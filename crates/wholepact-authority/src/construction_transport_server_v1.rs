@@ -206,6 +206,8 @@ impl AuthorityServer {
         Ok(Self {
             journal,
             tls,
+            #[cfg(all(feature = "offline-witness-owner", target_os = "linux"))]
+            offline_witness: None,
             handoff_scope: Some(ConstructionTransportServingScopeV1 {
                 pending,
                 pending_digest: selected_pending_grant_digest.into(),

@@ -1,8 +1,12 @@
-//! Disabled offline admission foundation. No public production capability factory.
+//! Opaque offline admission evidence. No public issuer or capability factory.
 //! A configured witness bridge must authenticate the offline signer independently
 //! of the controller's mTLS channel. Raw mutation DTOs never supply this authority.
 use crate::{offline::*, *};
 use serde::{Deserialize, Serialize};
+
+#[cfg(all(feature = "offline-witness-owner", target_os = "linux"))]
+#[path = "offline_witness_owner_v1.rs"]
+pub(crate) mod configured_witness;
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -53,8 +57,8 @@ impl OfflineIntentAuthenticationRecord {
 }
 
 /// Privileged bridge handle. No Deserialize/Clone/Debug or public constructor.
-/// Its eventual factory must require verified owner enrollment and the configured
-/// witness bridge. It must never be handed to a controller/application callback.
+/// Only the private configured witness owner constructs this after actual retained
+/// enrollment and HPKE checks. It never reaches a controller/application callback.
 pub struct OfflineIntentAuthenticationIssuer {
     policy: OfflineEnrollmentPolicy,
 }

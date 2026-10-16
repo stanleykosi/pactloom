@@ -547,7 +547,7 @@ fn connected_encrypted_v3_migration_preserves_history_and_rejects_wrong_identity
             .connection()
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        5
+        6
     );
     assert_eq!(
         migrated
@@ -563,6 +563,26 @@ fn connected_encrypted_v3_migration_preserves_history_and_rejects_wrong_identity
             .unwrap(),
         0
     );
+    // Schema 6 adds empty construction handoff tables; migration cannot invent
+    // a credential, grant or transport fence for retained legacy history.
+    for table in [
+        "authority_construction_transport_grants",
+        "authority_construction_transport_credentials",
+        "authority_transport_fences",
+    ] {
+        assert_eq!(
+            migrated
+                .connection
+                .lock()
+                .unwrap()
+                .connection()
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| {
+                    r.get::<_, u64>(0)
+                })
+                .unwrap(),
+            0
+        );
+    }
     drop(migrated);
     let reopened = open(dir.path());
     assert_eq!(snapshot(&reopened).outstanding_debit_zatoshis, 60);

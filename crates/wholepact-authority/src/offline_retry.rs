@@ -1,10 +1,10 @@
-//! Disabled production foundation: authority-owned original request retention.
+//! Private authority-owned original request retention.
 //!
-//! No public constructor, endpoint or caller-implemented trust trait.
+//! No public bridge constructor or caller-implemented trust trait.
 //! Low-level journal methods use AuthorityJournal's concrete encrypted connection.
 //! Cross-crate methods require the unconstructible configured bridge handle.
 //! Component verification is recorded in docs/offline-connected-foundation.md;
-//! owner-enrolled production handle construction remains deliberately unavailable.
+//! the optional configured legacy owner alone constructs the production bridge.
 //! Retained bytes and their checksums are evidence, never authentication authority.
 use crate::{offline::*, offline_export::OfflineAdmissionExportPlan, *};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
@@ -851,7 +851,7 @@ fn policy_for<'a>(
         .ok_or(AuthorityError::PolicyDenied)
 }
 
-fn gate(
+pub(crate) fn gate(
     c: &Connection,
     peer: &str,
     request: &ReserveOfflineAuthorization,

@@ -7,18 +7,30 @@
 //! snapshot rollback itself is outside this assumption and restores quarantine.
 #![forbid(unsafe_code)]
 
+// The canonical transport adapter is privately compiled here without a crate cycle.
+#[cfg(feature = "offline-witness-owner")]
+extern crate self as wholepact_authority;
+mod offline_witness_v1;
+pub use offline_witness_v1::{OfflineAdmissionDeliveryLookupV1, OfflineAdmissionDeliveryV1};
+#[cfg(feature = "offline-witness-owner")]
+mod offline_witness_transport_v1;
+
 #[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
 pub mod native_witness_owner;
 
-pub mod construction_transport_handoff_v1;
-mod construction_transport_handoff_policy_v1;
-#[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
-pub(crate) mod construction_transport_owner_v1;
 mod admission;
 mod automation;
+mod construction_transport_handoff_policy_v1;
+pub mod construction_transport_handoff_v1;
+#[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
+pub(crate) mod construction_transport_owner_v1;
 pub mod offline;
-pub mod offline_clock_v1;
 mod offline_admission;
+pub mod offline_clock_v1;
+#[cfg(all(feature = "offline-witness-owner", target_os = "linux"))]
+pub use offline_admission::configured_witness::{
+    OfflineWitnessConfigurationV1, OfflineWitnessIntentProfileV1,
+};
 mod offline_export;
 mod offline_outcome;
 mod offline_retry;
@@ -38,10 +50,6 @@ pub use offline_retry::{
 };
 pub mod account_use;
 pub mod account_use_link;
-#[cfg(feature = "pending-birth-foundation")]
-pub mod permanent_exclusion_signature;
-#[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
-pub(crate) mod permanent_exclusion_owner;
 mod journal;
 pub mod manual_enrollment;
 #[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
@@ -82,6 +90,10 @@ pub mod pending_birth;
 #[cfg(feature = "pending-birth-foundation")]
 pub mod pending_birth_signature;
 mod pending_birth_storage;
+#[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
+pub(crate) mod permanent_exclusion_owner;
+#[cfg(feature = "pending-birth-foundation")]
+pub mod permanent_exclusion_signature;
 pub use manual_enrollment::{
     AuthenticatedBornManualEnrollment, BornManualEnrollmentAdmissionRequest,
     ManualEnrollmentExtension,
@@ -149,7 +161,9 @@ pub enum AuthorityError {
     Storage,
     #[error("authority history failed verification")]
     CorruptHistory,
-    #[error("permanent routine-use exclusion is unavailable pending attended native and kernel qualification")]
+    #[error(
+        "permanent routine-use exclusion is unavailable pending attended native and kernel qualification"
+    )]
     PermanentStopUnavailable,
     #[error("offline reservation history requires a qualified typed consumer")]
     OfflineHistoryUnsupported,

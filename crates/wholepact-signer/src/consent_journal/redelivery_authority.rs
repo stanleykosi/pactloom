@@ -112,7 +112,7 @@ impl SignerConsentSession {
         #[cfg(not(all(feature = "native-ui", target_os = "linux")))]
         {
             let _ = transport;
-            return Err(JournalError::Permission);
+            Err(JournalError::Permission)
         }
         #[cfg(all(feature = "native-ui", target_os = "linux"))]
         Ok(())

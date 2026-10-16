@@ -10,7 +10,7 @@ mod manual_roster_construction_transport_v2;
 #[path = "manual_roster_construction_transport_v3.rs"]
 mod manual_roster_construction_transport_v3;
 mod offline_clock_v1;
-pub use offline_clock_v1::AuthenticatedOfflineClockV1;
+mod offline_witness_v1;
 use crate::{
     protocol::{WireRequest, WireResponse},
     *,
@@ -21,6 +21,7 @@ pub use construction_transport_client_v1::{
     ConstructionTransportCancellationV1, ConstructionTransportRevocationV1,
     ObservedConstructionTransportV1, PreparedConstructionTransportHandoffV1,
 };
+pub use offline_clock_v1::AuthenticatedOfflineClockV1;
 use rustls::{
     ClientConfig, ClientConnection, RootCertStore, ServerConfig, ServerConnection, StreamOwned,
     pki_types::{CertificateDer, PrivateKeyDer, ServerName},
@@ -1397,6 +1398,14 @@ pub struct AuthorityServer {
     journal: Arc<AuthorityJournal>,
     tls: ServerTls,
     handoff_scope: Option<construction_transport_server_v1::ConstructionTransportServingScopeV1>,
+    #[cfg(all(feature = "offline-witness-owner", target_os = "linux"))]
+    offline_witness: Option<
+        Arc<
+            std::sync::Mutex<
+                crate::offline_admission::configured_witness::ConfiguredOfflineWitnessV1,
+            >,
+        >,
+    >,
 }
 impl AuthorityServer {
     pub fn new(journal: Arc<AuthorityJournal>, tls: ServerTls) -> Self {
@@ -1404,6 +1413,8 @@ impl AuthorityServer {
             journal,
             tls,
             handoff_scope: None,
+            #[cfg(all(feature = "offline-witness-owner", target_os = "linux"))]
+            offline_witness: None,
         }
     }
     /// One bounded request per connection. Invalid clients never get a response
@@ -1456,9 +1467,17 @@ impl AuthorityServer {
         let mut stream = StreamOwned::new(connection, socket);
         let request: WireRequest = read_frame(&mut stream)?;
         let result = match request {
+            WireRequest::SubmitOfflineIntentV1(request) => {
+                self.serve_offline_intent_v1(&peer, &exporter, &request, deadline)
+            }
+            WireRequest::RecoverOfflineAdmissionDeliveryV1(original) => {
+                self.serve_offline_delivery_recovery_v1(&peer, &original, deadline)
+            }
             WireRequest::ObserveOfflineAdmissionTimeV1(request) => {
                 let binding = offline_clock_v1::channel_binding(
-                    &exporter, &request.scope, &request.challenge,
+                    &exporter,
+                    &request.scope,
+                    &request.challenge,
                 )?;
                 self.journal
                     .observe_offline_clock_v1(&peer, &request, &binding, now_ms)

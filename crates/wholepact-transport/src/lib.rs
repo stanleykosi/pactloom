@@ -23,6 +23,7 @@ mod offline_control_inbox;
 #[cfg(feature = "offline-admission-export")]
 pub use offline_control_inbox::*;
 mod replay;
+mod replay_schema;
 mod types;
 
 pub use backup::*;
@@ -47,3 +48,6 @@ mod offline_return_inbox;
 pub use offline_return_inbox::*;
 
 mod named_verifier_initialization;
+
+mod named_review_binding_v1;
+pub use named_review_binding_v1::*;

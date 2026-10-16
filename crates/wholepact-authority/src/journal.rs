@@ -18,6 +18,10 @@ mod namespace_archive_journal;
 #[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
 pub(crate) use namespace_archive_journal::*;
 
+#[cfg(all(feature = "offline-witness-owner", target_os = "linux"))]
+#[path = "offline_witness_journal_v1.rs"]
+mod offline_witness_journal_v1;
+
 const APPLICATION_ID: i64 = 0x57504157;
 const SCHEMA_VERSION: i64 = 6;
 #[path = "construction_transport_handoff_journal_v1.rs"]
@@ -336,6 +340,31 @@ impl AuthorityJournal {
         offline_authentication: Option<&AuthenticatedOfflineIntent>,
         require_original: bool,
     ) -> Result<MutationResult> {
+        self.mutate_inner_timed(
+            peer,
+            mutation,
+            proof,
+            exporter,
+            server_certificate,
+            now,
+            offline_authentication,
+            require_original,
+            None,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn mutate_inner_timed(
+        &self,
+        peer: &str,
+        mutation: AuthorityMutation,
+        proof: Option<protocol::WriterSessionProof>,
+        exporter: &[u8; 32],
+        server_certificate: &str,
+        now: u64,
+        offline_authentication: Option<&AuthenticatedOfflineIntent>,
+        require_original: bool,
+        current: Option<&crate::offline_witness_v1::CurrentOfflineWitnessWindowV1>,
+    ) -> Result<MutationResult> {
         // The generic adapter, including synthetic/offline callers, cannot issue
         // a handoff or reinterpret its proof as ordinary writer authentication.
         if matches!(
@@ -364,6 +393,10 @@ impl AuthorityJournal {
             .lock()
             .map_err(|_| AuthorityError::Storage)?;
         let tx = Transaction::new_unchecked(c.connection(), TransactionBehavior::Immediate)?;
+        let now = match current {
+            Some(window) => window.check()?,
+            None => now,
+        };
         authenticate_admission(&tx, peer)?;
         let mut ledger = load(&tx)?;
         self.require_born_bootstrap_mutation(&ledger, &mutation, now)?;
@@ -474,6 +507,14 @@ impl AuthorityJournal {
                 // capability could repeat key use after a crash or revocation.
                 return Err(AuthorityError::Uncertain);
             }
+            if let Some(window) = current {
+                let AuthorityMutation::ReserveOfflineAuthorization(record) = &event.mutation else {
+                    return Err(AuthorityError::InvalidBinding);
+                };
+                let checked =
+                    crate::offline_retry::gate(&tx, peer, &record.request, window.check()?)?;
+                window.check_after_replay(&checked, &record.request)?;
+            }
             return Ok(result);
         }
         let previous_head = ledger.snapshot.head.digest.clone();
@@ -550,6 +591,13 @@ impl AuthorityJournal {
         // are checked again at the durable boundary. No GUI lease spans network I/O.
         self.require_born_bootstrap_owner()?;
         self.require_born_bootstrap_mutation(&ledger, &event.mutation, now_ms()?)?;
+        if let Some(window) = current {
+            let AuthorityMutation::ReserveOfflineAuthorization(record) = &event.mutation else {
+                return Err(AuthorityError::InvalidBinding);
+            };
+            let checked = crate::offline_retry::gate(&tx, peer, &record.request, window.check()?)?;
+            window.check_after_replay(&checked, &record.request)?;
+        }
         tx.commit()?;
         Ok(result)
     }

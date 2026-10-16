@@ -201,6 +201,21 @@ impl OutcomeRecord {
 impl OfflineOriginalBridge<'_> {
     /// Parent's sealed composition calls this only after the original authority
     /// event committed. A prior fence refuses reissuance even if outbox is absent.
+    #[cfg(all(feature = "offline-witness-owner", target_os = "linux"))]
+    pub(crate) fn select_admission_export_current_v1(
+        &self,
+        operation: &str,
+        current: &crate::offline_witness_v1::CurrentOfflineWitnessWindowV1,
+    ) -> Result<CommittedOfflineAdmissionExport> {
+        let selected = select_admission_outcome_timed(
+            self.journal,
+            self.peer,
+            operation,
+            current.check()?,
+            Some(current),
+        )?;
+        Ok(crate::offline_export::CommittedOfflineAdmissionExport::from_selected(selected))
+    }
     pub fn select_admission_export(
         &self,
         operation: &str,
@@ -228,6 +243,15 @@ pub(crate) fn select_admission_outcome(
     operation: &str,
     now: u64,
 ) -> Result<SelectedOfflineAdmission> {
+    select_admission_outcome_timed(journal, peer, operation, now, None)
+}
+pub(crate) fn select_admission_outcome_timed(
+    journal: &AuthorityJournal,
+    peer: &str,
+    operation: &str,
+    now: u64,
+    current: Option<&crate::offline_witness_v1::CurrentOfflineWitnessWindowV1>,
+) -> Result<SelectedOfflineAdmission> {
     journal.require_born_mutation_current()?;
     id(operation)?;
     let c = journal
@@ -235,7 +259,14 @@ pub(crate) fn select_admission_outcome(
         .lock()
         .map_err(|_| AuthorityError::Storage)?;
     let tx = Transaction::new_unchecked(c.connection(), TransactionBehavior::Immediate)?;
+    let now = match current {
+        Some(window) => window.check()?,
+        None => now,
+    };
     let (ledger, original) = load_for_selection(&tx, peer, operation, now)?;
+    if current.is_some() {
+        offline_retry::gate(&tx, peer, original.request(), now)?;
+    }
     let receipt = original
         .receipt
         .as_ref()
@@ -314,6 +345,12 @@ pub(crate) fn select_admission_outcome(
         artifact: OutcomeArtifact::Admission((**admission).clone()),
     };
     persist_outcome(&tx, &record)?;
+    if let Some(window) = current {
+        let fresh = window.check()?;
+        load_for_selection(&tx, peer, operation, fresh)?;
+        let checked = offline_retry::gate(&tx, peer, original.request(), fresh)?;
+        window.check_after_replay(&checked, original.request())?;
+    }
     tx.commit()?; // A token must not leave this function before this durable fence.
     Ok(SelectedOfflineAdmission {
         descriptor: (**admission).clone(),
