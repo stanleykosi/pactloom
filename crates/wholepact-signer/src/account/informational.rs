@@ -29,6 +29,8 @@ impl std::fmt::Debug for QuarantinedInformationalBinding {
 }
 
 /// No vault, seed, viewing/spending key, session, connection or mutable journal.
+/// The private quarantined source may retain encrypted-archive transport-secret
+/// rows. They are never exposed or converted into a live transport owner.
 /// Keeps both cooperative locks and every original source descriptor until drop.
 /// All rechecks are read-only and bounded by the opening's original deadline.
 /// An unchanged source is historical evidence, never a live freshness assertion.

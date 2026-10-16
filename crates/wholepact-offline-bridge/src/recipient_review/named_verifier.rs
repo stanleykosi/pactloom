@@ -4,7 +4,7 @@
 use super::*;
 use crate::named_verifier::*;
 use wholepact_protocol::{
-    canonical_role_layout::{produce_canonical_layout, CanonicalLayoutArtifact},
+    canonical_role_layout::{CanonicalLayoutArtifact, produce_canonical_layout},
     own_effects::*,
 };
 
@@ -82,6 +82,45 @@ fn prepare_named_verifier_assertion(
     let layout = produce_canonical_layout(original, &retained.policy)
         .map_err(|_| TransportError::Authentication)?;
     let policy = &retained.policy;
+    // Both genuine owners derive new selected-own expectations in accepted
+    // manifest order. Untrusted policy vector order is not an identity source.
+    // Existing retained statements/signatures are never rewritten by this path.
+    let ordered_inputs = retained
+        .proposal
+        .manifest()
+        .inputs
+        .iter()
+        .map(|claimed| {
+            let mapping = retained
+                .input_actions
+                .iter()
+                .find(|mapping| mapping.input_id == claimed.input_id)
+                .ok_or(TransportError::WrongContext)?;
+            policy
+                .inputs
+                .iter()
+                .find(|input| input.action_index == mapping.action_index)
+                .ok_or(TransportError::WrongContext)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let ordered_outputs = retained
+        .proposal
+        .manifest()
+        .outputs
+        .iter()
+        .map(|claimed| {
+            let mapping = retained
+                .output_actions
+                .iter()
+                .find(|mapping| mapping.output_id == claimed.output_id)
+                .ok_or(TransportError::WrongContext)?;
+            policy
+                .outputs
+                .iter()
+                .find(|output| output.action_index == mapping.action_index)
+                .ok_or(TransportError::WrongContext)
+        })
+        .collect::<Result<Vec<_>>>()?;
     let mut participants = Vec::new();
     for (owner, p) in policy.participants.iter().enumerate() {
         let own = OwnEffectsPolicy {
@@ -97,8 +136,7 @@ fn prepare_named_verifier_assertion(
                 .ok_or(TransportError::WrongContext)?,
             declared_fee_share_zatoshis: p.fee_share_zatoshis,
             exact_transaction_fee_zatoshis: policy.exact_fee_zatoshis,
-            own_inputs: policy
-                .inputs
+            own_inputs: ordered_inputs
                 .iter()
                 .filter(|i| i.participant_index == owner)
                 .map(|i| OwnInputExpectation {
@@ -107,8 +145,7 @@ fn prepare_named_verifier_assertion(
                     value_zatoshis: i.value_zatoshis,
                 })
                 .collect(),
-            outputs: policy
-                .outputs
+            outputs: ordered_outputs
                 .iter()
                 .map(|o| OwnOutputExpectation {
                     action_index: o.action_index,
@@ -365,3 +402,8 @@ impl CurrentPreparedNamedVerifierAssertion<'_, '_, '_> {
 
 #[cfg(all(test, feature = "synthetic-selected-effects-tests"))]
 mod proved_fixture_tests;
+
+#[cfg(feature = "synthetic-selected-effects-tests")]
+mod joined_fixture;
+#[cfg(feature = "synthetic-selected-effects-tests")]
+pub use joined_fixture::synthetic_joined_named_package;

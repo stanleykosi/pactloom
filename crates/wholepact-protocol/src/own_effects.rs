@@ -56,6 +56,16 @@ pub struct OwnEffectsPolicy {
     pub own_inputs: Vec<OwnInputExpectation>,
     pub outputs: Vec<OwnOutputExpectation>,
 }
+impl OwnEffectsPolicy {
+    /// Exact local expectation commitment, including this owner's viewing key.
+    /// This hashes caller-provided data only: it does not verify a transaction,
+    /// authenticate policy provenance, or produce OwnEffectsInspection/authority.
+    /// Native owners use it to build their own expectations without disclosing
+    /// a viewing key to the external author of a request plan.
+    pub fn policy_commitment(&self) -> String {
+        hex::encode(fingerprint(self))
+    }
+}
 /// Same-byte cryptographic selected-own-effects evidence. No deserialization,
 /// public constructor, or conversion to approval/signing authority exists.
 pub struct OwnEffectsInspection {
@@ -344,7 +354,7 @@ pub fn verify_own_effects(
         .shielded_sighash();
     Ok(OwnEffectsInspection {
         artifact_digest: hex::encode(Sha256::digest(bytes)),
-        policy_digest: hex::encode(fingerprint(policy)),
+        policy_digest: policy.policy_commitment(),
         shielded_sighash: hex::encode(sighash),
         own_action_indices: own_indices.into_iter().collect(),
         selected_net_debit_zatoshis: debit,

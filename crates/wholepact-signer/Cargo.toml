@@ -6,19 +6,25 @@ license.workspace = true
 description = "Isolated fail-closed signer companion and opt-in synthetic process qualification"
 
 [features]
+# Ephemeral joined qualification only; creates no installed credentials or wallet.
+synthetic-recipient-signing-tests = ["synthetic-qualification", "offline-review-foundation", "native-ui", "authority-signing", "wholepact-authority/offline-witness-owner"]
 # Read-only maintained FVK consumer; enables no native/key-use issuer.
 manual-inventory-client = ["wholepact-wallet/protected-sync"]
 pending-birth-owner-signing = ["dep:tempfile", "native-ui", "authority-signing", "dep:rustls", "wholepact-authority/pending-birth-foundation"]
 default = []
-# Disabled native offline composition; does not install issuer or runtime route.
-offline-review-foundation = ["dep:wholepact-offline-bridge", "dep:wholepact-transport"]
-synthetic-qualification = ["wholepact-signer-origin/synthetic-qualification", "wholepact-wallet/synthetic-qualification", "wholepact-protocol/synthetic-qualification", "wholepact-authority/synthetic-qualification",  "wholepact-chain/synthetic-qualification", "dep:zcash_client_backend", "dep:zcash_primitives", "dep:incrementalmerkletree", "dep:prost", "dep:axum", "dep:tempfile", "dep:tokio", "tokio/rt-multi-thread", "tokio/macros"]
+# Opt-in named-recipient legacy composition; born and independent modes stay fenced.
+offline-review-foundation = ["dep:wholepact-offline-bridge", "dep:wholepact-transport", "dep:hpke", "dep:base64", "dep:chrono"]
+synthetic-qualification = ["wholepact-offline-bridge?/synthetic-selected-effects-tests", "wholepact-signer-origin/synthetic-qualification", "wholepact-wallet/synthetic-qualification", "wholepact-protocol/synthetic-qualification", "wholepact-authority/synthetic-qualification",  "wholepact-chain/synthetic-qualification", "dep:zcash_client_backend", "dep:zcash_primitives", "dep:incrementalmerkletree", "dep:prost", "dep:axum", "dep:tempfile", "dep:tokio", "tokio/rt-multi-thread", "tokio/macros"]
 checkpoint-review = ["dep:wholepact-proof-jobs"]
 native-ui = ["wholepact-signer-origin/native-ui", "dep:eframe", "dep:winit"]
 wallet-review = ["wholepact-wallet/wallet"]
 authority-signing = ["wholepact-signer-origin/authority-signing", "wholepact-chain/submission-dispatch","wholepact-protocol/transaction-checkpoint","wallet-review", "wholepact-wallet/protected-sync", "wholepact-protocol/proving", "dep:tokio"]
 
 [dependencies]
+# Canonical private offline-intent codec; same maintained versions as transport.
+hpke = { version = "=0.14.1", optional = true, default-features = false, features = ["alloc", "x25519", "chacha"] }
+base64 = { version = "=0.22.1", optional = true }
+chrono = { version = "=0.4.45", optional = true, default-features = false, features = ["std"] }
 wholepact-transport = { path = "../wholepact-transport", optional = true }
 ring = "=0.17.14"
 rustls = { version = "=0.23.45", optional = true, default-features = false, features = ["std", "ring"] }
@@ -66,3 +72,9 @@ winit = { version = "=0.30.13", optional = true, default-features = false, featu
 
 [dev-dependencies]
 tempfile = "3"
+
+# Private joined-fixture builder, using the same maintained dependency versions.
+[dev-dependencies.shardtree]
+version = "=0.8.0"
+[dev-dependencies.zcash_note_encryption]
+version = "=0.5.1"

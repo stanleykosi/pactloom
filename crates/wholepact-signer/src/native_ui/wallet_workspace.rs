@@ -4,9 +4,9 @@
 //! no provider contact until the approved bounded asynchronous scan is requested.
 use super::authority::{NativeAuthority, NativeAuthorityBinding, NativeDecision};
 use crate::{
+    Error, Result,
     account::AccountVault,
     manifest::{AcceptedManifest, LocalSelection, ReviewInputs},
-    Error, Result,
 };
 use orchard::keys::FullViewingKey;
 use serde::{Deserialize, Serialize};
@@ -15,8 +15,8 @@ use std::{
     collections::BTreeSet,
     num::NonZeroU32,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -24,20 +24,20 @@ use wholepact_core::{OutputAllocation, Proposal};
 use wholepact_protocol::{
     construction::{ConstructionContext, InputActionMapping, OutputActionMapping},
     review::{
-        decode_testnet_receiver, InputPolicy, OutputPolicy, OutputPurpose, ParticipantPolicy,
-        ReviewPolicy,
+        InputPolicy, OutputPolicy, OutputPurpose, ParticipantPolicy, ReviewPolicy,
+        decode_testnet_receiver,
     },
 };
 use wholepact_wallet::{
-    wallet::{
-        protected_sync::{
-            account_birthday_from_tree, key_use::WalletKeyUseTicket, BackendIdentity, ChainAdapter,
-            LocalWalletAccess, NetworkPolicy, ProtectedWalletSync, SyncLimits, TreeState,
-            WalletAccessPurpose,
-        },
-        AccountBirthday, AccountUuid, DedicatedTestnetWallet,
-    },
     WalletKeyUseConfidence, WalletKeyUsePolicy,
+    wallet::{
+        AccountBirthday, AccountUuid, DedicatedTestnetWallet,
+        protected_sync::{
+            BackendIdentity, ChainAdapter, LocalWalletAccess, NetworkPolicy, ProtectedWalletSync,
+            SyncLimits, TreeState, WalletAccessPurpose, account_birthday_from_tree,
+            key_use::WalletKeyUseTicket,
+        },
+    },
 };
 use zcash_protocol::memo::MemoBytes;
 
@@ -160,7 +160,11 @@ impl PreparedWalletSetup {
         &self.digest
     }
     pub(super) fn display(&self) -> Result<String> {
-        Ok(format!("SET UP SIGNER-OWNED DEDICATED VIEWING WALLET\nAccount: {}\nExact configuration:\n{}\n\nThis explicitly permits importing this signer's dedicated FVK into its private encrypted viewing database (create only), and bounded public-block synchronization plus local note selection for this native session. Grant expires after 15 minutes or native lock/revocation. No spending key leaves the signer, and this is not spending or witness-disclosure approval.\nThe chosen provider and the existing environment proxy can observe IP, timing, public block heights and history ranges. No private viewing key, note or nullifier is sent to the block provider. The existing proxy route is captured at setup; unsupported configurations fail without direct fallback.\nTrust: one explicitly chosen TLS provider, not independent consensus or a global unspentness oracle. Maximum provider tip age is 1200 seconds under the supported network profile. Cache ages only shorten freshness; absent cache metadata does not prove provider refresh. Chain reorganizations, missing mempool conflicts and other-wallet spends remain possible.\nA birthday checkpoint is an explicitly accepted source claim. A wrong or too-late birthday can omit wallet history; import and chain mismatches fail closed. Interrupted or missing wallet storage requires recovery, never silent recreation.", self.account_id, serde_json::to_string_pretty(&self.config).map_err(|_| Error::InvalidData)?))
+        Ok(format!(
+            "SET UP SIGNER-OWNED DEDICATED VIEWING WALLET\nAccount: {}\nExact configuration:\n{}\n\nThis explicitly permits importing this signer's dedicated FVK into its private encrypted viewing database (create only), and bounded public-block synchronization plus local note selection for this native session. Grant expires after 15 minutes or native lock/revocation. No spending key leaves the signer, and this is not spending or witness-disclosure approval.\nThe chosen provider and the existing environment proxy can observe IP, timing, public block heights and history ranges. No private viewing key, note or nullifier is sent to the block provider. The existing proxy route is captured at setup; unsupported configurations fail without direct fallback.\nTrust: one explicitly chosen TLS provider, not independent consensus or a global unspentness oracle. Maximum provider tip age is 1200 seconds under the supported network profile. Cache ages only shorten freshness; absent cache metadata does not prove provider refresh. Chain reorganizations, missing mempool conflicts and other-wallet spends remain possible.\nA birthday checkpoint is an explicitly accepted source claim. A wrong or too-late birthday can omit wallet history; import and chain mismatches fail closed. Interrupted or missing wallet storage requires recovery, never silent recreation.",
+            self.account_id,
+            serde_json::to_string_pretty(&self.config).map_err(|_| Error::InvalidData)?
+        ))
     }
     pub(super) fn approve(
         self,
@@ -650,3 +654,9 @@ mod tests {
         assert!(decode_hex::<32>(&"AB".repeat(32)).is_err());
     }
 }
+
+#[cfg(feature = "offline-review-foundation")]
+mod named_recipient;
+
+#[cfg(feature = "offline-review-foundation")]
+pub(super) use named_recipient::NamedRecipientOwnerContext;

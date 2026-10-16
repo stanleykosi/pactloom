@@ -51,13 +51,25 @@ impl WriterLocalInventory {
         account: &SignerAccountState,
         limits: (u64, u64),
     ) -> Result<Self> {
+        named_recipient_inventory::require_absent(c)?;
+        Self::read_existing_origin_cells(c, account, limits)
+    }
+
+    // Used only by the wrapper above and the restriction-only JSON renderer
+    // below. The latter also retains the COMPLETE named fingerprint inventory.
+    // This private branch is never returned as a writer/recovery/import plan.
+    fn read_existing_origin_cells(
+        c: &Connection,
+        account: &SignerAccountState,
+        limits: (u64, u64),
+    ) -> Result<Self> {
         if c.is_autocommit() {
             return Err(JournalError::InvalidBinding);
         }
         storage::check_account(c, account)?;
         storage::verify_schema(c)?;
         storage::bounded(c, limits)?;
-        let offline = offline_history::read_inventory(c, &account.account_id)?;
+        let offline = offline_history::read_existing_origin_cells(c, &account.account_id)?;
         let common_context_audit = construction_audit_v3::read_all(c, &account.account_id)?;
         let mut q = c.prepare("SELECT authorization_id,reference,nonce,enrollment_ref,manifest_ref FROM signer_original_consents ORDER BY authorization_id")?;
         let mut originals = Vec::new();
@@ -924,17 +936,25 @@ pub(super) fn complete_journal_commitment(c: &Connection) -> Result<String> {
 #[path = "writer_history_tests.rs"]
 mod tests;
 
-
 /// Archive-only complete local typed validation. No current witness or writer
 /// owner is returned. Live restriction publication additionally requires the
 /// full authenticated transport/financial replay through its dedicated reader.
 #[cfg(all(feature = "pending-birth-owner-signing", target_os = "linux"))]
-pub(super) fn validate_permanent_stop_archive_cells(c: &Connection, account: &SignerAccountState, limits: (u64,u64)) -> Result<serde_json::Value> {
-    let local = WriterLocalInventory::read_validated_cells(c,account,limits)?;
-    let audit = common_context_reentry_audit_v1::read_complete(c,&account.account_id)?;
-    if audit.original != local.common_context_audit { return Err(JournalError::InvalidBinding); }
-    offline_receipts::validate_all(c,&account.account_id)?;
+pub(super) fn validate_permanent_stop_archive_cells(
+    c: &Connection,
+    account: &SignerAccountState,
+    limits: (u64, u64),
+) -> Result<serde_json::Value> {
+    let named = named_recipient_inventory::read_all(c, &account.account_id)?;
+    let local = WriterLocalInventory::read_existing_origin_cells(c, account, limits)?;
+    let audit = common_context_reentry_audit_v1::read_complete(c, &account.account_id)?;
+    if audit.original != local.common_context_audit {
+        return Err(JournalError::InvalidBinding);
+    }
+    offline_receipts::validate_all(c, &account.account_id)?;
     let online=local.originals.iter().map(|o|serde_json::json!({"terms":o.original_consent().terms(),"original_reference":o.original_consent().reference()})).collect::<Vec<_>>();
     let offline=local.offline.admitted_origins().iter().map(|o|serde_json::json!({"local_admission":o.local_admission(),"original_consent":o.original_consent(),"key_use":o.local_key_use(),"retained_result":o.retained_result(),"signature_knowledge":format!("{:?}",o.signature_knowledge())})).collect::<Vec<_>>();
-    Ok(serde_json::json!({"all_local_original_online_consent_terms":online,"all_retained_remote_online_reservations":local.remote_online,"all_retained_offline_origins":offline,"offline_enrollments":local.offline.enrollments(),"offline_intents":local.offline.reservation_intents(),"complete_common_context_audit":audit,"complete_local_journal_commitment":local.commitment(),"remote_exposure":"UNKNOWN until independent complete authenticated witness replay; local absence is never emptiness or no-exposure evidence"}))
+    Ok(
+        serde_json::json!({"all_local_original_online_consent_terms":online,"all_retained_remote_online_reservations":local.remote_online,"retained_legacy_offline_origins":offline,"named_recipient_history":named,"named_recipient_exposure":"UNKNOWN; every named original, Started marker and result remains retained. The existing financial projection does not account for named origins and cannot activate a writer.","offline_enrollments":local.offline.enrollments(),"offline_intents":local.offline.reservation_intents(),"complete_common_context_audit":audit,"complete_local_journal_commitment":local.commitment(),"remote_exposure":"UNKNOWN until independent complete authenticated witness replay; local absence is never emptiness or no-exposure evidence"}),
+    )
 }

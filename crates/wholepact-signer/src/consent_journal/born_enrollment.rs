@@ -30,16 +30,24 @@ impl SignerConsentJournal {
         }
         // Old encrypted artifacts keep their own exact schema and bytes. This
         // is read-only; backup inspection must never migrate the source tree.
-        let old14 = recovery_activation::recovery_template(14)?;
-        if let Ok(snapshot) =
-            wholepact_storage_security::bundle::open_journal_read_snapshot(path, key, old14)
-        {
-            recovery_migration::verify_exact_schema(
-                snapshot.connection(),
-                recovery_migration::V14_SCHEMA,
-            )?;
-            verify_born_identity_cells(snapshot.connection(), genesis, epoch)?;
-            return verify_common_audit_tables(snapshot.connection(), genesis, epoch, None);
+        for (version, schema) in [
+            (15, recovery_migration::V15_SCHEMA),
+            (14, recovery_migration::V14_SCHEMA),
+        ] {
+            let old = recovery_activation::recovery_template(version)?;
+            if let Ok(snapshot) =
+                wholepact_storage_security::bundle::open_journal_read_snapshot(path, key, old)
+            {
+                recovery_migration::verify_exact_schema(snapshot.connection(), schema)?;
+                verify_born_identity_cells(snapshot.connection(), genesis, epoch)?;
+                if version == 15 {
+                    common_context_reentry_audit_v1::read_complete(
+                        snapshot.connection(),
+                        &genesis.identity.account_id,
+                    )?;
+                }
+                return verify_common_audit_tables(snapshot.connection(), genesis, epoch, None);
+            }
         }
         let old = recovery_activation::recovery_template(13)?;
         let snapshot =

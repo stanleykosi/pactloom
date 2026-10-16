@@ -549,6 +549,33 @@ fn proved_two_owner_named_verifier_private_kernel() {
     let prepared =
         prepare_named_verifier_assertion(&proved.pczt_bytes, &retained, &original_request, &key)
             .unwrap();
+    // The full review policy is already bound by the original review identity.
+    // It is not permissible to reorder that immutable original on retry.
+    retained.policy.inputs.reverse();
+    retained.policy.outputs.reverse();
+    assert!(
+        prepare_named_verifier_assertion(&proved.pczt_bytes, &retained, &original_request, &key)
+            .is_err()
+    );
+    retained.policy.inputs.reverse();
+    retained.policy.outputs.reverse();
+    // Untrusted action-map enumeration must not change manifest-ordered own
+    // expectations. Repeat the real producer and maintained proof validation.
+    retained.input_actions.reverse();
+    retained.output_actions.reverse();
+    let permuted =
+        prepare_named_verifier_assertion(&proved.pczt_bytes, &retained, &original_request, &key)
+            .unwrap();
+    assert_eq!(
+        permuted.signing_message().unwrap(),
+        prepared.signing_message().unwrap()
+    );
+    assert_eq!(
+        permuted.recipient_artifact().bytes(),
+        prepared.recipient_artifact().bytes()
+    );
+    retained.input_actions.reverse();
+    retained.output_actions.reverse();
     let statement = prepared.statement();
     let redacted = prepared.recipient_artifact().bytes();
     assert_ne!(redacted, proved.pczt_bytes.as_slice());

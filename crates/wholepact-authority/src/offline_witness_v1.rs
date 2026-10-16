@@ -4,7 +4,42 @@ use serde::{Deserialize, Serialize};
 
 // Keep this dedicated route inside the existing bounded authority frame. JSON
 // and request metadata consume the remaining half; encode() checks the full frame.
-pub(crate) const MAX_ENVELOPE_HEX: usize = MAX_FRAME_BYTES / 2;
+/// Inert size limit for the dedicated configured-witness submission route.
+/// A fitting ciphertext is not authenticated and does not imply the complete
+/// request fits its separately enforced MAX_FRAME_BYTES wire limit.
+pub const MAX_OFFLINE_INTENT_CIPHERTEXT_BYTES_V1: usize = MAX_FRAME_BYTES / 4;
+pub(crate) const MAX_ENVELOPE_HEX: usize = MAX_OFFLINE_INTENT_CIPHERTEXT_BYTES_V1 * 2;
+
+/// Pure preflight using the actual dedicated wire encoding and fixed-width proof
+/// fields. Success proves only structural size compatibility, never ownership,
+/// HPKE authentication, enrollment, availability or permission to submit.
+pub fn validate_offline_intent_delivery_size_v1(
+    request: &ReserveOfflineAuthorization,
+    original_envelope: &[u8],
+    export_template: &OfflineAdmissionExportPlan,
+) -> Result<()> {
+    if original_envelope.is_empty()
+        || original_envelope.len() > MAX_OFFLINE_INTENT_CIPHERTEXT_BYTES_V1
+    {
+        return Err(AuthorityError::Limit);
+    }
+    let wire = OfflineWitnessRequestV1 {
+        request: request.clone(),
+        original_envelope_hex: hex::encode(original_envelope),
+        export_template: export_template.clone(),
+        // Actual session IDs are SHA-256 digests and tags are HMAC-SHA256 hex.
+        // These inert placeholders are never returned, sent or verified.
+        proof: protocol::WriterSessionProof {
+            session_id: "0".repeat(64),
+            tag: "0".repeat(64),
+        },
+    };
+    wire.record()?;
+    encode(&protocol::WireRequest::SubmitOfflineIntentV1(Box::new(
+        wire,
+    )))
+    .map(|_| ())
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -263,3 +298,7 @@ impl CurrentOfflineWitnessWindowV1 {
         Ok(wall)
     }
 }
+
+#[cfg(test)]
+#[path = "offline_intent_size_v1_tests.rs"]
+mod size_tests;

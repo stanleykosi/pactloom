@@ -97,7 +97,7 @@ pub(super) fn reconcile_complete(
     {
         return Err(JournalError::InvalidBinding);
     }
-    if !(8..=15).contains(&source.provenance().schema_version) {
+    if !(8..=16).contains(&source.provenance().schema_version) {
         return Err(JournalError::UnsupportedSchema);
     }
     if source

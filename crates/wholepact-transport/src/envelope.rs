@@ -300,3 +300,7 @@ mod offline_return_generic_guard_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "retained_metadata_tests.rs"]
+mod retained_metadata_tests;

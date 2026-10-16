@@ -27,6 +27,7 @@ impl SignerConsentJournal {
         let tx = c.transaction()?;
         storage::check_account(&tx, &account)?;
         storage::bounded(&tx, self.capacity_limits())?;
+        named_recipient_inventory::require_absent(&tx)?;
         let mut snapshot = OwnerInspectionSnapshot {
             schema_version: 1,
             request: request.clone(),

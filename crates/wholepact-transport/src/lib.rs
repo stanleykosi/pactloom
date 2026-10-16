@@ -22,7 +22,9 @@ pub use offline_control_outbox::*;
 mod offline_control_inbox;
 #[cfg(feature = "offline-admission-export")]
 pub use offline_control_inbox::*;
+mod named_recipient_receipt_source;
 mod replay;
+pub use named_recipient_receipt_source::SignerNamedRecipientReceiptSource;
 mod replay_schema;
 mod types;
 
@@ -51,3 +53,6 @@ mod named_verifier_initialization;
 
 mod named_review_binding_v1;
 pub use named_review_binding_v1::*;
+
+mod offline_intent_handoff_v1;
+pub use offline_intent_handoff_v1::{MAX_OFFLINE_INTENT_HANDOFF_BYTES_V1, OfflineIntentHandoffV1};

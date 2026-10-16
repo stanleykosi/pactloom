@@ -26,6 +26,45 @@ pub struct NamedVerifierEnvelopeExpectation<'a> {
     pub assertion: &'a NamedVerifierExpectedContext<'a>,
 }
 
+/// Additional exact locally retained evidence commitments. Public data is not
+/// provenance or authorization: the native owner must load these from its own
+/// immutable original. This type cannot create a receipt, admission or permit.
+pub struct NamedVerifierRetainedPackageBinding<'a> {
+    pub package_digest: &'a str,
+    pub canonical_artifact_digest: &'a str,
+    pub assertion_digest: &'a str,
+    pub own_policy_digest: &'a str,
+}
+impl NamedVerifierRetainedPackageBinding<'_> {
+    fn check(&self, inspection: &NamedVerifierPackageInspection) -> Result<()> {
+        self.check_digests([
+            inspection.package_digest(),
+            inspection.own().inspection().artifact_digest(),
+            inspection.assertion().statement_digest(),
+            inspection.own().inspection().policy_digest(),
+        ])
+    }
+    fn check_digests(&self, observed: [&str; 4]) -> Result<()> {
+        let expected = [
+            self.package_digest,
+            self.canonical_artifact_digest,
+            self.assertion_digest,
+            self.own_policy_digest,
+        ];
+        if expected != observed
+            || expected.iter().any(|s| {
+                s.len() != 64
+                    || !s
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            })
+        {
+            return Err(TransportError::WrongContext);
+        }
+        Ok(())
+    }
+}
+
 pub struct ReceivedNamedVerifierAssertion {
     artifact: ReceivedArtifact,
     inspection: NamedVerifierPackageInspection,
@@ -59,6 +98,54 @@ pub fn open_named_verifier_assertion(
     expected: &NamedVerifierEnvelopeExpectation<'_>,
     now: &Timestamp,
     ledger: &mut impl ReplayLedger,
+    check_current: impl FnMut() -> Result<()>,
+) -> Result<ReceivedNamedVerifierAssertion> {
+    open_named_verifier_assertion_inner(
+        envelope,
+        recipient,
+        pinned_sender,
+        expected,
+        None,
+        now,
+        ledger,
+        check_current,
+    )
+}
+
+/// Exact retained binding is checked inside the authenticated artifact callback,
+/// after all package/own-effects checks and before any durable receipt is offered.
+#[allow(clippy::too_many_arguments)]
+pub fn open_named_verifier_assertion_bound(
+    envelope: &EncryptedEnvelope,
+    recipient: &TransportSecret,
+    pinned_sender: &TransportPublicKey,
+    expected: &NamedVerifierEnvelopeExpectation<'_>,
+    binding: &NamedVerifierRetainedPackageBinding<'_>,
+    now: &Timestamp,
+    ledger: &mut impl ReplayLedger,
+    check_current: impl FnMut() -> Result<()>,
+) -> Result<ReceivedNamedVerifierAssertion> {
+    open_named_verifier_assertion_inner(
+        envelope,
+        recipient,
+        pinned_sender,
+        expected,
+        Some(binding),
+        now,
+        ledger,
+        check_current,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn open_named_verifier_assertion_inner(
+    envelope: &EncryptedEnvelope,
+    recipient: &TransportSecret,
+    pinned_sender: &TransportPublicKey,
+    expected: &NamedVerifierEnvelopeExpectation<'_>,
+    binding: Option<&NamedVerifierRetainedPackageBinding<'_>>,
+    now: &Timestamp,
+    ledger: &mut impl ReplayLedger,
     mut check_current: impl FnMut() -> Result<()>,
 ) -> Result<ReceivedNamedVerifierAssertion> {
     check_current()?;
@@ -76,7 +163,11 @@ pub fn open_named_verifier_assertion(
         ledger,
         |artifact| {
             check_current()?;
-            inspection = Some(inspect_artifact(artifact, expected)?);
+            let checked = inspect_artifact(artifact, expected)?;
+            if let Some(binding) = binding {
+                binding.check(&checked)?;
+            }
+            inspection = Some(checked);
             check_current()
         },
     )?;
@@ -93,6 +184,11 @@ pub fn open_named_verifier_assertion(
 fn check_expectation(expected: &NamedVerifierEnvelopeExpectation<'_>) -> Result<()> {
     let terms = expected.original_terms;
     terms.validate().map_err(|_| TransportError::WrongContext)?;
+    check_exact_debit_reservation(
+        expected.own_policy.maximum_selected_net_debit_zatoshis,
+        expected.own_policy.exact_selected_net_debit_zatoshis,
+        terms.maximum_debit_zatoshis,
+    )?;
     if crate::named_verifier_original_context_digest(terms)?
         != expected.assertion.original_context_digest
         || terms.account_id != expected.assertion.own_account_id
@@ -106,7 +202,6 @@ fn check_expectation(expected: &NamedVerifierEnvelopeExpectation<'_>) -> Result<
         || expected.own_policy.expiry_height != terms.transaction_expiry_height
         || hex::encode(expected.own_policy.anchor) != terms.snapshot.anchor_root
         || hex::encode(expected.own_policy.manifest_digest) != terms.manifest_digest
-        || expected.own_policy.maximum_selected_net_debit_zatoshis != terms.maximum_debit_zatoshis
         || expected.own_policy.declared_fee_share_zatoshis != terms.fee_share_zatoshis
         || expected.own_policy.exact_transaction_fee_zatoshis != terms.transaction_fee_zatoshis
         || expected.own_policy.own_inputs.len() != terms.inputs.len()
@@ -125,6 +220,42 @@ fn check_expectation(expected: &NamedVerifierEnvelopeExpectation<'_>) -> Result<
         return Err(TransportError::WrongContext);
     }
     Ok(())
+}
+
+/// The witness reservation covers this exact transaction debit. The independently
+/// retained accepted cap remains unchanged and may be larger. The full package
+/// inspection still commits both values in its maintained own-policy digest.
+fn check_exact_debit_reservation(
+    accepted_cap: u64,
+    exact_debit: u64,
+    reserved_debit: u64,
+) -> Result<()> {
+    if exact_debit != reserved_debit || accepted_cap < exact_debit {
+        return Err(TransportError::WrongContext);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod exact_debit_reservation_tests {
+    use super::*;
+    #[test]
+    fn greater_accepted_cap_preserves_exact_transaction_reservation() {
+        assert!(check_exact_debit_reservation(100, 70, 70).is_ok());
+        assert!(check_exact_debit_reservation(70, 70, 70).is_ok());
+        assert_eq!(
+            check_exact_debit_reservation(100, 71, 70),
+            Err(TransportError::WrongContext)
+        );
+        assert_eq!(
+            check_exact_debit_reservation(69, 70, 70),
+            Err(TransportError::WrongContext)
+        );
+        assert_eq!(
+            check_exact_debit_reservation(100, 70, 71),
+            Err(TransportError::WrongContext)
+        );
+    }
 }
 
 fn inspect_artifact(
@@ -180,4 +311,58 @@ pub fn recover_named_verifier_assertion(
         inspection,
         historical: true,
     })
+}
+
+/// Historical counterpart for concrete owners that retain exact commitments.
+/// The receipt-backed constructor remains transport-private; arbitrary imported
+/// profile/original bytes cannot construct a RetainedEnvelope.
+pub fn recover_named_verifier_assertion_bound(
+    record: &RetainedEnvelope,
+    recipient: &TransportSecret,
+    pinned_sender: &TransportPublicKey,
+    expected: &NamedVerifierEnvelopeExpectation<'_>,
+    binding: &NamedVerifierRetainedPackageBinding<'_>,
+    mut check_current: impl FnMut() -> Result<()>,
+) -> Result<ReceivedNamedVerifierAssertion> {
+    let recovered = recover_named_verifier_assertion(
+        record,
+        recipient,
+        pinned_sender,
+        expected,
+        &mut check_current,
+    )?;
+    binding.check(recovered.inspection())?;
+    check_current()?;
+    Ok(recovered)
+}
+
+#[cfg(test)]
+mod retained_binding_tests {
+    use super::*;
+    #[test]
+    fn every_exact_commitment_mismatch_stops_before_receipt_acceptance() {
+        let values = [
+            "11".repeat(32),
+            "22".repeat(32),
+            "33".repeat(32),
+            "44".repeat(32),
+        ];
+        let binding = NamedVerifierRetainedPackageBinding {
+            package_digest: &values[0],
+            canonical_artifact_digest: &values[1],
+            assertion_digest: &values[2],
+            own_policy_digest: &values[3],
+        };
+        let expected = values.each_ref().map(String::as_str);
+        assert!(binding.check_digests(expected).is_ok());
+        for changed in 0..4 {
+            let mut observed = expected;
+            observed[changed] = &values[(changed + 1) % 4];
+            // This is a pure ordering test, not a forged AuthenticatedReceipt.
+            let mut accepted = false;
+            let result = binding.check_digests(observed).map(|()| accepted = true);
+            assert_eq!(result, Err(TransportError::WrongContext));
+            assert!(!accepted);
+        }
+    }
 }

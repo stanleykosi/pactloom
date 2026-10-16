@@ -960,6 +960,7 @@ pub(crate) fn history_page_at(
         let raw = Zeroizing::new(row.get::<_, Vec<u8>>(3)?);
         let event: Event = decode(&raw)?;
         page.entries.push(HistoryEntry {
+            original_request_link: event.original_request_link,
             sequence: row.get(0)?,
             previous_head: row.get(1)?,
             head: row.get(2)?,

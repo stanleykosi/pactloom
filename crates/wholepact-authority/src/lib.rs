@@ -11,7 +11,10 @@
 #[cfg(feature = "offline-witness-owner")]
 extern crate self as wholepact_authority;
 mod offline_witness_v1;
-pub use offline_witness_v1::{OfflineAdmissionDeliveryLookupV1, OfflineAdmissionDeliveryV1};
+pub use offline_witness_v1::{
+    MAX_OFFLINE_INTENT_CIPHERTEXT_BYTES_V1, OfflineAdmissionDeliveryLookupV1,
+    OfflineAdmissionDeliveryV1, validate_offline_intent_delivery_size_v1,
+};
 #[cfg(feature = "offline-witness-owner")]
 mod offline_witness_transport_v1;
 

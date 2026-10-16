@@ -131,12 +131,49 @@ pub struct PreparedExport {
     fields: Vec<DisclosureField>,
     recipient: TransportPublicKey,
 }
+/// Recomputable inert commitments only. This is not an authenticated receipt,
+/// native approval, delivery evidence, current-time assertion or signing permit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedMessageMetadata {
+    pub stream_digest: String,
+    pub message_id_digest: String,
+    pub content_digest: String,
+    pub payload_digest: String,
+}
 impl PreparedExport {
     pub fn preview(&self) -> &DisclosurePreview {
         &self.preview
     }
     pub fn fields(&self) -> &[DisclosureField] {
         &self.fields
+    }
+    /// Reproduce exact historical metadata without sealing or making an
+    /// authentication claim. No AuthenticatedReceipt escapes this helper.
+    pub fn retained_metadata(&self) -> Result<PreparedMessageMetadata> {
+        let approved = self.preview.digest()?;
+        let plaintext = self.canonical_protected_message(&approved)?;
+        let metadata = AuthenticatedReceipt::new(&self.preview, &plaintext, &[])?;
+        Ok(PreparedMessageMetadata {
+            stream_digest: metadata.stream_digest().into(),
+            message_id_digest: metadata.message_id_digest().into(),
+            content_digest: metadata.content_digest().into(),
+            payload_digest: metadata.payload_digest().into(),
+        })
+    }
+    fn canonical_protected_message(
+        &self,
+        approved_preview_digest: &str,
+    ) -> Result<Zeroizing<Vec<u8>>> {
+        let wire = ProtectedMessage {
+            preview: self.preview.clone(),
+            approved_preview_digest: approved_preview_digest.into(),
+            fields: encode_fields(&self.fields),
+        };
+        let plaintext = Zeroizing::new(encode(&wire)?);
+        if plaintext.len() + 16 > MAX_CIPHERTEXT_BYTES {
+            return Err(TransportError::ResourceLimit);
+        }
+        Ok(plaintext)
     }
     /// The approved digest must come from the application's authenticated consent
     /// boundary. This checks binding, not whether a human genuinely approved it.
@@ -165,15 +202,7 @@ impl PreparedExport {
         {
             return Err(TransportError::DisclosureDenied);
         }
-        let wire = ProtectedMessage {
-            preview: self.preview,
-            approved_preview_digest: approved_preview_digest.into(),
-            fields: encode_fields(&self.fields),
-        };
-        let plaintext = Zeroizing::new(encode(&wire)?);
-        if plaintext.len() + 16 > MAX_CIPHERTEXT_BYTES {
-            return Err(TransportError::ResourceLimit);
-        }
+        let plaintext = self.canonical_protected_message(approved_preview_digest)?;
         let mut seed = Zeroizing::new([0u8; 32]);
         getrandom::fill(seed.as_mut()).map_err(|_| TransportError::Randomness)?;
         let mut rng = rand::rngs::StdRng::from_seed(*seed);

@@ -6,17 +6,17 @@ use super::{
     state::inert_text,
 };
 use crate::{
+    Error, Result,
     account::{AccountVault, PendingAccount, ProvisioningConsent},
     consent_journal::*,
     ipc::{AuthenticatedPeer, LocalEvent, LocalIpc, PendingPairing},
-    Error, Result,
 };
 use eframe::egui;
 use std::{
     path::Path,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
@@ -264,7 +264,7 @@ struct PendingDecision {
     operation: Operation,
 }
 struct OpenAccount {
-    vault: AccountVault,
+    vault: Arc<AccountVault>,
     journal: Arc<SignerConsentJournal>,
     authority: NativeAuthority,
     // Every session remains registered until its through-commit write fence completes on lock,
@@ -466,6 +466,8 @@ impl RetirementNativeEntry {
 pub(super) struct NativeRuntime {
     #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
     named_verifier: super::named_verifier_owner::SetupWorkspace,
+    #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
+    named_recipient: super::named_recipient::NamedRecipientWorkspace,
     open: Option<OpenAccount>,
     parent_channel: Option<crate::native_launch::ParentChannel>,
     pending_account: Option<PendingAccount>,
@@ -567,6 +569,8 @@ impl NativeRuntime {
         Self {
             #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
             named_verifier: super::named_verifier_owner::SetupWorkspace::default(),
+            #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
+            named_recipient: super::named_recipient::NamedRecipientWorkspace::default(),
             open: None,
             parent_channel,
             pending_account: None,
@@ -666,6 +670,8 @@ impl NativeRuntime {
     pub(super) fn lock(&mut self) {
         #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
         self.named_verifier.clear();
+        #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
+        self.named_recipient.clear();
         #[cfg(feature = "authority-signing")]
         self.retirement_evidence.clear();
         #[cfg(feature = "authority-signing")]
@@ -759,6 +765,8 @@ impl NativeRuntime {
     pub(super) fn blur(&mut self) {
         #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
         self.named_verifier.blur();
+        #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
+        self.named_recipient.clear();
         #[cfg(feature = "authority-signing")]
         self.retirement_evidence.clear();
         #[cfg(feature = "authority-signing")]
@@ -846,6 +854,8 @@ impl NativeRuntime {
     pub(super) fn navigate(&mut self) {
         #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
         self.named_verifier.clear();
+        #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
+        self.named_recipient.clear();
         #[cfg(feature = "authority-signing")]
         self.retirement_evidence.clear();
         #[cfg(feature = "authority-signing")]
@@ -937,7 +947,7 @@ impl NativeRuntime {
             channel.publish_endpoint(ipc.socket_path())?;
         }
         self.open = Some(OpenAccount {
-            vault,
+            vault: Arc::new(vault),
             journal: Arc::new(journal),
             authority,
             session: None,
@@ -3182,7 +3192,7 @@ impl NativeRuntime {
                 )
             })();
             if let Err(unsent) = send.send((open, result)) {
-                unsent.0 .0.close();
+                unsent.0.0.close();
             }
         });
         self.signing_job = Some(SigningJob {
@@ -3301,7 +3311,7 @@ impl NativeRuntime {
                 }
             })();
             if let Err(unsent) = send.send((open, result)) {
-                unsent.0 .0.close();
+                unsent.0.0.close();
             }
         });
         self.signing_job = Some(SigningJob {
@@ -4149,6 +4159,41 @@ impl NativeRuntime {
     }
     pub(super) fn ui(&mut self, ui: &mut egui::Ui, focused: bool, epoch: u64) {
         #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
+        self.named_recipient.reap_cancelled();
+        // A final recipient worker can hold the signer journal. Route its
+        // event-thread cancellation/review before sibling polls or DB-backed UI.
+        #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
+        if self.named_recipient.final_active() {
+            if !focused {
+                self.named_recipient.clear();
+                return;
+            }
+            if let Some(open) = self.open.as_ref() {
+                if let Some(session) = open.session.as_ref() {
+                    let owner = super::wallet_workspace::NamedRecipientOwnerContext {
+                        journal: &open.journal,
+                        session,
+                        enrollment_ref: open.enrollment.as_ref().map_or("", |r| r.reference()),
+                        manifest_ref: open.manifest.as_ref().map_or("", |r| r.reference()),
+                        vault: &open.vault,
+                        authority: &open.authority,
+                    };
+                    self.named_recipient.final_ui(
+                        ui,
+                        &owner,
+                        open.witness.as_ref(),
+                        focused,
+                        epoch,
+                    );
+                } else {
+                    self.named_recipient.clear();
+                }
+            } else {
+                self.named_recipient.clear();
+            }
+            return;
+        }
+        #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
         self.named_verifier.poll_lifecycle(focused);
 
         #[cfg(feature = "authority-signing")]
@@ -4277,7 +4322,12 @@ impl NativeRuntime {
         }
         if self.open.is_none() {
             #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
-            if self.pending_account.is_none() && ui.button("Open optional named-verifier workspace").clicked_by(egui::PointerButton::Primary) && focused {
+            if self.pending_account.is_none()
+                && ui
+                    .button("Open optional named-verifier workspace")
+                    .clicked_by(egui::PointerButton::Primary)
+                && focused
+            {
                 self.named_verifier.begin();
                 return;
             }
@@ -4752,6 +4802,32 @@ impl NativeRuntime {
                 }
             }
         }
+        #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
+        if self.pending.is_none() {
+            if let Some(open) = self.open.as_ref() {
+                if let Some(session) = open.session.as_ref() {
+                    let owner = super::wallet_workspace::NamedRecipientOwnerContext {
+                        journal: &open.journal,
+                        session,
+                        enrollment_ref: open.enrollment.as_ref().map_or("", |r| r.reference()),
+                        manifest_ref: open.manifest.as_ref().map_or("", |r| r.reference()),
+                        vault: &open.vault,
+                        authority: &open.authority,
+                    };
+                    self.named_recipient.ui(
+                        ui,
+                        &owner,
+                        open.wallet.as_ref(),
+                        open.witness.as_ref(),
+                        focused,
+                        epoch,
+                    );
+                    if self.named_recipient.final_active() {
+                        return;
+                    }
+                }
+            }
+        }
         #[cfg(feature = "authority-signing")]
         if self.open.is_some() && self.pending.is_none() {
             egui::CollapsingHeader::new("Signer-local wallet and witness configuration").show(ui,|ui|{
@@ -5137,10 +5213,14 @@ mod focus_tests {
         // Genuine runtime entry points, synthetic lifetime only: no key, profile,
         // signing decision, worker, filesystem, listener or provider is created.
         for operation in 0..3 {
-            let mut runtime=NativeRuntime::new(None);
-            let source=runtime.named_verifier.test_arm_inert_source();
+            let mut runtime = NativeRuntime::new(None);
+            let source = runtime.named_verifier.test_arm_inert_source();
             assert!(source.check_current().is_ok());
-            match operation {0=>runtime.blur(),1=>runtime.lock(),_=>runtime.navigate()}
+            match operation {
+                0 => runtime.blur(),
+                1 => runtime.lock(),
+                _ => runtime.navigate(),
+            }
             assert!(!runtime.named_verifier.is_active());
             assert!(source.check_current().is_err());
         }

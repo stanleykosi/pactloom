@@ -788,6 +788,7 @@ fn read_complete_continuity_v4(
     limits: (u64, u64),
     history: &ReconciledAuthorityHistory,
 ) -> Result<crate::authority_bridge::host_recovery_ipc::v4::HostRecoveryHistoryV4> {
+    named_recipient_inventory::require_absent(c)?;
     storage::require_no_unimplemented_reentry(c)?;
     let complete = crate::authority_bridge::host_recovery_ipc::v4::HostRecoveryHistoryV4 {
         schema_version: 4,

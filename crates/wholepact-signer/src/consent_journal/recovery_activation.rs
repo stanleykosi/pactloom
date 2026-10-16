@@ -65,6 +65,12 @@ static V14_TEMPLATE: JournalTemplate = JournalTemplate {
     schema_version: 14,
     create_sql: recovery_migration::V14_SCHEMA,
 };
+static V15_TEMPLATE: JournalTemplate = JournalTemplate {
+    kind: JournalKind::SignerConsentAuthority,
+    application_id: APPLICATION_ID,
+    schema_version: 15,
+    create_sql: recovery_migration::V15_SCHEMA,
+};
 pub(crate) fn recovery_template(version: i64) -> Result<&'static JournalTemplate> {
     match version {
         8 => Ok(&V8_TEMPLATE),
@@ -74,7 +80,8 @@ pub(crate) fn recovery_template(version: i64) -> Result<&'static JournalTemplate
         12 => Ok(&V12_TEMPLATE),
         13 => Ok(&V13_TEMPLATE),
         14 => Ok(&V14_TEMPLATE),
-        15 => Ok(SignerConsentBundleAdapter::template()),
+        15 => Ok(&V15_TEMPLATE),
+        16 => Ok(SignerConsentBundleAdapter::template()),
         _ => Err(JournalError::UnsupportedSchema),
     }
 }
@@ -132,7 +139,7 @@ impl RecoveryActivationInventory {
                 .map_err(|_| JournalError::InvalidBinding)?
                 != target_profile.parent().unwrap()
             || source.provenance().application_id != APPLICATION_ID
-            || !matches!(source.provenance().schema_version, 8..=15)
+            || !matches!(source.provenance().schema_version, 8..=16)
         {
             return Err(JournalError::InvalidBinding);
         }

@@ -13,7 +13,9 @@ impl QuarantinedJournalRead {
     ) -> Result<Self> {
         // A wallet component can contain viewing material. Until a verified
         // consuming authority-only projection exists, refuse rather than keep
-        // those rows inside an allegedly key-free informational owner.
+        // wallet viewing rows inside this informational owner. Named-profile
+        // transport-secret rows may remain privately quarantined in the complete
+        // source; fingerprint readers never return them or create live owners.
         if source.wallet().is_some() {
             return Err(JournalError::RecoveryRequired);
         }
@@ -45,6 +47,16 @@ impl QuarantinedJournalRead {
     }
     pub(crate) fn checkpoint_id(&self) -> &str {
         &self.source.manifest().checkpoint_id
+    }
+
+    /// Separate complete named-history fingerprints. No private payload is
+    /// returned and no restored account row, epoch or expiry is rewritten.
+    pub(crate) fn named_recipient_history_inventory(
+        &self,
+    ) -> Result<named_recipient_inventory::NamedRecipientHistoryInventoryV1> {
+        recovery_inventory::with_complete_source(&self.source, |tx| {
+            named_recipient_inventory::read_all(tx, &self.account_id)
+        })
     }
 
     /// Complete historical projection of the sealed original signer source.

@@ -14,9 +14,11 @@ impl AuthorityClient {
     ) -> Result<OfflineAdmissionDeliveryV1> {
         let lookup = OfflineAdmissionDeliveryLookupV1::from_request(&request)?;
         self.check_offline_delivery_scope_v1(&lookup)?;
-        if original_envelope.is_empty() || original_envelope.len() > MAX_ENVELOPE_HEX / 2 {
-            return Err(AuthorityError::Limit);
-        }
+        crate::validate_offline_intent_delivery_size_v1(
+            &request,
+            original_envelope,
+            &export_template,
+        )?;
         let state = self
             .session
             .lock()

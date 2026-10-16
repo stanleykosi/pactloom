@@ -45,6 +45,10 @@ impl WitnessDisclosureDescriptor {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HistoryEntry {
+    /// Exact persisted append metadata, never portable admission authority.
+    /// Omitted only for legacy events whose original hash omitted the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_request_link: Option<crate::offline_retry::OriginalCommitLink>,
     pub sequence: u64,
     pub previous_head: String,
     pub head: String,

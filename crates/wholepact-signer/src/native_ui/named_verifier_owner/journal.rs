@@ -326,6 +326,10 @@ mod tests {
         let before = serde_json::to_vec(&j).unwrap();
         assert_eq!(j.prepare(s.clone(), a.clone()).unwrap(), key);
         assert_eq!(serde_json::to_vec(&j).unwrap(), before);
+        let mut reordered_policy = s.clone();
+        reordered_policy.participants[0].selected_own_policy_digest = "97".repeat(32);
+        assert!(j.prepare(reordered_policy, a.clone()).is_err());
+        assert_eq!(serde_json::to_vec(&j).unwrap(), before);
         let mut changed = s;
         changed.validity_expires_ms += 1;
         assert!(j.prepare(changed, a).is_err());

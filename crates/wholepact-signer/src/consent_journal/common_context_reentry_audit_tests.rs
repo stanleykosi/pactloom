@@ -672,7 +672,7 @@ fn signed_handoff_encrypted_six_phase_reopen_is_exact_and_atomic() {
         SignerConsentBundleAdapter::template(),
     )
     .unwrap();
-    assert_eq!(source.provenance().schema_version, 15);
+    assert_eq!(source.provenance().schema_version, SCHEMA_VERSION);
     let table = source
         .tables()
         .iter()

@@ -499,7 +499,7 @@ impl AuthorityClient {
                     return Err(AuthorityError::CorruptHistory);
                 }
                 let event = crate::policy::Event {
-                    original_request_link: None,
+                    original_request_link: entry.original_request_link,
                     mutation: entry.mutation,
                     authenticated_certificate_digest: entry.authenticated_certificate_digest,
                     witness_time_ms: entry.witness_time_ms,
@@ -1780,7 +1780,7 @@ pub mod synthetic {
                     return Err(AuthorityError::CorruptHistory);
                 }
                 let event = crate::policy::Event {
-                    original_request_link: None,
+                    original_request_link: entry.original_request_link,
                     mutation: entry.mutation,
                     authenticated_certificate_digest: entry.authenticated_certificate_digest,
                     witness_time_ms: entry.witness_time_ms,
@@ -1938,6 +1938,7 @@ pub mod synthetic {
                 return Err(AuthorityError::CorruptHistory);
             }
             entries.push(crate::protocol::HistoryEntry {
+                original_request_link: event.original_request_link,
                 sequence: ledger.snapshot.head.sequence,
                 previous_head: previous.digest,
                 head: ledger.snapshot.head.digest.clone(),
@@ -1984,6 +1985,7 @@ pub mod synthetic {
             let previous_head = ledger.snapshot.head.digest.clone();
             ledger.apply(&event)?;
             entries.push(crate::protocol::HistoryEntry {
+                original_request_link: event.original_request_link,
                 sequence: ledger.snapshot.head.sequence,
                 previous_head,
                 head: ledger.snapshot.head.digest.clone(),
@@ -2104,7 +2106,7 @@ pub mod synthetic {
                     return Err(AuthorityError::CorruptHistory);
                 }
                 let event = crate::policy::Event {
-                    original_request_link: None,
+                    original_request_link: entry.original_request_link,
                     mutation: entry.mutation,
                     authenticated_certificate_digest: entry.authenticated_certificate_digest,
                     witness_time_ms: entry.witness_time_ms,

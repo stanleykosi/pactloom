@@ -489,6 +489,16 @@ impl SignerConsentJournal {
 
 /// Caller must retain a single read/write transaction for the complete inventory.
 pub(super) fn read_inventory(c: &Connection, account: &str) -> Result<OfflineHistoryInventory> {
+    named_recipient_inventory::require_absent(c)?;
+    read_existing_origin_cells(c, account)
+}
+/// Private branch for the restriction-only complete archive renderer. The
+/// caller must retain separate named history; this is not a complete financial
+/// inventory and never enables ordinary reconciliation or recovery.
+pub(super) fn read_existing_origin_cells(
+    c: &Connection,
+    account: &str,
+) -> Result<OfflineHistoryInventory> {
     if c.is_autocommit() {
         return Err(JournalError::InvalidBinding);
     }
@@ -868,6 +878,7 @@ fn read_result(
 /// A local-only offline original cannot supply accountwide remote continuity.
 /// Keep ordinary online issuance blocked until complete origin is reconciled.
 pub(super) fn require_accountwide_online_admission(c: &Connection) -> Result<()> {
+    named_recipient_inventory::require_absent(c)?;
     let missing: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM signer_offline_local_admissions o WHERE NOT EXISTS(SELECT 1 FROM signer_offline_remote_exposures r WHERE r.authorization_id=o.authorization_id))", [], |r| r.get(0))?;
     if missing {
         return Err(JournalError::OfflineHistoryUnsupported);
@@ -878,6 +889,7 @@ pub(super) fn require_accountwide_online_admission(c: &Connection) -> Result<()>
 /// Legacy inventories are complete only for online origins. A local offline
 /// row must not disappear merely because the remote history is still online-only.
 pub(super) fn require_legacy_journal(c: &Connection) -> Result<()> {
+    named_recipient_inventory::require_absent(c)?;
     let common: bool = c.query_row(
         "SELECT EXISTS(SELECT 1 FROM signer_common_context_audit_v3 UNION ALL SELECT 1 FROM signer_common_context_reentry_v1)",
         [],
@@ -904,6 +916,13 @@ pub(super) fn require_legacy_journal(c: &Connection) -> Result<()> {
 pub(super) fn require_legacy_recovery_source(
     source: &wholepact_storage_security::bundle::recovery::VerifiedSignerRecoverySource,
 ) -> Result<()> {
+    if source.tables().iter().any(|t| {
+        (t.name().starts_with("signer_named_recipient_")
+            || t.name() == "signer_named_intent_outbox")
+            && !t.rows().is_empty()
+    }) {
+        return Err(JournalError::NamedRecipientHistoryUnsupported);
+    }
     if source.tables().iter().any(|t| {
         matches!(
             t.name(),

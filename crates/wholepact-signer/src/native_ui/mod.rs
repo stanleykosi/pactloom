@@ -18,6 +18,8 @@ mod host_recovery;
 #[cfg(feature = "authority-signing")]
 mod informational_witness;
 #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
+mod named_recipient;
+#[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
 mod offline_review;
 #[cfg(feature = "authority-signing")]
 mod preconstruction;

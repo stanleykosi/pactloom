@@ -1002,7 +1002,7 @@ fn complete_history_crosses_page_boundaries_without_skipping_originals() {
             assert_eq!(entry.sequence, after + 1);
             let result = reconstructed
                 .apply(&Event {
-                    original_request_link: None,
+                    original_request_link: entry.original_request_link,
                     mutation: entry.mutation,
                     authenticated_certificate_digest: entry.authenticated_certificate_digest,
                     witness_time_ms: entry.witness_time_ms,

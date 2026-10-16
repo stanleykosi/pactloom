@@ -82,6 +82,8 @@ pub use offline_reconciliation::{
     OfflineReconciliationInventory, OfflineReconciliationPresence, OfflineReplayCoverage,
     ReconciledOfflineOrigin,
 };
+pub(crate) mod named_recipient_inventory;
+pub(crate) mod named_recipient_records;
 mod offline_receipts;
 mod recovery_migration;
 mod storage;
@@ -122,7 +124,7 @@ use wholepact_core::proposal::canonical_digest;
 use zeroize::Zeroizing;
 
 const APPLICATION_ID: i64 = 0x57505343;
-const SCHEMA_VERSION: i64 = 15;
+const SCHEMA_VERSION: i64 = 16;
 const MAX_RECORD_BYTES: usize = 512 * 1024;
 const MAX_BACKUP_ROWS: u64 = 100_000;
 const MAX_BACKUP_ENCODED_BYTES: u64 = 64 * 1024 * 1024;
@@ -144,11 +146,13 @@ pub enum JournalError {
     #[error("signer journal requires writer and exposure reconciliation")]
     RecoveryRequired,
     #[error(
-        "unsupported signer journal schema; only exact v8 through v14 additive schema extensions are supported"
+        "unsupported signer journal schema; only exact v8 through v15 additive schema extensions are supported"
     )]
     UnsupportedSchema,
     #[error("offline reservation history requires a qualified typed signer recovery consumer")]
     OfflineHistoryUnsupported,
+    #[error("named-recipient history requires a qualified typed financial consumer")]
+    NamedRecipientHistoryUnsupported,
     #[error("non-signing construction history requires a qualified financial activation consumer")]
     ConstructionHistoryUnsupported,
     #[error("signer journal record or exact binding is invalid")]
@@ -255,5 +259,55 @@ mod common_context_reentry_audit_tests;
 #[cfg(test)]
 pub(crate) mod common_context_reentry_audit_fixture;
 
-#[cfg(all(feature = "native-ui", feature = "authority-signing", target_os = "linux"))]
+#[cfg(all(
+    feature = "native-ui",
+    feature = "authority-signing",
+    target_os = "linux"
+))]
 mod owner_inspection;
+
+#[cfg(all(
+    feature = "native-ui",
+    feature = "authority-signing",
+    feature = "offline-review-foundation",
+    target_os = "linux"
+))]
+mod named_recipient_setup;
+#[cfg(all(
+    feature = "native-ui",
+    feature = "authority-signing",
+    feature = "offline-review-foundation",
+    target_os = "linux"
+))]
+pub(crate) use named_recipient_setup::{
+    LiveNamedRecipientProfile, NamedRecipientPins, PreparedNamedRecipientSetup,
+};
+
+#[cfg(all(
+    feature = "native-ui",
+    feature = "authority-signing",
+    feature = "offline-review-foundation"
+))]
+mod named_intent_transport;
+
+#[cfg(all(
+    feature = "native-ui",
+    feature = "authority-signing",
+    feature = "offline-review-foundation"
+))]
+pub(crate) use named_recipient_setup::PreparedNamedRecipientReturnFile;
+#[cfg(all(
+    feature = "native-ui",
+    feature = "authority-signing",
+    feature = "offline-review-foundation"
+))]
+pub(crate) use named_recipient_setup::{
+    NamedIntentExportTemplate, NamedRecipientOriginalInputs, PreparedNamedIntentFileExport,
+    PreparedNamedRecipientOriginalImport, RetainedNamedIntentExport,
+};
+#[cfg(all(
+    feature = "native-ui",
+    feature = "authority-signing",
+    feature = "offline-review-foundation"
+))]
+pub(crate) use named_recipient_setup::{NamedRecipientOperation, PreparedNamedRecipientSigning};

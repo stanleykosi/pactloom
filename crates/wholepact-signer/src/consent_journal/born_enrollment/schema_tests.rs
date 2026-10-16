@@ -19,6 +19,9 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
+        Self::new_schema(SCHEMA, SCHEMA_VERSION)
+    }
+    fn new_schema(schema: &str, version: i64) -> Self {
         let temporary = tempfile::tempdir().unwrap();
         let directory =
             PrivateDirectory::create(&temporary.path().join("synthetic-source")).unwrap();
@@ -48,8 +51,10 @@ impl Fixture {
         let tx = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .unwrap();
-        tx.execute_batch(SCHEMA).unwrap();
-        verify_capacity_schema(&tx).unwrap();
+        tx.execute_batch(schema).unwrap();
+        if version == SCHEMA_VERSION {
+            verify_capacity_schema(&tx).unwrap();
+        }
         tx.execute(
             "INSERT INTO signer_account VALUES(1,?1,?2,0)",
             params![genesis.identity.account_id, EPOCH],
@@ -67,9 +72,13 @@ impl Fixture {
         .unwrap();
         tx.pragma_update(None, "application_id", APPLICATION_ID)
             .unwrap();
-        tx.pragma_update(None, "user_version", SCHEMA_VERSION)
-            .unwrap();
-        verify_born_initial(&tx, &genesis, EPOCH).unwrap();
+        tx.pragma_update(None, "user_version", version).unwrap();
+        if version == SCHEMA_VERSION {
+            verify_born_initial(&tx, &genesis, EPOCH).unwrap();
+        } else {
+            recovery_migration::verify_exact_schema(&tx, schema).unwrap();
+            verify_born_identity_cells(&tx, &genesis, EPOCH).unwrap();
+        }
         tx.commit().unwrap();
         Self {
             connection,
@@ -233,4 +242,19 @@ fn mismatched_initial_identity_epoch_or_key_preserves_complete_source_tree() {
         );
         assert_eq!(tree(f.directory.root()), before);
     }
+}
+
+#[test]
+fn schema15_born_archive_keeps_exact_bytes_without_implicit_migration() {
+    let f = Fixture::new_schema(recovery_migration::V15_SCHEMA, 15);
+    let before = tree(f.directory.root());
+    f.inspect().unwrap();
+    assert_eq!(tree(f.directory.root()), before);
+    recovery_migration::verify_exact_schema(&f.connection, recovery_migration::V15_SCHEMA).unwrap();
+    assert_eq!(
+        f.connection
+            .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+            .unwrap(),
+        15
+    );
 }

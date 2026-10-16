@@ -25,19 +25,7 @@ impl AuthenticatedReceipt {
     ) -> Result<Self> {
         let c = &preview.context;
         let stream = stream_digest(c)?;
-        let slot = if c.artifact_kind.immutable_slot() {
-            Some(digest(
-                b"wholepact.transport-slot.v1\0",
-                &encode(&(
-                    &stream,
-                    &c.proposal_id,
-                    c.proposal_revision,
-                    c.artifact_kind,
-                ))?,
-            ))
-        } else {
-            None
-        };
+        let slot = immutable_slot_digest(c)?;
         Ok(Self {
             stream,
             slot,
@@ -74,6 +62,24 @@ impl AuthenticatedReceipt {
     }
 }
 
+/// Canonical immutable proposal slot, shared with private concrete owners.
+/// This commitment selects retained evidence; it grants no receipt or authority.
+pub(crate) fn immutable_slot_digest(c: &MessageContext) -> Result<Option<String>> {
+    if !c.artifact_kind.immutable_slot() {
+        return Ok(None);
+    }
+    let stream = stream_digest(c)?;
+    Ok(Some(digest(
+        b"wholepact.transport-slot.v1\0",
+        &encode(&(
+            &stream,
+            &c.proposal_id,
+            c.proposal_revision,
+            c.artifact_kind,
+        ))?,
+    )))
+}
+
 /// Integration boundary. Implementations must durably and atomically compare and
 /// insert replay/ordering/immutable-slot records AND retain encrypted inbox bytes
 /// (or commit the complete domain import) before returning success. A bare in-memory
@@ -105,6 +111,15 @@ pub struct RetainedEnvelope {
     pub(crate) stream: String,
     pub(crate) sequence: u64,
     pub(crate) content_digest: String,
+    // Generic historical inboxes predate the exact receipt extension. The
+    // concrete named recipient reader always supplies every retained digest.
+    pub(crate) exact_receipt: Option<RetainedReceiptMetadata>,
+}
+pub(crate) struct RetainedReceiptMetadata {
+    pub(crate) message_id_digest: String,
+    pub(crate) payload_digest: String,
+    pub(crate) envelope_digest: String,
+    pub(crate) immutable_slot_digest: Option<String>,
 }
 impl RetainedEnvelope {
     pub fn stream_digest(&self) -> &str {
@@ -117,6 +132,12 @@ impl RetainedEnvelope {
         self.stream == receipt.stream
             && self.sequence == receipt.sequence
             && self.content_digest == receipt.content_digest
+            && self.exact_receipt.as_ref().is_none_or(|exact| {
+                exact.message_id_digest == receipt.message_id_digest
+                    && exact.payload_digest == receipt.payload_digest
+                    && exact.envelope_digest == receipt.envelope_digest
+                    && exact.immutable_slot_digest == receipt.slot
+            })
     }
 }
 impl SqliteReplayLedger {
@@ -320,6 +341,7 @@ impl SqliteReplayLedger {
                 stream: stream_digest.into(),
                 sequence,
                 content_digest,
+                exact_receipt: None,
             })
         })
         .transpose()

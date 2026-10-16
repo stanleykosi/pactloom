@@ -306,10 +306,12 @@ fn connected_encrypted_inbox_link_fence_restart_pause_and_backup() {
         journal: &f.journal,
         peer: &peer,
     };
-    assert!(bridge
-        .recover_admission_export_history(&f.request.operation_id)
-        .unwrap()
-        .is_some());
+    assert!(
+        bridge
+            .recover_admission_export_history(&f.request.operation_id)
+            .unwrap()
+            .is_some()
+    );
     assert!(matches!(f.commit(3006), Err(AuthorityError::Inactive)));
     let source_rows = offline_bytes(&f.journal);
     let source_events = event_bytes(&f.journal);
@@ -383,10 +385,12 @@ fn connected_encrypted_legacy_descriptor_cannot_upgrade_even_with_matching_sourc
     f.journal
         .commit_offline_for_test(&h('b'), f.request.clone(), f.bind_request(&f.request), 3003)
         .unwrap();
-    assert!(original_event(&f.journal, &f.request.operation_id)
-        .unwrap()
-        .original_request_link
-        .is_none());
+    assert!(
+        original_event(&f.journal, &f.request.operation_id)
+            .unwrap()
+            .original_request_link
+            .is_none()
+    );
     let peer = h('b');
     let bridge = OfflineOriginalBridge {
         journal: &f.journal,
@@ -396,10 +400,12 @@ fn connected_encrypted_legacy_descriptor_cannot_upgrade_even_with_matching_sourc
         bridge.select_admission_export(&f.request.operation_id, 3004),
         Err(AuthorityError::Authentication)
     ));
-    assert!(bridge
-        .recover_admission_export_history(&f.request.operation_id)
-        .unwrap()
-        .is_none());
+    assert!(
+        bridge
+            .recover_admission_export_history(&f.request.operation_id)
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(snapshot(&f.journal).outstanding_debit_zatoshis, 70);
 }
 
@@ -536,9 +542,11 @@ fn connected_encrypted_v3_migration_preserves_history_and_rejects_wrong_identity
     assert!(snapshot(&migrated) == before);
     assert_eq!(event_bytes(&migrated), events);
     assert!(mutate(&migrated, exact).unwrap() == permit);
-    assert!(offline_bytes(&migrated)
-        .iter()
-        .all(|(_, rows)| rows.is_empty()));
+    assert!(
+        offline_bytes(&migrated)
+            .iter()
+            .all(|(_, rows)| rows.is_empty())
+    );
     assert_eq!(
         migrated
             .connection
@@ -622,38 +630,44 @@ fn connected_controller_proof_input_cannot_replay_channel_session_or_changed_ori
         ),
         Err(AuthorityError::UnsupportedVersion)
     ));
-    assert!(bridge
-        .commit_admission_export(
-            fixture.request.clone(),
-            fixture.bind_request(&fixture.request),
-            Some(proof.clone()),
-            &[0xaa; 32],
-            &"1".repeat(64),
-            3003
-        )
-        .is_err());
+    assert!(
+        bridge
+            .commit_admission_export(
+                fixture.request.clone(),
+                fixture.bind_request(&fixture.request),
+                Some(proof.clone()),
+                &[0xaa; 32],
+                &"1".repeat(64),
+                3003
+            )
+            .is_err()
+    );
     let mut wrong_mac = proof.clone();
     wrong_mac.tag = h('9');
-    assert!(bridge
-        .commit_admission_export(
-            fixture.request.clone(),
-            fixture.bind_request(&fixture.request),
-            Some(wrong_mac),
-            &[0xaa; 32],
-            &"0".repeat(64),
-            3003
-        )
-        .is_err());
-    assert!(bridge
-        .commit_admission_export(
-            fixture.request.clone(),
-            fixture.bind_request(&fixture.request),
-            Some(proof.clone()),
-            &[0xbb; 32],
-            &"0".repeat(64),
-            3003
-        )
-        .is_err());
+    assert!(
+        bridge
+            .commit_admission_export(
+                fixture.request.clone(),
+                fixture.bind_request(&fixture.request),
+                Some(wrong_mac),
+                &[0xaa; 32],
+                &"0".repeat(64),
+                3003
+            )
+            .is_err()
+    );
+    assert!(
+        bridge
+            .commit_admission_export(
+                fixture.request.clone(),
+                fixture.bind_request(&fixture.request),
+                Some(proof.clone()),
+                &[0xbb; 32],
+                &"0".repeat(64),
+                3003
+            )
+            .is_err()
+    );
     let other_dir = private_dir();
     // Distinct synthetic genesis gives an actually distinct session. Reusing
     // Fixture::new would deliberately reproduce the same deterministic test key.
@@ -674,16 +688,18 @@ fn connected_controller_proof_input_cannot_replay_channel_session_or_changed_ori
         )
         .unwrap();
     assert_ne!(other_proof.session_id, proof.session_id);
-    assert!(bridge
-        .commit_admission_export(
-            fixture.request.clone(),
-            fixture.bind_request(&fixture.request),
-            Some(other_proof),
-            &[0xaa; 32],
-            &"0".repeat(64),
-            3003
-        )
-        .is_err());
+    assert!(
+        bridge
+            .commit_admission_export(
+                fixture.request.clone(),
+                fixture.bind_request(&fixture.request),
+                Some(other_proof),
+                &[0xaa; 32],
+                &"0".repeat(64),
+                3003
+            )
+            .is_err()
+    );
     // Even a genuine channel MAC for a changed request cannot replace retention.
     let mut changed = fixture.request.clone();
     changed.requested_at_ms += 1;
@@ -692,16 +708,18 @@ fn connected_controller_proof_input_cannot_replay_channel_session_or_changed_ori
         .journal
         .offline_controller_proof_for_test(&peer, &changed, &changed_auth)
         .unwrap();
-    assert!(bridge
-        .commit_admission_export(
-            changed,
-            changed_auth,
-            Some(changed_proof),
-            &[0xaa; 32],
-            &"0".repeat(64),
-            3003
-        )
-        .is_err());
+    assert!(
+        bridge
+            .commit_admission_export(
+                changed,
+                changed_auth,
+                Some(changed_proof),
+                &[0xaa; 32],
+                &"0".repeat(64),
+                3003
+            )
+            .is_err()
+    );
     assert!(snapshot(&fixture.journal) == before);
     let mut input = serde_json::to_value(&proof).unwrap();
     input
@@ -731,4 +749,93 @@ fn connected_controller_proof_input_cannot_replay_channel_session_or_changed_ori
         ),
         Err(AuthorityError::Uncertain)
     ));
+}
+
+#[test]
+fn connected_history_preserves_original_append_link_and_rejects_omission_or_tamper() {
+    let dir = private_dir();
+    let f = Fixture::new(dir.path());
+    f.authenticated_callback();
+    f.inbox_success_marker();
+    f.commit(3003).unwrap();
+    let snapshot = snapshot(&f.journal);
+    let page = f
+        .journal
+        .history(
+            &h('b'),
+            &snapshot.account_id,
+            &snapshot.network_profile_id,
+            &snapshot.head,
+            0,
+            16,
+        )
+        .unwrap();
+    assert!(page.next_after_sequence.is_none());
+    assert!(page.entries.last().unwrap().original_request_link.is_some());
+    // The actual wire DTO must preserve the exact bytes hashed by the journal.
+    let encoded = encode(&page).unwrap();
+    let decoded: HistoryPage = decode(&encoded).unwrap();
+    assert!(decoded == page);
+    fn replay(page: &HistoryPage) -> Result<()> {
+        let mut ledger = crate::policy::Ledger::new(page.policy.clone())?;
+        for entry in &page.entries {
+            if entry.previous_head != ledger.snapshot.head.digest {
+                return Err(AuthorityError::CorruptHistory);
+            }
+            ledger.apply(&Event {
+                original_request_link: entry.original_request_link.clone(),
+                mutation: entry.mutation.clone(),
+                authenticated_certificate_digest: entry.authenticated_certificate_digest.clone(),
+                witness_time_ms: entry.witness_time_ms,
+                writer_session_id: entry.writer_session_id.clone(),
+            })?;
+            if ledger.snapshot.head.digest != entry.head {
+                return Err(AuthorityError::CorruptHistory);
+            }
+        }
+        if ledger.snapshot != page.snapshot {
+            return Err(AuthorityError::CorruptHistory);
+        }
+        Ok(())
+    }
+    replay(&decoded).unwrap();
+    let mut omitted = decoded.clone();
+    omitted.entries.last_mut().unwrap().original_request_link = None;
+    assert!(matches!(
+        replay(&omitted),
+        Err(AuthorityError::CorruptHistory)
+    ));
+    for field in 0..6 {
+        let mut changed = decoded.clone();
+        let link = changed
+            .entries
+            .last_mut()
+            .unwrap()
+            .original_request_link
+            .as_mut()
+            .unwrap();
+        *match field {
+            0 => &mut link.prepared_record_digest,
+            1 => &mut link.authenticated_receipt_digest,
+            2 => &mut link.reservation_request_digest,
+            3 => &mut link.export_plan_digest,
+            4 => &mut link.original_envelope_digest,
+            _ => &mut link.inbox_acceptance_digest,
+        } = h('e');
+        assert!(matches!(
+            replay(&changed),
+            Err(AuthorityError::CorruptHistory)
+        ));
+    }
+    // Earlier events retain their old omitted-field wire representation. A
+    // missing new link cannot be repaired or inferred from the current request.
+    let legacy = decoded
+        .entries
+        .iter()
+        .find(|e| e.original_request_link.is_none())
+        .unwrap();
+    let value = serde_json::to_value(legacy).unwrap();
+    assert!(value.get("original_request_link").is_none());
+    let reopened: HistoryEntry = serde_json::from_value(value).unwrap();
+    assert!(reopened == *legacy);
 }

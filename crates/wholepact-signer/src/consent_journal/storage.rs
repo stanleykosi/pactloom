@@ -20,6 +20,9 @@ pub(super) static TEMPLATE: JournalTemplate = JournalTemplate {
 /// database key, generic SQL connection, generic record writer or release token.
 pub struct SignerConsentJournal {
     pub(super) connection: Mutex<Connection>,
+    /// Captured only by the authenticated SQLCipher factory, never from archive
+    /// cells, a path claim or an imported receipt. Read-only correlation only.
+    pub(super) database_identity: wholepact_storage_security::DatabaseFileIdentity,
     binding: SignerJournalBinding,
     pub(super) authority_fence: RwLock<()>,
     #[cfg(feature = "authority-signing")]
@@ -42,8 +45,9 @@ impl SignerConsentJournal {
         if epoch <= 0 {
             return Err(JournalError::InvalidBinding);
         }
-        let mut connection =
-            wholepact_storage_security::create_encrypted(path, key)?.into_connection();
+        let encrypted = wholepact_storage_security::create_encrypted(path, key)?;
+        let database_identity = encrypted.database_identity()?;
+        let mut connection = encrypted.into_connection();
         configure(&connection)?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute_batch(SCHEMA)?;
@@ -55,8 +59,10 @@ impl SignerConsentJournal {
         tx.pragma_update(None, "application_id", APPLICATION_ID)?;
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.commit()?;
+        database_identity.check_current(&connection)?;
         Ok(Self {
             connection: Mutex::new(connection),
+            database_identity,
             binding: SignerJournalBinding(Arc::new(())),
             authority_fence: RwLock::new(()),
             #[cfg(feature = "authority-signing")]
@@ -66,11 +72,12 @@ impl SignerConsentJournal {
         })
     }
     pub(crate) fn open_encrypted(path: &Path, key: &DatabaseKey, account_id: &str) -> Result<Self> {
-        let mut connection =
-            wholepact_storage_security::open_encrypted(path, key)?.into_connection();
+        let encrypted = wholepact_storage_security::open_encrypted(path, key)?;
+        let database_identity = encrypted.database_identity()?;
+        let mut connection = encrypted.into_connection();
         let initial_version: i64 =
             connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if matches!(initial_version, 8..=14) && read_account(&connection)?.account_id != account_id
+        if matches!(initial_version, 8..=15) && read_account(&connection)?.account_id != account_id
         {
             return Err(JournalError::InvalidBinding);
         }
@@ -94,6 +101,9 @@ impl SignerConsentJournal {
         }
         if initial_version == 14 {
             recovery_migration::migrate_v14(&mut connection, account_id)?;
+        }
+        if initial_version == 15 {
+            recovery_migration::migrate_v15(&mut connection, account_id)?;
         }
         let application: i64 =
             connection.pragma_query_value(None, "application_id", |r| r.get(0))?;
@@ -115,8 +125,10 @@ impl SignerConsentJournal {
             return Err(JournalError::InvalidBinding);
         }
         configure(&connection)?;
+        database_identity.check_current(&connection)?;
         Ok(Self {
             connection: Mutex::new(connection),
+            database_identity,
             binding: SignerJournalBinding(Arc::new(())),
             authority_fence: RwLock::new(()),
             #[cfg(feature = "authority-signing")]
@@ -136,11 +148,12 @@ impl SignerConsentJournal {
         account_id: &str,
         proof: &crate::account::VerifiedProfileActivation,
     ) -> Result<Self> {
-        let mut connection =
-            wholepact_storage_security::open_encrypted(path, key)?.into_connection();
+        let encrypted = wholepact_storage_security::open_encrypted(path, key)?;
+        let database_identity = encrypted.database_identity()?;
+        let mut connection = encrypted.into_connection();
         let initial_version: i64 =
             connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if matches!(initial_version, 8..=14) && read_account(&connection)?.account_id != account_id
+        if matches!(initial_version, 8..=15) && read_account(&connection)?.account_id != account_id
         {
             return Err(JournalError::InvalidBinding);
         }
@@ -164,6 +177,9 @@ impl SignerConsentJournal {
         }
         if initial_version == 14 {
             recovery_migration::migrate_v14(&mut connection, account_id)?;
+        }
+        if initial_version == 15 {
+            recovery_migration::migrate_v15(&mut connection, account_id)?;
         }
         let application: i64 =
             connection.pragma_query_value(None, "application_id", |r| r.get(0))?;
@@ -187,8 +203,10 @@ impl SignerConsentJournal {
             return Err(JournalError::RecoveryRequired);
         }
         configure(&connection)?;
+        database_identity.check_current(&connection)?;
         Ok(Self {
             connection: Mutex::new(connection),
+            database_identity,
             binding: SignerJournalBinding(Arc::new(())),
             authority_fence: RwLock::new(()),
             #[cfg(feature = "authority-signing")]
@@ -699,13 +717,69 @@ fn configure(c: &Connection) -> Result<()> {
     Ok(())
 }
 // Every table and every text column in the compiled schema is accounted for.
-// A row has at most seven cells. JSON text escaping expands each UTF-8 byte by
-// at most 6 (an ASCII control byte -> \u00xx). 1024 bytes per row is a proven
-// conservative allowance for <=7 tagged cells, signed 64-bit integers/rowid,
-// quotes, punctuation and field names (<512 bytes even at maximum widths).
+// A row has at most sixteen cells. JSON text escaping expands each UTF-8 byte by
+// at most 6 (an ASCII control byte -> \u00xx). 2048 bytes per row is a proven
+// conservative allowance for <=16 tagged cells, signed 64-bit integers/rowid,
+// quotes, punctuation and field names (<2048 bytes at maximum widths).
 // There are no BLOB or REAL cells in this schema. This dominates the bundle's
 // exact Row/Cell JSON encoding without duplicating its private serialization.
 const CAPACITY_TABLES: &[(&str, &[&str])] = &[
+    (
+        "signer_named_intent_outbox",
+        &[
+            "authorization_id",
+            "original_ref",
+            "profile_ref",
+            "stream",
+            "message_id",
+            "content_hash",
+            "payload_digest",
+            "envelope_digest",
+            "preview_json",
+            "envelope_hex",
+        ],
+    ),
+    (
+        "signer_named_recipient_profiles",
+        &[
+            "reference",
+            "original_setup_digest",
+            "account_id",
+            "enrollment_ref",
+            "manifest_ref",
+            "payload",
+        ],
+    ),
+    (
+        "signer_named_recipient_originals",
+        &["reference", "profile_ref", "authorization_id", "payload"],
+    ),
+    (
+        "signer_named_recipient_receipts",
+        &[
+            "profile_ref",
+            "stream",
+            "message_id",
+            "content_hash",
+            "payload_digest",
+            "envelope_digest",
+            "immutable_slot",
+            "envelope_hex",
+        ],
+    ),
+    (
+        "signer_named_recipient_started",
+        &[
+            "authorization_id",
+            "original_ref",
+            "marker_digest",
+            "payload",
+        ],
+    ),
+    (
+        "signer_named_recipient_results",
+        &["authorization_id", "result_digest", "payload"],
+    ),
     (
         "signer_common_context_reentry_v1",
         &[
@@ -984,7 +1058,7 @@ fn verify_capacity_schema(c: &Connection) -> Result<()> {
             .query_map([], |r| Ok((r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         if columns.is_empty()
-            || columns.len() > 7
+            || columns.len() > 16
             || columns.iter().any(|(_, t)| t != "TEXT" && t != "INTEGER")
         {
             return Err(JournalError::UnsupportedSchema);
@@ -1029,7 +1103,7 @@ pub(super) fn capacity_estimate(c: &Connection) -> Result<(u64, u64)> {
     let encoded_upper_bound = text_bytes
         .checked_mul(6)
         .and_then(|bytes| {
-            rows.checked_mul(1024)
+            rows.checked_mul(2048)
                 .and_then(|overhead| bytes.checked_add(overhead))
         })
         .and_then(|bytes| bytes.checked_add(BACKUP_METADATA_RESERVE))
@@ -1260,6 +1334,7 @@ pub(super) fn verify_schema(c: &Connection) -> Result<()> {
     offline_history::read_all(c, &read_account(c)?.account_id)?;
     offline_receipts::validate_all(c, &read_account(c)?.account_id)?;
     account_use_storage::inspect(c, &read_account(c)?.account_id)?;
+    named_recipient_inventory::validate_archive_rows(c, &read_account(c)?.account_id)?;
     construction_audit_v3::read_all(c, &read_account(c)?.account_id)?;
     common_context_reentry_audit_v1::read_complete(c, &read_account(c)?.account_id)?;
     Ok(())

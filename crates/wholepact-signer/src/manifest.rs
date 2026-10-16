@@ -1,12 +1,15 @@
 //! Exact core-manifest/protocol/local-wallet reconciliation. Source construction
 //! cannot authenticate another participant's real-world identity or chain inputs.
+#[cfg(feature = "offline-review-foundation")]
+pub(crate) mod named_own_policy;
+
 use crate::{Error, Result};
 use orchard::keys::FullViewingKey;
 use std::collections::BTreeSet;
 use wholepact_core::{OutputAllocation, Proposal};
 use wholepact_protocol::{
     construction::{ConstructionContext, InputActionMapping, OutputActionMapping},
-    review::{decode_testnet_receiver, OutputPurpose, ReviewPolicy},
+    review::{OutputPurpose, ReviewPolicy, decode_testnet_receiver},
 };
 use zcash_protocol::memo::MemoBytes;
 
