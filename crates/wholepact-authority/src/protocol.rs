@@ -596,6 +596,11 @@ impl ReservationPermit {
 // frame is already bounded and boxing would not change the protocol boundary.
 #[allow(clippy::large_enum_variant)]
 pub enum OwnerControl {
+    /// Purpose-specific local native publication only. No remote DTO can enroll
+    /// a born offline policy or bypass the existing legacy issuer restriction.
+    EnrollBornOfflineV1 {
+        record: Box<crate::born_offline_enrollment_v1::BornOfflineEnrollmentRecordV1>,
+    },
     GrantConstructionTransportV1 {
         grant: Box<crate::construction_transport_handoff_v1::ConstructionTransportGrantV1>,
     },

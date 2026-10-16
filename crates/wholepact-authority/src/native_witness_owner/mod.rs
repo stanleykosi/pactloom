@@ -5,11 +5,13 @@
 mod lifecycle;
 pub(crate) use lifecycle::{NativePublicationLease, NativeWorkerLease};
 pub(crate) use window::{
-    NativeConstructionTransportGrantDecisionV1, NativeEnrollmentDecision,
-    NativeManualEnrollmentExtensionDecision, NativeManualRosterConstructionDecisionV2,
-    NativeManualRosterConstructionDecisionV3, NativeManualRosterContinuationDecisionV2,
-    NativeManualRosterExtensionDecisionV2, NativeManualSessionContinuationDecision,
-    NativePermanentExclusionDecisionV1, NativeNamespaceBackupDecision, NativeNamespaceRecoveryDisclosureDecision, NativeSetupDecision,
+    NativeBornOfflineEnrollmentDecisionV1, NativeConstructionTransportGrantDecisionV1,
+    NativeEnrollmentDecision, NativeManualEnrollmentExtensionDecision,
+    NativeManualRosterConstructionDecisionV2, NativeManualRosterConstructionDecisionV3,
+    NativeManualRosterContinuationDecisionV2, NativeManualRosterExtensionDecisionV2,
+    NativeManualSessionContinuationDecision, NativeNamespaceBackupDecision,
+    NativeNamespaceRecoveryDisclosureDecision, NativePermanentExclusionDecisionV1,
+    NativeSetupDecision,
 };
 mod window;
 

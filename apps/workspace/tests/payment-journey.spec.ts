@@ -66,3 +66,19 @@ test('navigation cannot erase a failed refresh and re-enable a new draft', async
   const state = await fixture(page); await connect(page); state.fail = true; await page.getByRole('button', { name: 'Refresh workspace' }).click(); await expect(page.getByRole('alert')).toContainText('Local information may be stale');
   await page.getByRole('button', { name: 'Agreements', exact: true }).click(); await expect(page.getByRole('button', { name: 'New agreement' })).toBeDisabled(); await page.getByRole('button', { name: 'Overview', exact: true }).click(); await expect(page.getByRole('button', { name: 'Create a payment', exact: true })).toBeDisabled(); expect(state.mutations).toHaveLength(0);
 });
+
+test('keyboard skip link focuses current content without routing away or adding history', async ({ page }) => {
+  const state = await fixture(page); await connect(page); await openPlan(page);
+  const originalUrl = page.url();
+  const historyLength = await page.evaluate(() => history.length);
+  const skip = page.getByRole('link', { name: 'Skip to content', exact: true });
+  await skip.focus(); await page.keyboard.press('Enter');
+  await expect(page.locator('#main-content')).toBeFocused();
+  await expect(page.getByRole('heading', { name: 'Synthetic shared research invoice', exact: true })).toBeVisible();
+  expect(page.url()).toBe(originalUrl);
+  expect(await page.evaluate(() => history.length)).toBe(historyLength);
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.goBack(); await expect(page).toHaveURL(originalUrl);
+  await expect(page.getByRole('heading', { name: 'Agreements', exact: true })).toBeVisible();
+  expect(state.mutations).toHaveLength(0);
+});

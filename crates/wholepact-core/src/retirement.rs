@@ -10,8 +10,8 @@ use crate::records::{
     ExactTransactionReference, ObservationPolicy, ObservationWindow, SourcedChainObservation,
 };
 use crate::{
-    outstanding_exposure, Amount, AuthorizationExposure, ChainStatus, CoreError, ErrorCode, Result,
-    RevisionExposure,
+    Amount, AuthorizationExposure, ChainStatus, CoreError, ErrorCode, Result, RevisionExposure,
+    outstanding_exposure,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -165,15 +165,21 @@ impl AccountRecoveryView {
     }
     fn require_reclaimable(&self) -> Result<()> {
         if !matches!(self.history, ExposureHistoryState::Reconciled { .. }) {
-            return Err(CoreError::new(ErrorCode::RecoveryRequired, "reclaim requires complete current writer and authorization-history reconciliation; seed recovery and an empty list are insufficient"));
+            return Err(CoreError::new(
+                ErrorCode::RecoveryRequired,
+                "reclaim requires complete current writer and authorization-history reconciliation; seed recovery and an empty list are insufficient",
+            ));
         }
         if self
             .revisions
             .iter()
-            .any(|r| r.exposure.may_still_execute())
+            .any(|r| r.exposure.retains_unresolved_exposure())
             || !self.local_reservation_input_ids.is_empty()
         {
-            return Err(CoreError::new(ErrorCode::OutstandingExposure, "reclaim is blocked by live/local authorization or reservations; a separate intentional-conflict protocol is not supported here"));
+            return Err(CoreError::new(
+                ErrorCode::OutstandingExposure,
+                "reclaim is blocked by retained authorization exposure or reservations; conflict and expiry labels do not establish safe reclaim",
+            ));
         }
         if self
             .residual_inputs
@@ -240,7 +246,10 @@ impl UserControlledShieldedDestination {
             || self.network_profile_id != network
             || self.user_controlled_account_ref == source_account
         {
-            return Err(CoreError::new(ErrorCode::MissingEvidence, "reclaim needs the explicit independently checked user-controlled shielded destination on the same network and outside the retiring account"));
+            return Err(CoreError::new(
+                ErrorCode::MissingEvidence,
+                "reclaim needs the explicit independently checked user-controlled shielded destination on the same network and outside the retiring account",
+            ));
         }
         Ok(())
     }
@@ -320,7 +329,10 @@ impl AccountRetirementPlan {
         snapshot.require_reclaimable()?;
         let balance = snapshot.known_residual_balance()?;
         if balance == Amount::ZERO {
-            return Err(CoreError::new(ErrorCode::InvalidTerms, "no residual transfer is needed; use empty-account retirement after exposure reconciliation"));
+            return Err(CoreError::new(
+                ErrorCode::InvalidTerms,
+                "no residual transfer is needed; use empty-account retirement after exposure reconciliation",
+            ));
         }
         if balance > request.maximum_net_debit {
             return Err(CoreError::new(
@@ -426,7 +438,10 @@ impl AccountRetirementPlan {
         let mut snapshot = self.snapshot.clone();
         snapshot.observed_at = current.observed_at.clone();
         if current != snapshot || self.fee_quote.expires_at <= window.now {
-            return Err(CoreError::new(ErrorCode::RevisionConflict, "account, exposure or fee quote changed; prepare and review a new exact reclaim plan"));
+            return Err(CoreError::new(
+                ErrorCode::RevisionConflict,
+                "account, exposure or fee quote changed; prepare and review a new exact reclaim plan",
+            ));
         }
         let destination = source
             .verify_destination(&self.request.destination, &self.request.network_profile_id)?;
@@ -621,7 +636,10 @@ impl RetiredAccountRecord {
             )
             || observation.confirmations < required_confirmations
         {
-            return Err(CoreError::new(ErrorCode::StaleChain, "reclaim is not currently included under the retirement confirmation policy; keep observing"));
+            return Err(CoreError::new(
+                ErrorCode::StaleChain,
+                "reclaim is not currently included under the retirement confirmation policy; keep observing",
+            ));
         }
         let snapshot = source.read_recovery_view(&plan.request.account_id)?;
         snapshot.validate(
@@ -638,7 +656,10 @@ impl RetiredAccountRecord {
         transaction: Option<ExactTransactionReference>,
     ) -> Result<Self> {
         if snapshot.known_residual_balance()? != Amount::ZERO {
-            return Err(CoreError::new(ErrorCode::OutstandingExposure, "residual funds remain; retirement completion needs another separately reviewed recovery step"));
+            return Err(CoreError::new(
+                ErrorCode::OutstandingExposure,
+                "residual funds remain; retirement completion needs another separately reviewed recovery step",
+            ));
         }
         let ExposureHistoryState::Reconciled {
             journal_checkpoint_digest,

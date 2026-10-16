@@ -307,7 +307,7 @@ mod tests {
             before
         );
         assert_eq!(store.settled_debit("synthetic-account").unwrap(), "10");
-        assert_eq!(store.outstanding_debit("synthetic-account").unwrap(), "20");
+        assert_eq!(store.outstanding_debit("synthetic-account").unwrap(), "25");
         let count: u64 = store
             .connection
             .lock()
@@ -316,7 +316,7 @@ mod tests {
                 r.get(0)
             })
             .unwrap();
-        assert_eq!(count, 2);
+        assert_eq!(count, 3);
     }
 
     #[test]

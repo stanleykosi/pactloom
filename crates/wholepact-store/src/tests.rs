@@ -258,17 +258,36 @@ fn stale_writer_and_restored_ledger_cannot_issue_release_intent() {
         Err(StoreError::WriterEpochMismatch)
     ));
 }
+// Private historical-data fixture, not an admission capability. Legacy journals
+// may contain alternatives created before the conservative gate was fixed.
+fn insert_legacy_alternative(store: &Store, release: &ReleaseIntent) {
+    let value = serde_json::to_value(release).unwrap();
+    let c = store.connection.lock().unwrap();
+    c.execute("INSERT INTO authority_exposures(authorization_id,account_id,obligation_id,proposal_id,request_digest,maximum_debit,state,release_intent,payload,created_at_ms,updated_at_ms) VALUES(?1,?2,?3,?4,?5,?6,'outstanding_uncertain',1,?7,1,1)", params![release.authorization_id,release.account_id,release.obligation_id,release.proposal_id,request_digest(&value).unwrap(),release.maximum_debit,encode(&value).unwrap()]).unwrap();
+    for input in &release.input_ids {
+        c.execute(
+            "INSERT OR IGNORE INTO authority_reservations VALUES(?1,?2,?3)",
+            params![release.account_id, input, release.authorization_id],
+        )
+        .unwrap();
+    }
+}
+
 #[test]
-fn reorg_reopens_old_exposure_and_quarantines_even_after_replacement() {
+fn reorg_reopens_old_exposure_and_quarantines_even_after_legacy_replacement() {
     let s = Store::in_memory().unwrap();
     s.initialize_authority_account("account-a", 1).unwrap();
     s.record_authorization_release_intent(&intent("old", "obligation", "old-note", "60", "100"))
         .unwrap();
     s.record_observed_resolution("old", ExposureState::ExpiredObserved, "chain-evidence-1")
         .unwrap();
-    assert_eq!(s.outstanding_debit("account-a").unwrap(), "0");
-    s.record_authorization_release_intent(&intent("new", "obligation", "new-note", "60", "100"))
-        .unwrap();
+    assert_eq!(s.outstanding_debit("account-a").unwrap(), "60");
+    let replacement = intent("new", "obligation", "new-note", "60", "100");
+    assert!(matches!(
+        s.record_authorization_release_intent(&replacement),
+        Err(StoreError::LiveAuthorizationExists)
+    ));
+    insert_legacy_alternative(&s, &replacement);
     s.reopen_exposure_after_reorg("old", "reorg-evidence-2")
         .unwrap();
     assert_eq!(s.outstanding_debit("account-a").unwrap(), "120");
@@ -525,9 +544,11 @@ fn settlement_replay_atomically_reopens_every_alternative_and_fences_accounts() 
         .record_observed_resolution("old", ExposureState::ExpiredObserved, "prior-evidence")
         .unwrap();
     let replacement = intent("replacement", "obligation", "same-input", "20", "100");
-    store
-        .record_authorization_release_intent(&replacement)
-        .unwrap();
+    assert!(matches!(
+        store.record_authorization_release_intent(&replacement),
+        Err(StoreError::LiveAuthorizationExists)
+    ));
+    insert_legacy_alternative(&store, &replacement);
     let initial = store
         .create_agreement(
             &context("create-reorg-agreement", json!({"create":"agreement"})),
@@ -801,6 +822,16 @@ fn consumed_debit_remains_charged_against_reusable_aggregate_budget() {
     assert_eq!(store.settled_debit("account-a").unwrap(), "70");
     assert!(matches!(
         store.record_authorization_release_intent(&intent(
+            "reused-consumed-input",
+            "new-obligation",
+            "first-input",
+            "1",
+            "100"
+        )),
+        Err(StoreError::InputReserved)
+    ));
+    assert!(matches!(
+        store.record_authorization_release_intent(&intent(
             "too-much",
             "new-obligation",
             "new-input",
@@ -1026,4 +1057,209 @@ fn canonical_conflict_retains_original_exposure_and_link_through_restart_and_reo
     drop(store);
     cleanup(&path);
     std::fs::remove_dir(path.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn observed_conflict_and_expiry_preserve_budget_obligation_and_exact_input_claims() {
+    for observed in [
+        ExposureState::ConflictedObserved,
+        ExposureState::ExpiredObserved,
+    ] {
+        let store = Store::in_memory().unwrap();
+        store.initialize_authority_account("account-a", 1).unwrap();
+        let original = intent("original", "obligation", "original-input", "70", "100");
+        store
+            .record_authorization_release_intent(&original)
+            .unwrap();
+        store
+            .record_observed_resolution("original", observed, "synthetic-observation")
+            .unwrap();
+        let retained = store.exposure("original").unwrap().unwrap();
+        assert_eq!(retained.state, observed);
+        assert_eq!(store.outstanding_debit("account-a").unwrap(), "70");
+        assert_eq!(store.settled_debit("account-a").unwrap(), "0");
+        let count: u64 = store
+            .connection
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM authority_reservations WHERE authorization_id='original'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(
+            store
+                .record_authorization_release_intent(&original)
+                .unwrap(),
+            retained
+        );
+        assert!(matches!(
+            store.mark_authorization_released("original"),
+            Err(StoreError::InvalidTransition)
+        ));
+        assert!(matches!(
+            store.record_authorization_release_intent(&intent(
+                "replacement",
+                "obligation",
+                "fresh-input",
+                "1",
+                "100"
+            )),
+            Err(StoreError::LiveAuthorizationExists)
+        ));
+        assert!(matches!(
+            store.record_authorization_release_intent(&intent(
+                "over-budget",
+                "fresh-obligation",
+                "fresh-input",
+                "31",
+                "100"
+            )),
+            Err(StoreError::BudgetExceeded)
+        ));
+        assert!(matches!(
+            store.record_authorization_release_intent(&intent(
+                "shared-input",
+                "fresh-obligation",
+                "original-input",
+                "1",
+                "100"
+            )),
+            Err(StoreError::InputReserved)
+        ));
+        // Reproduce the old writer's missing reservation, without touching its
+        // retained original. No migration may interpret that absence as free.
+        store
+            .connection
+            .lock()
+            .unwrap()
+            .execute(
+                "DELETE FROM authority_reservations WHERE authorization_id='original'",
+                [],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.record_authorization_release_intent(&intent(
+                "legacy-shared",
+                "fresh-obligation",
+                "original-input",
+                "1",
+                "100"
+            )),
+            Err(StoreError::InputReserved)
+        ));
+        store
+            .record_authorization_release_intent(&intent(
+                "remaining",
+                "fresh-obligation",
+                "fresh-input",
+                "30",
+                "100",
+            ))
+            .unwrap();
+        assert_eq!(store.outstanding_debit("account-a").unwrap(), "100");
+        assert_eq!(store.account_exposures("account-a").unwrap().len(), 2);
+        store
+            .reopen_exposure_after_reorg("original", "synthetic-reorg")
+            .unwrap();
+        assert_eq!(store.outstanding_debit("account-a").unwrap(), "100");
+        assert!(
+            store
+                .authority_account("account-a")
+                .unwrap()
+                .unwrap()
+                .recovery_required
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn legacy_resolved_input_claims_survive_actual_encrypted_reopen() {
+    let path = encrypted_fixture_path();
+    let mut bytes = [0u8; 32];
+    std::io::Read::read_exact(
+        &mut std::fs::File::open("/dev/urandom").unwrap(),
+        &mut bytes,
+    )
+    .unwrap();
+    let key = wholepact_storage_security::DatabaseKey::from_bytes(bytes);
+    let store = Store::create_encrypted(&path, &key).unwrap();
+    store.initialize_authority_account("account-a", 1).unwrap();
+    let original = intent(
+        "original",
+        "original-obligation",
+        "original-input",
+        "70",
+        "100",
+    );
+    store
+        .record_authorization_release_intent(&original)
+        .unwrap();
+    store
+        .record_observed_resolution(
+            "original",
+            ExposureState::ConflictedObserved,
+            "synthetic-history",
+        )
+        .unwrap();
+    store
+        .connection
+        .lock()
+        .unwrap()
+        .execute(
+            "DELETE FROM authority_reservations WHERE authorization_id='original'",
+            [],
+        )
+        .unwrap();
+    drop(store);
+    let reopened = Store::open_encrypted(&path, &key).unwrap();
+    assert_eq!(reopened.outstanding_debit("account-a").unwrap(), "70");
+    assert!(matches!(
+        reopened.record_authorization_release_intent(&intent(
+            "fresh",
+            "fresh-obligation",
+            "original-input",
+            "1",
+            "100"
+        )),
+        Err(StoreError::InputReserved)
+    ));
+    assert!(matches!(
+        reopened.record_authorization_release_intent(&intent(
+            "new",
+            "original-obligation",
+            "new-input",
+            "1",
+            "100"
+        )),
+        Err(StoreError::LiveAuthorizationExists)
+    ));
+    assert_eq!(reopened.account_exposures("account-a").unwrap().len(), 1);
+    let archive = path.parent().unwrap().join("history-backup.sqlite");
+    reopened.backup_agreement_journal(&archive, &key).unwrap();
+    let restored_path = path.parent().unwrap().join("restored.sqlite");
+    let (restored, report) =
+        crate::backup::restore_agreement_journal(&archive, &key, &restored_path, &key).unwrap();
+    assert!(report.recovery_required);
+    assert_eq!(restored.outstanding_debit("account-a").unwrap(), "70");
+    assert_eq!(
+        restored.exposure("original").unwrap().unwrap().intent,
+        original
+    );
+    assert!(matches!(
+        restored.record_authorization_release_intent(&intent(
+            "restored-fresh",
+            "fresh-obligation",
+            "fresh-input",
+            "1",
+            "100"
+        )),
+        Err(StoreError::RecoveryRequired)
+    ));
+    drop(restored);
+    drop(reopened);
+    std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
 }

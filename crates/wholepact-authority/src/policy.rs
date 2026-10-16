@@ -809,6 +809,14 @@ impl Ledger {
                 }
                 self.fence(&r.expected_head, r.writer_epoch)?;
                 match &r.control {
+                    OwnerControl::EnrollBornOfflineV1 { record } => {
+                        if r.operation_id != record.enrollment.owner_operation_id()?
+                            || r.expected_head != record.enrollment.expected_head
+                        {
+                            return Err(AuthorityError::InvalidBinding);
+                        }
+                        self.apply_born_offline_enrollment_v1(record, event.witness_time_ms)?;
+                    }
                     OwnerControl::GrantConstructionTransportV1 { grant } => {
                         if r.operation_id != grant.operation_id
                             || r.expected_head != grant.expected_head
@@ -984,6 +992,7 @@ impl Ledger {
                 if !matches!(
                     &r.control,
                     OwnerControl::ActivateWriter { .. }
+                        | OwnerControl::EnrollBornOfflineV1 { .. }
                         | OwnerControl::GrantConstructionTransportV1 { .. }
                         | OwnerControl::ApproveManualRosterConstructionV3 { .. }
                         | OwnerControl::ApproveManualRosterConstructionV2 { .. }
@@ -1033,6 +1042,7 @@ impl Ledger {
             AuthorityMutation::OwnerControl(r) => matches!(
                 &r.control,
                 OwnerControl::ActivateWriter { .. }
+                    | OwnerControl::EnrollBornOfflineV1 { .. }
                     | OwnerControl::GrantConstructionTransportV1 { .. }
                     | OwnerControl::ApproveManualRosterConstructionV3 { .. }
                     | OwnerControl::ApproveManualRosterConstructionV2 { .. }

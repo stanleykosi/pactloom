@@ -305,7 +305,8 @@ impl AuthorityJournal {
                 | AuthorityMutation::ReopenResolutions(_)
                 | AuthorityMutation::ReserveOfflineAuthorization(_)
                 | AuthorityMutation::OwnerControl(OwnerControlRequest {
-                    control: OwnerControl::GrantConstructionTransportV1 { .. }
+                    control: OwnerControl::EnrollBornOfflineV1 { .. }
+                        | OwnerControl::GrantConstructionTransportV1 { .. }
                         | OwnerControl::ApproveManualRosterConstructionV3 { .. }
                         | OwnerControl::ApproveManualRosterConstructionV2 { .. }
                         | OwnerControl::ExtendManualEnrollment { .. }
@@ -1113,6 +1114,7 @@ pub(crate) fn load(c: &Connection) -> Result<Ledger> {
     if matches!(version, 5 | SCHEMA_VERSION) {
         let birth = crate::pending_birth_storage::read(c, &ledger.policy)?;
         ledger.validate_manual_birth(birth.as_ref())?;
+        ledger.validate_born_offline_birth_v1(birth.as_ref())?;
     } else if ledger.policy.account_use_genesis.is_some() {
         return Err(AuthorityError::CorruptHistory);
     }

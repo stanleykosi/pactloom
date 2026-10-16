@@ -141,3 +141,6 @@ fn serialized_scope_without_actual_namespace_owner_cannot_enable_bootstrap() {
     assert!(load(c.connection()).unwrap().snapshot == ledger.snapshot);
     let _ = extension;
 }
+
+#[path = "born_offline_enrollment_encrypted_tests.rs"]
+mod born_offline_enrollment_tests;

@@ -50,6 +50,12 @@ pub use offline_retry::{
 };
 pub mod account_use;
 pub mod account_use_link;
+#[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
+pub(crate) mod born_offline_enrollment_owner_v1;
+mod born_offline_enrollment_policy_v1;
+#[cfg(feature = "pending-birth-foundation")]
+pub mod born_offline_enrollment_signature_v1;
+pub mod born_offline_enrollment_v1;
 mod journal;
 pub mod manual_enrollment;
 #[cfg(all(feature = "native-witness-owner", target_os = "linux"))]

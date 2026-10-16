@@ -62,9 +62,11 @@ fn cancellation_decline_and_obsolete_do_not_recall_released_authorization() {
             ErrorCode::OutstandingExposure
         );
     }
-    assert!(state
-        .apply(LifecycleEvent::DiscardUnreleasedAuthorization)
-        .is_err());
+    assert!(
+        state
+            .apply(LifecycleEvent::DiscardUnreleasedAuthorization)
+            .is_err()
+    );
 }
 
 #[test]
@@ -85,14 +87,18 @@ fn unsigned_closure_blocks_export_until_reviewed_again() {
         LifecycleEvent::RequireRevision,
     ] {
         let closed = state.apply(event).unwrap();
-        assert!(closed
-            .apply(LifecycleEvent::RecordReleaseIntent {
-                operation_id: "late-export".into()
-            })
-            .is_err());
-        assert!(closed
-            .apply(LifecycleEvent::DiscardUnreleasedAuthorization)
-            .is_ok());
+        assert!(
+            closed
+                .apply(LifecycleEvent::RecordReleaseIntent {
+                    operation_id: "late-export".into()
+                })
+                .is_err()
+        );
+        assert!(
+            closed
+                .apply(LifecycleEvent::DiscardUnreleasedAuthorization)
+                .is_ok()
+        );
     }
 }
 
@@ -112,11 +118,13 @@ fn timeout_and_backend_rejection_retain_exposure_and_exact_retry_identity() {
         AuthorizationExposure::OutstandingUncertain
     );
     assert_eq!(state.chain_status(), ChainStatus::BackendRejected);
-    assert!(state
-        .apply(LifecycleEvent::RecordSubmissionIntent {
-            transaction_bytes_digest: "a".repeat(64)
-        })
-        .is_ok());
+    assert!(
+        state
+            .apply(LifecycleEvent::RecordSubmissionIntent {
+                transaction_bytes_digest: "a".repeat(64)
+            })
+            .is_ok()
+    );
     assert_eq!(
         state
             .apply(LifecycleEvent::RecordSubmissionIntent {
@@ -131,9 +139,11 @@ fn timeout_and_backend_rejection_retain_exposure_and_exact_retry_identity() {
 #[test]
 fn expiry_is_inclusive_and_confidence_is_height_based() {
     let state = released(1);
-    assert!(state
-        .observe(observation(ChainStatus::ExpiredObserved, 100, None))
-        .is_err());
+    assert!(
+        state
+            .observe(observation(ChainStatus::ExpiredObserved, 100, None))
+            .is_err()
+    );
     assert_eq!(
         state
             .observe(observation(ChainStatus::ExpiredObserved, 101, None))
@@ -141,27 +151,35 @@ fn expiry_is_inclusive_and_confidence_is_height_based() {
             .authorization_exposure(),
         AuthorizationExposure::ExpiredObserved
     );
-    assert!(state
-        .observe(observation(
-            ChainStatus::ConfirmationPolicyMet,
-            100,
-            Some(100)
-        ))
-        .is_ok());
-    assert!(state
-        .observe(observation(
-            ChainStatus::ConfirmationPolicyMet,
-            101,
-            Some(101)
-        ))
-        .is_err());
+    assert!(
+        state
+            .observe(observation(
+                ChainStatus::ConfirmationPolicyMet,
+                100,
+                Some(100)
+            ))
+            .is_ok()
+    );
+    assert!(
+        state
+            .observe(observation(
+                ChainStatus::ConfirmationPolicyMet,
+                101,
+                Some(101)
+            ))
+            .is_err()
+    );
     let state = released(10);
-    assert!(state
-        .observe(observation(ChainStatus::ExpiredObserved, 109, None))
-        .is_err());
-    assert!(state
-        .observe(observation(ChainStatus::ExpiredObserved, 110, None))
-        .is_ok());
+    assert!(
+        state
+            .observe(observation(ChainStatus::ExpiredObserved, 109, None))
+            .is_err()
+    );
+    assert!(
+        state
+            .observe(observation(ChainStatus::ExpiredObserved, 110, None))
+            .is_ok()
+    );
     let mut stale = observation(ChainStatus::ExpiredObserved, 110, None);
     stale.synchronized = false;
     assert_eq!(
@@ -206,22 +224,48 @@ fn exposure_accounting_is_conservative_and_settled_obligations_cannot_pay_twice(
             .as_zatoshis(),
         100
     );
-    assert_eq!(
-        outstanding_exposure(&history(AuthorizationExposure::ExpiredObserved)).unwrap(),
-        Amount::ZERO
+    for observed in [
+        AuthorizationExposure::ExpiredObserved,
+        AuthorizationExposure::ConflictedObserved,
+    ] {
+        assert_eq!(
+            outstanding_exposure(&history(observed))
+                .unwrap()
+                .as_zatoshis(),
+            100
+        );
+        assert_eq!(
+            check_replacement("obligation-1", &history(observed), false)
+                .unwrap_err()
+                .code,
+            ErrorCode::OutstandingExposure
+        );
+    }
+    for uncharged in [
+        AuthorizationExposure::NotAuthorized,
+        AuthorizationExposure::Consumed,
+    ] {
+        assert_eq!(
+            outstanding_exposure(&history(uncharged)).unwrap(),
+            Amount::ZERO
+        );
+    }
+    assert!(
+        check_replacement(
+            "obligation-1",
+            &history(AuthorizationExposure::NotAuthorized),
+            false
+        )
+        .is_ok()
     );
-    assert!(check_replacement(
-        "obligation-1",
-        &history(AuthorizationExposure::ExpiredObserved),
-        false
-    )
-    .is_ok());
-    assert!(check_replacement(
-        "obligation-1",
-        &history(AuthorizationExposure::Consumed),
-        false
-    )
-    .is_err());
+    assert!(
+        check_replacement(
+            "obligation-1",
+            &history(AuthorizationExposure::Consumed),
+            false
+        )
+        .is_err()
+    );
     assert!(check_replacement("obligation-1", &[], true).is_err());
     let mut duplicate = history(AuthorizationExposure::Released);
     duplicate.push(duplicate[0].clone());
@@ -251,4 +295,37 @@ fn contradictory_resolution_reopens_risk_without_trusting_new_success() {
         settled.observe(older).unwrap_err().code,
         ErrorCode::StaleChain
     );
+}
+
+#[test]
+fn reversible_observations_retain_additive_exposure_across_serialization_and_reorg() {
+    let mut revisions = history(AuthorizationExposure::ConflictedObserved);
+    let mut next = revisions[0].clone();
+    next.proposal_id = "second-proposal-same-input".into();
+    next.exposure = AuthorizationExposure::ExpiredObserved;
+    revisions.push(next);
+    let bytes = serde_json::to_vec(&revisions).unwrap();
+    let retained: Vec<RevisionExposure> = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(outstanding_exposure(&retained).unwrap().as_zatoshis(), 200);
+    for status in [
+        ChainStatus::ConflictedObserved,
+        ChainStatus::ExpiredObserved,
+    ] {
+        let inclusion = (status == ChainStatus::ConflictedObserved).then_some(101);
+        let observed = released(10)
+            .observe(observation(status, 110, inclusion))
+            .unwrap();
+        assert!(!observed.authorization_exposure().may_still_execute());
+        assert!(
+            observed
+                .authorization_exposure()
+                .retains_unresolved_exposure()
+        );
+        let before = outstanding_exposure(&history(observed.authorization_exposure())).unwrap();
+        let reopened = observed.apply(LifecycleEvent::MarkReorganization).unwrap();
+        assert_eq!(
+            outstanding_exposure(&history(reopened.authorization_exposure())).unwrap(),
+            before
+        );
+    }
 }

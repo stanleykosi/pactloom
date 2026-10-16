@@ -89,7 +89,7 @@ export function App() {
   const openAgreement = (agreement: AgreementView) => { setPage('agreements'); if (location.hash !== '#agreements') { location.hash = 'agreements'; setTimeout(() => setSelectedId(agreement.agreement.agreement_id), 0); } else setSelectedId(agreement.agreement.agreement_id); };
   if (!client) return <Connect onConnected={connected}/>;
   return <div className="app-shell">
-    <a className="skip-link" href="#main-content">Skip to content</a>
+    <a className="skip-link" href="#main-content" onClick={event => { event.preventDefault(); document.getElementById('main-content')?.focus(); }}>Skip to content</a>
     <aside className="sidebar"><a className="brand" href="#overview" aria-label="Wholepact overview"><Mark/><span>wholepact<span className="brand-tag">LOCAL WORKSPACE</span></span></a>
       <nav aria-label="Main navigation">{pages.map(item => <button key={item.id} className={`nav-item ${page === item.id ? 'active' : ''}`} aria-label={item.label} aria-current={page === item.id ? 'page' : undefined} onClick={() => navigate(item.id)}><Icon name={item.id}/><span>{item.label}</span>{item.id === 'agreements' && agreements.length > 0 && <span className="nav-count">{agreements.length}</span>}</button>)}</nav>
       <div className="sidebar-bottom"><div className="local-sign"><Icon name="lock"/><div><strong>Yours, by design</strong><span>Stored in your local service</span></div></div><button className="profile-button" onClick={() => navigate('settings')}><span className="profile-avatar">L</span><span><strong>Local profile</strong><small>{clientId}</small></span><Icon name="settings" size={16}/></button></div>

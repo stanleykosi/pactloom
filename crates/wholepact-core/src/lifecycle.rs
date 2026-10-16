@@ -38,11 +38,19 @@ pub enum AuthorizationExposure {
 }
 
 impl AuthorizationExposure {
+    /// Execution assessment at the last observed branch only. This is not a
+    /// budget release, replacement permit or account-retirement decision.
     pub fn may_still_execute(self) -> bool {
         matches!(
             self,
             Self::AuthorizedLocally | Self::Released | Self::OutstandingUncertain
         )
+    }
+    /// Keep reversible conflict and expiry observations charged until a distinct
+    /// qualified resolution/admission protocol establishes more than this label.
+    /// Consumed value is settled debit, not reusable allowance.
+    pub fn retains_unresolved_exposure(self) -> bool {
+        !matches!(self, Self::NotAuthorized | Self::Consumed)
     }
     pub fn was_released(self) -> bool {
         !matches!(self, Self::NotAuthorized | Self::AuthorizedLocally)
@@ -119,7 +127,7 @@ impl ChainObservation {
                 return Err(CoreError::new(
                     ErrorCode::StaleChain,
                     "incomplete or inconsistent inclusion evidence",
-                ))
+                ));
             }
         }
         let requires_inclusion = matches!(
@@ -417,7 +425,10 @@ impl Lifecycle {
                         )
                     })?;
                 if observation.tip_height < boundary || observation.inclusion_height.is_some() {
-                    return Err(CoreError::new(ErrorCode::StaleChain,"expiry requires a canonical observed tip beyond the inclusive expiry height and confidence margin"));
+                    return Err(CoreError::new(
+                        ErrorCode::StaleChain,
+                        "expiry requires a canonical observed tip beyond the inclusive expiry height and confidence margin",
+                    ));
                 }
                 next.authorization_exposure = A::ExpiredObserved;
             }
@@ -452,7 +463,7 @@ impl Lifecycle {
                 return Err(CoreError::new(
                     ErrorCode::InvalidTransition,
                     "not-submitted status cannot clear released exposure",
-                ))
+                ));
             }
         }
         if matches!(
@@ -504,17 +515,24 @@ pub fn check_replacement(
             ));
         }
         if revision.exposure == AuthorizationExposure::Consumed {
-            return Err(CoreError::new(ErrorCode::OutstandingExposure,"the obligation already has a consumed settlement; a replacement could duplicate payment"));
+            return Err(CoreError::new(
+                ErrorCode::OutstandingExposure,
+                "the obligation already has a consumed settlement; a replacement could duplicate payment",
+            ));
         }
-        if revision.exposure.may_still_execute() {
-            return Err(CoreError::new(ErrorCode::OutstandingExposure,"a historical revision may still execute; fresh-input and unverified conflict replacements are blocked"));
+        if revision.exposure.retains_unresolved_exposure() {
+            return Err(CoreError::new(
+                ErrorCode::OutstandingExposure,
+                "a historical revision retains exposure; conflict or expiry observations do not permit replacement",
+            ));
         }
     }
     Ok(())
 }
 
-/// Counts local and released unresolved authorizations, without assuming that
-/// shared inputs make their budget exposures safely interchangeable.
+/// Counts every unresolved local/released authorization, including reversible
+/// conflict and expiry observations. Shared inputs never net their debit.
+/// Consumed debits belong to a separate settled/lifetime ledger, not free budget.
 pub fn outstanding_exposure(history: &[RevisionExposure]) -> Result<Amount> {
     let mut ids = BTreeSet::new();
     for revision in history {
@@ -529,7 +547,7 @@ pub fn outstanding_exposure(history: &[RevisionExposure]) -> Result<Amount> {
     Ok(Amount::checked_sum(
         history
             .iter()
-            .filter(|r| r.exposure.may_still_execute())
+            .filter(|r| r.exposure.retains_unresolved_exposure())
             .map(|r| r.maximum_net_debit),
     )?)
 }

@@ -1,15 +1,15 @@
 use super::*;
 use crate::authority::ExposureState;
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     Arc,
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 use wholepact_core::{
-    automation::{
-        AutomationEvidence, AutomationEvidenceKind as Kind, AutomationEvidenceRequirement,
-        AUTOMATION_PROFILE,
-    },
     Amount,
+    automation::{
+        AUTOMATION_PROFILE, AutomationEvidence, AutomationEvidenceKind as Kind,
+        AutomationEvidenceRequirement,
+    },
 };
 use wholepact_storage_security::DatabaseKey;
 
@@ -371,15 +371,18 @@ fn release_then_revoke_preserves_exact_consent_exposure_and_historical_replay() 
             .authorize_automatically("g", changed, &f.trust, &mut signer),
         Err(AutomationError::Store(StoreError::IdempotencyConflict))
     ));
-    assert!(f
-        .store
-        .change_automation_grant("g", 3, AutomationGrantAction::Activate, &f.trust)
-        .is_err());
+    assert!(
+        f.store
+            .change_automation_grant("g", 3, AutomationGrantAction::Activate, &f.trust)
+            .is_err()
+    );
     let events = f.store.events_after(0, 100).unwrap();
     assert!(events.iter().any(|e| e.kind == "automation.grant_revoked"));
-    assert!(events
-        .iter()
-        .any(|e| e.kind == "automation.authorization_intent_recorded"));
+    assert!(
+        events
+            .iter()
+            .any(|e| e.kind == "automation.authorization_intent_recorded")
+    );
 }
 #[test]
 fn pause_resume_expiry_and_deliberate_renewal_never_extend_old_terms() {
@@ -396,17 +399,19 @@ fn pause_resume_expiry_and_deliberate_renewal_never_extend_old_terms() {
         calls: 0,
         fail: false,
     };
-    assert!(f
-        .store
-        .authorize_automatically("g", request("a", "app", 10), &f.trust, &mut signer)
-        .is_err());
+    assert!(
+        f.store
+            .authorize_automatically("g", request("a", "app", 10), &f.trust, &mut signer)
+            .is_err()
+    );
     f.store
         .change_automation_grant("g", 4, AutomationGrantAction::ObserveExpiry, &f.trust)
         .unwrap();
-    assert!(f
-        .store
-        .change_automation_grant("g", 5, AutomationGrantAction::Activate, &f.trust)
-        .is_err());
+    assert!(
+        f.store
+            .change_automation_grant("g", 5, AutomationGrantAction::Activate, &f.trust)
+            .is_err()
+    );
     assert_eq!(
         f.store
             .automation_grant("g")
@@ -496,10 +501,11 @@ fn grant_budget_atomic_audit_fault_and_callback_failure_remain_conservative() {
         fail: true,
     };
     f.store.connection.lock().unwrap().execute_batch("CREATE TRIGGER automation_fault BEFORE INSERT ON events WHEN NEW.kind='automation.authorization_intent_recorded' BEGIN SELECT RAISE(ABORT,'synthetic fault'); END;").unwrap();
-    assert!(f
-        .store
-        .authorize_automatically("g", request("a", "app", 70), &f.trust, &mut signer)
-        .is_err());
+    assert!(
+        f.store
+            .authorize_automatically("g", request("a", "app", 70), &f.trust, &mut signer)
+            .is_err()
+    );
     assert_eq!(signer.calls, 0);
     assert!(f.store.exposure("a").unwrap().is_none());
     f.store
@@ -831,4 +837,92 @@ fn delayed_key_use_rechecks_exact_policy_without_a_second_callback() {
         )
         .unwrap();
     assert_eq!(signer.calls, 1);
+}
+
+#[test]
+fn observed_conflict_and_expiry_keep_grant_charge_and_never_reinvoke_authorizer() {
+    for observed in [
+        ExposureState::ConflictedObserved,
+        ExposureState::ExpiredObserved,
+    ] {
+        let f = Fixture::new();
+        let mut g = terms("g", "app");
+        g.maximum_outstanding_debit = money(80);
+        f.store.create_automation_grant(g, &f.trust).unwrap();
+        f.store
+            .change_automation_grant("g", 1, AutomationGrantAction::Activate, &f.trust)
+            .unwrap();
+        let mut signer = SyntheticAuthorizer {
+            calls: 0,
+            fail: false,
+        };
+        f.store
+            .authorize_automatically("g", request("a", "app", 70), &f.trust, &mut signer)
+            .unwrap();
+        f.store
+            .record_observed_resolution("a", observed, "synthetic-observation")
+            .unwrap();
+        assert_eq!(f.store.outstanding_debit("account").unwrap(), "70");
+        // 20 fits the account's remaining 30, but not this grant's remaining 10.
+        assert!(matches!(
+            f.store
+                .authorize_automatically("g", request("b", "app", 20), &f.trust, &mut signer),
+            Err(AutomationError::Store(StoreError::BudgetExceeded))
+        ));
+        assert_eq!(signer.calls, 1);
+        assert!(f.store.exposure("b").unwrap().is_none());
+        let replay = f
+            .store
+            .authorize_automatically(
+                "g",
+                request("a", "app", 70),
+                &DenyAutomationTrustSource,
+                &mut signer,
+            )
+            .unwrap();
+        assert!(replay.replayed);
+        assert_eq!(signer.calls, 1);
+        assert_eq!(f.store.exposure("a").unwrap().unwrap().state, observed);
+        f.store
+            .authorize_automatically("g", request("c", "app", 10), &f.trust, &mut signer)
+            .unwrap();
+        assert_eq!(signer.calls, 2);
+        assert_eq!(f.store.outstanding_debit("account").unwrap(), "80");
+    }
+}
+
+#[test]
+fn consumed_settlement_reopens_pending_grant_capacity_but_never_lifetime_allowance() {
+    let f = Fixture::new();
+    let mut g = terms("g", "app");
+    g.maximum_outstanding_debit = money(80);
+    f.store.create_automation_grant(g, &f.trust).unwrap();
+    f.store
+        .change_automation_grant("g", 1, AutomationGrantAction::Activate, &f.trust)
+        .unwrap();
+    let mut signer = SyntheticAuthorizer {
+        calls: 0,
+        fail: false,
+    };
+    f.store
+        .authorize_automatically("g", request("a", "app", 70), &f.trust, &mut signer)
+        .unwrap();
+    f.store
+        .record_observed_resolution("a", ExposureState::Consumed, "synthetic-confirmed-original")
+        .unwrap();
+    assert_eq!(f.store.outstanding_debit("account").unwrap(), "0");
+    assert_eq!(f.store.settled_debit("account").unwrap(), "70");
+    // The pending grant has room again, but the account has only 30 remaining.
+    f.store
+        .authorize_automatically("g", request("b", "app", 20), &f.trust, &mut signer)
+        .unwrap();
+    assert!(matches!(
+        f.store
+            .authorize_automatically("g", request("c", "app", 11), &f.trust, &mut signer),
+        Err(AutomationError::Store(StoreError::BudgetExceeded))
+    ));
+    assert_eq!(signer.calls, 2);
+    assert_eq!(f.store.outstanding_debit("account").unwrap(), "20");
+    assert_eq!(f.store.settled_debit("account").unwrap(), "70");
+    assert!(f.store.exposure("c").unwrap().is_none());
 }

@@ -727,7 +727,7 @@ fn recovery_view() -> AccountRecoveryView {
             proposal_id: "original-proposal".into(),
             obligation_id: "original-obligation".into(),
             maximum_net_debit: a(100),
-            exposure: AuthorizationExposure::ExpiredObserved,
+            exposure: AuthorizationExposure::Consumed,
             input_ids: vec!["original-input".into()],
         }],
         local_reservation_input_ids: vec![],
@@ -839,6 +839,8 @@ fn missing_stale_and_live_history_block_reclaim_even_with_empty_exposure() {
         AuthorizationExposure::AuthorizedLocally,
         AuthorizationExposure::Released,
         AuthorizationExposure::OutstandingUncertain,
+        AuthorizationExposure::ExpiredObserved,
+        AuthorizationExposure::ConflictedObserved,
     ] {
         let mut source = SyntheticRecovery::default();
         source.view.revisions[0].exposure = exposure;
@@ -1254,4 +1256,53 @@ fn residual_commitment_binds_exact_review_and_destination_pool() {
         ResidualTransferProposal::bind(&reviewed, residual_transfer_input(&reviewed)).unwrap();
     assert_ne!(before.manifest_digest(), after.manifest_digest());
     assert_ne!(before.proposal_digest(), after.proposal_digest());
+}
+
+#[test]
+fn conflict_and_expiry_fence_every_retirement_boundary_even_with_empty_balances() {
+    let reviewed = reviewed_plan();
+    for exposure in [
+        AuthorizationExposure::ConflictedObserved,
+        AuthorizationExposure::ExpiredObserved,
+    ] {
+        let mut source = SyntheticRecovery::default();
+        source.view.revisions[0].exposure = exposure;
+        let mut review = SyntheticReclaimReview(ReclaimReviewDecision::Accepted {
+            plan_digest: reviewed.plan().digest().into(),
+            review_record_ref: "synthetic-reclaim-review".into(),
+        });
+        assert_eq!(
+            reviewed
+                .plan()
+                .review_for_separate_authorization(&mut source, &mut review, &window())
+                .unwrap_err()
+                .code,
+            ErrorCode::OutstandingExposure
+        );
+        source.view.residual_inputs.clear();
+        assert_eq!(
+            RetiredAccountRecord::retire_empty_account(
+                &mut source,
+                "account-alice",
+                "zcash-testnet-unqualified",
+                &window()
+            )
+            .unwrap_err()
+            .code,
+            ErrorCode::OutstandingExposure
+        );
+        assert_eq!(
+            RetiredAccountRecord::after_reclaim(
+                &mut source,
+                &mut SyntheticReclaimSettlement(reclaim_settlement(&reviewed)),
+                &reviewed,
+                &policy(),
+                10,
+                &window()
+            )
+            .unwrap_err()
+            .code,
+            ErrorCode::OutstandingExposure
+        );
+    }
 }

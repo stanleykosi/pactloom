@@ -2,8 +2,8 @@
 //! Integration must remain unavailable until trusted verification, encrypted
 //! storage and writer/restore reconciliation have been qualified.
 
-use crate::{encode, now_ms, request_digest, validate_id, Result, Store, StoreError};
-use rusqlite::{params, OptionalExtension, TransactionBehavior};
+use crate::{Result, Store, StoreError, encode, now_ms, request_digest, validate_id};
+use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -18,11 +18,17 @@ pub enum ExposureState {
     Consumed,
 }
 impl ExposureState {
+    /// Current lifecycle transition class, not budget or input eligibility.
     pub fn is_outstanding(self) -> bool {
         matches!(
             self,
             Self::AuthorizedLocally | Self::Released | Self::OutstandingUncertain
         )
+    }
+    /// A branch-local conflict/expiry observation retains the original charge.
+    /// Consumed debit remains charged separately against the lifetime budget.
+    pub fn retains_unresolved_exposure(self) -> bool {
+        self != Self::Consumed
     }
     fn as_str(self) -> &'static str {
         match self {
@@ -162,7 +168,7 @@ impl Store {
     pub fn outstanding_debit(&self, account_id: &str) -> Result<String> {
         let mut total: u128 = 0;
         for item in self.account_exposures(account_id)? {
-            if item.state.is_outstanding() {
+            if item.state.retains_unresolved_exposure() {
                 total = total
                     .checked_add(amount(&item.intent.maximum_debit)? as u128)
                     .ok_or(StoreError::BudgetExceeded)?;
@@ -176,7 +182,8 @@ impl Store {
         let mut total: u128 = 0;
         for item in self.account_exposures(account_id)? {
             if item.state == ExposureState::Consumed {
-                total = total.checked_add(amount(&item.intent.maximum_debit)? as u128)
+                total = total
+                    .checked_add(amount(&item.intent.maximum_debit)? as u128)
                     .ok_or(StoreError::BudgetExceeded)?;
             }
         }
@@ -186,7 +193,9 @@ impl Store {
         let mut c = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let old = read_exposure(&tx, authorization_id)?.ok_or(StoreError::NotFound)?;
-        if self.generation_fenced(&tx, "obligation", &old.intent.obligation_id)? { return Err(StoreError::RecoveryRequired); }
+        if self.generation_fenced(&tx, "obligation", &old.intent.obligation_id)? {
+            return Err(StoreError::RecoveryRequired);
+        }
         if old.state == ExposureState::Released {
             return Ok(());
         }
@@ -201,6 +210,9 @@ impl Store {
     /// Records already-validated chain evidence. The caller must enforce the
     /// qualified expiry/conflict/confirmation policy; an arbitrary external
     /// assertion may never reach this method. All records remain retained.
+    /// Conflict/expiry labels preserve reservations, debit and obligation fences;
+    /// they are not replacement or reclaim authority. Historical missing
+    /// reservations remain covered by retained-payload checks on admission.
     pub fn record_observed_resolution(
         &self,
         authorization_id: &str,
@@ -214,7 +226,9 @@ impl Store {
         let mut c = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let old = read_exposure(&tx, authorization_id)?.ok_or(StoreError::NotFound)?;
-        if self.generation_fenced(&tx, "obligation", &old.intent.obligation_id)? { return Err(StoreError::RecoveryRequired); }
+        if self.generation_fenced(&tx, "obligation", &old.intent.obligation_id)? {
+            return Err(StoreError::RecoveryRequired);
+        }
         if old.state == state {
             return Ok(());
         }
@@ -225,10 +239,12 @@ impl Store {
             "UPDATE authority_exposures SET state=?2,updated_at_ms=?3 WHERE authorization_id=?1",
             params![authorization_id, state.as_str(), now_ms()],
         )?;
-        tx.execute(
-            "DELETE FROM authority_reservations WHERE authorization_id=?1",
-            [authorization_id],
-        )?;
+        if state == ExposureState::Consumed {
+            tx.execute(
+                "DELETE FROM authority_reservations WHERE authorization_id=?1",
+                [authorization_id],
+            )?;
+        }
         tx.execute("INSERT INTO authority_events(authorization_id,kind,evidence_ref,occurred_at_ms) VALUES(?1,?2,?3,?4)",params![authorization_id,state.as_str(),evidence_ref,now_ms()])?;
         tx.commit()?;
         Ok(())
@@ -244,7 +260,9 @@ impl Store {
         let mut c = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let old = read_exposure(&tx, authorization_id)?.ok_or(StoreError::NotFound)?;
-        if self.generation_fenced(&tx, "obligation", &old.intent.obligation_id)? { return Err(StoreError::RecoveryRequired); }
+        if self.generation_fenced(&tx, "obligation", &old.intent.obligation_id)? {
+            return Err(StoreError::RecoveryRequired);
+        }
         tx.execute("UPDATE authority_exposures SET state='outstanding_uncertain',updated_at_ms=?2 WHERE authorization_id=?1",params![authorization_id,now_ms()])?;
         tx.execute(
             "UPDATE authority_accounts SET recovery_required=1 WHERE account_id=?1",
@@ -350,7 +368,9 @@ pub(crate) fn record_release_intent_in_transaction(
     // A prior source-bound loss applies to future local alternatives too. New
     // accounts cannot evade an obligation fence by having no earlier exposure.
     let obligation_fenced: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM records WHERE aggregate_type='settlement_applied' AND payload=?1)", [encode(&serde_json::json!(&intent.obligation_id))?], |r|r.get(0))?;
-    if obligation_fenced { return Err(StoreError::RecoveryRequired); }
+    if obligation_fenced {
+        return Err(StoreError::RecoveryRequired);
+    }
     let budget = crate::automation::account_budget_ceiling(tx, &intent.account_id)?
         .map_or(budget, |ceiling| budget.min(ceiling));
     if crate::backup::read_recovery_state(tx)?.recovery_required {
@@ -370,18 +390,46 @@ pub(crate) fn record_release_intent_in_transaction(
     if account.0 as u64 != intent.writer_epoch {
         return Err(StoreError::WriterEpochMismatch);
     }
-    let existing:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM authority_exposures WHERE account_id=?1 AND obligation_id=?2 AND state IN('authorized_locally','released','outstanding_uncertain','consumed'))",params![intent.account_id,intent.obligation_id],|r|r.get(0))?;
+    let existing: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM authority_exposures WHERE account_id=?1 AND obligation_id=?2)",
+        params![intent.account_id, intent.obligation_id],
+        |r| r.get(0),
+    )?;
     if existing {
         return Err(StoreError::LiveAuthorizationExists);
     }
+    // Every retained release counts against lifetime allowance, regardless of
+    // its last chain label. The payloads also preserve input claims from legacy
+    // journals whose old resolution writer removed their reservation rows.
     let mut total: u128 = 0;
+    let candidate_inputs: BTreeSet<_> = intent.input_ids.iter().collect();
+    let mut retained_input_conflict = false;
     {
-        let mut q=tx.prepare("SELECT maximum_debit FROM authority_exposures WHERE account_id=?1 AND state IN('authorized_locally','released','outstanding_uncertain','consumed')")?;
-        let rows = q.query_map([&intent.account_id], |r| r.get::<_, String>(0))?;
+        let mut q = tx.prepare("SELECT authorization_id,maximum_debit,payload FROM authority_exposures WHERE account_id=?1")?;
+        let rows = q.query_map([&intent.account_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
         for row in rows {
+            let (authorization_id, maximum_debit, payload) = row?;
+            let original: ReleaseIntent = serde_json::from_str(&payload)?;
+            validate_intent(&original)?;
+            if original.account_id != intent.account_id
+                || original.authorization_id != authorization_id
+                || original.maximum_debit != maximum_debit
+            {
+                return Err(StoreError::RecoveryRequired);
+            }
             total = total
-                .checked_add(amount(&row?)? as u128)
+                .checked_add(amount(&maximum_debit)? as u128)
                 .ok_or(StoreError::BudgetExceeded)?;
+            retained_input_conflict |= original
+                .input_ids
+                .iter()
+                .any(|input| candidate_inputs.contains(input));
         }
     }
     if total
@@ -390,6 +438,9 @@ pub(crate) fn record_release_intent_in_transaction(
         > budget as u128
     {
         return Err(StoreError::BudgetExceeded);
+    }
+    if retained_input_conflict {
+        return Err(StoreError::InputReserved);
     }
     for input in &intent.input_ids {
         let reserved:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM authority_reservations WHERE account_id=?1 AND input_id=?2)",params![intent.account_id,input],|r|r.get(0))?;

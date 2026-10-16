@@ -766,6 +766,7 @@ fn exact_selected_preview_persists_without_implicit_disclosure_and_invalidates_a
 struct SyntheticRecovery {
     candidate_id: String,
     exact_debit: Amount,
+    exposure: AuthorizationExposure,
 }
 impl AccountRecoverySource for SyntheticRecovery {
     fn read_recovery_view(
@@ -785,7 +786,7 @@ impl AccountRecoverySource for SyntheticRecovery {
                 proposal_id: self.candidate_id.clone(),
                 obligation_id: "obligation-example-01".into(),
                 maximum_net_debit: self.exact_debit,
-                exposure: AuthorizationExposure::ExpiredObserved,
+                exposure: self.exposure,
                 input_ids: vec!["input-alice".into()],
             }],
             local_reservation_input_ids: vec![],
@@ -865,6 +866,7 @@ fn retirement_plan_is_durable_unsigned_and_cross_checks_local_released_exposure(
             &mut SyntheticRecovery {
                 candidate_id: "omitted-real-proposal".into(),
                 exact_debit: amount(404),
+                exposure: AuthorizationExposure::Consumed,
             },
         )
         .unwrap_err();
@@ -886,6 +888,7 @@ fn retirement_plan_is_durable_unsigned_and_cross_checks_local_released_exposure(
                     &mut SyntheticRecovery {
                         candidate_id: candidate.clone(),
                         exact_debit: wrong_debit,
+                        exposure: AuthorizationExposure::Consumed,
                     },
                 )
                 .unwrap_err()
@@ -904,6 +907,7 @@ fn retirement_plan_is_durable_unsigned_and_cross_checks_local_released_exposure(
             &mut SyntheticRecovery {
                 candidate_id: candidate.clone(),
                 exact_debit: amount(404),
+                exposure: AuthorizationExposure::Consumed,
             },
         )
         .unwrap();
@@ -955,6 +959,7 @@ fn retirement_plan_is_durable_unsigned_and_cross_checks_local_released_exposure(
                 &mut SyntheticRecovery {
                     candidate_id: candidate.clone(),
                     exact_debit: amount(404),
+                    exposure: AuthorizationExposure::Consumed,
                 }
             )
             .unwrap_err()
@@ -1071,6 +1076,7 @@ fn encrypted_backup_keeps_private_records_and_restore_never_reactivates_mutation
                 &mut SyntheticRecovery {
                     candidate_id: candidate.clone(),
                     exact_debit: amount(404),
+                    exposure: AuthorizationExposure::Consumed,
                 }
             )
             .unwrap_err()
@@ -1140,3 +1146,109 @@ mod disclosure_exports;
 
 #[path = "participant_records/historical.rs"]
 mod historical;
+
+#[test]
+fn retirement_planning_rejects_retained_conflict_expiry_and_local_hidden_holds_without_writes() {
+    for exposure in [
+        AuthorizationExposure::ConflictedObserved,
+        AuthorizationExposure::ExpiredObserved,
+    ] {
+        let dir = private_directory();
+        let path = dir.path().join("retained-hold.sqlite");
+        let mut key_bytes = [0u8; 32];
+        std::io::Read::read_exact(
+            &mut std::fs::File::open("/dev/urandom").unwrap(),
+            &mut key_bytes,
+        )
+        .unwrap();
+        let key = DatabaseKey::from_bytes(key_bytes);
+        let engine = Engine::from_store(Store::create_encrypted(&path, &key).unwrap());
+        let (id, candidate, revision) = setup_candidate(&engine);
+        let authority = SyntheticAuthority::for_engine(&engine);
+        let retained = retain(&engine, &authority, &id, &candidate, revision);
+        let before = engine.get(&owner(), &id).unwrap().revision;
+        let mut source = SyntheticRecovery {
+            candidate_id: candidate,
+            exact_debit: amount(404),
+            exposure,
+        };
+        assert_eq!(
+            engine
+                .plan_participant_retirement(
+                    &owner(),
+                    "reject-reversible-original",
+                    &id,
+                    retained.agreement_revision,
+                    retirement_request("unsafe-observed-plan"),
+                    authority.runtime(&window()),
+                    &mut source,
+                )
+                .unwrap_err()
+                .code,
+            "OUTSTANDING_EXPOSURE"
+        );
+        assert_eq!(engine.get(&owner(), &id).unwrap().revision, before);
+        assert!(
+            engine
+                .read_participant_retirement_plan(
+                    &owner(),
+                    &id,
+                    "private-record-alice",
+                    "unsafe-observed-plan",
+                    authority.runtime(&window()),
+                )
+                .is_err()
+        );
+        // A different local authorization must also fence the account even if
+        // the selected adapter reports only the legitimately consumed original.
+        let store = Store::open_encrypted(&path, &key).unwrap();
+        store
+            .initialize_authority_account("account-alice", 1)
+            .unwrap();
+        store
+            .record_authorization_release_intent(&ReleaseIntent {
+                authorization_id: "hidden-local-release".into(),
+                account_id: "account-alice".into(),
+                writer_epoch: 1,
+                obligation_id: "other-obligation".into(),
+                proposal_id: "other-proposal".into(),
+                manifest_digest: hash(60),
+                effects_digest: hash(61),
+                artifact_digest: hash(62),
+                maximum_debit: "10".into(),
+                input_ids: vec!["other-input".into()],
+                aggregate_budget_limit: "100".into(),
+            })
+            .unwrap();
+        let local_state = match exposure {
+            AuthorizationExposure::ConflictedObserved => {
+                wholepact_store::authority::ExposureState::ConflictedObserved
+            }
+            _ => wholepact_store::authority::ExposureState::ExpiredObserved,
+        };
+        store
+            .record_observed_resolution(
+                "hidden-local-release",
+                local_state,
+                "synthetic-observation-only",
+            )
+            .unwrap();
+        source.exposure = AuthorizationExposure::Consumed;
+        assert_eq!(
+            engine
+                .plan_participant_retirement(
+                    &owner(),
+                    "reject-hidden-reversible-release",
+                    &id,
+                    retained.agreement_revision,
+                    retirement_request("unsafe-hidden-plan"),
+                    authority.runtime(&window()),
+                    &mut source,
+                )
+                .unwrap_err()
+                .code,
+            "RECOVERY_REQUIRED"
+        );
+        assert_eq!(engine.get(&owner(), &id).unwrap().revision, before);
+    }
+}

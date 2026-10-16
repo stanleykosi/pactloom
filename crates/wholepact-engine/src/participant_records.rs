@@ -4,7 +4,11 @@
 pub mod disclosure_exports;
 pub(crate) mod historical;
 pub(crate) mod reconciliation_selection;
-#[cfg(all(feature = "submission-handoff", feature = "signer-authority-bridge", target_os = "linux"))]
+#[cfg(all(
+    feature = "submission-handoff",
+    feature = "signer-authority-bridge",
+    target_os = "linux"
+))]
 mod settlement_resolution;
 
 use super::*;
@@ -138,7 +142,9 @@ pub(crate) struct StoredParticipantRecord {
     retirement_plans: BTreeMap<String, PrivateRetirementPlanView>,
 }
 impl StoredParticipantRecord {
-    pub(crate) fn recovery_archive(&self) -> &SettlementRecordArchive { &self.record }
+    pub(crate) fn recovery_archive(&self) -> &SettlementRecordArchive {
+        &self.record
+    }
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -343,7 +349,10 @@ impl Engine {
             .participant_records
             .contains_key(&request.record_id)
         {
-            return Err(ApiError::new("REVISION_CONFLICT", "Private record ID is already retained; exact replay requires its original operation key"));
+            return Err(ApiError::new(
+                "REVISION_CONFLICT",
+                "Private record ID is already retained; exact replay requires its original operation key",
+            ));
         }
         if envelope.participant_records.len() >= MAX_PARTICIPANT_RECORDS {
             return Err(ApiError::new(
@@ -370,7 +379,12 @@ impl Engine {
                 candidate_proposal_digest: candidate.proposal_digest().into(),
                 retained_source_id: source.source_id().into(),
                 record_revision: 1,
-                settlement_invalidated: self.store.settlement_obligation_requires_recovery(&candidate.manifest().agreement.obligation_id).map_err(store_error)?,
+                settlement_invalidated: self
+                    .store
+                    .settlement_obligation_requires_recovery(
+                        &candidate.manifest().agreement.obligation_id,
+                    )
+                    .map_err(store_error)?,
                 record: record.archive(),
                 disclosure_previews: BTreeMap::new(),
                 disclosure_exports: BTreeMap::new(),
@@ -527,7 +541,10 @@ impl Engine {
             ));
         }
         if stored.disclosure_previews.contains_key(&request.preview_id) {
-            return Err(ApiError::new("REVISION_CONFLICT", "Disclosure preview IDs are immutable; use the original retry key or prepare a new preview"));
+            return Err(ApiError::new(
+                "REVISION_CONFLICT",
+                "Disclosure preview IDs are immutable; use the original retry key or prepare a new preview",
+            ));
         }
         let record = load_private_record(self, stored)?;
         let preview = DisclosurePreview::build(
@@ -684,9 +701,12 @@ impl Engine {
                 .account_exposures(&scope.account_id)
                 .map_err(store_error)?
                 .iter()
-                .any(|exposure| exposure.state.is_outstanding())
+                .any(|exposure| exposure.state.retains_unresolved_exposure())
         {
-            return Err(ApiError::new("RECOVERY_REQUIRED", "Local account journal has unresolved exposure; reconcile it before reclaim planning"));
+            return Err(ApiError::new(
+                "RECOVERY_REQUIRED",
+                "Local account journal has unresolved exposure; reconcile it before reclaim planning",
+            ));
         }
         let known_record = load_private_record(self, stored)?;
         let mut bound_source = KnownReleaseRecoverySource {
@@ -799,16 +819,28 @@ impl Engine {
 
 fn require_encrypted(engine: &Engine) -> Result<()> {
     if engine.store.protection() != StorageProtection::Encrypted {
-        return Err(ApiError::new("STORAGE_PROTECTION_REQUIRED", "Participant records require verified encrypted storage; metadata development and memory stores are not private record stores"));
+        return Err(ApiError::new(
+            "STORAGE_PROTECTION_REQUIRED",
+            "Participant records require verified encrypted storage; metadata development and memory stores are not private record stores",
+        ));
     }
     Ok(())
 }
 fn require_mutable_records(engine: &Engine, agreement_id: &str) -> Result<()> {
     require_encrypted(engine)?;
-    if engine.store.runtime_recovery_required().map_err(store_error)?
-        || engine.store.recovery_record_is_historical("agreement", agreement_id).map_err(store_error)?
+    if engine
+        .store
+        .runtime_recovery_required()
+        .map_err(store_error)?
+        || engine
+            .store
+            .recovery_record_is_historical("agreement", agreement_id)
+            .map_err(store_error)?
     {
-        return Err(ApiError::new("RECOVERY_REQUIRED", "Restored journal remains quarantined; reconcile writer authority and complete exposure history before new private-record operations"));
+        return Err(ApiError::new(
+            "RECOVERY_REQUIRED",
+            "Restored journal remains quarantined; reconcile writer authority and complete exposure history before new private-record operations",
+        ));
     }
     Ok(())
 }
@@ -843,7 +875,10 @@ fn check_lease(
 ) -> Result<()> {
     wholepact_core::agreement::validate_timestamp(lease.expires_at())?;
     if lease.scope() != scope || lease.expires_at() <= window.now.as_str() {
-        return Err(ApiError::new("PERMISSION_DENIED", "Participant record lease is expired or belongs to another exact store/profile/principal/account/action"));
+        return Err(ApiError::new(
+            "PERMISSION_DENIED",
+            "Participant record lease is expired or belongs to another exact store/profile/principal/account/action",
+        ));
     }
     lease.check_current()
 }
@@ -911,8 +946,17 @@ fn load_private_record(
         archive.observations.clear();
         return Ok(SettlementRecord::restore(archive)?);
     }
-    if engine.store.runtime_recovery_required().map_err(store_error)?
-        || engine.store.recovery_record_is_historical("agreement", &stored.record.proposal.manifest.agreement.agreement_id).map_err(store_error)?
+    if engine
+        .store
+        .runtime_recovery_required()
+        .map_err(store_error)?
+        || engine
+            .store
+            .recovery_record_is_historical(
+                "agreement",
+                &stored.record.proposal.manifest.agreement.agreement_id,
+            )
+            .map_err(store_error)?
     {
         Ok(SettlementRecord::restore(stored.record.clone())?)
     } else {
@@ -992,7 +1036,10 @@ fn validate_retained_source_record(
         || record.own_authorization().participant_id != request.participant_id
         || record.own_authorization().account_id != request.account_id
     {
-        return Err(ApiError::new("RECORD_SOURCE_REJECTED", "Protected source record differs from the exact retained candidate and leased participant/account"));
+        return Err(ApiError::new(
+            "RECORD_SOURCE_REJECTED",
+            "Protected source record differs from the exact retained candidate and leased participant/account",
+        ));
     }
     // Candidate claims have no effects/artifact commitment. The trusted source
     // supplies those from actual retained approved verification/signature records;
@@ -1121,8 +1168,10 @@ impl<S: AccountRecoverySource> AccountRecoverySource for KnownReleaseRecoverySou
                         .collect::<BTreeSet<_>>()
                         == expected_inputs
             }) {
-                return Err(wholepact_core::CoreError::new(wholepact_core::ErrorCode::RecoveryRequired,
-                    "recovery source omitted or contradicted a retained released authorization; empty history cannot erase known exposure"));
+                return Err(wholepact_core::CoreError::new(
+                    wholepact_core::ErrorCode::RecoveryRequired,
+                    "recovery source omitted or contradicted a retained released authorization; empty history cannot erase known exposure",
+                ));
             }
         }
         Ok(view)
@@ -1145,10 +1194,14 @@ impl<S: AccountRecoverySource> AccountRecoverySource for KnownReleaseRecoverySou
 
 impl StoredParticipantRecord {
     #[cfg(feature = "submission-handoff")]
-    pub(crate) fn settlement_account_id(&self) -> &str { &self.record.own_authorization.account_id }
+    pub(crate) fn settlement_account_id(&self) -> &str {
+        &self.record.own_authorization.account_id
+    }
     #[cfg(feature = "submission-handoff")]
     pub(crate) fn invalidate_settlement(&mut self) -> Result<bool> {
-        if self.settlement_invalidated { return Ok(false); }
+        if self.settlement_invalidated {
+            return Ok(false);
+        }
         self.settlement_invalidated = true;
         self.record.exposure_reconciliation_required = true;
         advance_record_revision(self)?;

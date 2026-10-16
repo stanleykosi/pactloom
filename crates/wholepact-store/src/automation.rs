@@ -9,17 +9,18 @@
 //! There is no independent automation exposure ledger.
 
 use crate::{
+    StorageProtection, Store, StoreError,
     authority::{ReleaseIntent, StoredExposure},
-    encode, request_digest, StorageProtection, Store, StoreError,
+    encode, request_digest,
 };
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use wholepact_core::{
-    automation::{
-        evaluate_automation_request, AutomationAccountPolicy, AutomationGrantTerms,
-        AutomationRequest,
-    },
     CoreError,
+    automation::{
+        AutomationAccountPolicy, AutomationGrantTerms, AutomationRequest,
+        evaluate_automation_request,
+    },
 };
 
 const ACCOUNT: &str = "automation_account";
@@ -868,7 +869,7 @@ fn grants(c: &Connection, account_id: &str) -> crate::Result<Vec<StoredAutomatio
     Ok(result)
 }
 fn grant_outstanding(c: &Connection, grant_id: &str) -> crate::Result<u128> {
-    let mut q = c.prepare("SELECT r.payload,e.maximum_debit FROM records r JOIN authority_exposures e ON e.authorization_id=r.id WHERE r.aggregate_type=?1 AND e.state IN('authorized_locally','released','outstanding_uncertain')")?;
+    let mut q = c.prepare("SELECT r.payload,e.maximum_debit FROM records r JOIN authority_exposures e ON e.authorization_id=r.id WHERE r.aggregate_type=?1 AND e.state IN('authorized_locally','released','outstanding_uncertain','expired_observed','conflicted_observed')")?;
     let mut total = 0u128;
     for row in q.query_map([AUTHORIZATION], |r| {
         Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
