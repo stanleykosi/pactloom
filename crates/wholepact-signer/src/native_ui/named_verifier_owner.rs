@@ -13,6 +13,10 @@ use std::{
 use wholepact_offline_bridge::CurrentPreparedNamedVerifierAssertion;
 use zeroize::Zeroizing;
 mod journal;
+mod export_identity;
+mod export_setup;
+mod export;
+mod backup;
 mod handoff;
 mod request;
 mod setup;
@@ -113,6 +117,7 @@ impl PreparedVerifierCreation {
                 restored_informational: false,
                 families: Default::default(),
                 rows: Default::default(),
+                export_identity: None,
             },
             poisoned: false,
         };
@@ -219,6 +224,16 @@ impl VerifierOwner {
                 .bytes()
                 .to_vec(),
         )?;
+        let terms = prepared.original_terms().map_err(|_|Error::Locked)?.clone();
+        let entry = self.journal.rows.get_mut(&key).ok_or(Error::InvalidData)?;
+        if let Some(original) = &entry.original_terms {
+            if original != &terms { return Err(Error::ReviewMismatch); }
+        } else {
+            // Only the genuine current producer supplies metadata for new preparation.
+            // A historical Signed/Started row is never retroactively enriched.
+            if !matches!(entry.state, State::Prepared) { return Err(Error::Uncertain); }
+            entry.original_terms = Some(terms);
+        }
         self.persist()?;
         let entry = self.journal.rows.get(&key).ok_or(Error::InvalidData)?;
         if !matches!(entry.state, State::Prepared) {

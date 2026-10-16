@@ -957,6 +957,7 @@ pub(crate) struct WriterSessionProof {
     deny_unknown_fields
 )]
 pub(crate) enum WireRequest {
+    ObserveOfflineAdmissionTimeV1(Box<crate::offline_clock_v1::OfflineClockRequestV1>),
     ClaimConstructionTransport {
         claim: Box<crate::construction_transport_handoff_v1::SignedConstructionTransportClaimV1>,
     },
@@ -999,6 +1000,7 @@ pub(crate) enum WireRequest {
     deny_unknown_fields
 )]
 pub(crate) enum WireResponse {
+    OfflineAdmissionTimeV1(Box<crate::offline_clock_v1::OfflineClockResponseV1>),
     ConstructionTransportClaimed(
         Box<crate::construction_transport_handoff_v1::ConstructionTransportCredentialV1>,
     ),

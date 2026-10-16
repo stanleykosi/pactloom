@@ -206,6 +206,16 @@ pub fn validate_admission_fields(
     Ok(admission)
 }
 
+
+mod named_verifier;
+pub use named_verifier::*;
+
+mod named_verifier_package;
+pub use named_verifier_package::*;
+
+mod named_verifier_envelope;
+pub use named_verifier_envelope::*;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,9 +274,3 @@ mod tests {
             Err(TransportError::ResourceLimit)));
     }
 }
-
-mod named_verifier;
-pub use named_verifier::*;
-
-mod named_verifier_package;
-pub use named_verifier_package::*;

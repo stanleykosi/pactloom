@@ -8,6 +8,8 @@ import { SponsorPanel } from './sponsors';
 import { ProposalPanel, RosterPanel } from './planning';
 import { TermsHistory, useTermsCommand } from './terms-revisions';
 import { PaymentJourney, PaymentObservationDetails } from './payment-journey';
+import { beginPlanningCommand, currentPlanningResolution, dismissPlanningResolution, dispatchPlanningCommand, intentScope, planningSnapshot, retryPlanningCommand, type PlanningCommand } from './planning-command-session';
+import { PlanningSaveNotice, RetainedPlanningCommand, SavedPlanningCommand, usePlanningCommand } from './planning-command';
 
 const newId = (prefix: string) => `${prefix}-${crypto.randomUUID()}`;
 export function CreateAgreement({ client, capabilities, create, onClose, onCreated }: { create: { allowed: boolean; reason: string }; client: WholepactClient; capabilities?: CapabilitySet | null; onClose: () => void; onCreated: (id: string) => void }) {
@@ -16,15 +18,20 @@ export function CreateAgreement({ client, capabilities, create, onClose, onCreat
   const [deadline, setDeadline] = useState(''); const [confirmations, setConfirmations] = useState('10');
   const [network, setNetwork] = useState('zcash-testnet-unqualified'); const [privacy, setPrivacy] = useState<'local_only' | 'declared_operator'>('local_only');
   const [feeMode, setFeeMode] = useState<'pro_rata' | 'sponsor'>('pro_rata'); const [feeSponsor, setFeeSponsor] = useState(''); const [sponsorAmount, setSponsorAmount] = useState('');
-  const [operator, setOperator] = useState(''); const [ack, setAck] = useState(false); const [pending, setPending] = useState(false); const [uncertain, setUncertain] = useState(false); const [error, setError] = useState('');
+  const [operator, setOperator] = useState(''); const [ack, setAck] = useState(false); const [pending, setPending] = useState(false); const [error, setError] = useState('');
   const ids = useRef({ agreement: newId('agreement'), obligation: newId('obligation') }); const inFlight = useRef(false); const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
-  const attempt = useRef<{ draft: AgreementDraft; key: string; encoded: string } | null>(null);
+  const { command, resolution } = usePlanningCommand(client, 'draft');
+  const seen = useRef(command?.key); if (command) seen.current = command.key;
+  const save = async (original: PlanningCommand) => {
+    try { await dispatchPlanningCommand(client, original); if (mounted.current) onCreated(original.agreementId); }
+    catch (caught) { if (mounted.current) setError(errorText(caught)); }
+  };
+  const retry = async () => { const original = retryPlanningCommand(client, 'draft'); if (original) { setError(''); await save(original); } };
   const editRecipient = (index: number, patch: Partial<typeof recipients[number]>) => setRecipients(current => current.map((recipient, i) => i === index ? { ...recipient, ...patch } : recipient));
   const submit = async (event: FormEvent) => {
-    event.preventDefault(); if (inFlight.current || !ack || (!uncertain && !create.allowed)) return; inFlight.current = true; setPending(true); setError('');
+    event.preventDefault(); if (inFlight.current || !ack || !create.allowed || planningSnapshot(client, 'draft').command) return; inFlight.current = true; setPending(true); setError('');
     try {
-      if (!uncertain) {
         if (!/^[1-9]\d*$/.test(confirmations) || !Number.isSafeInteger(Number(confirmations))) throw new Error('Use a positive whole-number confirmation policy.');
         const parsedRecipients = recipients.map(recipient => {
           const amount = parseZec(recipient.amount); if (BigInt(amount) === 0n) throw new Error('Every recipient amount must be greater than zero.');
@@ -39,17 +46,17 @@ export function CreateAgreement({ client, capabilities, create, onClose, onCreat
           coordination_deadline: deadline ? new Date(`${deadline}:00Z`).toISOString().replace('.000Z', 'Z') : null,
           confirmation_policy: { required_confirmations: Number(confirmations) }, extensions: [],
         };
-        const encoded = JSON.stringify(draft); if (attempt.current?.encoded !== encoded) attempt.current = { draft, encoded, key: newId('create') };
-      }
-      const original = attempt.current!;
-      await client.createAgreement(original.draft, { idempotencyKey: original.key }); setUncertain(false); if (mounted.current) onCreated(original.draft.agreement_id);
-    } catch (caught) { setUncertain(previous => previous || caught instanceof WholepactError && caught.code === 'EXTERNAL_OUTCOME_UNCERTAIN'); setError(errorText(caught)); }
-    finally { inFlight.current = false; setPending(false); }
+        const original = beginPlanningCommand(client, { kind: 'draft', draft, key: newId('create') });
+        if (original) await save(original);
+    } catch (caught) { if (mounted.current) setError(errorText(caught)); }
+    finally { inFlight.current = false; if (mounted.current) setPending(false); }
   };
+  if (command) return <RetainedPlanningCommand command={command} error={error} onClose={onClose} onRetry={() => void retry()}/>;
+  if (resolution?.outcome === 'saved' && resolution.key === seen.current) return <SavedPlanningCommand onClose={onClose}/>;
   return <Modal title="Create a shared payment" onClose={onClose} wide><form onSubmit={submit} className="agreement-form">
-    {!create.allowed && <Notice warning>{create.reason} Only an exact interrupted request may be retried.</Notice>}
+    {!create.allowed && <Notice warning>{create.reason}</Notice>}
     <Notice>Start with the recipient and amount. Then choose fees and who can see preparation data. This saves terms in your local journal. It does not verify recipients, publish an invitation or authorize payment.</Notice>
-    <fieldset disabled={pending || uncertain || !create.allowed}><legend>01 · Purpose & recipients</legend>
+    <fieldset disabled={pending || !create.allowed}><legend>01 · Purpose & recipients</legend>
       <Field label="Agreement starting point"><select value={template} onChange={event => setTemplate(event.target.value)}><option value="purchase">Cooperative purchase</option><option value="support">Private collective support</option><option value="invoice">Shared invoice settlement</option></select></Field>
       <Field label="What are you agreeing to fund?"><input autoFocus maxLength={500} required value={purpose} onChange={event => setPurpose(event.target.value)} placeholder={template === 'purchase' ? 'A shared audit, research or service…' : template === 'support' ? 'A recipient and a common purpose…' : 'The invoice and exact shared payment…'}/></Field>
       <Field label="Organizer identity" hint="An agreement-scoped label, not a verified legal identity."><input required maxLength={128} value={identity} onChange={event => setIdentity(event.target.value)} placeholder="Your scoped organizer identifier"/></Field>
@@ -62,20 +69,19 @@ export function CreateAgreement({ client, capabilities, create, onClose, onCreat
       <button type="button" className="button secondary" disabled={recipients.length >= 64} onClick={() => setRecipients(current => [...current, { id: newId('recipient'), address: '', amount: '', provenance: '', reference: '' }])}>Add recipient</button>
       <p className="field-guidance">All recipients belong to one exact funding objective. Construction limits are checked separately; this draft never splits a payment.</p>
     </fieldset>
-    <fieldset disabled={pending || uncertain || !create.allowed}><legend>02 · Boundaries</legend><div className="form-grid">
+    <fieldset disabled={pending || !create.allowed}><legend>02 · Boundaries</legend><div className="form-grid">
       <Field label="Network profile"><select value={network} onChange={event => setNetwork(event.target.value)}><option value="zcash-testnet-unqualified">Zcash testnet · terms only</option>{capabilities?.features.candidate_terms?.status === 'supported' && <option value="ironwood-testnet-nu7-candidate">Ironwood testnet · unsigned candidate claims</option>}</select></Field>
       <Field label="Confirmation policy" hint="A chosen confidence threshold, not irreversible finality."><input type="number" required min="1" max="1000" value={confirmations} onChange={event => setConfirmations(event.target.value)}/></Field>
       <Field label="Coordination deadline (UTC, optional)" hint="Commercial timing is separate from transaction expiry."><input type="datetime-local" value={deadline} onChange={event => setDeadline(event.target.value)}/></Field>
       <Field label="Fee allocation"><select value={feeMode} onChange={event => setFeeMode(event.target.value as typeof feeMode)}><option value="pro_rata">Proportional to contribution</option><option value="sponsor">Explicit fee sponsor amount</option></select></Field>
     </div>{feeMode === 'sponsor' && <div className="form-grid"><Field label="Fee sponsor participant identifier"><input required maxLength={128} value={feeSponsor} onChange={event => setFeeSponsor(event.target.value)}/></Field><Field label="Sponsored fee amount (ZEC)" hint="Remaining fees are proportional. This is a draft policy, not the sponsor’s approval."><input required inputMode="decimal" value={sponsorAmount} onChange={event => setSponsorAmount(event.target.value)}/></Field></div>}
     <small>Actual fee shares require an exact candidate and separate review. Verified contribution matching is unavailable; a fee sponsor is not a verified match.</small></fieldset>
-    <fieldset disabled={pending || uncertain || !create.allowed}><legend>03 · Information boundaries</legend><Field label="Proving privacy profile"><select value={privacy} onChange={event => setPrivacy(event.target.value as typeof privacy)}><option value="local_only">Local only · no remote proving disclosure</option><option value="declared_operator">Declared operator · separate disclosure consent required</option></select></Field>
+    <fieldset disabled={pending || !create.allowed}><legend>03 · Information boundaries</legend><Field label="Proving privacy profile"><select value={privacy} onChange={event => setPrivacy(event.target.value as typeof privacy)}><option value="local_only">Local only · no remote proving disclosure</option><option value="declared_operator">Declared operator · separate disclosure consent required</option></select></Field>
       {privacy === 'declared_operator' && <Field label="Named proving operator" hint="Saving a name does not connect to the operator or share data."><input required value={operator} onChange={event => setOperator(event.target.value)} maxLength={256}/></Field>}
       <div className="privacy-preview"><Icon name="lock"/><div><strong>No proving data is shared by this draft</strong><p>Dedicated accounts are required. Every future disclosure must identify its recipient, fields, purpose and retention before consent. Spending authority stays with the signer.</p></div></div>
       <label className="consent"><input type="checkbox" checked={ack} onChange={event => setAck(event.target.checked)}/><span>I understand that these are unverified draft terms and no payment is authorized.</span></label>
     </fieldset>
-    {uncertain && <Notice warning title="The original draft may already be saved">Fields are frozen. Retry keeps exactly the original payload and idempotency key. If you close, inspect agreement {ids.current.agreement} before creating another draft.<p className="mono wrap">{attempt.current?.key}</p></Notice>}
-    {error && <p className="form-error" role="alert">{error}</p>}<div className="modal-actions"><button type="button" className="button secondary" onClick={onClose}>Cancel</button><button className="button primary" disabled={pending || !ack || (!uncertain && !create.allowed)}>{pending ? 'Saving draft…' : uncertain ? 'Retry exact original draft' : 'Save local draft'}<Icon name="arrow" size={16}/></button></div>
+    {error && <p className="form-error" role="alert">{error}</p>}<div className="modal-actions"><button type="button" className="button secondary" onClick={onClose}>Cancel</button><button className="button primary" disabled={pending || !ack || !create.allowed}>{pending ? 'Saving draft…' : 'Save local draft'}<Icon name="arrow" size={16}/></button></div>
   </form></Modal>;
 }
 export function AgreementDetail({ agreement: view, events, client, capabilities, permissions, stale, onBack, onIntent, onReview, onRevise, onChanged }: { agreement: AgreementView; events: WholepactEvent[]; client: WholepactClient; capabilities: CapabilitySet | null; permissions: string[]; stale: boolean; onBack: () => void; onIntent: () => void; onReview: () => void; onRevise: () => void; onChanged: (message: string) => Promise<void> }) {
@@ -83,6 +89,8 @@ export function AgreementDetail({ agreement: view, events, client, capabilities,
   const pending = useRef(false); const [uncertain, setUncertain] = useState(false);
   const original = useRef<{ kind: string; intentId?: string; agreementId: string; revision: number; key: string } | null>(null);
   const termsPending = useTermsCommand(client, view.agreement.agreement_id);
+  const intentCommandScope = intentScope(view.agreement.agreement_id);
+  const { command: intentPending, resolution: intentResolution } = usePlanningCommand(client, intentCommandScope);
   const agreement = view.agreement; const activeIntents = view.intents.filter(i => ['active', 'selected', 'waitlisted'].includes(i.status) && (!i.valid_until || Date.parse(i.valid_until) > Date.now()));
   const intended = sumZatoshis(activeIntents.map(i => i.desired_contribution));
   const allEvents = events.filter(e => e.aggregate_id === agreement.agreement_id);
@@ -103,7 +111,8 @@ export function AgreementDetail({ agreement: view, events, client, capabilities,
   return <><button className="text-button back-button" onClick={onBack}><Icon name="back" size={16}/> All agreements</button><PageTitle kicker={`Terms revision ${agreement.revision} · journal revision ${view.revision}`} title={agreement.purpose} action={<button className="button primary" onClick={onReview}>Review terms <Icon name="arrow" size={16}/></button>}>{agreement.organizer_identity} · {agreement.network_profile_id}</PageTitle><PaymentJourney view={view} capabilities={capabilities} permissions={permissions} stale={stale} onReview={onReview} onIntent={onIntent}/><section id="payment-status" className="payment-status" tabIndex={-1} aria-label="Payment status"><div className="state-triad"><div><span>Agreement progress</span><Badge>{human(view.progress)}</Badge></div><div><span>Authorization exposure</span><Badge tone={['unknown','released','outstanding_uncertain'].includes(view.authorization_exposure) ? 'warning' : 'neutral'}>{view.authorization_exposure === 'unknown' ? 'Unknown · authority journal not read' : human(view.authorization_exposure)}</Badge></div><div><span>Chain observation</span><Badge>{view.chain_observation === 'unknown' ? 'Unknown · no authoritative observation' : human(view.chain_observation)}</Badge></div></div><PaymentObservationDetails view={view}/></section>{view.cancellation_requested && <Notice warning title="Cancellation has been requested">The local request does not revoke a released authorization. Settlement remains possible wherever an executable authorization exists.</Notice>}
     <section className="panel"><div className="section-heading"><h2>Unsigned terms</h2><button className="button secondary" disabled={!termsPending && (stale || !permissions.includes('propose') || view.terms_editability?.allowed !== true)} onClick={onRevise}>{termsPending ? 'Resume original terms revision' : 'Edit unsigned terms'}</button></div><p className="panel-text">{termsPending ? 'An original terms save is pending or uncertain. Reopen it to inspect or retry that exact request.' : view.terms_editability?.reason ?? 'The service has not reported editing eligibility.'}</p></section>
     <div className="detail-grid"><div><section className="panel"><div className="section-heading"><h2>Exact recipient funding</h2><Badge>Unverified instructions</Badge></div><div className="funding-total"><Money value={agreement.funding_policy.target} detail/><span>Excludes fees; this is a funding objective.</span></div>{agreement.recipients.map(r => <div className="recipient-card" key={r.recipient_id}><div><strong>{r.recipient_id}</strong><Money value={r.amount}/></div><p className="mono wrap">{r.address}</p><small>Instruction provenance: {r.instruction_provenance}</small>{r.memo && <small>Reference: {r.memo}</small>}</div>)}<div className="funding-composition"><div><span>Nonbinding intent</span><Money value={intended}/></div><div><span>Inputs verified available</span><strong>Not established</strong></div><div><span>Exact transaction authorization</span><strong>Not established by intent</strong></div></div></section>
-    <section className="panel"><div className="section-heading"><h2>Participation intent</h2><button className="text-button" disabled={stale || !permissions.includes('intent') || view.cancellation_requested} onClick={onIntent}><Icon name="plus" size={15}/> Record intent</button></div>{view.intents.length ? view.intents.map(i => <div className="intent-row" key={i.intent_id}><div><strong>{i.participant_id}</strong><small>Contribution <Money value={i.desired_contribution}/></small><small>Maximum total debit <Money value={i.maximum_net_debit}/> · Fee cap <Money value={i.fee_cap}/></small>{i.conditions.length > 0 && <small>Conditions: {i.conditions.join('; ')}</small>}{i.valid_until && <small>Intent valid until {dateTime(i.valid_until)}{Date.parse(i.valid_until) <= Date.now() ? ' · validity ended' : ''}</small>}</div><div><Badge>{human(i.status)}</Badge>{['active','selected','waitlisted'].includes(i.status) && <button className="text-button" disabled={busy || uncertain || stale || !permissions.includes('intent')} onClick={() => command('withdraw',i.intent_id)}>Withdraw intent</button>}</div></div>) : <Empty title="No intent recorded">Participation intent is an expression of willingness. It is never a balance, reservation or payment authorization.</Empty>}</section>
+    {intentResolution?.outcome === 'saved' && <PlanningSaveNotice resolution={intentResolution} onView={() => { if (currentPlanningResolution(client, intentCommandScope, intentResolution)) void onChanged('Original contribution plan saved locally. No funds are reserved or authorized.'); }} onDismiss={() => { dismissPlanningResolution(client, intentCommandScope, intentResolution); }}/>}
+    <section className="panel"><div className="section-heading"><h2>Participation intent</h2><button className="text-button" disabled={!intentPending && (stale || !permissions.includes('intent') || view.cancellation_requested)} onClick={onIntent}><Icon name="plus" size={15}/>{intentPending ? 'Resume original contribution plan' : 'Record intent'}</button></div>{view.intents.length ? view.intents.map(i => <div className="intent-row" key={i.intent_id}><div><strong>{i.participant_id}</strong><small>Contribution <Money value={i.desired_contribution}/></small><small>Maximum total debit <Money value={i.maximum_net_debit}/> · Fee cap <Money value={i.fee_cap}/></small>{i.conditions.length > 0 && <small>Conditions: {i.conditions.join('; ')}</small>}{i.valid_until && <small>Intent valid until {dateTime(i.valid_until)}{Date.parse(i.valid_until) <= Date.now() ? ' · validity ended' : ''}</small>}</div><div><Badge>{human(i.status)}</Badge>{['active','selected','waitlisted'].includes(i.status) && <button className="text-button" disabled={busy || uncertain || stale || !permissions.includes('intent')} onClick={() => command('withdraw',i.intent_id)}>Withdraw intent</button>}</div></div>) : <Empty title="No intent recorded">Participation intent is an expression of willingness. It is never a balance, reservation or payment authorization.</Empty>}</section>
     <TermsHistory view={view}/><section id="private-messages" tabIndex={-1} aria-label="Private messages"><TransportPanel key={`transport-${agreement.agreement_id}`} view={view} client={client} capabilities={capabilities} permissions={permissions} stale={stale} onChanged={onChanged}/>
     </section><details className="advanced-preparation"><summary><span>Advanced preparation & evidence</span><small>Roster, sponsor policies, transaction claims and native requests</small></summary><p>These tools expose detailed service records and separately gated requests. Opening them does not approve disclosure or payment.</p>
     <RosterPanel key={`roster-${agreement.agreement_id}`} view={view} client={client} canCoordinate={permissions.includes('coordinate')} stale={stale} onChanged={onChanged}/>
@@ -120,33 +129,39 @@ export function AgreementDetail({ agreement: view, events, client, capabilities,
 export function IntentForm({ client, agreement, stale, onClose, onSaved }: { client: WholepactClient; agreement: AgreementView; stale: boolean; onClose: () => void; onSaved: () => void }) {
   const [snapshot] = useState(() => structuredClone(agreement));
   const [participant, setParticipant] = useState(''); const [amount, setAmount] = useState(''); const [fee, setFee] = useState(''); const [maximum, setMaximum] = useState(''); const [condition, setCondition] = useState(''); const [validUntil, setValidUntil] = useState('');
-  const [ack, setAck] = useState(false); const [busy, setBusy] = useState(false); const [uncertain, setUncertain] = useState(false); const [error, setError] = useState('');
+  const [ack, setAck] = useState(false); const [busy, setBusy] = useState(false); const [error, setError] = useState('');
   const intentId = useRef(newId('intent')); const pending = useRef(false); const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
-   const attempt = useRef<{ intent: ParticipationIntent; key: string; encoded: string } | null>(null);
+  const scope = intentScope(snapshot.agreement.agreement_id);
+  const { command, resolution } = usePlanningCommand(client, scope);
+  const seen = useRef(command?.key); if (command) seen.current = command.key;
+  const save = async (original: PlanningCommand) => {
+    try { await dispatchPlanningCommand(client, original); if (mounted.current) onSaved(); }
+    catch (caught) { if (mounted.current) setError(errorText(caught)); }
+  };
+  const retry = async () => { const original = retryPlanningCommand(client, scope); if (original) { setError(''); await save(original); } };
   const changed = snapshot.revision !== agreement.revision; const blocked = changed || stale || snapshot.cancellation_requested;
   const submit = async (event: FormEvent) => {
-    event.preventDefault(); if (pending.current || !ack || (!uncertain && blocked)) return; pending.current = true; setBusy(true); setError('');
+    event.preventDefault(); if (pending.current || !ack || blocked || planningSnapshot(client, scope).command) return; pending.current = true; setBusy(true); setError('');
     try {
-      if (!uncertain) {
         const intent: ParticipationIntent = { intent_id: intentId.current, agreement_id: snapshot.agreement.agreement_id, participant_id: participant.trim(), desired_contribution: parseZec(amount), maximum_net_debit: parseZec(maximum), fee_cap: parseZec(fee), conditions: condition.trim() ? [condition.trim()] : [], valid_until: validUntil ? new Date(`${validUntil}:00Z`).toISOString().replace('.000Z', 'Z') : null, status: 'active' };
         if (BigInt(intent.desired_contribution) <= 0n) throw new Error('Contribution must be greater than zero.');
         if (BigInt(intent.maximum_net_debit) < BigInt(intent.desired_contribution) + BigInt(intent.fee_cap)) throw new Error('Maximum net debit must cover the contribution plus your fee cap.');
-        const encoded = JSON.stringify(intent); if (attempt.current?.encoded !== encoded) attempt.current = { intent, encoded, key: newId('intent') };
-      }
-      await client.recordIntent(snapshot.agreement.agreement_id, attempt.current!.intent, { idempotencyKey: attempt.current!.key, expectedRevision: snapshot.revision }); setUncertain(false); if (mounted.current) onSaved();
-    } catch (caught) { setUncertain(previous => previous || caught instanceof WholepactError && caught.code === 'EXTERNAL_OUTCOME_UNCERTAIN'); setError(errorText(caught)); }
-    finally { pending.current = false; setBusy(false); }
+        const original = beginPlanningCommand(client, { kind: 'intent', intent, revision: snapshot.revision, key: newId('intent') });
+        if (original) await save(original);
+    } catch (caught) { if (mounted.current) setError(errorText(caught)); }
+    finally { pending.current = false; if (mounted.current) setBusy(false); }
   };
+  if (command) return <RetainedPlanningCommand command={command} error={error} onClose={onClose} onRetry={() => void retry()}/>;
+  if (resolution?.outcome === 'saved' && resolution.key === seen.current) return <SavedPlanningCommand onClose={onClose}/>;
   return <Modal title="Record nonbinding intent" onClose={onClose}><form className="modal-body" onSubmit={submit}><Notice>Intent records willingness and limits. It does not reserve funds, release an authorization or establish account availability.</Notice>
-    {(changed || stale) && <Notice warning>Journal context changed or is stale. Close and refresh before recording a new intent. Only an exact interrupted request may be retried.</Notice>}
-    <fieldset disabled={busy || uncertain || blocked}><legend>Contribution and conditions</legend><Field label="Agreement-scoped participant identifier"><input required autoFocus maxLength={128} pattern="[A-Za-z0-9_.:\-]+" value={participant} onChange={event => setParticipant(event.target.value)} placeholder="participant-alice"/></Field><div className="form-grid"><Field label="Contribution (ZEC)"><input required inputMode="decimal" value={amount} onChange={event => setAmount(event.target.value)}/></Field><Field label="Fee cap (ZEC)"><input required inputMode="decimal" value={fee} onChange={event => setFee(event.target.value)}/></Field></div>
+    {(changed || stale) && <Notice warning>Journal context changed or is stale. Close and refresh before recording a new intent.</Notice>}
+    <fieldset disabled={busy || blocked}><legend>Contribution and conditions</legend><Field label="Agreement-scoped participant identifier"><input required autoFocus maxLength={128} pattern="[A-Za-z0-9_.:\-]+" value={participant} onChange={event => setParticipant(event.target.value)} placeholder="participant-alice"/></Field><div className="form-grid"><Field label="Contribution (ZEC)"><input required inputMode="decimal" value={amount} onChange={event => setAmount(event.target.value)}/></Field><Field label="Fee cap (ZEC)"><input required inputMode="decimal" value={fee} onChange={event => setFee(event.target.value)}/></Field></div>
       <Field label="Maximum net debit, including fees (ZEC)"><input required inputMode="decimal" value={maximum} onChange={event => setMaximum(event.target.value)}/></Field><Field label="Conditions (optional)"><textarea maxLength={1024} value={condition} onChange={event => setCondition(event.target.value)} placeholder="Conditions requiring verification in the exact proposal"/></Field>
       <Field label="Intent validity (UTC, optional)" hint="Intent expiry is not transaction expiry and cannot revoke released signatures."><input type="datetime-local" value={validUntil} onChange={event => setValidUntil(event.target.value)}/></Field>
       <label className="consent"><input type="checkbox" checked={ack} onChange={event => setAck(event.target.checked)}/><span>I understand this records intent only. No payment is approved.</span></label>
     </fieldset>
-    {uncertain && <Notice warning title="The original intent may already be recorded">The payload, opening revision and key remain unchanged. Closing loses this in-memory retry reference; inspect the original intent before recording another.<p className="mono wrap">{intentId.current} · {attempt.current?.key}</p></Notice>}
-    {error && <p className="form-error" role="alert">{error}</p>}<div className="modal-actions"><button type="button" className="button secondary" onClick={onClose}>Cancel</button><button className="button primary" disabled={busy || !ack || (!uncertain && blocked)}>{busy ? 'Recording…' : uncertain ? 'Retry exact original intent' : 'Record intent'}</button></div>
+    {error && <p className="form-error" role="alert">{error}</p>}<div className="modal-actions"><button type="button" className="button secondary" onClick={onClose}>Cancel</button><button className="button primary" disabled={busy || !ack || blocked}>{busy ? 'Recording…' : 'Record intent'}</button></div>
   </form></Modal>;
 }
 export function ReviewAgreement({ agreement: view, onClose }: { agreement: AgreementView; onClose: () => void }) {

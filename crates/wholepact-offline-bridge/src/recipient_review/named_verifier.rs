@@ -351,8 +351,17 @@ impl CurrentPreparedNamedVerifierAssertion<'_, '_, '_> {
         self.check_current()?;
         self.prepared.signing_message()
     }
+    /// Original terms retained by the complete current-policy producer. Historical
+    /// storage of these bytes grants no authority and never refreshes validity.
+    pub fn original_terms(&self) -> Result<&OfflineAuthorizationTerms> {
+        self.check_current()?;
+        Ok(&self.owner.retained.terms)
+    }
     pub fn recipient_artifact(&self) -> Result<&CanonicalLayoutArtifact> {
         self.check_current()?;
         Ok(self.prepared.recipient_artifact())
     }
 }
+
+#[cfg(all(test, feature = "synthetic-selected-effects-tests"))]
+mod proved_fixture_tests;

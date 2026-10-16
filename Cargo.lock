@@ -5804,6 +5804,7 @@ dependencies = [
  "wholepact-signer-origin",
  "wholepact-storage-security",
  "wholepact-store",
+ "wholepact-transport",
  "wholepact-wallet",
  "winit",
  "zcash_client_backend",

@@ -11,7 +11,7 @@ manual-inventory-client = ["wholepact-wallet/protected-sync"]
 pending-birth-owner-signing = ["dep:tempfile", "native-ui", "authority-signing", "dep:rustls", "wholepact-authority/pending-birth-foundation"]
 default = []
 # Disabled native offline composition; does not install issuer or runtime route.
-offline-review-foundation = ["dep:wholepact-offline-bridge"]
+offline-review-foundation = ["dep:wholepact-offline-bridge", "dep:wholepact-transport"]
 synthetic-qualification = ["wholepact-signer-origin/synthetic-qualification", "wholepact-wallet/synthetic-qualification", "wholepact-protocol/synthetic-qualification", "wholepact-authority/synthetic-qualification",  "wholepact-chain/synthetic-qualification", "dep:zcash_client_backend", "dep:zcash_primitives", "dep:incrementalmerkletree", "dep:prost", "dep:axum", "dep:tempfile", "dep:tokio", "tokio/rt-multi-thread", "tokio/macros"]
 checkpoint-review = ["dep:wholepact-proof-jobs"]
 native-ui = ["wholepact-signer-origin/native-ui", "dep:eframe", "dep:winit"]
@@ -19,6 +19,7 @@ wallet-review = ["wholepact-wallet/wallet"]
 authority-signing = ["wholepact-signer-origin/authority-signing", "wholepact-chain/submission-dispatch","wholepact-protocol/transaction-checkpoint","wallet-review", "wholepact-wallet/protected-sync", "wholepact-protocol/proving", "dep:tokio"]
 
 [dependencies]
+wholepact-transport = { path = "../wholepact-transport", optional = true }
 ring = "=0.17.14"
 rustls = { version = "=0.23.45", optional = true, default-features = false, features = ["std", "ring"] }
 wholepact-offline-bridge = { path = "../wholepact-offline-bridge", optional = true }

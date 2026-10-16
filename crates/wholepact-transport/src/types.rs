@@ -41,6 +41,10 @@ pub enum TransportError {
     OutOfOrder,
     #[error("encrypted file or replay ledger I/O failed")]
     Storage,
+    #[error(
+        "the original encrypted import committed but its owner became unavailable; recover that original receipt"
+    )]
+    ImportCommittedButUnavailable,
     #[error("secure system randomness is unavailable")]
     Randomness,
     #[error("password must be 12 to 1024 bytes; use a strong unique passphrase")]
@@ -122,6 +126,8 @@ pub enum ArtifactKind {
     OfflineMinimalAuthorityAdmission,
     /// Exact offline-origin result; never an ordinary Authorization or permit.
     OfflineAuthorizationReturn,
+    /// Signed named-verifier assertion only; never reservation or spending authority.
+    NamedVerifierAssertion,
 }
 impl ArtifactKind {
     /// Wire-kind classification only; this never grants an export capability.

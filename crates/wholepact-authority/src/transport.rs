@@ -9,6 +9,8 @@ mod construction_transport_server_v1;
 mod manual_roster_construction_transport_v2;
 #[path = "manual_roster_construction_transport_v3.rs"]
 mod manual_roster_construction_transport_v3;
+mod offline_clock_v1;
+pub use offline_clock_v1::AuthenticatedOfflineClockV1;
 use crate::{
     protocol::{WireRequest, WireResponse},
     *,
@@ -1454,6 +1456,14 @@ impl AuthorityServer {
         let mut stream = StreamOwned::new(connection, socket);
         let request: WireRequest = read_frame(&mut stream)?;
         let result = match request {
+            WireRequest::ObserveOfflineAdmissionTimeV1(request) => {
+                let binding = offline_clock_v1::channel_binding(
+                    &exporter, &request.scope, &request.challenge,
+                )?;
+                self.journal
+                    .observe_offline_clock_v1(&peer, &request, &binding, now_ms)
+                    .map(|response| WireResponse::OfflineAdmissionTimeV1(Box::new(response)))
+            }
             WireRequest::ClaimConstructionTransport { .. }
             | WireRequest::ObserveConstructionTransport { .. }
             | WireRequest::MutateConstructionTransport { .. } => Err(AuthorityError::Permission),

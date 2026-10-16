@@ -10,6 +10,8 @@ import { ReviseAgreement } from './terms-revisions';
 import { sameTermsSession } from './terms-revision-model';
 import { PaymentStart } from './payment-journey';
 import { draftAvailability } from './payment-journey-model';
+import { PlanningSaveNotice, usePlanningCommand } from './planning-command';
+import { currentPlanningResolution, dismissPlanningResolution } from './planning-command-session';
 
 type Page = 'overview' | 'agreements' | 'authorizations' | 'accounts' | 'records' | 'settings';
 const pages: { id: Page; label: string }[] = [{ id: 'overview', label: 'Overview' }, { id: 'agreements', label: 'Agreements' }, { id: 'authorizations', label: 'Authorizations' }, { id: 'accounts', label: 'Accounts & connections' }, { id: 'records', label: 'Records' }, { id: 'settings', label: 'Settings' }];
@@ -32,7 +34,8 @@ export function App() {
   const [clientId, setClientId] = useState(''); const [permissions, setPermissions] = useState<string[]>([]);
   const sessionClient = useRef<WholepactClient | null>(null);
   const generation = useRef(0); const lastEvent = useRef(0); const refreshingClients = useRef(new WeakSet<WholepactClient>());
-  const create = draftAvailability(capabilities, permissions, !!error || !lastSync);
+  const { command: draftPending, resolution: draftResolution } = usePlanningCommand(client, 'draft');
+  const create = draftPending ? { allowed: false, reason: 'Resolve the original draft save before creating another payment plan.' } : draftAvailability(capabilities, permissions, !!error || !lastSync);
   const openCreate = () => { if (create.allowed) setModal('create'); };
   const active = agreements.find(a => a.agreement.agreement_id === selectedId) ?? null;
   const navigate = (next: Page) => { location.hash = next; setPage(next); setSelectedId(null); };
@@ -95,6 +98,8 @@ export function App() {
       <main id="main-content" tabIndex={-1}>
         <div className="build-note"><Icon name="info" size={17}/><span>Testnet development · {capabilities?.runtime.storage === 'encrypted_local_metadata' ? 'encrypted local metadata' : capabilities?.runtime.storage === 'local_metadata_unencrypted' ? 'unencrypted local metadata' : 'inspect storage capability'} · no qualified settlement.</span><button onClick={() => navigate('accounts')}>View capabilities <Icon name="arrow" size={14}/></button></div>
         {error && <div className="error-banner" role="alert"><Icon name="warning"/><div><strong>Local information may be stale</strong><p>{error}</p><button className="text-button" onClick={() => refresh(client)}>Retry connection</button></div></div>}
+        {draftResolution?.outcome === 'saved' && <PlanningSaveNotice resolution={draftResolution} onView={() => { if (currentPlanningResolution(client, 'draft', draftResolution)) void changed('Original draft saved locally. No payment has been authorized.', draftResolution.agreementId); }} onDismiss={() => { dismissPlanningResolution(client, 'draft', draftResolution); }}/>}
+        {draftPending && <Notice warning title={draftPending.phase === 'pending' ? 'An original draft save is in progress' : 'An original draft save needs attention'}>The exact original request is retained in this session. Closing a window does not cancel it. Reloading or disconnecting loses this retry reference; inspect the service journal before starting again.<button className="text-button" onClick={() => setModal('create')}>Resume original draft</button></Notice>}
         {partial.length > 0 && <Notice warning>{partial.join(', ')} could not be read. Those views are unavailable; absence is not evidence of no exposure.</Notice>}
         {page === 'overview' && <Overview agreements={agreements} authorizations={authorizations} records={records} partial={partial} create={create} onCreate={openCreate} onOpen={openAgreement} onNavigate={navigate} events={events}/>}
         {page === 'agreements' && (active ? <AgreementDetail key={active.agreement.agreement_id} agreement={active} events={events} client={client} capabilities={capabilities} permissions={permissions} stale={!!error} onBack={() => setSelectedId(null)} onIntent={() => setModal('intent')} onReview={() => setModal('review')} onRevise={() => setModal('revise')} onChanged={message => changed(message, undefined, false)}/> : <><PageTitle kicker="Private coordination" title="Agreements" action={<button className="button primary" disabled={!create.allowed} title={create.reason} onClick={openCreate}><Icon name="plus" size={18}/> New agreement</button>}>A shared purpose. Independently controlled contributions.</PageTitle><InvitationsPanel client={client} capabilities={capabilities}/><AgreementList agreements={agreements} onOpen={openAgreement} onCreate={openCreate} create={create}/></>)}

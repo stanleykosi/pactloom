@@ -208,3 +208,163 @@ fn pre_split_legacy_schema_and_ledger_hash_goldens_are_unchanged() {
         "33f880748d5db950863f703de9de913fe03d11daad395c2c7424008036e31a3f"
     );
 }
+
+// Fresh material retained only for the duration of each named-export test.
+fn named_random_bytes() -> [u8; 32] {
+    let mut bytes = [0; 32];
+    getrandom::fill(&mut bytes).unwrap();
+    bytes
+}
+fn named_prepared(sender: &TransportSecret, recipient: &TransportPublicKey) -> PreparedExport {
+    prepare_export(
+        ExportRequest {
+            context: context(ArtifactKind::NamedVerifierAssertion),
+            order: MessageOrder {
+                message_id: format!("{:032x}", 1),
+                sequence: 1,
+                issued_at: at(0),
+                expires_at: at(600),
+            },
+            purpose: "Synthetic source regression".into(),
+            persistence_warning: "Synthetic recipient may retain bytes".into(),
+        },
+        vec![DisclosureField::new(
+            "named-verifier-assertion-v1",
+            b"public synthetic payload".to_vec(),
+        )
+        .unwrap()],
+        &sender.public_key().unwrap(),
+        recipient,
+        &at(0),
+    )
+    .unwrap()
+}
+
+#[test]
+fn named_assertion_exact_message_recovery_survives_reopen_without_reseal() {
+    // Ephemeral OS-random transport encryption only: no wallet,
+    // signature, proof, network, account enrollment or native authority.
+    let temp = Temp::new();
+    let path = temp.0.join("assertion.sqlite");
+    let sender = TransportSecret::from_bytes(named_random_bytes()).unwrap();
+    let recipient = TransportSecret::from_bytes(named_random_bytes())
+        .unwrap()
+        .public_key()
+        .unwrap();
+    let sender_public = sender.public_key().unwrap();
+    let context = context(ArtifactKind::NamedVerifierAssertion);
+    let original = named_prepared(&sender, &recipient);
+    let payload = original.preview().payload_digest.clone();
+    let message = original.preview().order.message_id.clone();
+    let preview = original.preview().digest().unwrap();
+    let mut outbox = SqliteOutbox::open(&path).unwrap();
+    assert!(outbox
+        .recover_message_for_recipient(&context, &recipient, &message, &payload, &sender_public)
+        .unwrap()
+        .is_none());
+    assert_eq!(outbox.next_sequence(&context).unwrap(), 1);
+    let committed = outbox.enqueue(original, &sender, &preview, &at(0)).unwrap();
+    let exact = committed.envelope().as_bytes().to_vec();
+    drop(outbox);
+    let outbox = SqliteOutbox::open(&path).unwrap();
+    let recovered = outbox
+        .recover_message_for_recipient(&context, &recipient, &message, &payload, &sender_public)
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovered.envelope().as_bytes(), exact);
+    assert!(!recovered.authorization_allowed());
+    assert!(!recovered.is_currently_valid(&at(601)));
+    assert_eq!(outbox.next_sequence(&context).unwrap(), 2);
+    let mut changed = context.clone();
+    changed.proposal_revision += 1;
+    assert!(outbox
+        .recover_message_for_recipient(&changed, &recipient, &message, &payload, &sender_public)
+        .is_err());
+    let other = TransportSecret::from_bytes(named_random_bytes())
+        .unwrap()
+        .public_key()
+        .unwrap();
+    assert!(outbox
+        .recover_message_for_recipient(&context, &other, &message, &payload, &sender_public)
+        .is_err());
+    assert!(outbox
+        .recover_message_for_recipient(
+            &context,
+            &recipient,
+            &message,
+            &"00".repeat(32),
+            &sender_public
+        )
+        .is_err());
+    assert!(outbox
+        .recover_message_for_recipient(&context, &recipient, &message, &payload, &other)
+        .is_err());
+    assert_eq!(outbox.next_sequence(&context).unwrap(), 2);
+}
+
+#[test]
+fn named_assertion_kind_never_confers_financial_export_authority() {
+    assert_eq!(
+        serde_json::to_string(&ArtifactKind::NamedVerifierAssertion).unwrap(),
+        "\"named_verifier_assertion\""
+    );
+    assert!(!ArtifactKind::NamedVerifierAssertion.requires_qualified_export());
+    assert!(ArtifactKind::NamedVerifierAssertion.immutable_slot());
+    for kind in [
+        ArtifactKind::Authorization,
+        ArtifactKind::OfflineReservationIntent,
+        ArtifactKind::OfflineAuthorityAdmission,
+        ArtifactKind::OfflineMinimalAuthorityAdmission,
+        ArtifactKind::OfflineAuthorizationReturn,
+    ] {
+        assert!(kind.requires_qualified_export());
+    }
+    let sender = TransportSecret::from_bytes(named_random_bytes()).unwrap();
+    let recipient = TransportSecret::from_bytes(named_random_bytes())
+        .unwrap()
+        .public_key()
+        .unwrap();
+    let fields = vec![DisclosureField::new(
+        "named-verifier-assertion-v1",
+        b"public synthetic payload".to_vec(),
+    )
+    .unwrap()];
+    assert_eq!(
+        crate::disclosure_payload_digest(&fields).unwrap(),
+        named_prepared(&sender, &recipient).preview().payload_digest
+    );
+    assert!(DisclosureField::new(
+        "named-verifier-assertion-v1",
+        vec![0; crate::MAX_PAYLOAD_BYTES + 1]
+    )
+    .is_err());
+}
+
+#[test]
+fn export_setup_accepts_only_empty_authenticated_original_mailbox() {
+    // Each test retains fresh OS-random keys only within this temporary fixture.
+    let temp = Temp::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&temp.0, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let path = temp.0.join("outbox.sqlite");
+    let key = wholepact_storage_security::DatabaseKey::from_bytes(named_random_bytes());
+    let connection = wholepact_storage_security::create_encrypted(&path, &key).unwrap();
+    let mut outbox = SqliteOutbox::from_encrypted_connection(connection).unwrap();
+    outbox.require_empty_for_initial_setup().unwrap();
+    let sender = TransportSecret::from_bytes(named_random_bytes()).unwrap();
+    let recipient = TransportSecret::from_bytes(named_random_bytes())
+        .unwrap()
+        .public_key()
+        .unwrap();
+    let p = named_prepared(&sender, &recipient);
+    let d = p.preview().digest().unwrap();
+    outbox.enqueue(p, &sender, &d, &at(0)).unwrap();
+    assert!(outbox.require_empty_for_initial_setup().is_err());
+    drop(outbox);
+    let connection = wholepact_storage_security::open_encrypted(&path, &key).unwrap();
+    let outbox = SqliteOutbox::from_encrypted_connection(connection).unwrap();
+    assert!(outbox.require_empty_for_initial_setup().is_err());
+}

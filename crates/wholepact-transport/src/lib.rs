@@ -45,3 +45,5 @@ pub use offline_minimal_admission::*;
 mod offline_return_inbox;
 #[cfg(feature = "offline-admission-export")]
 pub use offline_return_inbox::*;
+
+mod named_verifier_initialization;

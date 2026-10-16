@@ -510,6 +510,15 @@ fn field_previews(fields: &[DisclosureField]) -> Vec<FieldPreview> {
         })
         .collect()
 }
+/// Canonical exact-field commitment for retained-message recovery. This validates
+/// sorted distinct fields but creates no consent, export or decryption authority.
+pub fn disclosure_payload_digest(fields: &[DisclosureField]) -> Result<String> {
+    validate_fields(fields)?;
+    if fields.windows(2).any(|pair| pair[0].name >= pair[1].name) {
+        return Err(TransportError::Malformed);
+    }
+    payload_digest(fields)
+}
 fn payload_digest(fields: &[DisclosureField]) -> Result<String> {
     let encoded = Zeroizing::new(encode(&encode_fields(fields))?);
     Ok(digest(b"wholepact.disclosed-payload.v1\0", &encoded))

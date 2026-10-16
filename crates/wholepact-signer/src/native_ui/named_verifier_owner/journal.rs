@@ -12,6 +12,8 @@ pub(super) struct Journal {
     pub restored_informational: bool,
     pub families: BTreeMap<String, String>,
     pub rows: BTreeMap<String, Entry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub export_identity: Option<super::export_identity::ExportIdentity>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -19,6 +21,8 @@ pub(super) struct Entry {
     pub statement: NamedVerifierStatementV1,
     pub recipient_artifact: Vec<u8>,
     pub state: State,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_terms: Option<wholepact_authority::offline::OfflineAuthorizationTerms>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
@@ -78,12 +82,27 @@ impl Journal {
         Ok(package)
     }
     pub fn validate(&self) -> Result<()> {
+        if let Some(identity) = &self.export_identity {
+            identity.validate()?;
+            if identity.setup_intent.verifier_digest != hex::encode(Sha256::digest(self.public_key))
+            {
+                return Err(Error::ReviewMismatch);
+            }
+        }
         if self.version != 1 || self.rows.len() > 128 || self.families.len() > 128 {
             return Err(Error::InvalidData);
         }
         let key_digest = hex::encode(Sha256::digest(self.public_key));
         let mut families = BTreeMap::new();
         for (key, e) in &self.rows {
+            if let Some(terms) = &e.original_terms {
+                if wholepact_offline_bridge::named_verifier_original_context_digest(terms)
+                    .map_err(|_| Error::InvalidData)?
+                    != e.statement.original_context_digest
+                {
+                    return Err(Error::ReviewMismatch);
+                }
+            }
             e.statement.validate().map_err(|_| Error::InvalidData)?;
             if row_key(&e.statement)? != *key
                 || e.statement.verifier_key_digest != key_digest
@@ -176,6 +195,7 @@ impl Journal {
                 statement,
                 recipient_artifact: artifact,
                 state: State::Prepared,
+                original_terms: None,
             },
         );
         Ok(key)
@@ -293,6 +313,7 @@ mod tests {
                 restored_informational: false,
                 families: Default::default(),
                 rows: Default::default(),
+                export_identity: None,
             },
             statement,
             artifact,

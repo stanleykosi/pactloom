@@ -168,6 +168,14 @@ impl SqliteOutbox {
         })
     }
 
+    /// Narrow initialization invariant; this never clears or changes a mailbox.
+    pub fn require_empty_for_initial_setup(&self) -> Result<()> {
+        self.database_identity()?;
+        let count: i64 = self.connection.query_row("SELECT count(*) FROM outbox", [], |r|r.get(0)).map_err(|_|TransportError::Storage)?;
+        if count != 0 { return Err(TransportError::Equivocation); }
+        Ok(())
+    }
+
     /// Advisory sequence for preview preparation; commit rechecks under an immediate
     /// transaction. Concurrent previews may race, but a loser is never exported.
     /// No sequence is reserved until ciphertext and metadata durably commit.
@@ -332,6 +340,37 @@ impl SqliteOutbox {
             &context_digest(context)?,
             &recipient.fingerprint(),
         )
+    }
+
+    /// Recover the original committed message without a separate sequence receipt.
+    /// This exact context/recipient lookup may return expired historical ciphertext;
+    /// it never reserves ordering, reseals bytes or grants financial authority.
+    pub fn recover_message_for_recipient(
+        &self,
+        context: &MessageContext,
+        recipient: &TransportPublicKey,
+        original_message_id: &str,
+        expected_payload_digest: &str,
+        expected_sender: &TransportPublicKey,
+    ) -> Result<Option<OutboxArtifact>> {
+        crate::types::validate_hex(original_message_id, 16)?;
+        crate::types::validate_hex(expected_payload_digest, 32)?;
+        if self.identity.is_some() {
+            self.database_identity()?;
+        }
+        let stream = stream_digest(context)?;
+        let sequence: Option<(i64,String,String)> = self.connection.query_row(
+            "SELECT sequence, substr(payload_digest,1,65), substr(sender_fingerprint,1,65) FROM outbox WHERE stream=?1 AND message_digest=?2",
+            params![stream, message_digest(original_message_id)],
+            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+        ).optional().map_err(|_| TransportError::Storage)?;
+        match sequence {
+            Some((sequence,payload,sender)) if sequence > 0 && payload==expected_payload_digest && sender==expected_sender.fingerprint() => self.recover_for_recipient(
+                context, recipient, sequence as u64,
+            )?.map(Some).ok_or(TransportError::WrongContext),
+            Some(_) => Err(TransportError::Storage),
+            None => Ok(None),
+        }
     }
 
     /// Reports unacknowledged sequences for the stream and exact pinned recipient.

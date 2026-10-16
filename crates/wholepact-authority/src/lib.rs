@@ -17,6 +17,7 @@ pub(crate) mod construction_transport_owner_v1;
 mod admission;
 mod automation;
 pub mod offline;
+pub mod offline_clock_v1;
 mod offline_admission;
 mod offline_export;
 mod offline_outcome;

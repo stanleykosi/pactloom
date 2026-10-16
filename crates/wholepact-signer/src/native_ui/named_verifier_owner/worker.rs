@@ -1,8 +1,8 @@
 //! Private bounded worker owns all borrowing policy/key state. Only the actual
 //! native UI can return a NativeDecision; prompts and status grant no authority.
 use super::{
-    handoff::{ApprovedRequest, Lifetime, Phase},
     NativeAuthorityBinding, NativeDecision, VerifierOwner,
+    handoff::{ApprovedRequest, Lifetime, Phase},
 };
 use crate::{Error, Result};
 use std::{
@@ -12,7 +12,7 @@ use std::{
 };
 use wholepact_offline_bridge::RetainedNamedVerifierOwner;
 use wholepact_signer_origin::{
-    named_verifier_policy::NamedVerifierPolicyScopeV1, NativeManualClient,
+    NativeManualClient, named_verifier_policy::NamedVerifierPolicyScopeV1,
 };
 use zeroize::Zeroizing;
 
@@ -36,7 +36,7 @@ pub(super) enum Notice {
     Finished(Result<String>),
 }
 enum Command {
-    Owner(VerifierOwner),
+    Owner(Box<VerifierOwner>),
     Decision(NativeDecision),
 }
 pub(super) struct Worker {
@@ -88,7 +88,7 @@ impl Worker {
         self.commands
             .as_ref()
             .ok_or(Error::Locked)?
-            .try_send(Command::Owner(owner))
+            .try_send(Command::Owner(Box::new(owner)))
             .map_err(|_| Error::Locked)
     }
     pub fn decide(&self, decision: NativeDecision) -> Result<()> {
@@ -153,7 +153,7 @@ fn owner(
     {
         return Err(Error::ReviewMismatch);
     }
-    Ok(owner)
+    Ok(*owner)
 }
 fn decision(
     source: &NativeAuthorityBinding,

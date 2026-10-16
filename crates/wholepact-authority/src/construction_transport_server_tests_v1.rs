@@ -471,3 +471,35 @@ fn pending_read_completion_rejects_clock_rollback_and_original_expiry() {
         ));
     }
 }
+
+#[test]
+fn offline_clock_v1_is_never_admitted_by_the_dedicated_handoff_read_route() {
+    use crate::offline_clock_v1::{OfflineClockRequestV1, OfflineClockScopeV1};
+    let f = crate::construction_transport_handoff_v1::tests::fixture();
+    let scope = scope(&f);
+    let ledger = ledger_at(&f, 14);
+    let a = &scope.pending.grant.authorization.authorization;
+    let request = WireRequest::ObserveOfflineAdmissionTimeV1(Box::new(OfflineClockRequestV1 {
+        scope: OfflineClockScopeV1 {
+            witness_id: ledger.policy.witness_id.clone(),
+            account_id: a.account_id.clone(),
+            network_profile_id: a.network_profile_id.clone(),
+            witness_policy_digest: ledger.policy.policy_digest().unwrap(),
+            operation_id: "synthetic-clock-operation".into(),
+            authorization_id: "synthetic-clock-authorization".into(),
+            original_request_digest: "11".repeat(32),
+            original_admission_digest: "22".repeat(32),
+            original_not_before_ms: 253_000,
+            original_expires_at_ms: 300_000,
+        },
+        challenge: "33".repeat(32),
+        channel_binding: "44".repeat(32),
+    }));
+    for stage in 0..=4 {
+        assert!(!pending_history_request(stage, &request));
+    }
+    assert!(matches!(
+        validate(&scope, &ledger, &request, 253_010),
+        Err(AuthorityError::Permission)
+    ));
+}

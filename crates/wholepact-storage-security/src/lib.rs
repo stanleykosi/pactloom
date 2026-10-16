@@ -572,3 +572,6 @@ pub use planned_witness_initialization::{
 };
 #[cfg(target_os = "linux")]
 pub mod witness_namespace_fs;
+
+mod planned_named_verifier_initialization;
+pub use planned_named_verifier_initialization::{PlannedNamedVerifierOutboxInitialization, PlannedNamedVerifierOutboxInspection, NamedVerifierOutboxInitialization};

@@ -4,11 +4,10 @@
 pub mod history;
 pub mod recovery;
 
-use crate::{create_encrypted, DatabaseKey, StorageSecurityError};
+use crate::{DatabaseKey, StorageSecurityError, create_encrypted};
 use rusqlite::{
-    params, params_from_iter,
+    Connection, OptionalExtension, params, params_from_iter,
     types::{Value, ValueRef},
-    Connection, OptionalExtension,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -22,6 +21,83 @@ pub const QUARANTINE_APPLICATION_ID: i64 = 0x57505152;
 const ARCHIVE_ID: i64 = 0x5750424d;
 const STAGING_ID: i64 = 0x57504250;
 const FORMAT: u32 = 1;
+// Additive domain. Legacy archives retain their exact v1 wire format and rules.
+// Format 2 is explicitly the named-verifier transport-only scope, not a wallet,
+// signer-consent or coordination authority inventory.
+const NAMED_VERIFIER_ARCHIVE_ID: i64 = 0x57504e42;
+const NAMED_VERIFIER_STAGING_ID: i64 = 0x57504e50;
+const NAMED_VERIFIER_FORMAT: u32 = 2;
+#[derive(Clone, Copy)]
+enum ArchiveProfile {
+    Ordinary,
+    NamedVerifierTransport,
+}
+impl ArchiveProfile {
+    fn format(self) -> u32 {
+        match self {
+            Self::Ordinary => FORMAT,
+            Self::NamedVerifierTransport => NAMED_VERIFIER_FORMAT,
+        }
+    }
+    fn application(self) -> i64 {
+        match self {
+            Self::Ordinary => ARCHIVE_ID,
+            Self::NamedVerifierTransport => NAMED_VERIFIER_ARCHIVE_ID,
+        }
+    }
+    fn staging(self) -> i64 {
+        match self {
+            Self::Ordinary => STAGING_ID,
+            Self::NamedVerifierTransport => NAMED_VERIFIER_STAGING_ID,
+        }
+    }
+    fn require_header(self, application: i64, version: u32) -> Result<()> {
+        if application != self.application() || version != self.format() {
+            return Err(BundleError::Unsupported);
+        }
+        Ok(())
+    }
+    fn coverage(self, coverage: &Coverage) -> Result<()> {
+        match self {
+            Self::Ordinary => validate_coverage(coverage),
+            Self::NamedVerifierTransport => {
+                let expected = named_verifier_transport_coverage();
+                if coverage != &expected {
+                    return Err(BundleError::Invalid);
+                }
+                Ok(())
+            }
+        }
+    }
+    fn digest(self, manifest: &BundleManifest) -> Result<String> {
+        match self {
+            Self::Ordinary => manifest_digest(manifest),
+            Self::NamedVerifierTransport => {
+                let mut value = manifest.clone();
+                value.digest.clear();
+                let mut hash = Sha256::new();
+                hash.update(b"wholepact.bundle.named-verifier-transport.manifest.v1\0");
+                hash.update(encode(&value)?);
+                Ok(hex_digest(hash))
+            }
+        }
+    }
+}
+/// Complete only for the independent named-verifier transport profile. The
+/// paired verifier seed/journal envelope is separately authenticated by its
+/// native owner and bound through checkpoint_id; it is never spending authority.
+pub fn named_verifier_transport_coverage() -> Coverage {
+    Coverage {
+        present: BTreeMap::from([(
+            JournalKind::TransportOutbox,
+            vec!["named-verifier-outbox".into()],
+        )]),
+        absent: KINDS
+            .into_iter()
+            .filter(|kind| *kind != JournalKind::TransportOutbox)
+            .collect(),
+    }
+}
 const MAX_COMPONENTS: usize = 64;
 const MAX_OBJECTS: usize = 256;
 const MAX_ROWS: usize = 100_000;
@@ -310,10 +386,21 @@ pub struct SnapshotRequest<'a> {
 }
 
 pub fn snapshot(request: SnapshotRequest<'_>) -> Result<BundleManifest> {
+    snapshot_profile(request, ArchiveProfile::Ordinary)
+}
+/// Explicit transport-only native checkpoint. Exactly one named-verifier outbox
+/// is permitted; no financial authority role may be present or invented.
+pub fn snapshot_named_verifier_transport(request: SnapshotRequest<'_>) -> Result<BundleManifest> {
+    snapshot_profile(request, ArchiveProfile::NamedVerifierTransport)
+}
+fn snapshot_profile(
+    request: SnapshotRequest<'_>,
+    profile: ArchiveProfile,
+) -> Result<BundleManifest> {
     identifier(request.principal_id)?;
     identifier(request.profile_id)?;
     private_path(request.destination)?;
-    validate_coverage(&request.coverage)?;
+    profile.coverage(&request.coverage)?;
     let sources: Vec<_> = request
         .sources
         .iter()
@@ -355,7 +442,7 @@ pub fn snapshot(request: SnapshotRequest<'_>) -> Result<BundleManifest> {
     lease.check_current()?;
     identifier(lease.checkpoint_id())?;
     let mut output = create_encrypted(request.destination, request.key)?.into_connection();
-    output.pragma_update(None, "application_id", STAGING_ID)?;
+    output.pragma_update(None, "application_id", profile.staging())?;
     output.pragma_update(None, "max_page_count", 131072)?;
     let tx = output.transaction()?;
     tx.execute_batch(ARCHIVE_SCHEMA)?;
@@ -390,7 +477,7 @@ pub fn snapshot(request: SnapshotRequest<'_>) -> Result<BundleManifest> {
     lease.check_current()?;
     components.sort_by(|a, b| a.id.cmp(&b.id));
     let mut manifest = BundleManifest {
-        format_version: FORMAT,
+        format_version: profile.format(),
         profile_id: request.profile_id.into(),
         checkpoint_id: lease.checkpoint_id().into(),
         coverage: request.coverage,
@@ -401,20 +488,20 @@ pub fn snapshot(request: SnapshotRequest<'_>) -> Result<BundleManifest> {
         writer_freshness_established: false,
         restore_requires_recovery: true,
     };
-    manifest.digest = manifest_digest(&manifest)?;
+    manifest.digest = profile.digest(&manifest)?;
     tx.execute(
         "INSERT INTO bundle_manifest VALUES(1,?1)",
         [encode(&manifest)?],
     )?;
-    tx.pragma_update(None, "application_id", ARCHIVE_ID)?;
-    tx.pragma_update(None, "user_version", FORMAT)?;
+    tx.pragma_update(None, "application_id", profile.application())?;
+    tx.pragma_update(None, "user_version", profile.format())?;
     tx.commit()?;
     crate::checkpoint_and_sync(&output, request.destination)?;
     drop(output);
     lease
         .check_current()
         .map_err(|_| BundleError::PermissionChanged)?;
-    let verified = inspect(request.destination, request.key)?;
+    let verified = inspect_profile(request.destination, request.key, profile)?;
     lease
         .check_current()
         .map_err(|_| BundleError::PermissionChanged)?;
@@ -538,19 +625,33 @@ fn copy_source(
 /// Inspect a private encrypted copy without changing archive sidecars. The
 /// caller must keep the archive file set quiescent under its owning locks.
 pub fn inspect(path: &Path, key: &DatabaseKey) -> Result<BundleManifest> {
+    inspect_profile(path, key, ArchiveProfile::Ordinary)
+}
+pub fn inspect_named_verifier_transport(path: &Path, key: &DatabaseKey) -> Result<BundleManifest> {
+    inspect_profile(path, key, ArchiveProfile::NamedVerifierTransport)
+}
+fn inspect_profile(
+    path: &Path,
+    key: &DatabaseKey,
+    profile: ArchiveProfile,
+) -> Result<BundleManifest> {
     bounded_file(path)?;
     let source = crate::open_encrypted_read_only(path, key)?;
     let read = source.unchecked_transaction()?;
-    let manifest = validate_archive(&read)?;
+    let manifest = validate_archive_profile(&read, profile)?;
     read.commit()?;
     Ok(manifest)
 }
 fn validate_archive(source: &Connection) -> Result<BundleManifest> {
+    validate_archive_profile(source, ArchiveProfile::Ordinary)
+}
+fn validate_archive_profile(
+    source: &Connection,
+    profile: ArchiveProfile,
+) -> Result<BundleManifest> {
     let app: i64 = source.pragma_query_value(None, "application_id", |r| r.get(0))?;
     let version: u32 = source.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if app != ARCHIVE_ID || version != FORMAT {
-        return Err(BundleError::Unsupported);
-    }
+    profile.require_header(app, version)?;
     let reference = Connection::open_in_memory()?;
     reference.execute_batch(ARCHIVE_SCHEMA)?;
     if schema(source)? != schema(&reference)? {
@@ -566,15 +667,15 @@ fn validate_archive(source: &Connection) -> Result<BundleManifest> {
         serde_json::from_slice(&encoded).map_err(|_| BundleError::Integrity)?;
     identifier(&manifest.profile_id)?;
     identifier(&manifest.checkpoint_id)?;
-    validate_coverage(&manifest.coverage)?;
-    if manifest.format_version != FORMAT
+    profile.coverage(&manifest.coverage)?;
+    if manifest.format_version != profile.format()
         || manifest.components.is_empty()
         || manifest.components.len() > MAX_COMPONENTS
         || manifest.wallet_spending_secrets_included
         || !manifest.private_viewing_witness_and_correlation_data_may_be_included
         || manifest.writer_freshness_established
         || !manifest.restore_requires_recovery
-        || manifest.digest != manifest_digest(&manifest)?
+        || manifest.digest != profile.digest(&manifest)?
     {
         return Err(BundleError::Integrity);
     }
@@ -690,14 +791,26 @@ pub struct RestoreRequest<'a> {
 }
 
 pub fn restore(request: RestoreRequest<'_>) -> Result<BundleRestoreReport> {
-    restore_action(request, BundleAction::Restore)
+    restore_action(request, BundleAction::Restore, ArchiveProfile::Ordinary)
 }
 pub fn test_restore(request: RestoreRequest<'_>) -> Result<BundleRestoreReport> {
-    restore_action(request, BundleAction::TestRestore)
+    restore_action(request, BundleAction::TestRestore, ArchiveProfile::Ordinary)
+}
+/// Restores the exact transport-only archive under the existing durable
+/// quarantine-before-import barrier. No ordinary live outbox handle is returned.
+pub fn restore_named_verifier_transport(
+    request: RestoreRequest<'_>,
+) -> Result<BundleRestoreReport> {
+    restore_action(
+        request,
+        BundleAction::Restore,
+        ArchiveProfile::NamedVerifierTransport,
+    )
 }
 fn restore_action(
     request: RestoreRequest<'_>,
     action: BundleAction,
+    profile: ArchiveProfile,
 ) -> Result<BundleRestoreReport> {
     identifier(request.principal_id)?;
     identifier(request.profile_id)?;
@@ -705,7 +818,7 @@ fn restore_action(
     bounded_file(request.archive)?;
     let source = crate::open_encrypted_read_only(request.archive, request.key)?;
     let read = source.unchecked_transaction()?;
-    let manifest = validate_archive(&read)?;
+    let manifest = validate_archive_profile(&read, profile)?;
     if manifest.profile_id != request.profile_id
         || request.targets.len() != manifest.components.len()
     {
@@ -1193,3 +1306,120 @@ fn hex_digest(hash: Sha256) -> String {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod named_verifier_profile_tests {
+    use super::*;
+    #[test]
+    fn transport_scope_cannot_escalate_or_masquerade_as_legacy_authority() {
+        let exact = named_verifier_transport_coverage();
+        assert!(
+            ArchiveProfile::NamedVerifierTransport
+                .coverage(&exact)
+                .is_ok()
+        );
+        assert!(ArchiveProfile::Ordinary.coverage(&exact).is_err());
+        for forbidden in KINDS
+            .into_iter()
+            .filter(|kind| *kind != JournalKind::TransportOutbox)
+        {
+            let mut mixed = exact.clone();
+            mixed.absent.remove(&forbidden);
+            mixed
+                .present
+                .insert(forbidden, vec!["invented-role".into()]);
+            assert!(
+                ArchiveProfile::NamedVerifierTransport
+                    .coverage(&mixed)
+                    .is_err()
+            );
+        }
+        let mut changed = exact.clone();
+        changed
+            .present
+            .get_mut(&JournalKind::TransportOutbox)
+            .unwrap()
+            .push("another-outbox".into());
+        assert!(
+            ArchiveProfile::NamedVerifierTransport
+                .coverage(&changed)
+                .is_err()
+        );
+        changed
+            .present
+            .insert(JournalKind::TransportOutbox, vec!["wrong-source".into()]);
+        assert!(
+            ArchiveProfile::NamedVerifierTransport
+                .coverage(&changed)
+                .is_err()
+        );
+        changed.present.clear();
+        assert!(
+            ArchiveProfile::NamedVerifierTransport
+                .coverage(&changed)
+                .is_err()
+        );
+    }
+    #[test]
+    fn both_directions_of_legacy_named_archive_confusion_are_rejected() {
+        let ordinary = ArchiveProfile::Ordinary;
+        let named = ArchiveProfile::NamedVerifierTransport;
+        assert!(
+            ordinary
+                .require_header(ordinary.application(), ordinary.format())
+                .is_ok()
+        );
+        assert!(
+            named
+                .require_header(named.application(), named.format())
+                .is_ok()
+        );
+        assert!(
+            ordinary
+                .require_header(named.application(), named.format())
+                .is_err()
+        );
+        assert!(
+            named
+                .require_header(ordinary.application(), ordinary.format())
+                .is_err()
+        );
+        assert!(
+            ordinary
+                .require_header(ordinary.application(), named.format())
+                .is_err()
+        );
+        assert!(
+            named
+                .require_header(named.application(), ordinary.format())
+                .is_err()
+        );
+    }
+    #[test]
+    fn named_scope_has_distinct_version_application_and_digest_domain() {
+        let ordinary = ArchiveProfile::Ordinary;
+        let named = ArchiveProfile::NamedVerifierTransport;
+        assert_eq!(ordinary.format(), 1);
+        assert_eq!(ordinary.application(), ARCHIVE_ID);
+        assert_ne!(ordinary.format(), named.format());
+        assert_ne!(ordinary.application(), named.application());
+        assert_ne!(ordinary.staging(), named.staging());
+        let manifest = BundleManifest {
+            format_version: named.format(),
+            profile_id: "synthetic-public-profile".into(),
+            checkpoint_id: "synthetic-checkpoint".into(),
+            coverage: named_verifier_transport_coverage(),
+            components: vec![],
+            digest: String::new(),
+            wallet_spending_secrets_included: false,
+            private_viewing_witness_and_correlation_data_may_be_included: true,
+            writer_freshness_established: false,
+            restore_requires_recovery: true,
+        };
+        assert_ne!(
+            ordinary.digest(&manifest).unwrap(),
+            named.digest(&manifest).unwrap()
+        );
+        // Pure metadata test: no credentials, native decision or database is created.
+    }
+}

@@ -45,9 +45,9 @@ test('synthetic: responsive navigation, disabled account actions and session res
 test('synthetic: an interrupted committed draft retains exact payload through a later permission failure',async({page})=>{
  const mutations=await fixture(page,false,{interruptDraft:true});await connect(page);await page.getByRole('button',{name:'New agreement'}).click();
  await page.getByLabel('What are you agreeing to fund?').fill('Synthetic uncertain draft');await page.getByLabel('Organizer identity',{exact:true}).fill('synthetic-organizer');await page.getByLabel('Exact recipient amount (ZEC)').fill('1');await page.getByLabel('Shielded receiving instructions').fill('utestsyntheticnotforfunds');await page.getByRole('checkbox').check();
- await page.getByRole('button',{name:'Save local draft'}).click();await expect(page.getByText('The original draft may already be saved',{exact:true})).toBeVisible();await expect(page.getByLabel('What are you agreeing to fund?')).toBeDisabled();
- await page.getByRole('button',{name:'Retry exact original draft'}).click();await expect(page.getByRole('alert')).toContainText('PERMISSION_DENIED');await expect(page.getByLabel('What are you agreeing to fund?')).toBeDisabled();
- await page.getByRole('button',{name:'Retry exact original draft'}).click();await expect(page.getByRole('heading',{name:'Synthetic uncertain draft'})).toBeVisible();
+ await page.getByRole('button',{name:'Save local draft'}).click();await expect(page.getByText('The original save outcome is uncertain',{exact:true})).toBeVisible();await expect(page.getByLabel('What are you agreeing to fund?')).toHaveCount(0);await page.getByText('Exact original request',{exact:true}).click();await expect(page.getByRole('dialog')).toContainText('Synthetic uncertain draft');
+ await page.getByRole('button',{name:'Retry exact original request'}).click();await expect(page.getByRole('alert')).toContainText('PERMISSION_DENIED');await expect(page.getByLabel('What are you agreeing to fund?')).toHaveCount(0);
+ await page.getByRole('button',{name:'Retry exact original request'}).click();await expect(page.getByRole('heading',{name:'Synthetic uncertain draft'})).toBeVisible();
  expect(mutations).toHaveLength(3);for(const attempt of mutations){expect(attempt.body).toEqual(mutations[0].body);expect(attempt.headers['idempotency-key']).toBe(mutations[0].headers['idempotency-key']);}
 });
 test('synthetic: multiple beneficiaries preserve exact sum and a separately named fee sponsor',async({page})=>{
