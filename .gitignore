@@ -121,10 +121,6 @@ credentials/
 *credentials*.yaml
 *credentials*.yml
 *token*.json
-# Exact, intentionally public never-funded TLS test assets needed by unit tests.
-!/crates/wholepact-chain/evidence/local-tls-fixture/certificate.pem
-!/crates/wholepact-chain/evidence/local-tls-fixture/certificate.der
-!/crates/wholepact-chain/evidence/local-tls-fixture/public-test-key.der
 
 # Private wallets, profiles, recovery payloads and local databases
 .runtime/
@@ -290,3 +286,7 @@ env/
 Thumbs.db
 Desktop.ini
 $RECYCLE.BIN/
+
+# Historical static cryptographic test material; tests generate ephemeral identities.
+/crates/wholepact-chain/evidence/local-tls-fixture/
+/crates/wholepact-signer/src/account/birth/enrollment_backup/roster_v2_public_fixture.rs

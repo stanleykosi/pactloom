@@ -1,0 +1,1 @@
+CREATE TABLE ext_wholepact_roster_import_records_v2(sequence INTEGER PRIMARY KEY CHECK(sequence IN (0,1)), format_version INTEGER NOT NULL CHECK(format_version=2), record BLOB NOT NULL CHECK(typeof(record)='blob' AND length(record)>0 AND length(record)<=262144));

@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "network_profile_id": "ironwood-testnet-nu7-candidate",
+  "agreement_scope": [
+    "sponsor-agreement"
+  ],
+  "sponsor": {
+    "participant_id": "sponsor",
+    "account_id": "account-s"
+  },
+  "eligible_contributors": [
+    {
+      "participant_id": "alice",
+      "account_id": "account-a"
+    }
+  ],
+  "beneficiaries": [
+    {
+      "recipient_id": "recipient-example",
+      "address": "uregtestsyntheticaddressnotforfunds",
+      "maximum_amount": "100"
+    }
+  ],
+  "rate_numerator": 2,
+  "rate_denominator": 3,
+  "maximum_match": "10",
+  "minimum_qualifying_total": "1",
+  "fee_cap": "3",
+  "maximum_net_debit": "13",
+  "aggregate_budget": "50",
+  "assurance": {
+    "kind": "independently_verified"
+  },
+  "identity_requirements": [
+    "Authenticate the sponsor and each designated contribution account"
+  ],
+  "privacy_profile": {
+    "mode": "local_only",
+    "proving_operator": null,
+    "dedicated_accounts_required": true
+  },
+  "expires_at": null
+}

@@ -1,0 +1,48 @@
+[package]
+name = "wholepact-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+manual-admission = ["wholepact-store/manual-admission", "dep:wholepact-signer-origin", "wholepact-signer?/manual-inventory-client"]
+offline-return-foundation = ["signature-intake", "wholepact-transport/offline-admission-export"]
+transport-workflows = ["dep:wholepact-transport"]
+submission-handoff = ["transaction-checkpoint", "wholepact-protocol/submission-handoff", "dep:wholepact-chain", "wholepact-chain/submission-dispatch"]
+transaction-checkpoint = ["signature-intake", "wholepact-protocol/transaction-checkpoint"]
+signature-intake = ["local-proof-jobs", "wholepact-protocol/signed-retention", "dep:wholepact-transport"]
+signer-authority-bridge = ["transaction-checkpoint", "dep:wholepact-signer"]
+wallet-sync = ["candidate-construction", "dep:wholepact-wallet", "wholepact-wallet/protected-sync"]
+local-proof-jobs = ["candidate-construction", "dep:wholepact-proof-jobs"]
+candidate-construction = ["dep:wholepact-protocol", "wholepact-protocol/construction"]
+synthetic-qualification = ["wholepact-signer?/synthetic-qualification", "wholepact-signer?/native-ui", "wholepact-signer?/authority-signing", "wholepact-chain?/synthetic-qualification", "candidate-construction", "dep:wholepact-wallet", "wholepact-wallet/synthetic-qualification"]
+
+[dependencies]
+wholepact-signer = { path = "../wholepact-signer", optional = true, default-features = false }
+wholepact-chain = { path = "../wholepact-chain", optional = true }
+wholepact-transport = { path = "../wholepact-transport", optional = true }
+wholepact-proof-jobs = { path = "../wholepact-proof-jobs", optional = true }
+wholepact-protocol = { path = "../wholepact-protocol", optional = true }
+wholepact-wallet = { path = "../wholepact-wallet", optional = true }
+wholepact-core = { path = "../wholepact-core" }
+wholepact-store = { path = "../wholepact-store" }
+wholepact-storage-security = { path = "../wholepact-storage-security" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+uuid = { version = "1", features = ["v4"] }
+time = { version = "0.3", features = ["formatting", "parsing"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+tempfile = "3"
+
+wholepact-protocol = { path = "../wholepact-protocol", features = ["synthetic-qualification"] }
+pczt = { version = "=0.10.0-pre.1", default-features = false, features = ["std", "orchard", "signer"] }
+orchard = { version = "=0.16.0", default-features = false, features = ["std"] }
+rand = { version = "=0.10.0", features = ["sys_rng"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+wholepact-signer-origin = { path = "../wholepact-signer-origin", optional = true }

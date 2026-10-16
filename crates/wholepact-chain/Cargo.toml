@@ -1,0 +1,41 @@
+[package]
+name = "wholepact-chain"
+version.workspace = true
+edition = "2024"
+rust-version = "1.88"
+license.workspace = true
+description = "Bounded read-only testnet chain observations for Wholepact"
+
+[features]
+default = []
+synthetic-qualification = []
+# Source implementation only; does not enable a service route or financial capability.
+submission-dispatch = []
+
+[dependencies]
+zcash_transparent = { version = "=0.11.0-pre.1", default-features = false }
+rustls = { version = "=0.23.45", default-features = false, features = ["std", "ring"] }
+httparse = "=1.10.1"
+zeroize = "=1.9.1"
+wholepact-storage-security = { path = "../wholepact-storage-security" }
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+sha2.workspace = true
+hex.workspace = true
+prost = "=0.14.4"
+tonic = { version = "=0.14.6", default-features = false, features = ["transport", "codegen", "tls-native-roots", "tls-ring"] }
+tonic-prost = "=0.14.6"
+http-body-util = "=0.1.5"
+tower = "=0.5.3"
+hyper-util = { version = "=0.1.21", features = ["client-legacy", "client-proxy", "tokio"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+zcash_primitives = { version = "=0.31.0-pre.1", default-features = false, features = ["std"] }
+zcash_protocol = "=0.11.0-pre.0"
+orchard = { version = "=0.16.0", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+tempfile = "3"
+axum = { version = "0.8", features = ["http2"] }
+tokio-rustls = { version = "=0.26.6", default-features = false, features = ["ring"] }

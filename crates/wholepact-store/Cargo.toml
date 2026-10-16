@@ -1,0 +1,25 @@
+[package]
+name = "wholepact-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+wholepact-core = { path = "../wholepact-core" }
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+thiserror.workspace = true
+wholepact-storage-security = { path = "../wholepact-storage-security" }
+
+[features]
+default = []
+manual-admission = ["dep:wholepact-signer-origin"]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+wholepact-signer-origin = { path = "../wholepact-signer-origin", optional = true }
+
+[dev-dependencies]
+tempfile = "3"

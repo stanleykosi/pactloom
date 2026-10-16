@@ -1,0 +1,43 @@
+[package]
+name = "wholepact-protocol"
+version.workspace = true
+edition = "2024"
+rust-version = "1.88"
+license.workspace = true
+description = "Fail-closed Wholepact protocol capabilities and opt-in synthetic Ironwood qualification"
+
+[features]
+default = []
+submission-handoff = ["transaction-checkpoint", "dep:wholepact-chain", "wholepact-chain/submission-dispatch"]
+authorization = ["proving"]
+transaction-checkpoint = ["signed-retention", "pczt/tx-extractor", "dep:zcash_primitives", "dep:zcash_transparent", "dep:rand"]
+signed-retention = ["authorization", "dep:rusqlite", "dep:wholepact-storage-security", "dep:zeroize"]
+upstream = ["dep:pczt", "dep:zcash_protocol", "dep:orchard", "dep:zcash_note_encryption", "dep:zcash_address"]
+construction = ["upstream", "dep:wholepact-core", "dep:zcash_primitives", "dep:rand", "pczt/zcp-builder", "pczt/io-finalizer"]
+proving = ["upstream", "dep:rand", "pczt/prover"]
+synthetic-qualification = ["wholepact-chain?/synthetic-qualification", "construction", "proving", "dep:orchard", "dep:zcash_primitives", "dep:zcash_note_encryption", "dep:rand", "dep:incrementalmerkletree", "dep:shardtree", "pczt/zcp-builder", "pczt/io-finalizer", "pczt/prover", "pczt/tx-extractor"]
+
+[dependencies]
+wholepact-chain = { path = "../wholepact-chain", optional = true }
+zcash_transparent = { version = "=0.11.0-pre.1", default-features = false, optional = true }
+rusqlite = { workspace = true, optional = true }
+wholepact-storage-security = { path = "../wholepact-storage-security", optional = true }
+zeroize = { version = "=1.9.1", optional = true }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+wholepact-core = { path = "../wholepact-core", optional = true }
+pczt = { version = "=0.10.0-pre.1", optional = true, default-features = false, features = ["std", "orchard", "signer"] }
+orchard = { version = "=0.16.0", optional = true, default-features = false, features = ["std"] }
+zcash_primitives = { version = "=0.31.0-pre.1", optional = true, default-features = false, features = ["std"] }
+zcash_protocol = { version = "=0.11.0-pre.0", optional = true, features = ["local-consensus"] }
+zcash_note_encryption = { version = "=0.5.1", optional = true }
+zcash_address = { version = "=0.14.0-pre.1", optional = true }
+rand = { version = "=0.10.0", optional = true, features = ["sys_rng"] }
+incrementalmerkletree = { version = "=0.9.0", optional = true }
+shardtree = { version = "=0.8.0", optional = true }
+
+[[example]]
+name = "qualify_ironwood"
+required-features = ["synthetic-qualification"]

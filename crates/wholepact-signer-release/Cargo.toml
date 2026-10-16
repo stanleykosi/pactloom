@@ -1,0 +1,21 @@
+[package]
+name = "wholepact-signer-release"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Opaque installed-signer release to the original encrypted transport outbox"
+
+[dependencies]
+wholepact-signer = { path = "../wholepact-signer", default-features = false }
+wholepact-transport = { path = "../wholepact-transport", default-features = false }
+wholepact-storage-security = { path = "../wholepact-storage-security" }
+wholepact-core = { path = "../wholepact-core" }
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+
+[dev-dependencies]
+wholepact-transport = { path = "../wholepact-transport", features = ["offline-admission-export"] }
+tempfile = "3"

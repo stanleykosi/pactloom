@@ -1,0 +1,1033 @@
+{
+  "request": {
+    "schema_version": 3,
+    "inventory_digest": "3232323232323232323232323232323232323232323232323232323232323232",
+    "generation_id": "3333333333333333333333333333333333333333333333333333333333333333",
+    "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "network_profile_id": "zcash-testnet-unqualified",
+    "expected_writer_epoch": 1,
+    "expected_witness": {
+      "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "endpoint": "127.0.0.1:1911",
+      "network_profile_id": "zcash-testnet-unqualified",
+      "pinned_server_certificate_digest": "5555555555555555555555555555555555555555555555555555555555555555",
+      "policy_digest": "919c15be141adae2b23f21272c061da48b5f30eb5c8a52f97186cdb012e20db7",
+      "server_name": "localhost",
+      "witness_id": "test-witness"
+    }
+  },
+  "writer_certificate_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+  "writer_session_id": "47c34a6f671a704f4837c1f220f23f627cba22c2774f39ff128c3819fa6ad2b0",
+  "writer_session_expires_at_ms": 429000,
+  "head": {
+    "digest": "ac1936be091856e299cd588a0a302692f11145821f011af4477b89445318fd47",
+    "sequence": 11
+  },
+  "history_digest": "c86386e1f41b281d36c3b40c7ead702da603c0442e881fb4e8d67b8c65dc57f2",
+  "complete_history": {
+    "schema_version": 3,
+    "financial_origins_v2": {
+      "schema_version": 2,
+      "complete_journal_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+      "pending_birth_commit": {
+        "authenticated_owner_certificate_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+        "committed_at_ms": 1500,
+        "local_owner_review_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "local_target_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "owner_approval_evidence_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "request": {
+          "disclosure": {
+            "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "endpoint": "127.0.0.1:1911",
+            "network_profile_id": "zcash-testnet-unqualified",
+            "pinned_server_certificate_digest": "5555555555555555555555555555555555555555555555555555555555555555",
+            "policy_digest": "919c15be141adae2b23f21272c061da48b5f30eb5c8a52f97186cdb012e20db7",
+            "server_name": "localhost",
+            "witness_id": "test-witness"
+          },
+          "generation_instance_id": "8888888888888888888888888888888888888888888888888888888888888888",
+          "initial_commit_deadline_ms": 2000,
+          "issued_at_ms": 1000,
+          "native_birth_digest": "e37cdb5e40179aaa4bea26b5f8c644a91c9704d82f3d16a81562b406053d65a1",
+          "operation_id": "birth-test-operation",
+          "original_target_digest": "9999999999999999999999999999999999999999999999999999999999999999",
+          "original_terms_digest": "ccb2fecb563f3fa20713e6f52958b291d67e05a9b0c440ee585521676511466d",
+          "policy": {
+            "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "account_use_genesis": {
+              "identity": {
+                "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "derivation_domain": "dedicated-testnet-legacy-zip32-v1",
+                "full_viewing_key_digest": "6666666666666666666666666666666666666666666666666666666666666666",
+                "network_profile_id": "zcash-testnet-unqualified"
+              },
+              "native_birth_digest": "e37cdb5e40179aaa4bea26b5f8c644a91c9704d82f3d16a81562b406053d65a1",
+              "owner_certificate_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+              "version": 1,
+              "witness_id": "test-witness",
+              "witness_origin_digest": "2b562c6e02835126925572906e1388193740e87ecd6e918f5bf347aae431aaeb"
+            },
+            "aggregate_budget_zatoshis": 1000000000,
+            "agreement_ids": [
+              "agreement-example-01"
+            ],
+            "enrollment_refs": [
+              "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            ],
+            "initial_writer_certificate_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+            "initial_writer_epoch": 1,
+            "maximum_fee_share_zatoshis": 12000,
+            "maximum_permit_lifetime_ms": 120000,
+            "maximum_transaction_fee_zatoshis": 30000,
+            "network_profile_id": "zcash-testnet-unqualified",
+            "owner_certificate_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+            "per_operation_limit_zatoshis": 400012000,
+            "policy_expires_at_ms": 6000000,
+            "recipient_scope_digests": [
+              "dc01af22dfd22d6d6feea96773c0684202748952f4f04734ea463344c9d5cd46"
+            ],
+            "witness_id": "test-witness"
+          },
+          "version": 1
+        },
+        "request_digest": "e08a572abf57af27ed1e19dd4ad6c52ae3a5c6ceb6f5c2e29a1e8b2ef2cd6310",
+        "version": 1
+      },
+      "origins": [],
+      "retained_enrollments": [],
+      "retained_reservation_intents": [],
+      "review_receipts": [],
+      "account_use": {
+        "exclusion": null,
+        "genesis": {
+          "identity": {
+            "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "derivation_domain": "dedicated-testnet-legacy-zip32-v1",
+            "full_viewing_key_digest": "6666666666666666666666666666666666666666666666666666666666666666",
+            "network_profile_id": "zcash-testnet-unqualified"
+          },
+          "native_birth_digest": "e37cdb5e40179aaa4bea26b5f8c644a91c9704d82f3d16a81562b406053d65a1",
+          "owner_certificate_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+          "version": 1,
+          "witness_id": "test-witness",
+          "witness_origin_digest": "2b562c6e02835126925572906e1388193740e87ecd6e918f5bf347aae431aaeb"
+        },
+        "witness_ack": null
+      }
+    },
+    "construction": {
+      "complete_replay_digest": "c86386e1f41b281d36c3b40c7ead702da603c0442e881fb4e8d67b8c65dc57f2",
+      "observed_snapshot": {
+        "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "account_use_checkpoint": {
+          "genesis_digest": "9c4821c2b58df8d5796361f98f4e23b05ea6ef455ec8df668e4f9dabe6a3c870",
+          "history_digest": "7e3647b6417f3099453be78c7cd383e806549071d95b01f16b7c7ee13fde9af3",
+          "permanent_exclusion_digest": null
+        },
+        "active_writer_session": {
+          "acquired_at_ms": 129000,
+          "acquired_head": {
+            "digest": "a95315260da81a96ed09c81f8112ccd01ac170e42a07ad8f32d32167af527faa",
+            "sequence": 6
+          },
+          "disclosure": {
+            "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "endpoint": "127.0.0.1:1911",
+            "network_profile_id": "zcash-testnet-unqualified",
+            "pinned_server_certificate_digest": "5555555555555555555555555555555555555555555555555555555555555555",
+            "policy_digest": "919c15be141adae2b23f21272c061da48b5f30eb5c8a52f97186cdb012e20db7",
+            "server_name": "localhost",
+            "witness_id": "test-witness"
+          },
+          "expires_at_ms": 429000,
+          "reconciled_head": {
+            "digest": "33e74fdb91db9d3715d7363d907a6d096a0f00626f010818c461ed040e7c716e",
+            "sequence": 5
+          },
+          "reconciled_history_digest": "98a0e5f0ffb9a77ee91dc63527a2c5ca45605feab6f90301cb4de40e10607da1",
+          "session_id": "47c34a6f671a704f4837c1f220f23f627cba22c2774f39ff128c3819fa6ad2b0",
+          "writer_certificate_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+          "writer_epoch": 1
+        },
+        "aggregate_budget_zatoshis": 1000000000,
+        "head": {
+          "digest": "ac1936be091856e299cd588a0a302692f11145821f011af4477b89445318fd47",
+          "sequence": 11
+        },
+        "last_witness_time_ms": 137000,
+        "network_profile_id": "zcash-testnet-unqualified",
+        "outstanding_debit_zatoshis": 400012000,
+        "outstanding_reservations": 1,
+        "pending_writer_session": null,
+        "policy_digest": "919c15be141adae2b23f21272c061da48b5f30eb5c8a52f97186cdb012e20db7",
+        "reserved_input_value_zatoshis": 500000000,
+        "settled_debit_zatoshis": 0,
+        "witness_id": "test-witness",
+        "writer_certificate_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+        "writer_epoch": 1,
+        "writer_status": "active"
+      },
+      "original_birth": {
+        "authenticated_owner_certificate_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+        "committed_at_ms": 1500,
+        "local_owner_review_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "local_target_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "owner_approval_evidence_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "request": {
+          "disclosure": {
+            "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "endpoint": "127.0.0.1:1911",
+            "network_profile_id": "zcash-testnet-unqualified",
+            "pinned_server_certificate_digest": "5555555555555555555555555555555555555555555555555555555555555555",
+            "policy_digest": "919c15be141adae2b23f21272c061da48b5f30eb5c8a52f97186cdb012e20db7",
+            "server_name": "localhost",
+            "witness_id": "test-witness"
+          },
+          "generation_instance_id": "8888888888888888888888888888888888888888888888888888888888888888",
+          "initial_commit_deadline_ms": 2000,
+          "issued_at_ms": 1000,
+          "native_birth_digest": "e37cdb5e40179aaa4bea26b5f8c644a91c9704d82f3d16a81562b406053d65a1",
+          "operation_id": "birth-test-operation",
+          "original_target_digest": "9999999999999999999999999999999999999999999999999999999999999999",
+          "original_terms_digest": "ccb2fecb563f3fa20713e6f52958b291d67e05a9b0c440ee585521676511466d",
+          "policy": {
+            "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "account_use_genesis": {
+              "identity": {
+                "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "derivation_domain": "dedicated-testnet-legacy-zip32-v1",
+                "full_viewing_key_digest": "6666666666666666666666666666666666666666666666666666666666666666",
+                "network_profile_id": "zcash-testnet-unqualified"
+              },
+              "native_birth_digest": "e37cdb5e40179aaa4bea26b5f8c644a91c9704d82f3d16a81562b406053d65a1",
+              "owner_certificate_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+              "version": 1,
+              "witness_id": "test-witness",
+              "witness_origin_digest": "2b562c6e02835126925572906e1388193740e87ecd6e918f5bf347aae431aaeb"
+            },
+            "aggregate_budget_zatoshis": 1000000000,
+            "agreement_ids": [
+              "agreement-example-01"
+            ],
+            "enrollment_refs": [
+              "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            ],
+            "initial_writer_certificate_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+            "initial_writer_epoch": 1,
+            "maximum_fee_share_zatoshis": 12000,
+            "maximum_permit_lifetime_ms": 120000,
+            "maximum_transaction_fee_zatoshis": 30000,
+            "network_profile_id": "zcash-testnet-unqualified",
+            "owner_certificate_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+            "per_operation_limit_zatoshis": 400012000,
+            "policy_expires_at_ms": 6000000,
+            "recipient_scope_digests": [
+              "dc01af22dfd22d6d6feea96773c0684202748952f4f04734ea463344c9d5cd46"
+            ],
+            "witness_id": "test-witness"
+          },
+          "version": 1
+        },
+        "request_digest": "e08a572abf57af27ed1e19dd4ad6c52ae3a5c6ceb6f5c2e29a1e8b2ef2cd6310",
+        "version": 1
+      },
+      "origins": [
+        {
+          "consumed": {
+            "construction_expires_at_ms": 252000,
+            "consumed_at_ms": 137000,
+            "request": {
+              "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "common_invocation_digest": "b666fb4f3e3bf9094e5b5646cff29010fa64e7731463ab0c19ffffa9a853cbbc",
+              "current_caller_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "expected_head": {
+                "digest": "639f9f0f6bfd453f64d6117eba214229a6ec578e66dbd32bfb2567205c234d65",
+                "sequence": 10
+              },
+              "network_profile_id": "zcash-testnet-unqualified",
+              "operation_id": "roster-construct-consume-v2-8dbd498728a008d9347a97881fb22d21883eccc12b0596ee14d85cf4c09f2556",
+              "reservation_digest": "8dbd498728a008d9347a97881fb22d21883eccc12b0596ee14d85cf4c09f2556",
+              "reservation_operation_id": "alice-reservation",
+              "session_id": "47c34a6f671a704f4837c1f220f23f627cba22c2774f39ff128c3819fa6ad2b0",
+              "version": 2,
+              "writer_epoch": 1
+            },
+            "snapshot": {
+              "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "account_use_checkpoint": {
+                "genesis_digest": "9c4821c2b58df8d5796361f98f4e23b05ea6ef455ec8df668e4f9dabe6a3c870",
+                "history_digest": "7e3647b6417f3099453be78c7cd383e806549071d95b01f16b7c7ee13fde9af3",
+                "permanent_exclusion_digest": null
+              },
+              "active_writer_session": {
+                "acquired_at_ms": 129000,
+                "acquired_head": {
+                  "digest": "a95315260da81a96ed09c81f8112ccd01ac170e42a07ad8f32d32167af527faa",
+                  "sequence": 6
+                },
+                "disclosure": {
+                  "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "endpoint": "127.0.0.1:1911",
+                  "network_profile_id": "zcash-testnet-unqualified",
+                  "pinned_server_certificate_digest": "5555555555555555555555555555555555555555555555555555555555555555",
+                  "policy_digest": "919c15be141adae2b23f21272c061da48b5f30eb5c8a52f97186cdb012e20db7",
+                  "server_name": "localhost",
+                  "witness_id": "test-witness"
+                },
+                "expires_at_ms": 429000,
+                "reconciled_head": {
+                  "digest": "33e74fdb91db9d3715d7363d907a6d096a0f00626f010818c461ed040e7c716e",
+                  "sequence": 5
+                },
+                "reconciled_history_digest": "98a0e5f0ffb9a77ee91dc63527a2c5ca45605feab6f90301cb4de40e10607da1",
+                "session_id": "47c34a6f671a704f4837c1f220f23f627cba22c2774f39ff128c3819fa6ad2b0",
+                "writer_certificate_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+                "writer_epoch": 1
+              },
+              "aggregate_budget_zatoshis": 1000000000,
+              "head": {
+                "digest": "ac1936be091856e299cd588a0a302692f11145821f011af4477b89445318fd47",
+                "sequence": 11
+              },
+              "last_witness_time_ms": 137000,
+              "network_profile_id": "zcash-testnet-unqualified",
+              "outstanding_debit_zatoshis": 400012000,
+              "outstanding_reservations": 1,
+              "pending_writer_session": null,
+              "policy_digest": "919c15be141adae2b23f21272c061da48b5f30eb5c8a52f97186cdb012e20db7",
+              "reserved_input_value_zatoshis": 500000000,
+              "settled_debit_zatoshis": 0,
+              "witness_id": "test-witness",
+              "writer_certificate_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+              "writer_epoch": 1,
+              "writer_status": "active"
+            }
+          },
+          "continuation": {
+            "continuation": {
+              "attempt_nonce": "8888888888888888888888888888888888888888888888888888888888888888",
+              "expected_previous_admission_digest": "60dc0da81e53e43e5425b1e0d16dfc83b5d622550449cdc11140aab98f2fddd8",
+              "expected_snapshot": {
+                "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "account_use_checkpoint": {
+                  "genesis_digest": "9c4821c2b58df8d5796361f98f4e23b05ea6ef455ec8df668e4f9dabe6a3c870",
+                  "history_digest": "7e3647b6417f3099453be78c7cd383e806549071d95b01f16b7c7ee13fde9af3",
+                  "permanent_exclusion_digest": null
+                },
+                "active_writer_session": {
+                  "acquired_at_ms": 5000,
+                  "acquired_head": {
+                    "digest": "5cc1232fae30deac076421dfb45f801de016bd4101ee204ca4bdb508cfb24933",
+                    "sequence": 2
+                  },
+                  "disclosure": {
+                    "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "endpoint": "127.0.0.1:1911",
+                    "network_profile_id": "zcash-testnet-unqualified",
+                    "pinned_server_certificate_digest": "5555555555555555555555555555555555555555555555555555555555555555",
+                    "policy_digest": "919c15be141adae2b23f21272c061da48b5f30eb5c8a52f97186cdb012e20db7",
+                    "server_name": "localhost",
+                    "witness_id": "test-witness"
+                  },
+                  "expires_at_ms": 305000,
+                  "reconciled_head": {
+                    "digest": "48b0e72341b98541915564f26a8cb4a7ca3288481812b4a0e3d4d7ccf348bb88",
+                    "sequence": 1
+                  },
+                  "reconciled_history_digest": "a1062c28db64cf91ad544b6af544a6770a509edf94fa6d9b0e80f9918061f7b3",
+                  "session_id": "311dbcca662dbb8f3bd4c568f040e5f18ec2098bdc6246eef39a9e207a5c9e9a",
+                  "writer_certificate_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+                  "writer_epoch": 1
+                },
+                "aggregate_budget_zatoshis": 1000000000,
+                "head": {
+                  "digest": "20501b7ad81caf25f9e1daf22ca3bf7d188c3a7cd9f48703d0d28baac264498e",
+                  "sequence": 4
+                },
+                "last_witness_time_ms": 7000,
+                "network_profile_id": "zcash-testnet-unqualified",
+                "outstanding_debit_zatoshis": 0,
+                "outstanding_reservations": 0,
+                "pending_writer_session": null,
+                "policy_digest": "919c15be141adae2b23f21272c061da48b5f30eb5c8a52f97186cdb012e20db7",
+                "reserved_input_value_zatoshis": 0,
+                "settled_debit_zatoshis": 0,
+                "witness_id": "test-witness",
+                "writer_certificate_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+                "writer_epoch": 1,
+                "writer_status": "active"
+              },
+              "extension_digest": "617cd5ac7bbb4a4f8d361cd584dd601d5536c59d05fdce3795c468981176a910",
+              "fresh_process_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "fresh_signer_review_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+              "initial_commit_deadline_ms": 158000,
+              "issued_at_ms": 128000,
+              "previous_attempt_digest": "2e463550be08092656121728ca6109d88bda17a6b64c80390ffd41137ca8f70b",
+              "sequence": 2,
+              "version": 1
+            },
+            "roster_extension_digest": "1bf7e883fbb56b3c56ed6a4ef751b7f96e542ac8b3a6567c2a70d649f4050747",
+            "version": 2
+          },
+          "extension": {
+            "account_extension": {
+              "enrollment_record_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "enrollment_ref": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "predecessor_digest": null,
+              "sequence": 1,
+              "terms": {
+                "account_use_genesis_digest": "9c4821c2b58df8d5796361f98f4e23b05ea6ef455ec8df668e4f9dabe6a3c870",
+                "birth_commit_digest": "4c2bb847acde3f331aedd3c35198b6d58d72e36ec69099d9d553daec2edd790d",
+                "birth_request_digest": "e08a572abf57af27ed1e19dd4ad6c52ae3a5c6ceb6f5c2e29a1e8b2ef2cd6310",
+                "host": {
+                  "canonical_root": "/synthetic/host",
+                  "destination_identity_digest": "6666666666666666666666666666666666666666666666666666666666666666",
+                  "financial_journal_origin_digest": "4444444444444444444444444444444444444444444444444444444444444444",
+                  "generation_id": "1111111111111111111111111111111111111111111111111111111111111111",
+                  "generation_plan_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+                  "inherited_identity_digest": "7777777777777777777777777777777777777777777777777777777777777777",
+                  "inventory_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+                  "profile_id": "synthetic-profile",
+                  "scope_predecessor_digest": null,
+                  "store_destination_identity": "5555555555555555555555555555555555555555555555555555555555555555"
+                },
+                "identity": {
+                  "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "derivation_domain": "dedicated-testnet-legacy-zip32-v1",
+                  "full_viewing_key_digest": "6666666666666666666666666666666666666666666666666666666666666666",
+                  "network_profile_id": "zcash-testnet-unqualified"
+                },
+                "issued_at_ms": 3000,
+                "native_birth_digest": "e37cdb5e40179aaa4bea26b5f8c644a91c9704d82f3d16a81562b406053d65a1",
+                "operation_id": "manual-enroll-fixture",
+                "original_policy_digest": "919c15be141adae2b23f21272c061da48b5f30eb5c8a52f97186cdb012e20db7",
+                "original_witness_origin_digest": "2b562c6e02835126925572906e1388193740e87ecd6e918f5bf347aae431aaeb",
+                "scope": {
+                  "aggregate_budget_zatoshis": 1000000000,
+                  "agreement_id": "agreement-example-01",
+                  "expires_at_ms": 5000000,
+                  "maximum_fee_share_zatoshis": 12000,
+                  "maximum_permit_lifetime_ms": 120000,
+                  "maximum_transaction_fee_zatoshis": 30000,
+                  "obligation_id": "obligation-example-01",
+                  "participant_id": "alice",
+                  "per_operation_limit_zatoshis": 400012000,
+                  "principal_id": "synthetic-principal",
+                  "privacy_domain": "synthetic-shared-domain",
+                  "recipient_scope_digests": [
+                    "dc01af22dfd22d6d6feea96773c0684202748952f4f04734ea463344c9d5cd46"
+                  ]
+                },
+                "signer": {
+                  "enrollment_generation_id": "8888888888888888888888888888888888888888888888888888888888888888",
+                  "native_signer_measurement": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                  "original_envelope_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "owner_certificate_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+                  "signer_target_digest": "9999999999999999999999999999999999999999999999999999999999999999",
+                  "writer_certificate_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+                  "writer_epoch": 1
+                },
+                "transport_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "version": 1
+              },
+              "version": 1
+            },
+            "roster": {
+              "generation_id": "1111111111111111111111111111111111111111111111111111111111111111",
+              "predecessor": {
+                "audit_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                "kind": "initial_publication_v2"
+              },
+              "roster_sequence": 2,
+              "store_destination_identity": "5555555555555555555555555555555555555555555555555555555555555555",
+              "version": 2
+            },
+            "signer_roster_record_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "version": 2
+          },
+          "reservation": {
+            "admitted_at_ms": 136000,
+            "construction_expires_at_ms": 252000,
+            "request": {
+              "attempt_digest": "e509b9c359ecfb290b050b7b49ffa87799f63129f40df22af3a7e255c24913e0",
+              "attempt_sequence": 2,
+              "construction": {
+                "admission_expires_at_ms": 165000,
+                "current_caller_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "operation_id": "alice-reservation",
+                "plan": {
+                  "participants": [
+                    {
+                      "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "full_viewing_key_digest": "6666666666666666666666666666666666666666666666666666666666666666",
+                      "participant_id": "alice",
+                      "retention_evidence_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+                      "retention_request_digest": "a123c25c8ca721e4c949206edcd820aeacc377b7cc75d8df9afd9c7eb53cc442"
+                    },
+                    {
+                      "account_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                      "full_viewing_key_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                      "participant_id": "bob",
+                      "retention_evidence_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+                      "retention_request_digest": "2222222222222222222222222222222222222222222222222222222222222222"
+                    }
+                  ],
+                  "proposal": {
+                    "artifact_digest": null,
+                    "created_at": "2026-10-13T14:00:00Z",
+                    "effects_commitment": null,
+                    "manifest": {
+                      "agreement": {
+                        "agreement_id": "agreement-example-01",
+                        "confirmation_policy": {
+                          "required_confirmations": 10
+                        },
+                        "coordination_deadline": null,
+                        "extensions": [],
+                        "fee_policy": {
+                          "kind": "pro_rata"
+                        },
+                        "funding_policy": {
+                          "kind": "exact",
+                          "target": "1000000000"
+                        },
+                        "network_profile_id": "zcash-testnet-unqualified",
+                        "obligation_id": "obligation-example-01",
+                        "organizer_identity": "organizer-example",
+                        "privacy_profile": {
+                          "dedicated_accounts_required": true,
+                          "mode": "local_only",
+                          "proving_operator": null
+                        },
+                        "purpose": "Synthetic cooperative procurement example. No real funds.",
+                        "recipients": [
+                          {
+                            "address": "uregtestsyntheticaddressnotforfunds",
+                            "amount": "1000000000",
+                            "instruction_provenance": "Synthetic fixture. Not address- or ownership-verified.",
+                            "memo": null,
+                            "recipient_id": "recipient-example"
+                          }
+                        ],
+                        "revision": 1,
+                        "schema_version": 1
+                      },
+                      "expiry_height": 3000000,
+                      "inputs": [
+                        {
+                          "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                          "amount": "500000000",
+                          "input_id": "input-alice",
+                          "ownership_evidence_ref": null,
+                          "participant_id": "alice"
+                        },
+                        {
+                          "account_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                          "amount": "700000000",
+                          "input_id": "input-bob",
+                          "ownership_evidence_ref": null,
+                          "participant_id": "bob"
+                        }
+                      ],
+                      "outputs": [
+                        {
+                          "address": "uregtestsyntheticaddressnotforfunds",
+                          "allocation": {
+                            "kind": "recipient",
+                            "recipient_id": "recipient-example"
+                          },
+                          "amount": "1000000000",
+                          "output_id": "recipient-output"
+                        },
+                        {
+                          "address": "usyntheticreturnalice",
+                          "allocation": {
+                            "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                            "kind": "return",
+                            "ownership_evidence_ref": null,
+                            "participant_id": "alice"
+                          },
+                          "amount": "99988000",
+                          "output_id": "alice-return"
+                        },
+                        {
+                          "address": "usyntheticreturnbob",
+                          "allocation": {
+                            "account_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                            "kind": "return",
+                            "ownership_evidence_ref": null,
+                            "participant_id": "bob"
+                          },
+                          "amount": "99982000",
+                          "output_id": "bob-return"
+                        }
+                      ],
+                      "participants": [
+                        {
+                          "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                          "charges": [],
+                          "contribution": "400000000",
+                          "fee_cap": "12000",
+                          "fee_share": "12000",
+                          "maximum_net_debit": "400012000",
+                          "participant_id": "alice"
+                        },
+                        {
+                          "account_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                          "charges": [],
+                          "contribution": "600000000",
+                          "fee_cap": "18000",
+                          "fee_share": "18000",
+                          "maximum_net_debit": "600018000",
+                          "participant_id": "bob"
+                        }
+                      ],
+                      "transaction_fee": "30000"
+                    },
+                    "previous_proposal_id": null,
+                    "proposal_id": "proposal-example-01"
+                  },
+                  "retained": {
+                    "admission_expires_at_ms": 160000,
+                    "change_address": "usyntheticreturnalice",
+                    "change_value_zatoshis": 99988000,
+                    "local_exclusion_digest": "8888888888888888888888888888888888888888888888888888888888888888",
+                    "operation_id": "alice-retention",
+                    "requested_at_ms": 133000,
+                    "selected_inputs": [
+                      {
+                        "input_id": "input-alice",
+                        "nullifier": "4444444444444444444444444444444444444444444444444444444444444444",
+                        "value_zatoshis": 500000000
+                      }
+                    ],
+                    "selection": {
+                      "current_caller_binding_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                      "disclosure_expires_at_ms": 160000,
+                      "operation_id": "alice-selection",
+                      "requested_at_ms": 132000,
+                      "scope": {
+                        "provenance": {
+                          "original_host_audit": {
+                            "audit_digest": "9999999999999999999999999999999999999999999999999999999999999999",
+                            "kind": "additional_publication_v3"
+                          },
+                          "roster": {
+                            "generation_id": "1111111111111111111111111111111111111111111111111111111111111111",
+                            "predecessor": {
+                              "audit_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                              "kind": "initial_publication_v2"
+                            },
+                            "roster_sequence": 2,
+                            "store_destination_identity": "5555555555555555555555555555555555555555555555555555555555555555",
+                            "version": 2
+                          },
+                          "signer_roster_record_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                          "version": 2,
+                          "witness_roster_extension_digest": "1bf7e883fbb56b3c56ed6a4ef751b7f96e542ac8b3a6567c2a70d649f4050747"
+                        },
+                        "selection": {
+                          "economic_intent": {
+                            "agreement": {
+                              "agreement_id": "agreement-example-01",
+                              "confirmation_policy": {
+                                "required_confirmations": 10
+                              },
+                              "coordination_deadline": null,
+                              "extensions": [],
+                              "fee_policy": {
+                                "kind": "pro_rata"
+                              },
+                              "funding_policy": {
+                                "kind": "exact",
+                                "target": "1000000000"
+                              },
+                              "network_profile_id": "zcash-testnet-unqualified",
+                              "obligation_id": "obligation-example-01",
+                              "organizer_identity": "organizer-example",
+                              "privacy_profile": {
+                                "dedicated_accounts_required": true,
+                                "mode": "local_only",
+                                "proving_operator": null
+                              },
+                              "purpose": "Synthetic cooperative procurement example. No real funds.",
+                              "recipients": [
+                                {
+                                  "address": "uregtestsyntheticaddressnotforfunds",
+                                  "amount": "1000000000",
+                                  "instruction_provenance": "Synthetic fixture. Not address- or ownership-verified.",
+                                  "memo": null,
+                                  "recipient_id": "recipient-example"
+                                }
+                              ],
+                              "revision": 1,
+                              "schema_version": 1
+                            },
+                            "candidate_id": "candidate",
+                            "candidate_revision": 1,
+                            "created_at": "2026-10-13T14:00:00Z",
+                            "expiry_height": 3000000,
+                            "own_return_rule": "authenticated_same_account",
+                            "participants": [
+                              {
+                                "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                                "charges": [],
+                                "contribution": "400000000",
+                                "fee_cap": "12000",
+                                "fee_share": "12000",
+                                "maximum_net_debit": "400012000",
+                                "participant_id": "alice"
+                              },
+                              {
+                                "account_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                                "charges": [],
+                                "contribution": "600000000",
+                                "fee_cap": "18000",
+                                "fee_share": "18000",
+                                "maximum_net_debit": "600018000",
+                                "participant_id": "bob"
+                              }
+                            ],
+                            "previous_proposal_id": null,
+                            "proposal_id": "proposal-example-01",
+                            "transaction_fee": "30000",
+                            "version": 1
+                          },
+                          "inventory": {
+                            "anchor_height": 200,
+                            "attachment": {
+                              "current_registry_digest": "5555555555555555555555555555555555555555555555555555555555555555",
+                              "latest_extension_digest": "6666666666666666666666666666666666666666666666666666666666666666",
+                              "original_primary_journal_origin_digest": "4444444444444444444444444444444444444444444444444444444444444444",
+                              "predecessor_registry_digest": "4444444444444444444444444444444444444444444444444444444444444444",
+                              "selected": {
+                                "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                                "canonical_directory": "/synthetic/wallet",
+                                "directory_identity_digest": "7777777777777777777777777777777777777777777777777777777777777777",
+                                "journal_origin_digest": "8888888888888888888888888888888888888888888888888888888888888888"
+                              },
+                              "version": 1
+                            },
+                            "attempt": {
+                              "attempt_sequence": 2,
+                              "continuation_digest": "e509b9c359ecfb290b050b7b49ffa87799f63129f40df22af3a7e255c24913e0",
+                              "version": 2
+                            },
+                            "birthday": {
+                              "ironwood_tree": "",
+                              "orchard_tree": "",
+                              "prior_block_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+                              "prior_height": 100,
+                              "sapling_tree": ""
+                            },
+                            "enrollment": {
+                              "account_use_genesis_digest": "9c4821c2b58df8d5796361f98f4e23b05ea6ef455ec8df668e4f9dabe6a3c870",
+                              "birth_commit_digest": "4c2bb847acde3f331aedd3c35198b6d58d72e36ec69099d9d553daec2edd790d",
+                              "birth_request_digest": "e08a572abf57af27ed1e19dd4ad6c52ae3a5c6ceb6f5c2e29a1e8b2ef2cd6310",
+                              "host": {
+                                "canonical_root": "/synthetic/host",
+                                "destination_identity_digest": "6666666666666666666666666666666666666666666666666666666666666666",
+                                "financial_journal_origin_digest": "4444444444444444444444444444444444444444444444444444444444444444",
+                                "generation_id": "1111111111111111111111111111111111111111111111111111111111111111",
+                                "generation_plan_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+                                "inherited_identity_digest": "7777777777777777777777777777777777777777777777777777777777777777",
+                                "inventory_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+                                "profile_id": "synthetic-profile",
+                                "scope_predecessor_digest": null,
+                                "store_destination_identity": "5555555555555555555555555555555555555555555555555555555555555555"
+                              },
+                              "identity": {
+                                "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                                "derivation_domain": "dedicated-testnet-legacy-zip32-v1",
+                                "full_viewing_key_digest": "6666666666666666666666666666666666666666666666666666666666666666",
+                                "network_profile_id": "zcash-testnet-unqualified"
+                              },
+                              "issued_at_ms": 3000,
+                              "native_birth_digest": "e37cdb5e40179aaa4bea26b5f8c644a91c9704d82f3d16a81562b406053d65a1",
+                              "operation_id": "manual-enroll-fixture",
+                              "original_policy_digest": "919c15be141adae2b23f21272c061da48b5f30eb5c8a52f97186cdb012e20db7",
+                              "original_witness_origin_digest": "2b562c6e02835126925572906e1388193740e87ecd6e918f5bf347aae431aaeb",
+                              "scope": {
+                                "aggregate_budget_zatoshis": 1000000000,
+                                "agreement_id": "agreement-example-01",
+                                "expires_at_ms": 5000000,
+                                "maximum_fee_share_zatoshis": 12000,
+                                "maximum_permit_lifetime_ms": 120000,
+                                "maximum_transaction_fee_zatoshis": 30000,
+                                "obligation_id": "obligation-example-01",
+                                "participant_id": "alice",
+                                "per_operation_limit_zatoshis": 400012000,
+                                "principal_id": "synthetic-principal",
+                                "privacy_domain": "synthetic-shared-domain",
+                                "recipient_scope_digests": [
+                                  "dc01af22dfd22d6d6feea96773c0684202748952f4f04734ea463344c9d5cd46"
+                                ]
+                              },
+                              "signer": {
+                                "enrollment_generation_id": "8888888888888888888888888888888888888888888888888888888888888888",
+                                "native_signer_measurement": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                                "original_envelope_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                                "owner_certificate_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+                                "signer_target_digest": "9999999999999999999999999999999999999999999999999999999999999999",
+                                "writer_certificate_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+                                "writer_epoch": 1
+                              },
+                              "transport_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                              "version": 1
+                            },
+                            "enrollment_ref": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                            "maximum_blocks": 100,
+                            "minimum_confirmations": 10,
+                            "operator_destination": "/synthetic/operator",
+                            "operator_name": "synthetic-operator",
+                            "original_recipient_policy": {
+                              "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                              "agreement_id": "agreement-example-01",
+                              "charges": [],
+                              "network_profile_id": "zcash-testnet-unqualified",
+                              "obligation_id": "obligation-example-01",
+                              "original_limits": {
+                                "aggregate_budget_zatoshis": 1000000000,
+                                "maximum_fee_share_zatoshis": 12000,
+                                "maximum_permit_lifetime_ms": 120000,
+                                "maximum_transaction_fee_zatoshis": 30000,
+                                "per_operation_limit_zatoshis": 400012000,
+                                "policy_expires_at_ms": 6000000
+                              },
+                              "own_return_rule": "authenticated_same_account",
+                              "participant_id": "alice",
+                              "recipients": [
+                                {
+                                  "address": "uregtestsyntheticaddressnotforfunds",
+                                  "instruction_provenance": "Synthetic fixture. Not address- or ownership-verified.",
+                                  "maximum_amount_zatoshis": 1000000000,
+                                  "memo": null,
+                                  "recipient_id": "recipient-example"
+                                }
+                              ],
+                              "version": 2
+                            },
+                            "provider": {
+                              "endpoint": "https://synthetic.invalid",
+                              "source_id": "synthetic-source",
+                              "trust_profile": "single_tls_provider_report_not_consensus"
+                            },
+                            "purpose": "preliminary_inventory_only",
+                            "retention_policy": "Private synthetic retention only",
+                            "version": 1,
+                            "wallet_destination": "/synthetic/wallet/wallet.sqlite",
+                            "witness_extension_digest": "617cd5ac7bbb4a4f8d361cd584dd601d5536c59d05fdce3795c468981176a910"
+                          },
+                          "invocation": {
+                            "checkpoint_destination": "/synthetic/operator",
+                            "construction_expires_at_ms": 252000,
+                            "economic_intent_digest": "c5e7408d724852a2036502b385fe04a094bd5f8872e173c307c965af291ef65b",
+                            "idempotency_key_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+                            "invocation_nonce": "2222222222222222222222222222222222222222222222222222222222222222",
+                            "operation_id": "common-construction",
+                            "requested_at_ms": 132000,
+                            "version": 1
+                          },
+                          "original_policy_origin": {
+                            "birth_digest": "e37cdb5e40179aaa4bea26b5f8c644a91c9704d82f3d16a81562b406053d65a1",
+                            "intent": {
+                              "generation_instance_id": "8888888888888888888888888888888888888888888888888888888888888888",
+                              "identity": {
+                                "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                                "derivation_domain": "dedicated-testnet-legacy-zip32-v1",
+                                "exact_derivation": "synthetic-derivation",
+                                "full_viewing_key_digest": "6666666666666666666666666666666666666666666666666666666666666666",
+                                "network_profile_id": "zcash-testnet-unqualified"
+                              },
+                              "native_measurement": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                              "native_principal_id": "synthetic-principal",
+                              "operation_id": "birth-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                              "original_policy_terms": {
+                                "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                                "aggregate_budget_zatoshis": 1000000000,
+                                "agreement_ids": [
+                                  "agreement-example-01"
+                                ],
+                                "enrollment_refs": [
+                                  "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                                ],
+                                "initial_writer_certificate_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+                                "initial_writer_epoch": 1,
+                                "maximum_fee_share_zatoshis": 12000,
+                                "maximum_permit_lifetime_ms": 120000,
+                                "maximum_transaction_fee_zatoshis": 30000,
+                                "network_profile_id": "zcash-testnet-unqualified",
+                                "owner_certificate_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+                                "per_operation_limit_zatoshis": 400012000,
+                                "policy_expires_at_ms": 6000000,
+                                "recipient_scope_digests": [
+                                  "dc01af22dfd22d6d6feea96773c0684202748952f4f04734ea463344c9d5cd46"
+                                ],
+                                "witness_id": "test-witness"
+                              },
+                              "original_policy_terms_digest": "ccb2fecb563f3fa20713e6f52958b291d67e05a9b0c440ee585521676511466d",
+                              "original_target": "/synthetic/vault",
+                              "version": 2,
+                              "witness_origin": {
+                                "endpoint": "127.0.0.1:1911",
+                                "pinned_server_certificate_digest": "5555555555555555555555555555555555555555555555555555555555555555",
+                                "server_name": "localhost",
+                                "witness_id": "test-witness"
+                              }
+                            },
+                            "recipient_policy": {
+                              "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                              "agreement_id": "agreement-example-01",
+                              "charges": [],
+                              "network_profile_id": "zcash-testnet-unqualified",
+                              "obligation_id": "obligation-example-01",
+                              "original_limits": {
+                                "aggregate_budget_zatoshis": 1000000000,
+                                "maximum_fee_share_zatoshis": 12000,
+                                "maximum_permit_lifetime_ms": 120000,
+                                "maximum_transaction_fee_zatoshis": 30000,
+                                "per_operation_limit_zatoshis": 400012000,
+                                "policy_expires_at_ms": 6000000
+                              },
+                              "own_return_rule": "authenticated_same_account",
+                              "participant_id": "alice",
+                              "recipients": [
+                                {
+                                  "address": "uregtestsyntheticaddressnotforfunds",
+                                  "instruction_provenance": "Synthetic fixture. Not address- or ownership-verified.",
+                                  "maximum_amount_zatoshis": 1000000000,
+                                  "memo": null,
+                                  "recipient_id": "recipient-example"
+                                }
+                              ],
+                              "version": 2
+                            },
+                            "version": 2
+                          },
+                          "purpose": "prepare_one_private_contribution",
+                          "version": 1
+                        },
+                        "version": 2
+                      },
+                      "version": 2
+                    },
+                    "selection_context": {
+                      "anchor_hash_protocol": "6666666666666666666666666666666666666666666666666666666666666666",
+                      "anchor_height": 200,
+                      "anchor_root": "7777777777777777777777777777777777777777777777777777777777777777",
+                      "tip_hash_protocol": "5555555555555555555555555555555555555555555555555555555555555555",
+                      "tip_height": 201
+                    },
+                    "selection_evidence_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "version": 2
+                  },
+                  "retained_evidence_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+                  "version": 2
+                },
+                "requested_at_ms": 135000,
+                "version": 2
+              },
+              "expected_head": {
+                "digest": "0cfbf4025e6dfcc899fd3ce368883dee23c9d6a5f5bdd9a3c4472d7916cd3151",
+                "sequence": 9
+              },
+              "native_review_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "reviewed_at_ms": 136000,
+              "session_id": "47c34a6f671a704f4837c1f220f23f627cba22c2774f39ff128c3819fa6ad2b0",
+              "signer_intent_digest": "9999999999999999999999999999999999999999999999999999999999999999",
+              "version": 2,
+              "writer_epoch": 1
+            },
+            "reserved_debit_zatoshis": 400012000,
+            "reserved_input_value_zatoshis": 500000000,
+            "session": {
+              "acquired_at_ms": 129000,
+              "acquired_head": {
+                "digest": "a95315260da81a96ed09c81f8112ccd01ac170e42a07ad8f32d32167af527faa",
+                "sequence": 6
+              },
+              "disclosure": {
+                "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "endpoint": "127.0.0.1:1911",
+                "network_profile_id": "zcash-testnet-unqualified",
+                "pinned_server_certificate_digest": "5555555555555555555555555555555555555555555555555555555555555555",
+                "policy_digest": "919c15be141adae2b23f21272c061da48b5f30eb5c8a52f97186cdb012e20db7",
+                "server_name": "localhost",
+                "witness_id": "test-witness"
+              },
+              "expires_at_ms": 429000,
+              "reconciled_head": {
+                "digest": "33e74fdb91db9d3715d7363d907a6d096a0f00626f010818c461ed040e7c716e",
+                "sequence": 5
+              },
+              "reconciled_history_digest": "98a0e5f0ffb9a77ee91dc63527a2c5ca45605feab6f90301cb4de40e10607da1",
+              "session_id": "47c34a6f671a704f4837c1f220f23f627cba22c2774f39ff128c3819fa6ad2b0",
+              "writer_certificate_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+              "writer_epoch": 1
+            },
+            "snapshot": {
+              "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "account_use_checkpoint": {
+                "genesis_digest": "9c4821c2b58df8d5796361f98f4e23b05ea6ef455ec8df668e4f9dabe6a3c870",
+                "history_digest": "7e3647b6417f3099453be78c7cd383e806549071d95b01f16b7c7ee13fde9af3",
+                "permanent_exclusion_digest": null
+              },
+              "active_writer_session": {
+                "acquired_at_ms": 129000,
+                "acquired_head": {
+                  "digest": "a95315260da81a96ed09c81f8112ccd01ac170e42a07ad8f32d32167af527faa",
+                  "sequence": 6
+                },
+                "disclosure": {
+                  "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "endpoint": "127.0.0.1:1911",
+                  "network_profile_id": "zcash-testnet-unqualified",
+                  "pinned_server_certificate_digest": "5555555555555555555555555555555555555555555555555555555555555555",
+                  "policy_digest": "919c15be141adae2b23f21272c061da48b5f30eb5c8a52f97186cdb012e20db7",
+                  "server_name": "localhost",
+                  "witness_id": "test-witness"
+                },
+                "expires_at_ms": 429000,
+                "reconciled_head": {
+                  "digest": "33e74fdb91db9d3715d7363d907a6d096a0f00626f010818c461ed040e7c716e",
+                  "sequence": 5
+                },
+                "reconciled_history_digest": "98a0e5f0ffb9a77ee91dc63527a2c5ca45605feab6f90301cb4de40e10607da1",
+                "session_id": "47c34a6f671a704f4837c1f220f23f627cba22c2774f39ff128c3819fa6ad2b0",
+                "writer_certificate_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+                "writer_epoch": 1
+              },
+              "aggregate_budget_zatoshis": 1000000000,
+              "head": {
+                "digest": "639f9f0f6bfd453f64d6117eba214229a6ec578e66dbd32bfb2567205c234d65",
+                "sequence": 10
+              },
+              "last_witness_time_ms": 136000,
+              "network_profile_id": "zcash-testnet-unqualified",
+              "outstanding_debit_zatoshis": 400012000,
+              "outstanding_reservations": 1,
+              "pending_writer_session": null,
+              "policy_digest": "919c15be141adae2b23f21272c061da48b5f30eb5c8a52f97186cdb012e20db7",
+              "reserved_input_value_zatoshis": 500000000,
+              "settled_debit_zatoshis": 0,
+              "witness_id": "test-witness",
+              "writer_certificate_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+              "writer_epoch": 1,
+              "writer_status": "active"
+            }
+          }
+        }
+      ],
+      "version": 1,
+      "witness": {
+        "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "endpoint": "127.0.0.1:1911",
+        "network_profile_id": "zcash-testnet-unqualified",
+        "pinned_server_certificate_digest": "5555555555555555555555555555555555555555555555555555555555555555",
+        "policy_digest": "919c15be141adae2b23f21272c061da48b5f30eb5c8a52f97186cdb012e20db7",
+        "server_name": "localhost",
+        "witness_id": "test-witness"
+      }
+    }
+  }
+}

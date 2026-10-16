@@ -1,0 +1,1247 @@
+{
+  "version": 3,
+  "retained": {
+    "version": 2,
+    "operation_id": "synthetic-retain-alice",
+    "selection": {
+      "version": 2,
+      "operation_id": "synthetic-select-alice",
+      "scope": {
+        "version": 2,
+        "selection": {
+          "version": 1,
+          "inventory": {
+            "version": 1,
+            "enrollment": {
+              "version": 1,
+              "operation_id": "synthetic-enrollment",
+              "identity": {
+                "account_id": "1111111111111111111111111111111111111111111111111111111111111111",
+                "full_viewing_key_digest": "1414141414141414141414141414141414141414141414141414141414141414",
+                "network_profile_id": "ironwood-testnet-nu7-candidate",
+                "derivation_domain": "dedicated-synthetic"
+              },
+              "birth_request_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "birth_commit_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+              "native_birth_digest": "2999363f9f462dbd5ea6fa8b2e5642f782b6eb62752b4cdf1375187212dddfcd",
+              "original_policy_digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+              "account_use_genesis_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+              "original_witness_origin_digest": "9d8bea0a879d28e7e374204a6be7673f4159c45875a68a942d1ba89abb9c61fe",
+              "host": {
+                "generation_id": "3333333333333333333333333333333333333333333333333333333333333333",
+                "inventory_digest": "4444444444444444444444444444444444444444444444444444444444444444",
+                "generation_plan_digest": "5555555555555555555555555555555555555555555555555555555555555555",
+                "financial_journal_origin_digest": "6666666666666666666666666666666666666666666666666666666666666666",
+                "store_destination_identity": "/synthetic/host/coordination.sqlite",
+                "profile_id": "synthetic-profile",
+                "canonical_root": "/synthetic/host",
+                "destination_identity_digest": "7777777777777777777777777777777777777777777777777777777777777777",
+                "inherited_identity_digest": "8888888888888888888888888888888888888888888888888888888888888888",
+                "scope_predecessor_digest": null
+              },
+              "signer": {
+                "enrollment_generation_id": "9999999999999999999999999999999999999999999999999999999999999999",
+                "signer_target_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "original_envelope_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "owner_certificate_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "writer_certificate_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                "writer_epoch": 1,
+                "native_signer_measurement": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+              },
+              "scope": {
+                "agreement_id": "agreement-example-01",
+                "obligation_id": "obligation-example-01",
+                "participant_id": "alice",
+                "principal_id": "synthetic-principal",
+                "privacy_domain": "synthetic-domain",
+                "recipient_scope_digests": [
+                  "b6f84a2ffc5699adc591edac15d919fc9dd364384f3f31f09db71ff83c9c83ae"
+                ],
+                "aggregate_budget_zatoshis": 1000000000,
+                "per_operation_limit_zatoshis": 1000000000,
+                "maximum_fee_share_zatoshis": 30000,
+                "maximum_transaction_fee_zatoshis": 30000,
+                "maximum_permit_lifetime_ms": 120000,
+                "expires_at_ms": 200000
+              },
+              "transport_binding_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+              "issued_at_ms": 1000
+            },
+            "enrollment_ref": "4444444444444444444444444444444444444444444444444444444444444444",
+            "witness_extension_digest": "5555555555555555555555555555555555555555555555555555555555555555",
+            "attempt": {
+              "version": 2,
+              "continuation_digest": "6666666666666666666666666666666666666666666666666666666666666666",
+              "attempt_sequence": 2
+            },
+            "original_recipient_policy": {
+              "version": 2,
+              "account_id": "1111111111111111111111111111111111111111111111111111111111111111",
+              "network_profile_id": "ironwood-testnet-nu7-candidate",
+              "agreement_id": "agreement-example-01",
+              "obligation_id": "obligation-example-01",
+              "participant_id": "alice",
+              "recipients": [
+                {
+                  "recipient_id": "recipient-example",
+                  "address": "uregtestsyntheticaddressnotforfunds",
+                  "memo": null,
+                  "instruction_provenance": "Synthetic fixture. Not address- or ownership-verified.",
+                  "maximum_amount_zatoshis": 1000000000
+                }
+              ],
+              "charges": [],
+              "original_limits": {
+                "aggregate_budget_zatoshis": 2000000000,
+                "per_operation_limit_zatoshis": 1000000000,
+                "maximum_fee_share_zatoshis": 30000,
+                "maximum_transaction_fee_zatoshis": 30000,
+                "maximum_permit_lifetime_ms": 120000,
+                "policy_expires_at_ms": 500000
+              },
+              "own_return_rule": "authenticated_same_account"
+            },
+            "attachment": {
+              "version": 1,
+              "original_primary_journal_origin_digest": "6666666666666666666666666666666666666666666666666666666666666666",
+              "predecessor_registry_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "current_registry_digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+              "latest_extension_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+              "selected": {
+                "account_id": "1111111111111111111111111111111111111111111111111111111111111111",
+                "canonical_directory": "/synthetic/alice",
+                "directory_identity_digest": "1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e",
+                "journal_origin_digest": "3333333333333333333333333333333333333333333333333333333333333333"
+              }
+            },
+            "operator_name": "synthetic-local-host",
+            "operator_destination": "/synthetic/checkpoint",
+            "wallet_destination": "/synthetic/alice/wallet.sqlite",
+            "purpose": "preliminary_inventory_only",
+            "retention_policy": "Keep only at exact local destination until explicit deletion",
+            "provider": {
+              "source_id": "synthetic-provider",
+              "endpoint": "https://synthetic.invalid",
+              "trust_profile": "single_tls_provider_report_not_consensus"
+            },
+            "birthday": {
+              "prior_height": 4465026,
+              "prior_block_hash": "7777777777777777777777777777777777777777777777777777777777777777",
+              "sapling_tree": "",
+              "orchard_tree": "",
+              "ironwood_tree": ""
+            },
+            "minimum_confirmations": 1,
+            "maximum_blocks": 10,
+            "anchor_height": 4465036
+          },
+          "original_policy_origin": {
+            "version": 2,
+            "intent": {
+              "version": 2,
+              "operation_id": "birth-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "generation_instance_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "identity": {
+                "account_id": "1111111111111111111111111111111111111111111111111111111111111111",
+                "full_viewing_key_digest": "1414141414141414141414141414141414141414141414141414141414141414",
+                "network_profile_id": "ironwood-testnet-nu7-candidate",
+                "derivation_domain": "dedicated-synthetic",
+                "exact_derivation": "synthetic-derivation"
+              },
+              "witness_origin": {
+                "endpoint": "https://synthetic.invalid",
+                "server_name": "synthetic.invalid",
+                "witness_id": "synthetic-witness",
+                "pinned_server_certificate_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+              },
+              "original_policy_terms": {
+                "witness_id": "synthetic-witness",
+                "account_id": "1111111111111111111111111111111111111111111111111111111111111111",
+                "network_profile_id": "ironwood-testnet-nu7-candidate",
+                "owner_certificate_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "initial_writer_certificate_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                "initial_writer_epoch": 1,
+                "enrollment_refs": [
+                  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                ],
+                "agreement_ids": [
+                  "agreement-example-01"
+                ],
+                "recipient_scope_digests": [
+                  "b6f84a2ffc5699adc591edac15d919fc9dd364384f3f31f09db71ff83c9c83ae"
+                ],
+                "aggregate_budget_zatoshis": 2000000000,
+                "per_operation_limit_zatoshis": 1000000000,
+                "maximum_fee_share_zatoshis": 30000,
+                "maximum_transaction_fee_zatoshis": 30000,
+                "maximum_permit_lifetime_ms": 120000,
+                "policy_expires_at_ms": 500000
+              },
+              "original_policy_terms_digest": "0934a9a4fc3dfb68515a39aaeaacbb56b457b921a85bbf2362a2579928ebf27f",
+              "native_principal_id": "synthetic-principal",
+              "native_measurement": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+              "original_target": "/synthetic/vault"
+            },
+            "recipient_policy": {
+              "version": 2,
+              "account_id": "1111111111111111111111111111111111111111111111111111111111111111",
+              "network_profile_id": "ironwood-testnet-nu7-candidate",
+              "agreement_id": "agreement-example-01",
+              "obligation_id": "obligation-example-01",
+              "participant_id": "alice",
+              "recipients": [
+                {
+                  "recipient_id": "recipient-example",
+                  "address": "uregtestsyntheticaddressnotforfunds",
+                  "memo": null,
+                  "instruction_provenance": "Synthetic fixture. Not address- or ownership-verified.",
+                  "maximum_amount_zatoshis": 1000000000
+                }
+              ],
+              "charges": [],
+              "original_limits": {
+                "aggregate_budget_zatoshis": 2000000000,
+                "per_operation_limit_zatoshis": 1000000000,
+                "maximum_fee_share_zatoshis": 30000,
+                "maximum_transaction_fee_zatoshis": 30000,
+                "maximum_permit_lifetime_ms": 120000,
+                "policy_expires_at_ms": 500000
+              },
+              "own_return_rule": "authenticated_same_account"
+            },
+            "birth_digest": "2999363f9f462dbd5ea6fa8b2e5642f782b6eb62752b4cdf1375187212dddfcd"
+          },
+          "economic_intent": {
+            "version": 1,
+            "candidate_id": "synthetic-candidate",
+            "candidate_revision": 1,
+            "proposal_id": "synthetic-proposal",
+            "previous_proposal_id": null,
+            "created_at": "2026-10-13T14:00:00Z",
+            "agreement": {
+              "schema_version": 1,
+              "agreement_id": "agreement-example-01",
+              "obligation_id": "obligation-example-01",
+              "revision": 1,
+              "purpose": "Synthetic cooperative procurement example. No real funds.",
+              "organizer_identity": "organizer-example",
+              "network_profile_id": "ironwood-testnet-nu7-candidate",
+              "recipients": [
+                {
+                  "recipient_id": "recipient-example",
+                  "address": "uregtestsyntheticaddressnotforfunds",
+                  "amount": "1000000000",
+                  "memo": null,
+                  "instruction_provenance": "Synthetic fixture. Not address- or ownership-verified."
+                }
+              ],
+              "funding_policy": {
+                "kind": "exact",
+                "target": "1000000000"
+              },
+              "fee_policy": {
+                "kind": "pro_rata"
+              },
+              "privacy_profile": {
+                "mode": "declared_operator",
+                "proving_operator": "synthetic-local-host",
+                "dedicated_accounts_required": true
+              },
+              "coordination_deadline": null,
+              "confirmation_policy": {
+                "required_confirmations": 10
+              },
+              "extensions": []
+            },
+            "participants": [
+              {
+                "participant_id": "alice",
+                "account_id": "1111111111111111111111111111111111111111111111111111111111111111",
+                "contribution": "400000000",
+                "fee_share": "12000",
+                "fee_cap": "12000",
+                "maximum_net_debit": "400012000",
+                "charges": []
+              },
+              {
+                "participant_id": "bob",
+                "account_id": "2222222222222222222222222222222222222222222222222222222222222222",
+                "contribution": "600000000",
+                "fee_share": "18000",
+                "fee_cap": "18000",
+                "maximum_net_debit": "600018000",
+                "charges": []
+              }
+            ],
+            "transaction_fee": "30000",
+            "expiry_height": 4465126,
+            "own_return_rule": "authenticated_same_account"
+          },
+          "invocation": {
+            "version": 1,
+            "operation_id": "synthetic-invocation",
+            "idempotency_key_digest": "8888888888888888888888888888888888888888888888888888888888888888",
+            "invocation_nonce": "9999999999999999999999999999999999999999999999999999999999999999",
+            "economic_intent_digest": "4001dbbaafccbce0da47389502eff2141bdbdd7cc8eaecec2bf272fd63a26614",
+            "checkpoint_destination": "/synthetic/checkpoint",
+            "requested_at_ms": 2000,
+            "construction_expires_at_ms": 100000
+          },
+          "purpose": "prepare_one_private_contribution"
+        },
+        "provenance": {
+          "version": 2,
+          "original_host_audit": {
+            "kind": "additional_publication_v3",
+            "audit_digest": "6464646464646464646464646464646464646464646464646464646464646464"
+          },
+          "roster": {
+            "version": 2,
+            "generation_id": "3333333333333333333333333333333333333333333333333333333333333333",
+            "store_destination_identity": "/synthetic/host/coordination.sqlite",
+            "roster_sequence": 2,
+            "predecessor": {
+              "kind": "initial_publication_v2",
+              "audit_digest": "9292929292929292929292929292929292929292929292929292929292929292"
+            }
+          },
+          "signer_roster_record_digest": "9393939393939393939393939393939393939393939393939393939393939393",
+          "witness_roster_extension_digest": "9494949494949494949494949494949494949494949494949494949494949494"
+        }
+      },
+      "current_caller_binding_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "requested_at_ms": 2000,
+      "disclosure_expires_at_ms": 32000
+    },
+    "selection_evidence_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "selected_inputs": [
+      {
+        "input_id": "synthetic-alice-input",
+        "nullifier": "3232323232323232323232323232323232323232323232323232323232323232",
+        "value_zatoshis": 400112000
+      }
+    ],
+    "selection_context": {
+      "tip_height": 4465037,
+      "tip_hash_protocol": "2828282828282828282828282828282828282828282828282828282828282828",
+      "anchor_height": 4465036,
+      "anchor_hash_protocol": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "anchor_root": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    "local_exclusion_digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "change_address": "uregtestsyntheticaddressnotforfunds",
+    "change_value_zatoshis": 100000,
+    "requested_at_ms": 2001,
+    "admission_expires_at_ms": 32000
+  },
+  "retained_evidence_digest": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+  "proposal": {
+    "proposal_id": "synthetic-proposal",
+    "previous_proposal_id": null,
+    "manifest": {
+      "agreement": {
+        "schema_version": 1,
+        "agreement_id": "agreement-example-01",
+        "obligation_id": "obligation-example-01",
+        "revision": 1,
+        "purpose": "Synthetic cooperative procurement example. No real funds.",
+        "organizer_identity": "organizer-example",
+        "network_profile_id": "ironwood-testnet-nu7-candidate",
+        "recipients": [
+          {
+            "recipient_id": "recipient-example",
+            "address": "uregtestsyntheticaddressnotforfunds",
+            "amount": "1000000000",
+            "memo": null,
+            "instruction_provenance": "Synthetic fixture. Not address- or ownership-verified."
+          }
+        ],
+        "funding_policy": {
+          "kind": "exact",
+          "target": "1000000000"
+        },
+        "fee_policy": {
+          "kind": "pro_rata"
+        },
+        "privacy_profile": {
+          "mode": "declared_operator",
+          "proving_operator": "synthetic-local-host",
+          "dedicated_accounts_required": true
+        },
+        "coordination_deadline": null,
+        "confirmation_policy": {
+          "required_confirmations": 10
+        },
+        "extensions": []
+      },
+      "participants": [
+        {
+          "participant_id": "alice",
+          "account_id": "1111111111111111111111111111111111111111111111111111111111111111",
+          "contribution": "400000000",
+          "fee_share": "12000",
+          "fee_cap": "12000",
+          "maximum_net_debit": "400012000",
+          "charges": []
+        },
+        {
+          "participant_id": "bob",
+          "account_id": "2222222222222222222222222222222222222222222222222222222222222222",
+          "contribution": "600000000",
+          "fee_share": "18000",
+          "fee_cap": "18000",
+          "maximum_net_debit": "600018000",
+          "charges": []
+        }
+      ],
+      "inputs": [
+        {
+          "input_id": "synthetic-alice-input",
+          "participant_id": "alice",
+          "account_id": "1111111111111111111111111111111111111111111111111111111111111111",
+          "amount": "400112000",
+          "ownership_evidence_ref": null
+        },
+        {
+          "input_id": "synthetic-bob-input",
+          "participant_id": "bob",
+          "account_id": "2222222222222222222222222222222222222222222222222222222222222222",
+          "amount": "600018000",
+          "ownership_evidence_ref": null
+        }
+      ],
+      "outputs": [
+        {
+          "output_id": "recipient-0",
+          "address": "uregtestsyntheticaddressnotforfunds",
+          "amount": "1000000000",
+          "allocation": {
+            "kind": "recipient",
+            "recipient_id": "recipient-example"
+          }
+        },
+        {
+          "output_id": "return-alice",
+          "address": "uregtestsyntheticaddressnotforfunds",
+          "amount": "100000",
+          "allocation": {
+            "kind": "return",
+            "participant_id": "alice",
+            "account_id": "1111111111111111111111111111111111111111111111111111111111111111",
+            "ownership_evidence_ref": null
+          }
+        }
+      ],
+      "transaction_fee": "30000",
+      "expiry_height": 4465126
+    },
+    "artifact_digest": null,
+    "effects_commitment": null,
+    "created_at": "2026-10-13T14:00:00Z"
+  },
+  "participants": [
+    {
+      "participant_id": "alice",
+      "account_id": "1111111111111111111111111111111111111111111111111111111111111111",
+      "full_viewing_key_digest": "1414141414141414141414141414141414141414141414141414141414141414",
+      "retention_request_digest": "7acb2e58295512af4106d673d859ced54dcd494953dac7d08a823885fb6cb211",
+      "retention_evidence_digest": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c"
+    },
+    {
+      "participant_id": "bob",
+      "account_id": "2222222222222222222222222222222222222222222222222222222222222222",
+      "full_viewing_key_digest": "1515151515151515151515151515151515151515151515151515151515151515",
+      "retention_request_digest": "2010fe26407f991815ebca8cda425d9efa492dd29df742d90bff064f0ddb1ac4",
+      "retention_evidence_digest": "3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d"
+    }
+  ],
+  "originals": [
+    {
+      "request": {
+        "version": 2,
+        "operation_id": "synthetic-retain-alice",
+        "selection": {
+          "version": 2,
+          "operation_id": "synthetic-select-alice",
+          "scope": {
+            "version": 2,
+            "selection": {
+              "version": 1,
+              "inventory": {
+                "version": 1,
+                "enrollment": {
+                  "version": 1,
+                  "operation_id": "synthetic-enrollment",
+                  "identity": {
+                    "account_id": "1111111111111111111111111111111111111111111111111111111111111111",
+                    "full_viewing_key_digest": "1414141414141414141414141414141414141414141414141414141414141414",
+                    "network_profile_id": "ironwood-testnet-nu7-candidate",
+                    "derivation_domain": "dedicated-synthetic"
+                  },
+                  "birth_request_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                  "birth_commit_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                  "native_birth_digest": "2999363f9f462dbd5ea6fa8b2e5642f782b6eb62752b4cdf1375187212dddfcd",
+                  "original_policy_digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                  "account_use_genesis_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+                  "original_witness_origin_digest": "9d8bea0a879d28e7e374204a6be7673f4159c45875a68a942d1ba89abb9c61fe",
+                  "host": {
+                    "generation_id": "3333333333333333333333333333333333333333333333333333333333333333",
+                    "inventory_digest": "4444444444444444444444444444444444444444444444444444444444444444",
+                    "generation_plan_digest": "5555555555555555555555555555555555555555555555555555555555555555",
+                    "financial_journal_origin_digest": "6666666666666666666666666666666666666666666666666666666666666666",
+                    "store_destination_identity": "/synthetic/host/coordination.sqlite",
+                    "profile_id": "synthetic-profile",
+                    "canonical_root": "/synthetic/host",
+                    "destination_identity_digest": "7777777777777777777777777777777777777777777777777777777777777777",
+                    "inherited_identity_digest": "8888888888888888888888888888888888888888888888888888888888888888",
+                    "scope_predecessor_digest": null
+                  },
+                  "signer": {
+                    "enrollment_generation_id": "9999999999999999999999999999999999999999999999999999999999999999",
+                    "signer_target_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "original_envelope_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "owner_certificate_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "writer_certificate_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                    "writer_epoch": 1,
+                    "native_signer_measurement": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+                  },
+                  "scope": {
+                    "agreement_id": "agreement-example-01",
+                    "obligation_id": "obligation-example-01",
+                    "participant_id": "alice",
+                    "principal_id": "synthetic-principal",
+                    "privacy_domain": "synthetic-domain",
+                    "recipient_scope_digests": [
+                      "b6f84a2ffc5699adc591edac15d919fc9dd364384f3f31f09db71ff83c9c83ae"
+                    ],
+                    "aggregate_budget_zatoshis": 1000000000,
+                    "per_operation_limit_zatoshis": 1000000000,
+                    "maximum_fee_share_zatoshis": 30000,
+                    "maximum_transaction_fee_zatoshis": 30000,
+                    "maximum_permit_lifetime_ms": 120000,
+                    "expires_at_ms": 200000
+                  },
+                  "transport_binding_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+                  "issued_at_ms": 1000
+                },
+                "enrollment_ref": "4444444444444444444444444444444444444444444444444444444444444444",
+                "witness_extension_digest": "5555555555555555555555555555555555555555555555555555555555555555",
+                "attempt": {
+                  "version": 2,
+                  "continuation_digest": "6666666666666666666666666666666666666666666666666666666666666666",
+                  "attempt_sequence": 2
+                },
+                "original_recipient_policy": {
+                  "version": 2,
+                  "account_id": "1111111111111111111111111111111111111111111111111111111111111111",
+                  "network_profile_id": "ironwood-testnet-nu7-candidate",
+                  "agreement_id": "agreement-example-01",
+                  "obligation_id": "obligation-example-01",
+                  "participant_id": "alice",
+                  "recipients": [
+                    {
+                      "recipient_id": "recipient-example",
+                      "address": "uregtestsyntheticaddressnotforfunds",
+                      "memo": null,
+                      "instruction_provenance": "Synthetic fixture. Not address- or ownership-verified.",
+                      "maximum_amount_zatoshis": 1000000000
+                    }
+                  ],
+                  "charges": [],
+                  "original_limits": {
+                    "aggregate_budget_zatoshis": 2000000000,
+                    "per_operation_limit_zatoshis": 1000000000,
+                    "maximum_fee_share_zatoshis": 30000,
+                    "maximum_transaction_fee_zatoshis": 30000,
+                    "maximum_permit_lifetime_ms": 120000,
+                    "policy_expires_at_ms": 500000
+                  },
+                  "own_return_rule": "authenticated_same_account"
+                },
+                "attachment": {
+                  "version": 1,
+                  "original_primary_journal_origin_digest": "6666666666666666666666666666666666666666666666666666666666666666",
+                  "predecessor_registry_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                  "current_registry_digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                  "latest_extension_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+                  "selected": {
+                    "account_id": "1111111111111111111111111111111111111111111111111111111111111111",
+                    "canonical_directory": "/synthetic/alice",
+                    "directory_identity_digest": "1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e",
+                    "journal_origin_digest": "3333333333333333333333333333333333333333333333333333333333333333"
+                  }
+                },
+                "operator_name": "synthetic-local-host",
+                "operator_destination": "/synthetic/checkpoint",
+                "wallet_destination": "/synthetic/alice/wallet.sqlite",
+                "purpose": "preliminary_inventory_only",
+                "retention_policy": "Keep only at exact local destination until explicit deletion",
+                "provider": {
+                  "source_id": "synthetic-provider",
+                  "endpoint": "https://synthetic.invalid",
+                  "trust_profile": "single_tls_provider_report_not_consensus"
+                },
+                "birthday": {
+                  "prior_height": 4465026,
+                  "prior_block_hash": "7777777777777777777777777777777777777777777777777777777777777777",
+                  "sapling_tree": "",
+                  "orchard_tree": "",
+                  "ironwood_tree": ""
+                },
+                "minimum_confirmations": 1,
+                "maximum_blocks": 10,
+                "anchor_height": 4465036
+              },
+              "original_policy_origin": {
+                "version": 2,
+                "intent": {
+                  "version": 2,
+                  "operation_id": "birth-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "generation_instance_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                  "identity": {
+                    "account_id": "1111111111111111111111111111111111111111111111111111111111111111",
+                    "full_viewing_key_digest": "1414141414141414141414141414141414141414141414141414141414141414",
+                    "network_profile_id": "ironwood-testnet-nu7-candidate",
+                    "derivation_domain": "dedicated-synthetic",
+                    "exact_derivation": "synthetic-derivation"
+                  },
+                  "witness_origin": {
+                    "endpoint": "https://synthetic.invalid",
+                    "server_name": "synthetic.invalid",
+                    "witness_id": "synthetic-witness",
+                    "pinned_server_certificate_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                  },
+                  "original_policy_terms": {
+                    "witness_id": "synthetic-witness",
+                    "account_id": "1111111111111111111111111111111111111111111111111111111111111111",
+                    "network_profile_id": "ironwood-testnet-nu7-candidate",
+                    "owner_certificate_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "initial_writer_certificate_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                    "initial_writer_epoch": 1,
+                    "enrollment_refs": [
+                      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    ],
+                    "agreement_ids": [
+                      "agreement-example-01"
+                    ],
+                    "recipient_scope_digests": [
+                      "b6f84a2ffc5699adc591edac15d919fc9dd364384f3f31f09db71ff83c9c83ae"
+                    ],
+                    "aggregate_budget_zatoshis": 2000000000,
+                    "per_operation_limit_zatoshis": 1000000000,
+                    "maximum_fee_share_zatoshis": 30000,
+                    "maximum_transaction_fee_zatoshis": 30000,
+                    "maximum_permit_lifetime_ms": 120000,
+                    "policy_expires_at_ms": 500000
+                  },
+                  "original_policy_terms_digest": "0934a9a4fc3dfb68515a39aaeaacbb56b457b921a85bbf2362a2579928ebf27f",
+                  "native_principal_id": "synthetic-principal",
+                  "native_measurement": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                  "original_target": "/synthetic/vault"
+                },
+                "recipient_policy": {
+                  "version": 2,
+                  "account_id": "1111111111111111111111111111111111111111111111111111111111111111",
+                  "network_profile_id": "ironwood-testnet-nu7-candidate",
+                  "agreement_id": "agreement-example-01",
+                  "obligation_id": "obligation-example-01",
+                  "participant_id": "alice",
+                  "recipients": [
+                    {
+                      "recipient_id": "recipient-example",
+                      "address": "uregtestsyntheticaddressnotforfunds",
+                      "memo": null,
+                      "instruction_provenance": "Synthetic fixture. Not address- or ownership-verified.",
+                      "maximum_amount_zatoshis": 1000000000
+                    }
+                  ],
+                  "charges": [],
+                  "original_limits": {
+                    "aggregate_budget_zatoshis": 2000000000,
+                    "per_operation_limit_zatoshis": 1000000000,
+                    "maximum_fee_share_zatoshis": 30000,
+                    "maximum_transaction_fee_zatoshis": 30000,
+                    "maximum_permit_lifetime_ms": 120000,
+                    "policy_expires_at_ms": 500000
+                  },
+                  "own_return_rule": "authenticated_same_account"
+                },
+                "birth_digest": "2999363f9f462dbd5ea6fa8b2e5642f782b6eb62752b4cdf1375187212dddfcd"
+              },
+              "economic_intent": {
+                "version": 1,
+                "candidate_id": "synthetic-candidate",
+                "candidate_revision": 1,
+                "proposal_id": "synthetic-proposal",
+                "previous_proposal_id": null,
+                "created_at": "2026-10-13T14:00:00Z",
+                "agreement": {
+                  "schema_version": 1,
+                  "agreement_id": "agreement-example-01",
+                  "obligation_id": "obligation-example-01",
+                  "revision": 1,
+                  "purpose": "Synthetic cooperative procurement example. No real funds.",
+                  "organizer_identity": "organizer-example",
+                  "network_profile_id": "ironwood-testnet-nu7-candidate",
+                  "recipients": [
+                    {
+                      "recipient_id": "recipient-example",
+                      "address": "uregtestsyntheticaddressnotforfunds",
+                      "amount": "1000000000",
+                      "memo": null,
+                      "instruction_provenance": "Synthetic fixture. Not address- or ownership-verified."
+                    }
+                  ],
+                  "funding_policy": {
+                    "kind": "exact",
+                    "target": "1000000000"
+                  },
+                  "fee_policy": {
+                    "kind": "pro_rata"
+                  },
+                  "privacy_profile": {
+                    "mode": "declared_operator",
+                    "proving_operator": "synthetic-local-host",
+                    "dedicated_accounts_required": true
+                  },
+                  "coordination_deadline": null,
+                  "confirmation_policy": {
+                    "required_confirmations": 10
+                  },
+                  "extensions": []
+                },
+                "participants": [
+                  {
+                    "participant_id": "alice",
+                    "account_id": "1111111111111111111111111111111111111111111111111111111111111111",
+                    "contribution": "400000000",
+                    "fee_share": "12000",
+                    "fee_cap": "12000",
+                    "maximum_net_debit": "400012000",
+                    "charges": []
+                  },
+                  {
+                    "participant_id": "bob",
+                    "account_id": "2222222222222222222222222222222222222222222222222222222222222222",
+                    "contribution": "600000000",
+                    "fee_share": "18000",
+                    "fee_cap": "18000",
+                    "maximum_net_debit": "600018000",
+                    "charges": []
+                  }
+                ],
+                "transaction_fee": "30000",
+                "expiry_height": 4465126,
+                "own_return_rule": "authenticated_same_account"
+              },
+              "invocation": {
+                "version": 1,
+                "operation_id": "synthetic-invocation",
+                "idempotency_key_digest": "8888888888888888888888888888888888888888888888888888888888888888",
+                "invocation_nonce": "9999999999999999999999999999999999999999999999999999999999999999",
+                "economic_intent_digest": "4001dbbaafccbce0da47389502eff2141bdbdd7cc8eaecec2bf272fd63a26614",
+                "checkpoint_destination": "/synthetic/checkpoint",
+                "requested_at_ms": 2000,
+                "construction_expires_at_ms": 100000
+              },
+              "purpose": "prepare_one_private_contribution"
+            },
+            "provenance": {
+              "version": 2,
+              "original_host_audit": {
+                "kind": "additional_publication_v3",
+                "audit_digest": "6464646464646464646464646464646464646464646464646464646464646464"
+              },
+              "roster": {
+                "version": 2,
+                "generation_id": "3333333333333333333333333333333333333333333333333333333333333333",
+                "store_destination_identity": "/synthetic/host/coordination.sqlite",
+                "roster_sequence": 2,
+                "predecessor": {
+                  "kind": "initial_publication_v2",
+                  "audit_digest": "9292929292929292929292929292929292929292929292929292929292929292"
+                }
+              },
+              "signer_roster_record_digest": "9393939393939393939393939393939393939393939393939393939393939393",
+              "witness_roster_extension_digest": "9494949494949494949494949494949494949494949494949494949494949494"
+            }
+          },
+          "current_caller_binding_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "requested_at_ms": 2000,
+          "disclosure_expires_at_ms": 32000
+        },
+        "selection_evidence_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "selected_inputs": [
+          {
+            "input_id": "synthetic-alice-input",
+            "nullifier": "3232323232323232323232323232323232323232323232323232323232323232",
+            "value_zatoshis": 400112000
+          }
+        ],
+        "selection_context": {
+          "tip_height": 4465037,
+          "tip_hash_protocol": "2828282828282828282828282828282828282828282828282828282828282828",
+          "anchor_height": 4465036,
+          "anchor_hash_protocol": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "anchor_root": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "local_exclusion_digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "change_address": "uregtestsyntheticaddressnotforfunds",
+        "change_value_zatoshis": 100000,
+        "requested_at_ms": 2001,
+        "admission_expires_at_ms": 32000
+      },
+      "evidence_digest": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c"
+    },
+    {
+      "request": {
+        "version": 2,
+        "operation_id": "synthetic-retain-bob",
+        "selection": {
+          "version": 2,
+          "operation_id": "synthetic-select-bob",
+          "scope": {
+            "version": 2,
+            "selection": {
+              "version": 1,
+              "inventory": {
+                "version": 1,
+                "enrollment": {
+                  "version": 1,
+                  "operation_id": "synthetic-enrollment",
+                  "identity": {
+                    "account_id": "2222222222222222222222222222222222222222222222222222222222222222",
+                    "full_viewing_key_digest": "1515151515151515151515151515151515151515151515151515151515151515",
+                    "network_profile_id": "ironwood-testnet-nu7-candidate",
+                    "derivation_domain": "dedicated-synthetic"
+                  },
+                  "birth_request_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                  "birth_commit_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                  "native_birth_digest": "9464359ff0113600832f9427c1cc7711276927ef584bd659135f3a546a1d08a1",
+                  "original_policy_digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                  "account_use_genesis_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+                  "original_witness_origin_digest": "9d8bea0a879d28e7e374204a6be7673f4159c45875a68a942d1ba89abb9c61fe",
+                  "host": {
+                    "generation_id": "3333333333333333333333333333333333333333333333333333333333333333",
+                    "inventory_digest": "4444444444444444444444444444444444444444444444444444444444444444",
+                    "generation_plan_digest": "5555555555555555555555555555555555555555555555555555555555555555",
+                    "financial_journal_origin_digest": "6666666666666666666666666666666666666666666666666666666666666666",
+                    "store_destination_identity": "/synthetic/host/coordination.sqlite",
+                    "profile_id": "synthetic-profile",
+                    "canonical_root": "/synthetic/host",
+                    "destination_identity_digest": "7777777777777777777777777777777777777777777777777777777777777777",
+                    "inherited_identity_digest": "8888888888888888888888888888888888888888888888888888888888888888",
+                    "scope_predecessor_digest": null
+                  },
+                  "signer": {
+                    "enrollment_generation_id": "9999999999999999999999999999999999999999999999999999999999999999",
+                    "signer_target_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "original_envelope_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "owner_certificate_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "writer_certificate_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                    "writer_epoch": 1,
+                    "native_signer_measurement": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+                  },
+                  "scope": {
+                    "agreement_id": "agreement-example-01",
+                    "obligation_id": "obligation-example-01",
+                    "participant_id": "bob",
+                    "principal_id": "synthetic-principal",
+                    "privacy_domain": "synthetic-domain",
+                    "recipient_scope_digests": [
+                      "470208529a624730d1ed6c47f51784f0e83a6f262fbe5c6975c189ec14904c36"
+                    ],
+                    "aggregate_budget_zatoshis": 1000000000,
+                    "per_operation_limit_zatoshis": 1000000000,
+                    "maximum_fee_share_zatoshis": 30000,
+                    "maximum_transaction_fee_zatoshis": 30000,
+                    "maximum_permit_lifetime_ms": 120000,
+                    "expires_at_ms": 200000
+                  },
+                  "transport_binding_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+                  "issued_at_ms": 1000
+                },
+                "enrollment_ref": "4444444444444444444444444444444444444444444444444444444444444444",
+                "witness_extension_digest": "5555555555555555555555555555555555555555555555555555555555555555",
+                "attempt": {
+                  "version": 2,
+                  "continuation_digest": "6666666666666666666666666666666666666666666666666666666666666666",
+                  "attempt_sequence": 2
+                },
+                "original_recipient_policy": {
+                  "version": 2,
+                  "account_id": "2222222222222222222222222222222222222222222222222222222222222222",
+                  "network_profile_id": "ironwood-testnet-nu7-candidate",
+                  "agreement_id": "agreement-example-01",
+                  "obligation_id": "obligation-example-01",
+                  "participant_id": "bob",
+                  "recipients": [
+                    {
+                      "recipient_id": "recipient-example",
+                      "address": "uregtestsyntheticaddressnotforfunds",
+                      "memo": null,
+                      "instruction_provenance": "Synthetic fixture. Not address- or ownership-verified.",
+                      "maximum_amount_zatoshis": 1000000000
+                    }
+                  ],
+                  "charges": [],
+                  "original_limits": {
+                    "aggregate_budget_zatoshis": 2000000000,
+                    "per_operation_limit_zatoshis": 1000000000,
+                    "maximum_fee_share_zatoshis": 30000,
+                    "maximum_transaction_fee_zatoshis": 30000,
+                    "maximum_permit_lifetime_ms": 120000,
+                    "policy_expires_at_ms": 500000
+                  },
+                  "own_return_rule": "authenticated_same_account"
+                },
+                "attachment": {
+                  "version": 1,
+                  "original_primary_journal_origin_digest": "6666666666666666666666666666666666666666666666666666666666666666",
+                  "predecessor_registry_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                  "current_registry_digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                  "latest_extension_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+                  "selected": {
+                    "account_id": "2222222222222222222222222222222222222222222222222222222222222222",
+                    "canonical_directory": "/synthetic/bob",
+                    "directory_identity_digest": "1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f",
+                    "journal_origin_digest": "3333333333333333333333333333333333333333333333333333333333333333"
+                  }
+                },
+                "operator_name": "synthetic-local-host",
+                "operator_destination": "/synthetic/checkpoint",
+                "wallet_destination": "/synthetic/bob/wallet.sqlite",
+                "purpose": "preliminary_inventory_only",
+                "retention_policy": "Keep only at exact local destination until explicit deletion",
+                "provider": {
+                  "source_id": "synthetic-provider",
+                  "endpoint": "https://synthetic.invalid",
+                  "trust_profile": "single_tls_provider_report_not_consensus"
+                },
+                "birthday": {
+                  "prior_height": 4465026,
+                  "prior_block_hash": "7777777777777777777777777777777777777777777777777777777777777777",
+                  "sapling_tree": "",
+                  "orchard_tree": "",
+                  "ironwood_tree": ""
+                },
+                "minimum_confirmations": 1,
+                "maximum_blocks": 10,
+                "anchor_height": 4465036
+              },
+              "original_policy_origin": {
+                "version": 2,
+                "intent": {
+                  "version": 2,
+                  "operation_id": "birth-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "generation_instance_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                  "identity": {
+                    "account_id": "2222222222222222222222222222222222222222222222222222222222222222",
+                    "full_viewing_key_digest": "1515151515151515151515151515151515151515151515151515151515151515",
+                    "network_profile_id": "ironwood-testnet-nu7-candidate",
+                    "derivation_domain": "dedicated-synthetic",
+                    "exact_derivation": "synthetic-derivation"
+                  },
+                  "witness_origin": {
+                    "endpoint": "https://synthetic.invalid",
+                    "server_name": "synthetic.invalid",
+                    "witness_id": "synthetic-witness",
+                    "pinned_server_certificate_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                  },
+                  "original_policy_terms": {
+                    "witness_id": "synthetic-witness",
+                    "account_id": "2222222222222222222222222222222222222222222222222222222222222222",
+                    "network_profile_id": "ironwood-testnet-nu7-candidate",
+                    "owner_certificate_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "initial_writer_certificate_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                    "initial_writer_epoch": 1,
+                    "enrollment_refs": [
+                      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    ],
+                    "agreement_ids": [
+                      "agreement-example-01"
+                    ],
+                    "recipient_scope_digests": [
+                      "470208529a624730d1ed6c47f51784f0e83a6f262fbe5c6975c189ec14904c36"
+                    ],
+                    "aggregate_budget_zatoshis": 2000000000,
+                    "per_operation_limit_zatoshis": 1000000000,
+                    "maximum_fee_share_zatoshis": 30000,
+                    "maximum_transaction_fee_zatoshis": 30000,
+                    "maximum_permit_lifetime_ms": 120000,
+                    "policy_expires_at_ms": 500000
+                  },
+                  "original_policy_terms_digest": "f9cfc17a926ba41ab67c3a6a210b202ba5b4706f3c7021e913e102f3947fbb55",
+                  "native_principal_id": "synthetic-principal",
+                  "native_measurement": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                  "original_target": "/synthetic/vault"
+                },
+                "recipient_policy": {
+                  "version": 2,
+                  "account_id": "2222222222222222222222222222222222222222222222222222222222222222",
+                  "network_profile_id": "ironwood-testnet-nu7-candidate",
+                  "agreement_id": "agreement-example-01",
+                  "obligation_id": "obligation-example-01",
+                  "participant_id": "bob",
+                  "recipients": [
+                    {
+                      "recipient_id": "recipient-example",
+                      "address": "uregtestsyntheticaddressnotforfunds",
+                      "memo": null,
+                      "instruction_provenance": "Synthetic fixture. Not address- or ownership-verified.",
+                      "maximum_amount_zatoshis": 1000000000
+                    }
+                  ],
+                  "charges": [],
+                  "original_limits": {
+                    "aggregate_budget_zatoshis": 2000000000,
+                    "per_operation_limit_zatoshis": 1000000000,
+                    "maximum_fee_share_zatoshis": 30000,
+                    "maximum_transaction_fee_zatoshis": 30000,
+                    "maximum_permit_lifetime_ms": 120000,
+                    "policy_expires_at_ms": 500000
+                  },
+                  "own_return_rule": "authenticated_same_account"
+                },
+                "birth_digest": "9464359ff0113600832f9427c1cc7711276927ef584bd659135f3a546a1d08a1"
+              },
+              "economic_intent": {
+                "version": 1,
+                "candidate_id": "synthetic-candidate",
+                "candidate_revision": 1,
+                "proposal_id": "synthetic-proposal",
+                "previous_proposal_id": null,
+                "created_at": "2026-10-13T14:00:00Z",
+                "agreement": {
+                  "schema_version": 1,
+                  "agreement_id": "agreement-example-01",
+                  "obligation_id": "obligation-example-01",
+                  "revision": 1,
+                  "purpose": "Synthetic cooperative procurement example. No real funds.",
+                  "organizer_identity": "organizer-example",
+                  "network_profile_id": "ironwood-testnet-nu7-candidate",
+                  "recipients": [
+                    {
+                      "recipient_id": "recipient-example",
+                      "address": "uregtestsyntheticaddressnotforfunds",
+                      "amount": "1000000000",
+                      "memo": null,
+                      "instruction_provenance": "Synthetic fixture. Not address- or ownership-verified."
+                    }
+                  ],
+                  "funding_policy": {
+                    "kind": "exact",
+                    "target": "1000000000"
+                  },
+                  "fee_policy": {
+                    "kind": "pro_rata"
+                  },
+                  "privacy_profile": {
+                    "mode": "declared_operator",
+                    "proving_operator": "synthetic-local-host",
+                    "dedicated_accounts_required": true
+                  },
+                  "coordination_deadline": null,
+                  "confirmation_policy": {
+                    "required_confirmations": 10
+                  },
+                  "extensions": []
+                },
+                "participants": [
+                  {
+                    "participant_id": "alice",
+                    "account_id": "1111111111111111111111111111111111111111111111111111111111111111",
+                    "contribution": "400000000",
+                    "fee_share": "12000",
+                    "fee_cap": "12000",
+                    "maximum_net_debit": "400012000",
+                    "charges": []
+                  },
+                  {
+                    "participant_id": "bob",
+                    "account_id": "2222222222222222222222222222222222222222222222222222222222222222",
+                    "contribution": "600000000",
+                    "fee_share": "18000",
+                    "fee_cap": "18000",
+                    "maximum_net_debit": "600018000",
+                    "charges": []
+                  }
+                ],
+                "transaction_fee": "30000",
+                "expiry_height": 4465126,
+                "own_return_rule": "authenticated_same_account"
+              },
+              "invocation": {
+                "version": 1,
+                "operation_id": "synthetic-invocation",
+                "idempotency_key_digest": "8888888888888888888888888888888888888888888888888888888888888888",
+                "invocation_nonce": "9999999999999999999999999999999999999999999999999999999999999999",
+                "economic_intent_digest": "4001dbbaafccbce0da47389502eff2141bdbdd7cc8eaecec2bf272fd63a26614",
+                "checkpoint_destination": "/synthetic/checkpoint",
+                "requested_at_ms": 2000,
+                "construction_expires_at_ms": 100000
+              },
+              "purpose": "prepare_one_private_contribution"
+            },
+            "provenance": {
+              "version": 2,
+              "original_host_audit": {
+                "kind": "additional_publication_v3",
+                "audit_digest": "6565656565656565656565656565656565656565656565656565656565656565"
+              },
+              "roster": {
+                "version": 2,
+                "generation_id": "3333333333333333333333333333333333333333333333333333333333333333",
+                "store_destination_identity": "/synthetic/host/coordination.sqlite",
+                "roster_sequence": 3,
+                "predecessor": {
+                  "kind": "additional_publication_v3",
+                  "audit_digest": "6464646464646464646464646464646464646464646464646464646464646464"
+                }
+              },
+              "signer_roster_record_digest": "9393939393939393939393939393939393939393939393939393939393939393",
+              "witness_roster_extension_digest": "9494949494949494949494949494949494949494949494949494949494949494"
+            }
+          },
+          "current_caller_binding_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "requested_at_ms": 2000,
+          "disclosure_expires_at_ms": 32000
+        },
+        "selection_evidence_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "selected_inputs": [
+          {
+            "input_id": "synthetic-bob-input",
+            "nullifier": "3333333333333333333333333333333333333333333333333333333333333333",
+            "value_zatoshis": 600018000
+          }
+        ],
+        "selection_context": {
+          "tip_height": 4465038,
+          "tip_hash_protocol": "2929292929292929292929292929292929292929292929292929292929292929",
+          "anchor_height": 4465036,
+          "anchor_hash_protocol": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "anchor_root": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "local_exclusion_digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "change_address": "uregtestsyntheticaddressnotforfunds",
+        "change_value_zatoshis": 0,
+        "requested_at_ms": 2001,
+        "admission_expires_at_ms": 32000
+      },
+      "evidence_digest": "3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d"
+    }
+  ],
+  "common_context": {
+    "version": 1,
+    "network_profile_id": "ironwood-testnet-nu7-candidate",
+    "network": "testnet",
+    "consensus_branch_id": 1998129881,
+    "selection_rule": "maximum_original_tip_plus_one",
+    "participants": [
+      {
+        "commitment": {
+          "participant_id": "alice",
+          "account_id": "1111111111111111111111111111111111111111111111111111111111111111",
+          "full_viewing_key_digest": "1414141414141414141414141414141414141414141414141414141414141414",
+          "retention_request_digest": "7acb2e58295512af4106d673d859ced54dcd494953dac7d08a823885fb6cb211",
+          "retention_evidence_digest": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c"
+        },
+        "original_host_audit": {
+          "kind": "additional_publication_v3",
+          "audit_digest": "6464646464646464646464646464646464646464646464646464646464646464"
+        },
+        "roster": {
+          "version": 2,
+          "generation_id": "3333333333333333333333333333333333333333333333333333333333333333",
+          "store_destination_identity": "/synthetic/host/coordination.sqlite",
+          "roster_sequence": 2,
+          "predecessor": {
+            "kind": "initial_publication_v2",
+            "audit_digest": "9292929292929292929292929292929292929292929292929292929292929292"
+          }
+        },
+        "original_tip_height": 4465037,
+        "original_tip_hash_protocol": "2828282828282828282828282828282828282828282828282828282828282828",
+        "original_completion_expires_at_ms": 100000,
+        "provider_configuration_digest": "d7fbe82de98bc25a15585b19fe4b3dd3f24c843f14f698425243a7d2d2fd1da6",
+        "read_scope_digest": "7c40f83cec89123df803ef9c4885cdc615eaff7147bd5650d5b92ecb0f11b092"
+      },
+      {
+        "commitment": {
+          "participant_id": "bob",
+          "account_id": "2222222222222222222222222222222222222222222222222222222222222222",
+          "full_viewing_key_digest": "1515151515151515151515151515151515151515151515151515151515151515",
+          "retention_request_digest": "2010fe26407f991815ebca8cda425d9efa492dd29df742d90bff064f0ddb1ac4",
+          "retention_evidence_digest": "3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d"
+        },
+        "original_host_audit": {
+          "kind": "additional_publication_v3",
+          "audit_digest": "6565656565656565656565656565656565656565656565656565656565656565"
+        },
+        "roster": {
+          "version": 2,
+          "generation_id": "3333333333333333333333333333333333333333333333333333333333333333",
+          "store_destination_identity": "/synthetic/host/coordination.sqlite",
+          "roster_sequence": 3,
+          "predecessor": {
+            "kind": "additional_publication_v3",
+            "audit_digest": "6464646464646464646464646464646464646464646464646464646464646464"
+          }
+        },
+        "original_tip_height": 4465038,
+        "original_tip_hash_protocol": "2929292929292929292929292929292929292929292929292929292929292929",
+        "original_completion_expires_at_ms": 100000,
+        "provider_configuration_digest": "d7fbe82de98bc25a15585b19fe4b3dd3f24c843f14f698425243a7d2d2fd1da6",
+        "read_scope_digest": "e793ff8b15c87542ec2b16c2991887910cd4761d56ea62c4612918d240a06a11"
+      }
+    ],
+    "original_invocation_digest": "1a2840697754d8d7f485415cbe629606e5fd629a30eee665d02634a6ef06d5c1",
+    "idempotency_key_digest": "8888888888888888888888888888888888888888888888888888888888888888",
+    "economic_intent_digest": "4001dbbaafccbce0da47389502eff2141bdbdd7cc8eaecec2bf272fd63a26614",
+    "agreement_id": "agreement-example-01",
+    "agreement_revision": 1,
+    "candidate_revision": 1,
+    "host": {
+      "generation_id": "3333333333333333333333333333333333333333333333333333333333333333",
+      "inventory_digest": "4444444444444444444444444444444444444444444444444444444444444444",
+      "generation_plan_digest": "5555555555555555555555555555555555555555555555555555555555555555",
+      "financial_journal_origin_digest": "6666666666666666666666666666666666666666666666666666666666666666",
+      "store_destination_identity": "/synthetic/host/coordination.sqlite",
+      "profile_id": "synthetic-profile",
+      "canonical_root": "/synthetic/host",
+      "destination_identity_digest": "7777777777777777777777777777777777777777777777777777777777777777",
+      "inherited_identity_digest": "8888888888888888888888888888888888888888888888888888888888888888",
+      "scope_predecessor_digest": null
+    },
+    "principal_id": "synthetic-principal",
+    "anchor_height": 4465036,
+    "anchor_hash_protocol": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "anchor_root": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "reference_tip_height": 4465038,
+    "reference_tip_hash_protocol": "2929292929292929292929292929292929292929292929292929292929292929",
+    "target_height": 4465039,
+    "expiry_height": 4465126,
+    "completion_expires_at_ms": 100000,
+    "provider": {
+      "source_id": "synthetic-provider",
+      "endpoint": "https://synthetic.invalid",
+      "trust_profile": "single_tls_provider_report_not_consensus"
+    },
+    "operator_name": "synthetic-local-host",
+    "operator_destination": "/synthetic/checkpoint",
+    "retention_policy": "Keep only at exact local destination until explicit deletion",
+    "maximum_owners": 8,
+    "maximum_notes": 64,
+    "read_profile": {
+      "mode": "append_only_same_original_anchor",
+      "completion": "admitted_bounded_completion",
+      "maximum_additional_blocks": 10,
+      "maximum_scan_runtime_ms": 30000,
+      "post_scan_runway_ms": 10000,
+      "minimum_expiry_margin_blocks": 10,
+      "maximum_parallel_scans": 2,
+      "minimum_confirmations": 1
+    }
+  },
+  "common_context_digest": "b6205af05b6b97375902850b3a7d11e5caf20ac5abba352fa4cdcb303e4b5163"
+}

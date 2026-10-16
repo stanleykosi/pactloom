@@ -1,0 +1,45 @@
+[package]
+name = "wholepact-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+signer-release = ["protected-transport", "dep:wholepact-signer-release"]
+proposal-review = ["protected-transport", "wholepact-engine/candidate-construction"]
+operator-chain = ["dep:wholepact-chain", "wholepact-chain/submission-dispatch", "wholepact-engine/submission-handoff"]
+protected-transport = ["wholepact-engine/transport-workflows", "dep:wholepact-transport"]
+
+[dependencies]
+wholepact-signer-release = { path = "../wholepact-signer-release", optional = true }
+zeroize = { version = "=1.9.1" }
+wholepact-chain = { path = "../wholepact-chain", optional = true }
+wholepact-transport = { path = "../wholepact-transport", optional = true }
+time = { version = "0.3", features = ["parsing", "formatting"] }
+wholepact-engine = { path = "../wholepact-engine" }
+wholepact-core = { path = "../wholepact-core" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+tower = { version = "0.5", features = ["util", "limit", "load-shed"] }
+async-stream = "0.3"
+futures-core = "0.3"
+clap = { version = "4", features = ["derive", "env"] }
+subtle = "2"
+rand = "0.8"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+# In-process receipt fixtures use public construction/retention APIs only.
+wholepact-engine = { path = "../wholepact-engine", features = ["local-proof-jobs"] }
+wholepact-proof-jobs = { path = "../wholepact-proof-jobs" }
+wholepact-protocol = { path = "../wholepact-protocol", features = ["construction"] }
+wholepact-wallet = { path = "../wholepact-wallet", features = ["synthetic-qualification"] }
+wholepact-store = { path = "../wholepact-store" }
+wholepact-storage-security = { path = "../wholepact-storage-security" }
+tempfile = "3"
+http-body-util = "0.1"

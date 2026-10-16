@@ -1,0 +1,49 @@
+[package]
+name = "wholepact-native-host"
+default-run = "wholepact-native-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Explicit foreground non-signing protected Wholepact host"
+
+[features]
+default = []
+manual-admission = ["wholepact-signer/manual-inventory-client", "wholepact-authority/pending-birth-foundation", "financial-runtime", "wholepact-engine/manual-admission", "dep:wholepact-signer-origin"]
+financial-runtime = ["wholepact-engine/wallet-sync", "wholepact-engine/submission-handoff", "wholepact-engine/signer-authority-bridge", "wholepact-engine/candidate-construction", "wholepact-service/signer-release", "wholepact-service/proposal-review", "dep:wholepact-signer", "dep:wholepact-signer-release", "dep:wholepact-authority", "dep:wholepact-protocol", "dep:wholepact-wallet", "dep:wholepact-proof-jobs", "dep:rustls-pki-types"]
+
+[dependencies]
+wholepact-signer-release = { path = "../wholepact-signer-release", optional = true }
+rustls-pki-types = { version = "=1.15.1", optional = true }
+wholepact-wallet = { path = "../wholepact-wallet", optional = true, features = ["encrypted-storage"] }
+wholepact-proof-jobs = { path = "../wholepact-proof-jobs", optional = true }
+wholepact-protocol = { path = "../wholepact-protocol", optional = true, features = ["submission-handoff"] }
+wholepact-signer = { path = "../wholepact-signer", optional = true, default-features = false }
+wholepact-authority = { path = "../wholepact-authority", optional = true }
+wholepact-core = { path = "../wholepact-core" }
+wholepact-engine = { path = "../wholepact-engine", features = ["transport-workflows"] }
+wholepact-store = { path = "../wholepact-store" }
+wholepact-storage-security = { path = "../wholepact-storage-security" }
+wholepact-transport = { path = "../wholepact-transport" }
+wholepact-chain = { path = "../wholepact-chain", features = ["submission-dispatch"] }
+wholepact-service = { path = "../wholepact-service", features = ["protected-transport", "operator-chain"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+sha2.workspace = true
+hex.workspace = true
+argon2 = { version = "=0.5.3", features = ["zeroize"] }
+chacha20poly1305 = "=0.11.0"
+zeroize = { version = "=1.9.1", features = ["derive"] }
+getrandom = "=0.4.3"
+libc = "0.2"
+rpassword = "=7.5.4"
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+axum = "0.8"
+time = { version = "0.3", features = ["formatting", "parsing"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+wholepact-signer-origin = { path = "../wholepact-signer-origin", optional = true }

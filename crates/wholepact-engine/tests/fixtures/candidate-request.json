@@ -1,0 +1,111 @@
+{
+  "manifest": {
+    "agreement": {
+      "schema_version": 1,
+      "agreement_id": "agreement-example-01",
+      "obligation_id": "obligation-example-01",
+      "revision": 1,
+      "purpose": "Synthetic cooperative procurement example. No real funds.",
+      "organizer_identity": "organizer-example",
+      "network_profile_id": "ironwood-testnet-nu7-candidate",
+      "recipients": [
+        {
+          "recipient_id": "recipient-example",
+          "address": "uregtestsyntheticaddressnotforfunds",
+          "amount": "300000",
+          "memo": null,
+          "instruction_provenance": "Synthetic fixture. Not address- or ownership-verified."
+        }
+      ],
+      "funding_policy": {
+        "kind": "exact",
+        "target": "300000"
+      },
+      "fee_policy": {
+        "kind": "pro_rata"
+      },
+      "privacy_profile": {
+        "mode": "local_only",
+        "proving_operator": null,
+        "dedicated_accounts_required": true
+      },
+      "coordination_deadline": null,
+      "confirmation_policy": {
+        "required_confirmations": 10
+      },
+      "extensions": []
+    },
+    "participants": [
+      {
+        "participant_id": "alice",
+        "account_id": "account-alice",
+        "contribution": "100000",
+        "fee_share": "5000",
+        "fee_cap": "5000",
+        "maximum_net_debit": "105000",
+        "charges": []
+      },
+      {
+        "participant_id": "bob",
+        "account_id": "account-bob",
+        "contribution": "200000",
+        "fee_share": "10000",
+        "fee_cap": "10000",
+        "maximum_net_debit": "210000",
+        "charges": []
+      }
+    ],
+    "inputs": [
+      {
+        "input_id": "input-alice",
+        "participant_id": "alice",
+        "account_id": "account-alice",
+        "amount": "200000",
+        "ownership_evidence_ref": null
+      },
+      {
+        "input_id": "input-bob",
+        "participant_id": "bob",
+        "account_id": "account-bob",
+        "amount": "300000",
+        "ownership_evidence_ref": null
+      }
+    ],
+    "outputs": [
+      {
+        "output_id": "recipient-output",
+        "address": "uregtestsyntheticaddressnotforfunds",
+        "amount": "300000",
+        "allocation": {
+          "kind": "recipient",
+          "recipient_id": "recipient-example"
+        }
+      },
+      {
+        "output_id": "return-alice",
+        "address": "utestsyntheticchangealice",
+        "amount": "95000",
+        "allocation": {
+          "kind": "return",
+          "participant_id": "alice",
+          "account_id": "account-alice",
+          "ownership_evidence_ref": null
+        }
+      },
+      {
+        "output_id": "return-bob",
+        "address": "utestsyntheticchangebob",
+        "amount": "90000",
+        "allocation": {
+          "kind": "return",
+          "participant_id": "bob",
+          "account_id": "account-bob",
+          "ownership_evidence_ref": null
+        }
+      }
+    ],
+    "transaction_fee": "15000",
+    "expiry_height": 4465070
+  },
+  "previous_candidate_id": null
+}

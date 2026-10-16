@@ -1,0 +1,40 @@
+[package]
+name = "wholepact-authority"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Owner-operated independent per-account reservation witness"
+
+[features]
+default = []
+synthetic-qualification = []
+pending-birth-foundation = ["dep:webpki"]
+native-witness-owner = ["pending-birth-foundation", "dep:eframe", "dep:winit"]
+
+[dependencies]
+wholepact-core = { path = "../wholepact-core" }
+webpki = { package = "rustls-webpki", version = "=0.103.15", default-features = false, features = ["std", "ring"], optional = true }
+wholepact-chain = { path = "../wholepact-chain", features = ["submission-dispatch"] }
+wholepact-storage-security = { path = "../wholepact-storage-security" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+sha2.workspace = true
+hex.workspace = true
+rusqlite.workspace = true
+zeroize = "=1.9.1"
+rustls = { version = "=0.23.45", default-features = false, features = ["std", "ring"] }
+ring = "=0.17.14"
+
+[dev-dependencies]
+tempfile = "3"
+
+# Same pinned native profile as the signer; no x11/accesskit/inspection/persistence.
+[target.'cfg(target_os = "linux")'.dependencies]
+eframe = { version = "=0.36.2", optional = true, default-features = false, features = ["default_fonts", "glow", "wayland"] }
+winit = { version = "=0.30.13", optional = true, default-features = false, features = ["wayland", "rwh_06"] }
+
+[[bin]]
+name = "wholepact-witness-owner-ui"
+path = "src/witness_owner_main.rs"
+required-features = ["native-witness-owner"]

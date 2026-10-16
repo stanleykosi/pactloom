@@ -1,0 +1,1236 @@
+//! SOURCE-ONLY connected native namespace owner. A single fixed OS-user witness
+//! installation is supported; no arbitrary root, implicit install, reset, legacy
+//! adoption or restored activation exists. All setup/enrollment mutation consumes
+//! the real native module's private one-shot decision and retained publication.
+use super::*;
+use crate::AuthorityJournal;
+use crate::journal::PendingBirthTargetInspection;
+use crate::native_witness_owner::{
+    NativeEnrollmentDecision, NativePublicationLease, NativeSetupDecision,
+};
+use crate::pending_birth_signature::VerifiedPendingBirthOwnerSignature;
+use ring::{
+    hkdf,
+    rand::{SecureRandom, SystemRandom},
+};
+use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
+use std::{
+    fs,
+    os::unix::fs::MetadataExt,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+};
+use wholepact_storage_security::witness_namespace_fs::{
+    DirectoryStamp, InstallationFiles, InstallationProbe, read_existing_storage_key,
+};
+use wholepact_storage_security::{DatabaseFileIdentity, DatabaseKey, EncryptedConnection};
+use zeroize::Zeroizing;
+
+#[path = "namespace_archive.rs"]
+mod namespace_archive;
+pub(crate) use namespace_archive::*;
+
+#[derive(Clone, Serialize)]
+pub(crate) struct NamespaceSetupInput {
+    pub(crate) endpoint: String,
+    pub(crate) server_name: String,
+    pub(crate) witness_id: String,
+    pub(crate) pinned_server_certificate_digest: String,
+    pub(crate) owner_certificate_digest: String,
+    pub(crate) network_profile_id: String,
+    pub(crate) storage_key_file: String,
+}
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct NamespaceOpenInput {
+    pub(crate) endpoint: String,
+    pub(crate) server_name: String,
+    pub(crate) witness_id: String,
+    pub(crate) pinned_server_certificate_digest: String,
+    pub(crate) owner_certificate_digest: String,
+    pub(crate) network_profile_id: String,
+    pub(crate) storage_key_file: String,
+    pub(crate) expected_account_id: String,
+}
+#[derive(Serialize)]
+struct OriginBinding<'a> {
+    endpoint: &'a str,
+    server_name: &'a str,
+    witness_id: &'a str,
+    pinned_server_certificate_digest: &'a str,
+    owner_certificate_digest: &'a str,
+    network_profile_id: &'a str,
+}
+impl NamespaceSetupInput {
+    fn validate(&self) -> Result<()> {
+        id(&self.witness_id)?;
+        id(&self.network_profile_id)?;
+        hash(&self.pinned_server_certificate_digest)?;
+        hash(&self.owner_certificate_digest)?;
+        // Delegate exact endpoint/name parsing to the existing disclosure validator.
+        self.disclosure()?.validate()?;
+        if self.storage_key_file.len() > 4096 || !Path::new(&self.storage_key_file).is_absolute() {
+            return Err(AuthorityError::InvalidBinding);
+        }
+        Ok(())
+    }
+    fn disclosure(&self) -> Result<crate::WitnessDisclosureDescriptor> {
+        Ok(crate::WitnessDisclosureDescriptor {
+            endpoint: self.endpoint.clone(),
+            server_name: self.server_name.clone(),
+            witness_id: self.witness_id.clone(),
+            account_id: "0".repeat(64),
+            network_profile_id: self.network_profile_id.clone(),
+            policy_digest: "0".repeat(64),
+            pinned_server_certificate_digest: self.pinned_server_certificate_digest.clone(),
+        })
+    }
+    fn origin(&self) -> OriginBinding<'_> {
+        OriginBinding {
+            endpoint: &self.endpoint,
+            server_name: &self.server_name,
+            witness_id: &self.witness_id,
+            pinned_server_certificate_digest: &self.pinned_server_certificate_digest,
+            owner_certificate_digest: &self.owner_certificate_digest,
+            network_profile_id: &self.network_profile_id,
+        }
+    }
+}
+impl NamespaceOpenInput {
+    fn setup(&self) -> NamespaceSetupInput {
+        NamespaceSetupInput {
+            endpoint: self.endpoint.clone(),
+            server_name: self.server_name.clone(),
+            witness_id: self.witness_id.clone(),
+            pinned_server_certificate_digest: self.pinned_server_certificate_digest.clone(),
+            owner_certificate_digest: self.owner_certificate_digest.clone(),
+            network_profile_id: self.network_profile_id.clone(),
+            storage_key_file: self.storage_key_file.clone(),
+        }
+    }
+}
+
+pub(crate) struct NamespaceSetupProposal {
+    input: NamespaceSetupInput,
+    probe: InstallationProbe,
+    master: Zeroizing<[u8; 32]>,
+    instance_id: String,
+    reviewed: String,
+    display: String,
+}
+impl NamespaceSetupProposal {
+    pub(crate) fn display(&self) -> Result<String> {
+        self.check_current()?;
+        Ok(self.display.clone())
+    }
+    pub(crate) fn review_digest(&self) -> Result<String> {
+        self.check_current()?;
+        Ok(self.reviewed.clone())
+    }
+    pub(crate) fn check_current(&self) -> Result<()> {
+        self.input.validate()?;
+        self.probe.require_absent()?;
+        Ok(())
+    }
+}
+pub(crate) fn prepare_namespace_setup(
+    mut input: NamespaceSetupInput,
+) -> Result<NamespaceSetupProposal> {
+    if !input.witness_id.is_empty() {
+        return Err(AuthorityError::RecoveryRequired);
+    }
+    let mut random = [0u8; 32];
+    SystemRandom::new()
+        .fill(&mut random)
+        .map_err(|_| AuthorityError::Storage)?;
+    let instance_id = hex::encode(random);
+    input.witness_id = format!("witness-{instance_id}");
+    input.validate()?;
+    let probe = InstallationProbe::fixed_user_installation()?;
+    probe.require_absent()?;
+    let master = read_existing_storage_key(Path::new(&input.storage_key_file))?;
+    let root = probe.root_path();
+    let reviewed = digest(
+        "wholepact:native-witness-namespace-setup:v1",
+        &(input.origin(), &input.storage_key_file, &root, &instance_id),
+    )?;
+    let display = format!(
+        "FIRST WITNESS NAMESPACE INSTALLATION\n\nCanonical OS-user root: {}\nInstallation identity: {}\nOrigin: {}\nExisting independent storage-key file: {}\n\nThis creates an immutable origin/root registry, encrypted locator and permanent account/FVK collision index. No journal/account is enrolled. Existing or interrupted installation is never replaced. This installation is continuity-critical: keep registry, installation marker and every journal together. Backups/restores remain quarantined; copying or rolling back the whole independent witness violates its no-rollback assumption. This is not a reset route.\n\nReview digest: {}",
+        root.display(),
+        instance_id,
+        serde_json::to_string_pretty(&input.origin())
+            .map_err(|_| AuthorityError::InvalidBinding)?,
+        input.storage_key_file,
+        reviewed
+    );
+    Ok(NamespaceSetupProposal {
+        input,
+        probe,
+        master,
+        instance_id,
+        reviewed,
+        display,
+    })
+}
+#[derive(Serialize)]
+pub(crate) struct NamespaceInstallationAudit {
+    pub(crate) witness_id: String,
+    pub(crate) namespace_digest: String,
+    pub(crate) canonical_root: String,
+}
+pub(crate) fn install_namespace(
+    decision: NativeSetupDecision,
+) -> Result<NamespaceInstallationAudit> {
+    let (proposal, lease) = decision.into_parts();
+    proposal.check_current()?;
+    if lease.reviewed_digest() != proposal.reviewed {
+        return Err(AuthorityError::InvalidBinding);
+    }
+    let publication = lease.publication_lease()?;
+    publication.check_current()?;
+    if publication.reviewed_digest() != proposal.reviewed
+        || publication.admitted_at_ms() > crate::now_ms()?
+    {
+        return Err(AuthorityError::InvalidBinding);
+    }
+    let files = proposal.probe.create_once(&proposal.instance_id)?;
+    // From this point any failure leaves a permanent uncertain installation,
+    // never cleanup followed by a second namespace. No origin may be swapped.
+    publication.check_current()?;
+    let namespace = WitnessNamespaceBinding {
+        version: 1,
+        namespace_instance_id: proposal.instance_id.clone(),
+        initial_inventory_digest: digest(
+            "wholepact:witness-native-empty-installation:v1",
+            &(&proposal.reviewed, &proposal.instance_id),
+        )?,
+        witness_id: proposal.input.witness_id.clone(),
+        witness_origin_digest: account_use_witness_origin_digest(&proposal.input.disclosure()?)?,
+        pinned_server_certificate_digest: proposal.input.pinned_server_certificate_digest.clone(),
+        owner_certificate_digest: proposal.input.owner_certificate_digest.clone(),
+        network_profile_id: proposal.input.network_profile_id.clone(),
+        canonical_private_root: files
+            .root_path()
+            .to_str()
+            .ok_or(AuthorityError::InvalidBinding)?
+            .into(),
+        root_identity: directory_identity(files.root_stamp()),
+        journals_identity: directory_identity(files.journals_stamp()),
+    };
+    namespace.validate()?;
+    let key = derive_key(
+        &proposal.master,
+        &proposal.instance_id,
+        "wholepact:witness-locator-storage-key:v1",
+    )?;
+    let c = wholepact_storage_security::create_encrypted(files.registry_path(), &key)?;
+    let tx = Transaction::new_unchecked(c.connection(), TransactionBehavior::Immediate)?;
+    tx.execute_batch(storage::SCHEMA)?;
+    tx.execute(
+        "INSERT INTO witness_locator_namespace VALUES(1,?1,?2)",
+        params![namespace.digest()?, &*encode(&namespace)?],
+    )?;
+    tx.execute("INSERT INTO witness_locator_quarantine VALUES(1,0)", [])?;
+    tx.pragma_update(None, "application_id", storage::LOCATOR_APPLICATION_ID)?;
+    tx.pragma_update(None, "user_version", storage::LOCATOR_SCHEMA_VERSION)?;
+    publication.check_current()?;
+    files.check_current()?;
+    tx.commit()?;
+    files.sync_directories()?;
+    storage::load_exact(c.connection(), &namespace)?;
+    Ok(NamespaceInstallationAudit {
+        witness_id: namespace.witness_id.clone(),
+        namespace_digest: namespace.digest()?,
+        canonical_root: namespace.canonical_private_root,
+    })
+}
+fn directory_identity(s: &DirectoryStamp) -> DirectoryIdentity {
+    DirectoryIdentity {
+        platform: "linux-unix-v1".into(),
+        device: s.device,
+        inode: s.inode,
+        owner_uid: s.owner_uid,
+    }
+}
+struct KeyLength;
+impl hkdf::KeyType for KeyLength {
+    fn len(&self) -> usize {
+        32
+    }
+}
+fn derive_key(master: &[u8; 32], salt: &str, domain: &str) -> Result<DatabaseKey> {
+    let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, salt.as_bytes());
+    let prk = salt.extract(master);
+    let info = [domain.as_bytes()];
+    let okm = prk
+        .expand(&info, KeyLength)
+        .map_err(|_| AuthorityError::Storage)?;
+    let mut bytes = Zeroizing::new([0u8; 32]);
+    okm.fill(&mut *bytes).map_err(|_| AuthorityError::Storage)?;
+    Ok(DatabaseKey::from_bytes(*bytes))
+}
+struct NamespaceCore {
+    files: InstallationFiles,
+    namespace: WitnessNamespaceBinding,
+    master: Zeroizing<[u8; 32]>,
+    registry: Mutex<EncryptedConnection>,
+    registry_identity: DatabaseFileIdentity,
+}
+impl NamespaceCore {
+    fn check_current(&self) -> Result<()> {
+        self.files.check_current()?;
+        let c = self.registry.lock().map_err(|_| AuthorityError::Storage)?;
+        self.registry_identity.check_current(c.connection())?;
+        require_runtime(c.connection())?;
+        let tx = Transaction::new_unchecked(c.connection(), TransactionBehavior::Deferred)?;
+        let history = storage::load_exact(&tx, &self.namespace)?;
+        check_inventory(&self.files, &history)?;
+        Ok(())
+    }
+    fn key_for(&self, intent: &CreationIntent) -> Result<DatabaseKey> {
+        derive_key(
+            &self.master,
+            &intent.digest(&self.namespace)?,
+            "wholepact:witness-original-account-journal-key:v1",
+        )
+    }
+    fn path_for(&self, intent: &CreationIntent) -> Result<PathBuf> {
+        intent.validate(&self.namespace)?;
+        Ok(self.files.root_path().join(&intent.derived_child))
+    }
+}
+fn open_namespace(input: &NamespaceOpenInput) -> Result<Arc<NamespaceCore>> {
+    hash(&input.expected_account_id)?;
+    open_namespace_identity(&input.setup())
+}
+// Shared concrete opener: identity-only backup needs no invented account ID.
+// Still the same fixed installation, held locks, immutable preflight, exact
+// original owner/origin/root binding and missing-history denial.
+fn open_namespace_identity(input: &NamespaceSetupInput) -> Result<Arc<NamespaceCore>> {
+    let setup = input;
+    setup.validate()?;
+    let files = InstallationProbe::fixed_user_installation()?.open_existing()?;
+    let master = read_existing_storage_key(Path::new(&input.storage_key_file))?;
+    let key = derive_key(
+        &master,
+        files.instance_id(),
+        "wholepact:witness-locator-storage-key:v1",
+    )?;
+    // No writable registry handle exists until the complete immutable preflight
+    // and actual canonical namespace/inventory comparisons below have succeeded.
+    let (namespace, prior) = read_registry_preflight(&files.registry_path(), &key)?;
+    if namespace.namespace_instance_id != files.instance_id()
+        || Path::new(&namespace.canonical_private_root) != files.root_path()
+        || namespace.root_identity != directory_identity(files.root_stamp())
+        || namespace.journals_identity != directory_identity(files.journals_stamp())
+        || namespace.witness_id != input.witness_id
+        || namespace.network_profile_id != input.network_profile_id
+        || namespace.pinned_server_certificate_digest != input.pinned_server_certificate_digest
+        || namespace.owner_certificate_digest != input.owner_certificate_digest
+        || namespace.witness_origin_digest
+            != account_use_witness_origin_digest(&setup.disclosure()?)?
+    {
+        return Err(AuthorityError::InvalidBinding);
+    }
+    check_inventory(&files, &prior)?;
+    files.check_current()?;
+    let registry =
+        wholepact_storage_security::open_encrypted_quiescent(files.registry_path(), &key)?;
+    require_runtime(registry.connection())?;
+    let current = storage::load_exact(registry.connection(), &namespace)?;
+    if prior.prepared != current.prepared
+        || prior.completed != current.completed
+        || prior.exclusions != current.exclusions
+    {
+        return Err(AuthorityError::CorruptHistory);
+    }
+    check_inventory(&files, &current)?;
+    let registry_identity = registry.database_identity()?;
+    let core = Arc::new(NamespaceCore {
+        files,
+        namespace,
+        master,
+        registry: Mutex::new(registry),
+        registry_identity,
+    });
+    core.check_current()?;
+    Ok(core)
+}
+/// Audit data only. The caller holds the canonical namespace locks. All source
+/// authentication/schema/record failures occur on immutable encrypted snapshots;
+/// this helper never allocates a writable handle to the original file set.
+fn read_registry_preflight(
+    path: &Path,
+    key: &DatabaseKey,
+) -> Result<(WitnessNamespaceBinding, LocatorHistory)> {
+    let preflight = wholepact_storage_security::open_encrypted_read_snapshot(path, key)?;
+    storage::verify_schema(preflight.connection())?;
+    let payload: Option<Vec<u8>> = preflight
+        .connection()
+        .query_row(
+            "SELECT payload FROM witness_locator_namespace WHERE singleton=1",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let namespace: WitnessNamespaceBinding =
+        crate::decode(&payload.ok_or(AuthorityError::RecoveryRequired)?)?;
+    namespace.validate()?;
+    let history = storage::load_exact(preflight.connection(), &namespace)?;
+    Ok((namespace, history))
+}
+
+fn require_runtime(c: &rusqlite::Connection) -> Result<()> {
+    let mode: String = c.pragma_query_value(None, "journal_mode", |r| r.get(0))?;
+    let sync: i64 = c.pragma_query_value(None, "synchronous", |r| r.get(0))?;
+    let foreign: i64 = c.pragma_query_value(None, "foreign_keys", |r| r.get(0))?;
+    if mode != "wal" || sync != 2 || foreign != 1 {
+        return Err(AuthorityError::Storage);
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) enum BirthDisposition {
+    FirstCommitAllowed,
+    ExistingCommittedAuditOnly,
+}
+pub(crate) struct NamespaceEnrollmentProposal {
+    core: Arc<NamespaceCore>,
+    intent: CreationIntent,
+    authenticated: VerifiedPendingBirthOwnerSignature,
+    disposition: BirthDisposition,
+    existing: Option<PendingBirthCommitRecord>,
+    reviewed: String,
+    display: String,
+}
+impl NamespaceEnrollmentProposal {
+    pub(crate) fn display(&self) -> Result<String> {
+        self.check_current()?;
+        Ok(self.display.clone())
+    }
+    pub(crate) fn review_digest(&self) -> Result<String> {
+        self.check_current()?;
+        Ok(self.reviewed.clone())
+    }
+    pub(crate) fn first_commit_deadline_ms(&self) -> Option<u64> {
+        match self.disposition {
+            BirthDisposition::FirstCommitAllowed => {
+                Some(self.intent.request.initial_commit_deadline_ms)
+            }
+            BirthDisposition::ExistingCommittedAuditOnly => None,
+        }
+    }
+    pub(crate) fn check_current(&self) -> Result<()> {
+        self.core.check_current()?;
+        self.intent.validate(&self.core.namespace)?;
+        if self.authenticated.request() != &self.intent.request
+            || self.authenticated.certificate_digest()
+                != self.core.namespace.owner_certificate_digest
+        {
+            return Err(AuthorityError::InvalidBinding);
+        }
+        if matches!(self.disposition, BirthDisposition::FirstCommitAllowed) {
+            self.intent
+                .request
+                .require_initial_commit_time(crate::now_ms()?)?;
+        }
+        Ok(())
+    }
+}
+pub(crate) fn prepare_namespace_enrollment(
+    input: NamespaceOpenInput,
+    authenticated: VerifiedPendingBirthOwnerSignature,
+) -> Result<NamespaceEnrollmentProposal> {
+    let request = authenticated.request();
+    request.validate()?;
+    if input.expected_account_id != request.policy.account_id
+        || input.owner_certificate_digest != authenticated.certificate_digest()
+    {
+        return Err(AuthorityError::InvalidBinding);
+    }
+    let core = open_namespace(&input)?;
+    core.namespace.require_request(request)?;
+    let namespace_digest = core.namespace.digest()?;
+    let local_target_digest = target_digest(&core.namespace, &request.policy.account_id)?;
+    let mut intent = CreationIntent {
+        version: 1,
+        namespace_digest,
+        request: request.clone(),
+        request_digest: request.digest()?,
+        derived_child: derived_child(&request.policy.account_id)?,
+        local_target_digest,
+        local_owner_review_digest: "0".repeat(64),
+        owner_approval_evidence_digest: authenticated.evidence_digest().into(),
+    };
+    let existing_intent = {
+        let c = core.registry.lock().map_err(|_| AuthorityError::Storage)?;
+        let tx = Transaction::new_unchecked(c.connection(), TransactionBehavior::Deferred)?;
+        let history = storage::load_exact(&tx, &core.namespace)?;
+        let mut found = None;
+        for p in history.prepared.values() {
+            let old = &p.intent;
+            if old.identity().overlaps(intent.identity())
+                || old.request.operation_id == request.operation_id
+                || old.request.generation_instance_id == request.generation_instance_id
+                || old.derived_child == intent.derived_child
+            {
+                // Fresh approval may have new signature/review evidence. It may
+                // continue only the full original request/namespace/target.
+                if old.request != intent.request
+                    || old.namespace_digest != intent.namespace_digest
+                    || old.derived_child != intent.derived_child
+                    || old.local_target_digest != intent.local_target_digest
+                {
+                    return Err(AuthorityError::Conflict);
+                }
+                found = Some(old.clone());
+            }
+        }
+        if history
+            .exclusions
+            .iter()
+            .any(|e| e.exclusion.identity.overlaps(intent.identity()))
+            && found.is_none()
+        {
+            return Err(AuthorityError::PolicyDenied);
+        }
+        found
+    };
+    // An unreserved request must not inspect/adopt any extant target. A genuinely
+    // committed target can only belong to the original durable preparation.
+    let existing_intent_digest = existing_intent
+        .as_ref()
+        .map(|old| old.digest(&core.namespace))
+        .transpose()?;
+    if let Some(old) = existing_intent {
+        intent = old;
+    }
+    let preliminary_review = digest(
+        "wholepact:native-witness-enrollment-review:v1",
+        &(
+            &core.namespace,
+            &intent.request,
+            &intent.local_target_digest,
+            authenticated.evidence_digest(),
+            &existing_intent_digest,
+        ),
+    )?;
+    intent.validate(&core.namespace)?;
+    let path = core.path_for(&intent)?;
+    let (disposition, existing) = if existing_intent_digest.is_none() {
+        // A fresh request cannot derive a final key from a provisional review or
+        // adopt any existing file. Final review fixes the original intent/key.
+        require_new_target_absent(&path)?;
+        intent
+            .request
+            .require_initial_commit_time(crate::now_ms()?)?;
+        (BirthDisposition::FirstCommitAllowed, None)
+    } else {
+        let key = core.key_for(&intent)?;
+        match AuthorityJournal::inspect_pending_birth_for_locator(
+            &path,
+            &key,
+            &intent.request.policy,
+            &intent.namespace_digest,
+            &intent.digest(&core.namespace)?,
+        )? {
+            PendingBirthTargetInspection::Absent
+            | PendingBirthTargetInspection::AuthenticatedEmpty => {
+                intent
+                    .request
+                    .require_initial_commit_time(crate::now_ms()?)?;
+                (BirthDisposition::FirstCommitAllowed, None)
+            }
+            PendingBirthTargetInspection::Committed {
+                record,
+                identity: _,
+            } => {
+                validate_record_against_intent(&core, &intent, &record)?;
+                (BirthDisposition::ExistingCommittedAuditOnly, Some(*record))
+            }
+        }
+    };
+    let reviewed = digest(
+        "wholepact:native-witness-enrollment-publication:v1",
+        &(&preliminary_review, &disposition, &existing),
+    )?;
+    if existing_intent_digest.is_none() {
+        // This is the ACTUAL first native review digest, not a precursor. Every
+        // later key derivation/retry uses these exact persisted original bytes.
+        intent.local_owner_review_digest = reviewed.clone();
+    }
+    intent.validate(&core.namespace)?;
+    let display = format!(
+        "EXACT CANONICAL WITNESS ENROLLMENT\n\nNamespace: {}\nCanonical child: {}\nFull immutable request: {}\nAuthenticated owner certificate: {}\nCurrent signature evidence: {}\nOriginal retained evidence: {}\nOriginal local review: {}\nDisposition: {}\n\nThe account-ID and raw-FVK DIGEST are permanently reserved before journal creation. No raw viewing key is disclosed. Failure never frees the key/path/operation or refunds budget. Exact retry retains original request, deadline, limits, evidence and genesis. Existing completed state is audit only; no writer, signing or active-vault authority follows.\n\nNative publication review digest: {}",
+        serde_json::to_string_pretty(&core.namespace)
+            .map_err(|_| AuthorityError::InvalidBinding)?,
+        path.display(),
+        serde_json::to_string_pretty(&intent.request)
+            .map_err(|_| AuthorityError::InvalidBinding)?,
+        authenticated.certificate_digest(),
+        authenticated.evidence_digest(),
+        intent.owner_approval_evidence_digest,
+        intent.local_owner_review_digest,
+        match disposition {
+            BirthDisposition::FirstCommitAllowed => "first commit only before original deadline",
+            BirthDisposition::ExistingCommittedAuditOnly =>
+                "exact existing committed audit; no new genesis",
+        },
+        reviewed
+    );
+    if display.len() > 512 * 1024 {
+        return Err(AuthorityError::Limit);
+    }
+    let proposal = NamespaceEnrollmentProposal {
+        core,
+        intent,
+        authenticated,
+        disposition,
+        existing,
+        reviewed,
+        display,
+    };
+    proposal.check_current()?;
+    Ok(proposal)
+}
+
+pub(crate) struct BornJournalOwner {
+    core: Arc<NamespaceCore>,
+    intent: CreationIntent,
+    path: PathBuf,
+    key: DatabaseKey,
+    intent_digest: String,
+}
+impl BornJournalOwner {
+    /// Audit continuity only. Does not clear retirement or create a writer.
+    pub(crate) fn check_current(&self) -> Result<()> {
+        self.check(false)
+    }
+    pub(crate) fn check_mutation_current(&self) -> Result<()> {
+        self.check(true)
+    }
+    fn check(&self, mutation: bool) -> Result<()> {
+        self.core.check_current()?;
+        let c = self
+            .core
+            .registry
+            .lock()
+            .map_err(|_| AuthorityError::Storage)?;
+        let tx = Transaction::new_unchecked(c.connection(), TransactionBehavior::Deferred)?;
+        let history = storage::load_exact(&tx, &self.core.namespace)?;
+        let prepared = history
+            .prepared
+            .get(&self.intent_digest)
+            .ok_or(AuthorityError::RecoveryRequired)?;
+        if prepared.intent != self.intent || !history.completed.contains_key(&self.intent_digest) {
+            return Err(AuthorityError::RecoveryRequired);
+        }
+        if mutation
+            && history
+                .exclusions
+                .iter()
+                .any(|e| e.exclusion.identity.overlaps(self.intent.identity()))
+        {
+            return Err(AuthorityError::PolicyDenied);
+        }
+        Ok(())
+    }
+}
+pub(crate) struct ReservedWitnessBirth {
+    owner: Arc<BornJournalOwner>,
+    publication: NativePublicationLease,
+    disposition: BirthDisposition,
+    existing: Option<PendingBirthCommitRecord>,
+    prepared_at_ms: u64,
+}
+pub(crate) fn reserve_birth(decision: NativeEnrollmentDecision) -> Result<ReservedWitnessBirth> {
+    let (proposal, lease) = decision.into_parts();
+    proposal.check_current()?;
+    if lease.reviewed_digest() != proposal.reviewed {
+        return Err(AuthorityError::InvalidBinding);
+    }
+    let publication = lease.publication_lease()?;
+    publication.check_current()?;
+    if publication.reviewed_digest() != proposal.reviewed
+        || publication.admitted_at_ms() > crate::now_ms()?
+    {
+        return Err(AuthorityError::InvalidBinding);
+    }
+    let core = &proposal.core;
+    let prepared_at_ms = {
+        let c = core.registry.lock().map_err(|_| AuthorityError::Storage)?;
+        core.registry_identity.check_current(c.connection())?;
+        let tx = Transaction::new_unchecked(c.connection(), TransactionBehavior::Immediate)?;
+        let history = storage::load_exact(&tx, &core.namespace)?;
+        let key = proposal.intent.digest(&core.namespace)?;
+        let prepared_at_ms = if let Some(original) = history.prepared.get(&key) {
+            if original.intent != proposal.intent {
+                return Err(AuthorityError::Conflict);
+            }
+            // Deadline-free recovery is only for a preflight authenticated valid
+            // journal, not an expired reserved/absent/empty target.
+            if matches!(proposal.disposition, BirthDisposition::FirstCommitAllowed) {
+                storage::prepare_in_transaction(&tx, &history, &proposal.intent, crate::now_ms()?)?;
+            }
+            original.prepared_at_ms
+        } else {
+            if !matches!(proposal.disposition, BirthDisposition::FirstCommitAllowed) {
+                return Err(AuthorityError::RecoveryRequired);
+            }
+            let now = crate::now_ms()?;
+            storage::prepare_in_transaction(&tx, &history, &proposal.intent, now)?;
+            now
+        };
+        publication.check_current()?;
+        core.files.check_current()?;
+        tx.commit()?;
+        core.files.sync_directories()?;
+        prepared_at_ms
+    };
+    let path = core.path_for(&proposal.intent)?;
+    let key = core.key_for(&proposal.intent)?;
+    let intent_digest = proposal.intent.digest(&core.namespace)?;
+    let owner = Arc::new(BornJournalOwner {
+        core: proposal.core,
+        intent: proposal.intent,
+        path,
+        key,
+        intent_digest,
+    });
+    let out = ReservedWitnessBirth {
+        owner,
+        publication,
+        disposition: proposal.disposition,
+        existing: proposal.existing,
+        prepared_at_ms,
+    };
+    out.check_current()?;
+    Ok(out)
+}
+impl ReservedWitnessBirth {
+    pub(crate) fn path(&self) -> &Path {
+        &self.owner.path
+    }
+    pub(crate) fn database_key(&self) -> &DatabaseKey {
+        &self.owner.key
+    }
+    pub(crate) fn namespace_digest(&self) -> &str {
+        &self.owner.intent.namespace_digest
+    }
+    pub(crate) fn intent_digest(&self) -> &str {
+        &self.owner.intent_digest
+    }
+    pub(crate) fn request(&self) -> &PendingBirthRequest {
+        &self.owner.intent.request
+    }
+    pub(crate) fn disposition(&self) -> BirthDisposition {
+        self.disposition
+    }
+    #[allow(dead_code)] // Optional strengthening for callers; original intent remains mandatory.
+    pub(crate) fn existing_commit(&self) -> Option<&PendingBirthCommitRecord> {
+        self.existing.as_ref()
+    }
+    pub(crate) fn owner(&self) -> Arc<BornJournalOwner> {
+        self.owner.clone()
+    }
+    pub(crate) fn check_current(&self) -> Result<()> {
+        self.publication.check_current()?;
+        self.owner.core.check_current()?;
+        let c = self
+            .owner
+            .core
+            .registry
+            .lock()
+            .map_err(|_| AuthorityError::Storage)?;
+        let tx = Transaction::new_unchecked(c.connection(), TransactionBehavior::Deferred)?;
+        let history = storage::load_exact(&tx, &self.owner.core.namespace)?;
+        let original = history
+            .prepared
+            .get(&self.owner.intent_digest)
+            .ok_or(AuthorityError::RecoveryRequired)?;
+        if original.intent != self.owner.intent || original.prepared_at_ms != self.prepared_at_ms {
+            return Err(AuthorityError::Conflict);
+        }
+        if matches!(self.disposition, BirthDisposition::FirstCommitAllowed) {
+            self.request()
+                .require_initial_commit_time(crate::now_ms()?)?;
+            if history
+                .exclusions
+                .iter()
+                .any(|e| e.exclusion.identity.overlaps(self.owner.intent.identity()))
+            {
+                return Err(AuthorityError::PolicyDenied);
+            }
+        }
+        Ok(())
+    }
+    pub(crate) fn initial_commit_record(&self, now: u64) -> Result<PendingBirthCommitRecord> {
+        self.check_current()?;
+        if !matches!(self.disposition, BirthDisposition::FirstCommitAllowed) {
+            return Err(AuthorityError::Permission);
+        }
+        self.request().require_initial_commit_time(now)?;
+        if now < self.prepared_at_ms {
+            return Err(AuthorityError::InvalidBinding);
+        }
+        let i = &self.owner.intent;
+        Ok(PendingBirthCommitRecord {
+            version: 1,
+            request: i.request.clone(),
+            request_digest: i.request_digest.clone(),
+            authenticated_owner_certificate_digest: i
+                .request
+                .policy
+                .owner_certificate_digest
+                .clone(),
+            owner_approval_evidence_digest: i.owner_approval_evidence_digest.clone(),
+            local_target_digest: i.local_target_digest.clone(),
+            local_owner_review_digest: i.local_owner_review_digest.clone(),
+            committed_at_ms: now,
+        })
+    }
+    pub(crate) fn validate_authenticated_record(
+        &self,
+        record: &PendingBirthCommitRecord,
+    ) -> Result<()> {
+        validate_record_against_intent(&self.owner.core, &self.owner.intent, record)?;
+        if record.committed_at_ms < self.prepared_at_ms {
+            return Err(AuthorityError::CorruptHistory);
+        }
+        if self
+            .existing
+            .as_ref()
+            .is_some_and(|original| original != record)
+        {
+            return Err(AuthorityError::Conflict);
+        }
+        Ok(())
+    }
+    pub(crate) fn complete_authenticated(
+        &mut self,
+        policy: &crate::AccountPolicy,
+        record: &PendingBirthCommitRecord,
+        actual: &EncryptedConnection,
+    ) -> Result<()> {
+        self.check_current()?;
+        self.validate_authenticated_record(record)?;
+        if policy != &self.request().policy || actual.connection().path() != self.path().to_str() {
+            return Err(AuthorityError::InvalidBinding);
+        }
+        let identity = actual.database_identity()?;
+        identity.check_current(actual.connection())?;
+        let journal_identity = actual_journal_identity(self.path())?;
+        let evidence = CompletionEvidence {
+            version: 1,
+            intent_digest: self.intent_digest().into(),
+            journal_identity,
+            journal_genesis_commitment: digest(
+                "wholepact:witness-locator-journal-genesis:v1",
+                &(policy, record),
+            )?,
+            birth_commit: record.clone(),
+        };
+        let c = self
+            .owner
+            .core
+            .registry
+            .lock()
+            .map_err(|_| AuthorityError::Storage)?;
+        let tx = Transaction::new_unchecked(c.connection(), TransactionBehavior::Immediate)?;
+        let history = storage::load_exact(&tx, &self.owner.core.namespace)?;
+        storage::complete_in_transaction(
+            &tx,
+            &history,
+            &self.owner.intent,
+            &evidence,
+            crate::now_ms()?,
+        )?;
+        self.publication.check_current()?;
+        self.owner.core.files.check_current()?;
+        identity.check_current(actual.connection())?;
+        tx.commit()?;
+        self.owner.core.files.sync_directories()?;
+        self.existing = Some(record.clone());
+        Ok(())
+    }
+}
+fn validate_record_against_intent(
+    core: &NamespaceCore,
+    intent: &CreationIntent,
+    record: &PendingBirthCommitRecord,
+) -> Result<()> {
+    record.validate()?;
+    intent.validate(&core.namespace)?;
+    if record.request != intent.request
+        || record.request_digest != intent.request_digest
+        || record.local_target_digest != intent.local_target_digest
+        || record.local_owner_review_digest != intent.local_owner_review_digest
+        || record.owner_approval_evidence_digest != intent.owner_approval_evidence_digest
+    {
+        return Err(AuthorityError::CorruptHistory);
+    }
+    Ok(())
+}
+fn actual_journal_identity(path: &Path) -> Result<JournalIdentity> {
+    let m = fs::symlink_metadata(path).map_err(|_| AuthorityError::Storage)?;
+    if !m.is_file() || m.nlink() != 1 || m.mode() & 0o7777 != 0o600 {
+        return Err(AuthorityError::Storage);
+    }
+    Ok(JournalIdentity {
+        device: m.dev(),
+        inode: m.ino(),
+        owner_uid: m.uid(),
+    })
+}
+
+fn check_inventory(files: &InstallationFiles, history: &LocatorHistory) -> Result<()> {
+    let mut bytes = 0u64;
+    let mut count = 0usize;
+    for e in fs::read_dir(files.root_path()).map_err(|_| AuthorityError::Storage)? {
+        let e = e.map_err(|_| AuthorityError::Storage)?;
+        let name = e.file_name();
+        let name = name.to_str().ok_or(AuthorityError::CorruptHistory)?;
+        if name == "journals" {
+            continue;
+        }
+        if ![
+            "installation.id",
+            "registry.wp",
+            "registry.wp-wal",
+            "registry.wp-shm",
+            "registry.wp-journal",
+        ]
+        .contains(&name)
+        {
+            return Err(AuthorityError::RecoveryRequired);
+        }
+        inventory_file(&e.path(), &mut bytes, &mut count)?;
+    }
+    let names: BTreeSet<String> = history
+        .prepared
+        .values()
+        .map(|p| {
+            p.intent
+                .derived_child
+                .trim_start_matches("journals/")
+                .to_owned()
+        })
+        .collect();
+    for e in
+        fs::read_dir(files.root_path().join("journals")).map_err(|_| AuthorityError::Storage)?
+    {
+        let e = e.map_err(|_| AuthorityError::Storage)?;
+        let name = e.file_name();
+        let name = name.to_str().ok_or(AuthorityError::CorruptHistory)?;
+        let main = name
+            .strip_suffix("-wal")
+            .or_else(|| name.strip_suffix("-shm"))
+            .or_else(|| name.strip_suffix("-journal"))
+            .unwrap_or(name);
+        if !names.contains(main) {
+            return Err(AuthorityError::RecoveryRequired);
+        }
+        if main != name && !files.root_path().join("journals").join(main).is_file() {
+            return Err(AuthorityError::CorruptHistory);
+        }
+        inventory_file(&e.path(), &mut bytes, &mut count)?;
+    }
+    for (key, completed) in &history.completed {
+        let prepared = history
+            .prepared
+            .get(key)
+            .ok_or(AuthorityError::CorruptHistory)?;
+        let identity =
+            actual_journal_identity(&files.root_path().join(&prepared.intent.derived_child))?;
+        if identity != completed.evidence.journal_identity {
+            return Err(AuthorityError::RecoveryRequired);
+        }
+    }
+    Ok(())
+}
+fn inventory_file(path: &Path, bytes: &mut u64, count: &mut usize) -> Result<()> {
+    let m = fs::symlink_metadata(path).map_err(|_| AuthorityError::Storage)?;
+    if !m.is_file() || m.nlink() != 1 || m.mode() & 0o7777 != 0o600 {
+        return Err(AuthorityError::Storage);
+    }
+    *bytes = bytes.checked_add(m.len()).ok_or(AuthorityError::Limit)?;
+    *count += 1;
+    if *bytes > 512 * 1024 * 1024 || *count > 4 * MAX_INTENTS + 5 {
+        return Err(AuthorityError::Limit);
+    }
+    Ok(())
+}
+
+/// Inert exact inventory for a future encrypted backup consumer. This does not
+/// activate a restored registry or supply credentials. Destination/export still
+/// needs its separately scoped native consent and full checkpoint protocol.
+#[derive(Serialize)]
+#[allow(dead_code)] // Audit inventory only; no backup/restore activation API yet.
+pub(crate) struct NamespaceBackupInventory {
+    namespace: WitnessNamespaceBinding,
+    files: Vec<String>,
+    requires_independent_storage_key: bool,
+    restored_must_remain_quarantined: bool,
+}
+impl BornJournalOwner {
+    #[allow(dead_code)] // Future consented encrypted-backup consumer.
+    pub(crate) fn backup_inventory(&self) -> Result<NamespaceBackupInventory> {
+        self.check_current()?;
+        let c = self
+            .core
+            .registry
+            .lock()
+            .map_err(|_| AuthorityError::Storage)?;
+        let tx = Transaction::new_unchecked(c.connection(), TransactionBehavior::Deferred)?;
+        let history = storage::load_exact(&tx, &self.core.namespace)?;
+        check_inventory(&self.core.files, &history)?;
+        let mut files = Vec::new();
+        for directory in [
+            self.core.files.root_path().to_path_buf(),
+            self.core.files.root_path().join("journals"),
+        ] {
+            for e in fs::read_dir(directory).map_err(|_| AuthorityError::Storage)? {
+                let e = e.map_err(|_| AuthorityError::Storage)?;
+                if e.file_type()
+                    .map_err(|_| AuthorityError::Storage)?
+                    .is_file()
+                {
+                    files.push(
+                        e.path()
+                            .to_str()
+                            .ok_or(AuthorityError::InvalidBinding)?
+                            .into(),
+                    );
+                }
+            }
+        }
+        files.sort();
+        Ok(NamespaceBackupInventory {
+            namespace: self.core.namespace.clone(),
+            files,
+            requires_independent_storage_key: true,
+            restored_must_remain_quarantined: true,
+        })
+    }
+}
+
+fn require_new_target_absent(path: &Path) -> Result<()> {
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        let mut candidate = path.as_os_str().to_os_string();
+        candidate.push(suffix);
+        match fs::symlink_metadata(PathBuf::from(candidate)) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => return Err(AuthorityError::RecoveryRequired),
+            Err(_) => return Err(AuthorityError::Storage),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod owner_model_tests {
+    use super::*;
+    #[test]
+    fn explicit_setup_cannot_reimport_an_existing_witness_identity() {
+        let input = NamespaceSetupInput {
+            endpoint: "127.0.0.1:1911".into(),
+            server_name: "localhost".into(),
+            witness_id: "previously-used-witness".into(),
+            pinned_server_certificate_digest: "1".repeat(64),
+            owner_certificate_digest: "2".repeat(64),
+            network_profile_id: "synthetic-network".into(),
+            storage_key_file: "/synthetic/never-read.key".into(),
+        };
+        // Reject occurs before OS-home probing, locks, key reads or randomness.
+        assert!(matches!(
+            prepare_namespace_setup(input),
+            Err(AuthorityError::RecoveryRequired)
+        ));
+    }
+    #[test]
+    fn fresh_target_preflight_preserves_unknown_files_and_sidecars() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("synthetic.wp");
+        require_new_target_absent(&target).unwrap();
+        fs::write(&target, b"preserve unknown state").unwrap();
+        assert!(require_new_target_absent(&target).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"preserve unknown state");
+        let other = directory.path().join("other.wp");
+        fs::write(directory.path().join("other.wp-wal"), b"preserve sidecar").unwrap();
+        assert!(require_new_target_absent(&other).is_err());
+    }
+    // There is intentionally no fake NativeSetupDecision/NativeEnrollmentDecision
+    // constructor or positive native acceptance fixture in this module.
+}
+
+/// Historical server opener for a fully completed canonical birth. No native
+/// enrollment or first-write fallback is possible through this read-only route.
+pub(crate) fn open_born_history(input: NamespaceOpenInput) -> Result<AuthorityJournal> {
+    let core = open_namespace(&input)?;
+    let (intent, expected_record) = {
+        let c = core.registry.lock().map_err(|_| AuthorityError::Storage)?;
+        let tx = Transaction::new_unchecked(c.connection(), TransactionBehavior::Deferred)?;
+        let history = storage::load_exact(&tx, &core.namespace)?;
+        let mut selected = history
+            .prepared
+            .values()
+            .filter(|p| p.intent.identity().account_id == input.expected_account_id);
+        let prepared = selected.next().ok_or(AuthorityError::RecoveryRequired)?;
+        if selected.next().is_some() {
+            return Err(AuthorityError::CorruptHistory);
+        }
+        let digest = prepared.intent.digest(&core.namespace)?;
+        let completed = history
+            .completed
+            .get(&digest)
+            .ok_or(AuthorityError::RecoveryRequired)?;
+        (
+            prepared.intent.clone(),
+            completed.evidence.birth_commit.clone(),
+        )
+    };
+    let path = core.path_for(&intent)?;
+    let key = core.key_for(&intent)?;
+    let intent_digest = intent.digest(&core.namespace)?;
+    let owner = Arc::new(BornJournalOwner {
+        core,
+        intent,
+        path,
+        key,
+        intent_digest,
+    });
+    owner.check_current()?;
+    AuthorityJournal::open_born_history_only(
+        owner.clone(),
+        &owner.path,
+        &owner.key,
+        &owner.intent.request.policy,
+        &expected_record,
+    )
+}
+
+#[cfg(test)]
+mod registry_preflight_tests {
+    //! Synthetic encrypted-storage negatives. They operate only in a fresh
+    //! tempfile, never the fixed OS-user installation, and mint no native owner.
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::os::unix::fs::PermissionsExt;
+    use wholepact_storage_security::create_encrypted;
+
+    enum Damage {
+        WrongApplication,
+        UnknownVersion,
+        WrongSchema,
+        MissingNamespace,
+    }
+    struct Fixture {
+        _directory_lock: fs::File,
+        directory: tempfile::TempDir,
+        _quiescent_connection: EncryptedConnection,
+        key: DatabaseKey,
+        path: PathBuf,
+    }
+    fn fixture(damage: Damage) -> Fixture {
+        let directory = tempfile::tempdir().unwrap();
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let lock = fs::File::open(directory.path()).unwrap();
+        lock.try_lock().unwrap();
+        let path = directory.path().join("synthetic-registry.wp");
+        let key = DatabaseKey::from_bytes([0x41; 32]); // SYNTHETIC, never a real credential.
+        let connection = create_encrypted(&path, &key).unwrap();
+        let c = connection.connection();
+        c.execute_batch(match damage {
+            Damage::WrongSchema => "CREATE TABLE wrong_application_table(v INTEGER)",
+            _ => storage::SCHEMA,
+        })
+        .unwrap();
+        c.pragma_update(
+            None,
+            "application_id",
+            match damage {
+                Damage::WrongApplication => 0x57504157,
+                _ => storage::LOCATOR_APPLICATION_ID,
+            },
+        )
+        .unwrap();
+        c.pragma_update(
+            None,
+            "user_version",
+            match damage {
+                Damage::UnknownVersion => 99,
+                _ => storage::LOCATOR_SCHEMA_VERSION,
+            },
+        )
+        .unwrap();
+        if !matches!(damage, Damage::WrongSchema) {
+            c.execute("INSERT INTO witness_locator_quarantine VALUES(1,0)", [])
+                .unwrap();
+        }
+        // Intentionally no namespace row. Wrong app/version/schema must be
+        // rejected earlier; the matching-schema case must report unknown state.
+        Fixture {
+            _directory_lock: lock,
+            directory,
+            _quiescent_connection: connection,
+            key,
+            path,
+        }
+    }
+    fn source_bytes(directory: &Path) -> BTreeMap<String, Vec<u8>> {
+        let mut result = BTreeMap::new();
+        let mut total = 0usize;
+        for entry in fs::read_dir(directory).unwrap() {
+            let entry = entry.unwrap();
+            let metadata = fs::symlink_metadata(entry.path()).unwrap();
+            assert!(metadata.is_file());
+            assert!(metadata.len() <= 4 * 1024 * 1024);
+            let bytes = fs::read(entry.path()).unwrap();
+            total += bytes.len();
+            assert!(total <= 16 * 1024 * 1024);
+            result.insert(entry.file_name().into_string().unwrap(), bytes);
+        }
+        assert!(!result.is_empty());
+        result
+    }
+    #[test]
+    fn wrong_application_version_or_schema_cannot_touch_original_file_set() {
+        for damage in [
+            Damage::WrongApplication,
+            Damage::UnknownVersion,
+            Damage::WrongSchema,
+        ] {
+            let fixture = fixture(damage);
+            let before = source_bytes(fixture.directory.path());
+            assert!(read_registry_preflight(&fixture.path, &fixture.key).is_err());
+            assert_eq!(source_bytes(fixture.directory.path()), before);
+        }
+    }
+    #[test]
+    fn missing_namespace_is_unknown_and_does_not_initialize_or_repair_source() {
+        let fixture = fixture(Damage::MissingNamespace);
+        let before = source_bytes(fixture.directory.path());
+        assert!(matches!(
+            read_registry_preflight(&fixture.path, &fixture.key),
+            Err(AuthorityError::RecoveryRequired)
+        ));
+        assert_eq!(source_bytes(fixture.directory.path()), before);
+        let count: u64 = fixture
+            ._quiescent_connection
+            .connection()
+            .query_row("SELECT count(*) FROM witness_locator_namespace", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+    #[test]
+    fn wrong_key_never_falls_back_to_writable_or_empty_namespace() {
+        let fixture = fixture(Damage::MissingNamespace);
+        let before = source_bytes(fixture.directory.path());
+        let wrong = DatabaseKey::from_bytes([0x42; 32]); // SYNTHETIC negative key only.
+        assert!(read_registry_preflight(&fixture.path, &wrong).is_err());
+        assert_eq!(source_bytes(fixture.directory.path()), before);
+    }
+}

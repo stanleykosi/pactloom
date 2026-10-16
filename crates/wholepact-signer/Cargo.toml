@@ -1,0 +1,67 @@
+[package]
+name = "wholepact-signer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Isolated fail-closed signer companion and opt-in synthetic process qualification"
+
+[features]
+# Read-only maintained FVK consumer; enables no native/key-use issuer.
+manual-inventory-client = ["wholepact-wallet/protected-sync"]
+pending-birth-owner-signing = ["dep:tempfile", "native-ui", "authority-signing", "dep:rustls", "wholepact-authority/pending-birth-foundation"]
+default = []
+# Disabled native offline composition; does not install issuer or runtime route.
+offline-review-foundation = ["dep:wholepact-offline-bridge"]
+synthetic-qualification = ["wholepact-signer-origin/synthetic-qualification", "wholepact-wallet/synthetic-qualification", "wholepact-protocol/synthetic-qualification", "wholepact-authority/synthetic-qualification",  "wholepact-chain/synthetic-qualification", "dep:zcash_client_backend", "dep:zcash_primitives", "dep:incrementalmerkletree", "dep:prost", "dep:axum", "dep:tempfile", "dep:tokio", "tokio/rt-multi-thread", "tokio/macros"]
+checkpoint-review = ["dep:wholepact-proof-jobs"]
+native-ui = ["wholepact-signer-origin/native-ui", "dep:eframe", "dep:winit"]
+wallet-review = ["wholepact-wallet/wallet"]
+authority-signing = ["wholepact-signer-origin/authority-signing", "wholepact-chain/submission-dispatch","wholepact-protocol/transaction-checkpoint","wallet-review", "wholepact-wallet/protected-sync", "wholepact-protocol/proving", "dep:tokio"]
+
+[dependencies]
+ring = "=0.17.14"
+rustls = { version = "=0.23.45", optional = true, default-features = false, features = ["std", "ring"] }
+wholepact-offline-bridge = { path = "../wholepact-offline-bridge", optional = true }
+wholepact-chain = { path = "../wholepact-chain", default-features = false }
+zcash_client_backend = { version = "=0.25.0-pre.1", optional = true, default-features = false, features = ["orchard"] }
+zcash_primitives = { version = "=0.31.0-pre.1", optional = true, default-features = false, features = ["std"] }
+incrementalmerkletree = { version = "=0.9.0", optional = true }
+prost = { version = "=0.14.4", optional = true }
+axum = { version = "0.8", optional = true, features = ["http2"] }
+tempfile = { version = "3", optional = true }
+wholepact-proof-jobs = { path = "../wholepact-proof-jobs", optional = true }
+wholepact-protocol = { path = "../wholepact-protocol", features = ["construction"] }
+wholepact-store = { path = "../wholepact-store" }
+wholepact-core = { path = "../wholepact-core" }
+wholepact-storage-security = { path = "../wholepact-storage-security" }
+wholepact-wallet = { path = "../wholepact-wallet", default-features = false }
+wholepact-authority = { path = "../wholepact-authority" }
+tokio = { version = "1", optional = true, features = ["rt", "time", "net"] }
+zcash_protocol = "=0.11.0-pre.0"
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+time = { version = "0.3", features = ["formatting"] }
+sha2.workspace = true
+hex.workspace = true
+argon2 = { version = "=0.5.3", features = ["zeroize"] }
+chacha20poly1305 = "=0.11.0"
+zeroize = { version = "=1.9.1", features = ["derive"] }
+getrandom = "=0.4.3"
+subtle = "=2.6.1"
+libc = "0.2"
+bip39 = { version = "=2.2.0", features = ["zeroize"] }
+rpassword = "=7.5.4"
+pczt = { version = "=0.10.0-pre.1", default-features = false, features = ["std", "orchard", "signer"] }
+orchard = { version = "=0.16.0", default-features = false, features = ["std", "zeroize"] }
+rand = { version = "=0.10.0", features = ["sys_rng"] }
+
+# Deliberately omit accesskit, inspection, links, persistence and x11.
+[target.'cfg(target_os = "linux")'.dependencies]
+wholepact-signer-origin = { path = "../wholepact-signer-origin" }
+eframe = { version = "=0.36.2", optional = true, default-features = false, features = ["default_fonts", "glow", "wayland"] }
+winit = { version = "=0.30.13", optional = true, default-features = false, features = ["wayland", "rwh_06"] }
+
+[dev-dependencies]
+tempfile = "3"

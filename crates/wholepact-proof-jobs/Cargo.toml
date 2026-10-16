@@ -1,0 +1,25 @@
+[package]
+name = "wholepact-proof-jobs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Encrypted local-only candidate checkpoints and recoverable bounded proof jobs"
+
+[dependencies]
+wholepact-protocol = { path = "../wholepact-protocol", features = ["proving"] }
+wholepact-storage-security = { path = "../wholepact-storage-security" }
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+thiserror.workspace = true
+zeroize = { version = "=1.9.1", features = ["derive"] }
+orchard = { version = "=0.16.0", default-features = false, features = ["std"] }
+pczt = { version = "=0.10.0-pre.1", default-features = false, features = ["std", "orchard"] }
+
+[dev-dependencies]
+tempfile = "3"
+wholepact-core = { path = "../wholepact-core" }
+wholepact-protocol = { path = "../wholepact-protocol", features = ["construction", "synthetic-qualification"] }
+wholepact-wallet = { path = "../wholepact-wallet", features = ["synthetic-qualification"] }

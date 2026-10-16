@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "agreement_id": "agreement-example-01",
+  "obligation_id": "obligation-example-01",
+  "revision": 1,
+  "purpose": "Synthetic cooperative procurement example. No real funds.",
+  "organizer_identity": "organizer-example",
+  "network_profile_id": "zcash-testnet-unqualified",
+  "recipients": [
+    {
+      "recipient_id": "recipient-example",
+      "address": "uregtestsyntheticaddressnotforfunds",
+      "amount": "1000000000",
+      "memo": null,
+      "instruction_provenance": "Synthetic fixture. Not address- or ownership-verified."
+    }
+  ],
+  "funding_policy": {"kind": "exact", "target": "1000000000"},
+  "fee_policy": {"kind": "pro_rata"},
+  "privacy_profile": {"mode": "local_only", "proving_operator": null, "dedicated_accounts_required": true},
+  "coordination_deadline": null,
+  "confirmation_policy": {"required_confirmations": 10},
+  "extensions": []
+}

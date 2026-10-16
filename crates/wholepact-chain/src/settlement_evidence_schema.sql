@@ -1,0 +1,2 @@
+CREATE TABLE settlement_evidence(sequence INTEGER PRIMARY KEY, evidence_id TEXT NOT NULL UNIQUE CHECK(length(evidence_id)=64), operation TEXT NOT NULL REFERENCES submission_intents(operation), payload TEXT NOT NULL CHECK(length(payload)<=262144)) STRICT;
+CREATE TABLE settlement_deliveries(evidence_id TEXT NOT NULL REFERENCES settlement_evidence(evidence_id), destination TEXT NOT NULL CHECK(length(destination) BETWEEN 1 AND 128), acknowledged INTEGER NOT NULL DEFAULT 0 CHECK(acknowledged IN (0,1)), PRIMARY KEY(evidence_id,destination)) STRICT;

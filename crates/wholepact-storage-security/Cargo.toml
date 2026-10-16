@@ -1,0 +1,16 @@
+[package]
+name = "wholepact-storage-security"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Fail-closed keyed SQLCipher connection boundary for private Wholepact storage"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+rusqlite = { workspace = true, features = ["backup"] }
+thiserror.workspace = true
+zeroize = { version = "=1.9.1", features = ["derive"] }
+libc = "0.2"
+tempfile = "3"

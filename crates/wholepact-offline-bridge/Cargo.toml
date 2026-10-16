@@ -1,0 +1,29 @@
+[package]
+name = "wholepact-offline-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Proposed workspace member only. No issuer feature or credential setup path.
+[features]
+default = []
+synthetic-selected-effects-tests = ["wholepact-protocol/synthetic-qualification"]
+offline-control-import = ["wholepact-transport/offline-admission-export"]
+
+[dependencies]
+wholepact-authority = { path = "../wholepact-authority" }
+wholepact-transport = { path = "../wholepact-transport", default-features = false, features = ["offline-admission-export"] }
+wholepact-core = { path = "../wholepact-core" }
+serde.workspace = true
+serde_json.workspace = true
+
+# Staged source only; no workspace or lockfile change has been made.
+wholepact-protocol = { path = "../wholepact-protocol", default-features = false, features = ["construction", "proving"] }
+sha2.workspace = true
+hex.workspace = true
+zeroize = "=1.9.1"
+
+ring = "=0.17.14"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+wholepact-signer-origin = { path = "../wholepact-signer-origin" }

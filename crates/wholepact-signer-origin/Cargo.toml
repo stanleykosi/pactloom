@@ -1,0 +1,28 @@
+[package]
+name = "wholepact-signer-origin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Installed signer process and bounded manual admission channel"
+
+[features]
+default = []
+native-ui = []
+authority-signing = []
+synthetic-qualification = []
+retirement-evidence-client = []
+
+[dependencies]
+ring = "=0.17.14"
+wholepact-core = { path = "../wholepact-core" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+sha2.workspace = true
+hex.workspace = true
+getrandom = "=0.4.3"
+zeroize = "=1.9.1"
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
