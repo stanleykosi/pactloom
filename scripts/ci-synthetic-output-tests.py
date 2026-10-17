@@ -159,7 +159,7 @@ class PublicOutputTests(unittest.TestCase):
         self.assertTrue(kinds['Outcome'] <= output.OUTCOMES)
         signer=ROOT/'crates/wholepact-signer/src/native_ui/born_manual_roster_v2/synthetic_diagnostics.rs'
         labels=set(re.findall(r'=> "(Roster\w+)"',signer.read_text()))
-        self.assertEqual(len(labels),53)
+        self.assertEqual(len(labels),65)
         self.assertTrue(labels <= output.BOUNDARIES)
         for label in labels | kinds['Phase']:
             self.assertTrue(output.safe_failure(self.failure(label+':Begin')))
@@ -184,6 +184,29 @@ class PublicOutputTests(unittest.TestCase):
         self.assertEqual(len(set(combined)),24)
         self.assertNotIn(expected,[row[0] for row in output.TESTS.values()])
         self.assertNotEqual(expected,output.STORAGE_BOOTSTRAP_TEST)
+
+    def test_completion_owner_and_witness_diagnostics_are_exact_closed_kinds(self):
+        native=set("NativeOwnerRevoked NativeOwnerExpired NativeOwnerParent NativeOwnerRetirementParent".split())
+        roster=set("RosterOwnerEpoch RosterWorkOpenCommonContext RosterWorkPrepareCompletionWitness RosterWorkPrepareReenteredConstruction RosterWorkCommitCompletionPair RosterWorkCommitCompletionWitness RosterWorkCommitCompletionClaim RosterWorkCommitReenteredConstruction RosterCompletionWitnessCheck RosterCompletionWitnessHistory RosterCompletionWitnessHistoryBinding RosterCompletionWitnessTransport".split())
+        base=ROOT/'crates/wholepact-signer/src/native_ui'
+        source=(base/'authority.rs').read_text()
+        self.assertEqual(set(re.findall(r'=> "(NativeOwner\w+)"',source)),native)
+        source=(base/'born_manual_roster_v2/synthetic_diagnostics.rs').read_text()
+        actual=set(re.findall(r'=> "(Roster\w+)"',source))
+        self.assertTrue(roster <= actual)
+        self.assertEqual(len(native|roster),16)
+        self.assertEqual({x for x in output.BOUNDARIES if x.startswith('NativeOwner')},native)
+        self.assertTrue(native|roster <= output.BOUNDARIES)
+        for label in native|roster:
+            self.assertTrue(output.safe_failure(self.failure(label+':Begin')))
+            self.assertFalse(output.safe_failure(self.failure(label+':Begin private-data')))
+        for label in roster:
+            for kind in ['Complete','SignerLocked','SignerUncertain','SignerReviewMismatch']:
+                self.assertTrue(output.safe_failure(self.failure(label+':'+kind)))
+        for value in ['NativeOwnerUnknown:Begin','RosterCompletionWitnessUnknown:SignerLocked',
+                      'RosterWorkCommitCompletionUnknown:SignerUncertain',
+                      'NativeOwnerExpired:private-data','RosterOwnerEpoch:Begin:private-data']:
+            self.assertFalse(output.safe_failure(self.failure(value)))
 
     def test_completion_diagnostics_preserve_exact_closed_layers(self):
         expected=set("CompletionOriginal CompletionPairApproval CompletionPairBegin CompletionPairFinish CompletionReentryRequest CompletionRequestApproval CompletionReentryBegin CompletionReentryFinish CompletionConstructionBegin CompletionConstructionFinish".split())

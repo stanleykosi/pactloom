@@ -1451,7 +1451,7 @@ impl BornManualRosterUiV2 {
     fn owner(&self, epoch: u64) -> Result<Arc<PendingAccountNativeAuthority>> {
         let owner = self.owner.as_ref().ok_or(Error::Locked)?;
         owner.check_current()?;
-        if owner.focus_epoch() != epoch {
+        if roster_clear_if!(owner.focus_epoch() != epoch, OwnerEpoch) {
             return Err(Error::ReviewMismatch);
         }
         Ok(owner.clone())

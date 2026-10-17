@@ -12,6 +12,42 @@ use std::{
     time::{Duration, Instant},
 };
 
+// Denial-only diagnostics preserve the original predicate/result and clock
+// evaluation. No mutable authority, scope or timing is changed by reporting.
+macro_rules! native_owner_denied {
+    ($reason:ident, $condition:expr) => {{
+        let denied = $condition;
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        if denied {
+            synthetic_owner_diagnostics::report(synthetic_owner_diagnostics::Reason::$reason);
+        }
+        denied
+    }};
+}
+macro_rules! native_owner_checked {
+    ($reason:ident, $operation:expr) => {{
+        let result = $operation;
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        if result.is_err() {
+            synthetic_owner_diagnostics::report(synthetic_owner_diagnostics::Reason::$reason);
+        }
+        result
+    }};
+}
+#[cfg(feature = "synthetic-born-joined-qualification")]
+mod synthetic_owner_diagnostics {
+    pub(super) enum Reason { Revoked, Expired, Parent, RetirementParent }
+    pub(super) fn report(reason: Reason) {
+        let label = match reason {
+            Reason::Revoked => "NativeOwnerRevoked",
+            Reason::Expired => "NativeOwnerExpired",
+            Reason::Parent => "NativeOwnerParent",
+            Reason::RetirementParent => "NativeOwnerRetirementParent",
+        };
+        eprintln!("\n[JOINED_DIAGNOSTIC {} Begin]", label);
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct NativeAuthorityBinding {
     instance: Arc<AtomicBool>,
@@ -100,17 +136,18 @@ impl NativeAuthorityBinding {
     }
 
     pub(crate) fn check_current(&self) -> Result<()> {
-        if !self.instance.load(Ordering::Acquire)
-            || self
-                .expires_at
-                .is_some_and(|deadline| Instant::now() >= deadline)
+        if native_owner_denied!(Revoked, !self.instance.load(Ordering::Acquire))
+            || native_owner_denied!(
+                Expired,
+                self.expires_at.is_some_and(|deadline| Instant::now() >= deadline)
+            )
         {
             self.revoke_construction_transport();
             return Err(Error::Locked);
         }
         #[cfg(feature = "authority-signing")]
         if let Some(parent) = &self.retirement_parent {
-            parent.check_connected()?;
+            native_owner_checked!(RetirementParent, parent.check_connected())?;
         }
         Ok(())
     }
@@ -207,7 +244,7 @@ impl PendingAccountNativeAuthority {
     pub(crate) fn check_current(&self) -> Result<()> {
         self.native.check_current()?;
         if let Some(channel) = &self.parent_channel {
-            if channel.check_connected().is_err() {
+            if native_owner_denied!(Parent, channel.check_connected().is_err()) {
                 self.native.binding.revoke_construction_transport();
                 return Err(Error::Locked);
             }

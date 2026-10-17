@@ -4,6 +4,20 @@ use super::{Error, Output, Result, Step, Work};
 
 #[derive(Clone, Copy)]
 pub(super) enum Operation {
+    CompletionWitnessCheck,
+    CompletionWitnessHistory,
+    CompletionWitnessHistoryBinding,
+    CompletionWitnessTransport,
+
+    OpenCommonContext,
+    PrepareCompletionWitness,
+    PrepareReenteredConstruction,
+    CommitCompletionPair,
+    CommitCompletionWitness,
+    CommitCompletionClaim,
+    CommitReenteredConstruction,
+    OwnerEpoch,
+
     Open,
     PrepareIntent,
     PrepareReentry,
@@ -61,6 +75,16 @@ pub(super) enum Operation {
 impl Operation {
     pub(super) fn from_work(work: &Work) -> Self {
         match work {
+            Work::OpenCommonContext(..) => Self::OpenCommonContext,
+            Work::PrepareCompletionWitness(..) => Self::PrepareCompletionWitness,
+            Work::PrepareReenteredConstruction(..) => Self::PrepareReenteredConstruction,
+            Work::CommitCompletion(_, step, _) => match step {
+                Step::Pair(_) => Self::CommitCompletionPair,
+                Step::CompletionWitness(_) => Self::CommitCompletionWitness,
+                Step::CompletionClaim(_) => Self::CommitCompletionClaim,
+                Step::ReenteredConstruction(_) => Self::CommitReenteredConstruction,
+                _ => Self::Other,
+            },
             Work::Open(..) => Self::Open,
             Work::PrepareIntent(..) => Self::PrepareIntent,
             Work::PrepareReentry(..) => Self::PrepareReentry,
@@ -112,6 +136,19 @@ impl Operation {
     }
     fn label(self) -> &'static str {
         match self {
+            Self::CompletionWitnessCheck => "RosterCompletionWitnessCheck",
+            Self::CompletionWitnessHistory => "RosterCompletionWitnessHistory",
+            Self::CompletionWitnessHistoryBinding => "RosterCompletionWitnessHistoryBinding",
+            Self::CompletionWitnessTransport => "RosterCompletionWitnessTransport",
+
+            Self::OpenCommonContext => "RosterWorkOpenCommonContext",
+            Self::PrepareCompletionWitness => "RosterWorkPrepareCompletionWitness",
+            Self::PrepareReenteredConstruction => "RosterWorkPrepareReenteredConstruction",
+            Self::CommitCompletionPair => "RosterWorkCommitCompletionPair",
+            Self::CommitCompletionWitness => "RosterWorkCommitCompletionWitness",
+            Self::CommitCompletionClaim => "RosterWorkCommitCompletionClaim",
+            Self::CommitReenteredConstruction => "RosterWorkCommitReenteredConstruction",
+            Self::OwnerEpoch => "RosterOwnerEpoch",
             Self::Open => "RosterWorkOpen",
             Self::PrepareIntent => "RosterWorkPrepareIntent",
             Self::PrepareReentry => "RosterWorkPrepareReentry",

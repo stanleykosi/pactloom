@@ -37,6 +37,24 @@ use wholepact_signer_origin::common_context_reentry_v1::{
 use wholepact_signer_origin::manual_roster_construction_v3::ManualRosterConstructionContributionEvidenceV3;
 use zeroize::Zeroizing;
 
+// Diagnostics classify only the result of each existing operation, evaluated
+// once. No additional source check, clock sample, or authority is introduced.
+macro_rules! completion_witness_trace {
+    ($phase:ident, $operation:expr) => {{
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        super::synthetic_diagnostics::report_begin(
+            super::synthetic_diagnostics::Operation::$phase,
+        );
+        let result = $operation;
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        super::synthetic_diagnostics::report_result(
+            super::synthetic_diagnostics::Operation::$phase,
+            &result,
+        );
+        result
+    }};
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Setup {
@@ -399,21 +417,29 @@ impl PreparedCommonContextWitnessV1 {
         d: NativeDecision,
         owner: &PendingAccountNativeAuthority,
     ) -> Result<PreparedCommonContextClaimV1> {
-        self.check(owner)?;
+        completion_witness_trace!(CompletionWitnessCheck, self.check(owner))?;
         decision(&d, &self.native, &self.digest)?;
-        let history = self
-            .client
-            .reconcile_history_checked(|| {
-                self.source
-                    .check_peer(&self.peer, owner)
-                    .map_err(|_| wholepact_authority::AuthorityError::Permission)
-            })
-            .map_err(|_| Error::Uncertain)?;
-        self.check(owner)?;
-        self.source
-            .require_current_handoff_history(&history, &self.pending)?;
-        let prepared = self.prepare_transport(history)?;
-        self.check(owner)?;
+        let history = completion_witness_trace!(
+            CompletionWitnessHistory,
+            self.client
+                .reconcile_history_checked(|| {
+                    self.source
+                        .check_peer(&self.peer, owner)
+                        .map_err(|_| wholepact_authority::AuthorityError::Permission)
+                })
+                .map_err(|_| Error::Uncertain)
+        )?;
+        completion_witness_trace!(CompletionWitnessCheck, self.check(owner))?;
+        completion_witness_trace!(
+            CompletionWitnessHistoryBinding,
+            self.source
+                .require_current_handoff_history(&history, &self.pending)
+        )?;
+        let prepared = completion_witness_trace!(
+            CompletionWitnessTransport,
+            self.prepare_transport(history)
+        )?;
+        completion_witness_trace!(CompletionWitnessCheck, self.check(owner))?;
         let digest = canonical(
             "wholepact:native-common-context-exact-channel-claim:v1",
             &(
