@@ -484,6 +484,33 @@ impl PreparedRosterInventoryV2 {
         )?;
         inventory_checked!(connected(&self.stream, &self.peer), InventoryPeerConnection)
     }
+    /// Waiting for or classifying an authenticated command releases no data and
+    /// changes no retained state. Keep the live owner, original clocks and peer
+    /// checks here; `send` still performs the complete original source/request
+    /// validation immediately before acquiring its publication lease. Never use
+    /// this receive-only check as authority for a response or source handoff.
+    /// A source-file mutation while idle is detected at that next full check,
+    /// before any response, rather than by rereading it before the bounded wait.
+    fn check_receive_liveness(&self, owner: &PendingAccountNativeAuthority) -> Result<()> {
+        if inventory_denied_if!(
+            owner.native().binding() != self.native,
+            InventoryNativeBinding,
+            ReviewMismatch
+        ) {
+            return Err(Error::ReviewMismatch);
+        }
+        self.remaining()?;
+        require_observed_session_time(
+            self.observed_session.observed_at_ms(),
+            self.observed_session.observation_age(),
+            now()?,
+            self.observed_session.receipt().expires_at_ms,
+        )?;
+        inventory_checked!(owner.check_current(), InventorySourceOwner)?;
+        inventory_checked!(self.native.check_current(), InventorySourceNative)?;
+        inventory_checked!(self.peer.check_current(), InventorySourcePeer)?;
+        inventory_checked!(connected(&self.stream, &self.peer), InventoryPeerConnection)
+    }
     pub(crate) fn approve_and_serve(
         mut self,
         decision: NativeDecision,
@@ -529,7 +556,7 @@ impl PreparedRosterInventoryV2 {
         drop(key);
         let mut challenges = BTreeSet::new();
         for _ in 0..128 {
-            self.check(owner)?;
+            self.check_receive_liveness(owner)?;
             let frame = crate::ipc::read_frame_with_deadline(
                 &self.stream,
                 &self.peer.peer,
@@ -540,8 +567,8 @@ impl PreparedRosterInventoryV2 {
             }
             let command: ManualAdmissionCommand =
                 serde_json::from_slice(&frame).map_err(|_| Error::InvalidData)?;
-            self.check(owner)?;
-            let response = match command {
+            self.check_receive_liveness(owner)?;
+            let (response, completed_challenge) = match command {
                 ManualAdmissionCommand::CheckCurrent {
                     lease_id: requested,
                     evidence_digest,
@@ -550,15 +577,18 @@ impl PreparedRosterInventoryV2 {
                     if requested != lease_id
                         || evidence_digest != digest
                         || !is_hash(&challenge_nonce)
-                        || !challenges.insert(challenge_nonce.clone())
+                        || challenges.contains(&challenge_nonce)
                     {
                         return Err(Error::Authentication);
                     }
-                    ManualAdmissionResponse::Current {
-                        lease_id: lease_id.clone(),
-                        evidence_digest: digest.clone(),
+                    (
+                        ManualAdmissionResponse::Current {
+                            lease_id: lease_id.clone(),
+                            evidence_digest: digest.clone(),
+                            challenge_nonce: challenge_nonce.clone(),
+                        },
                         challenge_nonce,
-                    }
+                    )
                 }
                 ManualAdmissionCommand::Finish {} => {
                     let bytes = Zeroizing::new(
@@ -571,7 +601,11 @@ impl PreparedRosterInventoryV2 {
             };
             let bytes =
                 Zeroizing::new(serde_json::to_vec(&response).map_err(|_| Error::InvalidData)?);
-            self.send(&bytes, owner)?;
+            retain_challenge_after_send(
+                self.send(&bytes, owner),
+                &mut challenges,
+                completed_challenge,
+            )?;
         }
         Err(Error::Unavailable)
     }
@@ -616,6 +650,19 @@ impl PreparedRosterInventoryV2 {
         }
         Ok(())
     }
+}
+
+/// Protocol bookkeeping only, not an admission or native owner. The actual
+/// caller evaluates the fully checked send before passing its result here.
+/// An uncertain/failed send never records a nonce as successfully completed.
+fn retain_challenge_after_send(
+    sent: Result<()>,
+    challenges: &mut BTreeSet<String>,
+    challenge: String,
+) -> Result<()> {
+    sent?;
+    let _ = challenges.insert(challenge);
+    Ok(())
 }
 fn require_observed_session_time(
     observed_at_ms: u64,
@@ -677,6 +724,23 @@ fn connected(stream: &UnixStream, peer: &AuthenticatedPeer) -> Result<()> {
 mod tests {
 
     use super::*;
+    #[test]
+    fn challenge_bookkeeping_requires_successful_checked_send_first() {
+        // Only protocol bookkeeping is exercised. These results cannot issue a
+        // native owner, authorize a send, or retry a failed serving operation.
+        for error in [Error::Authentication, Error::ReviewMismatch, Error::Uncertain] {
+            let mut challenges = BTreeSet::from(["previous".to_owned()]);
+            assert!(retain_challenge_after_send(
+                Err(error),
+                &mut challenges,
+                "next".to_owned(),
+            ).is_err());
+            assert_eq!(challenges, BTreeSet::from(["previous".to_owned()]));
+        }
+        let mut challenges = BTreeSet::new();
+        retain_challenge_after_send(Ok(()), &mut challenges, "completed".to_owned()).unwrap();
+        assert_eq!(challenges, BTreeSet::from(["completed".to_owned()]));
+    }
     #[test]
     fn fresh_session_observation_rejects_wall_rollback_even_with_unexpired_request() {
         // Original request may start at1000, but the authentic session read was
