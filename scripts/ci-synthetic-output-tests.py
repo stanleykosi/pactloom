@@ -272,6 +272,41 @@ class PublicOutputTests(unittest.TestCase):
             self.assertNotEqual(name,output.STORAGE_BOOTSTRAP_TEST)
             self.assertNotIn(name,output.SIGNER_VALIDATION_TESTS+output.SIGNER_BOOKKEEPING_TESTS)
 
+    def test_witness_diagnostics_use_exact_closed_authority_projection(self):
+        source=(ROOT/'crates/wholepact-authority/src/native_witness_owner/window/synthetic_plan_diagnostics_v1.rs').read_text()
+        labels=set(re.findall(r'Self::(WitnessPlan\w+) => "WitnessPlan\w+"',source))
+        outcomes=set(re.findall(r'"(Authority\w+)"',source))
+        self.assertEqual(len(labels),15)
+        self.assertEqual(len(outcomes),26)
+        self.assertEqual(labels,{x for x in output.BOUNDARIES if x.startswith('WitnessPlan')})
+        self.assertEqual(outcomes,{x for x in output.OUTCOMES if x.startswith('Authority')})
+        kinds=dict(re.findall(r'AuthorityError::(\w+) => "(Authority\w+)"',source))
+        host=(ROOT/'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3_qualification/safe_diagnostics_v1.rs').read_text()
+        self.assertEqual(len(kinds),23)
+        for variant,label in kinds.items():
+            self.assertEqual(label,'Authority'+variant)
+            self.assertIn('E::'+variant+' => Outcome::'+label,host)
+        for boundary in labels|{'ObservedPlanWitnessOrigin'}:
+            for outcome in outcomes:
+                self.assertTrue(output.safe_failure(self.failure(boundary+':'+outcome)))
+        for value in ['WitnessPlanUnknown:AuthorityPermission','WitnessPlanInput:262145',
+                      'WitnessPlanInput:AuthorityInputWithinBound private',
+                      'WitnessPlanWorkerPrepare:AuthorityUnknown',
+                      'ObservedPlanWitnessOrigin:AuthorityStorage:private']:
+            self.assertFalse(output.safe_failure(self.failure(value)))
+
+    def test_authority_projection_preflight_is_one_exact_inert_case(self):
+        expected=output.PREFIX+'safe_diagnostics_v1::authority_error_projection_preserves_only_closed_variants'
+        self.assertEqual(output.AUTHORITY_PROJECTION_TESTS,(expected,))
+        source=ROOT/'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3_qualification/safe_diagnostics_v1.rs'
+        self.assertEqual(source.read_text().count('fn '+expected.rsplit('::',1)[1]+'()'),1)
+        combined=output.PURE_TESTS+output.POLICY_ENVELOPE_TESTS+output.PROMPT_RENDERING_TESTS+output.LOWER_ERROR_TESTS+output.DENIAL_TESTS+output.ROLLING_TRANSCRIPT_TESTS+output.AUTHORITY_PROJECTION_TESTS
+        self.assertEqual(len(combined),36)
+        self.assertEqual(len(set(combined)),36)
+        self.assertNotIn(expected,[row[0] for row in output.TESTS.values()])
+        self.assertNotEqual(expected,output.STORAGE_BOOTSTRAP_TEST)
+        self.assertNotIn(expected,output.SIGNER_VALIDATION_TESTS+output.SIGNER_BOOKKEEPING_TESTS)
+
     def test_pure_preflight_is_exactly_the_eighteen_reviewed_cases(self):
         base=ROOT/'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3_qualification'
         expected=[]

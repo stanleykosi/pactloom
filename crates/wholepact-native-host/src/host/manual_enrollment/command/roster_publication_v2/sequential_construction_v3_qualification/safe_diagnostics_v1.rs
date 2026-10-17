@@ -14,6 +14,7 @@ macro_rules! labels {
     };
 }
 labels! { Boundary {
+    ObservedPlanWitnessOrigin, WitnessPlanInput, WitnessPlanSelect, WitnessPlanInputUtf8, WitnessPlanPublicRefusal, WitnessPlanQualifiedEntry, WitnessPlanLaunch, WitnessPlanDrain, WitnessPlanPending, WitnessPlanApprove, WitnessPlanReceipt, WitnessPlanReceiptDigest, WitnessPlanExpectedParse, WitnessPlanDigestMatch, WitnessPlanWorkerPrepare, WitnessPlanWorkerApprove,
     CandidateRetainCurrent, CandidateRetainRequest, CandidateRetainBegin, CandidateRetainFinish, CandidateLeaseOrigin, CandidateRequestRemaining,
     InventoryLeaseOrigin, InventoryRequestSource, InventoryRequestProvenance, InventoryRequestBinding, InventoryRequestRemaining,
     InventorySourceOwner, InventorySourceNative, InventorySourceDeadline, InventorySourcePeer, InventorySourceOwnerBinding, InventorySourcePeerBinding, InventorySourceRetiredGrant, InventorySourceProcess, InventorySourceRetained, InventorySourceAdmission, InventorySourceHistory, InventorySourceWitness, InventoryWindowWallRollback, InventoryWindowWallExpired, InventoryWindowMonotonicExpired, InventoryNativeBinding, InventorySourceRequest, InventoryPeerConnection, InventoryObservedMissing, InventoryObservedLifetimeInvalid, InventoryObservedWallRollback, InventoryObservedSessionExpired, InventoryObservedAgeExpired,
@@ -23,6 +24,7 @@ labels! { Boundary {
     FullOriginalPolicy, RetainedPredecessor, RetainedMaterial, RetainedEconomics, RetainedInvocation, RetainedRuntime, RetainedProvider, RetainedTls, RetainedWitness, RetainedPolicyRead, RetainedPolicyMatch, RetainedSelectionFiles, ContinuedPredecessor, ContinuedObservation, ContinuedOriginal, ContinuedWait, ContinuedPrepare, Bootstrap, Session, PublicRefusal, PaymentReceiver, AgreementInput, AgreementNative, WitnessSetup, WitnessOrigin, SignerStart, BirthExport, BirthRead, BirthEnroll, BirthHistory, BirthAcknowledge, BirthDistinct, SinglePrepare, SingleOpen, SinglePair, SingleSubmit, SingleExport, SingleWitness, SinglePublicationPrepare, SingleHistory, SinglePublicationOpen, SinglePublicationPair, SingleFinish, SingleClose, RosterPrepare, RosterOpen, RosterPair, RosterSubmit, RosterExport, RosterWitness, RosterPublicationPrepare, RosterHistory, RosterPublicationOpen, RosterPublicationPair, RosterFinish, RosterClose, MetadataCheck, FinancialRefusal, EndInvariant, SignerCreate, SignerExportBirth, SignerAcknowledge, SignerOpenSingleIntent, SignerPollSingleIntent, SignerExportSingle, SignerOpenSinglePublication, SignerPollSinglePublication, SignerCloseSinglePublication, SignerOpenRosterIntent, SignerPollRosterIntent, SignerExportRoster, SignerOpenRosterPublication, SignerPollRosterPublication, SignerCloseRosterPublication, SignerOpenContinuationIntent, SignerPollContinuationIntent, SignerOpenContinuedPublication, SignerPollContinuedPublication, SignerCloseContinuedPublication, SignerExportOriginalFullPlan, SignerOpenCommonContextRead, SignerPollCommonContextRead, SignerParkCommonContextCompletion, SignerPeerMetadata, SignerNativeEntry, SignerEndpoint, SignerProvider, SignerDeadline, SignerSingleController, ObservedInputs, ObservedRetainedPredecessor, ObservedAssemble, ObservedCandidateReview, ObservedPlanExport, ObservedPlanSign, ObservedPlanRead, ObservedPlanAuthenticate, ObservedPlanWitness, ObservedContinuation, ObservedOwnerSplit, ObservedReadPrepare, ObservedReadHistory, ObservedReadOpen, ObservedReadPair, ObservedReadFinish, ObservedReadPark, ObservedBarrier, ObservedProviderDrain, ConstructedPredecessor, ConstructedDisclosure, ConstructedWitnessOriginal, ConstructedWitnessGrant, ConstructedWitnessScope, ConstructedPendingFile, ConstructedPendingReview, ConstructedSignerOpen, ConstructedConsume, ConstructedSignerPark, ConstructedServerSeal, ConstructedCheckpoint, ConstructedSavedOriginal, ConstructedInvariant, ConstructedProviderDrain, SignerOpenOriginalCompletion, SignerPollOriginalCompletion, ProvedConstructionDrain, ProvedOriginalJob, ProvedOriginalCorrelation, ProvedHostPublic, ProvedWitnessKey, ProvedNamedOpen, ProvedNamedPair, ProvedNamedStatus, ProvedNamedRecords, ProvedNamedProfile, ProvedNativePins, ProvedCarrierPrepare, ProvedCarrierExport, ProvedCarrierRecover, ProvedCarrierRetained, ProvedCarrierInvariant, SignerOpenOriginalNamed, SignerPollOriginalNamed, SignerRetainOriginalProfile, SignerNamedEnrollmentExport, SignerNamedInstalledMetadata, SignerNamedVerifierArm, SignerNamedVerifierStart, SignerNamedVerifierPoll, SignerNamedAssertionExport, SignerNamedOriginalImport, SignerNamedOriginalSubmit, SignerNamedOriginalSign, SignerNamedHostServing, FullPaymentPredecessor, FullEnrollmentExport, FullEnrollmentInstall, FullArtifactsInstall, FullInstalledMetadata, FullVerifierRequest, FullAssertion, FullOriginalImport, FullAdmission, FullSignatureReturn, FullHistory, FullReturnIntake, FullMerge, FullCurrentDispatch, FullRecipientReceipt, SingleAccountUnlock, SingleRetainedRead, SingleAcquireState, SingleAttemptedSource, SingleAttemptsRead, SingleRetainedReopen, SinglePreacquire, SingleReference, SingleAccountId, SingleAudit, SingleEndpointCreate, SingleDirectoryOpen, SingleIpcBind, SingleEndpointPublish, SingleWorkOpen, SingleWorkPrepareIntent, SingleWorkPrepareSignature, SingleWorkPrepareExport, SingleWorkPrepareReentry, SingleWorkPrepareWitness, SingleWorkPrepareAcquire, SingleWorkPrepareActivate, SingleWorkPreparePublication, SingleWorkPrepareServe, SingleWorkCommitPair, SingleWorkCommitRetain, SingleWorkCommitSignature, SingleWorkCommitExport, SingleWorkCommitReentry, SingleWorkCommitWitness, SingleWorkCommitAcquire, SingleWorkCommitActivate, SingleWorkCommitAdmission, SingleWorkCommitPublication, SingleWorkCommitServe, SingleWorkRetryAcquire, SingleWorkRetryActivate, SingleWorkRetryAdmission, SingleWorkOther, SingleWorkAdoptOutput
 } }
 labels! { Outcome {
+    AuthorityInputEmpty, AuthorityInputWithinBound, AuthorityInputOverBound, AuthorityInvalidBinding, AuthorityPermission, AuthorityStaleHead, AuthorityConflict, AuthorityInactive, AuthorityRecoveryRequired, AuthorityExpired, AuthorityPolicyDenied, AuthorityBudgetExceeded, AuthorityInputReserved, AuthorityObligationReserved, AuthorityLimit, AuthorityStorage, AuthorityCorruptHistory, AuthorityPermanentStopUnavailable, AuthorityOfflineHistoryUnsupported, AuthorityConstructionHistoryUnsupported, AuthorityUnsupportedVersion, AuthorityAuthentication, AuthorityUncertain, AuthorityResolutionUnavailable, AuthoritySessionRequired, AuthoritySessionPending,
     OriginPermanentStopUnavailable, OriginRetirementEvidenceUnavailable, OriginSignerOriginUnavailable, OriginPeerLifetimeUnavailable, OriginAuthentication, OriginBinding, OriginConflict, OriginPermission, OriginInvalidData, OriginLocked, OriginCrypto, OriginIpc, OriginLimit, OriginIoTimedOut, OriginIoWouldBlock, OriginIoUnexpectedEof, OriginIoBrokenPipe, OriginIoConnectionReset, OriginIoConnectionAborted, OriginIoNotConnected, OriginIoInterrupted, OriginIoPermissionDenied, OriginIoOther,
     ImportFreshOwnerRequired, ImportBinding, ImportIncomplete, ImportStorage, SyncAccessDenied, SyncInvalidRequest, SyncInterrupted, SyncReconciliationRequired, SyncInvalidResponse, SyncResourceLimit, SyncNoCurrentObservation, WalletStorage, WalletAccountScope, WalletAccountMismatch, WalletIncompleteSync, WalletUnsupportedProfile, WalletChainMismatch, WalletInsufficientFunds, WalletInvalidRequest, WalletMissingWitness, WalletInvalidNote, WalletScan, WalletTransport, ChainInvalidConfiguration, ChainWrongNetwork, ChainUnsupportedProxyConfiguration, ChainWrongBranch, ChainStaleChain, ChainContradictoryChain, ChainTimeout, ChainTransportUnavailable, ChainObservationInterrupted, ChainMissingAncestryEvidence, ChainNotObserved, ChainResourceLimit, ChainMalformedEvidence, ChainUnsupportedCapability, ChainBackendFailure, ChainClockUnavailable, ChainIdempotencyConflict, ChainJournalFailure, ChainSubmissionNotAuthorized, ChainSubmissionExpiryMargin, ChainObligationConflict, ChainSubmissionOutcomeUnrecorded, ChainSubmissionRetentionUncertain, RecoveryAccessDenied, RecoveryUnsupportedAccountComponents, RecoveryIncompleteScan, RecoveryKnownFundsRemain, RecoveryAdditionalEvidenceRequired,
     Begin, Complete, HostPlatform, HostTerminal, HostPermission, HostLocked, HostInvalid, HostAuthentication, HostStorage, HostQuarantined, HostUnsupported, HostReceipt, HostRecoverySemantic, HostRecoveryBackupUnsupported, HostRecoveryFinancialUnsupported, HostCompleteOriginRecoveryUnavailable, HostHistoricalExportIncomplete, HostGenerationArchiveIncomplete, SignerUnavailable, SignerPeerLifetimeUnavailable, SignerIo, SignerAuthentication, SignerInvalidData, SignerCrypto, SignerLocked, SignerBackupRequired, SignerRecoveryRequired, SignerAlreadyOpen, SignerReviewMismatch, SignerVerification, SignerUncertain, SignerConsentJournal, SignerStore, WorkerFailure
@@ -87,6 +89,36 @@ pub(super) fn signer_error(error: &wholepact_signer::Error) -> Outcome {
         E::Store(_) => Outcome::SignerStore,
     }
 }
+#[cfg(feature = "synthetic-born-joined-qualification")]
+pub(super) fn authority_error(error: &wholepact_authority::AuthorityError) -> Outcome {
+    use wholepact_authority::AuthorityError as E;
+    match error {
+        E::InvalidBinding => Outcome::AuthorityInvalidBinding,
+        E::Permission => Outcome::AuthorityPermission,
+        E::StaleHead => Outcome::AuthorityStaleHead,
+        E::Conflict => Outcome::AuthorityConflict,
+        E::Inactive => Outcome::AuthorityInactive,
+        E::RecoveryRequired => Outcome::AuthorityRecoveryRequired,
+        E::Expired => Outcome::AuthorityExpired,
+        E::PolicyDenied => Outcome::AuthorityPolicyDenied,
+        E::BudgetExceeded => Outcome::AuthorityBudgetExceeded,
+        E::InputReserved => Outcome::AuthorityInputReserved,
+        E::ObligationReserved => Outcome::AuthorityObligationReserved,
+        E::Limit => Outcome::AuthorityLimit,
+        E::Storage => Outcome::AuthorityStorage,
+        E::CorruptHistory => Outcome::AuthorityCorruptHistory,
+        E::PermanentStopUnavailable => Outcome::AuthorityPermanentStopUnavailable,
+        E::OfflineHistoryUnsupported => Outcome::AuthorityOfflineHistoryUnsupported,
+        E::ConstructionHistoryUnsupported => Outcome::AuthorityConstructionHistoryUnsupported,
+        E::UnsupportedVersion => Outcome::AuthorityUnsupportedVersion,
+        E::Authentication => Outcome::AuthorityAuthentication,
+        E::Uncertain => Outcome::AuthorityUncertain,
+        E::ResolutionUnavailable => Outcome::AuthorityResolutionUnavailable,
+        E::SessionRequired => Outcome::AuthoritySessionRequired,
+        E::SessionPending => Outcome::AuthoritySessionPending,
+    }
+}
+
 /// Called only with locally generated labels. Parse again before disclosing:
 /// even a spoofed marker cannot cause arbitrary transcript content to escape.
 pub(super) fn summary(transcript: &[u8]) -> String {
@@ -188,4 +220,46 @@ fn io_diagnostics_accept_only_closed_kind_and_canonical_errno() {
     ] {
         assert_eq!(summary(line.as_bytes()), "none");
     }
+}
+
+#[test]
+#[cfg(feature = "synthetic-born-joined-qualification")]
+fn authority_error_projection_preserves_only_closed_variants() {
+    use wholepact_authority::AuthorityError as E;
+    let cases = [
+        (E::InvalidBinding, "AuthorityInvalidBinding"),
+        (E::Permission, "AuthorityPermission"),
+        (E::StaleHead, "AuthorityStaleHead"),
+        (E::Conflict, "AuthorityConflict"),
+        (E::Inactive, "AuthorityInactive"),
+        (E::RecoveryRequired, "AuthorityRecoveryRequired"),
+        (E::Expired, "AuthorityExpired"),
+        (E::PolicyDenied, "AuthorityPolicyDenied"),
+        (E::BudgetExceeded, "AuthorityBudgetExceeded"),
+        (E::InputReserved, "AuthorityInputReserved"),
+        (E::ObligationReserved, "AuthorityObligationReserved"),
+        (E::Limit, "AuthorityLimit"),
+        (E::Storage, "AuthorityStorage"),
+        (E::CorruptHistory, "AuthorityCorruptHistory"),
+        (E::PermanentStopUnavailable, "AuthorityPermanentStopUnavailable"),
+        (E::OfflineHistoryUnsupported, "AuthorityOfflineHistoryUnsupported"),
+        (E::ConstructionHistoryUnsupported, "AuthorityConstructionHistoryUnsupported"),
+        (E::UnsupportedVersion, "AuthorityUnsupportedVersion"),
+        (E::Authentication, "AuthorityAuthentication"),
+        (E::Uncertain, "AuthorityUncertain"),
+        (E::ResolutionUnavailable, "AuthorityResolutionUnavailable"),
+        (E::SessionRequired, "AuthoritySessionRequired"),
+        (E::SessionPending, "AuthoritySessionPending"),
+    ];
+    for (error, expected) in cases {
+        let actual = authority_error(&error).label();
+        assert_eq!(actual, expected);
+        let valid = format!("[JOINED_DIAGNOSTIC ObservedPlanWitnessOrigin {actual}]");
+        assert_eq!(summary(valid.as_bytes()), format!("ObservedPlanWitnessOrigin:{expected}"));
+        let invalid = format!("[JOINED_DIAGNOSTIC ObservedPlanWitnessOrigin {actual} private-data]");
+        assert_eq!(summary(invalid.as_bytes()), "none");
+    }
+    assert_eq!(summary(b"[JOINED_DIAGNOSTIC WitnessPlanInput AuthorityInputOverBound]"), "WitnessPlanInput:AuthorityInputOverBound");
+    assert_eq!(summary(b"[JOINED_DIAGNOSTIC WitnessPlanInput 262145]"), "none");
+    assert_eq!(summary(b"[JOINED_DIAGNOSTIC WitnessPlanWorkerPrepare AuthorityUnsupportedVersion]"), "WitnessPlanWorkerPrepare:AuthorityUnsupportedVersion");
 }

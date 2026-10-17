@@ -4,6 +4,9 @@
 #[cfg(feature = "synthetic-qualification")]
 #[path = "window/ephemeral_fixture_v1.rs"]
 pub(super) mod ephemeral_fixture_v1;
+#[cfg(feature = "synthetic-qualification")]
+#[path = "window/synthetic_plan_diagnostics_v1.rs"]
+mod synthetic_plan_diagnostics_v1;
 use super::NativeWorkerLease;
 use super::lifecycle::{NativeOwner, ReviewClock};
 #[cfg(feature = "born-offline-witness-owner")]
@@ -883,6 +886,20 @@ fn launch_private_work(
             let Ok(work) = work_receiver.recv() else {
                 return;
             };
+            #[cfg(feature = "synthetic-qualification")]
+            let diagnostic_boundary = match &work {
+                Work::PrepareManualRosterConstructionV3 { .. } => Some(
+                    synthetic_plan_diagnostics_v1::Boundary::WitnessPlanWorkerPrepare,
+                ),
+                Work::ApproveManualRosterConstructionV3 { .. } => Some(
+                    synthetic_plan_diagnostics_v1::Boundary::WitnessPlanWorkerApprove,
+                ),
+                _ => None,
+            };
+            #[cfg(feature = "synthetic-qualification")]
+            if let Some(boundary) = diagnostic_boundary {
+                synthetic_plan_diagnostics_v1::begin(boundary);
+            }
             let result = match work {
                 Work::Discard(prepared) => {
                     drop(prepared);
@@ -1122,6 +1139,10 @@ fn launch_private_work(
                     .and_then(|receipt| private_display(&receipt))
                     .map(|display| WorkResult::BackupWritten { display, clock }),
             };
+            #[cfg(feature = "synthetic-qualification")]
+            if let Some(boundary) = diagnostic_boundary {
+                synthetic_plan_diagnostics_v1::result(boundary, &result);
+            }
             let _ = send.send(result);
             if let Some(ctx) = ctx {
                 ctx.request_repaint();
@@ -1863,6 +1884,11 @@ impl Window {
                 ctx,
             )
         })();
+        #[cfg(feature = "synthetic-qualification")]
+        synthetic_plan_diagnostics_v1::result(
+            synthetic_plan_diagnostics_v1::Boundary::WitnessPlanLaunch,
+            &launched,
+        );
         self.accept_launch(launched);
     }
     fn prepare_construction_transport_grant_v1_from_primary(&mut self, ctx: &egui::Context) {

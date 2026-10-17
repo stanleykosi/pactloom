@@ -119,34 +119,53 @@ impl EphemeralNativeWitnessV1 {
         account_id: &str,
         signed_export: &[u8],
     ) -> Result<String> {
-        self.select_original_signed_form(account_id, signed_export)?;
+        use super::super::synthetic_plan_diagnostics_v1::{self as diagnostic, Boundary as B};
+        diagnostic::input_size(signed_export);
+        diagnostic::run(B::WitnessPlanSelect, || {
+            self.select_original_signed_form(account_id, signed_export)
+        })?;
         self.window.input.signed_manual_roster_construction_v3_json = Zeroizing::new(
-            std::str::from_utf8(signed_export)
-                .map_err(|_| AuthorityError::InvalidBinding)?
-                .into(),
+            diagnostic::run(B::WitnessPlanInputUtf8, || {
+                std::str::from_utf8(signed_export).map_err(|_| AuthorityError::InvalidBinding)
+            })?
+            .into(),
         );
-        self.require_public_v3_refusal(
-            "Authenticate signed V3 non-signing construction plan for review",
-        )?;
-        self.click_qualified_entry(QualifiedEntry::ConstructionPlan)?;
-        self.drain()?;
-        if !matches!(
-            self.window.pending.as_ref().map(|p| &p.prepared.proposal),
-            Some(Proposal::ManualRosterConstructionV3(_))
-        ) {
-            return Err(AuthorityError::Permission);
-        }
-        self.approve_exact()?;
-        let receipt = self.completed_native_receipt()?;
-        let actual = receipt
-            .get("approval_digest")
-            .and_then(serde_json::Value::as_str)
-            .ok_or(AuthorityError::CorruptHistory)?;
+        diagnostic::run(B::WitnessPlanPublicRefusal, || {
+            self.require_public_v3_refusal(
+                "Authenticate signed V3 non-signing construction plan for review",
+            )
+        })?;
+        diagnostic::run(B::WitnessPlanQualifiedEntry, || {
+            self.click_qualified_entry(QualifiedEntry::ConstructionPlan)
+        })?;
+        diagnostic::run(B::WitnessPlanDrain, || self.drain())?;
+        diagnostic::run(B::WitnessPlanPending, || {
+            if !matches!(
+                self.window.pending.as_ref().map(|p| &p.prepared.proposal),
+                Some(Proposal::ManualRosterConstructionV3(_))
+            ) {
+                return Err(AuthorityError::Permission);
+            }
+            Ok(())
+        })?;
+        diagnostic::run(B::WitnessPlanApprove, || self.approve_exact())?;
+        let receipt = diagnostic::run(B::WitnessPlanReceipt, || self.completed_native_receipt())?;
+        let actual = diagnostic::run(B::WitnessPlanReceiptDigest, || {
+            receipt
+                .get("approval_digest")
+                .and_then(serde_json::Value::as_str)
+                .ok_or(AuthorityError::CorruptHistory)
+        })?;
         let expected: crate::manual_roster_construction_v3::ManualRosterConstructionOwnerSignatureV3 =
-            serde_json::from_slice(signed_export).map_err(|_| AuthorityError::InvalidBinding)?;
-        if actual != expected.approval.digest_for(&expected.extension)? {
-            return Err(AuthorityError::CorruptHistory);
-        }
+            diagnostic::run(B::WitnessPlanExpectedParse, || {
+                serde_json::from_slice(signed_export).map_err(|_| AuthorityError::InvalidBinding)
+            })?;
+        diagnostic::run(B::WitnessPlanDigestMatch, || {
+            if actual != expected.approval.digest_for(&expected.extension)? {
+                return Err(AuthorityError::CorruptHistory);
+            }
+            Ok(())
+        })?;
         Ok(actual.into())
     }
 

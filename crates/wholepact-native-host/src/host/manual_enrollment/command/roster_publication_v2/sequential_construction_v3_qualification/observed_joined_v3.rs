@@ -250,7 +250,13 @@ fn observe_two_inner<'host>(
                 zeroize::Zeroizing::new(crate::files::read_private(&signed_file, 2 * 1024 * 1024)?);
             let actual = witness
                 .review_original_construction_plan_v3(&owner.account_id, &actual_bytes)
-                .map_err(|_| stage("independent exact original full-plan witness review"))?;
+                .map_err(|error| {
+                    diagnostic::emit(
+                        B::ObservedPlanWitnessOrigin,
+                        diagnostic::authority_error(&error),
+                    );
+                    stage("independent exact original full-plan witness review")
+                })?;
             if actual != verified_digest {
                 return Err(Error::Authentication);
             }
