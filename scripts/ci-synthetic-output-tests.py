@@ -13,6 +13,9 @@ ROOT=pathlib.Path(__file__).resolve().parent.parent
 spec=importlib.util.spec_from_file_location('ci_output', ROOT/'scripts/ci-synthetic-output.py')
 output=importlib.util.module_from_spec(spec)
 spec.loader.exec_module(output)
+build_spec=importlib.util.spec_from_file_location('ci_build_errors', ROOT/'scripts/ci-synthetic-build-errors.py')
+build_errors=importlib.util.module_from_spec(build_spec)
+build_spec.loader.exec_module(build_errors)
 
 class PublicOutputTests(unittest.TestCase):
     def record(self):
@@ -384,6 +387,82 @@ class PublicOutputTests(unittest.TestCase):
         for inner in ['wholepact-born-manual-ipc-','wholepact-born-stop-','.tmp']:
             path='/tmp/wpc.aaaaaa/wp-pty-bbbbbb/'+inner+'cccccc/requests-'+'0'*24+'.sock'
             self.assertLess(len(path.encode()),108)
+
+class PublicCompilerOutputTests(unittest.TestCase):
+    source='crates/wholepact-signer/src/account/birth/enrollment/roster_v2/inventory/candidate.rs'
+    def diagnostic(self, **span_changes):
+        span={'file_name':self.source,'is_primary':True,'line_start':63,'line_end':66,
+              'text':[{'text':'private source contents never printed'}],
+              'label':'private compiler label'}
+        span.update(span_changes)
+        return {'reason':'compiler-message','message':{'level':'error','code':{'code':'E0433','explanation':'private explanation'},
+                'message':'private diagnostic','rendered':'private rendered text','spans':[span]}}
+
+    def project(self, row):
+        return build_errors.project(row,frozenset((self.source,)),ROOT)
+
+    def test_compiler_projection_only_public_code_path_and_lines(self):
+        expected=[{'code':'E0433','source':self.source,'line_start':63,'line_end':66}]
+        self.assertEqual(self.project(self.diagnostic()),expected)
+        self.assertEqual(self.project(self.diagnostic(file_name=str(ROOT/self.source))),expected)
+        self.assertNotIn('private',json.dumps(expected))
+
+    def test_compiler_projection_never_emits_untracked_or_private_paths(self):
+        for name in ['/tmp/private-wallet.rs','crates/unknown/src/private.rs',
+                     'crates/wholepact-signer/../private.rs',self.source+'\nprivate',
+                     'https://example.invalid/private.rs']:
+            item=self.project(self.diagnostic(file_name=name))
+            self.assertEqual(item,[{'code':'E0433','source':None,'line_start':None,'line_end':None}])
+        for changes in [{'line_start':True},{'line_start':0},{'line_end':62},
+                        {'line_end':10_000_001},{'is_primary':False}]:
+            self.assertIsNone(self.project(self.diagnostic(**changes))[0]['source'])
+
+    def test_compiler_projection_handles_uncoded_errors_without_message(self):
+        for code in [None,{'code':'private'}, {'code':'E0433 private'}, {'code':123}]:
+            row=self.diagnostic(); row['message']['code']=code
+            actual=self.project(row)
+            self.assertEqual(actual[0]['code'],'Uncoded')
+            self.assertNotIn('private',json.dumps(actual))
+        for row in [None,[],{}, {'reason':'build-script-executed'},
+                    {'reason':'compiler-message','message':None}]:
+            self.assertEqual(self.project(row),[])
+        row=self.diagnostic(); row['message']['level']='warning'
+        self.assertEqual(self.project(row),[])
+
+    def test_compiler_scan_discards_oversize_physical_line_suffix(self):
+        valid=json.dumps(self.diagnostic()).encode()+b'\n'
+        with mock.patch.object(build_errors,'MAX_LINE',1024):
+            raw=b'private'+b'x'*1025+valid+valid
+            rows,truncated=build_errors.scan(io.BytesIO(raw),frozenset((self.source,)),ROOT)
+        self.assertTrue(truncated)
+        self.assertEqual(rows,self.project(self.diagnostic()))
+
+    def test_compiler_scan_caps_locations_bytes_and_deduplicates(self):
+        valid=json.dumps(self.diagnostic()).encode()+b'\n'
+        rows,truncated=build_errors.scan(io.BytesIO(valid*2),frozenset((self.source,)),ROOT)
+        self.assertEqual(len(rows),1); self.assertFalse(truncated)
+        many=b''.join(json.dumps(self.diagnostic(line_start=n,line_end=n)).encode()+b'\n' for n in range(1,30))
+        rows,truncated=build_errors.scan(io.BytesIO(many),frozenset((self.source,)),ROOT)
+        self.assertEqual(len(rows),20); self.assertTrue(truncated)
+        with mock.patch.object(build_errors,'MAX_BYTES',16):
+            rows,truncated=build_errors.scan(io.BytesIO(valid),frozenset((self.source,)),ROOT)
+        self.assertEqual(rows,[]); self.assertTrue(truncated)
+
+    def test_compiler_source_inventory_uses_only_tracked_rust_paths(self):
+        result=output.subprocess.CompletedProcess([],0,(self.source+'\0private/secret.rs\0crates/a/../secret.rs\0').encode(),b'')
+        with mock.patch.object(build_errors.subprocess,'run',return_value=result) as run:
+            self.assertEqual(build_errors.public_sources(ROOT),frozenset((self.source,)))
+        run.assert_called_once_with(['git','-C',str(ROOT),'ls-files','-z','--','crates'],capture_output=True,timeout=10,check=True)
+
+    def test_both_build_failures_keep_original_status_and_never_fallback(self):
+        shell=(ROOT/'scripts/ci-synthetic-linux.sh').read_text()
+        for phase,filename,seconds,package in [('host','build-metadata.jsonl',3600,'wholepact-native-host'),
+                                               ('signer','signer-build-metadata.jsonl',1200,'wholepact-signer')]:
+            start=f'if timeout --signal=TERM --kill-after=30s {seconds}s rustup run 1.99.0 cargo test --locked --release -p {package} --all-features --lib --no-run --message-format=json > "$build_root/{filename}"; then'
+            self.assertEqual(shell.count(start),1)
+            body=shell[shell.index(start):].split('\nfi',1)[0]
+            self.assertIn('else\n  build_status=$?\n',body)
+            self.assertIn(f'python3 -B scripts/ci-synthetic-build-errors.py "$build_root/{filename}" {phase} || true\n  exit "$build_status"',body)
 
 if __name__=='__main__':
     unittest.main()

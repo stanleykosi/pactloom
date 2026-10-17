@@ -75,7 +75,15 @@ unset link_flags
 openssl version
 sha256sum Cargo.lock
 # No project test executes during compilation; metadata contains public build data.
-timeout --signal=TERM --kill-after=30s 3600s rustup run 1.99.0 cargo test --locked --release -p wholepact-native-host --all-features --lib --no-run --message-format=json > "$build_root/build-metadata.jsonl"
+if timeout --signal=TERM --kill-after=30s 3600s rustup run 1.99.0 cargo test --locked --release -p wholepact-native-host --all-features --lib --no-run --message-format=json > "$build_root/build-metadata.jsonl"; then
+  :
+else
+  build_status=$?
+  # Only tracked public Rust locations and closed codes may escape. Projection
+  # failure never replaces the original compiler/timeout failure or resumes.
+  python3 -B scripts/ci-synthetic-build-errors.py "$build_root/build-metadata.jsonl" host || true
+  exit "$build_status"
+fi
 executable="$(python3 - "$build_root/build-metadata.jsonl" "$CARGO_TARGET_DIR" <<'PY'
 import json, pathlib, sys
 found=[]
@@ -94,7 +102,15 @@ sha256sum "$executable"
 # broad signer suite or any ignored/native tests during this separate build.
 # The unchanged 150-minute whole-job cap is authoritative and may interrupt
 # before all individual phase maxima are exhausted; they are not additive grants.
-timeout --signal=TERM --kill-after=30s 1200s rustup run 1.99.0 cargo test --locked --release -p wholepact-signer --all-features --lib --no-run --message-format=json > "$build_root/signer-build-metadata.jsonl"
+if timeout --signal=TERM --kill-after=30s 1200s rustup run 1.99.0 cargo test --locked --release -p wholepact-signer --all-features --lib --no-run --message-format=json > "$build_root/signer-build-metadata.jsonl"; then
+  :
+else
+  build_status=$?
+  # Only tracked public Rust locations and closed codes may escape. Projection
+  # failure never replaces the original compiler/timeout failure or resumes.
+  python3 -B scripts/ci-synthetic-build-errors.py "$build_root/signer-build-metadata.jsonl" signer || true
+  exit "$build_status"
+fi
 signer_executable="$(python3 - "$build_root/signer-build-metadata.jsonl" "$CARGO_TARGET_DIR" <<'PY'
 import json, pathlib, sys
 found=[]

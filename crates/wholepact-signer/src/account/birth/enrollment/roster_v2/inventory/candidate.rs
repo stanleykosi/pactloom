@@ -59,12 +59,15 @@ impl BornRosterInventorySourceV2 {
             return Err(Error::ReviewMismatch);
         }
         require_qualified_economic_destinations(&request.scope.selection.economic_intent)?;
-        inventory_checked!(
-            request
-                .remaining_ms(now()?)
-                .map_err(|_| Error::ReviewMismatch),
-            CandidateRequestRemaining
-        )?;
+        let remaining = request
+            .remaining_ms(now()?)
+            .map_err(|_| Error::ReviewMismatch);
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        super::synthetic_denial::result(
+            super::synthetic_denial::Boundary::CandidateRequestRemaining,
+            &remaining,
+        );
+        remaining?;
         Ok(())
     }
 }
