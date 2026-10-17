@@ -211,10 +211,27 @@ impl DedicatedAccount {
         Ok(FullViewingKey::from(&self.derive_spending_key()?))
     }
     pub fn account_id(&self) -> Result<String> {
+        Ok(Self::account_id_from_fvk(&self.fvk()?.to_bytes()))
+    }
+    fn account_id_from_fvk(fvk: &[u8]) -> String {
         let mut hash = Sha256::new();
         hash.update(b"wholepact:dedicated-testnet-account:legacy-zip32:v1\0");
-        hash.update(self.fvk()?.to_bytes());
-        Ok(hex::encode(hash.finalize()))
+        hash.update(fvk);
+        hex::encode(hash.finalize())
+    }
+    // Pure commitments from one actual derivation, never a caller-supplied key
+    // or a retained authority/cache. The temporary viewing bytes are zeroized.
+    #[cfg(all(
+        feature = "authority-signing",
+        feature = "native-ui",
+        target_os = "linux"
+    ))]
+    fn birth_identity_commitments(&self) -> Result<(String, String)> {
+        let fvk = Zeroizing::new(self.fvk()?.to_bytes());
+        Ok((
+            Self::account_id_from_fvk(fvk.as_slice()),
+            hex::encode(Sha256::digest(fvk.as_slice())),
+        ))
     }
     pub fn privacy_domain(&self) -> &str {
         &self.privacy_domain

@@ -89,10 +89,30 @@ print(exe)
 PY
 )"
 sha256sum "$executable"
+# The private account/envelope regressions live in the signer lib, not the Host
+# executable. Reuse this exact release target and dependencies; do not run a
+# broad signer suite or any ignored/native tests during this separate build.
+# The unchanged 150-minute whole-job cap is authoritative and may interrupt
+# before all individual phase maxima are exhausted; they are not additive grants.
+timeout --signal=TERM --kill-after=30s 1200s rustup run 1.99.0 cargo test --locked --release -p wholepact-signer --all-features --lib --no-run --message-format=json > "$build_root/signer-build-metadata.jsonl"
+signer_executable="$(python3 - "$build_root/signer-build-metadata.jsonl" "$CARGO_TARGET_DIR" <<'PY'
+import json, pathlib, sys
+found=[]
+for line in pathlib.Path(sys.argv[1]).read_text().splitlines():
+    row=json.loads(line)
+    if row.get('reason')=='compiler-artifact' and row.get('target',{}).get('name')=='wholepact_signer' and row.get('profile',{}).get('test') and row.get('executable'):
+        found.append(pathlib.Path(row['executable']).resolve(strict=True))
+assert len(set(found))==1
+exe=found[0]; assert exe.is_file() and exe.is_relative_to(pathlib.Path(sys.argv[2]).resolve(strict=True))
+print(exe)
+PY
+)"
+sha256sum "$signer_executable"
 # All runtime output is bounded and allowlisted by this script; never tee raw PTY,
 # test panics, private paths, wallets, collector files or process environments.
 export TMPDIR="$runtime_root"
 python3 -B scripts/ci-synthetic-output-tests.py
+python3 -B scripts/ci-synthetic-output.py "$signer_executable" signer-validation
 python3 -B scripts/ci-synthetic-output.py "$executable" pure
 python3 -B scripts/ci-synthetic-output.py "$executable" storage-bootstrap
 python3 -B scripts/ci-synthetic-output.py "$executable" initial

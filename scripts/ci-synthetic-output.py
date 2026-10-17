@@ -51,6 +51,12 @@ PROMPT_RENDERING_TESTS = tuple(PREFIX + name for name in (
 LOWER_ERROR_TESTS = ('host::synthetic_roster_trace_v1::lower_error_projection_preserves_only_closed_kinds',)
 DENIAL_TESTS = ('host::synthetic_roster_trace_v1::denial_projection_preserves_single_evaluation_and_short_circuit',)
 STORAGE_BOOTSTRAP_TEST = 'recovery_generation::layered::tests::native_layered_current_eight_nine_parent_provenance_is_exact_and_not_relabelable'
+SIGNER_VALIDATION_TESTS = (
+    'account::birth::retired_historical_tests::birth_identity_one_derivation_preserves_both_original_commitments',
+    'account::birth::active::tests::borrowed_original_plaintext_matches_complete_decoder_and_refuses_substitution',
+    'account::birth::active::tests::borrowed_original_is_exact_vault_scoped_and_checks_fresh_ciphertexts',
+    'account::birth::active::tests::borrowed_original_cannot_be_issued_for_mismatched_held_origin',
+)
 MARKER = 'WHOLEPACT_SYNTHETIC_PUBLIC_OUTCOME_V1='
 CORE = re.compile(r'\[JOINED_CORE_POLICY inherited_limit=Zero collector=(File|Pipe|Unknown) process_dumpability=Unchanged crash_copy_absence_verified=false\]')
 OPTION_INT = r'(?:None|Some\((?:0|[1-9][0-9]{0,9})\))'
@@ -168,6 +174,26 @@ def run_pure(executable):
             raise RuntimeError('exact pure test failed; raw output withheld')
     print('CI_SYNTHETIC_PURE passed=25 raw_output_discarded=true',flush=True)
 
+def run_signer_validation(executable):
+    assert resource.getrlimit(resource.RLIMIT_CORE)[0] == 0
+    for name in SIGNER_VALIDATION_TESTS:
+        flags=['--exact',name,'--test-threads=1']
+        try:
+            listed=subprocess.run([executable,*flags,'--list'],capture_output=True,timeout=30,check=True)
+            if not exact_listing(listed.stdout.decode(),name) or listed.stderr:
+                raise ValueError('exact signer validation test not uniquely registered')
+            # Actual maintained BIP39/ZIP32 and encrypted temporary-file checks,
+            # not inert models. No native authority, IPC or payment owner. Raw
+            # output stays private; this size check is post-capture, not a claim
+            # of an incremental memory cap. Each fixed case has its own bound.
+            result=subprocess.run([executable,*flags],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=120)
+            if result.returncode!=0 or len(result.stdout)>1024*1024:
+                raise RuntimeError('exact signer validation regression failed')
+        except Exception:
+            print('CI_SYNTHETIC_SIGNER_VALIDATION failed_test='+name+' raw_output_withheld=true',flush=True)
+            raise
+    print('CI_SYNTHETIC_SIGNER_VALIDATION passed=4 native_payment_verified=false raw_output_discarded=true',flush=True)
+
 def run_storage_bootstrap(executable):
     assert resource.getrlimit(resource.RLIMIT_CORE)[0] == 0
     flags=['--exact',STORAGE_BOOTSTRAP_TEST,'--test-threads=1']
@@ -246,10 +272,11 @@ def run(executable, phase):
 
 if __name__=='__main__':
     try:
-        assert len(sys.argv)==3 and sys.argv[2] in {*TESTS,'pure','storage-bootstrap'}
+        assert len(sys.argv)==3 and sys.argv[2] in {*TESTS,'pure','storage-bootstrap','signer-validation'}
         exe=pathlib.Path(sys.argv[1]).resolve(strict=True)
         assert exe.is_file() and exe.is_relative_to(pathlib.Path(os.environ['CARGO_TARGET_DIR']).resolve(strict=True))
         if sys.argv[2]=='pure': run_pure(str(exe))
+        elif sys.argv[2]=='signer-validation': run_signer_validation(str(exe))
         elif sys.argv[2]=='storage-bootstrap': run_storage_bootstrap(str(exe))
         else: run(str(exe),sys.argv[2])
     except Exception:

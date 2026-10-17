@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Pure public parser/selection tests. No child, socket, key or wallet is created."""
 import importlib.util
+import contextlib
+import io
 import json
 import pathlib
 import re
 import unittest
+from unittest import mock
 
 ROOT=pathlib.Path(__file__).resolve().parent.parent
 spec=importlib.util.spec_from_file_location('ci_output', ROOT/'scripts/ci-synthetic-output.py')
@@ -273,6 +276,76 @@ class PublicOutputTests(unittest.TestCase):
         self.assertNotIn(name,output.PURE_TESTS)
         path=ROOT/'crates/wholepact-native-host/src/recovery_generation/layered/tests.rs'
         self.assertEqual(path.read_text().count('fn '+name.rsplit('::',1)[1]+'()'),1)
+
+    def test_signer_validation_is_four_exact_private_crypto_cases(self):
+        names=(
+            'account::birth::retired_historical_tests::birth_identity_one_derivation_preserves_both_original_commitments',
+            'account::birth::active::tests::borrowed_original_plaintext_matches_complete_decoder_and_refuses_substitution',
+            'account::birth::active::tests::borrowed_original_is_exact_vault_scoped_and_checks_fresh_ciphertexts',
+            'account::birth::active::tests::borrowed_original_cannot_be_issued_for_mismatched_held_origin',
+        )
+        self.assertEqual(output.SIGNER_VALIDATION_TESTS,names)
+        root=ROOT/'crates/wholepact-signer/src'
+        self.assertIn('mod birth;', (root/'account.rs').read_text())
+        birth=(root/'account/birth.rs').read_text()
+        self.assertIn('mod active;',birth)
+        self.assertIn('mod retired_historical_tests {',birth)
+        active=(root/'account/birth/active.rs').read_text()
+        self.assertIn('mod tests {',active)
+        for name in names:
+            source=birth if 'retired_historical_tests' in name else active
+            self.assertEqual(len(re.findall(r'#\[test\]\s+fn '+name.rsplit('::',1)[1]+r'\(',source)),1)
+            self.assertNotIn(name,output.PURE_TESTS+output.POLICY_ENVELOPE_TESTS+output.PROMPT_RENDERING_TESTS+output.LOWER_ERROR_TESTS+output.DENIAL_TESTS)
+        shell=(ROOT/'scripts/ci-synthetic-linux.sh').read_text()
+        build='timeout --signal=TERM --kill-after=30s 1200s rustup run 1.99.0 cargo test --locked --release -p wholepact-signer --all-features --lib --no-run --message-format=json'
+        self.assertEqual(shell.count(build),1)
+        self.assertIn("get('name')=='wholepact_signer'",shell)
+        selected='python3 -B scripts/ci-synthetic-output.py "$signer_executable" signer-validation'
+        self.assertEqual(shell.count(selected),1)
+        self.assertLess(shell.index(build),shell.index(selected))
+        self.assertLess(shell.index(selected),shell.index('"$executable" initial'))
+
+    def test_signer_validation_runs_only_exact_bounded_cases_and_withholds_output(self):
+        calls=[]
+        def fake_run(argv, **kwargs):
+            calls.append((argv,kwargs))
+            name=argv[2]
+            self.assertIn(name,output.SIGNER_VALIDATION_TESTS)
+            self.assertEqual(argv[:2],['/verified/signer','--exact'])
+            self.assertEqual(argv[3],'--test-threads=1')
+            if argv[-1]=='--list':
+                self.assertEqual(len(argv),5)
+                self.assertEqual(kwargs,dict(capture_output=True,timeout=30,check=True))
+                return output.subprocess.CompletedProcess(argv,0,(name+': test\n\n1 test, 0 benchmarks\n').encode(),b'')
+            self.assertEqual(len(argv),4)
+            self.assertEqual(kwargs,dict(stdout=output.subprocess.PIPE,stderr=output.subprocess.STDOUT,timeout=120))
+            return output.subprocess.CompletedProcess(argv,0,b'private synthetic output')
+        captured=io.StringIO()
+        with mock.patch.object(output.resource,'getrlimit',return_value=(0,0)), \
+             mock.patch.object(output.subprocess,'run',side_effect=fake_run), \
+             contextlib.redirect_stdout(captured):
+            output.run_signer_validation('/verified/signer')
+        self.assertEqual([argv[2] for argv,_ in calls], [name for name in output.SIGNER_VALIDATION_TESTS for _ in range(2)])
+        self.assertEqual(captured.getvalue(),'CI_SYNTHETIC_SIGNER_VALIDATION passed=4 native_payment_verified=false raw_output_discarded=true\n')
+
+    def test_signer_validation_missing_failed_or_timed_out_is_not_success(self):
+        name=output.SIGNER_VALIDATION_TESTS[0]
+        listed=output.subprocess.CompletedProcess([],0,(name+': test\n\n1 test, 0 benchmarks\n').encode(),b'')
+        cases=[
+            [output.subprocess.CompletedProcess([],0,b'0 tests, 0 benchmarks\n',b'')],
+            [output.subprocess.CompletedProcess([],0,listed.stdout,b'private error')],
+            [listed,output.subprocess.CompletedProcess([],101,b'private panic')],
+            [listed,output.subprocess.CompletedProcess([],0,b'x'*(1024*1024+1))],
+            [listed,output.subprocess.TimeoutExpired('private command',120,output=b'private output')],
+        ]
+        for results in cases:
+            captured=io.StringIO()
+            with mock.patch.object(output.resource,'getrlimit',return_value=(0,0)), \
+                 mock.patch.object(output.subprocess,'run',side_effect=results) as run, \
+                 contextlib.redirect_stdout(captured):
+                with self.assertRaises(Exception): output.run_signer_validation('/verified/signer')
+            self.assertLessEqual(run.call_count,2)
+            self.assertEqual(captured.getvalue(),'CI_SYNTHETIC_SIGNER_VALIDATION failed_test='+name+' raw_output_withheld=true\n')
 
     def test_ci_temporary_socket_path_budget(self):
         # Includes this runner's extra short TMPDIR layer, not merely /tmp.

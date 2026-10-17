@@ -120,8 +120,8 @@ fn review_digest(
     )
 }
 pub(super) fn original(account: &AccountVault) -> Result<&RetainedBornAccountOrigin> {
-    let origin = account.born_origin.as_ref().ok_or(Error::Unavailable)?;
-    origin.validate_at_rest(&account.account)?;
+    let validated = active::ValidatedOriginalAccount::for_account(account)?;
+    let origin = validated.origin();
     if account.account.restored
         || account.generation.is_some()
         || account.authority_initialized
@@ -133,7 +133,7 @@ pub(super) fn original(account: &AccountVault) -> Result<&RetainedBornAccountOri
         return Err(Error::RecoveryRequired);
     }
     require_canonical_existing_root(account.directory.root())?;
-    active::validate_enrollment_source(account)?;
+    validated.check_envelope(account)?;
     Ok(origin)
 }
 fn target_digest(account: &AccountVault) -> Result<String> {

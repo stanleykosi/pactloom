@@ -41,9 +41,10 @@ pub(crate) struct BirthIdentity {
 }
 impl BirthIdentity {
     fn derive(account: &DedicatedAccount) -> Result<Self> {
+        let (account_id, full_viewing_key_digest) = account.birth_identity_commitments()?;
         Ok(Self {
-            account_id: account.account_id()?,
-            full_viewing_key_digest: hex::encode(Sha256::digest(account.fvk()?.to_bytes())),
+            account_id,
+            full_viewing_key_digest,
             network_profile_id: NETWORK.into(),
             derivation_domain: DERIVATION_DOMAIN.into(),
             exact_derivation: account.derivation(),
@@ -655,6 +656,21 @@ impl super::PendingAccount {
 #[cfg(test)]
 mod retired_historical_tests {
     use super::*;
+    #[test]
+    fn birth_identity_one_derivation_preserves_both_original_commitments() {
+        let account = super::tests::data_account();
+        let identity = BirthIdentity::derive(&account).unwrap();
+        let fvk = account.fvk().unwrap().to_bytes();
+        let mut account_hash = Sha256::new();
+        account_hash.update(b"wholepact:dedicated-testnet-account:legacy-zip32:v1\0");
+        account_hash.update(fvk);
+        assert_eq!(identity.account_id, hex::encode(account_hash.finalize()));
+        assert_eq!(identity.account_id, account.account_id().unwrap());
+        assert_eq!(identity.full_viewing_key_digest, hex::encode(Sha256::digest(fvk)));
+        assert_eq!(identity.exact_derivation, account.derivation());
+        assert_eq!(identity.network_profile_id, NETWORK);
+        assert_eq!(identity.derivation_domain, DERIVATION_DOMAIN);
+    }
     #[test]
     fn data_only_historical_anchor_matches_actual_key_and_rejects_substitution() {
         let account = super::tests::data_account();

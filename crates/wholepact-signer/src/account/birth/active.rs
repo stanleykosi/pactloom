@@ -27,13 +27,14 @@ fn encode(
     }
     Ok(plain)
 }
-fn decode(
-    plain: &[u8],
-) -> Result<(
-    DedicatedAccount,
-    RetainedBornAccountOrigin,
-    Zeroizing<[u8; 32]>,
-)> {
+// The same strict plaintext parser is used by ordinary decoding and the
+// borrowed original checker. It does not issue an account or authority.
+struct ParsedBornPlaintext<'a> {
+    account_bytes: &'a [u8],
+    origin: RetainedBornAccountOrigin,
+    authority_key: Zeroizing<[u8; 32]>,
+}
+fn parse_plaintext(plain: &[u8]) -> Result<ParsedBornPlaintext<'_>> {
     if plain.len() < 37 || plain.len() > MAX_ACTIVE || !matches!(plain[0], 1 | 2) {
         return Err(Error::InvalidData);
     }
@@ -47,14 +48,82 @@ fn decode(
     if plain[0] != origin.anchor().envelope_version() {
         return Err(Error::InvalidData);
     }
-    let mut account = DedicatedAccount::decode(&plain[37 + n..])?;
-    origin.validate_at_rest(&account)?;
+    Ok(ParsedBornPlaintext {
+        account_bytes: &plain[37 + n..],
+        origin,
+        authority_key: key,
+    })
+}
+fn decode(
+    plain: &[u8],
+) -> Result<(
+    DedicatedAccount,
+    RetainedBornAccountOrigin,
+    Zeroizing<[u8; 32]>,
+)> {
+    let parsed = parse_plaintext(plain)?;
+    let mut account = DedicatedAccount::decode(parsed.account_bytes)?;
+    parsed.origin.validate_at_rest(&account)?;
     // An authenticated origin is historical provenance, never an enrollment capability.
     account.born_authority_pending = true;
     account.generated_instance = None;
     account.activation = None;
-    Ok((account, origin, key))
+    Ok((account, parsed.origin, parsed.authority_key))
 }
+
+/// A call-local proof of pure historical validation for these exact immutable
+/// objects. No native permission, file freshness, journal state or clock is
+/// cached. It cannot be cloned, deserialized or manufactured from public data.
+pub(super) struct ValidatedOriginalAccount<'a> {
+    account: &'a AccountVault,
+    origin: &'a RetainedBornAccountOrigin,
+}
+impl<'a> ValidatedOriginalAccount<'a> {
+    pub(super) fn for_account(account: &'a AccountVault) -> Result<Self> {
+        let origin = account.born_origin.as_ref().ok_or(Error::Unavailable)?;
+        origin.validate_at_rest(&account.account)?;
+        Ok(Self { account, origin })
+    }
+    pub(super) fn origin(&self) -> &'a RetainedBornAccountOrigin {
+        self.origin
+    }
+    fn require_exact_plaintext(&self, plain: &[u8]) -> Result<()> {
+        let parsed = parse_plaintext(plain)?;
+        // DedicatedAccount's complete persisted encoding is canonical. Exact
+        // equality to this already-validated held account excludes every
+        // malformed/changed account, without reconstructing the same ZIP32 key.
+        // Origin parsing remains typed and rejects unknown/duplicate fields.
+        if parsed.account_bytes != self.account.account.encode().as_slice()
+            || !bool::from(
+                parsed
+                    .authority_key
+                    .as_slice()
+                    .ct_eq(self.account.authority_key.as_slice()),
+            )
+            || serde_json::to_vec(&parsed.origin).map_err(|_| Error::InvalidData)?
+                != serde_json::to_vec(self.origin).map_err(|_| Error::InvalidData)?
+        {
+            return Err(Error::ReviewMismatch);
+        }
+        Ok(())
+    }
+    pub(super) fn check_envelope(&self, account: &AccountVault) -> Result<()> {
+        // Equal public fields cannot transfer this proof to another actual vault.
+        if !std::ptr::eq(self.account, account) {
+            return Err(Error::ReviewMismatch);
+        }
+        let current = account.directory.read("account.wp", MAX_ACTIVE)?;
+        if current.len() < 24 || &current[..8] != MAGIC || current[8..24] != account.salt {
+            return Err(Error::InvalidData);
+        }
+        let plain = vault::decrypt(&account.encryption_key, &current[..24], &current[24..])?;
+        self.require_exact_plaintext(&plain)?;
+        // The original owner-request ciphertext is still freshly authenticated
+        // and completely compared on every call, not memoized by the proof.
+        request_matches(&account.directory, &account.encryption_key, self.origin)
+    }
+}
+
 fn request_matches(
     directory: &PrivateDirectory,
     encryption_key: &[u8; 32],
@@ -281,21 +350,7 @@ pub(super) fn validate_backup_source(account: &AccountVault) -> Result<()> {
 }
 // Envelope authentication only; the typed manual owner checks its exact expanded inventory.
 pub(super) fn validate_enrollment_source(account: &AccountVault) -> Result<()> {
-    let current = account.directory.read("account.wp", MAX_ACTIVE)?;
-    if current.len() < 24 || &current[..8] != MAGIC || current[8..24] != account.salt {
-        return Err(Error::InvalidData);
-    }
-    let plain = vault::decrypt(&account.encryption_key, &current[..24], &current[24..])?;
-    let (decoded, origin, key) = decode(&plain)?;
-    if decoded.encode().as_slice() != account.account.encode().as_slice()
-        || !bool::from(key.as_slice().ct_eq(account.authority_key.as_slice()))
-        || serde_json::to_vec(&origin).map_err(|_| Error::InvalidData)?
-            != serde_json::to_vec(account.born_origin.as_ref().ok_or(Error::Unavailable)?)
-                .map_err(|_| Error::InvalidData)?
-    {
-        return Err(Error::ReviewMismatch);
-    }
-    request_matches(&account.directory, &account.encryption_key, &origin)
+    ValidatedOriginalAccount::for_account(account)?.check_envelope(account)
 }
 pub(super) fn validate_backup_payload(
     key: &[u8; 32],
@@ -471,6 +526,169 @@ mod tests {
                 "aggregate_budget_zatoshis":100,"reserved_input_value_zatoshis":45,"last_witness_time_ms":1500,
                 "pending_writer_session":null,"active_writer_session":null}
         })).unwrap()
+    }
+    fn data_vault(root: &Path, entropy: u8) -> AccountVault {
+        // Data-only synthetic fixture; no native owner, current journal or
+        // witnessed authority is constructed by these tests.
+        let mut account = DedicatedAccount::from_entropy(
+            Zeroizing::new([entropy; 32]),
+            0,
+            "data-only-fixture".into(),
+            false,
+        )
+        .unwrap();
+        let origin = data_origin(&account);
+        account.born_authority_pending = true;
+        let vault = AccountVault {
+            directory: PrivateDirectory::create(root).unwrap(),
+            account,
+            encryption_key: Zeroizing::new([0x78; 32]),
+            salt: [0x79; 16],
+            authority_key: Zeroizing::new([0x7a; 32]),
+            authority_initialized: false,
+            generation: None,
+            born_origin: Some(origin),
+        };
+        let origin = vault.born_origin.as_ref().unwrap();
+        let mut domain = b"wholepact:pending-birth-owner-request-envelope:v1\0".to_vec();
+        domain.extend_from_slice(origin.anchor().birth_digest().as_bytes());
+        let request = crate::vault::encrypt(
+            &vault.encryption_key,
+            &domain,
+            &serde_json::to_vec(origin.original_request()).unwrap(),
+        )
+        .unwrap();
+        vault
+            .directory
+            .write(super::super::request::REQUEST_FILE, &request)
+            .unwrap();
+        persist(&vault).unwrap();
+        vault
+    }
+    fn old_exact_plaintext(vault: &AccountVault, plain: &[u8]) -> Result<()> {
+        let (decoded, origin, key) = decode(plain)?;
+        if decoded.encode().as_slice() != vault.account.encode().as_slice()
+            || !bool::from(key.as_slice().ct_eq(vault.authority_key.as_slice()))
+            || serde_json::to_vec(&origin).map_err(|_| Error::InvalidData)?
+                != serde_json::to_vec(vault.born_origin.as_ref().unwrap())
+                    .map_err(|_| Error::InvalidData)?
+        {
+            return Err(Error::ReviewMismatch);
+        }
+        Ok(())
+    }
+    fn with_origin_json(plain: &[u8], json: &[u8]) -> Vec<u8> {
+        let n = u32::from_le_bytes(plain[33..37].try_into().unwrap()) as usize;
+        let mut result = plain[..33].to_vec();
+        result.extend((json.len() as u32).to_le_bytes());
+        result.extend_from_slice(json);
+        result.extend_from_slice(&plain[37 + n..]);
+        result
+    }
+    #[test]
+    fn borrowed_original_plaintext_matches_complete_decoder_and_refuses_substitution() {
+        let temp = tempfile::tempdir().unwrap();
+        let vault = data_vault(&temp.path().join("original"), 0x39);
+        let other = data_vault(&temp.path().join("other"), 0x40);
+        let proof = ValidatedOriginalAccount::for_account(&vault).unwrap();
+        let plain = encode(&vault.account, proof.origin(), &vault.authority_key).unwrap();
+        let n = u32::from_le_bytes(plain[33..37].try_into().unwrap()) as usize;
+        let pretty = serde_json::to_vec_pretty(proof.origin()).unwrap();
+        let equivalent = with_origin_json(&plain, &pretty);
+        for candidate in [plain.as_slice(), equivalent.as_slice()] {
+            assert!(old_exact_plaintext(&vault, candidate).is_ok());
+            assert!(proof.require_exact_plaintext(candidate).is_ok());
+        }
+
+        let mut cases = Vec::new();
+        let mut changed = plain.to_vec();
+        changed[0] = if changed[0] == 1 { 2 } else { 1 };
+        cases.push(changed);
+        let mut changed = plain.to_vec();
+        changed[1] ^= 1; // Different authority key, valid envelope shape.
+        cases.push(changed);
+        let mut changed = plain.to_vec();
+        changed[37 + n + 2] = 1; // Restored bit is part of the full account.
+        cases.push(changed);
+        let mut changed = plain.to_vec();
+        changed[37 + n + 7] ^= 1; // Different actual entropy/account identity.
+        cases.push(changed);
+        let mut changed = plain.to_vec();
+        changed.push(0); // Trailing account bytes are not ignored.
+        cases.push(changed);
+        cases.push(plain[..plain.len() - 1].to_vec());
+        cases.push(plain[..36].to_vec());
+        let mut changed = plain.to_vec();
+        changed[33..37].copy_from_slice(&u32::MAX.to_le_bytes());
+        cases.push(changed);
+        cases.push(vec![0; MAX_ACTIVE + 1]);
+        let json = std::str::from_utf8(&plain[37..37 + n]).unwrap();
+        cases.push(with_origin_json(
+            &plain,
+            format!("{{\"unknown\":true,{}", &json[1..]).as_bytes(),
+        ));
+        let anchor = serde_json::to_string(&proof.origin().anchor()).unwrap();
+        cases.push(with_origin_json(
+            &plain,
+            format!("{{\"anchor\":{anchor},{}", &json[1..]).as_bytes(),
+        ));
+        cases.push(with_origin_json(&plain, format!("{json}{{}}").as_bytes()));
+        let other_origin = other.born_origin.as_ref().unwrap();
+        cases.push(with_origin_json(
+            &plain,
+            &serde_json::to_vec(other_origin).unwrap(),
+        ));
+        let other_plain = encode(&other.account, other_origin, &other.authority_key).unwrap();
+        assert!(decode(&other_plain).is_ok());
+        cases.push(other_plain.to_vec());
+        for candidate in cases {
+            assert!(old_exact_plaintext(&vault, &candidate).is_err());
+            assert!(proof.require_exact_plaintext(&candidate).is_err());
+        }
+    }
+    #[test]
+    fn borrowed_original_is_exact_vault_scoped_and_checks_fresh_ciphertexts() {
+        let temp = tempfile::tempdir().unwrap();
+        let vault = data_vault(&temp.path().join("original"), 0x39);
+        let equal_fields = data_vault(&temp.path().join("equal-fields"), 0x39);
+        let proof = ValidatedOriginalAccount::for_account(&vault).unwrap();
+        proof.check_envelope(&vault).unwrap();
+        assert!(proof.check_envelope(&equal_fields).is_err());
+        let original = vault.directory.read("account.wp", MAX_ACTIVE).unwrap();
+        let mut damaged = original.clone();
+        let last = damaged.len() - 1;
+        damaged[last] ^= 1;
+        vault.directory.write("account.wp", &damaged).unwrap();
+        assert!(proof.check_envelope(&vault).is_err());
+        vault.directory.write("account.wp", &original).unwrap();
+        proof.check_envelope(&vault).unwrap();
+        let file = super::super::request::REQUEST_FILE;
+        let original_request = vault
+            .directory
+            .read(file, super::super::request::MAX_REQUEST)
+            .unwrap();
+        let mut changed = proof.origin().original_request().clone();
+        changed.operation_id = "changed-original-operation".into();
+        let mut domain = b"wholepact:pending-birth-owner-request-envelope:v1\0".to_vec();
+        domain.extend_from_slice(proof.origin().anchor().birth_digest().as_bytes());
+        let encrypted = crate::vault::encrypt(
+            &vault.encryption_key,
+            &domain,
+            &serde_json::to_vec(&changed).unwrap(),
+        )
+        .unwrap();
+        vault.directory.write(file, &encrypted).unwrap();
+        assert!(proof.check_envelope(&vault).is_err());
+        vault.directory.write(file, &original_request).unwrap();
+        proof.check_envelope(&vault).unwrap();
+    }
+    #[test]
+    fn borrowed_original_cannot_be_issued_for_mismatched_held_origin() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut vault = data_vault(&temp.path().join("original"), 0x39);
+        let other = data_vault(&temp.path().join("other"), 0x40);
+        vault.born_origin = other.born_origin.clone();
+        assert!(ValidatedOriginalAccount::for_account(&vault).is_err());
     }
     #[test]
     fn v2_complete_encrypted_backup_restore_preserves_original_descriptor_and_key_denial() {
