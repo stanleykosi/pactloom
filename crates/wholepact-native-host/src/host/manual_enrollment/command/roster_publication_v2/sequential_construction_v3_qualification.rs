@@ -66,6 +66,9 @@ mod public_outcome_v1;
 #[path = "sequential_construction_v3_qualification/safe_diagnostics_v1.rs"]
 mod safe_diagnostics_v1;
 
+#[path = "sequential_construction_v3_qualification/rolling_transcript_v1.rs"]
+mod rolling_transcript_v1;
+
 #[path = "sequential_construction_v3_qualification/owned_test_process_group_v1.rs"]
 mod owned_test_process_group_v1;
 #[path = "sequential_construction_v3_qualification/process_containment_v1.rs"]
@@ -200,7 +203,66 @@ fn close_owned_temporary_root(root: tempfile::TempDir) -> TemporaryRootCleanupV1
     }
 }
 
+/// Closed parent-driver cause only. Never carries a private error or transcript.
+/// This does not classify the child's product failure or imply cancelled effects.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HarnessFailureReason {
+    Unclassified,
+    Deadline,
+    ChildObservation,
+    ChildExit,
+    PollIo,
+    ReadIo,
+    OutputLimit,
+    IncompleteUtf8,
+    InvalidUtf8,
+    MultilineInput,
+    WriteIo,
+    FlushIo,
+    MissingPathMarker,
+    InvalidPath,
+    InvalidChallenge,
+    OutcomeRead,
+    CleanupUnverified,
+}
+
+fn harness_io<T>(
+    failure: &mut HarnessFailureReason,
+    reason: HarnessFailureReason,
+    result: std::io::Result<T>,
+) -> std::io::Result<T> {
+    result.map_err(|error| {
+        *failure = reason;
+        error
+    })
+}
+
+fn harness_transcript<T>(
+    failure: &mut HarnessFailureReason,
+    result: std::result::Result<T, rolling_transcript_v1::Failure>,
+) -> std::io::Result<T> {
+    result.map_err(|error| {
+        use rolling_transcript_v1::Failure;
+        *failure = match error {
+            Failure::OutputLimit => HarnessFailureReason::OutputLimit,
+            Failure::IncompleteUtf8 => HarnessFailureReason::IncompleteUtf8,
+            Failure::InvalidUtf8 => HarnessFailureReason::InvalidUtf8,
+            Failure::InvalidPath => HarnessFailureReason::InvalidPath,
+            Failure::MissingPath => HarnessFailureReason::MissingPathMarker,
+        };
+        std::io::Error::other("bounded synthetic transcript refused; private contents withheld")
+    })
+}
+
 fn foreground_child(stage: &str, inputs: &[Input<'_>]) -> std::io::Result<()> {
+    let mut failure_reason = HarnessFailureReason::Unclassified;
+    let mut transcript = harness_transcript(
+        &mut failure_reason,
+        rolling_transcript_v1::Transcript::new(inputs.iter().filter_map(|input| match input {
+            Input::CapturedPath { marker, .. } => Some(*marker),
+            _ => None,
+        })),
+    )?;
     process_containment_v1::require_and_report_core_policy()?;
     // This creates a temporary terminal, not an OS trust root or permission
     // override. The child still passes the actual foreground() implementation.
@@ -327,27 +389,32 @@ fn foreground_child(stage: &str, inputs: &[Input<'_>]) -> std::io::Result<()> {
         180
     };
     let deadline = Instant::now() + Duration::from_secs(safety_seconds);
-    let mut transcript = zeroize::Zeroizing::new(Vec::new());
     let mut next = 0;
-    let mut consumed = 0;
     #[allow(unused_mut)] // Mutation only for the synthetic public-sidecar check.
     let mut outcome = (|| {
         loop {
             if Instant::now() >= deadline {
+                failure_reason = HarnessFailureReason::Deadline;
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
                     "synthetic foreground stage exceeded its original deadline",
                 ));
             }
-            if let Some(success) = child.observe_exit()? {
+            if let Some(success) = harness_io(
+                &mut failure_reason,
+                HarnessFailureReason::ChildObservation,
+                child.observe_exit(),
+            )? {
                 if success && next == inputs.len() {
                     // Observation/cleanup grace cannot renew the original stage.
                     if Instant::now() >= deadline {
+                        failure_reason = HarnessFailureReason::Deadline;
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::TimedOut,
                             "synthetic foreground success observed after original deadline",
                         ));
                     }
+                    harness_transcript(&mut failure_reason, transcript.finish_text())?;
                     return Ok(());
                 }
                 // Child exit can precede our final PTY read. Drain only already
@@ -363,15 +430,17 @@ fn foreground_child(stage: &str, inputs: &[Input<'_>]) -> std::io::Result<()> {
                     {
                         break;
                     }
-                    let mut chunk = [0u8; 4096];
-                    let Ok(length) = master.read(&mut chunk) else {
+                    let mut chunk = zeroize::Zeroizing::new([0u8; 4096]);
+                    let Ok(length) = master.read(&mut chunk[..]) else {
                         break;
                     };
-                    if length == 0 || transcript.len() + length > 262_144 {
+                    if length == 0
+                        || transcript.append(&chunk[..length], child.temporary_root()).is_err()
+                    {
                         break;
                     }
-                    transcript.extend_from_slice(&chunk[..length]);
                 }
+                failure_reason = HarnessFailureReason::ChildExit;
                 return Err(std::io::Error::other("synthetic foreground child failed"));
             }
             let mut descriptor = libc::pollfd {
@@ -380,27 +449,33 @@ fn foreground_child(stage: &str, inputs: &[Input<'_>]) -> std::io::Result<()> {
                 revents: 0,
             };
             if unsafe { libc::poll(&mut descriptor, 1, 50) } < 0 {
+                failure_reason = HarnessFailureReason::PollIo;
                 return Err(std::io::Error::last_os_error());
             }
             if descriptor.revents & libc::POLLIN == 0 {
                 continue;
             }
-            let mut chunk = [0; 4096];
-            let length = master.read(&mut chunk)?;
+            let mut chunk = zeroize::Zeroizing::new([0u8; 4096]);
+            let length = harness_io(
+                &mut failure_reason,
+                HarnessFailureReason::ReadIo,
+                master.read(&mut chunk[..]),
+            )?;
             if length == 0 {
                 continue;
             }
-            if transcript.len() + length > 262_144 {
-                return Err(std::io::Error::other(
-                    "synthetic foreground output exceeded fixed bound",
-                ));
-            }
-            transcript.extend_from_slice(&chunk[..length]);
+            harness_transcript(
+                &mut failure_reason,
+                transcript.append(&chunk[..length], child.temporary_root()),
+            )?;
             let Some(input) = inputs.get(next) else {
                 continue;
             };
-            let tail =
-                std::str::from_utf8(&transcript[consumed..]).map_err(std::io::Error::other)?;
+            let Some(tail) = harness_transcript(&mut failure_reason, transcript.tail())? else {
+                // An incomplete final UTF-8 scalar waits for more bytes under
+                // the unchanged original stage deadline. Invalid bytes refuse.
+                continue;
+            };
             let expected = input.rendered_expectation();
             let approve = match input {
                 Input::Text { response, .. } => {
@@ -408,39 +483,52 @@ fn foreground_child(stage: &str, inputs: &[Input<'_>]) -> std::io::Result<()> {
                         continue;
                     }
                     if response.contains(['\n', '\r']) {
+                        failure_reason = HarnessFailureReason::MultilineInput;
                         return Err(std::io::Error::other("multiline synthetic input denied"));
                     }
-                    master.write_all(response.as_bytes())?;
-                    master.write_all(b"\n")?;
-                    master.flush()?;
-                    consumed = transcript.len();
+                    harness_io(
+                        &mut failure_reason,
+                        HarnessFailureReason::WriteIo,
+                        master.write_all(response.as_bytes()),
+                    )?;
+                    harness_io(
+                        &mut failure_reason,
+                        HarnessFailureReason::WriteIo,
+                        master.write_all(b"\n"),
+                    )?;
+                    harness_io(
+                        &mut failure_reason,
+                        HarnessFailureReason::FlushIo,
+                        master.flush(),
+                    )?;
+                    harness_transcript(&mut failure_reason, transcript.consume(None))?;
                     next += 1;
                     continue;
                 }
                 Input::CapturedPath { marker, .. } => {
-                    if !tail.contains(expected.as_str()) {
-                        continue;
-                    }
-                    let all = std::str::from_utf8(&transcript).map_err(std::io::Error::other)?;
-                    let Some(marked) = all.rsplit_once(marker).map(|(_, rest)| rest) else {
-                        return Err(std::io::Error::other(
-                            "actual temporary path marker missing",
-                        ));
-                    };
-                    let Some(path) = marked.lines().next() else {
+                    let Some(prompt) = tail.find(expected.as_str()) else {
                         continue;
                     };
-                    let path = path.trim_end_matches('\r');
-                    if !std::path::Path::new(path).is_absolute()
-                        || !std::path::Path::new(path).starts_with(child.temporary_root())
-                        || path.contains(['\r', '\n'])
-                    {
-                        return Err(std::io::Error::other("invalid temporary path marker"));
-                    }
-                    master.write_all(path.as_bytes())?;
-                    master.write_all(b"\n")?;
-                    master.flush()?;
-                    consumed = transcript.len();
+                    let path = harness_transcript(
+                        &mut failure_reason,
+                        transcript.path(marker, prompt),
+                    )?;
+                    harness_io(
+                        &mut failure_reason,
+                        HarnessFailureReason::WriteIo,
+                        master.write_all(path.as_bytes()),
+                    )?;
+                    harness_io(
+                        &mut failure_reason,
+                        HarnessFailureReason::WriteIo,
+                        master.write_all(b"\n"),
+                    )?;
+                    harness_io(
+                        &mut failure_reason,
+                        HarnessFailureReason::FlushIo,
+                        master.flush(),
+                    )?;
+                    harness_transcript(&mut failure_reason, transcript.consume(Some(marker)))?;
                     next += 1;
                     continue;
                 }
@@ -465,17 +553,30 @@ fn foreground_child(stage: &str, inputs: &[Input<'_>]) -> std::io::Result<()> {
                     .bytes()
                     .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
             {
+                failure_reason = HarnessFailureReason::InvalidChallenge;
                 return Err(std::io::Error::other(
                     "unexpected native exact-review challenge",
                 ));
             }
             if *approve {
-                master.write_all(format!("APPROVE {challenge}\n").as_bytes())?;
+                harness_io(
+                    &mut failure_reason,
+                    HarnessFailureReason::WriteIo,
+                    master.write_all(format!("APPROVE {challenge}\n").as_bytes()),
+                )?;
             } else {
-                master.write_all(b"REJECT\n")?;
+                harness_io(
+                    &mut failure_reason,
+                    HarnessFailureReason::WriteIo,
+                    master.write_all(b"REJECT\n"),
+                )?;
             }
-            master.flush()?;
-            consumed = transcript.len();
+            harness_io(
+                &mut failure_reason,
+                HarnessFailureReason::FlushIo,
+                master.flush(),
+            )?;
+            harness_transcript(&mut failure_reason, transcript.consume(None))?;
             next += 1;
         }
     })();
@@ -498,6 +599,7 @@ fn foreground_child(stage: &str, inputs: &[Input<'_>]) -> std::io::Result<()> {
             match parsed {
                 Ok(json) => Some(json),
                 Err(_) => {
+                    failure_reason = HarnessFailureReason::OutcomeRead;
                     outcome = Err(std::io::Error::other(
                         "synthetic public outcome missing or invalid; private details withheld",
                     ));
@@ -530,10 +632,13 @@ fn foreground_child(stage: &str, inputs: &[Input<'_>]) -> std::io::Result<()> {
         || !process.verified()
         || root_cleanup != TemporaryRootCleanupV1::ClosedAndAbsenceVerified
     {
+        if outcome.is_ok() {
+            failure_reason = HarnessFailureReason::CleanupUnverified;
+        }
         // Portable evidence extraction must never print a panic or raw PTY log.
         // The projection reparses only closed labels and canonical numeric errno.
         eprintln!(
-            "[JOINED_FAILURE exit={:?} signal={:?} core_dumped={} inputs={}/{} static_boundaries={}]",
+            "[JOINED_FAILURE exit={:?} signal={:?} core_dumped={} inputs={}/{} reason={:?} static_boundaries={}]",
             process.status.as_ref().and_then(|status| status.code()),
             process.status.as_ref().and_then(|status| status.signal()),
             process
@@ -542,7 +647,8 @@ fn foreground_child(stage: &str, inputs: &[Input<'_>]) -> std::io::Result<()> {
                 .is_some_and(|status| status.core_dumped()),
             next,
             inputs.len(),
-            safe_diagnostics_v1::summary(&transcript),
+            failure_reason,
+            transcript.summary(),
         );
     }
     if !process.verified() || root_cleanup != TemporaryRootCleanupV1::ClosedAndAbsenceVerified {
@@ -573,7 +679,7 @@ fn foreground_child(stage: &str, inputs: &[Input<'_>]) -> std::io::Result<()> {
         status.as_ref().and_then(|status| status.code()),
         status.as_ref().and_then(|status| status.signal()),
         status.as_ref().is_some_and(|status| status.core_dumped()),
-        next, inputs.len(), safe_diagnostics_v1::summary(&transcript),
+        next, inputs.len(), transcript.summary(),
     )))?;
     // This is the only public outcome emission. The actual computation, exact
     // owned-process cleanup and explicit root close/absence have all succeeded.

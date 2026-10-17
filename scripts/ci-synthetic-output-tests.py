@@ -66,8 +66,35 @@ class PublicOutputTests(unittest.TestCase):
             with self.assertRaises(ValueError): output.public_outcome(json.dumps(dict(self.record(),**{field:value})))
         with self.assertRaises(ValueError): output.public_outcome(' '*4097)
 
-    def failure(self,summary='SingleIpcBind:IoKind=PermissionDenied:errno=1'):
-        return '[JOINED_FAILURE exit=Some(101) signal=None core_dumped=false inputs=1/2 static_boundaries='+summary+']'
+    def failure(self,summary='SingleIpcBind:IoKind=PermissionDenied:errno=1',reason='ChildExit'):
+        return '[JOINED_FAILURE exit=Some(101) signal=None core_dumped=false inputs=1/2 reason='+reason+' static_boundaries='+summary+']'
+
+    def test_harness_failure_reasons_match_exact_rust_enum(self):
+        source=(ROOT/'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3_qualification.rs').read_text()
+        body=re.search(r'enum HarnessFailureReason \{([^}]+)\}',source).group(1)
+        variants=set(re.findall(r'^    ([A-Za-z0-9]+),$',body,re.M))
+        self.assertEqual(variants,output.HARNESS_FAILURE_REASONS)
+        self.assertEqual(len(variants),17)
+        self.assertIn('inputs={}/{} reason={:?} static_boundaries={}]',source)
+        # No cause infers product validity, cancellation or a different deadline.
+        for expected in ['OutputLimit','IncompleteUtf8','InvalidUtf8','MissingPathMarker',
+                         'InvalidPath','InvalidChallenge','Deadline','ChildExit']:
+            self.assertIn(expected,variants)
+
+    def test_harness_failure_reasons_are_closed_and_payload_free(self):
+        name=output.TESTS['full'][0]
+        for reason in output.HARNESS_FAILURE_REASONS:
+            line=self.failure('none',reason)
+            self.assertTrue(output.safe_failure(line))
+            self.assertEqual(output.public_line(line.encode(),name),('failure',line))
+        for reason in ['', 'Unknown', 'outputlimit', 'OutputLimit/private',
+                       'OutputLimit private', 'OutputLimit\nprivate', 'OutputLimit:12']:
+            self.assertFalse(output.safe_failure(self.failure('none',reason)))
+        line=self.failure('none','OutputLimit')
+        for invalid in [line+' private', 'private '+line,
+                        line.replace(' reason=OutputLimit',''),
+                        line.replace('reason=OutputLimit','reason=OutputLimit reason=Deadline')]:
+            self.assertIsNone(output.public_line(invalid.encode(),name))
 
     def test_closed_failure_labels_and_canonical_errno(self):
         for summary in ['none','FullCurrentDispatch:Begin',
@@ -227,6 +254,23 @@ class PublicOutputTests(unittest.TestCase):
         self.assertEqual(framing.feed(marker+b'\n'),[marker])
         # Also reject a single oversized complete chunk and resume next line.
         self.assertEqual(framing.feed(b'x'*8193+marker+b'\n'+marker+b'\n'),[marker])
+
+    def test_rolling_preflight_is_ten_exact_pure_parser_cases(self):
+        base=ROOT/'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2'
+        source=(base/'sequential_construction_v3_qualification/rolling_transcript_v1.rs').read_text()
+        names=re.findall(r'#\[test\]\s+(?:#\[cfg\(feature = "synthetic-born-joined-qualification"\)\]\s+)?fn (\w+)\(',source)
+        expected=tuple(output.PREFIX+'rolling_transcript_v1::tests::'+name for name in names)
+        self.assertEqual(len(expected),10)
+        self.assertEqual(expected,output.ROLLING_TRANSCRIPT_TESTS)
+        self.assertIn('#[path = "sequential_construction_v3_qualification/rolling_transcript_v1.rs"]\nmod rolling_transcript_v1;',
+                      (base/'sequential_construction_v3_qualification.rs').read_text())
+        combined=output.PURE_TESTS+output.POLICY_ENVELOPE_TESTS+output.PROMPT_RENDERING_TESTS+output.LOWER_ERROR_TESTS+output.DENIAL_TESTS+expected
+        self.assertEqual(len(combined),35)
+        self.assertEqual(len(set(combined)),35)
+        for name in expected:
+            self.assertNotIn(name,[row[0] for row in output.TESTS.values()])
+            self.assertNotEqual(name,output.STORAGE_BOOTSTRAP_TEST)
+            self.assertNotIn(name,output.SIGNER_VALIDATION_TESTS+output.SIGNER_BOOKKEEPING_TESTS)
 
     def test_pure_preflight_is_exactly_the_eighteen_reviewed_cases(self):
         base=ROOT/'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3_qualification'
