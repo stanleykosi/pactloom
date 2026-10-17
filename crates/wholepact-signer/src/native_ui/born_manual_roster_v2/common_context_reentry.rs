@@ -55,6 +55,22 @@ macro_rules! completion_witness_trace {
     }};
 }
 
+macro_rules! completion_authority_trace {
+    ($phase:ident, $operation:expr) => {{
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        super::synthetic_diagnostics::report_begin(
+            super::synthetic_diagnostics::Operation::$phase,
+        );
+        let result = $operation;
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        super::synthetic_diagnostics::report_authority_result(
+            super::synthetic_diagnostics::Operation::$phase,
+            &result,
+        );
+        result
+    }};
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Setup {
@@ -520,33 +536,35 @@ impl PreparedCommonContextClaimV1 {
         d: NativeDecision,
         owner: &PendingAccountNativeAuthority,
     ) -> Result<ReenteredCommonContextOwnerV1> {
-        self.check(owner)?;
+        completion_witness_trace!(CompletionClaimCheck, self.check(owner))?;
         decision(&d, &self.native, &self.digest)?;
         let mut claim = self.prepared.unsigned_claim_binding().clone();
         claim.native_review_digest = self.digest.clone();
-        let signed = self.signer.sign_claim(claim)?;
-        self.check(owner)?;
-        append(
+        let signed = completion_witness_trace!(CompletionClaimSign, self.signer.sign_claim(claim))?;
+        completion_witness_trace!(CompletionClaimCheck, self.check(owner))?;
+        completion_witness_trace!(CompletionClaimGranted, append(
             &self.source,
             Phase::Granted {
                 grant: Box::new(self.prepared.pending_grant().clone()),
             },
-        )?;
-        self.check(owner)?;
-        let claimed = self.prepared.claim(signed).map_err(|_| Error::Uncertain)?;
-        self.source.check_peer(&self.peer, owner)?;
-        append(
+        ))?;
+        completion_witness_trace!(CompletionClaimCheck, self.check(owner))?;
+        let claimed = completion_authority_trace!(CompletionClaimClaim, self.prepared.claim(signed))
+            .map_err(|_| Error::Uncertain)?;
+        completion_witness_trace!(CompletionClaimCheck, self.source.check_peer(&self.peer, owner))?;
+        completion_witness_trace!(CompletionClaimClaimed, append(
             &self.source,
             Phase::Claimed {
                 credential: Box::new(claimed.credential().clone()),
             },
-        )?;
-        let observed = claimed.observe().map_err(|_| Error::Uncertain)?;
-        self.source.check_peer(&self.peer, owner)?;
-        let history = observed
-            .history()
-            .construction_history_with_transport_v1()
-            .map_err(|_| Error::ReviewMismatch)?;
+        ))?;
+        let observed = completion_authority_trace!(CompletionClaimObserve, claimed.observe())
+            .map_err(|_| Error::Uncertain)?;
+        completion_witness_trace!(CompletionClaimCheck, self.source.check_peer(&self.peer, owner))?;
+        let history = completion_authority_trace!(
+            CompletionClaimHistory,
+            observed.history().construction_history_with_transport_v1()
+        ).map_err(|_| Error::ReviewMismatch)?;
         let credential = observed.credential();
         let a = credential.authorization();
         let birth = history
@@ -603,15 +621,15 @@ impl PreparedCommonContextClaimV1 {
             completion_expires_at_ms: a.expires_at_ms.min(read.request.completion_expires_at_ms),
         };
         lineage.validate().map_err(|_| Error::InvalidData)?;
-        append(
+        completion_witness_trace!(CompletionClaimReentered, append(
             &self.source,
             Phase::Reentered {
                 lineage: Box::new(lineage.clone()),
                 witness_history: Box::new(history),
             },
-        )?;
-        self.source.check_peer(&self.peer, owner)?;
-        send(
+        ))?;
+        completion_witness_trace!(CompletionClaimCheck, self.source.check_peer(&self.peer, owner))?;
+        completion_witness_trace!(CompletionClaimSend, send(
             &mut self.stream,
             &self.peer,
             &RosterCommonContextReentryResponseV1::CommonContextReenteredV1 {
@@ -619,10 +637,11 @@ impl PreparedCommonContextClaimV1 {
             },
             self.source.completion_deadline(),
             || {
-                self.source.check_peer(&self.peer, owner)?;
-                observed.check_current().map_err(|_| Error::ReviewMismatch)
+                completion_witness_trace!(CompletionClaimCheck, self.source.check_peer(&self.peer, owner))?;
+                completion_authority_trace!(CompletionClaimCheck, observed.check_current())
+                    .map_err(|_| Error::ReviewMismatch)
             },
-        )?;
+        ))?;
         Ok(ReenteredCommonContextOwnerV1 {
             source: self.source,
             peer: self.peer,

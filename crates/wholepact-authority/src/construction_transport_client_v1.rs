@@ -9,6 +9,48 @@ use crate::manual_roster_extension_v2::ManualRosterEnrollmentExtensionV2;
 use crate::manual_roster_witness_v2::ManualRosterSessionContinuationV2;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+// Observe only the result of an existing predicate. The original clock inputs,
+// high-water update, short-circuit order and terminal state stay unchanged.
+macro_rules! handoff_clock_denied {
+    ($reason:ident, $predicate:expr) => {{
+        let denied = $predicate;
+        #[cfg(all(
+            feature = "synthetic-qualification",
+            feature = "native-witness-owner",
+            target_os = "linux"
+        ))]
+        if denied {
+            synthetic_clock_diagnostics::report(synthetic_clock_diagnostics::Reason::$reason);
+        }
+        denied
+    }};
+}
+
+#[cfg(all(
+    feature = "synthetic-qualification",
+    feature = "native-witness-owner",
+    target_os = "linux"
+))]
+mod synthetic_clock_diagnostics {
+    pub(super) enum Reason {
+        Terminal,
+        Liveness,
+        WallRollback,
+        WallExpired,
+        MonotonicExpired,
+    }
+    pub(super) fn report(reason: Reason) {
+        let label = match reason {
+            Reason::Terminal => "ConstructionClockTerminal",
+            Reason::Liveness => "ConstructionClockLiveness",
+            Reason::WallRollback => "ConstructionClockWallRollback",
+            Reason::WallExpired => "ConstructionClockWallExpired",
+            Reason::MonotonicExpired => "ConstructionClockMonotonicExpired",
+        };
+        eprintln!("\n[JOINED_DIAGNOSTIC {} Begin]", label);
+    }
+}
+
 /// Exact original read clock. The shared high-water is the actual original
 /// native read's owner, not a new clock initialized on fresh unlock. This data
 /// alone grants nothing; only the private channel issuer can retain it.
@@ -27,7 +69,7 @@ struct HandoffClockV1 {
 }
 impl HandoffClockV1 {
     fn check_at(&self, now: u64, monotonic: Instant) -> Result<()> {
-        if self.terminal.load(Ordering::Acquire) {
+        if handoff_clock_denied!(Terminal, self.terminal.load(Ordering::Acquire)) {
             return Err(AuthorityError::Expired);
         }
         #[cfg(all(
@@ -37,12 +79,16 @@ impl HandoffClockV1 {
         ))]
         if let Some(liveness) = &self.qualification_liveness {
             if let Err(error) = liveness.check() {
+                synthetic_clock_diagnostics::report(synthetic_clock_diagnostics::Reason::Liveness);
                 self.terminal.store(true, Ordering::Release);
                 return Err(error);
             }
         }
         let previous = self.high_water_ms.fetch_max(now, Ordering::AcqRel);
-        if now < previous || now >= self.expires_at_ms || monotonic >= self.deadline {
+        if handoff_clock_denied!(WallRollback, now < previous)
+            || handoff_clock_denied!(WallExpired, now >= self.expires_at_ms)
+            || handoff_clock_denied!(MonotonicExpired, monotonic >= self.deadline)
+        {
             self.terminal.store(true, Ordering::Release);
             return Err(AuthorityError::Expired);
         }

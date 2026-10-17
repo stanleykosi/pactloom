@@ -159,7 +159,7 @@ class PublicOutputTests(unittest.TestCase):
         self.assertTrue(kinds['Outcome'] <= output.OUTCOMES)
         signer=ROOT/'crates/wholepact-signer/src/native_ui/born_manual_roster_v2/synthetic_diagnostics.rs'
         labels=set(re.findall(r'=> "(Roster\w+)"',signer.read_text()))
-        self.assertEqual(len(labels),65)
+        self.assertEqual(len(labels),74)
         self.assertTrue(labels <= output.BOUNDARIES)
         for label in labels | kinds['Phase']:
             self.assertTrue(output.safe_failure(self.failure(label+':Begin')))
@@ -206,6 +206,31 @@ class PublicOutputTests(unittest.TestCase):
         for value in ['NativeOwnerUnknown:Begin','RosterCompletionWitnessUnknown:SignerLocked',
                       'RosterWorkCommitCompletionUnknown:SignerUncertain',
                       'NativeOwnerExpired:private-data','RosterOwnerEpoch:Begin:private-data']:
+            self.assertFalse(output.safe_failure(self.failure(value)))
+
+    def test_completion_claim_and_channel_clock_are_closed_diagnostics(self):
+        clocks=set("ConstructionClockTerminal ConstructionClockLiveness ConstructionClockWallRollback ConstructionClockWallExpired ConstructionClockMonotonicExpired".split())
+        claims=set("RosterCompletionClaimCheck RosterCompletionClaimSign RosterCompletionClaimGranted RosterCompletionClaimClaim RosterCompletionClaimClaimed RosterCompletionClaimObserve RosterCompletionClaimHistory RosterCompletionClaimReentered RosterCompletionClaimSend".split())
+        clock_source=(ROOT/'crates/wholepact-authority/src/construction_transport_client_v1.rs').read_text()
+        self.assertEqual(set(re.findall(r'=> "(ConstructionClock\w+)"',clock_source)),clocks)
+        signer=(ROOT/'crates/wholepact-signer/src/native_ui/born_manual_roster_v2/synthetic_diagnostics.rs').read_text()
+        self.assertEqual(set(re.findall(r'=> "(RosterCompletionClaim\w+)"',signer)),claims)
+        self.assertEqual({x for x in output.BOUNDARIES if x.startswith('ConstructionClock')},clocks)
+        self.assertEqual({x for x in output.BOUNDARIES if x.startswith('RosterCompletionClaim')},claims)
+        outcomes=set(re.findall(r'=> "(Authority\w+)"',signer))
+        self.assertEqual(len(outcomes),23)
+        self.assertEqual(outcomes,{x for x in output.OUTCOMES if x.startswith('Authority')}
+                         - {'AuthorityInputEmpty','AuthorityInputWithinBound','AuthorityInputOverBound'})
+        for label in clocks:
+            self.assertTrue(output.safe_failure(self.failure(label+':Begin')))
+        for label in claims:
+            for kind in outcomes|{'Begin','Complete','SignerLocked','SignerUncertain'}:
+                self.assertTrue(output.safe_failure(self.failure(label+':'+kind)))
+        for value in ['ConstructionClockUnknown:Begin','ConstructionClockWallExpired:Begin 123',
+                      'RosterCompletionClaimUnknown:AuthorityExpired',
+                      'RosterCompletionClaimClaim:AuthorityUnknown',
+                      'RosterCompletionClaimObserve:AuthorityUncertain private-data',
+                      'RosterCompletionClaimHistory:AuthorityExpired:private-data']:
             self.assertFalse(output.safe_failure(self.failure(value)))
 
     def test_completion_diagnostics_preserve_exact_closed_layers(self):

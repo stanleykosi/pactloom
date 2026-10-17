@@ -4,6 +4,15 @@ use super::{Error, Output, Result, Step, Work};
 
 #[derive(Clone, Copy)]
 pub(super) enum Operation {
+    CompletionClaimCheck,
+    CompletionClaimSign,
+    CompletionClaimGranted,
+    CompletionClaimClaim,
+    CompletionClaimClaimed,
+    CompletionClaimObserve,
+    CompletionClaimHistory,
+    CompletionClaimReentered,
+    CompletionClaimSend,
     CompletionWitnessCheck,
     CompletionWitnessHistory,
     CompletionWitnessHistoryBinding,
@@ -136,6 +145,15 @@ impl Operation {
     }
     fn label(self) -> &'static str {
         match self {
+            Self::CompletionClaimCheck => "RosterCompletionClaimCheck",
+            Self::CompletionClaimSign => "RosterCompletionClaimSign",
+            Self::CompletionClaimGranted => "RosterCompletionClaimGranted",
+            Self::CompletionClaimClaim => "RosterCompletionClaimClaim",
+            Self::CompletionClaimClaimed => "RosterCompletionClaimClaimed",
+            Self::CompletionClaimObserve => "RosterCompletionClaimObserve",
+            Self::CompletionClaimHistory => "RosterCompletionClaimHistory",
+            Self::CompletionClaimReentered => "RosterCompletionClaimReentered",
+            Self::CompletionClaimSend => "RosterCompletionClaimSend",
             Self::CompletionWitnessCheck => "RosterCompletionWitnessCheck",
             Self::CompletionWitnessHistory => "RosterCompletionWitnessHistory",
             Self::CompletionWitnessHistoryBinding => "RosterCompletionWitnessHistoryBinding",
@@ -247,4 +265,40 @@ pub(super) fn report_output(operation: Operation, result: &Result<Output>) {
         }
         _ => report_result(operation, result),
     }
+}
+
+/// Borrow the actual lower error before the caller's unchanged lossy mapping.
+/// No upstream error text, payload or serialized object crosses this boundary.
+pub(super) fn report_authority_result<T>(
+    operation: Operation,
+    result: &wholepact_authority::Result<T>,
+) {
+    use wholepact_authority::AuthorityError as E;
+    let outcome = match result {
+        Ok(_) => "Complete",
+        Err(E::InvalidBinding) => "AuthorityInvalidBinding",
+        Err(E::Permission) => "AuthorityPermission",
+        Err(E::StaleHead) => "AuthorityStaleHead",
+        Err(E::Conflict) => "AuthorityConflict",
+        Err(E::Inactive) => "AuthorityInactive",
+        Err(E::RecoveryRequired) => "AuthorityRecoveryRequired",
+        Err(E::Expired) => "AuthorityExpired",
+        Err(E::PolicyDenied) => "AuthorityPolicyDenied",
+        Err(E::BudgetExceeded) => "AuthorityBudgetExceeded",
+        Err(E::InputReserved) => "AuthorityInputReserved",
+        Err(E::ObligationReserved) => "AuthorityObligationReserved",
+        Err(E::Limit) => "AuthorityLimit",
+        Err(E::Storage) => "AuthorityStorage",
+        Err(E::CorruptHistory) => "AuthorityCorruptHistory",
+        Err(E::PermanentStopUnavailable) => "AuthorityPermanentStopUnavailable",
+        Err(E::OfflineHistoryUnsupported) => "AuthorityOfflineHistoryUnsupported",
+        Err(E::ConstructionHistoryUnsupported) => "AuthorityConstructionHistoryUnsupported",
+        Err(E::UnsupportedVersion) => "AuthorityUnsupportedVersion",
+        Err(E::Authentication) => "AuthorityAuthentication",
+        Err(E::Uncertain) => "AuthorityUncertain",
+        Err(E::ResolutionUnavailable) => "AuthorityResolutionUnavailable",
+        Err(E::SessionRequired) => "AuthoritySessionRequired",
+        Err(E::SessionPending) => "AuthoritySessionPending",
+    };
+    eprintln!("\n[JOINED_DIAGNOSTIC {} {}]", operation.label(), outcome);
 }
