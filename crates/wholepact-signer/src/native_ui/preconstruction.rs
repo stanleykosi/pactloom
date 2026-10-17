@@ -190,6 +190,10 @@ impl PreparedPreconstruction {
             started: Instant::now(),
         })
     }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(in crate::native_ui) fn qualification_request_digest(&self) -> Result<String> {
+        self.request.digest().map_err(error)
+    }
     pub(super) fn digest(&self) -> &str {
         &self.digest
     }
@@ -332,6 +336,10 @@ impl ApprovedPreconstruction {
             .and_then(|frame| serde_json::from_slice::<PreconstructionCommand>(&frame).ok());
             match command {
                 Some(PreconstructionCommand::Finish) => {
+                    // The acknowledgement means the old retained record fence
+                    // has ended, not merely that Finish was received. A caller
+                    // may then seek a separate new native disclosure decision.
+                    drop(lease);
                     let _ = write_frame(
                         &mut self.prepared.stream,
                         &PreconstructionResponse::Finished,

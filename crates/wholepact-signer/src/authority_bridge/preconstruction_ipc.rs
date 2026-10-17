@@ -123,6 +123,7 @@ pub struct SignerPreconstructionLease<'a> {
     fvk: FullViewingKey,
     started: Instant,
     sponsor_budget: Option<wholepact_authority::AccountSnapshot>,
+    finished: bool,
 }
 impl OriginalHistoryClient {
     pub fn request_preconstruction(
@@ -176,6 +177,7 @@ impl OriginalHistoryClient {
             fvk,
             started: Instant::now(),
             sponsor_budget: sponsor_budget.as_deref().cloned(),
+            finished: false,
         };
         lease.check_current()?;
         Ok(lease)
@@ -269,6 +271,25 @@ impl SignerPreconstructionLease<'_> {
     pub fn sponsor_policy(&self) -> Option<&wholepact_core::sponsor::SponsorPolicyTerms> {
         self.request.sponsor_policy.as_ref()
     }
+    /// Explicitly end this original disclosure and wait for the actual signer
+    /// to acknowledge release of its retained journal read fence. This creates
+    /// no replacement grant and retracts no data already disclosed. A failed or
+    /// ambiguous finish is not permission to start a dependent native review.
+    pub fn finish(mut self) -> Result<()> {
+        self.client.peer().check_alive().map_err(|_| BridgeError::Permission)?;
+        {
+            let mut stream = self.stream.lock().map_err(|_| BridgeError::Ipc)?;
+            write_frame(&mut stream, &PreconstructionCommand::Finish)?;
+            let frame = crate::ipc::read_frame_with_deadline(
+                &stream, self.client.peer(), Duration::from_secs(2),
+            ).map_err(|_| BridgeError::Ipc)?;
+            if !matches!(serde_json::from_slice::<PreconstructionResponse>(&frame)
+                .map_err(|_| BridgeError::Binding)?, PreconstructionResponse::Finished)
+            { return Err(BridgeError::Permission); }
+        }
+        self.finished = true;
+        Ok(())
+    }
     pub fn scope(&self) -> &PreconstructionScope {
         &self.request.scope
     }
@@ -307,6 +328,7 @@ impl SignerPreconstructionLease<'_> {
 }
 impl Drop for SignerPreconstructionLease<'_> {
     fn drop(&mut self) {
+        if self.finished { return; }
         if let Ok(mut stream) = self.stream.lock() {
             let _ = write_frame(&mut stream, &PreconstructionCommand::Finish);
         }

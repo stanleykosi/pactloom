@@ -34,6 +34,7 @@ pub struct SyntheticBornReceiverBlocksV1 {
     blocks: Vec<CompactBlock>,
     trees: Vec<TreeState>,
     context: SelectionContext,
+    funding_input_ids: [String; 2],
 }
 
 impl SyntheticBornReceiverBlocksV1 {
@@ -91,10 +92,26 @@ impl SyntheticBornReceiverBlocksV1 {
         }
         // Maintained encryption/commitments only. This fabricated incoming
         // funding block is deliberately NOT proved or submitted to a network.
-        let (bundle, _) = builder
+        let (bundle, metadata) = builder
             .build::<i64>(UnwrapErr(SysRng))
             .map_err(|_| WalletError::InvalidRequest)?
             .ok_or(WalletError::InvalidRequest)?;
+        let mut funding_txid = [0; 32];
+        UnwrapErr(SysRng).fill_bytes(&mut funding_txid);
+        let displayed_txid = zcash_protocol::TxId::from_bytes(funding_txid);
+        let mut funding_input_ids = [String::new(), String::new()];
+        for (receiver_index, input_id) in funding_input_ids.iter_mut().enumerate() {
+            let action = metadata
+                .output_action_index(receiver_index)
+                .ok_or(WalletError::InvalidRequest)?;
+            if action >= bundle.actions().len() {
+                return Err(WalletError::InvalidRequest);
+            }
+            *input_id = format!("ironwood:{displayed_txid}:{action}");
+        }
+        if funding_input_ids[0] == funding_input_ids[1] {
+            return Err(WalletError::InvalidRequest);
+        }
         let actions = bundle.actions().iter().map(Into::into).collect::<Vec<_>>();
         let mut tree = CommitmentTree::<MerkleHashOrchard, 32>::empty();
         for action in bundle.actions().iter() {
@@ -129,10 +146,8 @@ impl SyntheticBornReceiverBlocksV1 {
             };
             let height = first_height + offset;
             let transactions = if offset == 0 {
-                let mut txid = [0; 32];
-                UnwrapErr(SysRng).fill_bytes(&mut txid);
                 vec![CompactTx {
-                    txid: txid.to_vec(),
+                    txid: funding_txid.to_vec(),
                     ironwood_actions: actions.clone(),
                     ..Default::default()
                 }]
@@ -165,6 +180,7 @@ impl SyntheticBornReceiverBlocksV1 {
         }
         Ok(Self {
             spec,
+            funding_input_ids,
             context: SelectionContext {
                 tip_height,
                 tip_hash_protocol: previous,
@@ -181,6 +197,12 @@ impl SyntheticBornReceiverBlocksV1 {
         })
     }
 
+    /// Public fabricated funding outpoints in the original receiver order,
+    /// obtained from the maintained builder's actual shuffled output mapping.
+    /// No FVK, note secret, ownership authority or real-chain claim is returned.
+    pub fn public_funding_input_ids(&self) -> &[String; 2] {
+        &self.funding_input_ids
+    }
     pub fn spec(&self) -> SyntheticBornChainSpecV1 {
         self.spec
     }

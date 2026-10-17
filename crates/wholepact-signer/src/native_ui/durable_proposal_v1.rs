@@ -143,7 +143,7 @@ impl VerifiedDurableEconomicsV1 {
     }
 }
 
-fn plain_profile(proposal: &Proposal) -> Result<()> {
+pub(super) fn plain_profile(proposal: &Proposal) -> Result<()> {
     let m = proposal.manifest();
     if m.agreement.network_profile_id != "ironwood-testnet-nu7-candidate"
         || m.participants.len() != 2

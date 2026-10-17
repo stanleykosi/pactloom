@@ -12,12 +12,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use wholepact_proof_jobs::{CheckpointScope, LocalAction, LocalProofConsent, VerifiedCheckpoint};
 use wholepact_protocol::{
     authorization::retention::{
-        RetentionError, SignedCandidateContext, SignedRetentionConsent, SignedRetentionScope,
-        durable_intake_v1::{RetainedIntakeRefV1, retained_source_set_digest_v1},
+        durable_intake_v1::{retained_source_set_digest_v1, RetainedIntakeRefV1},
         transaction::{
-            LocalTransactionCheckpoint, TransactionCheckpointSummary,
             submission_handoff::{LocalSubmissionDispatch, LocalSubmissionHandoff},
+            LocalTransactionCheckpoint, TransactionCheckpointSummary,
         },
+        RetentionError, SignedCandidateContext, SignedRetentionConsent, SignedRetentionScope,
     },
     construction::{InputActionMapping, OutputActionMapping},
     durable_proposal_v1::{FixedProposalIdentityV1, VerifiedFixedProposal},
@@ -740,6 +740,33 @@ impl Engine {
             )
             .await
             .map_err(|_| submission_error(operation_id))
+    }
+
+    // Internal protected export join. No caller-supplied mapping or artifact can
+    // enter here; the same original engine receipt and fixed verifier are used.
+    pub(super) fn load_durable_review_export_inputs_v1(
+        &self,
+        access: &Access,
+        candidate_id: &str,
+        local: LocalProofJob<'_>,
+    ) -> Result<(
+        Envelope,
+        VerifiedCheckpoint,
+        VerifiedFixedProposal,
+        Vec<OutputActionMapping>,
+    )> {
+        let (envelope, stored, checkpoint, fixed) =
+            self.load_durable(access, candidate_id, local)?;
+        let outputs = stored
+            .mappings
+            .outputs
+            .iter()
+            .map(|m| OutputActionMapping {
+                output_id: m.output_id.clone(),
+                action_index: m.action_index,
+            })
+            .collect();
+        Ok((envelope, checkpoint, fixed, outputs))
     }
 
     fn load_durable(

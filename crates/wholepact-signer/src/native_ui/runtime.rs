@@ -4,6 +4,16 @@
 #[cfg(feature = "pending-birth-owner-signing")]
 #[path = "qualification/born_consumed_named_entry_v1.rs"]
 mod born_consumed_named_entry_v1;
+#[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+mod durable_entry_v1;
+#[cfg(all(
+    feature = "synthetic-born-joined-qualification",
+    feature = "durable-proposal"
+))]
+#[path = "qualification/durable_proposal_v1.rs"]
+pub(in crate::native_ui) mod durable_proposal_qualification_v1;
+#[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+mod durable_review_v1;
 
 #[cfg(feature = "pending-birth-owner-signing")]
 #[path = "qualification/born_common_context_entry_v3.rs"]
@@ -196,6 +206,16 @@ impl AuthenticatedPairing {
     }
 }
 enum Operation {
+    #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+    DurableDisclosureV1 {
+        flow: Box<durable_review_v1::DurableSpendFlowV1>,
+        review: Box<WitnessDisclosureReview>,
+    },
+    #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+    DurableSpendV1 {
+        flow: Box<durable_review_v1::DurableSpendFlowV1>,
+        disclosure: Box<ApprovedWitnessDisclosure>,
+    },
     #[cfg(feature = "authority-signing")]
     HostContinuity(Box<super::host_recovery::PreparedHostContinuity>),
     #[cfg(feature = "authority-signing")]
@@ -281,10 +301,37 @@ struct PendingDecision {
     review: ExactNativeReview,
     operation: Operation,
 }
+enum OpenNativeAuthority {
+    Ordinary(NativeAuthority),
+    #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+    DurableBorn(Arc<super::PendingAccountNativeAuthority>),
+}
+impl std::ops::Deref for OpenNativeAuthority {
+    type Target = NativeAuthority;
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Ordinary(native) => native,
+            #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+            Self::DurableBorn(owner) => owner.native(),
+        }
+    }
+}
 struct OpenAccount {
     vault: Arc<AccountVault>,
     journal: Arc<SignerConsentJournal>,
-    authority: NativeAuthority,
+    authority: OpenNativeAuthority,
+    #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+    durable_born_entry: Option<
+        Arc<
+            crate::account::birth::enrollment::roster_v2::durable_entry_v1::FreshDurableBornEntryV1,
+        >,
+    >,
+    #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+    durable_review: Option<Arc<durable_review_v1::ImportedDurableReviewV1>>,
+    #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+    durable_import_job: Option<durable_review_v1::DurableImportJobV1>,
+    #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+    durable_wallet_job: Option<durable_review_v1::DurableWalletJobV1>,
     // Every session remains registered until its through-commit write fence completes on lock,
     // navigation, app revocation/exit, expiry or replacement. Blur discards pending
     // input but preserves already-approved scope and original expiry. No detached grants.
@@ -322,7 +369,16 @@ struct OpenAccount {
     activation_retry: Option<ApprovedWriterActivation>,
 }
 impl OpenAccount {
+    fn supports_ordinary_routes(&self) -> bool {
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        if self.durable_born_entry.is_some() {
+            return false;
+        }
+        true
+    }
     fn invalidate_review(&mut self) {
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        self.clear_durable_review_v1();
         // Close admission immediately, before waiting for any already-held
         // through-commit lease. The native event thread never waits for a client.
         #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
@@ -368,6 +424,10 @@ impl OpenAccount {
         self.manifest = None;
     }
     fn refresh_session(&mut self) -> Result<()> {
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        if let Some(source) = &self.durable_born_entry {
+            source.check_current()?;
+        }
         self.revocations
             .retain(|done| !done.load(Ordering::Acquire));
         if !self.revocations.is_empty() || self.session.is_some() {
@@ -383,6 +443,8 @@ impl OpenAccount {
         Ok(())
     }
     fn close(mut self) {
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        self.clear_durable_review_v1();
         self.ipc.revoke_all();
         #[cfg(feature = "authority-signing")]
         {
@@ -444,6 +506,10 @@ impl OpenAccount {
         Ok(())
     }
     fn check_pairing(&self) -> Result<&AuthenticatedPairing> {
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        if let Some(source) = &self.durable_born_entry {
+            source.check_current()?;
+        }
         self.authority.check_current()?;
         if self
             .revocations
@@ -494,6 +560,8 @@ impl RetirementNativeEntry {
     }
 }
 pub(super) struct NativeRuntime {
+    #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+    durable_entry_job: Option<durable_entry_v1::DurableEntryJobV1>,
     #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
     named_verifier: super::named_verifier_owner::SetupWorkspace,
     #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
@@ -597,6 +665,8 @@ pub(super) struct NativeRuntime {
 impl NativeRuntime {
     pub(super) fn new(parent_channel: Option<crate::native_launch::ParentChannel>) -> Self {
         Self {
+            #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+            durable_entry_job: None,
             #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
             named_verifier: super::named_verifier_owner::SetupWorkspace::default(),
             #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
@@ -698,6 +768,17 @@ impl NativeRuntime {
         }
     }
     pub(super) fn lock(&mut self) {
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        {
+            self.cancel_durable_entry_v1();
+            if let Some(source) = self
+                .open
+                .as_ref()
+                .and_then(|o| o.durable_born_entry.as_ref())
+            {
+                source.native_owner().revoke_pending_now();
+            }
+        }
         // Named workers retain the exact live source and may be draining I/O.
         // Close admission without a grant/publication mutex on the event thread;
         // the unchanged background close below owns all blocking cleanup.
@@ -810,6 +891,17 @@ impl NativeRuntime {
     /// Losing focus cancels unconfirmed input, not an already consumed exact
     /// disclosure decision. Explicit lock still revokes every original lease.
     pub(super) fn blur(&mut self) {
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        if self
+            .open
+            .as_ref()
+            .is_some_and(|o| o.durable_wallet_job.is_some() || o.durable_import_job.is_some())
+        {
+            self.lock();
+            return;
+        }
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        self.cancel_durable_entry_v1();
         #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
         self.named_verifier.blur();
         #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
@@ -899,6 +991,8 @@ impl NativeRuntime {
         self.message = "Pending review discarded on focus loss. Already approved exact permissions retain their original scope and expiry; Lock revokes them.";
     }
     pub(super) fn navigate(&mut self) {
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        self.cancel_durable_entry_v1();
         #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
         self.named_verifier.clear();
         #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
@@ -996,7 +1090,15 @@ impl NativeRuntime {
         self.open = Some(OpenAccount {
             vault: Arc::new(vault),
             journal: Arc::new(journal),
-            authority,
+            authority: OpenNativeAuthority::Ordinary(authority),
+            #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+            durable_born_entry: None,
+            #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+            durable_review: None,
+            #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+            durable_import_job: None,
+            #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+            durable_wallet_job: None,
             session: None,
             ipc,
             pairing: None,
@@ -1093,6 +1195,14 @@ impl NativeRuntime {
     }
     #[cfg(feature = "authority-signing")]
     fn stage_recipient_observation(&mut self, epoch: u64) -> Result<()> {
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        if self
+            .open
+            .as_ref()
+            .is_some_and(|o| o.durable_born_entry.is_some())
+        {
+            return Err(Error::Unavailable);
+        }
         if self.recipient_job.is_some() {
             return Err(Error::Locked);
         }
@@ -1142,6 +1252,14 @@ impl NativeRuntime {
     }
     #[cfg(feature = "authority-signing")]
     fn stage_recipient(&mut self, issue: bool, epoch: u64) -> Result<()> {
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        if self
+            .open
+            .as_ref()
+            .is_some_and(|o| o.durable_born_entry.is_some())
+        {
+            return Err(Error::Unavailable);
+        }
         let open = self.open.as_ref().ok_or(Error::Locked)?;
         let prepared = if issue {
             super::recipient::PreparedRecipient::issue(
@@ -1170,6 +1288,14 @@ impl NativeRuntime {
         Ok(())
     }
     fn stage_provider(&mut self, epoch: u64) -> Result<()> {
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        if self
+            .open
+            .as_ref()
+            .is_some_and(|o| o.durable_born_entry.is_some())
+        {
+            return Err(Error::Unavailable);
+        }
         let open = self.open.as_ref().ok_or(Error::Locked)?;
         let prepared = super::provider_export::PreparedProviderExport::prepare(
             &self.provider_image,
@@ -1252,6 +1378,12 @@ impl NativeRuntime {
                 )
             {
                 drop(event);
+                continue;
+            }
+            #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+            if open.durable_born_entry.is_some() && !durable_review_v1::allowed_event(&event) {
+                drop(event);
+                self.message = "This fresh durable entry refuses legacy, V3, named, sponsor, automatic and recovery routes. No unsupported history was written.";
                 continue;
             }
             match event {
@@ -1753,6 +1885,13 @@ impl NativeRuntime {
                     stream,
                     request,
                 } => {
+                    #[cfg(all(
+                        feature = "durable-proposal",
+                        feature = "pending-birth-owner-signing"
+                    ))]
+                    if durable_review_v1::check_plain_preconstruction(open, &request).is_err() {
+                        continue;
+                    }
                     if self.pending.is_some()
                         || open.history_workers.len() >= 8
                         || open.check_pairing().is_err()
@@ -1793,24 +1932,41 @@ impl NativeRuntime {
                     }
                 }
                 #[cfg(feature = "durable-proposal")]
-                LocalEvent::DurableConstructionV1 { peer, stream, request } => {
+                LocalEvent::DurableConstructionV1 {
+                    peer,
+                    stream,
+                    request,
+                } => {
                     if self.pending.is_some()
                         || open.history_workers.len() >= 8
                         || open.check_pairing().is_err()
-                        || open.pairing.as_ref().is_none_or(|p| p.peer.grant_id != peer.grant_id)
+                        || open
+                            .pairing
+                            .as_ref()
+                            .is_none_or(|p| p.peer.grant_id != peer.grant_id)
                     {
                         continue;
                     }
                     let Some(session) = open.session.as_ref() else {
                         continue;
                     };
-                    if let Ok(prepared) = super::durable_construction_v1::PreparedDurableConstructionV1::prepare(
-                        *request, peer, stream, &open.journal, session,
-                        &open.authority.binding(), &open.vault,
-                    ) {
+                    if let Ok(prepared) =
+                        super::durable_construction_v1::PreparedDurableConstructionV1::prepare(
+                            *request,
+                            peer,
+                            stream,
+                            &open.journal,
+                            session,
+                            &open.authority.binding(),
+                            &open.vault,
+                        )
+                    {
                         if let Ok(display) = prepared.display() {
                             if let Ok(review) = ExactNativeReview::stage(
-                                &open.authority, prepared.digest(), display, epoch,
+                                &open.authority,
+                                prepared.digest(),
+                                display,
+                                epoch,
                             ) {
                                 self.pending = Some(PendingDecision {
                                     review,
@@ -1822,11 +1978,18 @@ impl NativeRuntime {
                     }
                 }
                 #[cfg(feature = "durable-proposal")]
-                LocalEvent::DurableConstructionHistoryV1 { peer, stream, request } => {
+                LocalEvent::DurableConstructionHistoryV1 {
+                    peer,
+                    stream,
+                    request,
+                } => {
                     if self.pending.is_some()
                         || open.history_workers.len() >= 8
                         || open.check_pairing().is_err()
-                        || open.pairing.as_ref().is_none_or(|p| p.peer.grant_id != peer.grant_id)
+                        || open
+                            .pairing
+                            .as_ref()
+                            .is_none_or(|p| p.peer.grant_id != peer.grant_id)
                     {
                         continue;
                     }
@@ -1835,13 +1998,60 @@ impl NativeRuntime {
                     };
                     let journal = open.journal.clone();
                     let worker = std::thread::spawn(move || {
-                        let _ = super::durable_construction_v1::serve_durable_construction_history_v1(
-                            stream, peer, *request, &journal, &session,
-                        );
+                        let _ =
+                            super::durable_construction_v1::serve_durable_construction_history_v1(
+                                stream, peer, *request, &journal, &session,
+                            );
                     });
                     open.disclosure_worker_ids.insert(worker.thread().id());
                     open.history_workers.push(worker);
                     self.message = "Checking only the exact retained construction disclosure for its original authenticated recipient. No permission or validity window is being renewed.";
+                }
+                #[cfg(feature = "durable-proposal")]
+                LocalEvent::DurableConstructionRedisclosureV1 {
+                    peer,
+                    stream,
+                    request,
+                } => {
+                    if self.pending.is_some()
+                        || open.history_workers.len() >= 8
+                        || open.check_pairing().is_err()
+                        || open
+                            .pairing
+                            .as_ref()
+                            .is_none_or(|p| p.peer.grant_id != peer.grant_id)
+                    {
+                        continue;
+                    }
+                    let Some(session) = open.session.as_ref() else {
+                        continue;
+                    };
+                    if let Ok(prepared) = super::durable_construction_v1::PreparedDurableConstructionV1::prepare_redisclosure(
+                        *request, peer, stream, &open.journal, session,
+                        &open.authority.binding(), &open.vault,
+                    ) {
+                        if let Ok(display) = prepared.display() {
+                            if let Ok(review) = ExactNativeReview::stage(
+                                &open.authority, prepared.digest(), display, epoch,
+                            ) {
+                                self.pending = Some(PendingDecision {
+                                    review,
+                                    operation: Operation::DurableConstructionV1(Box::new(prepared)),
+                                });
+                                self.message = "Review a NEW privacy disclosure of exactly retained construction material to this current paired process. Old permission is not restored; no spending is authorized.";
+                            }
+                        }
+                    }
+                }
+                #[cfg(feature = "durable-proposal")]
+                LocalEvent::DurableProposalReviewV1 {
+                    peer,
+                    stream,
+                    request,
+                } => {
+                    #[cfg(feature = "pending-birth-owner-signing")]
+                    let _ = self.start_durable_import_v1(stream, peer, *request, epoch);
+                    return;
                 }
                 #[cfg(feature = "authority-signing")]
                 LocalEvent::ProvedDisclosure {
@@ -2439,8 +2649,13 @@ impl NativeRuntime {
                         }
                         #[cfg(feature = "durable-proposal")]
                         crate::ipc::AppRequest::RequestDurableConstructionV1 { .. }
-                        | crate::ipc::AppRequest::RequestDurableConstructionHistoryV1 { .. } => {
+                        | crate::ipc::AppRequest::RequestDurableConstructionHistoryV1 { .. }
+                        | crate::ipc::AppRequest::RequestDurableConstructionRedisclosureV1 { .. } => {
                             "Durable construction uses its separate exact native disclosure and original-recipient history channel; a request grants no spending authority."
+                        }
+                        #[cfg(feature = "durable-proposal")]
+                        crate::ipc::AppRequest::RequestDurableProposalReviewV1 { .. } => {
+                            "Exact durable proposal import requires its separate authenticated metadata handshake; received data is not native spending permission."
                         }
                         crate::ipc::AppRequest::Status {} => {
                             "The native-approved local process proved current channel-key possession. You can now prepare enrollment."
@@ -2468,12 +2683,26 @@ impl NativeRuntime {
         let input: ProposalInput = wholepact_core::parse_typed_json(self.proposal.as_bytes())
             .map_err(|_| Error::InvalidData)?;
         let proposal = Proposal::validate(input).map_err(|_| Error::Verification)?;
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        durable_review_v1::check_plain_proposal(open, &proposal)?;
         if proposal.manifest_digest() != paired.peer.scope.manifest_digest
             || proposal.manifest().agreement.agreement_id != paired.agreement_id()
         {
             return Err(Error::Verification);
         }
         let budget: u64 = self.budget.parse().map_err(|_| Error::InvalidData)?;
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        if open.durable_born_entry.as_ref().is_some_and(|source| {
+            budget
+                > source
+                    .record()
+                    .account_record
+                    .terms
+                    .scope
+                    .aggregate_budget_zatoshis
+        }) {
+            return Err(Error::ReviewMismatch);
+        }
         let transport = AuthenticatedTransportIdentity::from_native(paired)?;
         let prepared = open
             .session
@@ -2510,6 +2739,8 @@ impl NativeRuntime {
         let input: ProposalInput = wholepact_core::parse_typed_json(self.proposal.as_bytes())
             .map_err(|_| Error::InvalidData)?;
         let proposal = Proposal::validate(input).map_err(|_| Error::Verification)?;
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        durable_review_v1::check_plain_proposal(open, &proposal)?;
         let prepared = open
             .session
             .as_ref()
@@ -2541,6 +2772,14 @@ impl NativeRuntime {
         head: wholepact_authority::AuthorityHead,
         epoch: u64,
     ) -> Result<()> {
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        if self
+            .open
+            .as_ref()
+            .is_some_and(|o| o.durable_born_entry.is_some())
+        {
+            return Err(Error::Unavailable);
+        }
         let open = self.open.as_ref().ok_or(Error::Locked)?;
         open.check_pairing()?;
         let authorization_id = format!("native-{}", hex::encode(crate::vault::random::<24>()?));
@@ -2592,6 +2831,14 @@ impl NativeRuntime {
         delivery: Option<AutomaticIpcDelivery>,
         epoch: u64,
     ) -> Result<()> {
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        if self
+            .open
+            .as_ref()
+            .is_some_and(|o| o.durable_born_entry.is_some())
+        {
+            return Err(Error::Unavailable);
+        }
         let open = self.open.as_mut().ok_or(Error::Locked)?;
         open.check_pairing()?;
         let session = open.session.as_ref().ok_or(Error::Locked)?;
@@ -2709,6 +2956,14 @@ impl NativeRuntime {
     }
     #[cfg(feature = "authority-signing")]
     fn stage_resolution(&mut self, kind: u8, epoch: u64) -> Result<()> {
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        if self
+            .open
+            .as_ref()
+            .is_some_and(|o| o.durable_born_entry.is_some())
+        {
+            return Err(Error::Unavailable);
+        }
         let open = self.open.as_ref().ok_or(Error::Locked)?;
         open.check_pairing()?;
         if self.pending.is_some() || open.wallet_job.is_some() || open.witness_job.is_some() {
@@ -2763,6 +3018,8 @@ impl NativeRuntime {
         if open.writer_retry.is_some() || open.writer_receipt.is_some() {
             return Err(Error::Locked);
         }
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        durable_review_v1::check_selected_witness_setup(open, &self.witness_setup)?;
         let prepared =
             PreparedWitnessSetup::prepare(&self.witness_setup, &open.vault, &open.authority)?;
         self.pending = Some(PendingDecision {
@@ -2782,6 +3039,8 @@ impl NativeRuntime {
         if open.activation_retry.is_some() {
             return Err(Error::Locked);
         }
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        durable_review_v1::check_selected_witness_setup(open, &self.owner_witness_setup)?;
         let prepared =
             PreparedWitnessSetup::prepare(&self.owner_witness_setup, &open.vault, &open.authority)?;
         self.pending = Some(PendingDecision {
@@ -2806,6 +3065,8 @@ impl NativeRuntime {
         }
         let open = self.open.as_mut().ok_or(Error::Locked)?;
         open.check_pairing()?;
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        durable_review_v1::check_configured_witnesses(open)?;
         if open.wallet_job.is_some() || open.witness_job.is_some() {
             return Err(Error::Locked);
         }
@@ -3283,6 +3544,14 @@ impl NativeRuntime {
         automation_grant: Option<String>,
         automatic_delivery: Option<AutomaticIpcDelivery>,
     ) -> Result<()> {
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        if self
+            .open
+            .as_ref()
+            .is_some_and(|o| o.durable_born_entry.is_some())
+        {
+            return Err(Error::Unavailable);
+        }
         let open = self.open.as_mut().ok_or(Error::Locked)?;
         if !open.writer_reconciled {
             return Err(Error::Locked);
@@ -3658,10 +3927,27 @@ impl NativeRuntime {
     }
     fn approve(&mut self, focused: bool, epoch: u64) -> Result<()> {
         let pending = self.pending.take().ok_or(Error::ReviewMismatch)?;
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        if self
+            .open
+            .as_ref()
+            .is_some_and(|o| o.durable_born_entry.is_some())
+            && !durable_review_v1::allowed_operation(&pending.operation)
+        {
+            return Err(Error::Unavailable);
+        }
         let decision = pending
             .review
             .consume_native_click(focused, epoch, &self.confirmation)?;
         self.confirmation.zeroize();
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        if let Operation::DurableSpendV1 { flow, disclosure } = pending.operation {
+            return self.begin_durable_signing_v1(*flow, *disclosure, decision);
+        }
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        if let Operation::DurableDisclosureV1 { flow, review } = pending.operation {
+            return self.approve_durable_disclosure_v1(*flow, *review, decision, epoch);
+        }
         #[cfg(feature = "authority-signing")]
         if let Operation::Spend { flow, disclosure } = pending.operation {
             return self.begin_signing(*flow, *disclosure, decision);
@@ -3676,6 +3962,10 @@ impl NativeRuntime {
         }
         let open = self.open.as_mut().ok_or(Error::Locked)?;
         match pending.operation {
+            #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+            Operation::DurableSpendV1 { .. } | Operation::DurableDisclosureV1 { .. } => {
+                unreachable!()
+            }
             #[cfg(feature = "authority-signing")]
             Operation::AutomationGrant(prepared) => {
                 open.check_pairing()?;
@@ -4031,11 +4321,10 @@ impl NativeRuntime {
             }
             #[cfg(feature = "authority-signing")]
             Operation::OwnerWitness(prepared) => {
-                open.owner_witness = Some(Arc::new(prepared.approve(
-                    decision,
-                    &open.authority,
-                    &open.vault,
-                )?));
+                let witness = prepared.approve(decision, &open.authority, &open.vault)?;
+                #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+                durable_review_v1::check_witness_descriptor(open, &witness.disclosure())?;
+                open.owner_witness = Some(Arc::new(witness));
                 self.message = "Separate owner-control client selected. Activation requires its own exact review; writer identity was not replaced.";
             }
             #[cfg(feature = "authority-signing")]
@@ -4075,11 +4364,10 @@ impl NativeRuntime {
             }
             #[cfg(feature = "authority-signing")]
             Operation::Witness(prepared) => {
-                open.witness = Some(Arc::new(prepared.approve(
-                    decision,
-                    &open.authority,
-                    &open.vault,
-                )?));
+                let witness = prepared.approve(decision, &open.authority, &open.vault)?;
+                #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+                durable_review_v1::check_witness_descriptor(open, &witness.disclosure())?;
+                open.witness = Some(Arc::new(witness));
                 self.message = "Pinned witness client selected natively. Every exact reservation still needs a separate disclosure and spend decision.";
             }
             #[cfg(feature = "authority-signing")]
@@ -4125,6 +4413,13 @@ impl NativeRuntime {
                 let session = open.session.as_ref().ok_or(Error::Locked)?;
                 let decision = session.native_decision(decision)?;
                 match operation {
+                    #[cfg(all(
+                        feature = "durable-proposal",
+                        feature = "pending-birth-owner-signing"
+                    ))]
+                    Operation::DurableSpendV1 { .. } | Operation::DurableDisclosureV1 { .. } => {
+                        unreachable!()
+                    }
                     Operation::Redelivery {
                         prepared,
                         peer,
@@ -4266,6 +4561,14 @@ impl NativeRuntime {
         command: super::automation_workspace::AutomationCommand,
         epoch: u64,
     ) -> Result<()> {
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        if self
+            .open
+            .as_ref()
+            .is_some_and(|o| o.durable_born_entry.is_some())
+        {
+            return Err(Error::Unavailable);
+        }
         use super::automation_workspace::AutomationCommand as C;
         if command == C::Authorize {
             let grant = self.automation.grant_id.to_string();
@@ -4450,6 +4753,14 @@ impl NativeRuntime {
         update: bool,
         epoch: u64,
     ) -> Result<()> {
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        if self
+            .open
+            .as_ref()
+            .is_some_and(|o| o.durable_born_entry.is_some())
+        {
+            return Err(Error::Unavailable);
+        }
         let open = self.open.as_ref().ok_or(Error::Locked)?;
         let session = open.session.as_ref().ok_or(Error::Locked)?;
         let replacement = if update {
@@ -4752,6 +5063,16 @@ impl NativeRuntime {
         // event-thread cancellation/review before sibling polls or DB-backed UI.
         #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
         if self.named_recipient.final_active() {
+            if self
+                .open
+                .as_ref()
+                .is_some_and(|open| !open.supports_ordinary_routes())
+            {
+                self.named_recipient.clear();
+                self.message =
+                    "This fresh durable entry cannot resume a named or legacy recipient workspace.";
+                return;
+            }
             if !focused {
                 self.named_recipient.clear();
                 return;
@@ -4806,6 +5127,8 @@ impl NativeRuntime {
         self.born_manual_roster_v2.poll_lifecycle(focused, epoch);
         #[cfg(feature = "pending-birth-owner-signing")]
         self.born_enrolled_backup.poll_lifecycle(focused, epoch);
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        self.poll_durable_entry_v1(focused, epoch);
         if !focused {
             #[cfg(feature = "authority-signing")]
             self.birth.clear();
@@ -4830,6 +5153,26 @@ impl NativeRuntime {
             return;
         }
         self.poll(epoch);
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        {
+            self.poll_durable_import_v1(epoch);
+            self.poll_durable_wallet_review_v1(epoch);
+        }
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        if self
+            .open
+            .as_ref()
+            .is_some_and(|o| o.durable_wallet_job.is_some() || o.durable_import_job.is_some())
+        {
+            ui.label(self.message);
+            ui.label("The bounded exact durable import or wallet check is in progress. Lock remains available.");
+            return;
+        }
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        if self.durable_entry_job.is_some() {
+            ui.label("Authenticating the original durable born source in a bounded worker. Lock, navigation or focus loss cancels entry; no old approval is restored.");
+            return;
+        }
         #[cfg(feature = "authority-signing")]
         if self.signing_job.is_some() {
             ui.label(self.message);
@@ -5163,6 +5506,18 @@ impl NativeRuntime {
                             else { "Restricted historical entry was refused. No writer session or financial authority was created." };
                     }
                 });
+                #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+                if ui
+                    .button("Fresh entry to original born account for fixed durable proposal")
+                    .clicked_by(egui::PointerButton::Primary)
+                    && focused
+                {
+                    if self.begin_durable_entry_v1(focused, epoch).is_err() {
+                        self.password.zeroize();
+                        self.message = "Fresh durable entry refused. Preserve the original account and journal; no native receipt, writer or key permission was restored.";
+                    }
+                    return;
+                }
                 if ui
                     .button("Unlock existing dedicated account")
                     .clicked_by(egui::PointerButton::Primary)
@@ -5240,7 +5595,7 @@ impl NativeRuntime {
             }
             let open = self.open.as_ref().unwrap();
             #[cfg(feature = "authority-signing")]
-            if self.pending.is_none() {
+            if self.pending.is_none() && open.supports_ordinary_routes() {
                 self.retirement_evidence
                     .ui(ui, &open.vault, &open.authority, focused, epoch);
                 self.retirement_witness.ui(
@@ -5256,6 +5611,19 @@ impl NativeRuntime {
                 "Unlocked account: {}",
                 open.vault.account_id().unwrap_or_default()
             ));
+            #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+            if open.durable_review.is_some()
+                && self.pending.is_none()
+                && ui
+                    .button("Review exact imported durable proposal with fresh wallet and witness")
+                    .clicked_by(egui::PointerButton::Primary)
+                && focused
+            {
+                if self.start_durable_wallet_review_v1(epoch).is_err() {
+                    self.message = "Fresh durable review unavailable. Preserve the same fixed proposal and all existing exposure; no replacement inputs or approval were created.";
+                }
+                return;
+            }
             ui.label(format!(
                 "Request-only Unix endpoint: {}",
                 inert_text(&open.ipc.socket_path().display().to_string())
@@ -5330,7 +5698,12 @@ impl NativeRuntime {
             }
         }
         #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
-        if self.pending.is_none() {
+        if self.pending.is_none()
+            && self
+                .open
+                .as_ref()
+                .is_some_and(OpenAccount::supports_ordinary_routes)
+        {
             if let Some(open) = self.open.as_ref() {
                 if let Some(session) = open.session.as_ref() {
                     let owner = super::wallet_workspace::NamedRecipientOwnerContext {

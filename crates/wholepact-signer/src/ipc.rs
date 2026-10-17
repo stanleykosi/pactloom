@@ -153,6 +153,14 @@ pub enum AppRequest {
     RequestDurableConstructionHistoryV1 {
         request: Box<crate::authority_bridge::durable_construction_v1::DurableConstructionHistoryRequestV1>,
     },
+    #[cfg(feature = "durable-proposal")]
+    RequestDurableConstructionRedisclosureV1 {
+        request: Box<crate::authority_bridge::durable_construction_v1::DurableConstructionRedisclosureRequestV1>,
+    },
+    #[cfg(feature = "durable-proposal")]
+    RequestDurableProposalReviewV1 {
+        request: Box<crate::authority_bridge::durable_review_ipc_v1::DurableReviewDeliveryRequestV1>,
+    },
     #[cfg(all(feature="authority-signing",feature="offline-review-foundation"))]
     RequestBornOriginalHistoryV1 {request:Box<crate::authority_bridge::born_history_ipc::BornOriginalHistoryRequestV1>},
     #[cfg(all(feature="authority-signing",feature="offline-review-foundation"))]
@@ -522,6 +530,18 @@ impl AppRequest {
                 if !scope.history_read || !scope.preconstruction_export {
                     return Err(Error::Authentication);
                 }
+                request.validate().map_err(|_| Error::InvalidData)?;
+            }
+            #[cfg(feature = "durable-proposal")]
+            Self::RequestDurableConstructionRedisclosureV1 { request } => {
+                if !scope.history_read || !scope.preconstruction_export {
+                    return Err(Error::Authentication);
+                }
+                request.validate().map_err(|_| Error::InvalidData)?;
+            }
+            #[cfg(feature = "durable-proposal")]
+            Self::RequestDurableProposalReviewV1 { request } => {
+                if !scope.history_read || !scope.preconstruction_export { return Err(Error::Authentication); }
                 request.validate().map_err(|_| Error::InvalidData)?;
             }
             #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
@@ -921,6 +941,18 @@ pub(crate) enum LocalEvent {
         peer: AuthenticatedPeer,
         stream: UnixStream,
         request: Box<crate::authority_bridge::durable_construction_v1::DurableConstructionHistoryRequestV1>,
+    },
+    #[cfg(feature = "durable-proposal")]
+    DurableConstructionRedisclosureV1 {
+        peer: AuthenticatedPeer,
+        stream: UnixStream,
+        request: Box<crate::authority_bridge::durable_construction_v1::DurableConstructionRedisclosureRequestV1>,
+    },
+    #[cfg(feature = "durable-proposal")]
+    DurableProposalReviewV1 {
+        peer: AuthenticatedPeer,
+        stream: UnixStream,
+        request: Box<crate::authority_bridge::durable_review_ipc_v1::DurableReviewDeliveryRequestV1>,
     },
     #[cfg(all(feature="authority-signing",feature="offline-review-foundation"))]
     BornOriginalHistoryV1{peer:AuthenticatedPeer,stream:UnixStream,request:Box<crate::authority_bridge::born_history_ipc::BornOriginalHistoryRequestV1>},
@@ -1757,6 +1789,22 @@ fn serve(
                                             request: request.clone(),
                                         })
                                         .map_err(|_| Error::Unavailable)?;
+                                }
+                                #[cfg(feature = "durable-proposal")]
+                                AppRequest::RequestDurableConstructionRedisclosureV1 { ref request } => {
+                                    sender
+                                        .try_send(LocalEvent::DurableConstructionRedisclosureV1 {
+                                            peer,
+                                            stream: stream.try_clone()?,
+                                            request: request.clone(),
+                                        })
+                                        .map_err(|_| Error::Unavailable)?;
+                                }
+                                #[cfg(feature = "durable-proposal")]
+                                AppRequest::RequestDurableProposalReviewV1 { ref request } => {
+                                    sender.try_send(LocalEvent::DurableProposalReviewV1 {
+                                        peer, stream: stream.try_clone()?, request: request.clone(),
+                                    }).map_err(|_| Error::Unavailable)?;
                                 }
                                 #[cfg(all(feature="authority-signing",feature="offline-review-foundation"))]
                                 AppRequest::RequestBornOriginalHistoryV1{ref request}=>{sender.try_send(LocalEvent::BornOriginalHistoryV1{peer,stream:stream.try_clone()?,request:request.clone()}).map_err(|_|Error::Unavailable)?;}

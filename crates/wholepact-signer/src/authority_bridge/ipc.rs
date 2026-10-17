@@ -1022,6 +1022,51 @@ pub(crate) fn existing_redelivery_reference(
 }
 
 impl OriginalHistoryClient {
+    #[cfg(feature = "durable-proposal")]
+    pub(super) fn check_durable_review_origin_v1(&self, stream: &UnixStream) -> Result<()> {
+        if self.mode != PairingMode::Ordinary
+            || !self.scope.preconstruction_export
+            || !self.scope.history_read
+            || Instant::now() >= self.grant.expires
+        {
+            return Err(BridgeError::Permission);
+        }
+        let actual = self.provider.verify_server(stream)?;
+        self.peer
+            .same_live_process(&actual)
+            .map_err(|_| BridgeError::Permission)?;
+        self.peer
+            .check_alive()
+            .map_err(|_| BridgeError::Permission)?;
+        Ok(())
+    }
+    #[cfg(feature = "durable-proposal")]
+    pub(super) fn check_durable_review_stream_v1(
+        &self,
+        stream: &UnixStream,
+        recipient: &super::durable_review_ipc_v1::DurableReviewRecipientV1,
+    ) -> Result<()> {
+        if self.mode != PairingMode::Ordinary
+            || !self.scope.preconstruction_export
+            || !self.scope.history_read
+            || Instant::now() >= self.grant.expires
+            || recipient.version != 1
+            || recipient.account_id != self.scope.account_id
+            || recipient.agreement_id != self.scope.agreement_id
+            || recipient.participant_id != self.scope.participant_id
+            || recipient.manifest_digest != self.scope.manifest_digest
+            || recipient.local_grant_id != self.grant.grant_id
+            || recipient.provider_enrollment_reference
+                != self.provider.native_enrollment_reference()
+            || recipient.signer_process_instance != self.peer.instance()
+        {
+            return Err(BridgeError::Permission);
+        }
+        recipient.request.validate()?;
+        super::durable_construction_v1::hash(&recipient.local_channel_digest)?;
+        self.check_durable_review_origin_v1(stream)
+    }
+
     /// Describe only this presently authenticated local construction grant. Its
     /// digest is a hash of the ephemeral pairing token, NOT a public key, owner
     /// identity or durable recipient identity. A new pairing has a new digest.
@@ -1029,7 +1074,9 @@ impl OriginalHistoryClient {
     pub fn durable_construction_recipient_v1(
         &self,
         principal_id: &str,
-    ) -> Result<wholepact_wallet::wallet::protected_sync::durable_construction_v1::ConstructionRecipientV1> {
+    ) -> Result<
+        wholepact_wallet::wallet::protected_sync::durable_construction_v1::ConstructionRecipientV1,
+    > {
         use sha2::{Digest, Sha256};
         crate::review::validate_label(principal_id).map_err(|_| BridgeError::Binding)?;
         if self.mode != PairingMode::Ordinary
@@ -1040,26 +1087,96 @@ impl OriginalHistoryClient {
         }
         // The installed-image check, exact live process and token-proving server
         // response are mandatory. A cached peer name or digest is insufficient.
-        let stream = self.open_preconstruction_request(serde_json::json!({"operation":"status"}))?;
-        let frame = crate::ipc::read_frame_with_deadline(
-            &stream, &self.peer, Duration::from_secs(2),
-        ).map_err(|_| BridgeError::Ipc)?;
+        let stream =
+            self.open_preconstruction_request(serde_json::json!({"operation":"status"}))?;
+        let frame =
+            crate::ipc::read_frame_with_deadline(&stream, &self.peer, Duration::from_secs(2))
+                .map_err(|_| BridgeError::Ipc)?;
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
-        struct Accepted { accepted: bool, reason_code: String }
+        struct Accepted {
+            accepted: bool,
+            reason_code: String,
+        }
         let response: Accepted = serde_json::from_slice(&frame).map_err(|_| BridgeError::Ipc)?;
-        self.peer.check_alive().map_err(|_| BridgeError::Permission)?;
-        if !response.accepted || response.reason_code != "REQUEST_ONLY"
+        self.peer
+            .check_alive()
+            .map_err(|_| BridgeError::Permission)?;
+        if !response.accepted
+            || response.reason_code != "REQUEST_ONLY"
             || Instant::now() >= self.grant.expires
         {
             return Err(BridgeError::Permission);
         }
-        let token = Zeroizing::new(hex::decode(self.grant.token_hex.as_str()).map_err(|_| BridgeError::Binding)?);
-        if token.len() != 32 { return Err(BridgeError::Binding); }
+        let token = Zeroizing::new(
+            hex::decode(self.grant.token_hex.as_str()).map_err(|_| BridgeError::Binding)?,
+        );
+        if token.len() != 32 {
+            return Err(BridgeError::Binding);
+        }
         Ok(wholepact_wallet::wallet::protected_sync::durable_construction_v1::ConstructionRecipientV1 {
             principal_id: principal_id.into(),
             authenticated_local_grant_digest: hex::encode(Sha256::digest(token.as_slice())),
         })
+    }
+
+    /// Check a signer-attested original recipient against THIS actual local
+    /// client and grant. The process nonce is retained by the authenticated
+    /// signer, not a public key or a portable owner identity.
+    #[cfg(feature = "durable-proposal")]
+    pub(super) fn verify_durable_construction_recipient_v1(
+        &self,
+        binding: &crate::consent_journal::TransportIdentityBinding,
+    ) -> Result<()> {
+        use crate::consent_journal::TransportIdentityBinding;
+        use sha2::{Digest, Sha256};
+        let TransportIdentityBinding::LocalProcess {
+            transport_identity_id,
+            channel_key_digest,
+            channel_binding_digest,
+            uid,
+            pid,
+            process_instance,
+            signer_generation,
+            account_id,
+            agreement_id,
+            participant_id,
+            manifest_digest,
+        } = binding
+        else {
+            return Err(BridgeError::Permission);
+        };
+        // This performs the installed-image/live-process/token-proving status
+        // exchange, rather than trusting cached labels or a package digest.
+        let actual = self.durable_construction_recipient_v1("durable-construction")?;
+        super::durable_construction_v1::hash(process_instance)?;
+        if transport_identity_id != &self.grant.grant_id
+            || channel_key_digest != &actual.authenticated_local_grant_digest
+            || *pid != std::process::id()
+            || *uid != unsafe { libc::geteuid() }
+            || *signer_generation == 0
+            || account_id != &self.scope.account_id
+            || agreement_id != &self.scope.agreement_id
+            || participant_id != &self.scope.participant_id
+            || manifest_digest != &self.scope.manifest_digest
+        {
+            return Err(BridgeError::Permission);
+        }
+        let mut hash = Sha256::new();
+        hash.update(b"wholepact:local-process-pairing:v1\0");
+        hash.update(process_instance.as_bytes());
+        hash.update(signer_generation.to_le_bytes());
+        hash.update(serde_json::to_vec(&self.scope).map_err(|_| BridgeError::Binding)?);
+        if channel_binding_digest != &hex::encode(hash.finalize()) {
+            return Err(BridgeError::Permission);
+        }
+        self.peer
+            .check_alive()
+            .map_err(|_| BridgeError::Permission)?;
+        if Instant::now() >= self.grant.expires {
+            return Err(BridgeError::Permission);
+        }
+        Ok(())
     }
 
     /// Identity observed from the actual installed signer and paired account.

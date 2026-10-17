@@ -1,6 +1,9 @@
 //! Purpose-distinct durable non-spending construction. Only the authenticated
 //! native disclosure client can admit material; decoded DTOs cannot. Historical
 //! material remains private data and never renews a native or writer capability.
+#[path = "durable_construction_v1/review_export_v1.rs"]
+pub mod review_export_v1;
+
 use crate::proof_jobs::LocalCheckpoint;
 use crate::{Access, ApiError, Engine, Envelope, Mutation, Result};
 use serde::{Deserialize, Serialize};
@@ -19,18 +22,19 @@ use wholepact_signer::authority_bridge::durable_construction_v1::{
     DurableConstructionScopeV1,
 };
 use wholepact_wallet::wallet::protected_sync::{
-    LocalWalletAccess, ProtectedWalletSync,
     durable_construction_v1::{
-        DurableConstructionError, DurableConstructionWalletSlotV1,
-        FreshDurableConstructionObservationV1, HeldDurableConstructionRosterV1,
-        with_durable_construction_roster_v1,
+        with_durable_construction_roster_v1, DurableConstructionError,
+        DurableConstructionWalletSlotV1, FreshDurableConstructionObservationV1,
+        HeldDurableConstructionRosterV1,
     },
+    LocalWalletAccess, ProtectedWalletSync,
 };
 
 #[derive(Clone, Copy)]
 pub enum DurableMaterialActionV1 {
     RetainAuthenticatedDisclosure,
     ReadForExactConstruction,
+    ExportForLocalNativeReview,
 }
 /// Current local privacy/retention gate supplied by the trusted embedding. It
 /// does not authenticate owner provenance and cannot replace native admission.
@@ -56,6 +60,8 @@ struct Intake {
 #[serde(deny_unknown_fields)]
 struct Roster {
     owners: BTreeMap<String, Intake>,
+    #[serde(default)]
+    review_exports: BTreeMap<String, review_export_v1::ExportIntent>,
 }
 fn damaged() -> ApiError {
     ApiError::new(
@@ -100,6 +106,8 @@ pub(crate) fn validate_stored(envelope: &Envelope) -> Result<()> {
         if roster.owners.is_empty() || roster.owners.len() > 2 {
             return Err(damaged());
         }
+        review_export_v1::validate_exports(&roster, candidate)?;
+        review_export_v1::validate_export_identity(&roster, envelope.durable_proposals_v1.get(id))?;
         for (account, intake) in roster.owners {
             intake.outbox.validate().map_err(|_| damaged())?;
             let request = intake.outbox.request();

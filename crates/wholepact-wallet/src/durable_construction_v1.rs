@@ -726,6 +726,37 @@ impl FreshDurableConstructionObservationV1 {
     }
 }
 impl ProtectedWalletSync {
+    /// No-I/O preflight for the exact historical material's configured source
+    /// and actual protected wallet. Call before synchronization so a mismatched
+    /// provider never receives the new request. This is not a fresh observation
+    /// or permission: current source software, chain ancestry and exact input
+    /// eligibility still require the maintained synchronization and ticket checks.
+    pub fn validate_durable_material_source_v1(
+        &self,
+        material: &HistoricalConstructionMaterialV1,
+        scope: &DurableConstructionScopeV1,
+        authenticated_fvk: &FullViewingKey,
+    ) -> Result<()> {
+        material.validate_for(scope)?;
+        material.verify_owner(authenticated_fvk)?;
+        scope.check_valid_at(now()?)?;
+        self.verify_account_fvk(authenticated_fvk)?;
+        self.verify_account_birthday_height(material.birthday_height)?;
+        if self.minimum_confirmations.get() < scope.minimum_confirmations
+            || self.source.identity().source_id != material.source.source_id
+            || self.source.identity().endpoint != material.source.endpoint
+            || self.source.identity().trust_profile != material.source.trust_profile
+        {
+            return Err(DurableConstructionError::Binding);
+        }
+        self.wallet
+            .backup_identity
+            .as_ref()
+            .ok_or(DurableConstructionError::Storage)?
+            .check()
+            .map_err(|_| DurableConstructionError::Storage)
+    }
+
     /// Issue ordinary local wallet key-use evidence for the exact fixed inputs
     /// after an actual fresh synchronization. This is not native consent, does
     /// not authorize export or spending, and does not create construction rights.
@@ -741,11 +772,7 @@ impl ProtectedWalletSync {
         policy: &crate::WalletKeyUsePolicy,
     ) -> Result<key_use::WalletKeyUseTicket> {
         self.require_access(access, WalletAccessPurpose::SelectPrivateContribution)?;
-        material.validate_for(scope)?;
-        material.verify_owner(authenticated_fvk)?;
-        self.verify_account_fvk(authenticated_fvk)?;
-        self.verify_account_birthday_height(material.birthday_height)?;
-        scope.check_valid_at(now()?)?;
+        self.validate_durable_material_source_v1(material, scope, authenticated_fvk)?;
         let accepted = self
             .accepted
             .as_ref()
@@ -853,24 +880,8 @@ impl ProtectedWalletSync {
         scope: &DurableConstructionScopeV1,
         access: &impl LocalWalletAccess,
     ) -> Result<FreshDurableConstructionObservationV1> {
-        material.validate_for(scope)?;
-        scope.check_valid_at(now()?)?;
         let decoded = material.validate()?;
-        self.verify_account_fvk(&decoded.fvk)?;
-        self.verify_account_birthday_height(material.birthday_height)?;
-        if self.minimum_confirmations.get() < scope.minimum_confirmations
-            || self.source.identity().source_id != material.source.source_id
-            || self.source.identity().endpoint != material.source.endpoint
-            || self.source.identity().trust_profile != material.source.trust_profile
-        {
-            return Err(DurableConstructionError::Binding);
-        }
-        self.wallet
-            .backup_identity
-            .as_ref()
-            .ok_or(DurableConstructionError::Storage)?
-            .check()
-            .map_err(|_| DurableConstructionError::Storage)?;
+        self.validate_durable_material_source_v1(material, scope, &decoded.fvk)?;
         let old = material.context.decode()?;
         let deadline = Duration::from_secs(60);
         // New operation, new bounded source observation. Old V3 read owners and

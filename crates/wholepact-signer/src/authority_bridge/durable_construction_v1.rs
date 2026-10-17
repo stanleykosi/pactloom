@@ -354,3 +354,238 @@ impl OriginalHistoryClient {
         })
     }
 }
+
+/// Material-free request for the genuine, sequential per-owner initial capture.
+/// The old live disclosure permits only initial import/selection. A separate new
+/// native decision is mandatory before this helper returns durable admission.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DurableConstructionCaptureRequestV1 {
+    pub operation_id: String,
+    pub enrollment_ref: String,
+    pub accepted_manifest_ref: String,
+    pub scope: DurableConstructionScopeV1,
+}
+
+impl OriginalHistoryClient {
+    /// Consume a genuinely new empty protected wallet at the native-approved
+    /// exact destination, import this actual owner's disclosed FVK/full birthday,
+    /// scan and capture under that owner's live bounded permission, then request
+    /// NEW durable consent. No second owner's native lifetime is needed.
+    ///
+    /// Failure drops the material and returns no durable authority. The initially
+    /// approved encrypted wallet import may remain on disk: privacy disclosure is
+    /// irreversible, and this method neither deletes it nor claims it was erased.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn capture_and_request_durable_construction_v1(
+        &self,
+        original: super::preconstruction_ipc::SignerPreconstructionLease<'_>,
+        destination: wholepact_storage_security::EncryptedConnection,
+        source: wholepact_chain::ChainAdapter,
+        request: DurableConstructionCaptureRequestV1,
+    ) -> Result<(
+        wholepact_wallet::wallet::protected_sync::ProtectedWalletSync,
+        AuthenticatedDurableConstructionDisclosureV1,
+    )> {
+        use wholepact_wallet::wallet::{
+            AccountUuid, DedicatedTestnetWallet,
+            protected_sync::{
+                BackendIdentity, LocalWalletAccess, ProtectedWalletSync, SyncLimits, TreeState,
+                WalletAccessPurpose, account_birthday_from_tree,
+            },
+        };
+        crate::review::validate_label(&request.operation_id).map_err(|_| BridgeError::Binding)?;
+        hash(&request.enrollment_ref)?;
+        hash(&request.accepted_manifest_ref)?;
+        let proposal = request.scope.validate().map_err(|_| BridgeError::Binding)?;
+        original.check_current()?;
+        let old = original.scope();
+        old.validate().map_err(|_| BridgeError::Binding)?;
+        if original.sponsor_policy().is_some()
+            || original.sponsor_budget()?.is_some()
+            || request.scope.version != 2
+            || request.scope.proposal != old.proposal
+            || request.scope.account_id != old.account_id
+            || request.scope.participant_id != old.participant_id
+            || request.scope.privacy_domain != old.privacy_domain
+            || request.scope.constructor.principal_id != old.principal_id
+            || request.scope.prover.principal_id != old.principal_id
+            || request.scope.protected_destination != old.operator_destination
+            || request.scope.minimum_confirmations != old.minimum_confirmations
+            || request.scope.maximum_scan_blocks != old.maximum_blocks
+            || source.identity().source_id != old.provider.source_id
+            || source.identity().endpoint != old.provider.endpoint
+            || source.identity().trust_profile != old.provider.trust_profile
+            || !matches!(
+                proposal.manifest().agreement.fee_policy,
+                wholepact_core::FeePolicy::ProRata
+            )
+            || proposal
+                .manifest()
+                .participants
+                .iter()
+                .any(|p| !p.charges.is_empty())
+            || !proposal.manifest().agreement.extensions.is_empty()
+            || proposal
+                .manifest()
+                .inputs
+                .iter()
+                .any(|i| i.ownership_evidence_ref.is_some())
+            || proposal
+                .manifest()
+                .outputs
+                .iter()
+                .any(|o| match &o.allocation {
+                    wholepact_core::OutputAllocation::Charge { .. } => true,
+                    wholepact_core::OutputAllocation::Return {
+                        ownership_evidence_ref,
+                        ..
+                    } => ownership_evidence_ref.is_some(),
+                    wholepact_core::OutputAllocation::Recipient { .. } => false,
+                })
+        {
+            return Err(BridgeError::Binding);
+        }
+        let actual_recipient = self.durable_construction_recipient_v1(&old.principal_id)?;
+        if request.scope.constructor != actual_recipient || request.scope.prover != actual_recipient
+        {
+            return Err(BridgeError::Binding);
+        }
+        // Join the approved path to the actual authenticated SQLite main handle,
+        // not to a caller string or a reconstructed account lookup.
+        let identity = destination
+            .database_identity()
+            .map_err(|_| BridgeError::Binding)?;
+        identity
+            .check_current(destination.connection())
+            .map_err(|_| BridgeError::Binding)?;
+        if destination.connection().path() != Some(old.wallet_destination.as_str())
+            || std::fs::canonicalize(&old.wallet_destination).map_err(|_| BridgeError::Binding)?
+                != std::path::Path::new(&old.wallet_destination)
+            || destination
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .map_err(|_| BridgeError::Binding)?
+                != 0
+        {
+            return Err(BridgeError::Binding);
+        }
+        identity
+            .check_current(destination.connection())
+            .map_err(|_| BridgeError::Binding)?;
+        let birthday = &old.birthday;
+        let birthday = account_birthday_from_tree(TreeState {
+            network: "test".into(),
+            height: u64::from(birthday.prior_height),
+            hash: birthday.prior_block_hash.clone(),
+            sapling_tree: birthday.sapling_tree.clone(),
+            orchard_tree: birthday.orchard_tree.clone(),
+            ironwood_tree: birthday.ironwood_tree.clone(),
+            ..Default::default()
+        })
+        .map_err(|_| BridgeError::Binding)?;
+        original.check_current()?;
+        let mut wallet = DedicatedTestnetWallet::from_encrypted_connection(destination)
+            .map_err(|_| BridgeError::Binding)?;
+        // Schema initialization/migrations can take time. Recheck the real
+        // disclosure immediately before the first viewing-key write, not merely
+        // before opening the maintained wallet. Failure after import is uncertain
+        // persistence, never erasure or permission to reuse the old grant.
+        original.check_current()?;
+        identity
+            .check_retained_owner_path()
+            .map_err(|_| BridgeError::Binding)?;
+        let account = wallet
+            .import_dedicated_fvk(original.fvk(), birthday)
+            .map_err(|_| BridgeError::Binding)?;
+        identity
+            .check_retained_owner_path()
+            .map_err(|_| BridgeError::Binding)?;
+        original.check_current()?;
+        let mut sync = ProtectedWalletSync::from_initialized_wallet(
+            wallet,
+            source,
+            std::num::NonZeroU32::new(old.minimum_confirmations).ok_or(BridgeError::Binding)?,
+        )
+        .map_err(|_| BridgeError::Binding)?;
+        struct InitialCaptureAccess<'a, 'b> {
+            original: &'a super::preconstruction_ipc::SignerPreconstructionLease<'b>,
+            account: AccountUuid,
+            identity: &'a wholepact_storage_security::DatabaseFileIdentity,
+        }
+        impl LocalWalletAccess for InitialCaptureAccess<'_, '_> {
+            fn permits(
+                &self,
+                account: AccountUuid,
+                provider: &BackendIdentity,
+                _: WalletAccessPurpose,
+            ) -> bool {
+                let expected = &self.original.scope().provider;
+                self.account == account
+                    && provider.source_id == expected.source_id
+                    && provider.endpoint == expected.endpoint
+                    && provider.trust_profile == expected.trust_profile
+                    && self.identity.check_retained_owner_path().is_ok()
+                    && self.original.check_current().is_ok()
+            }
+        }
+        let access = InitialCaptureAccess {
+            original: &original,
+            account,
+            identity: &identity,
+        };
+        sync.verify_account_fvk(original.fvk())
+            .map_err(|_| BridgeError::Binding)?;
+        sync.synchronize(
+            &access,
+            SyncLimits {
+                maximum_blocks: old.maximum_blocks,
+                anchor_height: Some(old.anchor_height),
+                deadline: Duration::from_secs(120),
+            },
+        )
+        .await
+        .map_err(|_| BridgeError::Permission)?;
+        original.check_current()?;
+        let debit = proposal
+            .accounting()
+            .participant_net_debits
+            .get(&old.participant_id)
+            .ok_or(BridgeError::Binding)?
+            .as_zatoshis();
+        if debit > old.maximum_net_debit_zatoshis {
+            return Err(BridgeError::Binding);
+        }
+        let selected = sync
+            .select_contribution(&access, original.fvk(), &old.account_id, debit, &[])
+            .map_err(|_| BridgeError::Permission)?;
+        let material = HistoricalConstructionMaterialV1::capture(&selected, &sync)
+            .map_err(|_| BridgeError::Binding)?;
+        material
+            .validate_for(&request.scope)
+            .map_err(|_| BridgeError::Binding)?;
+        original.check_current()?;
+        identity
+            .check_retained_owner_path()
+            .map_err(|_| BridgeError::Binding)?;
+        // Finish the original owner's lease before another human review. Its
+        // retained journal read fence must not overlap the new native decision.
+        // Captured bytes remain data; only that separate exact decision can
+        // approve their durable retention. No original grant is reconstructed.
+        drop(selected);
+        drop(access);
+        original.finish()?;
+        let disclosure = self.request_durable_construction_v1(&DurableConstructionRequestV1 {
+            operation_id: request.operation_id,
+            enrollment_ref: request.enrollment_ref,
+            accepted_manifest_ref: request.accepted_manifest_ref,
+            scope: request.scope,
+            material,
+        })?;
+        Ok((sync, disclosure))
+    }
+}

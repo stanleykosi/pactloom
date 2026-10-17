@@ -334,6 +334,14 @@ impl PreparedDurableConstructionV1 {
         outbox.validate()?;
         Ok(outbox)
     }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(in crate::native_ui) fn qualification_request(&self) -> &DurableConstructionRequestV1 {
+        &self.request
+    }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(super) fn qualification_request_digest(&self) -> Result<String> {
+        self.request.digest().map_err(error)
+    }
     pub(super) fn digest(&self) -> &str {
         &self.digest
     }

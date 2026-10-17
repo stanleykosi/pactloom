@@ -30,7 +30,7 @@ impl NativeWalletWorkspace {
             .synchronize(
                 &self.access,
                 SyncLimits {
-                    maximum_blocks: self.maximum_blocks,
+                    maximum_blocks: self.maximum_blocks.min(original_scope.maximum_scan_blocks),
                     anchor_height: Some(immutable.anchor_height),
                     deadline: Duration::from_secs(120),
                 },
