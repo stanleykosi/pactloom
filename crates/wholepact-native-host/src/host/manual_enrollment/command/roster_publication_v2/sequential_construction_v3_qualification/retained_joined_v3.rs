@@ -4,6 +4,9 @@
 //! by the maintained native-reviewed producer; no completed rows are seeded.
 #![cfg(all(test, feature = "synthetic-born-joined-qualification"))]
 
+#[path = "original_policy_export_v2.rs"]
+mod original_policy_export_v2;
+
 use super::continued_joined_v3::{prepare_original_continuation, retain_continued_candidate};
 use super::joined_signer_worker_v1::{AGREEMENT_ID, JoinedSignerWorkerV1, PublicJoinedBornV1};
 use super::safe_diagnostics_v1::{self as diagnostic, Boundary as B};
@@ -206,8 +209,7 @@ fn read_original_policy(
     owner: &PublicJoinedBornV1,
 ) -> Result<BornRecipientPolicyOriginV2> {
     let bytes = zeroize::Zeroizing::new(crate::files::read_private(path, 131_072)?);
-    let original: BornRecipientPolicyOriginV2 = serde_json::from_slice(&bytes)?;
-    original.validate().map_err(|_| Error::Invalid)?;
+    let original = original_policy_export_v2::parse(&bytes)?;
     if original.birth_digest != owner.birth_digest
         || original.intent.identity.account_id != owner.account_id
         || original.intent.identity.full_viewing_key_digest != owner.full_viewing_key_digest

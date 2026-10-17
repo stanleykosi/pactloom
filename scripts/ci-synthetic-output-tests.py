@@ -156,6 +156,20 @@ class PublicOutputTests(unittest.TestCase):
         self.assertNotIn(output.TESTS['initial'][0],expected)
         self.assertNotIn(output.TESTS['full'][0],expected)
 
+    def test_policy_preflight_is_three_exact_inert_envelope_cases(self):
+        base=ROOT/'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3_qualification'
+        names=re.findall(r'#\[test\]\s+fn (\w+)\(', (base/'original_policy_export_v2.rs').read_text())
+        expected=tuple(output.PREFIX+'retained_joined_v3::original_policy_export_v2::tests::'+name for name in names)
+        self.assertEqual(len(expected),3)
+        self.assertEqual(expected,output.POLICY_ENVELOPE_TESTS)
+        self.assertIn('#[path = "original_policy_export_v2.rs"]\nmod original_policy_export_v2;', (base/'retained_joined_v3.rs').read_text())
+        combined=output.PURE_TESTS+output.POLICY_ENVELOPE_TESTS
+        self.assertEqual(len(set(combined)),21)
+        for name in output.POLICY_ENVELOPE_TESTS:
+            self.assertNotIn(name,output.PURE_TESTS)
+            self.assertNotIn(name,[row[0] for row in output.TESTS.values()])
+            self.assertNotEqual(name,output.STORAGE_BOOTSTRAP_TEST)
+
     def test_storage_bootstrap_is_separate_exact_maintained_encrypted_case(self):
         name=output.STORAGE_BOOTSTRAP_TEST
         self.assertEqual(name,'recovery_generation::layered::tests::native_layered_current_eight_nine_parent_provenance_is_exact_and_not_relabelable')
