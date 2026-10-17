@@ -1,6 +1,7 @@
 //! Purpose-specific history admission for a fresh original-roster continuation.
 //! Approved V3 plans remain historical data, not construction/financial grants.
 //! Generic legacy history readers continue to refuse those approvals.
+use super::diagnostics::{self as diag, Phase as P};
 use super::*;
 use wholepact_authority::{ConstructionApprovalHistoryV2, ConstructionHistoryV2};
 use wholepact_core::manual_roster_construction_v3::ManualRosterConstructionPlanV3;
@@ -16,10 +17,13 @@ pub(super) fn require_original(
             // The authenticated witness approval is not a substitute for this
             // account's exact encrypted, native-admitted local retention file.
             // This reads/checks the actual retained owner, not an imported DTO.
-            retention::read_exact(
-                retained,
-                &record.approval.plan.retained,
-                &record.approval.plan.retained_evidence_digest,
+            diag::signer(
+                P::ContinuationRetainedReceipt,
+                retention::read_exact(
+                    retained,
+                    &record.approval.plan.retained,
+                    &record.approval.plan.retained_evidence_digest,
+                ),
             )?;
         }
     }
@@ -33,12 +37,16 @@ fn require_history(
     // No financial origin, reserved/consumed construction, exposure, recovery
     // fence or transport history is admitted. Complete replay validates every
     // approval's full plan, birth and actual pinned owner signature.
-    history
-        .require_original_roster_preconstruction_history()
-        .map_err(|_| Error::Unavailable)?;
-    let archive = history
-        .construction_history_v2()
-        .map_err(|_| Error::Authentication)?;
+    diag::authority(
+        P::ContinuationHistoryGate,
+        history.require_original_roster_preconstruction_history(),
+    )
+    .map_err(|_| Error::Unavailable)?;
+    let archive = diag::authority(
+        P::ContinuationHistoryArchive,
+        history.construction_history_v2(),
+    )
+    .map_err(|_| Error::Authentication)?;
     for approval in archive.approvals() {
         if let ConstructionApprovalHistoryV2::CommonContextV3 {
             extension: approved_extension,

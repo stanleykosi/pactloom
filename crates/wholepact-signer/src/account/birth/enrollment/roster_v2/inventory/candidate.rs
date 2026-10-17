@@ -166,7 +166,10 @@ impl PreparedRosterCandidateSelectionV2 {
         let session = e.witness.session();
         let audit = original(&e.retained.account)?
             .anchor()
-            .audit_historical_witness_link(&history)?;
+            .audit_original_roster_preconstruction_witness_link(
+                &history,
+                &e.retained.record.extension()?,
+            )?;
         let evidence = ManualRosterCandidateSelectionEvidenceV2 {
             version: 2,
             request: request.clone(),

@@ -113,6 +113,50 @@ impl BirthAnchor {
         history
             .require_legacy_online_only()
             .map_err(|_| Error::Unavailable)?;
+        self.audit_historical_linkage(history)
+    }
+
+    /// Original-roster preconstruction only. This admits independently signed
+    /// approval history, never reserved/consumed construction or financial
+    /// exposure. The caller supplies its actual retained record's extension.
+    /// Generic birth/Single/retirement readers retain the legacy gate above.
+    #[cfg(feature = "pending-birth-owner-signing")]
+    pub(in crate::account::birth) fn audit_original_roster_preconstruction_witness_link(
+        &self,
+        history: &ReconciledAuthorityHistory,
+        extension: &wholepact_authority::manual_roster_extension_v2::ManualRosterEnrollmentExtensionV2,
+    ) -> Result<HistoricalBirthLinkAudit> {
+        use super::enrollment::roster_v2::continuation::diagnostics::{self as diag, Phase as P};
+        diag::authority(
+            P::RosterBirthHistoryGate,
+            history.require_original_roster_preconstruction_history(),
+        )
+        .map_err(|_| Error::Unavailable)?;
+        let actual_extension = diag::authority(
+            P::RosterBirthExtension,
+            history.manual_roster_enrollment_extension(&extension.account_extension.enrollment_ref),
+        )
+        .map_err(|_| Error::Authentication)?;
+        if actual_extension != Some(extension) {
+            return diag::signer(P::RosterBirthExtension, Err(Error::Authentication));
+        }
+        let birth = history
+            .pending_birth_commit()
+            .ok_or(Error::RecoveryRequired)?;
+        diag::authority(
+            P::RosterBirthOriginal,
+            extension.validate_original_birth(birth),
+        )
+        .map_err(|_| Error::Authentication)?;
+        diag::signer(P::RosterBirthLinkage, self.audit_historical_linkage(history))
+    }
+
+    // Private shared linkage kernel. Each caller above applies its own explicit
+    // history-support gate first; this returns historical audit data only.
+    fn audit_historical_linkage(
+        &self,
+        history: &ReconciledAuthorityHistory,
+    ) -> Result<HistoricalBirthLinkAudit> {
         let (genesis, original_disclosure) = self.audit_policy_match(history.account_policy())?;
         let projection = history.account_use_history();
         let checkpoint = projection
@@ -219,3 +263,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(all(test, feature = "pending-birth-owner-signing", feature = "synthetic-qualification"))]
+#[path = "history/preconstruction_tests.rs"]
+mod preconstruction_tests;

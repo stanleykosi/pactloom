@@ -392,7 +392,7 @@ class PublicOutputTests(unittest.TestCase):
         def fake_run(argv, **kwargs):
             calls.append((argv,kwargs))
             name=argv[2]
-            self.assertIn(name,output.SIGNER_VALIDATION_TESTS+output.SIGNER_BOOKKEEPING_TESTS+output.SIGNER_PRECONSTRUCTION_TESTS)
+            self.assertIn(name,output.SIGNER_VALIDATION_TESTS+output.SIGNER_BOOKKEEPING_TESTS+output.SIGNER_PRECONSTRUCTION_TESTS+output.SIGNER_BIRTH_LINK_TESTS)
             self.assertEqual(argv[:2],['/verified/signer','--exact'])
             self.assertEqual(argv[3],'--test-threads=1')
             if argv[-1]=='--list':
@@ -407,8 +407,8 @@ class PublicOutputTests(unittest.TestCase):
              mock.patch.object(output.subprocess,'run',side_effect=fake_run), \
              contextlib.redirect_stdout(captured):
             output.run_signer_validation('/verified/signer')
-        self.assertEqual([argv[2] for argv,_ in calls], [name for name in output.SIGNER_VALIDATION_TESTS+output.SIGNER_BOOKKEEPING_TESTS+output.SIGNER_PRECONSTRUCTION_TESTS for _ in range(2)])
-        self.assertEqual(captured.getvalue(),'CI_SYNTHETIC_SIGNER_VALIDATION passed=9 crypto_file_cases=4 bookkeeping_cases=2 replay_cases=3 native_payment_verified=false raw_output_discarded=true\n')
+        self.assertEqual([argv[2] for argv,_ in calls], [name for name in output.SIGNER_VALIDATION_TESTS+output.SIGNER_BOOKKEEPING_TESTS+output.SIGNER_PRECONSTRUCTION_TESTS+output.SIGNER_BIRTH_LINK_TESTS for _ in range(2)])
+        self.assertEqual(captured.getvalue(),'CI_SYNTHETIC_SIGNER_VALIDATION passed=12 crypto_file_cases=4 bookkeeping_cases=2 replay_cases=6 native_payment_verified=false raw_output_discarded=true\n')
 
     def test_signer_preconstruction_is_three_exact_authenticated_history_cases(self):
         prefix='account::birth::enrollment::roster_v2::continuation::preconstruction::tests::'
@@ -428,6 +428,43 @@ class PublicOutputTests(unittest.TestCase):
         for name in expected:
             self.assertEqual(len(re.findall(r'#\[test\]\s+fn '+name.rsplit('::',1)[1]+r'\(',source)),1)
         self.assertEqual(len(set(output.SIGNER_VALIDATION_TESTS+output.SIGNER_BOOKKEEPING_TESTS+expected)),9)
+
+    def test_birth_link_preflight_is_three_exact_complete_history_audits(self):
+        prefix='account::birth::history::preconstruction_tests::'
+        expected=tuple(prefix+name for name in (
+            'original_birth_link_accepts_approval_only_and_preserves_legacy_refusal',
+            'original_birth_link_rejects_foreign_extension_and_other_original',
+            'original_birth_link_rejects_reserved_consumed_and_tampered_history',
+        ))
+        self.assertEqual(output.SIGNER_BIRTH_LINK_TESTS,expected)
+        base=ROOT/'crates/wholepact-signer/src/account/birth'
+        parent=(base/'history.rs').read_text()
+        self.assertIn('#[path = "history/preconstruction_tests.rs"]',parent)
+        self.assertIn('mod preconstruction_tests;',parent)
+        source=(base/'history/preconstruction_tests.rs').read_text()
+        self.assertIn('recorded_fixture_history(',source)
+        fixture=re.search(r'include_str!\(\s*"([^"]+)"',source).group(1)
+        self.assertTrue((base/'history'/fixture).resolve().is_file())
+        for name in expected:
+            self.assertEqual(len(re.findall(r'#\[test\]\s+fn '+name.rsplit('::',1)[1]+r'\(',source)),1)
+        self.assertEqual(len(set(output.SIGNER_VALIDATION_TESTS+output.SIGNER_BOOKKEEPING_TESTS+output.SIGNER_PRECONSTRUCTION_TESTS+expected)),12)
+
+    def test_continuation_birth_audit_diagnostics_are_exact_denial_only_labels(self):
+        expected=set('RosterBirthHistoryGate RosterBirthExtension RosterBirthOriginal RosterBirthLinkage ContinuationRetainedSource ContinuationAttemptedSource ContinuationWriterSource ContinuationHistoryReplay ContinuationPairing ContinuationPreparedReview ContinuationSource ContinuationBirthLink ContinuationPreconstruction ContinuationHistoryGate ContinuationHistoryArchive ContinuationRetainedReceipt ContinuationPreviousLoad ContinuationProposalCapacity ContinuationProposalIndex ContinuationAttemptSequence ContinuationProposalValidation'.split())
+        source=(ROOT/'crates/wholepact-signer/src/account/birth/enrollment/roster_v2/continuation/diagnostics.rs').read_text()
+        actual=set(re.findall(r'=> "((?:RosterBirth|Continuation)\w+)"',source))
+        self.assertEqual(actual,expected)
+        self.assertEqual({name for name in output.BOUNDARIES if name.startswith(('RosterBirth','Continuation'))},expected)
+        self.assertEqual(len(expected),21)
+        outcomes=set(re.findall(r'=> "((?:Signer|Authority)\w+)"',source))
+        self.assertTrue(outcomes <= output.OUTCOMES)
+        for name in expected:
+            for outcome in outcomes:
+                self.assertTrue(output.safe_failure(self.failure(name+':'+outcome)))
+        for value in ['ContinuationUnknown:SignerUnavailable','RosterBirthUnknown:AuthorityConflict',
+                      'ContinuationSource:SignerUnavailable private-data','RosterBirthLinkage:AuthorityInvalidBinding:private-data']:
+            self.assertFalse(output.safe_failure(self.failure(value)))
+        self.assertFalse(output.safe_failure(self.failure('ContinuationBirthLink:SignerUnavailable')+' private-data'))
 
     def test_signer_bookkeeping_preflight_is_two_exact_private_state_cases(self):
         prefix='account::birth::enrollment::roster_v2::inventory::'

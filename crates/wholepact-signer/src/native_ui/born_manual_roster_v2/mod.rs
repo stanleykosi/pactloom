@@ -808,32 +808,45 @@ fn run(work: Work, owner: &PendingAccountNativeAuthority) -> Result<Output> {
             )))?))
         }
         Work::PrepareContinuationProposal(c) => {
+            use crate::account::birth::enrollment::roster_v2::continuation::diagnostics::{
+                self as diag, Phase as P,
+            };
             if !c.attempted {
                 return Err(Error::RecoveryRequired);
             }
-            let retained = c
-                .account
-                .retained_born_manual_roster_enrollment_v2(owner)?
-                .ok_or(Error::RecoveryRequired)?;
-            attempts::require_attempted_source(&retained, owner)?;
-            c.writer()?.check_native_source(&owner.native().binding())?;
-            let history = c
-                .writer()?
-                .client()
-                .reconcile_history_checked(|| {
+            let retained = diag::signer(
+                P::ContinuationRetainedSource,
+                c.account.retained_born_manual_roster_enrollment_v2(owner),
+            )?
+            .ok_or(Error::RecoveryRequired)?;
+            diag::signer(
+                P::ContinuationAttemptedSource,
+                attempts::require_attempted_source(&retained, owner),
+            )?;
+            diag::signer(
+                P::ContinuationWriterSource,
+                c.writer()?.check_native_source(&owner.native().binding()),
+            )?;
+            let history = diag::authority(
+                P::ContinuationHistoryReplay,
+                c.writer()?.client().reconcile_history_checked(|| {
                     owner
                         .check_current()
                         .map_err(|_| wholepact_authority::AuthorityError::Permission)
-                })
-                .map_err(|_| Error::Uncertain)?;
-            Output::Prepared(Box::new(Prepared::new(Step::ContinuationProposal(
-                Box::new(PreparedContinuationProposal::prepare(
-                    retained,
-                    &history,
-                    &c.pairing()?,
-                    owner,
-                )?),
-            ))?))
+                }),
+            )
+            .map_err(|_| Error::Uncertain)?;
+            Output::Prepared(Box::new(diag::signer(
+                P::ContinuationPreparedReview,
+                Prepared::new(Step::ContinuationProposal(Box::new(
+                    PreparedContinuationProposal::prepare(
+                        retained,
+                        &history,
+                        &diag::signer(P::ContinuationPairing, c.pairing())?,
+                        owner,
+                    )?,
+                ))),
+            )?))
         }
         Work::PrepareContinuationSign(c, cert, key) => {
             Output::Prepared(Box::new(Prepared::new(Step::ContinuationSign(Box::new(

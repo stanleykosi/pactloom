@@ -43,7 +43,9 @@ pub(super) fn check_history(
     retained.check()?;
     witness.check_current().map_err(|_| Error::ReviewMismatch)?;
     let origin = original(&retained.account)?;
-    let audit = origin.anchor().audit_historical_witness_link(history)?;
+    let audit = origin
+        .anchor()
+        .audit_original_roster_preconstruction_witness_link(history, &retained.record.extension()?)?;
     history
         .require_original_roster_preconstruction_history()
         .map_err(|_| Error::Unavailable)?;
@@ -410,7 +412,10 @@ impl BornManualRosterEnrolledSignerV2 {
         let session = self.witness.session();
         let audit = original(&self.retained.account)?
             .anchor()
-            .audit_historical_witness_link(&self.history)?;
+            .audit_original_roster_preconstruction_witness_link(
+                &self.history,
+                &self.retained.record.extension()?,
+            )?;
         let evidence = ManualRosterEnrollmentEvidenceV2 {
             version: 2,
             request: request.clone(),

@@ -13,6 +13,7 @@ use wholepact_authority::manual_roster_witness_v2::{
     ManualRosterSessionContinuationV2,
 };
 
+pub(crate) mod diagnostics;
 mod preconstruction;
 
 pub(crate) const MAX_LOCAL_PROPOSALS: usize = 32;
@@ -507,7 +508,8 @@ impl PreparedContinuationProposal {
         pairing: &AuthenticatedPairing,
         owner: &PendingAccountNativeAuthority,
     ) -> Result<Self> {
-        retained.check_current_source(owner)?;
+        use diagnostics::{signer as checked, Phase as P};
+        checked(P::ContinuationSource, retained.check_current_source(owner))?;
         pairing.check_current()?;
         if pairing.native_origin() != &owner.native().binding() {
             return Err(Error::Authentication);
@@ -533,13 +535,24 @@ impl PreparedContinuationProposal {
             &first,
         )?;
         let origin = original(&retained.account)?;
-        let audit = origin.anchor().audit_historical_witness_link(history)?;
+        let audit = checked(
+            P::ContinuationBirthLink,
+            origin
+                .anchor()
+                .audit_original_roster_preconstruction_witness_link(
+                    history,
+                    &retained.record.extension()?,
+                ),
+        )?;
         if audit.permanent_exclusion().is_some()
             || history.pending_birth_commit() != Some(origin.witness_commit())
         {
             return Err(Error::RecoveryRequired);
         }
-        preconstruction::require_original(&retained, history)?;
+        checked(
+            P::ContinuationPreconstruction,
+            preconstruction::require_original(&retained, history),
+        )?;
         let extension = retained.record.extension()?;
         let observation: ManualRosterAttemptObservationV2 = history
             .latest_manual_roster_attempt_v2(&extension.account_extension.enrollment_ref)
@@ -553,9 +566,9 @@ impl PreparedContinuationProposal {
         {
             return Err(Error::RecoveryRequired);
         }
-        let previous = load(&retained)?;
+        let previous = checked(P::ContinuationPreviousLoad, load(&retained))?;
         if previous.len() >= MAX_LOCAL_PROPOSALS {
-            return Err(Error::Unavailable);
+            return checked(P::ContinuationProposalCapacity, Err(Error::Unavailable));
         }
         for old in &previous {
             let digest = old
@@ -582,9 +595,10 @@ impl PreparedContinuationProposal {
         }
         let mut proposal = ContinuationProposal {
             version: 2,
-            local_index: (previous.len() + 1)
-                .try_into()
-                .map_err(|_| Error::Unavailable)?,
+            local_index: checked(
+                P::ContinuationProposalIndex,
+                (previous.len() + 1).try_into().map_err(|_| Error::Unavailable),
+            )?,
             previous_local_digest: previous.last().map(|p| p.proposal.digest()).transpose()?,
             enrollment_ref: retained.record.account_record.reference()?,
             intent_digest: retained.intent_digest.clone(),
@@ -595,10 +609,10 @@ impl PreparedContinuationProposal {
                 continuation: wholepact_authority::manual_session_continuation::ManualEnrollmentSessionContinuation {
                 version: 1,
                 extension_digest: extension.account_extension.digest().map_err(|_| Error::InvalidData)?,
-                sequence: observation
-                    .sequence
-                    .checked_add(1)
-                    .ok_or(Error::Unavailable)?,
+                sequence: checked(
+                    P::ContinuationAttemptSequence,
+                    observation.sequence.checked_add(1).ok_or(Error::Unavailable),
+                )?,
                 previous_attempt_digest: observation.attempt_digest.clone(),
                 expected_snapshot: observation.snapshot.clone(),
                 expected_previous_admission_digest: observation
@@ -623,10 +637,13 @@ impl PreparedContinuationProposal {
             .continuation
             .continuation
             .fresh_signer_review_digest = proposal.review_digest()?;
-        proposal.validate(
-            &retained.record,
-            &retained.intent_digest,
-            &hex::encode(Sha256::digest(&first)),
+        checked(
+            P::ContinuationProposalValidation,
+            proposal.validate(
+                &retained.record,
+                &retained.intent_digest,
+                &hex::encode(Sha256::digest(&first)),
+            ),
         )?;
         let display = Zeroizing::new(format!(
             "RETAIN ONE EXACT ORIGINAL-ACCOUNT SESSION CONTINUATION\n{}\n\nThis preserves the original intent, first acquire marker, enrollment, epoch, policy, lifetime budget and all old session/exposure records. The independent witness must separately approve this exact predecessor and head. Every earlier uncommitted local proposal is expired and absent from complete authenticated history. No key or current native authority is serialized. The original 120-second first witness commit window cannot be renewed. Local index is separate from witness attempt sequence. No financial action is authorized.",
@@ -757,7 +774,7 @@ impl PreparedContinuedReentry {
             .ok_or(Error::RecoveryRequired)?;
         let audit = original(&retained.retained.account)?
             .anchor()
-            .audit_historical_witness_link(history)?;
+            .audit_original_roster_preconstruction_witness_link(history, &extension)?;
         let expected_attempt = wholepact_signer_origin::manual_roster_v2::ManualRosterPublicationAttemptV2::ContinuationV2 {
             continuation_digest: p.continuation.digest_for(&extension).map_err(|_| Error::InvalidData)?,
             attempt_sequence: p.continuation.sequence(),
