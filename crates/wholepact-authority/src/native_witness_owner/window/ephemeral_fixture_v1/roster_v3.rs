@@ -257,14 +257,11 @@ impl EphemeralNativeWitnessV1 {
     }
 
     fn require_public_v3_refusal(&mut self, label: &str) -> Result<()> {
-        if crate::COMMON_CONTEXT_V3_ACTIVATION_QUALIFIED {
+        // The negative public-control test must not hide a stale injected entry.
+        if self.qualification_entry.is_some() {
             return Err(AuthorityError::Conflict);
         }
-        self.click(label)?;
-        if self.window.job.is_some() || self.window.pending.is_some() || !self.window.can_select() {
-            return Err(AuthorityError::Conflict);
-        }
-        Ok(())
+        public_control_navigation_v1::require_refusal(&mut self.window, &self.context, label)
     }
 
     pub(super) fn completed_native_receipt(&self) -> Result<serde_json::Value> {

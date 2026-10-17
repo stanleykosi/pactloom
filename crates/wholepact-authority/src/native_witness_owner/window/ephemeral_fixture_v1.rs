@@ -26,6 +26,8 @@ const UNDERSTOOD: &str = "I reviewed this complete exact operation and its perma
 const AUTHORIZE: &str = "Authorize this exact one-time owner operation";
 const PROFILE: &str = "ironwood-testnet-nu7-candidate";
 
+#[path = "ephemeral_fixture_v1/public_control_navigation_v1.rs"]
+mod public_control_navigation_v1;
 #[path = "ephemeral_fixture_v1/roster_v3.rs"]
 mod roster_v3;
 pub use roster_v3::EphemeralRosterAttemptV2;
@@ -343,20 +345,7 @@ impl EphemeralNativeWitnessV1 {
     }
 
     fn frame(&mut self, events: Vec<egui::Event>, focused: bool) -> egui::FullOutput {
-        let mut input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(1800.0, 20000.0),
-            )),
-            focused,
-            events,
-            ..Default::default()
-        };
-        input
-            .viewports
-            .get_mut(&egui::ViewportId::ROOT)
-            .expect("default root viewport")
-            .focused = Some(focused);
+        let input = fixture_input(events, focused);
         let entry = self.qualification_entry;
         self.context.run_ui(input, |ui| {
             self.window.draw(ui);
@@ -584,6 +573,23 @@ impl Drop for EphemeralHistoryServerV1 {
             let _ = thread.join();
         }
     }
+}
+fn fixture_input(events: Vec<egui::Event>, focused: bool) -> egui::RawInput {
+    let mut input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1800.0, 20000.0),
+        )),
+        focused,
+        events,
+        ..Default::default()
+    };
+    input
+        .viewports
+        .get_mut(&egui::ViewportId::ROOT)
+        .expect("default root viewport")
+        .focused = Some(focused);
+    input
 }
 fn text_position(shape: &egui::epaint::Shape, label: &str) -> Option<egui::Pos2> {
     match shape {

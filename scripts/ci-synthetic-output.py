@@ -63,6 +63,11 @@ ROLLING_TRANSCRIPT_TESTS = tuple(PREFIX + 'rolling_transcript_v1::tests::' + nam
     'one_unconsumed_review_still_cannot_exceed_original_bound',
 ))
 AUTHORITY_PROJECTION_TESTS = (PREFIX + 'safe_diagnostics_v1::authority_error_projection_preserves_only_closed_variants',)
+AUTHORITY_RENDERER_TESTS = (
+    'native_witness_owner::window::ephemeral_fixture_v1::public_control_navigation_v1::tests::wheel_navigation_reaches_actual_disabled_controls_without_mutating_form',
+    'native_witness_owner::window::ephemeral_fixture_v1::public_control_navigation_v1::tests::missing_exact_control_stops_after_finite_wheel_events',
+    'native_witness_owner::window::ephemeral_fixture_v1::public_control_navigation_v1::tests::exact_label_requires_visible_clip_and_viewport',
+)
 STORAGE_BOOTSTRAP_TEST = 'recovery_generation::layered::tests::native_layered_current_eight_nine_parent_provenance_is_exact_and_not_relabelable'
 SIGNER_VALIDATION_TESTS = (
     'account::birth::retired_historical_tests::birth_identity_one_derivation_preserves_both_original_commitments',
@@ -214,6 +219,26 @@ def run_signer_validation(executable):
             raise
     print('CI_SYNTHETIC_SIGNER_VALIDATION passed=6 crypto_file_cases=4 bookkeeping_cases=2 native_payment_verified=false raw_output_discarded=true',flush=True)
 
+def run_authority_rendering(executable):
+    assert resource.getrlimit(resource.RLIMIT_CORE)[0] == 0
+    for name in AUTHORITY_RENDERER_TESTS:
+        flags=['--exact',name,'--test-threads=1']
+        try:
+            listed=subprocess.run([executable,*flags,'--list'],capture_output=True,timeout=30,check=True)
+            if not exact_listing(listed.stdout.decode(),name) or listed.stderr:
+                raise ValueError('exact authority renderer test not uniquely registered')
+            # Actual egui Context/Window rendering with inert fields only. No
+            # TLS, files, process, native authority or IPC owner is created.
+            # Output is withheld; the size check is post-capture, not a claim
+            # of incremental memory bounds. The fixed cases run separately.
+            result=subprocess.run([executable,*flags],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=30)
+            if result.returncode!=0 or len(result.stdout)>1024*1024:
+                raise RuntimeError('exact authority renderer regression failed')
+        except Exception:
+            print('CI_SYNTHETIC_AUTHORITY_RENDERER failed_test='+name+' raw_output_withheld=true',flush=True)
+            raise
+    print('CI_SYNTHETIC_AUTHORITY_RENDERER passed=3 native_payment_verified=false attended_gui_verified=false raw_output_discarded=true',flush=True)
+
 def run_storage_bootstrap(executable):
     assert resource.getrlimit(resource.RLIMIT_CORE)[0] == 0
     flags=['--exact',STORAGE_BOOTSTRAP_TEST,'--test-threads=1']
@@ -292,11 +317,12 @@ def run(executable, phase):
 
 if __name__=='__main__':
     try:
-        assert len(sys.argv)==3 and sys.argv[2] in {*TESTS,'pure','storage-bootstrap','signer-validation'}
+        assert len(sys.argv)==3 and sys.argv[2] in {*TESTS,'pure','storage-bootstrap','signer-validation','authority-rendering'}
         exe=pathlib.Path(sys.argv[1]).resolve(strict=True)
         assert exe.is_file() and exe.is_relative_to(pathlib.Path(os.environ['CARGO_TARGET_DIR']).resolve(strict=True))
         if sys.argv[2]=='pure': run_pure(str(exe))
         elif sys.argv[2]=='signer-validation': run_signer_validation(str(exe))
+        elif sys.argv[2]=='authority-rendering': run_authority_rendering(str(exe))
         elif sys.argv[2]=='storage-bootstrap': run_storage_bootstrap(str(exe))
         else: run(str(exe),sys.argv[2])
     except Exception:

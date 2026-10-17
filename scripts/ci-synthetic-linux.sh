@@ -124,11 +124,37 @@ print(exe)
 PY
 )"
 sha256sum "$signer_executable"
+# Exact private renderer regressions require the authority lib. Reuse the same
+# pinned release target; this build runs no tests. The 150-minute outer job cap
+# remains authoritative, not an additive guarantee of per-phase maxima.
+if timeout --signal=TERM --kill-after=30s 1200s rustup run 1.99.0 cargo test --locked --release -p wholepact-authority --all-features --lib --no-run --message-format=json > "$build_root/authority-build-metadata.jsonl"; then
+  :
+else
+  build_status=$?
+  # Only tracked public Rust locations and closed codes may escape. Projection
+  # failure never replaces the original compiler/timeout failure or resumes.
+  python3 -B scripts/ci-synthetic-build-errors.py "$build_root/authority-build-metadata.jsonl" authority || true
+  exit "$build_status"
+fi
+authority_executable="$(python3 - "$build_root/authority-build-metadata.jsonl" "$CARGO_TARGET_DIR" <<'PY'
+import json, pathlib, sys
+found=[]
+for line in pathlib.Path(sys.argv[1]).read_text().splitlines():
+    row=json.loads(line)
+    if row.get('reason')=='compiler-artifact' and row.get('target',{}).get('name')=='wholepact_authority' and row.get('profile',{}).get('test') and row.get('executable'):
+        found.append(pathlib.Path(row['executable']).resolve(strict=True))
+assert len(set(found))==1
+exe=found[0]; assert exe.is_file() and exe.is_relative_to(pathlib.Path(sys.argv[2]).resolve(strict=True))
+print(exe)
+PY
+)"
+sha256sum "$authority_executable"
 # All runtime output is bounded and allowlisted by this script; never tee raw PTY,
 # test panics, private paths, wallets, collector files or process environments.
 export TMPDIR="$runtime_root"
 python3 -B scripts/ci-synthetic-output-tests.py
 python3 -B scripts/ci-synthetic-output.py "$signer_executable" signer-validation
+python3 -B scripts/ci-synthetic-output.py "$authority_executable" authority-rendering
 python3 -B scripts/ci-synthetic-output.py "$executable" pure
 python3 -B scripts/ci-synthetic-output.py "$executable" storage-bootstrap
 python3 -B scripts/ci-synthetic-output.py "$executable" initial

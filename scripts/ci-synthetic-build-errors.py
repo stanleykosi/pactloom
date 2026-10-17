@@ -68,7 +68,7 @@ def scan(stream, sources, root):
     return locations,truncated
 
 def main():
-    if len(sys.argv)!=3 or sys.argv[2] not in ('host','signer'): raise ValueError('invalid phase')
+    if len(sys.argv)!=3 or sys.argv[2] not in ('host','signer','authority'): raise ValueError('invalid phase')
     root=pathlib.Path(__file__).resolve().parent.parent
     sources=public_sources(root)
     with open(sys.argv[1],'rb') as stream:

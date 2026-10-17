@@ -461,6 +461,74 @@ class PublicOutputTests(unittest.TestCase):
             self.assertLessEqual(run.call_count,2)
             self.assertEqual(captured.getvalue(),'CI_SYNTHETIC_SIGNER_VALIDATION failed_test='+name+' raw_output_withheld=true\n')
 
+    def test_authority_renderer_preflight_is_three_exact_private_cases(self):
+        prefix='native_witness_owner::window::ephemeral_fixture_v1::public_control_navigation_v1::tests::'
+        names=(
+            'wheel_navigation_reaches_actual_disabled_controls_without_mutating_form',
+            'missing_exact_control_stops_after_finite_wheel_events',
+            'exact_label_requires_visible_clip_and_viewport',
+        )
+        self.assertEqual(output.AUTHORITY_RENDERER_TESTS,tuple(prefix+name for name in names))
+        base=ROOT/'crates/wholepact-authority/src/native_witness_owner/window'
+        parent=(base/'ephemeral_fixture_v1.rs').read_text()
+        source=(base/'ephemeral_fixture_v1/public_control_navigation_v1.rs').read_text()
+        self.assertIn('mod public_control_navigation_v1;',parent)
+        self.assertIn('mod tests {',source)
+        for name in names:
+            self.assertEqual(len(re.findall(r'#\[test\]\s+fn '+name+r'\(',source)),1)
+        self.assertEqual(len(set(output.AUTHORITY_RENDERER_TESTS)),3)
+        self.assertTrue(set(output.AUTHORITY_RENDERER_TESTS).isdisjoint(output.SIGNER_VALIDATION_TESTS+output.SIGNER_BOOKKEEPING_TESTS))
+        shell=(ROOT/'scripts/ci-synthetic-linux.sh').read_text()
+        build='timeout --signal=TERM --kill-after=30s 1200s rustup run 1.99.0 cargo test --locked --release -p wholepact-authority --all-features --lib --no-run --message-format=json'
+        selected='python3 -B scripts/ci-synthetic-output.py "$authority_executable" authority-rendering'
+        self.assertEqual(shell.count(build),1)
+        self.assertEqual(shell.count(selected),1)
+        self.assertIn("get('name')=='wholepact_authority'",shell)
+        self.assertLess(shell.index(build),shell.index(selected))
+        self.assertLess(shell.index(selected),shell.index('"$executable" initial'))
+
+    def test_authority_renderer_runs_exact_bounded_cases_and_withholds_output(self):
+        calls=[]
+        def fake_run(argv, **kwargs):
+            calls.append((argv,kwargs))
+            name=argv[2]
+            self.assertIn(name,output.AUTHORITY_RENDERER_TESTS)
+            self.assertEqual(argv[:2],['/verified/authority','--exact'])
+            self.assertEqual(argv[3],'--test-threads=1')
+            if argv[-1]=='--list':
+                self.assertEqual(len(argv),5)
+                self.assertEqual(kwargs,dict(capture_output=True,timeout=30,check=True))
+                return output.subprocess.CompletedProcess(argv,0,(name+': test\n\n1 test, 0 benchmarks\n').encode(),b'')
+            self.assertEqual(len(argv),4)
+            self.assertEqual(kwargs,dict(stdout=output.subprocess.PIPE,stderr=output.subprocess.STDOUT,timeout=30))
+            return output.subprocess.CompletedProcess(argv,0,b'private inert output')
+        captured=io.StringIO()
+        with mock.patch.object(output.resource,'getrlimit',return_value=(0,0)), \
+             mock.patch.object(output.subprocess,'run',side_effect=fake_run), \
+             contextlib.redirect_stdout(captured):
+            output.run_authority_rendering('/verified/authority')
+        self.assertEqual([argv[2] for argv,_ in calls],[name for name in output.AUTHORITY_RENDERER_TESTS for _ in range(2)])
+        self.assertEqual(captured.getvalue(),'CI_SYNTHETIC_AUTHORITY_RENDERER passed=3 native_payment_verified=false attended_gui_verified=false raw_output_discarded=true\n')
+
+    def test_authority_renderer_missing_failed_or_timed_out_refuses(self):
+        name=output.AUTHORITY_RENDERER_TESTS[0]
+        listed=output.subprocess.CompletedProcess([],0,(name+': test\n\n1 test, 0 benchmarks\n').encode(),b'')
+        cases=[
+            [output.subprocess.CompletedProcess([],0,b'0 tests, 0 benchmarks\n',b'')],
+            [output.subprocess.CompletedProcess([],0,listed.stdout,b'private error')],
+            [listed,output.subprocess.CompletedProcess([],101,b'private panic')],
+            [listed,output.subprocess.CompletedProcess([],0,b'x'*(1024*1024+1))],
+            [listed,output.subprocess.TimeoutExpired('private command',30,output=b'private output')],
+        ]
+        for results in cases:
+            captured=io.StringIO()
+            with mock.patch.object(output.resource,'getrlimit',return_value=(0,0)), \
+                 mock.patch.object(output.subprocess,'run',side_effect=results) as run, \
+                 contextlib.redirect_stdout(captured):
+                with self.assertRaises(Exception): output.run_authority_rendering('/verified/authority')
+            self.assertLessEqual(run.call_count,2)
+            self.assertEqual(captured.getvalue(),'CI_SYNTHETIC_AUTHORITY_RENDERER failed_test='+name+' raw_output_withheld=true\n')
+
     def test_ci_temporary_socket_path_budget(self):
         # Includes this runner's extra short TMPDIR layer, not merely /tmp.
         for inner in ['wholepact-born-manual-ipc-','wholepact-born-stop-','.tmp']:
@@ -533,10 +601,11 @@ class PublicCompilerOutputTests(unittest.TestCase):
             self.assertEqual(build_errors.public_sources(ROOT),frozenset((self.source,)))
         run.assert_called_once_with(['git','-C',str(ROOT),'ls-files','-z','--','crates'],capture_output=True,timeout=10,check=True)
 
-    def test_both_build_failures_keep_original_status_and_never_fallback(self):
+    def test_all_three_build_failures_keep_original_status_and_never_fallback(self):
         shell=(ROOT/'scripts/ci-synthetic-linux.sh').read_text()
         for phase,filename,seconds,package in [('host','build-metadata.jsonl',3600,'wholepact-native-host'),
-                                               ('signer','signer-build-metadata.jsonl',1200,'wholepact-signer')]:
+                                               ('signer','signer-build-metadata.jsonl',1200,'wholepact-signer'),
+                                               ('authority','authority-build-metadata.jsonl',1200,'wholepact-authority')]:
             start=f'if timeout --signal=TERM --kill-after=30s {seconds}s rustup run 1.99.0 cargo test --locked --release -p {package} --all-features --lib --no-run --message-format=json > "$build_root/{filename}"; then'
             self.assertEqual(shell.count(start),1)
             body=shell[shell.index(start):].split('\nfi',1)[0]
