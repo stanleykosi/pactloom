@@ -51,6 +51,10 @@ enum QualifiedEntry {
     ConstructionTransport,
 }
 impl QualifiedEntry {
+    fn area(self) -> egui::Area {
+        egui::Area::new(egui::Id::new("synthetic-original-v3-entry"))
+            .fixed_pos(egui::pos2(20.0, 19000.0))
+    }
     fn label(self) -> &'static str {
         match self {
             Self::ConstructionPlan => "SYNTHETIC ONLY: enter original V3 plan controller",
@@ -354,8 +358,8 @@ impl EphemeralNativeWitnessV1 {
                 // prepare branch, not the disabled production entry or a raw
                 // owner constructor. Exact review and final commit stay in the
                 // unchanged real Window controller.
-                egui::Area::new(egui::Id::new("synthetic-original-v3-entry"))
-                    .fixed_pos(egui::pos2(20.0, 19000.0))
+                entry
+                    .area()
                     .show(ui.ctx(), |ui| {
                         let focused = ui
                             .ctx()
@@ -380,6 +384,10 @@ impl EphemeralNativeWitnessV1 {
     }
     fn click_qualified_entry(&mut self, entry: QualifiedEntry) -> Result<()> {
         self.qualification_entry = Some(entry);
+        // A new egui Area first performs an invisible, non-interactable sizing
+        // pass. Render that actual no-event frame before locating its label.
+        // The next frame and real primary click still use the unchanged path.
+        self.frame(vec![], true);
         let result = self.click(entry.label());
         self.qualification_entry = None;
         result

@@ -69,6 +69,7 @@ AUTHORITY_RENDERER_TESTS = (
     'native_witness_owner::window::ephemeral_fixture_v1::public_control_navigation_v1::tests::exact_label_requires_visible_clip_and_viewport',
     'native_witness_owner::window::ephemeral_fixture_v1::public_control_navigation_v1::tests::retained_receipt_scroll_is_independent_of_actual_selection_navigation',
     'native_witness_owner::window::ephemeral_fixture_v1::public_control_navigation_v1::tests::same_parent_scroll_areas_use_distinct_stable_production_ids',
+    'native_witness_owner::window::ephemeral_fixture_v1::public_control_navigation_v1::tests::qualified_area_requires_sizing_then_actual_focused_primary_click',
 )
 STORAGE_BOOTSTRAP_TEST = 'recovery_generation::layered::tests::native_layered_current_eight_nine_parent_provenance_is_exact_and_not_relabelable'
 SIGNER_VALIDATION_TESTS = (
@@ -239,7 +240,7 @@ def run_authority_rendering(executable):
         except Exception:
             print('CI_SYNTHETIC_AUTHORITY_RENDERER failed_test='+name+' raw_output_withheld=true',flush=True)
             raise
-    print('CI_SYNTHETIC_AUTHORITY_RENDERER passed=5 native_payment_verified=false attended_gui_verified=false raw_output_discarded=true',flush=True)
+    print('CI_SYNTHETIC_AUTHORITY_RENDERER passed=6 native_payment_verified=false attended_gui_verified=false raw_output_discarded=true',flush=True)
 
 def run_storage_bootstrap(executable):
     assert resource.getrlimit(resource.RLIMIT_CORE)[0] == 0

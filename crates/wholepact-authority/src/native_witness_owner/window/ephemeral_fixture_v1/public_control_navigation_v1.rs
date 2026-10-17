@@ -250,6 +250,60 @@ mod tests {
     }
 
     #[test]
+    fn qualified_area_requires_sizing_then_actual_focused_primary_click() {
+        let context = context();
+        let mut window = Window::new();
+        let original = serde_json::to_string_pretty(&serde_json::json!({
+            "synthetic_renderer_rows": vec!["inert fixture row"; 2800]
+        }))
+        .unwrap();
+        window.input.signed_manual_roster_construction_v3_json = Zeroizing::new(original);
+        require_refusal(&mut window, &context, PLAN).unwrap();
+        let entry = super::super::QualifiedEntry::ConstructionPlan;
+        let clicks = std::cell::Cell::new(0);
+        // Same fixed Area builder/label and focused primary event predicate.
+        // The test records an inert click count; it cannot enter a worker.
+        let mut frame = |events, focused| {
+            context.run_ui(fixture_input(events, focused), |ui| {
+                window.draw(ui);
+                entry.area().show(ui.ctx(), |ui| {
+                    let focused = ui
+                        .ctx()
+                        .input(|input| input.focused && input.viewport().focused == Some(true));
+                    if ui
+                        .add_enabled(window.can_select(), egui::Button::new(entry.label()))
+                        .clicked_by(egui::PointerButton::Primary)
+                        && focused
+                    {
+                        clicks.set(clicks.get() + 1);
+                    }
+                });
+            })
+        };
+        let sizing = frame(vec![], true);
+        assert!(visible_position(&sizing, entry.label()).is_none());
+        assert_eq!(clicks.get(), 0);
+        let painted = frame(vec![], true);
+        let position = visible_position(&painted, entry.label()).unwrap();
+        let event = |pressed| egui::Event::PointerButton {
+            pos: position,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(vec![egui::Event::PointerMoved(position), event(true)], false);
+        frame(vec![event(false)], false);
+        assert_eq!(clicks.get(), 0);
+        frame(vec![], true);
+        frame(vec![egui::Event::PointerMoved(position), event(true)], true);
+        frame(vec![event(false)], true);
+        assert_eq!(clicks.get(), 1);
+        frame(vec![], true);
+        assert_eq!(clicks.get(), 1);
+        assert!(window.job.is_none() && window.pending.is_none());
+    }
+
+    #[test]
     fn missing_exact_control_stops_after_finite_wheel_events() {
         let context = context();
         let mut window = Window::new();
