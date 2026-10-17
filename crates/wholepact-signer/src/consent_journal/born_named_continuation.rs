@@ -2,7 +2,7 @@
 //! Existing initial/read/reentry openers remain unchanged and continue to deny
 //! these later rows. Expired/uncertain Started, result and dispatch never vanish.
 use super::*;
-use rusqlite::Connection;
+use rusqlite::{Connection, TransactionBehavior};
 use wholepact_authority::{
     account_use::AccountUseGenesis, born_offline_construction_v1::BornOfflineConstructionOriginV1,
 };
@@ -15,11 +15,16 @@ impl SignerConsentJournal {
         epoch: u64,
         evidence: &RosterReenteredConstructionEvidenceV1,
     ) -> Result<BornOfflineConstructionOriginV1> {
-        let c = self.connection.lock().map_err(|_| JournalError::Database)?;
-        storage::verify_schema(&c)?;
-        storage::bounded(&c, self.capacity_limits())?;
-        let account = storage::read_account(&c)?;
-        let actual = account_use_storage::inspect(&c, &account.account_id)?;
+        let mut c = self.connection.lock().map_err(|_| JournalError::Database)?;
+        // Own one fresh read snapshot, never adopt or commit a caller's work.
+        if !c.is_autocommit() {
+            return Err(JournalError::Database);
+        }
+        let tx = c.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let validated = storage::verify_schema_with_common_audit(&tx)?;
+        storage::bounded(&tx, self.capacity_limits())?;
+        let account = storage::read_account(&tx)?;
+        let actual = account_use_storage::inspect(&tx, &account.account_id)?;
         if account.recovery_required
             || account.writer_epoch != epoch
             || account.account_id != genesis.identity.account_id
@@ -28,8 +33,10 @@ impl SignerConsentJournal {
         {
             return Err(JournalError::InvalidBinding);
         }
-        let origin = read_origin(&c, &account.account_id, evidence)?;
-        verify_local_records(&c, genesis, &origin)?;
+        let origin = origin_from_verified_schema(&validated, &account.account_id, evidence)?;
+        verify_local_records(&tx, genesis, &origin)?;
+        drop(validated);
+        tx.commit()?;
         Ok(origin)
     }
 }
@@ -42,6 +49,24 @@ pub(super) fn read_origin(
         .validate()
         .map_err(|_| JournalError::InvalidBinding)?;
     let audit = common_context_reentry_audit_v1::read_complete(c, account)?;
+    origin_from_audit(&audit, evidence)
+}
+
+/// Only an actual complete-schema read can supply this call-local inventory.
+/// The exact account and evidence are still checked before any inert projection.
+pub(super) fn origin_from_verified_schema(
+    validated: &storage::ValidatedCommonAudit<'_>,
+    account: &str,
+    evidence: &RosterReenteredConstructionEvidenceV1,
+) -> Result<BornOfflineConstructionOriginV1> {
+    evidence.validate().map_err(|_| JournalError::InvalidBinding)?;
+    origin_from_audit(validated.inventory_for(account)?, evidence)
+}
+
+fn origin_from_audit(
+    audit: &CommonContextSignerAuditInventoryV2,
+    evidence: &RosterReenteredConstructionEvidenceV1,
+) -> Result<BornOfflineConstructionOriginV1> {
     let [CommonContextSignerAuditV1::ReadAdmitted { evidence: read, .. }] =
         audit.original.rows.as_slice()
     else {

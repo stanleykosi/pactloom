@@ -112,7 +112,7 @@ fn validate(
     evidence: &RosterReenteredConstructionEvidenceV1,
     expected: &BornOfflineConstructionOriginV1,
 ) -> Result<()> {
-    storage::verify_schema(c)?;
+    let validated = storage::verify_schema_with_common_audit(c)?;
     storage::bounded(c, limits)?;
     let account = storage::read_account(c)?;
     let history = account_use_storage::inspect(c, &account.account_id)?;
@@ -124,7 +124,9 @@ fn validate(
     {
         return Err(JournalError::InvalidBinding);
     }
-    let actual = born_named_continuation::read_origin(c, &account.account_id, evidence)?;
+    let actual = born_named_continuation::origin_from_verified_schema(
+        &validated, &account.account_id, evidence,
+    )?;
     if &actual != expected {
         return Err(JournalError::Conflict);
     }

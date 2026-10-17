@@ -570,12 +570,18 @@ fn poll_until(
 ) -> Result<()> {
     loop {
         if cancelled.load(Ordering::Acquire) {
+            diagnostic::emit(B::SignerPollCancelled, Outcome::Begin);
             return Err("signer worker cancelled while polling");
         }
         if Instant::now() >= deadline {
+            diagnostic::emit(B::SignerPollDeadline, Outcome::Begin);
             return Err("actual signer entry deadline elapsed");
         }
-        if poll().map_err(|error| signer_error(error, stage))? {
+        let result = poll();
+        if let Err(error) = &result {
+            diagnostic::emit(B::SignerPollTerminal, diagnostic::signer_error(error));
+        }
+        if result.map_err(|error| signer_error(error, stage))? {
             return Ok(());
         }
         thread::sleep(Duration::from_millis(2));

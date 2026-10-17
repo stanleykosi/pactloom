@@ -1284,7 +1284,23 @@ fn run(work: Work, owner: &PendingAccountNativeAuthority) -> Result<Output> {
         &result,
         Output::CommonContextReadServed(_) | Output::CommonContextHandoffAuthorized(_)
     ) {
-        owner.check_current()?;
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        let completed_consumption = matches!(&result, Output::CompletionConsumed(_));
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        if completed_consumption {
+            synthetic_diagnostics::report_begin(
+                synthetic_diagnostics::Operation::ConstructionFinalOwner,
+            );
+        }
+        let current = owner.check_current();
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        if completed_consumption {
+            synthetic_diagnostics::report_result(
+                synthetic_diagnostics::Operation::ConstructionFinalOwner,
+                &current,
+            );
+        }
+        current?;
     }
     Ok(result)
 }

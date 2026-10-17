@@ -159,7 +159,7 @@ class PublicOutputTests(unittest.TestCase):
         self.assertTrue(kinds['Outcome'] <= output.OUTCOMES)
         signer=ROOT/'crates/wholepact-signer/src/native_ui/born_manual_roster_v2/synthetic_diagnostics.rs'
         labels=set(re.findall(r'=> "(Roster\w+)"',signer.read_text()))
-        self.assertEqual(len(labels),80)
+        self.assertEqual(len(labels),83)
         self.assertTrue(labels <= output.BOUNDARIES)
         for label in labels | kinds['Phase']:
             self.assertTrue(output.safe_failure(self.failure(label+':Begin')))
@@ -234,7 +234,7 @@ class PublicOutputTests(unittest.TestCase):
             self.assertFalse(output.safe_failure(self.failure(value)))
 
     def test_construction_effect_diagnostics_are_exact_and_payload_free(self):
-        expected=set("RosterConstructionCheck RosterConstructionReserve RosterConstructionReservedAppend RosterConstructionConsume RosterConstructionConsumedAppend RosterConstructionSend".split())
+        expected=set("RosterConstructionCheck RosterConstructionReserve RosterConstructionReservedAppend RosterConstructionConsume RosterConstructionConsumedAppend RosterConstructionSend RosterConstructionIntoNamed RosterConstructionNamedOwner RosterConstructionFinalOwner".split())
         source=(ROOT/'crates/wholepact-signer/src/native_ui/born_manual_roster_v2/synthetic_diagnostics.rs').read_text()
         self.assertEqual(set(re.findall(r'=> "(RosterConstruction\w+)"',source)),expected)
         self.assertEqual({x for x in output.BOUNDARIES if x.startswith('RosterConstruction')},expected)
@@ -470,7 +470,7 @@ class PublicOutputTests(unittest.TestCase):
         def fake_run(argv, **kwargs):
             calls.append((argv,kwargs))
             name=argv[2]
-            self.assertIn(name,output.SIGNER_VALIDATION_TESTS+output.SIGNER_BOOKKEEPING_TESTS+output.SIGNER_PRECONSTRUCTION_TESTS+output.SIGNER_BIRTH_LINK_TESTS+output.SIGNER_ENDPOINT_CHANNEL_TESTS+output.SIGNER_SNAPSHOT_STORAGE_TESTS+output.SIGNER_SHAPE_TAMPER_TESTS+output.SIGNER_REENTRY_COMPATIBILITY_TESTS+output.SIGNER_CALL_LOCAL_TESTS+output.SIGNER_AUDIT_STORAGE_TESTS+output.SIGNER_AUDIT_COMPATIBILITY_TESTS)
+            self.assertIn(name,output.SIGNER_VALIDATION_TESTS+output.SIGNER_BOOKKEEPING_TESTS+output.SIGNER_PRECONSTRUCTION_TESTS+output.SIGNER_BIRTH_LINK_TESTS+output.SIGNER_ENDPOINT_CHANNEL_TESTS+output.SIGNER_SNAPSHOT_STORAGE_TESTS+output.SIGNER_SHAPE_TAMPER_TESTS+output.SIGNER_REENTRY_COMPATIBILITY_TESTS+output.SIGNER_CALL_LOCAL_TESTS+output.SIGNER_AUDIT_STORAGE_TESTS+output.SIGNER_AUDIT_COMPATIBILITY_TESTS+output.SIGNER_NAMED_ORIGIN_SNAPSHOT_TESTS)
             self.assertEqual(argv[:2],['/verified/signer','--exact'])
             self.assertEqual(argv[3],'--test-threads=1')
             if argv[-1]=='--list':
@@ -485,8 +485,54 @@ class PublicOutputTests(unittest.TestCase):
              mock.patch.object(output.subprocess,'run',side_effect=fake_run), \
              contextlib.redirect_stdout(captured):
             output.run_signer_validation('/verified/signer')
-        self.assertEqual([argv[2] for argv,_ in calls], [name for name in output.SIGNER_VALIDATION_TESTS+output.SIGNER_BOOKKEEPING_TESTS+output.SIGNER_PRECONSTRUCTION_TESTS+output.SIGNER_BIRTH_LINK_TESTS+output.SIGNER_ENDPOINT_CHANNEL_TESTS+output.SIGNER_SNAPSHOT_STORAGE_TESTS+output.SIGNER_SHAPE_TAMPER_TESTS+output.SIGNER_REENTRY_COMPATIBILITY_TESTS+output.SIGNER_CALL_LOCAL_TESTS+output.SIGNER_AUDIT_STORAGE_TESTS+output.SIGNER_AUDIT_COMPATIBILITY_TESTS for _ in range(2)])
-        self.assertEqual(captured.getvalue(),'CI_SYNTHETIC_SIGNER_VALIDATION passed=27 crypto_file_cases=4 bookkeeping_cases=2 replay_cases=6 endpoint_channel_cases=4 snapshot_storage_cases=2 shape_tamper_cases=1 compatibility_cases=3 call_local_cases=2 audit_storage_cases=1 audit_compatibility_cases=2 native_payment_verified=false raw_output_discarded=true\n')
+        self.assertEqual([argv[2] for argv,_ in calls], [name for name in output.SIGNER_VALIDATION_TESTS+output.SIGNER_BOOKKEEPING_TESTS+output.SIGNER_PRECONSTRUCTION_TESTS+output.SIGNER_BIRTH_LINK_TESTS+output.SIGNER_ENDPOINT_CHANNEL_TESTS+output.SIGNER_SNAPSHOT_STORAGE_TESTS+output.SIGNER_SHAPE_TAMPER_TESTS+output.SIGNER_REENTRY_COMPATIBILITY_TESTS+output.SIGNER_CALL_LOCAL_TESTS+output.SIGNER_AUDIT_STORAGE_TESTS+output.SIGNER_AUDIT_COMPATIBILITY_TESTS+output.SIGNER_NAMED_ORIGIN_SNAPSHOT_TESTS for _ in range(2)])
+        self.assertEqual(captured.getvalue(),'CI_SYNTHETIC_SIGNER_VALIDATION passed=30 crypto_file_cases=4 bookkeeping_cases=2 replay_cases=6 endpoint_channel_cases=4 snapshot_storage_cases=2 shape_tamper_cases=1 compatibility_cases=3 call_local_cases=2 audit_storage_cases=1 audit_compatibility_cases=2 named_origin_snapshot_cases=3 native_payment_verified=false raw_output_discarded=true\n')
+
+    def test_postconsume_poll_and_owner_labels_are_closed(self):
+        labels=('SignerPollCancelled','SignerPollDeadline','SignerPollTerminal',
+                'RosterConstructionIntoNamed','RosterConstructionNamedOwner',
+                'RosterConstructionFinalOwner')
+        for label in labels:
+            self.assertIn(label,output.BOUNDARIES)
+            valid=('[JOINED_FAILURE exit=Some(101) signal=None core_dumped=false '
+                   'inputs=162/204 reason=ChildExit static_boundaries='+label+':SignerLocked]')
+            self.assertTrue(output.safe_failure(valid))
+            self.assertFalse(output.safe_failure(valid.replace(label,label+'Unknown')))
+            self.assertFalse(output.safe_failure(valid.replace(':SignerLocked]',':SignerLocked private]')))
+        worker=(ROOT/'crates/wholepact-native-host/src/host/manual_enrollment/command/'
+                'roster_publication_v2/sequential_construction_v3_qualification/'
+                'joined_signer_worker_v1.rs').read_text()
+        poll=worker.split('fn poll_until(',1)[1].split('\nfn execute(',1)[0]
+        self.assertEqual(poll.count('cancelled.load(Ordering::Acquire)'),1)
+        self.assertEqual(poll.count('Instant::now()'),1)
+        self.assertEqual(poll.count('poll()'),1)
+        self.assertLess(poll.index('cancelled.load'),poll.index('Instant::now()'))
+        self.assertLess(poll.index('Instant::now()'),poll.index('let result = poll();'))
+        self.assertIn('if result.map_err(|error| signer_error(error, stage))?',poll)
+        self.assertIn('thread::sleep(Duration::from_millis(2));',poll)
+
+    def test_named_origin_snapshot_preflight_is_three_exact_encrypted_cases(self):
+        prefix='consent_journal::common_context_reentry_audit_tests::'
+        expected=tuple(prefix+name for name in (
+            'named_origin_snapshot_matches_complete_reader_and_preserves_outer_transactions',
+            'named_origin_snapshot_rechecks_identity_evidence_schema_and_local_rows',
+            'named_origin_snapshot_revalidates_changed_consumed_rows_on_every_call',
+        ))
+        self.assertEqual(output.SIGNER_NAMED_ORIGIN_SNAPSHOT_TESTS,expected)
+        base=ROOT/'crates/wholepact-signer/src/consent_journal'
+        self.assertIn('mod common_context_reentry_audit_tests;', (base/'mod.rs').read_text())
+        source=(base/'common_context_reentry_audit_tests.rs').read_text()
+        for name in expected:
+            self.assertEqual(len(re.findall(r'#\[test\]\s+fn '+name.rsplit('::',1)[1]+r'\(',source)),1)
+        previous=(output.SIGNER_VALIDATION_TESTS+output.SIGNER_BOOKKEEPING_TESTS
+                  +output.SIGNER_PRECONSTRUCTION_TESTS+output.SIGNER_BIRTH_LINK_TESTS
+                  +output.SIGNER_ENDPOINT_CHANNEL_TESTS+output.SIGNER_SNAPSHOT_STORAGE_TESTS
+                  +output.SIGNER_SHAPE_TAMPER_TESTS+output.SIGNER_REENTRY_COMPATIBILITY_TESTS
+                  +output.SIGNER_CALL_LOCAL_TESTS+output.SIGNER_AUDIT_STORAGE_TESTS
+                  +output.SIGNER_AUDIT_COMPATIBILITY_TESTS)
+        self.assertEqual(len(previous),27)
+        self.assertEqual(len(set(previous+expected)),30)
+        self.assertTrue(set(expected).isdisjoint(previous))
 
     def test_call_local_audit_preflight_is_five_exact_distinct_cases(self):
         prefix='consent_journal::common_context_reentry_audit_tests::'

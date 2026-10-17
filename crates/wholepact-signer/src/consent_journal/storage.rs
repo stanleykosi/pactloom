@@ -1338,15 +1338,36 @@ pub(super) fn verify_schema(c: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Only the fresh reentry-owner read transaction consumes this inert result.
+/// Inert complete validation from this exact borrowed database read. Only this
+/// module can construct it; no clone, deserialization or mutable accessor can
+/// turn a caller's inventory into validated history. Callers keep it inside
+/// their own fresh read transaction, never across a native/effect boundary.
+#[cfg(all(feature = "pending-birth-owner-signing", target_os = "linux"))]
+pub(super) struct ValidatedCommonAudit<'snapshot> {
+    account: String,
+    inventory: CommonContextSignerAuditInventoryV2,
+    _snapshot: &'snapshot Connection,
+}
+#[cfg(all(feature = "pending-birth-owner-signing", target_os = "linux"))]
+impl ValidatedCommonAudit<'_> {
+    pub(super) fn inventory_for(&self, account: &str) -> Result<&CommonContextSignerAuditInventoryV2> {
+        if self.account != account {
+            return Err(JournalError::InvalidBinding);
+        }
+        Ok(&self.inventory)
+    }
+}
+
 /// `read_complete` itself reads and fully validates the original construction
 /// audit, so no separate, discarded replay is necessary in this same snapshot.
 #[cfg(all(feature = "pending-birth-owner-signing", target_os = "linux"))]
-fn verify_schema_with_common_audit(
+pub(super) fn verify_schema_with_common_audit(
     c: &Connection,
-) -> Result<CommonContextSignerAuditInventoryV2> {
+) -> Result<ValidatedCommonAudit<'_>> {
     verify_schema_before_common_audit(c)?;
-    common_context_reentry_audit_v1::read_complete(c, &read_account(c)?.account_id)
+    let account = read_account(c)?.account_id;
+    let inventory = common_context_reentry_audit_v1::read_complete(c, &account)?;
+    Ok(ValidatedCommonAudit { account, inventory, _snapshot: c })
 }
 
 fn verify_schema_before_common_audit(c: &Connection) -> Result<()> {

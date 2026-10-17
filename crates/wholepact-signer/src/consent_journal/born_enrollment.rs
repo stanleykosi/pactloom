@@ -334,12 +334,13 @@ impl SignerConsentJournal {
             return Err(JournalError::Database);
         }
         let tx = c.transaction_with_behavior(TransactionBehavior::Deferred)?;
-        let audit = verify_schema_with_common_audit(&tx)?;
+        let validated = verify_schema_with_common_audit(&tx)?;
         verify_born_identity_cells(&tx, genesis, epoch)?;
         if read_account(&tx)?.recovery_required {
             return Err(JournalError::RecoveryRequired);
         }
         verify_common_audit_table_counts(&tx, true)?;
+        let audit = validated.inventory_for(&genesis.identity.account_id)?;
         let [row @ CommonContextSignerAuditV1::ReadAdmitted { evidence, .. }] =
             audit.original.rows.as_slice()
         else {
@@ -382,7 +383,7 @@ impl SignerConsentJournal {
         // Only the already-existing inert receipt leaves this read. The
         // validated inventory is not retained as permission for a later call.
         let receipt = row.clone();
-        drop(audit);
+        drop(validated);
         tx.commit()?;
         Ok(receipt)
     }

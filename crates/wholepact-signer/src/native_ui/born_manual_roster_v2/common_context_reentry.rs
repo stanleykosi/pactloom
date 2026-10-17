@@ -968,12 +968,18 @@ impl PreparedReenteredConstructionV1 {
                     .map_err(|_| Error::ReviewMismatch)
             },
         ))?;
-        let source = source.into_named_recipient_after_consumed(evidence, owner)?;
-        super::named_continuation::ConsumedBornNamedOwnerV1::from_consumed(
-            source,
-            self.owner.owner_client,
-            self.owner.signer,
-            owner,
+        let source = completion_witness_trace!(
+            ConstructionIntoNamed,
+            source.into_named_recipient_after_consumed(evidence, owner)
+        )?;
+        completion_witness_trace!(
+            ConstructionNamedOwner,
+            super::named_continuation::ConsumedBornNamedOwnerV1::from_consumed(
+                source,
+                self.owner.owner_client,
+                self.owner.signer,
+                owner,
+            )
         )
     }
 }

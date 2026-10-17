@@ -1111,3 +1111,170 @@ fn stored_audit_digests_and_shapes_are_revalidated_on_every_read() {
         }
     });
 }
+
+/// The same maintained encrypted append producer, completed through all six
+/// inert archival phases. This does not create a native owner or permission.
+#[cfg(all(feature = "pending-birth-owner-signing", target_os = "linux"))]
+fn with_consumed_named_snapshot_fixture(
+    test: impl FnOnce(
+        &SignerConsentJournal,
+        &HostRecoveryContinuityEvidenceV5,
+        &wholepact_signer_origin::common_context_reentry_v1::RosterReenteredConstructionEvidenceV1,
+    ),
+) {
+    with_owner_snapshot_fixture(|journal, value| {
+        let rows = &value.complete_history.signer_common_context_audit.reentry.rows;
+        for phase in ["granted", "claimed", "reentered", "reserved", "consumed"] {
+            journal.retain_common_context_reentry_audit_v1(
+                rows.iter().find(|row| row.phase() == phase).unwrap(),
+            ).unwrap();
+        }
+        let evidence = rows.iter().find_map(|row| match &row.record {
+            CommonContextReentryAuditPhaseV1::Consumed { evidence, .. } => Some(evidence.as_ref()),
+            _ => None,
+        }).unwrap();
+        test(journal, value, evidence);
+    });
+}
+
+#[cfg(all(feature = "pending-birth-owner-signing", target_os = "linux"))]
+#[test]
+fn named_origin_snapshot_matches_complete_reader_and_preserves_outer_transactions() {
+    with_consumed_named_snapshot_fixture(|journal, value, evidence| {
+        let genesis = value.complete_history.financial_origins_v2.account_use.genesis.as_ref().unwrap();
+        let expected = {
+            let c = journal.connection.lock().unwrap();
+            storage::verify_schema(&c).unwrap();
+            let origin = born_named_continuation::read_origin(&c, &genesis.identity.account_id, evidence).unwrap();
+            born_named_continuation::verify_local_records(&c, genesis, &origin).unwrap();
+            origin
+        };
+        assert!(journal.born_named_construction_origin_v1(genesis, 1, evidence).unwrap() == expected);
+        let (enrollment, manifest) = journal.consumed_born_named_local_records_v1(genesis, 1, evidence, &expected).unwrap();
+        assert!(enrollment.is_none() && manifest.is_none());
+        let first = journal.consumed_born_named_inventory_v1(genesis, 1, evidence, &expected).unwrap();
+        assert!(journal.consumed_born_named_inventory_v1(genesis, 1, evidence, &expected).unwrap() == first);
+        assert!(journal.connection.lock().unwrap().is_autocommit());
+        // Actual complete-schema wrapper is bound to the account read by that
+        // same transaction, not a caller-supplied inventory or account claim.
+        {
+            let mut c = journal.connection.lock().unwrap();
+            let tx = c.transaction().unwrap();
+            let validated = storage::verify_schema_with_common_audit(&tx).unwrap();
+            assert!(validated.inventory_for(&genesis.identity.account_id).is_ok());
+            assert!(validated.inventory_for("foreign-never-funded-account").is_err());
+            drop(validated);
+            tx.rollback().unwrap();
+        }
+        journal.connection.lock().unwrap().execute_batch("BEGIN DEFERRED").unwrap();
+        assert!(journal.born_named_construction_origin_v1(genesis, 1, evidence).is_err());
+        assert!(journal.consumed_born_named_local_records_v1(genesis, 1, evidence, &expected).is_err());
+        assert!(journal.consumed_born_named_inventory_v1(genesis, 1, evidence, &expected).is_err());
+        {
+            let c = journal.connection.lock().unwrap();
+            assert!(!c.is_autocommit());
+            c.execute_batch("ROLLBACK").unwrap();
+        }
+        assert!(journal.born_named_construction_origin_v1(genesis, 1, evidence).unwrap() == expected);
+    });
+}
+
+#[cfg(all(feature = "pending-birth-owner-signing", target_os = "linux"))]
+#[test]
+fn named_origin_snapshot_rechecks_identity_evidence_schema_and_local_rows() {
+    with_consumed_named_snapshot_fixture(|journal, value, evidence| {
+        let genesis = value.complete_history.financial_origins_v2.account_use.genesis.as_ref().unwrap();
+        let expected = journal.born_named_construction_origin_v1(genesis, 1, evidence).unwrap();
+        let check = || [
+            journal.born_named_construction_origin_v1(genesis, 1, evidence).is_ok(),
+            journal.consumed_born_named_local_records_v1(genesis, 1, evidence, &expected).is_ok(),
+            journal.consumed_born_named_inventory_v1(genesis, 1, evidence, &expected).is_ok(),
+        ];
+        assert_eq!(check(), [true; 3]);
+        assert!(journal.born_named_construction_origin_v1(genesis, 2, evidence).is_err());
+        let mut foreign_genesis = genesis.clone();
+        foreign_genesis.identity.account_id = "foreign-never-funded-account".into();
+        assert!(journal.born_named_construction_origin_v1(&foreign_genesis, 1, evidence).is_err());
+        let mut foreign_evidence = evidence.clone();
+        foreign_evidence.reentry_lineage.current_native_binding_digest = "e".repeat(64);
+        assert!(journal.born_named_construction_origin_v1(genesis, 1, &foreign_evidence).is_err());
+        let mut foreign_origin = expected.clone();
+        foreign_origin.transport_credential_id = Some("e".repeat(64));
+        assert!(journal.consumed_born_named_local_records_v1(genesis, 1, evidence, &foreign_origin).is_err());
+        assert!(journal.consumed_born_named_inventory_v1(genesis, 1, evidence, &foreign_origin).is_err());
+        for (change, restore) in [
+            ("UPDATE signer_account SET recovery_required=1", "UPDATE signer_account SET recovery_required=0"),
+            ("UPDATE signer_account SET writer_epoch=2", "UPDATE signer_account SET writer_epoch=1"),
+            ("CREATE TABLE foreign_named_snapshot(value TEXT)", "DROP TABLE foreign_named_snapshot"),
+        ] {
+            journal.connection.lock().unwrap().execute_batch(change).unwrap();
+            assert_eq!(check(), [false; 3]);
+            assert!(journal.connection.lock().unwrap().is_autocommit());
+            journal.connection.lock().unwrap().execute_batch(restore).unwrap();
+            assert_eq!(check(), [true; 3]);
+        }
+        journal.connection.lock().unwrap().execute(
+            "INSERT INTO signer_enrollments VALUES('inert-ref',?1,'inert-agreement','inert-participant','{}')",
+            [&genesis.identity.account_id],
+        ).unwrap();
+        // Schema and audit remain valid. The unchanged exact local-row reader
+        // must still refuse this unrelated malformed enrollment.
+        storage::verify_schema(&journal.connection.lock().unwrap()).unwrap();
+        assert_eq!(check(), [false; 3]);
+        assert!(journal.connection.lock().unwrap().is_autocommit());
+    });
+}
+
+#[cfg(all(feature = "pending-birth-owner-signing", target_os = "linux"))]
+#[test]
+fn named_origin_snapshot_revalidates_changed_consumed_rows_on_every_call() {
+    with_consumed_named_snapshot_fixture(|journal, value, evidence| {
+        let genesis = value.complete_history.financial_origins_v2.account_use.genesis.as_ref().unwrap();
+        let expected = journal.born_named_construction_origin_v1(genesis, 1, evidence).unwrap();
+        let check = || [
+            journal.born_named_construction_origin_v1(genesis, 1, evidence).is_ok(),
+            journal.consumed_born_named_local_records_v1(genesis, 1, evidence, &expected).is_ok(),
+            journal.consumed_born_named_inventory_v1(genesis, 1, evidence, &expected).is_ok(),
+        ];
+        assert_eq!(check(), [true; 3]);
+        let (trigger, payload, digest): (String, String, String) = {
+            let c = journal.connection.lock().unwrap();
+            (
+                c.query_row("SELECT sql FROM sqlite_schema WHERE name='signer_common_context_reentry_no_update'", [], |r| r.get(0)).unwrap(),
+                c.query_row("SELECT payload FROM signer_common_context_reentry_v1 WHERE phase='consumed'", [], |r| r.get(0)).unwrap(),
+                c.query_row("SELECT receipt_digest FROM signer_common_context_reentry_v1 WHERE phase='consumed'", [], |r| r.get(0)).unwrap(),
+            )
+        };
+        let mut malformed: CommonContextReentrySignerAuditV1 = serde_json::from_str(&payload).unwrap();
+        malformed.version = 0;
+        assert!(malformed.digest().is_err());
+        let malformed_payload = serde_json::to_string(&malformed).unwrap();
+        let malformed_digest = wholepact_core::proposal::canonical_digest(
+            "wholepact:signer-common-context-reentry-audit:v1", &malformed,
+        ).unwrap();
+        for (replacement, saved_digest, accepted) in [
+            ("{}", digest.as_str(), false),
+            (malformed_payload.as_str(), malformed_digest.as_str(), false),
+            (payload.as_str(), "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", false),
+            (payload.as_str(), digest.as_str(), true),
+        ] {
+            {
+                let c = journal.connection.lock().unwrap();
+                c.execute_batch("DROP TRIGGER signer_common_context_reentry_no_update").unwrap();
+                c.execute("UPDATE signer_common_context_reentry_v1 SET payload=?1,receipt_digest=?2 WHERE phase='consumed'", rusqlite::params![replacement, saved_digest]).unwrap();
+                c.execute_batch(&trigger).unwrap();
+            }
+            assert_eq!(check(), [accepted; 3]);
+            assert!(journal.connection.lock().unwrap().is_autocommit());
+        }
+        {
+            let c = journal.connection.lock().unwrap();
+            let trigger: String = c.query_row("SELECT sql FROM sqlite_schema WHERE name='signer_common_context_reentry_no_delete'", [], |r| r.get(0)).unwrap();
+            c.execute_batch("DROP TRIGGER signer_common_context_reentry_no_delete").unwrap();
+            c.execute("DELETE FROM signer_common_context_reentry_v1 WHERE phase='consumed'", []).unwrap();
+            c.execute_batch(&trigger).unwrap();
+        }
+        assert_eq!(check(), [false; 3]);
+        assert!(journal.connection.lock().unwrap().is_autocommit());
+    });
+}
