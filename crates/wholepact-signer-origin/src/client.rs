@@ -93,7 +93,7 @@ pub struct NativeManualClient {
     scope: PairScope,
     grant: ClientGrant,
     active_leases: AtomicUsize,
-    /// Irreversible failed/cancelled V2 handoff; never reset by re-pairing.
+    /// Irreversible failed/cancelled acknowledged handoff; never reset by re-pairing.
     handoff: HandoffState,
 }
 impl NativeManualClient {
@@ -513,7 +513,7 @@ impl<'client> PendingManualEnrollment<'client> {
                 lifetime,
                 original_deadline,
                 failed: AtomicBool::new(false),
-                completion: CompletionState::Legacy,
+                completion: CompletionState::initial_enrollment(),
                 _slot: self.slot,
             },
             evidence: *evidence,
@@ -655,6 +655,13 @@ pub struct ManualEnrollmentLease<'a> {
     evidence: ManualEnrollmentEvidence,
 }
 impl ManualEnrollmentLease<'_> {
+    /// Complete this exact initial audit channel before releasing its stream.
+    /// A failed or late acknowledgment never rolls back the durable audit and
+    /// permanently prevents reuse of this client. Drop is cancellation only.
+    pub fn finish(self) -> Result<()> {
+        self.held.finish()
+    }
+
     pub fn binding(&self) -> &HostManualEnrollmentRequest {
         &self.evidence.request
     }
@@ -723,7 +730,7 @@ struct HeldLease<'a> {
     _slot: LeaseSlot<'a>,
 }
 impl HeldLease<'_> {
-    /// Explicit V2 completion keeps the authenticated stream open until its
+    /// Explicit completion keeps the authenticated stream open until its
     /// exact Finished acknowledgment. The entire phase is bounded once, by the
     /// original monotonic/wall/grant deadlines and at most two seconds.
     /// It cannot renew a lease or undo any already committed external effect.
@@ -858,7 +865,7 @@ impl HeldLease<'_> {
 impl Drop for HeldLease<'_> {
     fn drop(&mut self) {
         if self.completion.requires_ack() {
-            // Dropping a V2 lease is cancellation, never successful handoff.
+            // Dropping an ack-required lease is cancellation, never successful handoff.
             // Closing the owned stream makes the producer fail closed; poison
             // this client even if its process/grant remain otherwise current.
             self.client.handoff.poison();
@@ -902,6 +909,12 @@ enum CompletionState {
     Failed,
 }
 impl CompletionState {
+    fn initial_enrollment() -> Self {
+        // V1 initial publication uses the same explicit Finished protocol as
+        // V2 roster publication. A best-effort Finish from Drop races the
+        // producer's unchanged same-channel connected() checks.
+        Self::Pending
+    }
     fn requires_ack(self) -> bool {
         matches!(self, Self::Pending | Self::Completing | Self::Failed)
     }
@@ -1531,6 +1544,43 @@ mod completion_tests {
         guard.poison();
         assert!(guard.check().is_err());
     }
+    #[test]
+    fn initial_enrollment_never_completes_by_drop_or_unacknowledged_finish() {
+        // The selector is the exact one used by PendingManualEnrollment::finish.
+        // This is protocol bookkeeping only, without any socket or owner.
+        let mut state = CompletionState::initial_enrollment();
+        assert_eq!(state, CompletionState::Pending);
+        assert!(state.requires_ack());
+        state.begin().unwrap();
+        assert!(state.requires_ack());
+        state
+            .acknowledge(ManualAdmissionResponse::Finished {})
+            .unwrap();
+        assert_eq!(state, CompletionState::Acknowledged);
+        assert!(!state.requires_ack());
+        assert!(state.begin().is_err());
+
+        for response in [
+            ManualAdmissionResponse::Denied {},
+            ManualAdmissionResponse::Finished {},
+        ] {
+            let mut failed = CompletionState::initial_enrollment();
+            failed.begin().unwrap();
+            failed.fail(); // Includes timeout/disconnect after an already committed audit.
+            assert!(failed.acknowledge(response).is_err());
+            assert!(failed.requires_ack());
+            assert!(failed.begin().is_err());
+        }
+        let mut wrong = CompletionState::initial_enrollment();
+        wrong.begin().unwrap();
+        assert!(
+            wrong
+                .acknowledge(ManualAdmissionResponse::Denied {})
+                .is_err()
+        );
+        assert_eq!(wrong, CompletionState::Failed);
+    }
+
     #[test]
     fn only_explicit_exact_finish_ack_completes_a_v2_handoff() {
         let mut state = CompletionState::Pending;

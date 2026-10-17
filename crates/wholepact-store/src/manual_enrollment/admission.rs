@@ -244,12 +244,19 @@ impl Store {
         // two-second maximum; no arbitrary callback or indefinitely held peer.
         lease.check_current().map_err(denied)?;
         tx.commit()?;
-        Ok(ManualAuditAppendReceipt {
+        let receipt = ManualAuditAppendReceipt {
             audit_digest: audit.digest()?,
             operation_id: terms.operation_id.clone(),
             enrollment_ref: audit.enrollment_ref,
             replayed: !inserted,
-        })
+        };
+        drop(c);
+        // The original audit is already durable. Keep this exact authenticated
+        // stream open through Finished, outside the Store lock. A failed or
+        // late check/ack is recovery-required, never rollback or a new attempt.
+        lease.check_current().map_err(denied)?;
+        lease.finish().map_err(denied)?;
+        Ok(receipt)
     }
 
     /// Retain original exact durable action admission. This does not execute the
