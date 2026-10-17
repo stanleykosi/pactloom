@@ -124,7 +124,7 @@ class PublicOutputTests(unittest.TestCase):
         for kind in ['Phase','Outcome']:
             body=re.search(r'labels! \{ '+kind+r' \{(.*?)\} \}',text,re.S).group(1)
             kinds[kind]=set(x.strip() for x in body.split(',') if x.strip())
-        self.assertEqual(len(kinds['Phase']),44)
+        self.assertEqual(len(kinds['Phase']),48)
         self.assertTrue(kinds['Phase'] <= output.BOUNDARIES)
         self.assertTrue(kinds['Outcome'] <= output.OUTCOMES)
         signer=ROOT/'crates/wholepact-signer/src/native_ui/born_manual_roster_v2/synthetic_diagnostics.rs'
@@ -310,7 +310,7 @@ class PublicOutputTests(unittest.TestCase):
         def fake_run(argv, **kwargs):
             calls.append((argv,kwargs))
             name=argv[2]
-            self.assertIn(name,output.SIGNER_VALIDATION_TESTS)
+            self.assertIn(name,output.SIGNER_VALIDATION_TESTS+output.SIGNER_BOOKKEEPING_TESTS)
             self.assertEqual(argv[:2],['/verified/signer','--exact'])
             self.assertEqual(argv[3],'--test-threads=1')
             if argv[-1]=='--list':
@@ -325,8 +325,40 @@ class PublicOutputTests(unittest.TestCase):
              mock.patch.object(output.subprocess,'run',side_effect=fake_run), \
              contextlib.redirect_stdout(captured):
             output.run_signer_validation('/verified/signer')
-        self.assertEqual([argv[2] for argv,_ in calls], [name for name in output.SIGNER_VALIDATION_TESTS for _ in range(2)])
-        self.assertEqual(captured.getvalue(),'CI_SYNTHETIC_SIGNER_VALIDATION passed=4 native_payment_verified=false raw_output_discarded=true\n')
+        self.assertEqual([argv[2] for argv,_ in calls], [name for name in output.SIGNER_VALIDATION_TESTS+output.SIGNER_BOOKKEEPING_TESTS for _ in range(2)])
+        self.assertEqual(captured.getvalue(),'CI_SYNTHETIC_SIGNER_VALIDATION passed=6 crypto_file_cases=4 bookkeeping_cases=2 native_payment_verified=false raw_output_discarded=true\n')
+
+    def test_signer_bookkeeping_preflight_is_two_exact_private_state_cases(self):
+        prefix='account::birth::enrollment::roster_v2::inventory::'
+        expected=(
+            prefix+'tests::challenge_bookkeeping_requires_successful_checked_send_first',
+            prefix+'candidate::tests::candidate_nonce_is_retained_only_after_fully_checked_send_success',
+        )
+        self.assertEqual(output.SIGNER_BOOKKEEPING_TESTS,expected)
+        root=ROOT/'crates/wholepact-signer/src/account/birth/enrollment/roster_v2'
+        inventory=(root/'inventory.rs').read_text()
+        candidate=(root/'inventory/candidate.rs').read_text()
+        self.assertIn('mod candidate;',inventory)
+        for name,text in zip(expected,(inventory,candidate)):
+            self.assertIn('mod tests {',text)
+            self.assertEqual(len(re.findall(r'#\[test\]\s+fn '+name.rsplit('::',1)[1]+r'\(',text)),1)
+            self.assertNotIn(name,output.SIGNER_VALIDATION_TESTS)
+        self.assertEqual(len(set(output.SIGNER_VALIDATION_TESTS+expected)),6)
+
+    def test_candidate_retention_diagnostics_add_only_six_closed_labels(self):
+        expected={'CandidateRetainCurrent','CandidateRetainRequest','CandidateRetainBegin',
+                  'CandidateRetainFinish','CandidateLeaseOrigin','CandidateRequestRemaining'}
+        self.assertTrue(expected <= output.BOUNDARIES)
+        for label in expected:
+            for result in ['Begin','Complete','HostPermission','SignerReviewMismatch','OriginIoWouldBlock']:
+                self.assertTrue(output.safe_failure(self.failure(label+':'+result)))
+        for item in ['CandidateRetainUnknown:HostPermission','CandidateLeaseOrigin:OriginUnknown',
+                     'CandidateRequestRemaining:SignerReviewMismatch private',
+                     'CandidateRetainCurrent:HostPermission:private']:
+            self.assertFalse(output.safe_failure(self.failure(item)))
+        self.assertFalse(output.safe_failure(self.failure('CandidateLeaseOrigin:OriginIoWouldBlock')+' private'))
+        source=(ROOT/'crates/wholepact-signer/src/account/birth/enrollment/roster_v2/inventory/synthetic_denial.rs').read_text()
+        self.assertEqual(set(re.findall(r'=> "(Candidate\w+)"',source)),{'CandidateRequestRemaining'})
 
     def test_signer_validation_missing_failed_or_timed_out_is_not_success(self):
         name=output.SIGNER_VALIDATION_TESTS[0]

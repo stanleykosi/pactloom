@@ -109,7 +109,7 @@ impl<'client> SignerRosterInventoryLeaseV2<'client> {
 /// Synthetic-only closed projection before the existing bridge conversion.
 /// In particular, never format an OS error, path, or message payload.
 #[cfg(feature = "synthetic-born-joined-qualification")]
-fn native_lease_error_kind(error: &wholepact_signer_origin::Error) -> &'static str {
+pub(super) fn native_lease_error_kind(error: &wholepact_signer_origin::Error) -> &'static str {
     use wholepact_signer_origin::Error as E;
     match error {
         E::PermanentStopUnavailable => "OriginPermanentStopUnavailable",

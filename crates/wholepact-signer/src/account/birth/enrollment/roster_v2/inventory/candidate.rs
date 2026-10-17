@@ -59,9 +59,12 @@ impl BornRosterInventorySourceV2 {
             return Err(Error::ReviewMismatch);
         }
         require_qualified_economic_destinations(&request.scope.selection.economic_intent)?;
-        request
-            .remaining_ms(now()?)
-            .map_err(|_| Error::ReviewMismatch)?;
+        inventory_checked!(
+            request
+                .remaining_ms(now()?)
+                .map_err(|_| Error::ReviewMismatch),
+            CandidateRequestRemaining
+        )?;
         Ok(())
     }
 }
@@ -263,6 +266,29 @@ impl PreparedRosterCandidateSelectionV2 {
             .require_candidate_request(&self.request, &self.peer, owner)?;
         connected(&self.stream, &self.peer)
     }
+    /// Receive-only liveness cannot authorize disclosure, a retained review or
+    /// a source handoff. Full `send` validation remains before every response;
+    /// the Retain branch still enters `retention::prepare`, whose unchanged
+    /// first and final checks validate this exact original source before it can
+    /// produce the review owner. No persistent state changes during this wait.
+    /// File changes while idle are detected at that next full check, not by a
+    /// duplicate read before waiting for the authenticated command.
+    fn check_receive_liveness(&self, owner: &PendingAccountNativeAuthority) -> Result<()> {
+        if owner.native().binding() != self.native {
+            return Err(Error::ReviewMismatch);
+        }
+        self.remaining()?;
+        require_observed_session_time(
+            self.observed_session.observed_at_ms(),
+            self.observed_session.observation_age(),
+            now()?,
+            self.observed_session.receipt().expires_at_ms,
+        )?;
+        owner.check_current()?;
+        self.native.check_current()?;
+        self.peer.check_current()?;
+        connected(&self.stream, &self.peer)
+    }
     pub(crate) fn approve_and_serve(
         mut self,
         decision: NativeDecision,
@@ -313,7 +339,7 @@ impl PreparedRosterCandidateSelectionV2 {
         drop(key);
         let mut challenges = BTreeSet::new();
         for _ in 0..128 {
-            self.check(owner)?;
+            self.check_receive_liveness(owner)?;
             let frame = crate::ipc::read_frame_with_deadline(
                 &self.stream,
                 &self.peer.peer,
@@ -324,8 +350,8 @@ impl PreparedRosterCandidateSelectionV2 {
             }
             let command: wholepact_signer_origin::manual_roster_construction_v2::ManualRosterSelectionCommandV2 =
                 serde_json::from_slice(&frame).map_err(|_| Error::InvalidData)?;
-            self.check(owner)?;
-            let response = match command {
+            self.check_receive_liveness(owner)?;
+            let (response, completed_challenge) = match command {
                 wholepact_signer_origin::manual_roster_construction_v2::ManualRosterSelectionCommandV2::RetainExactContributionV2 { lease_id: requested, evidence_digest, request } => {
                     if requested != lease_id || evidence_digest != digest { return Err(Error::Authentication); }
                     let review = super::retention::PreparedRosterContributionRetentionV2::prepare(self,*request,owner)?;
@@ -339,15 +365,18 @@ impl PreparedRosterCandidateSelectionV2 {
                     if requested != lease_id
                         || evidence_digest != digest
                         || !is_hash(&challenge_nonce)
-                        || !challenges.insert(challenge_nonce.clone())
+                        || challenges.contains(&challenge_nonce)
                     {
                         return Err(Error::Authentication);
                     }
-                    ManualAdmissionResponse::Current {
-                        lease_id: lease_id.clone(),
-                        evidence_digest: digest.clone(),
+                    (
+                        ManualAdmissionResponse::Current {
+                            lease_id: lease_id.clone(),
+                            evidence_digest: digest.clone(),
+                            challenge_nonce: challenge_nonce.clone(),
+                        },
                         challenge_nonce,
-                    }
+                    )
                 }
                 wholepact_signer_origin::manual_roster_construction_v2::ManualRosterSelectionCommandV2::Finish {} => {
                     let bytes = Zeroizing::new(
@@ -360,7 +389,11 @@ impl PreparedRosterCandidateSelectionV2 {
             };
             let bytes =
                 Zeroizing::new(serde_json::to_vec(&response).map_err(|_| Error::InvalidData)?);
-            self.send(&bytes, owner)?;
+            retain_challenge_after_send(
+                self.send(&bytes, owner),
+                &mut challenges,
+                completed_challenge,
+            )?;
         }
         Err(Error::Unavailable)
     }
@@ -410,6 +443,25 @@ impl PreparedRosterCandidateSelectionV2 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn candidate_nonce_is_retained_only_after_fully_checked_send_success() {
+        // Protocol bookkeeping only. This cannot manufacture a native owner or
+        // bypass the real candidate send/retention checks exercised by CI.
+        let nonce = "17".repeat(32);
+        let mut challenges = BTreeSet::new();
+        for failure in [Error::ReviewMismatch, Error::Authentication, Error::Uncertain] {
+            assert!(retain_challenge_after_send(
+                Err(failure),
+                &mut challenges,
+                nonce.clone(),
+            )
+            .is_err());
+            assert!(!challenges.contains(&nonce));
+        }
+        retain_challenge_after_send(Ok(()), &mut challenges, nonce.clone()).unwrap();
+        assert!(challenges.contains(&nonce));
+        assert_eq!(challenges.len(), 1);
+    }
     #[test]
     fn qualified_same_account_return_uses_maintained_decoder_and_fvk_ownership() {
         use orchard::keys::{FullViewingKey, Scope, SpendingKey};

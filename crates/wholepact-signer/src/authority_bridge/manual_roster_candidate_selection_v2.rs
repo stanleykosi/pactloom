@@ -134,7 +134,15 @@ impl<'client> SignerRosterCandidateSelectionLeaseV2<'client> {
     /// Checks the actual installed process, exact evidence challenge, original
     /// native/request deadlines and revocation state. Failure is not renewable.
     pub fn check_current(&self) -> Result<()> {
-        self.native.check_current().map_err(Into::into)
+        let result = self.native.check_current();
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        if let Err(error) = &result {
+            eprintln!(
+                "\n[JOINED_DIAGNOSTIC CandidateLeaseOrigin {}]",
+                super::manual_roster_inventory_v2::native_lease_error_kind(error)
+            );
+        }
+        result.map_err(Into::into)
     }
 
     /// Exact reviewed request from the held native channel, not a caller claim.

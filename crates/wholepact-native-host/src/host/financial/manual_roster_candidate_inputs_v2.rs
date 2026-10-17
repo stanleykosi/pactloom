@@ -157,8 +157,11 @@ impl<'source, 'audit, 'host, 'store>
             RetainedRosterInputHandoffV2, RetainedRosterLocalOwnersV2, now_ms,
         };
         self.require_host(host)?;
-        self.current_evidence(&lease)?;
-        let request = lease.request().map_err(|_| Error::Permission)?;
+        roster_trace!(CandidateRetainCurrent, self.current_evidence(&lease))?;
+        let request = roster_trace!(
+            CandidateRetainRequest,
+            lease.request().map_err(|_| Error::Permission)
+        )?;
         admission.check_selection(&request.scope)?;
         let local = RetainedRosterLocalOwnersV2::capture(
             host,
@@ -185,18 +188,24 @@ impl<'source, 'audit, 'host, 'store>
             .ok_or(Error::Invalid)?;
         let end = host_end.min(request.disclosure_expires_at_ms);
         let operation_id = admission.operation_id().to_owned();
-        self.current_evidence(&lease)?;
-        let pending = lease
-            .begin_retention(
-                self.selected,
-                operation_id,
-                exclusion_digest,
-                now,
-                end,
-                admission.completion_deadline(),
-            )
-            .map_err(|_| Error::Permission)?;
-        let retained = pending.finish().map_err(|_| Error::Permission)?;
+        roster_trace!(CandidateRetainCurrent, self.current_evidence(&lease))?;
+        let pending = roster_trace!(
+            CandidateRetainBegin,
+            lease
+                .begin_retention(
+                    self.selected,
+                    operation_id,
+                    exclusion_digest,
+                    now,
+                    end,
+                    admission.completion_deadline(),
+                )
+                .map_err(|_| Error::Permission)
+        )?;
+        let retained = roster_trace!(
+            CandidateRetainFinish,
+            pending.finish().map_err(|_| Error::Permission)
+        )?;
         // The original live target is checked one last time at transition. Once
         // this succeeds, ONLY the explicit new retained owner may be used.
         self.fresh

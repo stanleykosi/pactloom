@@ -4,6 +4,7 @@ use super::{Error, Result};
 
 #[derive(Clone, Copy)]
 pub(super) enum Boundary {
+    CandidateRequestRemaining,
     InventoryRequestSource,
     InventoryRequestProvenance,
     InventoryRequestBinding,
@@ -36,6 +37,7 @@ pub(super) enum Boundary {
 impl Boundary {
     fn label(self) -> &'static str {
         match self {
+            Self::CandidateRequestRemaining => "CandidateRequestRemaining",
             Self::InventoryRequestSource => "InventoryRequestSource",
             Self::InventoryRequestProvenance => "InventoryRequestProvenance",
             Self::InventoryRequestBinding => "InventoryRequestBinding",
