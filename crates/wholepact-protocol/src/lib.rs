@@ -6,6 +6,9 @@
 
 use serde::Serialize;
 
+#[cfg(feature = "durable-proposal")]
+pub mod durable_proposal_v1;
+
 #[cfg(feature = "authorization")]
 pub mod authorization;
 

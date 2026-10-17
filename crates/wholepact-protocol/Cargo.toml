@@ -8,6 +8,7 @@ description = "Fail-closed Wholepact protocol capabilities and opt-in synthetic 
 
 [features]
 default = []
+durable-proposal = ["construction", "authorization"]
 submission-handoff = ["transaction-checkpoint", "dep:wholepact-chain", "wholepact-chain/submission-dispatch"]
 authorization = ["proving"]
 transaction-checkpoint = ["signed-retention", "pczt/tx-extractor", "dep:zcash_primitives", "dep:zcash_transparent", "dep:rand"]

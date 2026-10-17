@@ -16,6 +16,8 @@ pub mod born_history_ipc;
 #[cfg(target_os = "linux")]
 pub(crate) mod born_ipc_io;
 pub mod disclosure;
+#[cfg(feature = "durable-proposal")]
+pub mod durable_proposal_v1;
 #[cfg(target_os = "linux")]
 pub mod dispatch_ipc;
 #[cfg(target_os = "linux")]

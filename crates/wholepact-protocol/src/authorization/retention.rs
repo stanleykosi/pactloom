@@ -7,6 +7,8 @@
 #[cfg(feature = "transaction-checkpoint")]
 pub mod transaction;
 
+pub mod durable_intake_v1;
+
 use super::{ExternalSignature, SignatureInspection, assemble_external_signatures};
 use crate::{proving::ProvingLimits, review::ReviewPolicy};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
