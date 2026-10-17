@@ -993,3 +993,121 @@ fn completed_shape_pass_still_rejects_lineage_history_and_reservation_tampering(
         assert!(altered.validate(account).is_err());
     }
 }
+
+
+#[test]
+fn call_local_invocation_binding_keeps_every_phase_admission_digest() {
+    let value = handoff_fixture::fixture();
+    let audit = &value.complete_history.signer_common_context_audit;
+    let account = &value.request.account_id;
+    audit.validate(account).unwrap();
+    for index in 0..audit.reentry.rows.len() {
+        let mut changed = audit.clone();
+        changed.reentry.rows[index].original_read_admission_digest = "e7".repeat(32);
+        changed.reentry.rows[index].validate_shape().unwrap();
+        assert!(changed.validate(account).is_err());
+        audit.validate(account).unwrap();
+    }
+    // A distinct invocation cannot inherit the first invocation's validated
+    // authorization merely because the outer validator has already succeeded.
+    let mut second = audit.clone();
+    let mut foreign = audit.reentry.rows.iter().find(|r| r.phase() == "authorized").unwrap().clone();
+    foreign.invocation_digest = "ff".repeat(32);
+    assert!(foreign.invocation_digest != audit.reentry.rows[0].invocation_digest);
+    foreign.validate_shape().unwrap();
+    second.reentry.rows.push(foreign);
+    second.reentry.rows.sort_by_key(|r| (r.invocation_digest.clone(), r.phase()));
+    assert!(second.validate(account).is_err());
+}
+
+#[test]
+fn call_local_invocation_binding_never_survives_signature_read_or_history_changes() {
+    let value = handoff_fixture::fixture();
+    let audit = &value.complete_history.signer_common_context_audit;
+    let account = &value.request.account_id;
+    audit.validate(account).unwrap();
+    for mutation in 0..3 {
+        let mut changed = audit.clone();
+        match mutation {
+            0 => {
+                let row = changed.reentry.rows.iter_mut().find(|r| r.phase() == "authorized").unwrap();
+                let CommonContextReentryAuditPhaseV1::Authorized { authorization } = &mut row.record else { unreachable!() };
+                authorization.signature[0] ^= 1;
+            }
+            1 => {
+                let CommonContextSignerAuditV1::ReadAdmitted { evidence, .. } = &mut changed.original.rows[0] else { unreachable!() };
+                evidence.native_review_digest = "e8".repeat(32);
+            }
+            _ => {
+                let CommonContextSignerAuditV1::ReadAdmitted { witness_history, .. } = &mut changed.original.rows[0] else { unreachable!() };
+                let mut encoded = serde_json::to_value(witness_history.as_ref()).unwrap();
+                encoded["observed_snapshot"]["policy_digest"] = serde_json::json!("e8".repeat(32));
+                *witness_history = Box::new(serde_json::from_value(encoded).unwrap());
+            }
+        }
+        assert!(changed.validate(account).is_err());
+        audit.validate(account).unwrap();
+    }
+}
+
+#[cfg(all(feature = "pending-birth-owner-signing", target_os = "linux"))]
+#[test]
+fn stored_audit_digests_and_shapes_are_revalidated_on_every_read() {
+    with_owner_snapshot_fixture(|journal, value| {
+        check_owner_snapshot(journal, value).unwrap();
+        let audit = &value.complete_history.signer_common_context_audit;
+        for original in [true, false] {
+            let (table, trigger_name, malformed_payload, malformed_digest) = if original {
+                let mut row = audit.original.rows[0].clone();
+                let CommonContextSignerAuditV1::ReadAdmitted { version, .. } = &mut row else { unreachable!() };
+                *version = 0;
+                assert!(row.digest().is_err());
+                (
+                    "signer_common_context_audit_v3",
+                    "signer_common_context_audit_no_update",
+                    serde_json::to_string(&row).unwrap(),
+                    wholepact_core::proposal::canonical_digest("wholepact:signer-common-context-audit:v1", &row).unwrap(),
+                )
+            } else {
+                let mut row = audit.reentry.rows.iter().find(|r| r.phase() == "authorized").unwrap().clone();
+                row.version = 0;
+                assert!(row.digest().is_err());
+                (
+                    "signer_common_context_reentry_v1",
+                    "signer_common_context_reentry_no_update",
+                    serde_json::to_string(&row).unwrap(),
+                    wholepact_core::proposal::canonical_digest("wholepact:signer-common-context-reentry-audit:v1", &row).unwrap(),
+                )
+            };
+            let (trigger_sql, saved_payload, saved_digest): (String, String, String) = {
+                let c = journal.connection.lock().unwrap();
+                let trigger_sql = c.query_row("SELECT sql FROM sqlite_schema WHERE name=?1", [trigger_name], |r| r.get(0)).unwrap();
+                let (payload, digest) = c.query_row(&format!("SELECT payload,receipt_digest FROM {table}"), [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+                (trigger_sql, payload, digest)
+            };
+            // First alter only a saved commitment, with the same valid payload.
+            // Then supply malformed shape AND its correct canonical commitment:
+            // neither digest equality nor prior validation permits acceptance.
+            for mutation in 0..2 {
+                let (payload, digest) = if mutation == 0 {
+                    (saved_payload.clone(), "e9".repeat(32))
+                } else {
+                    (malformed_payload.clone(), malformed_digest.clone())
+                };
+                for (payload, digest, accepted) in [
+                    (payload, digest, false),
+                    (saved_payload.clone(), saved_digest.clone(), true),
+                ] {
+                    {
+                        let c = journal.connection.lock().unwrap();
+                        c.execute_batch(&format!("DROP TRIGGER {trigger_name}")).unwrap();
+                        c.execute(&format!("UPDATE {table} SET payload=?1,receipt_digest=?2"), rusqlite::params![payload, digest]).unwrap();
+                        c.execute_batch(&trigger_sql).unwrap();
+                    }
+                    assert_eq!(check_owner_snapshot(journal, value).is_ok(), accepted);
+                    assert!(journal.connection.lock().unwrap().is_autocommit());
+                }
+            }
+        }
+    });
+}

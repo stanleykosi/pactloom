@@ -125,6 +125,23 @@ SIGNER_REENTRY_COMPATIBILITY_TESTS = tuple(
         'explicit_v5_keeps_old_bytes_charge_and_never_issues_recovery',
     )
 )
+SIGNER_CALL_LOCAL_TESTS = tuple(
+    'consent_journal::common_context_reentry_audit_tests::' + name
+    for name in (
+        'call_local_invocation_binding_keeps_every_phase_admission_digest',
+        'call_local_invocation_binding_never_survives_signature_read_or_history_changes',
+    )
+)
+SIGNER_AUDIT_STORAGE_TESTS = (
+    'consent_journal::common_context_reentry_audit_tests::stored_audit_digests_and_shapes_are_revalidated_on_every_read',
+)
+SIGNER_AUDIT_COMPATIBILITY_TESTS = tuple(
+    'consent_journal::common_context_reentry_audit_tests::' + name
+    for name in (
+        'signed_handoff_each_missing_local_suffix_stays_charged_and_orphans_fail',
+        'signed_handoff_exact_lineage_substitutions_fail_after_complete_validation',
+    )
+)
 MARKER = 'WHOLEPACT_SYNTHETIC_PUBLIC_OUTCOME_V1='
 CORE = re.compile(r'\[JOINED_CORE_POLICY inherited_limit=Zero collector=(File|Pipe|Unknown) process_dumpability=Unchanged crash_copy_absence_verified=false\]')
 OPTION_INT = r'(?:None|Some\((?:0|[1-9][0-9]{0,9})\))'
@@ -247,7 +264,7 @@ def run_pure(executable):
 
 def run_signer_validation(executable):
     assert resource.getrlimit(resource.RLIMIT_CORE)[0] == 0
-    for name in SIGNER_VALIDATION_TESTS + SIGNER_BOOKKEEPING_TESTS + SIGNER_PRECONSTRUCTION_TESTS + SIGNER_BIRTH_LINK_TESTS + SIGNER_ENDPOINT_CHANNEL_TESTS + SIGNER_SNAPSHOT_STORAGE_TESTS + SIGNER_SHAPE_TAMPER_TESTS + SIGNER_REENTRY_COMPATIBILITY_TESTS:
+    for name in SIGNER_VALIDATION_TESTS + SIGNER_BOOKKEEPING_TESTS + SIGNER_PRECONSTRUCTION_TESTS + SIGNER_BIRTH_LINK_TESTS + SIGNER_ENDPOINT_CHANNEL_TESTS + SIGNER_SNAPSHOT_STORAGE_TESTS + SIGNER_SHAPE_TAMPER_TESTS + SIGNER_REENTRY_COMPATIBILITY_TESTS + SIGNER_CALL_LOCAL_TESTS + SIGNER_AUDIT_STORAGE_TESTS + SIGNER_AUDIT_COMPATIBILITY_TESTS:
         flags=['--exact',name,'--test-threads=1']
         try:
             listed=subprocess.run([executable,*flags,'--list'],capture_output=True,timeout=30,check=True)
@@ -258,7 +275,9 @@ def run_signer_validation(executable):
             # four real bounded in-process endpoint channels with current-image
             # identity/private facade bookkeeping, two encrypted snapshot cases,
             # one pure shape-tamper case and three archival/storage compatibility
-            # cases. No socket, native authority or payment owner. Raw
+            # cases, two call-local validation cases, one encrypted saved-digest
+            # case and two signed-history audit compatibility cases. No socket,
+            # native authority or payment owner. Raw
             # output stays private; this size check is post-capture, not a claim
             # of an incremental memory cap. Each fixed case has its own bound.
             result=subprocess.run([executable,*flags],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=120)
@@ -267,7 +286,7 @@ def run_signer_validation(executable):
         except Exception:
             print('CI_SYNTHETIC_SIGNER_VALIDATION failed_test='+name+' raw_output_withheld=true',flush=True)
             raise
-    print('CI_SYNTHETIC_SIGNER_VALIDATION passed=22 crypto_file_cases=4 bookkeeping_cases=2 replay_cases=6 endpoint_channel_cases=4 snapshot_storage_cases=2 shape_tamper_cases=1 compatibility_cases=3 native_payment_verified=false raw_output_discarded=true',flush=True)
+    print('CI_SYNTHETIC_SIGNER_VALIDATION passed=27 crypto_file_cases=4 bookkeeping_cases=2 replay_cases=6 endpoint_channel_cases=4 snapshot_storage_cases=2 shape_tamper_cases=1 compatibility_cases=3 call_local_cases=2 audit_storage_cases=1 audit_compatibility_cases=2 native_payment_verified=false raw_output_discarded=true',flush=True)
 
 def run_authority_rendering(executable):
     assert resource.getrlimit(resource.RLIMIT_CORE)[0] == 0

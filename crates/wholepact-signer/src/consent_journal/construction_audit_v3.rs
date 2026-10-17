@@ -181,6 +181,11 @@ impl CommonContextSignerAuditV1 {
     }
     pub fn digest(&self) -> Result<String> {
         self.validate()?;
+        self.encoded_digest()
+    }
+    // Inert canonical commitment only. Every private caller has validated this
+    // exact immutable row; the public digest remains independently validating.
+    fn encoded_digest(&self) -> Result<String> {
         wholepact_core::proposal::canonical_digest("wholepact:signer-common-context-audit:v1", self)
             .map_err(|_| JournalError::InvalidBinding)
     }
@@ -274,12 +279,37 @@ impl CommonContextSignerAuditInventoryV1 {
         Ok(())
     }
 }
+/// Private, call-local result of the actual reader's complete validation.
+/// No clone, deserialization, currentness or authority can be derived from it.
+/// It is consumed into an inert inventory in the same read operation.
+pub(super) struct ValidatedOriginalAudit {
+    account: String,
+    value: CommonContextSignerAuditInventoryV1,
+}
+impl ValidatedOriginalAudit {
+    pub(super) fn into_inventory_for(
+        self,
+        account: &str,
+    ) -> Result<CommonContextSignerAuditInventoryV1> {
+        if self.account != account {
+            return Err(JournalError::InvalidBinding);
+        }
+        Ok(self.value)
+    }
+}
 pub(super) fn read_all(
     c: &Connection,
     account: &str,
 ) -> Result<CommonContextSignerAuditInventoryV1> {
+    read_all_validated(c, account)?.into_inventory_for(account)
+}
+pub(super) fn read_all_validated(
+    c: &Connection,
+    account: &str,
+) -> Result<ValidatedOriginalAudit> {
     let mut q = c.prepare("SELECT invocation_digest,phase,account_id,receipt_digest,payload FROM signer_common_context_audit_v3 ORDER BY invocation_digest,phase")?;
     let mut rows = Vec::new();
+    let mut saved_digests = Vec::new();
     let result = q.query_map([], |r| {
         Ok((
             r.get::<_, String>(0)?,
@@ -295,15 +325,26 @@ pub(super) fn read_all(
         if invocation != row.invocation_digest()?
             || phase != row.phase()
             || owner != row.account_id()
-            || digest != row.digest()?
         {
             return Err(JournalError::InvalidBinding);
         }
+        // Equality to a canonical digest already required this exact shape.
+        // Bound the retained comparison value before storing it for validation.
+        hash(&digest)?;
+        saved_digests.push(digest);
         rows.push(row);
     }
     let value = CommonContextSignerAuditInventoryV1 { version: 1, rows };
     value.validate(account)?;
-    Ok(value)
+    for (row, saved_digest) in value.rows.iter().zip(saved_digests) {
+        if row.encoded_digest()? != saved_digest {
+            return Err(JournalError::InvalidBinding);
+        }
+    }
+    Ok(ValidatedOriginalAudit {
+        account: account.into(),
+        value,
+    })
 }
 impl SignerConsentJournal {
     /// Private producer-only append. Admission/Reserve/Consume have already
@@ -336,7 +377,7 @@ impl SignerConsentJournal {
                 record.invocation_digest()?,
                 record.phase(),
                 record.account_id(),
-                record.digest()?,
+                record.encoded_digest()?,
                 encode(record)?.as_str()
             ],
         )?;

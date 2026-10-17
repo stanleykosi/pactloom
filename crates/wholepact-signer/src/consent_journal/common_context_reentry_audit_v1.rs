@@ -121,6 +121,10 @@ impl CommonContextReentrySignerAuditV1 {
     }
     pub fn digest(&self) -> Result<String> {
         self.validate_shape()?;
+        self.encoded_digest()
+    }
+    // Only for an exact immutable row already validated in this same call.
+    fn encoded_digest(&self) -> Result<String> {
         digest("wholepact:signer-common-context-reentry-audit:v1", self)
     }
 }
@@ -331,14 +335,22 @@ fn require_lineage_after_shapes(
 }
 impl CommonContextSignerAuditInventoryV2 {
     pub fn validate(&self, account: &str) -> Result<()> {
+        self.validate_header()?;
+        self.original.validate(account)?;
+        self.validate_reentry_after_original(account)
+    }
+    fn validate_header(&self) -> Result<()> {
         if self.version != 2
             || self.reentry.version != 1
             || self.reentry.rows.len() > MAX_REENTRY_AUDIT_ROWS
         {
             return Err(JournalError::Limit);
         }
-        bounded(self, MAX_REENTRY_AUDIT_INVENTORY_BYTES)?;
-        self.original.validate(account)?;
+        bounded(self, MAX_REENTRY_AUDIT_INVENTORY_BYTES)
+    }
+    // Only the public full validator and the private actual-reader factory
+    // below reach this body, after exact original validation for this account.
+    fn validate_reentry_after_original(&self, account: &str) -> Result<()> {
         let mut rows = BTreeMap::new();
         let mut previous = None;
         for row in &self.reentry.rows {
@@ -352,20 +364,46 @@ impl CommonContextSignerAuditInventoryV2 {
             }
             previous = Some(key);
         }
+        // No cache survives this validation call. References bind the exact
+        // immutable original and Authorized row, not just an invocation name.
+        struct ValidatedInvocation<'a> {
+            read: &'a RosterCommonContextReadEvidenceV1,
+            history: &'a ConstructionHistoryV2,
+            authorization: &'a SignedConstructionTransportPreauthorizationV1,
+            read_digest: &'a str,
+        }
+        let mut invocations = BTreeMap::<&str, ValidatedInvocation<'_>>::new();
         for row in &self.reentry.rows {
-            let (read, history) = read_row(&self.original, row)?;
             let get = |phase| {
                 rows.get(&(row.invocation_digest.clone(), phase))
                     .copied()
                     .ok_or(JournalError::InvalidBinding)
             };
-            let auth = match &get("authorized")?.record {
-                CommonContextReentryAuditPhaseV1::Authorized { authorization } => {
-                    authorization.as_ref()
+            let binding = match invocations.entry(row.invocation_digest.as_str()) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    let (read, history) = read_row(&self.original, row)?;
+                    let auth = match &get("authorized")?.record {
+                        CommonContextReentryAuditPhaseV1::Authorized { authorization } => {
+                            authorization.as_ref()
+                        }
+                        _ => return Err(JournalError::InvalidBinding),
+                    };
+                    require_authorization(auth, read, history)?;
+                    entry.insert(ValidatedInvocation {
+                        read,
+                        history,
+                        authorization: auth,
+                        read_digest: &row.original_read_admission_digest,
+                    })
                 }
-                _ => return Err(JournalError::InvalidBinding),
+                std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
             };
-            require_authorization(auth, read, history)?;
+            if binding.read_digest != row.original_read_admission_digest.as_str() {
+                return Err(JournalError::Conflict);
+            }
+            let read = binding.read;
+            let history = binding.history;
+            let auth = binding.authorization;
             let credential = || -> Result<&ConstructionTransportCredentialV1> {
                 match &get("claimed")?.record {
                     CommonContextReentryAuditPhaseV1::Claimed { credential } => Ok(credential),
@@ -476,6 +514,20 @@ impl CommonContextSignerAuditInventoryV2 {
             }
         }
         Ok(())
+    }
+    fn from_validated_original(
+        account: &str,
+        original: construction_audit_v3::ValidatedOriginalAudit,
+        rows: Vec<CommonContextReentrySignerAuditV1>,
+    ) -> Result<Self> {
+        let value = Self {
+            version: 2,
+            original: original.into_inventory_for(account)?,
+            reentry: CommonContextReentryAuditInventoryV1 { version: 1, rows },
+        };
+        value.validate_header()?;
+        value.validate_reentry_after_original(account)?;
+        Ok(value)
     }
 }
 // Sole caller has validated this exact record against these same extension
@@ -718,9 +770,10 @@ pub(super) fn read_complete(
     c: &Connection,
     account: &str,
 ) -> Result<CommonContextSignerAuditInventoryV2> {
-    let original = construction_audit_v3::read_all(c, account)?;
+    let original = construction_audit_v3::read_all_validated(c, account)?;
     let mut q = c.prepare("SELECT invocation_digest,phase,account_id,receipt_digest,payload FROM signer_common_context_reentry_v1 ORDER BY invocation_digest,phase")?;
     let mut rows = Vec::new();
+    let mut saved_digests = Vec::new();
     let result = q.query_map([], |r| {
         Ok((
             r.get::<_, String>(0)?,
@@ -741,21 +794,26 @@ pub(super) fn read_complete(
         if row.invocation_digest != invocation
             || row.phase() != phase
             || row.account_id != owner
-            || row.digest()? != saved_digest
         {
             return Err(JournalError::InvalidBinding);
         }
+        // Equality to a canonical digest already required this exact shape.
+        // Bound the retained comparison value before storing it for validation.
+        hash(&saved_digest)?;
+        saved_digests.push(saved_digest);
         rows.push(row);
         if rows.len() > MAX_REENTRY_AUDIT_ROWS {
             return Err(JournalError::Limit);
         }
     }
-    let inventory = CommonContextSignerAuditInventoryV2 {
-        version: 2,
-        original,
-        reentry: CommonContextReentryAuditInventoryV1 { version: 1, rows },
-    };
-    inventory.validate(account)?;
+    let inventory = CommonContextSignerAuditInventoryV2::from_validated_original(
+        account, original, rows,
+    )?;
+    for (row, saved_digest) in inventory.reentry.rows.iter().zip(saved_digests) {
+        if row.encoded_digest()? != saved_digest {
+            return Err(JournalError::InvalidBinding);
+        }
+    }
     Ok(inventory)
 }
 impl SignerConsentJournal {
@@ -795,7 +853,7 @@ impl SignerConsentJournal {
                 row.invocation_digest,
                 row.phase(),
                 row.account_id,
-                row.digest()?,
+                row.encoded_digest()?,
                 payload.as_str()
             ],
         )?;
