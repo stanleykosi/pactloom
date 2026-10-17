@@ -473,3 +473,92 @@ fn native_layered_saved_audit_never_replaces_required_live_publication_admission
     assert_eq!(before, fingerprint(&target));
     assert!(!target.join(COMMIT).exists());
 }
+
+/// Actual maintained encrypted storage producers, not imported provenance DTOs.
+/// This reproduces the first native-bootstrap layered-plan boundary without
+/// opening a terminal, socket, signer/witness owner or financial permission.
+#[test]
+fn native_layered_current_eight_nine_parent_provenance_is_exact_and_not_relabelable() {
+    fn assert_exact_parent(pending: &PendingLayeredGeneration, expected: i64) {
+        use wholepact_storage_security::bundle::JournalKind;
+        let parent = pending.source.capsule();
+        let current = parent.root().current_provenance();
+        let coordination = current
+            .iter()
+            .find(|p| p.kind == JournalKind::CoordinationAuthority)
+            .unwrap();
+        assert_eq!(coordination.schema_version, expected);
+        assert_eq!(coordination.application_id,
+            wholepact_storage_security::bundle::recovery::generation::RECOVERED_GENERATION_APPLICATION_ID);
+        pending.plan.verify_parent(parent).unwrap();
+        // Known legacy encodings remain valid metadata shapes, but no older or
+        // different known version can relabel THIS actual authenticated parent.
+        for substituted in [2, 3, 4, 5, 6, 7, 8, 9] {
+            if substituted == expected {
+                continue;
+            }
+            let mut changed: LayeredPlan =
+                serde_json::from_slice(&serde_json::to_vec(&pending.plan).unwrap()).unwrap();
+            changed
+                .components
+                .iter_mut()
+                .find(|p| p.kind == JournalKind::CoordinationAuthority)
+                .unwrap()
+                .schema_version = substituted;
+            changed.validate().unwrap();
+            assert!(changed.verify_parent(parent).is_err());
+        }
+        for unsupported in [-1, 0, 1, 10, i64::MAX] {
+            let mut changed: LayeredPlan =
+                serde_json::from_slice(&serde_json::to_vec(&pending.plan).unwrap()).unwrap();
+            changed
+                .components
+                .iter_mut()
+                .find(|p| p.kind == JournalKind::CoordinationAuthority)
+                .unwrap()
+                .schema_version = unsupported;
+            assert!(changed.validate().is_err());
+            assert!(changed.verify_parent(parent).is_err());
+        }
+        let mut changed: LayeredPlan =
+            serde_json::from_slice(&serde_json::to_vec(&pending.plan).unwrap()).unwrap();
+        changed
+            .components
+            .iter_mut()
+            .find(|p| p.kind == JournalKind::CoordinationAuthority)
+            .unwrap()
+            .application_id = 0;
+        assert!(changed.validate().is_err());
+        assert!(changed.verify_parent(parent).is_err());
+    }
+    let (_temp, _legacy_backup, _legacy_quarantine, g1) = published_empty_fixture();
+    let source = synthetic_capsule_quarantine(
+        &g1,
+        &g1.with_file_name("current-eight-capsule"),
+        &g1.with_file_name("current-eight-quarantine"),
+        231,
+    );
+    let g2 = g1.with_file_name("current-nine-generation");
+    let pending = PendingLayeredGeneration::create(source, &g2, PASSWORD).unwrap();
+    assert_exact_parent(&pending, 8);
+    pending
+        .construct_synthetic_storage()
+        .unwrap()
+        .prepare_publication(vec![])
+        .unwrap()
+        .publish_synthetic_empty_accounts()
+        .unwrap();
+    let source = synthetic_capsule_quarantine(
+        &g2,
+        &g1.with_file_name("current-nine-capsule"),
+        &g1.with_file_name("current-nine-quarantine"),
+        241,
+    );
+    let pending = PendingLayeredGeneration::create(
+        source,
+        &g1.with_file_name("next-current-nine-generation"),
+        PASSWORD,
+    )
+    .unwrap();
+    assert_exact_parent(&pending, 9);
+}

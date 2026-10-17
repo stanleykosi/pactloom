@@ -121,8 +121,12 @@ impl LayeredPlan {
             canonical_hash(&component.component_digest)?;
             previous = Some(&component.component_id);
             if component.kind == JournalKind::CoordinationAuthority {
+                // Exact immutable recovered families only. Versions8/9 carry
+                // historical claim5 provenance; this metadata check grants no
+                // authority. The sealed parent reader authenticates full schema
+                // and verify_parent_history still requires exact provenance.
                 if component.application_id != wholepact_storage_security::bundle::recovery::generation::RECOVERED_GENERATION_APPLICATION_ID
-                    || ![2, 3, 4, 5, 6, 7].contains(&component.schema_version) { return Err(Error::Authentication); }
+                    || ![2, 3, 4, 5, 6, 7, 8, 9].contains(&component.schema_version) { return Err(Error::Authentication); }
             } else {
                 // Metadata-label compatibility only. Both wallet layouts share
                 // these labels; the sealed parent reader authenticates full schema.

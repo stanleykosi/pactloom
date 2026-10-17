@@ -119,6 +119,13 @@ class PublicOutputTests(unittest.TestCase):
         self.assertNotIn(output.TESTS['initial'][0],expected)
         self.assertNotIn(output.TESTS['full'][0],expected)
 
+    def test_storage_bootstrap_is_separate_exact_maintained_encrypted_case(self):
+        name=output.STORAGE_BOOTSTRAP_TEST
+        self.assertEqual(name,'recovery_generation::layered::tests::native_layered_current_eight_nine_parent_provenance_is_exact_and_not_relabelable')
+        self.assertNotIn(name,output.PURE_TESTS)
+        path=ROOT/'crates/wholepact-native-host/src/recovery_generation/layered/tests.rs'
+        self.assertEqual(path.read_text().count('fn '+name.rsplit('::',1)[1]+'()'),1)
+
     def test_ci_temporary_socket_path_budget(self):
         # Includes this runner's extra short TMPDIR layer, not merely /tmp.
         for inner in ['wholepact-born-manual-ipc-','wholepact-born-stop-','.tmp']:

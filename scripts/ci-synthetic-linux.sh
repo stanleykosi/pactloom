@@ -94,6 +94,7 @@ sha256sum "$executable"
 export TMPDIR="$runtime_root"
 python3 -B scripts/ci-synthetic-output-tests.py
 python3 -B scripts/ci-synthetic-output.py "$executable" pure
+python3 -B scripts/ci-synthetic-output.py "$executable" storage-bootstrap
 python3 -B scripts/ci-synthetic-output.py "$executable" initial
 python3 -B scripts/ci-synthetic-output.py "$executable" full
 # A leftover runtime container is a job failure, never an implicit cleanup pass.

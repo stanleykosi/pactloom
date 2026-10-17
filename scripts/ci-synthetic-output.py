@@ -39,6 +39,7 @@ PURE_TESTS = tuple(PREFIX + suffix for suffix in (
     'public_outcome_v1::tests::public_outcome_sidecar_is_single_create_exact_bounded_and_private',
     'public_outcome_v1::tests::public_outcome_sidecar_denies_symlink_multilink_partial_and_oversize',
 ))
+STORAGE_BOOTSTRAP_TEST = 'recovery_generation::layered::tests::native_layered_current_eight_nine_parent_provenance_is_exact_and_not_relabelable'
 MARKER = 'WHOLEPACT_SYNTHETIC_PUBLIC_OUTCOME_V1='
 CORE = re.compile(r'\[JOINED_CORE_POLICY inherited_limit=Zero collector=(File|Pipe|Unknown) process_dumpability=Unchanged crash_copy_absence_verified=false\]')
 OPTION_INT = r'(?:None|Some\((?:0|[1-9][0-9]{0,9})\))'
@@ -155,6 +156,21 @@ def run_pure(executable):
             raise RuntimeError('exact pure test failed; raw output withheld')
     print('CI_SYNTHETIC_PURE passed=18 raw_output_discarded=true',flush=True)
 
+def run_storage_bootstrap(executable):
+    assert resource.getrlimit(resource.RLIMIT_CORE)[0] == 0
+    flags=['--exact',STORAGE_BOOTSTRAP_TEST,'--test-threads=1']
+    listed=subprocess.run([executable,*flags,'--list'],capture_output=True,timeout=30,check=True)
+    if not exact_listing(listed.stdout.decode(),STORAGE_BOOTSTRAP_TEST) or listed.stderr:
+        raise ValueError('exact encrypted bootstrap test not uniquely registered')
+    # Real maintained encrypted empty archive8 -> layered9 -> later pending
+    # provenance regression. No terminal/IPC/native authority/payment owner.
+    # Keep this result separate from the 18 pure/model/filesystem test cases.
+    result=subprocess.run([executable,*flags],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=300)
+    if result.returncode!=0 or len(result.stdout)>1024*1024:
+        print('CI_SYNTHETIC_ENCRYPTED_BOOTSTRAP passed=false raw_output_withheld=true',flush=True)
+        raise RuntimeError('exact encrypted bootstrap regression failed')
+    print('CI_SYNTHETIC_ENCRYPTED_BOOTSTRAP passed=true native_payment_verified=false',flush=True)
+
 def run(executable, phase):
     assert resource.getrlimit(resource.RLIMIT_CORE)[0] == 0
     name, seconds = TESTS[phase]
@@ -218,10 +234,11 @@ def run(executable, phase):
 
 if __name__=='__main__':
     try:
-        assert len(sys.argv)==3 and sys.argv[2] in {*TESTS,'pure'}
+        assert len(sys.argv)==3 and sys.argv[2] in {*TESTS,'pure','storage-bootstrap'}
         exe=pathlib.Path(sys.argv[1]).resolve(strict=True)
         assert exe.is_file() and exe.is_relative_to(pathlib.Path(os.environ['CARGO_TARGET_DIR']).resolve(strict=True))
         if sys.argv[2]=='pure': run_pure(str(exe))
+        elif sys.argv[2]=='storage-bootstrap': run_storage_bootstrap(str(exe))
         else: run(str(exe),sys.argv[2])
     except Exception:
         # Never serialize arbitrary exception text or raw test output.
