@@ -232,15 +232,15 @@ fn require_authorization(
     }
     Ok(())
 }
-fn require_lineage(
+// Sole caller has completed validate_shape for every immutable borrowed row.
+// This helper retains the complete cross-row and authenticated-origin joins.
+fn require_lineage_after_shapes(
     lineage: &RosterCommonContextReentryLineageV1,
     credential: &ConstructionTransportCredentialV1,
     read: &RosterCommonContextReadEvidenceV1,
     old_history: &ConstructionHistoryV2,
     current: &ConstructionHistoryWithTransportV1,
 ) -> Result<()> {
-    lineage.validate().map_err(invalid)?;
-    current.validate().map_err(invalid)?;
     let a = credential.authorization();
     let claim = &credential.signed_claim.claim;
     let birth = old_history
@@ -413,7 +413,13 @@ impl CommonContextSignerAuditInventoryV2 {
                 CommonContextReentryAuditPhaseV1::Reentered {
                     lineage,
                     witness_history,
-                } => require_lineage(lineage, credential()?, read, history, witness_history)?,
+                } => require_lineage_after_shapes(
+                    lineage,
+                    credential()?,
+                    read,
+                    history,
+                    witness_history,
+                )?,
                 CommonContextReentryAuditPhaseV1::Reserved {
                     reentry_lineage_digest,
                     extension,
@@ -428,7 +434,12 @@ impl CommonContextSignerAuditInventoryV2 {
                     {
                         return Err(JournalError::Conflict);
                     }
-                    require_reservation(lineage, &record.original, extension, continuation)?;
+                    require_reservation_after_shapes(
+                        lineage,
+                        &record.original,
+                        extension,
+                        continuation,
+                    )?;
                 }
                 CommonContextReentryAuditPhaseV1::Consumed {
                     reentry_lineage_digest,
@@ -467,13 +478,14 @@ impl CommonContextSignerAuditInventoryV2 {
         Ok(())
     }
 }
-fn require_reservation(
+// Sole caller has validated this exact record against these same extension
+// and continuation values in the preceding complete shape pass.
+fn require_reservation_after_shapes(
     l: &RosterCommonContextReentryLineageV1,
     r: &wholepact_authority::manual_roster_construction_v3::ManualRosterConstructionReservationRecordV3,
     e: &ManualRosterEnrollmentExtensionV2,
     c: &ManualRosterSessionContinuationV2,
 ) -> Result<()> {
-    r.validate_for(e, c).map_err(invalid)?;
     let request = &r.request;
     if request.construction.plan != l.request.original_read.plan
         || request.construction.current_caller_binding_digest

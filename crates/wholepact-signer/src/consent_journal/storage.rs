@@ -1332,6 +1332,24 @@ pub(super) fn require_no_unimplemented_reentry(c: &Connection) -> Result<()> {
     Ok(())
 }
 pub(super) fn verify_schema(c: &Connection) -> Result<()> {
+    verify_schema_before_common_audit(c)?;
+    construction_audit_v3::read_all(c, &read_account(c)?.account_id)?;
+    common_context_reentry_audit_v1::read_complete(c, &read_account(c)?.account_id)?;
+    Ok(())
+}
+
+/// Only the fresh reentry-owner read transaction consumes this inert result.
+/// `read_complete` itself reads and fully validates the original construction
+/// audit, so no separate, discarded replay is necessary in this same snapshot.
+#[cfg(all(feature = "pending-birth-owner-signing", target_os = "linux"))]
+fn verify_schema_with_common_audit(
+    c: &Connection,
+) -> Result<CommonContextSignerAuditInventoryV2> {
+    verify_schema_before_common_audit(c)?;
+    common_context_reentry_audit_v1::read_complete(c, &read_account(c)?.account_id)
+}
+
+fn verify_schema_before_common_audit(c: &Connection) -> Result<()> {
     type SchemaObject = (String, String, String, Option<String>);
     fn objects(c: &Connection) -> Result<Vec<SchemaObject>> {
         let mut q =
@@ -1351,8 +1369,6 @@ pub(super) fn verify_schema(c: &Connection) -> Result<()> {
     offline_receipts::validate_all(c, &read_account(c)?.account_id)?;
     account_use_storage::inspect(c, &read_account(c)?.account_id)?;
     named_recipient_inventory::validate_archive_rows(c, &read_account(c)?.account_id)?;
-    construction_audit_v3::read_all(c, &read_account(c)?.account_id)?;
-    common_context_reentry_audit_v1::read_complete(c, &read_account(c)?.account_id)?;
     Ok(())
 }
 

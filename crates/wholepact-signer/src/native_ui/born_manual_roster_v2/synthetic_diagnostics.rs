@@ -4,6 +4,12 @@ use super::{Error, Output, Result, Step, Work};
 
 #[derive(Clone, Copy)]
 pub(super) enum Operation {
+    ConstructionCheck,
+    ConstructionReserve,
+    ConstructionReservedAppend,
+    ConstructionConsume,
+    ConstructionConsumedAppend,
+    ConstructionSend,
     CompletionClaimCheck,
     CompletionClaimSign,
     CompletionClaimGranted,
@@ -145,6 +151,12 @@ impl Operation {
     }
     fn label(self) -> &'static str {
         match self {
+            Self::ConstructionCheck => "RosterConstructionCheck",
+            Self::ConstructionReserve => "RosterConstructionReserve",
+            Self::ConstructionReservedAppend => "RosterConstructionReservedAppend",
+            Self::ConstructionConsume => "RosterConstructionConsume",
+            Self::ConstructionConsumedAppend => "RosterConstructionConsumedAppend",
+            Self::ConstructionSend => "RosterConstructionSend",
             Self::CompletionClaimCheck => "RosterCompletionClaimCheck",
             Self::CompletionClaimSign => "RosterCompletionClaimSign",
             Self::CompletionClaimGranted => "RosterCompletionClaimGranted",

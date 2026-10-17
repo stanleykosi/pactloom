@@ -809,10 +809,10 @@ impl PreparedReenteredConstructionV1 {
         d: NativeDecision,
         owner: &PendingAccountNativeAuthority,
     ) -> Result<super::named_continuation::ConsumedBornNamedOwnerV1> {
-        self.owner.check(owner)?;
-        connected(&self.stream, &self.owner.peer)?;
-        self.review_json()?;
-        decision(&d, &self.owner.native, &self.digest)?;
+        completion_witness_trace!(ConstructionCheck, self.owner.check(owner))?;
+        completion_witness_trace!(ConstructionCheck, connected(&self.stream, &self.owner.peer))?;
+        completion_witness_trace!(ConstructionCheck, self.review_json())?;
+        completion_witness_trace!(ConstructionCheck, decision(&d, &self.owner.native, &self.digest))?;
         let source = self.owner.source;
         let extension = source.retained().record().extension()?;
         let continuation = self
@@ -850,18 +850,16 @@ impl PreparedReenteredConstructionV1 {
             .map_err(|_| Error::ReviewMismatch)?;
         // self and its ORIGINAL read receipt move into this one call. No error
         // path returns an owner, repairs a grant, or restores a spent read slot.
-        source.check_peer(&self.owner.peer, owner)?;
-        let reservation = self
-            .owner
-            .observed
-            .reserve(&extension, &continuation, &request)
-            .map_err(|_| Error::Uncertain)?;
+        completion_witness_trace!(ConstructionCheck, source.check_peer(&self.owner.peer, owner))?;
+        let reservation = completion_authority_trace!(ConstructionReserve,
+            self.owner.observed.reserve(&extension, &continuation, &request)
+        ).map_err(|_| Error::Uncertain)?;
         let lineage_digest = self
             .owner
             .lineage
             .digest()
             .map_err(|_| Error::InvalidData)?;
-        append(
+        completion_witness_trace!(ConstructionReservedAppend, append(
             &source,
             Phase::Reserved {
                 reentry_lineage_digest: lineage_digest.clone(),
@@ -869,8 +867,8 @@ impl PreparedReenteredConstructionV1 {
                 continuation: Box::new(continuation.clone()),
                 record: Box::new(reservation.record().clone()),
             },
-        )?;
-        source.check_peer(&self.owner.peer, owner)?;
+        ))?;
+        completion_witness_trace!(ConstructionCheck, source.check_peer(&self.owner.peer, owner))?;
         let r = &reservation.record().original;
         let consume = ManualRosterConstructionConsumeRequestV3 {
             version: 3,
@@ -902,13 +900,12 @@ impl PreparedReenteredConstructionV1 {
             current_caller_binding_digest: self.request.current_caller_binding_digest.clone(),
         };
         let binding = self.owner.native.clone();
-        let _lease = binding.publication_lease()?;
-        source.check_peer(&self.owner.peer, owner)?;
-        let contribution = reservation
-            .consume(&consume)
-            .map_err(|_| Error::Uncertain)?;
-        contribution
-            .check_current()
+        let _lease = completion_witness_trace!(ConstructionCheck, binding.publication_lease())?;
+        completion_witness_trace!(ConstructionCheck, source.check_peer(&self.owner.peer, owner))?;
+        let contribution = completion_authority_trace!(ConstructionConsume,
+            reservation.consume(&consume)
+        ).map_err(|_| Error::Uncertain)?;
+        completion_authority_trace!(ConstructionCheck, contribution.check_current())
             .map_err(|_| Error::ReviewMismatch)?;
         let r = &contribution.reservation().original;
         let c = &contribution.consumed().original;
@@ -951,15 +948,15 @@ impl PreparedReenteredConstructionV1 {
             construction,
         };
         evidence.validate().map_err(|_| Error::InvalidData)?;
-        append(
+        completion_witness_trace!(ConstructionConsumedAppend, append(
             &source,
             Phase::Consumed {
                 reentry_lineage_digest: lineage_digest,
                 record: Box::new(contribution.consumed().clone()),
                 evidence: Box::new(evidence.clone()),
             },
-        )?;
-        send(
+        ))?;
+        completion_witness_trace!(ConstructionSend, send(
             &mut self.stream,
             &self.owner.peer,
             &RosterReenteredConstructionResponseV1::ReenteredConstructionConsumedV1 {
@@ -967,11 +964,10 @@ impl PreparedReenteredConstructionV1 {
             },
             source.completion_deadline(),
             || {
-                contribution
-                    .check_current()
+                completion_authority_trace!(ConstructionCheck, contribution.check_current())
                     .map_err(|_| Error::ReviewMismatch)
             },
-        )?;
+        ))?;
         let source = source.into_named_recipient_after_consumed(evidence, owner)?;
         super::named_continuation::ConsumedBornNamedOwnerV1::from_consumed(
             source,

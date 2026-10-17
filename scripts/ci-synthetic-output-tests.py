@@ -159,7 +159,7 @@ class PublicOutputTests(unittest.TestCase):
         self.assertTrue(kinds['Outcome'] <= output.OUTCOMES)
         signer=ROOT/'crates/wholepact-signer/src/native_ui/born_manual_roster_v2/synthetic_diagnostics.rs'
         labels=set(re.findall(r'=> "(Roster\w+)"',signer.read_text()))
-        self.assertEqual(len(labels),74)
+        self.assertEqual(len(labels),80)
         self.assertTrue(labels <= output.BOUNDARIES)
         for label in labels | kinds['Phase']:
             self.assertTrue(output.safe_failure(self.failure(label+':Begin')))
@@ -231,6 +231,19 @@ class PublicOutputTests(unittest.TestCase):
                       'RosterCompletionClaimClaim:AuthorityUnknown',
                       'RosterCompletionClaimObserve:AuthorityUncertain private-data',
                       'RosterCompletionClaimHistory:AuthorityExpired:private-data']:
+            self.assertFalse(output.safe_failure(self.failure(value)))
+
+    def test_construction_effect_diagnostics_are_exact_and_payload_free(self):
+        expected=set("RosterConstructionCheck RosterConstructionReserve RosterConstructionReservedAppend RosterConstructionConsume RosterConstructionConsumedAppend RosterConstructionSend".split())
+        source=(ROOT/'crates/wholepact-signer/src/native_ui/born_manual_roster_v2/synthetic_diagnostics.rs').read_text()
+        self.assertEqual(set(re.findall(r'=> "(RosterConstruction\w+)"',source)),expected)
+        self.assertEqual({x for x in output.BOUNDARIES if x.startswith('RosterConstruction')},expected)
+        for label in expected:
+            for kind in ['Begin','Complete','SignerUncertain','AuthorityExpired','AuthorityConflict']:
+                self.assertTrue(output.safe_failure(self.failure(label+':'+kind)))
+        for value in ['RosterConstructionUnknown:Begin','RosterConstructionReserve:AuthorityUnknown',
+                      'RosterConstructionConsume:AuthorityExpired private-data',
+                      'RosterConstructionSend:SignerUncertain:private-data']:
             self.assertFalse(output.safe_failure(self.failure(value)))
 
     def test_completion_diagnostics_preserve_exact_closed_layers(self):
@@ -457,7 +470,7 @@ class PublicOutputTests(unittest.TestCase):
         def fake_run(argv, **kwargs):
             calls.append((argv,kwargs))
             name=argv[2]
-            self.assertIn(name,output.SIGNER_VALIDATION_TESTS+output.SIGNER_BOOKKEEPING_TESTS+output.SIGNER_PRECONSTRUCTION_TESTS+output.SIGNER_BIRTH_LINK_TESTS+output.SIGNER_ENDPOINT_CHANNEL_TESTS)
+            self.assertIn(name,output.SIGNER_VALIDATION_TESTS+output.SIGNER_BOOKKEEPING_TESTS+output.SIGNER_PRECONSTRUCTION_TESTS+output.SIGNER_BIRTH_LINK_TESTS+output.SIGNER_ENDPOINT_CHANNEL_TESTS+output.SIGNER_SNAPSHOT_STORAGE_TESTS+output.SIGNER_SHAPE_TAMPER_TESTS+output.SIGNER_REENTRY_COMPATIBILITY_TESTS)
             self.assertEqual(argv[:2],['/verified/signer','--exact'])
             self.assertEqual(argv[3],'--test-threads=1')
             if argv[-1]=='--list':
@@ -472,8 +485,34 @@ class PublicOutputTests(unittest.TestCase):
              mock.patch.object(output.subprocess,'run',side_effect=fake_run), \
              contextlib.redirect_stdout(captured):
             output.run_signer_validation('/verified/signer')
-        self.assertEqual([argv[2] for argv,_ in calls], [name for name in output.SIGNER_VALIDATION_TESTS+output.SIGNER_BOOKKEEPING_TESTS+output.SIGNER_PRECONSTRUCTION_TESTS+output.SIGNER_BIRTH_LINK_TESTS+output.SIGNER_ENDPOINT_CHANNEL_TESTS for _ in range(2)])
-        self.assertEqual(captured.getvalue(),'CI_SYNTHETIC_SIGNER_VALIDATION passed=16 crypto_file_cases=4 bookkeeping_cases=2 replay_cases=6 endpoint_channel_cases=4 native_payment_verified=false raw_output_discarded=true\n')
+        self.assertEqual([argv[2] for argv,_ in calls], [name for name in output.SIGNER_VALIDATION_TESTS+output.SIGNER_BOOKKEEPING_TESTS+output.SIGNER_PRECONSTRUCTION_TESTS+output.SIGNER_BIRTH_LINK_TESTS+output.SIGNER_ENDPOINT_CHANNEL_TESTS+output.SIGNER_SNAPSHOT_STORAGE_TESTS+output.SIGNER_SHAPE_TAMPER_TESTS+output.SIGNER_REENTRY_COMPATIBILITY_TESTS for _ in range(2)])
+        self.assertEqual(captured.getvalue(),'CI_SYNTHETIC_SIGNER_VALIDATION passed=22 crypto_file_cases=4 bookkeeping_cases=2 replay_cases=6 endpoint_channel_cases=4 snapshot_storage_cases=2 shape_tamper_cases=1 compatibility_cases=3 native_payment_verified=false raw_output_discarded=true\n')
+
+    def test_reentry_snapshot_preflight_is_six_exact_distinct_cases(self):
+        prefix='consent_journal::common_context_reentry_audit_tests::'
+        storage=tuple(prefix+name for name in (
+            'owner_snapshot_is_fresh_and_never_commits_a_callers_transaction',
+            'owner_snapshot_revalidates_changed_payload_and_missing_rows',
+        ))
+        shape=(prefix+'completed_shape_pass_still_rejects_lineage_history_and_reservation_tampering',)
+        compatibility=tuple(prefix+name for name in (
+            'signed_handoff_reopen_requires_exact_authorized_only_original_journal',
+            'signed_handoff_encrypted_six_phase_reopen_is_exact_and_atomic',
+            'explicit_v5_keeps_old_bytes_charge_and_never_issues_recovery',
+        ))
+        self.assertEqual(output.SIGNER_SNAPSHOT_STORAGE_TESTS,storage)
+        self.assertEqual(output.SIGNER_SHAPE_TAMPER_TESTS,shape)
+        self.assertEqual(output.SIGNER_REENTRY_COMPATIBILITY_TESTS,compatibility)
+        base=ROOT/'crates/wholepact-signer/src/consent_journal'
+        self.assertIn('mod common_context_reentry_audit_tests;', (base/'mod.rs').read_text())
+        source=(base/'common_context_reentry_audit_tests.rs').read_text()
+        for name in storage+shape+compatibility:
+            self.assertEqual(len(re.findall(r'#\[test\]\s+fn '+name.rsplit('::',1)[1]+r'\(',source)),1)
+        all_cases=(output.SIGNER_VALIDATION_TESTS+output.SIGNER_BOOKKEEPING_TESTS
+                   +output.SIGNER_PRECONSTRUCTION_TESTS+output.SIGNER_BIRTH_LINK_TESTS
+                   +output.SIGNER_ENDPOINT_CHANNEL_TESTS+storage+shape+compatibility)
+        self.assertEqual(len(all_cases),22)
+        self.assertEqual(len(set(all_cases)),22)
 
     def test_endpoint_channel_preflight_is_four_exact_private_cases(self):
         prefix='native_ui::synthetic_born_joined_qualification::construction_fixture::endpoint_report_tests::'

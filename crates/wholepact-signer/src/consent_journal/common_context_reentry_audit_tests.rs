@@ -832,3 +832,164 @@ fn signed_handoff_reopen_requires_exact_authorized_only_original_journal() {
     assert!(check(true).is_err());
     check(false).unwrap();
 }
+
+
+/// Real encrypted storage with inert signed archival facts. No native owner,
+/// callback, socket, financial authority or currentness proof is manufactured.
+#[cfg(all(feature = "pending-birth-owner-signing", target_os = "linux"))]
+fn with_owner_snapshot_fixture(test: impl FnOnce(&SignerConsentJournal, &HostRecoveryContinuityEvidenceV5)) {
+    use std::os::unix::fs::PermissionsExt;
+    use wholepact_storage_security::DatabaseKey;
+    let value = handoff_fixture::fixture();
+    let audit = &value.complete_history.signer_common_context_audit;
+    let genesis = value.complete_history.financial_origins_v2.account_use.genesis.as_ref().unwrap();
+    let dir = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let journal = SignerConsentJournal::create_encrypted(
+        &dir.path().join("never-funded-snapshot.sqlite"),
+        &DatabaseKey::from_bytes([85; 32]),
+        &genesis.identity.account_id,
+        1,
+        false,
+    ).unwrap();
+    journal.connection.lock().unwrap().execute(
+        "INSERT INTO signer_account_use_genesis VALUES(1,?1,?2,?3,?4)",
+        rusqlite::params![
+            genesis.identity.account_id,
+            genesis.identity.full_viewing_key_digest,
+            genesis.digest().unwrap(),
+            encode(genesis).unwrap().as_str()
+        ],
+    ).unwrap();
+    journal.retain_common_context_audit_v3(&audit.original.rows[0]).unwrap();
+    journal.retain_common_context_reentry_audit_v1(
+        audit.reentry.rows.iter().find(|r| r.phase() == "authorized").unwrap(),
+    ).unwrap();
+    test(&journal, &value);
+}
+
+#[cfg(all(feature = "pending-birth-owner-signing", target_os = "linux"))]
+fn check_owner_snapshot(journal: &SignerConsentJournal, value: &HostRecoveryContinuityEvidenceV5) -> Result<CommonContextSignerAuditV1> {
+    let audit = &value.complete_history.signer_common_context_audit;
+    let CommonContextSignerAuditV1::ReadAdmitted { evidence, .. } = &audit.original.rows[0] else { unreachable!() };
+    let authorization = audit.reentry.rows.iter().find_map(|row| match &row.record {
+        CommonContextReentryAuditPhaseV1::Authorized { authorization } => Some(authorization),
+        _ => None,
+    }).unwrap();
+    journal.check_common_context_authorized_reentry_owner(
+        &CommonContextAuthorizedReentryOwnerInput {
+            genesis: value.complete_history.financial_origins_v2.account_use.genesis.as_ref().unwrap(),
+            epoch: 1,
+            read_digest: &evidence.digest().unwrap(),
+            attempt_digest: &evidence.current_attempt_digest,
+            attempt_sequence: evidence.current_attempt_sequence,
+            plan: &evidence.request.plan,
+            authorization_digest: &authorization.digest().unwrap(),
+        },
+        true,
+    )
+}
+
+#[cfg(all(feature = "pending-birth-owner-signing", target_os = "linux"))]
+#[test]
+fn owner_snapshot_is_fresh_and_never_commits_a_callers_transaction() {
+    with_owner_snapshot_fixture(|journal, value| {
+        let expected = &value.complete_history.signer_common_context_audit.original.rows[0];
+        assert!(check_owner_snapshot(journal, value).unwrap() == *expected);
+        assert!(journal.connection.lock().unwrap().is_autocommit());
+        // The exact same connection has an explicit outer transaction: refuse
+        // without adopting, rolling back or committing the caller's work.
+        journal.connection.lock().unwrap().execute_batch("BEGIN DEFERRED").unwrap();
+        assert!(check_owner_snapshot(journal, value).is_err());
+        {
+            let c = journal.connection.lock().unwrap();
+            assert!(!c.is_autocommit());
+            c.execute_batch("ROLLBACK").unwrap();
+        }
+        assert!(check_owner_snapshot(journal, value).unwrap() == *expected);
+        // Every call freshly rechecks mutable account state; no successful
+        // inventory/transaction is reused after it returns.
+        journal.connection.lock().unwrap().execute("UPDATE signer_account SET recovery_required=1", []).unwrap();
+        assert!(check_owner_snapshot(journal, value).is_err());
+        assert!(journal.connection.lock().unwrap().is_autocommit());
+        journal.connection.lock().unwrap().execute("UPDATE signer_account SET recovery_required=0", []).unwrap();
+        assert!(check_owner_snapshot(journal, value).unwrap() == *expected);
+        journal.connection.lock().unwrap().execute_batch("CREATE TABLE foreign_snapshot_row(value TEXT)").unwrap();
+        assert!(check_owner_snapshot(journal, value).is_err());
+        assert!(journal.connection.lock().unwrap().is_autocommit());
+        journal.connection.lock().unwrap().execute_batch("DROP TABLE foreign_snapshot_row").unwrap();
+        assert!(check_owner_snapshot(journal, value).unwrap() == *expected);
+        // A row in an otherwise valid non-construction table still violates
+        // this exact original-owner inventory policy, independently of schema.
+        {
+            let c = journal.connection.lock().unwrap();
+            c.execute(
+                "INSERT INTO signer_enrollments VALUES('inert-ref',?1,'inert-agreement','inert-participant','{}')",
+                [&value.request.account_id],
+            ).unwrap();
+            storage::verify_schema(&c).unwrap();
+        }
+        assert!(check_owner_snapshot(journal, value).is_err());
+        assert!(journal.connection.lock().unwrap().is_autocommit());
+    });
+}
+
+#[cfg(all(feature = "pending-birth-owner-signing", target_os = "linux"))]
+#[test]
+fn owner_snapshot_revalidates_changed_payload_and_missing_rows() {
+    with_owner_snapshot_fixture(|journal, value| {
+        check_owner_snapshot(journal, value).unwrap();
+        // Adversarial encrypted storage edits restore the exact original schema
+        // before each check. The refusal must therefore inspect actual rows,
+        // not only schema, a cached result or a file timestamp.
+        let (trigger, payload): (String, String) = {
+            let c = journal.connection.lock().unwrap();
+            (
+                c.query_row("SELECT sql FROM sqlite_schema WHERE name='signer_common_context_reentry_no_update'", [], |r| r.get(0)).unwrap(),
+                c.query_row("SELECT payload FROM signer_common_context_reentry_v1 WHERE phase='authorized'", [], |r| r.get(0)).unwrap(),
+            )
+        };
+        for replacement in ["{}", payload.as_str()] {
+            {
+                let c = journal.connection.lock().unwrap();
+                c.execute_batch("DROP TRIGGER signer_common_context_reentry_no_update").unwrap();
+                c.execute("UPDATE signer_common_context_reentry_v1 SET payload=?1 WHERE phase='authorized'", [replacement]).unwrap();
+                c.execute_batch(&trigger).unwrap();
+            }
+            assert_eq!(check_owner_snapshot(journal, value).is_ok(), replacement == payload);
+            assert!(journal.connection.lock().unwrap().is_autocommit());
+        }
+        {
+            let c = journal.connection.lock().unwrap();
+            let trigger: String = c.query_row("SELECT sql FROM sqlite_schema WHERE name='signer_common_context_reentry_no_delete'", [], |r| r.get(0)).unwrap();
+            c.execute_batch("DROP TRIGGER signer_common_context_reentry_no_delete").unwrap();
+            c.execute("DELETE FROM signer_common_context_reentry_v1", []).unwrap();
+            c.execute_batch(&trigger).unwrap();
+        }
+        assert!(check_owner_snapshot(journal, value).is_err());
+        assert!(journal.connection.lock().unwrap().is_autocommit());
+    });
+}
+
+#[test]
+fn completed_shape_pass_still_rejects_lineage_history_and_reservation_tampering() {
+    let value = handoff_fixture::fixture();
+    let audit = &value.complete_history.signer_common_context_audit;
+    let account = &value.request.account_id;
+    audit.validate(account).unwrap();
+    for field in 0..3 {
+        let mut altered = audit.clone();
+        if field < 2 {
+            let row = altered.reentry.rows.iter_mut().find(|r| r.phase() == "reentered").unwrap();
+            let CommonContextReentryAuditPhaseV1::Reentered { lineage, witness_history } = &mut row.record else { unreachable!() };
+            if field == 0 { lineage.version = 0; } else { witness_history.version = 0; }
+        } else {
+            let row = altered.reentry.rows.iter_mut().find(|r| r.phase() == "reserved").unwrap();
+            let CommonContextReentryAuditPhaseV1::Reserved { record, .. } = &mut row.record else { unreachable!() };
+            record.original.request.version = 0;
+        }
+        assert!(altered.validate(account).is_err());
+    }
+}

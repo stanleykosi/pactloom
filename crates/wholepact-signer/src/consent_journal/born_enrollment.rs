@@ -234,6 +234,12 @@ fn verify_common_audit_tables(
             return Err(JournalError::Conflict);
         }
     }
+    verify_common_audit_table_counts(c, plan.is_none())
+}
+
+/// Table/capacity policy only; callers must first fully validate the audit in
+/// the same current view (or the same read transaction for completion reentry).
+fn verify_common_audit_table_counts(c: &Connection, allow_reentry: bool) -> Result<()> {
     let mut q = c.prepare(
         "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'",
     )?;
@@ -242,7 +248,7 @@ fn verify_common_audit_tables(
         .collect::<std::result::Result<Vec<_>, _>>()?;
     for name in names {
         if name == "signer_common_context_audit_v3"
-            || (plan.is_none() && name == "signer_common_context_reentry_v1")
+            || (allow_reentry && name == "signer_common_context_reentry_v1")
         {
             continue;
         }
@@ -321,11 +327,19 @@ impl SignerConsentJournal {
         hash(read_digest)?;
         hash(attempt_digest)?;
         hash(authorization_digest)?;
-        let c = self.connection.lock().map_err(|_| JournalError::Database)?;
-        verify_born_identity(&c, genesis, epoch)?;
-        verify_common_audit_tables(&c, genesis, epoch, None)?;
-        let audit =
-            common_context_reentry_audit_v1::read_complete(&c, &genesis.identity.account_id)?;
+        let mut c = self.connection.lock().map_err(|_| JournalError::Database)?;
+        // This private check owns a fresh read-only transaction, never an outer
+        // caller's transaction. Failure drops/rolls back only this transaction.
+        if !c.is_autocommit() {
+            return Err(JournalError::Database);
+        }
+        let tx = c.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let audit = verify_schema_with_common_audit(&tx)?;
+        verify_born_identity_cells(&tx, genesis, epoch)?;
+        if read_account(&tx)?.recovery_required {
+            return Err(JournalError::RecoveryRequired);
+        }
+        verify_common_audit_table_counts(&tx, true)?;
         let [row @ CommonContextSignerAuditV1::ReadAdmitted { evidence, .. }] =
             audit.original.rows.as_slice()
         else {
@@ -365,6 +379,11 @@ impl SignerConsentJournal {
         {
             return Err(JournalError::Conflict);
         }
-        Ok(row.clone())
+        // Only the already-existing inert receipt leaves this read. The
+        // validated inventory is not retained as permission for a later call.
+        let receipt = row.clone();
+        drop(audit);
+        tx.commit()?;
+        Ok(receipt)
     }
 }
