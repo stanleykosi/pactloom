@@ -154,7 +154,7 @@ class PublicOutputTests(unittest.TestCase):
         for kind in ['Phase','Outcome']:
             body=re.search(r'labels! \{ '+kind+r' \{(.*?)\} \}',text,re.S).group(1)
             kinds[kind]=set(x.strip() for x in body.split(',') if x.strip())
-        self.assertEqual(len(kinds['Phase']),58)
+        self.assertEqual(len(kinds['Phase']),65)
         self.assertTrue(kinds['Phase'] <= output.BOUNDARIES)
         self.assertTrue(kinds['Outcome'] <= output.OUTCOMES)
         signer=ROOT/'crates/wholepact-signer/src/native_ui/born_manual_roster_v2/synthetic_diagnostics.rs'
@@ -487,6 +487,62 @@ class PublicOutputTests(unittest.TestCase):
             output.run_signer_validation('/verified/signer')
         self.assertEqual([argv[2] for argv,_ in calls], [name for name in output.SIGNER_VALIDATION_TESTS+output.SIGNER_BOOKKEEPING_TESTS+output.SIGNER_PRECONSTRUCTION_TESTS+output.SIGNER_BIRTH_LINK_TESTS+output.SIGNER_ENDPOINT_CHANNEL_TESTS+output.SIGNER_SNAPSHOT_STORAGE_TESTS+output.SIGNER_SHAPE_TAMPER_TESTS+output.SIGNER_REENTRY_COMPATIBILITY_TESTS+output.SIGNER_CALL_LOCAL_TESTS+output.SIGNER_AUDIT_STORAGE_TESTS+output.SIGNER_AUDIT_COMPATIBILITY_TESTS+output.SIGNER_NAMED_ORIGIN_SNAPSHOT_TESTS for _ in range(2)])
         self.assertEqual(captured.getvalue(),'CI_SYNTHETIC_SIGNER_VALIDATION passed=30 crypto_file_cases=4 bookkeeping_cases=2 replay_cases=6 endpoint_channel_cases=4 snapshot_storage_cases=2 shape_tamper_cases=1 compatibility_cases=3 call_local_cases=2 audit_storage_cases=1 audit_compatibility_cases=2 named_origin_snapshot_cases=3 native_payment_verified=false raw_output_discarded=true\n')
+
+    def test_checkpoint_engine_projection_is_exact_closed_public_kinds(self):
+        labels=set(('EngineCheckpointClaim', 'EngineCheckpointPlan', 'EngineCheckpointRetained', 'EngineCheckpointParts', 'EngineCheckpointNative', 'EngineCheckpointHeld', 'EngineCheckpointRestriction', 'EngineCheckpointConstruct', 'EngineCheckpointInspect', 'EngineCheckpointActionLimit', 'EngineCheckpointConsent', 'EngineCheckpointReceipt', 'EngineCheckpointRecord', 'EngineCheckpointEnqueue', 'EngineCheckpointFinish', 'EngineCheckpointContext'))
+        outcomes=set(('BridgeAuthority', 'BridgeBinding', 'BridgeCompleteOriginRecoveryUnavailable', 'BridgeConflict', 'BridgeIpc', 'BridgeJournal', 'BridgeLimit', 'BridgeMissing', 'BridgePermission', 'BridgeRecoveryRequired', 'BridgeSignerOriginUnavailable', 'BridgeUncertain', 'BridgeVerification', 'BridgeWallet', 'EngineAccessDenied', 'EngineCandidateVerificationFailed', 'EngineIdempotencyConflict', 'EngineInvalidRequest', 'EngineInvalidTransition', 'EngineLiveAuthorizationExists', 'EngineManualConstructionDenied', 'EngineNotFound', 'EngineRecoveryRequired', 'EngineResourceExhausted', 'EngineRetainedObservationUnavailable', 'EngineRevisionConflict', 'EngineStorageProtectionRequired', 'EngineStorageUnavailable', 'EngineUnclassified', 'JobConsentDenied', 'JobIdempotencyConflict', 'JobInvalidRequest', 'JobNotFound', 'JobRecoveryRequired', 'JobResourceExhausted', 'JobStateConflict', 'JobStorage', 'JobUnsupportedSchema', 'JobVerificationFailed', 'ProtocolActionMapping', 'ProtocolBuilderInput', 'ProtocolBuilderOutput', 'ProtocolContext', 'ProtocolContribution', 'ProtocolDisclosure', 'ProtocolFee', 'ProtocolFinalize', 'ProtocolInput', 'ProtocolManifest', 'ProtocolOutput', 'ProtocolPczt', 'ProtocolUnclassified', 'StoreAlreadyExists', 'StoreBudgetExceeded', 'StoreDatabase', 'StoreEncoding', 'StoreFile', 'StoreIdempotencyConflict', 'StoreInputReserved', 'StoreInvalidInput', 'StoreInvalidTransition', 'StoreLiveAuthorizationExists', 'StoreNotFound', 'StorePoisoned', 'StoreRecoveryRequired', 'StoreResourceExhausted', 'StoreRevisionConflict', 'StoreStorageSecurity', 'StoreUnsupportedSchema', 'StoreWriterEpochMismatch'))
+        self.assertEqual({label for label in output.BOUNDARIES if label.startswith('EngineCheckpoint')},labels)
+        source=(ROOT/'crates/wholepact-engine/src/manual_roster_construct_v3/synthetic_diagnostics.rs').read_text()
+        actual_labels=set(re.findall(r'=> "(EngineCheckpoint\w+)"',source))
+        actual_outcomes=set(re.findall(r'"((?:Bridge|Engine|Job|Protocol|Store)[A-Z]\w+)"',source))-actual_labels
+        self.assertEqual(actual_labels,labels)
+        self.assertEqual(actual_outcomes,outcomes)
+        self.assertEqual(len(labels),16)
+        self.assertEqual(len(outcomes),70)
+        self.assertTrue(outcomes <= output.OUTCOMES)
+        for label in labels:
+            for outcome in outcomes | {'Begin','Complete'}:
+                self.assertTrue(output.safe_failure(self.failure(label+':'+outcome)))
+                self.assertFalse(output.safe_failure(self.failure(label+':'+outcome+' private payload')))
+            self.assertFalse(output.safe_failure(self.failure(label+'Unknown:EngineUnclassified')))
+        self.assertFalse(output.safe_failure(self.failure('EngineCheckpointConstruct:ProtocolPrivate')))
+        self.assertFalse(output.safe_failure(self.failure('EngineCheckpointClaim:ENGINE_ERROR_CODE')))
+        self.assertIn('_ => "EngineUnclassified"',source)
+        self.assertIn('_ => "ProtocolUnclassified"',source)
+        self.assertNotIn('error.to_string()',source)
+        self.assertNotIn('format!',source)
+        parent=(ROOT/'crates/wholepact-engine/src/manual_roster_construct_v3.rs').read_text()
+        self.assertIn('#[cfg(feature = "synthetic-qualification")]\nmod synthetic_diagnostics;',parent)
+        self.assertEqual(parent.count('let result = $operation;'),1)
+        self.assertEqual(parent.count('let permitted = $predicate;'),1)
+
+    def test_checkpoint_host_precoarsening_is_closed_and_result_preserving(self):
+        labels={'CheckpointEngine','CheckpointWalletUnwind','CheckpointFinish',
+                'CheckpointObservations','CheckpointOutput','CheckpointBeforeClaim',
+                'CheckpointClaimMayExist'}
+        self.assertEqual({label for label in output.BOUNDARIES if label.startswith('Checkpoint')},labels)
+        for label in labels:
+            for outcome in ('Begin','Complete','HostPermission','HostReceipt','HostAuthentication'):
+                value=label+':'+outcome
+                self.assertTrue(output.safe_failure(self.failure(value)))
+                self.assertFalse(output.safe_failure(self.failure(value+' private receipt')))
+            self.assertFalse(output.safe_failure(self.failure(label+'Unknown:HostReceipt')))
+        source=(ROOT/'crates/wholepact-native-host/src/host/financial/'
+                'manual_roster_candidate_assembly_v3.rs').read_text()
+        body=source.split('pub(in crate::host) fn construct_observed_checkpoint(',1)[1].split('fn exact_claim_uncertain_error',1)[0]
+        for operation in ('with_common_context_roster(slots, &excluded,',
+                          'host.engine.checkpoint_manual_roster_from_retained_v3(',
+                          'pending.finish()', 'restriction.check_observations()',
+                          'host.terminal.json(&result)', '.classify_outer_result(result)',
+                          'progress.claim_digest().as_deref()'):
+            self.assertEqual(body.count(operation),1)
+        self.assertLess(body.index('checkpoint_manual_roster_from_retained_v3('),body.index('pending.finish()'))
+        self.assertLess(body.index('pending.finish()'),body.index('restriction.check_observations()'))
+        self.assertLess(body.index('restriction.check_observations()'),body.index('host.terminal.json(&result)'))
+        classified=body.split('.classify_outer_result(result)',1)[1]
+        self.assertLess(classified.index('match &error'),classified.index('match error'))
+        self.assertIn('ManualRosterConstructionOuterErrorV3::BeforeClaim(error) => error,',classified)
+        self.assertIn('ManualRosterConstructionOuterErrorV3::ClaimMayExist(_) => {',classified)
 
     def test_postconsume_poll_and_owner_labels_are_closed(self):
         labels=('SignerPollCancelled','SignerPollDeadline','SignerPollTerminal',

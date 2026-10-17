@@ -21,6 +21,30 @@ use wholepact_store::manual_enrollment::{
 };
 use wholepact_wallet::wallet::protected_sync::exact_input_observation::HeldCommonContextRosterObservation;
 
+#[cfg(feature = "synthetic-qualification")]
+mod synthetic_diagnostics;
+
+// Every wrapped operation and predicate runs exactly once. The actual result
+// keeps its original owner, mapping and control-flow position in every build.
+macro_rules! checkpoint_trace {
+    ($kind:ident, $phase:ident, $operation:expr) => {{
+        #[cfg(feature = "synthetic-qualification")]
+        synthetic_diagnostics::begin(synthetic_diagnostics::Phase::$phase);
+        let result = $operation;
+        #[cfg(feature = "synthetic-qualification")]
+        synthetic_diagnostics::$kind(synthetic_diagnostics::Phase::$phase, &result);
+        result
+    }};
+}
+macro_rules! checkpoint_permit {
+    ($phase:ident, $predicate:expr) => {{
+        let permitted = $predicate;
+        #[cfg(feature = "synthetic-qualification")]
+        synthetic_diagnostics::permit(synthetic_diagnostics::Phase::$phase, permitted);
+        permitted
+    }};
+}
+
 /// An embedding RESTRICTION only. It cannot substitute for the actual native,
 /// witness, wallet and Store claim owners independently required below. There
 /// is no synthetic prebuild CheckpointScope containing placeholder digests.
@@ -137,7 +161,7 @@ impl ManualRosterPendingCheckpointV3<'_> {
     /// This cannot create an owner or retry construction; it consumes this one
     /// pending result and checks the original actual owners again.
     pub fn finish(self) -> Result<ManualRosterPrivateCheckpointV3> {
-        complete_after_unwind(
+        checkpoint_trace!(api, Finish, complete_after_unwind(
             || check_native_guards(&self.native_guards),
             || {
                 self.restriction.check_before_constructor(
@@ -156,6 +180,7 @@ impl ManualRosterPendingCheckpointV3<'_> {
                 }
                 Ok(())
             },
+        )
         )
         .map_err(|error| {
             checkpoint_error(error, &self.metadata.claim_digest, &self.construction_key)
@@ -225,18 +250,18 @@ impl Engine {
             }
             plans.push(request.plan.clone());
         }
-        local.restriction.check_before_constructor(
+        checkpoint_trace!(api, Restriction, local.restriction.check_before_constructor(
             &plans,
             construction_key,
             local.maximum_actions,
-        )?;
+        ))?;
         let borrowed: Vec<_> = local
             .contributions
             .iter()
             .map(|(_, native)| native)
             .collect();
         check_held(local.held)?;
-        let outcome = self
+        let outcome = checkpoint_trace!(api, Claim, self
             .claim_manual_roster_construction_v5_fail_fast(
                 access,
                 construction_key,
@@ -244,7 +269,7 @@ impl Engine {
                 &borrowed,
                 local.held,
                 local.progress,
-            )
+            ))
             .map_err(|error| claim_error(error, local.progress, construction_key))?;
         let token = match outcome {
             ManualRosterConstructionClaimOutcomeV3::Started(token) => token,
@@ -266,7 +291,7 @@ impl Engine {
         // Every error from this point means the durable claim remains consumed.
         // No code path reconstructs randomized bytes for an existing claim.
         (|| {
-            let proposal = claim.validate().map_err(crate::store_error)?;
+            let proposal = checkpoint_trace!(store, Plan, claim.validate()).map_err(crate::store_error)?;
             let coordination_request_digest = claim.request_digest().map_err(crate::store_error)?;
             let manifest_digest: [u8; 32] = hex::decode(proposal.manifest_digest())
                 .map_err(|_| denied())?
@@ -296,21 +321,21 @@ impl Engine {
             let mut common = None;
             let mut native_guards = Vec::with_capacity(local.contributions.len());
             for (retained, admitted) in local.contributions {
-                let consumed = retained
-                    .into_common_context_construction(admitted, local.held)
+                let consumed = checkpoint_trace!(bridge, Retained, retained
+                    .into_common_context_construction(admitted, local.held))
                     .map_err(|_| denied())?;
-                let (selected, context, guard) = consumed
-                    .into_exact_parts(local.held)
+                let (selected, context, guard) = checkpoint_trace!(bridge, Parts, consumed
+                    .into_exact_parts(local.held))
                     .map_err(|_| denied())?;
                 // A fresh tip cannot replace ORIGINAL constructor target/anchor.
-                if common.as_ref().is_some_and(
+                if !checkpoint_permit!(Context, !common.as_ref().is_some_and(
                     |c: &wholepact_protocol::construction::ConstructionContext| {
                         c.anchor != context.anchor
                             || c.anchor_height != context.anchor_height
                             || c.anchor_block_hash != context.anchor_block_hash
                             || c.target_height != context.target_height
                     },
-                ) {
+                )) {
                     return Err(denied());
                 }
                 common = Some(context);
@@ -320,20 +345,20 @@ impl Engine {
             let context = common.ok_or_else(denied)?;
             check_native_guards(&native_guards)?;
             check_held(local.held)?;
-            local.restriction.check_before_constructor(
+            checkpoint_trace!(api, Restriction, local.restriction.check_before_constructor(
                 &plans,
                 construction_key,
                 local.maximum_actions,
-            )?;
+            ))?;
             // Last current-source/native gate immediately before randomness.
             check_native_guards(&native_guards)?;
             check_held(local.held)?;
-            let built = wholepact_protocol::construction::construct_proposal(
+            let built = checkpoint_trace!(protocol, Construct, wholepact_protocol::construction::construct_proposal(
                 &proposal,
                 context,
                 contributions,
                 &declarations,
-            )
+            ))
             .map_err(|_| {
                 ApiError::new(
                     "CANDIDATE_VERIFICATION_FAILED",
@@ -342,14 +367,14 @@ impl Engine {
             })?;
             check_native_guards(&native_guards)?;
             check_held(local.held)?;
-            local.restriction.check_before_constructor(
+            checkpoint_trace!(api, Restriction, local.restriction.check_before_constructor(
                 &plans,
                 construction_key,
                 local.maximum_actions,
-            )?;
+            ))?;
             let structure =
-                wholepact_protocol::inspect_candidate(&built.pczt_bytes).map_err(|_| denied())?;
-            if structure.actions > local.maximum_actions {
+                checkpoint_trace!(protocol, Inspect, wholepact_protocol::inspect_candidate(&built.pczt_bytes)).map_err(|_| denied())?;
+            if !checkpoint_permit!(ActionLimit, !(structure.actions > local.maximum_actions)) {
                 return Err(denied());
             }
             let first = plans.first().ok_or_else(denied)?;
@@ -373,7 +398,7 @@ impl Engine {
                 held: local.held,
                 exact_scope: &scope,
             };
-            if !consent.permits(&scope, LocalAction::RetainPrivateWitnesses) {
+            if !checkpoint_permit!(Consent, consent.permits(&scope, LocalAction::RetainPrivateWitnesses)) {
                 return Err(denied());
             }
             let receipt = ManualRosterConstructionCheckpointV3 {
@@ -398,17 +423,16 @@ impl Engine {
                     retention_policy: scope.retention_policy.clone(),
                 },
             };
-            receipt.validate_for(&claim).map_err(crate::store_error)?;
+            checkpoint_trace!(store, Receipt, receipt.validate_for(&claim)).map_err(crate::store_error)?;
             // Full exact constructor receipt is durable BEFORE the separate
             // encrypted proof journal write. Missing/ambiguous artifact later
             // means uncertain; neither receipt nor claim can mint a new token.
-            token
-                .record_checkpoint_fail_fast(receipt)
+            checkpoint_trace!(store, Record, token.record_checkpoint_fail_fast(receipt))
                 .map_err(crate::store_error)?;
-            if !consent.permits(&scope, LocalAction::RetainPrivateWitnesses) {
+            if !checkpoint_permit!(Consent, consent.permits(&scope, LocalAction::RetainPrivateWitnesses)) {
                 return Err(denied());
             }
-            let checkpoint = local
+            let checkpoint = checkpoint_trace!(job, Enqueue, local
                 .jobs
                 .enqueue_fail_fast(
                     &scope,
@@ -419,9 +443,9 @@ impl Engine {
                         maximum_actions: local.maximum_actions,
                     },
                     &consent,
-                )
+                ))
                 .map_err(|_| uncertain(&claim_digest, construction_key))?;
-            if !consent.permits(&scope, LocalAction::RetainPrivateWitnesses) {
+            if !checkpoint_permit!(Consent, consent.permits(&scope, LocalAction::RetainPrivateWitnesses)) {
                 return Err(denied());
             }
             Ok(ManualRosterPendingCheckpointV3 {
@@ -457,10 +481,10 @@ impl LocalProofConsent for CompletionRestriction<'_, '_> {
     }
 }
 fn check_held(held: &HeldCommonContextRosterObservation<'_>) -> Result<()> {
-    held.check_all_current().map_err(|_| ApiError::new(
+    checkpoint_trace!(api, Held, held.check_all_current().map_err(|_| ApiError::new(
         "RETAINED_INPUT_OBSERVATION_UNAVAILABLE",
         "Current same-input observation or held original-wallet revalidation failed; original exposure is unchanged",
-    ))
+    )))
 }
 fn claim_error(
     mut error: ApiError,
@@ -487,7 +511,7 @@ fn checkpoint_error(mut error: ApiError, claim: &str, key: &str) -> ApiError {
 }
 fn check_native_guards(guards: &[SignerRosterConstructionCompletionGuardV3]) -> Result<()> {
     for guard in guards {
-        guard.check_current().map_err(|_| denied())?;
+        checkpoint_trace!(bridge, Native, guard.check_current()).map_err(|_| denied())?;
     }
     Ok(())
 }

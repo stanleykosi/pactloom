@@ -710,15 +710,15 @@ impl CommonContextConstructionCoordinatorV3<'_> {
         // Diagnostic only. Its lifetime extends past EVERY nested final check
         // and commit, including an error after the leaf already returned success.
         let progress = wholepact_engine::manual_roster_construct_v3::ManualRosterConstructionProgressV3::default();
-        let outcome = with_common_context_roster(slots, &excluded, |held| {
-            host.engine.checkpoint_manual_roster_from_retained_v3(
+        let outcome = roster_trace!(CheckpointWalletUnwind, with_common_context_roster(slots, &excluded, |held| {
+            roster_trace!(CheckpointEngine, host.engine.checkpoint_manual_roster_from_retained_v3(
                 host.access()?, &construction_key,
                 wholepact_engine::manual_roster_construct_v3::ManualRosterPrivateConstructionV3 {
                     contributions, jobs: &primary.proof, maximum_actions,
                     restriction: &restriction, held, progress: &progress,
                 },
-            ).map_err(Error::from)
-        });
+            ).map_err(Error::from))
+        }));
         let pending = exact_outer_result(&progress, &construction_key, outcome)?;
         // Wallet final checks and commits have now all unwound. The independent
         // original native construction owners can have an EARLIER deadline than
@@ -727,16 +727,20 @@ impl CommonContextConstructionCoordinatorV3<'_> {
         let result = exact_outer_result(
             &progress,
             &construction_key,
-            pending.finish().map_err(Error::from),
+            roster_trace!(CheckpointFinish, pending.finish().map_err(Error::from)),
         )?;
         // Final source-owner sample before output. It cannot undo a durable
         // claim or promise atomic timing across a subsequent terminal write.
         exact_outer_result(
             &progress,
             &construction_key,
-            restriction.check_observations(),
+            roster_trace!(CheckpointObservations, restriction.check_observations()),
         )?;
-        exact_outer_result(&progress, &construction_key, host.terminal.json(&result))?;
+        exact_outer_result(
+            &progress,
+            &construction_key,
+            roster_trace!(CheckpointOutput, host.terminal.json(&result)),
+        )?;
         Ok(())
     }
 }
@@ -748,10 +752,26 @@ fn exact_outer_result<T>(
     use wholepact_engine::manual_roster_construct_v3::ManualRosterConstructionOuterErrorV3;
     progress
         .classify_outer_result(result)
-        .map_err(|error| match error {
-            ManualRosterConstructionOuterErrorV3::BeforeClaim(error) => error,
-            ManualRosterConstructionOuterErrorV3::ClaimMayExist(_) => {
-                exact_claim_uncertain_error(construction_key, progress.claim_digest().as_deref())
+        .map_err(|error| {
+            // Observe only the closed original kind before the existing durable
+            // uncertainty mapping. No claim state, payload or retry permission.
+            #[cfg(all(test, feature = "synthetic-born-joined-qualification"))]
+            {
+                use crate::host::synthetic_roster_trace_v1::{self as trace, Phase};
+                match &error {
+                    ManualRosterConstructionOuterErrorV3::BeforeClaim(error) => {
+                        trace::host_failure(Phase::CheckpointBeforeClaim, error);
+                    }
+                    ManualRosterConstructionOuterErrorV3::ClaimMayExist(error) => {
+                        trace::host_failure(Phase::CheckpointClaimMayExist, error);
+                    }
+                }
+            }
+            match error {
+                ManualRosterConstructionOuterErrorV3::BeforeClaim(error) => error,
+                ManualRosterConstructionOuterErrorV3::ClaimMayExist(_) => {
+                    exact_claim_uncertain_error(construction_key, progress.claim_digest().as_deref())
+                }
             }
         })
 }
