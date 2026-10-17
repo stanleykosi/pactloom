@@ -51,8 +51,12 @@ pub(super) fn emit(boundary: Boundary, outcome: Outcome) {
     );
 }
 pub(super) fn host<T>(boundary: Boundary, operation: impl FnOnce() -> Result<T>) -> Result<T> {
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    crate::host::synthetic_roster_timing_v1::event(boundary.label(), true, false);
     emit(boundary, Outcome::Begin);
     let result = operation();
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    crate::host::synthetic_roster_timing_v1::event(boundary.label(), false, result.is_err());
     emit(
         boundary,
         result

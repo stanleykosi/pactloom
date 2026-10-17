@@ -723,3 +723,10 @@ pub use crate::consent_journal::OriginalNamedSetupMetadataV1;
 pub use crate::consent_journal::{
     OriginalNamedPaymentArtifactsV1, OriginalNamedReturnReferencesV1,
 };
+
+/// Emit fixed, synthetic-only inclusive timing counters after scenario teardown.
+/// This accepts no owner, clock, identifier, or caller-selected payload and has
+/// no effect on authorization or the returned scenario result.
+pub fn emit_synthetic_timing_summary() {
+    super::born_manual_roster_v2::emit_synthetic_timing_summary();
+}

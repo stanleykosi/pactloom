@@ -32,6 +32,8 @@ pub(super) struct Transcript<'a> {
     line_start: usize,
     paths: BTreeMap<&'a str, Option<CapturedPath>>,
     diagnostics: VecDeque<String>,
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    timing: crate::host::synthetic_roster_timing_v1::Capture,
 }
 
 impl<'a> Transcript<'a> {
@@ -61,17 +63,34 @@ impl<'a> Transcript<'a> {
             line_start: 0,
             paths,
             diagnostics: VecDeque::new(),
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            timing: Default::default(),
         })
     }
 
     fn retained_bytes(&self) -> usize {
-        self.bytes.len()
+        self.bytes.len() + self.timing_retained_bytes()
             + self.paths.values().flatten().map(|p| p.value.len()).sum::<usize>()
             + self.diagnostics.iter().map(String::len).sum::<usize>()
             + self.diagnostics.len().saturating_sub(1)
     }
 
+    fn timing_retained_bytes(&self) -> usize {
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        { crate::host::synthetic_roster_timing_v1::Capture::RETAINED_BYTES }
+        #[cfg(not(feature = "synthetic-born-joined-qualification"))]
+        { 0 }
+    }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(super) fn capture_timing(&mut self, bytes: &[u8]) { self.timing.feed(bytes); }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(super) fn timing_json(&self) -> Option<String> { self.timing.public_json() }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(super) fn finish_timing(&mut self, drained: bool) { self.timing.finish_input(drained); }
+
     pub(super) fn append(&mut self, chunk: &[u8], root: &Path) -> Result<(), Failure> {
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        self.capture_timing(chunk);
         if chunk.len() > MAX_BYTES.saturating_sub(self.retained_bytes()) {
             return Err(Failure::OutputLimit);
         }
@@ -253,7 +272,7 @@ mod tests {
             assert!(transcript.tail().unwrap().unwrap().ends_with("EXACT CURRENT PROMPT: "));
             transcript.consume(None).unwrap();
             assert_eq!(transcript.tail().unwrap(), Some(""));
-            assert!(transcript.retained_bytes() < 1024);
+            assert!(transcript.retained_bytes() < 1024 + transcript.timing_retained_bytes());
         }
         transcript.append(b"\nDIFFERENT CURRENT PROMPT: ", root).unwrap();
         let tail = transcript.tail().unwrap().unwrap();
@@ -359,7 +378,7 @@ mod tests {
         }
         let summary = transcript.summary();
         assert_eq!(summary.split(',').count(), MAX_DIAGNOSTICS);
-        assert_eq!(transcript.retained_bytes(), summary.len());
+        assert_eq!(transcript.retained_bytes(), summary.len() + transcript.timing_retained_bytes());
         for (index, entry) in summary.split(',').enumerate() {
             assert_eq!(entry, if index % 2 == 0 { "Bootstrap:Begin" } else { "Session:Complete" });
         }
@@ -372,7 +391,7 @@ mod tests {
         transcript.append(b"SYNTHETIC_JOINED_DRAFT_PATH=/tmp/owned/exact\n[JOINED_DIAGNOSTIC Bootstrap Begin]\n", root).unwrap();
         transcript.consume(None).unwrap();
         let metadata = transcript.retained_bytes();
-        assert_eq!(metadata, "/tmp/owned/exact".len() + "Bootstrap:Begin".len());
+        assert_eq!(metadata, "/tmp/owned/exact".len() + "Bootstrap:Begin".len() + transcript.timing_retained_bytes());
         transcript.append(&vec![b'x'; MAX_BYTES - metadata], root).unwrap();
         assert_eq!(transcript.append(b"x", root), Err(Failure::OutputLimit));
         assert_eq!(transcript.retained_bytes(), MAX_BYTES);
@@ -382,7 +401,7 @@ mod tests {
     fn one_unconsumed_review_still_cannot_exceed_original_bound() {
         let root = Path::new("/tmp/owned");
         let mut transcript = Transcript::new([]).unwrap();
-        transcript.append(&vec![b'x'; MAX_BYTES], root).unwrap();
+        transcript.append(&vec![b'x'; MAX_BYTES - transcript.timing_retained_bytes()], root).unwrap();
         assert_eq!(transcript.append(b"x", root), Err(Failure::OutputLimit));
         assert_eq!(transcript.retained_bytes(), MAX_BYTES);
     }

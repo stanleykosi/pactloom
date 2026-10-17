@@ -326,7 +326,8 @@ fn observe_two_inner<'host>(
     )?;
     // Only actual prepared owners enter this original-order execution wave.
     // The existing pair/publication/read checks still run at their effect boundaries.
-    for (entry, owner, prepared) in read_wave {
+    for (ordinal, (entry, owner, prepared)) in read_wave.into_iter().enumerate() {
+        crate::host::synthetic_roster_timing_v1::select(ordinal);
         // Preparation can take time. Retain both original restriction checks
         // immediately before the history/server/native-open side effects too.
         check_scenario(original_scenario_deadline)?;

@@ -584,6 +584,38 @@ fn foreground_child(stage: &str, inputs: &[Input<'_>]) -> std::io::Result<()> {
     // Exactly one anchored group signal precedes the exact direct-child reap.
     let finished = child.finish();
     let process = finished.process;
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    if stage == "three-born-full-payment-v1" {
+        // Timing only: successful exit can precede the final PTY read. After
+        // exact reap, drain at most64 already-available chunks into the fixed
+        // timing framer, never the private transcript or outcome predicate.
+        let mut drained = false;
+        let flags = if process.verified() {
+            unsafe { libc::fcntl(master.as_raw_fd(), libc::F_GETFL) }
+        } else { -1 };
+        // This descriptor belongs only to the already-reaped child fixture.
+        // Failure to make the final reads nonblocking only loses telemetry.
+        if flags >= 0 && unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } >= 0 {
+            for _ in 0..64 {
+                let mut descriptor = libc::pollfd {
+                    fd: master.as_raw_fd(), events: libc::POLLIN, revents: 0,
+                };
+                let ready = unsafe { libc::poll(&mut descriptor, 1, 0) };
+                if ready < 0 || descriptor.revents & (libc::POLLERR | libc::POLLNVAL) != 0 { break; }
+                if ready == 0 || descriptor.revents & libc::POLLIN == 0 {
+                    drained = true;
+                    break;
+                }
+                let mut chunk = zeroize::Zeroizing::new([0u8; 4096]);
+                match master.read(&mut chunk[..]) {
+                    Ok(0) => { drained = true; break; }
+                    Ok(length) => transcript.capture_timing(&chunk[..length]),
+                    Err(_) => break,
+                }
+            }
+        }
+        transcript.finish_timing(drained);
+    }
     // Read only the fixed PUBLIC sidecar, after exact direct-child reap and
     // original group absence. A failed/timed-out child never promotes its file.
     // Save validation failure, then still explicitly close the actual root.
@@ -628,6 +660,16 @@ fn foreground_child(stage: &str, inputs: &[Input<'_>]) -> std::io::Result<()> {
             .as_ref()
             .is_some_and(|status| status.core_dumped()),
     );
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    if stage == "three-born-full-payment-v1" && process.verified()
+        && root_cleanup == TemporaryRootCleanupV1::ClosedAndAbsenceVerified
+    {
+        if let Some(json) = transcript.timing_json() {
+            // Optional telemetry only, even on failure. Write errors cannot
+            // replace the original result or verified cleanup evidence.
+            let _ = writeln!(std::io::stderr().lock(), "[JOINED_TIMING {json}]");
+        }
+    }
     if outcome.is_err()
         || !process.verified()
         || root_cleanup != TemporaryRootCleanupV1::ClosedAndAbsenceVerified

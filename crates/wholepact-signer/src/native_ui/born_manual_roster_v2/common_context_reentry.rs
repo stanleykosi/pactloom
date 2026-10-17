@@ -38,14 +38,21 @@ use wholepact_signer_origin::manual_roster_construction_v3::ManualRosterConstruc
 use zeroize::Zeroizing;
 
 // Diagnostics classify only the result of each existing operation, evaluated
-// once. No additional source check, clock sample, or authority is introduced.
+// once. Separate synthetic timing samples never feed source/currentness clocks
+// or authority; no additional source check is introduced.
 macro_rules! completion_witness_trace {
     ($phase:ident, $operation:expr) => {{
         #[cfg(feature = "synthetic-born-joined-qualification")]
         super::synthetic_diagnostics::report_begin(
             super::synthetic_diagnostics::Operation::$phase,
         );
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        let timing = super::synthetic_timing_v1::begin(
+            super::synthetic_diagnostics::Operation::$phase,
+        );
         let result = $operation;
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        if let Some(timing) = timing { timing.finish(result.is_err()); }
         #[cfg(feature = "synthetic-born-joined-qualification")]
         super::synthetic_diagnostics::report_result(
             super::synthetic_diagnostics::Operation::$phase,
@@ -61,7 +68,13 @@ macro_rules! completion_authority_trace {
         super::synthetic_diagnostics::report_begin(
             super::synthetic_diagnostics::Operation::$phase,
         );
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        let timing = super::synthetic_timing_v1::begin(
+            super::synthetic_diagnostics::Operation::$phase,
+        );
         let result = $operation;
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        if let Some(timing) = timing { timing.finish(result.is_err()); }
         #[cfg(feature = "synthetic-born-joined-qualification")]
         super::synthetic_diagnostics::report_authority_result(
             super::synthetic_diagnostics::Operation::$phase,

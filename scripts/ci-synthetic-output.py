@@ -83,6 +83,38 @@ SIGNER_LINEAGE_PREDICATE_TESTS = tuple(
         'same_call_lineage_probe_preserves_both_sentinel_originals',
     )
 )
+
+SIGNER_TIMING_TESTS = tuple(
+    'native_ui::born_manual_roster_v2::synthetic_timing_v1::tests::' + name
+    for name in (
+        'aggregate_counts_only_returned_results_and_keeps_incomplete',
+        'aggregate_saturation_is_bounded_and_marked_invalid',
+        'aggregate_catalogue_is_fixed_and_unselected_operations_are_inert',
+    )
+)
+TIMING_HOST_TESTS = tuple('host::synthetic_roster_timing_v1::tests::' + name for name in (
+    'timing_records_keep_incomplete_and_failed_spans_distinct',
+    'timing_capture_refuses_unknown_duplicate_and_out_of_bound_data',
+    'timing_stream_framing_discards_oversized_lines_and_erases_partial_bytes',
+    'timing_aggregate_bounds_do_not_sum_nested_durations',
+    'timing_complete_dump_is_not_success_or_finished_work',
+))
+TIMING_LANDMARK_PHASES = (
+    'ObservedReadRequest','ObservedReadAdmitted','ObservedReadOpen','ObservedReadPair',
+    'ObservedReadFinish','ObservedReadPark','ObservedBarrier','ConstructedPendingReview',
+    'ConstructedConsume','ConstructedSignerPark','ConstructedServerSeal','ConstructedCheckpoint',
+    'CompletionReentryFinish','CompletionConstructionFinish','CheckpointEngine',
+)
+TIMING_ALL_PHASES = frozenset(('ObservedBarrier','ConstructedCheckpoint','CheckpointEngine'))
+TIMING_LANDMARK_SLOTS = tuple((phase,ordinal) for phase in TIMING_LANDMARK_PHASES
+    for ordinal in (('All',) if phase in TIMING_ALL_PHASES else ('First','Second')))
+TIMING_AGGREGATE_PHASES = (
+    'CompletionClaimCheck','CompletionClaimSign','CompletionClaimGranted','CompletionClaimClaim',
+    'CompletionClaimClaimed','CompletionClaimObserve','CompletionClaimHistory','CompletionClaimReentered',
+    'CompletionClaimSend','ConstructionReserve','ConstructionReservedAppend','ConstructionConsume',
+    'ConstructionConsumedAppend','ConstructionNamedOwner','ConstructionIntoNamed','ConstructionFinalOwner',
+)
+TIMING_PREFIX = '[JOINED_TIMING '
 STORAGE_BOOTSTRAP_TEST = 'recovery_generation::layered::tests::native_layered_current_eight_nine_parent_provenance_is_exact_and_not_relabelable'
 SIGNER_VALIDATION_TESTS = (
     'account::birth::retired_historical_tests::birth_identity_one_derivation_preserves_both_original_commitments',
@@ -184,6 +216,57 @@ def distinct_object(pairs):
         result[key]=value
     return result
 
+
+def public_timing(text):
+    """Optional measurement, never success/authorization evidence or a clock."""
+    if len(text.encode('utf8')) > 8192: raise ValueError('oversized timing')
+    row=json.loads(text,object_pairs_hook=distinct_object)
+    fields={'version','complete','invalid','host_dump_complete','signer_dump_complete',
+            'inclusive_aggregates','landmarks','aggregates'}
+    if type(row) is not dict or set(row)!=fields: raise ValueError('unexpected timing fields')
+    if type(row['version']) is not int or row['version']!=1: raise ValueError('timing version')
+    for field in ('complete','invalid','host_dump_complete','signer_dump_complete','inclusive_aggregates'):
+        if type(row[field]) is not bool: raise ValueError('timing flag')
+    if row['inclusive_aggregates'] is not True: raise ValueError('timing interpretation')
+    def bounded(value, limit):
+        return type(value) is int and 0 <= value <= limit
+    landmarks=row['landmarks']; aggregates=row['aggregates']
+    if type(landmarks) is not list or len(landmarks)>len(TIMING_LANDMARK_SLOTS): raise ValueError('timing slots')
+    if type(aggregates) is not list or len(aggregates)>len(TIMING_AGGREGATE_PHASES): raise ValueError('timing aggregates')
+    seen=set()
+    for item in landmarks:
+        if type(item) is not dict or set(item)!={'kind','phase','ordinal','start_ms','end_ms','errors'}:
+            raise ValueError('timing landmark fields')
+        if item['kind']!='landmark' or type(item['phase']) is not str or type(item['ordinal']) is not str:
+            raise ValueError('timing landmark kind')
+        slot=(item['phase'],item['ordinal'])
+        if slot not in TIMING_LANDMARK_SLOTS or slot in seen: raise ValueError('timing landmark identity')
+        seen.add(slot)
+        start=item['start_ms']; end=item['end_ms']; errors=item['errors']
+        if not bounded(errors,1): raise ValueError('timing landmark errors')
+        if start is not None and not bounded(start,900000): raise ValueError('timing start')
+        if end is not None and not bounded(end,900000): raise ValueError('timing end')
+        if end is None:
+            if errors!=0: raise ValueError('timing unfinished result')
+        elif start is None or end<start: raise ValueError('timing order')
+    seen=set()
+    for item in aggregates:
+        if type(item) is not dict or set(item)!={'kind','phase','started','completed','errors','total_ms','max_ms'}:
+            raise ValueError('timing aggregate fields')
+        if item['kind']!='aggregate' or type(item['phase']) is not str or item['phase'] not in TIMING_AGGREGATE_PHASES or item['phase'] in seen:
+            raise ValueError('timing aggregate identity')
+        seen.add(item['phase'])
+        if any(not bounded(item[k],1000000) for k in ('started','completed','errors')):
+            raise ValueError('timing count')
+        if not item['errors']<=item['completed']<=item['started']: raise ValueError('timing count order')
+        if any(not bounded(item[k],900000000) for k in ('total_ms','max_ms')): raise ValueError('timing millis')
+        if item['max_ms']>item['total_ms'] or (item['completed']==0 and item['total_ms']!=0):
+            raise ValueError('timing total')
+    complete=(not row['invalid'] and row['host_dump_complete'] and row['signer_dump_complete']
+              and len(landmarks)==len(TIMING_LANDMARK_SLOTS) and len(aggregates)==len(TIMING_AGGREGATE_PHASES))
+    if row['complete'] and not complete: raise ValueError('timing completeness')
+    return row
+
 def public_outcome(text):
     if len(text.encode()) > 4096: raise ValueError('oversized public result')
     row=json.loads(text,object_pairs_hook=distinct_object)
@@ -228,7 +311,14 @@ def safe_failure(line):
 
 def public_line(raw, name):
     if len(raw)>8192: return None
-    line=raw.decode('utf8','strict').rstrip('\r')
+    try:
+        line=raw.decode('utf8','strict').rstrip('\r')
+    except UnicodeError:
+        prefix=('test '+name+' ... ').encode('utf8')
+        candidate=raw[len(prefix):] if raw.startswith(prefix) else raw
+        if candidate.startswith(TIMING_PREFIX.encode('ascii')):
+            return ('timing_invalid',None)
+        raise
     # No search inside arbitrary panic/text lines. Only libtest's exact prefix
     # or an entire standalone closed marker line is eligible for projection.
     prefix='test '+name+' ... '
@@ -237,6 +327,13 @@ def public_line(raw, name):
     cleanup=CLEANUP.fullmatch(line)
     if cleanup and option_i32(cleanup[5]) and option_i32(cleanup[6]): return ('cleanup',line)
     if safe_failure(line): return ('failure',line)
+    if line.startswith(TIMING_PREFIX):
+        try:
+            if not line.endswith(']'): raise ValueError('timing framing')
+            return ('timing',public_timing(line[len(TIMING_PREFIX):-1]))
+        except (ValueError, TypeError, KeyError, OverflowError, RecursionError):
+            # Optional diagnostics cannot replace the original scenario outcome.
+            return ('timing_invalid',None)
     if line.startswith(MARKER): return ('outcome',public_outcome(line[len(MARKER):]))
     return None
 
@@ -267,12 +364,12 @@ class BoundedLines:
 
 def run_pure(executable):
     assert resource.getrlimit(resource.RLIMIT_CORE)[0] == 0
-    for name in PURE_TESTS + POLICY_ENVELOPE_TESTS + PROMPT_RENDERING_TESTS + LOWER_ERROR_TESTS + DENIAL_TESTS + ROLLING_TRANSCRIPT_TESTS + AUTHORITY_PROJECTION_TESTS + READ_WAVE_TESTS:
+    for name in PURE_TESTS + POLICY_ENVELOPE_TESTS + PROMPT_RENDERING_TESTS + LOWER_ERROR_TESTS + DENIAL_TESTS + ROLLING_TRANSCRIPT_TESTS + AUTHORITY_PROJECTION_TESTS + READ_WAVE_TESTS + TIMING_HOST_TESTS:
         flags=['--exact',name,'--test-threads=1']
         listed=subprocess.run([executable,*flags,'--list'],capture_output=True,timeout=30,check=True)
         if not exact_listing(listed.stdout.decode(),name) or listed.stderr:
             raise ValueError('exact pure test not uniquely registered')
-        # These 38 fixed source-reviewed cases use only modeled process state,
+        # These 43 fixed source-reviewed cases use only modeled process state,
         # inert files, historical policy DTOs, fixed prompts, closed error kinds or
         # bounded private parsing state. They create
         # no native/IPC/network/payment owners.
@@ -280,11 +377,11 @@ def run_pure(executable):
         if result.returncode!=0 or len(result.stdout)>1024*1024:
             print('CI_SYNTHETIC_PURE failed_test='+name,flush=True)
             raise RuntimeError('exact pure test failed; raw output withheld')
-    print('CI_SYNTHETIC_PURE passed=38 raw_output_discarded=true',flush=True)
+    print('CI_SYNTHETIC_PURE passed=43 raw_output_discarded=true',flush=True)
 
 def run_signer_validation(executable):
     assert resource.getrlimit(resource.RLIMIT_CORE)[0] == 0
-    for name in SIGNER_VALIDATION_TESTS + SIGNER_BOOKKEEPING_TESTS + SIGNER_PRECONSTRUCTION_TESTS + SIGNER_BIRTH_LINK_TESTS + SIGNER_ENDPOINT_CHANNEL_TESTS + SIGNER_SNAPSHOT_STORAGE_TESTS + SIGNER_SHAPE_TAMPER_TESTS + SIGNER_REENTRY_COMPATIBILITY_TESTS + SIGNER_CALL_LOCAL_TESTS + SIGNER_AUDIT_STORAGE_TESTS + SIGNER_AUDIT_COMPATIBILITY_TESTS + SIGNER_NAMED_ORIGIN_SNAPSHOT_TESTS + SIGNER_LINEAGE_PREDICATE_TESTS:
+    for name in SIGNER_VALIDATION_TESTS + SIGNER_BOOKKEEPING_TESTS + SIGNER_PRECONSTRUCTION_TESTS + SIGNER_BIRTH_LINK_TESTS + SIGNER_ENDPOINT_CHANNEL_TESTS + SIGNER_SNAPSHOT_STORAGE_TESTS + SIGNER_SHAPE_TAMPER_TESTS + SIGNER_REENTRY_COMPATIBILITY_TESTS + SIGNER_CALL_LOCAL_TESTS + SIGNER_AUDIT_STORAGE_TESTS + SIGNER_AUDIT_COMPATIBILITY_TESTS + SIGNER_NAMED_ORIGIN_SNAPSHOT_TESTS + SIGNER_LINEAGE_PREDICATE_TESTS + SIGNER_TIMING_TESTS:
         flags=['--exact',name,'--test-threads=1']
         try:
             listed=subprocess.run([executable,*flags,'--list'],capture_output=True,timeout=30,check=True)
@@ -297,7 +394,8 @@ def run_signer_validation(executable):
             # one pure shape-tamper case and three archival/storage compatibility
             # cases, two call-local validation cases, one encrypted saved-digest
             # case, two signed-history audit compatibility cases and three encrypted
-            # named-origin snapshot cases and two inert lineage equality cases. No socket,
+            # named-origin snapshot cases, two inert lineage equality cases, and three
+            # fixed timing-counter model cases. No socket,
             # native authority or payment owner. Raw
             # output stays private; this size check is post-capture, not a claim
             # of an incremental memory cap. Each fixed case has its own bound.
@@ -307,7 +405,7 @@ def run_signer_validation(executable):
         except Exception:
             print('CI_SYNTHETIC_SIGNER_VALIDATION failed_test='+name+' raw_output_withheld=true',flush=True)
             raise
-    print('CI_SYNTHETIC_SIGNER_VALIDATION passed=32 crypto_file_cases=4 bookkeeping_cases=2 replay_cases=6 endpoint_channel_cases=4 snapshot_storage_cases=2 shape_tamper_cases=1 compatibility_cases=3 call_local_cases=2 audit_storage_cases=1 audit_compatibility_cases=2 named_origin_snapshot_cases=3 lineage_predicate_cases=2 native_payment_verified=false raw_output_discarded=true',flush=True)
+    print('CI_SYNTHETIC_SIGNER_VALIDATION passed=35 crypto_file_cases=4 bookkeeping_cases=2 replay_cases=6 endpoint_channel_cases=4 snapshot_storage_cases=2 shape_tamper_cases=1 compatibility_cases=3 call_local_cases=2 audit_storage_cases=1 audit_compatibility_cases=2 named_origin_snapshot_cases=3 lineage_predicate_cases=2 timing_counter_cases=3 native_payment_verified=false raw_output_discarded=true',flush=True)
 
 def run_authority_rendering(executable):
     assert resource.getrlimit(resource.RLIMIT_CORE)[0] == 0
@@ -372,7 +470,7 @@ def run(executable, phase):
     assert exact_listing(listed.stdout.decode(),name) and not listed.stderr, 'Exact test not uniquely registered'
     started=time.monotonic(); process=subprocess.Popen([executable,*flags,'--nocapture'],stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
     assert process.stdout is not None
-    framing=BoundedLines(); total=0; cleanup=False; cleanups=0; cores=0; failures=0; outcome=None; status=None
+    framing=BoundedLines(); total=0; cleanup=False; cleanup_observed=False; cleanups=0; cores=0; failures=0; outcome=None; status=None; timing=None; timing_count=0; timing_invalid=False
     try:
         eof=False
         while not eof:
@@ -396,12 +494,17 @@ def run(executable, phase):
                     cleanups+=1
                     if cleanups>1: raise ValueError('duplicate cleanup result')
                     fields=CLEANUP.fullmatch(value)
+                    cleanup_observed=fields[1]!='Unverified' and fields[2]=='OriginalGroupAbsentObserved' and fields[3]=='Reaped' and fields[4]=='ClosedAndAbsenceVerified'
                     cleanup=fields[1]!='Unverified' and fields[2]=='OriginalGroupAbsentObserved' and fields[3]=='Reaped' and fields[4]=='ClosedAndAbsenceVerified' and fields[5]=='Some(0)' and fields[6]=='None' and fields[7]=='false'
                     print(value,flush=True)
                 elif kind=='failure':
                     failures+=1
                     if failures>1: raise ValueError('duplicate failure result')
                     print(value,flush=True)
+                elif kind in ('timing','timing_invalid'):
+                    timing_count+=1
+                    if timing_count>1 or phase!='full' or kind=='timing_invalid': timing_invalid=True
+                    else: timing=value
                 elif kind=='outcome':
                     if phase!='full' or outcome is not None: raise ValueError('unexpected duplicate public outcome')
                     outcome=value
@@ -414,6 +517,16 @@ def run(executable, phase):
             try: process.wait(timeout=5)
             except subprocess.TimeoutExpired: pass
             print('CI_SYNTHETIC_RESULT cleanup_unverified=true outcome_unverified=true',flush=True)
+    # Measurement is optional and emitted only after the independently observed
+    # process/root cleanup. Failure exit statuses still retain bounded timing;
+    # malformed/missing/duplicate timing never changes the original result gate.
+    if phase=='full' and cleanup_observed:
+        if timing_invalid:
+            print('CI_SYNTHETIC_TIMING invalid=true details_withheld=true',flush=True)
+        elif timing is None:
+            print('CI_SYNTHETIC_TIMING missing=true details_withheld=true',flush=True)
+        else:
+            print(TIMING_PREFIX+json.dumps(timing,separators=(',',':'),sort_keys=True)+']',flush=True)
     if status!=0 or not cleanup or cores!=1 or failures or (phase=='full' and outcome is None):
         raise RuntimeError('synthetic phase failed or required cleanup/outcome evidence missing')
     if outcome is not None:

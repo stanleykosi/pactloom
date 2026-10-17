@@ -38,6 +38,7 @@ pub(crate) fn denied_predicate(phase: Phase, permitted: &bool) {
     }
 }
 pub(super) fn begin(phase: Phase) {
+    super::synthetic_roster_timing_v1::event(phase.label(), true, false);
     emit(phase, Outcome::Begin);
 }
 fn result<T, E>(
@@ -45,6 +46,7 @@ fn result<T, E>(
     value: &std::result::Result<T, E>,
     classify: impl FnOnce(&E) -> Outcome,
 ) {
+    super::synthetic_roster_timing_v1::event(phase.label(), false, value.is_err());
     emit(
         phase,
         value.as_ref().map_or_else(classify, |_| Outcome::Complete),

@@ -148,6 +148,7 @@ fn construct_two_inner<'host>(
     let mut originals = BTreeMap::new();
 
     for (participant, owner) in owners.into_iter().enumerate() {
+        crate::host::synthetic_roster_timing_v1::select(participant);
         check_scenario(original_scenario_deadline)?;
         let actual_born = born
             .get(owner.signer_index)

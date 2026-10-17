@@ -21,6 +21,8 @@ macro_rules! roster_trace {
 }
 #[cfg(all(test, feature = "synthetic-born-joined-qualification"))]
 pub(crate) mod synthetic_roster_trace_v1;
+#[cfg(all(test, feature = "synthetic-born-joined-qualification"))]
+pub(crate) mod synthetic_roster_timing_v1;
 
 // Denial-only projection of the actual predicate/result. Outside the synthetic
 // test build this is precisely the original expression, not an extra check.

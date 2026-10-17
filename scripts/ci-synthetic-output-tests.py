@@ -424,6 +424,11 @@ class PublicOutputTests(unittest.TestCase):
         self.assertEqual(output.READ_WAVE_TESTS,expected)
         path=ROOT/'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3_qualification/observed_joined_v3.rs'
         source=path.read_text()
+        timed_loop=('for (ordinal, (entry, owner, prepared)) in read_wave.into_iter().enumerate() {\n'
+                    '        crate::host::synthetic_roster_timing_v1::select(ordinal);')
+        self.assertEqual(source.count(timed_loop),1)
+        source=source.replace(timed_loop,'for (entry, owner, prepared) in read_wave {',1)
+        self.assertEqual(hashlib.sha256(source.encode()).hexdigest(),'269ce7d617fefac3115b6be58e9dfcef2f92deb2068a6039384429bdefde6fa2')
         for name in names:
             self.assertEqual(source.count('fn '+name+'()'),1)
         function=source.split('fn observe_two_inner<',1)[1].split('// A private collect barrier',1)[0]
@@ -542,7 +547,7 @@ class PublicOutputTests(unittest.TestCase):
         def fake_run(argv, **kwargs):
             calls.append((argv,kwargs))
             name=argv[2]
-            self.assertIn(name,output.SIGNER_VALIDATION_TESTS+output.SIGNER_BOOKKEEPING_TESTS+output.SIGNER_PRECONSTRUCTION_TESTS+output.SIGNER_BIRTH_LINK_TESTS+output.SIGNER_ENDPOINT_CHANNEL_TESTS+output.SIGNER_SNAPSHOT_STORAGE_TESTS+output.SIGNER_SHAPE_TAMPER_TESTS+output.SIGNER_REENTRY_COMPATIBILITY_TESTS+output.SIGNER_CALL_LOCAL_TESTS+output.SIGNER_AUDIT_STORAGE_TESTS+output.SIGNER_AUDIT_COMPATIBILITY_TESTS+output.SIGNER_NAMED_ORIGIN_SNAPSHOT_TESTS+output.SIGNER_LINEAGE_PREDICATE_TESTS)
+            self.assertIn(name,output.SIGNER_VALIDATION_TESTS+output.SIGNER_BOOKKEEPING_TESTS+output.SIGNER_PRECONSTRUCTION_TESTS+output.SIGNER_BIRTH_LINK_TESTS+output.SIGNER_ENDPOINT_CHANNEL_TESTS+output.SIGNER_SNAPSHOT_STORAGE_TESTS+output.SIGNER_SHAPE_TAMPER_TESTS+output.SIGNER_REENTRY_COMPATIBILITY_TESTS+output.SIGNER_CALL_LOCAL_TESTS+output.SIGNER_AUDIT_STORAGE_TESTS+output.SIGNER_AUDIT_COMPATIBILITY_TESTS+output.SIGNER_NAMED_ORIGIN_SNAPSHOT_TESTS+output.SIGNER_LINEAGE_PREDICATE_TESTS+output.SIGNER_TIMING_TESTS)
             self.assertEqual(argv[:2],['/verified/signer','--exact'])
             self.assertEqual(argv[3],'--test-threads=1')
             if argv[-1]=='--list':
@@ -557,8 +562,8 @@ class PublicOutputTests(unittest.TestCase):
              mock.patch.object(output.subprocess,'run',side_effect=fake_run), \
              contextlib.redirect_stdout(captured):
             output.run_signer_validation('/verified/signer')
-        self.assertEqual([argv[2] for argv,_ in calls], [name for name in output.SIGNER_VALIDATION_TESTS+output.SIGNER_BOOKKEEPING_TESTS+output.SIGNER_PRECONSTRUCTION_TESTS+output.SIGNER_BIRTH_LINK_TESTS+output.SIGNER_ENDPOINT_CHANNEL_TESTS+output.SIGNER_SNAPSHOT_STORAGE_TESTS+output.SIGNER_SHAPE_TAMPER_TESTS+output.SIGNER_REENTRY_COMPATIBILITY_TESTS+output.SIGNER_CALL_LOCAL_TESTS+output.SIGNER_AUDIT_STORAGE_TESTS+output.SIGNER_AUDIT_COMPATIBILITY_TESTS+output.SIGNER_NAMED_ORIGIN_SNAPSHOT_TESTS+output.SIGNER_LINEAGE_PREDICATE_TESTS for _ in range(2)])
-        self.assertEqual(captured.getvalue(),'CI_SYNTHETIC_SIGNER_VALIDATION passed=32 crypto_file_cases=4 bookkeeping_cases=2 replay_cases=6 endpoint_channel_cases=4 snapshot_storage_cases=2 shape_tamper_cases=1 compatibility_cases=3 call_local_cases=2 audit_storage_cases=1 audit_compatibility_cases=2 named_origin_snapshot_cases=3 lineage_predicate_cases=2 native_payment_verified=false raw_output_discarded=true\n')
+        self.assertEqual([argv[2] for argv,_ in calls], [name for name in output.SIGNER_VALIDATION_TESTS+output.SIGNER_BOOKKEEPING_TESTS+output.SIGNER_PRECONSTRUCTION_TESTS+output.SIGNER_BIRTH_LINK_TESTS+output.SIGNER_ENDPOINT_CHANNEL_TESTS+output.SIGNER_SNAPSHOT_STORAGE_TESTS+output.SIGNER_SHAPE_TAMPER_TESTS+output.SIGNER_REENTRY_COMPATIBILITY_TESTS+output.SIGNER_CALL_LOCAL_TESTS+output.SIGNER_AUDIT_STORAGE_TESTS+output.SIGNER_AUDIT_COMPATIBILITY_TESTS+output.SIGNER_NAMED_ORIGIN_SNAPSHOT_TESTS+output.SIGNER_LINEAGE_PREDICATE_TESTS+output.SIGNER_TIMING_TESTS for _ in range(2)])
+        self.assertEqual(captured.getvalue(),'CI_SYNTHETIC_SIGNER_VALIDATION passed=35 crypto_file_cases=4 bookkeeping_cases=2 replay_cases=6 endpoint_channel_cases=4 snapshot_storage_cases=2 shape_tamper_cases=1 compatibility_cases=3 call_local_cases=2 audit_storage_cases=1 audit_compatibility_cases=2 named_origin_snapshot_cases=3 lineage_predicate_cases=2 timing_counter_cases=3 native_payment_verified=false raw_output_discarded=true\n')
 
     def test_checkpoint_engine_projection_is_exact_closed_public_kinds(self):
         labels=set(('EngineCheckpointClaim', 'EngineCheckpointPlan', 'EngineCheckpointRetained', 'EngineCheckpointParts', 'EngineCheckpointNative', 'EngineCheckpointHeld', 'EngineCheckpointRestriction', 'EngineCheckpointConstruct', 'EngineCheckpointInspect', 'EngineCheckpointActionLimit', 'EngineCheckpointConsent', 'EngineCheckpointReceipt', 'EngineCheckpointRecord', 'EngineCheckpointEnqueue', 'EngineCheckpointFinish', 'EngineCheckpointContext'))
@@ -1015,6 +1020,164 @@ class PublicOutputTests(unittest.TestCase):
         for inner in ['wholepact-born-manual-ipc-','wholepact-born-stop-','.tmp']:
             path='/tmp/wpc.aaaaaa/wp-pty-bbbbbb/'+inner+'cccccc/requests-'+'0'*24+'.sock'
             self.assertLess(len(path.encode()),108)
+
+
+class PublicTimingTests(unittest.TestCase):
+    def record(self, complete=True):
+        row=dict(version=1,complete=complete,invalid=False,host_dump_complete=complete,
+                 signer_dump_complete=complete,inclusive_aggregates=True,landmarks=[],aggregates=[])
+        if complete:
+            row['landmarks']=[dict(kind='landmark',phase=p,ordinal=o,start_ms=None,end_ms=None,errors=0)
+                              for p,o in output.TIMING_LANDMARK_SLOTS]
+            row['aggregates']=[dict(kind='aggregate',phase=p,started=0,completed=0,errors=0,total_ms=0,max_ms=0)
+                               for p in output.TIMING_AGGREGATE_PHASES]
+        return row
+
+    def line(self, row):
+        return output.TIMING_PREFIX+json.dumps(row,separators=(',',':'))+']'
+
+    def test_timing_complete_dump_preserves_missing_unfinished_and_error_distinctions(self):
+        missing=self.record(False)
+        self.assertEqual(output.public_timing(json.dumps(missing)),missing)
+        row=self.record()
+        row['landmarks'][0].update(start_ms=0,end_ms=None)
+        row['landmarks'][1].update(start_ms=2,end_ms=9,errors=1)
+        row['aggregates'][0].update(started=3,completed=2,errors=1,total_ms=19,max_ms=12)
+        self.assertEqual(output.public_line(self.line(row).encode(),'fixed'),('timing',row))
+        self.assertTrue(row['complete'])  # Catalogue completeness, not finished/successful work.
+        row['invalid']=True; row['complete']=False
+        self.assertEqual(output.public_timing(json.dumps(row)),row)
+
+    def test_timing_projection_refuses_unknown_duplicate_or_private_fields(self):
+        row=self.record()
+        mutations=[]
+        for key,value in [('version',True),('version',2),('complete',1),('invalid','false'),
+                          ('inclusive_aggregates',False),('private','wallet'),('landmarks',{}),
+                          ('aggregates',[{}]),('signer_dump_complete',None)]:
+            changed=json.loads(json.dumps(row)); changed[key]=value; mutations.append(changed)
+        for field,value in [('phase','private'),('ordinal','All'),('kind','aggregate'),('private','secret')]:
+            changed=json.loads(json.dumps(row)); changed['landmarks'][0][field]=value; mutations.append(changed)
+        for field,value in [('phase','private'),('kind','landmark'),('private','secret')]:
+            changed=json.loads(json.dumps(row)); changed['aggregates'][0][field]=value; mutations.append(changed)
+        for field in ('landmarks','aggregates'):
+            changed=json.loads(json.dumps(row)); changed[field][1]=changed[field][0]; mutations.append(changed)
+        for changed in mutations:
+            with self.assertRaises(ValueError): output.public_timing(json.dumps(changed))
+            self.assertEqual(output.public_line(self.line(changed).encode(),'fixed'),('timing_invalid',None))
+        for text in [json.dumps(row).replace('"version": 1','"version": 1, "version": 1'),
+                     json.dumps(row).replace('"errors": 0','"errors": 0, "errors": 0',1)]:
+            with self.assertRaises(ValueError): output.public_timing(text)
+        self.assertEqual(output.public_line((self.line(row)+' private').encode(),'fixed'),('timing_invalid',None))
+        self.assertEqual(output.public_line((output.TIMING_PREFIX+'['*2000+'0'+']'*2000+']').encode(),'fixed'),('timing_invalid',None))
+
+    def test_timing_numeric_limits_and_relations_are_strict(self):
+        for field,value in [('start_ms',True),('start_ms',-1),('start_ms',900001),('end_ms',0),('errors',1),('errors',False)]:
+            row=self.record(); row['landmarks'][0][field]=value
+            with self.assertRaises(ValueError): output.public_timing(json.dumps(row))
+        for field,value in [('started',True),('started',-1),('started',1000001),('completed',1),
+                            ('errors',1),('total_ms',1),('max_ms',1),('max_ms',900000001)]:
+            row=self.record(); row['aggregates'][0][field]=value
+            with self.assertRaises(ValueError): output.public_timing(json.dumps(row))
+        for value in [float('nan'),float('inf'),1.0]:
+            row=self.record(); row['aggregates'][0]['started']=value
+            with self.assertRaises(ValueError): output.public_timing(json.dumps(row))
+        row=self.record(); row['landmarks'][0].update(start_ms=9,end_ms=8)
+        with self.assertRaises(ValueError): output.public_timing(json.dumps(row))
+        row=self.record(); row['aggregates'][0].update(started=2,completed=2,total_ms=3,max_ms=4)
+        with self.assertRaises(ValueError): output.public_timing(json.dumps(row))
+        row=self.record(); row['complete']=False
+        self.assertEqual(output.public_timing(json.dumps(row)),row)  # Conservative incomplete drain.
+        row=self.record(False); row['complete']=True
+        with self.assertRaises(ValueError): output.public_timing(json.dumps(row))
+
+    def test_timing_maximal_fixed_catalogue_fits_original_physical_line_bound(self):
+        row=self.record()
+        for item in row['landmarks']: item.update(start_ms=900000,end_ms=900000,errors=1)
+        for item in row['aggregates']: item.update(started=1000000,completed=1000000,errors=1000000,total_ms=900000000,max_ms=900000000)
+        line=self.line(row).encode()
+        self.assertLess(len(line),8192)
+        self.assertEqual(output.public_line(line,'fixed'),('timing',row))
+        framing=output.BoundedLines()
+        self.assertEqual(framing.feed(b'private'+b'x'*8200+line[:40]),[])
+        self.assertEqual(framing.feed(line[40:]+b'\n'+line+b'\n'),[line])
+        self.assertIsNone(output.public_line(b'private '+line,'fixed'))
+        self.assertIsNone(output.public_line(b'[JOINED_TIMING_V1 {"private":"secret"}]','fixed'))
+        for prefix in (b'', b'test fixed ... '):
+            self.assertEqual(output.public_line(prefix+b'[JOINED_TIMING '+bytes([255])+b']','fixed'),('timing_invalid',None))
+        with self.assertRaises(UnicodeError): output.public_line(b'private '+bytes([255]),'fixed')
+
+    def run_fake(self, timing_lines, status=101, verified=True):
+        name=output.TESTS['full'][0]
+        core='[JOINED_CORE_POLICY inherited_limit=Zero collector=Pipe process_dumpability=Unchanged crash_copy_absence_verified=false]'
+        cleanup=('[JOINED_CLEANUP group_signal=AlreadyAbsentWhileLeaderOwned group_absence=OriginalGroupAbsentObserved '
+                 'direct_child=Reaped root_cleanup='+('ClosedAndAbsenceVerified' if verified else 'CloseOrAbsenceUnverified')+
+                 f' exit=Some({status}) signal=None core_dumped=false]')
+        failure='[JOINED_FAILURE exit=Some(101) signal=None core_dumped=false inputs=1/204 reason=ChildExit static_boundaries=EndInvariant:HostReceipt]'
+        rows=[core,cleanup,*timing_lines]
+        if status: rows.append(failure)
+        else:
+            # Use existing exact valid synthetic receipt; no private payload.
+            rows.append(output.MARKER+json.dumps(PublicOutputTests().record()))
+        payload=('\n'.join(rows)+'\n').encode()
+        stream=mock.Mock(); stream.fileno.return_value=7
+        process=mock.Mock(stdout=stream); process.wait.return_value=status
+        listed=output.subprocess.CompletedProcess([],0,(name+': test\n\n1 test, 0 benchmarks\n').encode(),b'')
+        captured=io.StringIO()
+        with mock.patch.object(output.resource,'getrlimit',return_value=(0,0)), \
+             mock.patch.object(output.subprocess,'run',return_value=listed), \
+             mock.patch.object(output.subprocess,'Popen',return_value=process), \
+             mock.patch.object(output.select,'select',return_value=([stream],[],[])), \
+             mock.patch.object(output.os,'read',side_effect=[payload,b'']), \
+             mock.patch.dict(output.os.environ,{},clear=True), contextlib.redirect_stdout(captured):
+            if status or not verified:
+                with self.assertRaises(RuntimeError): output.run('/verified/host','full')
+            else: output.run('/verified/host','full')
+        process.kill.assert_not_called()
+        return captured.getvalue()
+
+    def test_timing_is_retained_on_actual_failure_only_after_verified_cleanup(self):
+        text=self.run_fake([self.line(self.record())])
+        self.assertIn('[JOINED_TIMING ',text)
+        self.assertLess(text.index('[JOINED_CLEANUP '),text.index('[JOINED_TIMING '))
+        self.assertNotIn('phase=full passed=true',text)
+        self.assertNotIn('[JOINED_TIMING ',self.run_fake([self.line(self.record())],verified=False))
+
+    def test_invalid_duplicate_or_missing_timing_never_changes_success_predicate(self):
+        valid=self.line(self.record())
+        for lines,marker in [([valid,valid],'invalid=true'),(['[JOINED_TIMING {"private":"secret"}]'],'invalid=true'),([], 'missing=true')]:
+            text=self.run_fake(lines,status=0)
+            self.assertIn('CI_SYNTHETIC_TIMING '+marker,text)
+            self.assertNotIn('private',text); self.assertNotIn('secret',text)
+            self.assertIn('phase=full passed=true cleanup_verified=true',text)
+        text=self.run_fake([valid],status=0)
+        self.assertIn('[JOINED_TIMING ',text)
+        self.assertIn('phase=full passed=true cleanup_verified=true',text)
+
+    def test_timing_catalogues_and_exact_test_registrations_match_actual_sources(self):
+        host=(ROOT/'crates/wholepact-native-host/src/host/synthetic_roster_timing_v1.rs').read_text()
+        signer=(ROOT/'crates/wholepact-signer/src/native_ui/born_manual_roster_v2/synthetic_timing_v1.rs').read_text()
+        def variants(name):
+            body=host.split('names! { '+name+' {',1)[1].split('} }',1)[0]
+            return tuple(re.findall(r'\b[A-Z][A-Za-z0-9_]+\b',body))
+        self.assertEqual(variants('Phase'),output.TIMING_LANDMARK_PHASES)
+        self.assertEqual(variants('AggregatePhase'),output.TIMING_AGGREGATE_PHASES)
+        phases=tuple(re.findall(r'"([A-Z][A-Za-z0-9]+)"',signer.split('const PHASES:',1)[1].split('];',1)[0]))
+        self.assertEqual(set(phases),set(output.TIMING_AGGREGATE_PHASES))
+        self.assertEqual(len(phases),16); self.assertEqual(len(output.TIMING_LANDMARK_SLOTS),27)
+        for names,source,prefix in [(output.SIGNER_TIMING_TESTS,signer,'native_ui::born_manual_roster_v2::synthetic_timing_v1::tests::'),
+                                    (output.TIMING_HOST_TESTS,host,'host::synthetic_roster_timing_v1::tests::')]:
+            self.assertEqual(len(names),3 if names is output.SIGNER_TIMING_TESTS else 5)
+            for name in names:
+                self.assertTrue(name.startswith(prefix))
+                self.assertEqual(len(re.findall(r'#\[test\]\s+fn '+name.rsplit('::',1)[1]+r'\(',source)),1)
+        source=(ROOT/'scripts/ci-synthetic-output.py').read_text()
+        self.assertIn(' + SIGNER_TIMING_TESTS:',source)
+        self.assertIn(' + TIMING_HOST_TESTS:',source)
+        self.assertIn('CI_SYNTHETIC_PURE passed=43 ',source)
+        self.assertIn('timing_counter_cases=3',source)
+        self.assertIn("if status!=0 or not cleanup or cores!=1 or failures or (phase=='full' and outcome is None):",source)
+        self.assertNotIn('eprintln!',signer)
+        self.assertIn('let _ = writeln!',signer)
 
 class PublicCompilerOutputTests(unittest.TestCase):
     source='crates/wholepact-signer/src/account/birth/enrollment/roster_v2/inventory/candidate.rs'

@@ -7,6 +7,12 @@ pub(in crate::native_ui) mod born_manual_roster;
 // Closed synthetic diagnostics preserve exact predicate evaluation and results.
 #[cfg(feature = "synthetic-born-joined-qualification")]
 mod synthetic_diagnostics;
+#[cfg(feature = "synthetic-born-joined-qualification")]
+mod synthetic_timing_v1;
+#[cfg(feature = "synthetic-born-joined-qualification")]
+pub(in crate::native_ui) fn emit_synthetic_timing_summary() {
+    synthetic_timing_v1::emit_summary();
+}
 macro_rules! roster_clear_if {
     ($condition:expr, $reason:ident) => {{
         let condition = $condition;
@@ -1292,7 +1298,13 @@ fn run(work: Work, owner: &PendingAccountNativeAuthority) -> Result<Output> {
                 synthetic_diagnostics::Operation::ConstructionFinalOwner,
             );
         }
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        let timing = if completed_consumption {
+            synthetic_timing_v1::begin(synthetic_diagnostics::Operation::ConstructionFinalOwner)
+        } else { None };
         let current = owner.check_current();
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        if let Some(timing) = timing { timing.finish(current.is_err()); }
         #[cfg(feature = "synthetic-born-joined-qualification")]
         if completed_consumption {
             synthetic_diagnostics::report_result(

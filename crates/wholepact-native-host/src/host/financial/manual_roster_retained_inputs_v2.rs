@@ -605,8 +605,16 @@ impl<'host> RetainedRosterCandidateInputsV2<'host> {
             client
                 .current_caller_binding_digest()
                 .map_err(|_| Error::Permission)?,
-            now_ms()?,
-        )?;
+            {
+                let now = now_ms()?;
+                #[cfg(all(test, feature = "synthetic-born-joined-qualification"))]
+                crate::host::synthetic_roster_timing_v1::event("ObservedReadRequest", true, false);
+                now
+            },
+        );
+        #[cfg(all(test, feature = "synthetic-born-joined-qualification"))]
+        crate::host::synthetic_roster_timing_v1::event("ObservedReadRequest", false, request.is_err());
+        let request = request?;
         let original_deadline = self.original_completion_deadline();
         if request.plan.retained != *self.request(host)? {
             return Err(Error::Authentication);
@@ -636,7 +644,12 @@ impl<'host> PendingHostCommonContextReadV1<'_, 'host> {
     ) -> Result<ReadyHostCommonContextReadV1<'host>> {
         self.source.check_current(host)?;
         let (native, read) = self.native.finish().map_err(|_| Error::Permission)?;
-        let read = self.admission.finish(read)?;
+        #[cfg(all(test, feature = "synthetic-born-joined-qualification"))]
+        crate::host::synthetic_roster_timing_v1::event("ObservedReadAdmitted", true, false);
+        let read = self.admission.finish(read);
+        #[cfg(all(test, feature = "synthetic-born-joined-qualification"))]
+        crate::host::synthetic_roster_timing_v1::event("ObservedReadAdmitted", false, read.is_err());
+        let read = read?;
         let (read, completion) = read.into_parts()?;
         self.source.check_current(host)?;
         Ok(ReadyHostCommonContextReadV1 {

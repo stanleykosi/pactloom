@@ -81,9 +81,15 @@ pub(super) fn inputs() -> Vec<Input<'static>> {
 /// The scenario retains Host, original witnesses, signer worker and recipient
 /// until the actual carrier/payment result and its bounded owners have drained.
 pub(super) fn exercise_full_payment_stage(terminal: Terminal) -> Result<()> {
-    super::safe_diagnostics_v1::host(super::safe_diagnostics_v1::Boundary::EndInvariant, || {
+    crate::host::synthetic_roster_timing_v1::enable();
+    let result = super::safe_diagnostics_v1::host(super::safe_diagnostics_v1::Boundary::EndInvariant, || {
         exercise_full_payment_stage_inner(terminal)
-    })
+    });
+    // All scenario locals, including the joined worker, have drained on either
+    // result. These optional bounded dumps never decide the result below.
+    crate::host::synthetic_roster_timing_v1::emit_summary();
+    wholepact_signer::native_ui::synthetic_born_joined_qualification::emit_synthetic_timing_summary();
+    result
 }
 
 fn exercise_full_payment_stage_inner(terminal: Terminal) -> Result<()> {
