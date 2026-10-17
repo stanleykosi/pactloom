@@ -16,8 +16,8 @@ macro_rules! labels {
         impl $name { fn label(self) -> &'static str { match self { $(Self::$variant => stringify!($variant)),+ } } }
     };
 }
-labels! { Phase { CandidateRetainCurrent, CandidateRetainRequest, CandidateRetainBegin, CandidateRetainFinish, ScanAccessAccount, ScanAccessNativeBefore, ScanAccessRequest, ScanAccessTarget, ScanAccessHostAccess, ScanAccessPrincipal, ScanAccessEnrollmentPrincipal, ScanAccessRequestDigest, ScanAccessScopeDigest, ScanAccessImport, ScanAccessNativeAfter, ScanNativeAdmissionDeadline, ScanNativeLease, ScanNativeRemaining, ScanNativePurpose, ScanNativeAccount, ScanNativeProviderSource, ScanNativeProviderEndpoint, ScanNativeProviderTrust, JoinedPairFinish, JoinedRequestBegin, JoinedLeaseFinish, JoinedInventoryCheck, JoinedAuditAppend, JoinedInventoryRun, InventoryPair, InventoryRequest, InventoryLease, InventoryImport, InventoryImportRecord, InventoryScan, InventorySynchronize, InventoryInspect, InventoryDisplay, InventoryFinish, CandidateRun, CandidatePair, CandidateRequest, CandidateLease, CandidateExclusions, CandidateSelect, CandidateDisplay, CandidateRetain, CandidateAttach } }
-labels! { Outcome { Begin, Complete, HostPlatform, HostTerminal, HostPermission, HostLocked, HostInvalid, HostAuthentication, HostStorage, HostQuarantined, HostUnsupported, HostReceipt, HostRecoverySemantic, HostRecoveryBackupUnsupported, HostRecoveryFinancialUnsupported, HostCompleteOriginRecoveryUnavailable, HostHistoricalExportIncomplete, HostGenerationArchiveIncomplete, ImportFreshOwnerRequired, ImportBinding, ImportIncomplete, ImportStorage, SyncAccessDenied, SyncInvalidRequest, SyncInterrupted, SyncReconciliationRequired, SyncInvalidResponse, SyncResourceLimit, SyncNoCurrentObservation, WalletStorage, WalletAccountScope, WalletAccountMismatch, WalletIncompleteSync, WalletUnsupportedProfile, WalletChainMismatch, WalletInsufficientFunds, WalletInvalidRequest, WalletMissingWitness, WalletInvalidNote, WalletScan, WalletTransport, ChainInvalidConfiguration, ChainWrongNetwork, ChainUnsupportedProxyConfiguration, ChainWrongBranch, ChainStaleChain, ChainContradictoryChain, ChainTimeout, ChainTransportUnavailable, ChainObservationInterrupted, ChainMissingAncestryEvidence, ChainNotObserved, ChainResourceLimit, ChainMalformedEvidence, ChainUnsupportedCapability, ChainBackendFailure, ChainClockUnavailable, ChainIdempotencyConflict, ChainJournalFailure, ChainSubmissionNotAuthorized, ChainSubmissionExpiryMargin, ChainObligationConflict, ChainSubmissionOutcomeUnrecorded, ChainSubmissionRetentionUncertain, RecoveryAccessDenied, RecoveryUnsupportedAccountComponents, RecoveryIncompleteScan, RecoveryKnownFundsRemain, RecoveryAdditionalEvidenceRequired } }
+labels! { Phase { CompletionOriginal, CompletionPairApproval, CompletionPairBegin, CompletionPairFinish, CompletionReentryRequest, CompletionRequestApproval, CompletionReentryBegin, CompletionReentryFinish, CompletionConstructionBegin, CompletionConstructionFinish, CandidateRetainCurrent, CandidateRetainRequest, CandidateRetainBegin, CandidateRetainFinish, ScanAccessAccount, ScanAccessNativeBefore, ScanAccessRequest, ScanAccessTarget, ScanAccessHostAccess, ScanAccessPrincipal, ScanAccessEnrollmentPrincipal, ScanAccessRequestDigest, ScanAccessScopeDigest, ScanAccessImport, ScanAccessNativeAfter, ScanNativeAdmissionDeadline, ScanNativeLease, ScanNativeRemaining, ScanNativePurpose, ScanNativeAccount, ScanNativeProviderSource, ScanNativeProviderEndpoint, ScanNativeProviderTrust, JoinedPairFinish, JoinedRequestBegin, JoinedLeaseFinish, JoinedInventoryCheck, JoinedAuditAppend, JoinedInventoryRun, InventoryPair, InventoryRequest, InventoryLease, InventoryImport, InventoryImportRecord, InventoryScan, InventorySynchronize, InventoryInspect, InventoryDisplay, InventoryFinish, CandidateRun, CandidatePair, CandidateRequest, CandidateLease, CandidateExclusions, CandidateSelect, CandidateDisplay, CandidateRetain, CandidateAttach } }
+labels! { Outcome { OriginPermanentStopUnavailable, OriginRetirementEvidenceUnavailable, OriginSignerOriginUnavailable, OriginPeerLifetimeUnavailable, OriginAuthentication, OriginBinding, OriginConflict, OriginPermission, OriginInvalidData, OriginLocked, OriginCrypto, OriginIpc, OriginLimit, OriginIoTimedOut, OriginIoWouldBlock, OriginIoUnexpectedEof, OriginIoBrokenPipe, OriginIoConnectionReset, OriginIoConnectionAborted, OriginIoNotConnected, OriginIoInterrupted, OriginIoPermissionDenied, OriginIoOther, BridgeBinding, BridgeConflict, BridgeMissing, BridgeUncertain, BridgeLimit, BridgePermission, BridgeRecoveryRequired, BridgeCompleteOriginRecoveryUnavailable, BridgeVerification, BridgeSignerOriginUnavailable, BridgeJournal, BridgeAuthority, BridgeWallet, BridgeIpc, Begin, Complete, HostPlatform, HostTerminal, HostPermission, HostLocked, HostInvalid, HostAuthentication, HostStorage, HostQuarantined, HostUnsupported, HostReceipt, HostRecoverySemantic, HostRecoveryBackupUnsupported, HostRecoveryFinancialUnsupported, HostCompleteOriginRecoveryUnavailable, HostHistoricalExportIncomplete, HostGenerationArchiveIncomplete, ImportFreshOwnerRequired, ImportBinding, ImportIncomplete, ImportStorage, SyncAccessDenied, SyncInvalidRequest, SyncInterrupted, SyncReconciliationRequired, SyncInvalidResponse, SyncResourceLimit, SyncNoCurrentObservation, WalletStorage, WalletAccountScope, WalletAccountMismatch, WalletIncompleteSync, WalletUnsupportedProfile, WalletChainMismatch, WalletInsufficientFunds, WalletInvalidRequest, WalletMissingWitness, WalletInvalidNote, WalletScan, WalletTransport, ChainInvalidConfiguration, ChainWrongNetwork, ChainUnsupportedProxyConfiguration, ChainWrongBranch, ChainStaleChain, ChainContradictoryChain, ChainTimeout, ChainTransportUnavailable, ChainObservationInterrupted, ChainMissingAncestryEvidence, ChainNotObserved, ChainResourceLimit, ChainMalformedEvidence, ChainUnsupportedCapability, ChainBackendFailure, ChainClockUnavailable, ChainIdempotencyConflict, ChainJournalFailure, ChainSubmissionNotAuthorized, ChainSubmissionExpiryMargin, ChainObligationConflict, ChainSubmissionOutcomeUnrecorded, ChainSubmissionRetentionUncertain, RecoveryAccessDenied, RecoveryUnsupportedAccountComponents, RecoveryIncompleteScan, RecoveryKnownFundsRemain, RecoveryAdditionalEvidenceRequired } }
 fn emit(phase: Phase, outcome: Outcome) {
     eprintln!(
         "\n[JOINED_DIAGNOSTIC {} {}]",
@@ -61,6 +61,65 @@ pub(super) fn sync<T>(phase: Phase, value: &std::result::Result<T, SyncError>) {
 }
 pub(super) fn recovery<T>(phase: Phase, value: &std::result::Result<T, RecoveryScanError>) {
     result(phase, value, recovery_error);
+}
+// These are the actual returned types before the existing Host conversion.
+// Bridge errors may already coarsen a lower origin error; do not reconstruct it.
+pub(super) fn origin<T>(phase: Phase, value: &wholepact_signer_origin::Result<T>) {
+    result(phase, value, origin_error);
+}
+pub(super) fn bridge<T>(phase: Phase, value: &wholepact_signer::authority_bridge::Result<T>) {
+    result(phase, value, bridge_error);
+}
+fn origin_error(error: &wholepact_signer_origin::Error) -> Outcome {
+    use wholepact_signer_origin::Error as E;
+    match error {
+        E::PermanentStopUnavailable => Outcome::OriginPermanentStopUnavailable,
+        E::RetirementEvidenceUnavailable => Outcome::OriginRetirementEvidenceUnavailable,
+        E::SignerOriginUnavailable => Outcome::OriginSignerOriginUnavailable,
+        E::PeerLifetimeUnavailable => Outcome::OriginPeerLifetimeUnavailable,
+        E::Authentication => Outcome::OriginAuthentication,
+        E::Binding => Outcome::OriginBinding,
+        E::Conflict => Outcome::OriginConflict,
+        E::Permission => Outcome::OriginPermission,
+        E::InvalidData => Outcome::OriginInvalidData,
+        E::Locked => Outcome::OriginLocked,
+        E::Crypto => Outcome::OriginCrypto,
+        E::Ipc => Outcome::OriginIpc,
+        E::Limit => Outcome::OriginLimit,
+        E::Io(error) => match error.kind() {
+            std::io::ErrorKind::TimedOut => Outcome::OriginIoTimedOut,
+            std::io::ErrorKind::WouldBlock => Outcome::OriginIoWouldBlock,
+            std::io::ErrorKind::UnexpectedEof => Outcome::OriginIoUnexpectedEof,
+            std::io::ErrorKind::BrokenPipe => Outcome::OriginIoBrokenPipe,
+            std::io::ErrorKind::ConnectionReset => Outcome::OriginIoConnectionReset,
+            std::io::ErrorKind::ConnectionAborted => Outcome::OriginIoConnectionAborted,
+            std::io::ErrorKind::NotConnected => Outcome::OriginIoNotConnected,
+            std::io::ErrorKind::Interrupted => Outcome::OriginIoInterrupted,
+            std::io::ErrorKind::PermissionDenied => Outcome::OriginIoPermissionDenied,
+            _ => Outcome::OriginIoOther,
+        },
+    }
+}
+fn bridge_error(error: &wholepact_signer::authority_bridge::BridgeError) -> Outcome {
+    use wholepact_signer::authority_bridge::BridgeError as E;
+    // This whole module requires synthetic-born-joined-qualification, which
+    // explicitly enables the signer's authority-signing (and Wallet variant).
+    match error {
+        E::Binding => Outcome::BridgeBinding,
+        E::Conflict => Outcome::BridgeConflict,
+        E::Missing => Outcome::BridgeMissing,
+        E::Uncertain => Outcome::BridgeUncertain,
+        E::Limit => Outcome::BridgeLimit,
+        E::Permission => Outcome::BridgePermission,
+        E::RecoveryRequired => Outcome::BridgeRecoveryRequired,
+        E::CompleteOriginRecoveryUnavailable => Outcome::BridgeCompleteOriginRecoveryUnavailable,
+        E::Verification => Outcome::BridgeVerification,
+        E::SignerOriginUnavailable => Outcome::BridgeSignerOriginUnavailable,
+        E::Journal(_) => Outcome::BridgeJournal,
+        E::Authority(_) => Outcome::BridgeAuthority,
+        E::Wallet(_) => Outcome::BridgeWallet,
+        E::Ipc => Outcome::BridgeIpc,
+    }
 }
 fn host_error(error: &Error) -> Outcome {
     use crate::Error as E;
@@ -165,6 +224,21 @@ fn recovery_error(error: &RecoveryScanError) -> Outcome {
 }
 #[test]
 fn lower_error_projection_preserves_only_closed_kinds() {
+    use wholepact_signer_origin::Error as Origin;
+    use wholepact_signer::authority_bridge::BridgeError as Bridge;
+    assert_eq!(origin_error(&Origin::SignerOriginUnavailable).label(), "OriginSignerOriginUnavailable");
+    assert_eq!(origin_error(&Origin::Binding).label(), "OriginBinding");
+    for (kind, expected) in [
+        (std::io::ErrorKind::WouldBlock, "OriginIoWouldBlock"),
+        (std::io::ErrorKind::TimedOut, "OriginIoTimedOut"),
+        (std::io::ErrorKind::Other, "OriginIoOther"),
+    ] {
+        let error = Origin::Io(std::io::Error::new(kind, "private path or endpoint never disclosed"));
+        assert_eq!(origin_error(&error).label(), expected);
+    }
+    assert_eq!(bridge_error(&Bridge::Binding).label(), "BridgeBinding");
+    assert_eq!(bridge_error(&Bridge::Permission).label(), "BridgePermission");
+    assert_eq!(bridge_error(&Bridge::Authority(wholepact_authority::AuthorityError::Conflict)).label(), "BridgeAuthority");
     assert_eq!(
         host_error(&Error::Receipt("private payload never disclosed".into())).label(),
         "HostReceipt"

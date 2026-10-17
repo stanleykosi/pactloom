@@ -965,15 +965,22 @@ impl AllObservedCommonContextRosterV1<'_> {
         self.check_current(host)?;
         let owner = self.owners.get_mut(participant).ok_or(Error::Invalid)?;
         let source = owner.reentry.take().ok_or(Error::Permission)?;
-        let client = source
-            .begin_pair_before(
+        let pending = roster_trace!(
+            origin,
+            CompletionPairBegin,
+            source.begin_pair_before(
                 owner.observed.2.native_read(),
                 label,
                 self.coordinator.original_deadline,
             )
-            .map_err(|_| Error::Permission)?
-            .finish(owner.observed.2.native_read())
-            .map_err(|_| Error::Permission)?;
+        )
+        .map_err(|_| Error::Permission)?;
+        let client = roster_trace!(
+            origin,
+            CompletionPairFinish,
+            pending.finish(owner.observed.2.native_read())
+        )
+        .map_err(|_| Error::Permission)?;
         self.check_current(host)?;
         Ok(client)
     }
@@ -1054,10 +1061,10 @@ impl AllObservedCommonContextRosterV1<'_> {
         {
             return Err(Error::Permission);
         }
-        let reentered = owner
-            .observed
-            .0
-            .begin_common_context_reentry_before(
+        let pending = roster_trace!(
+            bridge,
+            CompletionReentryBegin,
+            owner.observed.0.begin_common_context_reentry_before(
                 client,
                 reentry_request,
                 pending_grant,
@@ -1065,8 +1072,9 @@ impl AllObservedCommonContextRosterV1<'_> {
                 &owner.observed.2,
                 self.coordinator.original_deadline,
             )
-            .map_err(|_| Error::Permission)?
-            .finish()
+        )
+        .map_err(|_| Error::Permission)?;
+        let reentered = roster_trace!(bridge, CompletionReentryFinish, pending.finish())
             .map_err(|_| Error::Permission)?;
         self.check_current(host)?;
         // The request is produced only after the actual fresh reentry returns.
@@ -1098,18 +1106,19 @@ impl AllObservedCommonContextRosterV1<'_> {
         construction_request
             .validate()
             .map_err(|_| Error::Invalid)?;
-        let admitted = owner
-            .observed
-            .0
-            .begin_reentered_construction_before(
+        let pending = roster_trace!(
+            bridge,
+            CompletionConstructionBegin,
+            owner.observed.0.begin_reentered_construction_before(
                 client,
                 &construction_request,
                 &owner.observed.2,
                 reentered,
                 self.coordinator.original_deadline,
             )
-            .map_err(|_| Error::Permission)?
-            .finish()
+        )
+        .map_err(|_| Error::Permission)?;
+        let admitted = roster_trace!(origin, CompletionConstructionFinish, pending.finish())
             .map_err(|_| Error::Permission)?;
         admitted
             .check_original_read(owner.observed.2.native_read())

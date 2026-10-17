@@ -257,10 +257,12 @@ fn construct_two_inner<'host>(
                     scope,
                 ))
                 .map_err(failed)?;
-            // Metadata is only a sanity check. Actual pair_owner_before uses
-            // the retained original reentry source and SAME installed process.
+            // Actual reopen reported its locator to the retained original
+            // provider. This reply is correlation only; pair_owner_before still
+            // authenticates that same original process and fresh native scope.
             match signers.receive().map_err(failed)? {
-                Reply::Peer(peer) if Instant::now() < peer.deadline => Ok(()),
+                Reply::OriginalCompletionReady { index, deadline }
+                    if index == actual_born.index && Instant::now() < deadline => Ok(()),
                 _ => Err(Error::Authentication),
             }
         })?;

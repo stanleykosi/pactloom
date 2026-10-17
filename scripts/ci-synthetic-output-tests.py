@@ -154,7 +154,7 @@ class PublicOutputTests(unittest.TestCase):
         for kind in ['Phase','Outcome']:
             body=re.search(r'labels! \{ '+kind+r' \{(.*?)\} \}',text,re.S).group(1)
             kinds[kind]=set(x.strip() for x in body.split(',') if x.strip())
-        self.assertEqual(len(kinds['Phase']),48)
+        self.assertEqual(len(kinds['Phase']),58)
         self.assertTrue(kinds['Phase'] <= output.BOUNDARIES)
         self.assertTrue(kinds['Outcome'] <= output.OUTCOMES)
         signer=ROOT/'crates/wholepact-signer/src/native_ui/born_manual_roster_v2/synthetic_diagnostics.rs'
@@ -184,6 +184,23 @@ class PublicOutputTests(unittest.TestCase):
         self.assertEqual(len(set(combined)),24)
         self.assertNotIn(expected,[row[0] for row in output.TESTS.values()])
         self.assertNotEqual(expected,output.STORAGE_BOOTSTRAP_TEST)
+
+    def test_completion_diagnostics_preserve_exact_closed_layers(self):
+        expected=set("CompletionOriginal CompletionPairApproval CompletionPairBegin CompletionPairFinish CompletionReentryRequest CompletionRequestApproval CompletionReentryBegin CompletionReentryFinish CompletionConstructionBegin CompletionConstructionFinish".split())
+        source=(ROOT/'crates/wholepact-native-host/src/host/synthetic_roster_trace_v1.rs').read_text()
+        body=re.search(r'labels! \{ Phase \{(.*?)\} \}',source,re.S).group(1)
+        actual={x.strip() for x in body.split(',') if x.strip().startswith('Completion')}
+        self.assertEqual(actual,expected)
+        self.assertEqual({x for x in output.BOUNDARIES if x.startswith('Completion')},expected)
+        bridge=set("BridgeBinding BridgeConflict BridgeMissing BridgeUncertain BridgeLimit BridgePermission BridgeRecoveryRequired BridgeCompleteOriginRecoveryUnavailable BridgeVerification BridgeSignerOriginUnavailable BridgeJournal BridgeAuthority BridgeWallet BridgeIpc".split())
+        self.assertEqual({x for x in output.OUTCOMES if x.startswith('Bridge')},bridge)
+        for phase in expected:
+            for kind in bridge|{x for x in output.OUTCOMES if x.startswith('Origin')}:
+                self.assertTrue(output.safe_failure(self.failure(phase+':'+kind)))
+        for value in ['CompletionUnknown:BridgePermission', 'CompletionPairBegin:OriginUnknown',
+                      'CompletionReentryBegin:BridgeUnknown', 'CompletionPairFinish:OriginIoOther private',
+                      'CompletionConstructionFinish:OriginPermission:private']:
+            self.assertFalse(output.safe_failure(self.failure(value)))
 
     def test_inventory_denials_are_exact_closed_predicates(self):
         host=ROOT/'crates/wholepact-native-host/src/host/synthetic_roster_trace_v1.rs'
@@ -392,7 +409,7 @@ class PublicOutputTests(unittest.TestCase):
         def fake_run(argv, **kwargs):
             calls.append((argv,kwargs))
             name=argv[2]
-            self.assertIn(name,output.SIGNER_VALIDATION_TESTS+output.SIGNER_BOOKKEEPING_TESTS+output.SIGNER_PRECONSTRUCTION_TESTS+output.SIGNER_BIRTH_LINK_TESTS)
+            self.assertIn(name,output.SIGNER_VALIDATION_TESTS+output.SIGNER_BOOKKEEPING_TESTS+output.SIGNER_PRECONSTRUCTION_TESTS+output.SIGNER_BIRTH_LINK_TESTS+output.SIGNER_ENDPOINT_CHANNEL_TESTS)
             self.assertEqual(argv[:2],['/verified/signer','--exact'])
             self.assertEqual(argv[3],'--test-threads=1')
             if argv[-1]=='--list':
@@ -407,8 +424,33 @@ class PublicOutputTests(unittest.TestCase):
              mock.patch.object(output.subprocess,'run',side_effect=fake_run), \
              contextlib.redirect_stdout(captured):
             output.run_signer_validation('/verified/signer')
-        self.assertEqual([argv[2] for argv,_ in calls], [name for name in output.SIGNER_VALIDATION_TESTS+output.SIGNER_BOOKKEEPING_TESTS+output.SIGNER_PRECONSTRUCTION_TESTS+output.SIGNER_BIRTH_LINK_TESTS for _ in range(2)])
-        self.assertEqual(captured.getvalue(),'CI_SYNTHETIC_SIGNER_VALIDATION passed=12 crypto_file_cases=4 bookkeeping_cases=2 replay_cases=6 native_payment_verified=false raw_output_discarded=true\n')
+        self.assertEqual([argv[2] for argv,_ in calls], [name for name in output.SIGNER_VALIDATION_TESTS+output.SIGNER_BOOKKEEPING_TESTS+output.SIGNER_PRECONSTRUCTION_TESTS+output.SIGNER_BIRTH_LINK_TESTS+output.SIGNER_ENDPOINT_CHANNEL_TESTS for _ in range(2)])
+        self.assertEqual(captured.getvalue(),'CI_SYNTHETIC_SIGNER_VALIDATION passed=16 crypto_file_cases=4 bookkeeping_cases=2 replay_cases=6 endpoint_channel_cases=4 native_payment_verified=false raw_output_discarded=true\n')
+
+    def test_endpoint_channel_preflight_is_four_exact_private_cases(self):
+        prefix='native_ui::synthetic_born_joined_qualification::construction_fixture::endpoint_report_tests::'
+        expected=tuple(prefix+name for name in (
+            'original_report_requires_transfer_and_is_received_once',
+            'missing_or_dropped_report_is_terminal',
+            'separate_original_report_channels_cannot_supply_each_other',
+            'invalid_report_consumes_the_only_publication_opportunity',
+        ))
+        self.assertEqual(output.SIGNER_ENDPOINT_CHANNEL_TESTS,expected)
+        base=ROOT/'crates/wholepact-signer/src/native_ui'
+        self.assertIn('#[path = "qualification/born_joined_fixture_v1.rs"]', (base/'mod.rs').read_text())
+        self.assertIn('pub mod synthetic_born_joined_qualification;', (base/'mod.rs').read_text())
+        fixture=(base/'qualification/born_joined_fixture_v1.rs').read_text()
+        self.assertIn('#[path = "born_joined_construction_v3.rs"]',fixture)
+        self.assertIn('mod construction_fixture;',fixture)
+        parent=(base/'qualification/born_joined_construction_v3.rs').read_text()
+        self.assertIn('#[path = "born_joined_construction_v3/endpoint_report_tests.rs"]',parent)
+        self.assertIn('mod endpoint_report_tests;',parent)
+        source=(base/'qualification/born_joined_construction_v3/endpoint_report_tests.rs').read_text()
+        for name in expected:
+            self.assertEqual(len(re.findall(r'#\[test\]\s+fn '+name.rsplit('::',1)[1]+r'\(',source)),1)
+        combined=output.SIGNER_VALIDATION_TESTS+output.SIGNER_BOOKKEEPING_TESTS+output.SIGNER_PRECONSTRUCTION_TESTS+output.SIGNER_BIRTH_LINK_TESTS+expected
+        self.assertEqual(len(combined),16)
+        self.assertEqual(len(set(combined)),16)
 
     def test_signer_preconstruction_is_three_exact_authenticated_history_cases(self):
         prefix='account::birth::enrollment::roster_v2::continuation::preconstruction::tests::'

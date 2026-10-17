@@ -58,6 +58,7 @@ impl EphemeralAcknowledgedBornV1 {
                     handoff_operation: expected.handoff_operation,
                 },
             )?,
+            completion_report: OriginalCompletionReportV3::new()?,
         })
     }
 }
@@ -74,15 +75,44 @@ impl EphemeralExportedFullPlanV3 {
         }
     }
 }
+// The paired provider is transferred exactly once to the original Host read.
+// Its reporter is private lifecycle state, never reconstructed from metadata.
+struct OriginalCompletionReportV3 {
+    provider: Option<InstalledSignerProvider>,
+    reporter: wholepact_signer_origin::provider::QualificationEndpointReporterV1,
+}
+impl OriginalCompletionReportV3 {
+    fn new() -> Result<Self> {
+        let (provider, reporter) =
+            InstalledSignerProvider::qualification_current_process_endpoint_pair()
+                .map_err(|_| Error::Authentication)?;
+        Ok(Self {
+            provider: Some(provider),
+            reporter,
+        })
+    }
+    fn take_provider(&mut self) -> Result<InstalledSignerProvider> {
+        self.provider.take().ok_or(Error::ReviewMismatch)
+    }
+    fn into_reporter(
+        self,
+    ) -> Result<wholepact_signer_origin::provider::QualificationEndpointReporterV1> {
+        if self.provider.is_some() {
+            return Err(Error::ReviewMismatch);
+        }
+        Ok(self.reporter)
+    }
+}
 pub struct EphemeralCommonContextReadV3 {
     inner: CommonContextReadFixtureV3,
+    completion_report: OriginalCompletionReportV3,
 }
 impl EphemeralCommonContextReadV3 {
     pub fn endpoint(&self) -> Result<PathBuf> {
         self.inner.endpoint()
     }
-    pub fn provider(&self) -> Result<InstalledSignerProvider> {
-        current_provider()
+    pub fn provider(&mut self) -> Result<InstalledSignerProvider> {
+        self.completion_report.take_provider()
     }
     pub fn deadline(&self) -> Result<Instant> {
         self.inner.deadline()
@@ -91,13 +121,16 @@ impl EphemeralCommonContextReadV3 {
         self.inner.poll()
     }
     pub fn park_original_completion(self) -> Result<EphemeralDormantCommonContextV3> {
+        let reporter = self.completion_report.into_reporter()?;
         Ok(EphemeralDormantCommonContextV3 {
             inner: self.inner.into_dormant()?,
+            reporter,
         })
     }
 }
 pub struct EphemeralDormantCommonContextV3 {
     inner: DormantConstructionFixtureV3,
+    reporter: wholepact_signer_origin::provider::QualificationEndpointReporterV1,
 }
 impl EphemeralDormantCommonContextV3 {
     pub fn open_original_completion(
@@ -105,15 +138,23 @@ impl EphemeralDormantCommonContextV3 {
         expected: ExpectedCompletionOperationsV3Input,
         client_scope: wholepact_authority::native_witness_owner::EphemeralConstructionClientScopeV1,
     ) -> Result<EphemeralCommonContextCompletionV3> {
-        Ok(EphemeralCommonContextCompletionV3 {
-            inner: self.inner.reopen(
-                ExpectedCompletionOperationsV3 {
-                    reentry_operation: expected.reentry_operation,
-                    construction_operation: expected.construction_operation,
-                },
-                client_scope,
-            )?,
-        })
+        let inner = self.inner.reopen(
+            ExpectedCompletionOperationsV3 {
+                reentry_operation: expected.reentry_operation,
+                construction_operation: expected.construction_operation,
+            },
+            client_scope,
+        )?;
+        // Report only the actual freshly reopened controller's endpoint to its
+        // SAME original read provider. Reporting conveys no approval, and the
+        // retained consumer still authenticates the process and fresh Pair.
+        let endpoint = inner.endpoint()?;
+        inner.deadline()?;
+        self.reporter
+            .publish(&endpoint)
+            .map_err(|_| Error::Authentication)?;
+        inner.deadline()?;
+        Ok(EphemeralCommonContextCompletionV3 { inner })
     }
 }
 pub struct EphemeralCommonContextCompletionV3 {
@@ -122,9 +163,6 @@ pub struct EphemeralCommonContextCompletionV3 {
 impl EphemeralCommonContextCompletionV3 {
     pub fn endpoint(&self) -> Result<PathBuf> {
         self.inner.endpoint()
-    }
-    pub fn provider(&self) -> Result<InstalledSignerProvider> {
-        current_provider()
     }
     pub fn deadline(&self) -> Result<Instant> {
         self.inner.deadline()
@@ -143,3 +181,7 @@ impl EphemeralCommonContextCompletionV3 {
 pub struct EphemeralConsumedNamedV3 {
     pub(in crate::native_ui) inner: ConsumedNamedFixtureV3,
 }
+
+#[cfg(test)]
+#[path = "born_joined_construction_v3/endpoint_report_tests.rs"]
+mod endpoint_report_tests;

@@ -16,6 +16,19 @@ use std::{
     path::{Component, Path},
 };
 
+#[cfg(all(
+    feature = "synthetic-qualification",
+    feature = "native-ui",
+    feature = "authority-signing"
+))]
+mod qualification_endpoint;
+#[cfg(all(
+    feature = "synthetic-qualification",
+    feature = "native-ui",
+    feature = "authority-signing"
+))]
+pub use qualification_endpoint::QualificationEndpointReporterV1;
+
 const INSTALLED_PIN: &str = "/etc/wholepact/signer-provider.json";
 const MAX_EXECUTABLE_BYTES: u64 = 512 * 1024 * 1024;
 
@@ -43,6 +56,12 @@ pub struct InstalledSignerProvider {
         feature = "authority-signing"
     ))]
     qualification_process: Option<(u32, u32)>,
+    #[cfg(all(
+        feature = "synthetic-qualification",
+        feature = "native-ui",
+        feature = "authority-signing"
+    ))]
+    qualification_endpoint: Option<qualification_endpoint::QualificationEndpointReceiverV1>,
 }
 impl InstalledSignerProvider {
     pub fn load() -> Result<Self> {
@@ -77,6 +96,12 @@ impl InstalledSignerProvider {
                 feature = "authority-signing"
             ))]
             qualification_process: None,
+            #[cfg(all(
+                feature = "synthetic-qualification",
+                feature = "native-ui",
+                feature = "authority-signing"
+            ))]
+            qualification_endpoint: None,
         })
     }
     /// Narrow synthetic harness issuer: no caller path, identity, credential or
@@ -121,7 +146,30 @@ impl InstalledSignerProvider {
             pin,
             launched: std::sync::Mutex::new(None),
             qualification_process: Some((std::process::id(), uid)),
+            #[cfg(all(
+                feature = "synthetic-qualification",
+                feature = "native-ui",
+                feature = "authority-signing"
+            ))]
+            qualification_endpoint: None,
         })
+    }
+    /// Synthetic-only paired availability channel. The original provider is
+    /// moved into the actual read client; its sole reporter stays with that same
+    /// native controller until successful fresh completion reopen. No path or
+    /// caller identity is accepted here, and no production launch is changed.
+    #[cfg(all(
+        feature = "synthetic-qualification",
+        feature = "native-ui",
+        feature = "authority-signing"
+    ))]
+    pub fn qualification_current_process_endpoint_pair()
+        -> Result<(Self, QualificationEndpointReporterV1)>
+    {
+        let mut provider = Self::qualification_current_process()?;
+        let (receiver, reporter) = qualification_endpoint::pair();
+        provider.qualification_endpoint = Some(receiver);
+        Ok((provider, reporter))
     }
     /// Launch exactly the opened owner-installed image. The child still requires
     /// native unlock/pairing; the inherited channel conveys only its endpoint.
@@ -150,6 +198,14 @@ impl InstalledSignerProvider {
         Ok(())
     }
     pub fn wait_native_endpoint(&self, timeout: std::time::Duration) -> Result<std::path::PathBuf> {
+        #[cfg(all(
+            feature = "synthetic-qualification",
+            feature = "native-ui",
+            feature = "authority-signing"
+        ))]
+        if let Some(receiver) = &self.qualification_endpoint {
+            return receiver.wait(timeout);
+        }
         self.launched
             .lock()
             .map_err(|_| BridgeError::SignerOriginUnavailable)?

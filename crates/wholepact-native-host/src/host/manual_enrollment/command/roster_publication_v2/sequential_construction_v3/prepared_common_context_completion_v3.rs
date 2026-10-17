@@ -174,41 +174,52 @@ impl PreparedCommonContextCompletionV3<'_> {
             request_approval,
             operations,
         } = self;
-        require_original(host, roster, participant, &authorization, &disclosure)?;
-        let (roster, client) = pair_approval.commit(
-            &digest,
-            || {
-                require_original(host, roster, participant, &authorization, &disclosure)?;
-                Ok(roster)
-            },
-            |roster| {
-                let client = roster.pair_owner_before(
-                    host,
-                    participant,
-                    "wholepact-native-common-context-reentry-v1",
-                )?;
-                Ok((roster, client))
-            },
+        roster_trace!(
+            CompletionOriginal,
+            require_original(host, roster, participant, &authorization, &disclosure)
         )?;
-        let request =
-            roster.reentry_request(host, participant, &client, &pending, operations.reentry)?;
-        request_approval.commit(
-            &digest,
-            || {
-                require_original(host, roster, participant, &authorization, &disclosure)?;
-                Ok(roster)
-            },
-            |roster| {
-                roster.consume_owner_before(
-                    host,
-                    participant,
-                    &client,
-                    &pending,
-                    &request,
-                    operations.construction,
-                )?;
-                require_original(host, roster, participant, &authorization, &disclosure)
-            },
+        let (roster, client) = roster_trace!(
+            CompletionPairApproval,
+            pair_approval.commit(
+                &digest,
+                || {
+                    require_original(host, roster, participant, &authorization, &disclosure)?;
+                    Ok(roster)
+                },
+                |roster| {
+                    let client = roster.pair_owner_before(
+                        host,
+                        participant,
+                        "wholepact-native-common-context-reentry-v1",
+                    )?;
+                    Ok((roster, client))
+                },
+            )
+        )?;
+        let request = roster_trace!(
+            CompletionReentryRequest,
+            roster.reentry_request(host, participant, &client, &pending, operations.reentry)
+        )?;
+        roster_trace!(
+            CompletionRequestApproval,
+            request_approval.commit(
+                &digest,
+                || {
+                    require_original(host, roster, participant, &authorization, &disclosure)?;
+                    Ok(roster)
+                },
+                |roster| {
+                    roster.consume_owner_before(
+                        host,
+                        participant,
+                        &client,
+                        &pending,
+                        &request,
+                        operations.construction,
+                    )?;
+                    require_original(host, roster, participant, &authorization, &disclosure)
+                },
+            )
         )
     }
 }

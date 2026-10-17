@@ -200,6 +200,10 @@ pub(super) enum JoinedSignerReplyV1 {
     },
     Acknowledged(PublicJoinedBornV1),
     Peer(JoinedSignerPeerV1),
+    OriginalCompletionReady {
+        index: usize,
+        deadline: Instant,
+    },
     SingleExport {
         index: usize,
         signed_extension_file: PathBuf,
@@ -962,7 +966,7 @@ fn execute_inner(
         (C::OpenCommonContextRead(_, publication, expected), State::Acknowledged(account))
             if index > 0 =>
         {
-            let entry = account
+            let mut entry = account
                 .open_common_context_read_v3(publication, expected)
                 .map_err(|error| {
                     signer_error(
@@ -1017,17 +1021,13 @@ fn execute_inner(
             let entry = (*original)
                 .open_original_completion(expected, scope)
                 .map_err(|error| signer_error(error, "native exact original completion reopen"))?;
-            let reply = R::Peer(JoinedSignerPeerV1 {
-                endpoint: entry
-                    .endpoint()
-                    .map_err(|error| signer_error(error, "original completion endpoint"))?,
-                provider: entry
-                    .provider()
-                    .map_err(|error| signer_error(error, "original completion provider"))?,
-                deadline: entry
-                    .deadline()
-                    .map_err(|error| signer_error(error, "original completion deadline"))?,
-            });
+            // The actual reopen already published its fresh locator through
+            // the SAME original provider's one-use channel. Do not replace that
+            // provider with newly constructed metadata here.
+            let deadline = entry.deadline().map_err(|error| {
+                signer_error(error, "original completion deadline")
+            })?;
+            let reply = R::OriginalCompletionReady { index, deadline };
             (State::OriginalCompletion(Box::new(entry)), reply)
         }
         (C::PollOriginalCompletionAndPark(_), State::OriginalCompletion(mut entry))
