@@ -36,6 +36,123 @@ pub(super) fn report_controller_error(error: &Error) {
     eprintln!("\n[JOINED_DIAGNOSTIC SignerSingleController {label}]");
 }
 
+// Operation names are selected from the actual owned Work/Step before it moves
+// into its worker. Neither values nor error payloads enter these diagnostics.
+#[derive(Clone, Copy)]
+pub(super) enum WorkerOperation {
+    Open,
+    PrepareIntent,
+    PrepareSignature,
+    PrepareExport,
+    PrepareReentry,
+    PrepareWitness,
+    PrepareAcquire,
+    PrepareActivate,
+    PreparePublication,
+    PrepareServe,
+    CommitPair,
+    CommitRetain,
+    CommitSignature,
+    CommitExport,
+    CommitReentry,
+    CommitWitness,
+    CommitAcquire,
+    CommitActivate,
+    CommitAdmission,
+    CommitPublication,
+    CommitServe,
+    RetryAcquire,
+    RetryActivate,
+    RetryAdmission,
+    Other,
+    AdoptOutput,
+}
+impl WorkerOperation {
+    pub(super) fn from_work(work: &Work) -> Self {
+        match work {
+            Work::Open(..) => Self::Open,
+            Work::PrepareIntent(..) => Self::PrepareIntent,
+            Work::PrepareSignature(..) => Self::PrepareSignature,
+            Work::PrepareExport(..) => Self::PrepareExport,
+            Work::PrepareReentry(..) => Self::PrepareReentry,
+            Work::PrepareWitness(..) => Self::PrepareWitness,
+            Work::PrepareAcquire(..) => Self::PrepareAcquire,
+            Work::PrepareActivate(..) => Self::PrepareActivate,
+            Work::PreparePublication(..) => Self::PreparePublication,
+            Work::PrepareServe(..) => Self::PrepareServe,
+            Work::RetryAcquire(..) => Self::RetryAcquire,
+            Work::RetryActivate(..) => Self::RetryActivate,
+            Work::RetryAdmission(..) => Self::RetryAdmission,
+            Work::Commit(_, step, _) => match step {
+                Step::Pair(_) => Self::CommitPair,
+                Step::Retain(_) => Self::CommitRetain,
+                Step::Sign(_) => Self::CommitSignature,
+                Step::Export(_) => Self::CommitExport,
+                Step::Reentry(_) => Self::CommitReentry,
+                Step::Witness(_) => Self::CommitWitness,
+                Step::Acquire(_) => Self::CommitAcquire,
+                Step::Activate(_) => Self::CommitActivate,
+                Step::Admit(_) => Self::CommitAdmission,
+                Step::Publish(_) => Self::CommitPublication,
+                Step::Serve(_) => Self::CommitServe,
+                _ => Self::Other,
+            },
+            _ => Self::Other,
+        }
+    }
+    fn label(self) -> &'static str {
+        match self {
+            Self::Open => "SingleWorkOpen",
+            Self::PrepareIntent => "SingleWorkPrepareIntent",
+            Self::PrepareSignature => "SingleWorkPrepareSignature",
+            Self::PrepareExport => "SingleWorkPrepareExport",
+            Self::PrepareReentry => "SingleWorkPrepareReentry",
+            Self::PrepareWitness => "SingleWorkPrepareWitness",
+            Self::PrepareAcquire => "SingleWorkPrepareAcquire",
+            Self::PrepareActivate => "SingleWorkPrepareActivate",
+            Self::PreparePublication => "SingleWorkPreparePublication",
+            Self::PrepareServe => "SingleWorkPrepareServe",
+            Self::CommitPair => "SingleWorkCommitPair",
+            Self::CommitRetain => "SingleWorkCommitRetain",
+            Self::CommitSignature => "SingleWorkCommitSignature",
+            Self::CommitExport => "SingleWorkCommitExport",
+            Self::CommitReentry => "SingleWorkCommitReentry",
+            Self::CommitWitness => "SingleWorkCommitWitness",
+            Self::CommitAcquire => "SingleWorkCommitAcquire",
+            Self::CommitActivate => "SingleWorkCommitActivate",
+            Self::CommitAdmission => "SingleWorkCommitAdmission",
+            Self::CommitPublication => "SingleWorkCommitPublication",
+            Self::CommitServe => "SingleWorkCommitServe",
+            Self::RetryAcquire => "SingleWorkRetryAcquire",
+            Self::RetryActivate => "SingleWorkRetryActivate",
+            Self::RetryAdmission => "SingleWorkRetryAdmission",
+            Self::Other => "SingleWorkOther",
+            Self::AdoptOutput => "SingleWorkAdoptOutput",
+        }
+    }
+}
+pub(super) fn report_worker_begin(operation: WorkerOperation) {
+    eprintln!("\n[JOINED_DIAGNOSTIC {} Begin]", operation.label());
+}
+pub(super) fn report_worker_result<T>(operation: WorkerOperation, result: &Result<T>) {
+    let label = result
+        .as_ref()
+        .map_or_else(|error| error_label(error), |_| "Complete");
+    eprintln!("\n[JOINED_DIAGNOSTIC {} {}]", operation.label(), label);
+}
+pub(super) fn report_worker_output(operation: WorkerOperation, result: &Result<Output>) {
+    // These existing variants retain uncertain effects as nested results rather
+    // than failing the worker. Classify that exact result without changing it.
+    match result {
+        Ok(Output::Acquired(_, nested)) => report_worker_result(operation, nested),
+        Ok(Output::Activated(_, nested)) => report_worker_result(operation, nested),
+        Ok(Output::Admitted(_, nested)) | Ok(Output::ContinuedAdmitted(_, nested)) => {
+            report_worker_result(operation, nested)
+        }
+        _ => report_worker_result(operation, result),
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum OpenOperation {
     AccountUnlock,

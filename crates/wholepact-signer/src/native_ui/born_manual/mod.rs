@@ -786,10 +786,17 @@ struct Job {
 impl Job {
     fn start(work: Work, owner: Arc<PendingAccountNativeAuthority>) -> Result<Self> {
         let (send, receive) = mpsc::sync_channel(1);
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        let diagnostic_operation = born_single_anchor_v1::WorkerOperation::from_work(&work);
         let thread = std::thread::Builder::new()
             .name("wholepact-born-manual-owner".into())
             .spawn(move || {
-                let _ = send.send(run(work, &owner));
+                #[cfg(feature = "synthetic-born-joined-qualification")]
+                born_single_anchor_v1::report_worker_begin(diagnostic_operation);
+                let result = run(work, &owner);
+                #[cfg(feature = "synthetic-born-joined-qualification")]
+                born_single_anchor_v1::report_worker_output(diagnostic_operation, &result);
+                let _ = send.send(result);
             })?;
         Ok(Self { thread, receive })
     }
@@ -985,6 +992,14 @@ impl BornManualUi {
                 }
                 return;
             }
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            let diagnostic_adoption = result.is_ok();
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            if diagnostic_adoption {
+                born_single_anchor_v1::report_worker_begin(
+                    born_single_anchor_v1::WorkerOperation::AdoptOutput,
+                );
+            }
             let result=result.and_then(|out|{match out{
                 Output::CandidateSelectionServed(source)=>{self.inventory_source=Some(source);self.message="One private selection channel closed. Any selected contribution and full proposal still require fresh exact native review. No construction or financial permission was issued.";},
                 Output::InventoryServed(source)=>{self.inventory_source=Some(source);self.message="Preliminary viewing channel closed. Copied viewing information cannot be recalled. No construction or financial permission was issued.";},
@@ -1007,6 +1022,13 @@ impl BornManualUi {
                 Output::Served=>self.message="Finite exact enrollment publication channel closed. Durable original intent/admission/completion remain unchanged. No financial authority was issued.",
                 Output::Enrolled(e)=>{if self.opened.as_ref().is_some_and(|o|o.attempted) {self.continuation_controller.published()?;}else{self.bootstrap.published()?;}self.enrolled=Some(e);self.message="Exact first signer journal and immutable born manual record preserved. Financial/key-release/action gates remain denied pending their coherent per-action issuer.";},
             }Ok(())});
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            if diagnostic_adoption {
+                born_single_anchor_v1::report_worker_result(
+                    born_single_anchor_v1::WorkerOperation::AdoptOutput,
+                    &result,
+                );
+            }
             if let Err(error) = &result {
                 #[cfg(feature = "synthetic-born-joined-qualification")]
                 born_single_anchor_v1::report_controller_error(error);

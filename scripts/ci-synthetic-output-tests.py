@@ -77,6 +77,20 @@ class PublicOutputTests(unittest.TestCase):
         self.assertFalse(output.safe_failure(self.failure().replace('Some(101)','Some(2147483648)')))
         self.assertFalse(output.safe_failure(self.failure().replace('inputs=1/2','inputs=3/2')))
 
+    def test_single_worker_diagnostics_remain_closed_and_payload_free(self):
+        labels=sorted(label for label in output.BOUNDARIES if label.startswith('SingleWork'))
+        self.assertEqual(len(labels),26)
+        for label in labels:
+            self.assertTrue(output.safe_failure(self.failure(label+':Begin')))
+            self.assertTrue(output.safe_failure(self.failure(label+':SignerAuthentication')))
+        for summary in ['SingleWorkUnknown:Begin',
+                        'SingleWorkPrepareReentry:SignerAuthentication private-data',
+                        'SingleWorkPrepareWitness:SignerAuthentication:private-data',
+                        'SingleWorkCommitAcquire:private-data']:
+            self.assertFalse(output.safe_failure(self.failure(summary)))
+        line=self.failure('SingleWorkPrepareReentry:SignerAuthentication')
+        self.assertFalse(output.safe_failure(line+' private-data'))
+
     def test_projection_does_not_search_inside_private_text(self):
         name=output.TESTS['initial'][0]
         marker=self.failure()
