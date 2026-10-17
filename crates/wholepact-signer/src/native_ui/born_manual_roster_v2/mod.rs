@@ -4,6 +4,20 @@
 #[path = "../qualification/born_manual_roster.rs"]
 pub(in crate::native_ui) mod born_manual_roster;
 
+// Closed synthetic diagnostics preserve exact predicate evaluation and results.
+#[cfg(feature = "synthetic-born-joined-qualification")]
+mod synthetic_diagnostics;
+macro_rules! roster_clear_if {
+    ($condition:expr, $reason:ident) => {{
+        let condition = $condition;
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        if condition {
+            synthetic_diagnostics::report_begin(synthetic_diagnostics::Operation::$reason);
+        }
+        condition
+    }};
+}
+
 mod admission;
 mod permanent_stop;
 mod permanent_stop_export;
@@ -1277,10 +1291,17 @@ impl Job {
             )
         );
         let (send, receive) = mpsc::sync_channel(1);
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        let diagnostic_operation = synthetic_diagnostics::Operation::from_work(&work);
         let thread = std::thread::Builder::new()
             .name("wholepact-born-roster-v2-owner".into())
             .spawn(move || {
-                let _ = send.send(run(work, &owner));
+                #[cfg(feature = "synthetic-born-joined-qualification")]
+                synthetic_diagnostics::report_begin(diagnostic_operation);
+                let result = run(work, &owner);
+                #[cfg(feature = "synthetic-born-joined-qualification")]
+                synthetic_diagnostics::report_output(diagnostic_operation, &result);
+                let _ = send.send(result);
             })?;
         Ok(Self {
             thread,
@@ -1586,28 +1607,21 @@ impl BornManualRosterUiV2 {
             self.dormant_common_context = None;
         }
         if self.owner.is_some()
-            && (!focused
-                || self.owner(epoch).is_err()
-                || self
-                    .peer
-                    .as_ref()
-                    .is_some_and(|p| p.check_current().is_err())
-                || self
-                    .queued
-                    .as_ref()
-                    .is_some_and(|q| admission::connected(&q.stream, &q.peer).is_err())
-                || self
-                    .queued_continuation
-                    .as_ref()
-                    .is_some_and(|q| admission::connected(&q.stream, &q.peer).is_err())
-                || self.review.as_ref().is_some_and(|r| r.exact.expired()))
+            && (roster_clear_if!(!focused, ClearFocus)
+                || roster_clear_if!(self.owner(epoch).is_err(), ClearOwner)
+                || roster_clear_if!(self.peer.as_ref().is_some_and(|p| p.check_current().is_err()), ClearPeer)
+                || roster_clear_if!(self.queued.as_ref().is_some_and(|q| admission::connected(&q.stream, &q.peer).is_err()), ClearInitialStream)
+                || roster_clear_if!(self.queued_continuation.as_ref().is_some_and(|q| admission::connected(&q.stream, &q.peer).is_err()), ClearContinuedStream)
+                || roster_clear_if!(self.review.as_ref().is_some_and(|r| r.exact.expired()), ClearReviewExpired))
         {
             self.clear();
         }
         self.cleanup.retain(|thread| !thread.is_finished());
         if self.job.as_ref().is_some_and(|j| j.thread.is_finished()) {
             let result = self.job.take().unwrap().finish();
-            if self.owner(epoch).is_err() {
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            synthetic_diagnostics::report_error(synthetic_diagnostics::Operation::ReceiveResult, &result);
+            if roster_clear_if!(self.owner(epoch).is_err(), DropLateOutput) {
                 if let Ok(output) = result {
                     match output {
                         Output::CommonContextReadServed(mut source)
@@ -1624,6 +1638,8 @@ impl BornManualRosterUiV2 {
                 self.accept_blurred_read_completion = false;
                 return;
             }
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            synthetic_diagnostics::report_begin(synthetic_diagnostics::Operation::AdoptOutput);
             let result=result.and_then(|out|{match out{
                 Output::Stop(out)=>self.accept_stop_output(out)?,
                 Output::Named(out)=>self.accept_named_output(*out,epoch)?,
@@ -1662,6 +1678,8 @@ impl BornManualRosterUiV2 {
                 Output::Served=>self.message="Finite exact enrollment publication channel closed. Durable original intent/admission/completion remain unchanged. No financial authority was issued.",
                 Output::Enrolled(e)=>{if self.opened.as_ref().is_some_and(|o|o.attempted) {self.continuation_controller.published()?;}else{self.bootstrap.published()?;}self.enrolled=Some(e);self.message="Exact first signer journal and immutable born manual record preserved. Roster balance inventory, candidate selection, financial/key-release/action gates remain denied pending their coherent V2 per-action issuer.";},
             }Ok(())});
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            synthetic_diagnostics::report_result(synthetic_diagnostics::Operation::AdoptOutput, &result);
             if result.is_err() {
                 self.clear();
                 self.message = "Enrollment step failed or became uncertain. Preserve all source and output state. No replacement or synthetic approval was made.";

@@ -103,14 +103,21 @@ impl Host {
             .enable_all()
             .build()
             .map_err(|_| Error::Storage)?;
-        runtime
-            .block_on(wallet.sync.synchronize(&gate, limits))
-            .map_err(|_| Error::Invalid)?;
+        roster_trace!(
+            sync,
+            InventorySynchronize,
+            runtime.block_on(wallet.sync.synchronize(&gate, limits))
+        )
+        .map_err(|_| Error::Invalid)?;
         gate.check_current()?;
-        let inventory = wallet
-            .sync
-            .inspect_account_recovery(&gate, lease.fvk().map_err(|_| Error::Permission)?)
-            .map_err(|_| Error::Invalid)?;
+        let inventory = roster_trace!(
+            recovery,
+            InventoryInspect,
+            wallet
+                .sync
+                .inspect_account_recovery(&gate, lease.fvk().map_err(|_| Error::Permission)?)
+        )
+        .map_err(|_| Error::Invalid)?;
         gate.check_current()?;
         inventory.check_current().map_err(|_| Error::Permission)?;
         fresh.check_current(self, scope, target)?;

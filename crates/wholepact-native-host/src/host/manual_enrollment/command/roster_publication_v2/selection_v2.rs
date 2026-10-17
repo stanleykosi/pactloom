@@ -393,64 +393,76 @@ impl PreparedSelection {
         check_clock(&scope, deadline)?;
         // The parent dropped the preliminary read/lease before handing over
         // this exact client. The lower pairing rejects any occupied lease slot.
-        let pending = pair_approval.commit(
-            &review_digest,
-            || {
-                audit.check_current()?;
-                admission.require_scope(&scope)?;
-                check_clock(&scope, deadline)?;
-                fresh.check_current(host, &inventory_scope, target)
-            },
-            |_| {
-                client
-                    .begin_roster_candidate_selection_pair_before(
-                        "wholepact-native-roster-candidate-selection-v2",
-                        &scope,
-                        deadline,
-                    )
-                    .map_err(|_| Error::Permission)
-            },
+        let pending = roster_trace!(
+            CandidatePair,
+            pair_approval.commit(
+                &review_digest,
+                || {
+                    audit.check_current()?;
+                    admission.require_scope(&scope)?;
+                    check_clock(&scope, deadline)?;
+                    fresh.check_current(host, &inventory_scope, target)
+                },
+                |_| {
+                    client
+                        .begin_roster_candidate_selection_pair_before(
+                            "wholepact-native-roster-candidate-selection-v2",
+                            &scope,
+                            deadline,
+                        )
+                        .map_err(|_| Error::Permission)
+                },
+            )
         )?;
-        let client = pending.finish().map_err(|_| Error::Permission)?;
-        let pending = request_approval.commit(
-            &review_digest,
-            || {
-                audit.check_current()?;
-                admission.require_scope(&scope)?;
-                check_clock(&scope, deadline)?;
-                fresh.check_current(host, &inventory_scope, target)
-            },
-            |_| {
-                // Derive both fields inside the approved send action, after
-                // actual separate pairing; saved JSON never supplies either.
-                let current_caller_binding_digest = client
-                    .current_caller_binding_digest()
-                    .map_err(|_| Error::Permission)?;
-                let requested_at_ms = check_clock(&scope, deadline)?;
-                let invocation = &scope.selection.invocation;
-                let request = ManualRosterCandidateSelectionRequestV2 {
-                    version: 2,
-                    operation_id,
-                    scope: scope.clone(),
-                    current_caller_binding_digest,
-                    requested_at_ms,
-                    disclosure_expires_at_ms: disclosure_expiry(
+        let client = roster_trace!(
+            CandidatePair,
+            pending.finish().map_err(|_| Error::Permission)
+        )?;
+        let pending = roster_trace!(
+            CandidateRequest,
+            request_approval.commit(
+                &review_digest,
+                || {
+                    audit.check_current()?;
+                    admission.require_scope(&scope)?;
+                    check_clock(&scope, deadline)?;
+                    fresh.check_current(host, &inventory_scope, target)
+                },
+                |_| {
+                    // Derive both fields inside the approved send action, after
+                    // actual separate pairing; saved JSON never supplies either.
+                    let current_caller_binding_digest = client
+                        .current_caller_binding_digest()
+                        .map_err(|_| Error::Permission)?;
+                    let requested_at_ms = check_clock(&scope, deadline)?;
+                    let invocation = &scope.selection.invocation;
+                    let request = ManualRosterCandidateSelectionRequestV2 {
+                        version: 2,
+                        operation_id,
+                        scope: scope.clone(),
+                        current_caller_binding_digest,
                         requested_at_ms,
-                        invocation.requested_at_ms,
-                        invocation.construction_expires_at_ms,
-                    )?,
-                };
-                request.validate().map_err(|_| Error::Invalid)?;
-                client
-                    .begin_roster_candidate_selection_before(
-                        &request,
-                        &audit.original_signer_intent_digest,
-                        deadline,
-                    )
-                    .map_err(|_| Error::Permission)
-            },
+                        disclosure_expires_at_ms: disclosure_expiry(
+                            requested_at_ms,
+                            invocation.requested_at_ms,
+                            invocation.construction_expires_at_ms,
+                        )?,
+                    };
+                    request.validate().map_err(|_| Error::Invalid)?;
+                    client
+                        .begin_roster_candidate_selection_before(
+                            &request,
+                            &audit.original_signer_intent_digest,
+                            deadline,
+                        )
+                        .map_err(|_| Error::Permission)
+                },
+            )
         )?;
-        let lower = pending.finish().map_err(|_| Error::Permission)?;
+        let lower = roster_trace!(
+            CandidateLease,
+            pending.finish().map_err(|_| Error::Permission)
+        )?;
         audit.check_current()?;
         lower.check_current().map_err(|_| Error::Permission)?;
         admission.require_scope(&scope)?;
@@ -459,9 +471,12 @@ impl PreparedSelection {
         // This query requires the real lower owner, before moving it into the
         // maintained signer bridge. The snapshot borrows the actual Store,
         // never JSON, a boolean, an empty-default list or the earlier inventory.
-        let local_exclusions = host
-            .engine
-            .manual_roster_candidate_local_exclusions_v2(host.access()?, &lower)?;
+        let local_exclusions = roster_trace!(
+            CandidateExclusions,
+            host.engine
+                .manual_roster_candidate_local_exclusions_v2(host.access()?, &lower)
+                .map_err(Error::from)
+        )?;
         let lease = SignerRosterCandidateSelectionLeaseV2::from_native_lease(lower)
             .map_err(|_| Error::Permission)?;
         audit.check_current()?;
@@ -469,22 +484,29 @@ impl PreparedSelection {
         admission.require_scope(&scope)?;
         fresh.check_current(host, &inventory_scope, target)?;
         check_clock(&scope, deadline)?;
-        let selected = host.select_manual_roster_candidate_inputs_v2(
-            &mut fresh,
-            admission,
-            &lease,
-            target,
-            &local_exclusions,
+        let selected = roster_trace!(
+            CandidateSelect,
+            host.select_manual_roster_candidate_inputs_v2(
+                &mut fresh,
+                admission,
+                &lease,
+                target,
+                &local_exclusions,
+            )
         )?;
         audit.check_current()?;
-        selected.display_current_evidence(&lease)?;
+        roster_trace!(CandidateDisplay, selected.display_current_evidence(&lease))?;
         if let Some(retention) = retention {
-            let retained = selected.retain_for_sequential_collection(host, lease, retention)?;
+            let retained = roster_trace!(
+                CandidateRetain,
+                selected.retain_for_sequential_collection(host, lease, retention)
+            )?;
             // The selection/native borrow ended. Move the SAME live controller
             // and actual Store snapshot, never reopen/reconstruct a fresh one.
-            return Ok(Some(
-                retained.attach_original_source(fresh, local_exclusions)?,
-            ));
+            return Ok(Some(roster_trace!(
+                CandidateAttach,
+                retained.attach_original_source(fresh, local_exclusions)
+            )?));
         }
         drop(selected);
         audit.check_current()?;

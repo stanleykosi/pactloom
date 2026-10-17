@@ -197,29 +197,39 @@ impl<'host> PendingJoinedRosterPublication<'host> {
             deadline,
             pairing,
         } = self;
-        let client = pairing
-            .finish_checked(|| {
-                prepared
-                    .check_before()
-                    .map_err(|_| wholepact_signer_origin::Error::Permission)
-            })
-            .map_err(|_| Error::Permission)?;
-        let pending = request_approval.commit(
-            &exact_digest,
-            || prepared.check_before(),
-            |_| {
-                client
-                    .begin_roster_enrollment_v2_before(&prepared.request, deadline)
-                    .map_err(|_| Error::Permission)
-            },
+        let client = roster_trace!(
+            JoinedPairFinish,
+            pairing
+                .finish_checked(|| {
+                    prepared
+                        .check_before()
+                        .map_err(|_| wholepact_signer_origin::Error::Permission)
+                })
+                .map_err(|_| Error::Permission)
         )?;
-        let lease = pending.finish().map_err(|_| Error::Permission)?;
+        let pending = roster_trace!(
+            JoinedRequestBegin,
+            request_approval.commit(
+                &exact_digest,
+                || prepared.check_before(),
+                |_| {
+                    client
+                        .begin_roster_enrollment_v2_before(&prepared.request, deadline)
+                        .map_err(|_| Error::Permission)
+                },
+            )
+        )?;
+        let lease = roster_trace!(
+            JoinedLeaseFinish,
+            pending.finish().map_err(|_| Error::Permission)
+        )?;
         if let Some(inventory) = inventory {
-            inventory.check_before(&prepared)?;
-            let (_receipt, committed) = prepared.append_owned(lease)?;
-            inventory.run(host, client, &committed)
+            roster_trace!(JoinedInventoryCheck, inventory.check_before(&prepared))?;
+            let (_receipt, committed) =
+                roster_trace!(JoinedAuditAppend, prepared.append_owned(lease))?;
+            roster_trace!(JoinedInventoryRun, inventory.run(host, client, &committed))
         } else {
-            prepared.append(lease)?;
+            roster_trace!(JoinedAuditAppend, prepared.append(lease))?;
             Ok(None)
         }
     }

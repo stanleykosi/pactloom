@@ -164,10 +164,14 @@ impl FreshRosterPreliminaryWalletV2 {
         target.require_current(host, scope)?;
         admission.require_scope(scope)?;
         lease.check_current().map_err(|_| Error::Permission)?;
-        let import = profile
-            .wallet
-            .import_recorded_roster_inventory_fvk_v2(fvk, request, &evidence_digest)
-            .map_err(|_| Error::Invalid)?;
+        let import = roster_trace!(
+            import,
+            InventoryImportRecord,
+            profile
+                .wallet
+                .import_recorded_roster_inventory_fvk_v2(fvk, request, &evidence_digest)
+        )
+        .map_err(|_| Error::Invalid)?;
         admission.require_scope(scope)?;
         lease.check_current().map_err(|_| Error::Permission)?;
         target.require_current(host, scope)?;

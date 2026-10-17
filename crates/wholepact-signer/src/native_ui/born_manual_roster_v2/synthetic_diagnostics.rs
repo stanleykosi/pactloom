@@ -1,0 +1,213 @@
+//! Closed, synthetic-feature-only diagnostics. No private values or error
+//! payloads are formatted, and every result remains owned by its original path.
+use super::{Error, Output, Result, Step, Work};
+
+#[derive(Clone, Copy)]
+pub(super) enum Operation {
+    Open,
+    PrepareIntent,
+    PrepareReentry,
+    PrepareSignature,
+    PrepareExport,
+    PrepareWitness,
+    PrepareAcquire,
+    PrepareActivate,
+    PreparePublication,
+    PrepareServe,
+    PrepareContinuationProposal,
+    PrepareContinuationSign,
+    PrepareContinuationExport,
+    PrepareContinuedReentry,
+    PrepareContinuedServe,
+    PreparePolicyExport,
+    PrepareInventory,
+    PrepareCandidateSelection,
+    RetryAdmission,
+    RetryContinuedAdmission,
+    RetryAcquire,
+    RetryActivate,
+    CommitPair,
+    CommitRetain,
+    CommitReentry,
+    CommitSign,
+    CommitExport,
+    CommitWitness,
+    CommitAcquire,
+    CommitActivate,
+    CommitAdmit,
+    CommitPublish,
+    CommitServe,
+    CommitContinuationProposal,
+    CommitContinuationSign,
+    CommitContinuationExport,
+    CommitContinuedReentry,
+    CommitContinuedAdmit,
+    CommitContinuedServe,
+    CommitPolicyExport,
+    CommitInventory,
+    CommitCandidateSelection,
+    CommitContributionRetention,
+    Other,
+    ReceiveResult,
+    AdoptOutput,
+    ClearFocus,
+    ClearOwner,
+    ClearPeer,
+    ClearInitialStream,
+    ClearContinuedStream,
+    ClearReviewExpired,
+    DropLateOutput,
+}
+impl Operation {
+    pub(super) fn from_work(work: &Work) -> Self {
+        match work {
+            Work::Open(..) => Self::Open,
+            Work::PrepareIntent(..) => Self::PrepareIntent,
+            Work::PrepareReentry(..) => Self::PrepareReentry,
+            Work::PrepareSignature(..) => Self::PrepareSignature,
+            Work::PrepareExport(..) => Self::PrepareExport,
+            Work::PrepareWitness(..) => Self::PrepareWitness,
+            Work::PrepareAcquire(..) => Self::PrepareAcquire,
+            Work::PrepareActivate(..) => Self::PrepareActivate,
+            Work::PreparePublication(..) => Self::PreparePublication,
+            Work::PrepareServe(..) => Self::PrepareServe,
+            Work::PrepareContinuationProposal(..) => Self::PrepareContinuationProposal,
+            Work::PrepareContinuationSign(..) => Self::PrepareContinuationSign,
+            Work::PrepareContinuationExport(..) => Self::PrepareContinuationExport,
+            Work::PrepareContinuedReentry(..) => Self::PrepareContinuedReentry,
+            Work::PrepareContinuedServe(..) => Self::PrepareContinuedServe,
+            Work::PreparePolicyExport(..) => Self::PreparePolicyExport,
+            Work::PrepareInventory(..) => Self::PrepareInventory,
+            Work::PrepareCandidateSelection(..) => Self::PrepareCandidateSelection,
+            Work::RetryAdmission(..) => Self::RetryAdmission,
+            Work::RetryContinuedAdmission(..) => Self::RetryContinuedAdmission,
+            Work::RetryAcquire(..) => Self::RetryAcquire,
+            Work::RetryActivate(..) => Self::RetryActivate,
+            Work::Commit(_, step, _) => match step {
+                Step::Pair(_) => Self::CommitPair,
+                Step::Retain(_) => Self::CommitRetain,
+                Step::Reentry(_) => Self::CommitReentry,
+                Step::Sign(_) => Self::CommitSign,
+                Step::Export(_) => Self::CommitExport,
+                Step::Witness(_) => Self::CommitWitness,
+                Step::Acquire(_) => Self::CommitAcquire,
+                Step::Activate(_) => Self::CommitActivate,
+                Step::Admit(_) => Self::CommitAdmit,
+                Step::Publish(_) => Self::CommitPublish,
+                Step::Serve(_) => Self::CommitServe,
+                Step::ContinuationProposal(_) => Self::CommitContinuationProposal,
+                Step::ContinuationSign(_) => Self::CommitContinuationSign,
+                Step::ContinuationExport(_) => Self::CommitContinuationExport,
+                Step::ContinuedReentry(_) => Self::CommitContinuedReentry,
+                Step::ContinuedAdmit(_) => Self::CommitContinuedAdmit,
+                Step::ContinuedServe(_) => Self::CommitContinuedServe,
+                Step::PolicyExport(_) => Self::CommitPolicyExport,
+                Step::Inventory(_) => Self::CommitInventory,
+                Step::CandidateSelection(_) => Self::CommitCandidateSelection,
+                Step::ContributionRetention(_) => Self::CommitContributionRetention,
+                _ => Self::Other,
+            },
+            _ => Self::Other,
+        }
+    }
+    fn label(self) -> &'static str {
+        match self {
+            Self::Open => "RosterWorkOpen",
+            Self::PrepareIntent => "RosterWorkPrepareIntent",
+            Self::PrepareReentry => "RosterWorkPrepareReentry",
+            Self::PrepareSignature => "RosterWorkPrepareSignature",
+            Self::PrepareExport => "RosterWorkPrepareExport",
+            Self::PrepareWitness => "RosterWorkPrepareWitness",
+            Self::PrepareAcquire => "RosterWorkPrepareAcquire",
+            Self::PrepareActivate => "RosterWorkPrepareActivate",
+            Self::PreparePublication => "RosterWorkPreparePublication",
+            Self::PrepareServe => "RosterWorkPrepareServe",
+            Self::PrepareContinuationProposal => "RosterWorkPrepareContinuationProposal",
+            Self::PrepareContinuationSign => "RosterWorkPrepareContinuationSign",
+            Self::PrepareContinuationExport => "RosterWorkPrepareContinuationExport",
+            Self::PrepareContinuedReentry => "RosterWorkPrepareContinuedReentry",
+            Self::PrepareContinuedServe => "RosterWorkPrepareContinuedServe",
+            Self::PreparePolicyExport => "RosterWorkPreparePolicyExport",
+            Self::PrepareInventory => "RosterWorkPrepareInventory",
+            Self::PrepareCandidateSelection => "RosterWorkPrepareCandidateSelection",
+            Self::RetryAdmission => "RosterWorkRetryAdmission",
+            Self::RetryContinuedAdmission => "RosterWorkRetryContinuedAdmission",
+            Self::RetryAcquire => "RosterWorkRetryAcquire",
+            Self::RetryActivate => "RosterWorkRetryActivate",
+            Self::CommitPair => "RosterWorkCommitPair",
+            Self::CommitRetain => "RosterWorkCommitRetain",
+            Self::CommitReentry => "RosterWorkCommitReentry",
+            Self::CommitSign => "RosterWorkCommitSign",
+            Self::CommitExport => "RosterWorkCommitExport",
+            Self::CommitWitness => "RosterWorkCommitWitness",
+            Self::CommitAcquire => "RosterWorkCommitAcquire",
+            Self::CommitActivate => "RosterWorkCommitActivate",
+            Self::CommitAdmit => "RosterWorkCommitAdmit",
+            Self::CommitPublish => "RosterWorkCommitPublish",
+            Self::CommitServe => "RosterWorkCommitServe",
+            Self::CommitContinuationProposal => "RosterWorkCommitContinuationProposal",
+            Self::CommitContinuationSign => "RosterWorkCommitContinuationSign",
+            Self::CommitContinuationExport => "RosterWorkCommitContinuationExport",
+            Self::CommitContinuedReentry => "RosterWorkCommitContinuedReentry",
+            Self::CommitContinuedAdmit => "RosterWorkCommitContinuedAdmit",
+            Self::CommitContinuedServe => "RosterWorkCommitContinuedServe",
+            Self::CommitPolicyExport => "RosterWorkCommitPolicyExport",
+            Self::CommitInventory => "RosterWorkCommitInventory",
+            Self::CommitCandidateSelection => "RosterWorkCommitCandidateSelection",
+            Self::CommitContributionRetention => "RosterWorkCommitContributionRetention",
+            Self::Other => "RosterWorkOther",
+            Self::ReceiveResult => "RosterWorkReceiveResult",
+            Self::AdoptOutput => "RosterWorkAdoptOutput",
+            Self::ClearFocus => "RosterClearFocus",
+            Self::ClearOwner => "RosterClearOwner",
+            Self::ClearPeer => "RosterClearPeer",
+            Self::ClearInitialStream => "RosterClearInitialStream",
+            Self::ClearContinuedStream => "RosterClearContinuedStream",
+            Self::ClearReviewExpired => "RosterClearReviewExpired",
+            Self::DropLateOutput => "RosterDropLateOutput",
+        }
+    }
+}
+fn error_label(error: &Error) -> &'static str {
+    match error {
+        Error::Unavailable => "SignerUnavailable",
+        Error::PeerLifetimeUnavailable => "SignerPeerLifetimeUnavailable",
+        Error::Io(_) => "SignerIo",
+        Error::Authentication => "SignerAuthentication",
+        Error::InvalidData => "SignerInvalidData",
+        Error::Crypto => "SignerCrypto",
+        Error::Locked => "SignerLocked",
+        Error::BackupRequired => "SignerBackupRequired",
+        Error::RecoveryRequired => "SignerRecoveryRequired",
+        Error::AlreadyOpen => "SignerAlreadyOpen",
+        Error::ReviewMismatch => "SignerReviewMismatch",
+        Error::Verification => "SignerVerification",
+        Error::Uncertain => "SignerUncertain",
+        Error::ConsentJournal(_) => "SignerConsentJournal",
+        Error::Store(_) => "SignerStore",
+    }
+}
+pub(super) fn report_begin(operation: Operation) {
+    eprintln!("\n[JOINED_DIAGNOSTIC {} Begin]", operation.label());
+}
+pub(super) fn report_result<T>(operation: Operation, result: &Result<T>) {
+    let outcome = result
+        .as_ref()
+        .map_or_else(|e| error_label(e), |_| "Complete");
+    eprintln!("\n[JOINED_DIAGNOSTIC {} {}]", operation.label(), outcome);
+}
+pub(super) fn report_error<T>(operation: Operation, result: &Result<T>) {
+    if result.is_err() {
+        report_result(operation, result);
+    }
+}
+pub(super) fn report_output(operation: Operation, result: &Result<Output>) {
+    match result {
+        Ok(Output::Acquired(_, nested)) => report_result(operation, nested),
+        Ok(Output::Activated(_, nested)) => report_result(operation, nested),
+        Ok(Output::Admitted(_, nested)) | Ok(Output::ContinuedAdmitted(_, nested)) => {
+            report_result(operation, nested)
+        }
+        _ => report_result(operation, result),
+    }
+}

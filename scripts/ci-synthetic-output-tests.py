@@ -114,6 +114,44 @@ class PublicOutputTests(unittest.TestCase):
             self.assertFalse(output.safe_failure(self.failure(value)))
         self.assertFalse(output.safe_failure(self.failure('RetainedMaterial:HostReceipt')+' private-data'))
 
+    def test_roster_phase_diagnostics_are_exact_closed_kinds(self):
+        root=ROOT/'crates/wholepact-native-host/src/host'
+        text=(root/'synthetic_roster_trace_v1.rs').read_text()
+        kinds={}
+        for kind in ['Phase','Outcome']:
+            body=re.search(r'labels! \{ '+kind+r' \{(.*?)\} \}',text,re.S).group(1)
+            kinds[kind]=set(x.strip() for x in body.split(',') if x.strip())
+        self.assertEqual(len(kinds['Phase']),25)
+        self.assertTrue(kinds['Phase'] <= output.BOUNDARIES)
+        self.assertTrue(kinds['Outcome'] <= output.OUTCOMES)
+        signer=ROOT/'crates/wholepact-signer/src/native_ui/born_manual_roster_v2/synthetic_diagnostics.rs'
+        labels=set(re.findall(r'=> "(Roster\w+)"',signer.read_text()))
+        self.assertEqual(len(labels),53)
+        self.assertTrue(labels <= output.BOUNDARIES)
+        for label in labels | kinds['Phase']:
+            self.assertTrue(output.safe_failure(self.failure(label+':Begin')))
+            self.assertTrue(output.safe_failure(self.failure(label+':HostInvalid')))
+        for outcome in kinds['Outcome']:
+            self.assertTrue(output.safe_failure(self.failure('InventorySynchronize:'+outcome)))
+        for value in ['RosterWorkUnknown:Begin','InventoryUnknown:Begin',
+                      'InventorySynchronize:SyncUnknown','RosterClearOwner:SignerLocked private',
+                      'InventorySynchronize:ChainBackendFailure:private',
+                      'InventorySynchronize:private']:
+            self.assertFalse(output.safe_failure(self.failure(value)))
+        self.assertFalse(output.safe_failure(self.failure('RosterClearPeer:Begin')+' private'))
+
+    def test_lower_error_preflight_is_one_exact_inert_case(self):
+        expected='host::synthetic_roster_trace_v1::lower_error_projection_preserves_only_closed_kinds'
+        self.assertEqual(output.LOWER_ERROR_TESTS,(expected,))
+        root=ROOT/'crates/wholepact-native-host/src'
+        self.assertIn('mod synthetic_roster_trace_v1;', (root/'host.rs').read_text())
+        self.assertEqual((root/'host/synthetic_roster_trace_v1.rs').read_text().count(
+            'fn lower_error_projection_preserves_only_closed_kinds()'),1)
+        combined=output.PURE_TESTS+output.POLICY_ENVELOPE_TESTS+output.PROMPT_RENDERING_TESTS+output.LOWER_ERROR_TESTS
+        self.assertEqual(len(set(combined)),24)
+        self.assertNotIn(expected,[row[0] for row in output.TESTS.values()])
+        self.assertNotEqual(expected,output.STORAGE_BOOTSTRAP_TEST)
+
     def test_projection_does_not_search_inside_private_text(self):
         name=output.TESTS['initial'][0]
         marker=self.failure()

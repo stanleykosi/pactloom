@@ -344,24 +344,30 @@ impl PreparedInventory {
         request_approval.check()?;
         // Audit's actual lower lease has been consumed and its lease slot freed.
         // Consume that exact client; no provider reload or process relaunch.
-        let pending = pair_approval.commit(
-            &review_digest,
-            || {
-                audit.check_current()?;
-                admission.require_scope(&scope)?;
-                check_fresh(host, &fresh, &scope)
-            },
-            |_| {
-                client
-                    .begin_roster_inventory_pair_before(
-                        "wholepact-native-roster-preliminary-inventory-v2",
-                        &scope,
-                        deadline,
-                    )
-                    .map_err(|_| Error::Permission)
-            },
+        let pending = roster_trace!(
+            InventoryPair,
+            pair_approval.commit(
+                &review_digest,
+                || {
+                    audit.check_current()?;
+                    admission.require_scope(&scope)?;
+                    check_fresh(host, &fresh, &scope)
+                },
+                |_| {
+                    client
+                        .begin_roster_inventory_pair_before(
+                            "wholepact-native-roster-preliminary-inventory-v2",
+                            &scope,
+                            deadline,
+                        )
+                        .map_err(|_| Error::Permission)
+                },
+            )
         )?;
-        let client = pending.finish().map_err(|_| Error::Permission)?;
+        let client = roster_trace!(
+            InventoryPair,
+            pending.finish().map_err(|_| Error::Permission)
+        )?;
         audit.check_current()?;
         admission.require_scope(&scope)?;
         check_fresh(host, &fresh, &scope)?;
@@ -381,57 +387,68 @@ impl PreparedInventory {
             )?,
         };
         request.validate().map_err(|_| Error::Invalid)?;
-        let pending = request_approval.commit(
-            &review_digest,
-            || {
-                audit.check_current()?;
-                admission.require_scope(&scope)?;
-                check_fresh(host, &fresh, &scope)
-            },
-            |_| {
-                client
-                    .begin_roster_inventory_before(
-                        &request,
-                        &audit.original_signer_intent_digest,
-                        deadline,
-                    )
-                    .map_err(|_| Error::Permission)
-            },
+        let pending = roster_trace!(
+            InventoryRequest,
+            request_approval.commit(
+                &review_digest,
+                || {
+                    audit.check_current()?;
+                    admission.require_scope(&scope)?;
+                    check_fresh(host, &fresh, &scope)
+                },
+                |_| {
+                    client
+                        .begin_roster_inventory_before(
+                            &request,
+                            &audit.original_signer_intent_digest,
+                            deadline,
+                        )
+                        .map_err(|_| Error::Permission)
+                },
+            )
         )?;
-        let lower = pending.finish().map_err(|_| Error::Permission)?;
+        let lower = roster_trace!(
+            InventoryLease,
+            pending.finish().map_err(|_| Error::Permission)
+        )?;
         let lease = SignerRosterInventoryLeaseV2::from_native_lease(lower)
             .map_err(|_| Error::Permission)?;
         audit.check_current()?;
         lease.check_current().map_err(|_| Error::Permission)?;
         admission.require_scope(&scope)?;
         check_fresh(host, &fresh, &scope)?;
-        let mut wallet = FreshRosterPreliminaryWalletV2::import(
-            host,
-            fresh,
-            &admission,
-            &lease,
-            &import_target,
+        let mut wallet = roster_trace!(
+            InventoryImport,
+            FreshRosterPreliminaryWalletV2::import(host, fresh, &admission, &lease, &import_target,)
         )?;
         audit.check_current()?;
         lease.check_current().map_err(|_| Error::Permission)?;
         wallet.check_current(host, &scope, &import_target)?;
-        let read =
-            host.scan_manual_roster_inventory_v2(&mut wallet, admission, &lease, &import_target)?;
+        let read = roster_trace!(
+            InventoryScan,
+            host.scan_manual_roster_inventory_v2(&mut wallet, admission, &lease, &import_target)
+        )?;
         audit.check_current()?;
         lease.check_current().map_err(|_| Error::Permission)?;
         // The read owner itself retains/checks the wallet and import binding.
         // No unguarded metadata DTO escapes. The private read owner checks its
         // native gate and actual observation inside the fixed bounded display.
-        read.display_known_balances()?;
+        roster_trace!(InventoryDisplay, read.display_known_balances())?;
         drop(read);
         audit.check_current()?;
         lease.check_current().map_err(|_| Error::Permission)?;
         wallet.check_current(host, &scope, &import_target)?;
         // End the distinct preliminary native slot before a separately reviewed
         // candidate request. A prior viewing lease cannot authorize selection.
-        lease.finish().map_err(|_| Error::Permission)?;
+        roster_trace!(
+            InventoryFinish,
+            lease.finish().map_err(|_| Error::Permission)
+        )?;
         if let Some(selection) = selection {
-            return selection.run(host, client, audit, wallet, &import_target);
+            return roster_trace!(
+                CandidateRun,
+                selection.run(host, client, audit, wallet, &import_target)
+            );
         }
         Ok(None)
     }

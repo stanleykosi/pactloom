@@ -1,3 +1,27 @@
+// Diagnostic projection exists only in the explicit synthetic test build. In
+// every other build this macro expands to the original expression, evaluated once.
+macro_rules! roster_trace {
+    ($phase:ident, $operation:expr) => {
+        roster_trace!(host, $phase, $operation)
+    };
+    ($kind:ident, $phase:ident, $operation:expr) => {{
+        #[cfg(all(test, feature = "synthetic-born-joined-qualification"))]
+        {
+            use crate::host::synthetic_roster_trace_v1::{self as trace, Phase};
+            trace::begin(Phase::$phase);
+            let result = $operation;
+            trace::$kind(Phase::$phase, &result);
+            result
+        }
+        #[cfg(not(all(test, feature = "synthetic-born-joined-qualification")))]
+        {
+            $operation
+        }
+    }};
+}
+#[cfg(all(test, feature = "synthetic-born-joined-qualification"))]
+mod synthetic_roster_trace_v1;
+
 #[cfg(all(test, feature = "manual-admission", target_os = "linux"))]
 mod born_test_host_v1;
 #[cfg(all(feature = "manual-admission", target_os = "linux"))]
