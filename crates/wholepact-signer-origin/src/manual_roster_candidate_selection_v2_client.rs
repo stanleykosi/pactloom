@@ -476,13 +476,25 @@ impl RetainedManualRosterContributionV2 {
     }
 
     pub fn check_retained(&self) -> Result<()> {
-        require_completion_at(
+        let result = require_completion_at(
             self.deadline,
             &self.maximum_wall_seen,
             self.completion_expires_at_ms,
-            now_ms()?,
+            {
+                let wall = now_ms();
+                #[cfg(feature = "synthetic-qualification")]
+                if wall.is_err() {
+                    completion_clock_denied(CompletionClockDiagnostic::ObservationRetainedClockRead);
+                }
+                wall?
+            },
             Instant::now(),
-        )
+        );
+        #[cfg(feature = "synthetic-qualification")]
+        if result.is_err() {
+            completion_clock_denied(CompletionClockDiagnostic::ObservationRetainedClockDenied);
+        }
+        result
     }
     pub fn request(&self) -> Result<&ManualRosterContributionRetentionRequestV2> {
         self.check_retained()?;
@@ -539,13 +551,54 @@ pub(super) fn require_completion_at(
     wall: u64,
     monotonic: Instant,
 ) -> Result<()> {
-    observe_completion_wall(maximum, wall)?;
-    completion_budget(wall, expires, wall)?;
+    let observed = observe_completion_wall(maximum, wall);
+    #[cfg(feature = "synthetic-qualification")]
+    if observed.is_err() {
+        completion_clock_denied(CompletionClockDiagnostic::ObservationClockRollback);
+    }
+    observed?;
+    let budget = completion_budget(wall, expires, wall);
+    #[cfg(feature = "synthetic-qualification")]
+    if budget.is_err() {
+        // Both observed and current wall arguments are the same original sample.
+        // This actual refusal therefore means expiry, not a second clock read.
+        completion_clock_denied(CompletionClockDiagnostic::ObservationClockWallExpired);
+    }
+    budget?;
     if monotonic >= deadline {
+        #[cfg(feature = "synthetic-qualification")]
+        completion_clock_denied(CompletionClockDiagnostic::ObservationClockMonotonicExpired);
         return Err(Error::Permission);
     }
     Ok(())
 }
+
+// Denial-only opt-in qualification output. No clock samples, owner identifiers,
+// expiry values or error payloads are exposed; successful checks stay silent.
+#[cfg(feature = "synthetic-qualification")]
+pub(super) enum CompletionClockDiagnostic {
+    ObservationClockRollback,
+    ObservationClockWallExpired,
+    ObservationClockMonotonicExpired,
+    ObservationRetainedClockRead,
+    ObservationRetainedClockDenied,
+    ObservationAdmittedClockRead,
+    ObservationAdmittedClockDenied,
+}
+#[cfg(feature = "synthetic-qualification")]
+pub(super) fn completion_clock_denied(phase: CompletionClockDiagnostic) {
+    let label = match phase {
+        CompletionClockDiagnostic::ObservationClockRollback => "ObservationClockRollback",
+        CompletionClockDiagnostic::ObservationClockWallExpired => "ObservationClockWallExpired",
+        CompletionClockDiagnostic::ObservationClockMonotonicExpired => "ObservationClockMonotonicExpired",
+        CompletionClockDiagnostic::ObservationRetainedClockRead => "ObservationRetainedClockRead",
+        CompletionClockDiagnostic::ObservationRetainedClockDenied => "ObservationRetainedClockDenied",
+        CompletionClockDiagnostic::ObservationAdmittedClockRead => "ObservationAdmittedClockRead",
+        CompletionClockDiagnostic::ObservationAdmittedClockDenied => "ObservationAdmittedClockDenied",
+    };
+    eprintln!("\n[JOINED_DIAGNOSTIC {label} Begin]");
+}
+
 pub(super) fn observe_completion_wall(maximum: &AtomicU64, wall: u64) -> Result<()> {
     if wall < maximum.fetch_max(wall, Ordering::AcqRel) {
         return Err(Error::Permission);

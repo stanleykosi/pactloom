@@ -738,6 +738,11 @@ impl From<wholepact_wallet::wallet::protected_sync::exact_input_observation::Exa
         error: wholepact_wallet::wallet::protected_sync::exact_input_observation::ExactObservationError,
     ) -> Self {
         use wholepact_wallet::wallet::protected_sync::exact_input_observation::ExactObservationError as E;
+        #[cfg(all(test, feature = "synthetic-born-joined-qualification"))]
+        {
+            use crate::host::synthetic_roster_trace_v1::{self as trace, Phase};
+            trace::observation_failure(Phase::CompletionObservationDenied, &error);
+        }
         let reason = match error {
             E::Permission => "original or new read permission expired",
             E::Lineage => "original wallet lineage invalidated or already attempted",

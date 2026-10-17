@@ -1,6 +1,8 @@
 //! Genuine same-installed-peer additional-read admission. No public constructor
 //! from a request, callback, saved receipt, response JSON or audit evidence.
 use super::roster_candidate_selection_v2::require_completion_at;
+#[cfg(feature = "synthetic-qualification")]
+use super::roster_candidate_selection_v2::{CompletionClockDiagnostic, completion_clock_denied};
 use super::*;
 use crate::roster_common_context_read_v1::{
     MAX_COMMON_CONTEXT_READ_FRAME, RosterCommonContextReadEvidenceV1,
@@ -212,13 +214,25 @@ pub struct AdmittedRosterCommonContextReadV1 {
 impl AdmittedRosterCommonContextReadV1 {
     pub fn check_completion(&self) -> Result<()> {
         self.retained.check_retained()?;
-        require_completion_at(
+        let result = require_completion_at(
             self.deadline,
             &self.maximum_wall_seen,
             self.evidence.request.completion_expires_at_ms,
-            now_ms()?,
+            {
+                let wall = now_ms();
+                #[cfg(feature = "synthetic-qualification")]
+                if wall.is_err() {
+                    completion_clock_denied(CompletionClockDiagnostic::ObservationAdmittedClockRead);
+                }
+                wall?
+            },
             Instant::now(),
-        )
+        );
+        #[cfg(feature = "synthetic-qualification")]
+        if result.is_err() {
+            completion_clock_denied(CompletionClockDiagnostic::ObservationAdmittedClockDenied);
+        }
+        result
     }
     pub fn request(&self) -> Result<&RosterCommonContextReadRequestV1> {
         self.check_completion()?;

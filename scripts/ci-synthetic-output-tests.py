@@ -154,7 +154,7 @@ class PublicOutputTests(unittest.TestCase):
         for kind in ['Phase','Outcome']:
             body=re.search(r'labels! \{ '+kind+r' \{(.*?)\} \}',text,re.S).group(1)
             kinds[kind]=set(x.strip() for x in body.split(',') if x.strip())
-        self.assertEqual(len(kinds['Phase']),65)
+        self.assertEqual(len(kinds['Phase']),71)
         self.assertTrue(kinds['Phase'] <= output.BOUNDARIES)
         self.assertTrue(kinds['Outcome'] <= output.OUTCOMES)
         signer=ROOT/'crates/wholepact-signer/src/native_ui/born_manual_roster_v2/synthetic_diagnostics.rs'
@@ -247,7 +247,7 @@ class PublicOutputTests(unittest.TestCase):
             self.assertFalse(output.safe_failure(self.failure(value)))
 
     def test_completion_diagnostics_preserve_exact_closed_layers(self):
-        expected=set("CompletionOriginal CompletionPairApproval CompletionPairBegin CompletionPairFinish CompletionReentryRequest CompletionRequestApproval CompletionReentryBegin CompletionReentryFinish CompletionConstructionBegin CompletionConstructionFinish".split())
+        expected=set("CompletionObservationDenied CompletionPostReentryCurrent CompletionReadBinding CompletionConstructionTime CompletionCallerBinding CompletionConstructionRequest CompletionOriginal CompletionPairApproval CompletionPairBegin CompletionPairFinish CompletionReentryRequest CompletionRequestApproval CompletionReentryBegin CompletionReentryFinish CompletionConstructionBegin CompletionConstructionFinish".split())
         source=(ROOT/'crates/wholepact-native-host/src/host/synthetic_roster_trace_v1.rs').read_text()
         body=re.search(r'labels! \{ Phase \{(.*?)\} \}',source,re.S).group(1)
         actual={x.strip() for x in body.split(',') if x.strip().startswith('Completion')}
@@ -262,6 +262,49 @@ class PublicOutputTests(unittest.TestCase):
                       'CompletionReentryBegin:BridgeUnknown', 'CompletionPairFinish:OriginIoOther private',
                       'CompletionConstructionFinish:OriginPermission:private']:
             self.assertFalse(output.safe_failure(self.failure(value)))
+
+    def test_exact_observation_projection_is_exhaustive_and_payload_free(self):
+        variants=set("Permission Lineage Binding Storage RecoveryRequired StateChanged ProfileChanged Budget Roster".split())
+        expected={'Exact'+variant for variant in variants}
+        source=(ROOT/'crates/wholepact-native-host/src/host/synthetic_roster_trace_v1.rs').read_text()
+        body=source.split('fn observation_error(',1)[1].split('pub(super) fn import',1)[0]
+        self.assertEqual(set(re.findall(r'E::(\w+) => Outcome::Exact\w+',body)),variants)
+        self.assertIn('E::Sync(error) => sync_error(error)',body)
+        self.assertNotIn('=> format!',body)
+        self.assertEqual({label for label in output.OUTCOMES if label.startswith('Exact')},expected)
+        for outcome in expected|{'SyncInterrupted','ChainClockUnavailable','ChainBackendFailure'}:
+            self.assertTrue(output.safe_failure(self.failure('CompletionObservationDenied:'+outcome)))
+        for value in ['CompletionObservationDenied:ExactUnknown',
+                      'CompletionObservationDenied:ExactPermission private',
+                      'CompletionObservationDenied:ChainBackendFailure:12345',
+                      'CompletionObservationDeniedUnknown:ExactLineage']:
+            self.assertFalse(output.safe_failure(self.failure(value)))
+        existing=source.split('fn lower_error_projection_preserves_only_closed_kinds()',1)[1].split('#[test]',1)[0]
+        for variant in variants:
+            self.assertIn('(Exact::'+variant+', "Exact'+variant+'")',existing)
+        self.assertEqual(output.LOWER_ERROR_TESTS,('host::synthetic_roster_trace_v1::lower_error_projection_preserves_only_closed_kinds',))
+
+    def test_native_observation_clock_denials_preserve_exact_static_kinds(self):
+        expected=set("ObservationClockRollback ObservationClockWallExpired ObservationClockMonotonicExpired ObservationRetainedClockRead ObservationRetainedClockDenied ObservationAdmittedClockRead ObservationAdmittedClockDenied".split())
+        source=(ROOT/'crates/wholepact-signer-origin/src/manual_roster_candidate_selection_v2_client.rs').read_text()
+        body=source.split('pub(super) fn completion_clock_denied(',1)[1].split('pub(super) fn observe_completion_wall(',1)[0]
+        self.assertEqual(set(re.findall(r'=> "(Observation\w+)"',body)),expected)
+        self.assertEqual({label for label in output.BOUNDARIES if label.startswith('Observation')},expected)
+        self.assertNotIn('now_ms(',body)
+        self.assertNotIn('Instant::now(',body)
+        self.assertIn('[JOINED_DIAGNOSTIC {label} Begin]',body)
+        for label in expected:
+            self.assertTrue(output.safe_failure(self.failure(label+':Begin')))
+        for value in ['ObservationClockUnknown:Begin','ObservationAdmittedClockDenied:Unknown',
+                      'ObservationClockWallExpired:Begin private',
+                      'ObservationClockMonotonicExpired:Begin:12345']:
+            self.assertFalse(output.safe_failure(self.failure(value)))
+        check=source.split('pub(super) fn require_completion_at(',1)[1].split('// Denial-only opt-in qualification output.',1)[0]
+        self.assertEqual(check.count('observe_completion_wall(maximum, wall)'),1)
+        self.assertEqual(check.count('completion_budget(wall, expires, wall)'),1)
+        self.assertEqual(check.count('monotonic >= deadline'),1)
+        self.assertLess(check.index('observe_completion_wall(maximum, wall)'),check.index('completion_budget(wall, expires, wall)'))
+        self.assertLess(check.index('completion_budget(wall, expires, wall)'),check.index('monotonic >= deadline'))
 
     def test_inventory_denials_are_exact_closed_predicates(self):
         host=ROOT/'crates/wholepact-native-host/src/host/synthetic_roster_trace_v1.rs'

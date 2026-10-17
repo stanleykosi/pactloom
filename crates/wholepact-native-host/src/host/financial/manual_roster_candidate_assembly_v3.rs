@@ -1096,36 +1096,44 @@ impl AllObservedCommonContextRosterV1<'_> {
         .map_err(|_| Error::Permission)?;
         let reentered = roster_trace!(bridge, CompletionReentryFinish, pending.finish())
             .map_err(|_| Error::Permission)?;
-        self.check_current(host)?;
+        roster_trace!(CompletionPostReentryCurrent, self.check_current(host))?;
         // The request is produced only after the actual fresh reentry returns.
         // Never predate it, guess a future admission, or renew an original ceiling.
-        reentered
-            .check_original_read(owner.observed.2.native_read())
-            .map_err(|_| Error::Authentication)?;
+        roster_trace!(
+            CompletionReadBinding,
+            reentered
+                .check_original_read(owner.observed.2.native_read())
+                .map_err(|_| Error::Authentication)
+        )?;
         let lineage = reentered.lineage();
         let requested_at_ms = super::retained_inputs::now_ms()?;
-        require_reentry_construction_send_time(
-            requested_at_ms,
-            lineage.admitted_at_ms,
-            lineage.completion_expires_at_ms,
+        roster_trace!(
+            CompletionConstructionTime,
+            require_reentry_construction_send_time(
+                requested_at_ms,
+                lineage.admitted_at_ms,
+                lineage.completion_expires_at_ms,
+            )
         )?;
         let construction_request =
             wholepact_core::manual_roster_construction_v3::ManualRosterConstructionRequestV3 {
                 version: 3,
                 operation_id: construction_operation_id,
                 plan: lineage.request.original_read.plan.clone(),
-                current_caller_binding_digest: client
-                    .current_caller_binding_digest()
-                    .map_err(|_| Error::Permission)?,
+                current_caller_binding_digest: roster_trace!(
+                    CompletionCallerBinding,
+                    client.current_caller_binding_digest().map_err(|_| Error::Permission)
+                )?,
                 requested_at_ms,
                 admission_expires_at_ms: bounded_reentry_admission_end(
                     requested_at_ms,
                     lineage.completion_expires_at_ms,
                 )?,
             };
-        construction_request
-            .validate()
-            .map_err(|_| Error::Invalid)?;
+        roster_trace!(
+            CompletionConstructionRequest,
+            construction_request.validate().map_err(|_| Error::Invalid)
+        )?;
         let pending = roster_trace!(
             bridge,
             CompletionConstructionBegin,
