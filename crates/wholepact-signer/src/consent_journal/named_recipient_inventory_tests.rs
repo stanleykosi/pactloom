@@ -54,6 +54,7 @@ impl Fixture {
         #[cfg(not(feature = "offline-review-foundation"))]
         let public = random32();
         let mut profile = NamedRecipientProfileRecordV1 {
+            born_profile: None,
             schema_version: 1,
             reference: h(1),
             account_id: ACCOUNT.into(),
@@ -152,6 +153,7 @@ impl Fixture {
             }],
         };
         let mut original = NamedRecipientOriginalRecordV1 {
+            born_origin: None,
             schema_version: 1,
             reference: h(6),
             profile_ref: profile.reference.clone(),
@@ -174,6 +176,7 @@ impl Fixture {
         validate_original_fixture(&original, &profile).unwrap();
         let outbox = inert_intent_outbox(&original, &profile, 1, "22".repeat(16));
         let started = NamedRecipientStartedRecordV1 {
+            born_final_review: None,
             final_review: None,
             schema_version: 1,
             authorization_id: original.terms.authorization_id.clone(),
@@ -475,7 +478,7 @@ fn named_nonempty_encrypted_archive_preserves_exact_rows_and_restored_denial() {
         SignerConsentBundleAdapter::template(),
     )
     .unwrap();
-    assert_eq!(source.provenance().schema_version, 16);
+    assert_eq!(source.provenance().schema_version, SCHEMA_VERSION);
     for (table, expected) in &before {
         let retained = source.tables().iter().find(|t| t.name() == table).unwrap();
         let actual = retained
@@ -1263,4 +1266,224 @@ fn named_final_evidence_cannot_upgrade_or_downgrade_inert_history() {
         envelope_hex: hex::encode(bytes),
     });
     assert!(result.validate(&started, &original).is_err());
+}
+
+#[test]
+fn absent_born_origin_preserves_exact_legacy_encoding_and_reference() {
+    let fixture = Fixture::new();
+    let c = fixture.journal.connection.lock().unwrap();
+    let raw: String = c
+        .query_row(
+            "SELECT payload FROM signer_named_recipient_originals",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let original: NamedRecipientOriginalRecordV1 = decode(raw.clone()).unwrap();
+    assert!(original.born_origin.is_none());
+    let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert!(parsed.get("born_origin").is_none());
+    assert_eq!(encode(&original).unwrap().as_str(), raw);
+    let legacy = digest(
+        "wholepact:named-recipient-original:v1",
+        &(
+            original.schema_version,
+            &original.profile_ref,
+            &original.terms,
+            &original.original_artifact_digest,
+            &original.canonical_artifact_digest,
+            &original.transformation_digest,
+            &original.named_assertion_digest,
+            &original.assertion_package_digest,
+            original.validity_not_before_ms,
+            original.validity_expires_ms,
+            &original.original_request_digest,
+            &original.reservation_request,
+            &original.reservation_request_digest,
+            &original.admission_export_template,
+            &original.own_policy_digest,
+            &original.own_expectations,
+        ),
+    )
+    .unwrap();
+    assert_eq!(original.reference_digest().unwrap(), legacy);
+    assert_eq!(original.reference, legacy);
+    original.require_legacy_origin().unwrap();
+}
+
+#[test]
+fn absent_born_final_preserves_legacy_started_bytes_and_marker_domain() {
+    let f = Fixture::new();
+    let c = f.journal.connection.lock().unwrap();
+    let raw: String = c
+        .query_row(
+            "SELECT payload FROM signer_named_recipient_started",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let started: NamedRecipientStartedRecordV1 = decode(raw.clone()).unwrap();
+    assert!(started.born_final_review.is_none());
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&raw)
+            .unwrap()
+            .get("born_final_review")
+            .is_none()
+    );
+    assert_eq!(encode(&started).unwrap().as_str(), raw);
+    assert_eq!(
+        started.marker_digest().unwrap(),
+        digest("wholepact:named-recipient-started:v1", &started).unwrap()
+    );
+    assert!(started.return_metadata().is_err());
+}
+
+#[test]
+fn inert_born_final_fields_cannot_be_attached_to_a_legacy_original() {
+    // Intentionally untrusted serialized evidence, not a positive born lineage
+    // fixture or a native/session/clock capability. Reject before key code exists.
+    let f = Fixture::new();
+    let c = f.journal.connection.lock().unwrap();
+    let (profile, original, _) = retained_original_fixture(&c);
+    let raw: String = c
+        .query_row(
+            "SELECT payload FROM signer_named_recipient_started",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let mut started: NamedRecipientStartedRecordV1 = decode(raw).unwrap();
+    let (admission, enrollment, account) = offline_history::tests::full_admission();
+    let _ = account;
+    let request = wholepact_authority::born_offline_admission_v1::BornOfflineReservationRequestV1 {
+        version: 1,
+        enrollment_digest: h(71),
+        artifact_binding_digest: h(72),
+        construction_link:
+            wholepact_authority::born_offline_construction_v1::BornOfflineConstructionLinkV1 {
+                version: 1,
+                reservation_operation_id: "inert-construction".into(),
+                consume_operation_id: "inert-consume".into(),
+                reservation_digest: h(73),
+                consume_digest: h(74),
+                plan_digest: h(75),
+                common_context_digest: h(76),
+                invocation_digest: h(77),
+                checkpoint_origin_digest: h(78),
+            },
+        reservation: original.reservation_request.clone(),
+    };
+    let mut plan = original.admission_export_template.clone();
+    plan.sequence = 1;
+    let review = named_recipient_records::BornNamedRecipientFinalReviewV1 {
+        schema_version: 1,
+        admission:
+            wholepact_authority::born_offline_admission_v1::BornOfflineAuthorizationAdmissionV1 {
+                version: 1,
+                request,
+                reserved: admission.clone(),
+            },
+        origin_digest: h(79),
+        witness: wholepact_authority::WitnessDisclosureDescriptor {
+            endpoint: "127.0.0.1:1".into(),
+            server_name: "localhost".into(),
+            witness_id: admission.witness_id.clone(),
+            account_id: original.terms.account_id.clone(),
+            network_profile_id: original.terms.network_profile_id.clone(),
+            policy_digest: admission.witness_policy_digest.clone(),
+            pinned_server_certificate_digest: enrollment.witness_certificate_digest.clone(),
+        },
+        history_digest: h(80),
+        assertion_envelope_digest: h(81),
+        admission_receipt: named_recipient_records::BornNamedAdmissionReceiptV1 {
+            version: 1,
+            profile_ref: profile.reference.clone(),
+            original_ref: original.reference.clone(),
+            original_admission_digest: h(82),
+            export_plan: plan,
+            stream_digest: h(83),
+            sequence: 1,
+            message_id_digest: h(84),
+            content_digest: h(85),
+            payload_digest: h(86),
+            envelope_digest: h(87),
+            immutable_slot_digest: h(88),
+        },
+        native_review_digest: started.native_review_digest.clone(),
+        consent_reference: h(89),
+        reviewed_at_ms: 2000,
+        return_message_id: "90".repeat(16),
+        return_sequence: 1,
+        return_issued_at: 2,
+        return_expires_at: 30,
+    };
+    started.born_final_review = Some(review);
+    assert!(started.validate(&original).is_err());
+    assert_ne!(
+        started.marker_digest().unwrap(),
+        digest("wholepact:named-recipient-started:v1", &started).unwrap()
+    );
+    // A hash that is valid syntax but the wrong origin cannot revive historical
+    // inert rows or turn the inner legacy request into a born final approval.
+    started.admission_request_digest = started
+        .born_final_review
+        .as_ref()
+        .unwrap()
+        .admission
+        .request
+        .request_digest()
+        .unwrap();
+    assert!(started.validate(&original).is_err());
+}
+
+#[test]
+fn named_legacy_profile_keeps_exact_encoding_and_commitments_without_born_binding() {
+    let f = Fixture::new();
+    let c = f.journal.connection.lock().unwrap();
+    let raw: String = c
+        .query_row(
+            "SELECT payload FROM signer_named_recipient_profiles",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let profile: NamedRecipientProfileRecordV1 = decode(raw).unwrap();
+    assert!(profile.born_profile.is_none());
+    let json = serde_json::to_value(&profile).unwrap();
+    assert!(json.get("born_profile").is_none());
+    assert_eq!(profile.witness_enrollment_ref(), profile.enrollment_ref);
+    let old_setup = digest(
+        "wholepact:named-recipient-setup:v1",
+        &(
+            profile.schema_version,
+            &profile.account_id,
+            &profile.full_viewing_key_digest,
+            &profile.enrollment_ref,
+            &profile.manifest_ref,
+            &profile.verifier_signing_public_key,
+            &profile.verifier_transport_public_key,
+            &profile.witness_transport_public_key,
+            &profile.witness_certificate_digest,
+            &profile.return_transport_public_key,
+        ),
+    )
+    .unwrap();
+    let old_reference = digest(
+        "wholepact:named-recipient-profile:v1",
+        &(
+            &old_setup,
+            &profile.native_review_digest,
+            &profile.native_origin_digest,
+            &profile.transport_public_key,
+        ),
+    )
+    .unwrap();
+    assert_eq!(profile.original_setup_digest, old_setup);
+    assert_eq!(profile.reference, old_reference);
+    let decoded: NamedRecipientProfileRecordV1 = serde_json::from_value(json.clone()).unwrap();
+    assert!(decoded == profile);
+    assert!(serde_json::to_value(decoded).unwrap() == json);
+    let mut unsupported = json;
+    unsupported["born_profile"] = serde_json::json!({"version":1});
+    assert!(serde_json::from_value::<NamedRecipientProfileRecordV1>(unsupported).is_err());
 }

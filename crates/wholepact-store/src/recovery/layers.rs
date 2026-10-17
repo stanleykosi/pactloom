@@ -40,7 +40,7 @@ static LEGACY_LAYERED_TEMPLATE_V5: JournalTemplate = JournalTemplate {
         include_str!("../recovery-schema-v2.sql")
     ),
 };
-static LAYERED_TEMPLATE: JournalTemplate = JournalTemplate {
+static LEGACY_LAYERED_TEMPLATE_V7: JournalTemplate = JournalTemplate {
     kind: JournalKind::CoordinationAuthority,
     application_id: RECOVERED_GENERATION_APPLICATION_ID,
     schema_version: 7,
@@ -54,6 +54,23 @@ static LAYERED_TEMPLATE: JournalTemplate = JournalTemplate {
         include_str!("../recovery-schema-v2.sql")
     ),
 };
+static LAYERED_TEMPLATE: JournalTemplate = JournalTemplate {
+    kind: JournalKind::CoordinationAuthority,
+    application_id: RECOVERED_GENERATION_APPLICATION_ID,
+    schema_version: 9,
+    create_sql: concat!(
+        include_str!("../schema.sql"),
+        "\n",
+        include_str!("../migration-v2.sql"),
+        "\n",
+        include_str!("../recovery-schema.sql"),
+        "\n",
+        include_str!("../recovery-schema-v2.sql")
+    ),
+};
+pub(super) fn legacy_layered_template_v7() -> &'static JournalTemplate {
+    &LEGACY_LAYERED_TEMPLATE_V7
+}
 pub(super) fn legacy_layered_template_v5() -> &'static JournalTemplate {
     &LEGACY_LAYERED_TEMPLATE_V5
 }
@@ -66,7 +83,8 @@ pub fn coordination_layered_successor_template_for_schema(
     match version {
         3 => Ok(&LEGACY_LAYERED_TEMPLATE_V3),
         5 => Ok(&LEGACY_LAYERED_TEMPLATE_V5),
-        7 => Ok(&LAYERED_TEMPLATE),
+        7 => Ok(&LEGACY_LAYERED_TEMPLATE_V7),
+        9 => Ok(&LAYERED_TEMPLATE),
         _ => Err(BundleError::Unsupported),
     }
 }
@@ -885,13 +903,11 @@ fn verify_parent_commitment(c: &Connection, header: &Layer, rows: &[CapturedRow]
         coordination_layered_successor_template_for_schema(header.parent_schema_version)
     }
     .map_err(|_| StoreError::RecoveryRequired)?;
-    if (template.schema_version < 6
-        && construction_v4_supported_by_provenance(&header.parent_provenance)?)
-        || template.schema_version < 4
-            && construction_v3_supported_by_provenance(&header.parent_provenance)?
-    {
-        return Err(StoreError::RecoveryRequired);
-    }
+    let support = construction_encoding_support(template.application_id, template.schema_version)?;
+    require_construction_support(
+        support,
+        construction_encoding_supported_by_provenance(&header.parent_provenance)?,
+    )?;
     let scratch = Connection::open_in_memory()?;
     scratch.execute_batch(
         "PRAGMA trusted_schema=OFF; PRAGMA temp_store=MEMORY; PRAGMA foreign_keys=OFF;",
@@ -935,11 +951,7 @@ fn verify_parent_commitment(c: &Connection, header: &Layer, rows: &[CapturedRow]
     }
     scratch.pragma_update(None, "application_id", template.application_id)?;
     scratch.pragma_update(None, "user_version", template.schema_version)?;
-    crate::backup::validate_construction_encoding(
-        &scratch,
-        matches!(template.schema_version, 4..=7),
-        matches!(template.schema_version, 6 | 7),
-    )?;
+    crate::backup::validate_construction_encoding(&scratch, support.0, support.1, support.2)?;
     let (checksum, count) = coordination_owner_rows_commitment(&scratch, template)
         .map_err(|_| StoreError::RecoveryRequired)?;
     let state = crate::backup::read_recovery_state(&scratch)?;
@@ -984,15 +996,16 @@ fn validate_layered_for_template(
 ) -> Result<()> {
     if template.kind != JournalKind::CoordinationAuthority
         || template.application_id != RECOVERED_GENERATION_APPLICATION_ID
-        || !matches!(template.schema_version, 3 | 5 | 7)
+        || !matches!(template.schema_version, 3 | 5 | 7 | 9)
     {
         return Err(StoreError::RecoveryRequired);
     }
-    crate::backup::validate_construction_encoding(
-        c,
-        matches!(template.schema_version, 5 | 7),
-        template.schema_version == 7,
+    let support = construction_encoding_support(template.application_id, template.schema_version)?;
+    require_construction_support(
+        support,
+        construction_encoding_supported_by_provenance(provenance)?,
     )?;
+    crate::backup::validate_construction_encoding(c, support.0, support.1, support.2)?;
     let state = crate::backup::read_recovery_state(c)?;
     if !state.recovery_required
         || state.source_snapshot_digest.as_deref() != Some(&provenance.component_digest)
@@ -1000,16 +1013,14 @@ fn validate_layered_for_template(
         return Err(StoreError::RecoveryRequired);
     }
     let headers = load_headers(c)?;
-    if (template.schema_version < 6
-        && headers
-            .iter()
-            .any(|(header, _)| header.parent_schema_version >= 6))
-        || template.schema_version == 3
-            && headers
-                .iter()
-                .any(|(header, _)| header.parent_schema_version > 3)
-    {
-        return Err(StoreError::RecoveryRequired);
+    for (header, _) in &headers {
+        require_construction_support(
+            support,
+            construction_encoding_support(
+                RECOVERED_GENERATION_APPLICATION_ID,
+                header.parent_schema_version,
+            )?,
+        )?;
     }
     let last = &headers.last().ok_or(StoreError::RecoveryRequired)?.0;
     if last.binding()? != *binding || last.source_provenance != *provenance {
@@ -1051,8 +1062,16 @@ fn validate_layered_for_template(
                 if header.parent_binding()? == old.binding()?
                     && header.parent_provenance == old.source_provenance
                     && header.previous_layer_digest.as_ref() == Some(old_digest)
-                    && !(old.parent_schema_version >= 4 && header.parent_schema_version < 4)
-                    && !(old.parent_schema_version >= 6 && header.parent_schema_version < 6) => {}
+                    && require_construction_support(
+                        construction_encoding_support(
+                            RECOVERED_GENERATION_APPLICATION_ID,
+                            header.parent_schema_version,
+                        )?,
+                        construction_encoding_support(
+                            RECOVERED_GENERATION_APPLICATION_ID,
+                            old.parent_schema_version,
+                        )?,
+                    ).is_ok() => {}
             None if header.previous_layer_digest.is_none() => (),
             _ => return Err(StoreError::RecoveryRequired),
         }

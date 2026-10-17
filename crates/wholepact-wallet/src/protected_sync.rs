@@ -1,6 +1,9 @@
 //! Encrypted, bounded snapshot scanning and local contribution selection.
 //! A matching single-provider snapshot is never unspentness or signing authority.
 #[cfg(target_os = "linux")]
+#[path = "born_post_return_inputs_v1.rs"]
+pub mod born_post_return_inputs_v1;
+#[cfg(target_os = "linux")]
 #[path = "exact_input_observation.rs"]
 pub mod exact_input_observation;
 #[path = "wallet_key_use.rs"]

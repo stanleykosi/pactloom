@@ -56,9 +56,9 @@ pub(super) struct PreparedInventory {
 pub(super) fn prepare(
     host: &Host,
     audit: &PreparedRosterPublication<'_>,
-    select: bool,
-    retain: bool,
+    selection_mode: Option<super::selection_v2::SelectionMode>,
 ) -> Result<PreparedInventory> {
+    let retain = selection_mode.is_some_and(super::selection_v2::SelectionMode::retains_inputs);
     audit.check_before()?;
     if audit.purpose != RosterAuditPurpose::ExistingOriginalContinuationV4 {
         return Err(Error::Permission);
@@ -197,8 +197,8 @@ pub(super) fn prepare(
         "After that same-process pairing, send ONE preliminary viewing request for this exact scope.\nOperation: {}\nFull private scope: {}\nThe request's caller binding is derived only from the actual new native grant. Its start is the actual send-time clock and its requested disclosure expiry is exactly 30,000 milliseconds later, never beyond the original policy; all original native and Host deadlines may shorten it. The expected original signer-intent commitment comes only from the checked continuation lease before audit consumption.\nThe installed signer separately approves disclosing this account's FVK to this Host and encrypted wallet. The named provider receives the bounded public-block request. Local known-balance output is incomplete, single-provider and not consensus, unspentness, empty-account, contribution-selection or spending evidence. Disclosed keys and admitted wallet writes cannot be recalled. Stay in the signer window through automatic import, scan and guarded display; no further terminal prompts occur.",
         selected.operation_id, serde_json::to_string_pretty(&scope)?,
     ))?;
-    let selection = if select {
-        Some(super::selection_v2::prepare(host, audit, &scope, retain)?)
+    let selection = if let Some(mode) = selection_mode {
+        Some(super::selection_v2::prepare(host, audit, &scope, mode)?)
     } else {
         None
     };
@@ -271,6 +271,24 @@ fn disclosure_expiry(start: u64, original_expiry: u64) -> Result<u64> {
     Ok(end)
 }
 impl PreparedInventory {
+    #[cfg(test)]
+    pub(super) fn synthetic_retention_operation_id(&self) -> Option<&str> {
+        self.selection
+            .as_ref()
+            .and_then(|s| s.synthetic_retention_operation_id())
+    }
+
+    #[cfg(test)]
+    pub(super) fn synthetic_exact_request_parts(&self) -> (&ManualRosterInventoryScopeV2, &str) {
+        (&self.scope, &self.operation_id)
+    }
+    #[cfg(test)]
+    pub(super) fn synthetic_selection_parts(&self) -> Option<(&wholepact_core::manual_roster_candidate_selection_v2::ManualRosterCandidateSelectionScopeV2, &str)>{
+        self.selection
+            .as_ref()
+            .map(|s| s.synthetic_exact_request_parts())
+    }
+
     pub(super) fn deadline(&self) -> Instant {
         self.admission
             .deadline()

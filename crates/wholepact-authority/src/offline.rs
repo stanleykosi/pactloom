@@ -6,8 +6,8 @@
 //! Runtime support stays disabled until the independent witness, native signer,
 //! scoped transport and current online dispatch are composed and qualified.
 use crate::{
-    digest, encode, hash, id, AccountPolicy, AuthorityError, AuthorityHead, InputReservation,
-    Result, MAX_EVENTS, MAX_MONEY,
+    AccountPolicy, AuthorityError, AuthorityHead, InputReservation, MAX_EVENTS, MAX_MONEY, Result,
+    digest, encode, hash, id,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -327,6 +327,22 @@ impl ReserveOfflineAuthorization {
         offline: &OfflineEnrollmentPolicy,
         witness_now_ms: u64,
     ) -> Result<()> {
+        // Legacy origin membership is immutable. Born extension references are
+        // admitted only by their separate complete origin validator.
+        if !account
+            .enrollment_refs
+            .contains(&self.intent.terms.enrollment_ref)
+        {
+            return Err(AuthorityError::PolicyDenied);
+        }
+        self.validate_common_policy_bounds(account, offline, witness_now_ms)
+    }
+    pub(crate) fn validate_common_policy_bounds(
+        &self,
+        account: &AccountPolicy,
+        offline: &OfflineEnrollmentPolicy,
+        witness_now_ms: u64,
+    ) -> Result<()> {
         self.validate()?;
         account.validate()?;
         offline.validate()?;
@@ -337,7 +353,6 @@ impl ReserveOfflineAuthorization {
             || t.network_profile_id != offline.network_profile_id
             || account.witness_id != offline.witness_id
             || t.enrollment_ref != offline.enrollment_ref
-            || !account.enrollment_refs.contains(&t.enrollment_ref)
             || t.offline_policy_digest != offline.policy_digest()?
             || t.offline_signer_key_digest != offline.offline_signer_key_digest
             || t.return_recipient_key_digest != offline.return_recipient_key_digest

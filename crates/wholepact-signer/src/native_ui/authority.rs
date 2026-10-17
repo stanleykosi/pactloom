@@ -118,8 +118,16 @@ impl NativeAuthorityBinding {
 /// Owned by the real pending-account native UI lifecycle before generation.
 /// Only a private runtime entry token from its focused primary-click branch can
 /// construct this. Generic open-account NativeAuthority cannot be converted.
+#[cfg(feature = "pending-birth-owner-signing")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum PendingEntryPurpose {
+    Ordinary,
+    ConsumedBornNamed,
+}
 #[cfg(feature = "authority-signing")]
 pub(crate) struct PendingAccountNativeAuthority {
+    #[cfg(feature = "pending-birth-owner-signing")]
+    purpose: PendingEntryPurpose,
     native: NativeAuthority,
     parent_channel: Option<crate::native_launch::ParentChannel>,
     focus_epoch: u64,
@@ -132,6 +140,8 @@ impl PendingAccountNativeAuthority {
             channel.check_connected()?;
         }
         let owner = Self {
+            #[cfg(feature = "pending-birth-owner-signing")]
+            purpose: PendingEntryPurpose::Ordinary,
             native: NativeAuthority::entered_native_window()?,
             parent_channel,
             focus_epoch,
@@ -153,6 +163,26 @@ impl PendingAccountNativeAuthority {
         owner.native.binding.expires_at = Some(deadline);
         owner.check_current()?;
         Ok(owner)
+    }
+    /// A distinct fresh entry for an actual key-free consumed-origin token.
+    /// This cannot extend an old owner or any original financial clock.
+    #[cfg(feature = "pending-birth-owner-signing")]
+    pub(super) fn enter_consumed_born_named(
+        entry: super::runtime::PendingBirthEntry,
+        dormant: &crate::account::birth::enrollment::roster_v2::inventory::common_context_reentry_v1::named_recipient::DormantConsumedBornNamedSourceV1,
+    ) -> Result<Self> {
+        let deadline = Instant::now() + Duration::from_secs(15 * 60);
+        dormant.check_current()?;
+        let mut owner = Self::enter(entry)?;
+        owner.purpose = PendingEntryPurpose::ConsumedBornNamed;
+        owner.native.binding.expires_at = Some(deadline);
+        dormant.check_current()?;
+        owner.check_current()?;
+        Ok(owner)
+    }
+    #[cfg(feature = "pending-birth-owner-signing")]
+    pub(super) fn entry_purpose(&self) -> PendingEntryPurpose {
+        self.purpose
     }
     #[cfg(feature = "pending-birth-owner-signing")]
     pub(super) fn publish_pending_endpoint(&self, path: &std::path::Path) -> Result<()> {
@@ -295,6 +325,14 @@ impl NativeAuthority {
     /// lease may be draining, so cancellation cannot promise to recall output.
     #[cfg(feature = "authority-signing")]
     pub(super) fn revoke_informational_now(&self) {
+        self.binding.instance.store(false, Ordering::Release);
+    }
+    /// Active named-recipient Lock closes this exact owner immediately. The
+    /// runtime removes it from GUI state and retains it in the existing close
+    /// worker until publication/transport/session drain completes. This is
+    /// revocation only; it cannot create or refresh an authority instance.
+    #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
+    pub(super) fn revoke_named_recipient_now(&self) {
         self.binding.instance.store(false, Ordering::Release);
     }
     pub(super) fn invalidate(&self) {
@@ -645,6 +683,27 @@ pub(crate) fn recovery_test_decision(authority: &NativeAuthority, digest: &str) 
 #[cfg(all(test, feature = "authority-signing"))]
 mod publication_tests {
     use super::*;
+    #[cfg(feature = "offline-review-foundation")]
+    #[test]
+    fn named_lock_revokes_without_waiting_for_already_admitted_publication() {
+        let authority = Arc::new(recovery_test_authority());
+        let binding = authority.binding();
+        let lease = binding.publication_lease().unwrap();
+        let closing = Arc::clone(&authority);
+        let (send, recv) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            closing.revoke_named_recipient_now();
+            send.send(()).unwrap();
+        });
+        let immediate = recv.recv_timeout(Duration::from_secs(2)).is_ok();
+        // Release before joining even when a regression blocks the worker.
+        drop(lease);
+        worker.join().unwrap();
+        assert!(immediate);
+        assert!(binding.check_current().is_err());
+        assert!(binding.publication_lease().is_err());
+        authority.invalidate();
+    }
     #[test]
     fn native_lock_drains_admitted_publication_then_rejects_new_leases() {
         let authority = Arc::new(recovery_test_authority());
@@ -686,6 +745,7 @@ mod bounded_deadline_tests {
         // Inert cancellation only: no socket, exporter, credentials, account,
         // provider, authority effect or native decision is created.
         let owner = PendingAccountNativeAuthority {
+            purpose: PendingEntryPurpose::Ordinary,
             native: recovery_test_authority(),
             parent_channel: None,
             focus_epoch: 1,

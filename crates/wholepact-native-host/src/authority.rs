@@ -1,6 +1,8 @@
 //! Native consent is session-only and exactly bound. A counted fence serializes
 //! revocation with held effects, including async observation leases. No production
 //! allow-all controller or caller-supplied approval bit exists.
+#[cfg(all(feature = "financial-runtime", feature = "manual-admission", target_os = "linux"))]
+pub(crate) mod born_post_return_inputs_v1;
 #[cfg(feature = "financial-runtime")]
 pub(crate) mod construction;
 #[cfg(feature = "financial-runtime")]

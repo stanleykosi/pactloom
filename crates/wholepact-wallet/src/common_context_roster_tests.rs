@@ -72,6 +72,7 @@ fn snapshots(fixture: &mut Fixture) -> Vec<CommonContextVerifierSnapshot> {
         .map(|(index, mut exact)| {
             exact.required_ancestry = common.required_ancestry.clone();
             CommonContextVerifierSnapshot {
+                historical: None,
                 exact,
                 common: common.clone(),
                 plan_digest: hex::encode([90 + index as u8; 32]),
@@ -90,6 +91,7 @@ fn slots<'a, O: ObservationChecks>(
         .zip(snapshots)
         .zip(observations)
         .map(|((sync, snapshot), fresh)| CommonContextLockSlot {
+            historical: &snapshot.historical,
             exact: ExactInputWalletSlot {
                 sync,
                 snapshot: &snapshot.exact,
@@ -144,6 +146,7 @@ fn differing_original_tips_keep_frozen_target_under_sorted_actual_locks() {
         |held| {
             held.check_all_current()?;
             assert!(held.native_reads.is_empty());
+            assert!(held.historical_provenance_v1().is_err());
             assert_eq!(held.participant_count(), 2);
             assert_eq!(held.current_tip().0, 4_465_043);
             let context = held.common.construction_context()?;

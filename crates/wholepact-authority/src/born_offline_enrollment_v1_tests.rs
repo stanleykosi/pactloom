@@ -44,6 +44,7 @@ pub(crate) fn record(
     let g = ledger.policy.account_use_genesis.as_ref().unwrap();
     BornOfflineEnrollmentRecordV1 {
         enrollment: BornOfflineEnrollmentV1 {
+            owner_continuation: None,
             version: 1,
             policy,
             assurance: BornOfflineAssuranceV1::NamedVerifierOwnEffectsV1 {

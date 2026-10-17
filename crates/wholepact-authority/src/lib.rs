@@ -23,6 +23,7 @@ pub mod native_witness_owner;
 
 mod admission;
 mod automation;
+pub mod born_offline_clock_v1;
 mod construction_transport_handoff_policy_v1;
 pub mod construction_transport_handoff_v1;
 #[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
@@ -53,12 +54,30 @@ pub use offline_retry::{
 };
 pub mod account_use;
 pub mod account_use_link;
+pub mod born_offline_admission_v1;
+pub mod born_offline_checkpoint_origin_v1;
+pub mod born_offline_construction_v1;
+pub mod born_offline_dispatch_v1;
 #[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
 pub(crate) mod born_offline_enrollment_owner_v1;
+mod born_offline_retry_v1;
+#[cfg(all(feature = "born-offline-witness-owner", target_os = "linux"))]
+pub use born_offline_retry_v1::configured_born_witness::BornOfflineWitnessConfigurationV1;
+mod born_offline_witness_v1;
+pub use born_offline_witness_v1::{
+    BornOfflineDeliveryLookupV1, BornOfflineDeliveryV1,
+    validate_born_offline_intent_delivery_size_v1,
+};
+mod born_offline_artifact_schema_v1;
+#[cfg(all(feature = "born-offline-witness-owner", target_os = "linux"))]
+pub(crate) mod born_offline_artifacts_owner_v1;
+mod born_offline_artifacts_policy_v1;
+pub mod born_offline_artifacts_v1;
 mod born_offline_enrollment_policy_v1;
 #[cfg(feature = "pending-birth-foundation")]
 pub mod born_offline_enrollment_signature_v1;
 pub mod born_offline_enrollment_v1;
+pub mod born_offline_owner_continuation_v1;
 mod journal;
 pub mod manual_enrollment;
 #[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
@@ -283,3 +302,8 @@ pub use construction_history_v2::{
     ConstructionApprovalHistoryV2, ConstructionHistoryV2, ConstructionOriginHistoryV2,
     ConstructionOriginHistoryV3,
 };
+
+#[cfg(all(feature = "born-offline-witness-owner", target_os = "linux"))]
+pub mod born_offline_server_launcher_v1;
+
+pub use transport::AuthenticatedBornOfflineDispatchV1;

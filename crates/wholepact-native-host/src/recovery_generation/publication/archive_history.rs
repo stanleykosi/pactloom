@@ -464,7 +464,7 @@ pub(super) fn open_archived_coordination_generation(
     expected: &RecoveryProvenance,
     layered: bool,
 ) -> Result<ArchivedGenerationSource> {
-    for version in if layered { [3, 5, 7] } else { [2, 4, 6] } {
+    for version in coordination_generation_versions(layered) {
         let template = if layered {
             wholepact_store::recovery::coordination_layered_successor_template_for_schema(version)?
         } else {
@@ -1100,5 +1100,24 @@ mod tests {
             .unwrap()
             .payload = node.entries["host-vault"].payload.clone();
         assert!(check_role_matrix(&changed, &descriptor, &plan.components).is_err());
+    }
+}
+
+// Explicit destination marker encodings, not an inclusive version range.
+// Opening each candidate still authenticates the complete source/template and
+// typed Store inventory. No legacy source is rewritten or relabeled.
+fn coordination_generation_versions(layered: bool) -> [i64; 4] {
+    if layered { [3, 5, 7, 9] } else { [2, 4, 6, 8] }
+}
+
+#[cfg(test)]
+mod historical_provenance_versions {
+    #[test]
+    fn historical_provenance_archive_encodings_are_explicit_and_family_distinct() {
+        assert_eq!(super::coordination_generation_versions(false), [2, 4, 6, 8]);
+        assert_eq!(super::coordination_generation_versions(true), [3, 5, 7, 9]);
+        for v in super::coordination_generation_versions(false) {
+            assert!(!super::coordination_generation_versions(true).contains(&v));
+        }
     }
 }

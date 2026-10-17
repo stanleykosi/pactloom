@@ -5,6 +5,7 @@
 pub mod backup;
 #[cfg(feature = "submission-dispatch")]
 pub mod local_node;
+pub mod public_read_profile_v1;
 mod proxy;
 mod reconciliation;
 mod rpc;

@@ -1,6 +1,8 @@
 //! Exact transactional schema extension; migration never clears recovery state.
 use super::*;
 use rusqlite::{Connection, TransactionBehavior};
+pub(super) const V16_SCHEMA: &str = include_str!("schema_v16.sql");
+pub(super) const BORN_DISPATCH_SCHEMA: &str = include_str!("born_dispatch_schema_v17.sql");
 pub(super) const V15_SCHEMA: &str = include_str!("schema_v15.sql");
 pub(super) const NAMED_RECIPIENT_SCHEMA: &str = include_str!("named_recipient_schema.sql");
 pub(super) const V14_SCHEMA: &str = include_str!("schema_v14.sql");
@@ -52,6 +54,7 @@ fn migrate(c: &mut Connection, inject_failure: bool) -> Result<()> {
     tx.execute_batch(COMMON_CONTEXT_AUDIT_SCHEMA)?;
     tx.execute_batch(COMMON_CONTEXT_REENTRY_SCHEMA)?;
     tx.execute_batch(NAMED_RECIPIENT_SCHEMA)?;
+    tx.execute_batch(BORN_DISPATCH_SCHEMA)?;
     if inject_failure {
         return Err(JournalError::Database);
     }
@@ -78,6 +81,7 @@ pub(super) fn migrate_v9(c: &mut Connection) -> Result<()> {
     tx.execute_batch(COMMON_CONTEXT_AUDIT_SCHEMA)?;
     tx.execute_batch(COMMON_CONTEXT_REENTRY_SCHEMA)?;
     tx.execute_batch(NAMED_RECIPIENT_SCHEMA)?;
+    tx.execute_batch(BORN_DISPATCH_SCHEMA)?;
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     verify_exact_schema(&tx, SCHEMA)?;
     tx.commit()?;
@@ -106,6 +110,7 @@ fn migrate_v10_inner(c: &mut Connection, account_id: &str, inject_failure: bool)
     tx.execute_batch(COMMON_CONTEXT_AUDIT_SCHEMA)?;
     tx.execute_batch(COMMON_CONTEXT_REENTRY_SCHEMA)?;
     tx.execute_batch(NAMED_RECIPIENT_SCHEMA)?;
+    tx.execute_batch(BORN_DISPATCH_SCHEMA)?;
     if inject_failure {
         return Err(JournalError::Database);
     }
@@ -135,6 +140,7 @@ fn migrate_v11_inner(c: &mut Connection, account_id: &str, inject_failure: bool)
     tx.execute_batch(COMMON_CONTEXT_AUDIT_SCHEMA)?;
     tx.execute_batch(COMMON_CONTEXT_REENTRY_SCHEMA)?;
     tx.execute_batch(NAMED_RECIPIENT_SCHEMA)?;
+    tx.execute_batch(BORN_DISPATCH_SCHEMA)?;
     if inject_failure {
         return Err(JournalError::Database);
     }
@@ -165,6 +171,7 @@ fn migrate_v12_inner(c: &mut Connection, account_id: &str, inject_failure: bool)
     tx.execute_batch(COMMON_CONTEXT_AUDIT_SCHEMA)?;
     tx.execute_batch(COMMON_CONTEXT_REENTRY_SCHEMA)?;
     tx.execute_batch(NAMED_RECIPIENT_SCHEMA)?;
+    tx.execute_batch(BORN_DISPATCH_SCHEMA)?;
     if inject_failure {
         return Err(JournalError::Database);
     }
@@ -477,6 +484,7 @@ fn migrate_v13_inner(c: &mut Connection, account_id: &str, fail: bool) -> Result
     tx.execute_batch(COMMON_CONTEXT_AUDIT_SCHEMA)?;
     tx.execute_batch(COMMON_CONTEXT_REENTRY_SCHEMA)?;
     tx.execute_batch(NAMED_RECIPIENT_SCHEMA)?;
+    tx.execute_batch(BORN_DISPATCH_SCHEMA)?;
     if fail {
         return Err(JournalError::Database);
     }
@@ -543,6 +551,7 @@ fn migrate_v14_inner(c: &mut Connection, account_id: &str, fail: bool) -> Result
     }
     tx.execute_batch(COMMON_CONTEXT_REENTRY_SCHEMA)?;
     tx.execute_batch(NAMED_RECIPIENT_SCHEMA)?;
+    tx.execute_batch(BORN_DISPATCH_SCHEMA)?;
     if fail {
         return Err(JournalError::Database);
     }
@@ -638,6 +647,7 @@ fn migrate_v15_inner(c: &mut Connection, account_id: &str, fail: bool) -> Result
         return Err(JournalError::InvalidBinding);
     }
     tx.execute_batch(NAMED_RECIPIENT_SCHEMA)?;
+    tx.execute_batch(BORN_DISPATCH_SCHEMA)?;
     if fail {
         return Err(JournalError::Database);
     }
@@ -650,3 +660,28 @@ fn migrate_v15_inner(c: &mut Connection, account_id: &str, fail: bool) -> Result
 #[cfg(test)]
 #[path = "named_recipient_migration_tests.rs"]
 mod named_recipient_migration_tests;
+
+/// Exact additive migration; retained requests and quarantine never change.
+pub(super) fn migrate_v16(c: &mut Connection, account_id: &str) -> Result<()> {
+    migrate_v16_inner(c, account_id, false)
+}
+fn migrate_v16_inner(c: &mut Connection, account_id: &str, fail: bool) -> Result<()> {
+    let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let application: i64 = tx.pragma_query_value(None, "application_id", |r| r.get(0))?;
+    let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    if application != APPLICATION_ID || version != 16 {
+        return Err(JournalError::UnsupportedSchema);
+    }
+    verify_exact_schema(&tx, V16_SCHEMA)?;
+    if storage::read_account(&tx)?.account_id != account_id {
+        return Err(JournalError::InvalidBinding);
+    }
+    tx.execute_batch(BORN_DISPATCH_SCHEMA)?;
+    if fail {
+        return Err(JournalError::Database);
+    }
+    tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    verify_exact_schema(&tx, SCHEMA)?;
+    tx.commit()?;
+    Ok(())
+}

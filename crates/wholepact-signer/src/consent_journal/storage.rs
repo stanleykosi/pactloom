@@ -77,7 +77,7 @@ impl SignerConsentJournal {
         let mut connection = encrypted.into_connection();
         let initial_version: i64 =
             connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if matches!(initial_version, 8..=15) && read_account(&connection)?.account_id != account_id
+        if matches!(initial_version, 8..=16) && read_account(&connection)?.account_id != account_id
         {
             return Err(JournalError::InvalidBinding);
         }
@@ -104,6 +104,9 @@ impl SignerConsentJournal {
         }
         if initial_version == 15 {
             recovery_migration::migrate_v15(&mut connection, account_id)?;
+        }
+        if initial_version == 16 {
+            recovery_migration::migrate_v16(&mut connection, account_id)?;
         }
         let application: i64 =
             connection.pragma_query_value(None, "application_id", |r| r.get(0))?;
@@ -153,7 +156,7 @@ impl SignerConsentJournal {
         let mut connection = encrypted.into_connection();
         let initial_version: i64 =
             connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if matches!(initial_version, 8..=15) && read_account(&connection)?.account_id != account_id
+        if matches!(initial_version, 8..=16) && read_account(&connection)?.account_id != account_id
         {
             return Err(JournalError::InvalidBinding);
         }
@@ -180,6 +183,9 @@ impl SignerConsentJournal {
         }
         if initial_version == 15 {
             recovery_migration::migrate_v15(&mut connection, account_id)?;
+        }
+        if initial_version == 16 {
+            recovery_migration::migrate_v16(&mut connection, account_id)?;
         }
         let application: i64 =
             connection.pragma_query_value(None, "application_id", |r| r.get(0))?;
@@ -1023,6 +1029,16 @@ const CAPACITY_TABLES: &[(&str, &[&str])] = &[
     ("signer_bridge_permits", &["authorization_id", "payload"]),
     ("signer_bridge_keyuse", &["authorization_id"]),
     (
+        "signer_named_recipient_dispatch_requests",
+        &[
+            "operation_id",
+            "authorization_id",
+            "original_ref",
+            "request_digest",
+            "payload",
+        ],
+    ),
+    (
         "signer_dispatch_requests",
         &["operation_id", "authorization_id", "payload"],
     ),
@@ -1388,7 +1404,7 @@ pub(crate) struct CommonContextAuthorizedReentryOwnerInput<'a> {
 
 #[cfg(all(feature = "pending-birth-owner-signing", target_os = "linux"))]
 impl SignerConsentJournal {
-    /// The only binding-preserving reopen. The borrowed proof is privately
+    /// Read-completion-specific binding-preserving reopen. The borrowed proof is privately
     /// created by the consumed actual dormant owner after fresh native unlock;
     /// neither a path, receipt nor an arbitrary Arc can substitute for it.
     pub(crate) fn reopen_common_context_completion(
@@ -1417,6 +1433,37 @@ impl SignerConsentJournal {
             },
             true,
         )?;
+        proof
+            .check_current()
+            .map_err(|_| JournalError::Permission)?;
+        journal.binding = proof.original_binding().clone();
+        Ok(journal)
+    }
+}
+
+#[cfg(all(feature = "pending-birth-owner-signing", target_os = "linux"))]
+impl SignerConsentJournal {
+    /// Purpose-distinct reopen of the genuinely consumed V3 source after a new
+    /// native unlock. Only its private proof can preserve the original local
+    /// binding; complete current rows must exactly equal the drained snapshot.
+    pub(crate) fn reopen_consumed_born_named_v1(
+        proof: &crate::account::birth::enrollment::roster_v2::inventory::common_context_reentry_v1::named_recipient::FreshConsumedBornNamedJournalReopenV1<'_>,
+    ) -> Result<Self> {
+        proof
+            .check_current()
+            .map_err(|_| JournalError::Permission)?;
+        let path = proof.journal_path();
+        let key = proof.journal_key();
+        let mut journal = Self::open_encrypted(&path, &key, &proof.genesis().identity.account_id)?;
+        let actual = journal.consumed_born_named_inventory_v1(
+            proof.genesis(),
+            proof.writer_epoch(),
+            proof.evidence(),
+            proof.construction(),
+        )?;
+        if &actual != proof.inventory() {
+            return Err(JournalError::Conflict);
+        }
         proof
             .check_current()
             .map_err(|_| JournalError::Permission)?;

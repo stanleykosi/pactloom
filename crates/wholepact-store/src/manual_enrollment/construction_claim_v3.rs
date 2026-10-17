@@ -2,6 +2,7 @@
 //! Every field is historical data. Deserialization cannot issue the one-use
 //! runtime token. Missing private bytes never mean construction did not happen.
 use super::*;
+use wholepact_core::common_context_historical_provenance_v1::CommonContextHistoricalProvenanceV1;
 use wholepact_core::{Proposal, manual_roster_construction_v3::ManualRosterConstructionRequestV3};
 
 pub(crate) const CONSTRUCTION_CLAIM_V3: &str = "generation_manual_construction_claim_v3";
@@ -115,15 +116,20 @@ pub struct ManualRosterConstructionClaimV3 {
     pub maximum_actions: usize,
     /// Canonical participant order, complete ACTUAL consumed native responses.
     pub consumed: Vec<ManualRosterConsumedConstructionAuditV3>,
-    /// Present only in explicit encoding version 4. Old claim bytes remain exact.
+    /// Complete actual reentry reads in explicit encodings 4 and 5. Old bytes remain exact.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reentry_lineages:
         Option<Vec<wholepact_core::common_context_reentry_v1::RosterCommonContextReentryLineageV1>>,
+    /// Historical scanner facts, committed before randomness only by the nominal
+    /// held-wallet writer. Never reconstructed when absent from old claims.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub historical_provenance: Option<CommonContextHistoricalProvenanceV1>,
 }
 impl ManualRosterConstructionClaimV3 {
     pub fn validate(&self) -> Result<Proposal> {
-        if !matches!(self.version, 3 | 4)
+        if !matches!(self.version, 3 | 4 | 5)
             || (self.version == 3) != self.reentry_lineages.is_none()
+            || (self.version == 5) != self.historical_provenance.is_some()
             || !(2..=8).contains(&self.consumed.len())
             || !(1..=8).contains(&self.maximum_actions)
         {
@@ -199,12 +205,48 @@ impl ManualRosterConstructionClaimV3 {
                 }
             }
         }
+        if let Some(provenance) = &self.historical_provenance {
+            let lineages = self
+                .reentry_lineages
+                .as_ref()
+                .ok_or(StoreError::RecoveryRequired)?;
+            let plans = self
+                .consumed
+                .iter()
+                .map(|a| a.request.plan.clone())
+                .collect::<Vec<_>>();
+            let reads = lineages
+                .iter()
+                .map(|l| {
+                    (
+                        &l.request.original_read,
+                        l.request.original_read_admission_digest.as_str(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            provenance
+                .validate_for(&plans, &reads)
+                .map_err(|_| StoreError::RecoveryRequired)?;
+        }
         Ok(proposal)
+    }
+    /// Historical evidence only. Missing legacy provenance cannot be repaired
+    /// or promoted into a current wallet/native owner by this accessor.
+    pub fn require_historical_provenance_v5(&self) -> Result<&CommonContextHistoricalProvenanceV1> {
+        self.validate()?;
+        if self.version != 5 {
+            return Err(StoreError::RecoveryRequired);
+        }
+        self.historical_provenance
+            .as_ref()
+            .ok_or(StoreError::RecoveryRequired)
     }
     pub fn digest(&self) -> Result<String> {
         self.validate()?;
         domain_digest(
-            if self.version == 4 {
+            if self.version == 5 {
+                "wholepact:store-roster-construction-claim:v5"
+            } else if self.version == 4 {
                 "wholepact:store-roster-construction-claim:v4"
             } else {
                 "wholepact:store-roster-construction-claim:v3"
@@ -215,7 +257,9 @@ impl ManualRosterConstructionClaimV3 {
     pub fn request_digest(&self) -> Result<String> {
         self.validate()?;
         domain_digest(
-            if self.version == 4 {
+            if self.version == 5 {
+                "wholepact:manual-roster-private-checkpoint-command:v5"
+            } else if self.version == 4 {
                 "wholepact:manual-roster-private-checkpoint-command:v4"
             } else {
                 "wholepact:manual-roster-private-checkpoint-command:v3"
@@ -505,7 +549,11 @@ pub(crate) fn read_local_rows(c: &rusqlite::Connection) -> Result<ConstructionRo
                 continuations: &continuations,
             },
         )?;
-        validate_permanent_stop_set(&read_audits::<ManualPermanentStopPublicationV1>(c, PERMANENT_STOP_V1)?, &additions, &read_audits::<ManualExclusionAudit>(c, EXCLUSION)?)?;
+        validate_permanent_stop_set(
+            &read_audits::<ManualPermanentStopPublicationV1>(c, PERMANENT_STOP_V1)?,
+            &additions,
+            &read_audits::<ManualExclusionAudit>(c, EXCLUSION)?,
+        )?;
         validate_construction_roster_history(&claims, &additions, &continuations)?;
     }
     Ok((claims, checkpoints))
@@ -594,8 +642,8 @@ pub(crate) fn read_construction_rows(c: &rusqlite::Connection) -> Result<Constru
 mod tests;
 #[cfg(test)]
 pub(crate) use tests::{
-    append_modeled_construction_rows_v3, append_modeled_reentered_construction_rows_v4,
-    exact_manual_rows,
+    append_modeled_construction_rows_v3, append_modeled_historical_construction_rows_v5,
+    append_modeled_reentered_construction_rows_v4, exact_manual_rows,
 };
 
 pub(crate) fn validate_reentry_lineage(

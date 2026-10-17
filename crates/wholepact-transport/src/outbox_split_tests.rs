@@ -128,6 +128,10 @@ fn generic_writer_still_rejects_authorization_and_every_offline_kind() {
         ArtifactKind::OfflineMinimalAuthorityAdmission,
         ArtifactKind::OfflineAdmissionControl,
         ArtifactKind::OfflineAuthorizationReturn,
+        ArtifactKind::BornOfflineMinimalAdmissionV1,
+        ArtifactKind::BornOfflineIntentV1,
+        ArtifactKind::BornOfflineCheckpointOriginV1,
+        ArtifactKind::BornOfflineAuthorizationReturnV1,
     ] {
         let temp = Temp::new();
         let mut outbox = SqliteOutbox::open(temp.0.join("outbox.sqlite")).unwrap();
@@ -158,6 +162,10 @@ fn journal_context_order_and_kind_rules_match_transport_validation() {
         ArtifactKind::OfflineMinimalAuthorityAdmission,
         ArtifactKind::OfflineAdmissionControl,
         ArtifactKind::OfflineAuthorizationReturn,
+        ArtifactKind::BornOfflineMinimalAdmissionV1,
+        ArtifactKind::BornOfflineIntentV1,
+        ArtifactKind::BornOfflineCheckpointOriginV1,
+        ArtifactKind::BornOfflineAuthorizationReturnV1,
     ] {
         let mut ctx = context(kind);
         assert_eq!(
@@ -228,11 +236,13 @@ fn named_prepared(sender: &TransportSecret, recipient: &TransportPublicKey) -> P
             purpose: "Synthetic source regression".into(),
             persistence_warning: "Synthetic recipient may retain bytes".into(),
         },
-        vec![DisclosureField::new(
-            "named-verifier-assertion-v1",
-            b"public synthetic payload".to_vec(),
-        )
-        .unwrap()],
+        vec![
+            DisclosureField::new(
+                "named-verifier-assertion-v1",
+                b"public synthetic payload".to_vec(),
+            )
+            .unwrap(),
+        ],
         &sender.public_key().unwrap(),
         recipient,
         &at(0),
@@ -258,10 +268,12 @@ fn named_assertion_exact_message_recovery_survives_reopen_without_reseal() {
     let message = original.preview().order.message_id.clone();
     let preview = original.preview().digest().unwrap();
     let mut outbox = SqliteOutbox::open(&path).unwrap();
-    assert!(outbox
-        .recover_message_for_recipient(&context, &recipient, &message, &payload, &sender_public)
-        .unwrap()
-        .is_none());
+    assert!(
+        outbox
+            .recover_message_for_recipient(&context, &recipient, &message, &payload, &sender_public)
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(outbox.next_sequence(&context).unwrap(), 1);
     let committed = outbox.enqueue(original, &sender, &preview, &at(0)).unwrap();
     let exact = committed.envelope().as_bytes().to_vec();
@@ -277,28 +289,36 @@ fn named_assertion_exact_message_recovery_survives_reopen_without_reseal() {
     assert_eq!(outbox.next_sequence(&context).unwrap(), 2);
     let mut changed = context.clone();
     changed.proposal_revision += 1;
-    assert!(outbox
-        .recover_message_for_recipient(&changed, &recipient, &message, &payload, &sender_public)
-        .is_err());
+    assert!(
+        outbox
+            .recover_message_for_recipient(&changed, &recipient, &message, &payload, &sender_public)
+            .is_err()
+    );
     let other = TransportSecret::from_bytes(named_random_bytes())
         .unwrap()
         .public_key()
         .unwrap();
-    assert!(outbox
-        .recover_message_for_recipient(&context, &other, &message, &payload, &sender_public)
-        .is_err());
-    assert!(outbox
-        .recover_message_for_recipient(
-            &context,
-            &recipient,
-            &message,
-            &"00".repeat(32),
-            &sender_public
-        )
-        .is_err());
-    assert!(outbox
-        .recover_message_for_recipient(&context, &recipient, &message, &payload, &other)
-        .is_err());
+    assert!(
+        outbox
+            .recover_message_for_recipient(&context, &other, &message, &payload, &sender_public)
+            .is_err()
+    );
+    assert!(
+        outbox
+            .recover_message_for_recipient(
+                &context,
+                &recipient,
+                &message,
+                &"00".repeat(32),
+                &sender_public
+            )
+            .is_err()
+    );
+    assert!(
+        outbox
+            .recover_message_for_recipient(&context, &recipient, &message, &payload, &other)
+            .is_err()
+    );
     assert_eq!(outbox.next_sequence(&context).unwrap(), 2);
 }
 
@@ -316,6 +336,10 @@ fn named_assertion_kind_never_confers_financial_export_authority() {
         ArtifactKind::OfflineAuthorityAdmission,
         ArtifactKind::OfflineMinimalAuthorityAdmission,
         ArtifactKind::OfflineAuthorizationReturn,
+        ArtifactKind::BornOfflineMinimalAdmissionV1,
+        ArtifactKind::BornOfflineIntentV1,
+        ArtifactKind::BornOfflineCheckpointOriginV1,
+        ArtifactKind::BornOfflineAuthorizationReturnV1,
     ] {
         assert!(kind.requires_qualified_export());
     }
@@ -324,20 +348,24 @@ fn named_assertion_kind_never_confers_financial_export_authority() {
         .unwrap()
         .public_key()
         .unwrap();
-    let fields = vec![DisclosureField::new(
-        "named-verifier-assertion-v1",
-        b"public synthetic payload".to_vec(),
-    )
-    .unwrap()];
+    let fields = vec![
+        DisclosureField::new(
+            "named-verifier-assertion-v1",
+            b"public synthetic payload".to_vec(),
+        )
+        .unwrap(),
+    ];
     assert_eq!(
         crate::disclosure_payload_digest(&fields).unwrap(),
         named_prepared(&sender, &recipient).preview().payload_digest
     );
-    assert!(DisclosureField::new(
-        "named-verifier-assertion-v1",
-        vec![0; crate::MAX_PAYLOAD_BYTES + 1]
-    )
-    .is_err());
+    assert!(
+        DisclosureField::new(
+            "named-verifier-assertion-v1",
+            vec![0; crate::MAX_PAYLOAD_BYTES + 1]
+        )
+        .is_err()
+    );
 }
 
 #[test]

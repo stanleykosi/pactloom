@@ -30,7 +30,7 @@ pub(crate) struct OriginalPreparation {
     pub(crate) prepared_at_ms: u64,
 }
 impl OriginalPreparation {
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         if self.schema_version != 1 {
             return Err(AuthorityError::UnsupportedVersion);
         }
@@ -97,10 +97,36 @@ pub struct OriginalTransportReceipt {
     pub envelope_digest: String,
 }
 impl OriginalTransportReceipt {
-    fn matches(
+    pub(crate) fn matches(
         &self,
         original: &OriginalPreparation,
         policy: &OfflineEnrollmentPolicy,
+    ) -> Result<()> {
+        self.matches_kind(
+            original,
+            policy,
+            "offline_reservation_intent",
+            "offline-intent",
+        )
+    }
+    pub(crate) fn matches_born(
+        &self,
+        original: &OriginalPreparation,
+        policy: &OfflineEnrollmentPolicy,
+    ) -> Result<()> {
+        self.matches_kind(
+            original,
+            policy,
+            "born_offline_intent_v1",
+            "born-offline-intent",
+        )
+    }
+    fn matches_kind(
+        &self,
+        original: &OriginalPreparation,
+        policy: &OfflineEnrollmentPolicy,
+        kind: &str,
+        prefix: &str,
     ) -> Result<()> {
         original.validate()?;
         template_for_validation(&original.export_plan_template)?
@@ -134,9 +160,9 @@ impl OriginalTransportReceipt {
             || self.agreement_id != t.agreement_id
             || self.proposal_id != t.proposal_id
             || self.proposal_revision != t.proposal_revision
-            || self.artifact_kind != "offline_reservation_intent"
-            || self.sender_id != format!("offline-intent:{}", t.offline_signer_key_digest)
-            || self.recipient_id != format!("offline-intent:{}", t.offline_policy_digest)
+            || self.artifact_kind != kind
+            || self.sender_id != format!("{prefix}:{}", t.offline_signer_key_digest)
+            || self.recipient_id != format!("{prefix}:{}", t.offline_policy_digest)
             || self.sender_key_fingerprint != policy.offline_signer_key_digest
             || self.recipient_key_fingerprint != policy.witness_transport_key_digest
             || self.stream_digest

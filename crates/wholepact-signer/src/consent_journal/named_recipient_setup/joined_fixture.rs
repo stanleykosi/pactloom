@@ -399,6 +399,7 @@ fn incoming(f: &Fixture) -> Incoming {
             .collect(),
     };
     let mut original = NamedRecipientOriginalRecordV1 {
+        born_origin: None,
         schema_version: 1,
         reference: String::new(),
         profile_ref: profile.reference.clone(),

@@ -1,5 +1,9 @@
 //! A separate bounded native owner for born manual enrollment. It never calls
 //! ordinary runtime activation. All keys, I/O and durable writes stay on workers.
+#[cfg(feature = "synthetic-born-joined-qualification")]
+#[path = "../qualification/born_manual_roster.rs"]
+pub(in crate::native_ui) mod born_manual_roster;
+
 mod admission;
 mod permanent_stop;
 mod permanent_stop_export;
@@ -7,6 +11,16 @@ mod permanent_stop_flow;
 pub(crate) mod permanent_stop_publication;
 mod common_context_handoff;
 mod common_context_reentry;
+pub(in crate::native_ui) mod named_continuation;
+mod named_controls;
+mod named_reentry;
+mod named_reentry_witness;
+#[cfg(feature = "offline-review-foundation")]
+mod named_verifier_disclosure;
+#[cfg(feature = "offline-review-foundation")]
+mod named_bridge;
+#[cfg(feature="offline-review-foundation")]
+mod named_enrollment_export;
 mod construction_export;
 mod construction_export_v3;
 mod construction_signing;
@@ -63,6 +77,7 @@ use crate::{
     Error, Result,
 };
 use eframe::egui;
+use std::os::unix::fs::PermissionsExt;
 use std::{
     path::{Path, PathBuf},
     sync::{mpsc, Arc, Mutex},
@@ -120,6 +135,8 @@ struct ReenteredWork {
     lineage_digest: String,
 }
 enum Step {
+    NamedReentryWitness(Box<named_reentry_witness::PreparedNamedWitnessV1>),
+    Named(Box<named_controls::NamedStep>),
     Stop(Box<permanent_stop_flow::StopPreparation>),
     CompletionWitness(Box<common_context_reentry::PreparedCommonContextWitnessV1>),
     CompletionClaim(Box<common_context_reentry::PreparedCommonContextClaimV1>),
@@ -166,6 +183,8 @@ struct Prepared {
 impl Prepared {
     fn new(step: Step) -> Result<Self> {
         let (digest, display) = match &step {
+            Step::Named(p) => p.display()?,
+            Step::NamedReentryWitness(p) => (p.digest().into(), p.display()?),
             Step::Stop(p) => p.display()?,
             Step::CompletionWitness(p) => (p.reviewed_digest().into(), p.review_json()?),
             Step::CompletionClaim(p) => (p.reviewed_digest().into(), p.review_json()?),
@@ -293,6 +312,10 @@ struct InventoryWork {
     request: Box<wholepact_core::manual_roster_inventory_v2::ManualRosterInventoryRequestV2>,
 }
 enum Work {
+    OpenNamed(Box<crate::account::birth::enrollment::roster_v2::inventory::common_context_reentry_v1::named_recipient::DormantConsumedBornNamedSourceV1>, PathBuf, Zeroizing<String>),
+    PrepareNamedWitness(Box<crate::account::birth::enrollment::roster_v2::inventory::common_context_reentry_v1::named_recipient::ConsumedBornNamedSourceV1>, Zeroizing<String>),
+    ApproveNamedWitness(Box<named_reentry_witness::PreparedNamedWitnessV1>, NativeDecision),
+    Named(Box<named_controls::NamedWork>),
     Stop(permanent_stop_flow::StopWork),
     OpenCommonContext(Box<DormantCommonContextReadAdmission>, PathBuf, Zeroizing<String>),
     PrepareCompletionWitness(Box<CompletionWork>),
@@ -347,10 +370,13 @@ enum Work {
     RetryActivate(Context, Box<ApprovedWriterActivation>),
 }
 enum Output {
+    NamedReentryOpened(Box<named_reentry::OpenedNamed>),
+    NamedOwnerReady(Box<named_continuation::ConsumedBornNamedOwnerV1>),
+    Named(Box<named_controls::NamedOutput>),
     Stop(permanent_stop_flow::StopOutput),
     CompletionOpened(Box<CompletionOpened>),
     CompletionReentered(Box<common_context_reentry::ReenteredCommonContextOwnerV1>),
-    CompletionConsumed,
+    CompletionConsumed(Box<named_continuation::ConsumedBornNamedOwnerV1>),
     ConstructionSigned(Box<wholepact_authority::manual_roster_construction_signature_v2::ManualRosterConstructionOwnerSignatureV2>),
     ConstructionV3Signed(Box<wholepact_authority::manual_roster_construction_signature_v3::ManualRosterConstructionOwnerSignatureV3>),
     ConstructionExported,
@@ -391,11 +417,22 @@ enum Output {
 fn run(work: Work, owner: &PendingAccountNativeAuthority) -> Result<Output> {
     owner.check_current()?;
     owner.native().binding().bounded_deadline()?;
+    named_reentry::require_work_purpose(&work, owner)?;
     let result = match work {
+        Work::OpenNamed(dormant, path, password) => Output::NamedReentryOpened(Box::new(
+            named_reentry::open(*dormant, &path, password.as_bytes(), owner)?,
+        )),
+        Work::PrepareNamedWitness(source, setup) => Output::Prepared(Box::new(Prepared::new(
+            Step::NamedReentryWitness(Box::new(named_reentry_witness::PreparedNamedWitnessV1::prepare(*source, &setup, owner)?)),
+        )?)),
+        Work::ApproveNamedWitness(prepared, decision) => Output::NamedOwnerReady(Box::new(prepared.approve(decision, owner)?)),
+        Work::Named(work) => Output::Named(Box::new(named_controls::run(*work, owner)?)),
         Work::Stop(work) => permanent_stop_flow::run(work, owner)?,
         Work::OpenCommonContext(dormant, path, password) => {
             let source = (*dormant).unlock(&path, password.as_bytes(), owner)?;
-            let temporary = tempfile::tempdir()?;
+            let temporary = tempfile::Builder::new()
+                .permissions(std::fs::Permissions::from_mode(0o700))
+                .tempdir()?;
             let ipc = LocalIpc::bind(crate::files::PrivateDirectory::open(temporary.path())?)?;
             owner.publish_pending_endpoint(ipc.socket_path())?;
             Output::CompletionOpened(Box::new(CompletionOpened {
@@ -452,8 +489,7 @@ fn run(work: Work, owner: &PendingAccountNativeAuthority) -> Result<Output> {
                 Output::CompletionReentered(Box::new(p.approve_and_serve(decision, owner)?))
             }
             Step::ReenteredConstruction(p) => {
-                p.approve_and_serve(decision, owner)?;
-                Output::CompletionConsumed
+                Output::CompletionConsumed(Box::new(p.approve_and_serve(decision, owner)?))
             }
             _ => return Err(Error::Unavailable),
         },
@@ -913,7 +949,9 @@ fn run(work: Work, owner: &PendingAccountNativeAuthority) -> Result<Output> {
             };
             let account_id = account.account_id()?;
             let display = Zeroizing::new(account.born_origin_audit_json(owner)?);
-            let temporary = Arc::new(tempfile::tempdir()?);
+            let temporary = Arc::new(tempfile::Builder::new()
+                .permissions(std::fs::Permissions::from_mode(0o700))
+                .tempdir()?);
             let ipc = LocalIpc::bind(crate::files::PrivateDirectory::open(temporary.path())?)?;
             owner.publish_pending_endpoint(ipc.socket_path())?;
             Output::Opened(Box::new(Opened {
@@ -1049,7 +1087,7 @@ fn run(work: Work, owner: &PendingAccountNativeAuthority) -> Result<Output> {
             )))?))
         }
         Work::Commit(c, step, decision) => match step {
-            Step::Stop(_) => return Err(Error::Unavailable),
+            Step::Stop(_) | Step::Named(_) | Step::NamedReentryWitness(_) => return Err(Error::Unavailable),
             Step::CompletionWitness(_)
             | Step::CompletionClaim(_)
             | Step::ReenteredConstruction(_) => return Err(Error::Unavailable),
@@ -1294,6 +1332,9 @@ pub(super) struct BornManualRosterUiV2 {
     dormant_common_context: Option<DormantCommonContextReadAdmission>,
     completion_opened: Option<CompletionOpened>,
     completion_reentered: Option<common_context_reentry::ReenteredCommonContextOwnerV1>,
+    named_continuation: Option<Box<named_continuation::ConsumedBornNamedOwnerV1>>,
+    named_controls: named_controls::NamedControls,
+    named_reentry: named_reentry::State,
     accept_blurred_read_completion: bool,
     signed: Option<Box<ManualRosterEnrollmentOwnerSignatureV2>>,
 
@@ -1309,7 +1350,7 @@ pub(super) struct BornManualRosterUiV2 {
 }
 impl BornManualRosterUiV2 {
     pub(super) fn is_active(&self) -> bool {
-        self.owner.is_some() || self.job.is_some() || !self.cleanup.is_empty()
+        self.owner.is_some() || self.job.is_some() || !self.cleanup.is_empty() || self.named_reentry.draining() || self.named_controls.active()
     }
     pub(super) fn begin(
         &mut self,
@@ -1320,6 +1361,7 @@ impl BornManualRosterUiV2 {
         if self.is_active() || !path.is_absolute() || !(12..=1024).contains(&password.len()) {
             return Err(Error::ReviewMismatch);
         }
+        if let Some(drain) = self.named_reentry.clear() { self.cleanup.push(drain); }
         // Any ordinary entry is a source replacement, never a reentry.
         self.dormant_common_context = None;
         self.accept_blurred_read_completion = false;
@@ -1412,6 +1454,7 @@ impl BornManualRosterUiV2 {
         Ok(())
     }
     pub(super) fn clear(&mut self) {
+        if let Some(drain) = self.named_reentry.clear() { self.cleanup.push(drain); }
         self.dormant_common_context = None;
         self.accept_blurred_read_completion = false;
         self.retire_foreground();
@@ -1421,6 +1464,11 @@ impl BornManualRosterUiV2 {
         // channel before checking the dormant source's filesystem identity.
         // Those checks can do I/O; they must never delay focus revocation.
         self.revoke_foreground_now();
+        if self.named_continuation.is_some() && self.job.is_none()
+            && self.review.is_none() && !self.named_controls.active()
+        {
+            if self.park_named().is_ok() { return; }
+        }
         if self.owner.is_some() {
             self.accept_blurred_read_completion = self
                 .job
@@ -1454,7 +1502,10 @@ impl BornManualRosterUiV2 {
     }
     fn retire_foreground(&mut self) {
         self.revoke_foreground_now();
-        self.owner = None;
+        self.cleanup.extend(self.named_controls.clear());
+        // Closing admission above is immediate. The last genuine native owner
+        // may still need to drain a publication lease, so never drop it on GUI.
+        let retired_owner = self.owner.take();
         self.bootstrap.clear();
         self.continuation_controller.clear();
         self.queued_continuation = None;
@@ -1462,7 +1513,8 @@ impl BornManualRosterUiV2 {
         // Immediately revoke above; move potentially blocking connection/database
         // destructors off the GUI thread. At most the opened context and one
         // in-flight worker result can await cleanup; a new entry stays denied.
-        if self.stop_opened.is_some()
+        if retired_owner.is_some()
+            || self.stop_opened.is_some()
             || self.opened.is_some()
             || self.enrolled.is_some()
             || self.review.is_some()
@@ -1475,8 +1527,11 @@ impl BornManualRosterUiV2 {
             || self.inventory_source.is_some()
             || self.completion_opened.is_some()
             || self.completion_reentered.is_some()
+            || self.named_continuation.is_some()
+            || self.named_reentry.source.is_some()
         {
             let retired = (
+                retired_owner,
                 self.stop_opened.take(),
                 self.opened.take(),
                 self.enrolled.take(),
@@ -1494,6 +1549,8 @@ impl BornManualRosterUiV2 {
                 self.inventory_source.take(),
                 self.completion_opened.take(),
                 self.completion_reentered.take(),
+                self.named_continuation.take(),
+                self.named_reentry.source.take(),
             );
             self.cleanup.push(std::thread::spawn(move || drop(retired)));
         }
@@ -1513,6 +1570,11 @@ impl BornManualRosterUiV2 {
         self.message = "Manual enrollment closed. An already admitted durable operation may have finished. Preserve intent, journal and witness history; do not regenerate or replace the original operation.";
     }
     pub(super) fn poll_lifecycle(&mut self, focused: bool, epoch: u64) {
+        self.named_controls.reap_cancelled();
+        if self.named_reentry.poll().is_err() {
+            self.clear();
+            self.message = "Exact named source retirement failed. No reentry token or financial authority was created; original retained outcomes remain unchanged.";
+        }
         if !focused {
             self.blur();
         }
@@ -1564,9 +1626,12 @@ impl BornManualRosterUiV2 {
             }
             let result=result.and_then(|out|{match out{
                 Output::Stop(out)=>self.accept_stop_output(out)?,
+                Output::Named(out)=>self.accept_named_output(*out,epoch)?,
                 Output::CompletionOpened(open)=>{self.completion_opened=Some(*open);self.message="Exact original key-free source authenticated by fresh unlock. Only same original Host pairing and one completion handoff are permitted.";},
                 Output::CompletionReentered(source)=>{self.completion_reentered=Some(*source);self.message="Exact new channel claimed and original transport fenced. A separate full-proposal native decision is required within the original channel deadline.";},
-                Output::CompletionConsumed=>{self.message="One exact construction reservation consumed. Conservative lifetime exposure remains retained. No signing or dispatch permission was released.";},
+                Output::CompletionConsumed(source)=>{self.peer=None;self.named_continuation=Some(source);self.park_named()?;},
+                Output::NamedReentryOpened(opened)=>self.accept_named_reentry_open(*opened)?,
+                Output::NamedOwnerReady(actual)=>{self.named_continuation=Some(actual);self.message="Existing original owner credentials selected for this exact consumed source. Fresh same-Host pairing and every later exact decision remain required.";},
                 Output::ConstructionSigned(s)=>{self.construction_signed=Some(s);self.message="Exact stable full-proposal owner approval signed privately. Separate destination export and independent witness-owner review remain required.";},
                 Output::ConstructionV3Signed(s)=>{self.construction_v3_signed=Some(s);self.message="Exact stable full-proposal owner approval signed privately. Separate destination export and independent witness-owner review remain required.";},
                 Output::ExactInputObservationServed(source)=>{self.inventory_source=Some(source);self.message="One additional exact-input privacy read admitted within its fixed bounds and original completion ceiling. Separate full-construction review and financial Reserve/Consume remain required. No deadline or financial authority was renewed.";},
@@ -1616,6 +1681,11 @@ impl BornManualRosterUiV2 {
             if self.poll_stop_event(epoch).is_err() { self.clear(); self.message="Restriction propagation ended or became uncertain. Durable originals remain; reopen for exact retry."; }
             return;
         }
+        if self.named_continuation.is_some() {
+            if self.poll_named_event(epoch).is_err() { self.clear(); self.message="Exact born payment continuation closed. Original exposure and retained results remain unchanged."; }
+            return;
+        }
+        if self.named_reentry.source.is_some() { return; }
         if self.completion_opened.is_some() {
             if self.poll_completion_event(epoch).is_err() {
                 self.clear();
@@ -2233,6 +2303,13 @@ impl BornManualRosterUiV2 {
             .exact
             .consume_native_click(focused, epoch, &self.confirmation)?;
         self.confirmation.zeroize();
+        if let Step::NamedReentryWitness(prepared) = review.step {
+            return self.start(Work::ApproveNamedWitness(prepared, decision), epoch);
+        }
+        if let Step::Named(step) = review.step {
+            let actual = self.named_continuation.take().ok_or(Error::Locked)?;
+            return self.start(Work::Named(Box::new(named_controls::NamedWork::Commit(actual,*step,decision))),epoch);
+        }
         if let Some(open) = self.stop_opened.as_ref() {
             self.start(Work::Stop(permanent_stop_flow::StopWork::Commit(open.ipc.clone(), review.step, decision)), epoch)
         } else if let Some(open) = self.completion_opened.as_ref() {
@@ -2257,7 +2334,8 @@ impl BornManualRosterUiV2 {
         if !focused {
             return Some(self.message);
         }
-        if self.job.is_some() || !self.cleanup.is_empty() {
+        if self.job.is_some() || !self.cleanup.is_empty() || self.named_reentry.draining()
+            || (self.owner.is_none() && self.named_controls.active()) {
             ui.ctx().request_repaint_after(Duration::from_millis(50));
             if ui
                 .button("Cancel and close admission")
@@ -2276,6 +2354,14 @@ impl BornManualRosterUiV2 {
         }
         if self.enrolled.is_some() && self.review.is_none() && ui.button("Permanently stop routine reuse of this original born account").clicked_by(egui::PointerButton::Primary) {
             if self.transition_permanent_stop(epoch).is_err() { self.message="Permanent-stop entry remains unavailable pending native/kernel qualification; original ownership is unchanged."; }
+            return Some(self.message);
+        }
+        if self.named_continuation.is_some() && self.review.is_none() {
+            if self.named_ui(ui,focused,epoch).is_err() { self.clear(); }
+            return Some(self.message);
+        }
+        if self.named_reentry.source.is_some() && self.review.is_none() {
+            if self.named_reentry_ui(ui, epoch).is_err() { self.clear(); }
             return Some(self.message);
         }
         if self.completion_opened.is_some() && self.review.is_none() {

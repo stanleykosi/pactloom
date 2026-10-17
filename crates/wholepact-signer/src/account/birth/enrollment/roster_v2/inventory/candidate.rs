@@ -193,8 +193,20 @@ impl PreparedRosterCandidateSelectionV2 {
             },
         };
         evidence.validate().map_err(|_| Error::InvalidData)?;
+        let retention_notice = if request.scope.selection.version == 2 {
+            format!(
+                "ORIGINAL NONSPENDING RETENTION V2: the immutable retention ceiling is {} Unix milliseconds, selected before this attempt. The longer ceiling preserves only exact selected contribution evidence for one later all-observations-first common-context plan. It does not extend this at-most-30-second viewing/selection disclosure, any separate at-most-30-second witness Reserve/Consume admission, or any native owner. Original signing and dispatch each require separate fresh exact approvals and their own original bounds.\n\n",
+                request
+                    .scope
+                    .selection
+                    .invocation
+                    .construction_expires_at_ms
+            )
+        } else {
+            String::new()
+        };
         let display = Zeroizing::new(format!(
-            "APPROVE ONE PRIVATE INPUT SELECTION FOR EXACT ECONOMIC INTENT\n{}\n\nThe original Host V3 audit is a correlation claim from the Host. Only its authenticated Store can verify that record. The exact roster predecessor, original signer wrapper and V2 witness wrapper below remain unchanged; per-account witness continuation ancestry is separate.\n\nActual paired process/channel:\n{}\n\nThis distinct permission releases this account's full viewing key to this exact local process and permits one local maintained-wallet input-selection attempt for the displayed original V2 policy and exact economic intent. The reviewed amount is derived from contribution, deterministic fee share and approved charges, not a caller-selected cap. Inputs, input values, nullifiers, actual change and the full proposal do not yet exist and are not approved. Only authenticated same-account returned value is allowed; maintained selection must derive and verify the actual return address. Every exact contribution/full-proposal disclosure and construction requires a NEW review after actual selection. This grants no financial reservation, budget reset, signing, proof, dispatch, spending-key release or automatic future use. The process may learn private balance, transfers and history; copied viewing data cannot be recalled. Provider TLS reports are not independently verified consensus or proof of unspentness. The witness session is a fresh authenticated observation, not a continuous remote lease. The original request cutoff is at most 30 seconds and never renews on re-pair, retry or review. Focus loss, peer/parent disconnection or native expiry stops new admission. An already-admitted exact response send may finish within its fixed at-most-two-second bound; already-buffered bytes cannot be recalled. Failed selection or exclusion conflict consumes this attempt and needs a new decision.\nExact review: {}",
+            "APPROVE ONE PRIVATE INPUT SELECTION FOR EXACT ECONOMIC INTENT\n{retention_notice}{}\n\nThe original Host V3 audit is a correlation claim from the Host. Only its authenticated Store can verify that record. The exact roster predecessor, original signer wrapper and V2 witness wrapper below remain unchanged; per-account witness continuation ancestry is separate.\n\nActual paired process/channel:\n{}\n\nThis distinct permission releases this account's full viewing key to this exact local process and permits one local maintained-wallet input-selection attempt for the displayed original V2 policy and exact economic intent. The reviewed amount is derived from contribution, deterministic fee share and approved charges, not a caller-selected cap. Inputs, input values, nullifiers, actual change and the full proposal do not yet exist and are not approved. Only authenticated same-account returned value is allowed; maintained selection must derive and verify the actual return address. Every exact contribution/full-proposal disclosure and construction requires a NEW review after actual selection. This grants no financial reservation, budget reset, signing, proof, dispatch, spending-key release or automatic future use. The process may learn private balance, transfers and history; copied viewing data cannot be recalled. Provider TLS reports are not independently verified consensus or proof of unspentness. The witness session is a fresh authenticated observation, not a continuous remote lease. The original request cutoff is at most 30 seconds and never renews on re-pair, retry or review. Focus loss, peer/parent disconnection or native expiry stops new admission. An already-admitted exact response send may finish within its fixed at-most-two-second bound; already-buffered bytes cannot be recalled. Failed selection or exclusion conflict consumes this attempt and needs a new decision.\nExact review: {}",
             serde_json::to_string_pretty(&request).map_err(|_| Error::InvalidData)?,
             serde_json::to_string_pretty(pairing.binding()).map_err(|_| Error::InvalidData)?,
             digest
@@ -213,6 +225,10 @@ impl PreparedRosterCandidateSelectionV2 {
         };
         prepared.check(owner)?;
         Ok(prepared)
+    }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(crate) fn synthetic_request(&self) -> &ManualRosterCandidateSelectionRequestV2 {
+        &self.request
     }
     pub(crate) fn reviewed_digest(&self) -> &str {
         &self.digest

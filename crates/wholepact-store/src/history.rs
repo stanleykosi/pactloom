@@ -102,10 +102,11 @@ fn validate_construction_history(
             rusqlite::params_from_iter(values),
         )?;
     }
-    crate::backup::validate_construction_encoding(
-        &scratch,
-        provenance.schema_version >= 3,
-        provenance.schema_version >= 4,
+    let support = crate::recovery::construction_encoding_support(
+        provenance.application_id,
+        provenance.schema_version,
     )
-    .map_err(|_| BundleError::Integrity)
+    .map_err(|_| BundleError::Integrity)?;
+    crate::backup::validate_construction_encoding(&scratch, support.0, support.1, support.2)
+        .map_err(|_| BundleError::Integrity)
 }

@@ -1316,6 +1316,8 @@ fn reconciled_history_and_writer_session_share_budget_commitment() {
         snapshot: ledger.snapshot,
         permits: vec![],
         offline_permits: vec![],
+        born_offline_permits: vec![],
+        born_offline_dispatches: vec![],
         automatic_key_use_admissions: vec![],
         recovery_fences: vec![],
         committed_operation_ids: std::collections::BTreeSet::new(),

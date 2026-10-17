@@ -237,11 +237,12 @@ impl Engine {
             .collect();
         check_held(local.held)?;
         let outcome = self
-            .claim_manual_roster_construction_v3_fail_fast(
+            .claim_manual_roster_construction_v5_fail_fast(
                 access,
                 construction_key,
                 local.maximum_actions,
                 &borrowed,
+                local.held,
                 local.progress,
             )
             .map_err(|error| claim_error(error, local.progress, construction_key))?;

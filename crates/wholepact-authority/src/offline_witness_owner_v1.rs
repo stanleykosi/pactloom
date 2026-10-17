@@ -361,17 +361,17 @@ impl ConfiguredOfflineWitnessV1 {
     }
 }
 
-fn before(deadline: Instant) -> Result<()> {
+pub(crate) fn before(deadline: Instant) -> Result<()> {
     if Instant::now() >= deadline {
         return Err(AuthorityError::Uncertain);
     }
     Ok(())
 }
-fn timestamp(ms: u64) -> Result<transport::Timestamp> {
+pub(crate) fn timestamp(ms: u64) -> Result<transport::Timestamp> {
     let seconds = i64::try_from(ms / 1000).map_err(|_| AuthorityError::Expired)?;
     transport::Timestamp::from_unix_seconds(seconds).map_err(map_transport)
 }
-fn map_transport(error: transport::TransportError) -> AuthorityError {
+pub(crate) fn map_transport(error: transport::TransportError) -> AuthorityError {
     use transport::TransportError as E;
     match error {
         E::Storage | E::ImportCommittedButUnavailable => AuthorityError::Storage,
@@ -382,7 +382,9 @@ fn map_transport(error: transport::TransportError) -> AuthorityError {
         _ => AuthorityError::Authentication,
     }
 }
-fn intent_context(intent: &OfflineReservationIntent) -> Result<transport::MessageContext> {
+pub(crate) fn intent_context(
+    intent: &OfflineReservationIntent,
+) -> Result<transport::MessageContext> {
     intent.validate()?;
     let t = &intent.terms;
     Ok(transport::MessageContext {
@@ -395,7 +397,7 @@ fn intent_context(intent: &OfflineReservationIntent) -> Result<transport::Messag
         artifact_kind: transport::ArtifactKind::OfflineReservationIntent,
     })
 }
-fn validate_payload(
+pub(crate) fn validate_payload(
     received: &transport::ReceivedArtifact,
     intent: &OfflineReservationIntent,
     profile: &OfflineWitnessIntentProfileV1,
@@ -477,7 +479,9 @@ fn open_original(
     )
     .map_err(map_transport)
 }
-fn transport_receipt(received: &transport::ReceivedArtifact) -> Result<OriginalTransportReceipt> {
+pub(crate) fn transport_receipt(
+    received: &transport::ReceivedArtifact,
+) -> Result<OriginalTransportReceipt> {
     let p = received.preview();
     let c = &p.context;
     let o = &p.order;

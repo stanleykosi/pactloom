@@ -73,7 +73,7 @@ fn encrypted_common_context_v3_supported_layer_staging_installs_exact_marker_aft
         .unwrap();
     // The fixture is produced by the current compiled ordinary/single templates.
     // Exact historical templates must reject it before any successor is staged.
-    for version in [2, 4] {
+    for version in [2, 4, 6] {
         assert!(
             archived
                 .open_generation(
@@ -140,7 +140,7 @@ fn encrypted_common_context_v3_supported_layer_staging_installs_exact_marker_aft
             .unwrap()
             == (f.claim.clone(), f.receipt.clone())
     );
-    for version in [3, 5] {
+    for version in [3, 5, 7] {
         assert!(wholepact_storage_security::bundle::recovery::generation::open_recovered_generation_snapshot(
             &destination,
             &destination_key,

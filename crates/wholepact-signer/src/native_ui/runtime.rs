@@ -1,6 +1,14 @@
 //! Actual signer-owned native account, pairing, and consent workflow. No exported
 //! API can inject native decisions. This is source implementation; operating a
 //! real account remains an explicit user's native action, never a test fixture.
+#[cfg(feature = "pending-birth-owner-signing")]
+#[path = "qualification/born_consumed_named_entry_v1.rs"]
+mod born_consumed_named_entry_v1;
+
+#[cfg(feature = "pending-birth-owner-signing")]
+#[path = "qualification/born_common_context_entry_v3.rs"]
+mod born_common_context_entry_v3;
+
 use super::{
     authority::{ExactNativeReview, NativeAuthority},
     state::inert_text,
@@ -116,6 +124,10 @@ enum WitnessOutcome {
     ResolutionPrepared(Result<Box<super::resolution_workspace::PreparedResolution>>),
     ResolutionCompleted(Result<Option<String>>),
     DispatchPrepared(Result<Box<super::dispatch::PreparedDispatch>>),
+    #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
+    BornHistoryPrepared(Result<Box<super::born_history::PreparedBornHistoryV1>>),
+    #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
+    BornDispatchPrepared(Result<Box<super::born_dispatch::PreparedBornDispatchV1>>),
     SessionPrepared(Result<Box<PreparedWriterSession>>),
     SessionAcquired {
         approved: Box<ApprovedWriterSession>,
@@ -227,6 +239,10 @@ enum Operation {
     ProvedDisclosure(Box<super::proved_disclosure::PreparedProvedDisclosure>),
     #[cfg(feature = "authority-signing")]
     Dispatch(Box<super::dispatch::PreparedDispatch>),
+    #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
+    BornHistory(Box<super::born_history::PreparedBornHistoryV1>),
+    #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
+    BornDispatch(Box<super::born_dispatch::PreparedBornDispatchV1>),
     Pair(Box<PendingPairing>),
     Redelivery {
         prepared: Box<PreparedResultRedelivery>,
@@ -278,6 +294,10 @@ struct OpenAccount {
     revocations: Vec<Arc<AtomicBool>>,
     history_workers: Vec<std::thread::JoinHandle<()>>,
     disclosure_worker_ids: std::collections::HashSet<std::thread::ThreadId>,
+    #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
+    born_bridge_active: bool,
+    #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
+    born_bridge_workers: std::collections::HashSet<std::thread::ThreadId>,
     #[cfg(feature = "authority-signing")]
     host_continuity_worker: Option<std::thread::ThreadId>,
     #[cfg(feature = "authority-signing")]
@@ -303,6 +323,14 @@ impl OpenAccount {
     fn invalidate_review(&mut self) {
         // Close admission immediately, before waiting for any already-held
         // through-commit lease. The native event thread never waits for a client.
+        #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
+        if self.born_bridge_active {
+            self.authority.revoke_named_recipient_now();
+            self.ipc.revocation().close_named_recipient_now();
+        } else {
+            self.ipc.revoke_all();
+        }
+        #[cfg(not(all(feature = "authority-signing", feature = "offline-review-foundation")))]
         self.ipc.revoke_all();
         self.pairing = None;
         #[cfg(feature = "authority-signing")]
@@ -668,6 +696,21 @@ impl NativeRuntime {
         }
     }
     pub(super) fn lock(&mut self) {
+        // Named workers retain the exact live source and may be draining I/O.
+        // Close admission without a grant/publication mutex on the event thread;
+        // the unchanged background close below owns all blocking cleanup.
+        #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
+        let named_closing = self.named_recipient.final_active()
+            || self.open.as_ref().is_some_and(|o| o.born_bridge_active);
+        #[cfg(not(all(feature = "authority-signing", feature = "offline-review-foundation")))]
+        let named_closing = false;
+        #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
+        if named_closing {
+            if let Some(open) = self.open.as_ref() {
+                open.authority.revoke_named_recipient_now();
+                open.ipc.revocation().close_named_recipient_now();
+            }
+        }
         #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
         self.named_verifier.clear();
         #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
@@ -727,7 +770,9 @@ impl NativeRuntime {
         }
         self.pending = None;
         if let Some(mut open) = self.open.take() {
-            open.ipc.revoke_all();
+            if !named_closing {
+                open.ipc.revoke_all();
+            }
             let done = Arc::new(AtomicBool::new(false));
             let finished = done.clone();
             std::thread::spawn(move || {
@@ -958,6 +1003,10 @@ impl NativeRuntime {
             revocations: Vec::new(),
             history_workers: Vec::new(),
             disclosure_worker_ids: std::collections::HashSet::new(),
+            #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
+            born_bridge_active: false,
+            #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
+            born_bridge_workers: std::collections::HashSet::new(),
             #[cfg(feature = "authority-signing")]
             host_continuity_worker: None,
             #[cfg(feature = "authority-signing")]
@@ -1149,6 +1198,19 @@ impl NativeRuntime {
         open.revocations
             .retain(|done| !done.load(Ordering::Acquire));
         open.history_workers.retain(|worker| !worker.is_finished());
+        #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
+        {
+            open.born_bridge_workers
+                .retain(|id| open.history_workers.iter().any(|w| w.thread().id() == *id));
+            open.born_bridge_active &= open.witness_job.is_some()
+                || !open.born_bridge_workers.is_empty()
+                || self.pending.as_ref().is_some_and(|p| {
+                    matches!(
+                        &p.operation,
+                        Operation::BornHistory(_) | Operation::BornDispatch(_)
+                    )
+                });
+        }
         open.disclosure_worker_ids
             .retain(|id| open.history_workers.iter().any(|w| w.thread().id() == *id));
         #[cfg(feature = "authority-signing")]
@@ -1180,6 +1242,16 @@ impl NativeRuntime {
             let Some(event) = open.ipc.next_event() else {
                 break;
             };
+            #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
+            if open.born_bridge_active
+                && !matches!(
+                    &event,
+                    LocalEvent::BornOriginalHistoryV1 { .. } | LocalEvent::BornDispatchV1 { .. }
+                )
+            {
+                drop(event);
+                continue;
+            }
             match event {
                 #[cfg(feature = "pending-birth-owner-signing")]
                 LocalEvent::BornRosterCommonContextHandoffAuthorizationV1 { stream, .. }
@@ -1815,6 +1887,122 @@ impl NativeRuntime {
                         }
                     }
                 }
+                #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
+                LocalEvent::BornOriginalHistoryV1 {
+                    peer,
+                    stream,
+                    request,
+                } => {
+                    if self.pending.is_some()
+                        || open.wallet_job.is_some()
+                        || open.witness_job.is_some()
+                        || open.history_workers.len() >= 8
+                        || open.check_pairing().is_err()
+                        || open
+                            .pairing
+                            .as_ref()
+                            .is_none_or(|p| p.peer.grant_id != peer.grant_id)
+                    {
+                        continue;
+                    }
+                    let (Some(session), Some(witness), Some(profile)) = (
+                        open.session.clone(),
+                        open.witness.clone(),
+                        self.named_recipient.live_profile(),
+                    ) else {
+                        continue;
+                    };
+                    let journal = open.journal.clone();
+                    let authority = open.authority.binding();
+                    let cancelled = Arc::new(AtomicBool::new(false));
+                    let cancellation = cancelled.clone();
+                    let done = Arc::new(AtomicBool::new(false));
+                    let complete = done.clone();
+                    let (send, receive) = std::sync::mpsc::sync_channel(1);
+                    std::thread::spawn(move || {
+                        let _finished = WorkerCompletion(complete);
+                        let result = super::born_history::PreparedBornHistoryV1::prepare(
+                            *request,
+                            profile,
+                            peer,
+                            stream,
+                            &journal,
+                            &session,
+                            &authority,
+                            &witness,
+                            cancellation,
+                        )
+                        .map(Box::new);
+                        let _ = send.send(WitnessOutcome::BornHistoryPrepared(result));
+                    });
+                    open.born_bridge_active = true;
+                    open.witness_job = Some(WitnessJob {
+                        receive,
+                        done,
+                        cancelled,
+                        epoch,
+                    });
+                    self.message = "Preparing purpose-distinct original born evidence for separate exact native review. Lock and blur revoke new admission immediately.";
+                    break;
+                }
+                #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
+                LocalEvent::BornDispatchV1 {
+                    peer,
+                    stream,
+                    request,
+                } => {
+                    if self.pending.is_some()
+                        || open.wallet_job.is_some()
+                        || open.witness_job.is_some()
+                        || open.history_workers.len() >= 8
+                        || open.check_pairing().is_err()
+                        || open
+                            .pairing
+                            .as_ref()
+                            .is_none_or(|p| p.peer.grant_id != peer.grant_id)
+                    {
+                        continue;
+                    }
+                    let (Some(session), Some(witness), Some(profile)) = (
+                        open.session.clone(),
+                        open.witness.clone(),
+                        self.named_recipient.live_profile(),
+                    ) else {
+                        continue;
+                    };
+                    let journal = open.journal.clone();
+                    let authority = open.authority.binding();
+                    let cancelled = Arc::new(AtomicBool::new(false));
+                    let cancellation = cancelled.clone();
+                    let done = Arc::new(AtomicBool::new(false));
+                    let complete = done.clone();
+                    let (send, receive) = std::sync::mpsc::sync_channel(1);
+                    std::thread::spawn(move || {
+                        let _finished = WorkerCompletion(complete);
+                        let result = super::born_dispatch::PreparedBornDispatchV1::prepare(
+                            *request,
+                            profile,
+                            peer,
+                            stream,
+                            &journal,
+                            &session,
+                            &authority,
+                            &witness,
+                            cancellation,
+                        )
+                        .map(Box::new);
+                        let _ = send.send(WitnessOutcome::BornDispatchPrepared(result));
+                    });
+                    open.born_bridge_active = true;
+                    open.witness_job = Some(WitnessJob {
+                        receive,
+                        done,
+                        cancelled,
+                        epoch,
+                    });
+                    self.message = "Preparing purpose-distinct original born evidence for separate exact native review. Lock and blur revoke new admission immediately.";
+                    break;
+                }
                 #[cfg(feature = "authority-signing")]
                 LocalEvent::Dispatch {
                     peer,
@@ -2176,6 +2364,8 @@ impl NativeRuntime {
                         crate::ipc::AppRequest::RequestSettlement { .. } => {
                             "Settlement requires a separate exact native decision and independently enrolled sources."
                         }
+                        #[cfg(all(feature="authority-signing",feature="offline-review-foundation"))]
+                        crate::ipc::AppRequest::RequestBornOriginalHistoryV1{..}|crate::ipc::AppRequest::RequestBornDispatchV1{..}=>{"Born history and dispatch require their separate exact native decisions; the pairing grant is not authority."}
                         #[cfg(feature = "authority-signing")]
                         crate::ipc::AppRequest::RequestDispatch { .. } => {
                             "Dispatch requires a separate exact native decision."
@@ -2806,6 +2996,18 @@ impl NativeRuntime {
                 None
             }
 
+            #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
+            WitnessOutcome::BornHistoryPrepared(Ok(value)) => Some((
+                value.digest().to_owned(),
+                value.display(),
+                Operation::BornHistory(value),
+            )),
+            #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
+            WitnessOutcome::BornDispatchPrepared(Ok(value)) => Some((
+                value.digest().to_owned(),
+                value.display(),
+                Operation::BornDispatch(value),
+            )),
             WitnessOutcome::DispatchPrepared(Ok(value)) => Some((
                 value.digest().to_owned(),
                 value.display(),
@@ -3697,6 +3899,42 @@ impl NativeRuntime {
                 open.history_workers.push(worker);
                 self.message = "Exact proved-artifact disclosure approved for the listed installed recipients. Every original owner must separately approve.";
             }
+            #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
+            Operation::BornHistory(prepared) => {
+                open.check_pairing()?;
+                if open.history_workers.len() >= 8 {
+                    return Err(Error::Unavailable);
+                }
+                let approved = prepared.approve(decision, &open.authority)?;
+                let session = open.session.clone().ok_or(Error::Locked)?;
+                let witness = open.witness.clone().ok_or(Error::Locked)?;
+                let journal = open.journal.clone();
+                let worker = std::thread::spawn(move || {
+                    let _ = approved.serve(&journal, &session, &witness);
+                });
+                open.born_bridge_workers.insert(worker.thread().id());
+                open.history_workers.push(worker);
+                open.born_bridge_active = true;
+                self.message = "The exact born Host channel is held. Original exposure remains retained; Lock or blur stops new admission, and already-admitted outcomes remain possible.";
+            }
+            #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
+            Operation::BornDispatch(prepared) => {
+                open.check_pairing()?;
+                if open.history_workers.len() >= 8 {
+                    return Err(Error::Unavailable);
+                }
+                let approved = prepared.approve(decision, &open.authority)?;
+                let session = open.session.clone().ok_or(Error::Locked)?;
+                let witness = open.witness.clone().ok_or(Error::Locked)?;
+                let journal = open.journal.clone();
+                let worker = std::thread::spawn(move || {
+                    let _ = approved.serve(&journal, &session, &witness);
+                });
+                open.born_bridge_workers.insert(worker.thread().id());
+                open.history_workers.push(worker);
+                open.born_bridge_active = true;
+                self.message = "The exact born Host channel is held. Original exposure remains retained; Lock or blur stops new admission, and already-admitted outcomes remain possible.";
+            }
             #[cfg(feature = "authority-signing")]
             Operation::Dispatch(prepared) => {
                 open.check_pairing()?;
@@ -3848,6 +4086,11 @@ impl NativeRuntime {
                         self.message = "Exact native manifest acceptance committed in the encrypted signer journal.";
                     }
                     Operation::Pair(_) | Operation::Provider(_) => unreachable!(),
+                    #[cfg(all(
+                        feature = "authority-signing",
+                        feature = "offline-review-foundation"
+                    ))]
+                    Operation::BornHistory(_) | Operation::BornDispatch(_) => unreachable!(),
                     #[cfg(feature = "authority-signing")]
                     Operation::AutomationGrant(_)
                     | Operation::AutomationWitness(_)
@@ -4157,7 +4400,276 @@ impl NativeRuntime {
         });
         Ok(())
     }
+    fn exact_review_ui(&mut self, ui: &mut egui::Ui, focused: bool, epoch: u64) {
+        if let Some(pending) = self.pending.as_mut() {
+            ui.separator();
+            ui.label(egui::RichText::new(pending.review.display()).monospace());
+            if !pending.review.confirming() {
+                if ui
+                    .button("Continue after reviewing all exact terms")
+                    .clicked_by(egui::PointerButton::Primary)
+                    && pending
+                        .review
+                        .continue_from_native_click(focused, epoch)
+                        .is_err()
+                {
+                    self.pending = None;
+                    self.message = "Review was invalidated. Prepare it again.";
+                }
+            } else {
+                let phrase = format!("AUTHORIZE {}", &pending.review.digest()[..12]);
+                ui.label(format!("Type {phrase}"));
+                ui.add(egui::TextEdit::singleline(&mut *self.confirmation).char_limit(64));
+                if ui
+                    .add_enabled(
+                        *self.confirmation == phrase,
+                        egui::Button::new("Confirm this exact native decision"),
+                    )
+                    .clicked_by(egui::PointerButton::Primary)
+                    && self.approve(focused, epoch).is_err()
+                {
+                    self.message = "Decision rejected, expired, revoked or unable to commit. No substitute approval was created.";
+                }
+            }
+            if ui
+                .button("Reject and discard pending decision")
+                .clicked_by(egui::PointerButton::Primary)
+            {
+                self.pending = None;
+                self.confirmation.zeroize();
+            }
+        }
+    }
+    /// Same private transition for the focused primary-click branch below and
+    /// explicit synthetic controller delivery. This is not a public token API.
+    #[cfg(feature = "authority-signing")]
+    fn begin_pending_birth_from_native_click(&mut self, focused: bool, epoch: u64) -> Result<()> {
+        if !focused
+            || self.open.is_some()
+            || self.pending_account.is_some()
+            || self.birth.is_active()
+            || !self.closing_accounts.is_empty()
+            || self.signing_job.is_some()
+        {
+            return Err(Error::ReviewMismatch);
+        }
+        let entry = PendingBirthEntry {
+            focus_epoch: epoch,
+            parent_channel: self.parent_channel.clone(),
+        };
+        let result = self.birth.begin(
+            entry,
+            Path::new(&self.root),
+            &self.password,
+            &self.privacy_domain,
+        );
+        self.password.zeroize();
+        self.message = if result.is_ok() {
+            "Pending native birth started. No witness or application was contacted."
+        } else {
+            self.birth.clear();
+            "Pending birth could not start. Check the new private target, password and native parent lifetime. No signer account was activated."
+        };
+        result
+    }
+
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(in crate::native_ui) fn entered_pending_birth_for_qualification(
+        root: &Path,
+        privacy_domain: &str,
+    ) -> Result<super::birth_workspace::NativeBirthCeremony> {
+        let mut runtime = Self::new(None);
+        runtime.root = root.to_str().ok_or(Error::InvalidData)?.to_owned();
+        runtime.password = Zeroizing::new(
+            super::birth_workspace::born_roster_v3::SYNTHETIC_PENDING_PASSWORD.into(),
+        );
+        runtime.privacy_domain = privacy_domain.into();
+        // Rejected delivery must not create entropy, a private entry or owner.
+        if runtime
+            .begin_pending_birth_from_native_click(false, 1)
+            .is_ok()
+            || runtime.birth.is_active()
+        {
+            return Err(Error::ReviewMismatch);
+        }
+        runtime.begin_pending_birth_from_native_click(true, 1)?;
+        Ok(std::mem::take(&mut runtime.birth))
+    }
+
+    #[cfg(feature = "pending-birth-owner-signing")]
+    fn reopen_pending_from_native_click(&mut self, focused: bool, epoch: u64) -> Result<()> {
+        if !focused
+            || self.open.is_some()
+            || self.pending_account.is_some()
+            || self.birth.is_active()
+            || self.pending_enrollment.is_active()
+            || !self.closing_accounts.is_empty()
+            || self.signing_job.is_some()
+        {
+            return Err(Error::ReviewMismatch);
+        }
+        let entry = PendingBirthEntry {
+            focus_epoch: epoch,
+            parent_channel: self.parent_channel.clone(),
+        };
+        let result = self
+            .pending_enrollment
+            .begin(entry, Path::new(&self.root), &self.password);
+        self.password.zeroize();
+        self.message = if result.is_ok() {
+            "Authenticating the exact pending envelope in a bounded native worker."
+        } else {
+            self.pending_enrollment.clear();
+            "Pending reopen failed. Preserve the original directory unchanged; no account authority was granted."
+        };
+        result
+    }
+
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(in crate::native_ui) fn entered_pending_continuation_for_qualification(
+        root: &Path,
+    ) -> Result<super::pending_enrollment::PendingEnrollmentUi> {
+        let mut runtime = Self::new(None);
+        runtime.root = root.to_str().ok_or(Error::InvalidData)?.to_owned();
+        runtime.password = Zeroizing::new(
+            super::birth_workspace::born_roster_v3::SYNTHETIC_PENDING_PASSWORD.into(),
+        );
+        if runtime.reopen_pending_from_native_click(false, 1).is_ok()
+            || runtime.pending_enrollment.is_active()
+        {
+            return Err(Error::ReviewMismatch);
+        }
+        runtime.reopen_pending_from_native_click(true, 1)?;
+        Ok(std::mem::take(&mut runtime.pending_enrollment))
+    }
+
+    #[cfg(feature = "pending-birth-owner-signing")]
+    fn reopen_born_roster_from_native_click(&mut self, focused: bool, epoch: u64) -> Result<()> {
+        if !focused
+            || self.open.is_some()
+            || self.pending_account.is_some()
+            || self.birth.is_active()
+            || self.pending_enrollment.is_active()
+            || self.born_origin.is_active()
+            || self.born_manual_roster_v2.is_active()
+            || self.born_manual.is_active()
+            || self.born_enrolled_backup.is_active()
+            || !self.closing_accounts.is_empty()
+            || self.signing_job.is_some()
+        {
+            return Err(Error::ReviewMismatch);
+        }
+        let entry = PendingBirthEntry {
+            focus_epoch: epoch,
+            parent_channel: self.parent_channel.clone(),
+        };
+        let result = self
+            .born_manual_roster_v2
+            .begin(entry, Path::new(&self.root), &self.password);
+        self.password.zeroize();
+        self.message = if result.is_ok() {
+            "Authenticating exact original born V2 roster source."
+        } else {
+            self.born_manual_roster_v2.clear();
+            "V2 roster enrollment entry failed; original state preserved."
+        };
+        result
+    }
+
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(in crate::native_ui) fn entered_born_roster_for_qualification(
+        root: &Path,
+    ) -> Result<super::born_manual_roster_v2::BornManualRosterUiV2> {
+        let mut runtime = Self::new(None);
+        runtime.root = root.to_str().ok_or(Error::InvalidData)?.to_owned();
+        runtime.password = Zeroizing::new(
+            super::birth_workspace::born_roster_v3::SYNTHETIC_PENDING_PASSWORD.into(),
+        );
+        if runtime
+            .reopen_born_roster_from_native_click(false, 1)
+            .is_ok()
+            || runtime.born_manual_roster_v2.is_active()
+        {
+            return Err(Error::ReviewMismatch);
+        }
+        runtime.reopen_born_roster_from_native_click(true, 1)?;
+        Ok(std::mem::take(&mut runtime.born_manual_roster_v2))
+    }
+
+    #[cfg(feature = "pending-birth-owner-signing")]
+    fn reopen_born_single_from_native_click(&mut self, focused: bool, epoch: u64) -> Result<()> {
+        if !focused
+            || self.open.is_some()
+            || self.pending_account.is_some()
+            || self.birth.is_active()
+            || self.pending_enrollment.is_active()
+            || self.born_origin.is_active()
+            || self.born_manual_roster_v2.is_active()
+            || self.born_manual.is_active()
+            || self.born_enrolled_backup.is_active()
+            || !self.closing_accounts.is_empty()
+            || self.signing_job.is_some()
+        {
+            return Err(Error::ReviewMismatch);
+        }
+        let entry = PendingBirthEntry {
+            focus_epoch: epoch,
+            parent_channel: self.parent_channel.clone(),
+        };
+        let result = self
+            .born_manual
+            .begin(entry, Path::new(&self.root), &self.password);
+        self.password.zeroize();
+        self.message = if result.is_ok() {
+            "Authenticating exact original born enrollment source."
+        } else {
+            self.born_manual.clear();
+            #[cfg(feature = "pending-birth-owner-signing")]
+            self.born_manual_roster_v2.clear();
+            "Born manual enrollment entry failed; original state preserved."
+        };
+        result
+    }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(in crate::native_ui) fn entered_born_single_for_qualification(
+        root: &Path,
+    ) -> Result<super::born_manual::BornManualUi> {
+        let mut runtime = Self::new(None);
+        runtime.root = root.to_str().ok_or(Error::InvalidData)?.to_owned();
+        runtime.password = Zeroizing::new(
+            super::birth_workspace::born_roster_v3::SYNTHETIC_PENDING_PASSWORD.into(),
+        );
+        if runtime
+            .reopen_born_single_from_native_click(false, 1)
+            .is_ok()
+            || runtime.born_manual.is_active()
+        {
+            return Err(Error::ReviewMismatch);
+        }
+        runtime.reopen_born_single_from_native_click(true, 1)?;
+        Ok(std::mem::take(&mut runtime.born_manual))
+    }
+
     pub(super) fn ui(&mut self, ui: &mut egui::Ui, focused: bool, epoch: u64) {
+        #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
+        if self.open.as_ref().is_some_and(|o| o.born_bridge_active) {
+            if !focused {
+                self.lock();
+                return;
+            }
+            self.poll_witness(epoch);
+            self.poll(epoch);
+            ui.label("Original born Host disclosure/dispatch channel is active. Only exact born bridge requests are admitted until it finishes.");
+            self.exact_review_ui(ui, focused, epoch);
+            ui.label(self.message);
+            if ui
+                .button("Lock and close born Host admission")
+                .clicked_by(egui::PointerButton::Primary)
+            {
+                self.lock();
+            }
+            return;
+        }
         #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
         self.named_recipient.reap_cancelled();
         // A final recipient worker can hold the signer journal. Route its
@@ -4177,10 +4689,13 @@ impl NativeRuntime {
                         manifest_ref: open.manifest.as_ref().map_or("", |r| r.reference()),
                         vault: &open.vault,
                         authority: &open.authority,
+                        #[cfg(feature = "pending-birth-owner-signing")]
+                        born: None,
                     };
                     self.named_recipient.final_ui(
                         ui,
                         &owner,
+                        open.wallet.as_ref(),
                         open.witness.as_ref(),
                         focused,
                         epoch,
@@ -4362,6 +4877,17 @@ impl NativeRuntime {
             if self.pending_account.is_none() {
                 #[cfg(feature = "pending-birth-owner-signing")]
                 {
+                    if self.born_manual_roster_v2.has_dormant_named() {
+                        ui.label("Exact consumed named payment is key-free. A new native entry does not renew its original financial deadlines.");
+                        if ui
+                            .button("Unlock exact consumed account for named payment")
+                            .clicked_by(egui::PointerButton::Primary)
+                            && focused
+                        {
+                            let _ = self.reopen_consumed_named_from_native_click(focused, epoch);
+                            return;
+                        }
+                    }
                     if self.born_manual_roster_v2.has_dormant_common_context() {
                         ui.label("One admitted read retains a key-free completion. Fresh unlock cannot renew its deadline.");
                         if ui
@@ -4369,24 +4895,8 @@ impl NativeRuntime {
                             .clicked_by(egui::PointerButton::Primary)
                             && focused
                         {
-                            let entry = PendingBirthEntry {
-                                focus_epoch: epoch,
-                                parent_channel: self.parent_channel.clone(),
-                            };
-                            let result = self.born_manual_roster_v2.begin_common_context(
-                                entry,
-                                Path::new(&self.root),
-                                &self.password,
-                            );
-                            self.password.zeroize();
-                            if result.is_err() {
-                                self.born_manual_roster_v2.clear();
-                            }
-                            self.message = if result.is_ok() {
-                                "Authenticating exact original completion."
-                            } else {
-                                "Original completion ended; no retry was created."
-                            };
+                            let _ =
+                                self.reopen_born_common_context_from_native_click(focused, epoch);
                             return;
                         }
                     }
@@ -4419,22 +4929,7 @@ impl NativeRuntime {
                         .clicked_by(egui::PointerButton::Primary)
                         && focused
                     {
-                        let entry = PendingBirthEntry {
-                            focus_epoch: epoch,
-                            parent_channel: self.parent_channel.clone(),
-                        };
-                        let result = self.born_manual_roster_v2.begin(
-                            entry,
-                            Path::new(&self.root),
-                            &self.password,
-                        );
-                        self.password.zeroize();
-                        self.message = if result.is_ok() {
-                            "Authenticating exact original born V2 roster source."
-                        } else {
-                            self.born_manual_roster_v2.clear();
-                            "V2 roster enrollment entry failed; original state preserved."
-                        };
+                        let _ = self.reopen_born_roster_from_native_click(focused, epoch);
                         return;
                     }
                     ui.label("Separate original-born manual enrollment privately reads the immutable birth and policy, opens a bounded local pairing endpoint, and reviews one exact paired host generation and agreement. It never activates financial/key-release permission.");
@@ -4443,22 +4938,7 @@ impl NativeRuntime {
                         .clicked_by(egui::PointerButton::Primary)
                         && focused
                     {
-                        let entry = PendingBirthEntry {
-                            focus_epoch: epoch,
-                            parent_channel: self.parent_channel.clone(),
-                        };
-                        let result =
-                            self.born_manual
-                                .begin(entry, Path::new(&self.root), &self.password);
-                        self.password.zeroize();
-                        self.message = if result.is_ok() {
-                            "Authenticating exact original born enrollment source."
-                        } else {
-                            self.born_manual.clear();
-                            #[cfg(feature = "pending-birth-owner-signing")]
-                            self.born_manual_roster_v2.clear();
-                            "Born manual enrollment entry failed; original state preserved."
-                        };
+                        let _ = self.reopen_born_single_from_native_click(focused, epoch);
                         return;
                     }
                     ui.label("Complete enrolled backup/restore reads private birth, enrollment and encrypted journal history. Explicit V1 and V2 roster source entries support only exact initial schema-13 enrolled history; later activity fails closed. Restored history stays inert and financially denied.");
@@ -4575,20 +5055,7 @@ impl NativeRuntime {
                     .clicked_by(egui::PointerButton::Primary)
                     && focused
                 {
-                    let entry = PendingBirthEntry {
-                        focus_epoch: epoch,
-                        parent_channel: self.parent_channel.clone(),
-                    };
-                    let result =
-                        self.pending_enrollment
-                            .begin(entry, Path::new(&self.root), &self.password);
-                    self.password.zeroize();
-                    self.message = if result.is_ok() {
-                        "Authenticating the exact pending envelope in a bounded native worker."
-                    } else {
-                        self.pending_enrollment.clear();
-                        "Pending reopen failed. Preserve the original directory unchanged; no account authority was granted."
-                    };
+                    let _ = self.reopen_pending_from_native_click(focused, epoch);
                     return;
                 }
                 #[cfg(feature = "authority-signing")]
@@ -4648,23 +5115,7 @@ impl NativeRuntime {
                         .clicked_by(egui::PointerButton::Primary)
                         && focused
                     {
-                        let entry = PendingBirthEntry {
-                            focus_epoch: epoch,
-                            parent_channel: self.parent_channel.clone(),
-                        };
-                        let result = self.birth.begin(
-                            entry,
-                            Path::new(&self.root),
-                            &self.password,
-                            &self.privacy_domain,
-                        );
-                        self.password.zeroize();
-                        self.message = if result.is_ok() {
-                            "Pending native birth started. No witness or application was contacted."
-                        } else {
-                            self.birth.clear();
-                            "Pending birth could not start. Check the new private target, password and native parent lifetime. No signer account was activated."
-                        };
+                        let _ = self.begin_pending_birth_from_native_click(focused, epoch);
                         return;
                     }
                 }
@@ -4813,6 +5264,8 @@ impl NativeRuntime {
                         manifest_ref: open.manifest.as_ref().map_or("", |r| r.reference()),
                         vault: &open.vault,
                         authority: &open.authority,
+                        #[cfg(feature = "pending-birth-owner-signing")]
+                        born: None,
                     };
                     self.named_recipient.ui(
                         ui,
@@ -4941,44 +5394,7 @@ impl NativeRuntime {
                 ui.label("Decryption alone leaves chain inclusion unobserved. Provider reports are source-specific snapshots, never independently verified consensus. Do not deliver solely on an organizer message or a cryptographic check. Refunds require a separately agreed destination and separately authorized payment.");
             });
         }
-        if let Some(pending) = self.pending.as_mut() {
-            ui.separator();
-            ui.label(egui::RichText::new(pending.review.display()).monospace());
-            if !pending.review.confirming() {
-                if ui
-                    .button("Continue after reviewing all exact terms")
-                    .clicked_by(egui::PointerButton::Primary)
-                    && pending
-                        .review
-                        .continue_from_native_click(focused, epoch)
-                        .is_err()
-                {
-                    self.pending = None;
-                    self.message = "Review was invalidated. Prepare it again.";
-                }
-            } else {
-                let phrase = format!("AUTHORIZE {}", &pending.review.digest()[..12]);
-                ui.label(format!("Type {phrase}"));
-                ui.add(egui::TextEdit::singleline(&mut *self.confirmation).char_limit(64));
-                if ui
-                    .add_enabled(
-                        *self.confirmation == phrase,
-                        egui::Button::new("Confirm this exact native decision"),
-                    )
-                    .clicked_by(egui::PointerButton::Primary)
-                    && self.approve(focused, epoch).is_err()
-                {
-                    self.message = "Decision rejected, expired, revoked or unable to commit. No substitute approval was created.";
-                }
-            }
-            if ui
-                .button("Reject and discard pending decision")
-                .clicked_by(egui::PointerButton::Primary)
-            {
-                self.pending = None;
-                self.confirmation.zeroize();
-            }
-        }
+        self.exact_review_ui(ui, focused, epoch);
         ui.separator();
         ui.label(self.message);
         if let Some(receipt) = &self.last_receipt {

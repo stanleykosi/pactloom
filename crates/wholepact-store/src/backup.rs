@@ -315,6 +315,7 @@ pub(crate) fn validate_construction_encoding(
     connection: &Connection,
     supports_v3: bool,
     supports_v4: bool,
+    supports_v5: bool,
 ) -> Result<()> {
     if !supports_v3 {
         let has_v3: bool = connection.query_row(
@@ -329,13 +330,31 @@ pub(crate) fn validate_construction_encoding(
             return Err(StoreError::RecoveryRequired);
         }
     }
-    if !supports_v4
-        && crate::manual_enrollment::construction_claim_v3::read_local_rows(connection)?
-            .0
-            .iter()
-            .any(|(_, claim)| claim.version == 4)
-    {
-        return Err(StoreError::RecoveryRequired);
+    if !supports_v4 || !supports_v5 {
+        // Inspect the raw encoding before typed decoding: even an explicit null
+        // provenance field is a new field and cannot hide under a legacy marker.
+        let kind = crate::manual_enrollment::construction_claim_v3::CONSTRUCTION_CLAIM_V3;
+        // Preserve the typed reader's combined claim/checkpoint bounds before
+        // materializing any raw JSON for this earlier marker check.
+        let (count, bytes): (u64, u64) = connection.query_row(
+            "SELECT count(*),coalesce(sum(length(CAST(payload AS BLOB))),0) FROM records WHERE aggregate_type IN(?1,?2)",
+            params![kind, crate::manual_enrollment::construction_claim_v3::CONSTRUCTION_CHECKPOINT_V3],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        if count > 512 || bytes > 32 * 1024 * 1024 {
+            return Err(StoreError::ResourceExhausted);
+        }
+        let mut query = connection.prepare(
+            "SELECT payload FROM records WHERE aggregate_type=?1",
+        )?;
+        for row in query.query_map([kind], |r| r.get::<_, String>(0))? {
+            let payload: serde_json::Value = serde_json::from_str(&row?)?;
+            if (!supports_v4 && crate::recovery::is_construction_v4_claim(kind, &payload))
+                || (!supports_v5 && crate::recovery::is_construction_v5_claim(kind, &payload))
+            {
+                return Err(StoreError::RecoveryRequired);
+            }
+        }
     }
     crate::manual_enrollment::construction_claim_union::validate_current(connection)
 }
@@ -347,7 +366,7 @@ pub(crate) fn require_construction_v3_encoding(connection: &Connection) -> Resul
     let version: i64 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
     let recovered = wholepact_storage_security::bundle::recovery::generation::RECOVERED_GENERATION_APPLICATION_ID;
     if (application == 0 && version == SCHEMA_VERSION)
-        || (application == recovered && matches!(version, 4..=7))
+        || (application == recovered && matches!(version, 4 | 5 | 6 | 7 | 8 | 9))
     {
         Ok(())
     } else {
@@ -358,7 +377,20 @@ pub(crate) fn require_construction_v4_encoding(connection: &Connection) -> Resul
     let application: i64 = connection.pragma_query_value(None, "application_id", |r| r.get(0))?;
     let version: i64 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
     let recovered = wholepact_storage_security::bundle::recovery::generation::RECOVERED_GENERATION_APPLICATION_ID;
-    if (application == 0 && version == 4) || (application == recovered && matches!(version, 6 | 7))
+    if (application == 0 && version == SCHEMA_VERSION)
+        || (application == recovered && matches!(version, 6 | 7 | 8 | 9))
+    {
+        Ok(())
+    } else {
+        Err(StoreError::RecoveryRequired)
+    }
+}
+pub(crate) fn require_construction_v5_encoding(connection: &Connection) -> Result<()> {
+    let application: i64 = connection.pragma_query_value(None, "application_id", |r| r.get(0))?;
+    let version: i64 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    let recovered = wholepact_storage_security::bundle::recovery::generation::RECOVERED_GENERATION_APPLICATION_ID;
+    if (application == 0 && version == 5)
+        || (application == recovered && matches!(version, 8 | 9))
     {
         Ok(())
     } else {
@@ -514,7 +546,8 @@ fn inspect_rows(connection: &Connection, version: i64) -> Result<Stats> {
     if unknown_sequences != 0 {
         return Err(StoreError::InvalidInput("unsupported journal sequence"));
     }
-    validate_construction_encoding(connection, version >= 3, version >= 4)?;
+    let support = crate::recovery::construction_encoding_support(0, version)?;
+    validate_construction_encoding(connection, support.0, support.1, support.2)?;
     if version >= 2 {
         read_recovery_state(connection)?;
     }
@@ -649,3 +682,6 @@ fn fail_before_commit(operation: &str) -> Result<()> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod historical_provenance_v5_marker_tests;

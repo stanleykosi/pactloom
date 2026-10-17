@@ -67,6 +67,10 @@ fn retained_metadata_matches_actual_authenticated_plaintext_without_receipt_fact
         Some(&now),
     )
     .unwrap();
+    assert_eq!(
+        metadata.immutable_slot_digest.as_deref(),
+        receipt.immutable_slot_digest()
+    );
     assert_eq!(metadata.stream_digest, receipt.stream_digest());
     assert_eq!(metadata.message_id_digest, receipt.message_id_digest());
     assert_eq!(metadata.content_digest, receipt.content_digest());
@@ -83,6 +87,10 @@ fn retained_metadata_does_not_enable_any_generic_offline_sealer() {
         ArtifactKind::OfflineAdmissionControl,
         ArtifactKind::OfflineMinimalAuthorityAdmission,
         ArtifactKind::OfflineAuthorizationReturn,
+        ArtifactKind::BornOfflineMinimalAdmissionV1,
+        ArtifactKind::BornOfflineIntentV1,
+        ArtifactKind::BornOfflineCheckpointOriginV1,
+        ArtifactKind::BornOfflineAuthorizationReturnV1,
     ] {
         let p = prepared(kind, &sender, &recipient);
         let approved = p.preview().digest().unwrap();

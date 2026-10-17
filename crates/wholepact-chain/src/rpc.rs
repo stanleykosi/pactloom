@@ -177,6 +177,16 @@ pub(crate) struct Rpc {
     route: ProxyRoute,
 }
 impl Rpc {
+    pub(crate) fn public_read_route_v1(&self) -> crate::public_read_profile_v1::PublicReadRouteV1 {
+        use crate::public_read_profile_v1::PublicReadRouteV1;
+        match &self.route {
+            ProxyRoute::Direct => PublicReadRouteV1::Direct,
+            ProxyRoute::HttpTunnel(origin) => PublicReadRouteV1::ExistingHttpConnect {
+                origin: origin.to_string(),
+            },
+        }
+    }
+
     pub(crate) async fn connect(&self) -> Result<tonic::transport::Channel, ChainError> {
         tokio::time::timeout(
             self.policy.request_timeout,

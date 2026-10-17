@@ -1,6 +1,11 @@
 //! Narrow length-delimited JSON over maintained TLS 1.3 with mutual certificate
 //! validation. No plaintext remote mode, certificate-verification bypass, custom
 //! verifier, redirects, proxy credentials, or caller-controlled URL exists.
+mod born_offline_clock_v1;
+mod born_offline_dispatch_v1;
+mod born_offline_owner_continuation_v1;
+pub use born_offline_dispatch_v1::AuthenticatedBornOfflineDispatchV1;
+mod born_offline_witness_v1;
 #[path = "construction_transport_client_v1.rs"]
 mod construction_transport_client_v1;
 #[path = "construction_transport_server_v1.rs"]
@@ -15,6 +20,7 @@ use crate::{
     protocol::{WireRequest, WireResponse},
     *,
 };
+pub use born_offline_clock_v1::AuthenticatedBornOfflineClockV1;
 pub use construction_transport_client_v1::{
     AuthenticatedConstructionTransportContributionV1,
     AuthenticatedConstructionTransportReservationV1, AuthenticatedConstructionTransportV1,
@@ -422,6 +428,8 @@ impl AuthorityClient {
         let mut pending_birth_commit = None;
         let mut permits = Vec::new();
         let mut offline_permits = Vec::new();
+        let mut born_offline_permits = Vec::new();
+        let mut born_offline_dispatches = Vec::new();
         let mut automatic_key_use_admissions = Vec::new();
         let mut recovery_fences = Vec::new();
         let mut committed_operation_ids = std::collections::BTreeSet::new();
@@ -509,6 +517,12 @@ impl AuthorityClient {
                 match state.apply(&event)? {
                     MutationResult::Reserved(permit) => permits.push(*permit),
                     MutationResult::OfflineReserved(permit) => offline_permits.push(*permit),
+                    MutationResult::BornOfflineDispatchAdmittedV1(admission) => {
+                        born_offline_dispatches.push(*admission)
+                    }
+                    MutationResult::BornOfflineReservedV1(permit) => {
+                        born_offline_permits.push(*permit)
+                    }
                     MutationResult::AutomaticKeyUseAdmitted(admission) => {
                         automatic_key_use_admissions.push(*admission)
                     }
@@ -540,6 +554,7 @@ impl AuthorityClient {
         }
         let ledger = ledger.ok_or(AuthorityError::CorruptHistory)?;
         ledger.validate_manual_birth(pending_birth_commit.as_ref())?;
+        ledger.validate_born_offline_birth_v1(pending_birth_commit.as_ref())?;
         let manual_roster_attempt = if ledger.manual_roster_extension()?.is_some() {
             Some(ledger.latest_manual_roster_attempt_v2()?)
         } else {
@@ -578,6 +593,8 @@ impl AuthorityClient {
             snapshot,
             permits,
             offline_permits,
+            born_offline_permits,
+            born_offline_dispatches,
             automatic_key_use_admissions,
             recovery_fences,
             committed_operation_ids,
@@ -1332,12 +1349,27 @@ impl AuthorityClient {
         build: impl FnOnce(&[u8; 32]) -> Result<WireRequest>,
         caller_deadline: Option<Instant>,
     ) -> Result<WireResponse> {
+        self.call_with_inner_checked(build, caller_deadline, || Ok(()))
+    }
+    // A cancellation check is not a permission factory. Native callers retain
+    // their actual owner and original absolute deadline through this exchange.
+    fn call_with_inner_checked(
+        &self,
+        build: impl FnOnce(&[u8; 32]) -> Result<WireRequest>,
+        caller_deadline: Option<Instant>,
+        mut current: impl FnMut() -> Result<()>,
+    ) -> Result<WireResponse> {
+        current()?;
         let started = Instant::now();
         let deadline = match caller_deadline {
             Some(deadline) => bounded_transport_deadline_at(started, deadline)?,
             None => started + IO_TIMEOUT,
         };
-        let check = || -> Result<()> {
+        let mut check = || -> Result<()> {
+            if caller_deadline.is_some() {
+                require_before_caller_deadline(deadline)?;
+            }
+            current()?;
             if caller_deadline.is_some() {
                 require_before_caller_deadline(deadline)?;
             }
@@ -1348,6 +1380,7 @@ impl AuthorityClient {
         } else {
             IO_TIMEOUT
         };
+        check()?;
         let socket = TcpStream::connect_timeout(&self.endpoint, connect_timeout)
             .map_err(|_| AuthorityError::Uncertain)?;
         check()?;
@@ -1359,6 +1392,7 @@ impl AuthorityClient {
             ClientConnection::new(self.tls.config.clone(), self.tls.server_name.clone())
                 .map_err(|_| AuthorityError::Authentication)?;
         while connection.is_handshaking() {
+            check()?;
             connection
                 .complete_io(&mut socket)
                 .map_err(|_| AuthorityError::Authentication)?;
@@ -1382,6 +1416,8 @@ impl AuthorityClient {
         let request = build(&exporter)?;
         check()?;
         let mut stream = StreamOwned::new(connection, socket);
+        check()?;
+        // From this write onward cancellation cannot promise remote rollback.
         write_frame(&mut stream, &request).map_err(|_| AuthorityError::Uncertain)?;
         check()?;
         let response = read_frame(&mut stream).map_err(|_| AuthorityError::Uncertain)?;
@@ -1398,6 +1434,8 @@ pub struct AuthorityServer {
     journal: Arc<AuthorityJournal>,
     tls: ServerTls,
     handoff_scope: Option<construction_transport_server_v1::ConstructionTransportServingScopeV1>,
+    #[cfg(all(feature="born-offline-witness-owner",target_os="linux"))]
+    born_offline_witness: Option<Arc<std::sync::Mutex<crate::born_offline_retry_v1::configured_born_witness::ConfiguredBornOfflineWitnessV1>>>,
     #[cfg(all(feature = "offline-witness-owner", target_os = "linux"))]
     offline_witness: Option<
         Arc<
@@ -1413,6 +1451,8 @@ impl AuthorityServer {
             journal,
             tls,
             handoff_scope: None,
+            #[cfg(all(feature = "born-offline-witness-owner", target_os = "linux"))]
+            born_offline_witness: None,
             #[cfg(all(feature = "offline-witness-owner", target_os = "linux"))]
             offline_witness: None,
         }
@@ -1466,7 +1506,49 @@ impl AuthorityServer {
         );
         let mut stream = StreamOwned::new(connection, socket);
         let request: WireRequest = read_frame(&mut stream)?;
+        if self.is_born_offline_server_v1()
+            && !matches!(
+                &request,
+                WireRequest::SubmitBornOfflineIntentV1(_)
+                    | WireRequest::AuthorizeBornOfflineDispatchV1 { .. }
+                    | WireRequest::ObserveBornOfflineAdmissionTimeV1(_)
+                    | WireRequest::RecoverBornOfflineDeliveryV1(_)
+                    | WireRequest::Snapshot { .. }
+                    | WireRequest::ReadHistory { .. }
+            )
+        {
+            return write_frame(
+                &mut stream,
+                &WireResponse::Rejected(AuthorityError::Permission),
+            );
+        }
         let result = match request {
+            WireRequest::ObserveBornOfflineAdmissionTimeV1(request) => {
+                if !self.is_born_offline_server_v1() {
+                    Err(AuthorityError::Permission)
+                } else {
+                    let binding = born_offline_clock_v1::channel_binding(
+                        &exporter,
+                        &request.scope,
+                        &request.challenge,
+                    )?;
+                    self.journal
+                        .observe_born_offline_clock_v1(&peer, &request, &binding, now_ms)
+                        .map(|response| {
+                            WireResponse::BornOfflineAdmissionTimeV1(Box::new(response))
+                        })
+                }
+            }
+            WireRequest::AuthorizeBornOfflineDispatchV1 {
+                request,
+                authentication,
+            } => self.serve_born_dispatch_v1(&peer, &exporter, &request, &authentication, deadline),
+            WireRequest::SubmitBornOfflineIntentV1(request) => {
+                self.serve_born_offline_intent_v1(&peer, &exporter, &request, deadline)
+            }
+            WireRequest::RecoverBornOfflineDeliveryV1(lookup) => {
+                self.serve_born_offline_recovery_v1(&peer, &lookup, deadline)
+            }
             WireRequest::SubmitOfflineIntentV1(request) => {
                 self.serve_offline_intent_v1(&peer, &exporter, &request, deadline)
             }
@@ -1761,6 +1843,8 @@ pub mod synthetic {
         let mut ledger: Option<crate::policy::Ledger> = None;
         let mut permits = Vec::new();
         let mut offline_permits = Vec::new();
+        let mut born_offline_permits = Vec::new();
+        let mut born_offline_dispatches = Vec::new();
         let mut automatic_key_use_admissions = Vec::new();
         let mut recovery_fences = Vec::new();
         let mut committed_operation_ids = std::collections::BTreeSet::new();
@@ -1790,6 +1874,12 @@ pub mod synthetic {
                 match state.apply(&event)? {
                     MutationResult::Reserved(permit) => permits.push(*permit),
                     MutationResult::OfflineReserved(permit) => offline_permits.push(*permit),
+                    MutationResult::BornOfflineDispatchAdmittedV1(admission) => {
+                        born_offline_dispatches.push(*admission)
+                    }
+                    MutationResult::BornOfflineReservedV1(permit) => {
+                        born_offline_permits.push(*permit)
+                    }
                     MutationResult::AutomaticKeyUseAdmitted(admission) => {
                         automatic_key_use_admissions.push(*admission)
                     }
@@ -1843,6 +1933,8 @@ pub mod synthetic {
             snapshot: snapshot.clone(),
             permits,
             offline_permits,
+            born_offline_permits,
+            born_offline_dispatches,
             automatic_key_use_admissions,
             recovery_fences,
             committed_operation_ids,
@@ -2042,6 +2134,8 @@ pub mod synthetic {
         let mut pending_birth_commit = None;
         let mut permits = Vec::new();
         let mut offline_permits = Vec::new();
+        let mut born_offline_permits = Vec::new();
+        let mut born_offline_dispatches = Vec::new();
         let mut automatic_key_use_admissions = Vec::new();
         let mut recovery_fences = Vec::new();
         let mut committed_operation_ids = std::collections::BTreeSet::new();
@@ -2116,6 +2210,12 @@ pub mod synthetic {
                 match state.apply(&event)? {
                     MutationResult::Reserved(permit) => permits.push(*permit),
                     MutationResult::OfflineReserved(permit) => offline_permits.push(*permit),
+                    MutationResult::BornOfflineDispatchAdmittedV1(admission) => {
+                        born_offline_dispatches.push(*admission)
+                    }
+                    MutationResult::BornOfflineReservedV1(permit) => {
+                        born_offline_permits.push(*permit)
+                    }
                     MutationResult::AutomaticKeyUseAdmitted(admission) => {
                         automatic_key_use_admissions.push(*admission)
                     }
@@ -2147,6 +2247,7 @@ pub mod synthetic {
         }
         let ledger = ledger.ok_or(AuthorityError::CorruptHistory)?;
         ledger.validate_manual_birth(pending_birth_commit.as_ref())?;
+        ledger.validate_born_offline_birth_v1(pending_birth_commit.as_ref())?;
         let manual_roster_attempt = if ledger.manual_roster_extension()?.is_some() {
             Some(ledger.latest_manual_roster_attempt_v2()?)
         } else {
@@ -2185,6 +2286,8 @@ pub mod synthetic {
             snapshot,
             permits,
             offline_permits,
+            born_offline_permits,
+            born_offline_dispatches,
             automatic_key_use_admissions,
             recovery_fences,
             committed_operation_ids,

@@ -75,6 +75,10 @@ impl RosterContributionRetentionAdmissionV2 {
         require_original_wall(&self.scope)?;
         Ok(())
     }
+    #[cfg(test)]
+    pub(in crate::host) fn synthetic_operation_id(&self) -> &str {
+        &self.operation_id
+    }
     pub(super) fn operation_id(&self) -> &str {
         &self.operation_id
     }
@@ -232,6 +236,17 @@ pub(in crate::host) struct RetainedRosterCandidateInputsV2<'host> {
     exclusions: ManualRosterCandidateLocalExclusionsV2<'host>,
 }
 impl RetainedRosterCandidateInputsV2<'_> {
+    /// Restriction for the new live common-context producer only. Historical
+    /// uniform V1 records remain readable, but cannot enter this new invocation.
+    pub(in crate::host) fn require_original_retention_scope_v2(&self, host: &Host) -> Result<()> {
+        self.request(host)?
+            .selection
+            .scope
+            .selection
+            .require_original_retention_scope()
+            .map_err(|_| Error::Permission)?;
+        self.check_current(host)
+    }
     pub(super) fn check_current(&self, host: &Host) -> Result<()> {
         self.local.check_current(host)?;
         self.native

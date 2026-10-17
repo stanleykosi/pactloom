@@ -58,8 +58,11 @@ impl ManualRosterConstructionClaimTokenV3<'_> {
         mode.with_connection(&mut c, |c| {
             let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
             crate::backup::require_construction_v3_encoding(&tx)?;
-            if self.claim.version == 4 {
+            if matches!(self.claim.version, 4 | 5) {
                 crate::backup::require_construction_v4_encoding(&tx)?;
+            }
+            if self.claim.version == 5 {
+                crate::backup::require_construction_v5_encoding(&tx)?;
             }
             let (claims, checkpoints) = read_construction_rows(&tx)?;
             let id = self.claim.digest()?;
@@ -132,6 +135,7 @@ impl Store {
             },
             admitted,
             ManualPersistenceMode::Existing,
+            None,
         )
     }
     /// Same one-use native owners and immutable claim; only contention policy
@@ -155,6 +159,43 @@ impl Store {
             },
             admitted,
             ManualPersistenceMode::FailFast,
+            None,
+        )
+    }
+    /// The only observed construction issuer accepts the actual held wallet
+    /// conjunction, not a deserialized record, timestamp, trait, or callback.
+    #[cfg(feature = "observed-construction")]
+    pub fn claim_manual_roster_construction_v5_fail_fast<'store>(
+        &'store self,
+        target: &ManualStoreTarget<'_>,
+        expected: &StoredRecord,
+        principal: &str,
+        key: &str,
+        maximum_actions: usize,
+        admitted: &[&AdmittedManualRosterConstructionContributionV3],
+        held: &wholepact_wallet::wallet::protected_sync::exact_input_observation::HeldCommonContextRosterObservation<'_>,
+    ) -> Result<ManualRosterConstructionClaimOutcomeV3<'store>> {
+        let observe = || {
+            held.require_original_admissions(admitted)
+                .map_err(|_| StoreError::RecoveryRequired)?;
+            let facts = held
+                .historical_provenance_v1()
+                .map_err(|_| StoreError::RecoveryRequired)?;
+            held.require_original_admissions(admitted)
+                .map_err(|_| StoreError::RecoveryRequired)?;
+            Ok(facts)
+        };
+        self.claim_manual_roster_construction_v3_with_mode(
+            target,
+            expected,
+            ConstructionInvocation {
+                principal,
+                key,
+                maximum_actions,
+            },
+            admitted,
+            ManualPersistenceMode::FailFast,
+            Some(&observe),
         )
     }
     fn claim_manual_roster_construction_v3_with_mode<'store>(
@@ -164,6 +205,9 @@ impl Store {
         invocation: ConstructionInvocation<'_>,
         admitted: &[&AdmittedManualRosterConstructionContributionV3],
         mode: ManualPersistenceMode,
+        // Private code sharing only. The sole Some caller above closes over
+        // the nominal held owner; no external DTO/closure issuer exists.
+        observe: Option<&dyn Fn() -> Result<wholepact_core::common_context_historical_provenance_v1::CommonContextHistoricalProvenanceV1>>,
     ) -> Result<ManualRosterConstructionClaimOutcomeV3<'store>> {
         let ConstructionInvocation {
             principal,
@@ -187,8 +231,16 @@ impl Store {
             }
             consumed.push(audit);
         }
+        let historical_provenance = observe.map(|f| f()).transpose()?;
         let claim = ManualRosterConstructionClaimV3 {
-            version: if reentry_lineages.is_empty() { 3 } else { 4 },
+            version: if historical_provenance.is_some() {
+                5
+            } else if reentry_lineages.is_empty() {
+                3
+            } else {
+                4
+            },
+            historical_provenance,
             reentry_lineages: (!reentry_lineages.is_empty()).then_some(reentry_lineages),
             principal_id: principal.into(),
             construction_key: key.into(),
@@ -197,14 +249,19 @@ impl Store {
         };
         claim.validate()?;
         let id = claim.digest()?;
-        let mut c = self.connection.try_lock().map_err(|error| match error {
-            std::sync::TryLockError::WouldBlock => StoreError::ResourceExhausted,
-            std::sync::TryLockError::Poisoned(_) => StoreError::Poisoned,
-        })?;
-        let existing = mode.with_connection(&mut c, |c| {
+        let existing = with_historical_observation_boundary(
+            &claim.historical_provenance,
+            observe,
+            || {
+                let mut c = self.connection.try_lock().map_err(|error| match error {
+                    std::sync::TryLockError::WouldBlock => StoreError::ResourceExhausted,
+                    std::sync::TryLockError::Poisoned(_) => StoreError::Poisoned,
+                })?;
+                let existing = mode.with_connection(&mut c, |c| {
         let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
             crate::backup::require_construction_v3_encoding(&tx)?;
-            if claim.version == 4 { crate::backup::require_construction_v4_encoding(&tx)?; }
+            if matches!(claim.version, 4 | 5) { crate::backup::require_construction_v4_encoding(&tx)?; }
+            if claim.version == 5 { crate::backup::require_construction_v5_encoding(&tx)?; }
         let (existing, _) = read_construction_rows(&tx)?;
         for (saved_id, saved) in &existing {
             if saved.request_identity()? == claim.request_identity()?
@@ -340,7 +397,10 @@ impl Store {
         tx.commit()?;
         Ok(None)
         })?;
-        drop(c);
+                drop(c);
+                Ok(existing)
+            },
+        )?;
         if let Some(saved) = existing {
             return Ok(ManualRosterConstructionClaimOutcomeV3::ExistingOnly(saved));
         }
@@ -366,4 +426,97 @@ fn insert_row<T: Serialize>(
         params![kind, id, payload, crate::now_ms()],
     )?;
     Ok(())
+}
+
+/// Private ordering boundary. Full wallet restrictions may query this same
+/// Store, so they run only before the persistence closure and after its locks
+/// have been released. Persistence itself retains direct Store/native checks.
+/// A failed postcheck leaves any durable claim intact and returns no token.
+fn with_historical_observation_boundary<T>(
+    expected: &Option<wholepact_core::common_context_historical_provenance_v1::CommonContextHistoricalProvenanceV1>,
+    observe: Option<&dyn Fn() -> Result<wholepact_core::common_context_historical_provenance_v1::CommonContextHistoricalProvenanceV1>>,
+    persist: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let check = || -> Result<()> {
+        if observe.map(|f| f()).transpose()? != *expected {
+            return Err(StoreError::RecoveryRequired);
+        }
+        Ok(())
+    };
+    with_claim_pre_post_checks(check, persist)
+}
+fn with_claim_pre_post_checks<T>(
+    check: impl Fn() -> Result<()>,
+    persist: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    check()?;
+    let output = persist()?;
+    check()?;
+    Ok(output)
+}
+
+#[cfg(test)]
+mod historical_claim_boundary_tests {
+    use super::*;
+    use std::cell::Cell;
+    #[test]
+    fn historical_claim_v5_boundary_keeps_full_checks_outside_persistence_lock() {
+        let lock = std::sync::Mutex::new(());
+        let checks = Cell::new(0);
+        let durable = Cell::new(false);
+        // Same private ordering primitive, with inert callbacks only. This
+        // does not issue a native/held/Store construction owner.
+        let output = with_claim_pre_post_checks(
+            || {
+                let _available = lock.try_lock().map_err(|_| StoreError::ResourceExhausted)?;
+                checks.set(checks.get() + 1);
+                Ok(())
+            },
+            || {
+                let _guard = lock.try_lock().unwrap();
+                assert_eq!(checks.get(), 1);
+                durable.set(true);
+                Ok(7)
+            },
+        )
+        .unwrap();
+        assert_eq!(output, 7);
+        assert_eq!(checks.get(), 2);
+        assert!(durable.get());
+    }
+    #[test]
+    fn historical_claim_v5_failed_postcheck_keeps_durable_effect_without_output() {
+        let checks = Cell::new(0);
+        let durable = Cell::new(false);
+        let output = with_claim_pre_post_checks(
+            || {
+                checks.set(checks.get() + 1);
+                if checks.get() == 2 {
+                    Err(StoreError::RecoveryRequired)
+                } else {
+                    Ok(())
+                }
+            },
+            || {
+                durable.set(true);
+                Ok(7)
+            },
+        );
+        assert!(matches!(output, Err(StoreError::RecoveryRequired)));
+        assert!(durable.get());
+        assert_eq!(checks.get(), 2);
+    }
+    #[test]
+    fn historical_claim_v5_failed_precheck_does_not_start_persistence() {
+        let started = Cell::new(false);
+        let output = with_claim_pre_post_checks(
+            || Err(StoreError::RecoveryRequired),
+            || {
+                started.set(true);
+                Ok(7)
+            },
+        );
+        assert!(output.is_err());
+        assert!(!started.get());
+    }
 }

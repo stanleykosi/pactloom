@@ -1,8 +1,16 @@
 //! Actual native owner surface with one bounded private worker. Proposals come
 //! only from the concrete namespace backend. No GUI DTO supplies native approval,
 //! canonical directory identity, retained original enrollment or a storage key.
+#[cfg(feature = "synthetic-qualification")]
+#[path = "window/ephemeral_fixture_v1.rs"]
+pub(super) mod ephemeral_fixture_v1;
 use super::NativeWorkerLease;
 use super::lifecycle::{NativeOwner, ReviewClock};
+#[cfg(feature = "born-offline-witness-owner")]
+use crate::born_offline_artifacts_owner_v1::{
+    BornOfflineArtifactsProposalV1, commit_born_offline_artifacts_v1,
+    prepare_born_offline_artifacts_v1,
+};
 use crate::born_offline_enrollment_owner_v1::{
     BornOfflineEnrollmentProposalV1, commit_born_offline_enrollment_v1,
     prepare_born_offline_enrollment_v1,
@@ -160,6 +168,19 @@ impl NativeBornOfflineEnrollmentDecisionV1 {
     }
 }
 
+/// Only this window's focused final primary click creates persistent-import consent.
+#[cfg(feature = "born-offline-witness-owner")]
+pub(crate) struct NativeBornOfflineArtifactsDecisionV1 {
+    proposal: BornOfflineArtifactsProposalV1,
+    lease: NativeWorkerLease,
+}
+#[cfg(feature = "born-offline-witness-owner")]
+impl NativeBornOfflineArtifactsDecisionV1 {
+    pub(crate) fn into_parts(self) -> (BornOfflineArtifactsProposalV1, NativeWorkerLease) {
+        (self.proposal, self.lease)
+    }
+}
+
 /// One exact local extension commit from a genuine focused native final click.
 /// This is neither a remote writer lease nor a financial action capability.
 pub(crate) struct NativeManualEnrollmentExtensionDecision {
@@ -253,6 +274,12 @@ impl NativePermanentExclusionDecisionV1 {
 
 #[derive(Default)]
 struct NativeInputs {
+    #[cfg(feature = "synthetic-qualification")]
+    synthetic_installation: Option<
+        std::sync::Arc<
+            wholepact_storage_security::witness_namespace_fs::EphemeralWitnessInstallation,
+        >,
+    >,
     endpoint: String,
     server_name: String,
     witness_id: String,
@@ -264,6 +291,10 @@ struct NativeInputs {
     signed_request_json: Zeroizing<String>,
     signed_manual_extension_json: Zeroizing<String>,
     signed_born_offline_enrollment_json: Zeroizing<String>,
+    #[cfg(feature = "born-offline-witness-owner")]
+    born_transport_key_file: String,
+    #[cfg(feature = "born-offline-witness-owner")]
+    born_signer_public_key_hex: String,
     signed_permanent_exclusion_json: Zeroizing<String>,
     signed_manual_roster_extension_json: Zeroizing<String>,
     signed_manual_continuation_json: Zeroizing<String>,
@@ -300,6 +331,8 @@ impl NativeInputs {
     fn common_input(&self) -> Result<NamespaceSetupInput> {
         self.check_lengths()?;
         Ok(NamespaceSetupInput {
+            #[cfg(feature = "synthetic-qualification")]
+            synthetic_installation: self.synthetic_installation.clone(),
             endpoint: self.endpoint.clone(),
             server_name: self.server_name.clone(),
             witness_id: self.witness_id.clone(),
@@ -322,6 +355,8 @@ impl NativeInputs {
         crate::id(&s.witness_id)?;
         crate::hash(&self.expected_account_id)?;
         Ok(NamespaceOpenInput {
+            #[cfg(feature = "synthetic-qualification")]
+            synthetic_installation: s.synthetic_installation,
             endpoint: s.endpoint,
             server_name: s.server_name,
             witness_id: s.witness_id,
@@ -381,6 +416,11 @@ impl NativeInputs {
         self.signed_request_json.zeroize();
         self.signed_manual_extension_json.zeroize();
         self.signed_born_offline_enrollment_json.zeroize();
+        #[cfg(feature = "born-offline-witness-owner")]
+        {
+            self.born_transport_key_file.zeroize();
+            self.born_signer_public_key_hex.zeroize();
+        }
         self.signed_permanent_exclusion_json.zeroize();
         self.signed_manual_roster_extension_json.zeroize();
         self.signed_manual_continuation_json.zeroize();
@@ -407,6 +447,8 @@ enum Proposal {
     Enrollment(Box<NamespaceEnrollmentProposal>),
     ManualExtension(Box<ManualEnrollmentExtensionProposal>),
     BornOfflineEnrollmentV1(Box<BornOfflineEnrollmentProposalV1>),
+    #[cfg(feature = "born-offline-witness-owner")]
+    BornOfflineArtifactsV1(Box<BornOfflineArtifactsProposalV1>),
     PermanentExclusionV1(Box<PermanentExclusionProposalV1>),
     ManualRosterExtensionV2(Box<ManualRosterExtensionProposalV2>),
     ManualContinuation(Box<ManualSessionContinuationProposal>),
@@ -462,6 +504,19 @@ impl Prepared {
         let deadline = proposal.first_commit_deadline_ms();
         Self::new(
             Proposal::BornOfflineEnrollmentV1(Box::new(proposal)),
+            display,
+            digest,
+            deadline,
+        )
+    }
+    #[cfg(feature = "born-offline-witness-owner")]
+    fn born_offline_artifacts_v1(proposal: BornOfflineArtifactsProposalV1) -> Result<Self> {
+        proposal.check_current()?;
+        let digest = proposal.review_digest()?;
+        let display = proposal.display()?;
+        let deadline = proposal.first_commit_deadline_ms();
+        Self::new(
+            Proposal::BornOfflineArtifactsV1(Box::new(proposal)),
             display,
             digest,
             deadline,
@@ -633,6 +688,17 @@ enum Work {
         decision: Box<NativeBornOfflineEnrollmentDecisionV1>,
         clock: ReviewClock,
     },
+    #[cfg(feature = "born-offline-witness-owner")]
+    PrepareBornOfflineArtifactsV1 {
+        input: NamespaceOpenInput,
+        key_file: String,
+        signer_hex: String,
+    },
+    #[cfg(feature = "born-offline-witness-owner")]
+    InstallBornOfflineArtifactsV1 {
+        decision: Box<NativeBornOfflineArtifactsDecisionV1>,
+        clock: ReviewClock,
+    },
     PrepareManualExtension {
         input: NamespaceOpenInput,
         envelope: Zeroizing<String>,
@@ -718,6 +784,11 @@ enum WorkResult {
         clock: ReviewClock,
     },
     ConstructionApproved {
+        display: Zeroizing<String>,
+        clock: ReviewClock,
+    },
+    #[cfg(feature = "born-offline-witness-owner")]
+    BornOfflineArtifactsInstalledV1 {
         display: Zeroizing<String>,
         clock: ReviewClock,
     },
@@ -817,9 +888,25 @@ fn launch_private_work(
                     drop(prepared);
                     Ok(WorkResult::Discarded)
                 }
-                Work::PrepareSetup(input) => prepare_namespace_setup(input)
-                    .and_then(Prepared::setup)
-                    .map(WorkResult::Prepared),
+                Work::PrepareSetup(input) => {
+                    #[cfg(feature = "synthetic-qualification")]
+                    let synthetic_owned = input.synthetic_installation.is_some();
+                    let proposal = prepare_namespace_setup(input);
+                    #[cfg(feature = "synthetic-qualification")]
+                    if synthetic_owned {
+                        if let Err(error) = &proposal {
+                            eprintln!("synthetic witness setup prepare namespace: {error:?}");
+                        }
+                    }
+                    let prepared = proposal.and_then(Prepared::setup);
+                    #[cfg(feature = "synthetic-qualification")]
+                    if synthetic_owned {
+                        if let Err(error) = &prepared {
+                            eprintln!("synthetic witness setup prepared current/display: {error:?}");
+                        }
+                    }
+                    prepared.map(WorkResult::Prepared)
+                },
                 Work::PrepareEnrollment { input, envelope } => (|| {
                     let body: PendingBirthOwnerSignature = serde_json::from_str(&envelope)
                         .map_err(|_| AuthorityError::InvalidBinding)?;
@@ -848,6 +935,12 @@ fn launch_private_work(
                         })).map_err(|_| AuthorityError::Uncertain))
                         .map(|display| WorkResult::BornOfflineEnrolledV1 { display, clock })
                 }
+                #[cfg(feature = "born-offline-witness-owner")]
+                Work::PrepareBornOfflineArtifactsV1 {input,key_file,signer_hex} => prepare_born_offline_artifacts_v1(input,key_file,signer_hex).and_then(Prepared::born_offline_artifacts_v1).map(WorkResult::Prepared),
+                #[cfg(feature = "born-offline-witness-owner")]
+                Work::InstallBornOfflineArtifactsV1 {decision,clock} => commit_born_offline_artifacts_v1(*decision)
+                    .and_then(|audit|private_display(&serde_json::json!({"kind":"immutable_born_offline_artifact_import_v1","original_record":audit.original_record,"committed_head":audit.committed_head,"financial_execution_available":false})).map_err(|_|AuthorityError::Uncertain))
+                    .map(|display|WorkResult::BornOfflineArtifactsInstalledV1{display,clock}),
                 Work::PrepareManualExtension { input, envelope } => (|| {
                     let body = parse_manual_extension_envelope(&envelope)?;
                     let verified = verify_manual_enrollment_extension_owner_signature(
@@ -1526,7 +1619,19 @@ impl Window {
                 {
                     self.last_archive_receipt = Some((clock, display));
                 }
-                self.message = "The exact bounded born offline enrollment was recorded. Its original session, policy, charges and history remain. Older manual-only routes reject this offline-bearing history. Born execution is still unavailable until its protected transport owner is complete; no payment or new credential was authorized. Preserve the original signed request for exact recovery.";
+                self.message = "The exact bounded born offline enrollment was recorded. Its original session, policy, charges and history remain. Older manual-only routes reject this offline-bearing history. Enrollment alone cannot execute; separate native protected artifact import and a dedicated configured born runtime are required. No payment or new credential was authorized. Preserve the original signed request for exact recovery.";
+            }
+            #[cfg(feature = "born-offline-witness-owner")]
+            Ok(WorkResult::BornOfflineArtifactsInstalledV1 { display, clock }) => {
+                if focused
+                    && job.epoch == self.focus_epoch
+                    && !job.owner.revoke_requested()
+                    && !self.close_when_idle
+                    && clock.check().is_ok()
+                {
+                    self.last_archive_receipt = Some((clock, display));
+                }
+                self.message = "The exact existing transport key and private mailboxes were retained in the original encrypted journal. This persistent import does not authorize a signature or payment. Preserve the complete namespace archive; uncertain outcomes must be inspected, never reset or replaced.";
             }
             Ok(WorkResult::ManualExtended { display, clock }) => {
                 if focused
@@ -1733,6 +1838,62 @@ impl Window {
             else if self.can_select() { self.selection_ui(ui, focused); }
         });
     }
+    // Same concrete preparation entered only by a focused primary-pointer
+    // branch. Public buttons retain their activation guard; the synthetic-only
+    // fixture has a distinct finite control, never an opaque decision factory.
+    fn prepare_manual_roster_construction_v3_from_primary(&mut self, ctx: &egui::Context) {
+        let launched = (|| {
+            let input = self.input.enrollment_input()?;
+            if self
+                .input
+                .signed_manual_roster_construction_v3_json
+                .is_empty()
+                || self.input.signed_manual_roster_construction_v3_json.len()
+                    > crate::MAX_FRAME_BYTES
+            {
+                return Err(AuthorityError::Limit);
+            }
+            let envelope = Zeroizing::new(std::mem::take(
+                &mut *self.input.signed_manual_roster_construction_v3_json,
+            ));
+            launch_work(
+                Work::PrepareManualRosterConstructionV3 { input, envelope },
+                NativeOwner::entered_window(),
+                self.focus_epoch,
+                ctx,
+            )
+        })();
+        self.accept_launch(launched);
+    }
+    fn prepare_construction_transport_grant_v1_from_primary(&mut self, ctx: &egui::Context) {
+        let launched = (|| {
+            let input = self.input.enrollment_input()?;
+            if self
+                .input
+                .signed_construction_transport_preauthorization_json
+                .is_empty()
+                || self
+                    .input
+                    .signed_construction_transport_preauthorization_json
+                    .len()
+                    > MAX_CONSTRUCTION_TRANSPORT_COMPONENT_BYTES
+            {
+                return Err(AuthorityError::Limit);
+            }
+            let envelope = Zeroizing::new(std::mem::take(
+                &mut *self
+                    .input
+                    .signed_construction_transport_preauthorization_json,
+            ));
+            launch_work(
+                Work::PrepareConstructionTransportGrantV1 { input, envelope },
+                NativeOwner::entered_window(),
+                self.focus_epoch,
+                ctx,
+            )
+        })();
+        self.accept_launch(launched);
+    }
     fn selection_ui(&mut self, ui: &mut egui::Ui, focused: bool) {
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.label("One namespace per OS-user installation. The root is derived from the authenticated OS account, ignoring HOME/XDG overrides. There is no alternate-root or reset input. New setup requires a blank witness ID and displays a backend-generated public identity before approval; importing an old standalone origin is unsupported.");
@@ -1787,7 +1948,7 @@ impl Window {
             }
             ui.separator();
             ui.heading("Exact born offline enrollment");
-            ui.label("This source-staged operation records one independently signed offline policy for the already-active original writer session. Born offline execution remains unavailable. Committing it makes older manual-only routes reject the resulting offline-bearing history. No new session, key, budget or mailbox is created. Review those consequences before proceeding; there is no renewal or undo action here.");
+            ui.label("This operation records one independently signed offline policy for the already-active original writer session. Enrollment alone cannot execute; separate native protected artifact import and a dedicated configured born runtime are required. Committing it makes older manual-only routes reject the resulting offline-bearing history. No new session, key, budget or mailbox is created. Review those consequences before proceeding; there is no renewal or undo action here.");
             ui.add(egui::TextEdit::multiline(&mut *self.input.signed_born_offline_enrollment_json).desired_rows(6).char_limit(crate::MAX_FRAME_BYTES));
             if ui.add_enabled(focused, egui::Button::new("Authenticate exact born offline enrollment for review"))
                 .clicked_by(egui::PointerButton::Primary) {
@@ -1802,6 +1963,27 @@ impl Window {
                 return;
             }
             ui.separator();
+            #[cfg(feature = "born-offline-witness-owner")]
+            {
+                ui.heading("Persistent born offline transport import");
+                ui.label("Import only the existing protected witness HPKE key already pinned by the retained enrollment. This creates persistent local key and mailbox state inside the original encrypted journal. No new keys, namespace, budgets or mailbox files are created. Review and approve this separate persistent-access step only if intended; no signature or payment is authorized.");
+                field(ui,"Existing protected witness HPKE key FILE path (never paste its contents)",&mut self.input.born_transport_key_file,4096);
+                field(ui,"Original enrolled offline signer PUBLIC key (64 hex characters)",&mut self.input.born_signer_public_key_hex,64);
+                if ui.add_enabled(focused,egui::Button::new("Review exact persistent transport import")).clicked_by(egui::PointerButton::Primary) {
+                    let launched=(|| {
+                        let input=self.input.enrollment_input()?;
+                        if self.input.born_transport_key_file.len()>4096 || self.input.born_signer_public_key_hex.len()!=64 { return Err(AuthorityError::Limit); }
+                        let key_file=std::mem::take(&mut self.input.born_transport_key_file);
+                        let signer_hex=std::mem::take(&mut self.input.born_signer_public_key_hex);
+                        launch_work(Work::PrepareBornOfflineArtifactsV1{input,key_file,signer_hex},NativeOwner::entered_window(),self.focus_epoch,ui.ctx())
+                    })();
+                    self.accept_launch(launched);
+                    return;
+                }
+                ui.separator();
+            }
+            #[cfg(not(feature = "born-offline-witness-owner"))]
+            ui.label("Born offline persistent transport import is unavailable in this build profile.");
             ui.heading("Exact attempted-session continuation");
             ui.label("Use the original installed namespace and exact retained enrollment. This signed continuation binds the full prior head, original immutable admission deadline and one public nonce. After the prior publication drains, it fences only the old bootstrap session and approves one successor attempt. Every original record and key stays retained; no financial authority is granted.");
             ui.add(egui::TextEdit::multiline(&mut *self.input.signed_manual_continuation_json).desired_rows(6).char_limit(crate::MAX_FRAME_BYTES));
@@ -1894,16 +2076,7 @@ impl Window {
             ui.add(egui::TextEdit::multiline(&mut *self.input.signed_manual_roster_construction_v3_json).desired_rows(6).char_limit(crate::MAX_FRAME_BYTES));
             if ui.add_enabled(focused && crate::COMMON_CONTEXT_V3_ACTIVATION_QUALIFIED, egui::Button::new("Authenticate signed V3 non-signing construction plan for review"))
                 .clicked_by(egui::PointerButton::Primary) {
-                let launched = (|| {
-                    let input = self.input.enrollment_input()?;
-                    if self.input.signed_manual_roster_construction_v3_json.is_empty()
-                        || self.input.signed_manual_roster_construction_v3_json.len() > crate::MAX_FRAME_BYTES {
-                        return Err(AuthorityError::Limit);
-                    }
-                    let envelope = Zeroizing::new(std::mem::take(&mut *self.input.signed_manual_roster_construction_v3_json));
-                    launch_work(Work::PrepareManualRosterConstructionV3 { input, envelope }, NativeOwner::entered_window(), self.focus_epoch, ui.ctx())
-                })();
-                self.accept_launch(launched);
+                self.prepare_manual_roster_construction_v3_from_primary(ui.ctx());
                 return;
             }
             ui.separator();
@@ -1914,17 +2087,7 @@ impl Window {
             if ui.add_enabled(focused && crate::COMMON_CONTEXT_V3_ACTIVATION_QUALIFIED,
                 egui::Button::new("Authenticate original-owner handoff admission for exact review"))
                 .clicked_by(egui::PointerButton::Primary) {
-                let launched = (|| {
-                    let input = self.input.enrollment_input()?;
-                    if self.input.signed_construction_transport_preauthorization_json.is_empty()
-                        || self.input.signed_construction_transport_preauthorization_json.len() > MAX_CONSTRUCTION_TRANSPORT_COMPONENT_BYTES {
-                        return Err(AuthorityError::Limit);
-                    }
-                    let envelope = Zeroizing::new(std::mem::take(&mut *self.input.signed_construction_transport_preauthorization_json));
-                    launch_work(Work::PrepareConstructionTransportGrantV1 { input, envelope },
-                        NativeOwner::entered_window(), self.focus_epoch, ui.ctx())
-                })();
-                self.accept_launch(launched);
+                self.prepare_construction_transport_grant_v1_from_primary(ui.ctx());
                 return;
             }
             ui.separator();
@@ -2163,6 +2326,14 @@ impl Window {
                 },
                 Proposal::BornOfflineEnrollmentV1(proposal) => Work::EnrollBornOfflineV1 {
                     decision: Box::new(NativeBornOfflineEnrollmentDecisionV1 {
+                        proposal: *proposal,
+                        lease,
+                    }),
+                    clock: historical_clock,
+                },
+                #[cfg(feature = "born-offline-witness-owner")]
+                Proposal::BornOfflineArtifactsV1(proposal) => Work::InstallBornOfflineArtifactsV1 {
+                    decision: Box::new(NativeBornOfflineArtifactsDecisionV1 {
                         proposal: *proposal,
                         lease,
                     }),
@@ -2794,5 +2965,21 @@ mod tests {
         assert!(window.can_select());
         window.disposal_failed = true;
         assert!(!window.can_select());
+    }
+}
+
+#[cfg(all(test, feature = "born-offline-witness-owner"))]
+mod born_artifact_input_tests {
+    use super::*;
+    #[test]
+    fn discard_clears_persistent_import_inputs_without_creating_a_decision() {
+        let mut inputs = NativeInputs {
+            born_transport_key_file: "/synthetic/never-read.key".into(),
+            born_signer_public_key_hex: "7".repeat(64),
+            ..NativeInputs::default()
+        };
+        inputs.discard_raw();
+        assert!(inputs.born_transport_key_file.is_empty());
+        assert!(inputs.born_signer_public_key_hex.is_empty());
     }
 }

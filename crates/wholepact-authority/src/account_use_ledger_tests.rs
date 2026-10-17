@@ -72,13 +72,14 @@ fn exclusion_keeps_charges_and_exact_history_but_blocks_fresh_reservation() {
     );
     let event = exclude_event(&l);
     let result = l.apply(&event).unwrap();
-    assert!(l
-        .snapshot
-        .account_use_checkpoint
-        .as_ref()
-        .unwrap()
-        .permanent_exclusion_digest
-        .is_some());
+    assert!(
+        l.snapshot
+            .account_use_checkpoint
+            .as_ref()
+            .unwrap()
+            .permanent_exclusion_digest
+            .is_some()
+    );
     assert_eq!(
         charges,
         (
@@ -121,9 +122,11 @@ fn legacy_encoding_omits_unknown_provenance_and_does_not_migrate_it() {
     let l = Ledger::new(p).unwrap();
     assert!(l.snapshot.account_use_checkpoint.is_none());
     assert!(l.account_use_history.genesis().is_none());
-    assert!(!serde_json::to_string(&l.snapshot)
-        .unwrap()
-        .contains("account_use"));
+    assert!(
+        !serde_json::to_string(&l.snapshot)
+            .unwrap()
+            .contains("account_use")
+    );
 }
 #[test]
 fn birth_policy_cannot_rebind_original_witness_or_owner() {
@@ -233,6 +236,8 @@ fn exclusion_history() -> (
             snapshot: l.snapshot.clone(),
             permits: vec![],
             offline_permits: vec![],
+            born_offline_permits: vec![],
+            born_offline_dispatches: vec![],
             automatic_key_use_admissions: vec![],
             recovery_fences: vec![],
             committed_operation_ids: std::collections::BTreeSet::from([request
@@ -282,23 +287,17 @@ fn receipt_binds_original_event_and_rejects_origin_substitution() {
     assert!(receipt.receipt_digest().unwrap() == again.receipt_digest().unwrap());
     let mut substitute = original.clone();
     substitute.pinned_server_certificate_digest = h('7');
-    assert!(crate::account_use_link::reconcile_account_exclusion(
-        &history,
-        &g,
-        &substitute,
-        &exclusion
-    )
-    .is_err());
+    assert!(
+        crate::account_use_link::reconcile_account_exclusion(&history, &g, &substitute, &exclusion)
+            .is_err()
+    );
     // A modeled same-name witness projection cannot substitute its pin either;
     // the original genesis's origin digest remains independently bound.
     history.disclosure = substitute.clone();
-    assert!(crate::account_use_link::reconcile_account_exclusion(
-        &history,
-        &g,
-        &substitute,
-        &exclusion
-    )
-    .is_err());
+    assert!(
+        crate::account_use_link::reconcile_account_exclusion(&history, &g, &substitute, &exclusion)
+            .is_err()
+    );
 }
 #[test]
 fn missing_exclusion_operation_or_unknown_genesis_never_acknowledges() {
@@ -306,15 +305,15 @@ fn missing_exclusion_operation_or_unknown_genesis_never_acknowledges() {
     let g = history.account_policy.account_use_genesis.clone().unwrap();
     let original = history.disclosure.clone();
     history.owner_controls.clear();
-    assert!(crate::account_use_link::reconcile_account_exclusion(
-        &history, &g, &original, &exclusion
-    )
-    .is_err());
+    assert!(
+        crate::account_use_link::reconcile_account_exclusion(&history, &g, &original, &exclusion)
+            .is_err()
+    );
     history.account_use_history = AccountUseHistory::unknown_legacy();
-    assert!(crate::account_use_link::reconcile_account_exclusion(
-        &history, &g, &original, &exclusion
-    )
-    .is_err());
+    assert!(
+        crate::account_use_link::reconcile_account_exclusion(&history, &g, &original, &exclusion)
+            .is_err()
+    );
 }
 
 #[test]
@@ -460,6 +459,8 @@ fn complete_exclusion_ack_keeps_offline_exposure_and_legacy_gate() {
         snapshot: ledger.snapshot.clone(),
         permits: vec![],
         offline_permits: vec![offline],
+        born_offline_permits: vec![],
+        born_offline_dispatches: vec![],
         automatic_key_use_admissions: vec![],
         recovery_fences: vec![],
         committed_operation_ids: std::collections::BTreeSet::from([
@@ -475,13 +476,15 @@ fn complete_exclusion_ack_keeps_offline_exposure_and_legacy_gate() {
     };
     let genesis = history.account_policy.account_use_genesis.clone().unwrap();
     let before = history.history_digest().unwrap();
-    assert!(crate::account_use_link::reconcile_account_exclusion(
-        &history,
-        &genesis,
-        &disclosure,
-        &exclusion
-    )
-    .is_err());
+    assert!(
+        crate::account_use_link::reconcile_account_exclusion(
+            &history,
+            &genesis,
+            &disclosure,
+            &exclusion
+        )
+        .is_err()
+    );
     let receipt = crate::account_use_link::reconcile_account_exclusion_complete(
         &history,
         &genesis,

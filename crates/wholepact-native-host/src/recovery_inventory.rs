@@ -585,6 +585,15 @@ pub(crate) mod tests {
         restored: PathBuf,
         successor: PathBuf,
     }
+    /// A genuinely empty initialized source and pending first generation. This
+    /// test helper does not publish, forge admissions or install any account.
+    /// The joined native harness must drive the real Terminal publication path.
+    #[cfg(all(feature = "financial-runtime", feature = "manual-admission"))]
+    pub(crate) fn native_empty_pending_fixture() -> (tempfile::TempDir, crate::recovery_generation::PendingGeneration, PathBuf) {
+        let f = fixture_with_accounts(0, false);
+        let pending = crate::recovery_generation::PendingGeneration::create(inspect(&f).unwrap(), PASSWORD).unwrap();
+        (f._temp, pending, f.successor)
+    }
     #[cfg(feature = "financial-runtime")]
     pub(crate) fn published_empty_fixture() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
         let f = fixture_with_accounts(0, false);

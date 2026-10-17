@@ -6,6 +6,10 @@ use crate::{
     consent_journal::{LiveNamedRecipientProfile, NamedRecipientPins, PreparedNamedRecipientSetup},
 };
 use eframe::egui;
+mod born_courier;
+mod born_inbox;
+mod born_plan;
+mod born_signing;
 mod inbox;
 mod input;
 mod plan;
@@ -32,6 +36,9 @@ pub(super) struct NamedRecipientWorkspace {
     status: String,
     inbox: inbox::InboxWorkspace,
     signing: signing::SigningWorkspace,
+    born_signing: born_signing::BornSigningWorkspace,
+    born_inbox: born_inbox::BornInboxWorkspace,
+    born_courier: born_courier::BornCourierWorkspace,
 }
 fn key(s: &str) -> Result<[u8; 32]> {
     let bytes = hex::decode(s).map_err(|_| Error::InvalidData)?;
@@ -41,8 +48,14 @@ fn key(s: &str) -> Result<[u8; 32]> {
     bytes.try_into().map_err(|_| Error::InvalidData)
 }
 impl NamedRecipientWorkspace {
+    pub(super) fn live_profile(&self) -> Option<LiveNamedRecipientProfile> {
+        self.live.clone()
+    }
     pub(super) fn final_active(&self) -> bool {
         self.signing.is_active()
+            || self.born_signing.is_active()
+            || self.born_inbox.is_active()
+            || self.born_courier.is_active()
     }
     /// Dedicated event-thread path while final work or consent is pending. No
     /// sibling inbox/setup/IPC operation may wait on the worker's journal lock.
@@ -50,6 +63,7 @@ impl NamedRecipientWorkspace {
         &mut self,
         ui: &mut egui::Ui,
         owner: &NamedRecipientOwnerContext<'_>,
+        wallet: Option<&super::wallet_workspace::NativeWalletWorkspace>,
         witness: Option<&std::sync::Arc<super::witness_workspace::NativeWitnessWorkspace>>,
         focused: bool,
         epoch: u64,
@@ -66,18 +80,35 @@ impl NamedRecipientWorkspace {
                 self.clear();
                 return;
             }
-            self.signing.ui(ui, live, owner, witness, focused, epoch);
+            if self.signing.is_active() {
+                self.signing.ui(ui, live, owner, witness, focused, epoch);
+            } else if self.born_signing.is_active() {
+                self.born_signing
+                    .ui(ui, live, owner, witness, focused, epoch);
+            } else if self.born_inbox.is_active() {
+                self.born_inbox
+                    .ui(ui, live, owner, wallet, witness, focused, epoch);
+            } else if self.born_courier.is_active() {
+                self.born_courier
+                    .ui(ui, live, owner, witness, focused, epoch);
+            }
         } else {
-            self.signing.reap_cancelled();
+            self.reap_cancelled();
             ui.label("Cancelled final work is still finishing. No new operation is admitted; preserve any original Started/result.");
         }
     }
     pub(super) fn reap_cancelled(&mut self) {
         self.signing.reap_cancelled();
+        self.born_signing.reap_cancelled();
+        self.born_inbox.reap_cancelled();
+        self.born_courier.reap_cancelled();
     }
     pub(super) fn clear(&mut self) {
         self.inbox.clear();
+        self.born_inbox.clear();
+        self.born_courier.clear();
         self.signing.clear();
+        self.born_signing.clear();
         self.pending = None;
         self.live = None;
         self.phrase.zeroize();
@@ -108,21 +139,29 @@ impl NamedRecipientWorkspace {
                 )?
             }
         } else {
-            PreparedNamedRecipientSetup::prepare(
-                owner.journal,
-                owner.session,
-                owner.vault,
-                owner.authority,
-                owner.enrollment_ref,
-                owner.manifest_ref,
-                NamedRecipientPins {
-                    verifier_signing: key(&self.verifier_signing)?,
-                    verifier_transport: key(&self.verifier_transport)?,
-                    witness_transport: key(&self.witness_transport)?,
-                    witness_certificate_digest: self.witness_certificate.clone(),
-                    return_transport: key(&self.return_transport)?,
-                },
-            )?
+            #[cfg(feature = "pending-birth-owner-signing")]
+            if let Some((actual, born_owner)) = owner.born {
+                PreparedNamedRecipientSetup::prepare_born(
+                    actual,
+                    born_owner,
+                    owner.session,
+                    owner.enrollment_ref,
+                    owner.manifest_ref,
+                    NamedRecipientPins {
+                        verifier_signing: key(&self.verifier_signing)?,
+                        verifier_transport: key(&self.verifier_transport)?,
+                        witness_transport: key(&self.witness_transport)?,
+                        witness_certificate_digest: self.witness_certificate.clone(),
+                        return_transport: key(&self.return_transport)?,
+                    },
+                )?
+            } else {
+                Self::prepare_legacy(owner, self)?
+            }
+            #[cfg(not(feature = "pending-birth-owner-signing"))]
+            {
+                Self::prepare_legacy(owner, self)?
+            }
         };
         let review = ExactNativeReview::stage(
             owner.authority,
@@ -137,6 +176,59 @@ impl NamedRecipientWorkspace {
             continued: None,
         });
         Ok(())
+    }
+    fn prepare_legacy(
+        owner: &NamedRecipientOwnerContext<'_>,
+        this: &Self,
+    ) -> Result<PreparedNamedRecipientSetup> {
+        PreparedNamedRecipientSetup::prepare(
+            owner.journal,
+            owner.session,
+            owner.vault,
+            owner.authority,
+            owner.enrollment_ref,
+            owner.manifest_ref,
+            NamedRecipientPins {
+                verifier_signing: key(&this.verifier_signing)?,
+                verifier_transport: key(&this.verifier_transport)?,
+                witness_transport: key(&this.witness_transport)?,
+                witness_certificate_digest: this.witness_certificate.clone(),
+                return_transport: key(&this.return_transport)?,
+            },
+        )
+    }
+    fn retain_reviewed_profile(
+        &mut self,
+        owner: &NamedRecipientOwnerContext<'_>,
+        focused: bool,
+        epoch: u64,
+    ) -> Result<()> {
+        let p = self.pending.take().ok_or(Error::Locked)?;
+        let result = p
+            .review
+            .consume_native_click(focused, epoch, &self.phrase)
+            .and_then(|d| {
+                p.setup
+                    .approve(d, owner.journal, owner.session, owner.vault)
+            });
+        self.phrase.zeroize();
+        match result {
+            Ok(profile) => {
+                self.live = Some(profile);
+                self.status = "Exact profile retained or original recovered. No signing or witness reservation occurred.".into();
+                Ok(())
+            }
+            Err(Error::Uncertain) => {
+                self.live = None;
+                self.status = "Commit outcome uncertain. Preserve the journal and repeat only this exact setup review; the original key must be recovered, never reset.".into();
+                Err(Error::Uncertain)
+            }
+            Err(error) => {
+                self.live = None;
+                self.status = "Profile approval failed or expired. No success is claimed; retained originals remain immutable.".into();
+                Err(error)
+            }
+        }
     }
     pub(super) fn ui(
         &mut self,
@@ -173,6 +265,12 @@ impl NamedRecipientWorkspace {
                 ui.label(format!("Recipient public transport key: {}", hex::encode(live.transport_public_key())));
                 self.inbox.ui(ui, live, owner, wallet, focused, epoch);
                 self.signing.ui(ui, live, owner, witness, focused, epoch);
+                if self.signing.is_active() { return; }
+                self.born_signing.ui(ui, live, owner, witness, focused, epoch);
+                if self.born_signing.is_active() { return; }
+                self.born_inbox.ui(ui, live, owner, wallet, witness, focused, epoch);
+                if self.born_inbox.is_active() { return; }
+                self.born_courier.ui(ui, live, owner, witness, focused, epoch);
             }
             if self.final_active() { return; }
             if self.pending.is_none() {
@@ -215,15 +313,7 @@ impl NamedRecipientWorkspace {
                     ui.add(egui::TextEdit::singleline(&mut *self.phrase).char_limit(128));
                     let can = p.continued.is_some_and(|f| self.frame > f);
                     if ui.add_enabled(can, egui::Button::new("Retain exact optional profile")).clicked_by(egui::PointerButton::Primary) {
-                        let p = self.pending.take().expect("checked pending");
-                        let result = p.review.consume_native_click(focused, epoch, &self.phrase)
-                            .and_then(|d| p.setup.approve(d, owner.journal, owner.session, owner.vault));
-                        self.phrase.zeroize();
-                        match result {
-                            Ok(profile) => { self.live = Some(profile); self.status = "Exact profile retained or original recovered. No signing or witness reservation occurred.".into(); }
-                            Err(Error::Uncertain) => { self.live = None; self.status = "Commit outcome uncertain. Preserve the journal and repeat only this exact setup review; the original key must be recovered, never reset.".into(); }
-                            Err(_) => { self.live = None; self.status = "Profile approval failed or expired. No success is claimed; retained originals remain immutable.".into(); }
-                        }
+                        let _ = self.retain_reviewed_profile(owner, focused, epoch);
                     }
                 }
             }
@@ -231,3 +321,9 @@ impl NamedRecipientWorkspace {
         });
     }
 }
+
+#[cfg(feature = "synthetic-born-joined-qualification")]
+mod synthetic_born_profile;
+
+#[cfg(feature = "synthetic-born-joined-qualification")]
+mod synthetic_born_payment;

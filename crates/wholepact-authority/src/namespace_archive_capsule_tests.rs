@@ -210,7 +210,9 @@ fn fixture(damage: Damage) -> Fixture {
             let (stamp, actual_record) =
                 namespace_account_stamp(c, &intent.request.policy).unwrap();
             assert!(actual_record == record);
-            AccountState::Committed { stamp }
+            AccountState::Committed {
+                stamp: Box::new(stamp),
+            }
         } else {
             AccountState::AuthenticatedEmpty
         };

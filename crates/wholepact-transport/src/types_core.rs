@@ -124,8 +124,16 @@ pub enum ArtifactKind {
     OfflineAdmissionControl,
     /// Narrow witness projection; incompatible with the original broad descriptor.
     OfflineMinimalAuthorityAdmission,
+    /// Dedicated native born witness origin; never a legacy OfflineV1 permit.
+    BornOfflineMinimalAdmissionV1,
+    /// Complete born request including native-authenticated constructor lineage.
+    BornOfflineIntentV1,
+    /// Actual retained Host constructor origin, not imported completion claims.
+    BornOfflineCheckpointOriginV1,
     /// Exact offline-origin result; never an ordinary Authorization or permit.
     OfflineAuthorizationReturn,
+    /// Exact native-born return, never interpreted as legacy offline authority.
+    BornOfflineAuthorizationReturnV1,
     /// Signed named-verifier assertion only; never reservation or spending authority.
     NamedVerifierAssertion,
 }
@@ -139,7 +147,11 @@ impl ArtifactKind {
                 | Self::OfflineAuthorityAdmission
                 | Self::OfflineAdmissionControl
                 | Self::OfflineMinimalAuthorityAdmission
+                | Self::BornOfflineMinimalAdmissionV1
+                | Self::BornOfflineIntentV1
+                | Self::BornOfflineCheckpointOriginV1
                 | Self::OfflineAuthorizationReturn
+                | Self::BornOfflineAuthorizationReturnV1
         )
     }
     /// Immutable-slot classification only, shared by typed outbox adapters.

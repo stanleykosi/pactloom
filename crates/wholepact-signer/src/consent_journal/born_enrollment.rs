@@ -31,6 +31,7 @@ impl SignerConsentJournal {
         // Old encrypted artifacts keep their own exact schema and bytes. This
         // is read-only; backup inspection must never migrate the source tree.
         for (version, schema) in [
+            (16, recovery_migration::V16_SCHEMA),
             (15, recovery_migration::V15_SCHEMA),
             (14, recovery_migration::V14_SCHEMA),
         ] {
@@ -40,7 +41,7 @@ impl SignerConsentJournal {
             {
                 recovery_migration::verify_exact_schema(snapshot.connection(), schema)?;
                 verify_born_identity_cells(snapshot.connection(), genesis, epoch)?;
-                if version == 15 {
+                if version >= 15 {
                     common_context_reentry_audit_v1::read_complete(
                         snapshot.connection(),
                         &genesis.identity.account_id,

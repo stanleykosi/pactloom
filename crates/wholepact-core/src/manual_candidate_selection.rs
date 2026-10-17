@@ -16,6 +16,11 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Original non-spending retention for a later all-observations-first V3 plan.
+/// This purpose never changes a live disclosure, native or financial deadline.
+pub const ORIGINAL_RETENTION_SELECTION_PURPOSE_V2: &str =
+    "prepare_one_common_context_retained_contribution";
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ManualCandidateEconomicIntent {
@@ -293,7 +298,7 @@ impl ManualCandidateInvocation {
             hash(h)?;
         }
         absolute(&self.checkpoint_destination)?;
-        if self.version != 1
+        if !matches!(self.version, 1 | 2)
             || self.requested_at_ms == 0
             || self.construction_expires_at_ms > i64::MAX as u64
             || self.construction_expires_at_ms <= self.requested_at_ms
@@ -306,7 +311,12 @@ impl ManualCandidateInvocation {
     }
     pub fn digest(&self) -> Result<String> {
         self.validate()?;
-        canonical_digest("wholepact:manual-candidate-invocation:v1", self)
+        let domain = match self.version {
+            1 => "wholepact:manual-candidate-invocation:v1",
+            2 => "wholepact:manual-candidate-original-retention-invocation:v2",
+            _ => return Err(invalid()),
+        };
+        canonical_digest(domain, self)
     }
 }
 impl ManualCandidateSelectionScope {
@@ -321,8 +331,12 @@ impl ManualCandidateSelectionScope {
         let identity = &o.intent.identity;
         self.economic_intent
             .require_policy(&o.recipient_policy, e)?;
-        if self.version != 1
-            || self.purpose != "prepare_one_private_contribution"
+        let purpose_matches = match (self.version, self.invocation.version) {
+            (1, 1) => self.purpose == "prepare_one_private_contribution",
+            (2, 2) => self.purpose == ORIGINAL_RETENTION_SELECTION_PURPOSE_V2,
+            _ => false,
+        };
+        if !purpose_matches
             || o.recipient_policy != i.original_recipient_policy
             || o.birth_digest != e.native_birth_digest
             || identity.account_id != e.identity.account_id
@@ -344,8 +358,9 @@ impl ManualCandidateSelectionScope {
             || self.invocation.checkpoint_destination != i.operator_destination
             || self.invocation.requested_at_ms < e.issued_at_ms
             || self.invocation.construction_expires_at_ms > e.scope.expires_at_ms
-            || self.invocation.construction_expires_at_ms - self.invocation.requested_at_ms
-                > e.scope.maximum_permit_lifetime_ms
+            || (self.version == 1
+                && self.invocation.construction_expires_at_ms - self.invocation.requested_at_ms
+                    > e.scope.maximum_permit_lifetime_ms)
             || self
                 .economic_intent
                 .agreement
@@ -361,7 +376,29 @@ impl ManualCandidateSelectionScope {
     }
     pub fn pairing_digest(&self) -> Result<String> {
         self.validate()?;
-        canonical_digest("wholepact:manual-candidate-selection-scope:v1", self)
+        let domain = match self.version {
+            1 => "wholepact:manual-candidate-selection-scope:v1",
+            2 => "wholepact:manual-candidate-original-retention-scope:v2",
+            _ => return Err(invalid()),
+        };
+        canonical_digest(domain, self)
+    }
+    /// Keep Single and V2 construction consumers on the original exact domain.
+    pub fn require_legacy_selection(&self) -> Result<()> {
+        self.validate()?;
+        if self.version != 1 {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+    /// Require the newly reviewed original retention purpose without upgrading
+    /// an imported old invocation or returning any live permission.
+    pub fn require_original_retention_scope(&self) -> Result<()> {
+        self.validate()?;
+        if self.version != 2 {
+            return Err(invalid());
+        }
+        Ok(())
     }
     pub fn requested_debit_zatoshis(&self) -> Result<u64> {
         self.validate()?;
@@ -376,7 +413,7 @@ impl ManualCandidateSelectionScope {
 }
 impl ManualCandidateSelectionRequest {
     pub fn validate(&self) -> Result<()> {
-        self.scope.validate()?;
+        self.scope.require_legacy_selection()?;
         validate_id(&self.operation_id, "candidate selection operation")?;
         hash(&self.current_caller_binding_digest)?;
         if self.version != 1
@@ -405,3 +442,7 @@ impl ManualCandidateSelectionRequest {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "manual_candidate_original_retention_v2_tests.rs"]
+mod original_retention_v2_tests;

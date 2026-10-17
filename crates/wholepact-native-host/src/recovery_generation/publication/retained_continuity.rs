@@ -162,6 +162,22 @@ pub(super) fn inspect_retained_continuity(
                     };
                     require_reentered_consume(e, native, &lineages[index])?;
                 }
+                (5, Some(lineages)) => {
+                    // Version 5 adds genuine Host scanner provenance, not a
+                    // new signer attestation. Require its COMPLETE exact read
+                    // lineage validation before the unchanged consumed join.
+                    claim
+                        .require_historical_provenance_v5()
+                        .map_err(|_| Error::Authentication)?;
+                    let RetainedContinuity::V5(e) = history else {
+                        return Err(Error::RecoveryFinancialUnsupported);
+                    };
+                    require_reentered_consume(
+                        e,
+                        native,
+                        lineages.get(index).ok_or(Error::Authentication)?,
+                    )?;
+                }
                 _ => return Err(Error::Authentication),
             }
         }

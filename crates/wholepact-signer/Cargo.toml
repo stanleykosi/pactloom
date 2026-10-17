@@ -6,14 +6,16 @@ license.workspace = true
 description = "Isolated fail-closed signer companion and opt-in synthetic process qualification"
 
 [features]
+# Ephemeral real-controller joined harness only; absent from production/default builds.
+synthetic-born-joined-qualification = ["synthetic-qualification", "native-ui", "authority-signing", "pending-birth-owner-signing", "offline-review-foundation", "wholepact-authority/born-offline-witness-owner"]
 # Ephemeral joined qualification only; creates no installed credentials or wallet.
 synthetic-recipient-signing-tests = ["synthetic-qualification", "offline-review-foundation", "native-ui", "authority-signing", "wholepact-authority/offline-witness-owner"]
 # Read-only maintained FVK consumer; enables no native/key-use issuer.
 manual-inventory-client = ["wholepact-wallet/protected-sync"]
 pending-birth-owner-signing = ["dep:tempfile", "native-ui", "authority-signing", "dep:rustls", "wholepact-authority/pending-birth-foundation"]
 default = []
-# Opt-in named-recipient legacy composition; born and independent modes stay fenced.
-offline-review-foundation = ["dep:wholepact-offline-bridge", "dep:wholepact-transport", "dep:hpke", "dep:base64", "dep:chrono"]
+# Opt-in genuine native named-recipient composition; independent mode stays fenced.
+offline-review-foundation = ["dep:wholepact-offline-bridge", "dep:wholepact-transport", "wholepact-transport/offline-admission-export", "dep:hpke", "dep:base64", "dep:chrono"]
 synthetic-qualification = ["wholepact-offline-bridge?/synthetic-selected-effects-tests", "wholepact-signer-origin/synthetic-qualification", "wholepact-wallet/synthetic-qualification", "wholepact-protocol/synthetic-qualification", "wholepact-authority/synthetic-qualification",  "wholepact-chain/synthetic-qualification", "dep:zcash_client_backend", "dep:zcash_primitives", "dep:incrementalmerkletree", "dep:prost", "dep:axum", "dep:tempfile", "dep:tokio", "tokio/rt-multi-thread", "tokio/macros"]
 checkpoint-review = ["dep:wholepact-proof-jobs"]
 native-ui = ["wholepact-signer-origin/native-ui", "dep:eframe", "dep:winit"]

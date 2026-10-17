@@ -1,5 +1,7 @@
 //! Separately reviewed additional-account request. Source staging only; final
 //! publication and command dispatch are separate required composition steps.
+#[cfg(test)]
+pub(super) mod joined_intent_v3;
 use super::*;
 use wholepact_engine::manual_enrollment::ManualRosterIntentTarget;
 use wholepact_signer_origin::manual_roster_v2::HostManualRosterEnrollmentIntentV2;

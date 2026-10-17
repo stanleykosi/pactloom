@@ -21,6 +21,10 @@ pub(crate) struct ExposureView<'a> {
 }
 impl<'a> ExposureView<'a> {
     pub(crate) fn from_result(result: &'a MutationResult) -> Option<Self> {
+        // Born admission continues a construction bucket already counted below.
+        if matches!(result, MutationResult::BornOfflineReservedV1(_)) {
+            return None;
+        }
         if let MutationResult::ConstructionTransportReservedV1(record) = result {
             return Some(Self {
                 obligation_id: &record.original.request.enrollment().scope.obligation_id,

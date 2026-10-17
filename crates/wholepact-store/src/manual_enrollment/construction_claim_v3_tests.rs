@@ -126,6 +126,7 @@ fn seed_claim() -> ManualRosterConstructionClaimV3 {
     };
     let mut claim = ManualRosterConstructionClaimV3 {
         reentry_lineages: None,
+        historical_provenance: None,
         version: 3,
         principal_id: principal.into(),
         construction_key: key.into(),
@@ -249,11 +250,41 @@ pub(crate) fn append_modeled_reentered_construction_rows_v4(
     append_modeled_common_context_rows(store, root, with_checkpoint, true)
 }
 
+/// Inert historical rows only; this fixture never creates a native owner.
+pub(crate) fn append_modeled_historical_construction_rows_v5(
+    store: &Store,
+    root: &ManualEnrollmentInitialPublicationV2,
+    with_checkpoint: bool,
+) -> (
+    ManualRosterConstructionClaimV3,
+    Option<ManualRosterConstructionCheckpointV3>,
+) {
+    append_modeled_common_context_rows_with_provenance(store, root, with_checkpoint, true, true)
+}
+
 fn append_modeled_common_context_rows(
     store: &Store,
     root: &ManualEnrollmentInitialPublicationV2,
     with_checkpoint: bool,
     reentered: bool,
+) -> (
+    ManualRosterConstructionClaimV3,
+    Option<ManualRosterConstructionCheckpointV3>,
+) {
+    append_modeled_common_context_rows_with_provenance(
+        store,
+        root,
+        with_checkpoint,
+        reentered,
+        false,
+    )
+}
+fn append_modeled_common_context_rows_with_provenance(
+    store: &Store,
+    root: &ManualEnrollmentInitialPublicationV2,
+    with_checkpoint: bool,
+    reentered: bool,
+    observed: bool,
 ) -> (
     ManualRosterConstructionClaimV3,
     Option<ManualRosterConstructionCheckpointV3>,
@@ -322,6 +353,9 @@ fn append_modeled_common_context_rows(
     // Never retrofit reentry onto a persisted legacy claim.
     if reentered {
         model_reentry_lineages(&mut claim);
+    }
+    if observed {
+        model_historical_provenance_v5(&mut claim);
     }
     let receipt = with_checkpoint.then(|| checkpoint(&claim));
     let context = crate::CommandContext::for_request(
@@ -431,6 +465,13 @@ fn encrypted_reentry_v4_mixed_backup_reopen_preserves_complete_history() {
 }
 
 fn assert_encrypted_claim_backup_preserves_complete_history(reentered: bool) {
+    assert_encrypted_claim_encoding_backup_preserves_complete_history(if reentered {
+        4
+    } else {
+        3
+    });
+}
+fn assert_encrypted_claim_encoding_backup_preserves_complete_history(encoding: u16) {
     for with_checkpoint in [false, true] {
         let directory = tempfile::tempdir().unwrap();
         #[cfg(unix)]
@@ -449,9 +490,14 @@ fn assert_encrypted_claim_backup_preserves_complete_history(reentered: bool) {
         let root = append_modeled_construction_root(&source);
         let (v2, v2_receipt) = append_modeled_construction_rows(&source, &root, !with_checkpoint);
         let original_v2 = exact_manual_rows(&source);
-        let (v3, v3_receipt) =
-            append_modeled_common_context_rows(&source, &root, with_checkpoint, reentered);
-        assert_eq!(v3.version, if reentered { 4 } else { 3 });
+        let (v3, v3_receipt) = append_modeled_common_context_rows_with_provenance(
+            &source,
+            &root,
+            with_checkpoint,
+            encoding >= 4,
+            encoding == 5,
+        );
+        assert_eq!(v3.version, encoding);
         let exact = exact_manual_rows(&source);
         assert!(original_v2.iter().all(|row| exact.contains(row)));
         assert_eq!(
@@ -1345,7 +1391,9 @@ fn reentry_v4_rows_are_rejected_under_old_encoding_markers() {
         &claim.digest().unwrap(),
         &claim,
     );
-    assert!(crate::backup::validate_construction_encoding(&connection, true, false).is_err());
+    assert!(
+        crate::backup::validate_construction_encoding(&connection, true, false, false).is_err()
+    );
     for version in [2, 3, 4, 5] {
         connection.pragma_update(None, "application_id", wholepact_storage_security::bundle::recovery::generation::RECOVERED_GENERATION_APPLICATION_ID).unwrap();
         connection
@@ -1407,7 +1455,7 @@ fn encrypted_reentry_v4_migration_preserves_v3_bytes_and_rejects_marker_launderi
                     .unwrap()
                     .pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
                     .unwrap(),
-                4
+                crate::SCHEMA_VERSION
             );
             assert!(
                 opened
@@ -1422,3 +1470,6 @@ fn encrypted_reentry_v4_migration_preserves_v3_bytes_and_rejects_marker_launderi
         }
     }
 }
+
+// Pure modeled historical encodings only; no native or scanner issuer.
+include!("construction_claim_v5_tests.rs");

@@ -54,5 +54,19 @@ mod named_verifier_initialization;
 mod named_review_binding_v1;
 pub use named_review_binding_v1::*;
 
+#[cfg(feature = "offline-admission-export")]
+mod born_offline_minimal_admission_v1;
+#[cfg(feature = "offline-admission-export")]
+pub use born_offline_minimal_admission_v1::*;
 mod offline_intent_handoff_v1;
 pub use offline_intent_handoff_v1::{MAX_OFFLINE_INTENT_HANDOFF_BYTES_V1, OfflineIntentHandoffV1};
+
+#[cfg(feature = "offline-admission-export")]
+mod born_offline_intent_v1;
+#[cfg(feature = "offline-admission-export")]
+pub use born_offline_intent_v1::*;
+
+#[cfg(feature = "offline-admission-export")]
+mod born_offline_checkpoint_v1;
+#[cfg(feature = "offline-admission-export")]
+pub use born_offline_checkpoint_v1::*;

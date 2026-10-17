@@ -17,11 +17,29 @@ struct HandoffClockV1 {
     expires_at_ms: u64,
     high_water_ms: Arc<AtomicU64>,
     terminal: Arc<AtomicBool>,
+    #[cfg(all(
+        feature = "synthetic-qualification",
+        feature = "native-witness-owner",
+        target_os = "linux"
+    ))]
+    qualification_liveness:
+        Option<Arc<crate::native_witness_owner::RetainedConstructionFixtureLivenessV1>>,
 }
 impl HandoffClockV1 {
     fn check_at(&self, now: u64, monotonic: Instant) -> Result<()> {
         if self.terminal.load(Ordering::Acquire) {
             return Err(AuthorityError::Expired);
+        }
+        #[cfg(all(
+            feature = "synthetic-qualification",
+            feature = "native-witness-owner",
+            target_os = "linux"
+        ))]
+        if let Some(liveness) = &self.qualification_liveness {
+            if let Err(error) = liveness.check() {
+                self.terminal.store(true, Ordering::Release);
+                return Err(error);
+            }
         }
         let previous = self.high_water_ms.fetch_max(now, Ordering::AcqRel);
         if now < previous || now >= self.expires_at_ms || monotonic >= self.deadline {
@@ -67,6 +85,12 @@ impl HandoffChannelV1 {
             expires_at_ms,
             high_water_ms,
             terminal: revocation.terminal.clone(),
+            #[cfg(all(
+                feature = "synthetic-qualification",
+                feature = "native-witness-owner",
+                target_os = "linux"
+            ))]
+            qualification_liveness: None,
         };
         clock.check()?;
         let remaining = deadline
@@ -314,6 +338,30 @@ impl AuthorityClient {
         if !crate::COMMON_CONTEXT_V3_ACTIVATION_QUALIFIED {
             return Err(AuthorityError::ConstructionHistoryUnsupported);
         }
+        self.prepare_retained_construction_transport_handoff_v1(
+            history,
+            pending,
+            new_caller_binding_digest,
+            new_native_binding_digest,
+            original_deadline,
+            original_high_water_ms,
+            cancellation,
+        )
+    }
+
+    // Byte-identical maintained validator shared only with the concrete,
+    // one-use synthetic native-witness scope. The public guard stays closed.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn prepare_retained_construction_transport_handoff_v1(
+        &self,
+        history: ReconciledAuthorityHistory,
+        pending: PendingConstructionTransportGrantV1,
+        new_caller_binding_digest: String,
+        new_native_binding_digest: String,
+        original_deadline: Instant,
+        original_high_water_ms: Arc<AtomicU64>,
+        cancellation: ConstructionTransportCancellationV1,
+    ) -> Result<PreparedConstructionTransportHandoffV1> {
         // A fresh unlock must have discarded its original ephemeral writer key.
         // Neither an active nor an acquired original client is a fresh source.
         if self
@@ -399,6 +447,23 @@ impl AuthorityClient {
     }
 }
 impl PreparedConstructionTransportHandoffV1 {
+    #[cfg(all(
+        feature = "synthetic-qualification",
+        feature = "native-witness-owner",
+        target_os = "linux"
+    ))]
+    pub(crate) fn retain_qualification_liveness(
+        mut self,
+        liveness: Arc<crate::native_witness_owner::RetainedConstructionFixtureLivenessV1>,
+    ) -> Result<Self> {
+        if self.channel.clock.qualification_liveness.is_some() {
+            return Err(AuthorityError::Conflict);
+        }
+        liveness.check()?;
+        self.channel.clock.qualification_liveness = Some(liveness);
+        self.check_current()?;
+        Ok(self)
+    }
     pub fn check_current(&self) -> Result<()> {
         self.channel.check_current()
     }
@@ -762,6 +827,12 @@ impl AuthenticatedConstructionTransportReservationV1 {
             // Closing the key-bearing transport cannot undo a committed Consume.
             // This key-free result still retains the unchanged original bounds.
             terminal: Arc::new(AtomicBool::new(false)),
+            #[cfg(all(
+                feature = "synthetic-qualification",
+                feature = "native-witness-owner",
+                target_os = "linux"
+            ))]
+            qualification_liveness: self.transport.channel.clock.qualification_liveness.clone(),
         };
         Ok(AuthenticatedConstructionTransportContributionV1 {
             credential: self.transport.credential.clone(),
@@ -937,6 +1008,12 @@ mod clock_tests {
             expires_at_ms: 20,
             high_water_ms: high_water.clone(),
             terminal: Arc::new(AtomicBool::new(false)),
+            #[cfg(all(
+                feature = "synthetic-qualification",
+                feature = "native-witness-owner",
+                target_os = "linux"
+            ))]
+            qualification_liveness: None,
         };
         assert!(clock.check_at(11, start).is_ok());
         assert_eq!(high_water.load(Ordering::Acquire), 11);
@@ -948,5 +1025,27 @@ mod clock_tests {
             clock.check_at(21, start + Duration::from_millis(10)),
             Err(AuthorityError::Expired)
         );
+    }
+    #[cfg(all(
+        feature = "synthetic-qualification",
+        feature = "native-witness-owner",
+        target_os = "linux"
+    ))]
+    #[test]
+    fn retained_handoff_clock_cannot_outlive_revoked_fixture_source() {
+        let start = Instant::now();
+        let mut clock = HandoffClockV1 {
+            deadline: start + Duration::from_secs(10),
+            expires_at_ms: 20,
+            high_water_ms: Arc::new(AtomicU64::new(10)),
+            terminal: Arc::new(AtomicBool::new(false)),
+            qualification_liveness: Some(crate::native_witness_owner::RetainedConstructionFixtureLivenessV1::permanently_revoked_for_clock_test().unwrap()),
+        };
+        assert_eq!(clock.check_at(11, start), Err(AuthorityError::Expired));
+        assert!(clock.terminal.load(Ordering::Acquire));
+        // Even removing a restriction in this private data-only test cannot
+        // revive a terminal channel clock. Production has no removal API.
+        clock.qualification_liveness = None;
+        assert_eq!(clock.check_at(12, start), Err(AuthorityError::Expired));
     }
 }

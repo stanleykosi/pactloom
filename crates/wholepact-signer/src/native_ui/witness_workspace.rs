@@ -715,3 +715,25 @@ impl NativeWitnessWorkspace {
         Ok(())
     }
 }
+
+#[cfg(feature = "pending-birth-owner-signing")]
+impl NativeWitnessWorkspace {
+    /// Retains the original-owner TLS client selected by the genuine reentry
+    /// ceremony. No request is made and no writer-session MAC is installed.
+    /// Every subsequent purpose-specific action needs its own native review.
+    pub(in crate::native_ui) fn from_consumed_born_named(
+        actual: &crate::account::birth::enrollment::roster_v2::inventory::common_context_reentry_v1::named_recipient::ConsumedBornNamedSourceV1,
+        owner: &super::PendingAccountNativeAuthority,
+        client: AuthorityClient,
+    ) -> Result<Self> {
+        actual.check(owner)?;
+        let terms = &actual.construction().extension.account_extension.terms;
+        let disclosure = client.disclosure_descriptor();
+        if disclosure.account_id != terms.identity.account_id
+            || disclosure.policy_digest != terms.original_policy_digest
+            || disclosure != actual.construction().reservation.session.disclosure
+        { return Err(Error::ReviewMismatch); }
+        Ok(Self { source: owner.native().binding(), account_id:terms.identity.account_id.clone(),
+            client, writer_certificate_digest:terms.signer.owner_certificate_digest.clone() })
+    }
+}

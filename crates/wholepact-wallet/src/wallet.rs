@@ -742,6 +742,14 @@ mod synthetic_fixture;
 #[cfg(feature = "synthetic-qualification")]
 pub use synthetic_fixture::SyntheticContributionFixture;
 
+#[cfg(feature = "synthetic-qualification")]
+#[path = "synthetic_born_receiver_blocks_v1.rs"]
+pub mod synthetic_born_receiver_blocks_v1;
+
+#[cfg(all(feature = "synthetic-qualification", feature = "protected-sync"))]
+#[path = "synthetic_born_payment_recipient_v1.rs"]
+pub mod synthetic_born_payment_recipient_v1;
+
 #[cfg(any(test, feature = "synthetic-qualification"))]
 #[path = "qualification.rs"]
 mod qualification;

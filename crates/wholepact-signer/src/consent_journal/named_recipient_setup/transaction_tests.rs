@@ -663,7 +663,7 @@ fn setup_real_profile_backup_restores_as_history_without_live_profile_conversion
         SignerConsentBundleAdapter::template(),
     )
     .unwrap();
-    assert_eq!(source.provenance().schema_version, 16);
+    assert_eq!(source.provenance().schema_version, SCHEMA_VERSION);
     let retained = source
         .tables()
         .iter()

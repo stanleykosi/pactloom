@@ -406,10 +406,17 @@ impl PendingNativeManualPair {
         self.finish_checked(|| Ok(()))
     }
     /// Caller cancellation can only narrow mandatory installed-peer/grant checks.
-    pub fn finish_checked(self, mut check_current: impl FnMut() -> Result<()>) -> Result<NativeManualClient> {
+    pub fn finish_checked(
+        self,
+        mut check_current: impl FnMut() -> Result<()>,
+    ) -> Result<NativeManualClient> {
         check_current()?;
         let bytes = framing::read_frame_capped_checked_until(
-            &self.stream, &self.peer, MAX_MANUAL_FRAME, self.deadline, &mut check_current,
+            &self.stream,
+            &self.peer,
+            MAX_MANUAL_FRAME,
+            self.deadline,
+            &mut check_current,
         )?;
         check_current()?;
         let response: PairResponse = serde_json::from_slice(&bytes).map_err(|_| Error::Ipc)?;
@@ -445,11 +452,15 @@ impl PendingNativeManualPair {
         // Same token-possession handshake on the exact installed peer. Caller
         // cancellation narrows both response phases and final publication.
         check_current()?;
-        let stream = client.open_request_before(serde_json::json!({"operation":"status"}), self.deadline)?;
+        let stream =
+            client.open_request_before(serde_json::json!({"operation":"status"}), self.deadline)?;
         check_current()?;
         let bytes = framing::read_frame_capped_checked_until(
-            &stream,&client.peer,MAX_MANUAL_FRAME,
-            restricted_phase(self.deadline,MAX_CURRENT_WAIT)?,&mut check_current,
+            &stream,
+            &client.peer,
+            MAX_MANUAL_FRAME,
+            restricted_phase(self.deadline, MAX_CURRENT_WAIT)?,
+            &mut check_current,
         )?;
         check_current()?;
         require_request_only_ack(&bytes)?;
@@ -1032,6 +1043,23 @@ fn poll_timeout_ms(deadline: Instant, now: Instant) -> Result<libc::c_int> {
         .div_ceil(1_000_000)
         .min(i32::MAX as u128);
     libc::c_int::try_from(milliseconds).map_err(|_| Error::Limit)
+}
+/// Restriction-only transport adapter. This returns an UNAUTHENTICATED local
+/// socket, never a signer grant. The caller must still verify installed server
+/// identity and kernel peer credentials. A local connection receives at most
+/// 100ms of the caller's original budget; full backlogs fail without fallback.
+pub fn connect_local_checked_until(
+    path: &Path,
+    original_deadline: Instant,
+    check_current: impl Fn() -> Result<()>,
+) -> Result<UnixStream> {
+    check_current()?;
+    poll_timeout_ms(original_deadline, Instant::now())?;
+    let deadline = original_deadline.min(Instant::now() + Duration::from_millis(100));
+    let stream = connect_local_before(path, deadline)?;
+    check_current()?;
+    poll_timeout_ms(deadline, Instant::now())?;
+    Ok(stream)
 }
 fn connect_local_before(path: &Path, deadline: Instant) -> Result<UnixStream> {
     let (address, length) = local_address(path)?;
@@ -1690,3 +1718,37 @@ pub use permanent_stop_v1_client::{PendingPermanentStopV1, PermanentStopLeaseV1}
 #[path = "named_verifier_policy_client.rs"]
 mod named_verifier_policy_client;
 pub use named_verifier_policy_client::{NamedVerifierPolicyLease, PendingNamedVerifierPolicy};
+
+#[cfg(test)]
+mod checked_local_connect_tests {
+    use super::*;
+    #[test]
+    fn born_checked_connect_refuses_expired_or_revoked_before_open() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("synthetic.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        assert!(connect_local_checked_until(&path, Instant::now(), || Ok(())).is_err());
+        assert!(
+            connect_local_checked_until(&path, Instant::now() + Duration::from_secs(1), || Err(
+                Error::Permission
+            ))
+            .is_err()
+        );
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+    #[test]
+    fn born_checked_connect_uses_actual_socket_without_creating_authority() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("synthetic.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let stream =
+            connect_local_checked_until(&path, Instant::now() + Duration::from_secs(1), || Ok(()))
+                .unwrap();
+        let (accepted, _) = listener.accept().unwrap();
+        drop((stream, accepted));
+    }
+}

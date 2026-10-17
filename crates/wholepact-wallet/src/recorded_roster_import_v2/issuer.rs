@@ -11,6 +11,10 @@ use zcash_client_backend::data_api::AccountSource;
 use zcash_client_sqlite::ExtensionTransaction;
 use zeroize::Zeroizing;
 
+#[path = "post_return_history_v1.rs"]
+mod post_return_history_v1;
+pub(crate) use post_return_history_v1::verify_post_return_history_v1;
+
 const MAX_RECORD: usize = 262_144;
 const IMPORTER: &str = "wholepact:dedicated-testnet-orchard-roster-ufvk-import:v2";
 const DERIVATION: &str = "dedicated-testnet-legacy-zip32-v1";

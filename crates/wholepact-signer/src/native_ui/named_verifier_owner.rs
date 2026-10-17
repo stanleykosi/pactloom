@@ -444,3 +444,6 @@ mod validity_tests {
         assert!(check_validity_at(201, 200, 200).is_err());
     }
 }
+
+#[cfg(feature = "synthetic-born-joined-qualification")]
+pub use setup::synthetic_born_fixture::EphemeralNamedVerifierV1;

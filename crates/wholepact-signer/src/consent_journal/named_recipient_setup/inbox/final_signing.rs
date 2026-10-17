@@ -32,6 +32,10 @@ impl NamedRecipientOperation {
             deadline: Instant::now() + Duration::from_secs(120),
         }
     }
+    /// Original operation deadline; observing it never renews the operation.
+    pub(crate) fn deadline(&self) -> Instant {
+        self.deadline
+    }
     pub(crate) fn revoke(&self) {
         self.cancelled
             .store(true, std::sync::atomic::Ordering::Release);
@@ -87,6 +91,7 @@ impl LiveNamedRecipientProfile {
         let original_ref = original_reference(journal, self, authorization_id)?;
         let (record, retained) = load_profile_and_original(journal, self, &original_ref)?;
         let original = retained.record;
+        original.require_legacy_origin().map_err(unavailable)?;
         let deadline = created
             .checked_add(
                 Duration::from_millis(
@@ -279,13 +284,6 @@ impl PreparedNamedRecipientSigning {
             )?
             .ok_or(TransportError::Authentication)?;
         require_assertion_original(&assertion, &self.original)?;
-        let package_bytes = assertion
-            .artifact()
-            .fields()
-            .first()
-            .ok_or(TransportError::WrongContext)?
-            .bytes();
-        let package = NamedVerifierPackageV1::parse(package_bytes)?;
         let records = journal
             .acquire_preconstruction_records(
                 &self.profile.record.enrollment_ref,
@@ -309,6 +307,7 @@ impl PreparedNamedRecipientSigning {
         self.final_review.consent_reference =
             self.final_review.reference_digest().map_err(unavailable)?;
         let started = NamedRecipientStartedRecordV1 {
+            born_final_review: None,
             final_review: Some(self.final_review.clone()),
             schema_version: 1,
             authorization_id: self.original.terms.authorization_id.clone(),
@@ -324,108 +323,29 @@ impl PreparedNamedRecipientSigning {
                 .min(self.original.validity_expires_ms),
         };
         started.validate(&self.original).map_err(unavailable)?;
-        commit_started(journal, &self.profile, &self.original, &started, &check)?;
+        let committed = commit_started(
+            journal,
+            &self.profile,
+            &self.original,
+            &started,
+            &check,
+            |_| Ok(()),
+        )?;
         // Every failure after attempted Started is ambiguous, never retryable key
         // authority. No raw signature escapes this closure on any error.
         #[cfg(test)]
         let mut phase = "parse reviewed artifact";
         let result = (|| {
             check()?;
-            let parsed = Pczt::parse(&package.recipient_artifact).map_err(unavailable)?;
-            if own.own_inputs.iter().any(|i| {
-                parsed
-                    .ironwood()
-                    .actions()
-                    .get(i.action_index)
-                    .is_none_or(|a| a.spend().spend_auth_sig().is_some())
-            }) {
-                return Err(TransportError::WrongContext);
-            }
-            #[cfg(test)]
-            {
-                phase = "initialize maintained signer";
-            }
-            // Canonical named artifacts intentionally omit every real-input FVK.
-            // The high-level signer requires an embedded FVK. Use the maintained
-            // preverified role instead, after exact own-effects verification, and
-            // repeat nullifier/rk checks with this account's actual FVK below.
-            let sighash = Signer::new(parsed.clone())
-                .map_err(unavailable)?
-                .shielded_sighash();
-            if hex::encode(sighash) != assertion.inspection().own().inspection().shielded_sighash()
-                || hex::encode(sighash) != self.original.terms.effects_digest
-                || *parsed.global().tx_modifiable() != 0
-            {
-                return Err(TransportError::WrongContext);
-            }
-            #[cfg(test)]
-            {
-                phase = "maintained selected-own signing";
-            }
-            let signed = pczt::roles::low_level_signer::Signer::new(parsed)
-                .sign_ironwood_with::<MaintainedOwnSignError, _>(|_, bundle, tx_modifiable| {
-                    if *tx_modifiable != 0 {
-                        return Err(MaintainedOwnSignError);
-                    }
-                    bundle
-                        .verify_cross_address_restriction()
-                        .map_err(|_| MaintainedOwnSignError)?;
-                    for input in &own.own_inputs {
-                        let action = bundle
-                            .actions_mut()
-                            .get_mut(input.action_index)
-                            .ok_or(MaintainedOwnSignError)?;
-                        action
-                            .spend()
-                            .verify_nullifier(Some(&own.own_fvk))
-                            .map_err(|_| MaintainedOwnSignError)?;
-                        action
-                            .spend()
-                            .verify_rk(Some(&own.own_fvk))
-                            .map_err(|_| MaintainedOwnSignError)?;
-                        if action.spend().spend_auth_sig().is_some() {
-                            return Err(MaintainedOwnSignError);
-                        }
-                        // One bounded maintained key operation, not remote/SQLite I/O.
-                        let _key_use = self
-                            .profile
-                            .source
-                            .publication_lease()
-                            .map_err(|_| MaintainedOwnSignError)?;
-                        check().map_err(|_| MaintainedOwnSignError)?;
-                        let key = vault
-                            .account()
-                            .spending_key()
-                            .map_err(|_| MaintainedOwnSignError)?;
-                        let ask = SpendAuthorizingKey::from(&key);
-                        action
-                            .sign(sighash, &ask, UnwrapErr(SysRng))
-                            .map_err(|_| MaintainedOwnSignError)?;
-                    }
-                    Ok(())
-                })
-                .map_err(unavailable)?
-                .finish();
-            #[cfg(test)]
-            {
-                phase = "serialize maintained signed artifact";
-            }
-            let bytes = Zeroizing::new(
-                pczt::v2::Pczt::try_from(signed.clone())
-                    .map_err(unavailable)?
-                    .serialize(),
-            );
-            #[cfg(test)]
-            {
-                phase = "verify exact own signature delta";
-            }
-            let verified =
-                inspect_named_verifier_return(package_bytes, &bytes, assertion.inspection())?;
-            if verified.reviewed_artifact_digest() != self.original.canonical_artifact_digest
-                || verified.shielded_sighash() != self.original.terms.effects_digest
-            {
-                return Err(TransportError::WrongContext);
-            }
+            let bytes = sign_committed_own(
+                committed,
+                &self.profile,
+                &self.original,
+                &own,
+                &assertion,
+                vault,
+                &check,
+            )?;
             check()?;
             #[cfg(test)]
             {
@@ -482,6 +402,113 @@ impl PreparedNamedRecipientSigning {
             TransportError::ImportCommittedButUnavailable
         })
     }
+}
+
+/// Created only after the original Started transaction commits. It is neither
+/// cloneable nor deserializable and is consumed by the maintained key adapter.
+struct CommittedNamedRecipientStarted {
+    original_ref: String,
+}
+fn sign_committed_own(
+    committed: CommittedNamedRecipientStarted,
+    profile: &LiveNamedRecipientProfile,
+    original: &NamedRecipientOriginalRecordV1,
+    own: &OwnEffectsPolicy,
+    assertion: &ReceivedNamedVerifierAssertion,
+    vault: &AccountVault,
+    check: &impl Fn() -> ImportResult<()>,
+) -> ImportResult<Zeroizing<Vec<u8>>> {
+    if committed.original_ref != original.reference {
+        return Err(TransportError::WrongContext);
+    }
+    check()?;
+    require_assertion_original(assertion, original)?;
+    let package_bytes = assertion
+        .artifact()
+        .fields()
+        .first()
+        .ok_or(TransportError::WrongContext)?
+        .bytes();
+    let package = NamedVerifierPackageV1::parse(package_bytes)?;
+    let parsed = Pczt::parse(&package.recipient_artifact).map_err(unavailable)?;
+    if own.own_inputs.iter().any(|i| {
+        parsed
+            .ironwood()
+            .actions()
+            .get(i.action_index)
+            .is_none_or(|a| a.spend().spend_auth_sig().is_some())
+    }) {
+        return Err(TransportError::WrongContext);
+    }
+    // Canonical named artifacts intentionally omit every real-input FVK.
+    // The high-level signer requires an embedded FVK. Use the maintained
+    // preverified role instead, after exact own-effects verification, and
+    // repeat nullifier/rk checks with this account's actual FVK below.
+    let sighash = Signer::new(parsed.clone())
+        .map_err(unavailable)?
+        .shielded_sighash();
+    if hex::encode(sighash) != assertion.inspection().own().inspection().shielded_sighash()
+        || hex::encode(sighash) != original.terms.effects_digest
+        || *parsed.global().tx_modifiable() != 0
+    {
+        return Err(TransportError::WrongContext);
+    }
+    let signed = pczt::roles::low_level_signer::Signer::new(parsed)
+        .sign_ironwood_with::<MaintainedOwnSignError, _>(|_, bundle, tx_modifiable| {
+            if *tx_modifiable != 0 {
+                return Err(MaintainedOwnSignError);
+            }
+            bundle
+                .verify_cross_address_restriction()
+                .map_err(|_| MaintainedOwnSignError)?;
+            for input in &own.own_inputs {
+                let action = bundle
+                    .actions_mut()
+                    .get_mut(input.action_index)
+                    .ok_or(MaintainedOwnSignError)?;
+                action
+                    .spend()
+                    .verify_nullifier(Some(&own.own_fvk))
+                    .map_err(|_| MaintainedOwnSignError)?;
+                action
+                    .spend()
+                    .verify_rk(Some(&own.own_fvk))
+                    .map_err(|_| MaintainedOwnSignError)?;
+                if action.spend().spend_auth_sig().is_some() {
+                    return Err(MaintainedOwnSignError);
+                }
+                // One bounded maintained key operation, not remote/SQLite I/O.
+                let _key_use = profile
+                    .source
+                    .publication_lease()
+                    .map_err(|_| MaintainedOwnSignError)?;
+                check().map_err(|_| MaintainedOwnSignError)?;
+                let key = vault
+                    .account()
+                    .spending_key()
+                    .map_err(|_| MaintainedOwnSignError)?;
+                let ask = SpendAuthorizingKey::from(&key);
+                action
+                    .sign(sighash, &ask, UnwrapErr(SysRng))
+                    .map_err(|_| MaintainedOwnSignError)?;
+            }
+            Ok(())
+        })
+        .map_err(unavailable)?
+        .finish();
+    let bytes = Zeroizing::new(
+        pczt::v2::Pczt::try_from(signed.clone())
+            .map_err(unavailable)?
+            .serialize(),
+    );
+    let verified = inspect_named_verifier_return(package_bytes, &bytes, assertion.inspection())?;
+    if verified.reviewed_artifact_digest() != original.canonical_artifact_digest
+        || verified.shielded_sighash() != original.terms.effects_digest
+    {
+        return Err(TransportError::WrongContext);
+    }
+    check()?;
+    Ok(bytes)
 }
 
 // Nominal local adapter error only. It conveys no signing permission or detail
@@ -546,6 +573,7 @@ fn authenticate_original_history(
     history: &ReconciledAuthorityHistory,
     client: &AuthorityClient,
 ) -> ImportResult<NamedRecipientFinalReviewV1> {
+    original.require_legacy_origin().map_err(unavailable)?;
     let witness = client.disclosure_descriptor();
     if history.disclosure()!=&witness || witness.pinned_server_certificate_digest!=profile.record.witness_certificate_digest
         || witness.account_id!=profile.record.account_id || witness.network_profile_id!=original.terms.network_profile_id
@@ -633,7 +661,7 @@ fn authenticate_original_history(
         return_expires_at: i64::try_from(end).map_err(unavailable)?,
     })
 }
-fn retained_own_policy(
+pub(super) fn retained_own_policy(
     original: &NamedRecipientOriginalRecordV1,
     vault: &AccountVault,
 ) -> ImportResult<OwnEffectsPolicy> {
@@ -762,6 +790,7 @@ pub(super) fn next_return_sequence(
         let prior: NamedRecipientOriginalRecordV1 = decode(o).map_err(unavailable)?;
         if prior.terms.network_profile_id != original.terms.network_profile_id
             || prior.terms.agreement_id != original.terms.agreement_id
+            || prior.born_origin.is_some() != original.born_origin.is_some()
         {
             continue;
         }
@@ -772,10 +801,7 @@ pub(super) fn next_return_sequence(
         let started: NamedRecipientStartedRecordV1 = decode(s).map_err(unavailable)?;
         let result: NamedRecipientResultRecordV1 = decode(result).map_err(unavailable)?;
         result.validate(&started, &prior).map_err(unavailable)?;
-        let review = started
-            .final_review
-            .ok_or(TransportError::AuthorityUnavailable)?;
-        maximum = maximum.max(review.return_sequence);
+        maximum = maximum.max(started.return_metadata().map_err(unavailable)?.sequence);
     }
     maximum
         .checked_add(1)
@@ -788,7 +814,8 @@ fn commit_started(
     original: &NamedRecipientOriginalRecordV1,
     started: &NamedRecipientStartedRecordV1,
     check: &impl Fn() -> ImportResult<()>,
-) -> ImportResult<()> {
+    commit_evidence: impl FnOnce(&rusqlite::Transaction<'_>) -> ImportResult<()>,
+) -> ImportResult<CommittedNamedRecipientStarted> {
     let mut c = journal.connection.lock().map_err(unavailable)?;
     let tx = c
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -807,15 +834,12 @@ fn commit_started(
     super::super::super::named_recipient_inventory::read_all(&tx, &profile.record.account_id)
         .map_err(unavailable)?;
     started.validate(original).map_err(unavailable)?;
-    if started
-        .final_review
-        .as_ref()
-        .ok_or(TransportError::AuthorityUnavailable)?
-        .return_sequence
+    if started.return_metadata().map_err(unavailable)?.sequence
         != next_return_sequence(&tx, original)?
     {
         return Err(TransportError::WrongContext);
     }
+    commit_evidence(&tx)?;
     let raw = encode(started).map_err(unavailable)?;
     tx.execute(
         "INSERT INTO signer_named_recipient_started VALUES(?1,?2,?3,?4)",
@@ -827,13 +851,18 @@ fn commit_started(
         ],
     )
     .map_err(unavailable)?;
+    super::super::super::named_recipient_inventory::read_all(&tx, &profile.record.account_id)
+        .map_err(unavailable)?;
     storage::bounded(&tx, journal.capacity_limits()).map_err(unavailable)?;
     check()?;
     let _publication = profile.source.publication_lease().map_err(unavailable)?;
     check()?;
     tx.commit()
         .map_err(|_| TransportError::ImportCommittedButUnavailable)?;
-    check().map_err(|_| TransportError::ImportCommittedButUnavailable)
+    check().map_err(|_| TransportError::ImportCommittedButUnavailable)?;
+    Ok(CommittedNamedRecipientStarted {
+        original_ref: original.reference.clone(),
+    })
 }
 fn commit_result(
     journal: &SignerConsentJournal,
@@ -890,10 +919,23 @@ fn seal_signature_return(
     started: &NamedRecipientStartedRecordV1,
     bytes: &[u8],
 ) -> ImportResult<(String, wire::EncryptedEnvelope)> {
-    let review = started
-        .final_review
-        .as_ref()
-        .ok_or(TransportError::AuthorityUnavailable)?;
+    let review = started.return_metadata().map_err(unavailable)?;
+    let born = original.born_origin.is_some();
+    let family = if born {
+        "born-offline-return"
+    } else {
+        "offline-return"
+    };
+    let kind = if born {
+        wire::ArtifactKind::BornOfflineAuthorizationReturnV1
+    } else {
+        wire::ArtifactKind::OfflineAuthorizationReturn
+    };
+    let field = if born {
+        "born-offline-authorization-return-v1"
+    } else {
+        "offline-authorization-return-v1"
+    };
     let t = &original.terms;
     let raw = super::super::super::named_recipient_records::signature_return_projection(
         original, started, bytes,
@@ -908,14 +950,20 @@ fn seal_signature_return(
     let now =
         wire::Timestamp::from_unix_seconds(i64::try_from(wall_ms()? / 1000).map_err(unavailable)?)
             .map_err(unavailable)?;
-    let prepared=wire::prepare_export(wire::ExportRequest{context:wire::MessageContext{network_profile_id:t.network_profile_id.clone(),agreement_id:t.agreement_id.clone(),proposal_id:t.proposal_id.clone(),proposal_revision:t.proposal_revision,sender_id:format!("offline-return:{}",t.offline_signer_key_digest),recipient_id:format!("offline-return:{}",t.return_recipient_key_digest),artifact_kind:wire::ArtifactKind::OfflineAuthorizationReturn},order:wire::MessageOrder{message_id:review.return_message_id.clone(),sequence:review.return_sequence,issued_at:wire::Timestamp::from_unix_seconds(review.return_issued_at).map_err(unavailable)?,expires_at:wire::Timestamp::from_unix_seconds(review.return_expires_at).map_err(unavailable)?},purpose:"Exact own signatures for the original named-mode authorization".into(),persistence_warning:"This encrypted return can outlive local revocation; online current validation remains required.".into()},vec![wire::DisclosureField::new("offline-authorization-return-v1",raw.to_vec()).map_err(unavailable)?],&sender.public_key().map_err(unavailable)?,&recipient,&now).map_err(unavailable)?;
+    let prepared=wire::prepare_export(wire::ExportRequest{context:wire::MessageContext{network_profile_id:t.network_profile_id.clone(),agreement_id:t.agreement_id.clone(),proposal_id:t.proposal_id.clone(),proposal_revision:t.proposal_revision,sender_id:format!("{family}:{}",t.offline_signer_key_digest),recipient_id:format!("{family}:{}",t.return_recipient_key_digest),artifact_kind:kind},order:wire::MessageOrder{message_id:review.message_id.into(),sequence:review.sequence,issued_at:wire::Timestamp::from_unix_seconds(review.issued_at).map_err(unavailable)?,expires_at:wire::Timestamp::from_unix_seconds(review.expires_at).map_err(unavailable)?},purpose:"Exact own signatures for the original named-mode authorization".into(),persistence_warning:"This encrypted return can outlive local revocation; online current validation remains required.".into()},vec![wire::DisclosureField::new(field,raw.to_vec()).map_err(unavailable)?],&sender.public_key().map_err(unavailable)?,&recipient,&now).map_err(unavailable)?;
     let approved = prepared.preview().digest().map_err(unavailable)?;
-    let envelope =
-        wire::seal_original_return(prepared, &sender, &approved, &now).map_err(unavailable)?;
+    let envelope = if born {
+        wire::seal_born_return(prepared, &sender, &approved, &now)
+    } else {
+        wire::seal_original_return(prepared, &sender, &approved, &now)
+    }
+    .map_err(unavailable)?;
     Ok((projection, envelope))
 }
 mod return_file;
-pub(crate) use return_file::PreparedNamedRecipientReturnFile;
+pub(crate) use return_file::{
+    PreparedBornNamedRecipientReturnFile, PreparedNamedRecipientReturnFile,
+};
 
 #[cfg(test)]
 mod tests {
@@ -959,3 +1007,6 @@ mod tests {
         assert!(expired.clone().check().is_err());
     }
 }
+
+mod born_final;
+pub(crate) use born_final::PreparedBornNamedRecipientSigning;

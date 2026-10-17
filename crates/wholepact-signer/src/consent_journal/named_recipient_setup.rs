@@ -6,7 +6,7 @@ use crate::{
     account::AccountVault,
     native_ui::{NativeAuthority, NativeAuthorityBinding, NativeDecision},
 };
-use rusqlite::{OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
 use std::time::{Duration, Instant};
 use wholepact_transport::{TransportPublicKey, TransportSecret};
@@ -125,7 +125,7 @@ impl PreparedNamedRecipientSetup {
             source.check_current()?;
             record
         }; // Release read fences before acquiring the exact original-record lease.
-        Self::prepare(
+        Self::prepare_with_born_binding(
             journal,
             session,
             vault,
@@ -139,6 +139,7 @@ impl PreparedNamedRecipientSetup {
                 witness_certificate_digest: record.witness_certificate_digest.clone(),
                 return_transport: record.return_transport_public_key,
             },
+            record.born_profile.clone(),
         )
     }
     pub(crate) fn prepare(
@@ -149,6 +150,56 @@ impl PreparedNamedRecipientSetup {
         enrollment_ref: &str,
         manifest_ref: &str,
         pins: NamedRecipientPins,
+    ) -> crate::Result<Self> {
+        Self::prepare_with_born_binding(
+            journal,
+            session,
+            vault,
+            native,
+            enrollment_ref,
+            manifest_ref,
+            pins,
+            None,
+        )
+    }
+    #[cfg(feature = "pending-birth-owner-signing")]
+    pub(crate) fn prepare_born(
+        actual: &crate::account::birth::enrollment::roster_v2::inventory::common_context_reentry_v1::named_recipient::ConsumedBornNamedSourceV1,
+        owner: &crate::native_ui::PendingAccountNativeAuthority,
+        session: &SignerConsentSession,
+        enrollment_ref: &str,
+        manifest_ref: &str,
+        pins: NamedRecipientPins,
+    ) -> crate::Result<Self> {
+        actual.check(owner)?;
+        let binding = named_recipient_records::BornNamedRecipientProfileBindingV1 {
+            version: 1,
+            genesis: actual.genesis().clone(),
+            construction: actual.construction().clone(),
+        };
+        let result = Self::prepare_with_born_binding(
+            actual.journal(),
+            session,
+            actual.vault(),
+            owner.native(),
+            enrollment_ref,
+            manifest_ref,
+            pins,
+            Some(Box::new(binding)),
+        )?;
+        actual.check(owner)?;
+        Ok(result)
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_with_born_binding(
+        journal: &SignerConsentJournal,
+        session: &SignerConsentSession,
+        vault: &AccountVault,
+        native: &NativeAuthority,
+        enrollment_ref: &str,
+        manifest_ref: &str,
+        pins: NamedRecipientPins,
+        born_profile: Option<Box<named_recipient_records::BornNamedRecipientProfileBindingV1>>,
     ) -> crate::Result<Self> {
         native.check_current()?;
         let source = native.binding();
@@ -197,6 +248,7 @@ impl PreparedNamedRecipientSetup {
             return Err(crate::Error::ReviewMismatch);
         }
         let mut record = NamedRecipientProfileRecordV1 {
+            born_profile,
             schema_version: 1,
             reference: String::new(),
             account_id,
@@ -214,6 +266,16 @@ impl PreparedNamedRecipientSetup {
             transport_public_key: [0; 32],
             transport_secret: [0; 32],
         };
+        {
+            let c = journal
+                .connection
+                .lock()
+                .map_err(|_| crate::Error::Locked)?;
+            require_exact_profile_genesis(&c, &record)?;
+            if let Some(binding) = &record.born_profile {
+                binding.validate_local_enrollment(&record, records.enrollment())?;
+            }
+        }
         record.original_setup_digest = record
             .setup_digest()
             .map_err(|_| crate::Error::InvalidData)?;
@@ -227,7 +289,7 @@ impl PreparedNamedRecipientSetup {
         )
         .map_err(|_| crate::Error::InvalidData)?;
         record.native_review_digest = digest.clone();
-        let display = format!(
+        let mut display = format!(
             "OPTIONAL NAMED-VERIFIER OFFLINE PROFILE\nAccount: {}\nAccepted manifest: {}\nVerifier signing key: {}\nVerifier transport key: {}\nWitness transport key: {}\nWitness certificate: {}\nReturn destination key: {}\nSetup commitment: {}\nYou trust this exact verifier to attribute peers' inputs and returns. A dishonest verifier may misrepresent their contributions. Your own effects remain independently checked. Peer viewing keys are not shared with you. This setup does not authorize signing, spending or witness reservations. Original deadlines and unknown external-clone exposure remain. Confirm these pins through your independently authenticated source. CURRENT IMPLEMENTATION LIMIT: retaining even this setup-only immutable profile blocks existing legacy financial admission, history and recovery routes. Named financial consumers are not yet qualified. Cancelling this screen cannot remove the retained profile.",
             record.account_id,
             record.manifest_ref,
@@ -238,6 +300,9 @@ impl PreparedNamedRecipientSetup {
             hex::encode(record.return_transport_public_key),
             record.original_setup_digest
         );
+        if let Some(binding) = &record.born_profile {
+            display.push_str(&format!("\nORIGINAL BORN CONSTRUCTION CONTINUATION\nExact original lineage: {}\nOriginal witness enrollment: {}\nDistinct local native enrollment: {}\nThis separately permits contact only with the original pinned witness using its existing owner identity for this consumed construction. The general writer transport remains fenced. Local consent/profile setup neither renews the original session nor creates a second budget charge, new input selection or signing approval.", binding.digest()?, binding.witness_enrollment_ref(), record.enrollment_ref));
+        }
         records.check_current().map_err(|_| crate::Error::Locked)?;
         source.check_current()?;
         Ok(Self {
@@ -308,6 +373,7 @@ impl PreparedNamedRecipientSetup {
             .connection
             .lock()
             .map_err(|_| crate::Error::ConsentJournal(JournalError::Database))?;
+        require_exact_profile_genesis(&c, &self.record)?;
         let tx = c
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| crate::Error::ConsentJournal(JournalError::Database))?;
@@ -417,8 +483,16 @@ impl LiveNamedRecipientProfile {
             .map_err(|_| crate::Error::Locked)?;
         records.check_current().map_err(|_| crate::Error::Locked)
     }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(crate) fn original_setup_commitment(&self) -> &str {
+        &self.record.original_setup_digest
+    }
     pub(crate) fn reference(&self) -> &str {
         &self.record.reference
+    }
+    /// Public immutable pin, not a verifier owner or signing capability.
+    pub(crate) fn verifier_signing_public_key(&self) -> &[u8; 32] {
+        &self.record.verifier_signing_public_key
     }
     pub(crate) fn transport_public_key(&self) -> &[u8; 32] {
         &self.record.transport_public_key
@@ -461,4 +535,75 @@ pub(crate) use inbox::{
 #[cfg(all(test, feature = "synthetic-qualification"))]
 mod joined_fixture;
 pub(crate) use inbox::PreparedNamedRecipientReturnFile;
-pub(crate) use inbox::{NamedRecipientOperation, PreparedNamedRecipientSigning};
+pub(crate) use inbox::{
+    NamedRecipientOperation, PreparedBornNamedRecipientReturnFile,
+    PreparedBornNamedRecipientSigning, PreparedNamedRecipientSigning,
+};
+
+pub(crate) use inbox::{
+    BornCourierActionV1, BornNamedRecipientOriginalInputs, PreparedBornDeliveryFileV1,
+    PreparedBornIntentCourierV1, PreparedBornNamedIntentFileExport,
+    PreparedBornNamedRecipientOriginalImport, RetainedBornCourierDeliveryV1,
+    RetainedBornNamedIntentExport,
+};
+
+pub(crate) use inbox::PreparedBornAdmissionImportV1;
+
+pub(crate) use inbox::HeldBornHostHistoryV1;
+
+fn require_exact_profile_genesis(
+    c: &Connection,
+    profile: &NamedRecipientProfileRecordV1,
+) -> crate::Result<()> {
+    let actual = account_use_storage::inspect(c, &profile.account_id)?;
+    if actual.exclusion().is_some() {
+        return Err(crate::Error::Locked);
+    }
+    match (&profile.born_profile, actual.genesis()) {
+        (None, None) => Ok(()),
+        (Some(binding), Some(genesis)) if &binding.genesis == genesis => {
+            binding.validate()?;
+            let audit = common_context_reentry_audit_v1::read_complete(c, &profile.account_id)?;
+            let evidence = audit
+                .reentry
+                .rows
+                .iter()
+                .find_map(|row| match &row.record {
+                    CommonContextReentryAuditPhaseV1::Consumed { evidence, .. } => {
+                        Some(evidence.as_ref())
+                    }
+                    _ => None,
+                })
+                .ok_or(crate::Error::ReviewMismatch)?;
+            #[cfg(feature = "pending-birth-owner-signing")]
+            let actual = born_named_continuation::read_origin(c, &profile.account_id, evidence)?;
+            #[cfg(not(feature = "pending-birth-owner-signing"))]
+            let actual = {
+                let _ = evidence;
+                return Err(crate::Error::Unavailable);
+            };
+            if actual != binding.construction {
+                return Err(crate::Error::ReviewMismatch);
+            }
+            Ok(())
+        }
+        _ => Err(crate::Error::ReviewMismatch),
+    }
+}
+
+#[cfg(feature = "pending-birth-owner-signing")]
+mod born_enrollment_owner;
+#[cfg(feature = "pending-birth-owner-signing")]
+pub(crate) use born_enrollment_owner::PreparedBornOfflineOwnerEnrollmentV1;
+
+#[cfg(feature = "synthetic-born-joined-qualification")]
+mod synthetic_born_context;
+#[cfg(feature = "synthetic-born-joined-qualification")]
+pub use synthetic_born_context::OriginalNamedSetupMetadataV1;
+
+#[cfg(feature = "synthetic-born-joined-qualification")]
+mod synthetic_born_original;
+#[cfg(feature = "synthetic-born-joined-qualification")]
+pub use synthetic_born_original::{
+    OriginalNamedPaymentArtifactsV1, OriginalNamedReturnReferencesV1,
+};

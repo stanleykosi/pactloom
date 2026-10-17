@@ -32,6 +32,11 @@ pub(crate) use namespace_archive::*;
 
 #[derive(Clone, Serialize)]
 pub(crate) struct NamespaceSetupInput {
+    // Concrete temporary owner only; never a serialized root/permission input.
+    #[cfg(feature = "synthetic-qualification")]
+    #[serde(skip)]
+    pub(crate) synthetic_installation:
+        Option<Arc<wholepact_storage_security::witness_namespace_fs::EphemeralWitnessInstallation>>,
     pub(crate) endpoint: String,
     pub(crate) server_name: String,
     pub(crate) witness_id: String,
@@ -43,6 +48,11 @@ pub(crate) struct NamespaceSetupInput {
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct NamespaceOpenInput {
+    // Concrete temporary owner only; never a serialized root/permission input.
+    #[cfg(feature = "synthetic-qualification")]
+    #[serde(skip)]
+    pub(crate) synthetic_installation:
+        Option<Arc<wholepact_storage_security::witness_namespace_fs::EphemeralWitnessInstallation>>,
     pub(crate) endpoint: String,
     pub(crate) server_name: String,
     pub(crate) witness_id: String,
@@ -62,6 +72,13 @@ struct OriginBinding<'a> {
     network_profile_id: &'a str,
 }
 impl NamespaceSetupInput {
+    fn installation_probe(&self) -> Result<InstallationProbe> {
+        #[cfg(feature = "synthetic-qualification")]
+        if let Some(owner) = &self.synthetic_installation {
+            return owner.probe().map_err(Into::into);
+        }
+        InstallationProbe::fixed_user_installation().map_err(Into::into)
+    }
     fn validate(&self) -> Result<()> {
         id(&self.witness_id)?;
         id(&self.network_profile_id)?;
@@ -99,6 +116,8 @@ impl NamespaceSetupInput {
 impl NamespaceOpenInput {
     fn setup(&self) -> NamespaceSetupInput {
         NamespaceSetupInput {
+            #[cfg(feature = "synthetic-qualification")]
+            synthetic_installation: self.synthetic_installation.clone(),
             endpoint: self.endpoint.clone(),
             server_name: self.server_name.clone(),
             witness_id: self.witness_id.clone(),
@@ -146,7 +165,7 @@ pub(crate) fn prepare_namespace_setup(
     let instance_id = hex::encode(random);
     input.witness_id = format!("witness-{instance_id}");
     input.validate()?;
-    let probe = InstallationProbe::fixed_user_installation()?;
+    let probe = input.installation_probe()?;
     probe.require_absent()?;
     let master = read_existing_storage_key(Path::new(&input.storage_key_file))?;
     let root = probe.root_path();
@@ -309,7 +328,7 @@ fn open_namespace(input: &NamespaceOpenInput) -> Result<Arc<NamespaceCore>> {
 fn open_namespace_identity(input: &NamespaceSetupInput) -> Result<Arc<NamespaceCore>> {
     let setup = input;
     setup.validate()?;
-    let files = InstallationProbe::fixed_user_installation()?.open_existing()?;
+    let files = input.installation_probe()?.open_existing()?;
     let master = read_existing_storage_key(Path::new(&input.storage_key_file))?;
     let key = derive_key(
         &master,
@@ -1034,6 +1053,8 @@ mod owner_model_tests {
     #[test]
     fn explicit_setup_cannot_reimport_an_existing_witness_identity() {
         let input = NamespaceSetupInput {
+            #[cfg(feature = "synthetic-qualification")]
+            synthetic_installation: None,
             endpoint: "127.0.0.1:1911".into(),
             server_name: "localhost".into(),
             witness_id: "previously-used-witness".into(),
@@ -1232,5 +1253,59 @@ mod registry_preflight_tests {
         let wrong = DatabaseKey::from_bytes([0x42; 32]); // SYNTHETIC negative key only.
         assert!(read_registry_preflight(&fixture.path, &wrong).is_err());
         assert_eq!(source_bytes(fixture.directory.path()), before);
+    }
+}
+
+#[cfg(feature = "born-offline-witness-owner")]
+impl BornJournalOwner {
+    pub(crate) fn namespace_binding_digest_v1(&self) -> Result<String> {
+        self.check_current()?;
+        self.core.namespace.digest()
+    }
+    /// Additional authenticated handles to the SAME completed original database.
+    /// No caller path, namespace adoption, table initialization or new file exists.
+    pub(crate) fn open_born_artifact_handles_v1(
+        &self,
+        original: &EncryptedConnection,
+    ) -> Result<(EncryptedConnection, EncryptedConnection)> {
+        self.check_mutation_current()?;
+        let identity = original.database_identity()?;
+        identity.check_current(original.connection())?;
+        if original.connection().path() != self.path.to_str() {
+            return Err(AuthorityError::InvalidBinding);
+        }
+        let tx = Transaction::new_unchecked(original.connection(), TransactionBehavior::Deferred)?;
+        crate::journal::verify_born_artifact_schema_v1(&tx)?;
+        let (expected, birth) =
+            crate::journal::namespace_account_stamp(&tx, &self.intent.request.policy)?;
+        validate_record_against_intent(&self.core, &self.intent, &birth)?;
+        // Authenticated immutable preflight precedes additional mutable handles.
+        let snapshot =
+            wholepact_storage_security::open_encrypted_read_snapshot(&self.path, &self.key)?;
+        if crate::journal::namespace_account_stamp(
+            snapshot.connection(),
+            &self.intent.request.policy,
+        )?
+        .0 != expected
+        {
+            return Err(AuthorityError::Conflict);
+        }
+        drop(snapshot);
+        let inbox = wholepact_storage_security::open_encrypted(&self.path, &self.key)?;
+        let outbox = wholepact_storage_security::open_encrypted(&self.path, &self.key)?;
+        for c in [&inbox, &outbox] {
+            identity.check_current(c.connection())?;
+            require_runtime(c.connection())?;
+            let read = Transaction::new_unchecked(c.connection(), TransactionBehavior::Deferred)?;
+            crate::journal::verify_born_artifact_schema_v1(&read)?;
+            if crate::journal::namespace_account_stamp(&read, &self.intent.request.policy)?.0
+                != expected
+            {
+                return Err(AuthorityError::Conflict);
+            }
+        }
+        self.check_mutation_current()?;
+        identity.check_current(original.connection())?;
+        Ok((inbox, outbox))
     }
 }

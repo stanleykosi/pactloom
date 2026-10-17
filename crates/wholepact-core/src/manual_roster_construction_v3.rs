@@ -206,6 +206,9 @@ impl CommonContextProposalV1 {
                 || !wallet_destinations.insert(&source.wallet_destination)
                 || !directory_identities
                     .insert(&source.attachment.selected.directory_identity_digest)
+                // Preserve valid historical all-V1 records, while new original
+                // retention uses all-V2. Never combine the two purposes.
+                || scope.version != selection.version
                 || scope.invocation != selection.invocation
                 || scope.economic_intent != *economics
                 || owner.identity.network_profile_id != COMMON_CONTEXT_PROFILE_ID
@@ -530,7 +533,9 @@ impl ManualRosterConstructionPlanV3 {
         {
             return Err(invalid());
         }
-        // Reuse the unchanged, pure per-owner economics/input/return validator.
+        // Common-context validation above requires uniformly legacy-V1 or
+        // original-retention-V2 scopes. Reuse only pure per-owner facts, never
+        // public V2 plan validation, which deliberately rejects the new purpose.
         // This local temporary value is never a V2 approval, signature or owner.
         let mut checked = None;
         for original in &self.originals {
@@ -541,7 +546,7 @@ impl ManualRosterConstructionPlanV3 {
                 proposal: self.proposal.clone(),
                 participants: self.participants.clone(),
             };
-            checked = Some(plan.validate()?);
+            checked = Some(plan.validate_retained_economics()?);
         }
         checked.ok_or_else(invalid)
     }

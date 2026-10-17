@@ -7,7 +7,7 @@ use crate::account::birth::enrollment::roster_v2::inventory::common_context_reen
 use crate::consent_journal::{
     CommonContextReentryAuditPhaseV1 as Phase, CommonContextReentrySignerAuditV1 as Row,
 };
-use crate::{ipc::AuthenticatedPeer, Error, Result};
+use crate::{Error, Result, ipc::AuthenticatedPeer};
 use serde::{Deserialize, Serialize};
 use std::{
     io::Write,
@@ -17,8 +17,8 @@ use std::{
 };
 use wholepact_authority::construction_transport_handoff_v1::*;
 use wholepact_authority::manual_roster_construction_v3::{
-    construction_consume_operation_id_v3, ManualRosterConstructionConsumeRequestV3,
-    ManualRosterConstructionReservationRequestV3,
+    ManualRosterConstructionConsumeRequestV3, ManualRosterConstructionReservationRequestV3,
+    construction_consume_operation_id_v3,
 };
 use wholepact_authority::transport::{
     ObservedConstructionTransportV1, PreparedConstructionTransportHandoffV1,
@@ -31,8 +31,8 @@ use wholepact_core::common_context_reentry_v1::{
 };
 use wholepact_core::manual_roster_construction_v3::ManualRosterConstructionRequestV3;
 use wholepact_signer_origin::common_context_reentry_v1::{
-    RosterCommonContextReentryResponseV1, RosterReenteredConstructionEvidenceV1,
-    RosterReenteredConstructionResponseV1, MAX_COMMON_CONTEXT_REENTRY_FRAME,
+    MAX_COMMON_CONTEXT_REENTRY_FRAME, RosterCommonContextReentryResponseV1,
+    RosterReenteredConstructionEvidenceV1, RosterReenteredConstructionResponseV1,
 };
 use wholepact_signer_origin::manual_roster_construction_v3::ManualRosterConstructionContributionEvidenceV3;
 use zeroize::Zeroizing;
@@ -132,7 +132,11 @@ pub(super) struct PreparedCommonContextWitnessV1 {
     stream: UnixStream,
     request: RosterCommonContextReentryRequestV1,
     pending: PendingConstructionTransportGrantV1,
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    qualification_scope:
+        Option<wholepact_authority::native_witness_owner::EphemeralConstructionClientScopeV1>,
     client: AuthorityClient,
+    owner_client: AuthorityClient,
     cancellation: wholepact_authority::transport::ConstructionTransportCancellationV1,
     signer: PinnedOwnerSigner,
     native: NativeAuthorityBinding,
@@ -169,7 +173,11 @@ impl PreparedCommonContextWitnessV1 {
             || request.requested_at_ms < pending.grant.granted_at_ms
             || pending.grant.native_review_digest == read.native_review_digest
             || pending.grant.native_review_digest
-                == pending.grant.authorization.authorization.native_review_digest
+                == pending
+                    .grant
+                    .authorization
+                    .authorization
+                    .native_review_digest
             || request.current_caller_binding_digest
                 != wholepact_signer_origin::manual_current_caller_binding_digest(
                     &peer.grant_id,
@@ -222,6 +230,34 @@ impl PreparedCommonContextWitnessV1 {
             disclosure.policy_digest.clone(),
         )
         .map_err(|_| Error::InvalidData)?;
+        let owner_certificate = read_credential(&setup.owner_certificate_der)?;
+        if wholepact_authority::transport::certificate_digest(&CertificateDer::from(
+            owner_certificate.as_slice(),
+        )) != terms.signer.owner_certificate_digest
+        {
+            return Err(Error::Authentication);
+        }
+        let owner_key = read_credential(&setup.owner_private_key_pkcs8_der)?;
+        let owner_tls = ClientTls::new(
+            disclosure.server_name.clone(),
+            disclosure.pinned_server_certificate_digest.clone(),
+            vec![CertificateDer::from(root.to_vec())],
+            vec![CertificateDer::from(owner_certificate.to_vec())],
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(owner_key.to_vec())),
+        )
+        .map_err(|_| Error::Authentication)?;
+        let owner_client = AuthorityClient::new(
+            disclosure
+                .endpoint
+                .parse()
+                .map_err(|_| Error::InvalidData)?,
+            owner_tls,
+            disclosure.witness_id.clone(),
+            disclosure.account_id.clone(),
+            disclosure.network_profile_id.clone(),
+            disclosure.policy_digest.clone(),
+        )
+        .map_err(|_| Error::InvalidData)?;
         let signer = PinnedOwnerSigner::open(
             &terms.signer.owner_certificate_digest,
             &setup.owner_certificate_der,
@@ -241,14 +277,24 @@ impl PreparedCommonContextWitnessV1 {
                 native.entry_digest(),
             ),
         )?;
-        let display=Zeroizing::new(format!("CONTACT EXACT ORIGINAL WITNESS FOR ONE EXISTING READ COMPLETION\n{}\n{}\n{}\n\nThis privacy decision contacts only the immutable pinned witness with the original writer identity, retrieves complete current history, and prepares ONE fresh TLS channel. No writer acquisition, renewal, activation or ordinary mutation is allowed. A DIFFERENT exact native review must sign the new actual exporter commitment. Focus loss, cancellation, timeout or uncertainty destroys this source and channel permanently. Original completion expiry: {}.\nExact review: {}",serde_json::to_string_pretty(&disclosure).map_err(|_|Error::InvalidData)?,serde_json::to_string_pretty(&setup).map_err(|_|Error::InvalidData)?,serde_json::to_string_pretty(&pending).map_err(|_|Error::InvalidData)?,read.request.completion_expires_at_ms,digest));
+        let display = Zeroizing::new(format!(
+            "CONTACT EXACT ORIGINAL WITNESS FOR ONE EXISTING READ COMPLETION\n{}\n{}\n{}\n\nThis privacy decision contacts only the immutable pinned witness with the original writer identity, retrieves complete current history, and prepares ONE fresh TLS channel. No writer acquisition, renewal, activation or ordinary mutation is allowed. A DIFFERENT exact native review must sign the new actual exporter commitment. Focus loss, cancellation, timeout or uncertainty destroys this source and channel permanently. Original completion expiry: {}.\nExact review: {}",
+            serde_json::to_string_pretty(&disclosure).map_err(|_| Error::InvalidData)?,
+            serde_json::to_string_pretty(&setup).map_err(|_| Error::InvalidData)?,
+            serde_json::to_string_pretty(&pending).map_err(|_| Error::InvalidData)?,
+            read.request.completion_expires_at_ms,
+            digest
+        ));
         let value = Self {
             source,
             peer,
             stream,
             request,
             pending,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            qualification_scope: None,
             client,
+            owner_client,
             cancellation,
             signer,
             native,
@@ -258,6 +304,80 @@ impl PreparedCommonContextWitnessV1 {
         value.check(owner)?;
         Ok(value)
     }
+    /// Only the finite predecessor-owned fixture can supply this concrete
+    /// one-use witness scope. It creates no source, peer or native decision.
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(in crate::native_ui) fn attach_qualification_scope(
+        &mut self,
+        scope: wholepact_authority::native_witness_owner::EphemeralConstructionClientScopeV1,
+        owner: &PendingAccountNativeAuthority,
+    ) -> Result<()> {
+        self.check(owner)?;
+        if self.qualification_scope.is_some() {
+            return Err(Error::ReviewMismatch);
+        }
+        scope
+            .require_exact_pending(&self.pending)
+            .map_err(|_| Error::ReviewMismatch)?;
+        // Actual-scope negative: valid inert shape, guaranteed other original.
+        // This borrows the scope and cannot consume a grant or open a socket.
+        let mut substituted = self.pending.clone();
+        substituted.committed_head.digest = if substituted.committed_head.digest == "d0".repeat(32)
+        {
+            "d1".repeat(32)
+        } else {
+            "d0".repeat(32)
+        };
+        substituted.validate().map_err(|_| Error::InvalidData)?;
+        if !matches!(
+            scope.require_exact_pending(&substituted),
+            Err(wholepact_authority::AuthorityError::InvalidBinding)
+        ) {
+            return Err(Error::ReviewMismatch);
+        }
+        scope
+            .require_exact_pending(&self.pending)
+            .map_err(|_| Error::ReviewMismatch)?;
+        self.qualification_scope = Some(scope);
+        self.check(owner)
+    }
+
+    fn prepare_transport(
+        &mut self,
+        history: wholepact_authority::ReconciledAuthorityHistory,
+    ) -> Result<PreparedConstructionTransportHandoffV1> {
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        if let Some(scope) = self.qualification_scope.take() {
+            scope
+                .require_exact_pending(&self.pending)
+                .map_err(|_| Error::ReviewMismatch)?;
+            return scope
+                .prepare(
+                    &self.client,
+                    history,
+                    self.request.current_caller_binding_digest.clone(),
+                    self.native.entry_digest().into(),
+                    self.source.completion_deadline(),
+                    self.source.shared_wall_high_water(),
+                    self.cancellation.clone(),
+                )
+                .map_err(|_| Error::Uncertain);
+        }
+        // The production and every unscoped route keep their original global
+        // refusal. No imported pending grant can select the finite route.
+        self.client
+            .prepare_construction_transport_handoff_v1(
+                history,
+                self.pending.clone(),
+                self.request.current_caller_binding_digest.clone(),
+                self.native.entry_digest().into(),
+                self.source.completion_deadline(),
+                self.source.shared_wall_high_water(),
+                self.cancellation.clone(),
+            )
+            .map_err(|_| Error::Uncertain)
+    }
+
     pub(super) fn reviewed_digest(&self) -> &str {
         &self.digest
     }
@@ -275,7 +395,7 @@ impl PreparedCommonContextWitnessV1 {
         Ok(())
     }
     pub(super) fn approve(
-        self,
+        mut self,
         d: NativeDecision,
         owner: &PendingAccountNativeAuthority,
     ) -> Result<PreparedCommonContextClaimV1> {
@@ -292,18 +412,7 @@ impl PreparedCommonContextWitnessV1 {
         self.check(owner)?;
         self.source
             .require_current_handoff_history(&history, &self.pending)?;
-        let prepared = self
-            .client
-            .prepare_construction_transport_handoff_v1(
-                history,
-                self.pending.clone(),
-                self.request.current_caller_binding_digest.clone(),
-                self.native.entry_digest().into(),
-                self.source.completion_deadline(),
-                self.source.shared_wall_high_water(),
-                self.cancellation.clone(),
-            )
-            .map_err(|_| Error::Uncertain)?;
+        let prepared = self.prepare_transport(history)?;
         self.check(owner)?;
         let digest = canonical(
             "wholepact:native-common-context-exact-channel-claim:v1",
@@ -315,12 +424,24 @@ impl PreparedCommonContextWitnessV1 {
             ),
         )?;
         if digest == self.source.original_read().native_review_digest
-            || digest == self.pending.grant.authorization.authorization.native_review_digest
+            || digest
+                == self
+                    .pending
+                    .grant
+                    .authorization
+                    .authorization
+                    .native_review_digest
             || digest == self.pending.grant.native_review_digest
         {
             return Err(Error::ReviewMismatch);
         }
-        let display=Zeroizing::new(format!("CLAIM ONE EXACT NEW CONSTRUCTION TRANSPORT KEY\n{}\n{}\n\nThis NEW owner signature binds the displayed actual TLS exporter commitment and immutable pending-grant POST-APPEND head. It permanently fences the original general transport key and grants only one exact observation and original V3 Reserve/Consume pair. It cannot renew the unchanged original session, acquire general writer authority, sign a transaction, disclose another wallet read, change inputs, reset budget or dispatch. The prepared channel has its ORIGINAL ten-second total budget; review never renews it. The full proposal still needs a separate native decision.\nExact review: {}",serde_json::to_string_pretty(prepared.unsigned_claim_binding()).map_err(|_|Error::InvalidData)?,serde_json::to_string_pretty(&self.pending).map_err(|_|Error::InvalidData)?,digest));
+        let display = Zeroizing::new(format!(
+            "CLAIM ONE EXACT NEW CONSTRUCTION TRANSPORT KEY\n{}\n{}\n\nThis NEW owner signature binds the displayed actual TLS exporter commitment and immutable pending-grant POST-APPEND head. It permanently fences the original general transport key and grants only one exact observation and original V3 Reserve/Consume pair. It cannot renew the unchanged original session, acquire general writer authority, sign a transaction, disclose another wallet read, change inputs, reset budget or dispatch. The prepared channel has its ORIGINAL ten-second total budget; review never renews it. The full proposal still needs a separate native decision.\nExact review: {}",
+            serde_json::to_string_pretty(prepared.unsigned_claim_binding())
+                .map_err(|_| Error::InvalidData)?,
+            serde_json::to_string_pretty(&self.pending).map_err(|_| Error::InvalidData)?,
+            digest
+        ));
         Ok(PreparedCommonContextClaimV1 {
             source: self.source,
             peer: self.peer,
@@ -328,6 +449,7 @@ impl PreparedCommonContextWitnessV1 {
             request: self.request,
             prepared,
             signer: self.signer,
+            owner_client: self.owner_client,
             native: self.native,
             digest,
             display,
@@ -336,6 +458,7 @@ impl PreparedCommonContextWitnessV1 {
 }
 
 pub(super) struct PreparedCommonContextClaimV1 {
+    owner_client: AuthorityClient,
     source: FreshCommonContextReentrySource,
     peer: AuthenticatedPeer,
     stream: UnixStream,
@@ -480,11 +603,15 @@ impl PreparedCommonContextClaimV1 {
             native: self.native,
             lineage,
             observed,
+            owner_client: self.owner_client,
+            signer: self.signer,
         })
     }
 }
 
 pub(super) struct ReenteredCommonContextOwnerV1 {
+    owner_client: AuthorityClient,
+    signer: PinnedOwnerSigner,
     source: FreshCommonContextReentrySource,
     peer: AuthenticatedPeer,
     native: NativeAuthorityBinding,
@@ -502,16 +629,14 @@ impl ReenteredCommonContextOwnerV1 {
         }
         Ok(())
     }
-    pub(super) fn prepare(
-        self,
-        peer: AuthenticatedPeer,
-        stream: UnixStream,
-        request: ManualRosterConstructionRequestV3,
+    /// Original request/lineage predicate only. It borrows the real retained
+    /// owner and never reconstructs its lineage from the supplied digest.
+    fn require_exact_request(
+        &self,
+        peer: &AuthenticatedPeer,
+        request: &ManualRosterConstructionRequestV3,
         lineage_digest: &str,
-        owner: &PendingAccountNativeAuthority,
-    ) -> Result<PreparedReenteredConstructionV1> {
-        self.check(owner)?;
-        connected(&stream, &peer)?;
+    ) -> Result<()> {
         request.validate().map_err(|_| Error::InvalidData)?;
         if peer.grant_id != self.peer.grant_id
             || lineage_digest != self.lineage.digest().map_err(|_| Error::InvalidData)?
@@ -523,6 +648,19 @@ impl ReenteredCommonContextOwnerV1 {
         {
             return Err(Error::ReviewMismatch);
         }
+        Ok(())
+    }
+    pub(super) fn prepare(
+        self,
+        peer: AuthenticatedPeer,
+        stream: UnixStream,
+        request: ManualRosterConstructionRequestV3,
+        lineage_digest: &str,
+        owner: &PendingAccountNativeAuthority,
+    ) -> Result<PreparedReenteredConstructionV1> {
+        self.check(owner)?;
+        connected(&stream, &peer)?;
+        self.require_exact_request(&peer, &request, lineage_digest)?;
         self.source.require_exact_change(&request)?;
         let extension = self.source.retained().record().extension()?;
         self.observed
@@ -546,7 +684,12 @@ impl ReenteredCommonContextOwnerV1 {
                 self.native.entry_digest(),
             ),
         )?;
-        let display=Zeroizing::new(format!("APPROVE EXACT FULL COMMON-CONTEXT CONSTRUCTION\n{}\n\nThis is a separate full-proposal financial exposure decision AFTER read admission and transport handoff. Review every recipient, amount, fee, owned input/nullifier, same-account return, original target/anchor/expiry and disclosure destination. This reserves conservative lifetime exposure, then consumes it once for NON-SIGNING construction. Failure, cancel or lost response never refunds that charge or permits a second attempt. No additional read, wallet selection, transaction signature, proof or dispatch is allowed. The original session and original completion ceiling remain unchanged.\nExact old-read/new-native lineage:\n{}\nExact review: {}",serde_json::to_string_pretty(&request).map_err(|_|Error::InvalidData)?,serde_json::to_string_pretty(&self.lineage).map_err(|_|Error::InvalidData)?,digest));
+        let display = Zeroizing::new(format!(
+            "APPROVE EXACT FULL COMMON-CONTEXT CONSTRUCTION\n{}\n\nThis is a separate full-proposal financial exposure decision AFTER read admission and transport handoff. Review every recipient, amount, fee, owned input/nullifier, same-account return, original target/anchor/expiry and disclosure destination. This reserves conservative lifetime exposure, then consumes it once for NON-SIGNING construction. Failure, cancel or lost response never refunds that charge or permits a second attempt. No additional read, wallet selection, transaction signature, proof or dispatch is allowed. The original session and original completion ceiling remain unchanged.\nExact old-read/new-native lineage:\n{}\nExact review: {}",
+            serde_json::to_string_pretty(&request).map_err(|_| Error::InvalidData)?,
+            serde_json::to_string_pretty(&self.lineage).map_err(|_| Error::InvalidData)?,
+            digest
+        ));
         Ok(PreparedReenteredConstructionV1 {
             owner: self,
             stream,
@@ -564,6 +707,44 @@ pub(super) struct PreparedReenteredConstructionV1 {
     display: Zeroizing<String>,
 }
 impl PreparedReenteredConstructionV1 {
+    /// Borrow this actual prepared request/owner before native authorization.
+    /// No Reserve/Consume, transport claim, owner clone or attempted retry occurs.
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(in crate::native_ui) fn qualification_check_wrong_lineage(
+        &self,
+        owner: &PendingAccountNativeAuthority,
+    ) -> Result<()> {
+        self.owner.check(owner)?;
+        connected(&self.stream, &self.owner.peer)?;
+        self.review_json()?;
+        let lineage_digest = self
+            .owner
+            .lineage
+            .digest()
+            .map_err(|_| Error::InvalidData)?;
+        self.owner
+            .require_exact_request(&self.owner.peer, &self.request, &lineage_digest)?;
+        let wrong_lineage = if lineage_digest == "c0".repeat(32) {
+            "c1".repeat(32)
+        } else {
+            "c0".repeat(32)
+        };
+        wholepact_core::proposal::validate_sha256(&wrong_lineage)
+            .map_err(|_| Error::InvalidData)?;
+        if !matches!(
+            self.owner
+                .require_exact_request(&self.owner.peer, &self.request, &wrong_lineage),
+            Err(Error::ReviewMismatch)
+        ) {
+            return Err(Error::ReviewMismatch);
+        }
+        self.owner
+            .require_exact_request(&self.owner.peer, &self.request, &lineage_digest)?;
+        self.owner.check(owner)?;
+        connected(&self.stream, &self.owner.peer)?;
+        self.review_json()?;
+        Ok(())
+    }
     pub(super) fn reviewed_digest(&self) -> &str {
         &self.digest
     }
@@ -582,7 +763,7 @@ impl PreparedReenteredConstructionV1 {
         mut self,
         d: NativeDecision,
         owner: &PendingAccountNativeAuthority,
-    ) -> Result<()> {
+    ) -> Result<super::named_continuation::ConsumedBornNamedOwnerV1> {
         self.owner.check(owner)?;
         connected(&self.stream, &self.owner.peer)?;
         self.review_json()?;
@@ -737,7 +918,7 @@ impl PreparedReenteredConstructionV1 {
             &mut self.stream,
             &self.owner.peer,
             &RosterReenteredConstructionResponseV1::ReenteredConstructionConsumedV1 {
-                evidence: Box::new(evidence),
+                evidence: Box::new(evidence.clone()),
             },
             source.completion_deadline(),
             || {
@@ -745,6 +926,13 @@ impl PreparedReenteredConstructionV1 {
                     .check_current()
                     .map_err(|_| Error::ReviewMismatch)
             },
+        )?;
+        let source = source.into_named_recipient_after_consumed(evidence, owner)?;
+        super::named_continuation::ConsumedBornNamedOwnerV1::from_consumed(
+            source,
+            self.owner.owner_client,
+            self.owner.signer,
+            owner,
         )
     }
 }
@@ -760,24 +948,30 @@ mod native_decision_tests {
         let other = recovery_test_authority();
         let old_read = "a1".repeat(32);
         let exact_claim = "a2".repeat(32);
-        assert!(decision(
-            &recovery_test_decision(&current, &old_read),
-            &current.binding(),
-            &exact_claim
-        )
-        .is_err());
-        assert!(decision(
-            &recovery_test_decision(&other, &exact_claim),
-            &current.binding(),
-            &exact_claim
-        )
-        .is_err());
-        assert!(decision(
-            &recovery_test_decision(&current, &exact_claim),
-            &current.binding(),
-            &exact_claim
-        )
-        .is_ok());
+        assert!(
+            decision(
+                &recovery_test_decision(&current, &old_read),
+                &current.binding(),
+                &exact_claim
+            )
+            .is_err()
+        );
+        assert!(
+            decision(
+                &recovery_test_decision(&other, &exact_claim),
+                &current.binding(),
+                &exact_claim
+            )
+            .is_err()
+        );
+        assert!(
+            decision(
+                &recovery_test_decision(&current, &exact_claim),
+                &current.binding(),
+                &exact_claim
+            )
+            .is_ok()
+        );
     }
     #[test]
     fn credential_selection_rejects_caller_supplied_completion_or_authority_flags() {

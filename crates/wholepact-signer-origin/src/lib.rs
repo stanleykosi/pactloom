@@ -16,9 +16,9 @@ pub mod manual_inventory;
 pub mod manual_roster_v2;
 pub mod native_launch;
 pub mod native_peer;
+pub mod permanent_stop_v1;
 pub mod provider;
 pub mod retirement_evidence;
-pub mod permanent_stop_v1;
 pub use client::{
     ManualActionLease, ManualCandidateSelectionLease, ManualEnrollmentContinuationLeaseV2,
     ManualEnrollmentLease, ManualPreliminaryInventoryLease, NativeManualClient, PairScope,
@@ -26,13 +26,18 @@ pub use client::{
     PendingManualEnrollmentContinuationV2, PendingManualPreliminaryInventory,
     PendingNativeManualPair, manual_current_caller_binding_digest,
 };
-pub use client::{ManualRosterEnrollmentLeaseV2, PendingManualRosterEnrollmentV2, PendingPermanentStopV1, PermanentStopLeaseV1};
+pub use client::{
+    ManualRosterEnrollmentLeaseV2, PendingManualRosterEnrollmentV2, PendingPermanentStopV1,
+    PermanentStopLeaseV1,
+};
 pub use provider::{InstalledSignerProvider, SignerProviderInstallRequest};
 
 pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("permanent routine-use exclusion transport is unavailable pending attended native and kernel qualification")]
+    #[error(
+        "permanent routine-use exclusion transport is unavailable pending attended native and kernel qualification"
+    )]
     PermanentStopUnavailable,
     #[error("retirement evidence transport is unavailable pending native and kernel qualification")]
     RetirementEvidenceUnavailable,
@@ -142,3 +147,6 @@ pub use client::{
 
 pub mod named_verifier_policy;
 pub use client::{NamedVerifierPolicyLease, PendingNamedVerifierPolicy};
+
+// Raw bounded local transport only; installed peer authentication is separate.
+pub use client::connect_local_checked_until;

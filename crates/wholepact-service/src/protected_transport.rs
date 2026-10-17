@@ -2,12 +2,12 @@
 //! opaque handles. No key, ciphertext, filename, arbitrary path, clock value or
 //! caller-supplied approval crosses the browser request boundary.
 #[cfg(all(feature = "signer-release", target_os = "linux"))]
-pub mod signature_intake;
-#[cfg(all(feature = "signer-release", target_os = "linux"))]
 mod authorization;
+pub mod portable;
 #[cfg(feature = "proposal-review")]
 mod proposal_review;
-pub mod portable;
+#[cfg(all(feature = "signer-release", target_os = "linux"))]
+pub mod signature_intake;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
@@ -16,14 +16,14 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use wholepact_engine::{
-    transport_workflows::{InvitationExportRequest, TransportImportRequirements},
     Access, ApiError, Engine, Mutation,
+    transport_workflows::{InvitationExportRequest, TransportImportRequirements},
 };
 use wholepact_transport::{
-    open_envelope, random_message_id, recover_received, ArtifactKind, DeliveryStatus,
-    DisclosureField, DisclosurePreview, DomainImportResult, DomainOutcome, EncryptedEnvelope,
-    MailboxProtection, MessageContext, PreparedExport, RecoveredArtifact, SqliteOutbox,
-    SqliteReplayLedger, Timestamp, TransportError, TransportPublicKey, TransportSecret,
+    ArtifactKind, DeliveryStatus, DisclosureField, DisclosurePreview, DomainImportResult,
+    DomainOutcome, EncryptedEnvelope, MailboxProtection, MessageContext, PreparedExport,
+    RecoveredArtifact, SqliteOutbox, SqliteReplayLedger, Timestamp, TransportError,
+    TransportPublicKey, TransportSecret, open_envelope, random_message_id, recover_received,
 };
 
 type Result<T> = std::result::Result<T, ApiError>;
@@ -170,6 +170,22 @@ pub struct ProtectedTransportRuntime {
     staged: BTreeMap<String, StagedEntry>,
 }
 impl ProtectedTransportRuntime {
+    /// Read-only identity of the actual factory-authenticated original outbox.
+    /// Native purpose-specific adapters may compare their second authenticated
+    /// handle to this owner. This exposes no connection, key or export authority.
+    pub fn original_outbox_identity(
+        &self,
+    ) -> Result<wholepact_storage_security::DatabaseFileIdentity> {
+        self.outbox.database_identity().map_err(transport_error)
+    }
+
+    /// Read-only identity, never a key, writer or qualified-import capability.
+    pub fn original_inbox_identity(
+        &self,
+    ) -> Result<wholepact_storage_security::DatabaseFileIdentity> {
+        self.inbox.database_identity().map_err(transport_error)
+    }
+
     pub fn new(
         engine: Engine,
         inbox: SqliteReplayLedger,
@@ -204,11 +220,16 @@ impl ProtectedTransportRuntime {
     /// authenticate the exact same database as the ordinary transport owner.
     #[cfg(all(feature = "signer-release", target_os = "linux"))]
     pub fn new_with_signer_release(
-        engine: Engine, inbox: SqliteReplayLedger, outbox: SqliteOutbox,
+        engine: Engine,
+        inbox: SqliteReplayLedger,
+        outbox: SqliteOutbox,
         authorization_outbox: wholepact_signer_release::AuthorizationOutbox,
-        keys: Arc<dyn LocalTransportKeyController>, consent: Arc<dyn LocalTransportConsent>,
+        keys: Arc<dyn LocalTransportKeyController>,
+        consent: Arc<dyn LocalTransportConsent>,
     ) -> Result<Self> {
-        authorization_outbox.check_binding(&outbox).map_err(transport_error)?;
+        authorization_outbox
+            .check_binding(&outbox)
+            .map_err(transport_error)?;
         let mut runtime = Self::new(engine, inbox, outbox, keys, consent)?;
         runtime.authorization_outbox = Some(authorization_outbox);
         Ok(runtime)
@@ -347,7 +368,10 @@ impl ProtectedTransportRuntime {
         if binding.direction != TransportDirection::Incoming
             || !nonbinding(binding.context.artifact_kind)
         {
-            return Err(ApiError::new("UNSUPPORTED_CAPABILITY", "Only staged nonbinding intents or withdrawals can be imported through this endpoint"));
+            return Err(ApiError::new(
+                "UNSUPPORTED_CAPABILITY",
+                "Only staged nonbinding intents or withdrawals can be imported through this endpoint",
+            ));
         }
         let keys = self.current_keys(access, &binding)?;
         let recovered = self.recover(&binding, &keys)?;
@@ -404,7 +428,10 @@ impl ProtectedTransportRuntime {
         self.reserve_handle()?;
         if !nonbinding(expected.artifact_kind) && expected.artifact_kind != ArtifactKind::Invitation
         {
-            return Err(ApiError::new("UNSUPPORTED_CAPABILITY", "This protected runtime only stages invitations and nonbinding participation messages"));
+            return Err(ApiError::new(
+                "UNSUPPORTED_CAPABILITY",
+                "This protected runtime only stages invitations and nonbinding participation messages",
+            ));
         }
         let keys = self.keys.keys(&TransportKeyScope {
             principal_id: access.principal_id.clone(),

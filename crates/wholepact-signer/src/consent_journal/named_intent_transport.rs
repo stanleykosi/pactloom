@@ -48,3 +48,31 @@ pub(super) fn seal_original_return(
     }
     prepared.seal_qualified(sender, approved_preview_digest, now)
 }
+
+/// Purpose-distinct born owner only, after durable original Started and exact
+/// maintained signature inspection. Generic/public return sealing stays denied.
+pub(super) fn seal_born_return(
+    prepared: PreparedExport,
+    sender: &TransportSecret,
+    approved_preview_digest: &str,
+    now: &Timestamp,
+) -> Result<EncryptedEnvelope> {
+    if prepared.preview().context.artifact_kind != ArtifactKind::BornOfflineAuthorizationReturnV1 {
+        return Err(TransportError::AuthorityUnavailable);
+    }
+    prepared.seal_qualified(sender, approved_preview_digest, now)
+}
+
+/// Purpose-distinct first born original only. The private native importer owns
+/// genuine approval, exact checkpoint receipt and atomic first-original rows.
+pub(super) fn seal_born_original_intent(
+    prepared: PreparedExport,
+    sender: &TransportSecret,
+    approved_preview_digest: &str,
+    now: &Timestamp,
+) -> Result<EncryptedEnvelope> {
+    if prepared.preview().context.artifact_kind != ArtifactKind::BornOfflineIntentV1 {
+        return Err(TransportError::AuthorityUnavailable);
+    }
+    prepared.seal_qualified(sender, approved_preview_digest, now)
+}

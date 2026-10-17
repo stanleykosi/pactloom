@@ -2,10 +2,10 @@
 //! transport handoff. The old read decision cannot authorize this signature.
 use super::super::{NativeAuthorityBinding, NativeDecision, PendingAccountNativeAuthority};
 use crate::account::birth::enrollment::roster_v2::inventory::{
-    common_context_reentry_v1::OriginalCommonContextHandoffSource, BornRosterInventorySourceV2,
+    BornRosterInventorySourceV2, common_context_reentry_v1::OriginalCommonContextHandoffSource,
 };
-use crate::{ipc::AuthenticatedPeer, Error, Result};
-use rustls::{sign::Signer, SignatureScheme};
+use crate::{Error, Result, ipc::AuthenticatedPeer};
+use rustls::{SignatureScheme, sign::Signer};
 use std::{
     io::Write,
     os::unix::net::UnixStream,
@@ -13,8 +13,8 @@ use std::{
     time::{Duration, Instant},
 };
 use wholepact_authority::construction_transport_handoff_v1::{
-    construction_transport_preauthorization_signing_bytes_v1,
     ConstructionTransportPreauthorizationV1, SignedConstructionTransportPreauthorizationV1,
+    construction_transport_preauthorization_signing_bytes_v1,
 };
 use wholepact_authority::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use wholepact_signer_origin::common_context_handoff_v1::{
@@ -29,6 +29,28 @@ pub(super) struct PinnedOwnerSigner {
     pin: String,
 }
 impl PinnedOwnerSigner {
+    #[cfg(feature = "offline-review-foundation")]
+    pub(super) fn sign_born_enrollment(
+        &self,
+        prepared: crate::consent_journal::PreparedBornOfflineOwnerEnrollmentV1,
+        decision: NativeDecision,
+        actual: &super::named_continuation::ConsumedBornNamedOwnerV1,
+        owner: &PendingAccountNativeAuthority,
+    ) -> Result<wholepact_authority::born_offline_enrollment_signature_v1::BornOfflineEnrollmentOwnerSignatureV1>{
+        if self.pin != actual.source().genesis().owner_certificate_digest {
+            return Err(Error::Authentication);
+        }
+        prepared.approve_and_sign(
+            decision,
+            actual.source(),
+            owner,
+            actual.session()?,
+            actual.client(),
+            self.signer.as_ref(),
+            &self.certificate,
+        )
+    }
+
     pub(super) fn open(pin: &str, certificate_path: &Path, key_path: &Path) -> Result<Self> {
         let certificate =
             super::super::witness_workspace::read_private_credential(certificate_path)?;
@@ -58,7 +80,7 @@ impl PinnedOwnerSigner {
         wholepact_authority::construction_transport_handoff_v1::SignedConstructionTransportClaimV1,
     > {
         use wholepact_authority::construction_transport_handoff_v1::{
-            construction_transport_claim_signing_bytes_v1, SignedConstructionTransportClaimV1,
+            SignedConstructionTransportClaimV1, construction_transport_claim_signing_bytes_v1,
         };
         let bytes = construction_transport_claim_signing_bytes_v1(&claim)
             .map_err(|_| Error::InvalidData)?;
@@ -209,8 +231,10 @@ impl PreparedCommonContextHandoffAuthorizationV1 {
         )?;
         let display = Zeroizing::new(format!(
             "AUTHORIZE ONE FUTURE CONSTRUCTION-ONLY TRANSPORT HANDOFF\n{}\n\nThis is a NEW consent, separate from the privacy read. It signs and sends this exact bounded authorization to the same paired Host for relay to your independently selected witness owner. The witness must separately approve one inert grant only after every participant's actual read observation exists. The receipt above proves read admission, never provider-read completion or usable inputs.\n\nA future fresh unlock, exact source/journal verification, new native decision and new TLS-bound original-owner signature remain mandatory. Claiming the grant permanently fences the original transport key, preserving its history and all exposure. No account key or new exporter is transmitted here. No provider read, new note selection, transaction signature, proof, dispatch, ordinary writer authority, budget reset or deadline renewal is permitted. Original expiry: {}.\nActual process:\n{}\nExact review: {}",
-            serde_json::to_string_pretty(&authorization).map_err(|_|Error::InvalidData)?, expires_at_ms,
-            serde_json::to_string_pretty(pairing.binding()).map_err(|_|Error::InvalidData)?, digest,
+            serde_json::to_string_pretty(&authorization).map_err(|_| Error::InvalidData)?,
+            expires_at_ms,
+            serde_json::to_string_pretty(pairing.binding()).map_err(|_| Error::InvalidData)?,
+            digest,
         ));
         let value = Self {
             source,
@@ -250,6 +274,46 @@ impl PreparedCommonContextHandoffAuthorizationV1 {
             .map_err(|_| Error::Authentication)?;
         self.review_json()?;
         Ok(())
+    }
+    /// Borrow the actual prepared source before any NativeDecision. Validly
+    /// shaped substitutions must fail the SAME predicate used by prepare; the
+    /// unchanged actual input must still pass. No phase or owner is replaced.
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(in crate::native_ui) fn qualification_check_wrong_read_and_caller(
+        &self,
+        owner: &PendingAccountNativeAuthority,
+    ) -> Result<()> {
+        self.check(owner)?;
+        let read_digest = &self.authorization.read_evidence_digest;
+        let caller_digest = &self.authorization.original_caller_binding_digest;
+        self.source
+            .require_exact_read_for_qualification(read_digest, caller_digest)?;
+        let wrong_read = if read_digest == &"a0".repeat(32) {
+            "a1".repeat(32)
+        } else {
+            "a0".repeat(32)
+        };
+        let wrong_caller = if caller_digest == &"b0".repeat(32) {
+            "b1".repeat(32)
+        } else {
+            "b0".repeat(32)
+        };
+        wholepact_core::proposal::validate_sha256(&wrong_read).map_err(|_| Error::InvalidData)?;
+        wholepact_core::proposal::validate_sha256(&wrong_caller).map_err(|_| Error::InvalidData)?;
+        if !matches!(
+            self.source
+                .require_exact_read_for_qualification(&wrong_read, caller_digest),
+            Err(Error::ReviewMismatch)
+        ) || !matches!(
+            self.source
+                .require_exact_read_for_qualification(read_digest, &wrong_caller),
+            Err(Error::ReviewMismatch)
+        ) {
+            return Err(Error::ReviewMismatch);
+        }
+        self.source
+            .require_exact_read_for_qualification(read_digest, caller_digest)?;
+        self.check(owner)
     }
     pub(super) fn approve_and_serve(
         self,

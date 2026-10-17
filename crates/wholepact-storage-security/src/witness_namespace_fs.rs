@@ -18,6 +18,11 @@ use std::{
 };
 use zeroize::Zeroizing;
 
+#[cfg(feature = "synthetic-qualification")]
+mod ephemeral_qualification;
+#[cfg(feature = "synthetic-qualification")]
+pub use ephemeral_qualification::EphemeralWitnessInstallation;
+
 const ROOT_NAME: &str = ".wholepact-witness";
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -29,6 +34,8 @@ pub struct DirectoryStamp {
 pub struct InstallationProbe {
     home_path: PathBuf,
     home: File,
+    #[cfg(feature = "synthetic-qualification")]
+    _ephemeral_qualification: Option<std::sync::Arc<EphemeralWitnessInstallation>>,
 }
 pub struct InstallationFiles {
     probe: InstallationProbe,
@@ -39,6 +46,9 @@ pub struct InstallationFiles {
     instance_id: String,
     root_stamp: DirectoryStamp,
     journals_stamp: DirectoryStamp,
+    // Last so all held descriptors close before the test directory can vanish.
+    #[cfg(feature = "synthetic-qualification")]
+    _ephemeral_qualification: Option<std::sync::Arc<EphemeralWitnessInstallation>>,
 }
 impl InstallationProbe {
     /// Resolves the OS password database, ignoring mutable process environment.
@@ -48,7 +58,12 @@ impl InstallationProbe {
         let home = open_directory_walk(&home_path)?;
         home_metadata(&home)?;
         home.try_lock().map_err(|_| E::UnsafePath)?;
-        let this = Self { home_path, home };
+        let this = Self {
+            home_path,
+            home,
+            #[cfg(feature = "synthetic-qualification")]
+            _ephemeral_qualification: None,
+        };
         this.check_current()?;
         Ok(this)
     }
@@ -129,6 +144,8 @@ fn assemble(
     let root_path = probe.root_path();
     let root_stamp = stamp(&private_directory(&root)?);
     let journals_stamp = stamp(&private_directory(&journals)?);
+    #[cfg(feature = "synthetic-qualification")]
+    let ephemeral_qualification = probe._ephemeral_qualification.clone();
     let out = InstallationFiles {
         probe,
         root,
@@ -138,6 +155,8 @@ fn assemble(
         instance_id,
         root_stamp,
         journals_stamp,
+        #[cfg(feature = "synthetic-qualification")]
+        _ephemeral_qualification: ephemeral_qualification,
     };
     out.check_current()?;
     Ok(out)
@@ -196,26 +215,68 @@ impl InstallationFiles {
 /// Existing independent storage secret only. Never generated here, never a
 /// wallet/spending key. Bounded regular private single-link file, no symlinks.
 pub fn read_existing_storage_key(path: &Path) -> Result<Zeroizing<[u8; 32]>> {
+    let bytes = read_existing_private_file(path, 32)?;
+    if bytes.len() != 32 {
+        return Err(E::AuthenticationFailed);
+    }
+    let mut key = Zeroizing::new([0u8; 32]);
+    key.copy_from_slice(&bytes);
+    if *key == [0u8; 32] {
+        return Err(E::AuthenticationFailed);
+    }
+    Ok(key)
+}
+
+/// Bounded existing private input only. No create, chmod, symlink following,
+/// credential generation or installation. Every path component is opened via
+/// no-follow directory handles; the file and parent are rechecked after reading.
+/// Intended for operator-selected protected config and TLS inputs as well as
+/// the original fixed-width namespace key. Plain bytes are wiped on normal drop.
+pub fn read_existing_private_file(path: &Path, maximum_bytes: usize) -> Result<Zeroizing<Vec<u8>>> {
+    if maximum_bytes == 0 || maximum_bytes > 1_048_576 {
+        return Err(E::UnsafePath);
+    }
     let parent = path.parent().ok_or(E::UnsafePath)?;
     let name = path
         .file_name()
         .and_then(|v| v.to_str())
         .ok_or(E::UnsafePath)?;
     let directory = open_directory_walk(parent)?;
-    private_directory(&directory)?;
+    let parent_before = private_directory(&directory)?;
     let mut file = open_at(&directory, name, libc::O_RDONLY)?;
-    if private_file(&file)?.len() != 32 {
+    let before = private_file(&file)?;
+    if before.len() == 0 || before.len() > maximum_bytes as u64 {
         return Err(E::AuthenticationFailed);
     }
-    let mut key = Zeroizing::new([0u8; 32]);
-    file.read_exact(&mut *key).map_err(|_| E::Io)?;
-    if *key == [0u8; 32] {
+    let mut bytes = Zeroizing::new(Vec::with_capacity(before.len() as usize));
+    (&mut file)
+        .take(maximum_bytes as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| E::Io)?;
+    let after = private_file(&file)?;
+    let reopened_parent = open_directory_walk(parent)?;
+    same(&parent_before, &private_directory(&reopened_parent)?)?;
+    let reopened = open_at(&reopened_parent, name, libc::O_RDONLY)?;
+    let reopened_metadata = private_file(&reopened)?;
+    same(&before, &after)?;
+    same(&before, &reopened_metadata)?;
+    for current in [&after, &reopened_metadata] {
+        if current.len() != before.len()
+            || current.len() != bytes.len() as u64
+            || current.mtime() != before.mtime()
+            || current.mtime_nsec() != before.mtime_nsec()
+            || current.ctime() != before.ctime()
+            || current.ctime_nsec() != before.ctime_nsec()
+        {
+            return Err(E::SourceChanged);
+        }
+    }
+    if bytes.len() > maximum_bytes {
         return Err(E::AuthenticationFailed);
     }
-    let now = open_at(&directory, name, libc::O_RDONLY)?;
-    same(&private_file(&file)?, &private_file(&now)?)?;
-    Ok(key)
+    Ok(bytes)
 }
+
 fn os_home() -> Result<PathBuf> {
     // SAFETY: geteuid has no pointer inputs or side effects.
     let uid = unsafe { libc::geteuid() };
@@ -383,4 +444,64 @@ mod tests {
     }
     // Never call fixed_user_installation/create_once from these synthetic tests:
     // they must not touch the real OS user's canonical installation directory.
+}
+
+#[cfg(test)]
+mod private_input_tests {
+    use super::*;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    fn fixture() -> (tempfile::TempDir, PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let path = root.path().join("public-synthetic-input");
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .unwrap();
+        file.write_all(b"explicit public synthetic data").unwrap();
+        file.sync_all().unwrap();
+        (root, path)
+    }
+    #[test]
+    fn bounded_private_input_reads_only_exact_existing_file_and_preserves_bytes() {
+        let (_root, path) = fixture();
+        let before = fs::read(&path).unwrap();
+        let bytes = read_existing_private_file(&path, 64).unwrap();
+        assert_eq!(&*bytes, &before);
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert!(read_existing_private_file(&path, before.len() - 1).is_err());
+        assert!(read_existing_private_file(&path, 0).is_err());
+        assert!(read_existing_private_file(&path, 1_048_577).is_err());
+    }
+    #[test]
+    fn private_input_rejects_symlink_hardlink_public_file_and_public_parent() {
+        let (root, path) = fixture();
+        let alias = root.path().join("alias");
+        symlink(&path, &alias).unwrap();
+        assert!(read_existing_private_file(&alias, 64).is_err());
+        fs::remove_file(&alias).unwrap();
+        fs::hard_link(&path, &alias).unwrap();
+        assert!(read_existing_private_file(&path, 64).is_err());
+        fs::remove_file(alias).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(read_existing_private_file(&path, 64).is_err());
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(read_existing_private_file(&path, 64).is_err());
+    }
+    #[test]
+    fn original_fixed_width_key_reader_keeps_exact_width_and_nonzero_contract() {
+        let (_root, path) = fixture();
+        fs::write(&path, [0u8; 32]).unwrap();
+        assert!(read_existing_storage_key(&path).is_err());
+        // Public repeated bytes are inert parser fixtures, not installed keys.
+        fs::write(&path, [0x51u8; 32]).unwrap();
+        assert_eq!(*read_existing_storage_key(&path).unwrap(), [0x51u8; 32]);
+        fs::write(&path, [0x51u8; 33]).unwrap();
+        assert!(read_existing_storage_key(&path).is_err());
+        fs::write(&path, [0x51u8; 31]).unwrap();
+        assert!(read_existing_storage_key(&path).is_err());
+    }
 }

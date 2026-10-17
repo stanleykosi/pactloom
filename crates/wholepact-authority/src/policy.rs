@@ -48,6 +48,9 @@ impl Ledger {
             .and_then(|(_, _, result)| match result {
                 MutationResult::Reserved(p) => Some(p.writer_session_id.as_str()),
                 MutationResult::OfflineReserved(p) => Some(p.writer_session_id.as_str()),
+                MutationResult::BornOfflineReservedV1(p) => {
+                    Some(p.reserved.writer_session_id.as_str())
+                }
                 MutationResult::DispatchAdmitted(p) => Some(p.writer_session_id.as_str()),
                 MutationResult::AutomaticKeyUseAdmitted(p) => Some(p.writer_session_id.as_str()),
                 _ => None,
@@ -211,6 +214,15 @@ impl Ledger {
                 &r.network_profile_id,
                 peer == &self.snapshot.writer_certificate_digest,
             ),
+            AuthorityMutation::ReserveBornOfflineV1(record) => {
+                let r = &record.request.reservation;
+                (
+                    &r.intent.terms.account_id,
+                    &r.intent.terms.network_profile_id,
+                    self.born_offline_enrollment_v1()?
+                        .is_some_and(|e| peer == e.enrollment.born_transport_certificate_v1()),
+                )
+            }
             AuthorityMutation::ReserveOfflineAuthorization(record) => {
                 let r = &record.request;
                 let original =
@@ -243,6 +255,21 @@ impl Ledger {
                     &r.account_id,
                     &r.network_profile_id,
                     peer == &self.snapshot.writer_certificate_digest || owns_historical_reservation,
+                )
+            }
+            AuthorityMutation::AuthorizeBornOfflineDispatchV1(r) => {
+                let original = self.operations.get(&r.dispatch.operation_id).is_some_and(
+                    |(old, original, _)| {
+                        original == peer
+                            && matches!(old, AuthorityMutation::AuthorizeBornOfflineDispatchV1(_))
+                    },
+                );
+                (
+                    &r.dispatch.account_id,
+                    &r.dispatch.network_profile_id,
+                    self.born_offline_enrollment_v1()?
+                        .is_some_and(|e| peer == e.enrollment.born_transport_certificate_v1())
+                        || original,
                 )
             }
             AuthorityMutation::AuthorizeDispatch(r) => {
@@ -420,6 +447,9 @@ impl Ledger {
                 MutationResult::ManualEnrollmentAdmitted(Box::new(
                     self.apply_manual_admission(r, event, &next_head)?,
                 ))
+            }
+            AuthorityMutation::ReserveBornOfflineV1(r) => {
+                self.reserve_born_offline_v1(r, event, &next_head)?
             }
             AuthorityMutation::ReserveOfflineAuthorization(r) => {
                 self.reserve_offline(r, event, &next_head)?
@@ -633,6 +663,11 @@ impl Ledger {
                 }
                 MutationResult::Reserved(Box::new(permit))
             }
+            AuthorityMutation::AuthorizeBornOfflineDispatchV1(r) => {
+                MutationResult::BornOfflineDispatchAdmittedV1(Box::new(
+                    self.apply_born_dispatch_v1(r, event, &next_head)?,
+                ))
+            }
             AuthorityMutation::AuthorizeDispatch(r) => {
                 r.validate()?;
                 if event.authenticated_certificate_digest != self.snapshot.writer_certificate_digest
@@ -809,6 +844,14 @@ impl Ledger {
                 }
                 self.fence(&r.expected_head, r.writer_epoch)?;
                 match &r.control {
+                    OwnerControl::InstallBornOfflineArtifactsV1 { record } => {
+                        if r.operation_id != record.binding.owner_operation_id()?
+                            || r.expected_head != record.binding.expected_head
+                        {
+                            return Err(AuthorityError::InvalidBinding);
+                        }
+                        self.validate_new_born_offline_artifacts_v1(record, event.witness_time_ms)?;
+                    }
                     OwnerControl::EnrollBornOfflineV1 { record } => {
                         if r.operation_id != record.enrollment.owner_operation_id()?
                             || r.expected_head != record.enrollment.expected_head
@@ -993,6 +1036,7 @@ impl Ledger {
                     &r.control,
                     OwnerControl::ActivateWriter { .. }
                         | OwnerControl::EnrollBornOfflineV1 { .. }
+                        | OwnerControl::InstallBornOfflineArtifactsV1 { .. }
                         | OwnerControl::GrantConstructionTransportV1 { .. }
                         | OwnerControl::ApproveManualRosterConstructionV3 { .. }
                         | OwnerControl::ApproveManualRosterConstructionV2 { .. }
@@ -1036,13 +1080,16 @@ impl Ledger {
             | AuthorityMutation::AdmitBornManualRosterEnrollmentV2(_) => true,
             AuthorityMutation::ReserveAuthorization(_)
             | AuthorityMutation::ReserveOfflineAuthorization(_)
+            | AuthorityMutation::ReserveBornOfflineV1(_)
             | AuthorityMutation::AuthorizeAutomaticKeyUse(_)
             | AuthorityMutation::AuthorizeDispatch(_)
+            | AuthorityMutation::AuthorizeBornOfflineDispatchV1(_)
             | AuthorityMutation::AcquireWriter(_) => true,
             AuthorityMutation::OwnerControl(r) => matches!(
                 &r.control,
                 OwnerControl::ActivateWriter { .. }
                     | OwnerControl::EnrollBornOfflineV1 { .. }
+                    | OwnerControl::InstallBornOfflineArtifactsV1 { .. }
                     | OwnerControl::GrantConstructionTransportV1 { .. }
                     | OwnerControl::ApproveManualRosterConstructionV3 { .. }
                     | OwnerControl::ApproveManualRosterConstructionV2 { .. }

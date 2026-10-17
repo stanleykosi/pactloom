@@ -30,6 +30,11 @@ pub struct BornOfflineEnrollmentV1 {
     pub version: u16,
     pub policy: OfflineEnrollmentPolicy,
     pub assurance: BornOfflineAssuranceV1,
+    /// Explicit new native-approved owner purpose after the old general MAC was fenced.
+    /// Absence preserves the original writer-origin encoding and all its gates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_continuation:
+        Option<crate::born_offline_owner_continuation_v1::BornOfflineOwnerContinuationV1>,
     pub original_policy_digest: String,
     pub account_use_genesis_digest: String,
     pub birth_request_digest: String,
@@ -51,6 +56,9 @@ impl BornOfflineEnrollmentV1 {
     pub fn validate(&self) -> Result<()> {
         self.policy.validate()?;
         self.assurance.validate()?;
+        if let Some(origin) = &self.owner_continuation {
+            origin.validate()?;
+        }
         for h in [
             &self.original_policy_digest,
             &self.account_use_genesis_digest,

@@ -504,6 +504,31 @@ impl ProofJobStore {
         job_id: &str,
         consent: &dyn LocalProofConsent,
     ) -> Result<JobSummary> {
+        self.run_mode(principal, job_id, consent, false)
+    }
+
+    /// One first attempt of an original saved queued job only. Unlike `run`,
+    /// this never retries uncertain work or replays a completed result. The
+    /// exact state/attempt restriction is checked under the SAME immediate
+    /// transaction that admits Running, not a racy external status preflight.
+    /// The embedding still authenticates the actual retained constructor and
+    /// exact saved-scope native permission; job IDs alone grant no permission.
+    pub fn run_original_queued(
+        &self,
+        principal: &str,
+        job_id: &str,
+        consent: &dyn LocalProofConsent,
+    ) -> Result<JobSummary> {
+        self.run_mode(principal, job_id, consent, true)
+    }
+
+    fn run_mode(
+        &self,
+        principal: &str,
+        job_id: &str,
+        consent: &dyn LocalProofConsent,
+        original_queued_only: bool,
+    ) -> Result<JobSummary> {
         let private = {
             let mut connection = self.connection.lock().map_err(|_| JobError::Storage)?;
             let tx = connection
@@ -512,6 +537,11 @@ impl ProofJobStore {
             let r = record(&tx, principal, job_id)?.ok_or(JobError::NotFound)?;
             gate(consent, &r.scope, LocalAction::ProveLocally)?;
             gate(consent, &r.scope, LocalAction::RetainPrivateWitnesses)?;
+            if original_queued_only
+                && (r.summary.state != JobState::Queued || r.summary.attempt != 0)
+            {
+                return Err(JobError::StateConflict);
+            }
             let mut p = private_record(&tx, principal, job_id)?;
             match p.record.summary.state {
                 JobState::Succeeded => {
@@ -877,6 +907,8 @@ fn verify_saved(p: &PrivateRecord) -> Result<()> {
     Ok(())
 }
 
+#[cfg(all(test, target_os = "linux"))]
+mod original_queued_tests;
 #[cfg(all(test, target_os = "linux"))]
 mod tests;
 

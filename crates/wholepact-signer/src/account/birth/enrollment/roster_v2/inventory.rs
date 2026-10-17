@@ -375,6 +375,10 @@ impl PreparedRosterInventoryV2 {
         prepared.check(owner)?;
         Ok(prepared)
     }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(crate) fn synthetic_request(&self) -> &ManualRosterInventoryRequestV2 {
+        &self.request
+    }
     pub(crate) fn reviewed_digest(&self) -> &str {
         &self.digest
     }

@@ -1,6 +1,10 @@
 //! Genuine native pending-account continuation. Reopen authenticates the pending
 //! vault; all decisions originate in this UI's exact two-click review. Worker
 //! handoffs own real vault/owner Arcs, never borrowed/self-referential state.
+#[cfg(feature = "synthetic-born-joined-qualification")]
+#[path = "../qualification/born_pending_continuation.rs"]
+pub(in crate::native_ui) mod born_pending_continuation;
+
 mod export;
 mod history;
 use super::{

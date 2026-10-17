@@ -48,8 +48,16 @@ impl PreparedRosterContributionRetentionV2 {
                 owner.native().measurement(),
             ),
         )?;
+        let retention_notice = if request.selection.scope.selection.version == 2 {
+            format!(
+                "ORIGINAL NONSPENDING RETENTION V2: this exact original retention ceiling is {} Unix milliseconds. It is evidence retention for one later all-observations-first common-context plan, not a longer financial permit. This response retains its original short admission cutoff; later private reads and witness Reserve/Consume each require their separately bounded at-most-30-second admissions. Signing and dispatch remain separate exact approvals. No original clock is renewed.\n\n",
+                request.completion_expires_at_ms()
+            )
+        } else {
+            String::new()
+        };
         let display = Zeroizing::new(format!(
-            "RETAIN THESE EXACT SELECTED INPUTS FOR SEQUENTIAL PROPOSAL ASSEMBLY\n{}\n\nActual paired process:\n{}\n\nApprove the displayed input IDs, nullifiers, values, selected chain context, actual same-account internal change, economic intent, participant roster, original checkpoint destination, provider and private wallet destination. The inputs/context are Host-reported maintained-wallet evidence; this review does not prove unspentness or consensus. The signer independently verifies that the displayed change belongs to this account. This purpose only retains and discloses this exact contribution to the paired local process for the fixed original invocation; it cannot construct, reserve budget, sign, prove, dispatch or spend. Every full-proposal contribution needs separate exact native review and witness Reserve/Consume. Retention stops at the original invocation completion deadline {} and never renews on re-pair, retry, restart or focus change. Cancellation and focus loss stop NEW admission. An already-admitted exact durable write and response may finish after focus changes; disclosed data cannot be recalled. A saved receipt is history, never signing, dispatch or reusable construction authority.\nExact review: {}",
+            "RETAIN THESE EXACT SELECTED INPUTS FOR SEQUENTIAL PROPOSAL ASSEMBLY\n{retention_notice}{}\n\nActual paired process:\n{}\n\nApprove the displayed input IDs, nullifiers, values, selected chain context, actual same-account internal change, economic intent, participant roster, original checkpoint destination, provider and private wallet destination. The inputs/context are Host-reported maintained-wallet evidence; this review does not prove unspentness or consensus. The signer independently verifies that the displayed change belongs to this account. This purpose only retains and discloses this exact contribution to the paired local process for the fixed original invocation; it cannot construct, reserve budget, sign, prove, dispatch or spend. Every full-proposal contribution needs separate exact native review and witness Reserve/Consume. Retention stops at the original invocation completion deadline {} and never renews on re-pair, retry, restart or focus change. Cancellation and focus loss stop NEW admission. An already-admitted exact durable write and response may finish after focus changes; disclosed data cannot be recalled. A saved receipt is history, never signing, dispatch or reusable construction authority.\nExact review: {}",
             serde_json::to_string_pretty(&request).map_err(|_| Error::InvalidData)?,
             serde_json::to_string_pretty(pairing.binding()).map_err(|_| Error::InvalidData)?,
             request.completion_expires_at_ms(),
@@ -70,6 +78,10 @@ impl PreparedRosterContributionRetentionV2 {
             .remaining_admission_ms(now()?)
             .map_err(|_| Error::ReviewMismatch)?;
         Ok(())
+    }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(crate) fn synthetic_request(&self) -> &ManualRosterContributionRetentionRequestV2 {
+        &self.request
     }
     pub(crate) fn reviewed_digest(&self) -> &str {
         &self.digest

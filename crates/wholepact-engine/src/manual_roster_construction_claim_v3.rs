@@ -134,6 +134,87 @@ impl Engine {
         target.check_current_fail_fast(access)?;
         Ok(outcome)
     }
+    /// New actual-observation encoding only. Existing v3 entrypoints retain
+    /// exact v3/v4 behavior and cannot create or infer historical provenance.
+    #[cfg(all(
+        feature = "signer-authority-bridge",
+        feature = "wallet-sync",
+        feature = "local-proof-jobs"
+    ))]
+    pub fn claim_manual_roster_construction_v5_fail_fast<'engine>(
+        &'engine self,
+        access: &Access,
+        key: &str,
+        maximum_actions: usize,
+        admitted: &[&AdmittedManualRosterConstructionContributionV3],
+        held: &wholepact_wallet::wallet::protected_sync::exact_input_observation::HeldCommonContextRosterObservation<'_>,
+        progress: &crate::manual_roster_construct_v3::ManualRosterConstructionProgressV3,
+    ) -> Result<ManualRosterConstructionClaimOutcomeV3<'engine>> {
+        // This is an actual all-wallet owner, not caller-supplied provenance.
+        // Store derives the historical record from this same nominal borrow.
+        held.check_all_current().map_err(|_| manual_denied())?;
+        if held.participant_count() != admitted.len() {
+            return Err(manual_denied());
+        }
+        let first = admitted.first().ok_or_else(manual_denied)?;
+        let request = first.request().map_err(|_| manual_denied())?;
+        let plan = &request.plan;
+        let target = self.manual_enrollment_target_fail_fast(access, plan.enrollment())?;
+        let envelope = decode(&target.agreement_record)?;
+        if plan.proposal.manifest.agreement != envelope.view.agreement
+            || plan
+                .retained
+                .selection
+                .scope
+                .selection
+                .economic_intent
+                .candidate_revision
+                != target.agreement_revision
+            || envelope.view.candidates.iter().any(|candidate| {
+                candidate.candidate_id
+                    == plan
+                        .retained
+                        .selection
+                        .scope
+                        .selection
+                        .economic_intent
+                        .candidate_id
+            })
+        {
+            return Err(manual_denied());
+        }
+        for owner in admitted {
+            owner.check_completion().map_err(|_| manual_denied())?;
+            let request = owner.request().map_err(|_| manual_denied())?;
+            let own = self.manual_enrollment_target_fail_fast(access, request.plan.enrollment())?;
+            if own.agreement_record != target.agreement_record
+                || request.plan.proposal != plan.proposal
+            {
+                return Err(manual_denied());
+            }
+            own.check_current_fail_fast(access)?;
+        }
+        target.check_current_fail_fast(access)?;
+        held.check_all_current().map_err(|_| manual_denied())?;
+        let outcome = progress
+            .with_claim_attempt(|| {
+                self.store.claim_manual_roster_construction_v5_fail_fast(
+                    &target.store,
+                    &target.agreement_record,
+                    &access.principal_id,
+                    key,
+                    maximum_actions,
+                    admitted,
+                    held,
+                )
+            })
+            .map_err(store_error)?;
+        // A late failure can follow a durable claim. The existing progress
+        // marker remains set; no saved record creates a fresh builder token.
+        target.check_current_fail_fast(access)?;
+        held.check_all_current().map_err(|_| manual_denied())?;
+        Ok(outcome)
+    }
 }
 
 #[cfg(feature = "local-proof-jobs")]

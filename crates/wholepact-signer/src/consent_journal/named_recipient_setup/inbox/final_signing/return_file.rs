@@ -24,12 +24,58 @@ impl LiveNamedRecipientProfile {
         path: &Path,
         operation: NamedRecipientOperation,
     ) -> ImportResult<PreparedNamedRecipientReturnFile> {
+        self.prepare_return_file_for_origin(
+            journal,
+            session,
+            vault,
+            authorization,
+            path,
+            operation,
+            false,
+        )
+    }
+    pub(crate) fn prepare_born_retained_return_file(
+        &self,
+        journal: &SignerConsentJournal,
+        session: &SignerConsentSession,
+        vault: &AccountVault,
+        authorization: &str,
+        path: &Path,
+        operation: NamedRecipientOperation,
+    ) -> ImportResult<PreparedBornNamedRecipientReturnFile> {
+        self.prepare_return_file_for_origin(
+            journal,
+            session,
+            vault,
+            authorization,
+            path,
+            operation,
+            true,
+        )
+        .map(PreparedBornNamedRecipientReturnFile)
+    }
+    fn prepare_return_file_for_origin(
+        &self,
+        journal: &SignerConsentJournal,
+        session: &SignerConsentSession,
+        vault: &AccountVault,
+        authorization: &str,
+        path: &Path,
+        operation: NamedRecipientOperation,
+        born: bool,
+    ) -> ImportResult<PreparedNamedRecipientReturnFile> {
         operation.check()?;
         require_profile_owner(self, journal)?;
         id(authorization).map_err(unavailable)?;
         let reference = original_reference(journal, self, authorization)?;
         let (profile, retained) = load_profile_and_original(journal, self, &reference)?;
         let original = retained.record;
+        if original.born_origin.is_some() != born {
+            return Err(TransportError::AuthorityUnavailable);
+        }
+        if !born {
+            original.require_legacy_origin().map_err(unavailable)?;
+        }
         let own = retained_own_policy(&original, vault)?;
         let envelope = assertion_receipt_digest(journal, self, &original)?;
         let assertion = self
@@ -43,7 +89,20 @@ impl LiveNamedRecipientProfile {
             )
             .map_err(unavailable)?;
         require_own_context(self, &original, &own, vault, &records)?;
-        let (started, result) = read_result(journal, &original)?;
+        if let Some(origin) = &original.born_origin {
+            origin
+                .require_retained_signer(
+                    &*journal.connection.lock().map_err(unavailable)?,
+                    &profile,
+                    records.enrollment(),
+                )
+                .map_err(unavailable)?;
+            origin
+                .checkpoint_receipt
+                .require_retained(&*journal.connection.lock().map_err(unavailable)?)
+                .map_err(unavailable)?;
+        }
+        let (started, result) = read_result(journal, &original, &profile)?;
         let signed = Zeroizing::new(hex::decode(&result.result_hex).map_err(unavailable)?);
         inspect_named_verifier_return(
             assertion.artifact().fields()[0].bytes(),
@@ -54,13 +113,14 @@ impl LiveNamedRecipientProfile {
             .encrypted_return
             .as_ref()
             .ok_or(TransportError::AuthorityUnavailable)?;
-        let final_review = started
-            .final_review
-            .as_ref()
-            .ok_or(TransportError::AuthorityUnavailable)?;
+        let final_review = started.return_metadata().map_err(unavailable)?;
         let destination = ExactFileDestination::prepare(path)?;
         let digest = digest(
-            "wholepact:native-named-recipient-return-file:v1",
+            if born {
+                "wholepact:native-born-named-recipient-return-file:v1"
+            } else {
+                "wholepact:native-named-recipient-return-file:v1"
+            },
             &(
                 &original.reference,
                 &started.marker_digest().map_err(unavailable)?,
@@ -134,7 +194,20 @@ impl PreparedNamedRecipientReturnFile {
             .map_err(unavailable)?;
         let own = retained_own_policy(&self.original, vault)?;
         require_own_context(&self.profile, &self.original, &own, vault, &records)?;
-        let (started, result) = read_result(journal, &self.original)?;
+        if let Some(origin) = &self.original.born_origin {
+            origin
+                .require_retained_signer(
+                    &*journal.connection.lock().map_err(unavailable)?,
+                    &self.profile.record,
+                    records.enrollment(),
+                )
+                .map_err(unavailable)?;
+            origin
+                .checkpoint_receipt
+                .require_retained(&*journal.connection.lock().map_err(unavailable)?)
+                .map_err(unavailable)?;
+        }
+        let (started, result) = read_result(journal, &self.original, &self.profile.record)?;
         if started != self.started || result != self.result {
             return Err(TransportError::WrongContext);
         }
@@ -171,6 +244,7 @@ impl PreparedNamedRecipientReturnFile {
 fn read_result(
     journal: &SignerConsentJournal,
     original: &NamedRecipientOriginalRecordV1,
+    profile: &NamedRecipientProfileRecordV1,
 ) -> ImportResult<(NamedRecipientStartedRecordV1, NamedRecipientResultRecordV1)> {
     let c = journal.connection.lock().map_err(unavailable)?;
     let started: String = c
@@ -182,7 +256,7 @@ fn read_result(
         .map_err(|_| TransportError::ImportCommittedButUnavailable)?;
     let started: NamedRecipientStartedRecordV1 = decode(started).map_err(unavailable)?;
     started.validate(original).map_err(unavailable)?;
-    if started.final_review.is_none() {
+    if started.return_metadata().is_err() {
         return Err(TransportError::AuthorityUnavailable);
     }
     let result: String = c
@@ -194,5 +268,54 @@ fn read_result(
         .map_err(|_| TransportError::ImportCommittedButUnavailable)?;
     let result: NamedRecipientResultRecordV1 = decode(result).map_err(unavailable)?;
     result.validate(&started, original).map_err(unavailable)?;
+    if let Some(review) = &started.born_final_review {
+        review
+            .validate_profile(profile, original)
+            .map_err(unavailable)?;
+        review
+            .admission_receipt
+            .require_retained(&c)
+            .map_err(unavailable)?;
+    }
     Ok((started, result))
+}
+
+/// Separate nominal born export owner; no legacy constructor accepts a born original.
+pub(crate) struct PreparedBornNamedRecipientReturnFile(PreparedNamedRecipientReturnFile);
+impl PreparedBornNamedRecipientReturnFile {
+    pub(crate) fn digest(&self) -> &str {
+        self.0.digest()
+    }
+    pub(crate) fn display(&self) -> &str {
+        self.0.display()
+    }
+    pub(crate) fn write(
+        self,
+        decision: NativeDecision,
+        journal: &SignerConsentJournal,
+        session: &SignerConsentSession,
+        vault: &AccountVault,
+    ) -> ImportResult<()> {
+        self.0.write(decision, journal, session, vault)
+    }
+}
+
+#[cfg(feature = "synthetic-born-joined-qualification")]
+impl PreparedBornNamedRecipientReturnFile {
+    /// Only the actual validated original/result export owner supplies these.
+    /// The finite caller exposes them only after this same export succeeds.
+    pub(crate) fn synthetic_original_references(
+        &self,
+    ) -> ImportResult<crate::consent_journal::OriginalNamedReturnReferencesV1> {
+        let original = &self.0.original;
+        let origin = original
+            .born_origin
+            .as_ref()
+            .ok_or(TransportError::WrongContext)?;
+        Ok(crate::consent_journal::OriginalNamedReturnReferencesV1 {
+            authorization_id: original.terms.authorization_id.clone(),
+            original_ref: original.reference.clone(),
+            born_origin_digest: origin.digest().map_err(unavailable)?,
+        })
+    }
 }

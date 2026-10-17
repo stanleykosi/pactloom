@@ -54,29 +54,42 @@ impl OfflineWitnessRequestV1 {
         decode_ciphertext(&self.original_envelope_hex)
     }
     pub(crate) fn record(&self) -> Result<OfflineReservationRecord> {
-        self.request.validate()?;
-        if self.export_template.sequence != 0 {
-            return Err(AuthorityError::InvalidBinding);
-        }
-        let mut allocated = self.export_template.clone();
-        allocated.sequence = 1;
-        allocated.validate()?;
-        let envelope = self.envelope()?;
-        let mut digest = Sha256::new();
-        digest.update(b"wholepact.encrypted-envelope.v1\0");
-        digest.update(&envelope);
-        Ok(OfflineReservationRecord {
-            request: self.request.clone(),
-            authentication: OfflineIntentAuthenticationRecord {
-                intent_digest: self.request.intent.intent_digest()?,
-                reservation_request_digest: self.request.request_digest()?,
-                policy_digest: self.request.intent.terms.offline_policy_digest.clone(),
-                sender_fingerprint: self.request.intent.terms.offline_signer_key_digest.clone(),
-                witness_fingerprint: self.export_template.sender_key_fingerprint.clone(),
-                envelope_digest: hex::encode(digest.finalize()),
-            },
-        })
+        offline_reservation_record_from_wire_v1(
+            &self.request,
+            &self.original_envelope_hex,
+            &self.export_template,
+        )
     }
+}
+
+/// Pure shared metadata projection. It does not inspect or fabricate a session proof.
+pub(crate) fn offline_reservation_record_from_wire_v1(
+    request: &ReserveOfflineAuthorization,
+    original_envelope_hex: &str,
+    export_template: &OfflineAdmissionExportPlan,
+) -> Result<OfflineReservationRecord> {
+    request.validate()?;
+    if export_template.sequence != 0 {
+        return Err(AuthorityError::InvalidBinding);
+    }
+    let mut allocated = export_template.clone();
+    allocated.sequence = 1;
+    allocated.validate()?;
+    let envelope = decode_ciphertext(original_envelope_hex)?;
+    let mut digest = Sha256::new();
+    digest.update(b"wholepact.encrypted-envelope.v1\0");
+    digest.update(&envelope);
+    Ok(OfflineReservationRecord {
+        request: request.clone(),
+        authentication: OfflineIntentAuthenticationRecord {
+            intent_digest: request.intent.intent_digest()?,
+            reservation_request_digest: request.request_digest()?,
+            policy_digest: request.intent.terms.offline_policy_digest.clone(),
+            sender_fingerprint: request.intent.terms.offline_signer_key_digest.clone(),
+            witness_fingerprint: export_template.sender_key_fingerprint.clone(),
+            envelope_digest: hex::encode(digest.finalize()),
+        },
+    })
 }
 
 /// Original lookup expectations only. Incoming values cannot enroll a policy or

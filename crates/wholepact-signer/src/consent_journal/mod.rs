@@ -21,7 +21,11 @@ pub use sponsor::{
     NativeSponsorPolicyRecord, NativeSponsorPolicyStatus, SponsorOwnerAttestation,
     SponsorOwnerBinding, SponsorPolicyBinding, SponsorWitnessBinding,
 };
+#[cfg(target_os = "linux")]
+mod born_dispatch_storage;
 mod bridge_storage;
+#[cfg(target_os = "linux")]
+pub(crate) use born_dispatch_storage::RetainedBornDispatchV1;
 #[cfg(all(
     target_os = "linux",
     any(
@@ -44,6 +48,12 @@ mod preconstruction_lease;
     )
 ))]
 pub(crate) use dispatch_storage::RetainedDispatch;
+#[cfg(all(
+    feature = "native-ui",
+    feature = "authority-signing",
+    target_os = "linux"
+))]
+pub(crate) use preconstruction_lease::PreconstructionRecordLease;
 mod bridge_delivery_storage;
 mod redelivery_types;
 pub use redelivery_types::*;
@@ -124,7 +134,7 @@ use wholepact_core::proposal::canonical_digest;
 use zeroize::Zeroizing;
 
 const APPLICATION_ID: i64 = 0x57505343;
-const SCHEMA_VERSION: i64 = 16;
+const SCHEMA_VERSION: i64 = 17;
 const MAX_RECORD_BYTES: usize = 512 * 1024;
 const MAX_BACKUP_ROWS: u64 = 100_000;
 const MAX_BACKUP_ENCODED_BYTES: u64 = 64 * 1024 * 1024;
@@ -246,7 +256,13 @@ pub use construction_audit_v3::{
 #[cfg(test)]
 mod common_context_audit_tests;
 
+#[cfg(all(feature = "pending-birth-owner-signing", target_os = "linux"))]
+mod born_named_continuation;
+#[cfg(all(feature = "pending-birth-owner-signing", target_os = "linux"))]
+mod born_named_reentry;
 mod common_context_reentry_audit_v1;
+#[cfg(all(feature = "pending-birth-owner-signing", target_os = "linux"))]
+pub(crate) use born_named_reentry::BornNamedReentryInventoryV1;
 pub use common_context_reentry_audit_v1::{
     CommonContextReentryAuditInventoryV1, CommonContextReentryAuditPhaseV1,
     CommonContextReentrySignerAuditV1, CommonContextSignerAuditInventoryV2,
@@ -286,20 +302,23 @@ pub(crate) use named_recipient_setup::{
 #[cfg(all(
     feature = "native-ui",
     feature = "authority-signing",
-    feature = "offline-review-foundation"
+    feature = "offline-review-foundation",
+    target_os = "linux"
 ))]
 mod named_intent_transport;
 
 #[cfg(all(
     feature = "native-ui",
     feature = "authority-signing",
-    feature = "offline-review-foundation"
+    feature = "offline-review-foundation",
+    target_os = "linux"
 ))]
 pub(crate) use named_recipient_setup::PreparedNamedRecipientReturnFile;
 #[cfg(all(
     feature = "native-ui",
     feature = "authority-signing",
-    feature = "offline-review-foundation"
+    feature = "offline-review-foundation",
+    target_os = "linux"
 ))]
 pub(crate) use named_recipient_setup::{
     NamedIntentExportTemplate, NamedRecipientOriginalInputs, PreparedNamedIntentFileExport,
@@ -308,6 +327,54 @@ pub(crate) use named_recipient_setup::{
 #[cfg(all(
     feature = "native-ui",
     feature = "authority-signing",
-    feature = "offline-review-foundation"
+    feature = "offline-review-foundation",
+    target_os = "linux"
 ))]
-pub(crate) use named_recipient_setup::{NamedRecipientOperation, PreparedNamedRecipientSigning};
+pub(crate) use named_recipient_setup::{
+    NamedRecipientOperation, PreparedBornNamedRecipientReturnFile,
+    PreparedBornNamedRecipientSigning, PreparedNamedRecipientSigning,
+};
+
+#[cfg(all(
+    feature = "native-ui",
+    feature = "authority-signing",
+    feature = "offline-review-foundation",
+    target_os = "linux"
+))]
+pub(crate) use named_recipient_setup::{
+    BornCourierActionV1, BornNamedRecipientOriginalInputs, PreparedBornDeliveryFileV1,
+    PreparedBornIntentCourierV1, PreparedBornNamedIntentFileExport,
+    PreparedBornNamedRecipientOriginalImport, RetainedBornCourierDeliveryV1,
+    RetainedBornNamedIntentExport,
+};
+
+#[cfg(all(
+    feature = "native-ui",
+    feature = "authority-signing",
+    feature = "offline-review-foundation",
+    target_os = "linux"
+))]
+pub(crate) use named_recipient_setup::PreparedBornAdmissionImportV1;
+
+#[cfg(all(
+    feature = "native-ui",
+    feature = "authority-signing",
+    feature = "offline-review-foundation",
+    target_os = "linux"
+))]
+pub(crate) use named_recipient_setup::HeldBornHostHistoryV1;
+
+#[cfg(all(
+    feature = "native-ui",
+    feature = "authority-signing",
+    feature = "offline-review-foundation",
+    feature = "pending-birth-owner-signing",
+    target_os = "linux"
+))]
+pub(crate) use named_recipient_setup::PreparedBornOfflineOwnerEnrollmentV1;
+
+#[cfg(feature = "synthetic-born-joined-qualification")]
+pub use named_recipient_setup::OriginalNamedSetupMetadataV1;
+
+#[cfg(feature = "synthetic-born-joined-qualification")]
+pub use named_recipient_setup::{OriginalNamedPaymentArtifactsV1, OriginalNamedReturnReferencesV1};

@@ -179,6 +179,7 @@ fn candidate(
         recipient_key_fingerprint: terms.offline_signer_key_digest.clone(),
     };
     let original = NamedRecipientOriginalRecordV1 {
+        born_origin: None,
         schema_version: 1,
         reference: hash_label(1),
         profile_ref: live.record.reference.clone(),
@@ -380,4 +381,41 @@ fn named_unresolved_started_fences_only_its_original_return_stream() {
     )
     .unwrap();
     assert!(next(&original).is_err());
+}
+
+#[test]
+fn first_original_empty_native_draft_normalizes_then_policy_still_refuses() {
+    let f = Fixture::new();
+    let live = f.approve(f.prepare(&f.selected));
+    for mismatch in [false, true] {
+        let (mut original, own, mut policy, outgoing) = candidate(&f, &live);
+        original
+            .reservation_request
+            .intent
+            .native_reservation_review_digest
+            .clear();
+        assert!(original.reservation_request.validate().is_err());
+        if mismatch {
+            policy.witness_certificate_digest = hash_label(98);
+        }
+        let result = live.prepare_original_import(
+            &f.journal,
+            &f.session,
+            &f.vault,
+            NamedRecipientOriginalInputs {
+                proposed: original,
+                own_policy: own,
+                proposed_policy: policy,
+                assertion_envelope: inert_outer_envelope(),
+                outgoing,
+                now: fixture_now(),
+            },
+        );
+        if mismatch {
+            assert!(matches!(result, Err(TransportError::WrongContext)));
+        } else {
+            assert!(result.is_ok());
+        }
+        assert_no_original_writes(&f);
+    }
 }

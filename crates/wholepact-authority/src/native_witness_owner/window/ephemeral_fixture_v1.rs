@@ -1,0 +1,733 @@
+//! Explicit temporary synthetic native-controller qualification only.
+//! No /etc, passwd-home namespace, installed pin or production account is used.
+//! Ordinary form data is supplied by the fixture, while every approval is made
+//! by the SAME Window::draw/review_ui primary-pointer event path as production.
+//! No FinalPrimaryClick, NativeDecision, lease or completed birth row is built.
+use super::*;
+use crate::transport::{AuthorityServer, ServerTls};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use std::{
+    fs::{self, OpenOptions},
+    net::TcpListener,
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+    sync::{
+        Arc, Mutex, TryLockError,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Instant,
+};
+use wholepact_storage_security::witness_namespace_fs::EphemeralWitnessInstallation;
+
+const SETUP: &str = "Prepare exact permanent namespace setup review";
+const ENROLL: &str = "Open installed namespace and prepare exact enrollment / retry review";
+const CONTINUE: &str = "Continue to exact native confirmation";
+const UNDERSTOOD: &str = "I reviewed this complete exact operation and its permanent consequences. I understand the existing owner signature does not attest fresh signer keys or native signer focus.";
+const AUTHORIZE: &str = "Authorize this exact one-time owner operation";
+const PROFILE: &str = "ironwood-testnet-nu7-candidate";
+
+#[path = "ephemeral_fixture_v1/roster_v3.rs"]
+mod roster_v3;
+pub use roster_v3::EphemeralRosterAttemptV2;
+#[cfg(feature = "born-offline-witness-owner")]
+#[path = "ephemeral_fixture_v1/born_offline_v1.rs"]
+mod born_offline_v1;
+#[cfg(feature = "born-offline-witness-owner")]
+pub use born_offline_v1::{EphemeralBornTransportKeyV1, EphemeralBornTransportPublicPinV1};
+#[path = "ephemeral_fixture_v1/construction_client_scope_v1.rs"]
+mod construction_client_scope_v1;
+#[path = "ephemeral_fixture_v1/single_anchor_v1.rs"]
+mod single_anchor_v1;
+pub use construction_client_scope_v1::EphemeralConstructionClientScopeV1;
+pub(crate) use construction_client_scope_v1::RetainedConstructionFixtureLivenessV1;
+
+#[derive(Clone, Copy)]
+enum QualifiedEntry {
+    ConstructionPlan,
+    ConstructionTransport,
+}
+impl QualifiedEntry {
+    fn label(self) -> &'static str {
+        match self {
+            Self::ConstructionPlan => "SYNTHETIC ONLY: enter original V3 plan controller",
+            Self::ConstructionTransport => "SYNTHETIC ONLY: enter original handoff controller",
+        }
+    }
+}
+
+/// Public test input/output metadata, not an approval or portable capability.
+#[derive(Clone)]
+pub struct EphemeralWitnessOriginV1 {
+    pub endpoint: String,
+    pub server_name: String,
+    pub witness_id: String,
+    pub server_certificate_digest: String,
+    pub owner_certificate_digest: String,
+    pub owner_certificate_file: PathBuf,
+    pub owner_key_file: PathBuf,
+    pub trusted_server_root_file: PathBuf,
+    pub writer_certificate_digest: String,
+    pub writer_certificate_file: PathBuf,
+    pub writer_key_file: PathBuf,
+    // A nominal retained owner, never a caller-supplied root or wire selector.
+    credential_root: PathBuf,
+    _installation: Arc<EphemeralWitnessInstallation>,
+}
+impl EphemeralWitnessOriginV1 {
+    pub fn credential_root(&self) -> &Path {
+        &self.credential_root
+    }
+}
+
+/// All files are generated below this concrete owner before any signer birth
+/// deadline begins. No caller path, arbitrary root or imported key is accepted.
+pub struct EphemeralNativeWitnessV1 {
+    window: Window,
+    context: egui::Context,
+    qualification_entry: Option<QualifiedEntry>,
+    construction_client_grants: std::collections::BTreeSet<String>,
+    construction_client_scope_revoked: Arc<AtomicBool>,
+    installation: Arc<EphemeralWitnessInstallation>,
+    listener: TcpListener,
+    tls: ServerTls,
+    server_certificate_digest: String,
+    owner_certificate: Vec<u8>,
+    root: PathBuf,
+}
+impl EphemeralNativeWitnessV1 {
+    pub fn new() -> Result<Self> {
+        let installation = EphemeralWitnessInstallation::new()?;
+        let root = installation
+            .probe()?
+            .root_path()
+            .parent()
+            .ok_or(AuthorityError::Storage)?
+            .to_path_buf();
+        create_tls_material(&root)?;
+        let ca = CertificateDer::from(
+            fs::read(root.join("ca.der")).map_err(|_| AuthorityError::Storage)?,
+        );
+        let certificate = CertificateDer::from(
+            fs::read(root.join("server.der")).map_err(|_| AuthorityError::Storage)?,
+        );
+        let owner_certificate =
+            fs::read(root.join("owner.der")).map_err(|_| AuthorityError::Storage)?;
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+            fs::read(root.join("server.pk8")).map_err(|_| AuthorityError::Storage)?,
+        ));
+        let tls = ServerTls::new(vec![ca], vec![certificate.clone()], key)?;
+        let listener = TcpListener::bind("127.0.0.1:0").map_err(|_| AuthorityError::Storage)?;
+        let endpoint = listener
+            .local_addr()
+            .map_err(|_| AuthorityError::Storage)?
+            .to_string();
+        let key_path = root.join("synthetic-namespace.key");
+        let mut key_file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&key_path)
+            .map_err(|_| AuthorityError::Storage)?;
+        // Public fixed never-production fixture key, not a secret supplied by a
+        // caller or silently provisioned in the user's namespace.
+        key_file
+            .write_all(&[0x6d; 32])
+            .map_err(|_| AuthorityError::Storage)?;
+        key_file.sync_all().map_err(|_| AuthorityError::Storage)?;
+        drop(key_file);
+        let mut window = Window::new();
+        window.input.endpoint = endpoint;
+        window.input.server_name = "localhost".into();
+        window.input.pinned_server_certificate_digest =
+            crate::transport::certificate_digest(&certificate);
+        window.input.network_profile_id = PROFILE.into();
+        window.input.storage_key_file = key_path
+            .to_str()
+            .ok_or(AuthorityError::InvalidBinding)?
+            .into();
+        window.input.owner_certificate_hex = Zeroizing::new(hex::encode(&owner_certificate));
+        window.input.synthetic_installation = Some(installation.clone());
+        let context = egui::Context::default();
+        configure_style(&context);
+        let mut result = Self {
+            window,
+            context,
+            qualification_entry: None,
+            construction_client_grants: std::collections::BTreeSet::new(),
+            construction_client_scope_revoked: Arc::new(AtomicBool::new(false)),
+            installation,
+            listener,
+            server_certificate_digest: crate::transport::certificate_digest(&certificate),
+            tls,
+            owner_certificate,
+            root,
+        };
+        result.click(SETUP).inspect_err(|error| {
+            eprintln!("synthetic witness fixture stage setup-pointer: {error:?}");
+        })?;
+        result.drain().inspect_err(|error| {
+            eprintln!("synthetic witness fixture stage setup-prepare-drain: {error:?}");
+        })?;
+        if !matches!(
+            result.window.pending.as_ref().map(|p| &p.prepared.proposal),
+            Some(Proposal::Setup(_))
+        ) {
+            // Window messages are static source literals, never form data.
+            eprintln!(
+                "synthetic witness fixture stage setup-prepared: {}",
+                result.window.message
+            );
+            return Err(AuthorityError::Permission);
+        }
+        result.approve_exact().inspect_err(|error| {
+            eprintln!("synthetic witness fixture stage setup-exact-review: {error:?}");
+        })?;
+        if result.window.last_installation_audit.is_none()
+            || result.window.input.witness_id.is_empty()
+        {
+            return Err(AuthorityError::Uncertain);
+        }
+        // This is the real completed immutable registry, not a synthetic row.
+        result
+            .installation
+            .probe()?
+            .open_existing()?
+            .check_current()?;
+        Ok(result)
+    }
+
+    pub fn origin(&self) -> Result<EphemeralWitnessOriginV1> {
+        if self.window.input.witness_id.is_empty()
+            || self.window.job.is_some()
+            || self.window.pending.is_some()
+        {
+            return Err(AuthorityError::Permission);
+        }
+        Ok(EphemeralWitnessOriginV1 {
+            endpoint: self.window.input.endpoint.clone(),
+            server_name: self.window.input.server_name.clone(),
+            witness_id: self.window.input.witness_id.clone(),
+            server_certificate_digest: self.window.input.pinned_server_certificate_digest.clone(),
+            owner_certificate_digest: crate::transport::certificate_digest(&CertificateDer::from(
+                self.owner_certificate.as_slice(),
+            )),
+            owner_certificate_file: self.root.join("owner.der"),
+            owner_key_file: self.root.join("owner.pk8"),
+            trusted_server_root_file: self.root.join("ca.der"),
+            writer_certificate_digest: crate::transport::certificate_digest(&CertificateDer::from(
+                fs::read(self.root.join("writer.der")).map_err(|_| AuthorityError::Storage)?,
+            )),
+            writer_certificate_file: self.root.join("writer.der"),
+            writer_key_file: self.root.join("writer.pk8"),
+            credential_root: self.root.clone(),
+            _installation: self.installation.clone(),
+        })
+    }
+
+    /// The caller supplies ONLY the actual signer-private exported public JSON.
+    /// The existing native parser verifies it against the independently chosen
+    /// DER owner certificate before proposing, reviewing or committing birth.
+    pub fn enroll_signed_birth(&mut self, account_id: &str, signed_envelope: &[u8]) -> Result<()> {
+        crate::hash(account_id)?;
+        if signed_envelope.is_empty()
+            || signed_envelope.len() > crate::MAX_FRAME_BYTES
+            || !self.window.can_select()
+        {
+            return Err(AuthorityError::Limit);
+        }
+        self.window.input.expected_account_id = account_id.into();
+        self.window.input.owner_certificate_hex =
+            Zeroizing::new(hex::encode(&self.owner_certificate));
+        self.window.input.signed_request_json = Zeroizing::new(
+            std::str::from_utf8(signed_envelope)
+                .map_err(|_| AuthorityError::InvalidBinding)?
+                .into(),
+        );
+        self.click(ENROLL)?;
+        self.drain()?;
+        if !matches!(
+            self.window.pending.as_ref().map(|p| &p.prepared.proposal),
+            Some(Proposal::Enrollment(_))
+        ) {
+            return Err(AuthorityError::Permission);
+        }
+        self.approve_exact()?;
+        // Read-only actual factory authenticates immutable locator completion,
+        // actual born journal and matching request. Never create/open generic
+        // AuthorityJournal from a policy with a caller-supplied genesis.
+        let journal =
+            crate::witness_locator::open_born_history(self.original_namespace_input(account_id)?)?;
+        drop(journal);
+        Ok(())
+    }
+
+    /// Actual TLS history server for this original completed namespace. The
+    /// caller must drop it before a later native namespace mutation needs locks.
+    pub fn serve_original_history(&mut self) -> Result<EphemeralHistoryServerV1> {
+        let account_id = self.window.input.expected_account_id.clone();
+        let input = self.original_namespace_input(&account_id)?;
+        let actual_listen = self
+            .listener
+            .local_addr()
+            .map_err(|_| AuthorityError::Storage)?
+            .to_string();
+        let journal = Arc::new(
+            crate::born_history_server::open_born_history_from_namespace(
+                input,
+                &self.server_certificate_digest,
+                &actual_listen,
+            )?,
+        );
+        self.serve_exact_server(AuthorityServer::new(journal, self.tls.clone()))
+    }
+
+    fn original_namespace_input(&mut self, account_id: &str) -> Result<NamespaceOpenInput> {
+        crate::hash(account_id)?;
+        if !self.window.can_select() {
+            return Err(AuthorityError::Permission);
+        }
+        self.window.input.expected_account_id = account_id.into();
+        self.window.input.owner_certificate_hex =
+            Zeroizing::new(hex::encode(&self.owner_certificate));
+        self.window.input.enrollment_input()
+    }
+
+    fn serve_exact_server(&self, server: AuthorityServer) -> Result<EphemeralHistoryServerV1> {
+        // Keep the original bound endpoint for later independently reviewed
+        // phases. Dropping a finite server closes its journal, not this owner.
+        let listener = self
+            .listener
+            .try_clone()
+            .map_err(|_| AuthorityError::Storage)?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|_| AuthorityError::Storage)?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = stop.clone();
+        let accept_gate = Arc::new(Mutex::new(false));
+        let serving_accept_gate = accept_gate.clone();
+        // Capture once before spawn; neither sealing nor a later caller can
+        // restart this original finite serving lifetime.
+        let deadline = Instant::now() + Duration::from_secs(120);
+        let installation = self.installation.clone();
+        let thread = std::thread::Builder::new()
+            .name("synthetic-original-witness-history".into())
+            .spawn(move || {
+                let _server_stopped = SyntheticServerStopped(stopped.clone());
+                let _retained_installation = installation;
+                while !stopped.load(Ordering::Acquire) && Instant::now() < deadline {
+                    // The gate covers only nonblocking accept. It is released
+                    // before the maintained bounded TLS/authority handler runs.
+                    match accept_while_unsealed(&serving_accept_gate, || listener.accept()) {
+                        Ok(Some(Ok((socket, _)))) => {
+                            let _ = server.serve_connection(socket);
+                        }
+                        Ok(None) => std::thread::sleep(Duration::from_millis(2)),
+                        Ok(Some(Err(error))) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(2))
+                        }
+                        Ok(Some(Err(_))) | Err(_) => break,
+                    }
+                }
+                drop(server);
+            })
+            .map_err(|_| AuthorityError::Storage)?;
+        Ok(EphemeralHistoryServerV1 {
+            stop,
+            accept_gate,
+            deadline,
+            thread: Some(thread),
+        })
+    }
+
+    fn frame(&mut self, events: Vec<egui::Event>, focused: bool) -> egui::FullOutput {
+        let mut input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1800.0, 20000.0),
+            )),
+            focused,
+            events,
+            ..Default::default()
+        };
+        input
+            .viewports
+            .get_mut(&egui::ViewportId::ROOT)
+            .expect("default root viewport")
+            .focused = Some(focused);
+        let entry = self.qualification_entry;
+        self.context.run_ui(input, |ui| {
+            self.window.draw(ui);
+            if let Some(entry) = entry {
+                // A finite synthetic control exercises the SAME private inner
+                // prepare branch, not the disabled production entry or a raw
+                // owner constructor. Exact review and final commit stay in the
+                // unchanged real Window controller.
+                egui::Area::new(egui::Id::new("synthetic-original-v3-entry"))
+                    .fixed_pos(egui::pos2(20.0, 19000.0))
+                    .show(ui.ctx(), |ui| {
+                        let focused = ui
+                            .ctx()
+                            .input(|i| i.focused && i.viewport().focused == Some(true));
+                        if ui
+                            .add_enabled(self.window.can_select(), egui::Button::new(entry.label()))
+                            .clicked_by(egui::PointerButton::Primary)
+                            && focused
+                        {
+                            match entry {
+                                QualifiedEntry::ConstructionPlan => self
+                                    .window
+                                    .prepare_manual_roster_construction_v3_from_primary(ui.ctx()),
+                                QualifiedEntry::ConstructionTransport => self
+                                    .window
+                                    .prepare_construction_transport_grant_v1_from_primary(ui.ctx()),
+                            }
+                        }
+                    });
+            }
+        })
+    }
+    fn click_qualified_entry(&mut self, entry: QualifiedEntry) -> Result<()> {
+        self.qualification_entry = Some(entry);
+        let result = self.click(entry.label());
+        self.qualification_entry = None;
+        result
+    }
+    fn click(&mut self, label: &str) -> Result<()> {
+        let output = self.frame(vec![], true);
+        let position = output
+            .shapes
+            .iter()
+            .find_map(|shape| text_position(&shape.shape, label))
+            .ok_or(AuthorityError::Permission)
+            .inspect_err(|_| eprintln!("synthetic witness fixture missing control: {label}"))?;
+        let event = |pressed| egui::Event::PointerButton {
+            pos: position,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        self.frame(vec![egui::Event::PointerMoved(position), event(true)], true);
+        self.frame(vec![event(false)], true);
+        Ok(())
+    }
+    fn drain(&mut self) -> Result<()> {
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while self.window.job.is_some() {
+            self.frame(vec![], true);
+            if Instant::now() >= deadline {
+                self.window.discard();
+                // Revocation is immediate, but already admitted publication
+                // still drains. Never drop its temporary owner before joining.
+                while self.window.job.is_some() {
+                    self.window.poll_job(&self.context, false);
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                return Err(AuthorityError::Uncertain);
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        if self.window.disposal_failed {
+            return Err(AuthorityError::Uncertain);
+        }
+        Ok(())
+    }
+    fn approve_exact(&mut self) -> Result<()> {
+        if self
+            .window
+            .pending
+            .as_ref()
+            .is_none_or(|p| p.phase != Phase::Reading)
+        {
+            return Err(AuthorityError::Permission);
+        }
+        self.click(CONTINUE)?;
+        let pending = self
+            .window
+            .pending
+            .as_ref()
+            .ok_or(AuthorityError::Permission)?;
+        if pending.phase != Phase::Confirming {
+            return Err(AuthorityError::Permission);
+        }
+        // Ordinary exact confirmation text is synthetic input data only. The
+        // final pointer event below, not this assignment, creates the decision.
+        self.window.confirmation = Zeroizing::new(pending.phrase());
+        self.click(UNDERSTOOD)?;
+        self.click(AUTHORIZE)?;
+        self.drain()?;
+        if self.window.pending.is_some() || !self.window.can_select() {
+            return Err(AuthorityError::Uncertain);
+        }
+        Ok(())
+    }
+}
+impl Drop for EphemeralNativeWitnessV1 {
+    fn drop(&mut self) {
+        self.construction_client_scope_revoked
+            .store(true, Ordering::Release);
+        self.window.discard();
+        while self.window.job.is_some() {
+            self.window.poll_job(&self.context, false);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+}
+struct SyntheticServerStopped(Arc<AtomicBool>);
+impl Drop for SyntheticServerStopped {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+pub struct EphemeralHistoryServerV1 {
+    stop: Arc<AtomicBool>,
+    accept_gate: Arc<Mutex<bool>>,
+    deadline: Instant,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+impl EphemeralHistoryServerV1 {
+    /// Irreversibly stop accepting NEW sockets on this particular finite
+    /// synthetic server. The shared lock acknowledges quiescence before return:
+    /// an accept already holding the lock must finish first, and no later
+    /// accept can pass it. An already accepted stream is not replaced or reset;
+    /// it continues under its unchanged original ten-second handler deadline.
+    /// The actual server/namespace and original finite lifetime remain retained.
+    /// No resume, rebind, additional authority, or deadline renewal exists.
+    pub fn seal_new_connections(&self, original_deadline: Instant) -> Result<()> {
+        let deadline = original_deadline
+            .min(self.deadline)
+            .min(Instant::now() + Duration::from_secs(1));
+        seal_acceptance_gate_until(&self.accept_gate, &self.stop, deadline)
+    }
+}
+fn accept_while_unsealed<T>(gate: &Mutex<bool>, accept: impl FnOnce() -> T) -> Result<Option<T>> {
+    let sealed = gate.lock().map_err(|_| AuthorityError::Permission)?;
+    if *sealed {
+        return Ok(None);
+    }
+    Ok(Some(accept()))
+}
+fn seal_acceptance_gate_until(
+    gate: &Mutex<bool>,
+    stopped: &AtomicBool,
+    deadline: Instant,
+) -> Result<()> {
+    loop {
+        if stopped.load(Ordering::Acquire) || Instant::now() >= deadline {
+            return Err(AuthorityError::Expired);
+        }
+        match gate.try_lock() {
+            Ok(mut sealed) => {
+                // This is the only write; it is deliberately one-way.
+                *sealed = true;
+                drop(sealed);
+                return if stopped.load(Ordering::Acquire) || Instant::now() >= deadline {
+                    Err(AuthorityError::Expired)
+                } else {
+                    Ok(())
+                };
+            }
+            Err(TryLockError::WouldBlock) => {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(TryLockError::Poisoned(_)) => return Err(AuthorityError::Permission),
+        }
+    }
+}
+#[cfg(test)]
+mod acceptance_gate_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn sealed_synthetic_server_gate_never_calls_accept_or_resumes() {
+        let gate = Mutex::new(false);
+        let stopped = AtomicBool::new(false);
+        let calls = Cell::new(0);
+        let accept = || calls.set(calls.get() + 1);
+        assert!(accept_while_unsealed(&gate, accept).unwrap().is_some());
+        assert_eq!(calls.get(), 1);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        seal_acceptance_gate_until(&gate, &stopped, deadline).unwrap();
+        assert!(accept_while_unsealed(&gate, accept).unwrap().is_none());
+        seal_acceptance_gate_until(&gate, &stopped, deadline).unwrap();
+        assert!(accept_while_unsealed(&gate, accept).unwrap().is_none());
+        assert_eq!(calls.get(), 1);
+        assert!(!stopped.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn sealing_synthetic_server_gate_never_renews_expired_or_stopped_owner() {
+        let gate = Mutex::new(false);
+        let stopped = AtomicBool::new(false);
+        let held = gate.lock().unwrap();
+        assert!(matches!(
+            seal_acceptance_gate_until(&gate, &stopped, Instant::now()),
+            Err(AuthorityError::Expired)
+        ));
+        assert!(!*held);
+        drop(held);
+        stopped.store(true, Ordering::Release);
+        assert!(matches!(
+            seal_acceptance_gate_until(&gate, &stopped, Instant::now() + Duration::from_secs(1)),
+            Err(AuthorityError::Expired)
+        ));
+        assert!(!*gate.lock().unwrap());
+    }
+}
+impl Drop for EphemeralHistoryServerV1 {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+fn text_position(shape: &egui::epaint::Shape, label: &str) -> Option<egui::Pos2> {
+    match shape {
+        egui::epaint::Shape::Text(text) if text.galley.text() == label => {
+            Some(text.pos + text.galley.rect.center().to_vec2())
+        }
+        egui::epaint::Shape::Vec(shapes) => {
+            shapes.iter().find_map(|shape| text_position(shape, label))
+        }
+        _ => None,
+    }
+}
+fn create_tls_material(root: &Path) -> Result<()> {
+    let run = |arguments: &[&str]| -> Result<()> {
+        if Command::new("openssl")
+            .current_dir(root)
+            .args(arguments)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(|_| AuthorityError::Storage)?
+            .success()
+        {
+            Ok(())
+        } else {
+            Err(AuthorityError::Authentication)
+        }
+    };
+    run(&[
+        "req",
+        "-x509",
+        "-newkey",
+        "ec",
+        "-pkeyopt",
+        "ec_paramgen_curve:P-256",
+        "-sha256",
+        "-days",
+        "1",
+        "-nodes",
+        "-subj",
+        "/CN=wholepact-ephemeral-qualification-root",
+        "-addext",
+        "basicConstraints=critical,CA:TRUE",
+        "-addext",
+        "keyUsage=critical,keyCertSign,cRLSign",
+        "-keyout",
+        "ca.key",
+        "-out",
+        "ca.pem",
+    ])?;
+    run(&["x509", "-in", "ca.pem", "-outform", "DER", "-out", "ca.der"])?;
+    fs::write(root.join("leaf.ext"), b"basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth,clientAuth\nsubjectAltName=DNS:localhost\n").map_err(|_| AuthorityError::Storage)?;
+    for name in ["owner", "writer", "server"] {
+        let key = format!("{name}.key");
+        let csr = format!("{name}.csr");
+        let der = format!("{name}.der");
+        let pk8 = format!("{name}.pk8");
+        run(&[
+            "req",
+            "-new",
+            "-newkey",
+            "ec",
+            "-pkeyopt",
+            "ec_paramgen_curve:P-256",
+            "-sha256",
+            "-nodes",
+            "-subj",
+            "/CN=localhost",
+            "-keyout",
+            &key,
+            "-out",
+            &csr,
+        ])?;
+        run(&[
+            "x509",
+            "-req",
+            "-in",
+            &csr,
+            "-CA",
+            "ca.pem",
+            "-CAkey",
+            "ca.key",
+            "-CAcreateserial",
+            "-days",
+            "1",
+            "-sha256",
+            "-extfile",
+            "leaf.ext",
+            "-outform",
+            "DER",
+            "-out",
+            &der,
+        ])?;
+        run(&[
+            "pkcs8", "-topk8", "-nocrypt", "-in", &key, "-outform", "DER", "-out", &pk8,
+        ])?;
+    }
+    for entry in fs::read_dir(root).map_err(|_| AuthorityError::Storage)? {
+        let entry = entry.map_err(|_| AuthorityError::Storage)?;
+        if entry
+            .file_type()
+            .map_err(|_| AuthorityError::Storage)?
+            .is_file()
+        {
+            fs::set_permissions(entry.path(), fs::Permissions::from_mode(0o600))
+                .map_err(|_| AuthorityError::Storage)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::ToSocketAddrs;
+    #[test]
+    fn actual_ephemeral_native_namespace_setup_preserves_original_registry() {
+        let fixture = EphemeralNativeWitnessV1::new().unwrap();
+        let original = fixture.origin().unwrap();
+        assert!(!original.witness_id.is_empty());
+        assert!(
+            original
+                .endpoint
+                .to_socket_addrs()
+                .unwrap()
+                .all(|a| a.ip().is_loopback())
+        );
+        assert!(
+            fixture
+                .installation
+                .probe()
+                .unwrap()
+                .require_absent()
+                .is_err()
+        );
+        let files = fixture
+            .installation
+            .probe()
+            .unwrap()
+            .open_existing()
+            .unwrap();
+        files.check_current().unwrap();
+        // No account has been created or enrolled. Namespace setup is distinct
+        // from genesis, writer admission, construction and proof qualification.
+        assert!(fixture.window.input.expected_account_id.is_empty());
+    }
+}

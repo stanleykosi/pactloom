@@ -85,6 +85,8 @@ pub(super) struct ApprovedRequest {
     pub lifetime: Lifetime,
     pub key: [u8; 32],
     pub profile_commitment: String,
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(super) synthetic_providers: Option<Vec<wholepact_signer_origin::InstalledSignerProvider>>,
 }
 impl ApprovedRequest {
     pub(super) fn admit(
@@ -138,6 +140,8 @@ impl ApprovedRequest {
             lifetime,
             key,
             profile_commitment,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            synthetic_providers: None,
         })
     }
 }

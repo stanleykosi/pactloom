@@ -33,6 +33,17 @@ static LEGACY_TEMPLATE_V3: JournalTemplate = JournalTemplate {
     ),
 };
 
+static LEGACY_TEMPLATE_V4: JournalTemplate = JournalTemplate {
+    kind: JournalKind::CoordinationAuthority,
+    application_id: 0,
+    schema_version: 4,
+    create_sql: concat!(
+        include_str!("schema.sql"),
+        "\n",
+        include_str!("migration-v2.sql")
+    ),
+};
+
 static TEMPLATE: JournalTemplate = JournalTemplate {
     kind: JournalKind::CoordinationAuthority,
     application_id: 0,
@@ -53,7 +64,8 @@ pub fn coordination_template_for_schema(
         1 => Ok(&LEGACY_TEMPLATE_V1),
         2 => Ok(&LEGACY_TEMPLATE_V2),
         3 => Ok(&LEGACY_TEMPLATE_V3),
-        4 => Ok(&TEMPLATE),
+        4 => Ok(&LEGACY_TEMPLATE_V4),
+        5 => Ok(&TEMPLATE),
         _ => Err(BundleError::Unsupported),
     }
 }

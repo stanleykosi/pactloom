@@ -33,12 +33,16 @@ impl ProtectedTransportRuntime {
         sources: &[AuthorizationArtifactSource<'_>],
         operation: impl FnOnce(&[&ReceivedArtifact]) -> Result<R>,
     ) -> Result<R> {
-        self.with_authorization_artifacts_and_transport(access, sources, |artifacts, _, _| operation(artifacts))
+        self.with_authorization_artifacts_and_transport(access, sources, |artifacts, _, _| {
+            operation(artifacts)
+        })
     }
     /// Lend the runtime while the original incoming privacy leases remain held.
     /// The final effect must recheck the supplied guard after any interactive wait.
     pub fn with_authorization_artifacts_and_transport<R>(
-        &mut self, access: &Access, sources: &[AuthorizationArtifactSource<'_>],
+        &mut self,
+        access: &Access,
+        sources: &[AuthorizationArtifactSource<'_>],
         operation: impl FnOnce(&[&ReceivedArtifact], &mut Self, &dyn Fn() -> Result<()>) -> Result<R>,
     ) -> Result<R> {
         if sources.is_empty() || sources.len() > 32 {
@@ -122,7 +126,12 @@ impl ProtectedTransportRuntime {
             .iter()
             .map(OpenedAuthorization::artifact)
             .collect::<Vec<_>>();
-        let check = || { for lease in &leases { check_lease(lease.as_ref())?; } Ok(()) };
+        let check = || {
+            for lease in &leases {
+                check_lease(lease.as_ref())?;
+            }
+            Ok(())
+        };
         let result = operation(&refs, self, &check)?;
         for (binding, lease) in bindings.iter().zip(&leases) {
             check_lease(lease.as_ref())?;

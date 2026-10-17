@@ -103,6 +103,8 @@ impl Worker {
         self.lifetime.cancel();
         self.commands.take();
     }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(super) fn synthetic_finished(&self) -> bool { self.join.as_ref().is_none_or(|j|j.is_finished()) }
     pub fn reap(&mut self) {
         if self.join.as_ref().is_some_and(|j| j.is_finished()) {
             if let Some(j) = self.join.take() {
@@ -190,10 +192,12 @@ fn decision(
     }
 }
 fn run(
-    approved: ApprovedRequest,
+    #[allow(unused_mut)] mut approved: ApprovedRequest,
     notices: &SyncSender<Notice>,
     commands: &Receiver<Command>,
 ) -> Result<String> {
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    let mut synthetic_providers = approved.synthetic_providers.take().map(Vec::into_iter);
     let lifetime = &approved.lifetime;
     let deadline = lifetime.deadline();
     let endpoints = &approved.endpoints;
@@ -211,6 +215,12 @@ fn run(
             authorization_export: false,
             preconstruction_export: false,
         };
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        let provider = match synthetic_providers.as_mut() {
+            Some(providers) => providers.next().ok_or(Error::ReviewMismatch)?,
+            None => wholepact_signer_origin::InstalledSignerProvider::load().map_err(|_| Error::Unavailable)?,
+        };
+        #[cfg(not(feature = "synthetic-born-joined-qualification"))]
         let provider = wholepact_signer_origin::InstalledSignerProvider::load()
             .map_err(|_| Error::Unavailable)?;
         let client = NativeManualClient::begin_pair_before(

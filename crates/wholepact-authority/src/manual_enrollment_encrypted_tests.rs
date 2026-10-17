@@ -144,3 +144,7 @@ fn serialized_scope_without_actual_namespace_owner_cannot_enable_bootstrap() {
 
 #[path = "born_offline_enrollment_encrypted_tests.rs"]
 mod born_offline_enrollment_tests;
+
+#[cfg(all(feature = "born-offline-witness-owner", target_os = "linux"))]
+#[path = "born_offline_artifacts_encrypted_tests_v1.rs"]
+mod born_offline_artifacts_tests;

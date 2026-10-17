@@ -1,8 +1,14 @@
 //! Explicit foreground Linux TTY. Never stdin/env/argv/browser secret entry.
 //! This is local non-signing consent, not attestation against same-user PTY spoofing.
+#[cfg(all(feature = "manual-admission", target_os = "linux"))]
+pub(crate) mod born_checkpoint_retention_v1;
+#[cfg(all(feature = "manual-admission", target_os = "linux"))]
+pub(crate) mod born_offline_proof_v1;
+#[cfg(all(feature = "manual-admission", target_os = "linux"))]
+pub(crate) mod born_dispatch_v1;
 #[cfg(feature = "financial-runtime")]
 pub(crate) mod historical;
-use crate::{random, Error, Result};
+use crate::{Error, Result, random};
 #[cfg(target_os = "linux")]
 use std::os::unix::{
     fs::{FileTypeExt, OpenOptionsExt},
@@ -282,19 +288,21 @@ mod publication_tests {
             };
             let prepared = std::cell::Cell::new(false);
             let invoked = std::cell::Cell::new(false);
-            assert!(approval
-                .commit(
-                    &supplied,
-                    || {
-                        prepared.set(true);
-                        Ok(())
-                    },
-                    |()| {
-                        invoked.set(true);
-                        Ok(())
-                    },
-                )
-                .is_err());
+            assert!(
+                approval
+                    .commit(
+                        &supplied,
+                        || {
+                            prepared.set(true);
+                            Ok(())
+                        },
+                        |()| {
+                            invoked.set(true);
+                            Ok(())
+                        },
+                    )
+                    .is_err()
+            );
             assert!(!prepared.get());
             assert!(!invoked.get());
         }

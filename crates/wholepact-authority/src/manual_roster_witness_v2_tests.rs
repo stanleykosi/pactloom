@@ -368,6 +368,8 @@ pub(crate) fn history(
         snapshot: ledger.snapshot.clone(),
         permits: Vec::new(),
         offline_permits: Vec::new(),
+        born_offline_permits: vec![],
+        born_offline_dispatches: vec![],
         automatic_key_use_admissions: Vec::new(),
         recovery_fences: Vec::new(),
         committed_operation_ids: ledger.operations.keys().cloned().collect(),

@@ -178,6 +178,16 @@ impl AuthorityServer {
         if !crate::COMMON_CONTEXT_V3_ACTIVATION_QUALIFIED {
             return Err(AuthorityError::ConstructionHistoryUnsupported);
         }
+        Self::for_retained_construction_transport_v1(journal, tls, selected_pending_grant_digest)
+    }
+
+    // Same validation for the concrete synthetic native owner. No wire caller,
+    // raw DTO or public namespace selector can enter this private inner path.
+    pub(crate) fn for_retained_construction_transport_v1(
+        journal: Arc<AuthorityJournal>,
+        tls: ServerTls,
+        selected_pending_grant_digest: &str,
+    ) -> Result<Self> {
         hash(selected_pending_grant_digest)?;
         let pending = {
             let c = journal
@@ -208,6 +218,8 @@ impl AuthorityServer {
             tls,
             #[cfg(all(feature = "offline-witness-owner", target_os = "linux"))]
             offline_witness: None,
+            #[cfg(all(feature = "born-offline-witness-owner", target_os = "linux"))]
+            born_offline_witness: None,
             handoff_scope: Some(ConstructionTransportServingScopeV1 {
                 pending,
                 pending_digest: selected_pending_grant_digest.into(),

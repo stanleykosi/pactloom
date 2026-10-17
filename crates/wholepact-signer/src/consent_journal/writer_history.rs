@@ -196,13 +196,21 @@ impl WriterLocalInventory {
         &self,
         history: &ReconciledAuthorityHistory,
     ) -> Result<()> {
+        if history
+            .reservation_evidence()
+            .any(|entry| matches!(entry, ReservationEvidenceRef::BornOfflineV1(_)))
+        {
+            return Err(JournalError::RecoveryRequired);
+        }
         let online: BTreeMap<_, _> = history
             .reservation_evidence()
             .filter_map(|entry| match entry {
                 ReservationEvidenceRef::OnlineV2(permit) => {
                     Some((permit.request.authorization_id.as_str(), permit))
                 }
-                ReservationEvidenceRef::OfflineV1(_) => None,
+                ReservationEvidenceRef::OfflineV1(_) | ReservationEvidenceRef::BornOfflineV1(_) => {
+                    None
+                }
             })
             .collect();
         for original in &self.originals {
@@ -348,6 +356,9 @@ impl PreparedWriterHistory {
         let mut offline = Vec::new();
         for entry in history.reservation_evidence() {
             match entry {
+                ReservationEvidenceRef::BornOfflineV1(_) => {
+                    return Err(JournalError::RecoveryRequired);
+                }
                 ReservationEvidenceRef::OnlineV2(permit) => online.push(permit.clone()),
                 ReservationEvidenceRef::OfflineV1(admission) => {
                     let operation = history

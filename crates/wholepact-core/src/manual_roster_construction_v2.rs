@@ -159,6 +159,19 @@ impl ManualRosterConstructionPlanV2 {
 
     pub fn validate(&self) -> Result<Proposal> {
         bounded(self)?;
+        self.retained
+            .selection
+            .scope
+            .selection
+            .require_legacy_selection()?;
+        self.validate_retained_economics()
+    }
+
+    /// Pure per-owner economic/input/return checks shared with V3. This does not
+    /// validate this value as a public V2 plan, compute its V2 digest or issue an
+    /// approval. Keep the original bound, serialized shape and all fact checks.
+    pub(crate) fn validate_retained_economics(&self) -> Result<Proposal> {
+        bounded(self)?;
         self.retained.validate()?;
         hash(&self.retained_evidence_digest)?;
         let selection = &self.retained.selection.scope.selection;

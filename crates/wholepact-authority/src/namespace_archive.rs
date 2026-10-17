@@ -5,9 +5,9 @@ use super::*;
 #[cfg(test)]
 use crate::journal::NAMESPACE_ACCOUNT_TEMPLATE;
 use crate::journal::{
-    HistoricalNamespaceAccount, HistoricalNamespaceHistoryPage,
-    NamespaceJournalStamp, namespace_account_history_page, namespace_account_stamp,
-    namespace_account_summary, open_namespace_archive_account,
+    HistoricalNamespaceAccount, HistoricalNamespaceHistoryPage, NamespaceJournalStamp,
+    namespace_account_history_page, namespace_account_stamp, namespace_account_summary,
+    open_namespace_archive_account,
 };
 use crate::native_witness_owner::{
     NativeNamespaceBackupDecision, NativeNamespaceRecoveryDisclosureDecision, NativeWorkerLease,
@@ -57,7 +57,7 @@ pub(crate) struct NamespaceRecoveryInput {
 enum AccountState {
     Absent,
     AuthenticatedEmpty,
-    Committed { stamp: NamespaceJournalStamp },
+    Committed { stamp: Box<NamespaceJournalStamp> },
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -228,7 +228,9 @@ fn capture_descriptor(core: &NamespaceCore, captured_at_ms: u64) -> Result<Descr
                         &prepared.intent.request.policy,
                     )?;
                     require_birth(&history, prepared, &birth)?;
-                    AccountState::Committed { stamp }
+                    AccountState::Committed {
+                        stamp: Box::new(stamp),
+                    }
                 }
             }
         };
@@ -724,7 +726,7 @@ fn verify_namespace_archive(archive: capsule::VerifiedArchive) -> Result<Verifie
                 let (actual, birth) =
                     namespace_account_stamp(account.connection(), &prepared.intent.request.policy)?;
                 require_birth(&history, prepared, &birth)?;
-                if &actual != stamp {
+                if &actual != stamp.as_ref() {
                     return Err(AuthorityError::CorruptHistory);
                 }
                 expected_entries.insert(entry_id);

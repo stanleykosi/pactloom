@@ -37,6 +37,9 @@ pub struct RetainedOfflineReturnOriginal {
     signed_artifact_digest: String,
     projection_digest: String,
     online_proved_artifact_digest: String,
+    // Distinct canonical signer-role digest, retained by the future protected
+    // producer from its actual verified original-to-role transformation.
+    reviewed_artifact_digest: String,
     account_fvk_digest: String,
     return_order: MessageOrder,
     purpose: String,
@@ -65,9 +68,13 @@ impl RetainedOfflineReturnOriginal {
             &self.signed_artifact_digest,
             &self.projection_digest,
             &self.online_proved_artifact_digest,
+            &self.reviewed_artifact_digest,
             &self.account_fvk_digest,
         ] {
             crate::types::validate_hex(h, 32)?;
+        }
+        if self.terms().artifact_digest != self.online_proved_artifact_digest {
+            return Err(TransportError::WrongContext);
         }
         self.return_order.validate(&self.return_order.issued_at)?;
         crate::types::validate_text(&self.purpose)?;
@@ -242,6 +249,13 @@ fn validate_return(
         return Err(TransportError::WrongContext);
     }
     let t = original.terms();
+    validate_artifact_roles(
+        &t.artifact_digest,
+        &p.online_proved_artifact_digest,
+        &original.online_proved_artifact_digest,
+        &p.reviewed_artifact_digest,
+        &original.reviewed_artifact_digest,
+    )?;
     if p.account_id != t.account_id
         || p.authorization_id != t.authorization_id
         || p.original_consent_ref != original.original_consent_ref
@@ -256,8 +270,6 @@ fn validate_return(
                 .map_err(|_| TransportError::WrongContext)?
         || p.terms_digest != t.terms_digest().map_err(|_| TransportError::WrongContext)?
         || p.review_package_digest != t.review_package_digest
-        || p.reviewed_artifact_digest != t.artifact_digest
-        || p.online_proved_artifact_digest != original.online_proved_artifact_digest
         || p.manifest_digest != t.manifest_digest
         || p.effects_digest != t.effects_digest
         || p.review_binding != t.review_binding
@@ -271,6 +283,24 @@ fn validate_return(
         return Err(TransportError::WrongContext);
     }
     Ok(OfflineReturnData { payload: p })
+}
+
+// Exact role commitments only. This cannot create the still-unavailable
+// protected retained original, nor verify a cryptographic signature/layout.
+fn validate_artifact_roles(
+    terms_original: &str,
+    payload_original: &str,
+    retained_original: &str,
+    payload_reviewed: &str,
+    retained_reviewed: &str,
+) -> Result<()> {
+    if terms_original != retained_original
+        || payload_original != retained_original
+        || payload_reviewed != retained_reviewed
+    {
+        return Err(TransportError::WrongContext);
+    }
+    Ok(())
 }
 
 /// Dedicated pinned import. The callback may only add validation; its result is
@@ -479,5 +509,23 @@ mod tests {
             parse_payload(&input),
             Err(TransportError::Malformed)
         ));
+    }
+    #[test]
+    fn offline_return_artifact_roles_keep_full_and_reviewed_commitments_distinct() {
+        // Inert exact-role reduction only: no retained-original constructor.
+        let original = "1".repeat(64);
+        let reviewed = "2".repeat(64);
+        assert!(
+            validate_artifact_roles(&original, &original, &original, &reviewed, &reviewed).is_ok()
+        );
+        assert!(
+            validate_artifact_roles(&reviewed, &original, &original, &reviewed, &reviewed).is_err()
+        );
+        assert!(
+            validate_artifact_roles(&original, &reviewed, &original, &reviewed, &reviewed).is_err()
+        );
+        assert!(
+            validate_artifact_roles(&original, &original, &original, &original, &reviewed).is_err()
+        );
     }
 }

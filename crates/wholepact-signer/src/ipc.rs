@@ -6,7 +6,7 @@
 #[cfg(feature = "authority-signing")]
 use crate::authority_bridge::host_recovery_ipc::v5::V5TransferDialect;
 use crate::{
-    files::PrivateDirectory, native_peer::PeerProcess, review::validate_label, Error, Result,
+    Error, Result, files::PrivateDirectory, native_peer::PeerProcess, review::validate_label,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -23,9 +23,9 @@ use std::{
     },
     path::PathBuf,
     sync::{
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, SyncSender},
-        Arc, Mutex,
     },
     thread::JoinHandle,
     time::{Duration, Instant},
@@ -45,6 +45,14 @@ const LEASE: Duration = Duration::from_secs(900);
 pub(crate) mod permanent_stop;
 #[cfg(all(feature = "native-ui", feature = "authority-signing"))]
 pub(crate) mod retirement_evidence;
+
+// Pure checks are shared, but the ordinary outer product refusal stays closed.
+#[cfg(feature = "pending-birth-owner-signing")]
+mod common_context_scope_v3;
+// No runtime, CLI or environment activation. This nominal owner exists only in
+// the dedicated synthetic dependency facade, including cross-crate libtests.
+#[cfg(feature = "synthetic-born-joined-qualification")]
+mod scoped_born_qualification_v3;
 
 /// Public request data; constructing this does not create any authority.
 pub use wholepact_signer_origin::PairScope;
@@ -137,6 +145,10 @@ pub enum AppRequest {
     RequestPreconstruction {
         request: Box<crate::authority_bridge::preconstruction_ipc::PreconstructionRequest>,
     },
+    #[cfg(all(feature="authority-signing",feature="offline-review-foundation"))]
+    RequestBornOriginalHistoryV1 {request:Box<crate::authority_bridge::born_history_ipc::BornOriginalHistoryRequestV1>},
+    #[cfg(all(feature="authority-signing",feature="offline-review-foundation"))]
+    RequestBornDispatchV1 {request:Box<crate::authority_bridge::born_dispatch_ipc::BornDispatchRequestV1>},
     #[cfg(feature = "authority-signing")]
     RequestDispatch {
         request: Box<crate::authority_bridge::dispatch_ipc::DispatchRequest>,
@@ -275,84 +287,32 @@ impl AppRequest {
                 }
             }
             #[cfg(feature = "pending-birth-owner-signing")]
-            Self::RequestBornRosterCommonContextReadV1 { request } => {
+            Self::RequestBornRosterCommonContextReadV1 { .. } => {
                 if !COMMON_CONTEXT_V3_COMPOSITION_QUALIFIED {
                     return Err(Error::Unavailable);
                 }
-                request.validate().map_err(|_| Error::InvalidData)?;
-                let t = request.plan.enrollment();
-                if request.plan.digest().map_err(|_| Error::InvalidData)? != scope.manifest_digest
-                    || t.identity.account_id != scope.account_id
-                    || t.scope.agreement_id != scope.agreement_id
-                    || t.scope.participant_id != scope.participant_id
-                    || scope.history_read
-                    || scope.authorization_export
-                    || scope.preconstruction_export
-                {
-                    return Err(Error::Authentication);
-                }
+                common_context_scope_v3::validate_fields(self, scope)?;
             }
             #[cfg(feature = "pending-birth-owner-signing")]
-            Self::RequestBornRosterCommonContextReentryV1 {
-                request,
-                pending_grant_json,
-            } => {
+            Self::RequestBornRosterCommonContextReentryV1 { .. } => {
                 if !COMMON_CONTEXT_V3_COMPOSITION_QUALIFIED {
                     return Err(Error::Unavailable);
                 }
-                request.validate().map_err(|_| Error::InvalidData)?;
-                if pending_grant_json.len() > 16 * 1024
-                    || request
-                        .original_read
-                        .plan
-                        .digest()
-                        .map_err(|_| Error::InvalidData)?
-                        != scope.manifest_digest
-                    || request.original_read.plan.enrollment().identity.account_id
-                        != scope.account_id
-                    || request.original_read.plan.enrollment().scope.agreement_id
-                        != scope.agreement_id
-                    || request.original_read.plan.enrollment().scope.participant_id
-                        != scope.participant_id
-                    || scope.history_read
-                    || scope.authorization_export
-                    || scope.preconstruction_export
-                {
-                    return Err(Error::Authentication);
-                }
+                common_context_scope_v3::validate_fields(self, scope)?;
             }
             #[cfg(feature = "pending-birth-owner-signing")]
-            Self::RequestBornRosterReenteredConstructionV1 {
-                request,
-                reentry_lineage_digest,
-            } => {
+            Self::RequestBornRosterReenteredConstructionV1 { .. } => {
                 if !COMMON_CONTEXT_V3_COMPOSITION_QUALIFIED {
                     return Err(Error::Unavailable);
                 }
-                request.validate().map_err(|_| Error::InvalidData)?;
-                wholepact_core::proposal::validate_sha256(reentry_lineage_digest)
-                    .map_err(|_| Error::InvalidData)?;
-                if request.plan.digest().map_err(|_| Error::InvalidData)? != scope.manifest_digest
-                    || request.plan.enrollment().identity.account_id != scope.account_id
-                    || request.plan.enrollment().scope.agreement_id != scope.agreement_id
-                    || request.plan.enrollment().scope.participant_id != scope.participant_id
-                    || scope.history_read
-                    || scope.authorization_export
-                    || scope.preconstruction_export
-                {
-                    return Err(Error::Authentication);
-                }
+                common_context_scope_v3::validate_fields(self, scope)?;
             }
             #[cfg(feature = "pending-birth-owner-signing")]
-            Self::RequestBornRosterCommonContextHandoffAuthorizationV1 { request } => {
+            Self::RequestBornRosterCommonContextHandoffAuthorizationV1 { .. } => {
                 if !COMMON_CONTEXT_V3_COMPOSITION_QUALIFIED {
                     return Err(Error::Unavailable);
                 }
-                request.validate().map_err(|_| Error::InvalidData)?;
-                if scope.history_read || scope.authorization_export || scope.preconstruction_export
-                {
-                    return Err(Error::Authentication);
-                }
+                common_context_scope_v3::validate_fields(self, scope)?;
             }
             #[cfg(feature = "pending-birth-owner-signing")]
             Self::RequestBornRosterConstructionV2 { request } => {
@@ -370,22 +330,11 @@ impl AppRequest {
                 }
             }
             #[cfg(feature = "pending-birth-owner-signing")]
-            Self::RequestBornRosterConstructionV3 { request } => {
+            Self::RequestBornRosterConstructionV3 { .. } => {
                 if !COMMON_CONTEXT_V3_COMPOSITION_QUALIFIED {
                     return Err(Error::Unavailable);
                 }
-                request.validate().map_err(|_| Error::InvalidData)?;
-                let t = request.plan.enrollment();
-                if request.plan.digest().map_err(|_| Error::InvalidData)? != scope.manifest_digest
-                    || t.identity.account_id != scope.account_id
-                    || t.scope.agreement_id != scope.agreement_id
-                    || t.scope.participant_id != scope.participant_id
-                    || scope.history_read
-                    || scope.authorization_export
-                    || scope.preconstruction_export
-                {
-                    return Err(Error::Authentication);
-                }
+                common_context_scope_v3::validate_fields(self, scope)?;
             }
             #[cfg(feature = "pending-birth-owner-signing")]
             Self::RequestBornRosterCandidateSelectionV2 { request } => {
@@ -544,6 +493,22 @@ impl AppRequest {
             #[cfg(feature = "authority-signing")]
             Self::RequestPreconstruction { request } => {
                 if !scope.preconstruction_export {
+                    return Err(Error::Authentication);
+                }
+                request.validate().map_err(|_| Error::InvalidData)?;
+            }
+            #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
+            Self::RequestBornOriginalHistoryV1 { request } => {
+                if !scope.history_read || scope.authorization_export || scope.preconstruction_export
+                {
+                    return Err(Error::Authentication);
+                }
+                request.validate().map_err(|_| Error::InvalidData)?;
+            }
+            #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
+            Self::RequestBornDispatchV1 { request } => {
+                if !scope.history_read || scope.authorization_export || scope.preconstruction_export
+                {
                     return Err(Error::Authentication);
                 }
                 request.validate().map_err(|_| Error::InvalidData)?;
@@ -918,6 +883,10 @@ pub(crate) enum LocalEvent {
         stream: UnixStream,
         request: Box<crate::authority_bridge::preconstruction_ipc::PreconstructionRequest>,
     },
+    #[cfg(all(feature="authority-signing",feature="offline-review-foundation"))]
+    BornOriginalHistoryV1{peer:AuthenticatedPeer,stream:UnixStream,request:Box<crate::authority_bridge::born_history_ipc::BornOriginalHistoryRequestV1>},
+    #[cfg(all(feature="authority-signing",feature="offline-review-foundation"))]
+    BornDispatchV1{peer:AuthenticatedPeer,stream:UnixStream,request:Box<crate::authority_bridge::born_dispatch_ipc::BornDispatchRequestV1>},
     #[cfg(feature = "authority-signing")]
     Dispatch {
         peer: AuthenticatedPeer,
@@ -1047,6 +1016,16 @@ impl IpcRevocation {
             grants.clear();
         }
     }
+    /// Active named-recipient Lock calls this only after atomically revoking
+    /// the actual native owner. Existing peer checks retain that same owner;
+    /// a contended grant map is drained by OpenAccount::close off the GUI.
+    #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
+    pub(crate) fn close_named_recipient_now(&self) {
+        self.admission_closed.store(true, Ordering::Release);
+        if let Ok(mut grants) = self.grants.try_lock() {
+            grants.clear();
+        }
+    }
     pub(crate) fn close(&self) {
         self.admission_closed.store(true, Ordering::Release);
         if let Ok(mut grants) = self.grants.lock() {
@@ -1060,6 +1039,8 @@ impl IpcRevocation {
 #[derive(Clone)]
 enum IpcMode {
     Ordinary,
+    #[cfg(all(feature = "pending-birth-owner-signing", feature = "offline-review-foundation"))]
+    BornNamedVerifierV1 { exact: PairScope },
     #[cfg(feature = "pending-birth-owner-signing")]
     PermanentStopV1 {
         account_id: String,
@@ -1081,6 +1062,11 @@ impl IpcMode {
     ) -> Result<()> {
         match self {
             Self::Ordinary => request.validate(scope),
+            #[cfg(all(feature = "pending-birth-owner-signing", feature = "offline-review-foundation"))]
+            Self::BornNamedVerifierV1 { .. } => {
+                if !self.permits_scope(scope) || !self.permits_request(request) { return Err(Error::Authentication); }
+                request.validate(scope)
+            },
             #[cfg(feature = "pending-birth-owner-signing")]
             Self::PermanentStopV1 { .. } => {
                 if !self.permits_scope(scope) || !self.permits_request(request) {
@@ -1124,6 +1110,8 @@ impl IpcMode {
     fn permits_scope(&self, scope: &PairScope) -> bool {
         match self {
             Self::Ordinary => true,
+            #[cfg(all(feature = "pending-birth-owner-signing", feature = "offline-review-foundation"))]
+            Self::BornNamedVerifierV1 { exact } => scope == exact,
             #[cfg(feature = "pending-birth-owner-signing")]
             Self::PermanentStopV1 { account_id } => {
                 scope.account_id == *account_id
@@ -1143,6 +1131,8 @@ impl IpcMode {
     fn permits_request(&self, request: &AppRequest) -> bool {
         match self {
             Self::Ordinary => true,
+            #[cfg(all(feature = "pending-birth-owner-signing", feature = "offline-review-foundation"))]
+            Self::BornNamedVerifierV1 { .. } => matches!(request, AppRequest::Status {} | AppRequest::RequestNamedVerifierPolicyV1 { .. }),
             #[cfg(feature = "pending-birth-owner-signing")]
             Self::PermanentStopV1 { account_id } => match request {
                 AppRequest::Status {} => true,
@@ -1209,8 +1199,17 @@ pub struct LocalIpc {
     generation: u64,
     admission_closed: Arc<AtomicBool>,
     mode: IpcMode,
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    scoped_born_qualification_v3: scoped_born_qualification_v3::ScopedBornQualificationV3,
 }
 impl LocalIpc {
+    #[cfg(all(feature = "pending-birth-owner-signing", feature = "offline-review-foundation"))]
+    pub(crate) fn bind_born_named_verifier_v1(directory: PrivateDirectory, exact: PairScope) -> Result<Self> {
+        exact.validate()?;
+        if exact.history_read || exact.authorization_export || exact.preconstruction_export { return Err(Error::Authentication); }
+        // A restriction-only listener, never a native/account/pairing issuer.
+        Self::bind_mode(directory, IpcMode::BornNamedVerifierV1 { exact })
+    }
     #[cfg(feature = "pending-birth-owner-signing")]
     pub(crate) fn bind_permanent_stop_v1(
         directory: PrivateDirectory,
@@ -1288,8 +1287,23 @@ impl LocalIpc {
         let g = grants.clone();
         let s = stop.clone();
         let worker_mode = mode.clone();
-        let worker =
-            std::thread::spawn(move || serve(listener, g, s, sender, admission, worker_mode));
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        let scoped_born_qualification_v3 =
+            scoped_born_qualification_v3::ScopedBornQualificationV3::default();
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        let worker_scoped_v3 = scoped_born_qualification_v3.clone();
+        let worker = std::thread::spawn(move || {
+            serve(
+                listener,
+                g,
+                s,
+                sender,
+                admission,
+                worker_mode,
+                #[cfg(feature = "synthetic-born-joined-qualification")]
+                worker_scoped_v3,
+            )
+        });
         Ok(Self {
             _directory: directory,
             path,
@@ -1300,6 +1314,8 @@ impl LocalIpc {
             generation: 1,
             admission_closed,
             mode,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            scoped_born_qualification_v3,
         })
     }
     pub(crate) fn revocation(&self) -> IpcRevocation {
@@ -1336,6 +1352,8 @@ impl LocalIpc {
         decision: crate::native_ui::NativeDecision,
         authority: &crate::native_ui::NativeAuthority,
     ) -> Result<()> {
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        let _scoped_admission = self.scoped_born_qualification_v3.begin_admission()?;
         if !self.mode.permits_scope(&pending.scope)
             || decision.binding() != &authority.binding()
             || decision.reviewed_digest() != pending.review_digest(self.generation)?
@@ -1344,6 +1362,9 @@ impl LocalIpc {
         }
         authority.binding().check_current()?;
         pending.check_current()?;
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        self.scoped_born_qualification_v3
+            .require_pairing_owner(&pending.scope, &authority.binding())?;
         let mut grants = self.grants.lock().map_err(|_| Error::Locked)?;
         grants.retain(|_, g| g.peer.check_alive().is_ok() && Instant::now() < g.expires);
         if grants.len() >= MAX_GRANTS {
@@ -1415,6 +1436,8 @@ fn serve(
     sender: SyncSender<LocalEvent>,
     admission_closed: Arc<AtomicBool>,
     mode: IpcMode,
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    scoped_v3: scoped_born_qualification_v3::ScopedBornQualificationV3,
 ) {
     while !stop.load(Ordering::Acquire) {
         if let Ok(mut g) = grants.lock() {
@@ -1444,6 +1467,10 @@ fn serve(
                     };
                     let mut envelope: Envelope =
                         serde_json::from_slice(&frame).map_err(|_| Error::InvalidData)?;
+                    // Attachment, approval and event admission share one bounded
+                    // linearization point. Socket reading never holds this lock.
+                    #[cfg(feature = "synthetic-born-joined-qualification")]
+                    let _scoped_admission = scoped_v3.begin_admission()?;
                     match &mut envelope {
                         Envelope::RequestPairing {
                             schema_version,
@@ -1458,6 +1485,8 @@ fn serve(
                             if !mode.permits_scope(scope) {
                                 return Err(Error::Authentication);
                             }
+                            #[cfg(feature = "synthetic-born-joined-qualification")]
+                            scoped_v3.require_pairing_scope(scope)?;
                             peer.check_alive()?;
                             sender
                                 .try_send(LocalEvent::Pairing(PendingPairing {
@@ -1481,6 +1510,10 @@ fn serve(
                             if !mode.permits_request(request) {
                                 return Err(Error::Authentication);
                             }
+                            #[cfg(feature = "synthetic-born-joined-qualification")]
+                            let peer = scoped_v3
+                                .authenticate(&grants, peer, grant_id, token_hex, request, &mode)?;
+                            #[cfg(not(feature = "synthetic-born-joined-qualification"))]
                             let peer =
                                 authenticate(&grants, peer, grant_id, token_hex, request, &mode)?;
                             let request = std::mem::replace(request, AppRequest::Status {});
@@ -1666,6 +1699,10 @@ fn serve(
                                         })
                                         .map_err(|_| Error::Unavailable)?;
                                 }
+                                #[cfg(all(feature="authority-signing",feature="offline-review-foundation"))]
+                                AppRequest::RequestBornOriginalHistoryV1{ref request}=>{sender.try_send(LocalEvent::BornOriginalHistoryV1{peer,stream:stream.try_clone()?,request:request.clone()}).map_err(|_|Error::Unavailable)?;}
+                                #[cfg(all(feature="authority-signing",feature="offline-review-foundation"))]
+                                AppRequest::RequestBornDispatchV1{ref request}=>{sender.try_send(LocalEvent::BornDispatchV1{peer,stream:stream.try_clone()?,request:request.clone()}).map_err(|_|Error::Unavailable)?;}
                                 #[cfg(feature = "authority-signing")]
                                 AppRequest::RequestDispatch { ref request } => {
                                     sender
@@ -1726,6 +1763,8 @@ fn serve(
                                     match &mode {
                                         #[cfg(feature = "pending-birth-owner-signing")]
                                         IpcMode::PermanentStopV1 { .. } => return Err(Error::Authentication),
+                                        #[cfg(all(feature = "pending-birth-owner-signing", feature = "offline-review-foundation"))]
+                                        IpcMode::BornNamedVerifierV1 { .. } => return Err(Error::Authentication),
                                         IpcMode::Ordinary => crate::authority_bridge::host_recovery_ipc::v5::require_construction_transport_recovery_endpoint(),
                                         IpcMode::QuarantinedV5 { .. } => crate::authority_bridge::host_recovery_ipc::v5::require_quarantined_informational_endpoint(),
                                     }.map_err(|_| Error::Unavailable)?;
@@ -1778,6 +1817,8 @@ fn serve(
                                     match &mode {
                                         #[cfg(feature = "pending-birth-owner-signing")]
                                         IpcMode::PermanentStopV1 { .. } => return Err(Error::Authentication),
+                                        #[cfg(all(feature = "pending-birth-owner-signing", feature = "offline-review-foundation"))]
+                                        IpcMode::BornNamedVerifierV1 { .. } => return Err(Error::Authentication),
                                         IpcMode::Ordinary => crate::authority_bridge::host_recovery_ipc::v5::require_construction_transport_recovery_endpoint(),
                                         IpcMode::QuarantinedV5 { .. } => crate::authority_bridge::host_recovery_ipc::v5::require_quarantined_informational_endpoint(),
                                     }.map_err(|_| Error::Unavailable)?;
@@ -1948,6 +1989,31 @@ pub(crate) fn read_frame_with_deadline(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
+    #[test]
+    fn named_close_admission_never_waits_for_contended_grant_map() {
+        let revocation = super::IpcRevocation {
+            grants: std::sync::Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new())),
+            admission_closed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        let held = revocation.grants.lock().unwrap();
+        let closing = revocation.clone();
+        let (send, recv) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            closing.close_named_recipient_now();
+            send.send(()).unwrap();
+        });
+        let immediate = recv.recv_timeout(std::time::Duration::from_secs(2)).is_ok();
+        drop(held);
+        worker.join().unwrap();
+        assert!(immediate);
+        assert!(
+            revocation
+                .admission_closed
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+        revocation.close();
+    }
     use super::*;
     #[test]
     fn request_schema_cannot_express_unlock_approval_or_peer_attestation() {
@@ -2351,11 +2417,13 @@ mod transport_complete_host_routing_v5_tests {
             nested["request"]["transfer_dialect"] = "v5_bounded_transfer_v1".into();
             assert!(serde_json::from_value::<AppRequest>(nested).is_err());
         }
-        assert!(serde_json::from_value::<AppRequest>(serde_json::json!({
-            "operation": "status",
-            "transfer_dialect": "v5_bounded_transfer_v1"
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<AppRequest>(serde_json::json!({
+                "operation": "status",
+                "transfer_dialect": "v5_bounded_transfer_v1"
+            }))
+            .is_err()
+        );
         for operation in [
             "request_host_recovery_continuity_v3",
             "request_host_recovery_publication_v3",
@@ -2416,3 +2484,52 @@ mod transport_complete_host_routing_v5_tests {
 #[cfg(all(test, feature = "native-ui", feature = "authority-signing"))]
 #[path = "ipc/quarantined_endpoint_tests.rs"]
 mod quarantined_endpoint_tests;
+
+#[cfg(all(
+    test,
+    feature = "authority-signing",
+    feature = "offline-review-foundation"
+))]
+mod born_host_scope_tests {
+    use super::*;
+    #[test]
+    fn born_bridge_narrow_pairing_is_request_transport_not_export_authority() {
+        let request = crate::authority_bridge::born_dispatch_ipc::born_synthetic_request();
+        let history = request.history();
+        let mut scope = PairScope {
+            account_id: "synthetic-account".into(),
+            agreement_id: "synthetic-agreement".into(),
+            participant_id: "synthetic-participant".into(),
+            manifest_digest: "42".repeat(32),
+            history_read: true,
+            authorization_export: false,
+            preconstruction_export: false,
+        };
+        let dispatch = AppRequest::RequestBornDispatchV1 {
+            request: Box::new(request),
+        };
+        let history = AppRequest::RequestBornOriginalHistoryV1 {
+            request: Box::new(history),
+        };
+        assert!(dispatch.validate(&scope).is_ok());
+        assert!(history.validate(&scope).is_ok());
+        for change in 0..3 {
+            scope.history_read = change != 0;
+            scope.authorization_export = change == 1;
+            scope.preconstruction_export = change == 2;
+            assert!(dispatch.validate(&scope).is_err());
+            assert!(history.validate(&scope).is_err());
+        }
+        let mode = IpcMode::QuarantinedV5 {
+            account_id: "synthetic-account".into(),
+        };
+        assert!(
+            mode.validate_authenticated_request(&dispatch, &scope)
+                .is_err()
+        );
+    }
+}
+
+#[cfg(all(test, feature = "pending-birth-owner-signing", feature = "offline-review-foundation"))]
+#[path = "ipc/born_named_verifier_tests.rs"]
+mod born_named_verifier_tests;

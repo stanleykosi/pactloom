@@ -55,7 +55,7 @@ impl AuthorityJournal {
         let c = snapshot.connection();
         let app: i64 = c.pragma_query_value(None, "application_id", |r| r.get(0))?;
         let version: i64 = c.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if app != APPLICATION_ID || !matches!(version, 5 | SCHEMA_VERSION) {
+        if app != APPLICATION_ID || !matches!(version, 5..=7) {
             return Err(AuthorityError::UnsupportedVersion);
         }
         verify_schema(c)?;
@@ -88,18 +88,14 @@ impl AuthorityJournal {
         owner.check_current()?;
         // Exact namespace owner already holds writer/replacement exclusion.
         let snapshot = wholepact_storage_security::open_encrypted_read_snapshot(path, key)?;
-        verify_schema(snapshot.connection())?;
-        if matching_record(snapshot.connection(), policy)? != *expected
-            || is_quarantined(snapshot.connection())?
-        {
+        let (stamp, record) = namespace_account_stamp(snapshot.connection(), policy)?;
+        if record != *expected || stamp.quarantined {
             return Err(AuthorityError::CorruptHistory);
         }
         drop(snapshot);
         let connection = wholepact_storage_security::open_encrypted_quiescent(path, key)?;
-        verify_schema(connection.connection())?;
-        if matching_record(connection.connection(), policy)? != *expected
-            || is_quarantined(connection.connection())?
-        {
+        let (actual, record) = namespace_account_stamp(connection.connection(), policy)?;
+        if record != *expected || actual != stamp || actual.quarantined {
             return Err(AuthorityError::CorruptHistory);
         }
         owner.check_current()?;

@@ -42,6 +42,8 @@ pub(in crate::native_ui) struct SetupWorkspace {
     phrase: Zeroizing<String>,
     frame: u64,
     status: String,
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    synthetic_providers: Option<Vec<wholepact_signer_origin::InstalledSignerProvider>>,
 }
 impl Default for SetupWorkspace {
     fn default() -> Self {
@@ -64,6 +66,8 @@ impl Default for SetupWorkspace {
             phrase: Zeroizing::new(String::new()),
             frame: 0,
             status: String::new(),
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            synthetic_providers: None,
         }
     }
 }
@@ -95,6 +99,8 @@ impl SetupWorkspace {
         self.restore_password.zeroize();
         self.phrase.zeroize();
         self.active = false;
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        { self.synthetic_providers = None; }
     }
     pub(in crate::native_ui) fn blur(&mut self) {
         if let Some(assertion) = &mut self.assertion {
@@ -327,6 +333,8 @@ impl SetupWorkspace {
                 let profile = owner.directory.root().to_path_buf();
                 let approved =
                     super::handoff::ApprovedRequest::admit(*request, decision, native, owner)?;
+                #[cfg(feature = "synthetic-born-joined-qualification")]
+                let approved = { let mut actual = approved; actual.synthetic_providers = self.synthetic_providers.take(); actual };
                 // Close/zeroize the actual profile owner and revoke its native key
                 // authority before any peer pairing or external approval wait.
                 self.owner.take();
@@ -555,3 +563,6 @@ mod backup_lifecycle_tests {
         assert!(source.check_current().is_err());
     }
 }
+
+#[cfg(feature = "synthetic-born-joined-qualification")]
+pub(in crate::native_ui) mod synthetic_born_fixture;

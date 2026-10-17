@@ -26,6 +26,8 @@ pub(crate) struct NamedRecipientProfileFingerprintV1 {
 }
 #[derive(Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct NamedRecipientOriginalFingerprintV1 {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) born_origin_digest: Option<String>,
     pub(crate) reference: String,
     pub(crate) profile_ref: String,
     pub(crate) authorization_id: String,
@@ -90,6 +92,8 @@ pub(crate) struct NamedRecipientHistoryInventoryV1 {
     pub(crate) receipts: Vec<NamedRecipientReceiptFingerprintV1>,
     pub(crate) started: Vec<NamedRecipientStartedFingerprintV1>,
     pub(crate) results: Vec<NamedRecipientResultFingerprintV1>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) born_dispatch_requests: Vec<(String, String, String, String)>,
 }
 impl SignerConsentJournal {
     pub(crate) fn named_recipient_history_inventory(
@@ -111,7 +115,7 @@ impl SignerConsentJournal {
 /// Legacy consumers cannot silently omit setup/receipt-only history either.
 pub(super) fn require_absent(c: &Connection) -> Result<()> {
     let present: bool = c.query_row(
-        "SELECT EXISTS(SELECT 1 FROM signer_named_recipient_profiles UNION ALL SELECT 1 FROM signer_named_recipient_originals UNION ALL SELECT 1 FROM signer_named_recipient_receipts UNION ALL SELECT 1 FROM signer_named_recipient_started UNION ALL SELECT 1 FROM signer_named_recipient_results UNION ALL SELECT 1 FROM signer_named_intent_outbox)",
+        "SELECT EXISTS(SELECT 1 FROM signer_named_recipient_profiles UNION ALL SELECT 1 FROM signer_named_recipient_originals UNION ALL SELECT 1 FROM signer_named_recipient_receipts UNION ALL SELECT 1 FROM signer_named_recipient_started UNION ALL SELECT 1 FROM signer_named_recipient_results UNION ALL SELECT 1 FROM signer_named_intent_outbox UNION ALL SELECT 1 FROM signer_named_recipient_dispatch_requests)",
         [], |r| r.get(0))?;
     if present {
         return Err(JournalError::NamedRecipientHistoryUnsupported);
@@ -141,6 +145,7 @@ fn read_records(
         receipts: vec![],
         started: vec![],
         results: vec![],
+        born_dispatch_requests: vec![],
     };
     let mut profiles = BTreeMap::new();
     let mut q = c.prepare("SELECT reference,original_setup_digest,account_id,enrollment_ref,manifest_ref,payload FROM signer_named_recipient_profiles ORDER BY reference")?;
@@ -179,6 +184,13 @@ fn read_records(
             || manifest.terms.account_id != account
         {
             return Err(JournalError::InvalidBinding);
+        }
+        if let Some(born) = &profile.born_profile {
+            let actual = super::account_use_storage::inspect(c, account)?;
+            if actual.genesis() != Some(&born.genesis) {
+                return Err(JournalError::InvalidBinding);
+            }
+            born.validate_local_manifest(&profile, &enrollment, &manifest)?;
         }
         inventory.profiles.push(NamedRecipientProfileFingerprintV1 {
             reference: reference.clone(),
@@ -238,7 +250,13 @@ fn read_records(
         {
             return Err(JournalError::InvalidBinding);
         }
-        validate_manifest_terms(c, &original, &manifest)?;
+        validate_manifest_terms(c, profile, &original, &manifest)?;
+        if let Some(origin) = &original.born_origin {
+            let enrollment = storage::read_enrollment(c, &profile.enrollment_ref)?
+                .ok_or(JournalError::InvalidBinding)?;
+            origin.require_retained_signer(c, profile, &enrollment)?;
+            origin.checkpoint_receipt.require_retained(c)?;
+        }
         let alias: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM signer_original_consents WHERE authorization_id=?1 UNION ALL SELECT 1 FROM signer_offline_original_consents WHERE authorization_id=?1)", [&authorization_id], |r| r.get(0))?;
         if alias {
             return Err(JournalError::Conflict);
@@ -246,6 +264,11 @@ fn read_records(
         inventory
             .originals
             .push(NamedRecipientOriginalFingerprintV1 {
+                born_origin_digest: original
+                    .born_origin
+                    .as_ref()
+                    .map(|o| o.digest())
+                    .transpose()?,
                 reference,
                 profile_ref,
                 authorization_id: authorization_id.clone(),
@@ -441,11 +464,35 @@ fn read_records(
                         && r.envelope_digest == final_review.assertion_envelope_digest
                 })
                 || !return_sequences.insert((
+                    false,
                     original.terms.network_profile_id.clone(),
                     original.terms.agreement_id.clone(),
                     original.terms.offline_signer_key_digest.clone(),
                     original.terms.return_recipient_key_digest.clone(),
                     final_review.return_sequence,
+                ))
+            {
+                return Err(JournalError::InvalidBinding);
+            }
+        }
+        if let Some(review) = &started.born_final_review {
+            let profile = profiles
+                .get(&original.profile_ref)
+                .ok_or(JournalError::InvalidBinding)?;
+            review.validate_profile(profile, original)?;
+            review.admission_receipt.require_retained(c)?;
+            if review.witness.pinned_server_certificate_digest != profile.witness_certificate_digest
+                || !inventory.receipts.iter().any(|r| {
+                    r.profile_ref == original.profile_ref
+                        && r.envelope_digest == review.assertion_envelope_digest
+                })
+                || !return_sequences.insert((
+                    true,
+                    original.terms.network_profile_id.clone(),
+                    original.terms.agreement_id.clone(),
+                    original.terms.offline_signer_key_digest.clone(),
+                    original.terms.return_recipient_key_digest.clone(),
+                    review.return_sequence,
                 ))
             {
                 return Err(JournalError::InvalidBinding);
@@ -495,6 +542,51 @@ fn read_records(
             result_digest,
         });
     }
+    drop(q);
+    let mut q=c.prepare("SELECT operation_id,authorization_id,original_ref,request_digest,payload FROM signer_named_recipient_dispatch_requests ORDER BY operation_id")?;
+    for row in q.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+            r.get::<_, String>(4)?,
+        ))
+    })? {
+        let (operation, authorization, reference, commitment, raw) = row?;
+        #[cfg(target_os = "linux")]
+        {
+            let record: RetainedBornDispatchV1 = decode(raw)?;
+            let original = originals
+                .get(&authorization)
+                .ok_or(JournalError::InvalidBinding)?;
+            let started = started_records
+                .get(&authorization)
+                .ok_or(JournalError::InvalidBinding)?;
+            record.validate(original, started)?;
+            if operation != record.exact.dispatch.operation_id
+                || reference != original.reference
+                || commitment != record.digest()?
+                || !inventory
+                    .results
+                    .iter()
+                    .any(|r| r.authorization_id == authorization)
+            {
+                return Err(JournalError::InvalidBinding);
+            }
+            inventory.born_dispatch_requests.push((
+                operation,
+                authorization,
+                reference,
+                commitment,
+            ));
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (operation, authorization, reference, commitment, raw);
+            return Err(JournalError::ConstructionHistoryUnsupported);
+        }
+    }
     Ok(inventory)
 }
 
@@ -504,12 +596,13 @@ mod tests;
 
 fn validate_manifest_terms(
     c: &Connection,
+    profile: &NamedRecipientProfileRecordV1,
     original: &NamedRecipientOriginalRecordV1,
     manifest: &AcceptedManifestRecord,
 ) -> Result<()> {
     let t = &original.terms;
-    let enrollment =
-        storage::read_enrollment(c, &t.enrollment_ref)?.ok_or(JournalError::InvalidBinding)?;
+    let enrollment = storage::read_enrollment(c, &profile.enrollment_ref)?
+        .ok_or(JournalError::InvalidBinding)?;
     let p = manifest.proposal()?;
     let owner = p
         .manifest()

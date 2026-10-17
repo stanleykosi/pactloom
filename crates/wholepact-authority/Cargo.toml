@@ -7,7 +7,8 @@ description = "Owner-operated independent per-account reservation witness"
 
 [features]
 default = []
-synthetic-qualification = []
+born-offline-witness-owner = ["native-witness-owner", "offline-witness-owner"]
+synthetic-qualification = ["wholepact-storage-security/synthetic-qualification"]
 offline-witness-owner = ["dep:hpke", "dep:rand", "dep:getrandom", "dep:base64", "dep:chrono"]
 pending-birth-foundation = ["dep:webpki"]
 native-witness-owner = ["pending-birth-foundation", "dep:eframe", "dep:winit"]
@@ -45,3 +46,8 @@ winit = { version = "=0.30.13", optional = true, default-features = false, featu
 name = "wholepact-witness-owner-ui"
 path = "src/witness_owner_main.rs"
 required-features = ["native-witness-owner"]
+
+[[bin]]
+name = "wholepact-born-offline-witness"
+path = "src/born_offline_server_main.rs"
+required-features = ["born-offline-witness-owner"]

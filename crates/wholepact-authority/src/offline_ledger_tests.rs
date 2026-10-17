@@ -248,6 +248,8 @@ fn legacy_history_accessor_refuses_to_drop_an_offline_origin() {
         snapshot: ledger.snapshot.clone(),
         permits: vec![],
         offline_permits: vec![*p],
+        born_offline_permits: vec![],
+        born_offline_dispatches: vec![],
         automatic_key_use_admissions: vec![],
         recovery_fences: vec![],
         committed_operation_ids: Default::default(),

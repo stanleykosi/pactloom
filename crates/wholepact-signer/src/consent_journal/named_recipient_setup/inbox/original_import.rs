@@ -40,6 +40,8 @@ pub(crate) struct NamedRecipientOriginalInputs {
 /// Owns genuine process-local source/journal association, but is not approved.
 /// No raw constructor, Clone, Debug, Deserialize or authority conversion exists.
 pub(crate) struct PreparedNamedRecipientOriginalImport {
+    operation: Option<super::NamedRecipientOperation>,
+    checkpoint_input: Option<super::born_checkpoint_input::PreparedBornCheckpointInputV1>,
     profile: LiveNamedRecipientProfile,
     original: NamedRecipientOriginalRecordV1,
     own_policy: OwnEffectsPolicy,
@@ -73,6 +75,19 @@ impl LiveNamedRecipientProfile {
         &self.record.manifest_ref
     }
     pub(crate) fn prepare_original_import(
+        &self,
+        journal: &SignerConsentJournal,
+        session: &SignerConsentSession,
+        vault: &AccountVault,
+        inputs: NamedRecipientOriginalInputs,
+    ) -> ImportResult<PreparedNamedRecipientOriginalImport> {
+        inputs
+            .proposed
+            .require_legacy_origin()
+            .map_err(|_| TransportError::AuthorityUnavailable)?;
+        self.prepare_original_import_inner(journal, session, vault, inputs)
+    }
+    fn prepare_original_import_inner(
         &self,
         journal: &SignerConsentJournal,
         session: &SignerConsentSession,
@@ -120,7 +135,7 @@ impl LiveNamedRecipientProfile {
         records
             .require_native_origin(&self.source)
             .map_err(unavailable)?;
-        let context = intent_context(&proposed);
+        let context = draft_intent_context(&proposed.terms, proposed.born_origin.is_some())?;
         let stream = wire::stream_digest(&context).map_err(codec_error)?;
         let profile_record = {
             let c = journal
@@ -129,7 +144,13 @@ impl LiveNamedRecipientProfile {
                 .map_err(|_| TransportError::Storage)?;
             let record = exact_profile(&c, self, journal)?;
             require_new_authorization(&c, &proposed.terms.authorization_id)?;
-            require_proposed_policy(&record, &proposed, &proposed_policy)?;
+            if let Some(origin) = &proposed.born_origin {
+                origin
+                    .require_actual_signer(&c, &record, records.enrollment())
+                    .map_err(|_| TransportError::WrongContext)?;
+            } else {
+                require_legacy_new_original_account(&c, &record.account_id)?;
+            }
             outgoing.order.sequence = next_outgoing_sequence(&c, &record.reference, &stream)?;
             record
         };
@@ -142,6 +163,9 @@ impl LiveNamedRecipientProfile {
             .reservation_request
             .intent
             .native_reservation_review_digest = reviewed.clone();
+        if let Some(origin) = &mut proposed.born_origin {
+            origin.request.reservation = proposed.reservation_request.clone();
+        }
         proposed.reservation_request_digest = proposed
             .reservation_request
             .request_digest()
@@ -149,6 +173,10 @@ impl LiveNamedRecipientProfile {
         proposed.reference = proposed
             .reference_digest()
             .map_err(|_| TransportError::WrongContext)?;
+        // Full policy/origin validation remains under the SAME actual lease.
+        // Normalize the real local review first; no supplied digest is consent.
+        require_proposed_policy(&profile_record, &proposed, &proposed_policy)?;
+        require_same_intent_context(&context, &intent_context(&proposed)?)?;
         require_own_context(self, &proposed, &own_policy, vault, &records)?;
         let prepared = prepare_intent(self, &proposed, outgoing, &now)?;
         if prepared
@@ -164,6 +192,8 @@ impl LiveNamedRecipientProfile {
         records.check_current().map_err(unavailable)?;
         check_setup_current(&self.source, original_window_deadline).map_err(unavailable)?;
         Ok(PreparedNamedRecipientOriginalImport {
+            operation: None,
+            checkpoint_input: None,
             profile: LiveNamedRecipientProfile {
                 record: profile_record,
                 journal: self.journal.clone(),
@@ -192,6 +222,23 @@ impl LiveNamedRecipientProfile {
         vault: &AccountVault,
         authorization_id: &str,
     ) -> ImportResult<Option<RetainedNamedIntentExport>> {
+        let result =
+            self.recover_original_intent_export_inner(journal, session, vault, authorization_id)?;
+        if result
+            .as_ref()
+            .is_some_and(|r| r.original.born_origin.is_some())
+        {
+            return Err(TransportError::AuthorityUnavailable);
+        }
+        Ok(result)
+    }
+    fn recover_original_intent_export_inner(
+        &self,
+        journal: &SignerConsentJournal,
+        session: &SignerConsentSession,
+        vault: &AccountVault,
+        authorization_id: &str,
+    ) -> ImportResult<Option<RetainedNamedIntentExport>> {
         require_profile_owner(self, journal)?;
         id(authorization_id).map_err(|_| TransportError::WrongContext)?;
         let records = journal
@@ -214,6 +261,12 @@ impl LiveNamedRecipientProfile {
             match original {
                 None => None,
                 Some(original) => {
+                    if let Some(origin) = &original.born_origin {
+                        origin
+                            .checkpoint_receipt
+                            .require_retained(&c)
+                            .map_err(unavailable)?;
+                    }
                     let outbox = read_outbox(&c, &original, &record)?;
                     Some((record, original, outbox))
                 }
@@ -266,6 +319,19 @@ impl PreparedNamedRecipientOriginalImport {
         &self.original.terms.authorization_id
     }
     pub(crate) fn approve(
+        self,
+        decision: NativeDecision,
+        journal: &SignerConsentJournal,
+        session: &SignerConsentSession,
+        vault: &AccountVault,
+        now: &Timestamp,
+    ) -> ImportResult<RetainedNamedIntentExport> {
+        self.original
+            .require_legacy_origin()
+            .map_err(|_| TransportError::AuthorityUnavailable)?;
+        self.approve_inner(decision, journal, session, vault, now)
+    }
+    fn approve_inner(
         self,
         decision: NativeDecision,
         journal: &SignerConsentJournal,
@@ -348,10 +414,15 @@ impl PreparedNamedRecipientOriginalImport {
         let sender =
             TransportPublicKey::from_bytes(self.profile.record.verifier_transport_public_key)?;
         let current = || {
+            if let Some(operation) = &self.operation {
+                operation.check()?;
+            }
             records.check_current().map_err(unavailable)?;
             check_setup_current(&self.profile.source, expires).map_err(unavailable)
         };
         let mut ledger = FirstOriginalLedger {
+            operation: self.operation.as_ref(),
+            checkpoint_input: self.checkpoint_input.as_ref(),
             journal,
             profile: &self.profile,
             original: &self.original,
@@ -410,6 +481,7 @@ impl PreparedNamedRecipientOriginalImport {
 /// Exact resolved output destination is part of this separate native review.
 /// No arbitrary destination can be supplied after the decision is consumed.
 pub(crate) struct PreparedNamedIntentFileExport {
+    operation: Option<super::NamedRecipientOperation>,
     retained: RetainedNamedIntentExport,
     destination: ExactFileDestination,
     handoff_bytes: Zeroizing<Vec<u8>>,
@@ -434,19 +506,28 @@ impl RetainedNamedIntentExport {
         vault: &AccountVault,
         destination: &Path,
     ) -> ImportResult<PreparedNamedIntentFileExport> {
+        self.original
+            .require_legacy_origin()
+            .map_err(|_| TransportError::AuthorityUnavailable)?;
+        self.prepare_file_export_inner(journal, session, vault, destination)
+    }
+    fn prepare_file_export_inner(
+        self,
+        journal: &SignerConsentJournal,
+        session: &SignerConsentSession,
+        vault: &AccountVault,
+        destination: &Path,
+    ) -> ImportResult<PreparedNamedIntentFileExport> {
         self.require_exact_current(journal, session, vault)?;
         let destination = ExactFileDestination::prepare(destination)?;
-        let handoff = OfflineIntentHandoffV1::from_untrusted_parts(
-            self.original.reservation_request.clone(),
-            self.original.admission_export_template.clone(),
+        let handoff = born_intent_file::ExactIntentHandoff::from_original(
+            &self.original,
             self.envelope.as_bytes(),
         )?;
         let handoff_digest = handoff.commitment()?;
         let handoff_bytes = Zeroizing::new(handoff.canonical_bytes()?);
-        let request_display = serde_json::to_string_pretty(handoff.request())
-            .map_err(|_| TransportError::Malformed)?;
-        let reply_display = serde_json::to_string_pretty(handoff.admission_export_template())
-            .map_err(|_| TransportError::Malformed)?;
+        let request_display = handoff.request_display()?;
+        let reply_display = handoff.reply_display()?;
         let reviewed = digest(
             "wholepact:native-named-intent-file-export:v1",
             &(
@@ -465,6 +546,7 @@ impl RetainedNamedIntentExport {
         );
         self.profile.source.check_current().map_err(unavailable)?;
         Ok(PreparedNamedIntentFileExport {
+            operation: None,
             retained: self,
             destination,
             handoff_bytes,
@@ -513,6 +595,11 @@ impl RetainedNamedIntentExport {
             read_original_by_authorization(&c, &self.profile.record, self.authorization_id())?
                 .ok_or(TransportError::WrongContext)?;
         let outbox = read_outbox(&c, &original, &self.profile.record)?;
+        if let Some(origin) = &original.born_origin {
+            origin
+                .require_retained_signer(&c, &self.profile.record, records.enrollment())
+                .map_err(|_| TransportError::WrongContext)?;
+        }
         if original != self.original
             || outbox != self.outbox
             || envelope_commitment(self.envelope.as_bytes())? != outbox.envelope_digest
@@ -538,6 +625,9 @@ impl PreparedNamedIntentFileExport {
         session: &SignerConsentSession,
         vault: &AccountVault,
     ) -> ImportResult<()> {
+        if let Some(operation) = &self.operation {
+            operation.check()?;
+        }
         require_profile_owner(&self.retained.profile, journal)?;
         if decision.binding() != &self.retained.profile.source
             || decision.reviewed_digest() != self.digest
@@ -559,6 +649,9 @@ impl PreparedNamedIntentFileExport {
         check_setup_current(&self.retained.profile.source, expires).map_err(unavailable)?;
         // Allocate outside the publication fence. A delayed filesystem operation
         // cannot extend native consent; after creation every error is uncertain.
+        if let Some(operation) = &self.operation {
+            operation.check()?;
+        }
         let mut file = self.destination.allocate()?;
         let result = (|| -> ImportResult<()> {
             self.destination.check_created(&file, 0)?;
@@ -576,10 +669,16 @@ impl PreparedNamedIntentFileExport {
             check_setup_current(&self.retained.profile.source, expires).map_err(unavailable)?;
             // This is the first handoff write, immediately after the original
             // deadline/session/source checks. No renewal or fresh approval hash.
+            if let Some(operation) = &self.operation {
+                operation.check()?;
+            }
             file.write_all(self.handoff_bytes.as_slice())
                 .map_err(|_| TransportError::Storage)?;
             file.sync_all().map_err(|_| TransportError::Storage)?;
             self.destination.sync_parent()?;
+            if let Some(operation) = &self.operation {
+                operation.check()?;
+            }
             self.destination
                 .check_created(&file, self.handoff_bytes.len() as u64)?;
             records.check_current().map_err(unavailable)?;
@@ -593,6 +692,8 @@ impl PreparedNamedIntentFileExport {
 // Only this genuine native approval path creates this ledger. It is not exported
 // and cannot receive raw receipt records in place of AuthenticatedReceipt.
 struct FirstOriginalLedger<'a, 'lease> {
+    operation: Option<&'a super::NamedRecipientOperation>,
+    checkpoint_input: Option<&'a super::born_checkpoint_input::PreparedBornCheckpointInputV1>,
     journal: &'a SignerConsentJournal,
     profile: &'a LiveNamedRecipientProfile,
     original: &'a NamedRecipientOriginalRecordV1,
@@ -606,6 +707,9 @@ struct FirstOriginalLedger<'a, 'lease> {
 }
 impl FirstOriginalLedger<'_, '_> {
     fn current(&self) -> ImportResult<()> {
+        if let Some(operation) = self.operation {
+            operation.check()?;
+        }
         self.records.check_current().map_err(unavailable)?;
         check_setup_current(&self.profile.source, self.expires).map_err(unavailable)
     }
@@ -644,6 +748,13 @@ impl ReplayLedger for FirstOriginalLedger<'_, '_> {
         exact_profile(&tx, self.profile, self.journal)?;
         require_new_authorization(&tx, &self.original.terms.authorization_id)?;
         require_proposed_policy(&self.profile.record, self.original, self.proposed_policy)?;
+        if let Some(origin) = &self.original.born_origin {
+            origin
+                .require_actual_signer(&tx, &self.profile.record, self.records.enrollment())
+                .map_err(|_| TransportError::WrongContext)?;
+        } else {
+            require_legacy_new_original_account(&tx, &self.profile.record.account_id)?;
+        }
         if next_outgoing_sequence(&tx, &self.profile.record.reference, &metadata.stream_digest)?
             != sequence
         {
@@ -658,6 +769,13 @@ impl ReplayLedger for FirstOriginalLedger<'_, '_> {
         // Replay/sequence/slot collisions fail before consuming randomness.
         // This receipt is uncommitted until original and outbound bytes join it.
         insert_authenticated(&tx, &self.profile.record.reference, receipt, encrypted)?;
+        match (&self.original.born_origin, self.checkpoint_input) {
+            (Some(_), Some(checkpoint)) => {
+                checkpoint.commit_into(&tx, self.profile, self.original, self.records)?
+            }
+            (None, None) => {}
+            _ => return Err(TransportError::AuthorityUnavailable),
+        }
         let sender = wire::TransportSecret::from_bytes(self.profile.record.transport_secret)
             .map_err(codec_error)?;
         // SQL-lock acquisition, receipt collisions and metadata work can block.
@@ -671,15 +789,18 @@ impl ReplayLedger for FirstOriginalLedger<'_, '_> {
             self.current()?;
             let seal_now =
                 local_time_for_original(self.original, &order, self.minimum_wall_milliseconds)?;
-            wire::seal_original_intent(prepared, &sender, &preview_digest, &seal_now)
-                .map_err(codec_error)?
+            if self.original.born_origin.is_some() {
+                wire::seal_born_original_intent(prepared, &sender, &preview_digest, &seal_now)
+            } else {
+                wire::seal_original_intent(prepared, &sender, &preview_digest, &seal_now)
+            }
+            .map_err(codec_error)?
         };
         // The immutable original must fit the actual bounded witness route.
         // The inert handoff validator uses its maintained wire-size preflight;
         // failure here rolls back the uncommitted inbound receipt as well.
-        let candidate_handoff = OfflineIntentHandoffV1::from_untrusted_parts(
-            self.original.reservation_request.clone(),
-            self.original.admission_export_template.clone(),
+        let candidate_handoff = born_intent_file::ExactIntentHandoff::from_original(
+            self.original,
             envelope.as_bytes(),
         )?;
         let _bounded_handoff = Zeroizing::new(candidate_handoff.canonical_bytes()?);
@@ -932,6 +1053,14 @@ fn require_proposed_policy(
     policy
         .validate()
         .map_err(|_| TransportError::WrongContext)?;
+    if let Some(origin) = &original.born_origin {
+        if policy != &origin.enrollment.enrollment.policy {
+            return Err(TransportError::WrongContext);
+        }
+        origin
+            .validate_structure(profile, original)
+            .map_err(|_| TransportError::WrongContext)?;
+    }
     let request = &original.reservation_request;
     let terms = &request.intent.terms;
     let lifetime = request
@@ -947,7 +1076,7 @@ fn require_proposed_policy(
         || policy.account_id != profile.account_id
         || policy.account_id != terms.account_id
         || policy.network_profile_id != terms.network_profile_id
-        || policy.enrollment_ref != profile.enrollment_ref
+        || policy.enrollment_ref != profile.witness_enrollment_ref()
         || policy.enrollment_ref != terms.enrollment_ref
         || policy.witness_transport_key_digest != fingerprint(&profile.witness_transport_public_key)
         || policy.witness_certificate_digest != profile.witness_certificate_digest
@@ -1001,7 +1130,7 @@ fn original_review_digest(
     outgoing: &NamedIntentExportTemplate,
     assertion_envelope_digest: &str,
 ) -> ImportResult<String> {
-    digest(
+    let legacy_review = digest(
         "wholepact:native-named-first-original-review:v1",
         &(
             &profile.record.reference,
@@ -1041,12 +1170,32 @@ fn original_review_digest(
             assertion_envelope_digest,
         ),
     )
-    .map_err(|_| TransportError::ResourceLimit)
+    .map_err(|_| TransportError::ResourceLimit)?;
+    match &proposed.born_origin {
+        None => Ok(legacy_review),
+        Some(origin) => digest(
+            "wholepact:native-born-named-first-original-review:v1",
+            &(
+                legacy_review,
+                origin
+                    .parent_binding_digest()
+                    .map_err(|_| TransportError::WrongContext)?,
+            ),
+        )
+        .map_err(|_| TransportError::ResourceLimit),
+    }
 }
 
-fn intent_context(original: &NamedRecipientOriginalRecordV1) -> wire::MessageContext {
+fn intent_context(original: &NamedRecipientOriginalRecordV1) -> ImportResult<wire::MessageContext> {
+    if let Some(origin) = &original.born_origin {
+        let context = wholepact_transport::born_offline_intent_context_v1(&origin.request)?;
+        return serde_json::from_slice(
+            &serde_json::to_vec(&context).map_err(|_| TransportError::Malformed)?,
+        )
+        .map_err(|_| TransportError::Malformed);
+    }
     let terms = &original.reservation_request.intent.terms;
-    wire::MessageContext {
+    Ok(wire::MessageContext {
         network_profile_id: terms.network_profile_id.clone(),
         agreement_id: terms.agreement_id.clone(),
         proposal_id: terms.proposal_id.clone(),
@@ -1054,7 +1203,7 @@ fn intent_context(original: &NamedRecipientOriginalRecordV1) -> wire::MessageCon
         sender_id: format!("offline-intent:{}", terms.offline_signer_key_digest),
         recipient_id: format!("offline-intent:{}", terms.offline_policy_digest),
         artifact_kind: wire::ArtifactKind::OfflineReservationIntent,
-    }
+    })
 }
 fn prepare_intent(
     profile: &LiveNamedRecipientProfile,
@@ -1081,20 +1230,33 @@ fn prepare_intent(
     .map_err(|_| TransportError::Malformed)?;
     wire::prepare_export(
         wire::ExportRequest {
-            context: intent_context(original),
+            context: intent_context(original)?,
             order,
             purpose: outgoing.purpose,
             persistence_warning: outgoing.persistence_warning,
         },
-        vec![
-            wire::DisclosureField::new(
-                "offline-reservation-intent-v1",
-                serde_json::to_vec(&request.intent).map_err(|_| TransportError::Malformed)?,
-            )
-            .map_err(codec_error)?,
-            wire::DisclosureField::new(NAMED_REVIEW_BINDING_FIELD_V1, header.canonical_bytes()?)
+        if let Some(origin) = &original.born_origin {
+            wholepact_transport::born_offline_intent_fields_v1(&origin.request, &header)?
+                .iter()
+                .map(|field| {
+                    wire::DisclosureField::new(field.name(), field.bytes().to_vec())
+                        .map_err(codec_error)
+                })
+                .collect::<ImportResult<Vec<_>>>()?
+        } else {
+            vec![
+                wire::DisclosureField::new(
+                    "offline-reservation-intent-v1",
+                    serde_json::to_vec(&request.intent).map_err(|_| TransportError::Malformed)?,
+                )
                 .map_err(codec_error)?,
-        ],
+                wire::DisclosureField::new(
+                    NAMED_REVIEW_BINDING_FIELD_V1,
+                    header.canonical_bytes()?,
+                )
+                .map_err(codec_error)?,
+            ]
+        },
         &wire::TransportPublicKey::from_bytes(profile.record.transport_public_key)
             .map_err(codec_error)?,
         &wire::TransportPublicKey::from_bytes(profile.record.witness_transport_public_key)
@@ -1139,8 +1301,9 @@ fn original_display(
         preview.purpose,
         preview.persistence_warning
     );
+    let born_display = proposed_origin_display(original)?;
     Ok(format!(
-        "{summary}\nSelected verifier signing key: {}\nSelected verifier transport key: {}\nExact request: {request_json}\nExact independently checked own effects: {own_json}\nOriginal admission reply template: {reply_json}",
+        "{summary}{born_display}\nSelected verifier signing key: {}\nSelected verifier transport key: {}\nExact request: {request_json}\nExact independently checked own effects: {own_json}\nOriginal admission reply template: {reply_json}",
         hex::encode(profile.record.verifier_signing_public_key),
         hex::encode(profile.record.verifier_transport_public_key)
     ))
@@ -1155,6 +1318,20 @@ fn review_deadline(created: Instant, decision: &NativeDecision) -> ImportResult<
                 .checked_add(Duration::from_secs(120))
                 .ok_or(TransportError::InvalidTime)?,
         ))
+}
+
+// Only new legacy originals are fenced. Existing historical rows and exact
+// recovery remain readable; an absent DTO origin cannot downgrade actual birth.
+fn require_legacy_new_original_account(
+    c: &rusqlite::Connection,
+    account: &str,
+) -> ImportResult<()> {
+    let actual =
+        super::super::super::account_use_storage::inspect(c, account).map_err(unavailable)?;
+    if actual.genesis().is_some() || actual.exclusion().is_some() {
+        return Err(TransportError::AuthorityUnavailable);
+    }
+    Ok(())
 }
 
 fn read_original_by_authorization(
@@ -1282,3 +1459,67 @@ fn codec_error(error: wire::TransportError) -> TransportError {
 #[cfg(test)]
 #[path = "original_import/local_window_tests.rs"]
 mod local_window_tests;
+
+fn proposed_origin_display(original: &NamedRecipientOriginalRecordV1) -> ImportResult<String> {
+    match &original.born_origin {
+        None => Ok(String::new()),
+        Some(origin) => Ok(format!(
+            "\nPURPOSE-DISTINCT BORN ORIGINAL. Legacy submission/signing is forbidden. Exact authenticated parent evidence (historical only): {}",
+            serde_json::to_string_pretty(origin).map_err(|_| TransportError::Malformed)?
+        )),
+    }
+}
+mod born;
+mod born_intent_file;
+pub(crate) use born::{
+    BornNamedRecipientOriginalInputs, PreparedBornNamedIntentFileExport,
+    PreparedBornNamedRecipientOriginalImport, RetainedBornNamedIntentExport,
+};
+pub(crate) use born_intent_file::BornIntentHandoffV1;
+mod born_courier;
+pub(crate) use born_courier::{
+    BornCourierActionV1, PreparedBornDeliveryFileV1, PreparedBornIntentCourierV1,
+    RetainedBornCourierDeliveryV1,
+};
+
+// Read-only preallocation routing from validated terms. This is never sealed or
+// retained; full maintained request context equality is mandatory after review
+// normalization. In particular no fake native-review hash is needed here.
+fn draft_intent_context(
+    terms: &wholepact_authority::offline::OfflineAuthorizationTerms,
+    born: bool,
+) -> ImportResult<wire::MessageContext> {
+    terms.validate().map_err(|_| TransportError::WrongContext)?;
+    let prefix = if born {
+        "born-offline-intent"
+    } else {
+        "offline-intent"
+    };
+    Ok(wire::MessageContext {
+        network_profile_id: terms.network_profile_id.clone(),
+        agreement_id: terms.agreement_id.clone(),
+        proposal_id: terms.proposal_id.clone(),
+        proposal_revision: terms.proposal_revision,
+        sender_id: format!("{prefix}:{}", terms.offline_signer_key_digest),
+        recipient_id: format!("{prefix}:{}", terms.offline_policy_digest),
+        artifact_kind: if born {
+            wire::ArtifactKind::BornOfflineIntentV1
+        } else {
+            wire::ArtifactKind::OfflineReservationIntent
+        },
+    })
+}
+fn require_same_intent_context(
+    draft: &wire::MessageContext,
+    complete: &wire::MessageContext,
+) -> ImportResult<()> {
+    if serde_json::to_vec(draft).map_err(|_| TransportError::Malformed)?
+        != serde_json::to_vec(complete).map_err(|_| TransportError::Malformed)?
+    {
+        return Err(TransportError::WrongContext);
+    }
+    Ok(())
+}
+#[cfg(test)]
+#[path = "original_import/draft_context_tests.rs"]
+mod draft_context_tests;

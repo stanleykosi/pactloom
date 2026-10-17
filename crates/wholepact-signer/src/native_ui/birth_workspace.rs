@@ -1,5 +1,9 @@
 //! Actual pending-account native lifecycle. No witness client, journal creation,
 //! IPC endpoint, financial activation or authority-conversion path exists here.
+#[cfg(feature = "synthetic-born-joined-qualification")]
+#[path = "qualification/born_roster_v3.rs"]
+pub(in crate::native_ui) mod born_roster_v3;
+
 use super::{
     authority::{ExactNativeReview, PendingAccountNativeAuthority},
     runtime::PendingBirthEntry,

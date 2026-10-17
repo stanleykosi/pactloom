@@ -1,27 +1,5 @@
-// Canonical immutable schema bytes. The including owner chooses its supported profile.
+// Canonical immutable schema bytes shared by independent protected owners.
 pub(crate) const INBOX_SCHEMAS: [(&str, i64); 2] = [
-("CREATE TABLE IF NOT EXISTS receipts (
-              stream TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence > 0),
-              message_id_digest TEXT NOT NULL, content_digest TEXT NOT NULL,
-              slot TEXT, payload_digest TEXT NOT NULL, envelope BLOB NOT NULL,
-              PRIMARY KEY(stream, sequence), UNIQUE(stream, message_id_digest));
-            CREATE INDEX IF NOT EXISTS receipts_slot ON receipts(slot);
-            CREATE TABLE IF NOT EXISTS domain_imports (
-              stream TEXT NOT NULL, sequence INTEGER NOT NULL, processor TEXT NOT NULL,
-              content_digest TEXT NOT NULL, outcome INTEGER NOT NULL CHECK(outcome IN (1,2)),
-              result_digest TEXT NOT NULL, PRIMARY KEY(stream, sequence, processor));", 2),
-("CREATE TABLE IF NOT EXISTS receipts (
-              stream TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence > 0),
-              message_id_digest TEXT NOT NULL, content_digest TEXT NOT NULL,
-              slot TEXT, payload_digest TEXT NOT NULL, envelope BLOB NOT NULL,
-              PRIMARY KEY(stream, sequence), UNIQUE(stream, message_id_digest));
-            CREATE INDEX IF NOT EXISTS receipts_slot ON receipts(slot);
-            CREATE TABLE IF NOT EXISTS domain_imports (
-              stream TEXT NOT NULL, sequence INTEGER NOT NULL, processor TEXT NOT NULL,
-              content_digest TEXT NOT NULL, outcome INTEGER NOT NULL CHECK(outcome IN (1,2)),
-              result_digest TEXT NOT NULL, PRIMARY KEY(stream, sequence, processor));CREATE TABLE IF NOT EXISTS offline_control_outcomes (
- stream TEXT NOT NULL, sequence INTEGER NOT NULL, content_digest TEXT NOT NULL,
- control_digest TEXT NOT NULL, outcome INTEGER NOT NULL CHECK(outcome IN (1,2)),
- admission_digest TEXT, PRIMARY KEY(stream,sequence),
- CHECK((outcome=1 AND admission_digest IS NULL) OR (outcome=2 AND admission_digest IS NOT NULL)));", 3),
+    (include_str!("inbox_schema_v2.sql"), 2),
+    (include_str!("inbox_schema_v3.sql"), 3),
 ];

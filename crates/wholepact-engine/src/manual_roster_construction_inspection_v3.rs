@@ -1,4 +1,5 @@
-//! Original V3 common-context construction metadata from an immutable snapshot.
+//! Original common-context construction metadata from an immutable snapshot.
+//! Claim encodings 3/4/5 remain historical data, never renewed observations.
 //! This owner never reads a live Store or carries a constructor/wallet permit.
 use super::*;
 use wholepact_core::manual_enrollment::ManualHostGenerationBinding;
@@ -189,9 +190,12 @@ impl PreparedManualRosterConstructionInspectionV3 {
         self.snapshot
             .check_source_unchanged()
             .map_err(store_error)?;
+        // Validate the complete exact encoding, including v4 reentry and v5
+        // retained historical observations. Legacy absence stays absence; this
+        // metadata-only inspection does not issue a born export/proof owner.
+        self.claim.validate().map_err(store_error)?;
         if access.principal_id != self.metadata.principal_id
             || !access.permits_agreement(&self.agreement.agreement_id, &self.owner_client_id)
-            || self.claim.version != 3
             || self.claim.consumed.first().is_none_or(|audit| {
                 audit.request.plan.common_context_digest != self.metadata.common_context_digest
                     || audit.request.plan.common_context.target_height

@@ -388,6 +388,7 @@ pub(super) fn join_replayed<'a>(
     let mut offline = BTreeMap::new();
     for evidence in replayed {
         match evidence {
+            ReservationEvidenceRef::BornOfflineV1(_) => return Err(JournalError::RecoveryRequired),
             ReservationEvidenceRef::OnlineV2(permit) => {
                 permit
                     .matches_request(&permit.request)

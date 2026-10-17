@@ -32,6 +32,11 @@ impl<'a> ReservationView<'a> {
                 maximum_debit_zatoshis: p.request.intent.terms.maximum_debit_zatoshis,
                 inputs: &p.request.intent.terms.inputs,
             }),
+            // A born continuation is not a second generic reservation. Its
+            // original V3 construction owns the only accounting bucket and its
+            // purpose-distinct consumers use the full outer request directly.
+            // Old generic-progress histories against this origin fail closed.
+            MutationResult::BornOfflineReservedV1(_) => None,
             MutationResult::Reserved(p) => Some(Self {
                 request_digest: &p.request_digest,
                 operation_id: &p.request.operation_id,
@@ -59,6 +64,7 @@ impl<'a> ReservationView<'a> {
             | MutationResult::WriterPending(_)
             | MutationResult::ProgressRecorded(_)
             | MutationResult::DispatchAdmitted(_)
+            | MutationResult::BornOfflineDispatchAdmittedV1(_)
             | MutationResult::ResolutionRecorded(_)
             | MutationResult::ResolutionsReopened(_) => None,
         }

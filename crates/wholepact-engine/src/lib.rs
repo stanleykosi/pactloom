@@ -19,6 +19,18 @@ pub const MAX_REVIEWS: usize = 128;
 #[cfg(all(feature = "signer-authority-bridge", target_os = "linux"))]
 pub mod automation;
 pub mod backups;
+#[cfg(all(
+    feature = "manual-admission",
+    feature = "local-proof-jobs",
+    target_os = "linux"
+))]
+pub mod born_offline_checkpoint_original_v1;
+#[cfg(all(
+    feature = "manual-admission",
+    feature = "local-proof-jobs",
+    target_os = "linux"
+))]
+pub mod born_offline_saved_proof_v1;
 pub mod candidates;
 pub mod financial_preflight;
 #[cfg(all(feature = "manual-admission", target_os = "linux"))]
@@ -39,13 +51,13 @@ pub mod manual_roster_construct_v2;
     target_os = "linux"
 ))]
 pub mod manual_roster_construct_v3;
+pub mod native_account_inspection_requests;
 pub mod native_artifact_handoff_requests;
 pub mod native_dispatch_requests;
 pub mod native_proof_execution_requests;
 pub mod native_proof_requests;
 pub mod native_reconciliation_requests;
 pub mod native_requests;
-pub mod native_account_inspection_requests;
 pub mod native_settlement_requests;
 pub mod participant_records;
 pub mod planning;
@@ -231,7 +243,10 @@ struct Envelope {
         native_reconciliation_requests::StoredNativeReconciliationRequest,
     >,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    native_account_inspection_requests: std::collections::BTreeMap<String, native_account_inspection_requests::StoredNativeAccountInspectionRequest>,
+    native_account_inspection_requests: std::collections::BTreeMap<
+        String,
+        native_account_inspection_requests::StoredNativeAccountInspectionRequest,
+    >,
     owner_client_id: String,
     #[serde(default)]
     sponsor_policies: std::collections::BTreeMap<String, sponsor_policies::StoredSponsorPolicy>,

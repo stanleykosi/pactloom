@@ -16,7 +16,7 @@ impl AuthorityClient {
         request: &ManualRosterConstructionReservationRequestV2,
     ) -> Result<AuthenticatedManualRosterConstructionReservationV2> {
         history.require_construction_v2_only()?;
-        if !history.offline_permits.is_empty() {
+        if !history.offline_permits.is_empty() || !history.born_offline_permits.is_empty() {
             return Err(AuthorityError::OfflineHistoryUnsupported);
         }
         if !history.permits.is_empty() || !history.automatic_key_use_admissions.is_empty() {

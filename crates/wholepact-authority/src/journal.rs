@@ -22,8 +22,43 @@ pub(crate) use namespace_archive_journal::*;
 #[path = "offline_witness_journal_v1.rs"]
 mod offline_witness_journal_v1;
 
+#[cfg(all(feature = "born-offline-witness-owner", target_os = "linux"))]
+#[path = "born_offline_dispatch_journal_v1.rs"]
+mod born_offline_dispatch_journal_v1;
+#[cfg(all(feature = "born-offline-witness-owner", target_os = "linux"))]
+#[path = "born_offline_witness_journal_v1.rs"]
+mod born_offline_witness_journal_v1;
+
 const APPLICATION_ID: i64 = 0x57504157;
 const SCHEMA_VERSION: i64 = 6;
+const BORN_ARTIFACT_SCHEMA_VERSION: i64 = 7;
+#[path = "born_offline_artifacts_storage_v1.rs"]
+mod born_offline_artifacts_storage_v1;
+#[cfg(all(feature = "born-offline-witness-owner", target_os = "linux"))]
+pub(crate) use born_offline_artifacts_storage_v1::install_born_artifact_rows_v1;
+#[cfg(all(feature = "born-offline-witness-owner", target_os = "linux"))]
+pub(crate) use born_offline_artifacts_storage_v1::verify_born_artifact_schema_v1;
+fn schema_v7() -> &'static str {
+    static SQL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        format!(
+            "{}\n{}\n{}\n{}\n{}",
+            SCHEMA,
+            include_str!("born_offline_artifacts_schema_v1.sql"),
+            crate::born_offline_artifact_schema_v1::INBOX_SCHEMA,
+            crate::born_offline_artifact_schema_v1::OUTBOX_SCHEMA,
+            include_str!("born_offline_retry_schema_v1.sql"),
+        )
+    });
+    SQL.as_str()
+}
+fn schema_for_version(version: i64) -> Result<&'static str> {
+    match version {
+        5 => Ok(SCHEMA_V5),
+        6 => Ok(SCHEMA),
+        7 => Ok(schema_v7()),
+        _ => Err(AuthorityError::UnsupportedVersion),
+    }
+}
 #[path = "construction_transport_handoff_journal_v1.rs"]
 mod construction_transport_handoff_journal_v1;
 const LEGACY_SCHEMA: &str = include_str!("schema.sql");
@@ -304,8 +339,11 @@ impl AuthorityJournal {
                 | AuthorityMutation::QualifiedResolution(_)
                 | AuthorityMutation::ReopenResolutions(_)
                 | AuthorityMutation::ReserveOfflineAuthorization(_)
+                | AuthorityMutation::ReserveBornOfflineV1(_)
+                | AuthorityMutation::AuthorizeBornOfflineDispatchV1(_)
                 | AuthorityMutation::OwnerControl(OwnerControlRequest {
                     control: OwnerControl::EnrollBornOfflineV1 { .. }
+                        | OwnerControl::InstallBornOfflineArtifactsV1 { .. }
                         | OwnerControl::GrantConstructionTransportV1 { .. }
                         | OwnerControl::ApproveManualRosterConstructionV3 { .. }
                         | OwnerControl::ApproveManualRosterConstructionV2 { .. }
@@ -464,6 +502,8 @@ impl AuthorityJournal {
                 | AuthorityMutation::ReserveManualRosterConstructionV2(_)
                 | AuthorityMutation::ReserveAuthorization(_)
                 | AuthorityMutation::ReserveOfflineAuthorization(_)
+                | AuthorityMutation::ReserveBornOfflineV1(_)
+                | AuthorityMutation::AuthorizeBornOfflineDispatchV1(_)
                 | AuthorityMutation::AuthorizeAutomaticKeyUse(_)
                 | AuthorityMutation::AuthorizeDispatch(_)
                 | AuthorityMutation::OwnerControl(OwnerControlRequest {
@@ -1109,26 +1149,30 @@ pub(crate) fn load(c: &Connection) -> Result<Ledger> {
         }
     }
     let version: i64 = c.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if matches!(version, 4 | 5 | SCHEMA_VERSION) {
+    if matches!(version, 4..=7) {
         crate::offline_retry::verify_offline_state(c, &ledger)?;
     }
-    if matches!(version, 5 | SCHEMA_VERSION) {
+    if matches!(version, 5..=7) {
         let birth = crate::pending_birth_storage::read(c, &ledger.policy)?;
         ledger.validate_manual_birth(birth.as_ref())?;
         ledger.validate_born_offline_birth_v1(birth.as_ref())?;
     } else if ledger.policy.account_use_genesis.is_some() {
         return Err(AuthorityError::CorruptHistory);
     }
-    if version == SCHEMA_VERSION {
+    if matches!(version, 6 | 7) {
         construction_transport_handoff_journal_v1::verify_handoff_tables(c, &ledger)?;
     } else if !ledger.construction_transport_history_v1().is_empty() {
         return Err(AuthorityError::CorruptHistory);
+    }
+    born_offline_artifacts_storage_v1::verify_artifact_tables(c, &ledger)?;
+    if version == BORN_ARTIFACT_SCHEMA_VERSION {
+        crate::born_offline_retry_v1::verify_retained_born_offline_v1(c, &ledger)?;
     }
     Ok(ledger)
 }
 fn verify_schema(c: &Connection) -> Result<()> {
     let version: i64 = c.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    verify_schema_against(c, if version == 5 { SCHEMA_V5 } else { SCHEMA })
+    verify_schema_against(c, schema_for_version(version)?)
 }
 fn verify_schema_against(c: &Connection, expected_sql: &str) -> Result<()> {
     // Compare the exact compiled schema using a scratch in-memory schema only;
@@ -1504,6 +1548,8 @@ mod offline_schema_tests {
     fn staged_schema_rejects_unexpected_objects() {
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch(SCHEMA).unwrap();
+        c.pragma_update(None, "user_version", SCHEMA_VERSION)
+            .unwrap();
         verify_schema(&c).unwrap();
         c.execute_batch("CREATE TABLE unrelated_state(value BLOB)")
             .unwrap();
@@ -1525,6 +1571,8 @@ mod schema_name_filter_tests {
         ] {
             let c = Connection::open_in_memory().unwrap();
             c.execute_batch(SCHEMA).unwrap();
+            c.pragma_update(None, "user_version", SCHEMA_VERSION)
+                .unwrap();
             verify_schema(&c).unwrap();
             c.execute_batch(sql).unwrap();
             assert!(matches!(
@@ -1537,6 +1585,8 @@ mod schema_name_filter_tests {
     fn legitimate_sqlite_statistics_and_autoindexes_remain_supported() {
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch(SCHEMA).unwrap();
+        c.pragma_update(None, "user_version", SCHEMA_VERSION)
+            .unwrap();
         c.execute_batch("ANALYZE;").unwrap();
         let stats: bool = c
             .query_row(

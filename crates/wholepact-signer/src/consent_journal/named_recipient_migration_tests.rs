@@ -115,7 +115,7 @@ fn named_schema16_every_exact_legacy_template_gets_empty_extension() {
         assert_eq!(
             c.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                 .unwrap(),
-            16
+            SCHEMA_VERSION
         );
     }
 }
@@ -166,11 +166,52 @@ fn named_schema16_keeps_legacy_versioned_backup_templates_exact() {
         (13, V13_SCHEMA),
         (14, V14_SCHEMA),
         (15, V15_SCHEMA),
-        (16, SCHEMA),
+        (16, V16_SCHEMA),
+        (17, SCHEMA),
     ] {
         let template = recovery_template(version).unwrap();
         assert_eq!(template.schema_version, version);
         assert_eq!(template.create_sql.as_bytes(), sql.as_bytes());
     }
     assert!(SCHEMA.as_bytes().starts_with(V15_SCHEMA.as_bytes()));
+}
+
+#[test]
+fn schema17_exact_extension_preserves_all16_rows_and_rollback() {
+    let mut c = source(V16_SCHEMA, 16);
+    let before = rows(&c, V16_SCHEMA);
+    assert!(migrate_v16(&mut c, "wrong-account").is_err());
+    assert!(migrate_v16_inner(&mut c, "synthetic-v16-migration", true).is_err());
+    verify_exact_schema(&c, V16_SCHEMA).unwrap();
+    assert_eq!(before, rows(&c, V16_SCHEMA));
+    migrate_v16(&mut c, "synthetic-v16-migration").unwrap();
+    verify_exact_schema(&c, SCHEMA).unwrap();
+    assert_eq!(before, rows(&c, V16_SCHEMA));
+    assert_eq!(
+        c.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+            .unwrap(),
+        17
+    );
+    assert!(storage::read_account(&c).unwrap().recovery_required);
+}
+#[test]
+fn schema17_dispatch_intent_is_immutable_and_replace_denied() {
+    let c = source(SCHEMA, 17);
+    // Inert schema-only payloads, with the actual full foreign-key chain enabled.
+    c.pragma_update(None, "foreign_keys", true).unwrap();
+    assert!(c.execute("INSERT INTO signer_named_recipient_dispatch_requests VALUES('orphan','absent','absent','orphan-digest','unparsed')", []).is_err());
+    c.execute_batch("INSERT INTO signer_enrollments VALUES('enrollment','synthetic-v16-migration','agreement','participant','unparsed');
+        INSERT INTO signer_accepted_manifests VALUES('manifest','enrollment','proposal','proposal-digest','unparsed');
+        INSERT INTO signer_named_recipient_profiles VALUES('profile','setup','synthetic-v16-migration','enrollment','manifest','unparsed');
+        INSERT INTO signer_named_recipient_originals VALUES('original','profile','auth','unparsed');
+        INSERT INTO signer_named_recipient_started VALUES('auth','original','marker','unparsed');
+        INSERT INTO signer_named_recipient_results VALUES('auth','result','unparsed');").unwrap();
+    c.execute("INSERT INTO signer_named_recipient_dispatch_requests VALUES('op','auth','original','digest','unparsed historical intent')",[]).unwrap();
+    for sql in [
+        "DELETE FROM signer_named_recipient_dispatch_requests",
+        "UPDATE signer_named_recipient_dispatch_requests SET payload='changed'",
+        "INSERT OR REPLACE INTO signer_named_recipient_dispatch_requests VALUES('op','auth','original','digest','changed')",
+    ] {
+        assert!(c.execute(sql, []).is_err());
+    }
 }

@@ -14,6 +14,7 @@ use wholepact_core::{
     born_policy_origin_v2::BornRecipientPolicyOriginV2,
     manual_candidate_selection::{
         ManualCandidateEconomicIntent, ManualCandidateInvocation, ManualCandidateSelectionScope,
+        ORIGINAL_RETENTION_SELECTION_PURPOSE_V2,
     },
     manual_inventory::MAX_PRELIMINARY_DISCLOSURE_MS,
     manual_roster_candidate_selection_v2::{
@@ -34,7 +35,47 @@ struct SelectionInput {
     invocation: ManualCandidateInvocation,
 }
 
+/// The actual caller selects a purpose. Imported JSON cannot choose or upgrade it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SelectionMode {
+    Legacy,
+    LegacyRetained,
+    CommonContextRetentionV2,
+}
+impl SelectionMode {
+    pub(super) fn retains_inputs(self) -> bool {
+        self != Self::Legacy
+    }
+    fn version(self, imported_invocation_version: u16) -> Result<u16> {
+        let expected = if self == Self::CommonContextRetentionV2 {
+            2
+        } else {
+            1
+        };
+        if imported_invocation_version != expected {
+            return Err(Error::Permission);
+        }
+        Ok(expected)
+    }
+    fn purpose(self) -> &'static str {
+        if self == Self::CommonContextRetentionV2 {
+            ORIGINAL_RETENTION_SELECTION_PURPOSE_V2
+        } else {
+            "prepare_one_private_contribution"
+        }
+    }
+    fn require_scope(self, scope: &ManualCandidateSelectionScope) -> Result<()> {
+        self.version(scope.invocation.version)?;
+        match self {
+            Self::Legacy | Self::LegacyRetained => scope.require_legacy_selection(),
+            Self::CommonContextRetentionV2 => scope.require_original_retention_scope(),
+        }
+        .map_err(|_| Error::Permission)
+    }
+}
+
 pub(super) struct PreparedSelection {
+    mode: SelectionMode,
     inventory_scope: ManualRosterInventoryScopeV2,
     scope: ManualRosterCandidateSelectionScopeV2,
     operation_id: String,
@@ -51,7 +92,7 @@ pub(super) fn prepare(
     host: &Host,
     audit: &PreparedRosterPublication<'_>,
     inventory: &ManualRosterInventoryScopeV2,
-    retain: bool,
+    mode: SelectionMode,
 ) -> Result<PreparedSelection> {
     require_prepared_inventory(host, audit, inventory)?;
     let selected: SelectionInput = host.read_manual_private(
@@ -65,17 +106,18 @@ pub(super) fn prepare(
     let scope = ManualRosterCandidateSelectionScopeV2 {
         version: 2,
         selection: ManualCandidateSelectionScope {
-            version: 1,
+            version: mode.version(selected.invocation.version)?,
             // The actual earlier prepared scope is wrapped without accepting
             // enrollment, attachment or roster substitution from this file.
             inventory: inventory.inventory.clone(),
             original_policy_origin: selected.original_policy_origin,
             economic_intent: selected.economic_intent,
             invocation: selected.invocation,
-            purpose: "prepare_one_private_contribution".into(),
+            purpose: mode.purpose().into(),
         },
         provenance: inventory.provenance.clone(),
     };
+    mode.require_scope(&scope.selection)?;
     require_exact_wrapper(&scope, inventory)?;
     // Capture the original wall-clock budget once, before further approvals.
     // Time spent reviewing, launching, publishing and scanning consumes it.
@@ -117,7 +159,7 @@ pub(super) fn prepare(
             selected.operation_id,
         ),
     )?;
-    let retention = if retain {
+    let retention = if mode.retains_inputs() {
         let operation_id = host
             .terminal
             .ask("Exact distinct native retention operation ID: ")?;
@@ -137,6 +179,7 @@ pub(super) fn prepare(
         None
     };
     let result = PreparedSelection {
+        mode,
         inventory_scope: inventory.clone(),
         scope,
         operation_id: selected.operation_id,
@@ -259,6 +302,18 @@ fn check_clock(scope: &ManualRosterCandidateSelectionScopeV2, deadline: Instant)
 }
 
 impl PreparedSelection {
+    #[cfg(test)]
+    pub(super) fn synthetic_retention_operation_id(&self) -> Option<&str> {
+        self.retention.as_ref().map(|r| r.synthetic_operation_id())
+    }
+
+    #[cfg(test)]
+    pub(super) fn synthetic_exact_request_parts(
+        &self,
+    ) -> (&ManualRosterCandidateSelectionScopeV2, &str) {
+        (&self.scope, &self.operation_id)
+    }
+
     pub(super) fn deadline(&self) -> Instant {
         self.invocation_deadline
             .min(self.admission.deadline())
@@ -273,6 +328,10 @@ impl PreparedSelection {
     pub(super) fn check_before(&self, audit: &PreparedRosterPublication<'_>) -> Result<()> {
         require_prepared_inventory(audit.original.source.host, audit, &self.inventory_scope)?;
         require_exact_wrapper(&self.scope, &self.inventory_scope)?;
+        self.mode.require_scope(&self.scope.selection)?;
+        if self.mode.retains_inputs() != self.retention.is_some() {
+            return Err(Error::Authentication);
+        }
         if self.audit_review_digest != audit.review_digest
             || self.review_digest
                 != selection_review_digest(
@@ -303,6 +362,7 @@ impl PreparedSelection {
     ) -> Result<Option<RetainedRosterCandidateInputsV2<'host>>> {
         let deadline = self.deadline().min(audit.deadline);
         let Self {
+            mode,
             inventory_scope,
             scope,
             operation_id,
@@ -315,6 +375,10 @@ impl PreparedSelection {
             retention,
         } = self;
         require_exact_wrapper(&scope, &inventory_scope)?;
+        mode.require_scope(&scope.selection)?;
+        if mode.retains_inputs() != retention.is_some() {
+            return Err(Error::Authentication);
+        }
         if audit_review_digest != audit.review_digest
             || review_digest
                 != selection_review_digest(&scope, &operation_id, &audit_review_digest)?
@@ -435,6 +499,21 @@ impl PreparedSelection {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn explicit_common_context_mode_never_upgrades_legacy_invocations() {
+        for mode in [SelectionMode::Legacy, SelectionMode::LegacyRetained] {
+            assert_eq!(mode.version(1).unwrap(), 1);
+            assert!(mode.version(2).is_err());
+            assert_eq!(mode.purpose(), "prepare_one_private_contribution");
+        }
+        let mode = SelectionMode::CommonContextRetentionV2;
+        assert_eq!(mode.version(2).unwrap(), 2);
+        assert!(mode.version(1).is_err());
+        assert!(mode.version(0).is_err());
+        assert!(mode.version(3).is_err());
+        assert!(mode.retains_inputs());
+        assert_eq!(mode.purpose(), ORIGINAL_RETENTION_SELECTION_PURPOSE_V2);
+    }
     #[test]
     fn selection_disclosure_is_clipped_to_original_invocation_without_renewal() {
         assert_eq!(disclosure_expiry(100, 100, 120_100).unwrap(), 30_100);

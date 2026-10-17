@@ -162,6 +162,7 @@ impl StoreRecoveryInventory {
     ) -> Result<Self> {
         let supports_v3 = construction_v3_supported_by_provenance(provenance)?;
         let supports_v4 = construction_v4_supported_by_provenance(provenance)?;
+        let supports_v5 = construction_v5_supported_by_provenance(provenance)?;
         let mut inventory = Self {
             provenance: provenance.clone(),
             accounts: BTreeSet::new(),
@@ -192,6 +193,9 @@ impl StoreRecoveryInventory {
                         return Err(StoreError::RecoveryRequired);
                     }
                     let record = stored(cells, 1)?;
+                    if !supports_v5 && is_construction_v5_claim(kind, &record.payload) {
+                        return Err(StoreError::RecoveryRequired);
+                    }
                     if !supports_v4 && is_construction_v4_claim(kind, &record.payload) {
                         return Err(StoreError::RecoveryRequired);
                     }
@@ -612,10 +616,22 @@ static LEGACY_SUCCESSOR_TEMPLATE_V4: JournalTemplate = JournalTemplate {
         include_str!("recovery-schema.sql")
     ),
 };
-static SUCCESSOR_TEMPLATE: JournalTemplate = JournalTemplate {
+static LEGACY_SUCCESSOR_TEMPLATE_V6: JournalTemplate = JournalTemplate {
     kind: JournalKind::CoordinationAuthority,
     application_id: RECOVERED_GENERATION_APPLICATION_ID,
     schema_version: 6,
+    create_sql: concat!(
+        include_str!("schema.sql"),
+        "\n",
+        include_str!("migration-v2.sql"),
+        "\n",
+        include_str!("recovery-schema.sql")
+    ),
+};
+static SUCCESSOR_TEMPLATE: JournalTemplate = JournalTemplate {
+    kind: JournalKind::CoordinationAuthority,
+    application_id: RECOVERED_GENERATION_APPLICATION_ID,
+    schema_version: 8,
     create_sql: concat!(
         include_str!("schema.sql"),
         "\n",
@@ -630,16 +646,19 @@ pub fn coordination_successor_template_for_schema(
     match version {
         2 => Ok(&LEGACY_SUCCESSOR_TEMPLATE_V2),
         4 => Ok(&LEGACY_SUCCESSOR_TEMPLATE_V4),
-        6 => Ok(&SUCCESSOR_TEMPLATE),
+        6 => Ok(&LEGACY_SUCCESSOR_TEMPLATE_V6),
+        8 => Ok(&SUCCESSOR_TEMPLATE),
         _ => Err(BundleError::Unsupported),
     }
 }
-fn recovered_templates() -> [&'static JournalTemplate; 6] {
+fn recovered_templates() -> [&'static JournalTemplate; 8] {
     [
         &LEGACY_SUCCESSOR_TEMPLATE_V2,
         layers::legacy_layered_template(),
         &LEGACY_SUCCESSOR_TEMPLATE_V4,
         layers::legacy_layered_template_v5(),
+        &LEGACY_SUCCESSOR_TEMPLATE_V6,
+        layers::legacy_layered_template_v7(),
         coordination_successor_template(),
         coordination_layered_successor_template(),
     ]
@@ -651,30 +670,67 @@ fn is_construction_v3_kind(kind: &str) -> bool {
             | crate::manual_enrollment::construction_claim_v3::CONSTRUCTION_CHECKPOINT_V3
     )
 }
-fn construction_v3_supported_by_provenance(provenance: &RecoveryProvenance) -> Result<bool> {
-    if provenance.kind != JournalKind::CoordinationAuthority {
-        return Err(StoreError::RecoveryRequired);
-    }
-    match (provenance.application_id, provenance.schema_version) {
-        (0, 1 | 2) => Ok(false),
-        (0, 3 | 4) => Ok(true),
-        (RECOVERED_GENERATION_APPLICATION_ID, 2 | 3) => Ok(false),
-        (RECOVERED_GENERATION_APPLICATION_ID, 4..=7) => Ok(true),
+// Exact encoding support, independent of physical SQL layout. Unknown markers
+// are never treated as future supersets of a known encoding.
+pub(crate) fn construction_encoding_support(
+    application: i64,
+    version: i64,
+) -> Result<(bool, bool, bool)> {
+    match (application, version) {
+        (0, 1 | 2) | (RECOVERED_GENERATION_APPLICATION_ID, 2 | 3) => {
+            Ok((false, false, false))
+        }
+        (0, 3) | (RECOVERED_GENERATION_APPLICATION_ID, 4 | 5) => {
+            Ok((true, false, false))
+        }
+        (0, 4) | (RECOVERED_GENERATION_APPLICATION_ID, 6 | 7) => {
+            Ok((true, true, false))
+        }
+        (0, 5) | (RECOVERED_GENERATION_APPLICATION_ID, 8 | 9) => {
+            Ok((true, true, true))
+        }
         _ => Err(StoreError::RecoveryRequired),
     }
 }
-fn is_construction_v4_claim(kind: &str, payload: &Value) -> bool {
+fn construction_encoding_supported_by_provenance(
+    provenance: &RecoveryProvenance,
+) -> Result<(bool, bool, bool)> {
+    if provenance.kind != JournalKind::CoordinationAuthority {
+        return Err(StoreError::RecoveryRequired);
+    }
+    construction_encoding_support(provenance.application_id, provenance.schema_version)
+}
+fn construction_v3_supported_by_provenance(provenance: &RecoveryProvenance) -> Result<bool> {
+    Ok(construction_encoding_supported_by_provenance(provenance)?.0)
+}
+pub(crate) fn is_construction_v4_claim(kind: &str, payload: &Value) -> bool {
     kind == crate::manual_enrollment::construction_claim_v3::CONSTRUCTION_CLAIM_V3
         && (payload.get("version").and_then(Value::as_u64) == Some(4)
             || payload.get("reentry_lineages").is_some())
 }
+pub(crate) fn is_construction_v5_claim(kind: &str, payload: &Value) -> bool {
+    kind == crate::manual_enrollment::construction_claim_v3::CONSTRUCTION_CLAIM_V3
+        && (payload.get("version").and_then(Value::as_u64) == Some(5)
+            || payload.get("historical_provenance").is_some())
+}
 fn construction_v4_supported_by_provenance(provenance: &RecoveryProvenance) -> Result<bool> {
-    construction_v3_supported_by_provenance(provenance)?;
-    Ok(if provenance.application_id == 0 {
-        provenance.schema_version == 4
+    Ok(construction_encoding_supported_by_provenance(provenance)?.1)
+}
+fn construction_v5_supported_by_provenance(provenance: &RecoveryProvenance) -> Result<bool> {
+    Ok(construction_encoding_supported_by_provenance(provenance)?.2)
+}
+fn require_construction_support(
+    destination: (bool, bool, bool),
+    source: (bool, bool, bool),
+) -> Result<()> {
+    if (!destination.0 && source.0)
+        || (!destination.1 && source.1)
+        || (!destination.2 && source.2)
+    {
+        Err(StoreError::RecoveryRequired)
     } else {
-        matches!(provenance.schema_version, 6 | 7)
-    })
+        Ok(())
+    }
 }
 pub fn coordination_successor_template() -> &'static JournalTemplate {
     &SUCCESSOR_TEMPLATE
@@ -1071,18 +1127,11 @@ fn validate_generation(
     provenance: &RecoveryProvenance,
     binding: &GenerationBinding,
 ) -> Result<()> {
-    construction_v3_supported_by_provenance(provenance)?;
+    let source_support = construction_encoding_supported_by_provenance(provenance)?;
     let template = layers::generation_template(c)?;
-    if (template.schema_version < 6 && construction_v4_supported_by_provenance(provenance)?)
-        || template.schema_version == 2 && construction_v3_supported_by_provenance(provenance)?
-    {
-        return Err(StoreError::RecoveryRequired);
-    }
-    crate::backup::validate_construction_encoding(
-        c,
-        matches!(template.schema_version, 4..=7),
-        matches!(template.schema_version, 6 | 7),
-    )?;
+    let support = construction_encoding_support(template.application_id, template.schema_version)?;
+    require_construction_support(support, source_support)?;
+    crate::backup::validate_construction_encoding(c, support.0, support.1, support.2)?;
     if layers::is_layered(c)? {
         layers::validate_layered(c, provenance, binding)?;
         project_manual_snapshot(c, binding)?;
@@ -1103,6 +1152,7 @@ fn validate_generation(
 fn validate_originals(c: &Connection, provenance: &RecoveryProvenance) -> Result<()> {
     let supports_v3 = construction_v3_supported_by_provenance(provenance)?;
     let supports_v4 = construction_v4_supported_by_provenance(provenance)?;
+    let supports_v5 = construction_v5_supported_by_provenance(provenance)?;
     let count: usize = c.query_row(
         "SELECT count(*) FROM store_generation_original_rows",
         [],
@@ -1145,6 +1195,9 @@ fn validate_originals(c: &Connection, provenance: &RecoveryProvenance) -> Result
                     return Err(StoreError::RecoveryRequired);
                 }
                 let payload: Value = serde_json::from_str(s(3)?)?;
+                if !supports_v5 && is_construction_v5_claim(s(0)?, &payload) {
+                    return Err(StoreError::RecoveryRequired);
+                }
                 if !supports_v4 && is_construction_v4_claim(s(0)?, &payload) {
                     return Err(StoreError::RecoveryRequired);
                 }
@@ -1680,3 +1733,6 @@ mod tests {
         assert!(verify_original_row(&c, "idempotency", &replay).is_err());
     }
 }
+
+#[cfg(test)]
+mod historical_provenance_v5_encoding_tests;

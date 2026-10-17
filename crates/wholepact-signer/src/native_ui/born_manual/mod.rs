@@ -1,5 +1,9 @@
 //! A separate bounded native owner for born manual enrollment. It never calls
 //! ordinary runtime activation. All keys, I/O and durable writes stay on workers.
+#[cfg(feature = "synthetic-born-joined-qualification")]
+#[path = "../qualification/born_single_anchor_v1.rs"]
+pub(in crate::native_ui) mod born_single_anchor_v1;
+
 mod admission;
 mod continuation_admission;
 mod continuation_controller;
@@ -41,6 +45,7 @@ use crate::{
     ipc::{AuthenticatedPeer, IpcRevocation, LocalEvent, LocalIpc, PendingPairing},
 };
 use eframe::egui;
+use std::os::unix::fs::PermissionsExt;
 use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex, mpsc},
@@ -246,6 +251,32 @@ enum Output {
     Enrolled(Arc<BornManualEnrolledSigner>),
     Served,
 }
+// Creation-only private mode is required independently of the caller's umask.
+// Never chmod an existing endpoint or relax PrivateDirectory's admission check.
+fn private_temporary_endpoint() -> Result<Arc<tempfile::TempDir>> {
+    Ok(Arc::new(
+        tempfile::Builder::new()
+            .prefix("wholepact-born-manual-ipc-")
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()?,
+    ))
+}
+
+// Synthetic diagnostics preserve the expression, returned error and admission order.
+// Default/production builds have no diagnostic output or alternate operation.
+macro_rules! single_open_step {
+    ($operation:ident, $expression:expr) => {{
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        let diagnostic_operation = born_single_anchor_v1::OpenOperation::$operation;
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        born_single_anchor_v1::report_open_begin(diagnostic_operation);
+        let result = $expression;
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        born_single_anchor_v1::report_open_result(diagnostic_operation, &result);
+        result
+    }};
+}
+
 fn run(work: Work, owner: &PendingAccountNativeAuthority) -> Result<Output> {
     owner.check_current()?;
     owner.native().binding().bounded_deadline()?;
@@ -446,36 +477,54 @@ fn run(work: Work, owner: &PendingAccountNativeAuthority) -> Result<Output> {
             )))?))
         }
         Work::Open(path, password) => {
-            let account = Arc::new(AccountVault::unlock_born_for_manual_enrollment(
-                &path,
-                password.as_bytes(),
-                owner,
+            let account = Arc::new(single_open_step!(
+                AccountUnlock,
+                AccountVault::unlock_born_for_manual_enrollment(&path, password.as_bytes(), owner)
             )?);
-            let retained = account.retained_born_manual_enrollment(owner)?;
+            let retained =
+                single_open_step!(RetainedRead, account.retained_born_manual_enrollment(owner))?;
             let mut attempted = false;
             let mut continuation = None;
             let retained_reference = if let Some(retained) = retained {
-                if retained.first_acquire_attempted()? {
-                    attempts::require_attempted_source(&retained, owner)?;
+                if single_open_step!(AcquireState, retained.first_acquire_attempted())? {
+                    single_open_step!(
+                        AttemptedSource,
+                        attempts::require_attempted_source(&retained, owner)
+                    )?;
                     attempted = true;
-                    if let Some(last) = attempts::load(&retained)?.pop() {
+                    if let Some(last) =
+                        single_open_step!(AttemptsRead, attempts::load(&retained))?.pop()
+                    {
                         continuation = Some(Arc::new(RetainedContinuation {
-                            retained: retained.reopen_exact(owner)?,
+                            retained: single_open_step!(
+                                RetainedReopen,
+                                retained.reopen_exact(owner)
+                            )?,
                             proposal: last.proposal,
                         }));
                     }
                 } else {
-                    retained.require_preacquire_reentry(owner)?;
+                    single_open_step!(Preacquire, retained.require_preacquire_reentry(owner))?;
                 }
-                Some(retained.record().reference()?)
+                Some(single_open_step!(Reference, retained.record().reference())?)
             } else {
                 None
             };
-            let account_id = account.account_id()?;
-            let display = Zeroizing::new(account.born_origin_audit_json(owner)?);
-            let temporary = Arc::new(tempfile::tempdir()?);
-            let ipc = LocalIpc::bind(crate::files::PrivateDirectory::open(temporary.path())?)?;
-            owner.publish_pending_endpoint(ipc.socket_path())?;
+            let account_id = single_open_step!(AccountId, account.account_id())?;
+            let display = Zeroizing::new(single_open_step!(
+                Audit,
+                account.born_origin_audit_json(owner)
+            )?);
+            let temporary = single_open_step!(EndpointCreate, private_temporary_endpoint())?;
+            let directory = single_open_step!(
+                DirectoryOpen,
+                crate::files::PrivateDirectory::open(temporary.path())
+            )?;
+            let ipc = single_open_step!(IpcBind, LocalIpc::bind(directory))?;
+            single_open_step!(
+                EndpointPublish,
+                owner.publish_pending_endpoint(ipc.socket_path())
+            )?;
             Output::Opened(Box::new(Opened {
                 account,
                 account_id,
@@ -958,7 +1007,11 @@ impl BornManualUi {
                 Output::Served=>self.message="Finite exact enrollment publication channel closed. Durable original intent/admission/completion remain unchanged. No financial authority was issued.",
                 Output::Enrolled(e)=>{if self.opened.as_ref().is_some_and(|o|o.attempted) {self.continuation_controller.published()?;}else{self.bootstrap.published()?;}self.enrolled=Some(e);self.message="Exact first signer journal and immutable born manual record preserved. Financial/key-release/action gates remain denied pending their coherent per-action issuer.";},
             }Ok(())});
-            if result.is_err() {
+            if let Err(error) = &result {
+                #[cfg(feature = "synthetic-born-joined-qualification")]
+                born_single_anchor_v1::report_controller_error(error);
+                #[cfg(not(feature = "synthetic-born-joined-qualification"))]
+                let _ = error;
                 self.clear();
                 self.message = "Enrollment step failed or became uncertain. Preserve all source and output state. No replacement or synthetic approval was made.";
             }

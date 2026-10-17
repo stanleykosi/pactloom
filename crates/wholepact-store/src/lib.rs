@@ -16,9 +16,10 @@ use std::{
 };
 use thiserror::Error;
 
-// Version 4 adds exact reentry lineage to the version-3 encoding boundary: the SQL layout remains version 2, but
-// common-context construction rows must never be opened by legacy readers.
-const SCHEMA_VERSION: i64 = 4;
+// Version 5 adds mandatory historical provenance to the construction encoding
+// boundary. The SQL layout remains version 2, and legacy claim bytes are never
+// rewritten or supplied with inferred provenance during a marker upgrade.
+const SCHEMA_VERSION: i64 = 5;
 pub mod backup;
 mod draft_history;
 const MAX_JSON_BYTES: usize = 1_048_576;

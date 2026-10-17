@@ -1,5 +1,7 @@
 //! Explicit, separately protected financial journal attachment. This creates no
 //! account, grant, native signer approval or remote connection.
+#[cfg(all(feature = "manual-admission", target_os = "linux"))]
+pub(in crate::host) mod born_post_return_inputs_v1;
 mod artifact_handoff_request;
 mod account_inspection;
 mod automation;

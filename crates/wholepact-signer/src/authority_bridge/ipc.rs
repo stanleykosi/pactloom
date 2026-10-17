@@ -883,6 +883,57 @@ impl OriginalHistoryClient {
         require_before_deadline(deadline)?;
         Ok((stream, deadline))
     }
+    pub(super) fn open_born_request_checked_until(
+        &self,
+        request: serde_json::Value,
+        original_deadline: Instant,
+        check_current: &impl Fn() -> Result<()>,
+    ) -> Result<(UnixStream, Instant)> {
+        use super::born_ipc_io::{require_current, write_checked};
+        let deadline = original_deadline.min(self.grant.expires);
+        require_born_request_scope(self.mode, &self.scope, &request)?;
+        let current = || {
+            check_current()?;
+            self.peer.check_alive().map_err(|_| BridgeError::Permission)
+        };
+        require_current(deadline, &current)?;
+        let mut stream =
+            wholepact_signer_origin::connect_local_checked_until(&self.socket, deadline, || {
+                current().map_err(|_| wholepact_signer_origin::Error::Permission)
+            })
+            .map_err(|_| BridgeError::Ipc)?;
+        require_current(deadline, &current)?;
+        crate::ipc::enable_credentials(stream.as_raw_fd()).map_err(|_| BridgeError::Ipc)?;
+        require_current(deadline, &current)?;
+        let actual = self.provider.verify_server(&stream)?;
+        require_current(deadline, &current)?;
+        self.peer
+            .same_live_process(&actual)
+            .map_err(|_| BridgeError::Permission)?;
+        require_current(deadline, &current)?;
+        #[derive(Serialize)]
+        struct Request<'a> {
+            command: &'static str,
+            schema_version: u16,
+            grant_id: &'a str,
+            token_hex: &'a str,
+            request: &'a serde_json::Value,
+        }
+        write_checked(
+            &mut stream,
+            &Request {
+                command: "request",
+                schema_version: 1,
+                grant_id: &self.grant.grant_id,
+                token_hex: self.grant.token_hex.as_str(),
+                request: &request,
+            },
+            deadline,
+            &current,
+        )?;
+        require_current(deadline, &current)?;
+        Ok((stream, deadline))
+    }
     pub(super) fn open_authenticated_request(
         &self,
         request: serde_json::Value,
@@ -917,7 +968,12 @@ impl OriginalHistoryClient {
         self.open_scoped_request(request)
     }
     pub(super) fn open_inspection_request(&self, request: serde_json::Value) -> Result<UnixStream> {
-        if self.mode != PairingMode::Ordinary || !self.scope.history_read || Instant::now() >= self.grant.expires { return Err(BridgeError::Permission); }
+        if self.mode != PairingMode::Ordinary
+            || !self.scope.history_read
+            || Instant::now() >= self.grant.expires
+        {
+            return Err(BridgeError::Permission);
+        }
         self.open_scoped_request(request)
     }
     fn open_scoped_request(&self, request: serde_json::Value) -> Result<UnixStream> {
@@ -1281,3 +1337,78 @@ mod quarantined_v5_until_tests {
         }
     }
 }
+
+fn require_born_request_scope(
+    mode: PairingMode,
+    scope: &PairScope,
+    request: &serde_json::Value,
+) -> Result<()> {
+    if mode != PairingMode::Ordinary
+        || !scope.history_read
+        || scope.authorization_export
+        || scope.preconstruction_export
+        || !matches!(
+            request.get("operation").and_then(|v| v.as_str()),
+            Some("request_born_original_history_v1" | "request_born_dispatch_v1")
+        )
+    {
+        return Err(BridgeError::Permission);
+    }
+    Ok(())
+}
+
+#[cfg(all(test, feature = "offline-review-foundation"))]
+mod born_opener_tests {
+    use super::*;
+    #[test]
+    fn born_opener_accepts_only_ordinary_exact_narrow_request_scope() {
+        let scope = PairScope {
+            account_id: "synthetic-account".into(),
+            agreement_id: "synthetic-agreement".into(),
+            participant_id: "synthetic-participant".into(),
+            manifest_digest: "42".repeat(32),
+            history_read: true,
+            authorization_export: false,
+            preconstruction_export: false,
+        };
+        for operation in [
+            "request_born_original_history_v1",
+            "request_born_dispatch_v1",
+        ] {
+            let request = serde_json::json!({"operation":operation});
+            assert!(require_born_request_scope(PairingMode::Ordinary, &scope, &request).is_ok());
+            assert!(
+                require_born_request_scope(PairingMode::QuarantinedInformational, &scope, &request)
+                    .is_err()
+            );
+            for change in 0..3 {
+                let mut other = scope.clone();
+                match change {
+                    0 => other.history_read = false,
+                    1 => other.authorization_export = true,
+                    _ => other.preconstruction_export = true,
+                };
+                assert!(
+                    require_born_request_scope(PairingMode::Ordinary, &other, &request).is_err()
+                );
+            }
+        }
+        for operation in [
+            "request_dispatch",
+            "request_original_history",
+            "request_preconstruction",
+        ] {
+            assert!(
+                require_born_request_scope(
+                    PairingMode::Ordinary,
+                    &scope,
+                    &serde_json::json!({"operation":operation})
+                )
+                .is_err()
+            );
+        }
+    }
+}
+
+mod born_pairing;
+pub use born_pairing::PendingBornHistoryPairV1;

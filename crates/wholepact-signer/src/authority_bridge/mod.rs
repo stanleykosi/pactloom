@@ -9,6 +9,12 @@
     target_os = "linux"
 ))]
 pub mod automation;
+#[cfg(target_os = "linux")]
+pub mod born_dispatch_ipc;
+#[cfg(target_os = "linux")]
+pub mod born_history_ipc;
+#[cfg(target_os = "linux")]
+pub(crate) mod born_ipc_io;
 pub mod disclosure;
 #[cfg(target_os = "linux")]
 pub mod dispatch_ipc;

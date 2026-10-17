@@ -1,3 +1,17 @@
+#[cfg(all(test, feature = "manual-admission", target_os = "linux"))]
+mod born_test_host_v1;
+#[cfg(all(feature = "manual-admission", target_os = "linux"))]
+mod born_offline_saved_proof_v1;
+#[cfg(all(feature = "manual-admission", target_os = "linux"))]
+mod born_offline_return_commands_v1;
+#[cfg(all(feature = "manual-admission", target_os = "linux"))]
+mod born_offline_checkpoint_commands_v1;
+#[cfg(all(feature = "manual-admission", target_os = "linux"))]
+mod born_offline_checkpoint_carrier_v1;
+#[cfg(all(feature = "manual-admission", target_os = "linux"))]
+mod born_offline_return_validation_v1;
+#[cfg(all(feature = "manual-admission", target_os = "linux"))]
+mod born_offline_return_owner_v1;
 #[cfg(feature = "financial-runtime")]
 mod financial;
 #[cfg(test)]
@@ -592,12 +606,22 @@ impl Host {
         self.terminal.message("Restriction-only command: manual-permanent-stop-publish-v1. Source connected; native/kernel qualification-gated before prompts. It never reclaims funds or clears outstanding authorization.\n")?;
         #[cfg(all(feature = "manual-admission", target_os = "linux"))]
         self.terminal.message("Additional-account audit commands: manual-roster-enrollment-intent-v2, manual-roster-enrollment-publish-v2, manual-roster-initial-continuation-intent-v2, manual-roster-initial-continued-publish-v2, manual-roster-continuation-intent-v2, manual-roster-continuation-publish-v2. Every route preserves the original account ledger and exact roster predecessor. The explicit manual-roster-continuation-publish-inventory-v2 command adds separately reviewed fresh-wallet viewing inventory only after an existing original V3 audit and exact V4 continuation. First-save routes remain audit-only. The separate manual-roster-continuation-select-v2 command adds one exact separately reviewed local input selection. The separate manual-roster-sequential-construct-v2 command permits one bounded unsigned local construction under all real owners. manual-roster-construction-inspect-v2 reads exact saved current-generation metadata only; neither command grants proving, spending or dispatch.\n")?;
+        #[cfg(all(feature = "manual-admission", target_os = "linux"))]
+        self.terminal.message("Born proof command: born-offline-proof-run-v1 (ONE first proof of actual queued V3/V4 saved checkpoint, separate exact native one-hour permission, never uncertain retry). Born checkpoint command: born-offline-checkpoint-export-v1. Export/recover only an actual retained completed V3/V4 checkpoint to an already pinned signer; separate native proof-read/disclosure and create-only ciphertext output. No construction, new keys, signing or dispatch. Born return commands: born-return-retain-v1 (historical exact full-roster return retention/merge only), born-return-dispatch-v1 (separate genuine installed-signer, protected-wallet-current and native exact-backend gates). Every producer/origin qualification gate remains mandatory.\n")?;
         loop {
             let command = self.terminal.ask("wholepact-native> ")?;
             if matches!(command.as_str(), "lock" | "quit") {
                 return Ok(());
             }
             let outcome=match command.as_str(){
+                #[cfg(all(feature = "manual-admission", target_os = "linux"))]
+                "born-offline-checkpoint-export-v1" => self.born_offline_checkpoint_export_v1_command(),
+                #[cfg(all(feature = "manual-admission", target_os = "linux"))]
+                "born-offline-proof-run-v1" => self.born_offline_proof_run_v1_command(),
+                #[cfg(all(feature = "manual-admission", target_os = "linux"))]
+                "born-return-retain-v1" => self.born_return_command_v1(false),
+                #[cfg(all(feature = "manual-admission", target_os = "linux"))]
+                "born-return-dispatch-v1" => self.born_return_command_v1(true),
                 #[cfg(all(feature = "manual-admission", target_os = "linux"))]
                 "manual-permanent-stop-publish-v1" => self.manual_permanent_stop_publish_v1_command().inspect_err(|_| { let _ = self.terminal.message("Permanent restriction publication is native/kernel qualification-gated before prompts. If a future admitted attempt fails after persistence, preserve the original local exclusion, witness receipt, Host publication and acknowledgment uncertainty. Never reset or infer funds reclaimed or authorization cancelled.\n"); }),
                 #[cfg(all(feature = "manual-admission", target_os = "linux"))]

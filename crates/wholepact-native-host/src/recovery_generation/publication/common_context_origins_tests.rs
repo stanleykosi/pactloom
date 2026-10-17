@@ -279,7 +279,14 @@ mod signed_nonempty_audit {
 fn manifest_v4_cannot_drop_explicit_reentry_claim_lineage() {
     // Format gate only; this creates no Store inventory or native admission.
     super::require_manifest_v4_claim_encoding(3, false).unwrap();
-    for (version, lineage) in [(3, true), (4, true), (4, false), (2, false), (5, true)] {
+    for (version, lineage) in [
+        (3, true),
+        (4, true),
+        (4, false),
+        (2, false),
+        (5, true),
+        (5, false),
+    ] {
         assert!(matches!(
             super::require_manifest_v4_claim_encoding(version, lineage),
             Err(crate::Error::RecoveryFinancialUnsupported)

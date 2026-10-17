@@ -26,6 +26,14 @@ mod offline_kind_tests {
                 "offline_minimal_authority_admission",
             ),
             (
+                ArtifactKind::BornOfflineMinimalAdmissionV1,
+                "born_offline_minimal_admission_v1",
+            ),
+            (
+                ArtifactKind::BornOfflineAuthorizationReturnV1,
+                "born_offline_authorization_return_v1",
+            ),
+            (
                 ArtifactKind::OfflineAuthorizationReturn,
                 "offline_authorization_return",
             ),

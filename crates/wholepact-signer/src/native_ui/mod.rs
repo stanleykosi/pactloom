@@ -9,6 +9,10 @@ mod automatic_ipc;
 mod automation_workspace;
 #[cfg(feature = "authority-signing")]
 mod birth_workspace;
+#[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
+mod born_dispatch;
+#[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
+mod born_history;
 #[cfg(feature = "authority-signing")]
 mod dispatch;
 #[cfg(feature = "authority-signing")]
@@ -248,3 +252,10 @@ mod named_verifier_policy;
 
 #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
 mod named_verifier_owner;
+
+#[cfg(feature = "synthetic-born-joined-qualification")]
+#[path = "qualification/born_joined_fixture_v1.rs"]
+pub mod synthetic_born_joined_qualification;
+
+#[cfg(feature = "synthetic-born-joined-qualification")]
+pub(crate) use born_manual_roster_v2::born_manual_roster::continuation_fixture::construction_fixture::ScopedV3FixtureDispatch;

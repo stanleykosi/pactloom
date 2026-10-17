@@ -17,9 +17,11 @@ wholepact-storage-security = { path = "../wholepact-storage-security" }
 [features]
 default = []
 manual-admission = ["dep:wholepact-signer-origin"]
+observed-construction = ["manual-admission", "dep:wholepact-wallet"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 wholepact-signer-origin = { path = "../wholepact-signer-origin", optional = true }
+wholepact-wallet = { path = "../wholepact-wallet", features = ["protected-sync"], optional = true }
 
 [dev-dependencies]
 tempfile = "3"

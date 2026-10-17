@@ -4,6 +4,8 @@
 mod continuation_intent;
 mod import_target_v2;
 mod inventory_v2;
+#[cfg(test)]
+pub(super) mod joined_host_v3;
 mod selection_v2;
 mod sequential_construction_v2;
 mod sequential_construction_v3;
@@ -29,8 +31,24 @@ enum PreparationMode {
     Inventory,
     InventoryAndSelection,
     InventoryAndRetainedSelection,
+    InventoryAndCommonContextRetainedSelection,
 }
 impl PreparationMode {
+    fn selection(self) -> Option<selection_v2::SelectionMode> {
+        use selection_v2::SelectionMode;
+        match self {
+            Self::AuditOnly | Self::Inventory => None,
+            Self::InventoryAndSelection => Some(SelectionMode::Legacy),
+            Self::InventoryAndRetainedSelection => Some(SelectionMode::LegacyRetained),
+            Self::InventoryAndCommonContextRetainedSelection => {
+                Some(SelectionMode::CommonContextRetentionV2)
+            }
+        }
+    }
+    fn retains_inputs(self) -> bool {
+        self.selection()
+            .is_some_and(selection_v2::SelectionMode::retains_inputs)
+    }
     fn require_purpose(self, continuation: bool, purpose: RosterAuditPurpose) -> Result<()> {
         if self != Self::AuditOnly
             && (!continuation || purpose != RosterAuditPurpose::ExistingOriginalContinuationV4)
@@ -410,7 +428,7 @@ impl Host {
         requested_purpose: RosterAuditPurpose,
         preparation: PreparationMode,
     ) -> Result<()> {
-        if preparation == PreparationMode::InventoryAndRetainedSelection {
+        if preparation.retains_inputs() {
             return Err(Error::Permission);
         }
         let retained =
@@ -476,12 +494,7 @@ impl Host {
             Some(inventory_v2::prepare(
                 self,
                 &prepared,
-                matches!(
-                    preparation,
-                    PreparationMode::InventoryAndSelection
-                        | PreparationMode::InventoryAndRetainedSelection
-                ),
-                preparation == PreparationMode::InventoryAndRetainedSelection,
+                preparation.selection(),
             )?)
         } else {
             None
@@ -567,6 +580,8 @@ mod preparation_tests {
         for mode in [
             PreparationMode::Inventory,
             PreparationMode::InventoryAndSelection,
+            PreparationMode::InventoryAndRetainedSelection,
+            PreparationMode::InventoryAndCommonContextRetainedSelection,
         ] {
             assert!(
                 mode.require_purpose(false, RosterAuditPurpose::InitialPublicationV3)

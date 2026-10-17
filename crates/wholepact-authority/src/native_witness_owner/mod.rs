@@ -4,6 +4,8 @@
 //! No signer dependency, no signer-key loader, no socket and no public approval factory.
 mod lifecycle;
 pub(crate) use lifecycle::{NativePublicationLease, NativeWorkerLease};
+#[cfg(feature = "born-offline-witness-owner")]
+pub(crate) use window::NativeBornOfflineArtifactsDecisionV1;
 pub(crate) use window::{
     NativeBornOfflineEnrollmentDecisionV1, NativeConstructionTransportGrantDecisionV1,
     NativeEnrollmentDecision, NativeManualEnrollmentExtensionDecision,
@@ -14,6 +16,21 @@ pub(crate) use window::{
     NativeSetupDecision,
 };
 mod window;
+#[cfg(feature = "synthetic-qualification")]
+pub(crate) use window::ephemeral_fixture_v1::RetainedConstructionFixtureLivenessV1;
+#[cfg(feature = "synthetic-qualification")]
+pub use window::ephemeral_fixture_v1::{
+    EphemeralConstructionClientScopeV1, EphemeralHistoryServerV1, EphemeralNativeWitnessV1,
+    EphemeralRosterAttemptV2, EphemeralWitnessOriginV1,
+};
+
+#[cfg(all(
+    feature = "synthetic-qualification",
+    feature = "born-offline-witness-owner"
+))]
+pub use window::ephemeral_fixture_v1::{
+    EphemeralBornTransportKeyV1, EphemeralBornTransportPublicPinV1,
+};
 
 use std::fmt;
 use winit::platform::wayland::EventLoopBuilderExtWayland;

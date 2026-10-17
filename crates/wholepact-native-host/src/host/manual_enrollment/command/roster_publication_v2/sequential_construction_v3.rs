@@ -2,6 +2,10 @@
 //! Every continuation, read, authorization and construction owner comes from
 //! its actual producer. Inert files never substitute for those owners.
 use super::*;
+#[path = "sequential_construction_v3/prepared_common_context_completion_v3.rs"]
+mod prepared_common_context_completion_v3;
+#[path = "sequential_construction_v3/prepared_common_context_read_v3.rs"]
+mod prepared_common_context_read_v3;
 use crate::authority::manual_roster_common_context_read_v1::RosterCommonContextReadAdmissionV1;
 use crate::host::financial::manual_roster_inventory_setup_v2::{
     AllObservedCommonContextRosterV1, CommonContextConstructionCoordinatorV3,
@@ -102,10 +106,28 @@ impl Host {
                 self.roster_publish_v2_collect(
                     true,
                     RosterAuditPurpose::ExistingOriginalContinuationV4,
-                    PreparationMode::InventoryAndRetainedSelection,
+                    PreparationMode::InventoryAndCommonContextRetainedSelection,
                 )?
                 .ok_or(Error::Authentication)?,
             );
+        }
+        self.construct_retained_sequential_roster_v3(retained, construction_key, maximum_actions)
+    }
+
+    /// Shared inner composition for the actual retained owners. The public
+    /// command is still qualification-gated before any prompt. Synthetic tests
+    /// may call this private boundary only with owners from their maintained
+    /// producers; there is no DTO, fixture-state or approval-flag conversion.
+    fn construct_retained_sequential_roster_v3<'host>(
+        &'host self,
+        retained: Vec<RetainedRosterCandidateInputsV2<'host>>,
+        construction_key: String,
+        maximum_actions: usize,
+    ) -> Result<()> {
+        self.require_manual_session()?;
+        let count = retained.len();
+        for owner in &retained {
+            owner.require_original_retention_scope_v2(self)?;
         }
         let candidate = UnreviewedRosterManualCandidateV3::assemble(self, retained)?;
         candidate.display_current(self)?;
@@ -210,244 +232,12 @@ impl Host {
         ObservedHandoffCommonContextV1<'host>,
         CompletionOperationIdsV1,
     )> {
-        coordinator.check_current(self)?;
-        let plan = &read_plan.plan;
-        plan.validate().map_err(|_| Error::Invalid)?;
-        let terms = plan.enrollment();
-        let key = self
-            .terminal
-            .ask("Exact new read-continuation Host audit key: ")?;
-        id(&key)?;
-        let read_operation = self
-            .terminal
-            .ask("Distinct common-context read operation ID: ")?
-            .to_string();
-        let handoff_operation = self
-            .terminal
-            .ask("Distinct future-handoff preauthorization operation ID: ")?
-            .to_string();
-        let reentry_operation = self
-            .terminal
-            .ask("Distinct later transport-reentry operation ID: ")?
-            .to_string();
-        let construction_operation = self
-            .terminal
-            .ask("Distinct later full-construction operation ID: ")?
-            .to_string();
-        require_distinct_operations(
-            plan,
-            &[
-                &read_operation,
-                &handoff_operation,
-                &reentry_operation,
-                &construction_operation,
-            ],
-        )?;
-        let signed: ManualRosterContinuationOwnerSignatureV2 = self.read_manual_private(
-            "Exact NEW private roster-continuation signature JSON for this original owner: ",
-            "reviewing the exact fresh continuation used by this sole common-context read",
-        )?;
-        signed.extension.validate().map_err(|_| Error::Invalid)?;
-        signed
-            .continuation
-            .validate_for(&signed.extension)
-            .map_err(|_| Error::Invalid)?;
-        let selected = &plan.retained.selection.scope;
-        let attempt_digest = signed
-            .continuation
-            .digest_for(&signed.extension)
-            .map_err(|_| Error::Invalid)?;
-        let attempt_sequence = signed.continuation.sequence();
-        if signed.extension.account_extension.terms != *terms
-            || signed.extension.account_extension.enrollment_ref
-                != selected.selection.inventory.enrollment_ref
-            || signed
-                .extension
-                .account_extension
-                .digest()
-                .map_err(|_| Error::Invalid)?
-                != selected.selection.inventory.witness_extension_digest
-            || signed.extension.roster != selected.provenance.roster
-            || signed.extension.signer_roster_record_digest
-                != selected.provenance.signer_roster_record_digest
-            || signed.extension.digest().map_err(|_| Error::Invalid)?
-                != selected.provenance.witness_roster_extension_digest
-            || attempt_sequence <= selected.selection.inventory.attempt.attempt_sequence
-        {
-            return Err(Error::Authentication);
-        }
-        let publication_request = HostManualRosterPublicationRequestV2 {
-            version: 2,
-            enrollment: HostManualEnrollmentRequest {
-                terms: terms.clone(),
-            },
-            roster: signed.extension.roster.clone(),
-            attempt: ManualRosterPublicationAttemptV2::ContinuationV2 {
-                continuation_digest: attempt_digest.clone(),
-                attempt_sequence,
-            },
-        };
-        let prepared = self.prepare_roster_publication(
-            publication_request,
-            signed.extension,
-            RosterAuditPurpose::ExistingOriginalContinuationV4,
-            &key,
-        )?;
-        if prepared.prior_digest.as_deref()
-            != Some(selected.provenance.original_host_audit.audit_digest())
-        {
-            return Err(Error::Authentication);
-        }
-        let exact_digest = prepared.request.digest().map_err(|_| Error::Invalid)?;
-        let ceremony_digest = wholepact_core::proposal::canonical_digest(
-            "wholepact:host-common-context-read-and-handoff-ceremony:v1",
-            &(
-                plan,
-                &exact_digest,
-                &read_plan.durable_receipt_digest,
-                &read_plan.witness_plan_approval_digest,
-                &attempt_digest,
-                attempt_sequence,
-                &read_operation,
-                &handoff_operation,
-            ),
-        )
-        .map_err(|_| Error::Invalid)?;
-        let prior = &prepared.original.source.history_review;
-        let pair_approval = self.terminal.approve_publication_reviewed(prior, &exact_digest,
-            "Pair once for this exact fresh original-account continuation. All terminal questions finish before signer launch; no old approval or deadline is extended.")?;
-        let publication_approval = self.terminal.approve_publication_reviewed(prior, &exact_digest,
-            "Publish this exact fresh V4 continuation against the same original V3/account ledger, without resetting retained exposure, input exclusions or lifetime budget.")?;
-        let read_pair_approval = self.terminal.approve_publication_reviewed(prior, &ceremony_digest,
-            "After exact publication, pair the SAME actual installed process for this full V3 common-context plan. This permits no read or construction without its separate native decision.")?;
-        let handoff_approval = self.terminal.approve_publication_reviewed(prior, &ceremony_digest,
-            "After the separate native read admission, send one future construction-only transport preauthorization request on that SAME original paired source. The actual read receipt digest and caller come from that admission and pairing. The signer must obtain a NEW purpose-distinct native owner decision. Its signed response remains inert until all actual observations and independent witness grant review. No new key, Reserve, construction or spending authority is requested here.")?;
-        let original_deadline = coordinator.original_deadline();
-        let read_admission = RosterCommonContextReadAdmissionV1::review(
-            &self.terminal,
-            prior,
-            plan,
-            &read_plan.durable_receipt_digest,
-            &read_plan.witness_plan_approval_digest,
-            read_operation,
-            original_deadline,
-        )?;
-        let deadline = original_deadline
-            .min(prior.deadline())
-            .min(prepared.original.approval.deadline())
-            .min(prepared.approval.deadline())
-            .min(pair_approval.deadline())
-            .min(publication_approval.deadline())
-            .min(read_pair_approval.deadline())
-            .min(handoff_approval.deadline())
-            .min(read_admission.deadline());
-        coordinator.check_current(self)?;
-        prepared.check_before()?;
+        let prepared =
+            prepared_common_context_read_v3::prepare(self, coordinator, retained, read_plan)?;
         let provider = InstalledSignerProvider::load().map_err(|_| Error::Permission)?;
         provider.launch_native().map_err(|_| Error::Permission)?;
-        let endpoint = wait_manual_endpoint_before(&provider, deadline)?;
-        let client = pair_approval
-            .commit(
-                &exact_digest,
-                || {
-                    coordinator.check_current(self)?;
-                    prepared.check_before()
-                },
-                |_| {
-                    NativeManualClient::begin_pair_before(
-                        provider,
-                        &endpoint,
-                        "wholepact-native-roster-common-context-publication-v3",
-                        PairScope {
-                            account_id: terms.identity.account_id.clone(),
-                            agreement_id: terms.scope.agreement_id.clone(),
-                            participant_id: terms.scope.participant_id.clone(),
-                            manifest_digest: exact_digest.clone(),
-                            history_read: false,
-                            authorization_export: false,
-                            preconstruction_export: false,
-                        },
-                        deadline,
-                    )
-                    .map_err(|_| Error::Permission)
-                },
-            )?
-            .finish()
-            .map_err(|_| Error::Permission)?;
-        let pending = publication_approval.commit(
-            &exact_digest,
-            || {
-                coordinator.check_current(self)?;
-                prepared.check_before()
-            },
-            |_| {
-                client
-                    .begin_roster_enrollment_v2_before(&prepared.request, deadline)
-                    .map_err(|_| Error::Permission)
-            },
-        )?;
-        let lease = pending.finish().map_err(|_| Error::Permission)?;
-        let (_, committed) = prepared.append_owned(lease)?;
-        committed.check_current()?;
-        coordinator.check_current(self)?;
-        let client = read_pair_approval
-            .commit(
-                &ceremony_digest,
-                || {
-                    coordinator.check_current(self)?;
-                    committed.check_current()
-                },
-                |_| {
-                    client
-                        .begin_roster_construction_v3_pair_before(
-                            "wholepact-native-roster-common-context-read-v3",
-                            plan,
-                            deadline,
-                        )
-                        .map_err(|_| Error::Permission)
-                },
-            )?
-            .finish()
-            .map_err(|_| Error::Permission)?;
-        let ready = retained
-            .begin_common_context_read(
-                self,
-                &client,
-                read_admission,
-                &attempt_digest,
-                attempt_sequence,
-            )?
-            .finish(self)?;
-        committed.check_current()?;
-        coordinator.check_current(self)?;
-        let request = ready.handoff_request(&client, handoff_operation)?;
-        let authorized = handoff_approval.commit(
-            &ceremony_digest,
-            || {
-                coordinator.check_current(self)?;
-                committed.check_current()
-            },
-            |_| ready.authorize_handoff_before(&client, &request, deadline),
-        )?;
-        committed.check_current()?;
-        coordinator.check_current(self)?;
-        // Both pending stages finished before moving the paired client. A timed
-        // out read is dropped, never returned for a repeat observation wave.
-        let observed = runtime.block_on(async {
-            tokio::time::timeout_at(tokio::time::Instant::from_std(original_deadline),
-                authorized.observe(self, client),
-            ).await.map_err(|_| Error::Receipt(
-                "Common-context read expired; partial scan progress may remain. Preserve the original invocation and journals; no reread or randomized retry is permitted".into(),
-            ))?
-        })?;
-        coordinator.check_current(self)?;
-        Ok((
-            observed,
-            CompletionOperationIdsV1 {
-                reentry: reentry_operation,
-                construction: construction_operation,
-            },
-        ))
+        let endpoint = wait_manual_endpoint_before(&provider, prepared.deadline())?;
+        prepared.begin_pair(provider, &endpoint)?.finish(runtime)
     }
 
     fn complete_roster_common_context_owner_v1(
@@ -456,90 +246,9 @@ impl Host {
         participant: usize,
         operations: CompletionOperationIdsV1,
     ) -> Result<()> {
-        roster.check_current(self)?;
-        let authorization = roster.grant_request(self, participant)?.clone();
-        let disclosure = self.terminal.approve_historical(
-            "Display this one exact original-owner signed handoff preauthorization for manual relay to its independent pinned native witness owner? ALL actual observations have been checked. It includes exact original account/session/read/plan commitments and creates no active credential or grant. Do not reuse it for another account or operation.",
-        )?;
-        let output = self.terminal.historical_output()?;
-        disclosure
-            .effect(&mut || output.json_checked(&authorization, || roster.check_current(self)))?;
-        self.terminal.message("Paste that exact authorization into the independent witness owner's 'One-use construction transport handoff' review. Save its resulting exact inert pending-grant display as a private JSON file. Select the exact original namespace/attempt and pending-grant digest in the purpose-limited Authority server. Neither a terminal acknowledgment nor the file proves native approval. Keep every original signer process open so its key-free completion remains available.\n")?;
-        let shown: PendingGrantDisplayV1 = self.read_manual_private(
-            "Exact native witness pending-grant DISPLAY JSON file (kind, notice, pending_grant): ",
-            "binding the separately issued inert pending grant to this original actual observed owner",
-        )?;
-        let pending = shown.into_pending()?;
-        if pending.grant.authorization != authorization {
-            return Err(Error::Authentication);
-        }
-        roster.check_current(self)?;
-        let pending_digest = pending.digest().map_err(|_| Error::Authentication)?;
-        let selector_disclosure = self.terminal.approve_historical_reviewed(&disclosure,
-            "Display the exact inert pending-grant digest and original attempt digest for selecting this one purpose-limited Authority server? Use the already retained original namespace, extension and server configuration. This metadata creates no credential or approval and cannot renew the original read or invocation clocks.")?;
-        let selector = serde_json::json!({
-            "kind": "inert_construction_transport_server_selector_v1",
-            "pending_grant_digest": pending_digest,
-            "original_attempt_digest": authorization.authorization.attempt_digest,
-            "original_attempt_sequence": authorization.authorization.attempt_sequence,
-        });
-        selector_disclosure.effect(&mut || {
-            output.json_checked(&selector, || {
-                disclosure.check()?;
-                roster.check_current(self)
-            })
-        })?;
-        self.terminal.message("Configure serve-born-construction-transport-v1 with that exact pending_grant_digest and original_attempt.attempt_digest, preserving the original namespace, extension and pinned server configuration. Complete that selection before the fresh signer unlock below. Do not select the ordinary writer server.\n")?;
-        let digest = wholepact_core::proposal::canonical_digest(
-            "wholepact:host-common-context-exact-reentry-process:v1",
-            &(
-                &authorization,
-                &pending_digest,
-                &operations.reentry,
-                &operations.construction,
-            ),
-        )
-        .map_err(|_| Error::Invalid)?;
-        let pair_approval = self.terminal.approve_publication_reviewed(&disclosure, &digest,
-            "Wait for a genuinely fresh original-account completion unlock in the SAME still-running installed signer, then pair only that newly published endpoint. The original dormant owner and original read clocks remain mandatory; this approves no new account/session, read, input selection or general writer use.")?;
-        let request_approval = self.terminal.approve_publication_reviewed(&disclosure, &digest,
-            "Send one exact completion request using this pending grant and the actual fresh caller. The signer must separately approve original witness contact, then the exact fresh TLS-bound claim and permanent old-key fence, then the complete original proposal's Reserve/Consume. The construction request will be created only after actual reentry admission. All original observations and deadlines remain mandatory; uncertainty or failure cannot retry. No proof, transaction signature or dispatch is approved.")?;
-        self.terminal.message("Now use the SAME original signer window's 'Unlock exact original account for admitted completion' control, complete fresh pairing, and remain there for the separate contact, TLS claim and full-proposal reviews. Do not use ordinary account unlock, explicit Lock or another signer process. The retained claim channel keeps its original ten-second limit, including both later native reviews.\n")?;
-        let (roster, client) = pair_approval.commit(
-            &digest,
-            || {
-                roster.check_current(self)?;
-                Ok(roster)
-            },
-            |roster| {
-                let client = roster.pair_owner_before(
-                    self,
-                    participant,
-                    "wholepact-native-common-context-reentry-v1",
-                )?;
-                Ok((roster, client))
-            },
-        )?;
-        let request =
-            roster.reentry_request(self, participant, &client, &pending, operations.reentry)?;
-        request_approval.commit(
-            &digest,
-            || {
-                roster.check_current(self)?;
-                Ok(roster)
-            },
-            |roster| {
-                roster.consume_owner_before(
-                    self,
-                    participant,
-                    &client,
-                    &pending,
-                    &request,
-                    operations.construction,
-                )?;
-                roster.check_current(self)
-            },
-        )
+        prepared_common_context_completion_v3::disclose_original(self, roster, participant)?
+            .review_pending(roster, operations)?
+            .consume(roster)
     }
 }
 
@@ -651,3 +360,7 @@ mod tests {
         assert!(require_distinct_operations(&plan, &[""]).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "sequential_construction_v3_qualification.rs"]
+mod qualification;

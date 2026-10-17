@@ -247,25 +247,30 @@ mod minimal_admission_generic_guards {
     use super::*;
     #[test]
     fn minimal_kind_has_no_generic_seal_enqueue_or_open_route_in_any_feature_profile() {
-        let kind = ArtifactKind::OfflineMinimalAuthorityAdmission;
-        assert!(kind.requires_qualified_export());
-        assert_eq!(
-            reject_unqualified_offline_seal(kind),
-            Err(TransportError::AuthorityUnavailable)
-        );
-        let expected = MessageContext {
-            network_profile_id: "synthetic".into(),
-            agreement_id: "synthetic".into(),
-            proposal_id: "synthetic".into(),
-            proposal_revision: 1,
-            sender_id: "synthetic".into(),
-            recipient_id: "synthetic".into(),
-            artifact_kind: kind,
-        };
-        assert_eq!(
-            reject_generic_control(&expected),
-            Err(TransportError::AuthorityUnavailable)
-        );
+        for kind in [
+            ArtifactKind::OfflineMinimalAuthorityAdmission,
+            ArtifactKind::BornOfflineMinimalAdmissionV1,
+            ArtifactKind::BornOfflineAuthorizationReturnV1,
+        ] {
+            assert!(kind.requires_qualified_export());
+            assert_eq!(
+                reject_unqualified_offline_seal(kind),
+                Err(TransportError::AuthorityUnavailable)
+            );
+            let expected = MessageContext {
+                network_profile_id: "synthetic".into(),
+                agreement_id: "synthetic".into(),
+                proposal_id: "synthetic".into(),
+                proposal_revision: 1,
+                sender_id: "synthetic".into(),
+                recipient_id: "synthetic".into(),
+                artifact_kind: kind,
+            };
+            assert_eq!(
+                reject_generic_control(&expected),
+                Err(TransportError::AuthorityUnavailable)
+            );
+        }
     }
 }
 
@@ -274,30 +279,48 @@ mod offline_return_generic_guard_tests {
     use super::*;
     #[test]
     fn offline_return_cannot_use_generic_seal_or_open() {
-        let kind = ArtifactKind::OfflineAuthorizationReturn;
-        let context = MessageContext {
-            network_profile_id: "ironwood-testnet-nu7-candidate".into(),
-            agreement_id: "synthetic-agreement".into(),
-            proposal_id: "synthetic-proposal".into(),
-            proposal_revision: 1,
-            sender_id: "offline-return:synthetic-sender".into(),
-            recipient_id: "offline-return:synthetic-recipient".into(),
-            artifact_kind: kind,
-        };
-        assert_eq!(
-            reject_unqualified_offline_seal(kind),
-            Err(TransportError::AuthorityUnavailable)
-        );
-        assert_eq!(
-            reject_generic_control(&context),
-            Err(TransportError::AuthorityUnavailable)
-        );
-        assert!(kind.immutable_slot());
-        assert!(kind.requires_qualified_export());
-        assert_ne!(
-            serde_json::to_string(&kind).unwrap(),
-            serde_json::to_string(&ArtifactKind::Authorization).unwrap()
-        );
+        for kind in [
+            ArtifactKind::OfflineAuthorizationReturn,
+            ArtifactKind::BornOfflineAuthorizationReturnV1,
+        ] {
+            let context = MessageContext {
+                network_profile_id: "ironwood-testnet-nu7-candidate".into(),
+                agreement_id: "synthetic-agreement".into(),
+                proposal_id: "synthetic-proposal".into(),
+                proposal_revision: 1,
+                sender_id: "offline-return:synthetic-sender".into(),
+                recipient_id: "offline-return:synthetic-recipient".into(),
+                artifact_kind: kind,
+            };
+            assert_eq!(
+                reject_unqualified_offline_seal(kind),
+                Err(TransportError::AuthorityUnavailable)
+            );
+            assert_eq!(
+                reject_generic_control(&context),
+                Err(TransportError::AuthorityUnavailable)
+            );
+            // Explicitly public synthetic codec input. Generic historical recovery
+            // must reject before parsing this invalid ciphertext or consulting keys.
+            let secret = TransportSecret::from_bytes([0x51; 32]).unwrap();
+            let record = RetainedEnvelope {
+                envelope: EncryptedEnvelope(Vec::new()),
+                stream: String::new(),
+                sequence: 0,
+                content_digest: String::new(),
+                exact_receipt: None,
+            };
+            assert!(matches!(
+                recover_received(&record, &secret, &secret.public_key().unwrap(), &context),
+                Err(TransportError::AuthorityUnavailable)
+            ));
+            assert!(kind.immutable_slot());
+            assert!(kind.requires_qualified_export());
+            assert_ne!(
+                serde_json::to_string(&kind).unwrap(),
+                serde_json::to_string(&ArtifactKind::Authorization).unwrap()
+            );
+        }
     }
 }
 

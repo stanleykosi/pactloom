@@ -13,6 +13,8 @@ pub(in crate::native_ui) struct NamedRecipientOwnerContext<'a> {
     pub manifest_ref: &'a str,
     pub vault: &'a Arc<AccountVault>,
     pub authority: &'a NativeAuthority,
+    #[cfg(feature = "pending-birth-owner-signing")]
+    pub born: Option<(&'a crate::account::birth::enrollment::roster_v2::inventory::common_context_reentry_v1::named_recipient::ConsumedBornNamedSourceV1, &'a super::super::PendingAccountNativeAuthority)>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -168,6 +170,7 @@ impl NativeWalletWorkspace {
             manifest_ref,
             vault,
             authority,
+            ..
         } = owner;
         self.access.check()?;
         authority.check_current()?;
@@ -253,5 +256,29 @@ mod tests {
             )
             .is_err()
         );
+    }
+}
+
+#[cfg(feature = "pending-birth-owner-signing")]
+impl NamedRecipientOwnerContext<'_> {
+    pub(in crate::native_ui) fn born_own_policy(&self, context: &[u8]) -> Result<OwnEffectsPolicy> {
+        let (actual, owner) = self.born.ok_or(Error::Unavailable)?;
+        actual.check(owner)?;
+        let proposal = actual
+            .construction()
+            .reservation
+            .request
+            .construction
+            .plan
+            .validate()
+            .map_err(|_| Error::Verification)?;
+        let envelope = OwnContextEnvelope::decode(context, &proposal)?;
+        crate::manifest::named_own_policy::derive_born_consumed_own_policy(
+            actual,
+            owner,
+            &envelope.context()?,
+            &envelope.inputs(),
+            &envelope.outputs(),
+        )
     }
 }

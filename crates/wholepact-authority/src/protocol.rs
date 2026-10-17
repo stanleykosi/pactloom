@@ -90,6 +90,10 @@ pub struct ReconciledAuthorityHistory {
     pub(crate) snapshot: AccountSnapshot,
     pub(crate) permits: Vec<ReservationPermit>,
     pub(crate) offline_permits: Vec<crate::offline::OfflineAuthorizationAdmission>,
+    pub(crate) born_offline_dispatches:
+        Vec<crate::born_offline_dispatch_v1::BornOfflineDispatchAdmissionV1>,
+    pub(crate) born_offline_permits:
+        Vec<crate::born_offline_admission_v1::BornOfflineAuthorizationAdmissionV1>,
     pub(crate) automatic_key_use_admissions: Vec<AutomaticKeyUseAdmission>,
     pub(crate) recovery_fences: Vec<RecoveryFenceReceipt>,
     pub(crate) committed_operation_ids: BTreeSet<String>,
@@ -121,6 +125,7 @@ impl ReconciledAuthorityHistory {
             .require_not_permanently_excluded()?;
         if !self.permits.is_empty()
             || !self.offline_permits.is_empty()
+            || !self.born_offline_permits.is_empty()
             || !self.automatic_key_use_admissions.is_empty()
             || !self.recovery_fences.is_empty()
             || !self.manual_roster_construction_records.is_empty()
@@ -247,7 +252,7 @@ impl ReconciledAuthorityHistory {
     }
     pub fn require_legacy_online_only(&self) -> Result<()> {
         self.require_construction_v2_only()?;
-        if !self.offline_permits.is_empty() {
+        if !self.offline_permits.is_empty() || !self.born_offline_permits.is_empty() {
             return Err(AuthorityError::OfflineHistoryUnsupported);
         }
         if !self.manual_roster_construction_records.is_empty()
@@ -270,10 +275,16 @@ impl ReconciledAuthorityHistory {
                     .iter()
                     .map(ReservationEvidenceRef::OfflineV1),
             )
+            .chain(
+                self.born_offline_permits
+                    .iter()
+                    .map(ReservationEvidenceRef::BornOfflineV1),
+            )
             .collect();
         all.sort_by_key(|entry| match entry {
             ReservationEvidenceRef::OnlineV2(p) => p.committed_head.sequence,
             ReservationEvidenceRef::OfflineV1(p) => p.committed_head.sequence,
+            ReservationEvidenceRef::BornOfflineV1(p) => p.reserved.committed_head.sequence,
         });
         all.into_iter()
     }
@@ -600,6 +611,10 @@ impl ReservationPermit {
 // frame is already bounded and boxing would not change the protocol boundary.
 #[allow(clippy::large_enum_variant)]
 pub enum OwnerControl {
+    /// Exact native setup only; remote mutation and parsed data cannot install keys.
+    InstallBornOfflineArtifactsV1 {
+        record: Box<crate::born_offline_artifacts_v1::BornOfflineArtifactRecordV1>,
+    },
     /// Purpose-specific local native publication only. No remote DTO can enroll
     /// a born offline policy or bypass the existing legacy issuer restriction.
     EnrollBornOfflineV1 {
@@ -868,6 +883,7 @@ pub enum AuthorityMutation {
     AdmitBornManualEnrollmentV2(
         crate::manual_session_continuation::BornManualEnrollmentAdmissionRequestV2,
     ),
+    ReserveBornOfflineV1(Box<crate::born_offline_admission_v1::BornOfflineReservationRecordV1>),
     ReserveOfflineAuthorization(Box<OfflineReservationRecord>),
     AuthorizeAutomaticKeyUse(AuthorizeAutomaticKeyUse),
     ReserveAuthorization(Box<ReserveAuthorization>),
@@ -875,6 +891,9 @@ pub enum AuthorityMutation {
     AcquireWriter(AcquireWriterRequest),
     ReportProgress(ReportProgress),
     AuthorizeDispatch(AuthorizeDispatch),
+    AuthorizeBornOfflineDispatchV1(
+        Box<crate::born_offline_dispatch_v1::BornOfflineDispatchRequestV1>,
+    ),
     /// Journal-internal only. The remote mutation boundary rejects this variant.
     QualifiedResolution(ResolutionRecord),
     /// Conservative internal reopening of every previously resolved reservation.
@@ -892,6 +911,7 @@ impl AuthorityMutation {
             Self::AdmitBornManualRosterEnrollmentV2(r) => &r.operation_id,
             Self::AdmitBornManualEnrollment(r) => &r.operation_id,
             Self::AdmitBornManualEnrollmentV2(r) => &r.operation_id,
+            Self::ReserveBornOfflineV1(r) => &r.request.reservation.operation_id,
             Self::ReserveOfflineAuthorization(r) => &r.request.operation_id,
             Self::AuthorizeAutomaticKeyUse(r) => &r.operation_id,
             Self::ReserveAuthorization(r) => &r.operation_id,
@@ -899,6 +919,7 @@ impl AuthorityMutation {
             Self::AcquireWriter(r) => &r.operation_id,
             Self::ReportProgress(r) => &r.operation_id,
             Self::AuthorizeDispatch(r) => &r.operation_id,
+            Self::AuthorizeBornOfflineDispatchV1(r) => &r.dispatch.operation_id,
             Self::QualifiedResolution(r) => &r.operation_id,
             Self::ReopenResolutions(r) => &r.operation_id,
         }
@@ -940,6 +961,9 @@ pub enum MutationResult {
     ManualEnrollmentAdmittedV2(
         Box<crate::manual_session_continuation::BornManualEnrollmentAdmissionRecordV2>,
     ),
+    BornOfflineReservedV1(
+        Box<crate::born_offline_admission_v1::BornOfflineAuthorizationAdmissionV1>,
+    ),
     OfflineReserved(Box<crate::offline::OfflineAuthorizationAdmission>),
     AutomaticKeyUseAdmitted(Box<AutomaticKeyUseAdmission>),
     Reserved(Box<ReservationPermit>),
@@ -947,6 +971,9 @@ pub enum MutationResult {
     WriterPending(WriterSessionReceipt),
     ProgressRecorded(AccountSnapshot),
     DispatchAdmitted(Box<DispatchAdmission>),
+    BornOfflineDispatchAdmittedV1(
+        Box<crate::born_offline_dispatch_v1::BornOfflineDispatchAdmissionV1>,
+    ),
     ResolutionRecorded(Box<ResolutionReceipt>),
     ResolutionsReopened(AccountSnapshot),
 }
@@ -966,6 +993,14 @@ pub(crate) struct WriterSessionProof {
     deny_unknown_fields
 )]
 pub(crate) enum WireRequest {
+    ObserveBornOfflineAdmissionTimeV1(Box<crate::born_offline_clock_v1::BornOfflineClockRequestV1>),
+    AuthorizeBornOfflineDispatchV1 {
+        request: Box<crate::born_offline_dispatch_v1::BornOfflineDispatchRequestV1>,
+        authentication:
+            crate::born_offline_owner_continuation_v1::BornOfflineTransportAuthenticationV1,
+    },
+    SubmitBornOfflineIntentV1(Box<crate::born_offline_witness_v1::BornOfflineWitnessRequestV1>),
+    RecoverBornOfflineDeliveryV1(crate::born_offline_witness_v1::BornOfflineDeliveryLookupV1),
     SubmitOfflineIntentV1(Box<crate::offline_witness_v1::OfflineWitnessRequestV1>),
     RecoverOfflineAdmissionDeliveryV1(crate::offline_witness_v1::OfflineAdmissionDeliveryLookupV1),
     ObserveOfflineAdmissionTimeV1(Box<crate::offline_clock_v1::OfflineClockRequestV1>),
@@ -1011,6 +1046,9 @@ pub(crate) enum WireRequest {
     deny_unknown_fields
 )]
 pub(crate) enum WireResponse {
+    BornOfflineAdmissionTimeV1(Box<crate::born_offline_clock_v1::BornOfflineClockResponseV1>),
+    BornOfflineDispatchV1(Box<crate::born_offline_dispatch_v1::BornOfflineDispatchAdmissionV1>),
+    BornOfflineDeliveryV1(Box<crate::born_offline_witness_v1::BornOfflineDeliveryBodyV1>),
     OfflineAdmissionDeliveryV1(Box<crate::offline_witness_v1::OfflineWitnessDeliveryBodyV1>),
     OfflineAdmissionTimeV1(Box<crate::offline_clock_v1::OfflineClockResponseV1>),
     ConstructionTransportClaimed(
@@ -1074,10 +1112,12 @@ pub struct ReopenResolutions {
 pub enum ReservationEvidence {
     OnlineV2(Box<ReservationPermit>),
     OfflineV1(Box<crate::offline::OfflineAuthorizationAdmission>),
+    BornOfflineV1(Box<crate::born_offline_admission_v1::BornOfflineAuthorizationAdmissionV1>),
 }
 pub enum ReservationEvidenceRef<'a> {
     OnlineV2(&'a ReservationPermit),
     OfflineV1(&'a crate::offline::OfflineAuthorizationAdmission),
+    BornOfflineV1(&'a crate::born_offline_admission_v1::BornOfflineAuthorizationAdmissionV1),
 }
 
 // Pure matching only; the public entry point owns the authenticated replay.

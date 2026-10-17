@@ -123,7 +123,10 @@ impl AuthorityServer {
         mut self,
         configuration: crate::OfflineWitnessConfigurationV1,
     ) -> Result<Self> {
-        if self.handoff_scope.is_some() || self.offline_witness.is_some() {
+        if self.handoff_scope.is_some()
+            || self.offline_witness.is_some()
+            || self.is_born_offline_server_v1()
+        {
             return Err(AuthorityError::Permission);
         }
         let owner =

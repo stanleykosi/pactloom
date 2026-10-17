@@ -8,10 +8,17 @@ description = "Explicit foreground non-signing protected Wholepact host"
 
 [features]
 default = []
-manual-admission = ["wholepact-signer/manual-inventory-client", "wholepact-authority/pending-birth-foundation", "financial-runtime", "wholepact-engine/manual-admission", "dep:wholepact-signer-origin"]
+manual-admission = ["wholepact-signer/manual-inventory-client", "wholepact-authority/pending-birth-foundation", "financial-runtime", "wholepact-engine/manual-admission", "dep:wholepact-signer-origin", "dep:hpke", "dep:rand", "dep:base64", "dep:chrono", "dep:rusqlite", "dep:pczt", "wholepact-transport/offline-admission-export"]
+synthetic-born-joined-qualification = ["manual-admission", "wholepact-signer/synthetic-born-joined-qualification", "wholepact-wallet/synthetic-qualification"]
 financial-runtime = ["wholepact-engine/wallet-sync", "wholepact-engine/submission-handoff", "wholepact-engine/signer-authority-bridge", "wholepact-engine/candidate-construction", "wholepact-service/signer-release", "wholepact-service/proposal-review", "dep:wholepact-signer", "dep:wholepact-signer-release", "dep:wholepact-authority", "dep:wholepact-protocol", "dep:wholepact-wallet", "dep:wholepact-proof-jobs", "dep:rustls-pki-types"]
 
 [dependencies]
+hpke = { version = "=0.14.1", default-features = false, features = ["alloc", "x25519", "chacha"], optional = true }
+rand = { version = "=0.10.0", default-features = false, features = ["std_rng"], optional = true }
+base64 = { version = "=0.22.1", optional = true }
+chrono = { version = "=0.4.45", default-features = false, features = ["std"], optional = true }
+rusqlite = { workspace = true, optional = true }
+pczt = { version = "=0.10.0-pre.1", default-features = false, features = ["std", "orchard", "signer"], optional = true }
 wholepact-signer-release = { path = "../wholepact-signer-release", optional = true }
 rustls-pki-types = { version = "=1.15.1", optional = true }
 wholepact-wallet = { path = "../wholepact-wallet", optional = true, features = ["encrypted-storage"] }
@@ -43,7 +50,12 @@ axum = "0.8"
 time = { version = "0.3", features = ["formatting", "parsing"] }
 
 [dev-dependencies]
+orchard = { version = "=0.16.0", default-features = false, features = ["std"] }
+zcash_primitives = { version = "=0.31.0-pre.1", default-features = false, features = ["std"] }
+zcash_protocol = { version = "=0.11.0-pre.0" }
 tempfile = "3"
+prost = "=0.14.4"
+tokio-rustls = { version = "=0.26.6", default-features = false, features = ["ring"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 wholepact-signer-origin = { path = "../wholepact-signer-origin", optional = true }

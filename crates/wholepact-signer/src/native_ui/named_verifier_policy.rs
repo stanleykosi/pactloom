@@ -235,9 +235,20 @@ impl PreparedNamedVerifierPolicy {
 }
 impl ApprovedNamedVerifierPolicy {
     pub(super) fn serve(
+        self,
+        journal: &SignerConsentJournal,
+        session: &SignerConsentSession,
+    ) -> Result<()> {
+        self.serve_with_current(journal, session, |_| Ok(()), || Ok(()))
+    }
+    /// The born lane adds checks against its actual original source while the
+    /// maintained local-record lease is held; no callback issues authority.
+    pub(super) fn serve_with_current(
         mut self,
         journal: &SignerConsentJournal,
         session: &SignerConsentSession,
+        check_held: impl Fn(&crate::consent_journal::PreconstructionRecordLease<'_>) -> Result<()>,
+        check_released: impl Fn() -> Result<()>,
     ) -> Result<()> {
         let lease = journal
             .acquire_preconstruction_records(
@@ -257,6 +268,7 @@ impl ApprovedNamedVerifierPolicy {
         }
         self.prepared.check()?;
         lease.check_current().map_err(map)?;
+        check_held(&lease)?;
         let id = hex::encode(crate::vault::random::<32>()?);
         let digest = self.prepared.request.digest().map_err(map)?;
         write(
@@ -269,12 +281,13 @@ impl ApprovedNamedVerifierPolicy {
             self.prepared.deadline,
             &self.prepared.source,
             &self.prepared.peer,
-            || lease.check_current().map_err(map),
+            || { lease.check_current().map_err(map)?; check_held(&lease) },
         )?;
         let mut challenges = BTreeSet::new();
         for _ in 0..256 {
             self.prepared.check()?;
             lease.check_current().map_err(map)?;
+        check_held(&lease)?;
             let frame = wholepact_signer_origin::framing::read_frame_capped_checked_until(
                 &self.prepared.stream,
                 &self.prepared.peer.peer,
@@ -284,9 +297,8 @@ impl ApprovedNamedVerifierPolicy {
                     self.prepared
                         .check()
                         .map_err(|_| wholepact_signer_origin::Error::Permission)?;
-                    lease
-                        .check_current()
-                        .map_err(|_| wholepact_signer_origin::Error::Permission)
+                    lease.check_current().map_err(|_| wholepact_signer_origin::Error::Permission)?;
+                    check_held(&lease).map_err(|_| wholepact_signer_origin::Error::Permission)
                 },
             )
             .map_err(map)?;
@@ -296,9 +308,12 @@ impl ApprovedNamedVerifierPolicy {
             let command: ManualAdmissionCommand = serde_json::from_slice(&frame).map_err(map)?;
             self.prepared.check()?;
             lease.check_current().map_err(map)?;
+        check_held(&lease)?;
             match command {
                 ManualAdmissionCommand::Finish {} => {
+                    check_held(&lease)?;
                     drop(lease);
+                    check_released()?;
                     write(
                         &mut self.prepared.stream,
                         &ManualAdmissionResponse::Finished {},
@@ -307,7 +322,7 @@ impl ApprovedNamedVerifierPolicy {
                         &self.prepared.peer,
                         // The original record lease is deliberately released
                         // before Finished. This acknowledges release only.
-                        || Ok(()),
+                        &check_released,
                     )?;
                     return Ok(());
                 }
@@ -336,7 +351,7 @@ impl ApprovedNamedVerifierPolicy {
                         self.prepared.deadline,
                         &self.prepared.source,
                         &self.prepared.peer,
-                        || lease.check_current().map_err(map),
+                        || { lease.check_current().map_err(map)?; check_held(&lease) },
                     )?;
                 }
             }

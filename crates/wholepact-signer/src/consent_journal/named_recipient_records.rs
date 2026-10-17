@@ -12,6 +12,22 @@ use wholepact_authority::{
 };
 use zeroize::Zeroize;
 
+mod born_admission_receipt;
+pub(crate) use born_admission_receipt::BornNamedAdmissionReceiptV1;
+#[cfg(feature = "offline-review-foundation")]
+pub(crate) use born_admission_receipt::expected_projection as born_admission_projection;
+
+mod born_final_review;
+pub(crate) use born_final_review::BornNamedRecipientFinalReviewV1;
+mod born_checkpoint_receipt;
+pub(crate) use born_checkpoint_receipt::BornNamedCheckpointReceiptV1;
+#[cfg(feature = "offline-review-foundation")]
+pub(crate) use born_checkpoint_receipt::expected_projection as born_checkpoint_projection;
+mod born_profile;
+pub(crate) use born_profile::BornNamedRecipientProfileBindingV1;
+mod born_origin;
+pub(crate) use born_origin::{BornNamedManualParentV1, BornNamedRecipientOriginV1};
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct NamedRecipientProfileRecordV1 {
@@ -31,6 +47,8 @@ pub(crate) struct NamedRecipientProfileRecordV1 {
     pub(crate) return_transport_public_key: [u8; 32],
     pub(crate) transport_public_key: [u8; 32],
     pub(crate) transport_secret: [u8; 32],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) born_profile: Option<Box<BornNamedRecipientProfileBindingV1>>,
 }
 impl Drop for NamedRecipientProfileRecordV1 {
     fn drop(&mut self) {
@@ -42,6 +60,24 @@ impl NamedRecipientProfileRecordV1 {
     /// native review and generated key are excluded so exact retry after
     /// restart finds the original key; provenance remains in reference_digest.
     pub(crate) fn setup_digest(&self) -> Result<String> {
+        if let Some(born) = &self.born_profile {
+            return digest(
+                "wholepact:born-named-recipient-setup:v1",
+                &(
+                    self.schema_version,
+                    &self.account_id,
+                    &self.full_viewing_key_digest,
+                    &self.enrollment_ref,
+                    &self.manifest_ref,
+                    &self.verifier_signing_public_key,
+                    &self.verifier_transport_public_key,
+                    &self.witness_transport_public_key,
+                    &self.witness_certificate_digest,
+                    &self.return_transport_public_key,
+                    born.digest()?,
+                ),
+            );
+        }
         digest(
             "wholepact:named-recipient-setup:v1",
             &(
@@ -61,6 +97,18 @@ impl NamedRecipientProfileRecordV1 {
     /// Public commitment excludes private transport bytes. Full validation
     /// separately proves that the retained secret derives exactly this key.
     pub(crate) fn reference_digest(&self) -> Result<String> {
+        if let Some(born) = &self.born_profile {
+            return digest(
+                "wholepact:born-named-recipient-profile:v1",
+                &(
+                    &self.original_setup_digest,
+                    &self.native_review_digest,
+                    &self.native_origin_digest,
+                    &self.transport_public_key,
+                    born.digest()?,
+                ),
+            );
+        }
         digest(
             "wholepact:named-recipient-profile:v1",
             &(
@@ -70,6 +118,13 @@ impl NamedRecipientProfileRecordV1 {
                 &self.transport_public_key,
             ),
         )
+    }
+    pub(crate) fn witness_enrollment_ref(&self) -> &str {
+        self.born_profile
+            .as_ref()
+            .map_or(self.enrollment_ref.as_str(), |born| {
+                born.witness_enrollment_ref()
+            })
     }
     pub(crate) fn validate(&self) -> Result<()> {
         self.validate_structure()?;
@@ -100,6 +155,14 @@ impl NamedRecipientProfileRecordV1 {
     }
     /// Structural retention check only. Not an authenticated or usable profile.
     pub(super) fn validate_structure(&self) -> Result<()> {
+        if let Some(born) = &self.born_profile {
+            born.validate()?;
+            if born.genesis.identity.account_id != self.account_id
+                || born.genesis.identity.full_viewing_key_digest != self.full_viewing_key_digest
+            {
+                return Err(JournalError::InvalidBinding);
+            }
+        }
         id(&self.account_id)?;
         for h in [
             &self.reference,
@@ -264,6 +327,9 @@ fn exact_hex(s: &str, bytes: usize) -> Result<()> {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct NamedRecipientOriginalRecordV1 {
+    /// Purpose-distinct origin. Absence retains the exact legacy encoding/hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) born_origin: Option<BornNamedRecipientOriginV1>,
     pub(crate) schema_version: u16,
     pub(crate) reference: String,
     pub(crate) profile_ref: String,
@@ -289,7 +355,7 @@ pub(crate) struct NamedRecipientOriginalRecordV1 {
 }
 impl NamedRecipientOriginalRecordV1 {
     pub(crate) fn reference_digest(&self) -> Result<String> {
-        digest(
+        let legacy_fields = digest(
             "wholepact:named-recipient-original:v1",
             &(
                 self.schema_version,
@@ -309,7 +375,21 @@ impl NamedRecipientOriginalRecordV1 {
                 &self.own_policy_digest,
                 &self.own_expectations,
             ),
-        )
+        )?;
+        match &self.born_origin {
+            None => Ok(legacy_fields),
+            Some(origin) => digest(
+                "wholepact:born-named-recipient-original:v1",
+                &(legacy_fields, origin.digest()?),
+            ),
+        }
+    }
+    pub(crate) fn require_legacy_origin(&self) -> Result<()> {
+        if self.born_origin.is_some() {
+            Err(JournalError::InvalidBinding)
+        } else {
+            Ok(())
+        }
     }
     pub(crate) fn validate(&self, profile: &NamedRecipientProfileRecordV1) -> Result<()> {
         self.validate_structure(profile)?;
@@ -362,12 +442,16 @@ impl NamedRecipientOriginalRecordV1 {
         {
             return Err(JournalError::InvalidBinding);
         }
+        if let Some(origin) = &self.born_origin {
+            origin.validate_structure(profile, self)?;
+        }
         self.own_expectations.validate(&self.terms)?;
         validate_original_assertion_window(self.validity_not_before_ms, self.validity_expires_ms)?;
         if self.schema_version != 1
             || self.profile_ref != profile.reference
             || self.terms.account_id != profile.account_id
-            || self.terms.enrollment_ref != profile.enrollment_ref
+            || self.born_origin.is_some() != profile.born_profile.is_some()
+            || self.terms.enrollment_ref != profile.witness_enrollment_ref()
             || self.terms.accepted_manifest_ref != profile.manifest_ref
             || self.terms.artifact_digest != self.original_artifact_digest
             || self.terms.offline_signer_key_digest
@@ -484,6 +568,9 @@ pub(crate) struct NamedRecipientStartedRecordV1 {
     /// Absent only in pre-issuer historical fixtures. Absence is never signing authority.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) final_review: Option<NamedRecipientFinalReviewV1>,
+    /// Purpose-distinct born evidence; never interpreted as legacy OfflineV1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) born_final_review: Option<BornNamedRecipientFinalReviewV1>,
     pub(crate) schema_version: u16,
     pub(crate) authorization_id: String,
     pub(crate) original_ref: String,
@@ -495,7 +582,33 @@ pub(crate) struct NamedRecipientStartedRecordV1 {
 }
 impl NamedRecipientStartedRecordV1 {
     pub(crate) fn marker_digest(&self) -> Result<String> {
-        digest("wholepact:named-recipient-started:v1", self)
+        digest(
+            if self.born_final_review.is_some() {
+                "wholepact:born-named-recipient-started:v1"
+            } else {
+                "wholepact:named-recipient-started:v1"
+            },
+            self,
+        )
+    }
+    pub(crate) fn return_metadata(&self) -> Result<NamedReturnMetadata<'_>> {
+        match (&self.final_review, &self.born_final_review) {
+            (Some(r), None) => Ok(NamedReturnMetadata {
+                consent_reference: &r.consent_reference,
+                message_id: &r.return_message_id,
+                sequence: r.return_sequence,
+                issued_at: r.return_issued_at,
+                expires_at: r.return_expires_at,
+            }),
+            (None, Some(r)) => Ok(NamedReturnMetadata {
+                consent_reference: &r.consent_reference,
+                message_id: &r.return_message_id,
+                sequence: r.return_sequence,
+                issued_at: r.return_issued_at,
+                expires_at: r.return_expires_at,
+            }),
+            _ => Err(JournalError::InvalidBinding),
+        }
     }
     pub(crate) fn validate(&self, original: &NamedRecipientOriginalRecordV1) -> Result<()> {
         for h in [
@@ -508,13 +621,30 @@ impl NamedRecipientStartedRecordV1 {
             hash(h)?;
         }
         id(&self.authorization_id)?;
-        if let Some(final_review) = &self.final_review {
-            final_review.validate(original, self)?;
-        }
+        let expected_request = match (
+            &original.born_origin,
+            &self.final_review,
+            &self.born_final_review,
+        ) {
+            (None, legacy, None) => {
+                if let Some(review) = legacy {
+                    review.validate(original, self)?;
+                }
+                original.reservation_request_digest.clone()
+            }
+            (Some(origin), None, Some(review)) => {
+                review.validate(original, self)?;
+                origin
+                    .request
+                    .request_digest()
+                    .map_err(invalid_named_record)?
+            }
+            _ => return Err(JournalError::InvalidBinding),
+        };
         if self.schema_version != 1
             || self.authorization_id != original.terms.authorization_id
             || self.original_ref != original.reference
-            || self.admission_request_digest != original.reservation_request_digest
+            || self.admission_request_digest != expected_request
             || self.original_deadline_ms > original.reservation_request.admission_expires_at_ms
             || self.authenticated_package_digest != original.terms.review_package_digest
             || self.original_deadline_ms == 0
@@ -524,6 +654,14 @@ impl NamedRecipientStartedRecordV1 {
         }
         Ok(())
     }
+}
+/// Borrowed historical transport metadata, never a sealing authority.
+pub(crate) struct NamedReturnMetadata<'a> {
+    pub(crate) consent_reference: &'a str,
+    pub(crate) message_id: &'a str,
+    pub(crate) sequence: u64,
+    pub(crate) issued_at: i64,
+    pub(crate) expires_at: i64,
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -545,9 +683,9 @@ impl NamedRecipientResultRecordV1 {
     ) -> Result<()> {
         started.validate(original)?;
         hash(&self.result_digest)?;
-        match (&started.final_review, &self.encrypted_return) {
-            (Some(review), Some(returned)) => {
-                returned.validate(review, self)?;
+        match (started.return_metadata(), &self.encrypted_return) {
+            (Ok(review), Some(returned)) => {
+                returned.validate(review.message_id, self)?;
                 let bytes =
                     Zeroizing::new(hex::decode(&self.result_hex).map_err(invalid_named_record)?);
                 let projection = signature_return_projection(original, started, &bytes)?;
@@ -555,7 +693,13 @@ impl NamedRecipientResultRecordV1 {
                     return Err(JournalError::InvalidBinding);
                 }
             }
-            (None, None) => (),
+            (Err(_), None)
+                if started.final_review.is_none()
+                    && started.born_final_review.is_none()
+                    && original.born_origin.is_none() =>
+            {
+                ()
+            }
             _ => return Err(JournalError::InvalidBinding),
         }
         if self.schema_version != 1
@@ -689,14 +833,19 @@ impl NamedIntentOutboxRecordV1 {
             return Err(JournalError::InvalidBinding);
         }
         let terms = &original.reservation_request.intent.terms;
-        let context = MessageContext {
-            network_profile_id: terms.network_profile_id.clone(),
-            agreement_id: terms.agreement_id.clone(),
-            proposal_id: terms.proposal_id.clone(),
-            proposal_revision: terms.proposal_revision,
-            sender_id: format!("offline-intent:{}", terms.offline_signer_key_digest),
-            recipient_id: format!("offline-intent:{}", terms.offline_policy_digest),
-            artifact_kind: ArtifactKind::OfflineReservationIntent,
+        let context = if let Some(origin) = &original.born_origin {
+            wholepact_transport::born_offline_intent_context_v1(&origin.request)
+                .map_err(invalid_named_record)?
+        } else {
+            MessageContext {
+                network_profile_id: terms.network_profile_id.clone(),
+                agreement_id: terms.agreement_id.clone(),
+                proposal_id: terms.proposal_id.clone(),
+                proposal_revision: terms.proposal_revision,
+                sender_id: format!("offline-intent:{}", terms.offline_signer_key_digest),
+                recipient_id: format!("offline-intent:{}", terms.offline_policy_digest),
+                artifact_kind: ArtifactKind::OfflineReservationIntent,
+            }
         };
         if preview.context != context {
             return Err(JournalError::InvalidBinding);
@@ -721,22 +870,30 @@ impl NamedIntentOutboxRecordV1 {
                 purpose: preview.purpose.clone(),
                 persistence_warning: preview.persistence_warning.clone(),
             },
-            vec![
-                DisclosureField::new(
-                    "offline-reservation-intent-v1",
-                    serde_json::to_vec(&original.reservation_request.intent)
-                        .map_err(invalid_named_record)?,
+            if let Some(origin) = &original.born_origin {
+                wholepact_transport::born_offline_intent_fields_v1(
+                    &origin.request,
+                    &original.named_header(profile)?,
                 )
-                .map_err(invalid_named_record)?,
-                DisclosureField::new(
-                    NAMED_REVIEW_BINDING_FIELD_V1,
-                    original
-                        .named_header(profile)?
-                        .canonical_bytes()
-                        .map_err(invalid_named_record)?,
-                )
-                .map_err(invalid_named_record)?,
-            ],
+                .map_err(invalid_named_record)?
+            } else {
+                vec![
+                    DisclosureField::new(
+                        "offline-reservation-intent-v1",
+                        serde_json::to_vec(&original.reservation_request.intent)
+                            .map_err(invalid_named_record)?,
+                    )
+                    .map_err(invalid_named_record)?,
+                    DisclosureField::new(
+                        NAMED_REVIEW_BINDING_FIELD_V1,
+                        original
+                            .named_header(profile)?
+                            .canonical_bytes()
+                            .map_err(invalid_named_record)?,
+                    )
+                    .map_err(invalid_named_record)?,
+                ]
+            },
             &TransportPublicKey::from_bytes(profile.transport_public_key)
                 .map_err(invalid_named_record)?,
             &TransportPublicKey::from_bytes(profile.witness_transport_public_key)
@@ -878,7 +1035,7 @@ pub(crate) struct NamedRecipientEncryptedReturnV1 {
 impl NamedRecipientEncryptedReturnV1 {
     fn validate(
         &self,
-        review: &NamedRecipientFinalReviewV1,
+        return_message_id: &str,
         result: &NamedRecipientResultRecordV1,
     ) -> Result<()> {
         for h in [
@@ -888,7 +1045,7 @@ impl NamedRecipientEncryptedReturnV1 {
         ] {
             hash(h)?;
         }
-        exact_hex(&review.return_message_id, 16)?;
+        exact_hex(return_message_id, 16)?;
         if self.schema_version != 1
             || self.signed_artifact_digest != result.result_digest
             || self.envelope_hex.is_empty()
@@ -931,6 +1088,16 @@ struct SignatureReturn {
     signed_artifact_digest: String,
     signatures: Vec<Signature>,
 }
+#[derive(Serialize)]
+struct BornSignatureReturn {
+    #[serde(flatten)]
+    common: SignatureReturn,
+    born_origin_digest: String,
+    born_enrollment_digest: String,
+    born_artifact_binding_digest: String,
+    born_admission_digest: String,
+    inner_reservation_request_digest: String,
+}
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Signature {
@@ -940,6 +1107,7 @@ struct Signature {
 impl Drop for Signature {
     fn drop(&mut self) {
         use zeroize::Zeroize;
+
         self.signature_hex.zeroize();
     }
 }
@@ -951,10 +1119,8 @@ pub(crate) fn signature_return_projection(
     started: &NamedRecipientStartedRecordV1,
     bytes: &[u8],
 ) -> Result<Zeroizing<Vec<u8>>> {
-    let review = started
-        .final_review
-        .as_ref()
-        .ok_or(JournalError::InvalidBinding)?;
+    started.validate(original)?;
+    let review = started.return_metadata()?;
     let signed = pczt::Pczt::parse(bytes).map_err(invalid_named_record)?;
     let t = &original.terms;
     let signatures = t
@@ -978,9 +1144,9 @@ pub(crate) fn signature_return_projection(
         schema_version: 1,
         account_id: t.account_id.clone(),
         authorization_id: t.authorization_id.clone(),
-        original_consent_ref: review.consent_reference.clone(),
+        original_consent_ref: review.consent_reference.into(),
         native_review_digest: started.native_review_digest.clone(),
-        admission_request_digest: original.reservation_request_digest.clone(),
+        admission_request_digest: started.admission_request_digest.clone(),
         intent_digest: original
             .reservation_request
             .intent
@@ -996,7 +1162,28 @@ pub(crate) fn signature_return_projection(
         signed_artifact_digest: hex::encode(Sha256::digest(bytes)),
         signatures,
     };
-    let raw = Zeroizing::new(serde_json::to_vec(&payload).map_err(invalid_named_record)?);
+    let raw = if let Some(review) = &started.born_final_review {
+        let origin = original
+            .born_origin
+            .as_ref()
+            .ok_or(JournalError::InvalidBinding)?;
+        Zeroizing::new(
+            serde_json::to_vec(&BornSignatureReturn {
+                common: payload,
+                born_origin_digest: origin.digest()?,
+                born_enrollment_digest: origin.request.enrollment_digest.clone(),
+                born_artifact_binding_digest: origin.request.artifact_binding_digest.clone(),
+                born_admission_digest: review
+                    .admission
+                    .admission_digest()
+                    .map_err(invalid_named_record)?,
+                inner_reservation_request_digest: original.reservation_request_digest.clone(),
+            })
+            .map_err(invalid_named_record)?,
+        )
+    } else {
+        Zeroizing::new(serde_json::to_vec(&payload).map_err(invalid_named_record)?)
+    };
     if raw.len() > 16_384 {
         return Err(JournalError::InvalidBinding);
     }

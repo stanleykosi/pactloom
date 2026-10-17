@@ -219,6 +219,32 @@ pub(crate) fn construction_fixture_v3_with_signing_owner() -> (
     Vec<u8>,
     EcdsaKeyPair,
 ) {
+    construction_fixture_v3_mode(false)
+}
+
+fn construction_fixture_v3_with_original_retention() -> (
+    crate::pending_birth::PendingBirthCommitRecord,
+    ManualRosterEnrollmentExtensionV2,
+    Vec<Event>,
+    Ledger,
+    tempfile::TempDir,
+    Vec<u8>,
+    EcdsaKeyPair,
+) {
+    construction_fixture_v3_mode(true)
+}
+
+fn construction_fixture_v3_mode(
+    original_retention_v2: bool,
+) -> (
+    crate::pending_birth::PendingBirthCommitRecord,
+    ManualRosterEnrollmentExtensionV2,
+    Vec<Event>,
+    Ledger,
+    tempfile::TempDir,
+    Vec<u8>,
+    EcdsaKeyPair,
+) {
     let (private_test_directory, certificate, key) = synthetic_owner();
     let pin = crate::transport::certificate_digest(&rustls::pki_types::CertificateDer::from(
         certificate.clone(),
@@ -252,6 +278,15 @@ pub(crate) fn construction_fixture_v3_with_signing_owner() -> (
         .construction_expires_at_ms = 260_000;
     original.retained.selection.requested_at_ms = 140_000;
     original.retained.requested_at_ms = 141_000;
+    if original_retention_v2 {
+        let scope = &mut original.retained.selection.scope.selection;
+        scope.version = 2;
+        scope.purpose = "prepare_one_common_context_retained_contribution".into();
+        scope.invocation.version = 2;
+        // Fixed before the second publication, not rebased after its expiry.
+        scope.invocation.requested_at_ms = 125_000;
+        scope.invocation.construction_expires_at_ms = 350_000;
+    }
     let plan = v3_plan(&original);
     let approval = ManualRosterConstructionApprovalV3 {
         version: 3,
@@ -700,3 +735,6 @@ fn v2_approval_blocks_v3_before_any_new_charge_and_consumption_timeout_never_ref
         matches!(&archive.origins()[0], ConstructionOriginHistoryV2::CommonContextV3 { origin } if origin.consumed().is_none())
     );
 }
+
+#[path = "manual_roster_construction_v3_tests/original_retention_v2.rs"]
+mod original_retention_v2;

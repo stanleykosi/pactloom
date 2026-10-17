@@ -697,9 +697,24 @@ pub(crate) use original_import::{
 };
 
 mod final_signing;
-pub(crate) use final_signing::PreparedNamedRecipientReturnFile;
 pub(crate) use final_signing::{NamedRecipientOperation, PreparedNamedRecipientSigning};
+pub(crate) use final_signing::{
+    PreparedBornNamedRecipientReturnFile, PreparedBornNamedRecipientSigning,
+    PreparedNamedRecipientReturnFile,
+};
 
+mod born_admission_import;
+mod born_admission_input;
+pub(crate) use born_admission_import::PreparedBornAdmissionImportV1;
+mod born_checkpoint_input;
+mod born_original_history;
+
+pub(crate) use original_import::{
+    BornCourierActionV1, BornNamedRecipientOriginalInputs, PreparedBornDeliveryFileV1,
+    PreparedBornIntentCourierV1, PreparedBornNamedIntentFileExport,
+    PreparedBornNamedRecipientOriginalImport, RetainedBornCourierDeliveryV1,
+    RetainedBornNamedIntentExport,
+};
 #[cfg(all(test, feature = "synthetic-qualification"))]
 pub(super) fn next_return_sequence_for_test(
     c: &rusqlite::Connection,
@@ -707,3 +722,6 @@ pub(super) fn next_return_sequence_for_test(
 ) -> ImportResult<u64> {
     final_signing::next_return_sequence(c, original)
 }
+
+mod born_host_bridge;
+pub(crate) use born_host_bridge::HeldBornHostHistoryV1;

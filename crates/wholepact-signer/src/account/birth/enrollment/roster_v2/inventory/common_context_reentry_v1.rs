@@ -1,6 +1,7 @@
 //! Actual process-local ownership of one completed common-context read.
 //! Focus loss may preserve this key-free receipt; no journal, request, callback
 //! or serialized lineage can create it. Every fresh-entry failure consumes it.
+pub(crate) mod named_recipient;
 use super::common_context_read_v1::NativeCommonContextReadAdmission;
 use super::*;
 use std::os::unix::fs::MetadataExt;
@@ -598,6 +599,23 @@ impl OriginalCommonContextHandoffSource {
         caller_digest: &str,
     ) -> Result<Self> {
         source.check(&peer, owner)?;
+        Self::require_exact_read_input(&source, &peer, read_digest, caller_digest)?;
+        let value = Self {
+            source,
+            peer,
+            native: owner.native().binding(),
+        };
+        value.check(owner)?;
+        Ok(value)
+    }
+    /// The original data predicate, shared with borrowed probes on the actual
+    /// prepared owner. This accepts no substitute source or peer constructor.
+    fn require_exact_read_input(
+        source: &BornRosterInventorySourceV2,
+        peer: &AuthenticatedPeer,
+        read_digest: &str,
+        caller_digest: &str,
+    ) -> Result<()> {
         let read = source
             .common_context_read
             .as_ref()
@@ -619,13 +637,15 @@ impl OriginalCommonContextHandoffSource {
         {
             return Err(Error::ReviewMismatch);
         }
-        let value = Self {
-            source,
-            peer,
-            native: owner.native().binding(),
-        };
-        value.check(owner)?;
-        Ok(value)
+        Ok(())
+    }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(crate) fn require_exact_read_for_qualification(
+        &self,
+        read_digest: &str,
+        caller_digest: &str,
+    ) -> Result<()> {
+        Self::require_exact_read_input(&self.source, &self.peer, read_digest, caller_digest)
     }
     pub(crate) fn check(&self, owner: &PendingAccountNativeAuthority) -> Result<()> {
         self.source.check(&self.peer, owner)?;

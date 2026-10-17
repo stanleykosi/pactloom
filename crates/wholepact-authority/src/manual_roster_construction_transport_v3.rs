@@ -15,7 +15,7 @@ impl AuthorityClient {
         continuation: &ManualRosterSessionContinuationV2,
         request: &ManualRosterConstructionReservationRequestV3,
     ) -> Result<AuthenticatedManualRosterConstructionReservationV3> {
-        if !history.offline_permits.is_empty() {
+        if !history.offline_permits.is_empty() || !history.born_offline_permits.is_empty() {
             return Err(AuthorityError::OfflineHistoryUnsupported);
         }
         if !history.permits.is_empty() || !history.automatic_key_use_admissions.is_empty() {

@@ -7,3 +7,5 @@ pub(crate) const SCHEMA: &str = include_str!("recorded_roster_import_v2/schema.s
 mod issuer;
 #[cfg(feature = "protected-sync")]
 pub use issuer::{RecordedRosterImportErrorV2, RecordedRosterInventoryImportV2};
+#[cfg(feature = "protected-sync")]
+pub(crate) use issuer::verify_post_return_history_v1;

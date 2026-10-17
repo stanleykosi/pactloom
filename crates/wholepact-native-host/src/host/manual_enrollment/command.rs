@@ -2,6 +2,8 @@
 //! then an audit-only append under the genuine bounded lower admission. Only the
 //! separate explicit publish-inventory commands add bounded viewing disclosure. This
 //! module never manufactures private signer fields or bypasses financial gates.
+#[cfg(test)]
+pub(super) mod joined_initial_v1;
 mod permanent_stop;
 mod construction_inspection_v2;
 mod construction_inspection_v3;
@@ -78,7 +80,7 @@ impl InitialOwners<'_> {
     }
 }
 impl Host {
-    fn require_manual_session(&self) -> Result<()> {
+    pub(in crate::host) fn require_manual_session(&self) -> Result<()> {
         self.directory.check()?;
         let principal = &self.access()?.principal_id;
         if !self.config.as_ref().is_some_and(|config| {

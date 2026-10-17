@@ -41,7 +41,9 @@ impl ReconciledAuthorityHistory {
         for evidence in self.reservation_evidence() {
             match evidence {
                 ReservationEvidenceRef::OnlineV2(_) => online += 1,
-                ReservationEvidenceRef::OfflineV1(_) => offline += 1,
+                ReservationEvidenceRef::OfflineV1(_) | ReservationEvidenceRef::BornOfflineV1(_) => {
+                    offline += 1
+                }
             }
         }
         // Purpose-distinct construction holds are not financial reservation

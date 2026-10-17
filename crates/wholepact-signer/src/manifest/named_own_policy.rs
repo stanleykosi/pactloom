@@ -41,6 +41,108 @@ pub(crate) fn derive_selected_own_policy(
     input_actions: &[InputActionMapping],
     output_actions: &[OutputActionMapping],
 ) -> Result<OwnEffectsPolicy> {
+    let facts = OwnPolicyFacts {
+        account_id: &selected.account_id,
+        fvk: &selected.fvk,
+        inputs: selected
+            .inputs
+            .iter()
+            .map(|i| OwnPolicyInput {
+                input_id: i.input_id.clone(),
+                nullifier: i.nullifier,
+                value: i.value,
+            })
+            .collect(),
+        context: super::SelectionContext {
+            tip_height: selected.context.tip_height,
+            tip_hash: selected.context.tip_hash,
+            anchor_height: selected.context.anchor_height,
+            anchor_hash: selected.context.anchor_hash,
+            anchor_root: selected.context.anchor_root,
+        },
+    };
+    derive_exact_own_facts(
+        accepted,
+        &facts,
+        account,
+        context,
+        input_actions,
+        output_actions,
+    )
+}
+// Internal expectation data only. Deliberately not LocalSelection, a current
+// wallet ticket, a serializable issuer, or a public constructor.
+struct OwnPolicyFacts<'a> {
+    account_id: &'a str,
+    fvk: &'a orchard::keys::FullViewingKey,
+    inputs: Vec<OwnPolicyInput>,
+    context: super::SelectionContext,
+}
+struct OwnPolicyInput {
+    input_id: String,
+    nullifier: [u8; 32],
+    value: u64,
+}
+#[cfg(all(feature = "pending-birth-owner-signing", target_os = "linux"))]
+pub(crate) fn derive_born_consumed_own_policy(
+    actual: &crate::account::birth::enrollment::roster_v2::inventory::common_context_reentry_v1::named_recipient::ConsumedBornNamedSourceV1,
+    owner: &crate::native_ui::PendingAccountNativeAuthority,
+    context: &ConstructionContext,
+    input_actions: &[InputActionMapping],
+    output_actions: &[OutputActionMapping],
+) -> Result<OwnEffectsPolicy> {
+    actual.check(owner)?;
+    let plan = &actual.construction().reservation.request.construction.plan;
+    let proposal = plan.validate().map_err(|_| Error::Verification)?;
+    let decode = |s: &str| -> Result<[u8; 32]> {
+        hex::decode(s)
+            .map_err(|_| Error::Verification)?
+            .try_into()
+            .map_err(|_| Error::Verification)
+    };
+    let fvk = actual.vault().account().fvk()?;
+    let common = &plan.common_context;
+    let facts = OwnPolicyFacts {
+        account_id: &plan.enrollment().identity.account_id,
+        fvk: &fvk,
+        inputs: plan
+            .selected_inputs()
+            .iter()
+            .map(|i| {
+                Ok(OwnPolicyInput {
+                    input_id: i.input_id.clone(),
+                    nullifier: decode(&i.nullifier)?,
+                    value: i.value_zatoshis,
+                })
+            })
+            .collect::<Result<_>>()?,
+        context: super::SelectionContext {
+            tip_height: common.reference_tip_height,
+            tip_hash: decode(&common.reference_tip_hash_protocol)?,
+            anchor_height: common.anchor_height,
+            anchor_hash: decode(&common.anchor_hash_protocol)?,
+            anchor_root: decode(&common.anchor_root)?,
+        },
+    };
+    let result = derive_exact_own_facts(
+        &AcceptedManifest { proposal },
+        &facts,
+        actual.vault().account(),
+        context,
+        input_actions,
+        output_actions,
+    )?;
+    actual.check(owner)?;
+    Ok(result)
+}
+fn derive_exact_own_facts(
+    accepted: &AcceptedManifest,
+    selected: &OwnPolicyFacts<'_>,
+    account: &DedicatedAccount,
+    context: &ConstructionContext,
+    input_actions: &[InputActionMapping],
+    output_actions: &[OutputActionMapping],
+) -> Result<OwnEffectsPolicy> {
     let manifest = accepted.proposal.manifest();
     check(
         (1..=MAX_ACTIONS).contains(&manifest.inputs.len())

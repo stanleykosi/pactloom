@@ -2,6 +2,8 @@
 //! Parent owner checks authenticate the live Host. This never creates a roster
 //! position, witness attempt, publication lease or approval from imported data.
 use super::*;
+#[cfg(all(test, feature = "synthetic-born-joined-qualification"))]
+pub(super) mod joined_continuation_v3;
 use wholepact_signer_origin::manual_roster_v2::HostManualRosterEnrollmentIntentV2;
 
 struct PreparedRosterContinuationIntent<'host> {

@@ -557,3 +557,26 @@ fn require_retained_registry_prefix(
     }
     Ok(())
 }
+
+/// Read-only validation for a purpose-distinct post-return reopened owner. It
+/// validates the whole current registry and exact original committed prefix;
+/// this cannot append a dependency, renew import, or grant construction.
+pub(crate) fn require_born_post_return_wallet_binding_v1(
+    host: &Directory,
+    secrets: &Secrets,
+    primary: &FinancialProfile,
+    wallet: &crate::financial_profile::born_post_return_v1::BornPostReturnWalletProvenanceV1,
+    expected: &ManualConstructionAttachmentBinding,
+) -> Result<()> {
+    expected.validate().map_err(|_| Error::Invalid)?;
+    let actual = wallet.descriptor(&secrets.profile(), &expected.selected.account_id)?;
+    if actual != expected.selected
+        || primary.manual_original_primary_origin_digest(host, secrets)?
+            != expected.original_primary_journal_origin_digest
+    { return Err(Error::Authentication); }
+    let inventory = match load(host, secrets)? {
+        Registry::V2(value) => value,
+        _ => return Err(Error::RecoveryFinancialUnsupported),
+    };
+    require_retained_registry_prefix(&inventory, secrets, expected, &actual)
+}

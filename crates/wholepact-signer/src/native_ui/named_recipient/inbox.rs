@@ -67,6 +67,8 @@ impl InboxWorkspace {
             session: owner.session,
             vault: owner.vault,
             authority: owner.authority,
+            #[cfg(feature = "pending-birth-owner-signing")]
+            born: owner.born,
             enrollment_ref: profile.enrollment_ref(),
             manifest_ref: profile.manifest_ref(),
         }

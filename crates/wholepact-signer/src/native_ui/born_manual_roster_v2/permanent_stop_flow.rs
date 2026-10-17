@@ -64,12 +64,21 @@ pub(super) enum StopOutput {
     Source(Box<BornPermanentStopSourceV1>),
     Published(Box<BornPermanentStopSourceV1>),
 }
+fn private_stop_endpoint_directory() -> Result<tempfile::TempDir> {
+    use std::os::unix::fs::PermissionsExt;
+    // Set the mode when creating our own new directory; never repair an
+    // existing source or depend on the ambient umask for private admission.
+    Ok(tempfile::Builder::new()
+        .prefix("wholepact-born-stop-")
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()?)
+}
 fn open_source(
     source: BornPermanentStopSourceV1,
     owner: &PendingAccountNativeAuthority,
 ) -> Result<Output> {
     source.check(owner)?;
-    let temporary = tempfile::tempdir()?;
+    let temporary = private_stop_endpoint_directory()?;
     let ipc = LocalIpc::bind_permanent_stop_v1(
         crate::files::PrivateDirectory::open(temporary.path())?,
         source.genesis().identity.account_id.clone(),
@@ -388,5 +397,30 @@ impl BornManualRosterUiV2 {
             self.start(Work::Stop(work), epoch)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod private_endpoint_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn born_stop_endpoint_creator_is_private_before_strict_open() {
+        let temporary = private_stop_endpoint_directory().unwrap();
+        assert_eq!(
+            std::fs::metadata(temporary.path())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        // Exercise the actual creator/admission pair without any account,
+        // source, native approval, listener or one-way stop authority.
+        let directory = crate::files::PrivateDirectory::open(temporary.path()).unwrap();
+        assert_eq!(directory.root(), temporary.path());
+        drop(directory);
+        temporary.close().unwrap();
     }
 }

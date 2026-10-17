@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "Fail-closed keyed SQLCipher connection boundary for private Wholepact storage"
 
+[features]
+# Concrete self-owned temporary namespace for explicit synthetic qualification only.
+synthetic-qualification = []
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true

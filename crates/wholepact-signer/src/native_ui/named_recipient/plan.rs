@@ -99,6 +99,7 @@ impl OriginalDraft {
             outputs,
         };
         Ok(NamedRecipientOriginalRecordV1 {
+            born_origin: None,
             schema_version: 1,
             reference: String::new(),
             profile_ref: self.profile_ref,

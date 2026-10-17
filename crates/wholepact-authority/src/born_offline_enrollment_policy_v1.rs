@@ -57,7 +57,7 @@ impl Ledger {
         {
             return Err(AuthorityError::Conflict);
         }
-        self.require_unfenced_transport(&e.original_writer_session.session_id)?;
+        self.require_born_transport_lineage_v1(e)?;
         let common = &self
             .manual_extension()?
             .ok_or(AuthorityError::Permission)?

@@ -2,6 +2,9 @@
 //! same historical material attempt and original clocks used by V2. A frozen
 //! maximum-ORIGINAL-tip target never substitutes for current spendability.
 use super::*;
+#[path = "common_context_historical_capture_v1.rs"]
+mod historical_capture_v1;
+use historical_capture_v1::SnapshotHistorical;
 use wholepact_core::manual_roster_construction_v3::RosterCommonContextReadRequestV1;
 use wholepact_signer_origin::{
     AdmittedManualRosterConstructionContributionV3, AdmittedRosterCommonContextReadV1,
@@ -204,6 +207,7 @@ impl FreshCommonContextObservation {
         let inventory = &request.plan.retained.selection.scope.selection.inventory;
         let c = &material.contribution;
         Ok(CommonContextVerifierSnapshot {
+            historical: Some(SnapshotHistorical::capture(material, self)?),
             common: self.common.clone(),
             plan_digest: self.plan_digest.clone(),
             exact: ExactInputVerifierSnapshot {
@@ -516,6 +520,7 @@ impl<A: LocalWalletAccess> LocalWalletAccess for CommonContextScanAccess<'_, A> 
 /// Private exact facts with the immutable native-approved V3 context. This is
 /// verification data only; it cannot issue native construction authority.
 pub struct CommonContextVerifierSnapshot {
+    historical: Option<SnapshotHistorical>,
     exact: ExactInputVerifierSnapshot,
     common: FrozenCommonContext,
     plan_digest: String,
@@ -532,6 +537,7 @@ impl ObservationChecks for FreshCommonContextObservation {
     }
 }
 pub struct CommonContextWalletSlot<'a> {
+    historical: &'a Option<SnapshotHistorical>,
     native_read: &'a StartedRosterCommonContextReadV1,
     exact: ExactInputWalletSlot<'a>,
     common: &'a FrozenCommonContext,
@@ -540,6 +546,7 @@ pub struct CommonContextWalletSlot<'a> {
 // Private lock-only carrier shared with component fixtures. It cannot be
 // supplied to the public roster entry or manufacture an original native read.
 struct CommonContextLockSlot<'a> {
+    historical: &'a Option<SnapshotHistorical>,
     exact: ExactInputWalletSlot<'a>,
     common: &'a FrozenCommonContext,
     plan_digest: &'a str,
@@ -573,6 +580,7 @@ impl<'a> CommonContextWalletSlot<'a> {
                 fresh,
                 restriction,
             },
+            historical: &snapshot.historical,
             native_read: fresh.native_read(),
             common: &snapshot.common,
             plan_digest: &snapshot.plan_digest,
@@ -583,6 +591,7 @@ impl<'a> CommonContextWalletSlot<'a> {
 /// Borrows all actual maintained V3 wallet locks. No DTO, Clone, or callback-
 /// escaping factory exists, and the V2 conversion does not accept this type.
 pub struct HeldCommonContextRosterObservation<'a> {
+    historical: &'a std::collections::BTreeMap<String, &'a SnapshotHistorical>,
     chain: &'a dyn GuardChain,
     current: &'a SelectionContext,
     count: usize,
@@ -680,6 +689,7 @@ where
             slot.native_read,
         );
         locks.push(CommonContextLockSlot {
+            historical: slot.historical,
             exact: slot.exact,
             common: slot.common,
             plan_digest: slot.plan_digest,
@@ -707,8 +717,12 @@ where
         .common
         .clone();
     let mut plans = std::collections::BTreeMap::new();
+    let mut historical = std::collections::BTreeMap::new();
     let mut valid = slots.len() == common.context.participants.len();
     for slot in &slots {
+        if let Some(row) = slot.historical {
+            historical.insert(slot.exact.snapshot.evidence.account_id.clone(), row);
+        }
         valid &=
             slot.common.digest == common.digest && common.matches_snapshot(slot.exact.snapshot);
         valid &= plans
@@ -726,6 +740,7 @@ where
         |snapshot, _| valid && common.matches_snapshot(snapshot),
         |held| {
             callback(&HeldCommonContextRosterObservation {
+                historical: &historical,
                 chain: held.chain,
                 current: held.current,
                 count: held.count,

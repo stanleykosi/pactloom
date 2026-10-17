@@ -16,6 +16,16 @@ pub fn open_born_history_for_server(
     }
     let input: NamespaceOpenInput =
         serde_json::from_slice(namespace_json).map_err(|_| AuthorityError::InvalidBinding)?;
+    open_born_history_from_namespace(input, actual_server_certificate_digest, actual_listen)
+}
+
+// Shared concrete opener. Ordinary JSON callers cannot select a temporary
+// installation: its nominal owner is serde-skipped and absent on that route.
+pub(crate) fn open_born_history_from_namespace(
+    input: NamespaceOpenInput,
+    actual_server_certificate_digest: &str,
+    actual_listen: &str,
+) -> Result<AuthorityJournal> {
     if input.pinned_server_certificate_digest != actual_server_certificate_digest
         || input.endpoint != actual_listen
     {
@@ -68,12 +78,35 @@ fn open_born_manual_attempt_inner(
     actual_server_certificate_digest: &str,
     actual_listen: &str,
 ) -> Result<AuthorityJournal> {
-    crate::hash(selected_extension_digest)?;
-    let mut journal = open_born_history_for_server(
-        namespace_json,
+    if namespace_json.is_empty() || namespace_json.len() > 16 * 1024 {
+        return Err(AuthorityError::Limit);
+    }
+    let input: NamespaceOpenInput =
+        serde_json::from_slice(namespace_json).map_err(|_| AuthorityError::InvalidBinding)?;
+    open_born_manual_attempt_from_namespace(
+        input,
+        selected_extension_digest,
+        selected_attempt_digest,
         actual_server_certificate_digest,
         actual_listen,
-    )?;
+    )
+}
+
+// Same exact original-attempt opener for the retained concrete synthetic
+// installation. Ordinary JSON has no serialized installation selector.
+pub(crate) fn open_born_manual_attempt_from_namespace(
+    input: NamespaceOpenInput,
+    selected_extension_digest: &str,
+    selected_attempt_digest: Option<&str>,
+    actual_server_certificate_digest: &str,
+    actual_listen: &str,
+) -> Result<AuthorityJournal> {
+    crate::hash(selected_extension_digest)?;
+    if let Some(digest) = selected_attempt_digest {
+        crate::hash(digest)?;
+    }
+    let mut journal =
+        open_born_history_from_namespace(input, actual_server_certificate_digest, actual_listen)?;
     journal
         .born_owner
         .as_ref()
@@ -122,13 +155,33 @@ pub fn open_born_manual_roster_attempt_v2_for_server(
     actual_server_certificate_digest: &str,
     actual_listen: &str,
 ) -> Result<AuthorityJournal> {
-    crate::hash(selected_extension_digest)?;
-    crate::hash(selected_attempt_digest)?;
-    let mut journal = open_born_history_for_server(
-        namespace_json,
+    if namespace_json.is_empty() || namespace_json.len() > 16 * 1024 {
+        return Err(AuthorityError::Limit);
+    }
+    let input: NamespaceOpenInput =
+        serde_json::from_slice(namespace_json).map_err(|_| AuthorityError::InvalidBinding)?;
+    open_born_manual_roster_attempt_v2_from_namespace(
+        input,
+        selected_extension_digest,
+        selected_attempt_digest,
         actual_server_certificate_digest,
         actual_listen,
-    )?;
+    )
+}
+
+// The synthetic native fixture retains the concrete installation owner through
+// this SAME exact-attempt opener. No fixture constructs a bootstrap scope.
+pub(crate) fn open_born_manual_roster_attempt_v2_from_namespace(
+    input: NamespaceOpenInput,
+    selected_extension_digest: &str,
+    selected_attempt_digest: &str,
+    actual_server_certificate_digest: &str,
+    actual_listen: &str,
+) -> Result<AuthorityJournal> {
+    crate::hash(selected_extension_digest)?;
+    crate::hash(selected_attempt_digest)?;
+    let mut journal =
+        open_born_history_from_namespace(input, actual_server_certificate_digest, actual_listen)?;
     journal
         .born_owner
         .as_ref()

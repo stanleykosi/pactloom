@@ -135,6 +135,7 @@ pub struct PreparedExport {
 /// native approval, delivery evidence, current-time assertion or signing permit.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedMessageMetadata {
+    pub immutable_slot_digest: Option<String>,
     pub stream_digest: String,
     pub message_id_digest: String,
     pub content_digest: String,
@@ -154,6 +155,7 @@ impl PreparedExport {
         let plaintext = self.canonical_protected_message(&approved)?;
         let metadata = AuthenticatedReceipt::new(&self.preview, &plaintext, &[])?;
         Ok(PreparedMessageMetadata {
+            immutable_slot_digest: metadata.immutable_slot_digest().map(str::to_owned),
             stream_digest: metadata.stream_digest().into(),
             message_id_digest: metadata.message_id_digest().into(),
             content_digest: metadata.content_digest().into(),
@@ -234,7 +236,11 @@ fn reject_unqualified_offline_seal(kind: ArtifactKind) -> Result<()> {
             | ArtifactKind::OfflineAuthorityAdmission
             | ArtifactKind::OfflineAdmissionControl
             | ArtifactKind::OfflineMinimalAuthorityAdmission
+            | ArtifactKind::BornOfflineMinimalAdmissionV1
+            | ArtifactKind::BornOfflineIntentV1
+            | ArtifactKind::BornOfflineCheckpointOriginV1
             | ArtifactKind::OfflineAuthorizationReturn
+            | ArtifactKind::BornOfflineAuthorizationReturnV1
     ) {
         return Err(TransportError::AuthorityUnavailable);
     }
@@ -370,7 +376,11 @@ fn reject_generic_control(expected: &MessageContext) -> Result<()> {
         expected.artifact_kind,
         ArtifactKind::OfflineAdmissionControl
             | ArtifactKind::OfflineMinimalAuthorityAdmission
+            | ArtifactKind::BornOfflineMinimalAdmissionV1
+            | ArtifactKind::BornOfflineIntentV1
+            | ArtifactKind::BornOfflineCheckpointOriginV1
             | ArtifactKind::OfflineAuthorizationReturn
+            | ArtifactKind::BornOfflineAuthorizationReturnV1
     ) {
         return Err(TransportError::AuthorityUnavailable);
     }
@@ -409,7 +419,13 @@ pub fn recover_received(
     expected_sender: &TransportPublicKey,
     expected: &MessageContext,
 ) -> Result<RecoveredArtifact> {
-    if expected.artifact_kind == ArtifactKind::OfflineAuthorizationReturn {
+    if matches!(
+        expected.artifact_kind,
+        ArtifactKind::OfflineAuthorizationReturn
+            | ArtifactKind::BornOfflineAuthorizationReturnV1
+            | ArtifactKind::BornOfflineIntentV1
+            | ArtifactKind::BornOfflineCheckpointOriginV1
+    ) {
         return Err(TransportError::AuthorityUnavailable);
     }
     let (artifact, receipt) =

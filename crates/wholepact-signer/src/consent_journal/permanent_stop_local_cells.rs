@@ -63,6 +63,11 @@ pub(super) fn validate(
     automation(c, account, &mut display)?;
     deliveries(c, &mut display)?;
     recovery_generations(c, account, &mut display)?;
+    display.push(
+        "signer_named_recipient_complete_history",
+        serde_json::to_value(named_recipient_inventory::read_all(c, &account.account_id)?)
+            .map_err(invalid)?,
+    )?;
     settlement_sources(c, account, &mut display)?;
     display.push(
         "signer_settlement_history",

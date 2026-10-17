@@ -208,3 +208,6 @@ impl Drop for AssertionWorkspace {
         self.cancel();
     }
 }
+
+#[cfg(feature = "synthetic-born-joined-qualification")]
+mod synthetic_born_assertion;
