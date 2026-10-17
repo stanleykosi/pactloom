@@ -295,29 +295,43 @@ fn observe_two_inner<'host>(
     }
     let mut observations = Vec::with_capacity(2);
     let mut owners = Vec::with_capacity(2);
-    // Every full plan and every newer continuation is ready before the first
-    // short-lived observation. Only genuine reads enter this actual barrier.
-    for (original, entry) in retained.into_iter().zip(prepared_reads) {
+    // Prepare BOTH actual owner ceremonies before starting EITHER short-lived
+    // native read. These are the same non-Clone retained owners and exact Host
+    // approvals, with their originally captured deadlines, not renewed reviews.
+    // Execution below asks no terminal questions, so finite input order is unchanged.
+    let read_wave = prepare_read_wave(
+        retained.into_iter().zip(prepared_reads),
+        |(original, entry)| {
+            check_scenario(original_scenario_deadline)?;
+            let owner = born
+                .get(entry.index)
+                .filter(|owner| {
+                    owner.index == entry.index
+                        && owner.account_id == entry.plan.plan.enrollment().identity.account_id
+                })
+                .ok_or(Error::Authentication)?;
+            coordinator.check_current(host)?;
+            host.terminal.message(&format!(
+                "SYNTHETIC_JOINED_READ_CONTINUATION_PATH={}\n",
+                entry.continuation.signed_continuation_file().display()
+            ))?;
+            let prepared = diagnostic::host(B::ObservedReadPrepare, || {
+                prepared_common_context_read_v3::prepare(host, &coordinator, original, &entry.plan)
+            })?;
+            if prepared.publication_request() != entry.continuation.request() {
+                return Err(Error::Authentication);
+            }
+            Ok((entry, owner, prepared))
+        },
+    )?;
+    // Only actual prepared owners enter this original-order execution wave.
+    // The existing pair/publication/read checks still run at their effect boundaries.
+    for (entry, owner, prepared) in read_wave {
+        // Preparation can take time. Retain both original restriction checks
+        // immediately before the history/server/native-open side effects too.
         check_scenario(original_scenario_deadline)?;
-        let owner = born
-            .get(entry.index)
-            .filter(|owner| {
-                owner.index == entry.index
-                    && owner.account_id == entry.plan.plan.enrollment().identity.account_id
-            })
-            .ok_or(Error::Authentication)?;
-        let witness = witnesses.for_original(owner)?;
         coordinator.check_current(host)?;
-        host.terminal.message(&format!(
-            "SYNTHETIC_JOINED_READ_CONTINUATION_PATH={}\n",
-            entry.continuation.signed_continuation_file().display()
-        ))?;
-        let prepared = diagnostic::host(B::ObservedReadPrepare, || {
-            prepared_common_context_read_v3::prepare(host, &coordinator, original, &entry.plan)
-        })?;
-        if prepared.publication_request() != entry.continuation.request() {
-            return Err(Error::Authentication);
-        }
+        let witness = witnesses.for_original(owner)?;
         let (actual, read_operation, handoff_operation) = prepared.exact_read_parts();
         let expected = ExpectedCommonContextReadV3Input {
             plan: actual.plan.clone(),
@@ -406,6 +420,19 @@ fn observe_two_inner<'host>(
         provider,
         runtime,
     })
+}
+
+// A private collect barrier, not a permission or owner constructor. On any
+// preparation error it drops all already prepared values before returning; no
+// execution callback exists here and no original can be cloned or reconstructed.
+fn prepare_read_wave<I, P>(
+    originals: I,
+    prepare: impl FnMut(I::Item) -> Result<P>,
+) -> Result<Vec<P>>
+where
+    I: IntoIterator,
+{
+    originals.into_iter().map(prepare).collect()
 }
 
 /// A separately named executable milestone, not completed construction. All
@@ -541,5 +568,47 @@ pub(super) fn inputs() -> Vec<Input<'static>> {
 fn actual_three_born_same_original_all_observations_preserve_refusal() {
     foreground_child("three-born-all-observations-v3", &inputs()).expect(
         "actual temporary same-owner all-observations barrier only; no Reserve, Consume, construction, proof, return, dispatch or attended qualification",
+    );
+}
+
+#[test]
+fn actual_read_wave_prepares_every_item_before_original_order_execution() {
+    let events = std::cell::RefCell::new(Vec::new());
+    let original = vec![(1, String::from("first")), (2, String::from("second"))];
+    let prepared = prepare_read_wave(original, |(index, value)| {
+        events.borrow_mut().push(("prepare", index));
+        Ok((index, value))
+    })
+    .unwrap();
+    for (index, value) in prepared {
+        events.borrow_mut().push(("execute", index));
+        assert_eq!(value, if index == 1 { "first" } else { "second" });
+    }
+    assert_eq!(
+        *events.borrow(),
+        vec![("prepare", 1), ("prepare", 2), ("execute", 1), ("execute", 2)],
+    );
+}
+
+#[test]
+fn failed_read_wave_drops_prepared_values_without_execution_or_retry() {
+    struct InertPrepared<'a>(&'a std::cell::RefCell<Vec<(&'static str, usize)>>, usize);
+    impl Drop for InertPrepared<'_> {
+        fn drop(&mut self) {
+            self.0.borrow_mut().push(("drop", self.1));
+        }
+    }
+    let events = std::cell::RefCell::new(Vec::new());
+    let result = prepare_read_wave([1, 2, 3], |index| {
+        events.borrow_mut().push(("prepare", index));
+        if index == 2 {
+            return Err(Error::Permission);
+        }
+        Ok(InertPrepared(&events, index))
+    });
+    assert!(matches!(result, Err(Error::Permission)));
+    assert_eq!(
+        *events.borrow(),
+        vec![("prepare", 1), ("prepare", 2), ("drop", 1)],
     );
 }

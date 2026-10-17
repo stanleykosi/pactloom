@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Pure public parser/selection tests. No child, socket, key or wallet is created."""
 import importlib.util
+import hashlib
 import contextlib
 import io
 import json
@@ -415,6 +416,34 @@ class PublicOutputTests(unittest.TestCase):
                       'WitnessPlanWorkerPrepare:AuthorityUnknown',
                       'ObservedPlanWitnessOrigin:AuthorityStorage:private']:
             self.assertFalse(output.safe_failure(self.failure(value)))
+
+    def test_read_wave_preflight_keeps_original_inputs_and_effect_tail(self):
+        names=('actual_read_wave_prepares_every_item_before_original_order_execution',
+               'failed_read_wave_drops_prepared_values_without_execution_or_retry')
+        expected=tuple(output.PREFIX+'observed_joined_v3::'+name for name in names)
+        self.assertEqual(output.READ_WAVE_TESTS,expected)
+        path=ROOT/'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3_qualification/observed_joined_v3.rs'
+        source=path.read_text()
+        for name in names:
+            self.assertEqual(source.count('fn '+name+'()'),1)
+        function=source.split('fn observe_two_inner<',1)[1].split('// A private collect barrier',1)[0]
+        self.assertEqual(function.count('prepared_common_context_read_v3::prepare('),1)
+        self.assertEqual(function.count('prepared.begin_pair('),1)
+        self.assertLess(function.index('let read_wave = prepare_read_wave('),function.index('prepared_common_context_read_v3::prepare('))
+        self.assertLess(function.index('prepared_common_context_read_v3::prepare('),function.index('for (entry, owner, prepared) in read_wave'))
+        self.assertLess(function.index('for (entry, owner, prepared) in read_wave'),function.index('prepared.begin_pair('))
+        execution=function.split('for (entry, owner, prepared) in read_wave',1)[1]
+        self.assertLess(execution.index('check_scenario(original_scenario_deadline)?;'),execution.index('let witness = witnesses.for_original(owner)?;'))
+        self.assertLess(execution.index('coordinator.check_current(host)?;'),execution.index('let witness = witnesses.for_original(owner)?;'))
+        self.assertLess(execution.index('let witness = witnesses.for_original(owner)?;'),execution.index('witness\n                .serve_original_roster_attempt_v2('))
+        inputs=source.split('pub(super) fn inputs()',1)[1].split('#[test]',1)[0]
+        self.assertEqual(hashlib.sha256(inputs.encode()).hexdigest(),'4b1cc2f8f7e0cd5aa77fecfb3e46423a67a1cee07b0592fbc7b64bcf599e5d3a')
+        tail=source.split('let (actual, read_operation, handoff_operation) = prepared.exact_read_parts();',1)[1].split('    check_scenario(original_scenario_deadline)?;\n    let roster',1)[0]
+        self.assertEqual(hashlib.sha256(tail.encode()).hexdigest(),'dd33079c1cacfe52a211c349fc473d1873c9a6f80096e0546656ffc6e304f125')
+        combined=output.PURE_TESTS+output.POLICY_ENVELOPE_TESTS+output.PROMPT_RENDERING_TESTS+output.LOWER_ERROR_TESTS+output.DENIAL_TESTS+output.ROLLING_TRANSCRIPT_TESTS+output.AUTHORITY_PROJECTION_TESTS+output.READ_WAVE_TESTS
+        self.assertEqual(len(combined),38)
+        self.assertEqual(len(set(combined)),38)
+        self.assertTrue(set(expected).isdisjoint(row[0] for row in output.TESTS.values()))
 
     def test_authority_projection_preflight_is_one_exact_inert_case(self):
         expected=output.PREFIX+'safe_diagnostics_v1::authority_error_projection_preserves_only_closed_variants'

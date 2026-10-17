@@ -63,6 +63,10 @@ ROLLING_TRANSCRIPT_TESTS = tuple(PREFIX + 'rolling_transcript_v1::tests::' + nam
     'one_unconsumed_review_still_cannot_exceed_original_bound',
 ))
 AUTHORITY_PROJECTION_TESTS = (PREFIX + 'safe_diagnostics_v1::authority_error_projection_preserves_only_closed_variants',)
+READ_WAVE_TESTS = tuple(PREFIX + 'observed_joined_v3::' + name for name in (
+    'actual_read_wave_prepares_every_item_before_original_order_execution',
+    'failed_read_wave_drops_prepared_values_without_execution_or_retry',
+))
 AUTHORITY_RENDERER_TESTS = (
     'native_witness_owner::window::ephemeral_fixture_v1::public_control_navigation_v1::tests::wheel_navigation_reaches_actual_disabled_controls_without_mutating_form',
     'native_witness_owner::window::ephemeral_fixture_v1::public_control_navigation_v1::tests::missing_exact_control_stops_after_finite_wheel_events',
@@ -263,12 +267,12 @@ class BoundedLines:
 
 def run_pure(executable):
     assert resource.getrlimit(resource.RLIMIT_CORE)[0] == 0
-    for name in PURE_TESTS + POLICY_ENVELOPE_TESTS + PROMPT_RENDERING_TESTS + LOWER_ERROR_TESTS + DENIAL_TESTS + ROLLING_TRANSCRIPT_TESTS + AUTHORITY_PROJECTION_TESTS:
+    for name in PURE_TESTS + POLICY_ENVELOPE_TESTS + PROMPT_RENDERING_TESTS + LOWER_ERROR_TESTS + DENIAL_TESTS + ROLLING_TRANSCRIPT_TESTS + AUTHORITY_PROJECTION_TESTS + READ_WAVE_TESTS:
         flags=['--exact',name,'--test-threads=1']
         listed=subprocess.run([executable,*flags,'--list'],capture_output=True,timeout=30,check=True)
         if not exact_listing(listed.stdout.decode(),name) or listed.stderr:
             raise ValueError('exact pure test not uniquely registered')
-        # These 36 fixed source-reviewed cases use only modeled process state,
+        # These 38 fixed source-reviewed cases use only modeled process state,
         # inert files, historical policy DTOs, fixed prompts, closed error kinds or
         # bounded private parsing state. They create
         # no native/IPC/network/payment owners.
@@ -276,7 +280,7 @@ def run_pure(executable):
         if result.returncode!=0 or len(result.stdout)>1024*1024:
             print('CI_SYNTHETIC_PURE failed_test='+name,flush=True)
             raise RuntimeError('exact pure test failed; raw output withheld')
-    print('CI_SYNTHETIC_PURE passed=36 raw_output_discarded=true',flush=True)
+    print('CI_SYNTHETIC_PURE passed=38 raw_output_discarded=true',flush=True)
 
 def run_signer_validation(executable):
     assert resource.getrlimit(resource.RLIMIT_CORE)[0] == 0
