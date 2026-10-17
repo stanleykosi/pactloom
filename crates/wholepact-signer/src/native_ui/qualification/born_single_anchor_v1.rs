@@ -467,7 +467,7 @@ impl SinglePublicationFixture {
             account_id: original.account_id.clone(),
             agreement_id: terms.scope.agreement_id.clone(),
             participant_id: terms.scope.participant_id.clone(),
-            manifest_digest: request.digest().map_err(|_| Error::InvalidData)?,
+            manifest_digest: publication_intent_digest(&request)?,
             history_read: false,
             authorization_export: false,
             preconstruction_export: false,
@@ -563,6 +563,21 @@ impl SinglePublicationFixture {
     }
 }
 
+// Initial V1 publication pairs to the original request-only intent, just as
+// the actual Host and PreparedBornManualReentry do. The full queued
+// request is still independently compared in poll_publication above.
+fn publication_intent_digest(request: &HostManualEnrollmentRequest) -> Result<String> {
+    request.validate().map_err(|_| Error::InvalidData)?;
+    HostIntent {
+        version: 1,
+        operation_id: request.terms.operation_id.clone(),
+        host: request.terms.host.clone(),
+        scope: request.terms.scope.clone(),
+    }
+    .digest()
+    .map_err(|_| Error::InvalidData)
+}
+
 fn record_intent(
     record: &crate::account::birth::enrollment::BornManualEnrollmentRecord,
 ) -> HostIntent {
@@ -586,5 +601,113 @@ mod endpoint_tests {
         let private = crate::files::PrivateDirectory::open(temporary.path()).unwrap();
         drop(private);
         drop(temporary);
+    }
+}
+
+#[cfg(test)]
+mod publication_scope_tests {
+    use super::*;
+    use wholepact_core::manual_enrollment::{
+        BornManualEnrollmentTerms, BornManualScope, BornManualSignerBinding, ManualAccountIdentity,
+        ManualHostGenerationBinding,
+    };
+
+    // Inert validated terms only. No native, account, pairing or witness owner
+    // is manufactured, and these records are never submitted or persisted.
+    fn request() -> HostManualEnrollmentRequest {
+        let h = || "a".repeat(64);
+        HostManualEnrollmentRequest {
+            terms: BornManualEnrollmentTerms {
+                version: 1,
+                operation_id: "synthetic-first-enrollment".into(),
+                identity: ManualAccountIdentity {
+                    account_id: h(),
+                    full_viewing_key_digest: h(),
+                    network_profile_id: "synthetic-testnet".into(),
+                    derivation_domain: "dedicated-testnet-legacy-zip32-v1".into(),
+                },
+                birth_request_digest: h(),
+                birth_commit_digest: h(),
+                native_birth_digest: h(),
+                original_policy_digest: h(),
+                account_use_genesis_digest: h(),
+                original_witness_origin_digest: h(),
+                host: ManualHostGenerationBinding {
+                    generation_id: h(),
+                    inventory_digest: h(),
+                    generation_plan_digest: h(),
+                    financial_journal_origin_digest: h(),
+                    store_destination_identity: "synthetic-store".into(),
+                    profile_id: "synthetic-profile".into(),
+                    canonical_root: "/synthetic/profile".into(),
+                    destination_identity_digest: h(),
+                    inherited_identity_digest: h(),
+                    scope_predecessor_digest: None,
+                },
+                signer: BornManualSignerBinding {
+                    enrollment_generation_id: h(),
+                    signer_target_digest: h(),
+                    original_envelope_digest: h(),
+                    owner_certificate_digest: h(),
+                    writer_certificate_digest: h(),
+                    writer_epoch: 1,
+                    native_signer_measurement: h(),
+                },
+                scope: BornManualScope {
+                    agreement_id: "synthetic-agreement".into(),
+                    obligation_id: "synthetic-obligation".into(),
+                    participant_id: "synthetic-participant".into(),
+                    principal_id: "synthetic-host-principal".into(),
+                    privacy_domain: "synthetic-domain".into(),
+                    recipient_scope_digests: vec![h()],
+                    aggregate_budget_zatoshis: 100,
+                    per_operation_limit_zatoshis: 80,
+                    maximum_fee_share_zatoshis: 5,
+                    maximum_transaction_fee_zatoshis: 10,
+                    maximum_permit_lifetime_ms: 1000,
+                    expires_at_ms: 200000,
+                },
+                transport_binding_digest: h(),
+                issued_at_ms: 10,
+            },
+        }
+    }
+
+    #[test]
+    fn single_publication_pairs_to_original_intent_not_full_request() {
+        let request = request();
+        request.validate().unwrap();
+        let intent = HostIntent {
+            version: 1,
+            operation_id: request.terms.operation_id.clone(),
+            host: request.terms.host.clone(),
+            scope: request.terms.scope.clone(),
+        };
+        intent.matches_terms(&request.terms).unwrap();
+        let expected = intent.digest().unwrap();
+        assert_eq!(publication_intent_digest(&request).unwrap(), expected);
+        assert_ne!(request.digest().unwrap(), expected);
+
+        // Signer-derived fields do not redefine the original pairing scope,
+        // but the separate complete queued-request comparison still sees them.
+        let mut changed = request.clone();
+        changed.terms.signer.signer_target_digest = "b".repeat(64);
+        changed.validate().unwrap();
+        assert_eq!(publication_intent_digest(&changed).unwrap(), expected);
+        assert_ne!(changed.digest().unwrap(), request.digest().unwrap());
+
+        // Every original intent component remains committed, with no new scope.
+        for field in 0..3 {
+            let mut changed = request.clone();
+            match field {
+                0 => changed.terms.operation_id.push_str("-other"),
+                1 => changed.terms.host.inventory_digest = "c".repeat(64),
+                _ => changed.terms.scope.participant_id.push_str("-other"),
+            }
+            assert_ne!(publication_intent_digest(&changed).unwrap(), expected);
+        }
+        let mut malformed = request;
+        malformed.terms.version = 2;
+        assert!(publication_intent_digest(&malformed).is_err());
     }
 }
