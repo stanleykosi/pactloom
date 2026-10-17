@@ -159,8 +159,8 @@ class PublicOutputTests(unittest.TestCase):
         signer=ROOT/'crates/wholepact-signer/src/account/birth/enrollment/roster_v2/inventory/synthetic_denial.rs'
         signer_labels=set(re.findall(r'=> "(Inventory\w+)"',signer.read_text()))
         self.assertEqual(len(host_labels),19)
-        self.assertEqual(len(signer_labels),23)
-        self.assertEqual(len(host_labels|signer_labels),42)
+        self.assertEqual(len(signer_labels),27)
+        self.assertEqual(len(host_labels|signer_labels),46)
         self.assertTrue(host_labels|signer_labels <= output.BOUNDARIES)
         for label in host_labels|signer_labels:
             for outcome in ['HostPermission','SignerReviewMismatch','SignerAuthentication']:
@@ -169,6 +169,21 @@ class PublicOutputTests(unittest.TestCase):
                      'ScanAccessAccount:HostPermission private','InventorySourceOwner:SignerLocked:private']:
             self.assertFalse(output.safe_failure(self.failure(item)))
         self.assertFalse(output.safe_failure(self.failure('InventoryObservedAgeExpired:SignerReviewMismatch')+' private'))
+
+    def test_native_lease_origin_diagnostics_expose_only_closed_kinds(self):
+        source=ROOT/'crates/wholepact-signer/src/authority_bridge/manual_roster_inventory_v2.rs'
+        labels=set(re.findall(r'"(Origin\w+)"',source.read_text()))
+        self.assertEqual(len(labels),23)
+        self.assertEqual(labels,{name for name in output.OUTCOMES if name.startswith('Origin')})
+        self.assertIn('InventoryLeaseOrigin',output.BOUNDARIES)
+        for label in labels:
+            self.assertTrue(output.safe_failure(self.failure('InventoryLeaseOrigin:'+label)))
+        for value in ['InventoryLeaseOrigin:OriginUnknown',
+                      'InventoryLeaseOrigin:OriginIoTimedOut private',
+                      'InventoryLeaseOrigin:OriginIoOther:private',
+                      'InventoryLeaseUnknown:OriginPermission']:
+            self.assertFalse(output.safe_failure(self.failure(value)))
+        self.assertFalse(output.safe_failure(self.failure('InventoryLeaseOrigin:OriginPermission')+' private'))
 
     def test_denial_preflight_is_one_exact_inert_case(self):
         expected='host::synthetic_roster_trace_v1::denial_projection_preserves_single_evaluation_and_short_circuit'

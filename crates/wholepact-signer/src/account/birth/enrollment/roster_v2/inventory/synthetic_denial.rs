@@ -4,6 +4,11 @@ use super::{Error, Result};
 
 #[derive(Clone, Copy)]
 pub(super) enum Boundary {
+    InventoryRequestSource,
+    InventoryRequestProvenance,
+    InventoryRequestBinding,
+    InventoryRequestRemaining,
+
     InventorySourceOwner,
     InventorySourceNative,
     InventorySourceDeadline,
@@ -31,6 +36,11 @@ pub(super) enum Boundary {
 impl Boundary {
     fn label(self) -> &'static str {
         match self {
+            Self::InventoryRequestSource => "InventoryRequestSource",
+            Self::InventoryRequestProvenance => "InventoryRequestProvenance",
+            Self::InventoryRequestBinding => "InventoryRequestBinding",
+            Self::InventoryRequestRemaining => "InventoryRequestRemaining",
+
             Self::InventorySourceOwner => "InventorySourceOwner",
             Self::InventorySourceNative => "InventorySourceNative",
             Self::InventorySourceDeadline => "InventorySourceDeadline",

@@ -54,7 +54,15 @@ impl<'client> SignerRosterInventoryLeaseV2<'client> {
     /// Checks the actual installed process, exact evidence challenge, original
     /// native/request deadlines and revocation state. Failure is not renewable.
     pub fn check_current(&self) -> Result<()> {
-        self.native.check_current().map_err(Into::into)
+        let result = self.native.check_current();
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        if let Err(error) = &result {
+            eprintln!(
+                "\n[JOINED_DIAGNOSTIC InventoryLeaseOrigin {}]",
+                native_lease_error_kind(error)
+            );
+        }
+        result.map_err(Into::into)
     }
 
     /// Exact reviewed request from the held native channel, not a caller claim.
@@ -98,6 +106,40 @@ impl<'client> SignerRosterInventoryLeaseV2<'client> {
     }
 }
 
+/// Synthetic-only closed projection before the existing bridge conversion.
+/// In particular, never format an OS error, path, or message payload.
+#[cfg(feature = "synthetic-born-joined-qualification")]
+fn native_lease_error_kind(error: &wholepact_signer_origin::Error) -> &'static str {
+    use wholepact_signer_origin::Error as E;
+    match error {
+        E::PermanentStopUnavailable => "OriginPermanentStopUnavailable",
+        E::RetirementEvidenceUnavailable => "OriginRetirementEvidenceUnavailable",
+        E::SignerOriginUnavailable => "OriginSignerOriginUnavailable",
+        E::PeerLifetimeUnavailable => "OriginPeerLifetimeUnavailable",
+        E::Authentication => "OriginAuthentication",
+        E::Binding => "OriginBinding",
+        E::Conflict => "OriginConflict",
+        E::Permission => "OriginPermission",
+        E::InvalidData => "OriginInvalidData",
+        E::Locked => "OriginLocked",
+        E::Crypto => "OriginCrypto",
+        E::Ipc => "OriginIpc",
+        E::Limit => "OriginLimit",
+        E::Io(error) => match error.kind() {
+            std::io::ErrorKind::TimedOut => "OriginIoTimedOut",
+            std::io::ErrorKind::WouldBlock => "OriginIoWouldBlock",
+            std::io::ErrorKind::UnexpectedEof => "OriginIoUnexpectedEof",
+            std::io::ErrorKind::BrokenPipe => "OriginIoBrokenPipe",
+            std::io::ErrorKind::ConnectionReset => "OriginIoConnectionReset",
+            std::io::ErrorKind::ConnectionAborted => "OriginIoConnectionAborted",
+            std::io::ErrorKind::NotConnected => "OriginIoNotConnected",
+            std::io::ErrorKind::Interrupted => "OriginIoInterrupted",
+            std::io::ErrorKind::PermissionDenied => "OriginIoPermissionDenied",
+            _ => "OriginIoOther",
+        },
+    }
+}
+
 /// Pure maintained-library validation, deliberately private. Returning a parsed
 /// key here cannot construct a native lease or the public wrapper.
 fn decode_inventory_fvk(raw: &[u8; 96], expected_digest: &str) -> Result<FullViewingKey> {
@@ -115,6 +157,22 @@ fn decode_inventory_fvk(raw: &[u8; 96], expected_digest: &str) -> Result<FullVie
 mod tests {
     use super::*;
     use orchard::keys::SpendingKey;
+
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    #[test]
+    fn native_lease_error_projection_never_formats_private_payloads() {
+        use wholepact_signer_origin::Error as E;
+        assert_eq!(native_lease_error_kind(&E::Permission), "OriginPermission");
+        assert_eq!(native_lease_error_kind(&E::Binding), "OriginBinding");
+        for (kind, expected) in [
+            (std::io::ErrorKind::TimedOut, "OriginIoTimedOut"),
+            (std::io::ErrorKind::WouldBlock, "OriginIoWouldBlock"),
+            (std::io::ErrorKind::Other, "OriginIoOther"),
+        ] {
+            let error = E::Io(std::io::Error::new(kind, "private payload must not escape"));
+            assert_eq!(native_lease_error_kind(&error), expected);
+        }
+    }
 
     // Public synthetic never-funded fixture. These tests construct no native
     // owner, lower lease, wallet-access permission or wrapper instance.

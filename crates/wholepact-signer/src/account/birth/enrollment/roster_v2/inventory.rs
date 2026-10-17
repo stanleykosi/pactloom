@@ -206,14 +206,17 @@ impl BornRosterInventorySourceV2 {
         peer: &AuthenticatedPeer,
         owner: &PendingAccountNativeAuthority,
     ) -> Result<()> {
-        self.check(peer, owner)?;
+        inventory_checked!(self.check(peer, owner), InventoryRequestSource)?;
         request.validate().map_err(|_| Error::InvalidData)?;
         let e = &self.enrolled;
         let s = &request.scope.inventory;
         let t = &e.retained.record.account_record.terms;
         let w = &e.witness;
         let continuation = w.continuation().ok_or(Error::Unavailable)?;
-        self.require_provenance(&request.scope.provenance, s)?;
+        inventory_checked!(
+            self.require_provenance(&request.scope.provenance, s),
+            InventoryRequestProvenance
+        )?;
         let scope = &peer.scope;
         if s.enrollment != *t
             || s.enrollment_ref != e.retained.record.account_record.reference()?
@@ -249,11 +252,17 @@ impl BornRosterInventorySourceV2 {
                 )
                 .map_err(|_| Error::InvalidData)?
         {
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            synthetic_denial::emit(
+                synthetic_denial::Boundary::InventoryRequestBinding,
+                synthetic_denial::Kind::ReviewMismatch,
+            );
             return Err(Error::ReviewMismatch);
         }
-        request
-            .remaining_ms(now()?)
-            .map_err(|_| Error::ReviewMismatch)?;
+        inventory_checked!(
+            request.remaining_ms(now()?).map_err(|_| Error::ReviewMismatch),
+            InventoryRequestRemaining
+        )?;
         Ok(())
     }
 }
