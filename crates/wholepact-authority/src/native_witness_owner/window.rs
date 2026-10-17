@@ -97,6 +97,10 @@ use std::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
+// These areas coexist on one CentralPanel Ui after a completed operation.
+// Stable distinct IDs keep receipt scrolling from overwriting form scrolling.
+const COMPLETED_RECEIPT_SCROLL_ID: &str = "witness-completed-operation-receipt";
+const OPERATION_SELECTION_SCROLL_ID: &str = "witness-operation-selection";
 const MAX_CERTIFICATE_BYTES: usize = 16 * 1024;
 const MAX_REVIEW_BYTES: usize = 512 * 1024;
 const MAX_HISTORICAL_DISPLAY_BYTES: usize = 2 * 1024 * 1024;
@@ -1838,7 +1842,7 @@ impl Window {
             if let Some(audit) = &self.last_installation_audit { ui.label(RichText::new(audit.as_str()).monospace()); }
             if let Some((_, receipt)) = &self.last_archive_receipt {
                 ui.label("Exact completed operation receipt");
-                egui::ScrollArea::vertical().max_height(160.0).show(ui, |ui| {
+                egui::ScrollArea::vertical().id_salt(COMPLETED_RECEIPT_SCROLL_ID).max_height(160.0).show(ui, |ui| {
                     ui.label(RichText::new(receipt.as_str()).monospace());
                 });
             }
@@ -1921,7 +1925,7 @@ impl Window {
         self.accept_launch(launched);
     }
     fn selection_ui(&mut self, ui: &mut egui::Ui, focused: bool) {
-        egui::ScrollArea::vertical().show(ui, |ui| {
+        egui::ScrollArea::vertical().id_salt(OPERATION_SELECTION_SCROLL_ID).show(ui, |ui| {
             ui.label("One namespace per OS-user installation. The root is derived from the authenticated OS account, ignoring HOME/XDG overrides. There is no alternate-root or reset input. New setup requires a blank witness ID and displays a backend-generated public identity before approval; importing an old standalone origin is unsupported.");
             field(ui, "Exact witness endpoint (IP:port)", &mut self.input.endpoint, 256);
             field(ui, "Exact TLS server name", &mut self.input.server_name, 253);

@@ -175,6 +175,81 @@ mod tests {
     }
 
     #[test]
+    fn retained_receipt_scroll_is_independent_of_actual_selection_navigation() {
+        let context = context();
+        let mut window = Window::new();
+        let original = serde_json::to_string_pretty(&serde_json::json!({
+            "synthetic_renderer_rows": vec!["inert fixture row"; 2800]
+        }))
+        .unwrap();
+        let receipt = serde_json::to_string_pretty(&serde_json::json!({
+            "synthetic_display_only": vec!["not an authenticated receipt"; 128]
+        }))
+        .unwrap();
+        // A private data-only display/clock fixture, never a completed ledger
+        // row, native decision, namespace owner, or authenticated receipt.
+        // This same clock remains in the Window throughout navigation.
+        window.last_archive_receipt = Some((
+            super::super::ReviewClock::start(None).unwrap(),
+            Zeroizing::new(receipt.clone()),
+        ));
+        window.input.signed_manual_roster_construction_v3_json = Zeroizing::new(original.clone());
+        let initial = render(&context, &mut window);
+        let receipt_position = |output: &egui::FullOutput| {
+            output
+                .shapes
+                .iter()
+                .find_map(|shape| super::super::text_position(&shape.shape, &receipt))
+                .expect("retained receipt text remains painted")
+        };
+        let before = receipt_position(&initial);
+        assert!(visible_position(&initial, PLAN).is_none());
+        require_refusal(&mut window, &context, PLAN).unwrap();
+        let after = render(&context, &mut window);
+        assert!(visible_position(&after, PLAN).is_some());
+        assert_eq!(receipt_position(&after), before);
+        let (original_clock, retained_display) = window.last_archive_receipt.as_ref().unwrap();
+        original_clock.check().unwrap();
+        assert_eq!(retained_display.as_str(), receipt);
+        assert_eq!(window.input.signed_manual_roster_construction_v3_json.as_str(), original);
+        assert!(window.job.is_none() && window.pending.is_none() && window.can_select());
+    }
+
+    #[test]
+    fn same_parent_scroll_areas_use_distinct_stable_production_ids() {
+        fn ids(explicit: bool) -> (egui::Id, egui::Id) {
+            let context = context();
+            let mut ids = None;
+            context.run_ui(fixture_input(vec![], true), |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    let receipt = egui::ScrollArea::vertical().max_height(160.0);
+                    let receipt = if explicit {
+                        receipt.id_salt(super::super::COMPLETED_RECEIPT_SCROLL_ID)
+                    } else {
+                        receipt
+                    };
+                    let receipt = receipt.show(ui, |ui| ui.label("inert prior display"));
+                    let selection = egui::ScrollArea::vertical();
+                    let selection = if explicit {
+                        selection.id_salt(super::super::OPERATION_SELECTION_SCROLL_ID)
+                    } else {
+                        selection
+                    };
+                    let selection = selection.show(ui, |ui| ui.label("inert current form"));
+                    ids = Some((receipt.id, selection.id));
+                });
+            });
+            ids.unwrap()
+        }
+        // The old defaults alias even for distinct same-parent controls.
+        let legacy = ids(false);
+        assert_eq!(legacy.0, legacy.1);
+        let actual = ids(true);
+        assert_ne!(actual.0, actual.1);
+        assert_eq!(actual, ids(true));
+    }
+
+    #[test]
     fn missing_exact_control_stops_after_finite_wheel_events() {
         let context = context();
         let mut window = Window::new();

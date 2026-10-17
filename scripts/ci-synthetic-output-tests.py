@@ -461,12 +461,14 @@ class PublicOutputTests(unittest.TestCase):
             self.assertLessEqual(run.call_count,2)
             self.assertEqual(captured.getvalue(),'CI_SYNTHETIC_SIGNER_VALIDATION failed_test='+name+' raw_output_withheld=true\n')
 
-    def test_authority_renderer_preflight_is_three_exact_private_cases(self):
+    def test_authority_renderer_preflight_is_five_exact_private_cases(self):
         prefix='native_witness_owner::window::ephemeral_fixture_v1::public_control_navigation_v1::tests::'
         names=(
             'wheel_navigation_reaches_actual_disabled_controls_without_mutating_form',
             'missing_exact_control_stops_after_finite_wheel_events',
             'exact_label_requires_visible_clip_and_viewport',
+            'retained_receipt_scroll_is_independent_of_actual_selection_navigation',
+            'same_parent_scroll_areas_use_distinct_stable_production_ids',
         )
         self.assertEqual(output.AUTHORITY_RENDERER_TESTS,tuple(prefix+name for name in names))
         base=ROOT/'crates/wholepact-authority/src/native_witness_owner/window'
@@ -476,7 +478,7 @@ class PublicOutputTests(unittest.TestCase):
         self.assertIn('mod tests {',source)
         for name in names:
             self.assertEqual(len(re.findall(r'#\[test\]\s+fn '+name+r'\(',source)),1)
-        self.assertEqual(len(set(output.AUTHORITY_RENDERER_TESTS)),3)
+        self.assertEqual(len(set(output.AUTHORITY_RENDERER_TESTS)),5)
         self.assertTrue(set(output.AUTHORITY_RENDERER_TESTS).isdisjoint(output.SIGNER_VALIDATION_TESTS+output.SIGNER_BOOKKEEPING_TESTS))
         shell=(ROOT/'scripts/ci-synthetic-linux.sh').read_text()
         build='timeout --signal=TERM --kill-after=30s 1200s rustup run 1.99.0 cargo test --locked --release -p wholepact-authority --all-features --lib --no-run --message-format=json'
@@ -508,7 +510,7 @@ class PublicOutputTests(unittest.TestCase):
              contextlib.redirect_stdout(captured):
             output.run_authority_rendering('/verified/authority')
         self.assertEqual([argv[2] for argv,_ in calls],[name for name in output.AUTHORITY_RENDERER_TESTS for _ in range(2)])
-        self.assertEqual(captured.getvalue(),'CI_SYNTHETIC_AUTHORITY_RENDERER passed=3 native_payment_verified=false attended_gui_verified=false raw_output_discarded=true\n')
+        self.assertEqual(captured.getvalue(),'CI_SYNTHETIC_AUTHORITY_RENDERER passed=5 native_payment_verified=false attended_gui_verified=false raw_output_discarded=true\n')
 
     def test_authority_renderer_missing_failed_or_timed_out_refuses(self):
         name=output.AUTHORITY_RENDERER_TESTS[0]
