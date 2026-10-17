@@ -205,6 +205,14 @@ impl Terminal {
         self.message(&text)
     }
 }
+/// Pure projection for the finite synthetic PTY driver. It must expect exactly
+/// the bytes the maintained terminal renderer writes, never a raw-text fallback.
+/// No runtime binary exposes this helper, and no response is transformed.
+#[cfg(test)]
+pub(crate) fn render_synthetic_expected_prompt(s: &str) -> Zeroizing<String> {
+    sanitize(s)
+}
+
 fn sanitize(s: &str) -> Zeroizing<String> {
     Zeroizing::new(
         s.chars()

@@ -44,6 +44,10 @@ POLICY_ENVELOPE_TESTS = tuple(PREFIX + 'retained_joined_v3::original_policy_expo
     'policy_envelope_rejects_individually_valid_substituted_originals',
     'policy_envelope_refuses_bare_legacy_unknown_and_duplicate_fields',
 ))
+PROMPT_RENDERING_TESTS = tuple(PREFIX + name for name in (
+    'finite_prompt_rendering_preserves_exact_terminal_purpose',
+    'full_finite_prompt_census_uses_only_exact_rendered_expectations',
+))
 STORAGE_BOOTSTRAP_TEST = 'recovery_generation::layered::tests::native_layered_current_eight_nine_parent_provenance_is_exact_and_not_relabelable'
 MARKER = 'WHOLEPACT_SYNTHETIC_PUBLIC_OUTCOME_V1='
 CORE = re.compile(r'\[JOINED_CORE_POLICY inherited_limit=Zero collector=(File|Pipe|Unknown) process_dumpability=Unchanged crash_copy_absence_verified=false\]')
@@ -148,19 +152,19 @@ class BoundedLines:
 
 def run_pure(executable):
     assert resource.getrlimit(resource.RLIMIT_CORE)[0] == 0
-    for name in PURE_TESTS + POLICY_ENVELOPE_TESTS:
+    for name in PURE_TESTS + POLICY_ENVELOPE_TESTS + PROMPT_RENDERING_TESTS:
         flags=['--exact',name,'--test-threads=1']
         listed=subprocess.run([executable,*flags,'--list'],capture_output=True,timeout=30,check=True)
         if not exact_listing(listed.stdout.decode(),name) or listed.stderr:
             raise ValueError('exact pure test not uniquely registered')
-        # These 21 fixed source-reviewed cases use only modeled process state,
-        # inert temporary regular files or historical policy DTOs. They create
+        # These 23 fixed source-reviewed cases use only modeled process state,
+        # inert files, historical policy DTOs or fixed prompt rendering. They create
         # no native/IPC/network/payment owners.
         result=subprocess.run([executable,*flags],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=30)
         if result.returncode!=0 or len(result.stdout)>1024*1024:
             print('CI_SYNTHETIC_PURE failed_test='+name,flush=True)
             raise RuntimeError('exact pure test failed; raw output withheld')
-    print('CI_SYNTHETIC_PURE passed=21 raw_output_discarded=true',flush=True)
+    print('CI_SYNTHETIC_PURE passed=23 raw_output_discarded=true',flush=True)
 
 def run_storage_bootstrap(executable):
     assert resource.getrlimit(resource.RLIMIT_CORE)[0] == 0

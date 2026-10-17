@@ -170,6 +170,21 @@ class PublicOutputTests(unittest.TestCase):
             self.assertNotIn(name,[row[0] for row in output.TESTS.values()])
             self.assertNotEqual(name,output.STORAGE_BOOTSTRAP_TEST)
 
+    def test_prompt_preflight_is_two_exact_no_terminal_rendering_cases(self):
+        parent=ROOT/'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3_qualification.rs'
+        text=parent.read_text()
+        names=['finite_prompt_rendering_preserves_exact_terminal_purpose',
+               'full_finite_prompt_census_uses_only_exact_rendered_expectations']
+        self.assertEqual(tuple(output.PREFIX+name for name in names),output.PROMPT_RENDERING_TESTS)
+        for name in names:
+            self.assertEqual(len(re.findall(r'fn '+name+r'\(\)',text)),1)
+        combined=output.PURE_TESTS+output.POLICY_ENVELOPE_TESTS+output.PROMPT_RENDERING_TESTS
+        self.assertEqual(len(set(combined)),23)
+        for name in output.PROMPT_RENDERING_TESTS:
+            self.assertNotIn(name,output.PURE_TESTS+output.POLICY_ENVELOPE_TESTS)
+            self.assertNotIn(name,[row[0] for row in output.TESTS.values()])
+            self.assertNotEqual(name,output.STORAGE_BOOTSTRAP_TEST)
+
     def test_storage_bootstrap_is_separate_exact_maintained_encrypted_case(self):
         name=output.STORAGE_BOOTSTRAP_TEST
         self.assertEqual(name,'recovery_generation::layered::tests::native_layered_current_eight_nine_parent_provenance_is_exact_and_not_relabelable')

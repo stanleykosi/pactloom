@@ -83,6 +83,99 @@ enum Input<'a> {
     ExactReview { detail: &'a str, approve: bool },
 }
 
+impl Input<'_> {
+    fn rendered_expectation(&self) -> zeroize::Zeroizing<String> {
+        let expected = match self {
+            Self::Text { prompt, .. } | Self::CapturedPath { prompt, .. } => prompt,
+            Self::ExactReview { detail, .. } => detail,
+        };
+        crate::terminal::render_synthetic_expected_prompt(expected)
+    }
+}
+
+#[test]
+fn finite_prompt_rendering_preserves_exact_terminal_purpose() {
+    let source = "Exact purpose 12–1024: \t\r\0\u{1b}\nASCII";
+    let expected = "Exact purpose 12\\u{2013}1024: \\t\\r\\u{0}\\u{1b}\nASCII";
+    for input in [
+        Input::Text {
+            prompt: source,
+            response: "unchanged-response",
+        },
+        Input::CapturedPath {
+            marker: "FIXED_PUBLIC_MARKER=",
+            prompt: source,
+        },
+        Input::ExactReview {
+            detail: source,
+            approve: true,
+        },
+    ] {
+        let rendered = input.rendered_expectation();
+        assert_eq!(rendered.as_str(), expected);
+        assert!(!source.contains(rendered.as_str()));
+        assert!(format!("prefix {expected} suffix").contains(rendered.as_str()));
+        assert!(
+            !expected
+                .replace("Exact purpose", "Other purpose")
+                .contains(rendered.as_str())
+        );
+    }
+    let ascii = "ASCII purpose: ~!09, keep spaces and newline\n";
+    assert_eq!(
+        Input::Text {
+            prompt: ascii,
+            response: "unchanged-response"
+        }
+        .rendered_expectation()
+        .as_str(),
+        ascii
+    );
+}
+
+#[cfg(feature = "synthetic-born-joined-qualification")]
+#[test]
+fn full_finite_prompt_census_uses_only_exact_rendered_expectations() {
+    let full = full_payment_inputs_v1::inputs();
+    assert_eq!(full.len(), 204);
+    let mut escaped = 0;
+    for input in &full {
+        let source = match input {
+            Input::Text { prompt, response } => {
+                assert!(!response.contains(['\r', '\n']));
+                *prompt
+            }
+            Input::CapturedPath { marker, prompt } => {
+                // Path markers are exact ASCII, including when emitted through
+                // Terminal::message. Keep their separate byte contract unchanged.
+                assert!(!marker.is_empty() && marker.bytes().all(|b| b.is_ascii_graphic()));
+                *prompt
+            }
+            Input::ExactReview { detail, .. } => *detail,
+        };
+        let rendered = input.rendered_expectation();
+        assert!(!rendered.is_empty());
+        assert!(rendered.is_ascii());
+        assert_eq!(
+            rendered.as_str(),
+            crate::terminal::render_synthetic_expected_prompt(source).as_str()
+        );
+        if source.is_ascii() {
+            assert_eq!(rendered.as_str(), source);
+        } else {
+            escaped += 1;
+            assert_ne!(rendered.as_str(), source);
+            assert!(rendered.contains("\\u{2013}"));
+        }
+    }
+    // Two preliminary-wallet prompts plus the original checkpoint disclosure.
+    assert_eq!(escaped, 3);
+    assert_eq!(
+        full[65].rendered_expectation().as_str(),
+        "New preliminary wallet passphrase (12\\u{2013}1024 bytes): "
+    );
+}
+
 const CHILD_TEMPORARY_PREFIX: &str = "wp-pty-";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -308,9 +401,10 @@ fn foreground_child(stage: &str, inputs: &[Input<'_>]) -> std::io::Result<()> {
             };
             let tail =
                 std::str::from_utf8(&transcript[consumed..]).map_err(std::io::Error::other)?;
-            let (detail, approve) = match input {
-                Input::Text { prompt, response } => {
-                    if !tail.contains(prompt) {
+            let expected = input.rendered_expectation();
+            let approve = match input {
+                Input::Text { response, .. } => {
+                    if !tail.contains(expected.as_str()) {
                         continue;
                     }
                     if response.contains(['\n', '\r']) {
@@ -323,8 +417,8 @@ fn foreground_child(stage: &str, inputs: &[Input<'_>]) -> std::io::Result<()> {
                     next += 1;
                     continue;
                 }
-                Input::CapturedPath { marker, prompt } => {
-                    if !tail.contains(prompt) {
+                Input::CapturedPath { marker, .. } => {
+                    if !tail.contains(expected.as_str()) {
                         continue;
                     }
                     let all = std::str::from_utf8(&transcript).map_err(std::io::Error::other)?;
@@ -350,12 +444,12 @@ fn foreground_child(stage: &str, inputs: &[Input<'_>]) -> std::io::Result<()> {
                     next += 1;
                     continue;
                 }
-                Input::ExactReview { detail, approve } => (detail, approve),
+                Input::ExactReview { approve, .. } => approve,
             };
-            let Some(detail_start) = tail.find(detail) else {
+            let Some(detail_start) = tail.find(expected.as_str()) else {
                 continue;
             };
-            let remaining = &tail[detail_start + detail.len()..];
+            let remaining = &tail[detail_start + expected.len()..];
             let prefix = "Type APPROVE ";
             let suffix = " to approve this exact operation, or anything else to reject: ";
             let Some(start) = remaining.find(prefix) else {
