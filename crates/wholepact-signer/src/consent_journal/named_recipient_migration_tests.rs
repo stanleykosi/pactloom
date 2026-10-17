@@ -167,7 +167,8 @@ fn named_schema16_keeps_legacy_versioned_backup_templates_exact() {
         (14, V14_SCHEMA),
         (15, V15_SCHEMA),
         (16, V16_SCHEMA),
-        (17, SCHEMA),
+        (17, V17_SCHEMA),
+        (18, SCHEMA),
     ] {
         let template = recovery_template(version).unwrap();
         assert_eq!(template.schema_version, version);
@@ -190,13 +191,13 @@ fn schema17_exact_extension_preserves_all16_rows_and_rollback() {
     assert_eq!(
         c.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        17
+        SCHEMA_VERSION
     );
     assert!(storage::read_account(&c).unwrap().recovery_required);
 }
 #[test]
 fn schema17_dispatch_intent_is_immutable_and_replace_denied() {
-    let c = source(SCHEMA, 17);
+    let c = source(SCHEMA, SCHEMA_VERSION);
     // Inert schema-only payloads, with the actual full foreign-key chain enabled.
     c.pragma_update(None, "foreign_keys", true).unwrap();
     assert!(c.execute("INSERT INTO signer_named_recipient_dispatch_requests VALUES('orphan','absent','absent','orphan-digest','unparsed')", []).is_err());

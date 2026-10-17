@@ -31,6 +31,7 @@ impl SignerConsentJournal {
         // Old encrypted artifacts keep their own exact schema and bytes. This
         // is read-only; backup inspection must never migrate the source tree.
         for (version, schema) in [
+            (17, recovery_migration::V17_SCHEMA),
             (16, recovery_migration::V16_SCHEMA),
             (15, recovery_migration::V15_SCHEMA),
             (14, recovery_migration::V14_SCHEMA),

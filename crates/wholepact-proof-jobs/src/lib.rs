@@ -142,12 +142,18 @@ pub struct JobSummary {
 /// Sensitive local output, intentionally neither Debug nor Serialize. Returning
 /// these bytes to a remote caller or transport needs a separate disclosure path.
 pub struct VerifiedCheckpoint {
+    original_bytes: Zeroizing<Vec<u8>>,
     bytes: Zeroizing<Vec<u8>>,
     summary: JobSummary,
     scope: CheckpointScope,
     policy: ReviewPolicy,
 }
 impl VerifiedCheckpoint {
+    /// The exact immutable unsigned predecessor, under the same current private
+    /// artifact read consent as the proved result. This is data, never authority.
+    pub fn private_unsigned_pczt_bytes(&self) -> &[u8] {
+        &self.original_bytes
+    }
     pub fn summary(&self) -> &JobSummary {
         &self.summary
     }
@@ -667,6 +673,7 @@ impl ProofJobStore {
         verify_saved(&p)?;
         gate(consent, &p.record.scope, LocalAction::ReadPrivateArtifact)?;
         Ok(VerifiedCheckpoint {
+            original_bytes: p.input,
             bytes: p.result.take().ok_or(JobError::Storage)?,
             policy: policy::decode(&p.policy_bytes)?,
             scope: p.record.scope,

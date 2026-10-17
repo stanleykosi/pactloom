@@ -77,6 +77,12 @@ static V16_TEMPLATE: JournalTemplate = JournalTemplate {
     schema_version: 16,
     create_sql: recovery_migration::V16_SCHEMA,
 };
+static V17_TEMPLATE: JournalTemplate = JournalTemplate {
+    kind: JournalKind::SignerConsentAuthority,
+    application_id: APPLICATION_ID,
+    schema_version: 17,
+    create_sql: recovery_migration::V17_SCHEMA,
+};
 pub(crate) fn recovery_template(version: i64) -> Result<&'static JournalTemplate> {
     match version {
         8 => Ok(&V8_TEMPLATE),
@@ -88,7 +94,8 @@ pub(crate) fn recovery_template(version: i64) -> Result<&'static JournalTemplate
         14 => Ok(&V14_TEMPLATE),
         15 => Ok(&V15_TEMPLATE),
         16 => Ok(&V16_TEMPLATE),
-        17 => Ok(SignerConsentBundleAdapter::template()),
+        17 => Ok(&V17_TEMPLATE),
+        18 => Ok(SignerConsentBundleAdapter::template()),
         _ => Err(JournalError::UnsupportedSchema),
     }
 }
@@ -146,7 +153,7 @@ impl RecoveryActivationInventory {
                 .map_err(|_| JournalError::InvalidBinding)?
                 != target_profile.parent().unwrap()
             || source.provenance().application_id != APPLICATION_ID
-            || !matches!(source.provenance().schema_version, 8..=17)
+            || !matches!(source.provenance().schema_version, 8..=18)
         {
             return Err(JournalError::InvalidBinding);
         }
@@ -750,6 +757,9 @@ fn populate_successor(
     // Before even creating schema: unsupported history cannot leave partial
     // active-generation rows through an internal mistaken caller.
     history.require_enabled()?;
+    // Retained disclosure bytes are historical data, never portable native
+    // decisions. Recheck before any successor schema or authority mutation.
+    offline_history::require_legacy_recovery_source(source)?;
     c.execute_batch(SCHEMA)?;
     c.execute_batch("PRAGMA defer_foreign_keys=ON;")?;
     import_all(c, source)?;

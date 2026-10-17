@@ -80,6 +80,10 @@ pub struct CandidateProofJob {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CheckpointReceipt {
+    /// Exact constructor-produced action mapping; absent on historical receipts.
+    /// A missing mapping cannot be invented to upgrade an old artifact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_mappings_v1: Option<Value>,
     pub job_id: String,
     pub scope_digest: String,
     pub principal_id: String,

@@ -235,6 +235,8 @@ enum Operation {
     NamedVerifierPolicy(Box<super::named_verifier_policy::PreparedNamedVerifierPolicy>),
     #[cfg(feature = "authority-signing")]
     Preconstruction(Box<super::preconstruction::PreparedPreconstruction>),
+    #[cfg(feature = "durable-proposal")]
+    DurableConstructionV1(Box<super::durable_construction_v1::PreparedDurableConstructionV1>),
     #[cfg(feature = "authority-signing")]
     ProvedDisclosure(Box<super::proved_disclosure::PreparedProvedDisclosure>),
     #[cfg(feature = "authority-signing")]
@@ -1790,6 +1792,57 @@ impl NativeRuntime {
                         }
                     }
                 }
+                #[cfg(feature = "durable-proposal")]
+                LocalEvent::DurableConstructionV1 { peer, stream, request } => {
+                    if self.pending.is_some()
+                        || open.history_workers.len() >= 8
+                        || open.check_pairing().is_err()
+                        || open.pairing.as_ref().is_none_or(|p| p.peer.grant_id != peer.grant_id)
+                    {
+                        continue;
+                    }
+                    let Some(session) = open.session.as_ref() else {
+                        continue;
+                    };
+                    if let Ok(prepared) = super::durable_construction_v1::PreparedDurableConstructionV1::prepare(
+                        *request, peer, stream, &open.journal, session,
+                        &open.authority.binding(), &open.vault,
+                    ) {
+                        if let Ok(display) = prepared.display() {
+                            if let Ok(review) = ExactNativeReview::stage(
+                                &open.authority, prepared.digest(), display, epoch,
+                            ) {
+                                self.pending = Some(PendingDecision {
+                                    review,
+                                    operation: Operation::DurableConstructionV1(Box::new(prepared)),
+                                });
+                                self.message = "Review exact durable construction disclosure and retention. This shares viewing material with the named constructor; it grants no spending permission.";
+                            }
+                        }
+                    }
+                }
+                #[cfg(feature = "durable-proposal")]
+                LocalEvent::DurableConstructionHistoryV1 { peer, stream, request } => {
+                    if self.pending.is_some()
+                        || open.history_workers.len() >= 8
+                        || open.check_pairing().is_err()
+                        || open.pairing.as_ref().is_none_or(|p| p.peer.grant_id != peer.grant_id)
+                    {
+                        continue;
+                    }
+                    let Some(session) = open.session.clone() else {
+                        continue;
+                    };
+                    let journal = open.journal.clone();
+                    let worker = std::thread::spawn(move || {
+                        let _ = super::durable_construction_v1::serve_durable_construction_history_v1(
+                            stream, peer, *request, &journal, &session,
+                        );
+                    });
+                    open.disclosure_worker_ids.insert(worker.thread().id());
+                    open.history_workers.push(worker);
+                    self.message = "Checking only the exact retained construction disclosure for its original authenticated recipient. No permission or validity window is being renewed.";
+                }
                 #[cfg(feature = "authority-signing")]
                 LocalEvent::ProvedDisclosure {
                     peer,
@@ -2383,6 +2436,11 @@ impl NativeRuntime {
                         #[cfg(feature = "authority-signing")]
                         crate::ipc::AppRequest::RequestPreconstruction { .. } => {
                             "Viewing export requires its own exact native disclosure decision."
+                        }
+                        #[cfg(feature = "durable-proposal")]
+                        crate::ipc::AppRequest::RequestDurableConstructionV1 { .. }
+                        | crate::ipc::AppRequest::RequestDurableConstructionHistoryV1 { .. } => {
+                            "Durable construction uses its separate exact native disclosure and original-recipient history channel; a request grants no spending authority."
                         }
                         crate::ipc::AppRequest::Status {} => {
                             "The native-approved local process proved current channel-key possession. You can now prepare enrollment."
@@ -3883,6 +3941,22 @@ impl NativeRuntime {
                 open.history_workers.push(worker);
                 self.message = "Exact viewing disclosure approved for the named local constructor. Spending keys remain inside the signer; disclosed viewing capability cannot be recalled.";
             }
+            #[cfg(feature = "durable-proposal")]
+            Operation::DurableConstructionV1(prepared) => {
+                open.check_pairing()?;
+                if open.history_workers.len() >= 8 {
+                    return Err(Error::Unavailable);
+                }
+                let approved = prepared.approve(decision, &open.authority, &open.vault)?;
+                let session = open.session.clone().ok_or(Error::Locked)?;
+                let journal = open.journal.clone();
+                let worker = std::thread::spawn(move || {
+                    let _ = approved.serve(&journal, &session);
+                });
+                open.disclosure_worker_ids.insert(worker.thread().id());
+                open.history_workers.push(worker);
+                self.message = "Exact durable construction disclosure approved for its named recipient and retention scope. No signature, reservation refund or payment was authorized.";
+            }
             #[cfg(feature = "authority-signing")]
             Operation::ProvedDisclosure(prepared) => {
                 open.check_pairing()?;
@@ -4086,6 +4160,8 @@ impl NativeRuntime {
                         self.message = "Exact native manifest acceptance committed in the encrypted signer journal.";
                     }
                     Operation::Pair(_) | Operation::Provider(_) => unreachable!(),
+                    #[cfg(feature = "durable-proposal")]
+                    Operation::DurableConstructionV1(_) => unreachable!(),
                     #[cfg(all(
                         feature = "authority-signing",
                         feature = "offline-review-foundation"

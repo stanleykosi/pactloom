@@ -4,6 +4,9 @@
 #[path = "born_post_return_inputs_v1.rs"]
 pub mod born_post_return_inputs_v1;
 #[cfg(target_os = "linux")]
+#[path = "durable_construction_v1.rs"]
+pub mod durable_construction_v1;
+#[cfg(target_os = "linux")]
 #[path = "exact_input_observation.rs"]
 pub mod exact_input_observation;
 #[path = "wallet_key_use.rs"]

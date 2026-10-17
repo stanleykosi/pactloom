@@ -264,6 +264,33 @@ impl Store {
         Ok(original.origin_commitment())
     }
 
+    /// Verify a native-approved private destination against this actual open,
+    /// authenticated encrypted SQLite handle. A supplied path alone is never
+    /// storage provenance. This is correlation only, not spending authority.
+    pub fn verify_original_encrypted_destination(&self, expected: &Path) -> Result<[u8; 32]> {
+        if self.protection != StorageProtection::Encrypted || self.recovered_generation {
+            return Err(StoreError::RecoveryRequired);
+        }
+        let original = self
+            .original_database
+            .as_ref()
+            .ok_or(StoreError::RecoveryRequired)?;
+        let connection = self.connection.try_lock().map_err(|error| match error {
+            std::sync::TryLockError::WouldBlock => StoreError::ResourceExhausted,
+            std::sync::TryLockError::Poisoned(_) => StoreError::Poisoned,
+        })?;
+        original.check_current(&connection)?;
+        let actual = connection.path().ok_or(StoreError::RecoveryRequired)?;
+        if !expected.is_absolute()
+            || std::fs::canonicalize(expected)? != expected
+            || std::fs::canonicalize(actual)? != expected
+        {
+            return Err(StoreError::RecoveryRequired);
+        }
+        original.check_current(&connection)?;
+        Ok(original.origin_commitment())
+    }
+
     fn from_connection(connection: Connection, protection: StorageProtection) -> Result<Self> {
         Self::from_connection_with_origin(connection, protection, None)
     }
@@ -443,6 +470,7 @@ impl Store {
         }
         let encoded = encode(&payload)?;
         let mut c = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        self.check_durable_private_destination(&c, &payload)?;
         let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
         self.require_current_replay(&tx, context)?;
         crate::manual_enrollment::require_generic_request_not_manual(&tx, context)?;
@@ -520,8 +548,61 @@ impl Store {
         let serialized = serde_json::to_string(&result)?;
         tx.execute("INSERT INTO operations(operation_id,principal_id,kind,resource_id,status,result,created_at_ms,updated_at_ms) VALUES(?1,?2,?3,?4,'succeeded',?5,?6,?6)", params![operation_id,context.principal_id,event_kind,id,serialized,now])?;
         tx.execute("INSERT INTO idempotency(principal_id,idempotency_key,request_digest,result) VALUES(?1,?2,?3,?4)", params![context.principal_id,context.idempotency_key,context.request_digest,serialized])?;
+        self.check_durable_private_destination(&tx, &result.record.payload)?;
         tx.commit()?;
+        self.check_durable_private_destination(&c, &result.record.payload)?;
         Ok(result)
+    }
+
+    // A private-data record cannot be committed to a substituted destination
+    // between the embedding's admission check and the actual metadata commit.
+    // This verifies storage identity only, never native consent or owner claims.
+    fn check_durable_private_destination(
+        &self,
+        connection: &Connection,
+        payload: &Value,
+    ) -> Result<()> {
+        let Some(value) = payload.get("durable_construction_v1") else {
+            return Ok(());
+        };
+        let rosters = value.as_object().ok_or(StoreError::RecoveryRequired)?;
+        if rosters.is_empty() {
+            return Ok(());
+        }
+        if self.protection != StorageProtection::Encrypted || self.recovered_generation {
+            return Err(StoreError::RecoveryRequired);
+        }
+        let original = self
+            .original_database
+            .as_ref()
+            .ok_or(StoreError::RecoveryRequired)?;
+        original.check_current(connection)?;
+        let actual = std::fs::canonicalize(connection.path().ok_or(StoreError::RecoveryRequired)?)?;
+        let origin = hex::encode(original.origin_commitment());
+        for roster in rosters.values() {
+            let owners = roster
+                .get("owners")
+                .and_then(Value::as_object)
+                .ok_or(StoreError::RecoveryRequired)?;
+            if owners.is_empty() || owners.len() > 2 {
+                return Err(StoreError::RecoveryRequired);
+            }
+            for intake in owners.values() {
+                let expected = intake["outbox"]["request"]["scope"]["protected_destination"]
+                    .as_str()
+                    .ok_or(StoreError::RecoveryRequired)?;
+                let expected = Path::new(expected);
+                if !expected.is_absolute()
+                    || std::fs::canonicalize(expected)? != expected
+                    || actual != expected
+                    || intake["metadata_origin"].as_str() != Some(origin.as_str())
+                {
+                    return Err(StoreError::RecoveryRequired);
+                }
+            }
+        }
+        original.check_current(connection)?;
+        Ok(())
     }
     pub fn events_after(&self, after_sequence: u64, limit: u32) -> Result<Vec<StoredEvent>> {
         let cursor = i64::try_from(after_sequence)

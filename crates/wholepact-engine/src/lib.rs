@@ -32,6 +32,10 @@ pub mod born_offline_checkpoint_original_v1;
 ))]
 pub mod born_offline_saved_proof_v1;
 pub mod candidates;
+#[cfg(all(feature = "durable-proposal", target_os = "linux"))]
+pub mod durable_construction_v1;
+#[cfg(feature = "durable-proposal")]
+pub mod durable_proposals_v1;
 pub mod financial_preflight;
 #[cfg(all(feature = "manual-admission", target_os = "linux"))]
 pub mod manual_enrollment;
@@ -211,6 +215,13 @@ pub struct AgreementView {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Envelope {
+    /// Private purpose-distinct disclosure receipts. Never projected in views.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    durable_construction_v1: std::collections::BTreeMap<String, Value>,
+    /// Versioned data-only durable proposal records. Kept opaque in builds that
+    /// do not compile this experimental profile, so old history stays readable.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    durable_proposals_v1: std::collections::BTreeMap<String, Value>,
     /// Only new drafts created with durable pre-disclosure closure semantics qualify.
     #[serde(default, skip_serializing_if = "terms_revisions::is_false")]
     terms_editing_origin: bool,
@@ -466,6 +477,8 @@ impl Engine {
         }
         let now = now();
         let envelope = Envelope {
+            durable_construction_v1: Default::default(),
+            durable_proposals_v1: Default::default(),
             terms_editing_origin: true,
             native_requests: Default::default(),
             native_account_inspection_requests: Default::default(),
@@ -825,7 +838,7 @@ impl Engine {
         let journal = self.journal_recovery_metadata()?;
         let quarantined = journal.restored_journal_quarantined;
         Ok(
-            json!({"schema_version":1,"status":if quarantined {"restored_journal_quarantined"} else {"metadata_only"},"agreements_loaded":count,"observation_stale":true,"background_observation":false,"new_authorization_allowed":false,"authority_status":if quarantined {"recovery_required"} else {"not_connected"},"wallet_recovery":"unavailable","agreement_backup":if self.store.protection()==wholepact_store::StorageProtection::Encrypted {"trusted_local_full_journal_embedding_only"} else {"unavailable_requires_encrypted_store"},"journal_recovery":journal,"message":if quarantined {"This restored coordination journal is quarantined. Reconcile writer authority and outstanding exposure, and recover the separate wallet and private artifact journals before any spending can be considered."} else {"Local agreement records are available. A full coordination-journal backup requires separate trusted local administration and does not back up wallet secrets or private artifact journals. No signer authority or complete outstanding history is established."}}),
+            json!({"schema_version":1,"status":if quarantined {"restored_journal_quarantined"} else {"metadata_only"},"agreements_loaded":count,"observation_stale":true,"background_observation":false,"new_authorization_allowed":false,"authority_status":if quarantined {"recovery_required"} else {"not_connected"},"wallet_recovery":"unavailable","agreement_backup":if self.store.protection()==wholepact_store::StorageProtection::Encrypted {"trusted_local_full_journal_embedding_only"} else {"unavailable_requires_encrypted_store"},"journal_recovery":journal,"message":if quarantined {"This restored coordination journal is quarantined. Reconcile writer authority and outstanding exposure, and recover the separate wallet and private artifact journals before any spending can be considered."} else {"Local agreement records are available. A full coordination-journal backup requires separate trusted local administration. The legacy metadata-only backup refuses journals containing durable private construction disclosures; those viewing keys, selected notes and witnesses require a separately qualified private-material backup path. Other private artifact journals and signer vaults are separate. No signer authority or complete outstanding history is established."}}),
         )
     }
 }
@@ -880,6 +893,18 @@ fn decode(record: &StoredRecord) -> Result<Envelope> {
             "Stored agreement schema is incompatible or damaged; preserve the journal",
         )
     })?;
+    if envelope.durable_proposals_v1.len() > MAX_PROPOSALS
+        || envelope.durable_construction_v1.len() > 4
+    {
+        return Err(ApiError::new(
+            "RECOVERY_REQUIRED",
+            "Durable proposal inventory exceeds its bound",
+        ));
+    }
+    #[cfg(feature = "durable-proposal")]
+    durable_proposals_v1::validate_stored(&envelope)?;
+    #[cfg(all(feature = "durable-proposal", target_os = "linux"))]
+    durable_construction_v1::validate_stored(&envelope)?;
     terms_revisions::validate_history(&envelope.view)?;
     native_requests::validate_stored(&envelope)?;
     native_account_inspection_requests::validate_stored(&envelope)?;

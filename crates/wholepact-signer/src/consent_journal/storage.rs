@@ -77,7 +77,7 @@ impl SignerConsentJournal {
         let mut connection = encrypted.into_connection();
         let initial_version: i64 =
             connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if matches!(initial_version, 8..=16) && read_account(&connection)?.account_id != account_id
+        if matches!(initial_version, 8..=17) && read_account(&connection)?.account_id != account_id
         {
             return Err(JournalError::InvalidBinding);
         }
@@ -107,6 +107,9 @@ impl SignerConsentJournal {
         }
         if initial_version == 16 {
             recovery_migration::migrate_v16(&mut connection, account_id)?;
+        }
+        if initial_version == 17 {
+            recovery_migration::migrate_v17(&mut connection, account_id)?;
         }
         let application: i64 =
             connection.pragma_query_value(None, "application_id", |r| r.get(0))?;
@@ -156,7 +159,7 @@ impl SignerConsentJournal {
         let mut connection = encrypted.into_connection();
         let initial_version: i64 =
             connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if matches!(initial_version, 8..=16) && read_account(&connection)?.account_id != account_id
+        if matches!(initial_version, 8..=17) && read_account(&connection)?.account_id != account_id
         {
             return Err(JournalError::InvalidBinding);
         }
@@ -186,6 +189,9 @@ impl SignerConsentJournal {
         }
         if initial_version == 16 {
             recovery_migration::migrate_v16(&mut connection, account_id)?;
+        }
+        if initial_version == 17 {
+            recovery_migration::migrate_v17(&mut connection, account_id)?;
         }
         let application: i64 =
             connection.pragma_query_value(None, "application_id", |r| r.get(0))?;
@@ -730,6 +736,16 @@ fn configure(c: &Connection) -> Result<()> {
 // There are no BLOB or REAL cells in this schema. This dominates the bundle's
 // exact Row/Cell JSON encoding without duplicating its private serialization.
 const CAPACITY_TABLES: &[(&str, &[&str])] = &[
+    (
+        "signer_durable_construction_outbox",
+        &[
+            "operation_id",
+            "request_digest",
+            "enrollment_ref",
+            "manifest_ref",
+            "payload",
+        ],
+    ),
     (
         "signer_named_intent_outbox",
         &[
@@ -1390,6 +1406,21 @@ fn verify_schema_before_common_audit(c: &Connection) -> Result<()> {
     offline_receipts::validate_all(c, &read_account(c)?.account_id)?;
     account_use_storage::inspect(c, &read_account(c)?.account_id)?;
     named_recipient_inventory::validate_archive_rows(c, &read_account(c)?.account_id)?;
+    #[cfg(all(feature = "durable-proposal", feature = "native-ui", target_os = "linux"))]
+    durable_construction_v1::validate_rows(c)?;
+    #[cfg(not(all(feature = "durable-proposal", feature = "native-ui", target_os = "linux")))]
+    {
+        // A build without the typed reader must not silently omit retained
+        // disclosure evidence or admit it as an original native capability.
+        let present: bool = c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM signer_durable_construction_outbox)",
+            [],
+            |r| r.get(0),
+        )?;
+        if present {
+            return Err(JournalError::ConstructionHistoryUnsupported);
+        }
+    }
     Ok(())
 }
 

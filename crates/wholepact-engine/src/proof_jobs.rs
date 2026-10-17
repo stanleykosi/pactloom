@@ -5,8 +5,8 @@
 //! saved randomness.
 use super::*;
 use crate::candidates::{
-    check_current_terms, check_revision, private_request_digest, CandidateProofJob,
-    LocalConstruction,
+    CandidateProofJob, LocalConstruction, check_current_terms, check_revision,
+    private_request_digest,
 };
 use wholepact_proof_jobs::{
     CheckpointScope, JobError, JobSummary, LocalAction, LocalProofConsent, ProofJobStore,
@@ -57,7 +57,10 @@ pub struct LocalProofJob<'a> {
 impl Engine {
     fn require_protected_metadata(&self) -> Result<()> {
         if self.store.protection() != wholepact_store::StorageProtection::Encrypted {
-            return Err(ApiError::new("STORAGE_PROTECTION_REQUIRED", "The local proof bridge requires verified encrypted coordination and artifact journals"));
+            return Err(ApiError::new(
+                "STORAGE_PROTECTION_REQUIRED",
+                "The local proof bridge requires verified encrypted coordination and artifact journals",
+            ));
         }
         Ok(())
     }
@@ -186,7 +189,10 @@ impl Engine {
                 .map_err(|error| checkpoint_exists(error, &saved));
         }
         if envelope.checkpoint_receipts.contains_key(&receipt_key) {
-            return Err(ApiError::new("RECOVERY_REQUIRED", "An exact constructor receipt exists without its encrypted private artifact. Restore the original artifact journal; do not reconstruct randomized bytes under this request"));
+            return Err(ApiError::new(
+                "RECOVERY_REQUIRED",
+                "An exact constructor receipt exists without its encrypted private artifact. Restore the original artifact journal; do not reconstruct randomized bytes under this request",
+            ));
         }
         check_revision(&envelope, revision)?;
         check_current_terms(&envelope.view, &candidate.proposal.manifest)?;
@@ -208,7 +214,10 @@ impl Engine {
             .iter()
             .any(|d| d.purpose != first.purpose || d.retention_policy != first.retention_policy)
         {
-            return Err(ApiError::new("DISCLOSURE_DENIED", "All selected accounts must declare the exact same local purpose and retention policy"));
+            return Err(ApiError::new(
+                "DISCLOSURE_DENIED",
+                "All selected accounts must declare the exact same local purpose and retention policy",
+            ));
         }
         let built = wholepact_protocol::construction::construct_proposal(
             &proposal,
@@ -265,6 +274,10 @@ impl Engine {
         // private commit. A caller-supplied manifest digest is not provenance.
         let prepared_revision = revision.checked_add(1).ok_or_else(internal)?;
         let receipt = candidates::CheckpointReceipt {
+            action_mappings_v1: Some(json!({
+                "inputs": built.input_actions.iter().map(|m| json!({"input_id": m.input_id, "account_id": m.account_id, "action_index": m.action_index})).collect::<Vec<_>>(),
+                "outputs": built.output_actions.iter().map(|m| json!({"output_id": m.output_id, "action_index": m.action_index})).collect::<Vec<_>>(),
+            })),
             job_id: wholepact_proof_jobs::job_id_for_key(&access.principal_id, key)
                 .map_err(job_error)?,
             scope_digest: hex::encode(Sha256::digest(
@@ -458,7 +471,10 @@ impl Engine {
                 .iter()
                 .any(|job| job.job_id == local.job_id)
             {
-                return Err(ApiError::new("INVALID_TRANSITION", "Reconcile the existing encrypted checkpoint into this candidate before starting proof work"));
+                return Err(ApiError::new(
+                    "INVALID_TRANSITION",
+                    "Reconcile the existing encrypted checkpoint into this candidate before starting proof work",
+                ));
             }
             check_current_terms(&envelope.view, &candidate.proposal.manifest)?;
             local
@@ -587,15 +603,42 @@ fn checkpoint_exists(mut error: ApiError, summary: &JobSummary) -> ApiError {
 }
 fn job_error(error: JobError) -> ApiError {
     let (code, message) = match error {
-        JobError::ConsentDenied => ("DISCLOSURE_DENIED", "Authenticated local permission for this exact checkpoint action is missing or revoked"),
-        JobError::NotFound => ("NOT_FOUND", "The encrypted proof job was not found in this principal's scope"),
-        JobError::IdempotencyConflict => ("IDEMPOTENCY_CONFLICT", "The original encrypted checkpoint key is bound to a different exact request"),
-        JobError::RecoveryRequired => ("RECOVERY_REQUIRED", "The original proof worker has an uncertain state; explicit verified recovery is required before another attempt"),
-        JobError::StateConflict => ("REVISION_CONFLICT", "The proof job state or attempt changed; inspect its current encrypted journal status"),
-        JobError::ResourceExhausted => ("RESOURCE_EXHAUSTED", "The bounded local proof queue or artifact limit was reached"),
-        JobError::InvalidRequest => ("INVALID_REQUEST", "The local encrypted checkpoint request is invalid or unsupported"),
-        JobError::VerificationFailed => ("CANDIDATE_VERIFICATION_FAILED", "The saved candidate or proof failed exact local verification"),
-        JobError::Storage | JobError::UnsupportedSchema => ("RECOVERY_REQUIRED", "The original encrypted proof journal cannot be safely read; preserve it and do not reconstruct a replacement artifact"),
+        JobError::ConsentDenied => (
+            "DISCLOSURE_DENIED",
+            "Authenticated local permission for this exact checkpoint action is missing or revoked",
+        ),
+        JobError::NotFound => (
+            "NOT_FOUND",
+            "The encrypted proof job was not found in this principal's scope",
+        ),
+        JobError::IdempotencyConflict => (
+            "IDEMPOTENCY_CONFLICT",
+            "The original encrypted checkpoint key is bound to a different exact request",
+        ),
+        JobError::RecoveryRequired => (
+            "RECOVERY_REQUIRED",
+            "The original proof worker has an uncertain state; explicit verified recovery is required before another attempt",
+        ),
+        JobError::StateConflict => (
+            "REVISION_CONFLICT",
+            "The proof job state or attempt changed; inspect its current encrypted journal status",
+        ),
+        JobError::ResourceExhausted => (
+            "RESOURCE_EXHAUSTED",
+            "The bounded local proof queue or artifact limit was reached",
+        ),
+        JobError::InvalidRequest => (
+            "INVALID_REQUEST",
+            "The local encrypted checkpoint request is invalid or unsupported",
+        ),
+        JobError::VerificationFailed => (
+            "CANDIDATE_VERIFICATION_FAILED",
+            "The saved candidate or proof failed exact local verification",
+        ),
+        JobError::Storage | JobError::UnsupportedSchema => (
+            "RECOVERY_REQUIRED",
+            "The original encrypted proof journal cannot be safely read; preserve it and do not reconstruct a replacement artifact",
+        ),
     };
     ApiError::new(code, message)
 }

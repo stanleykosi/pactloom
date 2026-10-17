@@ -3,9 +3,12 @@
 //! No key creation, transport, arbitrary SQL import, overwrite or authority reset.
 use crate::{Result, SCHEMA_VERSION, StorageProtection, Store, StoreError, now_ms};
 use rusqlite::{Connection, TransactionBehavior, params, params_from_iter, types::ValueRef};
-use serde::Serialize;
+use serde::{
+    Deserializer, Serialize,
+    de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor},
+};
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{collections::BTreeMap, fmt, fs, path::Path};
 pub use wholepact_storage_security::DatabaseKey;
 use wholepact_storage_security::{
     EncryptedReadSnapshot, create_encrypted, open_encrypted_read_snapshot,
@@ -18,6 +21,8 @@ const MAX_ROWS: u64 = 100_000;
 const MAX_DATA_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_FILE_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_CELL_BYTES: usize = 4 * 1024 * 1024;
+const PRIVATE_CONSTRUCTION_SCOPE_ERROR: &str =
+    "private construction material is outside coordination-only backup scope";
 const ARCHIVE_SCHEMA: &str = "CREATE TABLE backup_manifest(singleton INTEGER PRIMARY KEY CHECK(singleton=1), format_version INTEGER NOT NULL, source_schema_version INTEGER NOT NULL, created_at_ms INTEGER NOT NULL, snapshot_digest TEXT NOT NULL, row_count INTEGER NOT NULL, data_bytes INTEGER NOT NULL, scope TEXT NOT NULL CHECK(scope='coordination_and_authority_only'));";
 
 struct Table {
@@ -121,6 +126,8 @@ pub struct AgreementRestoreReport {
 impl Store {
     /// Snapshot ALL records of this protected store, including idempotency,
     /// observations and unresolved effects. Not a participant-scoped disclosure.
+    /// Refuses durable private construction material, including mutation history;
+    /// this archive's scope and consent do not cover private witness journals.
     /// The destination needs a separately provisioned independent key and a private
     /// directory. A failure leaves any partial destination untouched for inspection.
     pub fn backup_agreement_journal(
@@ -146,6 +153,9 @@ impl Store {
         validate_schema(&snapshot, SCHEMA_VERSION, false)?;
         validate_integrity(&snapshot)?;
         let stats = inspect_rows(&snapshot, SCHEMA_VERSION)?;
+        // Check the actual bounded snapshot, not a prior inventory or the calling
+        // principal's visible agreements. No destination exists before this check.
+        validate_coordination_only_scope(&snapshot)?;
         let destination = destination.as_ref();
         let mut archive = create_encrypted(destination, backup_key)?.into_connection();
         archive.pragma_update(None, "max_page_count", 32768)?;
@@ -344,9 +354,8 @@ pub(crate) fn validate_construction_encoding(
         if count > 512 || bytes > 32 * 1024 * 1024 {
             return Err(StoreError::ResourceExhausted);
         }
-        let mut query = connection.prepare(
-            "SELECT payload FROM records WHERE aggregate_type=?1",
-        )?;
+        let mut query =
+            connection.prepare("SELECT payload FROM records WHERE aggregate_type=?1")?;
         for row in query.query_map([kind], |r| r.get::<_, String>(0))? {
             let payload: serde_json::Value = serde_json::from_str(&row?)?;
             if (!supports_v4 && crate::recovery::is_construction_v4_claim(kind, &payload))
@@ -389,8 +398,7 @@ pub(crate) fn require_construction_v5_encoding(connection: &Connection) -> Resul
     let application: i64 = connection.pragma_query_value(None, "application_id", |r| r.get(0))?;
     let version: i64 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
     let recovered = wholepact_storage_security::bundle::recovery::generation::RECOVERED_GENERATION_APPLICATION_ID;
-    if (application == 0 && version == 5)
-        || (application == recovered && matches!(version, 8 | 9))
+    if (application == 0 && version == 5) || (application == recovered && matches!(version, 8 | 9))
     {
         Ok(())
     } else {
@@ -582,6 +590,98 @@ fn copy_tables(source: &Connection, destination: &Connection, version: i64) -> R
     }
     Ok(())
 }
+
+/// This legacy scope is feature-independent. The engine retains private viewing
+/// keys, selected notes and witnesses in an opaque envelope field even in builds
+/// without construction support. Mutation results retain old envelopes after a
+/// current record changes, so they must be checked as well. Call only after the
+/// row/cell bounds have been validated, in the same read transaction.
+fn validate_coordination_only_scope(connection: &Connection) -> Result<()> {
+    let mut query = connection.prepare(
+        "SELECT payload FROM records UNION ALL SELECT result FROM operations \
+         UNION ALL SELECT result FROM idempotency UNION ALL SELECT payload FROM events",
+    )?;
+    let mut rows = query.query([])?;
+    while let Some(row) = rows.next()? {
+        let payload: String = row.get(0)?;
+        let mut decoder = serde_json::Deserializer::from_str(&payload);
+        CoordinationOnlyValue {
+            empty_object_only: false,
+        }
+        .deserialize(&mut decoder)
+        .and_then(|()| decoder.end())
+        .map_err(|_| StoreError::InvalidInput(PRIVATE_CONSTRUCTION_SCOPE_ERROR))?;
+    }
+    Ok(())
+}
+
+// Stream every field, including duplicates, instead of materializing Value:
+// last-key-wins decoding must not hide a private map behind a later empty map.
+// A present reserved field must be exactly an empty object. Malformed JSON or
+// any other field encoding fails closed, without reflecting private data.
+struct CoordinationOnlyValue {
+    empty_object_only: bool,
+}
+impl<'de> DeserializeSeed<'de> for CoordinationOnlyValue {
+    type Value = ();
+
+    fn deserialize<D: Deserializer<'de>>(self, decoder: D) -> std::result::Result<(), D::Error> {
+        if self.empty_object_only {
+            decoder.deserialize_map(self)
+        } else {
+            decoder.deserialize_any(self)
+        }
+    }
+}
+impl<'de> Visitor<'de> for CoordinationOnlyValue {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("coordination-only JSON value")
+    }
+    fn visit_bool<E: de::Error>(self, _: bool) -> std::result::Result<(), E> {
+        Ok(())
+    }
+    fn visit_i64<E: de::Error>(self, _: i64) -> std::result::Result<(), E> {
+        Ok(())
+    }
+    fn visit_u64<E: de::Error>(self, _: u64) -> std::result::Result<(), E> {
+        Ok(())
+    }
+    fn visit_f64<E: de::Error>(self, _: f64) -> std::result::Result<(), E> {
+        Ok(())
+    }
+    fn visit_str<E: de::Error>(self, _: &str) -> std::result::Result<(), E> {
+        Ok(())
+    }
+    fn visit_unit<E: de::Error>(self) -> std::result::Result<(), E> {
+        Ok(())
+    }
+    fn visit_seq<A: SeqAccess<'de>>(self, mut values: A) -> std::result::Result<(), A::Error> {
+        while values
+            .next_element_seed(CoordinationOnlyValue {
+                empty_object_only: false,
+            })?
+            .is_some()
+        {}
+        Ok(())
+    }
+    fn visit_map<A: MapAccess<'de>>(self, mut values: A) -> std::result::Result<(), A::Error> {
+        if self.empty_object_only {
+            return match values.next_key::<de::IgnoredAny>()? {
+                None => Ok(()),
+                Some(_) => Err(de::Error::custom(PRIVATE_CONSTRUCTION_SCOPE_ERROR)),
+            };
+        }
+        while let Some(key) = values.next_key::<String>()? {
+            values.next_value_seed(CoordinationOnlyValue {
+                empty_object_only: key == "durable_construction_v1",
+            })?;
+        }
+        Ok(())
+    }
+}
+
 fn open_archive(path: &Path, key: &DatabaseKey) -> Result<EncryptedReadSnapshot> {
     let mut total = 0u64;
     for suffix in ["", "-wal", "-shm", "-journal"] {
@@ -632,6 +732,9 @@ fn validate_archive(connection: &Connection) -> Result<AgreementBackupSummary> {
             "agreement archive content mismatch",
         ));
     }
+    // A correctly keyed archive and recomputed digest cannot broaden the scope
+    // declared by its manifest. Inspection and restore enforce the same boundary.
+    validate_coordination_only_scope(connection)?;
     Ok(AgreementBackupSummary {
         format_version: ARCHIVE_VERSION as u32,
         source_schema_version: version as u32,
@@ -685,3 +788,6 @@ fn fail_before_commit(operation: &str) -> Result<()> {
 
 #[cfg(test)]
 mod historical_provenance_v5_marker_tests;
+
+#[cfg(all(test, target_os = "linux"))]
+mod private_material_scope_tests;

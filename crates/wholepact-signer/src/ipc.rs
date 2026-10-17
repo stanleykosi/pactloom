@@ -145,6 +145,14 @@ pub enum AppRequest {
     RequestPreconstruction {
         request: Box<crate::authority_bridge::preconstruction_ipc::PreconstructionRequest>,
     },
+    #[cfg(feature = "durable-proposal")]
+    RequestDurableConstructionV1 {
+        request: Box<crate::authority_bridge::durable_construction_v1::DurableConstructionRequestV1>,
+    },
+    #[cfg(feature = "durable-proposal")]
+    RequestDurableConstructionHistoryV1 {
+        request: Box<crate::authority_bridge::durable_construction_v1::DurableConstructionHistoryRequestV1>,
+    },
     #[cfg(all(feature="authority-signing",feature="offline-review-foundation"))]
     RequestBornOriginalHistoryV1 {request:Box<crate::authority_bridge::born_history_ipc::BornOriginalHistoryRequestV1>},
     #[cfg(all(feature="authority-signing",feature="offline-review-foundation"))]
@@ -493,6 +501,25 @@ impl AppRequest {
             #[cfg(feature = "authority-signing")]
             Self::RequestPreconstruction { request } => {
                 if !scope.preconstruction_export {
+                    return Err(Error::Authentication);
+                }
+                request.validate().map_err(|_| Error::InvalidData)?;
+            }
+            #[cfg(feature = "durable-proposal")]
+            Self::RequestDurableConstructionV1 { request } => {
+                let proposal = request.validate().map_err(|_| Error::InvalidData)?;
+                if !scope.preconstruction_export
+                    || request.scope.account_id != scope.account_id
+                    || request.scope.participant_id != scope.participant_id
+                    || proposal.manifest().agreement.agreement_id != scope.agreement_id
+                    || proposal.manifest_digest() != scope.manifest_digest
+                {
+                    return Err(Error::Authentication);
+                }
+            }
+            #[cfg(feature = "durable-proposal")]
+            Self::RequestDurableConstructionHistoryV1 { request } => {
+                if !scope.history_read || !scope.preconstruction_export {
                     return Err(Error::Authentication);
                 }
                 request.validate().map_err(|_| Error::InvalidData)?;
@@ -882,6 +909,18 @@ pub(crate) enum LocalEvent {
         peer: AuthenticatedPeer,
         stream: UnixStream,
         request: Box<crate::authority_bridge::preconstruction_ipc::PreconstructionRequest>,
+    },
+    #[cfg(feature = "durable-proposal")]
+    DurableConstructionV1 {
+        peer: AuthenticatedPeer,
+        stream: UnixStream,
+        request: Box<crate::authority_bridge::durable_construction_v1::DurableConstructionRequestV1>,
+    },
+    #[cfg(feature = "durable-proposal")]
+    DurableConstructionHistoryV1 {
+        peer: AuthenticatedPeer,
+        stream: UnixStream,
+        request: Box<crate::authority_bridge::durable_construction_v1::DurableConstructionHistoryRequestV1>,
     },
     #[cfg(all(feature="authority-signing",feature="offline-review-foundation"))]
     BornOriginalHistoryV1{peer:AuthenticatedPeer,stream:UnixStream,request:Box<crate::authority_bridge::born_history_ipc::BornOriginalHistoryRequestV1>},
@@ -1693,6 +1732,26 @@ fn serve(
                                 AppRequest::RequestPreconstruction { ref request } => {
                                     sender
                                         .try_send(LocalEvent::Preconstruction {
+                                            peer,
+                                            stream: stream.try_clone()?,
+                                            request: request.clone(),
+                                        })
+                                        .map_err(|_| Error::Unavailable)?;
+                                }
+                                #[cfg(feature = "durable-proposal")]
+                                AppRequest::RequestDurableConstructionV1 { ref request } => {
+                                    sender
+                                        .try_send(LocalEvent::DurableConstructionV1 {
+                                            peer,
+                                            stream: stream.try_clone()?,
+                                            request: request.clone(),
+                                        })
+                                        .map_err(|_| Error::Unavailable)?;
+                                }
+                                #[cfg(feature = "durable-proposal")]
+                                AppRequest::RequestDurableConstructionHistoryV1 { ref request } => {
+                                    sender
+                                        .try_send(LocalEvent::DurableConstructionHistoryV1 {
                                             peer,
                                             stream: stream.try_clone()?,
                                             request: request.clone(),

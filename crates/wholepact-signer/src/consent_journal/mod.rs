@@ -24,6 +24,8 @@ pub use sponsor::{
 #[cfg(target_os = "linux")]
 mod born_dispatch_storage;
 mod bridge_storage;
+#[cfg(all(feature = "durable-proposal", feature = "native-ui", target_os = "linux"))]
+pub(crate) mod durable_construction_v1;
 #[cfg(target_os = "linux")]
 pub(crate) use born_dispatch_storage::RetainedBornDispatchV1;
 #[cfg(all(
@@ -134,7 +136,7 @@ use wholepact_core::proposal::canonical_digest;
 use zeroize::Zeroizing;
 
 const APPLICATION_ID: i64 = 0x57505343;
-const SCHEMA_VERSION: i64 = 17;
+const SCHEMA_VERSION: i64 = 18;
 const MAX_RECORD_BYTES: usize = 512 * 1024;
 const MAX_BACKUP_ROWS: u64 = 100_000;
 const MAX_BACKUP_ENCODED_BYTES: u64 = 64 * 1024 * 1024;
@@ -156,7 +158,7 @@ pub enum JournalError {
     #[error("signer journal requires writer and exposure reconciliation")]
     RecoveryRequired,
     #[error(
-        "unsupported signer journal schema; only exact v8 through v15 additive schema extensions are supported"
+        "unsupported signer journal schema; only exact v8 through v17 additive schema extensions are supported"
     )]
     UnsupportedSchema,
     #[error("offline reservation history requires a qualified typed signer recovery consumer")]

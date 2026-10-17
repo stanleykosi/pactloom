@@ -20,6 +20,7 @@ use crate::{
     manifest::ReviewInputs,
 };
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
 use wholepact_authority::{AuthorityClient, AuthorityHead};
 use wholepact_protocol::{
     durable_proposal_v1::{FixedProposalIdentityV1, VerifiedFixedProposal},
@@ -30,15 +31,18 @@ use wholepact_wallet::wallet::protected_sync::{key_use::WalletKeyUseTicket, Prot
 /// Reloads the exact protected proposal record and its independently retained
 /// full policy. A caller must not hold a database lock across this callback or
 /// across key use. Returning a digest, parsed descriptor or verification flag is
-/// deliberately insufficient: every reload must construct the opaque verified
-/// proposal through the maintained protocol verifier.
-pub type FixedProposalSource<'a> = dyn Fn() -> Result<VerifiedFixedProposal> + 'a;
+/// deliberately insufficient. The immutable proposal must have been constructed
+/// through the maintained protocol verifier. An owned verified snapshot may be
+/// reused after exact retained-record and genuine current permission checks; no
+/// callback can manufacture native permission or revive a former approval.
+pub type FixedProposalSource =
+    Arc<dyn Fn() -> Result<Arc<VerifiedFixedProposal>> + Send + Sync>;
 
 /// A displayable fresh review, not permission. Neither this type nor its approved
 /// successor is serializable, cloneable, or constructible from saved evidence.
-pub struct PreparedDurableProposalReview<'a> {
-    source: &'a FixedProposalSource<'a>,
-    proposal: VerifiedFixedProposal,
+pub struct PreparedDurableProposalReview {
+    source: FixedProposalSource,
+    proposal: Arc<VerifiedFixedProposal>,
     inputs: ReviewInputs,
     prepared: PreparedSpendConsent,
 }
@@ -49,11 +53,11 @@ pub struct PreparedDurableProposalReview<'a> {
 /// Saved data cannot restore this continuation:
 /// ```compile_fail
 /// use wholepact_signer::authority_bridge::durable_proposal_v1::ApprovedDurableProposalAction;
-/// let action: ApprovedDurableProposalAction<'static> = serde_json::from_str("{}").unwrap();
+/// let action: ApprovedDurableProposalAction = serde_json::from_str("{}").unwrap();
 /// ```
-pub struct ApprovedDurableProposalAction<'a> {
-    source: &'a FixedProposalSource<'a>,
-    proposal: VerifiedFixedProposal,
+pub struct ApprovedDurableProposalAction {
+    source: FixedProposalSource,
+    proposal: Arc<VerifiedFixedProposal>,
     inputs: ReviewInputs,
     approval: ApprovedSpendConsent,
     original: OriginalSpendConsent,
@@ -89,15 +93,15 @@ pub fn manual_authorization_id(
 /// to the current native session; old native receipts are never renewed here.
 /// Human waiting happens before this call, or discards and repeats this review.
 #[allow(clippy::too_many_arguments)]
-pub fn prepare_manual_review<'a>(
-    source: &'a FixedProposalSource<'a>,
+pub fn prepare_manual_review(
+    source: FixedProposalSource,
     journal: &SignerConsentJournal,
     session: &SignerConsentSession,
     enrollment: &AccountEnrollmentRecord,
     manifest: &AcceptedManifestRecord,
     account: &DedicatedAccount,
     inputs: ReviewInputs,
-) -> Result<PreparedDurableProposalReview<'a>> {
+) -> Result<PreparedDurableProposalReview> {
     let proposal = source()?;
     validate_review_inputs(&proposal, manifest, &inputs)?;
     let account_id = account.account_id().map_err(|_| BridgeError::Binding)?;
@@ -129,7 +133,7 @@ pub fn prepare_manual_review<'a>(
     })
 }
 
-impl PreparedDurableProposalReview<'_> {
+impl PreparedDurableProposalReview {
     /// Borrowed for the existing native spending display and separate exact
     /// witness-disclosure review. No extraction of approval is provided.
     pub fn prepared_spend(&self) -> &PreparedSpendConsent {
@@ -141,15 +145,15 @@ impl PreparedDurableProposalReview<'_> {
     }
 }
 
-impl<'a> PreparedDurableProposalReview<'a> {
+impl PreparedDurableProposalReview {
     /// Only the existing native decision issuer can provide this opaque input.
     /// A JSON success flag, terminal acknowledgement or durable data is not one.
     pub fn approve(
         self,
         session: &SignerConsentSession,
         decision: NativeConsentDecision,
-    ) -> Result<ApprovedDurableProposalAction<'a>> {
-        check_reload(self.source, &self.proposal)?;
+    ) -> Result<ApprovedDurableProposalAction> {
+        check_reload(&self.source, &self.proposal)?;
         let original = self.prepared.record().clone();
         let approval = session.approve_spend(self.prepared, decision)?;
         Ok(ApprovedDurableProposalAction {
@@ -162,7 +166,7 @@ impl<'a> PreparedDurableProposalReview<'a> {
     }
 }
 
-impl ApprovedDurableProposalAction<'_> {
+impl ApprovedDurableProposalAction {
     /// Commit exact release intent and conservative exposure before contacting
     /// the independently authenticated witness, then use the existing held
     /// wallet/native key-use fence. An error after release requires recovery,
@@ -202,7 +206,7 @@ impl ApprovedDurableProposalAction<'_> {
         if disclosure.record().expected_head != expected_head {
             return Err(BridgeError::Binding);
         }
-        let check = || check_reload(self.source, &self.proposal);
+        let check = || check_reload(&self.source, &self.proposal);
         check()?;
         // record_original_consent_release atomically rejects another live
         // authorization for the obligation or any reserved input, including a
@@ -229,7 +233,7 @@ impl ApprovedDurableProposalAction<'_> {
 /// restore a signing continuation or export signatures. A committed original
 /// without its exact retained result is recovery-required, even before key use.
 pub fn retained_manual_commit(
-    source: &FixedProposalSource<'_>,
+    source: &FixedProposalSource,
     journal: &SignerConsentJournal,
     session: &SignerConsentSession,
     account: &DedicatedAccount,
@@ -276,7 +280,7 @@ fn require_unreleased(
     Ok(())
 }
 
-fn check_reload(source: &FixedProposalSource<'_>, original: &VerifiedFixedProposal) -> Result<()> {
+fn check_reload(source: &FixedProposalSource, original: &VerifiedFixedProposal) -> Result<()> {
     let current = source()?;
     if current.identity() != original.identity()
         || current.private_proved_pczt_bytes() != original.private_proved_pczt_bytes()

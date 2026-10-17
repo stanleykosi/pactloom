@@ -3100,3 +3100,7 @@ fn connected_never_funded_flow_uses_one_proof_and_preserves_exact_recovery_bound
             .is_err()
     );
 }
+
+#[cfg(feature = "durable-proposal")]
+#[path = "durable_proposals_v1_tests.rs"]
+mod durable_proposals;

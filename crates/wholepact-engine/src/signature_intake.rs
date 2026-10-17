@@ -339,7 +339,7 @@ impl Engine {
     }
 }
 
-fn retention_inputs(
+pub(crate) fn retention_inputs(
     checkpoint: &VerifiedCheckpoint,
     agreement_id: &str,
     proposal_id: &str,

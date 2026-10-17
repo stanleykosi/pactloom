@@ -15,6 +15,8 @@ mod born_dispatch;
 mod born_history;
 #[cfg(feature = "authority-signing")]
 mod dispatch;
+#[cfg(feature = "durable-proposal")]
+pub(crate) mod durable_construction_v1;
 #[cfg(feature = "authority-signing")]
 mod host_publication;
 #[cfg(feature = "authority-signing")]

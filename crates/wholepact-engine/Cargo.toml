@@ -6,6 +6,7 @@ license.workspace = true
 
 [features]
 default = []
+durable-proposal = ["submission-handoff", "wholepact-protocol/durable-proposal", "wallet-sync", "signer-authority-bridge", "wholepact-signer/durable-proposal"]
 manual-admission = ["wholepact-store/manual-admission", "dep:wholepact-signer-origin", "wholepact-signer?/manual-inventory-client"]
 offline-return-foundation = ["signature-intake", "wholepact-transport/offline-admission-export"]
 transport-workflows = ["dep:wholepact-transport"]

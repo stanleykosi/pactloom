@@ -926,7 +926,9 @@ pub(super) fn require_legacy_recovery_source(
     if source.tables().iter().any(|t| {
         matches!(
             t.name(),
-            "signer_common_context_audit_v3" | "signer_common_context_reentry_v1"
+            "signer_common_context_audit_v3"
+                | "signer_common_context_reentry_v1"
+                | "signer_durable_construction_outbox"
         ) && !t.rows().is_empty()
     }) {
         return Err(JournalError::ConstructionHistoryUnsupported);
