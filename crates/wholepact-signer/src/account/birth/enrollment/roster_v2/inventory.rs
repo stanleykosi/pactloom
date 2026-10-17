@@ -8,6 +8,32 @@ pub(crate) mod construction;
 pub(crate) mod construction_v3;
 pub(crate) mod exact_input_observation;
 pub(crate) mod retention;
+#[cfg(feature = "synthetic-born-joined-qualification")]
+mod synthetic_denial;
+
+// Each original expression is evaluated once. Diagnostics borrow only the
+// unchanged result and expose closed discriminants, never values or payloads.
+macro_rules! inventory_checked {
+    ($expression:expr, $boundary:ident) => {{
+        let result = $expression;
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        synthetic_denial::result(synthetic_denial::Boundary::$boundary, &result);
+        result
+    }};
+}
+macro_rules! inventory_denied_if {
+    ($expression:expr, $boundary:ident, $kind:ident) => {{
+        let denied = $expression;
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        if denied {
+            synthetic_denial::emit(
+                synthetic_denial::Boundary::$boundary,
+                synthetic_denial::Kind::$kind,
+            );
+        }
+        denied
+    }};
+}
 use super::*;
 use crate::consent_journal::CommonContextAuthorizedReentryOwnerInput;
 use std::{
@@ -68,21 +94,37 @@ impl BornRosterInventorySourceV2 {
     }
     fn check(&self, peer: &AuthenticatedPeer, owner: &PendingAccountNativeAuthority) -> Result<()> {
         let e = &self.enrolled;
-        owner.check_current()?;
-        e.source.check_current()?;
-        e.source.bounded_deadline()?;
-        peer.check_current()?;
-        if e.source != owner.native().binding()
-            || peer.native_origin != e.source
-            || peer.grant_id == e.peer.grant_id
+        inventory_checked!(owner.check_current(), InventorySourceOwner)?;
+        inventory_checked!(e.source.check_current(), InventorySourceNative)?;
+        inventory_checked!(e.source.bounded_deadline(), InventorySourceDeadline)?;
+        inventory_checked!(peer.check_current(), InventorySourcePeer)?;
+        if inventory_denied_if!(
+            e.source != owner.native().binding(),
+            InventorySourceOwnerBinding,
+            Authentication
+        ) || inventory_denied_if!(
+            peer.native_origin != e.source,
+            InventorySourcePeerBinding,
+            Authentication
+        ) || inventory_denied_if!(
+            peer.grant_id == e.peer.grant_id,
+            InventorySourceRetiredGrant,
+            Authentication
+        )
         {
             return Err(Error::Authentication);
         }
         // A historical grant is NOT checked as current. Only its actual kernel
         // process identity is compared to the fresh independently approved peer.
-        peer.peer.same_live_process(&e.peer.peer)?;
-        e.retained.check()?;
-        publication::require_retained_admission(&e.retained, &e.witness)?;
+        inventory_checked!(
+            peer.peer.same_live_process(&e.peer.peer).map_err(Error::from),
+            InventorySourceProcess
+        )?;
+        inventory_checked!(e.retained.check(), InventorySourceRetained)?;
+        inventory_checked!(
+            publication::require_retained_admission(&e.retained, &e.witness),
+            InventorySourceAdmission
+        )?;
         if let Some(plan) = &self.common_context_plan {
             if let Some((read, authorization)) =
                 self.common_context_read.as_ref().and_then(|read| {
@@ -122,10 +164,14 @@ impl BornRosterInventorySourceV2 {
                 e.retained.record.account_record.terms.signer.writer_epoch,
             )?;
         }
-        publication::check_history(&e.retained, &e.history, &e.witness)?;
-        e.witness
-            .check_current()
-            .map_err(|_| Error::ReviewMismatch)?;
+        inventory_checked!(
+            publication::check_history(&e.retained, &e.history, &e.witness),
+            InventorySourceHistory
+        )?;
+        inventory_checked!(
+            e.witness.check_current().map_err(|_| Error::ReviewMismatch),
+            InventorySourceWitness
+        )?;
         original(&e.retained.account)?
             .anchor()
             .recipient_policy_v2()?;
@@ -257,14 +303,25 @@ impl DisclosureWindow {
         Ok(result)
     }
     fn remaining(&self, wall: u64, monotonic: Instant) -> Result<Duration> {
-        if wall < self.requested_at_ms || wall >= self.expires_at_ms {
+        if inventory_denied_if!(
+            wall < self.requested_at_ms,
+            InventoryWindowWallRollback,
+            ReviewMismatch
+        ) || inventory_denied_if!(
+            wall >= self.expires_at_ms,
+            InventoryWindowWallExpired,
+            ReviewMismatch
+        ) {
             return Err(Error::ReviewMismatch);
         }
-        self.monotonic_deadline
-            .checked_duration_since(monotonic)
-            .filter(|d| !d.is_zero())
-            .map(|d| d.min(Duration::from_millis(self.expires_at_ms - wall)))
-            .ok_or(Error::ReviewMismatch)
+        inventory_checked!(
+            self.monotonic_deadline
+                .checked_duration_since(monotonic)
+                .filter(|d| !d.is_zero())
+                .map(|d| d.min(Duration::from_millis(self.expires_at_ms - wall)))
+                .ok_or(Error::ReviewMismatch),
+            InventoryWindowMonotonicExpired
+        )
     }
 }
 impl PreparedRosterInventoryV2 {
@@ -398,7 +455,11 @@ impl PreparedRosterInventoryV2 {
         self.window.remaining(now()?, Instant::now())
     }
     fn check(&self, owner: &PendingAccountNativeAuthority) -> Result<()> {
-        if owner.native().binding() != self.native {
+        if inventory_denied_if!(
+            owner.native().binding() != self.native,
+            InventoryNativeBinding,
+            ReviewMismatch
+        ) {
             return Err(Error::ReviewMismatch);
         }
         self.remaining()?;
@@ -408,9 +469,11 @@ impl PreparedRosterInventoryV2 {
             now()?,
             self.observed_session.receipt().expires_at_ms,
         )?;
-        self.source
-            .require_request(&self.request, &self.peer, owner)?;
-        connected(&self.stream, &self.peer)
+        inventory_checked!(
+            self.source.require_request(&self.request, &self.peer, owner),
+            InventorySourceRequest
+        )?;
+        inventory_checked!(connected(&self.stream, &self.peer), InventoryPeerConnection)
     }
     pub(crate) fn approve_and_serve(
         mut self,
@@ -551,11 +614,27 @@ fn require_observed_session_time(
     wall_now_ms: u64,
     expires_at_ms: u64,
 ) -> Result<()> {
-    if observed_at_ms == 0
-        || expires_at_ms <= observed_at_ms
-        || wall_now_ms < observed_at_ms
-        || wall_now_ms >= expires_at_ms
-        || observation_age >= Duration::from_secs(30)
+    if inventory_denied_if!(observed_at_ms == 0, InventoryObservedMissing, ReviewMismatch)
+        || inventory_denied_if!(
+            expires_at_ms <= observed_at_ms,
+            InventoryObservedLifetimeInvalid,
+            ReviewMismatch
+        )
+        || inventory_denied_if!(
+            wall_now_ms < observed_at_ms,
+            InventoryObservedWallRollback,
+            ReviewMismatch
+        )
+        || inventory_denied_if!(
+            wall_now_ms >= expires_at_ms,
+            InventoryObservedSessionExpired,
+            ReviewMismatch
+        )
+        || inventory_denied_if!(
+            observation_age >= Duration::from_secs(30),
+            InventoryObservedAgeExpired,
+            ReviewMismatch
+        )
     {
         return Err(Error::ReviewMismatch);
     }

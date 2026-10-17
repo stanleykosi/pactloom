@@ -20,7 +20,26 @@ macro_rules! roster_trace {
     }};
 }
 #[cfg(all(test, feature = "synthetic-born-joined-qualification"))]
-mod synthetic_roster_trace_v1;
+pub(crate) mod synthetic_roster_trace_v1;
+
+// Denial-only projection of the actual predicate/result. Outside the synthetic
+// test build this is precisely the original expression, not an extra check.
+macro_rules! roster_denial {
+    ($kind:ident, $phase:ident, $operation:expr) => {{
+        #[cfg(all(test, feature = "synthetic-born-joined-qualification"))]
+        {
+            use crate::host::synthetic_roster_trace_v1::{self as trace, Phase};
+            let result = $operation;
+            trace::$kind(Phase::$phase, &result);
+            result
+        }
+        #[cfg(not(all(test, feature = "synthetic-born-joined-qualification")))]
+        {
+            $operation
+        }
+    }};
+}
+pub(crate) use roster_denial;
 
 #[cfg(all(test, feature = "manual-admission", target_os = "linux"))]
 mod born_test_host_v1;

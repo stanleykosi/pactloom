@@ -121,7 +121,7 @@ class PublicOutputTests(unittest.TestCase):
         for kind in ['Phase','Outcome']:
             body=re.search(r'labels! \{ '+kind+r' \{(.*?)\} \}',text,re.S).group(1)
             kinds[kind]=set(x.strip() for x in body.split(',') if x.strip())
-        self.assertEqual(len(kinds['Phase']),25)
+        self.assertEqual(len(kinds['Phase']),44)
         self.assertTrue(kinds['Phase'] <= output.BOUNDARIES)
         self.assertTrue(kinds['Outcome'] <= output.OUTCOMES)
         signer=ROOT/'crates/wholepact-signer/src/native_ui/born_manual_roster_v2/synthetic_diagnostics.rs'
@@ -149,6 +149,35 @@ class PublicOutputTests(unittest.TestCase):
             'fn lower_error_projection_preserves_only_closed_kinds()'),1)
         combined=output.PURE_TESTS+output.POLICY_ENVELOPE_TESTS+output.PROMPT_RENDERING_TESTS+output.LOWER_ERROR_TESTS
         self.assertEqual(len(set(combined)),24)
+        self.assertNotIn(expected,[row[0] for row in output.TESTS.values()])
+        self.assertNotEqual(expected,output.STORAGE_BOOTSTRAP_TEST)
+
+    def test_inventory_denials_are_exact_closed_predicates(self):
+        host=ROOT/'crates/wholepact-native-host/src/host/synthetic_roster_trace_v1.rs'
+        body=re.search(r'labels! \{ Phase \{(.*?)\} \}',host.read_text(),re.S).group(1)
+        host_labels={x.strip() for x in body.split(',') if x.strip().startswith('Scan')}
+        signer=ROOT/'crates/wholepact-signer/src/account/birth/enrollment/roster_v2/inventory/synthetic_denial.rs'
+        signer_labels=set(re.findall(r'=> "(Inventory\w+)"',signer.read_text()))
+        self.assertEqual(len(host_labels),19)
+        self.assertEqual(len(signer_labels),23)
+        self.assertEqual(len(host_labels|signer_labels),42)
+        self.assertTrue(host_labels|signer_labels <= output.BOUNDARIES)
+        for label in host_labels|signer_labels:
+            for outcome in ['HostPermission','SignerReviewMismatch','SignerAuthentication']:
+                self.assertTrue(output.safe_failure(self.failure(label+':'+outcome)))
+        for item in ['ScanNativeUnknown:HostPermission','InventoryObservedUnknown:SignerReviewMismatch',
+                     'ScanAccessAccount:HostPermission private','InventorySourceOwner:SignerLocked:private']:
+            self.assertFalse(output.safe_failure(self.failure(item)))
+        self.assertFalse(output.safe_failure(self.failure('InventoryObservedAgeExpired:SignerReviewMismatch')+' private'))
+
+    def test_denial_preflight_is_one_exact_inert_case(self):
+        expected='host::synthetic_roster_trace_v1::denial_projection_preserves_single_evaluation_and_short_circuit'
+        self.assertEqual(output.DENIAL_TESTS,(expected,))
+        source=ROOT/'crates/wholepact-native-host/src/host/synthetic_roster_trace_v1.rs'
+        self.assertEqual(source.read_text().count('fn '+expected.rsplit('::',1)[1]+'()'),1)
+        combined=output.PURE_TESTS+output.POLICY_ENVELOPE_TESTS+output.PROMPT_RENDERING_TESTS+output.LOWER_ERROR_TESTS+output.DENIAL_TESTS
+        self.assertEqual(len(combined),25)
+        self.assertEqual(len(set(combined)),25)
         self.assertNotIn(expected,[row[0] for row in output.TESTS.values()])
         self.assertNotEqual(expected,output.STORAGE_BOOTSTRAP_TEST)
 

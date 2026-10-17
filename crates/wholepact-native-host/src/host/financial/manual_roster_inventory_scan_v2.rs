@@ -22,24 +22,46 @@ struct RosterScanAccessV2<'a, 'peer, 'audit, 'host> {
 }
 impl RosterScanAccessV2<'_, '_, '_, '_> {
     fn check_current(&self) -> Result<()> {
-        self.native.check_current()?;
-        let request = self.native.request()?;
-        self.target.require_current(self.host, &request.scope)?;
-        let access = self.host.access()?;
-        self.host
-            .authority
-            .check_financial_principal(&access.principal_id)?;
+        roster_denial!(denied_host, ScanAccessNativeBefore, self.native.check_current())?;
+        let request = roster_denial!(denied_host, ScanAccessRequest, self.native.request())?;
+        roster_denial!(
+            denied_host,
+            ScanAccessTarget,
+            self.target.require_current(self.host, &request.scope)
+        )?;
+        let access = roster_denial!(denied_host, ScanAccessHostAccess, self.host.access())?;
+        roster_denial!(
+            denied_host,
+            ScanAccessPrincipal,
+            self.host.authority.check_financial_principal(&access.principal_id)
+        )?;
         if request.scope.inventory.enrollment.scope.principal_id != access.principal_id {
-            return Err(Error::Permission);
+            return roster_denial!(
+                denied_host,
+                ScanAccessEnrollmentPrincipal,
+                Err(Error::Permission)
+            );
         }
-        self.import
-            .check_request_scope_and_account(
-                &request.digest().map_err(|_| Error::Invalid)?,
-                &request.scope.pairing_digest().map_err(|_| Error::Invalid)?,
-                self.import.account_uuid(),
-            )
-            .map_err(|_| Error::Permission)?;
-        self.native.check_current()
+        roster_denial!(
+            denied_host,
+            ScanAccessImport,
+            self.import
+                .check_request_scope_and_account(
+                    &roster_denial!(
+                        denied_host,
+                        ScanAccessRequestDigest,
+                        request.digest().map_err(|_| Error::Invalid)
+                    )?,
+                    &roster_denial!(
+                        denied_host,
+                        ScanAccessScopeDigest,
+                        request.scope.pairing_digest().map_err(|_| Error::Invalid)
+                    )?,
+                    self.import.account_uuid(),
+                )
+                .map_err(|_| Error::Permission)
+        )?;
+        roster_denial!(denied_host, ScanAccessNativeAfter, self.native.check_current())
     }
 }
 impl LocalWalletAccess for RosterScanAccessV2<'_, '_, '_, '_> {
@@ -49,14 +71,22 @@ impl LocalWalletAccess for RosterScanAccessV2<'_, '_, '_, '_> {
         provider: &BackendIdentity,
         purpose: WalletAccessPurpose,
     ) -> bool {
-        account == self.import.account_uuid()
+        roster_denial!(
+            denied_predicate,
+            ScanAccessAccount,
+            account == self.import.account_uuid()
+        )
             && self.check_current().is_ok()
             && self.native.permits(account, provider, purpose)
     }
 }
 impl LocalRecoveryReadAccess for RosterScanAccessV2<'_, '_, '_, '_> {
     fn permits_recovery_read(&self, account: AccountUuid, provider: &BackendIdentity) -> bool {
-        account == self.import.account_uuid()
+        roster_denial!(
+            denied_predicate,
+            ScanAccessAccount,
+            account == self.import.account_uuid()
+        )
             && self.check_current().is_ok()
             && self.native.permits_recovery_read(account, provider)
     }

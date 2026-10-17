@@ -12,11 +12,11 @@ use wholepact_wallet::wallet::{
 macro_rules! labels {
     ($name:ident { $($variant:ident),+ $(,)? }) => {
         #[derive(Clone, Copy, PartialEq, Eq)]
-        pub(super) enum $name { $($variant),+ }
+        pub(crate) enum $name { $($variant),+ }
         impl $name { fn label(self) -> &'static str { match self { $(Self::$variant => stringify!($variant)),+ } } }
     };
 }
-labels! { Phase { JoinedPairFinish, JoinedRequestBegin, JoinedLeaseFinish, JoinedInventoryCheck, JoinedAuditAppend, JoinedInventoryRun, InventoryPair, InventoryRequest, InventoryLease, InventoryImport, InventoryImportRecord, InventoryScan, InventorySynchronize, InventoryInspect, InventoryDisplay, InventoryFinish, CandidateRun, CandidatePair, CandidateRequest, CandidateLease, CandidateExclusions, CandidateSelect, CandidateDisplay, CandidateRetain, CandidateAttach } }
+labels! { Phase { ScanAccessAccount, ScanAccessNativeBefore, ScanAccessRequest, ScanAccessTarget, ScanAccessHostAccess, ScanAccessPrincipal, ScanAccessEnrollmentPrincipal, ScanAccessRequestDigest, ScanAccessScopeDigest, ScanAccessImport, ScanAccessNativeAfter, ScanNativeAdmissionDeadline, ScanNativeLease, ScanNativeRemaining, ScanNativePurpose, ScanNativeAccount, ScanNativeProviderSource, ScanNativeProviderEndpoint, ScanNativeProviderTrust, JoinedPairFinish, JoinedRequestBegin, JoinedLeaseFinish, JoinedInventoryCheck, JoinedAuditAppend, JoinedInventoryRun, InventoryPair, InventoryRequest, InventoryLease, InventoryImport, InventoryImportRecord, InventoryScan, InventorySynchronize, InventoryInspect, InventoryDisplay, InventoryFinish, CandidateRun, CandidatePair, CandidateRequest, CandidateLease, CandidateExclusions, CandidateSelect, CandidateDisplay, CandidateRetain, CandidateAttach } }
 labels! { Outcome { Begin, Complete, HostPlatform, HostTerminal, HostPermission, HostLocked, HostInvalid, HostAuthentication, HostStorage, HostQuarantined, HostUnsupported, HostReceipt, HostRecoverySemantic, HostRecoveryBackupUnsupported, HostRecoveryFinancialUnsupported, HostCompleteOriginRecoveryUnavailable, HostHistoricalExportIncomplete, HostGenerationArchiveIncomplete, ImportFreshOwnerRequired, ImportBinding, ImportIncomplete, ImportStorage, SyncAccessDenied, SyncInvalidRequest, SyncInterrupted, SyncReconciliationRequired, SyncInvalidResponse, SyncResourceLimit, SyncNoCurrentObservation, WalletStorage, WalletAccountScope, WalletAccountMismatch, WalletIncompleteSync, WalletUnsupportedProfile, WalletChainMismatch, WalletInsufficientFunds, WalletInvalidRequest, WalletMissingWitness, WalletInvalidNote, WalletScan, WalletTransport, ChainInvalidConfiguration, ChainWrongNetwork, ChainUnsupportedProxyConfiguration, ChainWrongBranch, ChainStaleChain, ChainContradictoryChain, ChainTimeout, ChainTransportUnavailable, ChainObservationInterrupted, ChainMissingAncestryEvidence, ChainNotObserved, ChainResourceLimit, ChainMalformedEvidence, ChainUnsupportedCapability, ChainBackendFailure, ChainClockUnavailable, ChainIdempotencyConflict, ChainJournalFailure, ChainSubmissionNotAuthorized, ChainSubmissionExpiryMargin, ChainObligationConflict, ChainSubmissionOutcomeUnrecorded, ChainSubmissionRetentionUncertain, RecoveryAccessDenied, RecoveryUnsupportedAccountComponents, RecoveryIncompleteScan, RecoveryKnownFundsRemain, RecoveryAdditionalEvidenceRequired } }
 fn emit(phase: Phase, outcome: Outcome) {
     eprintln!(
@@ -24,6 +24,18 @@ fn emit(phase: Phase, outcome: Outcome) {
         phase.label(),
         outcome.label()
     );
+}
+// Successful predicates are intentionally silent, so repeated native checks
+// cannot bury the first real denial in the bounded public diagnostic tail.
+pub(crate) fn denied_host<T>(phase: Phase, value: &crate::Result<T>) {
+    if let Err(error) = value {
+        emit(phase, host_error(error));
+    }
+}
+pub(crate) fn denied_predicate(phase: Phase, permitted: &bool) {
+    if !permitted {
+        emit(phase, Outcome::HostPermission);
+    }
 }
 pub(super) fn begin(phase: Phase) {
     emit(phase, Outcome::Begin);
@@ -183,4 +195,30 @@ fn lower_error_projection_preserves_only_closed_kinds() {
         recovery_error(&RecoveryScanError::IncompleteScan).label(),
         "RecoveryIncompleteScan"
     );
+}
+
+#[test]
+fn denial_projection_preserves_single_evaluation_and_short_circuit() {
+    let mut evaluated = Vec::new();
+    let allowed = crate::host::roster_denial!(denied_predicate, ScanAccessAccount, {
+        evaluated.push(1);
+        false
+    }) && crate::host::roster_denial!(denied_predicate, ScanNativePurpose, {
+        evaluated.push(2);
+        true
+    });
+    assert!(!allowed);
+    assert_eq!(evaluated, vec![1]);
+    let result: crate::Result<()> = crate::host::roster_denial!(denied_host, ScanAccessTarget, {
+        evaluated.push(3);
+        Err(Error::Authentication)
+    });
+    assert!(matches!(result, Err(Error::Authentication)));
+    assert_eq!(evaluated, vec![1, 3]);
+    let result = crate::host::roster_denial!(denied_host, ScanAccessTarget, {
+        evaluated.push(4);
+        Ok::<_, Error>(7)
+    });
+    assert_eq!(result.unwrap(), 7);
+    assert_eq!(evaluated, vec![1, 3, 4]);
 }

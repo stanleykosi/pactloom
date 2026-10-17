@@ -96,21 +96,46 @@ impl RosterInventoryWalletAccessV2<'_, '_> {
     }
     pub(crate) fn check_current(&self) -> Result<()> {
         if Instant::now() >= self.admission.deadline {
-            return Err(Error::Permission);
+            return crate::host::roster_denial!(
+                denied_host,
+                ScanNativeAdmissionDeadline,
+                Err(Error::Permission)
+            );
         }
-        self.lease.check_current().map_err(|_| Error::Permission)?;
+        crate::host::roster_denial!(
+            denied_host,
+            ScanNativeLease,
+            self.lease.check_current().map_err(|_| Error::Permission)
+        )?;
         self.remaining()?;
         Ok(())
     }
     pub(crate) fn remaining(&self) -> Result<std::time::Duration> {
-        remaining_before(self.admission.deadline, Instant::now())
+        crate::host::roster_denial!(
+            denied_host,
+            ScanNativeRemaining,
+            remaining_before(self.admission.deadline, Instant::now())
+        )
     }
     fn matches(&self, account: AccountUuid, provider: &BackendIdentity) -> bool {
         let approved = &self.admission.scope.inventory.provider;
-        account == self.account
-            && provider.source_id == approved.source_id
-            && provider.endpoint == approved.endpoint
-            && provider.trust_profile == approved.trust_profile
+        crate::host::roster_denial!(
+            denied_predicate,
+            ScanNativeAccount,
+            account == self.account
+        ) && crate::host::roster_denial!(
+            denied_predicate,
+            ScanNativeProviderSource,
+            provider.source_id == approved.source_id
+        ) && crate::host::roster_denial!(
+            denied_predicate,
+            ScanNativeProviderEndpoint,
+            provider.endpoint == approved.endpoint
+        ) && crate::host::roster_denial!(
+            denied_predicate,
+            ScanNativeProviderTrust,
+            provider.trust_profile == approved.trust_profile
+        )
             && self.check_current().is_ok()
     }
 }
@@ -121,7 +146,11 @@ impl LocalWalletAccess for RosterInventoryWalletAccessV2<'_, '_> {
         provider: &BackendIdentity,
         purpose: WalletAccessPurpose,
     ) -> bool {
-        inventory_purpose(purpose) && self.matches(account, provider)
+        crate::host::roster_denial!(
+            denied_predicate,
+            ScanNativePurpose,
+            inventory_purpose(purpose)
+        ) && self.matches(account, provider)
     }
 }
 
