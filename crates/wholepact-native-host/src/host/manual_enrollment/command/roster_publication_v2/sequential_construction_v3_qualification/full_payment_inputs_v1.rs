@@ -92,13 +92,18 @@ pub(super) fn exercise_full_payment_stage(terminal: Terminal) -> Result<()> {
     {
         return Err(Error::Authentication);
     }
+    let public = super::public_outcome_v1::PublicOutcomeV1::from_actual(&result)
+        .map_err(|_| Error::Storage)?;
     drop(result);
     drop(scenario);
+    // One create-only PUBLIC projection after successful actual receipt and
+    // same-scenario teardown. Parent publishes it only after verified cleanup.
+    public.write_child_once().map_err(|_| Error::Storage)?;
     Ok(())
 }
 
 #[test]
-#[ignore = "Linux native IPC is blocked; source-only full path, no retry or execution authorization"]
+#[ignore = "Explicit approved isolated Linux synthetic runner only; never a local denied-IPC retry"]
 fn actual_three_born_full_payment_uses_one_original_synthetic_path() {
     foreground_child("three-born-full-payment-v1", &inputs()).expect(
         "one original temporary synthetic full path only; not public-chain settlement or attended native acceptance",

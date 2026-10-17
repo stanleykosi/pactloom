@@ -1,0 +1,38 @@
+name: Bounded synthetic born payment (Linux)
+on:
+  push:
+    branches: [qualification/linux-native-synthetic-wip90]
+permissions:
+  contents: read
+concurrency:
+  group: qualification-linux-native-synthetic-wip90
+  cancel-in-progress: false
+jobs:
+  synthetic-only:
+    if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/qualification/linux-native-synthetic-wip90' && github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - name: Fetch exact public event commit without credentials
+        shell: bash
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+          GIT_TERMINAL_PROMPT: '0'
+          GIT_CONFIG_NOSYSTEM: '1'
+          GIT_CONFIG_GLOBAL: /dev/null
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          git init source
+          git -C source -c credential.helper= -c http.extraheader= fetch --no-tags --depth=1 https://github.com/stanleykosi/pactloom.git "$SOURCE_COMMIT"
+          git -C source checkout --detach FETCH_HEAD
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_COMMIT"
+      - name: Pinned build, exact initial test, then exact synthetic full path
+        shell: bash
+        working-directory: source
+        env:
+          CARGO_BUILD_JOBS: '3'
+          CARGO_INCREMENTAL: '0'
+          WHOLEPACT_BUILD_JOBS: '3'
+        run: bash scripts/ci-synthetic-linux.sh

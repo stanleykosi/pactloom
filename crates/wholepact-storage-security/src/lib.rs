@@ -8,6 +8,8 @@ pub mod generation_archive;
 mod read_snapshot;
 pub use database_identity::DatabaseFileIdentity;
 pub mod receipt_file;
+#[cfg(all(feature = "synthetic-qualification", target_os = "linux"))]
+pub mod synthetic_child_observation_v1;
 
 use rusqlite::{Connection, OpenFlags};
 use std::{fs, path::Path, time::Duration};

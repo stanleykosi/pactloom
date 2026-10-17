@@ -59,8 +59,17 @@ mod full_payment_joined_v1;
 #[path = "sequential_construction_v3_qualification/named_request_projection_v1.rs"]
 mod named_request_projection_v1;
 
+#[cfg(feature = "synthetic-born-joined-qualification")]
+#[path = "sequential_construction_v3_qualification/public_outcome_v1.rs"]
+mod public_outcome_v1;
+
 #[path = "sequential_construction_v3_qualification/safe_diagnostics_v1.rs"]
 mod safe_diagnostics_v1;
+
+#[path = "sequential_construction_v3_qualification/owned_test_process_group_v1.rs"]
+mod owned_test_process_group_v1;
+#[path = "sequential_construction_v3_qualification/process_containment_v1.rs"]
+mod process_containment_v1;
 
 const CHILD: &str = "host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification::synthetic_foreground_child";
 const CHILD_ENV: &str = "WHOLEPACT_TEST_ONLY_ROSTER_FOREGROUND_STAGE";
@@ -76,7 +85,30 @@ enum Input<'a> {
 
 const CHILD_TEMPORARY_PREFIX: &str = "wp-pty-";
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TemporaryRootCleanupV1 {
+    ClosedAndAbsenceVerified,
+    RetainedForUnverifiedProcess,
+    CloseOrAbsenceUnverified,
+}
+fn close_owned_temporary_root(root: tempfile::TempDir) -> TemporaryRootCleanupV1 {
+    // Exact owned path only; never enumerate/read artifacts or print the path.
+    // Filesystem deletion is checked, but is not a preemptible wall-clock bound.
+    let exact_path = root.path().to_path_buf();
+    let closed = root.close().is_ok();
+    let absent = matches!(
+        std::fs::symlink_metadata(&exact_path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+    );
+    if closed && absent {
+        TemporaryRootCleanupV1::ClosedAndAbsenceVerified
+    } else {
+        TemporaryRootCleanupV1::CloseOrAbsenceUnverified
+    }
+}
+
 fn foreground_child(stage: &str, inputs: &[Input<'_>]) -> std::io::Result<()> {
+    process_containment_v1::require_and_report_core_policy()?;
     // This creates a temporary terminal, not an OS trust root or permission
     // override. The child still passes the actual foreground() implementation.
     let master_fd = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC) };
@@ -97,47 +129,99 @@ fn foreground_child(stage: &str, inputs: &[Input<'_>]) -> std::io::Result<()> {
         .read(true)
         .write(true)
         .open(std::ffi::OsStr::from_bytes(slave_name.to_bytes()))?;
-    // Parent retains this root through kill+reap. Child-owned TempDirs cannot
-    // run Drop after SIGKILL; this outer owner removes all synthetic secrets and
-    // journals on timeout as well as success. TMPDIR affects only allocation in
-    // the isolated test process, never a production namespace trust root.
-    let child_temporary_root = tempfile::Builder::new()
-        .prefix(CHILD_TEMPORARY_PREFIX)
-        .permissions(std::fs::Permissions::from_mode(0o700))
-        .tempdir()?;
-    let tls_material =
-        synthetic_provider_tls_v1::ChildTlsMaterialV1::prepare(child_temporary_root.path())?;
-    let mut command = Command::new(std::env::current_exe()?);
-    tls_material.configure_child(&mut command);
-    command
-        .args([
-            "--exact",
-            CHILD,
-            "--ignored",
-            "--nocapture",
-            "--test-threads=1",
-        ])
-        .env(CHILD_ENV, stage)
-        .env("TMPDIR", child_temporary_root.path())
-        .env_remove("DISPLAY")
-        .env_remove("WAYLAND_DISPLAY")
-        .stdin(Stdio::from(slave.try_clone()?))
-        .stdout(Stdio::from(slave.try_clone()?))
-        .stderr(Stdio::from(slave));
-    unsafe {
-        command.pre_exec(|| {
-            // Only the new child changes session membership. No parent's TTY,
-            // foreground group or persistent system setting is changed.
-            if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY, 0) < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            if libc::tcsetpgrp(0, libc::getpgrp()) < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
+    // Parent owns the exact synthetic root through process cleanup. It closes
+    // and checks absence only after direct-child reap plus owned-group absence;
+    // an uncertain process outcome retains the root without publishing its path.
+    // TMPDIR changes allocation only in this isolated test process.
+    let child_temporary_root = owned_test_process_group_v1::PreSpawnTemporaryRootV1::new(
+        tempfile::Builder::new()
+            .prefix(CHILD_TEMPORARY_PREFIX)
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()?,
+    );
+    // TLS preparation also spawns OpenSSL. Require a preserving default
+    // SIGCHLD disposition before any fixture child creation, without changing it.
+    // This exact test invocation must have no competing waiter or policy writer.
+    if let Err(error) = owned_test_process_group_v1::require_default_child_wait_policy() {
+        let _ = child_temporary_root.keep();
+        return Err(std::io::Error::new(
+            error.kind(),
+            "synthetic child wait policy unverified; no fixture child started; owned root retained",
+        ));
     }
-    let mut child = command.spawn()?;
+    let tls_material =
+        match synthetic_provider_tls_v1::ChildTlsMaterialV1::prepare(child_temporary_root.path()) {
+            Ok(material) => material,
+            Err(error) => {
+                // Preparation uses exact bounded direct-child cleanup. Every error
+                // still retains this root, without promoting uncertain cleanup.
+                let _ = child_temporary_root.keep();
+                return Err(std::io::Error::new(
+                    error.kind(),
+                    "synthetic TLS preparation failed; cleanup unverified; owned root retained",
+                ));
+            }
+        };
+    let prepared_command = (|| -> std::io::Result<Command> {
+        let mut command = Command::new(std::env::current_exe()?);
+        tls_material.configure_child(&mut command);
+        command
+            .args([
+                "--exact",
+                CHILD,
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD_ENV, stage)
+            .env("TMPDIR", child_temporary_root.path())
+            .env_remove("DISPLAY")
+            .env_remove("WAYLAND_DISPLAY")
+            .stdin(Stdio::from(slave.try_clone()?))
+            .stdout(Stdio::from(slave.try_clone()?))
+            .stderr(Stdio::from(slave));
+        unsafe {
+            command.pre_exec(|| {
+                // Only the new child changes session membership. No parent's TTY,
+                // foreground group or persistent system setting is changed.
+                if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::tcsetpgrp(0, libc::getpgrp()) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        Ok(command)
+    })();
+    let mut command = match prepared_command {
+        Ok(command) => command,
+        Err(error) => {
+            // TLS preparation completed and no main child spawn was attempted.
+            let cleanup = close_owned_temporary_root(child_temporary_root.into_tempdir());
+            return Err(std::io::Error::new(
+                error.kind(),
+                format!("synthetic child command preparation failed; root_cleanup={cleanup:?}"),
+            ));
+        }
+    };
+    let spawned = match owned_test_process_group_v1::spawn_with_checked_wait_policy(&mut command) {
+        Ok(child) => child,
+        Err(error) => {
+            // No Child handle is available to demonstrate ownership/reap. Do
+            // not turn an ambiguous launch failure into root-removal evidence.
+            let _ = child_temporary_root.keep();
+            return Err(std::io::Error::new(
+                error.kind(),
+                "synthetic child spawn failed; cleanup unverified; owned root retained",
+            ));
+        }
+    };
+    let mut child = owned_test_process_group_v1::OwnedTestProcessGroupV1::from_spawned_session(
+        spawned,
+        child_temporary_root.into_tempdir(),
+    );
     let safety_seconds = if matches!(
         stage,
         "three-born-retained-inputs-v3"
@@ -153,10 +237,24 @@ fn foreground_child(stage: &str, inputs: &[Input<'_>]) -> std::io::Result<()> {
     let mut transcript = zeroize::Zeroizing::new(Vec::new());
     let mut next = 0;
     let mut consumed = 0;
-    let outcome = (|| {
+    #[allow(unused_mut)] // Mutation only for the synthetic public-sidecar check.
+    let mut outcome = (|| {
         loop {
-            if let Some(status) = child.try_wait()? {
-                if status.success() && next == inputs.len() {
+            if Instant::now() >= deadline {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "synthetic foreground stage exceeded its original deadline",
+                ));
+            }
+            if let Some(success) = child.observe_exit()? {
+                if success && next == inputs.len() {
+                    // Observation/cleanup grace cannot renew the original stage.
+                    if Instant::now() >= deadline {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "synthetic foreground success observed after original deadline",
+                        ));
+                    }
                     return Ok(());
                 }
                 // Child exit can precede our final PTY read. Drain only already
@@ -182,12 +280,6 @@ fn foreground_child(stage: &str, inputs: &[Input<'_>]) -> std::io::Result<()> {
                     transcript.extend_from_slice(&chunk[..length]);
                 }
                 return Err(std::io::Error::other("synthetic foreground child failed"));
-            }
-            if Instant::now() >= deadline {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "synthetic foreground stage exceeded its original deadline",
-                ));
             }
             let mut descriptor = libc::pollfd {
                 fd: master.as_raw_fd(),
@@ -246,7 +338,7 @@ fn foreground_child(stage: &str, inputs: &[Input<'_>]) -> std::io::Result<()> {
                     };
                     let path = path.trim_end_matches('\r');
                     if !std::path::Path::new(path).is_absolute()
-                        || !std::path::Path::new(path).starts_with(child_temporary_root.path())
+                        || !std::path::Path::new(path).starts_with(child.temporary_root())
                         || path.contains(['\r', '\n'])
                     {
                         return Err(std::io::Error::other("invalid temporary path marker"));
@@ -293,19 +385,109 @@ fn foreground_child(stage: &str, inputs: &[Input<'_>]) -> std::io::Result<()> {
             next += 1;
         }
     })();
-    // Always reap. Timeout/error is not evidence of cancellation of an admitted
-    // financial operation; this harness stage performs none.
-    if outcome.is_err() {
-        let _ = child.kill();
+    // Cleanup never converts an uncertain operation into cancelled/absent work.
+    // Exactly one anchored group signal precedes the exact direct-child reap.
+    let finished = child.finish();
+    let process = finished.process;
+    // Read only the fixed PUBLIC sidecar, after exact direct-child reap and
+    // original group absence. A failed/timed-out child never promotes its file.
+    // Save validation failure, then still explicitly close the actual root.
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    let public_json =
+        if stage == "three-born-full-payment-v1" && outcome.is_ok() && process.verified() {
+            let parsed = finished
+                .root_for_explicit_close
+                .as_ref()
+                .ok_or_else(|| std::io::Error::other("synthetic public outcome root unavailable"))
+                .and_then(|root| public_outcome_v1::read_after_reap(root.path()))
+                .and_then(|record| record.public_json());
+            match parsed {
+                Ok(json) => Some(json),
+                Err(_) => {
+                    outcome = Err(std::io::Error::other(
+                        "synthetic public outcome missing or invalid; private details withheld",
+                    ));
+                    None
+                }
+            }
+        } else {
+            None
+        };
+    let root_cleanup = match finished.root_for_explicit_close {
+        Some(root) => close_owned_temporary_root(root),
+        None => TemporaryRootCleanupV1::RetainedForUnverifiedProcess,
+    };
+    // Closed enum labels and numeric status only, after process cleanup and
+    // explicit close/absence observation when allowed. Unverified stays explicit.
+    eprintln!(
+        "[JOINED_CLEANUP group_signal={:?} group_absence={:?} direct_child={:?} root_cleanup={:?} exit={:?} signal={:?} core_dumped={}]",
+        process.group_signal,
+        process.group_absence,
+        process.direct_child,
+        root_cleanup,
+        process.status.as_ref().and_then(|status| status.code()),
+        process.status.as_ref().and_then(|status| status.signal()),
+        process
+            .status
+            .as_ref()
+            .is_some_and(|status| status.core_dumped()),
+    );
+    if outcome.is_err()
+        || !process.verified()
+        || root_cleanup != TemporaryRootCleanupV1::ClosedAndAbsenceVerified
+    {
+        // Portable evidence extraction must never print a panic or raw PTY log.
+        // The projection reparses only closed labels and canonical numeric errno.
+        eprintln!(
+            "[JOINED_FAILURE exit={:?} signal={:?} core_dumped={} inputs={}/{} static_boundaries={}]",
+            process.status.as_ref().and_then(|status| status.code()),
+            process.status.as_ref().and_then(|status| status.signal()),
+            process
+                .status
+                .as_ref()
+                .is_some_and(|status| status.core_dumped()),
+            next,
+            inputs.len(),
+            safe_diagnostics_v1::summary(&transcript),
+        );
     }
-    let status = child.wait().ok();
+    if !process.verified() || root_cleanup != TemporaryRootCleanupV1::ClosedAndAbsenceVerified {
+        let kind = outcome
+            .as_ref()
+            .err()
+            .map_or(std::io::ErrorKind::Other, |error| error.kind());
+        return Err(std::io::Error::new(
+            kind,
+            format!(
+                "synthetic foreground cleanup unverified; private transcript withheld; group_signal={:?}; group_absence={:?}; direct_child={:?}; root_cleanup={:?}; exit={:?}; signal={:?}; core_dumped={}",
+                process.group_signal,
+                process.group_absence,
+                process.direct_child,
+                root_cleanup,
+                process.status.as_ref().and_then(|status| status.code()),
+                process.status.as_ref().and_then(|status| status.signal()),
+                process
+                    .status
+                    .as_ref()
+                    .is_some_and(|status| status.core_dumped()),
+            ),
+        ));
+    }
+    let status = process.status;
     outcome.map_err(|error| std::io::Error::new(error.kind(), format!(
         "synthetic foreground child failed; private transcript withheld; exit={:?}; signal={:?}; core_dumped={}; inputs={}/{}; static_boundaries={}",
         status.as_ref().and_then(|status| status.code()),
         status.as_ref().and_then(|status| status.signal()),
         status.as_ref().is_some_and(|status| status.core_dumped()),
         next, inputs.len(), safe_diagnostics_v1::summary(&transcript),
-    )))
+    )))?;
+    // This is the only public outcome emission. The actual computation, exact
+    // owned-process cleanup and explicit root close/absence have all succeeded.
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    if let Some(json) = public_json {
+        eprintln!("{}{}", public_outcome_v1::PUBLIC_MARKER, json);
+    }
+    Ok(())
 }
 
 #[test]
@@ -329,6 +511,8 @@ fn actual_host_public_refusal_and_foreground_review_controller() {
 #[test]
 #[ignore = "invoked only by the bounded controlling-PTY parent above"]
 fn synthetic_foreground_child() {
+    process_containment_v1::require_and_report_core_policy()
+        .expect("inherited zero core limit and read-only collector classification");
     let stage = std::env::var(CHILD_ENV).expect("bounded synthetic parent stage");
     let _synthetic_tls = synthetic_provider_tls_v1::child_server_config()
         .expect("owned test-process TLS identity, not chain qualification");

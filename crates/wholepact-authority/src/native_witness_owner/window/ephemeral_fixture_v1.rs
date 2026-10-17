@@ -11,7 +11,6 @@ use std::{
     net::TcpListener,
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
     sync::{
         Arc, Mutex, TryLockError,
         atomic::{AtomicBool, Ordering},
@@ -39,6 +38,8 @@ pub use born_offline_v1::{EphemeralBornTransportKeyV1, EphemeralBornTransportPub
 mod construction_client_scope_v1;
 #[path = "ephemeral_fixture_v1/single_anchor_v1.rs"]
 mod single_anchor_v1;
+#[path = "ephemeral_fixture_v1/tls_child_v1.rs"]
+mod tls_child_v1;
 pub use construction_client_scope_v1::EphemeralConstructionClientScopeV1;
 pub(crate) use construction_client_scope_v1::RetainedConstructionFixtureLivenessV1;
 
@@ -104,7 +105,7 @@ impl EphemeralNativeWitnessV1 {
             .parent()
             .ok_or(AuthorityError::Storage)?
             .to_path_buf();
-        create_tls_material(&root)?;
+        create_tls_material(&root, &installation)?;
         let ca = CertificateDer::from(
             fs::read(root.join("ca.der")).map_err(|_| AuthorityError::Storage)?,
         );
@@ -595,22 +596,16 @@ fn text_position(shape: &egui::epaint::Shape, label: &str) -> Option<egui::Pos2>
         _ => None,
     }
 }
-fn create_tls_material(root: &Path) -> Result<()> {
+fn create_tls_material(
+    root: &Path,
+    installation: &Arc<EphemeralWitnessInstallation>,
+) -> Result<()> {
+    // Fixed once before any birth/native financial approval, never per command.
+    let deadline = Instant::now()
+        .checked_add(std::time::Duration::from_secs(30))
+        .ok_or(AuthorityError::Expired)?;
     let run = |arguments: &[&str]| -> Result<()> {
-        if Command::new("openssl")
-            .current_dir(root)
-            .args(arguments)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map_err(|_| AuthorityError::Storage)?
-            .success()
-        {
-            Ok(())
-        } else {
-            Err(AuthorityError::Authentication)
-        }
+        tls_child_v1::run_openssl(root, installation, arguments, deadline)
     };
     run(&[
         "req",

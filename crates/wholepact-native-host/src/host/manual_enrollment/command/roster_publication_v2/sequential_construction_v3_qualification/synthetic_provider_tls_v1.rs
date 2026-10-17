@@ -14,6 +14,9 @@ use tokio_rustls::rustls::{
     pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
 };
 
+#[path = "owned_tls_child_v1.rs"]
+mod owned_tls_child_v1;
+
 const DIRECTORY: &str = "synthetic-provider-tls-v1";
 
 pub(super) struct ChildTlsMaterialV1 {
@@ -23,81 +26,96 @@ impl ChildTlsMaterialV1 {
     /// Caller is the same parent that has just created its fresh private
     /// TempDir. It retains that TempDir through kill/reap even on failure.
     pub(super) fn prepare(parent: &Path) -> io::Result<Self> {
+        // One original preparation budget covers all four sequential commands.
+        // Each command may only consume its remainder; cleanup has separate grace.
+        let deadline = Instant::now() + Duration::from_secs(20);
         require_private_directory(parent)?;
         let directory = parent.join(DIRECTORY);
         fs::create_dir(&directory)?;
         fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
         let material = Self { directory };
-        material.run(&[
-            "req",
-            "-x509",
-            "-newkey",
-            "ec",
-            "-pkeyopt",
-            "ec_paramgen_curve:P-256",
-            "-sha256",
-            "-days",
-            "1",
-            "-nodes",
-            "-subj",
-            "/CN=wholepact-synthetic-public-block-root",
-            "-addext",
-            "basicConstraints=critical,CA:TRUE",
-            "-addext",
-            "keyUsage=critical,keyCertSign,cRLSign",
-            "-keyout",
-            "ca.key",
-            "-out",
-            "ca.pem",
-        ])?;
-        material.run(&[
-            "req",
-            "-new",
-            "-newkey",
-            "ec",
-            "-pkeyopt",
-            "ec_paramgen_curve:P-256",
-            "-sha256",
-            "-nodes",
-            "-subj",
-            "/CN=127.0.0.1",
-            "-keyout",
-            "server.key",
-            "-out",
-            "server.csr",
-        ])?;
+        material.run(
+            deadline,
+            &[
+                "req",
+                "-x509",
+                "-newkey",
+                "ec",
+                "-pkeyopt",
+                "ec_paramgen_curve:P-256",
+                "-sha256",
+                "-days",
+                "1",
+                "-nodes",
+                "-subj",
+                "/CN=wholepact-synthetic-public-block-root",
+                "-addext",
+                "basicConstraints=critical,CA:TRUE",
+                "-addext",
+                "keyUsage=critical,keyCertSign,cRLSign",
+                "-keyout",
+                "ca.key",
+                "-out",
+                "ca.pem",
+            ],
+        )?;
+        material.run(
+            deadline,
+            &[
+                "req",
+                "-new",
+                "-newkey",
+                "ec",
+                "-pkeyopt",
+                "ec_paramgen_curve:P-256",
+                "-sha256",
+                "-nodes",
+                "-subj",
+                "/CN=127.0.0.1",
+                "-keyout",
+                "server.key",
+                "-out",
+                "server.csr",
+            ],
+        )?;
         fs::write(material.directory.join("server.ext"), b"basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\nsubjectAltName=IP:127.0.0.1\n")?;
-        material.run(&[
-            "x509",
-            "-req",
-            "-in",
-            "server.csr",
-            "-CA",
-            "ca.pem",
-            "-CAkey",
-            "ca.key",
-            "-CAcreateserial",
-            "-days",
-            "1",
-            "-sha256",
-            "-extfile",
-            "server.ext",
-            "-outform",
-            "DER",
-            "-out",
-            "server.der",
-        ])?;
-        material.run(&[
-            "pkcs8",
-            "-topk8",
-            "-nocrypt",
-            "-in",
-            "server.key",
-            "-outform",
-            "DER",
-            "-out",
-            "server.pk8",
-        ])?;
+        material.run(
+            deadline,
+            &[
+                "x509",
+                "-req",
+                "-in",
+                "server.csr",
+                "-CA",
+                "ca.pem",
+                "-CAkey",
+                "ca.key",
+                "-CAcreateserial",
+                "-days",
+                "1",
+                "-sha256",
+                "-extfile",
+                "server.ext",
+                "-outform",
+                "DER",
+                "-out",
+                "server.der",
+            ],
+        )?;
+        material.run(
+            deadline,
+            &[
+                "pkcs8",
+                "-topk8",
+                "-nocrypt",
+                "-in",
+                "server.key",
+                "-outform",
+                "DER",
+                "-out",
+                "server.pk8",
+            ],
+        )?;
         for entry in fs::read_dir(&material.directory)? {
             let path = entry?.path();
             if !fs::symlink_metadata(&path)?.is_file() {
@@ -129,41 +147,15 @@ impl ChildTlsMaterialV1 {
         }
     }
 
-    fn run(&self, arguments: &[&str]) -> io::Result<()> {
-        let mut child = Command::new("openssl")
+    fn run(&self, deadline: Instant, arguments: &[&str]) -> io::Result<()> {
+        let mut command = Command::new("openssl");
+        command
             .current_dir(&self.directory)
             .args(arguments)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()?;
-        let deadline = Instant::now() + Duration::from_secs(20);
-        loop {
-            let status = match child.try_wait() {
-                Ok(status) => status,
-                Err(error) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(error);
-                }
-            };
-            if let Some(status) = status {
-                return if status.success() {
-                    Ok(())
-                } else {
-                    Err(io::Error::other("synthetic TLS material generation failed"))
-                };
-            }
-            if Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "synthetic TLS generation deadline",
-                ));
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
+            .stderr(Stdio::null());
+        owned_tls_child_v1::run(command, deadline)
     }
 }
 
