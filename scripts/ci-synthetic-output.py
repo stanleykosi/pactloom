@@ -82,6 +82,14 @@ SIGNER_BOOKKEEPING_TESTS = (
     'account::birth::enrollment::roster_v2::inventory::tests::challenge_bookkeeping_requires_successful_checked_send_first',
     'account::birth::enrollment::roster_v2::inventory::candidate::tests::candidate_nonce_is_retained_only_after_fully_checked_send_success',
 )
+SIGNER_PRECONSTRUCTION_TESTS = tuple(
+    'account::birth::enrollment::roster_v2::continuation::preconstruction::tests::' + name
+    for name in (
+        'approval_history_keeps_original_attempt_and_legacy_refusal',
+        'exposure_and_tampered_approval_history_remain_refused',
+        'approval_cannot_cross_enrollment_or_original_attempt',
+    )
+)
 MARKER = 'WHOLEPACT_SYNTHETIC_PUBLIC_OUTCOME_V1='
 CORE = re.compile(r'\[JOINED_CORE_POLICY inherited_limit=Zero collector=(File|Pipe|Unknown) process_dumpability=Unchanged crash_copy_absence_verified=false\]')
 OPTION_INT = r'(?:None|Some\((?:0|[1-9][0-9]{0,9})\))'
@@ -204,14 +212,15 @@ def run_pure(executable):
 
 def run_signer_validation(executable):
     assert resource.getrlimit(resource.RLIMIT_CORE)[0] == 0
-    for name in SIGNER_VALIDATION_TESTS + SIGNER_BOOKKEEPING_TESTS:
+    for name in SIGNER_VALIDATION_TESTS + SIGNER_BOOKKEEPING_TESTS + SIGNER_PRECONSTRUCTION_TESTS:
         flags=['--exact',name,'--test-threads=1']
         try:
             listed=subprocess.run([executable,*flags,'--list'],capture_output=True,timeout=30,check=True)
             if not exact_listing(listed.stdout.decode(),name) or listed.stderr:
                 raise ValueError('exact signer validation test not uniquely registered')
-            # Four actual BIP39/ZIP32/encrypted-file cases plus two inert nonce
-            # bookkeeping cases. No native authority, IPC or payment owner. Raw
+            # Four actual BIP39/ZIP32/encrypted-file cases, two inert nonce
+            # bookkeeping cases and three authenticated historical replay cases.
+            # No native authority, IPC or payment owner. Raw
             # output stays private; this size check is post-capture, not a claim
             # of an incremental memory cap. Each fixed case has its own bound.
             result=subprocess.run([executable,*flags],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=120)
@@ -220,7 +229,7 @@ def run_signer_validation(executable):
         except Exception:
             print('CI_SYNTHETIC_SIGNER_VALIDATION failed_test='+name+' raw_output_withheld=true',flush=True)
             raise
-    print('CI_SYNTHETIC_SIGNER_VALIDATION passed=6 crypto_file_cases=4 bookkeeping_cases=2 native_payment_verified=false raw_output_discarded=true',flush=True)
+    print('CI_SYNTHETIC_SIGNER_VALIDATION passed=9 crypto_file_cases=4 bookkeeping_cases=2 replay_cases=3 native_payment_verified=false raw_output_discarded=true',flush=True)
 
 def run_authority_rendering(executable):
     assert resource.getrlimit(resource.RLIMIT_CORE)[0] == 0

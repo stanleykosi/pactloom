@@ -13,6 +13,8 @@ use wholepact_authority::manual_roster_witness_v2::{
     ManualRosterSessionContinuationV2,
 };
 
+mod preconstruction;
+
 pub(crate) const MAX_LOCAL_PROPOSALS: usize = 32;
 const PREFIX: &str = "born-manual-roster-continuation-v2-";
 const MAX_RECORD: usize = 256 * 1024;
@@ -537,9 +539,7 @@ impl PreparedContinuationProposal {
         {
             return Err(Error::RecoveryRequired);
         }
-        history
-            .require_legacy_online_only()
-            .map_err(|_| Error::Unavailable)?;
+        preconstruction::require_original(&retained, history)?;
         let extension = retained.record.extension()?;
         let observation: ManualRosterAttemptObservationV2 = history
             .latest_manual_roster_attempt_v2(&extension.account_extension.enrollment_ref)
