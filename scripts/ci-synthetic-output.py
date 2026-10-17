@@ -71,6 +71,14 @@ AUTHORITY_RENDERER_TESTS = (
     'native_witness_owner::window::ephemeral_fixture_v1::public_control_navigation_v1::tests::same_parent_scroll_areas_use_distinct_stable_production_ids',
     'native_witness_owner::window::ephemeral_fixture_v1::public_control_navigation_v1::tests::qualified_area_requires_sizing_then_actual_focused_primary_click',
 )
+AUTHORITY_VALIDATION_TESTS = ('manual_roster_construction_v3::validation_reuse_tests::call_local_validation_preserves_complete_records_and_canonical_identifiers', 'manual_roster_construction_v3::validation_reuse_tests::call_local_validation_rejects_substituted_plan_extension_attempt_and_amounts', 'manual_roster_construction_v3::validation_reuse_tests::call_local_validation_keeps_every_consume_join_and_revalidates_each_call')
+SIGNER_LINEAGE_PREDICATE_TESTS = tuple(
+    'native_ui::born_manual_roster_v2::common_context_reentry::lineage_comparison_tests::' + name
+    for name in (
+        'exact_lineage_comparison_refuses_another_well_formed_digest',
+        'same_call_lineage_probe_preserves_both_sentinel_originals',
+    )
+)
 STORAGE_BOOTSTRAP_TEST = 'recovery_generation::layered::tests::native_layered_current_eight_nine_parent_provenance_is_exact_and_not_relabelable'
 SIGNER_VALIDATION_TESTS = (
     'account::birth::retired_historical_tests::birth_identity_one_derivation_preserves_both_original_commitments',
@@ -272,7 +280,7 @@ def run_pure(executable):
 
 def run_signer_validation(executable):
     assert resource.getrlimit(resource.RLIMIT_CORE)[0] == 0
-    for name in SIGNER_VALIDATION_TESTS + SIGNER_BOOKKEEPING_TESTS + SIGNER_PRECONSTRUCTION_TESTS + SIGNER_BIRTH_LINK_TESTS + SIGNER_ENDPOINT_CHANNEL_TESTS + SIGNER_SNAPSHOT_STORAGE_TESTS + SIGNER_SHAPE_TAMPER_TESTS + SIGNER_REENTRY_COMPATIBILITY_TESTS + SIGNER_CALL_LOCAL_TESTS + SIGNER_AUDIT_STORAGE_TESTS + SIGNER_AUDIT_COMPATIBILITY_TESTS + SIGNER_NAMED_ORIGIN_SNAPSHOT_TESTS:
+    for name in SIGNER_VALIDATION_TESTS + SIGNER_BOOKKEEPING_TESTS + SIGNER_PRECONSTRUCTION_TESTS + SIGNER_BIRTH_LINK_TESTS + SIGNER_ENDPOINT_CHANNEL_TESTS + SIGNER_SNAPSHOT_STORAGE_TESTS + SIGNER_SHAPE_TAMPER_TESTS + SIGNER_REENTRY_COMPATIBILITY_TESTS + SIGNER_CALL_LOCAL_TESTS + SIGNER_AUDIT_STORAGE_TESTS + SIGNER_AUDIT_COMPATIBILITY_TESTS + SIGNER_NAMED_ORIGIN_SNAPSHOT_TESTS + SIGNER_LINEAGE_PREDICATE_TESTS:
         flags=['--exact',name,'--test-threads=1']
         try:
             listed=subprocess.run([executable,*flags,'--list'],capture_output=True,timeout=30,check=True)
@@ -285,7 +293,7 @@ def run_signer_validation(executable):
             # one pure shape-tamper case and three archival/storage compatibility
             # cases, two call-local validation cases, one encrypted saved-digest
             # case, two signed-history audit compatibility cases and three encrypted
-            # named-origin snapshot cases. No socket,
+            # named-origin snapshot cases and two inert lineage equality cases. No socket,
             # native authority or payment owner. Raw
             # output stays private; this size check is post-capture, not a claim
             # of an incremental memory cap. Each fixed case has its own bound.
@@ -295,7 +303,7 @@ def run_signer_validation(executable):
         except Exception:
             print('CI_SYNTHETIC_SIGNER_VALIDATION failed_test='+name+' raw_output_withheld=true',flush=True)
             raise
-    print('CI_SYNTHETIC_SIGNER_VALIDATION passed=30 crypto_file_cases=4 bookkeeping_cases=2 replay_cases=6 endpoint_channel_cases=4 snapshot_storage_cases=2 shape_tamper_cases=1 compatibility_cases=3 call_local_cases=2 audit_storage_cases=1 audit_compatibility_cases=2 named_origin_snapshot_cases=3 native_payment_verified=false raw_output_discarded=true',flush=True)
+    print('CI_SYNTHETIC_SIGNER_VALIDATION passed=32 crypto_file_cases=4 bookkeeping_cases=2 replay_cases=6 endpoint_channel_cases=4 snapshot_storage_cases=2 shape_tamper_cases=1 compatibility_cases=3 call_local_cases=2 audit_storage_cases=1 audit_compatibility_cases=2 named_origin_snapshot_cases=3 lineage_predicate_cases=2 native_payment_verified=false raw_output_discarded=true',flush=True)
 
 def run_authority_rendering(executable):
     assert resource.getrlimit(resource.RLIMIT_CORE)[0] == 0
@@ -316,6 +324,26 @@ def run_authority_rendering(executable):
             print('CI_SYNTHETIC_AUTHORITY_RENDERER failed_test='+name+' raw_output_withheld=true',flush=True)
             raise
     print('CI_SYNTHETIC_AUTHORITY_RENDERER passed=6 native_payment_verified=false attended_gui_verified=false raw_output_discarded=true',flush=True)
+
+def run_authority_validation(executable):
+    assert resource.getrlimit(resource.RLIMIT_CORE)[0] == 0
+    for name in AUTHORITY_VALIDATION_TESTS:
+        flags=['--exact',name,'--test-threads=1']
+        try:
+            listed=subprocess.run([executable,*flags,'--list'],capture_output=True,timeout=30,check=True)
+            if not exact_listing(listed.stdout.decode(),name) or listed.stderr:
+                raise ValueError('exact authority validation test not uniquely registered')
+            # Three immutable validation/equivalence cases replay an existing
+            # public signed fixture. No key, process, wallet, native/IPC owner or
+            # payment is created. These are not renderer or attended GUI cases.
+            # Raw output stays private. The size bound is post-capture only.
+            result=subprocess.run([executable,*flags],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=120)
+            if result.returncode!=0 or len(result.stdout)>1024*1024:
+                raise RuntimeError('exact authority validation regression failed')
+        except Exception:
+            print('CI_SYNTHETIC_AUTHORITY_VALIDATION failed_test='+name+' raw_output_withheld=true',flush=True)
+            raise
+    print('CI_SYNTHETIC_AUTHORITY_VALIDATION passed=3 immutable_replay_cases=3 native_payment_verified=false raw_output_discarded=true',flush=True)
 
 def run_storage_bootstrap(executable):
     assert resource.getrlimit(resource.RLIMIT_CORE)[0] == 0
@@ -400,7 +428,9 @@ if __name__=='__main__':
         assert exe.is_file() and exe.is_relative_to(pathlib.Path(os.environ['CARGO_TARGET_DIR']).resolve(strict=True))
         if sys.argv[2]=='pure': run_pure(str(exe))
         elif sys.argv[2]=='signer-validation': run_signer_validation(str(exe))
-        elif sys.argv[2]=='authority-rendering': run_authority_rendering(str(exe))
+        elif sys.argv[2]=='authority-rendering':
+            run_authority_rendering(str(exe))
+            run_authority_validation(str(exe))
         elif sys.argv[2]=='storage-bootstrap': run_storage_bootstrap(str(exe))
         else: run(str(exe),sys.argv[2])
     except Exception:

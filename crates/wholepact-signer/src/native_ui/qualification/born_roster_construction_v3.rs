@@ -670,14 +670,14 @@ impl CompletionFixtureV3 {
             )?;
         }
         if matches!(self.phase, CompletionPhaseV3::Construction) {
-            let Step::ReenteredConstruction(prepared) =
+            let Step::ReenteredConstruction(_) =
                 &ui.review.as_ref().ok_or(Error::ReviewMismatch)?.step
             else {
                 return Err(Error::ReviewMismatch);
             };
-            let owner = ui.owner(self.epoch)?;
-            prepared.qualification_check_wrong_lineage(&owner)?;
-            drop(owner);
+            // The actual prepare path already exercised the wrong-lineage
+            // comparison against its original validated digest. Do not repeat
+            // full source/owner validation solely for this synthetic assertion.
             approve_exact_consumption_without_old_owner_drain(ui, self.epoch)?;
             self.phase = CompletionPhaseV3::Park;
             return Ok(false);

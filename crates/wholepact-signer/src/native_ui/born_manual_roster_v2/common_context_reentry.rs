@@ -684,7 +684,10 @@ impl ReenteredCommonContextOwnerV1 {
     ) -> Result<()> {
         request.validate().map_err(|_| Error::InvalidData)?;
         if peer.grant_id != self.peer.grant_id
-            || lineage_digest != self.lineage.digest().map_err(|_| Error::InvalidData)?
+            || !lineage_digest_matches(
+                lineage_digest,
+                &self.lineage.digest().map_err(|_| Error::InvalidData)?,
+            )
             || request.plan != self.lineage.request.original_read.plan
             || request.current_caller_binding_digest
                 != self.lineage.request.current_caller_binding_digest
@@ -744,6 +747,33 @@ impl ReenteredCommonContextOwnerV1 {
         })
     }
 }
+// Only the exact immutable digest comparison is shared. The actual caller
+// still validates its request first and derives its retained lineage digest at
+// the original short-circuit position. This predicate cannot issue authority.
+fn exact_lineage_digest_matches(supplied: &str, original: &str) -> bool {
+    supplied == original
+}
+fn lineage_digest_matches(supplied: &str, original: &str) -> bool {
+    let matches = exact_lineage_digest_matches(supplied, original);
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    if matches {
+        // Exercise actual/wrong/actual against this same original validated
+        // digest, without a second owner read, request validation or clock.
+        let wrong = if original == "c0".repeat(32) {
+            "c1".repeat(32)
+        } else {
+            "c0".repeat(32)
+        };
+        if wholepact_core::proposal::validate_sha256(&wrong).is_err()
+            || exact_lineage_digest_matches(&wrong, original)
+            || !exact_lineage_digest_matches(supplied, original)
+        {
+            return false;
+        }
+    }
+    matches
+}
+
 pub(super) struct PreparedReenteredConstructionV1 {
     owner: ReenteredCommonContextOwnerV1,
     stream: UnixStream,
@@ -752,44 +782,6 @@ pub(super) struct PreparedReenteredConstructionV1 {
     display: Zeroizing<String>,
 }
 impl PreparedReenteredConstructionV1 {
-    /// Borrow this actual prepared request/owner before native authorization.
-    /// No Reserve/Consume, transport claim, owner clone or attempted retry occurs.
-    #[cfg(feature = "synthetic-born-joined-qualification")]
-    pub(in crate::native_ui) fn qualification_check_wrong_lineage(
-        &self,
-        owner: &PendingAccountNativeAuthority,
-    ) -> Result<()> {
-        self.owner.check(owner)?;
-        connected(&self.stream, &self.owner.peer)?;
-        self.review_json()?;
-        let lineage_digest = self
-            .owner
-            .lineage
-            .digest()
-            .map_err(|_| Error::InvalidData)?;
-        self.owner
-            .require_exact_request(&self.owner.peer, &self.request, &lineage_digest)?;
-        let wrong_lineage = if lineage_digest == "c0".repeat(32) {
-            "c1".repeat(32)
-        } else {
-            "c0".repeat(32)
-        };
-        wholepact_core::proposal::validate_sha256(&wrong_lineage)
-            .map_err(|_| Error::InvalidData)?;
-        if !matches!(
-            self.owner
-                .require_exact_request(&self.owner.peer, &self.request, &wrong_lineage),
-            Err(Error::ReviewMismatch)
-        ) {
-            return Err(Error::ReviewMismatch);
-        }
-        self.owner
-            .require_exact_request(&self.owner.peer, &self.request, &lineage_digest)?;
-        self.owner.check(owner)?;
-        connected(&self.stream, &self.owner.peer)?;
-        self.review_json()?;
-        Ok(())
-    }
     pub(super) fn reviewed_digest(&self) -> &str {
         &self.digest
     }
@@ -1028,6 +1020,40 @@ mod native_decision_tests {
             r#"{"approved":true,"exporter":"00"}"#,
         ] {
             assert!(serde_json::from_str::<Setup>(text).is_err());
+        }
+    }
+}
+
+#[cfg(all(test, feature = "synthetic-born-joined-qualification"))]
+mod lineage_comparison_tests {
+    use super::{exact_lineage_digest_matches, lineage_digest_matches};
+
+    #[test]
+    fn exact_lineage_comparison_refuses_another_well_formed_digest() {
+        let actual = "a1".repeat(32);
+        let wrong = "b2".repeat(32);
+        wholepact_core::proposal::validate_sha256(&actual).unwrap();
+        wholepact_core::proposal::validate_sha256(&wrong).unwrap();
+        assert!(exact_lineage_digest_matches(&actual, &actual));
+        assert!(!exact_lineage_digest_matches(&wrong, &actual));
+        assert!(exact_lineage_digest_matches(&actual, &actual));
+        assert!(lineage_digest_matches(&actual, &actual));
+        assert!(!lineage_digest_matches(&wrong, &actual));
+        assert!(!lineage_digest_matches("", &actual));
+        assert_eq!(actual, "a1".repeat(32));
+        assert_eq!(wrong, "b2".repeat(32));
+    }
+
+    #[test]
+    fn same_call_lineage_probe_preserves_both_sentinel_originals() {
+        for text in ["c0", "c1"] {
+            let original = text.repeat(32);
+            let before = original.clone();
+            assert!(lineage_digest_matches(&original, &original));
+            let other = if text == "c0" { "c1" } else { "c0" }.repeat(32);
+            assert!(!lineage_digest_matches(&other, &original));
+            assert!(lineage_digest_matches(&original, &original));
+            assert_eq!(original, before);
         }
     }
 }

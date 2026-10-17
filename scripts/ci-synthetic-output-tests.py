@@ -470,7 +470,7 @@ class PublicOutputTests(unittest.TestCase):
         def fake_run(argv, **kwargs):
             calls.append((argv,kwargs))
             name=argv[2]
-            self.assertIn(name,output.SIGNER_VALIDATION_TESTS+output.SIGNER_BOOKKEEPING_TESTS+output.SIGNER_PRECONSTRUCTION_TESTS+output.SIGNER_BIRTH_LINK_TESTS+output.SIGNER_ENDPOINT_CHANNEL_TESTS+output.SIGNER_SNAPSHOT_STORAGE_TESTS+output.SIGNER_SHAPE_TAMPER_TESTS+output.SIGNER_REENTRY_COMPATIBILITY_TESTS+output.SIGNER_CALL_LOCAL_TESTS+output.SIGNER_AUDIT_STORAGE_TESTS+output.SIGNER_AUDIT_COMPATIBILITY_TESTS+output.SIGNER_NAMED_ORIGIN_SNAPSHOT_TESTS)
+            self.assertIn(name,output.SIGNER_VALIDATION_TESTS+output.SIGNER_BOOKKEEPING_TESTS+output.SIGNER_PRECONSTRUCTION_TESTS+output.SIGNER_BIRTH_LINK_TESTS+output.SIGNER_ENDPOINT_CHANNEL_TESTS+output.SIGNER_SNAPSHOT_STORAGE_TESTS+output.SIGNER_SHAPE_TAMPER_TESTS+output.SIGNER_REENTRY_COMPATIBILITY_TESTS+output.SIGNER_CALL_LOCAL_TESTS+output.SIGNER_AUDIT_STORAGE_TESTS+output.SIGNER_AUDIT_COMPATIBILITY_TESTS+output.SIGNER_NAMED_ORIGIN_SNAPSHOT_TESTS+output.SIGNER_LINEAGE_PREDICATE_TESTS)
             self.assertEqual(argv[:2],['/verified/signer','--exact'])
             self.assertEqual(argv[3],'--test-threads=1')
             if argv[-1]=='--list':
@@ -485,8 +485,8 @@ class PublicOutputTests(unittest.TestCase):
              mock.patch.object(output.subprocess,'run',side_effect=fake_run), \
              contextlib.redirect_stdout(captured):
             output.run_signer_validation('/verified/signer')
-        self.assertEqual([argv[2] for argv,_ in calls], [name for name in output.SIGNER_VALIDATION_TESTS+output.SIGNER_BOOKKEEPING_TESTS+output.SIGNER_PRECONSTRUCTION_TESTS+output.SIGNER_BIRTH_LINK_TESTS+output.SIGNER_ENDPOINT_CHANNEL_TESTS+output.SIGNER_SNAPSHOT_STORAGE_TESTS+output.SIGNER_SHAPE_TAMPER_TESTS+output.SIGNER_REENTRY_COMPATIBILITY_TESTS+output.SIGNER_CALL_LOCAL_TESTS+output.SIGNER_AUDIT_STORAGE_TESTS+output.SIGNER_AUDIT_COMPATIBILITY_TESTS+output.SIGNER_NAMED_ORIGIN_SNAPSHOT_TESTS for _ in range(2)])
-        self.assertEqual(captured.getvalue(),'CI_SYNTHETIC_SIGNER_VALIDATION passed=30 crypto_file_cases=4 bookkeeping_cases=2 replay_cases=6 endpoint_channel_cases=4 snapshot_storage_cases=2 shape_tamper_cases=1 compatibility_cases=3 call_local_cases=2 audit_storage_cases=1 audit_compatibility_cases=2 named_origin_snapshot_cases=3 native_payment_verified=false raw_output_discarded=true\n')
+        self.assertEqual([argv[2] for argv,_ in calls], [name for name in output.SIGNER_VALIDATION_TESTS+output.SIGNER_BOOKKEEPING_TESTS+output.SIGNER_PRECONSTRUCTION_TESTS+output.SIGNER_BIRTH_LINK_TESTS+output.SIGNER_ENDPOINT_CHANNEL_TESTS+output.SIGNER_SNAPSHOT_STORAGE_TESTS+output.SIGNER_SHAPE_TAMPER_TESTS+output.SIGNER_REENTRY_COMPATIBILITY_TESTS+output.SIGNER_CALL_LOCAL_TESTS+output.SIGNER_AUDIT_STORAGE_TESTS+output.SIGNER_AUDIT_COMPATIBILITY_TESTS+output.SIGNER_NAMED_ORIGIN_SNAPSHOT_TESTS+output.SIGNER_LINEAGE_PREDICATE_TESTS for _ in range(2)])
+        self.assertEqual(captured.getvalue(),'CI_SYNTHETIC_SIGNER_VALIDATION passed=32 crypto_file_cases=4 bookkeeping_cases=2 replay_cases=6 endpoint_channel_cases=4 snapshot_storage_cases=2 shape_tamper_cases=1 compatibility_cases=3 call_local_cases=2 audit_storage_cases=1 audit_compatibility_cases=2 named_origin_snapshot_cases=3 lineage_predicate_cases=2 native_payment_verified=false raw_output_discarded=true\n')
 
     def test_checkpoint_engine_projection_is_exact_closed_public_kinds(self):
         labels=set(('EngineCheckpointClaim', 'EngineCheckpointPlan', 'EngineCheckpointRetained', 'EngineCheckpointParts', 'EngineCheckpointNative', 'EngineCheckpointHeld', 'EngineCheckpointRestriction', 'EngineCheckpointConstruct', 'EngineCheckpointInspect', 'EngineCheckpointActionLimit', 'EngineCheckpointConsent', 'EngineCheckpointReceipt', 'EngineCheckpointRecord', 'EngineCheckpointEnqueue', 'EngineCheckpointFinish', 'EngineCheckpointContext'))
@@ -566,6 +566,32 @@ class PublicOutputTests(unittest.TestCase):
         self.assertLess(poll.index('Instant::now()'),poll.index('let result = poll();'))
         self.assertIn('if result.map_err(|error| signer_error(error, stage))?',poll)
         self.assertIn('thread::sleep(Duration::from_millis(2));',poll)
+
+    def test_lineage_predicate_preflight_keeps_original_validation_position(self):
+        prefix='native_ui::born_manual_roster_v2::common_context_reentry::lineage_comparison_tests::'
+        expected=tuple(prefix+name for name in (
+            'exact_lineage_comparison_refuses_another_well_formed_digest',
+            'same_call_lineage_probe_preserves_both_sentinel_originals',
+        ))
+        self.assertEqual(output.SIGNER_LINEAGE_PREDICATE_TESTS,expected)
+        base=ROOT/'crates/wholepact-signer/src/native_ui'
+        source=(base/'born_manual_roster_v2/common_context_reentry.rs').read_text()
+        self.assertIn('mod common_context_reentry;', (base/'born_manual_roster_v2/mod.rs').read_text())
+        self.assertIn('mod lineage_comparison_tests {',source)
+        for name in expected:
+            self.assertEqual(len(re.findall(r'#\[test\]\s+fn '+name.rsplit('::',1)[1]+r'\(',source)),1)
+        exact=source.split('    fn require_exact_request(',1)[1].split('    pub(super) fn prepare(',1)[0]
+        self.assertEqual(exact.count('request.validate()'),1)
+        self.assertEqual(exact.count('self.lineage.digest()'),1)
+        self.assertLess(exact.index('request.validate()'),exact.index('peer.grant_id != self.peer.grant_id'))
+        self.assertLess(exact.index('peer.grant_id != self.peer.grant_id'),exact.index('self.lineage.digest()'))
+        self.assertLess(exact.index('self.lineage.digest()'),exact.index('request.plan != self.lineage.request.original_read.plan'))
+        self.assertIn('request.requested_at_ms < self.lineage.admitted_at_ms',exact)
+        self.assertIn('request.admission_expires_at_ms > self.lineage.completion_expires_at_ms',exact)
+        self.assertNotIn('qualification_check_wrong_lineage',source)
+        fixture=(base/'qualification/born_roster_construction_v3.rs').read_text()
+        self.assertNotIn('qualification_check_wrong_lineage',fixture)
+        self.assertIn('approve_exact_consumption_without_old_owner_drain(ui, self.epoch)?;',fixture)
 
     def test_named_origin_snapshot_preflight_is_three_exact_encrypted_cases(self):
         prefix='consent_journal::common_context_reentry_audit_tests::'
@@ -846,6 +872,71 @@ class PublicOutputTests(unittest.TestCase):
                 with self.assertRaises(Exception): output.run_authority_rendering('/verified/authority')
             self.assertLessEqual(run.call_count,2)
             self.assertEqual(captured.getvalue(),'CI_SYNTHETIC_AUTHORITY_RENDERER failed_test='+name+' raw_output_withheld=true\n')
+
+    def test_authority_validation_is_three_exact_immutable_replay_cases(self):
+        prefix='manual_roster_construction_v3::validation_reuse_tests::'
+        names=(
+            'call_local_validation_preserves_complete_records_and_canonical_identifiers',
+            'call_local_validation_rejects_substituted_plan_extension_attempt_and_amounts',
+            'call_local_validation_keeps_every_consume_join_and_revalidates_each_call',
+        )
+        self.assertEqual(output.AUTHORITY_VALIDATION_TESTS,tuple(prefix+name for name in names))
+        self.assertEqual(len(set(output.AUTHORITY_VALIDATION_TESTS)),3)
+        self.assertTrue(set(output.AUTHORITY_VALIDATION_TESTS).isdisjoint(output.AUTHORITY_RENDERER_TESTS))
+        base=ROOT/'crates/wholepact-authority/src'
+        parent=(base/'manual_roster_construction_v3.rs').read_text()
+        source=(base/'manual_roster_construction_v3_validation_reuse_tests.rs').read_text()
+        self.assertIn('#[path = "manual_roster_construction_v3_validation_reuse_tests.rs"]\nmod validation_reuse_tests;',parent)
+        for name in names:
+            self.assertEqual(len(re.findall(r'#\[test\]\s+fn '+name+r'\(',source)),1)
+        fixture='../../wholepact-signer/src/consent_journal/fixtures/common-context-authority-audit.synthetic.json'
+        self.assertIn('"'+fixture+'"',source)
+        self.assertTrue((base/fixture).is_file())
+        self.assertIn('history.validate().unwrap();',source)
+        runner=(ROOT/'scripts/ci-synthetic-output.py').read_text()
+        self.assertIn("elif sys.argv[2]=='authority-rendering':\n            run_authority_rendering(str(exe))\n            run_authority_validation(str(exe))",runner)
+
+    def test_authority_validation_runs_exact_cases_with_separate_bound_and_summary(self):
+        calls=[]
+        def fake_run(argv, **kwargs):
+            calls.append((argv,kwargs))
+            name=argv[2]
+            self.assertIn(name,output.AUTHORITY_VALIDATION_TESTS)
+            self.assertEqual(argv[:2],['/verified/authority','--exact'])
+            self.assertEqual(argv[3],'--test-threads=1')
+            if argv[-1]=='--list':
+                self.assertEqual(len(argv),5)
+                self.assertEqual(kwargs,dict(capture_output=True,timeout=30,check=True))
+                return output.subprocess.CompletedProcess(argv,0,(name+': test\n\n1 test, 0 benchmarks\n').encode(),b'')
+            self.assertEqual(len(argv),4)
+            self.assertEqual(kwargs,dict(stdout=output.subprocess.PIPE,stderr=output.subprocess.STDOUT,timeout=120))
+            return output.subprocess.CompletedProcess(argv,0,b'private immutable fixture output')
+        captured=io.StringIO()
+        with mock.patch.object(output.resource,'getrlimit',return_value=(0,0)), \
+             mock.patch.object(output.subprocess,'run',side_effect=fake_run), \
+             contextlib.redirect_stdout(captured):
+            output.run_authority_validation('/verified/authority')
+        self.assertEqual([argv[2] for argv,_ in calls],[name for name in output.AUTHORITY_VALIDATION_TESTS for _ in range(2)])
+        self.assertEqual(captured.getvalue(),'CI_SYNTHETIC_AUTHORITY_VALIDATION passed=3 immutable_replay_cases=3 native_payment_verified=false raw_output_discarded=true\n')
+
+    def test_authority_validation_missing_failed_or_timed_out_refuses_without_raw_output(self):
+        name=output.AUTHORITY_VALIDATION_TESTS[0]
+        listed=output.subprocess.CompletedProcess([],0,(name+': test\n\n1 test, 0 benchmarks\n').encode(),b'')
+        cases=[
+            [output.subprocess.CompletedProcess([],0,b'0 tests, 0 benchmarks\n',b'')],
+            [output.subprocess.CompletedProcess([],0,listed.stdout,b'private error')],
+            [listed,output.subprocess.CompletedProcess([],101,b'private panic')],
+            [listed,output.subprocess.CompletedProcess([],0,b'x'*(1024*1024+1))],
+            [listed,output.subprocess.TimeoutExpired('private command',120,output=b'private output')],
+        ]
+        for results in cases:
+            captured=io.StringIO()
+            with mock.patch.object(output.resource,'getrlimit',return_value=(0,0)), \
+                 mock.patch.object(output.subprocess,'run',side_effect=results) as run, \
+                 contextlib.redirect_stdout(captured):
+                with self.assertRaises(Exception): output.run_authority_validation('/verified/authority')
+            self.assertLessEqual(run.call_count,2)
+            self.assertEqual(captured.getvalue(),'CI_SYNTHETIC_AUTHORITY_VALIDATION failed_test='+name+' raw_output_withheld=true\n')
 
     def test_ci_temporary_socket_path_budget(self):
         # Includes this runner's extra short TMPDIR layer, not merely /tmp.

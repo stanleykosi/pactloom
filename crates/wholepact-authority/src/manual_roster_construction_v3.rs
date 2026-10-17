@@ -183,6 +183,13 @@ impl ManualRosterConstructionReservationRequestV3 {
             .construction
             .validate()
             .map_err(|_| AuthorityError::InvalidBinding)?;
+        self.maximum_net_debit_from_proposal(&p)
+    }
+    // Pure join used only with this request's freshly validated Proposal.
+    fn maximum_net_debit_from_proposal(
+        &self,
+        p: &wholepact_core::proposal::Proposal,
+    ) -> Result<u64> {
         let e = self.enrollment();
         p.manifest()
             .participants
@@ -205,10 +212,23 @@ impl ManualRosterConstructionReservationRequestV3 {
         e: &ManualRosterEnrollmentExtensionV2,
         c: &ManualRosterSessionContinuationV2,
     ) -> Result<()> {
-        self.construction
+        self.validate_with_proposal(e, c).map(|_| ())
+    }
+    // The private result borrows this exact immutable request and owns only the
+    // Proposal returned by its complete validation. It cannot outlive the call
+    // as a permission, replace a current check, or refer to another request.
+    fn validate_with_proposal(
+        &self,
+        e: &ManualRosterEnrollmentExtensionV2,
+        c: &ManualRosterSessionContinuationV2,
+    ) -> Result<ValidatedReservationRequest<'_>> {
+        let proposal = self
+            .construction
             .validate()
             .map_err(|_| AuthorityError::InvalidBinding)?;
-        validate_plan_original(&self.construction.plan, e)?;
+        e.validate()?;
+        // construction.validate above already validated this exact plan.
+        validate_plan_original_bindings(&self.construction.plan, e)?;
         c.validate_for(e)?;
         for h in [
             &self.expected_head.digest,
@@ -252,7 +272,10 @@ impl ManualRosterConstructionReservationRequestV3 {
             return Err(AuthorityError::InvalidBinding);
         }
         id(&self.construction.operation_id)?;
-        Ok(())
+        Ok(ValidatedReservationRequest {
+            request: self,
+            proposal,
+        })
     }
     pub fn digest_for(
         &self,
@@ -266,6 +289,18 @@ impl ManualRosterConstructionReservationRequestV3 {
         )
     }
 }
+// Call-local pure validation evidence only. No public constructor, Clone,
+// deserialization, native owner, clock, source-file or journal authority.
+struct ValidatedReservationRequest<'a> {
+    request: &'a ManualRosterConstructionReservationRequestV3,
+    proposal: wholepact_core::proposal::Proposal,
+}
+impl ValidatedReservationRequest<'_> {
+    fn maximum_net_debit_zatoshis(&self) -> Result<u64> {
+        self.request.maximum_net_debit_from_proposal(&self.proposal)
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ManualRosterConstructionReservationRecordV3 {
@@ -283,7 +318,7 @@ impl ManualRosterConstructionReservationRecordV3 {
         e: &ManualRosterEnrollmentExtensionV2,
         c: &ManualRosterSessionContinuationV2,
     ) -> Result<()> {
-        self.request.validate_for(e, c)?;
+        let validated = self.request.validate_with_proposal(e, c)?;
         let t = &e.account_extension.terms;
         validate_snapshot(
             &self.snapshot,
@@ -297,7 +332,7 @@ impl ManualRosterConstructionReservationRecordV3 {
             || self.admitted_at_ms >= self.request.construction.admission_expires_at_ms
             || self.admitted_at_ms >= self.session.expires_at_ms
             || self.construction_expires_at_ms != self.request.completion_deadline_ms()
-            || self.reserved_debit_zatoshis != self.request.maximum_net_debit_zatoshis()?
+            || self.reserved_debit_zatoshis != validated.maximum_net_debit_zatoshis()?
             || self.reserved_input_value_zatoshis != self.request.input_value_zatoshis()?
             || self.snapshot.outstanding_debit_zatoshis < self.reserved_debit_zatoshis
             || self.snapshot.reserved_input_value_zatoshis < self.reserved_input_value_zatoshis
@@ -321,6 +356,11 @@ impl ManualRosterConstructionReservationRecordV3 {
         c: &ManualRosterSessionContinuationV2,
     ) -> Result<String> {
         self.validate_for(e, c)?;
+        self.encoded_digest()
+    }
+    // Sole nonvalidating caller is ConsumeRequest::validate_for, immediately
+    // after it fully validates this same borrowed reservation against e and c.
+    fn encoded_digest(&self) -> Result<String> {
         digest("wholepact:manual-roster-construction-reservation:v3", self)
     }
 }
@@ -348,10 +388,15 @@ impl ManualRosterConstructionConsumeRequestV3 {
     ) -> Result<()> {
         r.validate_for(e, c)?;
         let t = &e.account_extension.terms;
-        if self.version != 3
-            || self.operation_id != construction_consume_operation_id_v3(r, e, c)?
+        if self.version != 3 {
+            return Err(AuthorityError::InvalidBinding);
+        }
+        // r is immutable and has just passed its complete public validator.
+        // Reuse its exact canonical digest for both original relational joins.
+        let reservation_digest = r.encoded_digest()?;
+        if self.operation_id != consume_operation_id_from_digest(&reservation_digest)
             || self.reservation_operation_id != r.request.construction.operation_id
-            || self.reservation_digest != r.digest_for(e, c)?
+            || self.reservation_digest != reservation_digest
             || self.account_id != t.identity.account_id
             || self.network_profile_id != t.identity.network_profile_id
             || self.writer_epoch != r.request.writer_epoch
@@ -371,10 +416,10 @@ pub fn construction_consume_operation_id_v3(
     e: &ManualRosterEnrollmentExtensionV2,
     c: &ManualRosterSessionContinuationV2,
 ) -> Result<String> {
-    Ok(format!(
-        "roster-construct-consume-v3-{}",
-        r.digest_for(e, c)?
-    ))
+    Ok(consume_operation_id_from_digest(&r.digest_for(e, c)?))
+}
+fn consume_operation_id_from_digest(digest: &str) -> String {
+    format!("roster-construct-consume-v3-{digest}")
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -428,6 +473,14 @@ pub(crate) fn validate_plan_original(
 ) -> Result<()> {
     e.validate()?;
     p.validate().map_err(|_| AuthorityError::InvalidBinding)?;
+    validate_plan_original_bindings(p, e)
+}
+// Both callers fully validate the exact borrowed plan and extension first.
+// This helper performs all unchanged original-plan/extension relationships.
+fn validate_plan_original_bindings(
+    p: &ManualRosterConstructionPlanV3,
+    e: &ManualRosterEnrollmentExtensionV2,
+) -> Result<()> {
     let scope = &p.retained.selection.scope;
     let i = &scope.selection.inventory;
     if i.enrollment != e.account_extension.terms
@@ -637,3 +690,7 @@ impl crate::policy::Ledger {
 #[cfg(all(test, feature = "pending-birth-foundation", target_os = "linux"))]
 #[path = "manual_roster_construction_v3_tests.rs"]
 pub(crate) mod tests;
+
+#[cfg(all(test, feature = "pending-birth-foundation", target_os = "linux"))]
+#[path = "manual_roster_construction_v3_validation_reuse_tests.rs"]
+mod validation_reuse_tests;
