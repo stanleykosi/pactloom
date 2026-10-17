@@ -91,6 +91,29 @@ class PublicOutputTests(unittest.TestCase):
         line=self.failure('SingleWorkPrepareReentry:SignerAuthentication')
         self.assertFalse(output.safe_failure(line+' private-data'))
 
+    def test_retained_preparation_diagnostics_are_exact_and_payload_free(self):
+        labels = {
+            'FullOriginalPolicy', 'RetainedPredecessor', 'RetainedMaterial',
+            'RetainedEconomics', 'RetainedInvocation', 'RetainedRuntime',
+            'RetainedProvider', 'RetainedTls', 'RetainedWitness',
+            'RetainedPolicyRead', 'RetainedPolicyMatch', 'RetainedSelectionFiles',
+            'ContinuedPredecessor', 'ContinuedObservation', 'ContinuedOriginal',
+            'ContinuedWait', 'ContinuedPrepare',
+        }
+        self.assertEqual(len(labels),17)
+        selected={label for label in output.BOUNDARIES
+                  if label.startswith(('Retained','Continued')) or label=='FullOriginalPolicy'}
+        self.assertEqual(selected,labels)
+        for label in labels:
+            for result in ['Begin','Complete','HostAuthentication','HostReceipt']:
+                self.assertTrue(output.safe_failure(self.failure(label+':'+result)))
+        for value in ['RetainedUnknown:Begin','ContinuedUnknown:HostReceipt',
+                      'RetainedPolicyRead:HostReceipt private-data',
+                      'ContinuedObservation:HostAuthentication:private-data',
+                      'FullOriginalPolicy:private-data']:
+            self.assertFalse(output.safe_failure(self.failure(value)))
+        self.assertFalse(output.safe_failure(self.failure('RetainedMaterial:HostReceipt')+' private-data'))
+
     def test_projection_does_not_search_inside_private_text(self):
         name=output.TESTS['initial'][0]
         marker=self.failure()

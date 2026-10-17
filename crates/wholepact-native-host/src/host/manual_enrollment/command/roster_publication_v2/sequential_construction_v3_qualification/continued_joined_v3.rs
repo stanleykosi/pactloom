@@ -7,6 +7,7 @@ use super::joined_signer_worker_v1::{
     JoinedSignerCommandV1 as Command, JoinedSignerPeerV1, JoinedSignerReplyV1 as Reply,
     JoinedSignerWorkerV1, PublicJoinedBornV1,
 };
+use super::safe_diagnostics_v1::{self as diagnostic, Boundary as B};
 use super::*;
 use crate::host::financial::manual_roster_inventory_setup_v2::RetainedRosterCandidateInputsV2;
 use crate::host::manual_enrollment::command::roster_publication_v2::{
@@ -103,28 +104,36 @@ pub(super) fn prepare_original_continuation(
     original_signed_extension_file: &Path,
     scenario_deadline: Instant,
 ) -> Result<ReviewedJoinedContinuationV3> {
-    if !(1..=2).contains(&owner.index) {
-        return Err(Error::Invalid);
-    }
-    host.require_manual_session()?;
-    let prior = witness
-        .observe_original_roster_attempt_v2(&owner.account_id)
-        .map_err(|_| stage("actual prior roster observation"))?;
-    original_intent
-        .matches_terms(
-            &prior.extension.account_extension.terms,
-            &prior.extension.roster,
+    diagnostic::host(B::ContinuedPredecessor, || {
+        if !(1..=2).contains(&owner.index) {
+            return Err(Error::Invalid);
+        }
+        host.require_manual_session()
+    })?;
+    let prior = diagnostic::host(B::ContinuedObservation, || {
+        witness
+            .observe_original_roster_attempt_v2(&owner.account_id)
+            .map_err(|_| stage("actual prior roster observation"))
+    })?;
+    let previous_deadline = diagnostic::host(B::ContinuedOriginal, || {
+        original_intent
+            .matches_terms(
+                &prior.extension.account_extension.terms,
+                &prior.extension.roster,
+            )
+            .map_err(|_| Error::Authentication)?;
+        prior
+            .attempt
+            .last_publication_deadline_ms()
+            .ok_or(Error::Authentication)
+    })?;
+    diagnostic::host(B::ContinuedWait, || {
+        wait_previous_publication(
+            previous_deadline,
+            prior.extension.account_extension.terms.scope.expires_at_ms,
+            scenario_deadline,
         )
-        .map_err(|_| Error::Authentication)?;
-    let previous_deadline = prior
-        .attempt
-        .last_publication_deadline_ms()
-        .ok_or(Error::Authentication)?;
-    wait_previous_publication(
-        previous_deadline,
-        prior.extension.account_extension.terms.scope.expires_at_ms,
-        scenario_deadline,
-    )?;
+    })?;
     host.require_manual_session()?;
     // Only a path to our actual private temporary export. The ordinary reader
     // still requests its own exact local-file disclosure approval below.
@@ -132,7 +141,9 @@ pub(super) fn prepare_original_continuation(
         "SYNTHETIC_JOINED_ORIGINAL_ROSTER_PATH={}\n",
         original_signed_extension_file.display(),
     ))?;
-    let prepared = PreparedJoinedRosterContinuationIntent::prepare(host)?;
+    let prepared = diagnostic::host(B::ContinuedPrepare, || {
+        PreparedJoinedRosterContinuationIntent::prepare(host)
+    })?;
     if prepared.intent() != original_intent || Instant::now() >= scenario_deadline {
         return Err(Error::Authentication);
     }

@@ -6,6 +6,7 @@
 
 use super::continued_joined_v3::{prepare_original_continuation, retain_continued_candidate};
 use super::joined_signer_worker_v1::{AGREEMENT_ID, JoinedSignerWorkerV1, PublicJoinedBornV1};
+use super::safe_diagnostics_v1::{self as diagnostic, Boundary as B};
 use super::synthetic_born_provider_v1::SyntheticBornProviderV1;
 use super::*;
 use crate::host::financial::manual_roster_inventory_setup_v2::RetainedRosterCandidateInputsV2;
@@ -234,10 +235,14 @@ fn write_selections(
     economics: &ManualCandidateEconomicIntent,
     invocation: &ManualCandidateInvocation,
 ) -> Result<SelectedFilesV3> {
-    let original = read_original_policy(policy_file, owner)?;
-    economics
-        .require_policy(&original.recipient_policy, terms)
-        .map_err(|_| Error::Invalid)?;
+    let original = diagnostic::host(B::RetainedPolicyRead, || {
+        read_original_policy(policy_file, owner)
+    })?;
+    diagnostic::host(B::RetainedPolicyMatch, || {
+        economics
+            .require_policy(&original.recipient_policy, terms)
+            .map_err(|_| Error::Invalid)
+    })?;
     let inventory = root.join(format!("synthetic-inventory-owner-{}.json", owner.index));
     let selection = root.join(format!("synthetic-selection-owner-{}.json", owner.index));
     let new_wallet = root.join(format!("synthetic-new-preliminary-owner-{}", owner.index));
@@ -348,28 +353,33 @@ fn retain_two_inner<'host>(
     temporary_root: &Path,
     original_scenario_deadline: Instant,
 ) -> Result<RetainedJoinedStageV3<'host>> {
-    host.require_manual_session()?;
-    let now_ms = wall_ms()?;
-    let remaining = original_scenario_deadline.saturating_duration_since(Instant::now());
-    if remaining.is_zero() || remaining > Duration::from_secs(900) {
-        return Err(Error::Permission);
-    }
+    let (now_ms, remaining) = diagnostic::host(B::RetainedPredecessor, || {
+        host.require_manual_session()?;
+        let now_ms = wall_ms()?;
+        let remaining = original_scenario_deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() || remaining > Duration::from_secs(900) {
+            return Err(Error::Permission);
+        }
+        Ok((now_ms, remaining))
+    })?;
     // Fixed public synthetic chain parameters. The maintained builder also
     // enforces the qualified NU7 branch; these are never network observations.
-    let material = SyntheticBornReceiverBlocksV1::build(
-        [
-            &born[1].public_receive_address,
-            &born[2].public_receive_address,
-        ],
-        [300_000, 300_000],
-        SyntheticBornChainSpecV1 {
-            prior_height: 4_465_039,
-            prior_hash_protocol: crate::random::<32>()?,
-            block_count: 12,
-            timestamp: (now_ms / 1000).try_into().map_err(|_| Error::Invalid)?,
-        },
-    )
-    .map_err(|_| stage("actual public receiver block material"))?;
+    let material = diagnostic::host(B::RetainedMaterial, || {
+        SyntheticBornReceiverBlocksV1::build(
+            [
+                &born[1].public_receive_address,
+                &born[2].public_receive_address,
+            ],
+            [300_000, 300_000],
+            SyntheticBornChainSpecV1 {
+                prior_height: 4_465_039,
+                prior_hash_protocol: crate::random::<32>()?,
+                block_count: 12,
+                timestamp: (now_ms / 1000).try_into().map_err(|_| Error::Invalid)?,
+            },
+        )
+        .map_err(|_| stage("actual public receiver block material"))
+    })?;
     let prior = material.trees().first().ok_or(Error::Invalid)?;
     let birthday = PreconstructionBirthday {
         prior_height: material.spec().prior_height,
@@ -378,60 +388,73 @@ fn retain_two_inner<'host>(
         orchard_tree: prior.orchard_tree.clone(),
         ironwood_tree: prior.ironwood_tree.clone(),
     };
-    let economics = exact_economics(
-        host,
-        born,
-        roster_requests,
-        now_ms,
-        material
-            .fabricated_context()
-            .tip_height
-            .checked_add(1)
-            .ok_or(Error::Invalid)?,
-        material
-            .fabricated_context()
-            .tip_height
-            .checked_add(32)
-            .ok_or(Error::Invalid)?,
-    )?;
-    let completion = now_ms
-        .checked_add(
-            remaining
-                .as_millis()
-                .try_into()
-                .map_err(|_| Error::Invalid)?,
+    let economics = diagnostic::host(B::RetainedEconomics, || {
+        exact_economics(
+            host,
+            born,
+            roster_requests,
+            now_ms,
+            material
+                .fabricated_context()
+                .tip_height
+                .checked_add(1)
+                .ok_or(Error::Invalid)?,
+            material
+                .fabricated_context()
+                .tip_height
+                .checked_add(32)
+                .ok_or(Error::Invalid)?,
         )
-        .ok_or(Error::Invalid)?
-        .min(original_scope_expiry_ms);
-    let invocation = ManualCandidateInvocation {
-        version: 2,
-        operation_id: "synthetic-original-retention-invocation-v2".into(),
-        idempotency_key_digest: wholepact_store::request_digest(&serde_json::json!([
-            &host.access()?.principal_id,
-            CONSTRUCTION_KEY
-        ]))?,
-        invocation_nonce: hex::encode(crate::random::<32>()?),
-        economic_intent_digest: economics.digest().map_err(|_| Error::Invalid)?,
-        checkpoint_destination: roster_intents[0].account_intent.host.canonical_root.clone(),
-        requested_at_ms: now_ms,
-        construction_expires_at_ms: completion,
-    };
-    invocation.validate().map_err(|_| Error::Invalid)?;
-    if roster_intents[1].account_intent.host.canonical_root != invocation.checkpoint_destination {
-        return Err(Error::Authentication);
-    }
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-        .map_err(|_| Error::Storage)?;
-    let provider = runtime
-        .block_on(SyntheticBornProviderV1::start(
-            material.clone(),
-            super::synthetic_provider_tls_v1::child_server_config().map_err(|_| Error::Storage)?,
-            original_scenario_deadline,
-        ))
-        .map_err(|_| stage("finite actual TLS provider start"))?;
+    })?;
+    let invocation = diagnostic::host(B::RetainedInvocation, || {
+        let completion = now_ms
+            .checked_add(
+                remaining
+                    .as_millis()
+                    .try_into()
+                    .map_err(|_| Error::Invalid)?,
+            )
+            .ok_or(Error::Invalid)?
+            .min(original_scope_expiry_ms);
+        let invocation = ManualCandidateInvocation {
+            version: 2,
+            operation_id: "synthetic-original-retention-invocation-v2".into(),
+            idempotency_key_digest: wholepact_store::request_digest(&serde_json::json!([
+                &host.access()?.principal_id,
+                CONSTRUCTION_KEY
+            ]))?,
+            invocation_nonce: hex::encode(crate::random::<32>()?),
+            economic_intent_digest: economics.digest().map_err(|_| Error::Invalid)?,
+            checkpoint_destination: roster_intents[0].account_intent.host.canonical_root.clone(),
+            requested_at_ms: now_ms,
+            construction_expires_at_ms: completion,
+        };
+        invocation.validate().map_err(|_| Error::Invalid)?;
+        if roster_intents[1].account_intent.host.canonical_root != invocation.checkpoint_destination
+        {
+            return Err(Error::Authentication);
+        }
+        Ok(invocation)
+    })?;
+    let runtime = diagnostic::host(B::RetainedRuntime, || {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .map_err(|_| Error::Storage)
+    })?;
+    let provider = diagnostic::host(B::RetainedProvider, || {
+        runtime
+            .block_on(SyntheticBornProviderV1::start(
+                material.clone(),
+                diagnostic::host(B::RetainedTls, || {
+                    super::synthetic_provider_tls_v1::child_server_config()
+                        .map_err(|_| Error::Storage)
+                })?,
+                original_scenario_deadline,
+            ))
+            .map_err(|_| stage("finite actual TLS provider start"))
+    })?;
     let configuration = PreconstructionProvider {
         source_id: "synthetic-same-original-public-blocks-v1".into(),
         endpoint: provider.endpoint().into(),
@@ -440,18 +463,20 @@ fn retain_two_inner<'host>(
     let mut contributions = Vec::with_capacity(2);
     for index in 0..2 {
         let owner = &born[index + 1];
-        let witness = witnesses.for_original(owner)?;
-        let files = write_selections(
-            temporary_root,
-            owner,
-            &roster_original_policy_files[index],
-            &roster_requests[index].enrollment.terms,
-            &configuration,
-            &birthday,
-            &material,
-            &economics,
-            &invocation,
-        )?;
+        let witness = diagnostic::host(B::RetainedWitness, || witnesses.for_original(owner))?;
+        let files = diagnostic::host(B::RetainedSelectionFiles, || {
+            write_selections(
+                temporary_root,
+                owner,
+                &roster_original_policy_files[index],
+                &roster_requests[index].enrollment.terms,
+                &configuration,
+                &birthday,
+                &material,
+                &economics,
+                &invocation,
+            )
+        })?;
         let reviewed = prepare_original_continuation(
             host,
             witness,

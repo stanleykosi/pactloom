@@ -81,6 +81,12 @@ pub(super) fn inputs() -> Vec<Input<'static>> {
 /// The scenario retains Host, original witnesses, signer worker and recipient
 /// until the actual carrier/payment result and its bounded owners have drained.
 pub(super) fn exercise_full_payment_stage(terminal: Terminal) -> Result<()> {
+    super::safe_diagnostics_v1::host(super::safe_diagnostics_v1::Boundary::EndInvariant, || {
+        exercise_full_payment_stage_inner(terminal)
+    })
+}
+
+fn exercise_full_payment_stage_inner(terminal: Terminal) -> Result<()> {
     let mut scenario = super::full_joined_v3::prepare(terminal)?;
     let result = scenario.prove_originals()?.finish_original_payment()?;
     if result.public_network_settlement_verified

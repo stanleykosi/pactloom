@@ -176,21 +176,23 @@ fn check_scenario(deadline: Instant) -> Result<()> {
     }
 }
 fn require_original_declared_policy(host: &Host, receiver: &str) -> Result<()> {
-    host.require_manual_session()?;
-    let actual = host
-        .engine
-        .manual_enrollment_intent_target(host.access()?, AGREEMENT)?;
-    let terms = actual.agreement();
-    if terms.privacy_profile.mode != PrivacyMode::DeclaredOperator
-        || terms.privacy_profile.proving_operator.as_deref() != Some("synthetic-local-host")
-        || !terms.privacy_profile.dedicated_accounts_required
-        || terms.recipients.len() != 1
-        || terms.recipients[0].address != receiver
-    {
-        return Err(Error::Authentication);
-    }
-    actual.check_current(host.access()?)?;
-    Ok(())
+    diagnostic::host(B::FullOriginalPolicy, || {
+        host.require_manual_session()?;
+        let actual = host
+            .engine
+            .manual_enrollment_intent_target(host.access()?, AGREEMENT)?;
+        let terms = actual.agreement();
+        if terms.privacy_profile.mode != PrivacyMode::DeclaredOperator
+            || terms.privacy_profile.proving_operator.as_deref() != Some("synthetic-local-host")
+            || !terms.privacy_profile.dedicated_accounts_required
+            || terms.recipients.len() != 1
+            || terms.recipients[0].address != receiver
+        {
+            return Err(Error::Authentication);
+        }
+        actual.check_current(host.access()?)?;
+        Ok(())
+    })
 }
 
 pub(super) fn prepare(terminal: crate::terminal::Terminal) -> Result<FullJoinedV3> {
