@@ -42,6 +42,13 @@ pub mod retired_history;
 pub mod settlement_ipc;
 #[cfg(feature = "authority-signing")]
 mod signing;
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "pending-birth-owner-signing",
+    feature = "native-ui",
+    target_os = "linux"
+))]
+pub(crate) use signing::DurableBornKeyUseFenceV1;
 
 use crate::{
     account::DedicatedAccount,

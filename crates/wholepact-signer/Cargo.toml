@@ -14,7 +14,7 @@ synthetic-recipient-signing-tests = ["synthetic-qualification", "offline-review-
 manual-inventory-client = ["wholepact-wallet/protected-sync"]
 pending-birth-owner-signing = ["dep:tempfile", "native-ui", "authority-signing", "dep:rustls", "wholepact-authority/pending-birth-foundation"]
 default = []
-durable-proposal = ["authority-signing", "wholepact-protocol/durable-proposal"]
+durable-proposal = ["pending-birth-owner-signing", "wholepact-protocol/durable-proposal"]
 # Opt-in genuine native named-recipient composition; independent mode stays fenced.
 offline-review-foundation = ["dep:wholepact-offline-bridge", "dep:wholepact-transport", "wholepact-transport/offline-admission-export", "dep:hpke", "dep:base64", "dep:chrono"]
 synthetic-qualification = ["wholepact-offline-bridge?/synthetic-selected-effects-tests", "wholepact-signer-origin/synthetic-qualification", "wholepact-wallet/synthetic-qualification", "wholepact-protocol/synthetic-qualification", "wholepact-authority/synthetic-qualification",  "wholepact-chain/synthetic-qualification", "dep:zcash_client_backend", "dep:zcash_primitives", "dep:incrementalmerkletree", "dep:prost", "dep:axum", "dep:tempfile", "dep:tokio", "tokio/rt-multi-thread", "tokio/macros"]

@@ -8,11 +8,19 @@ Independent account owners authorize their assigned debit in one exact joint shi
 
 ## Initial qualification profile
 
-- Two independent contributors, one recipient, manual approval and one authoritative writer per account.
+- Two separately controlled contribution accounts, one recipient, manual approval and one authoritative writer per account. Account attribution does not establish distinct people or independent economic sources.
 - Existing pinned testnet transaction/pool profile, finite block-height expiry, fixed canonical candidate and anchor.
 - Prove before collecting signatures. No post-sign reanchoring, permissive merge, automatic replacement, automation or shared writer in this first slice.
 - Use real engine interfaces and genuine signer/authority adapters with synthetic accounts first. Test seams cannot manufacture production authority.
 - Matching, larger groups, offline modes, automation and platform support remain separate full-product qualification obligations, not deleted requirements.
+
+## Minimal account-attribution profile
+
+The first slice accepts only plain fixed contributions. The genuinely accepted immutable manifest pins canonical account IDs, derived with the existing domain-separated account-ID hash of each full viewing key. The verifier recomputes those IDs and verifies every real input, note/value/witness, nullifier, randomized verification key, ownership/action mapping, recipient/change output, allocation and fee against the exact fixed artifact. Constructor-supplied labels or selected-own-effects checks cannot substitute for this verification.
+
+Final required spend signatures demonstrate executable control of the attributed accounts. Before those signatures exist, the state is awaiting authorization, not peer approval. This profile makes no claims about legal identity, separate people, sponsor eligibility or matching conditions. Such clauses are rejected rather than silently treated as ordinary contributions; richer profiles remain future qualification obligations.
+
+Private viewing material is a separate disclosure boundary. Mathematical verification does not authorize onward disclosure. Any constructor, prover or local reviewer audience must be explicitly scoped by genuine native consent and authenticated delivery. Recovery to a new recipient grant requires a fresh disclosure decision, retaining the original material, audience limits and deadline rather than extending them.
 
 ## Pre-proof construction is part of the repair
 
@@ -32,7 +40,7 @@ Current chain evidence is checked at the boundary that needs it. Historical prov
 
 ## Release and recovery ordering
 
-1. Reconcile the account's authoritative writer and independent exposure fence. Uncertain, stale, cloned or restored state cannot issue authorization from its local ledger alone.
+1. Before spend-authority release or key use, freshly reconcile the account's authoritative writer and independent exposure fence. Uncertain, stale, cloned or restored state cannot issue authorization from its local ledger alone. Earlier non-spending material admission does not acquire or retain a live writer capability across construction or human delays.
 2. Prepare permitted contribution data, then construct and prove an exact candidate. Private disclosure, unsigned local planning reservations and potentially executable spend authority remain distinct records.
 3. Verify full manifest coverage, actual recipients, contribution and fee allocations, maximum debit, change ownership, attribution, network, expiry and conditions. Selected-own-effects evidence alone is insufficient.
 4. Durably reserve the exact obligation and record release intent before usable authorization crosses the signer boundary. Persist the exact signed result/outbox. An uncertain key-use attempt cannot obtain a new authorization ID to evade existing exposure.

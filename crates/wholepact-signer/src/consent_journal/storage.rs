@@ -1,4 +1,11 @@
 use super::*;
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "pending-birth-owner-signing",
+    target_os = "linux"
+))]
+#[path = "durable_born_entry_v1.rs"]
+mod durable_born_entry_v1;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::{
     path::Path,
@@ -1366,7 +1373,10 @@ pub(super) struct ValidatedCommonAudit<'snapshot> {
 }
 #[cfg(all(feature = "pending-birth-owner-signing", target_os = "linux"))]
 impl ValidatedCommonAudit<'_> {
-    pub(super) fn inventory_for(&self, account: &str) -> Result<&CommonContextSignerAuditInventoryV2> {
+    pub(super) fn inventory_for(
+        &self,
+        account: &str,
+    ) -> Result<&CommonContextSignerAuditInventoryV2> {
         if self.account != account {
             return Err(JournalError::InvalidBinding);
         }
@@ -1377,13 +1387,15 @@ impl ValidatedCommonAudit<'_> {
 /// `read_complete` itself reads and fully validates the original construction
 /// audit, so no separate, discarded replay is necessary in this same snapshot.
 #[cfg(all(feature = "pending-birth-owner-signing", target_os = "linux"))]
-pub(super) fn verify_schema_with_common_audit(
-    c: &Connection,
-) -> Result<ValidatedCommonAudit<'_>> {
+pub(super) fn verify_schema_with_common_audit(c: &Connection) -> Result<ValidatedCommonAudit<'_>> {
     verify_schema_before_common_audit(c)?;
     let account = read_account(c)?.account_id;
     let inventory = common_context_reentry_audit_v1::read_complete(c, &account)?;
-    Ok(ValidatedCommonAudit { account, inventory, _snapshot: c })
+    Ok(ValidatedCommonAudit {
+        account,
+        inventory,
+        _snapshot: c,
+    })
 }
 
 fn verify_schema_before_common_audit(c: &Connection) -> Result<()> {
@@ -1406,9 +1418,17 @@ fn verify_schema_before_common_audit(c: &Connection) -> Result<()> {
     offline_receipts::validate_all(c, &read_account(c)?.account_id)?;
     account_use_storage::inspect(c, &read_account(c)?.account_id)?;
     named_recipient_inventory::validate_archive_rows(c, &read_account(c)?.account_id)?;
-    #[cfg(all(feature = "durable-proposal", feature = "native-ui", target_os = "linux"))]
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "native-ui",
+        target_os = "linux"
+    ))]
     durable_construction_v1::validate_rows(c)?;
-    #[cfg(not(all(feature = "durable-proposal", feature = "native-ui", target_os = "linux")))]
+    #[cfg(not(all(
+        feature = "durable-proposal",
+        feature = "native-ui",
+        target_os = "linux"
+    )))]
     {
         // A build without the typed reader must not silently omit retained
         // disclosure evidence or admit it as an original native capability.

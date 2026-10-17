@@ -69,9 +69,43 @@ pub struct ConstructionRecipientV1 {
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ConstructionReviewerV1 {
+pub struct ExactTransportConstructionReviewerV1 {
     pub account_id: String,
     pub transport_key_digest: String,
+}
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalConstructionReviewerKindV2 {
+    LocalInstalledSignerCanonicalAccount,
+}
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalInstalledSignerConstructionReviewerV2 {
+    pub kind: LocalConstructionReviewerKindV2,
+    pub account_id: String,
+}
+/// Legacy exact transport-key audiences remain byte-for-byte readable. The
+/// distinct tagged local-account audience requires explicit scope version 2.
+/// Neither category authenticates an export recipient by itself.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ConstructionReviewerV1 {
+    ExactTransport(ExactTransportConstructionReviewerV1),
+    LocalInstalledSigner(LocalInstalledSignerConstructionReviewerV2),
+}
+impl ConstructionReviewerV1 {
+    pub fn account_id(&self) -> &str {
+        match self {
+            Self::ExactTransport(v) => &v.account_id,
+            Self::LocalInstalledSigner(v) => &v.account_id,
+        }
+    }
+    pub fn local_installed_signer(account_id: String) -> Self {
+        Self::LocalInstalledSigner(LocalInstalledSignerConstructionReviewerV2 {
+            kind: LocalConstructionReviewerKindV2::LocalInstalledSignerCanonicalAccount,
+            account_id,
+        })
+    }
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -96,7 +130,7 @@ impl DurableConstructionScopeV1 {
     pub fn validate(&self) -> Result<Proposal> {
         let p = Proposal::validate(self.proposal.clone())
             .map_err(|_| DurableConstructionError::Invalid)?;
-        if self.version != 1
+        if !matches!(self.version, 1 | 2)
             || self.purpose != PURPOSE
             || self.valid_from_unix_seconds == 0
             || self
@@ -148,8 +182,16 @@ impl DurableConstructionScopeV1 {
             .collect::<BTreeSet<_>>();
         let mut reviewers = BTreeSet::new();
         for reviewer in &self.reviewers {
-            bytes::<32>(&reviewer.transport_key_digest)?;
-            if !reviewers.insert(reviewer.account_id.as_str()) {
+            match (self.version, reviewer) {
+                (1, ConstructionReviewerV1::ExactTransport(v)) => {
+                    bytes::<32>(&v.transport_key_digest)?;
+                }
+                (2, ConstructionReviewerV1::LocalInstalledSigner(v)) => {
+                    bytes::<32>(&v.account_id)?;
+                }
+                _ => return Err(DurableConstructionError::Binding),
+            }
+            if !reviewers.insert(reviewer.account_id()) {
                 return Err(DurableConstructionError::Invalid);
             }
         }
@@ -164,6 +206,15 @@ impl DurableConstructionScopeV1 {
             return Err(DurableConstructionError::Invalid);
         }
         Ok(p)
+    }
+    /// Scope permission only, NOT authentication. Export additionally needs the
+    /// actual installed signer, fresh paired vault-bound account, protected
+    /// original intake, current local consent, and a committed export intent.
+    pub fn permits_local_reviewer_account(&self, account: &str) -> Result<bool> {
+        self.validate()?;
+        Ok(self.version == 2 && self.reviewers.iter().any(|r| {
+            matches!(r, ConstructionReviewerV1::LocalInstalledSigner(v) if v.account_id == account)
+        }))
     }
     pub fn check_valid_at(&self, now: u64) -> Result<()> {
         self.validate()?;
@@ -337,6 +388,34 @@ impl HistoricalNoteV1 {
     }
 }
 
+// Exact existing dedicated-account identity derivation. An arbitrary host label
+// is not account ownership, even when the rest of the note mathematics agrees.
+fn canonical_durable_account_id(fvk: &FullViewingKey) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"wholepact:dedicated-testnet-account:legacy-zip32:v1\0");
+    hash.update(fvk.to_bytes());
+    hex::encode(hash.finalize())
+}
+
+/// Inert mathematical evidence for independently reconstructing a complete
+/// fixed-proposal review. It conveys neither current eligibility nor anyone's
+/// identity, consent, native decision, or spending authority.
+pub struct HistoricalConstructionReviewEvidenceV1 {
+    pub account_id: String,
+    pub fvk: FullViewingKey,
+    pub change_address: Address,
+    pub context: SelectionContext,
+    pub inputs: Vec<HistoricalConstructionInputEvidenceV1>,
+}
+/// Exact nullifier mapping, never an equal-value host-supplied action mapping.
+pub struct HistoricalConstructionInputEvidenceV1 {
+    pub input_id: String,
+    pub nullifier: [u8; 32],
+    pub value_zatoshis: u64,
+    pub commitment: [u8; 32],
+    pub position: u32,
+}
+
 /// Sensitive inert data. It deliberately implements no Debug and exposes no
 /// key-use, reservation, authority or native-capability conversion.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -447,6 +526,28 @@ impl HistoricalConstructionMaterialV1 {
     pub fn fvk_digest(&self) -> &str {
         &self.fvk_digest
     }
+    pub fn historical_review_evidence(&self) -> Result<HistoricalConstructionReviewEvidenceV1> {
+        let validated = self.validate()?;
+        Ok(HistoricalConstructionReviewEvidenceV1 {
+            account_id: self.account_id.clone(),
+            fvk: validated.fvk,
+            change_address: validated.change_address,
+            context: self.context.decode()?,
+            inputs: self
+                .notes
+                .iter()
+                .map(|note| {
+                    Ok(HistoricalConstructionInputEvidenceV1 {
+                        input_id: note.input_id.clone(),
+                        nullifier: bytes(&note.nullifier)?,
+                        value_zatoshis: note.value_zatoshis,
+                        commitment: bytes(&note.commitment)?,
+                        position: note.position,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?,
+        })
+    }
     pub fn review_summary(&self) -> serde_json::Value {
         serde_json::json!({
             "account_id": self.account_id, "account_fvk_digest": self.fvk_digest,
@@ -553,7 +654,9 @@ impl HistoricalConstructionMaterialV1 {
         let context = self.context.decode()?;
         let fvk = FullViewingKey::from_bytes(&bytes(&self.fvk_hex)?)
             .ok_or(DurableConstructionError::Invalid)?;
-        if hex::encode(Sha256::digest(fvk.to_bytes())) != self.fvk_digest {
+        if hex::encode(Sha256::digest(fvk.to_bytes())) != self.fvk_digest
+            || canonical_durable_account_id(&fvk) != self.account_id
+        {
             return Err(DurableConstructionError::Binding);
         }
         let change_address = Option::<Address>::from(Address::from_raw_address_bytes(&bytes(
@@ -623,6 +726,123 @@ impl FreshDurableConstructionObservationV1 {
     }
 }
 impl ProtectedWalletSync {
+    /// Issue ordinary local wallet key-use evidence for the exact fixed inputs
+    /// after an actual fresh synchronization. This is not native consent, does
+    /// not authorize export or spending, and does not create construction rights.
+    /// The unchanged with_key_use_guard still rechecks the exact maintained rows,
+    /// current native permission, recovery state, source policy and expiry while
+    /// holding the actual wallet transaction through key use and result storage.
+    pub fn exact_durable_review_ticket_v1(
+        &mut self,
+        material: &HistoricalConstructionMaterialV1,
+        scope: &DurableConstructionScopeV1,
+        access: &impl LocalWalletAccess,
+        authenticated_fvk: &FullViewingKey,
+        policy: &crate::WalletKeyUsePolicy,
+    ) -> Result<key_use::WalletKeyUseTicket> {
+        self.require_access(access, WalletAccessPurpose::SelectPrivateContribution)?;
+        material.validate_for(scope)?;
+        material.verify_owner(authenticated_fvk)?;
+        self.verify_account_fvk(authenticated_fvk)?;
+        self.verify_account_birthday_height(material.birthday_height)?;
+        scope.check_valid_at(now()?)?;
+        let accepted = self
+            .accepted
+            .as_ref()
+            .ok_or(DurableConstructionError::Stale)?;
+        if self.phase != SyncPhase::SnapshotMatched
+            || !material.source.matches(&accepted.chain)
+            || self.minimum_confirmations.get() < scope.minimum_confirmations
+            || accepted
+                .selection
+                .tip_height
+                .checked_sub(material.context.tip_height)
+                .is_none_or(|blocks| blocks > scope.maximum_scan_blocks)
+        {
+            return Err(DurableConstructionError::Stale);
+        }
+        self.wallet
+            .backup_identity
+            .as_ref()
+            .ok_or(DurableConstructionError::Storage)?
+            .check()
+            .map_err(|_| DurableConstructionError::Storage)?;
+        let fresh = FreshDurableConstructionObservationV1 {
+            material: material.clone(),
+            scope: scope.clone(),
+            observation: accepted.chain.clone(),
+            current: accepted.selection.clone(),
+            started: accepted.monotonic_started,
+            generation: Arc::downgrade(&self.generation),
+            account: self.account,
+            attempted: std::cell::Cell::new(false),
+        };
+        verify_current_notes(&self.wallet.db, &fresh)?;
+        let target = accepted
+            .selection
+            .tip_height
+            .checked_add(1)
+            .ok_or(DurableConstructionError::Stale)?;
+        let mut local_note_refs = Vec::with_capacity(material.notes.len());
+        let mut local_outpoints = Vec::with_capacity(material.notes.len());
+        // Retain references read from the maintained wallet, never references
+        // deserialized from historical material or synthesized by equal value.
+        for historical in &material.notes {
+            let txid = zcash_protocol::TxId::from_bytes(bytes(&historical.txid_protocol)?);
+            let received = self
+                .wallet
+                .db
+                .get_spendable_note(
+                    &txid,
+                    ShieldedPool::Ironwood,
+                    u32::from(historical.output_index),
+                    target.into(),
+                    LockFilter::Policy(&LockedInputPolicy::Exclude),
+                )
+                .map_err(|_| DurableConstructionError::Storage)?
+                .ok_or(DurableConstructionError::Stale)?;
+            local_note_refs.push(*received.internal_note_id());
+            local_outpoints.push((*received.txid(), received.output_index()));
+        }
+        let owned = material.validate()?;
+        let selected = ProtectedContribution {
+            monotonic_started: accepted.monotonic_started,
+            observation: accepted.chain.clone(),
+            generation: Arc::downgrade(&self.generation),
+            contribution: WalletContribution {
+                account_id: material.account_id.clone(),
+                fvk: owned.fvk,
+                notes: owned
+                    .notes
+                    .into_iter()
+                    .map(|n| SelectedNote {
+                        input_id: n.input_id,
+                        note: n.note,
+                        witness: n.witness,
+                    })
+                    .collect(),
+                change_address: owned.change_address,
+                selected_zatoshis: material.selected_zatoshis,
+                requested_debit_zatoshis: material.requested_debit_zatoshis,
+                context: accepted.selection.clone(),
+                local_note_refs,
+                local_outpoints,
+            },
+        };
+        verify_current_notes(&self.wallet.db, &fresh)?;
+        self.require_access(access, WalletAccessPurpose::SelectPrivateContribution)?;
+        self.wallet
+            .backup_identity
+            .as_ref()
+            .ok_or(DurableConstructionError::Storage)?
+            .check()
+            .map_err(|_| DurableConstructionError::Storage)?;
+        let ticket = selected.key_use_ticket();
+        ticket
+            .validate_policy(policy)
+            .map_err(|_| DurableConstructionError::Stale)?;
+        Ok(ticket)
+    }
     /// Reopens may use this new data-only profile. Historical bytes never reset
     /// a clock: a fresh complete scan and exact database checks are mandatory.
     /// `access` is the existing trusted provider/privacy policy, not native

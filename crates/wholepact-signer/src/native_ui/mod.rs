@@ -261,3 +261,6 @@ pub mod synthetic_born_joined_qualification;
 
 #[cfg(feature = "synthetic-born-joined-qualification")]
 pub(crate) use born_manual_roster_v2::born_manual_roster::continuation_fixture::construction_fixture::ScopedV3FixtureDispatch;
+
+#[cfg(all(feature = "durable-proposal", target_os = "linux"))]
+pub(crate) mod durable_proposal_v1;

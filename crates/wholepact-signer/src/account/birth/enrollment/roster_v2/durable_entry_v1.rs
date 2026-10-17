@@ -1,0 +1,185 @@
+//! Fresh native access to an ORIGINAL born/manual account and its complete
+//! existing journal. Historical enrollment is an account association, never a
+//! restored process, writer session, native approval or signing capability.
+//!
+//! In particular this entry does not consume a V3 dormant token, require the
+//! former Host process to remain alive, or call the empty-journal initial-owner
+//! gate. Old reservations and uncertain results remain in the same journal.
+use super::*;
+use crate::consent_journal::OriginalAuthorizationLease;
+use crate::native_ui::PendingAccountNativeAuthority;
+use wholepact_authority::account_use::AccountUseGenesis;
+
+/// An actual locked original vault with a fresh genuine native owner. There is
+/// deliberately no Clone, Deserialize, from-record factory, key accessor,
+/// activation flag, writer-session conversion or authorization conversion.
+pub(crate) struct FreshDurableBornEntryV1 {
+    retained: RetainedBornManualRosterEnrollmentV2,
+    original_commit: publication::BornManualRosterCommitV2,
+    journal: Arc<SignerConsentJournal>,
+    owner: Arc<PendingAccountNativeAuthority>,
+}
+
+impl FreshDurableBornEntryV1 {
+    /// Opens existing authenticated originals only. Missing enrollment, commit
+    /// or journal is recovery-required, never permission to initialize a new
+    /// account, choose another journal key, or replace historical evidence.
+    pub(crate) fn open(
+        root: &Path,
+        password: &[u8],
+        owner: Arc<PendingAccountNativeAuthority>,
+    ) -> Result<Self> {
+        owner.check_current()?;
+        owner.native().binding().bounded_deadline()?;
+
+        // This existing purpose-specific opener owns the actual private
+        // directory lock and authenticates the original born envelope, original
+        // target, birth request, original account/FVK and complete file inventory.
+        // It does not activate the account or make spending_key available.
+        let account = Arc::new(AccountVault::unlock_born_for_manual_roster_enrollment_v2(
+            root, password, &owner,
+        )?);
+        let retained = account
+            .retained_born_manual_roster_enrollment_v2(&owner)?
+            .ok_or(Error::RecoveryRequired)?;
+        retained.check_current_source(&owner)?;
+        if !account.directory.exists(ROSTER_COMMIT)? || !account.directory.exists(JOURNAL)? {
+            return Err(Error::RecoveryRequired);
+        }
+
+        // This is a historical authenticated read. It checks exact original
+        // enrollment/intent and any original continuation/admission linkage,
+        // without treating its old timestamps or native session as current.
+        let original_commit = publication::read_commit(&retained)?;
+        let genesis = &retained.record.account_record.genesis;
+        let key = DatabaseKey::from_bytes(*retained.journal_key);
+        let journal = Arc::new(SignerConsentJournal::open_durable_born_entry_v1(
+            &account.directory.root().join(JOURNAL),
+            &key,
+            genesis,
+        )?);
+        let result = Self {
+            retained,
+            original_commit,
+            journal,
+            owner,
+        };
+        result.check_current()?;
+        Ok(result)
+    }
+
+    /// Rechecks real native/parent lifetime, the held ORIGINAL source and the
+    /// exact existing journal. No callback flag or historic receipt substitutes
+    /// for these checks. Callers must separately hold their current native and
+    /// journal publication fences across any immediate consequential action.
+    pub(crate) fn check_current(&self) -> Result<()> {
+        self.check_original_source_current()?;
+        self.journal.check_durable_born_entry_v1(self.genesis())?;
+        self.owner.check_current()?;
+        Ok(())
+    }
+
+    /// Rechecks only the actual native/vault/immutable-original source. It takes
+    /// no journal authority lock, so an immutable data callback can use it while
+    /// the specialized adapter separately checks the held authorization lease.
+    /// This is deliberately not sufficient journal or spending authority.
+    pub(crate) fn check_original_source_current(&self) -> Result<()> {
+        self.owner.check_current()?;
+        self.owner.native().binding().bounded_deadline()?;
+        self.retained.check_current_source(&self.owner)?;
+        if publication::read_commit(&self.retained)? != self.original_commit {
+            return Err(Error::ReviewMismatch);
+        }
+        self.owner.check_current()?;
+        Ok(())
+    }
+
+    /// Reuses the existing authorization read fence. Taking another normal
+    /// journal read lock here can deadlock behind a queued revocation writer.
+    pub(crate) fn check_current_under_lease(
+        &self,
+        lease: &OriginalAuthorizationLease<'_>,
+    ) -> Result<()> {
+        self.check_original_source_current()?;
+        lease.require_native_origin(&self.native_binding())?;
+        self.journal
+            .check_durable_born_entry_v1_under_lease(self.genesis(), lease)?;
+        self.owner.check_current()?;
+        Ok(())
+    }
+
+    /// Same actual vault/journal identities, while preserving the held fence.
+    pub(crate) fn require_authorization_identity(
+        &self,
+        account: &crate::account::DedicatedAccount,
+        journal: &SignerConsentJournal,
+        lease: &OriginalAuthorizationLease<'_>,
+    ) -> Result<()> {
+        if !std::ptr::eq(self.account(), account) || !std::ptr::eq(self.journal.as_ref(), journal) {
+            return Err(Error::Authentication);
+        }
+        self.check_current_under_lease(lease)
+    }
+
+    /// Account access remains private to the concrete native composition. The
+    /// existing born flag and ordinary spending-key refusal are unchanged.
+    pub(crate) fn vault(&self) -> &Arc<AccountVault> {
+        &self.retained.account
+    }
+
+    pub(crate) fn account(&self) -> &crate::account::DedicatedAccount {
+        self.retained.account.account()
+    }
+
+    /// Equal public account identifiers do not transfer this actual source to
+    /// another account instance, copied vault, or deserialized account record.
+    pub(crate) fn require_account_identity(
+        &self,
+        account: &crate::account::DedicatedAccount,
+    ) -> Result<()> {
+        if !std::ptr::eq(self.account(), account) {
+            return Err(Error::Authentication);
+        }
+        self.check_current()
+    }
+
+    pub(crate) fn journal(&self) -> &Arc<SignerConsentJournal> {
+        &self.journal
+    }
+
+    /// A matching genesis or pathname is not enough: the immediate action must
+    /// use this exact freshly opened journal and its held database identity.
+    pub(crate) fn require_journal_identity(&self, journal: &SignerConsentJournal) -> Result<()> {
+        if !std::ptr::eq(self.journal.as_ref(), journal) {
+            return Err(Error::Authentication);
+        }
+        self.check_current()
+    }
+
+    pub(crate) fn native_owner(&self) -> &Arc<PendingAccountNativeAuthority> {
+        &self.owner
+    }
+
+    pub(crate) fn native_binding(&self) -> NativeAuthorityBinding {
+        self.owner.native().binding()
+    }
+
+    pub(crate) fn record(&self) -> &BornManualRosterEnrollmentRecordV2 {
+        &self.retained.record
+    }
+
+    pub(crate) fn genesis(&self) -> &AccountUseGenesis {
+        &self.retained.record.account_record.genesis
+    }
+
+    /// The original independently selected witness endpoint/policy remains
+    /// fixed. This descriptor is data, not a live TLS owner or writer session.
+    pub(crate) fn original_witness_disclosure(
+        &self,
+    ) -> Result<wholepact_authority::WitnessDisclosureDescriptor> {
+        self.check_current()?;
+        let disclosure = self.retained.disclosure()?;
+        self.check_current()?;
+        Ok(disclosure)
+    }
+}

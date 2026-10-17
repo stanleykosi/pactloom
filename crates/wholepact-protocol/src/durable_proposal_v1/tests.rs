@@ -147,7 +147,9 @@ fn detached_set_digest_binds_attribution_signature_and_fixed_artifact_identity()
 #[cfg(feature = "synthetic-qualification")]
 mod synthetic {
     use super::*;
-    use crate::review::encode_testnet_receiver;
+    use crate::review::{
+        InputPolicy, OutputPolicy, OutputPurpose, ParticipantPolicy, encode_testnet_receiver,
+    };
     use orchard::{
         keys::{FullViewingKey, Scope, SpendAuthorizingKey, SpendingKey},
         note::ExtractedNoteCommitment,
@@ -182,6 +184,10 @@ mod synthetic {
     // randomness. No wallet, network, filesystem, new private key or funded note
     // is read. These constants are the existing protocol qualification test keys.
     fn fixture() -> Fixture {
+        fixture_with_inputs(&[(0, 200_000), (1, 300_000)])
+    }
+
+    fn fixture_with_inputs(specs: &[(usize, u64)]) -> Fixture {
         let mut rng = StdRng::from_seed([0xd1; 32]);
         let keys = [1_u8, 2, 3].map(|byte| SpendingKey::from_bytes([byte; 32]).unwrap());
         let fvks = keys.each_ref().map(FullViewingKey::from);
@@ -193,11 +199,11 @@ mod synthetic {
             orchard::Anchor::empty_tree(),
         )
         .unwrap();
-        for (fvk, value) in fvks.iter().take(2).zip([200_000, 300_000]) {
+        for &(owner, value) in specs {
             incoming
                 .add_output(
                     None,
-                    fvk.address_at(0_u32, Scope::External),
+                    fvks[owner].address_at(0_u32, Scope::External),
                     orchard::value::NoteValue::from_raw(value),
                     MemoBytes::empty().into_bytes(),
                 )
@@ -207,11 +213,11 @@ mod synthetic {
         let mut tree =
             ShardTree::<_, 32, 16>::new(MemoryShardStore::<MerkleHashOrchard, u32>::empty(), 100);
         let mut notes = Vec::new();
-        for (owner, fvk) in fvks.iter().take(2).enumerate() {
-            let action = &bundle.actions()[meta.output_action_index(owner).unwrap()];
+        for (slot, &(owner, _)) in specs.iter().enumerate() {
+            let action = &bundle.actions()[meta.output_action_index(slot).unwrap()];
             let (note, _, _) = try_note_decryption(
                 &IronwoodDomain::for_action(action),
-                &fvk.to_ivk(Scope::External).prepare(),
+                &fvks[owner].to_ivk(Scope::External).prepare(),
                 action,
             )
             .unwrap();
@@ -224,7 +230,7 @@ mod synthetic {
             notes.push(note);
         }
         tree.checkpoint(99).unwrap();
-        let paths: Vec<orchard::tree::MerklePath> = (0_u64..2)
+        let paths: Vec<orchard::tree::MerklePath> = (0_u64..specs.len() as u64)
             .map(|index| {
                 tree.witness_at_checkpoint_depth(index.into(), 0)
                     .unwrap()
@@ -258,9 +264,9 @@ mod synthetic {
             },
         )
         .with_expiry_height(140_u32.into());
-        for ((fvk, note), path) in fvks.iter().take(2).zip(notes).zip(paths) {
+        for ((&(owner, _), note), path) in specs.iter().zip(notes).zip(paths) {
             builder
-                .add_ironwood_spend::<zip317::FeeRule>(fvk.clone(), note, path)
+                .add_ironwood_spend::<zip317::FeeRule>(fvks[owner].clone(), note, path)
                 .unwrap();
         }
         for (owner, scope, value) in [
@@ -277,14 +283,66 @@ mod synthetic {
                 )
                 .unwrap();
         }
-        let PcztResult { pczt_parts, .. } = builder
+        let PcztResult {
+            pczt_parts,
+            ironwood_meta,
+            ..
+        } = builder
             .build_for_pczt(&mut rng, &zip317::FeeRule::standard())
             .unwrap();
         let pczt = IoFinalizer::new(Creator::build_from_parts(pczt_parts).unwrap())
             .finalize_io(&mut rng)
             .unwrap();
+        let mut policy = ReviewPolicy {
+            manifest_digest: [0; 32],
+            participants: (0..2)
+                .map(|owner| ParticipantPolicy {
+                    account_id: canonical_durable_account_id(&fvks[owner]),
+                    fvk: fvks[owner].clone(),
+                    contribution_zatoshis: [100_000, 200_000][owner],
+                    fee_share_zatoshis: [5_000, 10_000][owner],
+                    maximum_net_debit_zatoshis: [105_000, 210_000][owner],
+                })
+                .collect(),
+            inputs: specs
+                .iter()
+                .enumerate()
+                .map(|(slot, &(owner, value))| {
+                    let action_index = ironwood_meta.spend_action_index(slot).unwrap();
+                    InputPolicy {
+                        action_index,
+                        participant_index: owner,
+                        nullifier: *pczt.ironwood().actions()[action_index].spend().nullifier(),
+                        value_zatoshis: value,
+                    }
+                })
+                .collect(),
+            outputs: [
+                (2, Scope::External, 300_000),
+                (0, Scope::Internal, 95_000),
+                (1, Scope::Internal, 90_000),
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(slot, (owner, scope, value))| OutputPolicy {
+                action_index: ironwood_meta.output_action_index(slot).unwrap(),
+                receiver: fvks[owner].address_at(0_u32, scope),
+                value_zatoshis: value,
+                memo: MemoBytes::empty().into_bytes(),
+                purpose: if slot == 0 {
+                    OutputPurpose::Recipient
+                } else {
+                    OutputPurpose::Return {
+                        participant_index: owner,
+                    }
+                },
+            })
+            .collect(),
+            exact_fee_zatoshis: 15_000,
+            expiry_height: 140,
+            anchor: pczt.ironwood().anchor().unwrap(),
+        };
         let unsigned = encode(pczt).unwrap();
-        let mut policy = crate::synthetic::policy_for_fixture_pczt(&unsigned).unwrap();
         let agreement = AgreementDraft {
             schema_version: 1,
             agreement_id: "durable-test-agreement".into(),
@@ -446,6 +504,29 @@ mod synthetic {
         let first = fixture();
         let second = fixture();
         assert_eq!(first.unsigned, second.unsigned);
+        verify_canonical_accounts(&first.policy).unwrap();
+        for (owner, participant) in first.policy.participants.iter().enumerate() {
+            let mut expected = Sha256::new();
+            expected.update(b"wholepact:dedicated-testnet-account:legacy-zip32:v1\0");
+            expected.update(participant.fvk.to_bytes());
+            assert_eq!(participant.account_id, hex::encode(expected.finalize()));
+            assert_eq!(
+                first.proposal.manifest().participants[owner].account_id,
+                participant.account_id
+            );
+            assert!(
+                first
+                    .inputs
+                    .iter()
+                    .filter(|mapping| {
+                        first.policy.inputs.iter().any(|input| {
+                            input.action_index == mapping.action_index
+                                && input.participant_index == owner
+                        })
+                    })
+                    .all(|mapping| mapping.account_id == participant.account_id)
+            );
+        }
         verify_manifest_policy(
             &first.proposal,
             &first.policy,
@@ -474,6 +555,88 @@ mod synthetic {
         .unwrap();
         assert!(verify(&first, &fake).is_err());
         assert!(verify(&first, &first.unsigned).is_err());
+    }
+
+    #[test]
+    fn canonical_account_gate_rejects_fvk_labels_aliases_and_manifest_substitution() {
+        let mut fixture = fixture();
+        let fake = fabricated_proof(&fixture);
+        let original = fixture.policy.clone();
+        fixture.policy.participants[0].account_id = "unverified-human-label".into();
+        assert_eq!(
+            verify(&fixture, &fake).err().unwrap(),
+            "Durable account ID is not canonical for its actual viewing key"
+        );
+        fixture.policy = original.clone();
+        fixture.policy.participants[0]
+            .account_id
+            .make_ascii_uppercase();
+        assert_eq!(
+            verify(&fixture, &fake).err().unwrap(),
+            "Durable account ID is not canonical for its actual viewing key"
+        );
+        fixture.policy = original.clone();
+        fixture.policy.participants[0].fvk = original.participants[1].fvk.clone();
+        assert_eq!(
+            verify(&fixture, &fake).err().unwrap(),
+            "Durable account ID is not canonical for its actual viewing key"
+        );
+        fixture.policy.participants[0].account_id = original.participants[1].account_id.clone();
+        assert_eq!(
+            verify(&fixture, &fake).err().unwrap(),
+            "Durable accounts must have distinct account IDs and viewing keys"
+        );
+        fixture.policy = original.clone();
+        fixture.policy.participants.swap(0, 1);
+        verify_canonical_accounts(&fixture.policy).unwrap();
+        assert!(
+            verify(&fixture, &fake)
+                .err()
+                .unwrap()
+                .contains("Participant policy differs")
+        );
+        fixture.policy = original;
+        fixture.inputs[0].account_id = fixture.inputs[1].account_id.clone();
+        assert!(
+            verify(&fixture, &fake)
+                .err()
+                .unwrap()
+                .contains("Input policy differs")
+        );
+    }
+
+    #[test]
+    fn equal_value_same_account_input_ids_require_exact_frozen_mapping() {
+        let fixture = fixture_with_inputs(&[(0, 100_000), (0, 100_000), (1, 300_000)]);
+        verify_canonical_accounts(&fixture.policy).unwrap();
+        verify_review(&fixture.unsigned, &fixture.policy).unwrap();
+        let mut swapped = fixture.inputs.clone();
+        let first_action = swapped[0].action_index;
+        swapped[0].action_index = swapped[1].action_index;
+        swapped[1].action_index = first_action;
+        assert_ne!(fixture.inputs[0].input_id, fixture.inputs[1].input_id);
+        assert_ne!(
+            fixture.policy.inputs[0].nullifier,
+            fixture.policy.inputs[1].nullifier
+        );
+        assert_eq!(
+            fixture.policy.inputs[0].value_zatoshis,
+            fixture.policy.inputs[1].value_zatoshis
+        );
+        assert_eq!(fixture.inputs[0].account_id, fixture.inputs[1].account_id);
+        // Complete economic/ownership verification alone cannot distinguish the
+        // off-chain selection IDs of equal-value notes owned by the same account.
+        verify_manifest_policy(
+            &fixture.proposal,
+            &fixture.policy,
+            &swapped,
+            &fixture.outputs,
+        )
+        .unwrap();
+        assert_ne!(
+            mapping_digest(&fixture.inputs, &fixture.outputs),
+            mapping_digest(&swapped, &fixture.outputs)
+        );
     }
 
     #[test]
@@ -630,7 +793,7 @@ mod synthetic {
     #[test]
     #[ignore = "CPU-intensive real synthetic proof qualification; run explicitly"]
     fn real_proof_and_independent_detached_owners_preserve_exact_fixed_artifact() {
-        let fixture = fixture();
+        let fixture = fixture_with_inputs(&[(0, 100_000), (0, 100_000), (1, 300_000)]);
         let key =
             orchard::circuit::ProvingKey::build(orchard::circuit::OrchardCircuitVersion::PostNu6_3);
         let proved = Prover::new(parse_candidate(&fixture.unsigned).unwrap())
@@ -659,6 +822,22 @@ mod synthetic {
         fixed
             .verify_action_mappings(&reversed_inputs, &fixture.outputs)
             .unwrap();
+        let mut swapped = fixture.inputs.clone();
+        let first_action = swapped[0].action_index;
+        swapped[0].action_index = swapped[1].action_index;
+        swapped[1].action_index = first_action;
+        verify_manifest_policy(
+            &fixture.proposal,
+            &fixture.policy,
+            &swapped,
+            &fixture.outputs,
+        )
+        .unwrap();
+        assert!(
+            fixed
+                .verify_action_mappings(&swapped, &fixture.outputs)
+                .is_err()
+        );
         let empty = fixed.verify_detached_signatures(&[]).unwrap();
         assert!(!empty.inspection().signatures_complete);
         assert_eq!(
@@ -667,8 +846,8 @@ mod synthetic {
         );
 
         let mut signatures = Vec::new();
-        for owner in 0..2 {
-            let input = &fixture.policy.inputs[owner];
+        for input in &fixture.policy.inputs {
+            let owner = input.participant_index;
             let key =
                 SpendingKey::from_bytes(crate::synthetic::TEST_OWNER_SPENDING_KEY_BYTES[owner])
                     .unwrap();
@@ -732,7 +911,7 @@ mod synthetic {
             .actions()
             .iter()
             .position(|action| action.spend().spend_auth_sig().is_some())
-            .unwrap();
+            .unwrap_or(fixture.policy.inputs.len());
         assert!(fixed.verify_detached_signatures(&signatures).is_err());
         signatures[0].action_index = signatures[1].action_index;
         assert!(fixed.verify_detached_signatures(&signatures).is_err());

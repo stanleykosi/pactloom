@@ -41,6 +41,8 @@ impl SignerConsentJournal {
             // native review digests do not replace its historical provenance.
             if existing.request() != request
                 || existing.request_digest() != candidate.request_digest()
+                || existing.recipient_transport() != candidate.recipient_transport()
+                || existing.redisclosure() != candidate.redisclosure()
             {
                 return Err(JournalError::Conflict);
             }
@@ -99,6 +101,15 @@ fn validate_original_rows(c: &Connection, outbox: &DurableConstructionOutboxV1) 
     outbox
         .validate()
         .map_err(|_| JournalError::InvalidBinding)?;
+    if let Some(link) = outbox.redisclosure() {
+        // Bounded one-link join: refuse a chain before recursive validation, so
+        // malicious restored data cannot cause cycles or unbounded recursion.
+        let original = read_raw(c, &link.original_operation_id)?.ok_or(JournalError::NotFound)?;
+        outbox
+            .validate_redisclosure_of(&original)
+            .map_err(|_| JournalError::InvalidBinding)?;
+        validate_original_rows(c, &original)?;
+    }
     let request = outbox.request();
     let enrollment =
         storage::read_enrollment(c, &request.enrollment_ref)?.ok_or(JournalError::NotFound)?;
@@ -120,6 +131,14 @@ fn validate_original_rows(c: &Connection, outbox: &DurableConstructionOutboxV1) 
     Ok(())
 }
 fn read(c: &Connection, operation_id: &str) -> Result<Option<DurableConstructionOutboxV1>> {
+    read_raw(c, operation_id)?
+        .map(|outbox| {
+            validate_original_rows(c, &outbox)?;
+            Ok(outbox)
+        })
+        .transpose()
+}
+fn read_raw(c: &Connection, operation_id: &str) -> Result<Option<DurableConstructionOutboxV1>> {
     let raw: Option<(String, String, String, String)> = c.query_row(
         "SELECT request_digest,enrollment_ref,manifest_ref,payload FROM signer_durable_construction_outbox WHERE operation_id=?1", [operation_id],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional()?;
@@ -132,7 +151,6 @@ fn read(c: &Connection, operation_id: &str) -> Result<Option<DurableConstruction
         {
             return Err(JournalError::InvalidBinding);
         }
-        validate_original_rows(c, &outbox)?;
         Ok(outbox)
     })
     .transpose()

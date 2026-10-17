@@ -66,6 +66,31 @@ impl DurableConstructionHistoryRequestV1 {
         hash(&self.expected_request_digest)
     }
 }
+/// A NEW native disclosure to the current authenticated local application.
+/// It can recover bytes lost before intake, but cannot renew their validity.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DurableConstructionRedisclosureRequestV1 {
+    pub operation_id: String,
+    pub original: DurableConstructionHistoryRequestV1,
+}
+impl DurableConstructionRedisclosureRequestV1 {
+    pub fn validate(&self) -> Result<()> {
+        crate::review::validate_label(&self.operation_id).map_err(|_| BridgeError::Binding)?;
+        self.original.validate()?;
+        if self.operation_id == self.original.operation_id {
+            return Err(BridgeError::Binding);
+        }
+        Ok(())
+    }
+}
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DurableConstructionRedisclosureLinkV1 {
+    pub original_operation_id: String,
+    pub original_request_digest: String,
+    pub original_outbox_reference: String,
+}
 /// Historical signer-owned consent/outbox, not a portable authentication proof
 /// or an executable permit. Native decision objects never appear on this wire.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,6 +104,9 @@ pub struct DurableConstructionOutboxV1 {
     pub(crate) recipient_grant_digest: String,
     pub(crate) original_channel_digest: String,
     pub(crate) original_grant_id: String,
+    pub(crate) recipient_transport: crate::consent_journal::TransportIdentityBinding,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) redisclosure: Option<DurableConstructionRedisclosureLinkV1>,
     pub(crate) reference: String,
 }
 impl DurableConstructionOutboxV1 {
@@ -97,7 +125,74 @@ impl DurableConstructionOutboxV1 {
     pub fn recipient_grant_digest(&self) -> &str {
         &self.recipient_grant_digest
     }
+    pub fn redisclosure(&self) -> Option<&DurableConstructionRedisclosureLinkV1> {
+        self.redisclosure.as_ref()
+    }
+    /// Data consistency only. The journal separately joins this exact link to
+    /// its immutable original row before a new native-approved write.
+    pub(crate) fn validate_redisclosure_of(&self, original: &Self) -> Result<()> {
+        let link = self.redisclosure.as_ref().ok_or(BridgeError::Binding)?;
+        if original.redisclosure.is_some()
+            || link.original_operation_id != original.request.operation_id
+            || link.original_request_digest != original.request_digest
+            || link.original_outbox_reference != original.reference
+        {
+            return Err(BridgeError::Binding);
+        }
+        let mut expected = original.request.clone();
+        expected.operation_id = self.request.operation_id.clone();
+        expected.scope.constructor.authenticated_local_grant_digest =
+            self.recipient_grant_digest.clone();
+        expected.scope.prover.authenticated_local_grant_digest =
+            self.recipient_grant_digest.clone();
+        if self.request != expected || self.material_digest != original.material_digest {
+            return Err(BridgeError::Binding);
+        }
+        Ok(())
+    }
+    pub fn recipient_transport(&self) -> &crate::consent_journal::TransportIdentityBinding {
+        &self.recipient_transport
+    }
     pub fn validate(&self) -> Result<()> {
+        if let Some(link) = &self.redisclosure {
+            crate::review::validate_label(&link.original_operation_id)
+                .map_err(|_| BridgeError::Binding)?;
+            hash(&link.original_request_digest)?;
+            hash(&link.original_outbox_reference)?;
+            if link.original_operation_id == self.request.operation_id {
+                return Err(BridgeError::Binding);
+            }
+        }
+        let crate::consent_journal::TransportIdentityBinding::LocalProcess {
+            transport_identity_id,
+            channel_key_digest,
+            channel_binding_digest,
+            uid: _,
+            pid,
+            process_instance,
+            signer_generation,
+            account_id,
+            agreement_id,
+            participant_id,
+            manifest_digest,
+        } = &self.recipient_transport
+        else {
+            return Err(BridgeError::Binding);
+        };
+        hash(process_instance)?;
+        let proposal = self.request.validate()?;
+        if *pid == 0
+            || *signer_generation == 0
+            || transport_identity_id != &self.original_grant_id
+            || channel_key_digest != &self.recipient_grant_digest
+            || channel_binding_digest != &self.original_channel_digest
+            || account_id != &self.request.scope.account_id
+            || agreement_id != &proposal.manifest().agreement.agreement_id
+            || participant_id != &self.request.scope.participant_id
+            || manifest_digest != proposal.manifest_digest()
+        {
+            return Err(BridgeError::Binding);
+        }
         for h in [
             &self.request_digest,
             &self.material_digest,
@@ -147,6 +242,8 @@ impl DurableConstructionOutboxV1 {
                 &self.recipient_grant_digest,
                 &self.original_channel_digest,
                 &self.original_grant_id,
+                &self.recipient_transport,
+                &self.redisclosure,
             ),
         )
         .map_err(|_| BridgeError::Binding)
@@ -188,7 +285,11 @@ impl OriginalHistoryClient {
         let stream = self.open_preconstruction_request(
             serde_json::json!({"operation":"request_durable_construction_v1", "request":request}),
         )?;
-        self.receive_durable_construction_v1(stream, &request.operation_id, &request.digest()?)
+        self.receive_durable_construction_v1(
+            stream,
+            &request.operation_id,
+            Some(&request.digest()?),
+        )
     }
     pub fn read_durable_construction_v1(
         &self,
@@ -199,14 +300,31 @@ impl OriginalHistoryClient {
         self.receive_durable_construction_v1(
             stream,
             &request.operation_id,
-            &request.expected_request_digest,
+            Some(&request.expected_request_digest),
         )
+    }
+    pub fn redisclose_durable_construction_v1(
+        &self,
+        request: &DurableConstructionRedisclosureRequestV1,
+    ) -> Result<AuthenticatedDurableConstructionDisclosureV1> {
+        request.validate()?;
+        let stream = self.open_preconstruction_request(serde_json::json!({
+            "operation":"request_durable_construction_redisclosure_v1", "request":request
+        }))?;
+        let received = self.receive_durable_construction_v1(stream, &request.operation_id, None)?;
+        let link = received.outbox.redisclosure().ok_or(BridgeError::Binding)?;
+        if link.original_operation_id != request.original.operation_id
+            || link.original_request_digest != request.original.expected_request_digest
+        {
+            return Err(BridgeError::Binding);
+        }
+        Ok(received)
     }
     fn receive_durable_construction_v1(
         &self,
         stream: std::os::unix::net::UnixStream,
         operation: &str,
-        expected: &str,
+        expected: Option<&str>,
     ) -> Result<AuthenticatedDurableConstructionDisclosureV1> {
         let observed = self.proved_disclosure_recipient()?;
         let frame =
@@ -218,8 +336,9 @@ impl OriginalHistoryClient {
             return Err(BridgeError::Permission);
         };
         outbox.validate()?;
+        self.verify_durable_construction_recipient_v1(outbox.recipient_transport())?;
         if outbox.request.operation_id != operation
-            || outbox.request_digest != expected
+            || expected.is_some_and(|expected| outbox.request_digest != expected)
             || outbox.request.scope.account_id != observed.account_id
         {
             return Err(BridgeError::Binding);

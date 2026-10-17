@@ -6,6 +6,7 @@ use crate::authority_bridge::{
     self, BridgeError,
     durable_construction_v1::{
         DurableConstructionHistoryRequestV1, DurableConstructionOutboxV1,
+        DurableConstructionRedisclosureLinkV1, DurableConstructionRedisclosureRequestV1,
         DurableConstructionRequestV1, DurableConstructionResponseV1,
     },
 };
@@ -87,6 +88,7 @@ fn write_bounded(
 
 pub(super) struct PreparedDurableConstructionV1 {
     request: DurableConstructionRequestV1,
+    redisclosure: Option<DurableConstructionRedisclosureLinkV1>,
     peer: AuthenticatedPeer,
     stream: UnixStream,
     source: NativeAuthorityBinding,
@@ -148,6 +150,71 @@ impl PreparedDurableConstructionV1 {
         authority: &NativeAuthorityBinding,
         vault: &AccountVault,
     ) -> Result<Self> {
+        Self::prepare_internal(
+            request, None, peer, stream, journal, session, authority, vault,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn prepare_redisclosure(
+        request: DurableConstructionRedisclosureRequestV1,
+        peer: AuthenticatedPeer,
+        stream: UnixStream,
+        journal: &SignerConsentJournal,
+        session: &SignerConsentSession,
+        authority: &NativeAuthorityBinding,
+        vault: &AccountVault,
+    ) -> Result<Self> {
+        request.validate().map_err(error)?;
+        peer.check_current()?;
+        authority.check_current()?;
+        if !peer.scope.history_read || !peer.scope.preconstruction_export {
+            return Err(Error::ReviewMismatch);
+        }
+        // Read only inside the signer under a current native session. No old
+        // material or prior consent is exported before this NEW exact decision.
+        let original = journal
+            .durable_construction_history_v1(&request.original, session)
+            .map_err(error)?;
+        if original.redisclosure().is_some() {
+            return Err(Error::ReviewMismatch);
+        }
+        let link = DurableConstructionRedisclosureLinkV1 {
+            original_operation_id: original.request().operation_id.clone(),
+            original_request_digest: original.request_digest().into(),
+            original_outbox_reference: original.reference().into(),
+        };
+        let mut next = original.request().clone();
+        next.operation_id = request.operation_id;
+        next.scope.constructor.authenticated_local_grant_digest = peer.key_digest.clone();
+        next.scope.prover.authenticated_local_grant_digest = peer.key_digest.clone();
+        let prepared = Self::prepare_internal(
+            next,
+            Some(link),
+            peer,
+            stream,
+            journal,
+            session,
+            authority,
+            vault,
+        )?;
+        prepared
+            .outbox_data()
+            .map_err(error)?
+            .validate_redisclosure_of(&original)
+            .map_err(error)?;
+        Ok(prepared)
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_internal(
+        request: DurableConstructionRequestV1,
+        redisclosure: Option<DurableConstructionRedisclosureLinkV1>,
+        peer: AuthenticatedPeer,
+        stream: UnixStream,
+        journal: &SignerConsentJournal,
+        session: &SignerConsentSession,
+        authority: &NativeAuthorityBinding,
+        vault: &AccountVault,
+    ) -> Result<Self> {
         authority.check_current()?;
         validate_peer(&request, &peer).map_err(error)?;
         request.scope.check_valid_at(now()?).map_err(error)?;
@@ -177,6 +244,7 @@ impl PreparedDurableConstructionV1 {
             "wholepact:native-durable-construction-review:v1",
             &(
                 &request.digest().map_err(error)?,
+                &redisclosure,
                 &peer.key_digest,
                 &peer.channel_digest,
                 &peer.grant_id,
@@ -184,9 +252,19 @@ impl PreparedDurableConstructionV1 {
             ),
         )
         .map_err(error)?;
+        let audience_notice = if request.scope.version == 2 {
+            "NEW LOCAL REVIEWER AUDIENCE: You approve sequential disclosure to the exact listed canonical account IDs through their actual installed local signer and fresh account-bound pairing, including after earlier pairings close. Account IDs are cryptographic account identifiers, not people, distinct-person guarantees, or prior peer approvals. Each forwarding still requires current local export consent, exact recipient authentication, and a committed protected export intent. No remote or arbitrary onward recipient is authorized."
+        } else {
+            "LEGACY EXACT TRANSPORT AUDIENCE: Reviewer fingerprints name only the exact intended transport keys. This local channel does not authenticate those remote keys or people. This scope does NOT authorize local account-scoped forwarding; a new explicit purpose-specific scope is required."
+        };
+        let redisclosure_notice = redisclosure.as_ref().map(|link| format!(
+            "NEW IRREVERSIBLE REDISCLOSURE of original operation {} / outbox {}. This is not replay, restoration, renewal, or extension of the previous recipient grant. Exact original material, manifest, purpose, destination, retention, reviewer audience and validity ceiling remain unchanged. You are approving another copy to the CURRENT authenticated local application.\n\n",
+            link.original_operation_id, link.original_outbox_reference
+        )).unwrap_or_default();
         // Show the scope and exact material commitment, NOT raw viewing material.
         let display = Zeroizing::new(format!(
-            "DISCLOSE AND RETAIN EXACT CONSTRUCTION MATERIAL\n\n{}\n\nMaterial commitment: {}\nAccount FVK commitment: {}\nExact historical material review: {}\n\nActual local recipient: {} (PID {}, UID {}, authenticated local grant fingerprint {}). Constructor and prover are this same authenticated local application for THIS grant. This fingerprint is not a persistent public key; a new pairing cannot silently inherit this disclosure recipient. Reviewer fingerprints above name the exact intended onward audience; this local channel does not authenticate remote people or authorize arbitrary onward export. Protected destination is exact and must also be checked by the recipient's authenticated encrypted-store intake.\n\nThis NEW purpose permits retention across process closure and fresh bounded public-block reads for these exact inputs and provider until the listed validity limit. It does not renew any V3 permit. Old consumed records remain unchanged.\n\nThe full viewing key reveals this dedicated account's past and future activity. Selected notes, values, nullifiers, witnesses, change ownership, and participant linkages are privacy-sensitive. Disclosure is irreversible. Retention is a recipient commitment, not technical erasure. Provider contact reveals IP, timing and height ranges; it receives no viewing key. A provider snapshot is not independent consensus or proof of unspentness.\n\nNo spending key, native decision, writer credential, executable witness permit or released signature is exported. This reserves no inputs and authorizes no spending, replacement or submission. Later signing requires separate fresh exact transaction review and independent writer/exposure reconciliation.\n\nNative review binding: {}",
+            "{}DISCLOSE AND RETAIN EXACT CONSTRUCTION MATERIAL\n\n{}\n\nMaterial commitment: {}\nAccount FVK commitment: {}\nExact historical material review: {}\n\nActual local recipient: {} (PID {}, UID {}, authenticated local grant fingerprint {}). Constructor and prover are this same authenticated local application for THIS grant. This fingerprint is not a persistent public key; a new pairing cannot silently inherit this disclosure recipient. {} Protected destination is exact and must also be checked by the recipient's authenticated encrypted-store intake.\n\nThis NEW purpose permits retention across process closure and fresh bounded public-block reads for these exact inputs and provider until the listed validity limit. It does not renew any V3 permit. Old consumed records remain unchanged.\n\nThe full viewing key reveals this dedicated account's past and future activity. Selected notes, values, nullifiers, witnesses, change ownership, and participant linkages are privacy-sensitive. Disclosure is irreversible. Retention is a recipient commitment, not technical erasure. Provider contact reveals IP, timing and height ranges; it receives no viewing key. A provider snapshot is not independent consensus or proof of unspentness.\n\nNo spending key, native decision, writer credential, executable witness permit or released signature is exported. This reserves no inputs and authorizes no spending, replacement or submission. Later signing requires separate fresh exact transaction review and independent writer/exposure reconciliation.\n\nNative review binding: {}",
+            redisclosure_notice,
             serde_json::to_string_pretty(&request.scope).map_err(error)?,
             request.material.digest().map_err(error)?,
             request.material.fvk_digest(),
@@ -195,17 +273,66 @@ impl PreparedDurableConstructionV1 {
             peer.peer.pid(),
             peer.peer.uid(),
             peer.key_digest,
+            audience_notice,
             digest
         ));
-        Ok(Self {
+        let prepared = Self {
             request,
+            redisclosure,
             peer,
             stream,
             source: authority.clone(),
             digest,
             display,
             started: Instant::now(),
-        })
+        };
+        // Preflight the exact serialized response before asking for the native
+        // decision. A committed outbox must fit the existing framing ceiling.
+        let preview = DurableConstructionResponseV1::Retained {
+            outbox: Box::new(prepared.outbox_data().map_err(error)?),
+        };
+        let encoded = Zeroizing::new(serde_json::to_vec(&preview).map_err(error)?);
+        if encoded.len() > 128 * 1024 {
+            return Err(Error::ReviewMismatch);
+        }
+        Ok(prepared)
+    }
+    // Produces data only; the journal append still accepts exclusively an
+    // ApprovedDurableConstructionV1 that owns the exact real native decision.
+    fn outbox_data(&self) -> authority_bridge::Result<DurableConstructionOutboxV1> {
+        let p = self;
+        let mut outbox = DurableConstructionOutboxV1 {
+            request: p.request.clone(),
+            request_digest: p.request.digest()?,
+            material_digest: p
+                .request
+                .material
+                .digest()
+                .map_err(|_| BridgeError::Binding)?,
+            native_review_digest: p.digest.clone(),
+            native_entry_digest: p.source.entry_digest().into(),
+            recipient_grant_digest: p.peer.key_digest.clone(),
+            original_channel_digest: p.peer.channel_digest.clone(),
+            original_grant_id: p.peer.grant_id.clone(),
+            recipient_transport: crate::consent_journal::TransportIdentityBinding::LocalProcess {
+                transport_identity_id: p.peer.grant_id.clone(),
+                channel_key_digest: p.peer.key_digest.clone(),
+                channel_binding_digest: p.peer.channel_digest.clone(),
+                uid: p.peer.peer.uid(),
+                pid: p.peer.peer.pid(),
+                process_instance: p.peer.peer.instance().into(),
+                signer_generation: p.peer.generation,
+                account_id: p.peer.scope.account_id.clone(),
+                agreement_id: p.peer.scope.agreement_id.clone(),
+                participant_id: p.peer.scope.participant_id.clone(),
+                manifest_digest: p.peer.scope.manifest_digest.clone(),
+            },
+            redisclosure: p.redisclosure.clone(),
+            reference: String::new(),
+        };
+        outbox.reference = outbox.compute_reference()?;
+        outbox.validate()?;
+        Ok(outbox)
     }
     pub(super) fn digest(&self) -> &str {
         &self.digest
@@ -274,26 +401,9 @@ impl ApprovedDurableConstructionV1 {
         &self,
     ) -> authority_bridge::Result<DurableConstructionOutboxV1> {
         self.check_current()?;
-        let p = &self.prepared;
-        let mut outbox = DurableConstructionOutboxV1 {
-            request: p.request.clone(),
-            request_digest: p.request.digest()?,
-            material_digest: p
-                .request
-                .material
-                .digest()
-                .map_err(|_| BridgeError::Binding)?,
-            native_review_digest: p.digest.clone(),
-            native_entry_digest: p.source.entry_digest().into(),
-            recipient_grant_digest: p.peer.key_digest.clone(),
-            original_channel_digest: p.peer.channel_digest.clone(),
-            original_grant_id: p.peer.grant_id.clone(),
-            reference: String::new(),
-        };
-        outbox.reference = outbox.compute_reference()?;
-        outbox.validate()?;
-        Ok(outbox)
+        self.prepared.outbox_data()
     }
+
     pub(super) fn serve(
         mut self,
         journal: &SignerConsentJournal,
@@ -344,7 +454,7 @@ pub(super) fn serve_durable_construction_history_v1(
     // Read only. This path never creates a decision or a new outbox record.
     let outbox = journal.durable_construction_history_v1(&request, session)?;
     validate_peer(outbox.request(), &peer)?;
-    if outbox.recipient_grant_digest() != peer.key_digest {
+    if !authority_bridge::ipc::exact_local_recipient(outbox.recipient_transport(), &peer) {
         return Err(BridgeError::Permission);
     }
     let lease = journal.acquire_preconstruction_records(

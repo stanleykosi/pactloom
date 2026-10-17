@@ -12,9 +12,11 @@ use wholepact_signer_origin::manual_roster_v2::{
 
 pub(crate) mod acquisition;
 pub(crate) mod continuation;
+#[cfg(feature = "durable-proposal")]
+pub(crate) mod durable_entry_v1;
 pub(crate) mod inventory;
-pub(crate) mod publication;
 pub(crate) mod permanent_stop;
+pub(crate) mod publication;
 pub(crate) mod retention;
 pub(super) const ROSTER_ACQUIRE: &str = "born-manual-roster-first-acquire-v2.wp";
 pub(super) const ROSTER_COMMIT: &str = "born-manual-roster-commit-v2.wp";
@@ -360,7 +362,9 @@ pub(in crate::account::birth) fn roster_inventory(directory: &PrivateDirectory) 
         || (names.contains(JOURNAL) || names.contains(ROSTER_COMMIT))
             && !names.contains(ROSTER_ACQUIRE)
         || names.contains(ROSTER_COMMIT) && !names.contains(JOURNAL)
-        || (names.contains(permanent_stop::artifacts::SIGNATURE) || names.contains(permanent_stop::artifacts::HOST_ACK)) && !names.contains(ROSTER_COMMIT)
+        || (names.contains(permanent_stop::artifacts::SIGNATURE)
+            || names.contains(permanent_stop::artifacts::HOST_ACK))
+            && !names.contains(ROSTER_COMMIT)
         || names
             .iter()
             .any(|n| n.starts_with("authority.sqlite-") && !names.contains(JOURNAL))

@@ -185,7 +185,9 @@ impl DedicatedAccount {
     pub(crate) fn recovery_words(&self) -> Result<Zeroizing<String>> {
         Ok(Zeroizing::new(self.mnemonic()?.to_string()))
     }
-    pub(crate) fn spending_key(&self) -> Result<SpendingKey> {
+    /// Non-key-bearing preflight so the generic path never charges a release
+    /// that is deterministically blocked by the existing born-account gate.
+    pub(crate) fn require_generic_spending_source(&self) -> Result<()> {
         #[cfg(all(
             feature = "authority-signing",
             feature = "native-ui",
@@ -194,7 +196,29 @@ impl DedicatedAccount {
         if self.born_authority_pending {
             return Err(Error::Unavailable);
         }
+        Ok(())
+    }
+    pub(crate) fn spending_key(&self) -> Result<SpendingKey> {
+        self.require_generic_spending_source()?;
         self.derive_spending_key()
+    }
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "pending-birth-owner-signing",
+        feature = "native-ui",
+        target_os = "linux"
+    ))]
+    pub(crate) fn derive_durable_born_spending_key_v1(
+        &self,
+        fence: &crate::authority_bridge::DurableBornKeyUseFenceV1<'_>,
+    ) -> Result<SpendingKey> {
+        if !self.born_authority_pending || self.recovery_required() {
+            return Err(Error::Unavailable);
+        }
+        fence.require_account(self)?;
+        let key = self.derive_spending_key()?;
+        fence.require_account(self)?;
+        Ok(key)
     }
     fn derive_spending_key(&self) -> Result<SpendingKey> {
         let seed = Zeroizing::new(self.mnemonic()?.to_seed_normalized(""));
@@ -890,6 +914,10 @@ pub(crate) use activation::recovery_profile_fixture_with;
 #[allow(dead_code)]
 pub(crate) mod birth;
 
-#[cfg(all(feature = "authority-signing", feature = "native-ui", target_os = "linux"))]
+#[cfg(all(
+    feature = "authority-signing",
+    feature = "native-ui",
+    target_os = "linux"
+))]
 #[path = "account/informational.rs"]
 pub(crate) mod informational;

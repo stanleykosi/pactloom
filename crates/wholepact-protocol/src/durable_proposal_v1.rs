@@ -4,6 +4,12 @@
 //! from economic effects. In particular, the NU7 shielded sighash does not commit
 //! to the anchor; a matching sighash is never permission to re-anchor or re-prove.
 //! Only detached, explicitly attributed spend signatures may be added afterwards.
+//! This new profile supports plain two-account economics: each accepted account
+//! ID is derived from its actual FVK using the existing dedicated-testnet account
+//! domain. These are account/key associations, not real-person identity,
+//! distinct-person evidence, or advance approval by the other account holder.
+//! Sponsor, identity-dependent extension and service-charge semantics are not
+//! supported. Each owner's immediate approval and key use remain separate.
 //! This module neither authenticates people nor grants consent, writer authority,
 //! release, retention, chain freshness, signing, export, or settlement permission.
 
@@ -14,6 +20,7 @@ use crate::{
     review::{CryptographicReview, ReviewPolicy, verify_review},
     review_manifest::{policy_fingerprint, verify_manifest_policy},
 };
+use orchard::keys::FullViewingKey;
 use pczt::{
     Pczt,
     roles::{redactor::Redactor, signer::Signer},
@@ -26,6 +33,17 @@ use wholepact_core::Proposal;
 const PROPOSAL_DOMAIN: &[u8] = b"wholepact:durable-fixed-proposal:pczt-0.10.0-pre.1:v1\0";
 const MAPPING_DOMAIN: &[u8] = b"wholepact:durable-fixed-action-mapping:v1\0";
 const SIGNATURE_DOMAIN: &[u8] = b"wholepact:durable-fixed-detached-signature-set:v1\0";
+const ACCOUNT_DOMAIN: &[u8] = b"wholepact:dedicated-testnet-account:legacy-zip32:v1\0";
+
+/// Exact existing dedicated-testnet account identifier, derived from the full
+/// viewing key rather than an operator-supplied label. This does not prove spend
+/// authority, a person's identity, distinct people, enrollment, or peer approval.
+pub fn canonical_durable_account_id(fvk: &FullViewingKey) -> String {
+    let mut hash = Sha256::new();
+    hash.update(ACCOUNT_DOMAIN);
+    hash.update(fvk.to_bytes());
+    hex::encode(hash.finalize())
+}
 
 /// Persistable metadata, not a verified token. Deserialization never constructs
 /// `VerifiedFixedProposal`; reopening must verify the private artifacts and policy.
@@ -137,10 +155,14 @@ impl VerifiedFixedProposal {
         )?;
         wholepact_core::validate_claimed_accounting(proposal.manifest())
             .map_err(|_| "Durable manifest accounting is invalid")?;
+        verify_canonical_accounts(policy)?;
         verify_manifest_policy(proposal, policy, input_actions, output_actions)?;
         for owner in 0..2 {
             require(
-                policy.inputs.iter().any(|input| input.participant_index == owner),
+                policy
+                    .inputs
+                    .iter()
+                    .any(|input| input.participant_index == owner),
                 "Each durable owner must have a selected real input",
             )?;
         }
@@ -279,8 +301,7 @@ impl VerifiedFixedProposal {
         let assembled = verifier.finish();
         let encoded = encode(assembled.clone())?;
         require(
-            verify_review(&encoded, &self.policy)?.review_binding()
-                == self.identity.review_binding,
+            verify_review(&encoded, &self.policy)?.review_binding() == self.identity.review_binding,
             "Detached signature intake changed the economic review",
         )?;
         let normalized = Redactor::new(assembled)
@@ -297,7 +318,10 @@ impl VerifiedFixedProposal {
         Ok(VerifiedSignatureSetV1 {
             identity: SignatureSetIdentityV1 {
                 proposal_binding: self.identity.proposal_binding.clone(),
-                signature_set_digest: signature_set_digest(&self.identity.proposal_binding, &ordered),
+                signature_set_digest: signature_set_digest(
+                    &self.identity.proposal_binding,
+                    &ordered,
+                ),
                 signed_artifact_digest: digest(&encoded),
                 signed_action_indices: seen.into_iter().collect(),
                 participant_ids: participants.into_iter().collect(),
@@ -317,7 +341,27 @@ impl VerifiedFixedProposal {
 }
 
 fn require(condition: bool, message: &str) -> Result<(), String> {
-    if condition { Ok(()) } else { Err(message.into()) }
+    if condition {
+        Ok(())
+    } else {
+        Err(message.into())
+    }
+}
+
+fn verify_canonical_accounts(policy: &ReviewPolicy) -> Result<(), String> {
+    let mut accounts = BTreeSet::new();
+    let mut keys = BTreeSet::new();
+    for participant in &policy.participants {
+        require(
+            participant.account_id == canonical_durable_account_id(&participant.fvk),
+            "Durable account ID is not canonical for its actual viewing key",
+        )?;
+        require(
+            accounts.insert(&participant.account_id) && keys.insert(participant.fvk.to_bytes()),
+            "Durable accounts must have distinct account IDs and viewing keys",
+        )?;
+    }
+    Ok(())
 }
 
 fn parse_candidate(bytes: &[u8]) -> Result<Pczt, String> {
@@ -364,9 +408,13 @@ fn require_exact_proof_addition(
 }
 
 fn verify_retained_padding_signatures(pczt: &Pczt, policy: &ReviewPolicy) -> Result<(), String> {
-    let real: BTreeSet<_> = policy.inputs.iter().map(|input| input.action_index).collect();
-    let mut verifier =
-        Signer::new(pczt.clone()).map_err(|_| "Padding signature verifier initialization failed")?;
+    let real: BTreeSet<_> = policy
+        .inputs
+        .iter()
+        .map(|input| input.action_index)
+        .collect();
+    let mut verifier = Signer::new(pczt.clone())
+        .map_err(|_| "Padding signature verifier initialization failed")?;
     for (index, action) in pczt.ironwood().actions().iter().enumerate() {
         if !real.contains(&index) {
             let signature = action

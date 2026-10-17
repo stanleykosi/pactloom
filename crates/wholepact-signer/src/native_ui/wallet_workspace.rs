@@ -2,6 +2,9 @@
 //! No app-supplied FVK, input-selection flag or context DTO becomes local authority.
 //! The only setup constructor consumes an exact signer-native decision. It makes
 //! no provider contact until the approved bounded asynchronous scan is requested.
+#[cfg(feature = "durable-proposal")]
+mod durable_proposal_v1;
+
 use super::authority::{NativeAuthority, NativeAuthorityBinding, NativeDecision};
 use crate::{
     Error, Result,

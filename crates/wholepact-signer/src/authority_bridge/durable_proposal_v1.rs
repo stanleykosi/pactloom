@@ -7,15 +7,15 @@
 //! this adapter never creates a second attempt: only the exact already-retained
 //! result may be delivered through the existing recipient-authenticated IPC.
 use super::{
-    disclosure::ApprovedWitnessDisclosure, protocol::AuthorizationDeliveryScope,
-    AuthorizationCommit, BridgeError, Result,
+    AuthorizationCommit, BridgeError, Result, disclosure::ApprovedWitnessDisclosure,
+    protocol::AuthorizationDeliveryScope,
 };
 use crate::{
     account::DedicatedAccount,
     consent_journal::{
-        AcceptedManifestRecord, AccountEnrollmentRecord, ApprovedSpendConsent, NativeConsentDecision,
-        OriginalSpendConsent, PreparedSpendConsent, SignerConsentJournal, SignerConsentSession,
-        SpendConsentTerms,
+        AcceptedManifestRecord, AccountEnrollmentRecord, ApprovedSpendConsent,
+        NativeConsentDecision, OriginalSpendConsent, PreparedSpendConsent, SignerConsentJournal,
+        SignerConsentSession, SpendConsentTerms,
     },
     manifest::ReviewInputs,
 };
@@ -26,7 +26,7 @@ use wholepact_protocol::{
     durable_proposal_v1::{FixedProposalIdentityV1, VerifiedFixedProposal},
     review_manifest::{policy_fingerprint, verify_manifest_policy},
 };
-use wholepact_wallet::wallet::protected_sync::{key_use::WalletKeyUseTicket, ProtectedWalletSync};
+use wholepact_wallet::wallet::protected_sync::{ProtectedWalletSync, key_use::WalletKeyUseTicket};
 
 /// Reloads the exact protected proposal record and its independently retained
 /// full policy. A caller must not hold a database lock across this callback or
@@ -35,8 +35,13 @@ use wholepact_wallet::wallet::protected_sync::{key_use::WalletKeyUseTicket, Prot
 /// through the maintained protocol verifier. An owned verified snapshot may be
 /// reused after exact retained-record and genuine current permission checks; no
 /// callback can manufacture native permission or revive a former approval.
-pub type FixedProposalSource =
-    Arc<dyn Fn() -> Result<Arc<VerifiedFixedProposal>> + Send + Sync>;
+///
+/// This callback also runs while the original authorization owns the journal
+/// read fence. It MUST NOT acquire journal authority/session fences recursively:
+/// a queued revocation writer can otherwise deadlock a recursive read. Concrete
+/// native sources check only immutable data and the actual native/vault source;
+/// the specialized key-use path separately validates the exact held lease.
+pub type FixedProposalSource = Arc<dyn Fn() -> Result<Arc<VerifiedFixedProposal>> + Send + Sync>;
 
 /// A displayable fresh review, not permission. Neither this type nor its approved
 /// successor is serializable, cloneable, or constructible from saved evidence.
@@ -187,6 +192,11 @@ impl ApprovedDurableProposalAction {
         wallet: &mut ProtectedWalletSync,
         ticket: &WalletKeyUseTicket,
     ) -> Result<AuthorizationCommit> {
+        // The generic route cannot consume a release for a born account that
+        // its downstream key accessor deliberately refuses.
+        account
+            .require_generic_spending_source()
+            .map_err(|_| BridgeError::Permission)?;
         let account_id = account.account_id().map_err(|_| BridgeError::Binding)?;
         validate_original_binding(&self.proposal, &self.original, &account_id)?;
         require_unreleased(
@@ -227,6 +237,98 @@ impl ApprovedDurableProposalAction {
         let reserved = pending.reserve(client)?;
         reserved.authorize_with_wallet_checked(wallet, ticket, &self.inputs, &check)
     }
+
+    /// Purpose-specific genuine fresh born entry. Historical origin only pins
+    /// the original namespace; current native consent, wallet transaction and
+    /// independently reconciled writer/permit remain mandatory. No born flag is
+    /// cleared and generic key access remains denied.
+    #[cfg(all(
+        feature = "pending-birth-owner-signing",
+        feature = "native-ui",
+        target_os = "linux"
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn authorize_from_durable_born_v1(
+        self,
+        entry: &crate::account::birth::enrollment::roster_v2::durable_entry_v1::FreshDurableBornEntryV1,
+        session: &SignerConsentSession,
+        expected_head: AuthorityHead,
+        disclosure: ApprovedWitnessDisclosure,
+        client: &AuthorityClient,
+        wallet: &mut ProtectedWalletSync,
+        ticket: &WalletKeyUseTicket,
+    ) -> Result<AuthorizationCommit> {
+        entry.check_current().map_err(|_| BridgeError::Permission)?;
+        let journal = entry.journal().as_ref();
+        let account = entry.account();
+        entry
+            .require_account_identity(account)
+            .map_err(|_| BridgeError::Permission)?;
+        entry
+            .require_journal_identity(journal)
+            .map_err(|_| BridgeError::Permission)?;
+        if client.disclosure_descriptor()
+            != entry
+                .original_witness_disclosure()
+                .map_err(|_| BridgeError::Binding)?
+        {
+            return Err(BridgeError::Binding);
+        }
+        let account_id = account.account_id().map_err(|_| BridgeError::Binding)?;
+        validate_original_binding(&self.proposal, &self.original, &account_id)?;
+        require_unreleased(
+            journal,
+            session,
+            self.proposal.identity(),
+            &self.original.terms().authorization_id,
+            &account_id,
+        )?;
+        check_ticket(&self.original, ticket)?;
+        if ticket.evidence().fvk().to_bytes()
+            != account.fvk().map_err(|_| BridgeError::Binding)?.to_bytes()
+        {
+            return Err(BridgeError::Binding);
+        }
+        disclosure.check(&self.original, Some(client))?;
+        if disclosure.record().expected_head != expected_head {
+            return Err(BridgeError::Binding);
+        }
+        // Once prepare_authorization returns, its original lease already owns
+        // the journal read fence. This callback must never recursively acquire
+        // that fence behind a queued revocation writer. Full journal + origin
+        // checks below reuse the actual held lease instead.
+        let check = || {
+            entry
+                .check_original_source_current()
+                .map_err(|_| BridgeError::Permission)?;
+            check_reload(&self.source, &self.proposal)
+        };
+        check()?;
+        let pending = super::prepare_authorization(
+            journal,
+            session,
+            account,
+            self.approval,
+            self.proposal.private_proved_pczt_bytes(),
+            expected_head,
+            AuthorizationDeliveryScope {
+                candidate_id: self.proposal.identity().proposal_id.clone(),
+            },
+            disclosure,
+        )?;
+        check()?;
+        entry
+            .require_authorization_identity(account, journal, &pending.lease)
+            .map_err(|_| BridgeError::Permission)?;
+        let reserved = pending.reserve(client)?;
+        reserved.authorize_with_wallet_from_durable_born_v1(
+            wallet,
+            ticket,
+            &self.inputs,
+            &check,
+            entry,
+        )
+    }
 }
 
 /// Read only the receipt for an already persisted exact result. This does not
@@ -246,7 +348,9 @@ pub fn retained_manual_commit(
     };
     validate_original_binding(&proposal, original.original_consent(), &account_id)?;
     let lease = journal.acquire_original_authorization(&authorization_id, session)?;
-    let result = journal.bridge_result(&lease).map_err(recovery_if_incomplete)?;
+    let result = journal
+        .bridge_result(&lease)
+        .map_err(recovery_if_incomplete)?;
     check_reload(source, &proposal)?;
     Ok(Some(AuthorizationCommit::from(&result)))
 }
@@ -342,8 +446,7 @@ fn validate_original_binding(
         .iter()
         .filter(|input| input.participant_index == owner)
         .collect();
-    if fixed.economic_review().net_debits_zatoshis().get(owner)
-        != Some(&t.maximum_debit_zatoshis)
+    if fixed.economic_review().net_debits_zatoshis().get(owner) != Some(&t.maximum_debit_zatoshis)
         || t.transaction_fee_zatoshis != policy.exact_fee_zatoshis
         || t.fee_share_zatoshis != policy.participants[owner].fee_share_zatoshis
         || own_inputs.len() != t.input_bindings.len()

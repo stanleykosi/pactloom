@@ -16,6 +16,83 @@ use wholepact_wallet::wallet::protected_sync::{
 };
 use zeroize::Zeroizing;
 
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "pending-birth-owner-signing",
+    feature = "native-ui",
+    target_os = "linux"
+))]
+use crate::account::birth::enrollment::roster_v2::durable_entry_v1::FreshDurableBornEntryV1;
+
+#[derive(Clone, Copy)]
+enum KeySource<'a> {
+    Generic,
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "pending-birth-owner-signing",
+        feature = "native-ui",
+        target_os = "linux"
+    ))]
+    DurableBorn(&'a FreshDurableBornEntryV1),
+    // Retain a lifetime in builds without the experimental born branch.
+    #[allow(dead_code)]
+    Lifetime(std::marker::PhantomData<&'a ()>),
+}
+impl KeySource<'_> {
+    fn check(
+        self,
+        account: &DedicatedAccount,
+        journal: &SignerConsentJournal,
+        lease: &OriginalAuthorizationLease<'_>,
+    ) -> Result<()> {
+        let _ = (journal, lease);
+        match self {
+            Self::Generic => account
+                .require_generic_spending_source()
+                .map_err(|_| BridgeError::Permission),
+            #[cfg(all(
+                feature = "durable-proposal",
+                feature = "pending-birth-owner-signing",
+                feature = "native-ui",
+                target_os = "linux"
+            ))]
+            Self::DurableBorn(source) => source
+                .require_authorization_identity(account, journal, lease)
+                .map_err(|_| BridgeError::Permission),
+            Self::Lifetime(_) => Err(BridgeError::Permission),
+        }
+    }
+}
+
+/// Call-local proof created ONLY below the newly committed exact key-use fence.
+/// No public constructor, clone, serde or generic callback issuer exists. The
+/// private closure binds this actual account/journal, original authorization and
+/// permit, current native source and held maintained-wallet transaction.
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "pending-birth-owner-signing",
+    feature = "native-ui",
+    target_os = "linux"
+))]
+pub(crate) struct DurableBornKeyUseFenceV1<'a> {
+    account: &'a DedicatedAccount,
+    check: &'a dyn Fn() -> Result<()>,
+}
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "pending-birth-owner-signing",
+    feature = "native-ui",
+    target_os = "linux"
+))]
+impl DurableBornKeyUseFenceV1<'_> {
+    pub(crate) fn require_account(&self, account: &DedicatedAccount) -> crate::Result<()> {
+        if !std::ptr::eq(self.account, account) {
+            return Err(crate::Error::Authentication);
+        }
+        (self.check)().map_err(|_| crate::Error::ReviewMismatch)
+    }
+}
+
 #[derive(Serialize)]
 #[serde(deny_unknown_fields)]
 struct SignaturePayload<'a> {
@@ -77,7 +154,7 @@ impl ReservedAuthorization<'_> {
         inputs: &ReviewInputs,
         wallet: &HeldWalletKeyUse<'_>,
     ) -> Result<AuthorizationCommit> {
-        self.sign_and_retain_held(inputs, wallet, &|| Ok(()))
+        self.sign_and_retain_held(inputs, wallet, &|| Ok(()), KeySource::Generic)
     }
     /// Concrete composition: acquire the maintained signer-owned wallet lock and
     /// recheck exactly the original policy, then sign and commit while it is held.
@@ -98,7 +175,44 @@ impl ReservedAuthorization<'_> {
         inputs: &ReviewInputs,
         check: &dyn Fn() -> Result<()>,
     ) -> Result<AuthorizationCommit> {
+        self.authorize_with_wallet_source(wallet, ticket, inputs, check, KeySource::Generic)
+    }
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "pending-birth-owner-signing",
+        feature = "native-ui",
+        target_os = "linux"
+    ))]
+    pub(crate) fn authorize_with_wallet_from_durable_born_v1(
+        self,
+        wallet: &mut ProtectedWalletSync,
+        ticket: &WalletKeyUseTicket,
+        inputs: &ReviewInputs,
+        check: &dyn Fn() -> Result<()>,
+        source: &FreshDurableBornEntryV1,
+    ) -> Result<AuthorizationCommit> {
+        self.authorize_with_wallet_source(
+            wallet,
+            ticket,
+            inputs,
+            check,
+            KeySource::DurableBorn(source),
+        )
+    }
+    fn authorize_with_wallet_source(
+        self,
+        wallet: &mut ProtectedWalletSync,
+        ticket: &WalletKeyUseTicket,
+        inputs: &ReviewInputs,
+        check: &dyn Fn() -> Result<()>,
+        source: KeySource<'_>,
+    ) -> Result<AuthorizationCommit> {
         check()?;
+        source.check(
+            self.pending.account,
+            self.pending.journal,
+            &self.pending.lease,
+        )?;
         let original = self.pending.lease.evidence().original_consent().terms();
         let policy = original
             .wallet_key_use_policy
@@ -118,7 +232,7 @@ impl ReservedAuthorization<'_> {
             &fvk,
             policy,
             original.transaction_expiry_height,
-            |held| self.sign_and_retain_held(inputs, held, check),
+            |held| self.sign_and_retain_held(inputs, held, check, source),
         )
     }
     fn sign_and_retain_held(
@@ -126,9 +240,11 @@ impl ReservedAuthorization<'_> {
         inputs: &ReviewInputs,
         wallet: &HeldWalletKeyUse<'_>,
         check: &dyn Fn() -> Result<()>,
+        source: KeySource<'_>,
     ) -> Result<AuthorizationCommit> {
         check()?;
         let p = &self.pending;
+        source.check(p.account, p.journal, &p.lease)?;
         p.lease.require_current_authorization()?;
         self.check_automatic_admission()?;
         wallet.check_current()?;
@@ -236,19 +352,46 @@ impl ReservedAuthorization<'_> {
         p.lease.require_current_authorization()?;
         self.check_automatic_admission()?;
         wallet.check_current()?;
-        let sk = p
-            .account
-            .spending_key()
-            .map_err(|_| BridgeError::Verification)?;
+        let key_use_check = || {
+            check()?;
+            source.check(p.account, p.journal, &p.lease)?;
+            p.lease.require_current_authorization()?;
+            self.check_automatic_admission()?;
+            self.permit.matches_request(&p.request.reservation)?;
+            wallet.check_current()?;
+            Ok(())
+        };
+        key_use_check()?;
+        let sk = match source {
+            KeySource::Generic => p
+                .account
+                .spending_key()
+                .map_err(|_| BridgeError::Verification)?,
+            #[cfg(all(
+                feature = "durable-proposal",
+                feature = "pending-birth-owner-signing",
+                feature = "native-ui",
+                target_os = "linux"
+            ))]
+            KeySource::DurableBorn(_) => {
+                // The only token constructor is after bridge_begin_key_use.
+                // It cannot be reconstructed from the durable row on restart.
+                let fence = DurableBornKeyUseFenceV1 {
+                    account: p.account,
+                    check: &key_use_check,
+                };
+                p.account
+                    .derive_durable_born_spending_key_v1(&fence)
+                    .map_err(|_| BridgeError::Verification)?
+            }
+            KeySource::Lifetime(_) => return Err(BridgeError::Permission),
+        };
         let ask = SpendAuthorizingKey::from(&sk);
         let mut signer = Signer::new(parsed).map_err(|_| BridgeError::Verification)?;
         for input in &actual {
             // Recheck each actual action under the same held wallet/native
             // leases; interruption after a prior action retains the fence.
-            check()?;
-            p.lease.require_current_authorization()?;
-            self.check_automatic_admission()?;
-            wallet.check_current()?;
+            key_use_check()?;
             signer
                 .sign_ironwood(UnwrapErr(SysRng), input.action_index, &ask)
                 .map_err(|_| BridgeError::Verification)?;
@@ -322,7 +465,7 @@ impl ReservedAuthorization<'_> {
             outbox_digest: hex::encode(Sha256::digest(outbox_payload.as_bytes())),
             outbox_payload: outbox_payload.to_string(),
         };
-        wallet.check_current()?;
+        key_use_check()?;
         p.lease.check_current()?;
         p.journal.bridge_retain_result(&p.lease, &result)?;
         Ok(AuthorizationCommit::from(&result))

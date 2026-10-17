@@ -99,10 +99,35 @@ fn owner_return(
 fn durable_proposals_two_owners_restart_and_exact_submission_unknown_recovery() {
     let Fixture {
         secrets,
-        request,
+        mut request,
         context,
-        packages,
+        mut packages,
     } = fixture();
+    // This NEW profile uses actual FVK-derived canonical identities, never the
+    // older fixture's display aliases or a test-only verifier bypass.
+    let identities: BTreeMap<_, _> = packages
+        .iter()
+        .map(|p| {
+            (
+                p.account_id.clone(),
+                wholepact_protocol::durable_proposal_v1::canonical_durable_account_id(&p.fvk),
+            )
+        })
+        .collect();
+    for package in &mut packages {
+        package.account_id = identities[&package.account_id].clone();
+    }
+    for participant in &mut request.manifest.participants {
+        participant.account_id = identities[&participant.account_id].clone();
+    }
+    for input in &mut request.manifest.inputs {
+        input.account_id = identities[&input.account_id].clone();
+    }
+    for output in &mut request.manifest.outputs {
+        if let OutputAllocation::Return { account_id, .. } = &mut output.allocation {
+            *account_id = identities[account_id.as_str()].clone();
+        }
+    }
     let directory = tempfile::tempdir().unwrap();
     #[cfg(unix)]
     {

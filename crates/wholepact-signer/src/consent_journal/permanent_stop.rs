@@ -4,6 +4,16 @@
 use super::*;
 #[path = "permanent_stop_local_cells.rs"]
 mod local_cells;
+/// Reuse the full maintained online-ledger verifier without performing any
+/// permanent-stop mutation or interpreting its result as current authority.
+#[cfg(feature = "durable-proposal")]
+pub(super) fn validate_retained_local_cells(
+    connection: &rusqlite::Connection,
+    account: &SignerAccountState,
+    limits: (u64, u64),
+) -> Result<()> {
+    local_cells::validate(connection, account, limits).map(|_| ())
+}
 use crate::account::birth::enrollment::roster_v2::permanent_stop::{
     LocalPermanentStopPublication, PermanentStopHistoryPin, PermanentStopWitnessAcknowledgment,
 };

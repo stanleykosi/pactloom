@@ -62,7 +62,10 @@ fn fixture() -> (
     DurableConstructionScopeV1,
     Vec<WalletContribution>,
 ) {
-    let (contributions, _) = crate::wallet::synthetic_scanned_contributions().unwrap();
+    let (mut contributions, _) = crate::wallet::synthetic_scanned_contributions().unwrap();
+    for contribution in &mut contributions {
+        contribution.account_id = canonical_durable_account_id(&contribution.fvk);
+    }
     let a = &contributions[0];
     let receiver = encode_testnet_receiver(&a.notes[0].note.recipient());
     let agreement = AgreementDraft {
@@ -166,9 +169,11 @@ fn fixture() -> (
         reviewers: contributions
             .iter()
             .enumerate()
-            .map(|(i, c)| ConstructionReviewerV1 {
-                account_id: c.account_id.clone(),
-                transport_key_digest: format!("{:02x}", 20 + i).repeat(32),
+            .map(|(i, c)| {
+                ConstructionReviewerV1::ExactTransport(ExactTransportConstructionReviewerV1 {
+                    account_id: c.account_id.clone(),
+                    transport_key_digest: format!("{:02x}", 20 + i).repeat(32),
+                })
             })
             .collect(),
         protected_destination: "/component/private/intake.sqlite".into(),
@@ -189,6 +194,15 @@ fn exact_private_material_roundtrip_preserves_math_not_authority() {
     assert!(restored == m);
     assert_eq!(restored.digest().unwrap(), m.digest().unwrap());
     restored.verify_owner(owners[0].fvk()).unwrap();
+    let evidence = restored.historical_review_evidence().unwrap();
+    assert_eq!(evidence.account_id, owners[0].account_id);
+    assert_eq!(evidence.fvk.to_bytes(), owners[0].fvk.to_bytes());
+    assert_eq!(evidence.inputs.len(), owners[0].notes.len());
+    assert_eq!(
+        evidence.inputs[0].nullifier,
+        owners[0].notes[0].note.nullifier(&owners[0].fvk).to_bytes()
+    );
+    assert_eq!(evidence.context.anchor_root, owners[0].context.anchor_root);
     assert!(restored.verify_owner(owners[1].fvk()).is_err());
     // Historical source expiry is not revived or treated as fresh permission.
     assert!(
@@ -271,7 +285,10 @@ fn exact_consent_digest_binds_changed_recipient_manifest_and_destination() {
     v.prover.authenticated_local_grant_digest = "12".repeat(32);
     values.push(v);
     let mut v = scope.clone();
-    v.reviewers[0].transport_key_digest = "12".repeat(32);
+    let ConstructionReviewerV1::ExactTransport(reviewer) = &mut v.reviewers[0] else {
+        panic!("legacy fixture");
+    };
+    reviewer.transport_key_digest = "12".repeat(32);
     values.push(v);
     let mut v = scope.clone();
     v.protected_destination.push_str(".other");
@@ -292,4 +309,77 @@ fn exact_consent_digest_binds_changed_recipient_manifest_and_destination() {
     for changed in values {
         assert_ne!(changed.digest().unwrap(), original);
     }
+}
+
+#[test]
+fn arbitrary_or_relabelled_account_is_not_cryptographic_account_ownership() {
+    let (material, mut scope, _) = fixture();
+    let mut forged = material.clone();
+    forged.account_id = "host-selected-owner-label".into();
+    assert!(forged.encode().is_err());
+    assert!(forged.historical_review_evidence().is_err());
+    // Coordinated relabelling of both material and manifest cannot make a
+    // different account ID belong to the same actual viewing key.
+    let old = scope.account_id.clone();
+    scope.account_id = forged.account_id.clone();
+    for participant in &mut scope.proposal.manifest.participants {
+        if participant.account_id == old {
+            participant.account_id = forged.account_id.clone();
+        }
+    }
+    for input in &mut scope.proposal.manifest.inputs {
+        if input.account_id == old {
+            input.account_id = forged.account_id.clone();
+        }
+    }
+    for output in &mut scope.proposal.manifest.outputs {
+        if let OutputAllocation::Return { account_id, .. } = &mut output.allocation {
+            if *account_id == old {
+                *account_id = forged.account_id.clone();
+            }
+        }
+    }
+    for reviewer in &mut scope.reviewers {
+        if let ConstructionReviewerV1::ExactTransport(reviewer) = reviewer {
+            if reviewer.account_id == old {
+                reviewer.account_id = forged.account_id.clone();
+            }
+        }
+    }
+    scope.validate().unwrap();
+    assert!(forged.validate_for(&scope).is_err());
+}
+
+#[test]
+fn local_reviewer_audience_is_explicit_and_never_inferred_from_legacy_transport() {
+    let (_, mut scope, _) = fixture();
+    let account = scope.account_id.clone();
+    assert!(!scope.permits_local_reviewer_account(&account).unwrap());
+    let legacy = serde_json::to_value(&scope.reviewers[0]).unwrap();
+    assert!(legacy.get("transport_key_digest").is_some());
+    assert!(legacy.get("kind").is_none());
+    scope.reviewers = scope
+        .reviewers
+        .iter()
+        .map(|r| ConstructionReviewerV1::local_installed_signer(r.account_id().into()))
+        .collect();
+    assert!(scope.validate().is_err()); // Not a grant under the old scope version.
+    scope.version = 2;
+    assert!(scope.permits_local_reviewer_account(&account).unwrap());
+    assert!(
+        !scope
+            .permits_local_reviewer_account(&"ff".repeat(32))
+            .unwrap()
+    );
+    let encoded = serde_json::to_value(&scope.reviewers[0]).unwrap();
+    assert_eq!(encoded["kind"], "local_installed_signer_canonical_account");
+    assert!(encoded.get("transport_key_digest").is_none());
+    let mut ambiguous = encoded.clone();
+    ambiguous["transport_key_digest"] = serde_json::json!("11".repeat(32));
+    assert!(serde_json::from_value::<ConstructionReviewerV1>(ambiguous).is_err());
+    let mut unknown = encoded;
+    unknown["unknown_recipient"] = serde_json::json!(true);
+    assert!(serde_json::from_value::<ConstructionReviewerV1>(unknown).is_err());
+    scope.reviewers[0] = serde_json::from_value(legacy).unwrap();
+    assert!(scope.validate().is_err()); // No mixed audience or fallback.
 }

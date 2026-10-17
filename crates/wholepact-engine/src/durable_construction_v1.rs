@@ -167,8 +167,9 @@ impl Engine {
             DurableMaterialActionV1::RetainAuthenticatedDisclosure,
         )?;
         // Provider/process evidence is retained once as the original admission.
-        // Reopening the same original signer outbox may use a new process, but
-        // cannot replace its original immutable intake evidence.
+        // Already admitted data needs no old signer process. A restart before
+        // intake instead requires a new linked native disclosure/outbox; exact
+        // same-grant history cannot relabel the original process or recipient.
         let command = crate::context(
             access,
             key,
@@ -323,7 +324,7 @@ impl Engine {
                 reviewer_account_ids: scope
                     .reviewers
                     .iter()
-                    .map(|r| r.account_id.clone())
+                    .map(|r| r.account_id().to_string())
                     .collect(),
                 purpose: scope.purpose.clone(),
                 retention_policy: scope.retention_policy.clone(),
