@@ -8,12 +8,12 @@ pub(crate) use lifecycle::{NativePublicationLease, NativeWorkerLease};
 pub(crate) use window::NativeBornOfflineArtifactsDecisionV1;
 pub(crate) use window::{
     NativeBornOfflineEnrollmentDecisionV1, NativeConstructionTransportGrantDecisionV1,
-    NativeEnrollmentDecision, NativeManualEnrollmentExtensionDecision,
-    NativeManualRosterConstructionDecisionV2, NativeManualRosterConstructionDecisionV3,
-    NativeManualRosterContinuationDecisionV2, NativeManualRosterExtensionDecisionV2,
-    NativeManualSessionContinuationDecision, NativeNamespaceBackupDecision,
-    NativeNamespaceRecoveryDisclosureDecision, NativePermanentExclusionDecisionV1,
-    NativeSetupDecision,
+    NativeDurablePaymentAdmissionDecisionV1, NativeEnrollmentDecision,
+    NativeManualEnrollmentExtensionDecision, NativeManualRosterConstructionDecisionV2,
+    NativeManualRosterConstructionDecisionV3, NativeManualRosterContinuationDecisionV2,
+    NativeManualRosterExtensionDecisionV2, NativeManualSessionContinuationDecision,
+    NativeNamespaceBackupDecision, NativeNamespaceRecoveryDisclosureDecision,
+    NativePermanentExclusionDecisionV1, NativeSetupDecision,
 };
 mod window;
 #[cfg(feature = "synthetic-qualification")]

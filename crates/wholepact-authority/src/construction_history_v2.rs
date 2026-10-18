@@ -358,6 +358,7 @@ impl ReconciledAuthorityHistory {
         self.construction_history_v2_projection()
     }
     pub(crate) fn construction_history_v2_projection(&self) -> Result<ConstructionHistoryV2> {
+        self.require_no_durable_payment_v1()?;
         let legacy = self.construction_history_v1_projection()?;
         let mut origins: Vec<_> = legacy
             .origins()

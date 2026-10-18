@@ -1,6 +1,6 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-18, 04:52 UTC.
+Updated: 2026-10-18, 05:16 UTC.
 
 **Incomplete implementation. No full native financial signing, public testnet settlement, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
 
@@ -21,6 +21,12 @@ The sections below retain historical observations and failed-run diagnoses; olde
 The main and isolated qualification checkouts previously shared a Cargo target directory. A later main Host build reused an older isolated workspace dependency, producing misleading missing-symbol errors. No feature visibility changes were justified. Separate initially empty `target-main` and `target-isolated` directories are now required. The main Host and Signer all-features release library test build succeeded from the empty main target in 11 minutes 28 seconds. This is compilation, not native signing qualification; the independent cold GitHub CI6 result is unaffected.
 
 The inactive signing helper also had one private field access corrected to the existing binding accessor without widening visibility. Genuine financial authority still requires a new exact owner-authenticated admission route and a signer-side immutable request retained before dispatch. A lost response must reconcile the same request, not create a different request/head. The financial-only schema proposal preserves original born journals by refusing old-born automatic migration before writes; dedicated original-born upgrade remains out of scope. None of this is yet an integrated financial signing pass.
+
+## Financial witness increment: source and component tests only
+
+The strict immutable admission/replay layer and narrow native witness one-record/server source are implemented and independently source-reviewed. After one missing legacy server initializer was corrected to `None`, authority all-features library compilation passed in 70 seconds and default compilation in 91 seconds. New selected pure/encrypted tests passed: 19 with all features and 18 in default (the native-gated channel-MAC test is absent there). Existing exact compatibility checks passed: 12 with all features and 10 in default, including original enrollment, conservative exposure/retry, exclusions and historical V2/V3 projection behavior. These overlapping configurations are not a unique test total.
+
+No socket/native owner was exercised by these component selections. Actual owner-mTLS admission, uncertain-delivery recovery, signer integration, financial signature release and the bounded native sequence remain unqualified. Signer intent storage/current-source reconciliation and actual source ownership for safe old-schema refusal are still being implemented. The complete Host/Signer graph must be rebuilt after those changes; this authority-only checkpoint is not an activated product.
 
 ## Observed local results
 

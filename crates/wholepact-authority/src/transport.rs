@@ -6,6 +6,10 @@ mod born_offline_dispatch_v1;
 mod born_offline_owner_continuation_v1;
 pub use born_offline_dispatch_v1::AuthenticatedBornOfflineDispatchV1;
 mod born_offline_witness_v1;
+mod durable_payment_client_v1;
+mod durable_payment_server_v1;
+#[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
+pub use durable_payment_server_v1::open_born_durable_payment_v1_for_server;
 #[path = "construction_transport_client_v1.rs"]
 mod construction_transport_client_v1;
 #[path = "construction_transport_server_v1.rs"]
@@ -29,8 +33,8 @@ pub use construction_transport_client_v1::{
 };
 pub use offline_clock_v1::AuthenticatedOfflineClockV1;
 use rustls::{
-    ClientConfig, ClientConnection, RootCertStore, ServerConfig, ServerConnection, StreamOwned,
     pki_types::{CertificateDer, PrivateKeyDer, ServerName},
+    ClientConfig, ClientConnection, RootCertStore, ServerConfig, ServerConnection, StreamOwned,
 };
 use std::{
     io::{Read, Write},
@@ -413,10 +417,20 @@ impl AuthorityClient {
             Ok(())
         };
         check(check_current)?;
-        let snapshot = match caller_deadline {
-            Some(deadline) => self.snapshot_until(deadline)?,
-            None => self.snapshot()?,
+        let snapshot_response = self.call_with_inner_checked(
+            |_| {
+                Ok(WireRequest::Snapshot {
+                    account_id: self.account.clone(),
+                    network_profile_id: self.network.clone(),
+                })
+            },
+            caller_deadline,
+            &mut *check_current,
+        )?;
+        let WireResponse::Snapshot(snapshot) = snapshot_response else {
+            return Err(AuthorityError::InvalidBinding);
         };
+        self.check_snapshot(&snapshot)?;
         check(check_current)?;
         if bounded && snapshot.head.sequence > 65_536 {
             return Err(AuthorityError::Permission);
@@ -449,10 +463,11 @@ impl AuthorityClient {
                 after_sequence: after,
                 maximum_entries: 16,
             };
-            let response = match caller_deadline {
-                Some(deadline) => self.call_until(&request, deadline)?,
-                None => self.call(&request)?,
-            };
+            let response = self.call_with_inner_checked(
+                |_| Ok(request),
+                caller_deadline,
+                &mut *check_current,
+            )?;
             let WireResponse::History(page) = response else {
                 return Err(AuthorityError::InvalidBinding);
             };
@@ -554,6 +569,7 @@ impl AuthorityClient {
         }
         let ledger = ledger.ok_or(AuthorityError::CorruptHistory)?;
         ledger.validate_manual_birth(pending_birth_commit.as_ref())?;
+        ledger.validate_durable_payment_birth_v1(pending_birth_commit.as_ref())?;
         ledger.validate_born_offline_birth_v1(pending_birth_commit.as_ref())?;
         let manual_roster_attempt = if ledger.manual_roster_extension()?.is_some() {
             Some(ledger.latest_manual_roster_attempt_v2()?)
@@ -569,6 +585,9 @@ impl AuthorityClient {
         let manual_roster_construction_records = ledger.roster_construction_history_v2();
         let manual_roster_construction_records_v3 = ledger.roster_construction_history_v3();
         let construction_transport_history = ledger.construction_transport_history_v1();
+        let durable_payment_history_supported_v1 = ledger
+            .require_supported_durable_payment_history_v1()
+            .is_ok();
         let account_use_history = ledger.account_use_history;
         let account_policy = ledger.policy;
         let mut computed = ledger.snapshot;
@@ -582,6 +601,7 @@ impl AuthorityClient {
         }
         check(check_current)?;
         Ok(ReconciledAuthorityHistory {
+            durable_payment_history_supported_v1,
             construction_transport_history,
             manual_roster_construction_records,
             manual_roster_construction_records_v3,
@@ -611,6 +631,7 @@ impl AuthorityClient {
         history: &ReconciledAuthorityHistory,
         operation_id: &str,
     ) -> Result<WriterSessionReceipt> {
+        history.require_no_durable_payment_v1()?;
         id(operation_id)?;
         if history.disclosure != self.disclosure_descriptor()
             || history.snapshot.writer_certificate_digest != self.tls.client_certificate
@@ -700,6 +721,7 @@ impl AuthorityClient {
         &self,
         history: &ReconciledAuthorityHistory,
     ) -> Result<AuthenticatedWriterSession> {
+        history.require_no_durable_payment_v1()?;
         if history.disclosure != self.disclosure_descriptor() {
             return Err(AuthorityError::Authentication);
         }
@@ -1434,6 +1456,8 @@ pub struct AuthorityServer {
     journal: Arc<AuthorityJournal>,
     tls: ServerTls,
     handoff_scope: Option<construction_transport_server_v1::ConstructionTransportServingScopeV1>,
+    #[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
+    durable_payment: Option<Arc<durable_payment_server_v1::DurablePaymentServingV1>>,
     #[cfg(all(feature="born-offline-witness-owner",target_os="linux"))]
     born_offline_witness: Option<Arc<std::sync::Mutex<crate::born_offline_retry_v1::configured_born_witness::ConfiguredBornOfflineWitnessV1>>>,
     #[cfg(all(feature = "offline-witness-owner", target_os = "linux"))]
@@ -1451,6 +1475,8 @@ impl AuthorityServer {
             journal,
             tls,
             handoff_scope: None,
+            #[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
+            durable_payment: None,
             #[cfg(all(feature = "born-offline-witness-owner", target_os = "linux"))]
             born_offline_witness: None,
             #[cfg(all(feature = "offline-witness-owner", target_os = "linux"))]
@@ -1463,14 +1489,18 @@ impl AuthorityServer {
         self.serve_connection_before(socket, Instant::now() + IO_TIMEOUT)
     }
     fn serve_connection_before(&self, socket: TcpStream, deadline: Instant) -> Result<()> {
+        self.require_durable_payment_socket_v1(&socket)?;
+        self.check_durable_payment_wait_v1()?;
         let mut socket = DeadlineSocket { socket, deadline };
         let mut connection = ServerConnection::new(self.tls.config.clone())
             .map_err(|_| AuthorityError::Authentication)?;
         while connection.is_handshaking() {
+            self.check_durable_payment_wait_v1()?;
             connection
                 .complete_io(&mut socket)
                 .map_err(|_| AuthorityError::Authentication)?;
         }
+        self.check_durable_payment_wait_v1()?;
         if connection.alpn_protocol() != Some(ALPN) {
             return Err(AuthorityError::Authentication);
         }
@@ -1505,7 +1535,19 @@ impl AuthorityServer {
                 .map_err(|_| AuthorityError::Authentication)?,
         );
         let mut stream = StreamOwned::new(connection, socket);
+        self.check_durable_payment_wait_v1()?;
         let request: WireRequest = read_frame(&mut stream)?;
+        self.check_durable_payment_wait_v1()?;
+        if self.is_durable_payment_server_v1() {
+            let response = self
+                .serve_durable_payment_request_v1(&peer, &exporter, request)
+                .unwrap_or_else(WireResponse::Rejected);
+            self.check_durable_payment_output_v1(&response)?;
+            write_frame(&mut stream, &response)?;
+            stream.conn.send_close_notify();
+            stream.flush().map_err(|_| AuthorityError::Uncertain)?;
+            return Ok(());
+        }
         if self.is_born_offline_server_v1()
             && !matches!(
                 &request,
@@ -1636,7 +1678,7 @@ impl AuthorityServer {
         self.serve_admitted(listener, None)
     }
     fn serve_admitted(&self, listener: TcpListener, maximum_accepts: Option<usize>) -> Result<()> {
-        use std::sync::{Mutex, mpsc};
+        use std::sync::{mpsc, Mutex};
         let admission = crate::admission::Admission::new();
         let (send, receive) =
             mpsc::sync_channel::<(TcpStream, Instant, crate::admission::AdmissionGuard)>(8);
@@ -1645,17 +1687,15 @@ impl AuthorityServer {
         for _ in 0..8 {
             let receiver = receive.clone();
             let server = self.clone();
-            workers.push(std::thread::spawn(move || {
-                loop {
-                    let next = match receiver.lock() {
-                        Ok(receiver) => receiver.recv(),
-                        Err(_) => return,
-                    };
-                    let Ok((socket, deadline, _guard)) = next else {
-                        return;
-                    };
-                    let _ = server.serve_connection_before(socket, deadline);
-                }
+            workers.push(std::thread::spawn(move || loop {
+                let next = match receiver.lock() {
+                    Ok(receiver) => receiver.recv(),
+                    Err(_) => return,
+                };
+                let Ok((socket, deadline, _guard)) = next else {
+                    return;
+                };
+                let _ = server.serve_connection_before(socket, deadline);
             }));
         }
         let mut accepted = 0;
@@ -1922,6 +1962,7 @@ pub mod synthetic {
                 None
             };
         let history = ReconciledAuthorityHistory {
+            durable_payment_history_supported_v1: false,
             construction_transport_history: ledger.construction_transport_history_v1(),
             manual_roster_construction_records_v3: ledger.roster_construction_history_v3(),
             manual_roster_construction_records: ledger.roster_construction_history_v2(),
@@ -2247,6 +2288,7 @@ pub mod synthetic {
         }
         let ledger = ledger.ok_or(AuthorityError::CorruptHistory)?;
         ledger.validate_manual_birth(pending_birth_commit.as_ref())?;
+        ledger.validate_durable_payment_birth_v1(pending_birth_commit.as_ref())?;
         ledger.validate_born_offline_birth_v1(pending_birth_commit.as_ref())?;
         let manual_roster_attempt = if ledger.manual_roster_extension()?.is_some() {
             Some(ledger.latest_manual_roster_attempt_v2()?)
@@ -2262,6 +2304,9 @@ pub mod synthetic {
         let manual_roster_construction_records = ledger.roster_construction_history_v2();
         let manual_roster_construction_records_v3 = ledger.roster_construction_history_v3();
         let construction_transport_history = ledger.construction_transport_history_v1();
+        let durable_payment_history_supported_v1 = ledger
+            .require_supported_durable_payment_history_v1()
+            .is_ok();
         let account_use_history = ledger.account_use_history;
         let account_policy = ledger.policy;
         let mut computed = ledger.snapshot;
@@ -2275,6 +2320,7 @@ pub mod synthetic {
         }
         check(check_current)?;
         Ok(ReconciledAuthorityHistory {
+            durable_payment_history_supported_v1,
             construction_transport_history,
             manual_roster_construction_records,
             manual_roster_construction_records_v3,

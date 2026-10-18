@@ -12,8 +12,8 @@
 extern crate self as wholepact_authority;
 mod offline_witness_v1;
 pub use offline_witness_v1::{
-    MAX_OFFLINE_INTENT_CIPHERTEXT_BYTES_V1, OfflineAdmissionDeliveryLookupV1,
-    OfflineAdmissionDeliveryV1, validate_offline_intent_delivery_size_v1,
+    validate_offline_intent_delivery_size_v1, OfflineAdmissionDeliveryLookupV1,
+    OfflineAdmissionDeliveryV1, MAX_OFFLINE_INTENT_CIPHERTEXT_BYTES_V1,
 };
 #[cfg(feature = "offline-witness-owner")]
 mod offline_witness_transport_v1;
@@ -22,6 +22,12 @@ mod offline_witness_transport_v1;
 pub mod native_witness_owner;
 
 mod admission;
+#[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
+pub(crate) mod durable_payment_owner_v1;
+mod durable_payment_policy_v1;
+pub mod durable_payment_v1;
+#[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
+pub use transport::open_born_durable_payment_v1_for_server;
 mod automation;
 pub mod born_offline_clock_v1;
 mod construction_transport_handoff_policy_v1;
@@ -65,8 +71,8 @@ mod born_offline_retry_v1;
 pub use born_offline_retry_v1::configured_born_witness::BornOfflineWitnessConfigurationV1;
 mod born_offline_witness_v1;
 pub use born_offline_witness_v1::{
-    BornOfflineDeliveryLookupV1, BornOfflineDeliveryV1,
-    validate_born_offline_intent_delivery_size_v1,
+    validate_born_offline_intent_delivery_size_v1, BornOfflineDeliveryLookupV1,
+    BornOfflineDeliveryV1,
 };
 mod born_offline_artifact_schema_v1;
 #[cfg(all(feature = "born-offline-witness-owner", target_os = "linux"))]
@@ -134,7 +140,7 @@ mod reservation_view;
 mod resolution;
 pub use recovery::{AuthenticatedRecoveryFence, RecoveryFenceReceipt};
 mod session;
-pub use resolution::{AuthenticatedResolutionReceipt, resolution_source_digest};
+pub use resolution::{resolution_source_digest, AuthenticatedResolutionReceipt};
 pub mod transport;
 
 pub use journal::AuthorityJournal;
@@ -145,7 +151,7 @@ pub use transport::{
     AuthenticatedWriterSession, AuthorityClient, AuthorityServer, ClientTls, ServerTls,
 };
 
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{de::DeserializeOwned, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 

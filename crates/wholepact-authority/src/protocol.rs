@@ -71,6 +71,7 @@ pub struct HistoryPage {
 /// Complete verified witness history; cannot be fabricated by deserializing
 /// summaries. Original permits are evidence, never newly minted signing tokens.
 pub struct ReconciledAuthorityHistory {
+    pub(crate) durable_payment_history_supported_v1: bool,
     pub(crate) construction_transport_history:
         crate::construction_transport_handoff_v1::ConstructionTransportHistoryV1,
     pub(crate) manual_roster_construction_records_v3: std::collections::BTreeMap<
@@ -102,9 +103,20 @@ pub struct ReconciledAuthorityHistory {
     pub(crate) disclosure: WitnessDisclosureDescriptor,
 }
 impl ReconciledAuthorityHistory {
+    pub(crate) fn require_no_durable_payment_v1(&self) -> Result<()> {
+        if self
+            .owner_controls
+            .values()
+            .any(|r| matches!(r.control, OwnerControl::AdmitDurablePaymentV1 { .. }))
+        {
+            return Err(AuthorityError::PolicyDenied);
+        }
+        Ok(())
+    }
     /// Explicit compatibility admission for callers implementing only V2 origins.
     /// A V3 approval alone is retained history and cannot be silently dropped.
     pub fn require_construction_v2_only(&self) -> Result<()> {
+        self.require_no_durable_payment_v1()?;
         if !self.construction_transport_history.is_empty()
             || !self.manual_roster_construction_records_v3.is_empty()
             || self.owner_controls.values().any(|r| {
@@ -121,6 +133,7 @@ impl ReconciledAuthorityHistory {
     /// Original roster reentry may carry independently authenticated V3 approval
     /// evidence before its one read. This is never a Reserve/Consume replay path.
     pub fn require_original_roster_preconstruction_history(&self) -> Result<()> {
+        self.require_no_durable_payment_v1()?;
         self.account_use_history
             .require_not_permanently_excluded()?;
         if !self.permits.is_empty()
@@ -611,6 +624,10 @@ impl ReservationPermit {
 // frame is already bounded and boxing would not change the protocol boundary.
 #[allow(clippy::large_enum_variant)]
 pub enum OwnerControl {
+    /// Historical data only. Every generic live append path rejects this variant.
+    AdmitDurablePaymentV1 {
+        record: Box<crate::durable_payment_v1::DurablePaymentAdmissionRecordV1>,
+    },
     /// Exact native setup only; remote mutation and parsed data cannot install keys.
     InstallBornOfflineArtifactsV1 {
         record: Box<crate::born_offline_artifacts_v1::BornOfflineArtifactRecordV1>,

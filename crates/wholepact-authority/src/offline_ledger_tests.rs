@@ -233,6 +233,7 @@ fn legacy_history_accessor_refuses_to_drop_an_offline_origin() {
         panic!("offline result");
     };
     let history = ReconciledAuthorityHistory {
+        durable_payment_history_supported_v1: false,
         construction_transport_history:
             crate::construction_transport_handoff_v1::ConstructionTransportHistoryV1 {
                 version: 1,
