@@ -11,8 +11,9 @@ use crate::authority_bridge::{
 };
 use crate::native_ui::runtime::durable_proposal_qualification_v1::DurableNativeFixtureV1;
 pub use crate::native_ui::runtime::durable_proposal_qualification_v1::{
-    DurableAdmissionPreparationFailureV1, DurableAdmissionPreparationStageV1,
-    DurableNativeEntryFailureV1, DurableNativeEntryStageV1, DurableNativeRecordsV1,
+    DurableAdmissionHistoryFailureV1, DurableAdmissionPreparationFailureV1,
+    DurableAdmissionPreparationStageV1, DurableNativeEntryFailureV1, DurableNativeEntryStageV1,
+    DurableNativeRecordsV1,
 };
 
 pub struct EphemeralDurableNativeV1 {

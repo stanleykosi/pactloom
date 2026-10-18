@@ -30,10 +30,10 @@ use wholepact_signer::authority_bridge::{
     preconstruction_ipc::PreconstructionRequest,
 };
 use wholepact_signer::native_ui::synthetic_born_joined_qualification::{
-    DurableAdmissionPreparationFailureV1, DurableAdmissionPreparationStageV1,
-    DurableNativeEntryFailureV1, DurableNativeEntryStageV1, DurableNativeRecordsV1,
-    EphemeralAcknowledgedBornV1, EphemeralDurableNativeV1, EphemeralExportedBirthV1,
-    EphemeralFirstAnchorIntentV1, EphemeralFirstAnchorPublicationV1,
+    DurableAdmissionHistoryFailureV1, DurableAdmissionPreparationFailureV1,
+    DurableAdmissionPreparationStageV1, DurableNativeEntryFailureV1, DurableNativeEntryStageV1,
+    DurableNativeRecordsV1, EphemeralAcknowledgedBornV1, EphemeralDurableNativeV1,
+    EphemeralExportedBirthV1, EphemeralFirstAnchorIntentV1, EphemeralFirstAnchorPublicationV1,
     EphemeralOriginalRosterIntentV1, EphemeralPendingBornV1, EphemeralRosterPublicationV1,
     OriginalBirthSetupV1,
 };
@@ -72,7 +72,56 @@ fn durable_entry_error(failure: DurableNativeEntryFailureV1) -> &'static str {
     diagnostic::emit(boundary, diagnostic::signer_error(&error));
     signer_error(error, "fresh durable original entry")
 }
-fn durable_admission_error(failure: DurableAdmissionPreparationFailureV1) -> &'static str {
+fn durable_admission_history_error(failure: DurableAdmissionHistoryFailureV1) {
+    use wholepact_authority::transport::history_diagnostics_v1::{
+        CheckedHistoryIoKindV1 as I, CheckedHistoryStageV1 as S,
+    };
+    let boundary = match failure.stage() {
+        S::CallerDeadline => B::SignerAdmissionHistoryCallerDeadline,
+        S::ExchangeDeadline => B::SignerAdmissionHistoryExchangeDeadline,
+        S::SourceCallback => B::SignerAdmissionHistorySourceCallback,
+        S::SnapshotConnect => B::SignerAdmissionHistorySnapshotConnect,
+        S::SnapshotHandshake => B::SignerAdmissionHistorySnapshotHandshake,
+        S::SnapshotPeerBinding => B::SignerAdmissionHistorySnapshotPeerBinding,
+        S::SnapshotRequestBuild => B::SignerAdmissionHistorySnapshotRequestBuild,
+        S::SnapshotRequestWrite => B::SignerAdmissionHistorySnapshotRequestWrite,
+        S::SnapshotResponseRead => B::SignerAdmissionHistorySnapshotResponseRead,
+        S::SnapshotResponse => B::SignerAdmissionHistorySnapshotResponse,
+        S::SnapshotValidation => B::SignerAdmissionHistorySnapshotValidation,
+        S::PageConnect => B::SignerAdmissionHistoryPageConnect,
+        S::PageHandshake => B::SignerAdmissionHistoryPageHandshake,
+        S::PagePeerBinding => B::SignerAdmissionHistoryPagePeerBinding,
+        S::PageRequestBuild => B::SignerAdmissionHistoryPageRequestBuild,
+        S::PageRequestWrite => B::SignerAdmissionHistoryPageRequestWrite,
+        S::PageResponseRead => B::SignerAdmissionHistoryPageResponseRead,
+        S::PageResponse => B::SignerAdmissionHistoryPageResponse,
+        S::PageValidation => B::SignerAdmissionHistoryPageValidation,
+        S::EventReplay => B::SignerAdmissionHistoryEventReplay,
+        S::FinalValidation => B::SignerAdmissionHistoryFinalValidation,
+        S::Bounds => B::SignerAdmissionHistoryBounds,
+    };
+    let io_boundary = failure.io_kind().map(|kind| match kind {
+        I::Timeout => B::SignerAdmissionHistoryIoTimeout,
+        I::Closed => B::SignerAdmissionHistoryIoClosed,
+        I::Refused => B::SignerAdmissionHistoryIoRefused,
+        I::Other => B::SignerAdmissionHistoryIoOther,
+    });
+    let (error, callback_error) = failure.into_errors();
+    diagnostic::emit(boundary, diagnostic::authority_error(&error));
+    if let Some(boundary) = io_boundary {
+        diagnostic::emit(boundary, diagnostic::authority_error(&error));
+    }
+    if let Some(error) = callback_error {
+        diagnostic::emit(
+            B::SignerAdmissionHistoryCallbackError,
+            diagnostic::signer_error(&error),
+        );
+    }
+}
+fn durable_admission_error(mut failure: DurableAdmissionPreparationFailureV1) -> &'static str {
+    if let Some(history) = failure.take_history_failure() {
+        durable_admission_history_error(history);
+    }
     use DurableAdmissionPreparationStageV1 as S;
     let boundary = match failure.stage() {
         S::FixtureState => B::SignerAdmissionFixtureState,

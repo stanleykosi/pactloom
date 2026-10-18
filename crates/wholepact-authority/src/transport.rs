@@ -8,8 +8,14 @@ pub use born_offline_dispatch_v1::AuthenticatedBornOfflineDispatchV1;
 mod born_offline_witness_v1;
 mod durable_payment_client_v1;
 mod durable_payment_server_v1;
+#[cfg(feature = "synthetic-qualification")]
+pub mod history_diagnostics_v1;
 #[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
 pub use durable_payment_server_v1::open_born_durable_payment_v1_for_server;
+#[cfg(feature = "synthetic-qualification")]
+use history_diagnostics_v1::{
+    CheckedHistoryStageV1, HistoryCallStepV1, HistoryObserverV1, HistoryPhaseV1,
+};
 #[path = "construction_transport_client_v1.rs"]
 mod construction_transport_client_v1;
 #[path = "construction_transport_server_v1.rs"]
@@ -375,7 +381,13 @@ impl AuthorityClient {
     /// append chain and accounting, and returns retained exact original permits.
     /// A changing head aborts; a summary or saved local cursor cannot substitute.
     pub fn reconcile_history(&self) -> Result<ReconciledAuthorityHistory> {
-        self.reconcile_history_inner(&mut || Ok(()), false, None)
+        self.reconcile_history_inner(
+            &mut || Ok(()),
+            false,
+            None,
+            #[cfg(feature = "synthetic-qualification")]
+            None,
+        )
     }
     /// Complete authenticated history with caller-owned cancellation checks.
     /// This is a read-only admission hook, never an authority/verified factory.
@@ -384,7 +396,13 @@ impl AuthorityClient {
         &self,
         mut check_current: impl FnMut() -> Result<()>,
     ) -> Result<ReconciledAuthorityHistory> {
-        self.reconcile_history_inner(&mut check_current, true, None)
+        self.reconcile_history_inner(
+            &mut check_current,
+            true,
+            None,
+            #[cfg(feature = "synthetic-qualification")]
+            None,
+        )
     }
     /// Complete bounded read-only replay, with all pages and validation sharing
     /// one caller-owned absolute deadline. No page renews the caller's budget.
@@ -394,30 +412,77 @@ impl AuthorityClient {
         mut check_current: impl FnMut() -> Result<()>,
     ) -> Result<ReconciledAuthorityHistory> {
         require_before_caller_deadline(deadline)?;
-        self.reconcile_history_inner(&mut check_current, true, Some(deadline))
+        self.reconcile_history_inner(
+            &mut check_current,
+            true,
+            Some(deadline),
+            #[cfg(feature = "synthetic-qualification")]
+            None,
+        )
+    }
+    /// Synthetic observation of the same checked replay. This adds no checks,
+    /// time samples, retries or authority, and preserves its original errors.
+    #[cfg(feature = "synthetic-qualification")]
+    pub fn reconcile_history_diagnosed_checked_until(
+        &self,
+        deadline: Instant,
+        mut check_current: impl FnMut() -> Result<()>,
+    ) -> std::result::Result<
+        ReconciledAuthorityHistory,
+        history_diagnostics_v1::CheckedHistoryFailureV1,
+    > {
+        let observer = HistoryObserverV1::new();
+        let result = (|| {
+            require_before_caller_deadline(deadline)?;
+            self.reconcile_history_inner(&mut check_current, true, Some(deadline), Some(&observer))
+        })();
+        result.map_err(|error| observer.into_failure(error))
     }
     fn reconcile_history_inner(
         &self,
         check_current: &mut dyn FnMut() -> Result<()>,
         bounded: bool,
         caller_deadline: Option<Instant>,
+        #[cfg(feature = "synthetic-qualification")] observer: Option<&HistoryObserverV1>,
     ) -> Result<ReconciledAuthorityHistory> {
         let started = std::time::Instant::now();
         let check = |check_current: &mut dyn FnMut() -> Result<()>| -> Result<()> {
             if let Some(deadline) = caller_deadline {
-                require_before_caller_deadline(deadline)?;
+                require_before_caller_deadline(deadline).map_err(|error| {
+                    #[cfg(feature = "synthetic-qualification")]
+                    if let Some(observer) = observer {
+                        observer.record(CheckedHistoryStageV1::CallerDeadline, None, error);
+                    }
+                    error
+                })?;
             }
-            check_current()?;
+            check_current().map_err(|error| {
+                #[cfg(feature = "synthetic-qualification")]
+                if let Some(observer) = observer {
+                    observer.record(CheckedHistoryStageV1::SourceCallback, None, error);
+                }
+                error
+            })?;
             if let Some(deadline) = caller_deadline {
-                require_before_caller_deadline(deadline)?;
+                require_before_caller_deadline(deadline).map_err(|error| {
+                    #[cfg(feature = "synthetic-qualification")]
+                    if let Some(observer) = observer {
+                        observer.record(CheckedHistoryStageV1::CallerDeadline, None, error);
+                    }
+                    error
+                })?;
             }
             if bounded && started.elapsed() >= std::time::Duration::from_secs(120) {
+                #[cfg(feature = "synthetic-qualification")]
+                if let Some(observer) = observer {
+                    observer.enter(CheckedHistoryStageV1::Bounds);
+                }
                 return Err(AuthorityError::Permission);
             }
             Ok(())
         };
         check(check_current)?;
-        let snapshot_response = self.call_with_inner_checked(
+        let snapshot_response = self.call_with_inner_checked_observed(
             |_| {
                 Ok(WireRequest::Snapshot {
                     account_id: self.account.clone(),
@@ -426,12 +491,22 @@ impl AuthorityClient {
             },
             caller_deadline,
             &mut *check_current,
+            #[cfg(feature = "synthetic-qualification")]
+            observer.map(|observer| (observer, HistoryPhaseV1::Snapshot)),
         )?;
         let WireResponse::Snapshot(snapshot) = snapshot_response else {
             return Err(AuthorityError::InvalidBinding);
         };
+        #[cfg(feature = "synthetic-qualification")]
+        if let Some(observer) = observer {
+            observer.enter(CheckedHistoryStageV1::SnapshotValidation);
+        }
         self.check_snapshot(&snapshot)?;
         check(check_current)?;
+        #[cfg(feature = "synthetic-qualification")]
+        if let Some(observer) = observer {
+            observer.enter(CheckedHistoryStageV1::Bounds);
+        }
         if bounded && snapshot.head.sequence > 65_536 {
             return Err(AuthorityError::Permission);
         }
@@ -453,6 +528,10 @@ impl AuthorityClient {
         let mut after = 0;
         loop {
             check(check_current)?;
+            #[cfg(feature = "synthetic-qualification")]
+            if let Some(observer) = observer {
+                observer.enter(CheckedHistoryStageV1::Bounds);
+            }
             if bounded && pages >= 4_096 {
                 return Err(AuthorityError::Permission);
             }
@@ -463,16 +542,22 @@ impl AuthorityClient {
                 after_sequence: after,
                 maximum_entries: 16,
             };
-            let response = self.call_with_inner_checked(
+            let response = self.call_with_inner_checked_observed(
                 |_| Ok(request),
                 caller_deadline,
                 &mut *check_current,
+                #[cfg(feature = "synthetic-qualification")]
+                observer.map(|observer| (observer, HistoryPhaseV1::Page)),
             )?;
             let WireResponse::History(page) = response else {
                 return Err(AuthorityError::InvalidBinding);
             };
             let page = *page;
             check(check_current)?;
+            #[cfg(feature = "synthetic-qualification")]
+            if let Some(observer) = observer {
+                observer.enter(CheckedHistoryStageV1::Bounds);
+            }
             if bounded {
                 pages = pages.checked_add(1).ok_or(AuthorityError::Permission)?;
                 entries = entries
@@ -488,6 +573,10 @@ impl AuthorityClient {
                 if entries > 65_536 || bytes > 32 * 1024 * 1024 {
                     return Err(AuthorityError::Permission);
                 }
+            }
+            #[cfg(feature = "synthetic-qualification")]
+            if let Some(observer) = observer {
+                observer.enter(CheckedHistoryStageV1::PageValidation);
             }
             if page.snapshot != snapshot || page.policy.policy_digest()? != self.policy_digest {
                 return Err(AuthorityError::Authentication);
@@ -515,6 +604,10 @@ impl AuthorityClient {
                 return Err(AuthorityError::Authentication);
             }
             let before = after;
+            #[cfg(feature = "synthetic-qualification")]
+            if let Some(observer) = observer {
+                observer.enter(CheckedHistoryStageV1::EventReplay);
+            }
             for entry in page.entries {
                 if entry.sequence != state.snapshot.head.sequence + 1
                     || entry.previous_head != state.snapshot.head.digest
@@ -558,6 +651,10 @@ impl AuthorityClient {
                 history_heads.insert(entry.sequence, entry.head.clone());
                 after = entry.sequence;
             }
+            #[cfg(feature = "synthetic-qualification")]
+            if let Some(observer) = observer {
+                observer.enter(CheckedHistoryStageV1::PageValidation);
+            }
             if after == before && after < snapshot.head.sequence {
                 return Err(AuthorityError::CorruptHistory);
             }
@@ -566,6 +663,10 @@ impl AuthorityClient {
                 None if after == snapshot.head.sequence => break,
                 _ => return Err(AuthorityError::CorruptHistory),
             }
+        }
+        #[cfg(feature = "synthetic-qualification")]
+        if let Some(observer) = observer {
+            observer.enter(CheckedHistoryStageV1::FinalValidation);
         }
         let ledger = ledger.ok_or(AuthorityError::CorruptHistory)?;
         ledger.validate_manual_birth(pending_birth_commit.as_ref())?;
@@ -1379,47 +1480,130 @@ impl AuthorityClient {
         &self,
         build: impl FnOnce(&[u8; 32]) -> Result<WireRequest>,
         caller_deadline: Option<Instant>,
-        mut current: impl FnMut() -> Result<()>,
+        current: impl FnMut() -> Result<()>,
     ) -> Result<WireResponse> {
-        current()?;
+        self.call_with_inner_checked_observed(
+            build,
+            caller_deadline,
+            current,
+            #[cfg(feature = "synthetic-qualification")]
+            None,
+        )
+    }
+    // One shared kernel: existing callers pass no diagnostic observer.
+    fn call_with_inner_checked_observed(
+        &self,
+        build: impl FnOnce(&[u8; 32]) -> Result<WireRequest>,
+        caller_deadline: Option<Instant>,
+        mut current: impl FnMut() -> Result<()>,
+        #[cfg(feature = "synthetic-qualification")] observation: Option<(
+            &HistoryObserverV1,
+            HistoryPhaseV1,
+        )>,
+    ) -> Result<WireResponse> {
+        #[cfg(feature = "synthetic-qualification")]
+        let observer = observation.map(|(observer, _)| observer);
+        current().map_err(|error| {
+            #[cfg(feature = "synthetic-qualification")]
+            if let Some(observer) = observer {
+                observer.record(CheckedHistoryStageV1::SourceCallback, None, error);
+            }
+            error
+        })?;
         let started = Instant::now();
         let deadline = match caller_deadline {
-            Some(deadline) => bounded_transport_deadline_at(started, deadline)?,
+            Some(deadline) => {
+                bounded_transport_deadline_at(started, deadline).map_err(|error| {
+                    #[cfg(feature = "synthetic-qualification")]
+                    if let Some(observer) = observer {
+                        observer.record(CheckedHistoryStageV1::CallerDeadline, None, error);
+                    }
+                    error
+                })?
+            }
             None => started + IO_TIMEOUT,
         };
+        #[cfg(feature = "synthetic-qualification")]
+        let deadline_stage =
+            history_diagnostics_v1::selected_deadline_stage(deadline, caller_deadline);
         let mut check = || -> Result<()> {
             if caller_deadline.is_some() {
-                require_before_caller_deadline(deadline)?;
+                require_before_caller_deadline(deadline).map_err(|error| {
+                    #[cfg(feature = "synthetic-qualification")]
+                    if let Some(observer) = observer {
+                        observer.record(deadline_stage, None, error);
+                    }
+                    error
+                })?;
             }
-            current()?;
+            current().map_err(|error| {
+                #[cfg(feature = "synthetic-qualification")]
+                if let Some(observer) = observer {
+                    observer.record(CheckedHistoryStageV1::SourceCallback, None, error);
+                }
+                error
+            })?;
             if caller_deadline.is_some() {
-                require_before_caller_deadline(deadline)?;
+                require_before_caller_deadline(deadline).map_err(|error| {
+                    #[cfg(feature = "synthetic-qualification")]
+                    if let Some(observer) = observer {
+                        observer.record(deadline_stage, None, error);
+                    }
+                    error
+                })?;
             }
             Ok(())
         };
         let connect_timeout = if caller_deadline.is_some() {
-            caller_remaining_at(deadline, Instant::now())?
+            caller_remaining_at(deadline, Instant::now()).map_err(|error| {
+                #[cfg(feature = "synthetic-qualification")]
+                if let Some(observer) = observer {
+                    observer.record(deadline_stage, None, error);
+                }
+                error
+            })?
         } else {
             IO_TIMEOUT
         };
         check()?;
-        let socket = TcpStream::connect_timeout(&self.endpoint, connect_timeout)
-            .map_err(|_| AuthorityError::Uncertain)?;
+        #[cfg(feature = "synthetic-qualification")]
+        if let Some((observer, phase)) = observation {
+            observer.enter(phase.stage(HistoryCallStepV1::Connect));
+        }
+        let connected = TcpStream::connect_timeout(&self.endpoint, connect_timeout);
+        #[cfg(feature = "synthetic-qualification")]
+        let connected = match observer {
+            Some(observer) => observer.observe_io(connected),
+            None => connected,
+        };
+        let socket = connected.map_err(|_| AuthorityError::Uncertain)?;
         check()?;
         let mut socket = CallerDeadlineSocket {
             inner: DeadlineSocket { socket, deadline },
             check_after_io: caller_deadline.is_some(),
         };
+        #[cfg(feature = "synthetic-qualification")]
+        if let Some((observer, phase)) = observation {
+            observer.enter(phase.stage(HistoryCallStepV1::Handshake));
+        }
         let mut connection =
             ClientConnection::new(self.tls.config.clone(), self.tls.server_name.clone())
                 .map_err(|_| AuthorityError::Authentication)?;
         while connection.is_handshaking() {
             check()?;
-            connection
-                .complete_io(&mut socket)
-                .map_err(|_| AuthorityError::Authentication)?;
+            let completed = connection.complete_io(&mut socket);
+            #[cfg(feature = "synthetic-qualification")]
+            let completed = match observer {
+                Some(observer) => observer.observe_io(completed),
+                None => completed,
+            };
+            completed.map_err(|_| AuthorityError::Authentication)?;
         }
         check()?;
+        #[cfg(feature = "synthetic-qualification")]
+        if let Some((observer, phase)) = observation {
+            observer.enter(phase.stage(HistoryCallStepV1::PeerBinding));
+        }
         let peer = connection
             .peer_certificates()
             .and_then(|c| c.first())
@@ -1435,15 +1619,39 @@ impl AuthorityClient {
                 .map_err(|_| AuthorityError::Authentication)?,
         );
         check()?;
+        #[cfg(feature = "synthetic-qualification")]
+        if let Some((observer, phase)) = observation {
+            observer.enter(phase.stage(HistoryCallStepV1::RequestBuild));
+        }
         let request = build(&exporter)?;
         check()?;
         let mut stream = StreamOwned::new(connection, socket);
         check()?;
+        #[cfg(feature = "synthetic-qualification")]
+        if let Some((observer, phase)) = observation {
+            observer.enter(phase.stage(HistoryCallStepV1::RequestWrite));
+        }
         // From this write onward cancellation cannot promise remote rollback.
-        write_frame(&mut stream, &request).map_err(|_| AuthorityError::Uncertain)?;
+        #[cfg(feature = "synthetic-qualification")]
+        let written = history_diagnostics_v1::write_frame_observed(&mut stream, &request, observer);
+        #[cfg(not(feature = "synthetic-qualification"))]
+        let written = write_frame(&mut stream, &request);
+        written.map_err(|_| AuthorityError::Uncertain)?;
         check()?;
-        let response = read_frame(&mut stream).map_err(|_| AuthorityError::Uncertain)?;
+        #[cfg(feature = "synthetic-qualification")]
+        if let Some((observer, phase)) = observation {
+            observer.enter(phase.stage(HistoryCallStepV1::ResponseRead));
+        }
+        #[cfg(feature = "synthetic-qualification")]
+        let read = history_diagnostics_v1::read_frame_observed(&mut stream, observer);
+        #[cfg(not(feature = "synthetic-qualification"))]
+        let read = read_frame(&mut stream);
+        let response = read.map_err(|_| AuthorityError::Uncertain)?;
         check()?;
+        #[cfg(feature = "synthetic-qualification")]
+        if let Some((observer, phase)) = observation {
+            observer.enter(phase.stage(HistoryCallStepV1::Response));
+        }
         match response {
             WireResponse::Rejected(e) => Err(e),
             response => Ok(response),

@@ -2,6 +2,8 @@
 //! custody stays in runtime; these adapters cannot mint financial permission.
 use super::*;
 use std::time::Instant;
+#[cfg(feature = "synthetic-born-joined-qualification")]
+use wholepact_authority::transport::history_diagnostics_v1::CheckedHistoryFailureV1;
 use wholepact_authority::{
     AccountSnapshot, AuthenticatedWriterSession, OwnerControlRequest, ReconciledAuthorityHistory,
     WriterSessionReceipt,
@@ -40,17 +42,73 @@ impl NativeWitnessWorkspace {
     pub(in crate::native_ui) fn durable_history_v1(
         &self,
         deadline: Instant,
+        check: impl FnMut() -> Result<()>,
+    ) -> Result<ReconciledAuthorityHistory> {
+        self.durable_history_inner_v1(
+            deadline,
+            check,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            None,
+        )
+    }
+
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(in crate::native_ui) fn durable_history_diagnosed_v1(
+        &self,
+        deadline: Instant,
+        check: impl FnMut() -> Result<()>,
+        failure: &mut Option<(CheckedHistoryFailureV1, Option<Error>)>,
+    ) -> Result<ReconciledAuthorityHistory> {
+        self.durable_history_inner_v1(deadline, check, Some(failure))
+    }
+
+    fn durable_history_inner_v1(
+        &self,
+        deadline: Instant,
         mut check: impl FnMut() -> Result<()>,
+        #[cfg(feature = "synthetic-born-joined-qualification")] failure: Option<
+            &mut Option<(CheckedHistoryFailureV1, Option<Error>)>,
+        >,
     ) -> Result<ReconciledAuthorityHistory> {
         self.check_current()?;
         check()?;
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        let mut callback_failure = None;
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        let observed = failure.is_some();
+        let current = || {
+            self.check_current()
+                .and_then(|_| check())
+                .map_err(|_error| {
+                    // The SAME callback Error is retained only for the exact
+                    // synthetic observation; the authority result is unchanged.
+                    #[cfg(feature = "synthetic-born-joined-qualification")]
+                    {
+                        observe_history_callback_error(observed, &mut callback_failure, _error)
+                    }
+                    #[cfg(not(feature = "synthetic-born-joined-qualification"))]
+                    wholepact_authority::AuthorityError::Permission
+                })
+        };
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        let history = if let Some(failure) = failure {
+            self.client
+                .reconcile_history_diagnosed_checked_until(deadline, current)
+                .map_err(|authority_error| {
+                    if failure.is_none() {
+                        *failure = Some((authority_error, callback_failure));
+                    }
+                    Error::Uncertain
+                })?
+        } else {
+            self.client
+                .reconcile_history_checked_until(deadline, current)
+                .map_err(|_| Error::Uncertain)?
+        };
+        #[cfg(not(feature = "synthetic-born-joined-qualification"))]
         let history = self
             .client
-            .reconcile_history_checked_until(deadline, || {
-                self.check_current()
-                    .and_then(|_| check())
-                    .map_err(|_| wholepact_authority::AuthorityError::Permission)
-            })
+            .reconcile_history_checked_until(deadline, current)
             .map_err(|_| Error::Uncertain)?;
         check()?;
         if history.disclosure() != &self.disclosure()
@@ -136,12 +194,52 @@ impl NativeWitnessWorkspace {
     }
 }
 
+#[cfg(feature = "synthetic-born-joined-qualification")]
+fn observe_history_callback_error(
+    observed: bool,
+    first: &mut Option<Error>,
+    error: Error,
+) -> wholepact_authority::AuthorityError {
+    if observed && first.is_none() {
+        *first = Some(error);
+    }
+    wholepact_authority::AuthorityError::Permission
+}
+
 fn same_actual_workspace(actual: &std::sync::Arc<()>, expected: &std::sync::Arc<()>) -> bool {
     std::sync::Arc::ptr_eq(actual, expected)
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    #[test]
+    fn history_callback_observer_preserves_first_error_and_optional_none() {
+        let mut first = None;
+        assert!(matches!(
+            observe_history_callback_error(false, &mut first, Error::Locked),
+            wholepact_authority::AuthorityError::Permission
+        ));
+        assert!(first.is_none());
+        assert!(matches!(
+            observe_history_callback_error(
+                true,
+                &mut first,
+                Error::ConsentJournal(crate::consent_journal::JournalError::Expired)
+            ),
+            wholepact_authority::AuthorityError::Permission
+        ));
+        assert!(matches!(
+            observe_history_callback_error(true, &mut first, Error::ReviewMismatch),
+            wholepact_authority::AuthorityError::Permission
+        ));
+        assert!(matches!(
+            first.take(),
+            Some(Error::ConsentJournal(
+                crate::consent_journal::JournalError::Expired
+            ))
+        ));
+    }
     #[test]
     fn equal_certificate_labels_cannot_substitute_another_client_instance() {
         let original = std::sync::Arc::new(());
