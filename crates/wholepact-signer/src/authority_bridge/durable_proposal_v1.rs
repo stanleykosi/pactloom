@@ -28,6 +28,8 @@ use wholepact_protocol::{
 };
 use wholepact_wallet::wallet::protected_sync::{key_use::WalletKeyUseTicket, ProtectedWalletSync};
 
+mod stable_returns_v2;
+
 /// Reloads the exact protected proposal record and its independently retained
 /// full policy. A caller must not hold a database lock across this callback or
 /// across key use. Returning a digest, parsed descriptor or verification flag is
@@ -155,11 +157,30 @@ impl PreparedDurableProposalReview {
         manifest: &AcceptedManifestRecord,
     ) -> Result<Self> {
         entry.check_current().map_err(|_| BridgeError::Permission)?;
-        let binding = crate::consent_journal::DurableBornPolicyBindingV1::from_original_source(
-            entry.record(),
-            enrollment,
-            manifest,
-            self.proposal.identity(),
+        // This runtime profile requires a genuine original V2 birth preimage.
+        // Failure does not fall back to interpreting an allowlisted policy hash
+        // as a concrete output digest or trusting a caller-supplied descriptor.
+        let original_policy = entry
+            .original_recipient_policy_export_v2()
+            .map_err(|_| BridgeError::Binding)?;
+        let binding =
+            crate::consent_journal::DurableBornPolicyBindingV1::from_original_stable_source_v2(
+                entry.record(),
+                enrollment,
+                manifest,
+                self.proposal.identity(),
+                &original_policy,
+            )?;
+        stable_returns_v2::verify_stable_returns_v2(
+            &self.proposal,
+            &self.inputs.input_actions,
+            &self.inputs.output_actions,
+            &entry.account().fvk().map_err(|_| BridgeError::Binding)?,
+            &entry
+                .account()
+                .account_id()
+                .map_err(|_| BridgeError::Binding)?,
+            &binding.stable_return_requirements_v2(manifest)?,
         )?;
         self.prepared = self
             .prepared
@@ -323,7 +344,42 @@ impl ApprovedDurableProposalAction {
         let manifest = journal
             .accepted_manifest(&self.original.terms().accepted_manifest_ref, session)?
             .ok_or(BridgeError::Missing)?;
-        binding.validate_original_source(entry.record(), entry.genesis())?;
+        // Cache only an exact historical projection of the actual immutable
+        // source, not permission. Repeated checks below revalidate that source
+        // under the already-held original lease without reacquiring its fence.
+        let original_policy = if binding.uses_stable_recipient_policy_v2() {
+            Some(
+                entry
+                    .original_recipient_policy_export_v2()
+                    .map_err(|_| BridgeError::Binding)?,
+            )
+        } else {
+            None
+        };
+        let actual_fvk = account.fvk().map_err(|_| BridgeError::Binding)?;
+        let validate_policy = || {
+            if let Some(original_policy) = &original_policy {
+                binding.validate_stable_original_source_v2(
+                    entry.record(),
+                    entry.genesis(),
+                    original_policy,
+                )?;
+                stable_returns_v2::verify_stable_returns_v2(
+                    &self.proposal,
+                    &self.inputs.input_actions,
+                    &self.inputs.output_actions,
+                    &actual_fvk,
+                    &account_id,
+                    &binding.stable_return_requirements_v2(&manifest)?,
+                )
+            } else {
+                // Only an explicitly exact historical profile can reach this
+                // validator; it rejects stable-policy records, never downgrades.
+                binding.validate_original_source(entry.record(), entry.genesis())?;
+                Ok(())
+            }
+        };
+        validate_policy()?;
         binding.validate_consent(self.original.terms(), &enrollment, &manifest)?;
         binding.require_fixed_identity(self.proposal.identity())?;
         binding.require_current_time(current_time_ms()?)?;
@@ -352,7 +408,7 @@ impl ApprovedDurableProposalAction {
             entry
                 .check_original_source_current()
                 .map_err(|_| BridgeError::Permission)?;
-            binding.validate_original_source(entry.record(), entry.genesis())?;
+            validate_policy()?;
             binding.validate_consent(self.original.terms(), &enrollment, &manifest)?;
             binding.require_fixed_identity(self.proposal.identity())?;
             binding.require_current_time(current_time_ms()?)?;

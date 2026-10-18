@@ -399,7 +399,20 @@ impl SignerConsentJournal {
             .durable_born_policy_v1
             .as_ref()
             .ok_or(JournalError::Permission)?;
-        binding.validate_original_source(entry.record(), entry.genesis())?;
+        if binding.uses_stable_recipient_policy_v2() {
+            let original_policy = entry
+                .original_recipient_policy_export_v2()
+                .map_err(|_| JournalError::InvalidBinding)?;
+            binding.validate_stable_original_source_v2(
+                entry.record(),
+                entry.genesis(),
+                &original_policy,
+            )?;
+        } else {
+            // Explicit legacy-exact mapping only. Its validator refuses a
+            // stable-policy record rather than falling back by hash membership.
+            binding.validate_original_source(entry.record(), entry.genesis())?;
+        }
         binding.require_current_time(now_ms()?)?;
         if terms.automation.is_some()
             || terms.sponsor_policy.is_some()

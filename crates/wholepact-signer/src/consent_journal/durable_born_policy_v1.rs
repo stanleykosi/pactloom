@@ -163,6 +163,75 @@ impl FixedCandidateV1 {
     }
 }
 
+/// Strict feature-independent projection of the maintained actual-source export.
+/// It retains the complete V2 native-birth preimage and its original witness
+/// commit; an allowlisted hash or a version label cannot stand in for either.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OriginalRecipientPolicyExportProjectionV2 {
+    version: u16,
+    anchor: wholepact_core::born_policy_origin_v2::BornRecipientPolicyOriginV2,
+    original_birth_commit: wholepact_authority::pending_birth::PendingBirthCommitRecord,
+}
+impl OriginalRecipientPolicyExportProjectionV2 {
+    fn validate_for(
+        &self,
+        original: &OriginalManualRecordV1,
+        extension: &ManualRosterEnrollmentExtensionV2,
+    ) -> Result<()> {
+        self.anchor.validate().map_err(invalid)?;
+        self.original_birth_commit.validate().map_err(invalid)?;
+        extension
+            .validate_original_birth(&self.original_birth_commit)
+            .map_err(invalid)?;
+        let a = &self.anchor;
+        let r = &self.original_birth_commit.request;
+        let g = &original.genesis;
+        if self.version != 2
+            || a.birth_digest != g.native_birth_digest
+            || a.birth_digest != r.native_birth_digest
+            || a.intent.operation_id != r.operation_id
+            || a.intent.generation_instance_id != r.generation_instance_id
+            || a.intent.original_policy_terms_digest != r.original_terms_digest
+            || r.policy.account_use_genesis.as_ref() != Some(g)
+            || a.intent.identity.account_id != g.identity.account_id
+            || a.intent.identity.full_viewing_key_digest != g.identity.full_viewing_key_digest
+            || a.intent.identity.network_profile_id != g.identity.network_profile_id
+            || a.intent.identity.derivation_domain != g.identity.derivation_domain
+            || a.intent.witness_origin.endpoint != r.disclosure.endpoint
+            || a.intent.witness_origin.server_name != r.disclosure.server_name
+            || a.intent.witness_origin.witness_id != r.disclosure.witness_id
+            || a.intent.witness_origin.pinned_server_certificate_digest
+                != r.disclosure.pinned_server_certificate_digest
+        {
+            return Err(JournalError::InvalidBinding);
+        }
+        a.recipient_policy
+            .require_enrollment(&original.terms)
+            .map_err(invalid)?;
+        Ok(())
+    }
+}
+
+/// Explicit meaning of the witness's policy scope. This is not a fallback:
+/// stable V2 never reinterprets a V1 concrete output digest, and the exact
+/// payment-effect commitment remains independently fixed in both profiles.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum DurableBornRecipientPolicyProfileV1 {
+    #[default]
+    FixedExactV1,
+    StableOriginalV2 {
+        original: OriginalRecipientPolicyExportProjectionV2,
+        policy_scope_digest: String,
+    },
+}
+impl DurableBornRecipientPolicyProfileV1 {
+    fn is_exact(&self) -> bool {
+        matches!(self, Self::FixedExactV1)
+    }
+}
+
 /// DATA ONLY. The optional presence is committed by the native consent hash.
 /// Local enrollment/transport remain fresh; only the two explicit witness policy
 /// fields are derived from this independently source-checked historical mapping.
@@ -180,6 +249,13 @@ pub struct DurableBornPolicyBindingV1 {
     local_enrollment_ref: String,
     local_accepted_manifest_ref: String,
     fixed: FixedCandidateV1,
+    // The default omission preserves the complete pre-existing exact V1 wire
+    // shape and consent hash, not only the older unbound None representation.
+    #[serde(
+        default,
+        skip_serializing_if = "DurableBornRecipientPolicyProfileV1::is_exact"
+    )]
+    recipient_policy_profile: DurableBornRecipientPolicyProfileV1,
 }
 impl DurableBornPolicyBindingV1 {
     pub(crate) fn validate(&self) -> Result<()> {
@@ -230,7 +306,55 @@ impl DurableBornPolicyBindingV1 {
         {
             return Err(JournalError::InvalidBinding);
         }
+        if let DurableBornRecipientPolicyProfileV1::StableOriginalV2 {
+            original,
+            policy_scope_digest,
+        } = &self.recipient_policy_profile
+        {
+            original.validate_for(&self.original, &self.original_roster_extension)?;
+            hash(policy_scope_digest)?;
+            if *policy_scope_digest != original.anchor.recipient_policy.digest().map_err(invalid)? {
+                return Err(JournalError::InvalidBinding);
+            }
+        }
         Ok(())
+    }
+
+    pub(crate) fn uses_stable_recipient_policy_v2(&self) -> bool {
+        !self.recipient_policy_profile.is_exact()
+    }
+
+    /// Pure requirements, NOT proof of address ownership. The live adapter must
+    /// join each returned output to its verified action and actual account FVK.
+    pub(crate) fn stable_return_requirements_v2(
+        &self,
+        manifest: &AcceptedManifestRecord,
+    ) -> Result<Vec<wholepact_core::born_recipient_policy_v2::OwnReturnRequirementV2>> {
+        self.validate()?;
+        let DurableBornRecipientPolicyProfileV1::StableOriginalV2 { original, .. } =
+            &self.recipient_policy_profile
+        else {
+            return Err(JournalError::InvalidBinding);
+        };
+        let proposal = manifest.proposal()?;
+        if manifest.reference() != self.local_accepted_manifest_ref
+            || proposal.proposal_digest() != self.fixed.proposal_digest
+            || proposal.manifest_digest() != self.fixed.manifest_digest
+            || wholepact_core::manual_construction::construction_recipient_scope_digest(&proposal)
+                .map_err(invalid)?
+                != self.recipient_scope_digest
+        {
+            return Err(JournalError::InvalidBinding);
+        }
+        let (validated, requirements) = original
+            .anchor
+            .recipient_policy
+            .validate_candidate_for_enrollment(&self.original.terms, proposal.input())
+            .map_err(invalid)?;
+        if validated.input() != proposal.input() {
+            return Err(JournalError::InvalidBinding);
+        }
+        Ok(requirements)
     }
 
     /// Pure historical conjunction. No wall-clock expiry, current native owner,
@@ -256,6 +380,18 @@ impl DurableBornPolicyBindingV1 {
         let payment =
             wholepact_core::manual_construction::construction_recipient_scope_digest(&proposal)
                 .map_err(invalid)?;
+        match &self.recipient_policy_profile {
+            DurableBornRecipientPolicyProfileV1::FixedExactV1 => {
+                if !s.recipient_scope_digests.contains(&payment) {
+                    return Err(JournalError::InvalidBinding);
+                }
+            }
+            DurableBornRecipientPolicyProfileV1::StableOriginalV2 { .. } => {
+                // Historical arithmetic/descriptor validation does not claim
+                // that these address-ownership obligations were discharged.
+                let _requirements = self.stable_return_requirements_v2(manifest)?;
+            }
+        }
         let reviewed = t.receipt.reviewed_at_ms();
         let expires = t.receipt.expires_at_ms();
         if t.automation.is_some()
@@ -283,7 +419,6 @@ impl DurableBornPolicyBindingV1 {
             || m.agreement.obligation_id != s.obligation_id
             || m.agreement.network_profile_id != e.identity.network_profile_id
             || self.recipient_scope_digest != payment
-            || !s.recipient_scope_digests.contains(&payment)
             || t.aggregate_budget_limit_zatoshis != enrollment.budget_limit_zatoshis()
             || t.aggregate_budget_limit_zatoshis > s.aggregate_budget_zatoshis
             || t.maximum_debit_zatoshis > s.per_operation_limit_zatoshis
@@ -373,6 +508,105 @@ impl DurableBornPolicyBindingV1 {
         manifest: &AcceptedManifestRecord,
         fixed: &wholepact_protocol::durable_proposal_v1::FixedProposalIdentityV1,
     ) -> Result<Self> {
+        let result = Self::from_source_data(source, enrollment, manifest, fixed)?;
+        if !result
+            .original
+            .terms
+            .scope
+            .recipient_scope_digests
+            .contains(&result.recipient_scope_digest)
+        {
+            return Err(JournalError::InvalidBinding);
+        }
+        Ok(result)
+    }
+
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "native-ui",
+        target_os = "linux"
+    ))]
+    pub(crate) fn from_original_stable_source_v2(
+        source: &crate::account::birth::enrollment::roster_v2::BornManualRosterEnrollmentRecordV2,
+        enrollment: &AccountEnrollmentRecord,
+        manifest: &AcceptedManifestRecord,
+        fixed: &wholepact_protocol::durable_proposal_v1::FixedProposalIdentityV1,
+        actual_export: &crate::account::birth::recipient_policy_v2::OriginalRecipientPolicyExportV2,
+    ) -> Result<Self> {
+        actual_export.validate().map_err(invalid)?;
+        let original: OriginalRecipientPolicyExportProjectionV2 =
+            serde_json::from_value(serde_json::to_value(actual_export).map_err(invalid)?)
+                .map_err(invalid)?;
+        let mut result = Self::from_source_data(source, enrollment, manifest, fixed)?;
+        let policy_scope_digest = original.anchor.recipient_policy.digest().map_err(invalid)?;
+        result.recipient_policy_profile = DurableBornRecipientPolicyProfileV1::StableOriginalV2 {
+            original,
+            policy_scope_digest,
+        };
+        result.validate_stable_original_source_v2(
+            source,
+            &source.account_record.genesis,
+            actual_export,
+        )?;
+        let _requirements = result.stable_return_requirements_v2(manifest)?;
+        Ok(result)
+    }
+
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "native-ui",
+        target_os = "linux"
+    ))]
+    pub(crate) fn validate_original_source(
+        &self,
+        source: &crate::account::birth::enrollment::roster_v2::BornManualRosterEnrollmentRecordV2,
+        genesis: &AccountUseGenesis,
+    ) -> Result<()> {
+        // A former exact-profile caller cannot accidentally authorize stable
+        // policy data without comparing its complete actual original export.
+        if !self.recipient_policy_profile.is_exact() {
+            return Err(JournalError::InvalidBinding);
+        }
+        self.validate_common_original_source(source, genesis)
+    }
+
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "native-ui",
+        target_os = "linux"
+    ))]
+    pub(crate) fn validate_stable_original_source_v2(
+        &self,
+        source: &crate::account::birth::enrollment::roster_v2::BornManualRosterEnrollmentRecordV2,
+        genesis: &AccountUseGenesis,
+        actual_export: &crate::account::birth::recipient_policy_v2::OriginalRecipientPolicyExportV2,
+    ) -> Result<()> {
+        self.validate_common_original_source(source, genesis)?;
+        actual_export.validate().map_err(invalid)?;
+        let DurableBornRecipientPolicyProfileV1::StableOriginalV2 { original, .. } =
+            &self.recipient_policy_profile
+        else {
+            return Err(JournalError::InvalidBinding);
+        };
+        if serde_json::to_value(original).map_err(invalid)?
+            != serde_json::to_value(actual_export).map_err(invalid)?
+        {
+            return Err(JournalError::InvalidBinding);
+        }
+        Ok(())
+    }
+
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "native-ui",
+        target_os = "linux"
+    ))]
+    fn from_source_data(
+        source: &crate::account::birth::enrollment::roster_v2::BornManualRosterEnrollmentRecordV2,
+        enrollment: &AccountEnrollmentRecord,
+        manifest: &AcceptedManifestRecord,
+        fixed: &wholepact_protocol::durable_proposal_v1::FixedProposalIdentityV1,
+    ) -> Result<Self> {
         source.validate().map_err(invalid)?;
         let original: OriginalManualRecordV1 =
             serde_json::from_value(serde_json::to_value(&source.account_record).map_err(invalid)?)
@@ -395,6 +629,7 @@ impl DurableBornPolicyBindingV1 {
                 .map_err(invalid)?,
             original,
             original_roster_extension: extension,
+            recipient_policy_profile: DurableBornRecipientPolicyProfileV1::FixedExactV1,
         };
         result.validate()?;
         Ok(result)
@@ -405,7 +640,7 @@ impl DurableBornPolicyBindingV1 {
         feature = "native-ui",
         target_os = "linux"
     ))]
-    pub(crate) fn validate_original_source(
+    fn validate_common_original_source(
         &self,
         source: &crate::account::birth::enrollment::roster_v2::BornManualRosterEnrollmentRecordV2,
         genesis: &AccountUseGenesis,
@@ -457,7 +692,15 @@ pub(crate) fn witness_policy_scope(
         binding.validate_consent(t, &original.enrollment, &original.manifest)?;
         Ok((
             binding.original_enrollment_ref.clone(),
-            binding.recipient_scope_digest.clone(),
+            match &binding.recipient_policy_profile {
+                DurableBornRecipientPolicyProfileV1::FixedExactV1 => {
+                    binding.recipient_scope_digest.clone()
+                }
+                DurableBornRecipientPolicyProfileV1::StableOriginalV2 {
+                    policy_scope_digest,
+                    ..
+                } => policy_scope_digest.clone(),
+            },
         ))
     } else {
         Ok((
@@ -478,3 +721,7 @@ pub(crate) fn witness_policy_scope(
 #[cfg(test)]
 #[path = "durable_born_policy_v1_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "durable_born_policy_v2_tests.rs"]
+mod stable_tests;

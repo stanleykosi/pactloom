@@ -20,14 +20,14 @@ fn private_dir() -> tempfile::TempDir {
     dir
 }
 
-struct Fixture {
-    binding: DurableBornPolicyBindingV1,
-    terms: SpendConsentTerms,
-    enrollment: AccountEnrollmentRecord,
-    manifest: AcceptedManifestRecord,
+pub(super) struct Fixture {
+    pub(super) binding: DurableBornPolicyBindingV1,
+    pub(super) terms: SpendConsentTerms,
+    pub(super) enrollment: AccountEnrollmentRecord,
+    pub(super) manifest: AcceptedManifestRecord,
 }
 impl Fixture {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let mut input =
             crate::consent_journal::tests::proposal("agreement-a", "obligation-a", "proposal-a")
                 .input()
@@ -240,6 +240,7 @@ impl Fixture {
             local_enrollment_ref: enrollment.reference().into(),
             local_accepted_manifest_ref: manifest.reference().into(),
             original,
+            recipient_policy_profile: DurableBornRecipientPolicyProfileV1::FixedExactV1,
             original_roster_extension: ManualRosterEnrollmentExtensionV2 {
                 version: 2,
                 account_extension: extension,
@@ -299,7 +300,7 @@ impl Fixture {
             manifest,
         }
     }
-    fn evidence(&self, mapped: bool) -> OriginalAuthorizationEvidence {
+    pub(super) fn evidence(&self, mapped: bool) -> OriginalAuthorizationEvidence {
         let mut terms = self.terms.clone();
         terms.durable_born_policy_v1 = mapped.then(|| self.binding.clone());
         let consent = OriginalSpendConsent::new(terms).unwrap();
@@ -312,7 +313,7 @@ impl Fixture {
     }
 }
 
-fn rehash_original(b: &mut DurableBornPolicyBindingV1) {
+pub(super) fn rehash_original(b: &mut DurableBornPolicyBindingV1) {
     let o = &mut b.original;
     o.terms_digest = o.terms.terms_digest().unwrap();
     o.signer_native_review_digest = digest(

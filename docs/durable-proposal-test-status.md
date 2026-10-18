@@ -26,3 +26,15 @@ Engine and wallet builds passed in the active working tree. Some files were bein
 6. Explicit profile activation and attended UI acceptance, followed separately by testnet submission, inclusion, recipient observation and confirmation policy.
 
 Native IPC execution is not available in the current local sandbox. Component tests are not a substitute for the authorized native Linux run. Funded wallets and secrets must not be placed in source checkpoints.
+
+## Subsequent checks: 2026-10-18
+
+- Frozen checkpoint `aeb067047db6e2f7de8fe745d004d535468d39f0` Rust sources compiled successfully for the native-host all-features library test executable (7 minutes 41 seconds). This was compilation only, not local native execution.
+- The 43 existing source-reviewed pure Host regressions passed. They create no native, IPC, network or payment owners.
+- Default signer library test compilation passed. After correcting only invalid test fixture permissions/lifetimes and respecting immutable genesis, eight policy tests passed. Four default migration/refusal tests passed, including refusal of signed historical verification when its verifier feature is disabled. Positive signed-history verification still requires its separate feature-enabled test run.
+- Four strict JSON tests passed, including the explicit aggregate limit retaining the default limit and strict depth/node/duplicate-key protections.
+- Isolated native baseline run: [39082330109](https://github.com/stanleykosi/pactloom/actions/runs/39082330109), pinned to the exact checkpoint above. At the time of this update it is in progress, with no native-test result yet. Its scope is genuine signer disclosure, saved contributions and native-owner/session reopening. Host-local privacy permissions and chain responses are synthetic. It does not prove full native signing, a usable foreground Host workflow, OS-process restart or testnet settlement.
+
+The new stable-V2 birth-policy mapping is a later source change and is not covered by the earlier policy test pass. It must retain the original allowlisted stable policy digest while independently binding and verifying the exact concrete payment and own returns.
+
+Production usability also requires genuine candidate-free own-wallet input discovery and separately consented inert projections before a complete manifest exists, followed by a usable coordinator command with genuine foreground Host consent. Synthetic funding outpoints and test-local permission matchers are not substitutes for these product paths.

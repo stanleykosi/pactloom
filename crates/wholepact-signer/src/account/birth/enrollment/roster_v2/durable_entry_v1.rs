@@ -172,6 +172,46 @@ impl FreshDurableBornEntryV1 {
         &self.retained.record.account_record.genesis
     }
 
+    /// Complete ORIGINAL V2 policy evidence, not a current approval or a
+    /// spending capability. Legacy births have no such preimage and remain
+    /// refused; a caller cannot supply or attach a replacement descriptor.
+    ///
+    /// This accessor deliberately takes no journal authority lock, so the
+    /// specialized adapter can use it while separately holding and checking
+    /// the exact original authorization lease. Native/vault/source checks are
+    /// still fresh on both sides of this historical projection.
+    pub(crate) fn original_recipient_policy_export_v2(
+        &self,
+    ) -> Result<crate::account::birth::recipient_policy_v2::OriginalRecipientPolicyExportV2> {
+        self.check_original_source_current()?;
+        let original = super::original(&self.retained.account)?;
+        original.validate_at_rest(self.account())?;
+        let origin = original.anchor().complete_policy_origin_v2()?;
+        let genesis = self.genesis();
+        if original.anchor().expected_account_use_genesis()? != *genesis
+            || origin.birth_digest != genesis.native_birth_digest
+            || origin.intent.identity.account_id != genesis.identity.account_id
+            || origin.intent.identity.full_viewing_key_digest
+                != genesis.identity.full_viewing_key_digest
+            || origin.intent.identity.network_profile_id != genesis.identity.network_profile_id
+            || origin.intent.identity.derivation_domain != genesis.identity.derivation_domain
+        {
+            return Err(Error::ReviewMismatch);
+        }
+        self.record()
+            .extension()?
+            .validate_original_birth(original.witness_commit())
+            .map_err(|_| Error::ReviewMismatch)?;
+        // Reuse the maintained complete export validator, including exact
+        // birth operation, generation, policy-terms digest and witness commit.
+        let export = self
+            .retained
+            .original_recipient_policy_export_v2(&self.owner)?;
+        export.validate()?;
+        self.check_original_source_current()?;
+        Ok(export)
+    }
+
     /// The original independently selected witness endpoint/policy remains
     /// fixed. This descriptor is data, not a live TLS owner or writer session.
     pub(crate) fn original_witness_disclosure(
