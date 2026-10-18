@@ -60,8 +60,8 @@ fn recovery_raw_policy_preserves_construction_empty_and_opaque_strings() {
             let encoded = serde_json::to_string(&cells).unwrap();
             let decoded =
                 original_cells_without_private_input_projections(table, &encoded).unwrap();
-            assert_eq!(decoded, cells);
-            assert_eq!(serde_json::to_string(&decoded).unwrap(), encoded);
+            assert!(decoded == cells);
+            assert!(serde_json::to_string(&decoded).unwrap() == encoded);
         }
     }
     let encoded =
@@ -97,5 +97,74 @@ fn recovery_inventory_scans_every_raw_row_before_first_record_projection() {
             [("records", earlier.as_slice()), (table, later.as_slice())],
             false,
         ));
+    }
+}
+
+fn workspace_marker_payloads() -> [&'static str; 6] {
+    [
+        r#"{"private_workspace_origin_v1":{}}"#,
+        r#"{"private_workspace_origin_v1":null}"#,
+        r#"{"private_workspace_origin_v\u0031":{}}"#,
+        r#"{"private_workspace_origin_v1":{},"private_workspace_origin_v\u0031":null}"#,
+        r#"{"nested":[{"private_workspace_origin_v1":{}}]}"#,
+        r#"{"record":{"payload":{}},"unknown":{"private_workspace_origin_v1":null}}"#,
+    ]
+}
+
+#[test]
+fn workspace_marker_scans_exact_current_and_original_cells_without_string_recursion() {
+    for (table, column, width) in COLUMNS {
+        for payload in workspace_marker_payloads() {
+            let mut cells = (0..width).map(|_| RecoveryCell::Null).collect::<Vec<_>>();
+            cells[column] = RecoveryCell::Text(payload.into());
+            refuse(validate_no_private_input_projection_cells(table, &cells));
+            let mut originals = vec![Value::Null; width];
+            originals[column] = Value::String(payload.into());
+            let encoded = serde_json::to_string(&originals).unwrap();
+            refuse(original_cells_without_private_input_projections(
+                table, &encoded,
+            ));
+        }
+        let mut harmless = vec![Value::Null; width];
+        harmless[0] = Value::String(workspace_marker_payloads()[0].into());
+        harmless[column] = Value::String(
+            r#"{"durable_input_projections_v1":{},"opaque":"{\"private_workspace_origin_v1\":null}"}"#.into(),
+        );
+        let encoded = serde_json::to_string(&harmless).unwrap();
+        assert!(
+            original_cells_without_private_input_projections(table, &encoded).unwrap() == harmless
+        );
+    }
+}
+
+#[test]
+fn workspace_marker_inventory_prepass_precedes_any_earlier_record_projection() {
+    let provenance = RecoveryProvenance {
+        profile_id: "synthetic-profile".into(),
+        checkpoint_id: "synthetic-checkpoint".into(),
+        bundle_digest: "a".repeat(64),
+        component_id: "coordination".into(),
+        kind: JournalKind::CoordinationAuthority,
+        component_digest: "b".repeat(64),
+        application_id: 0,
+        schema_version: SCHEMA_VERSION,
+        rows: 2,
+    };
+    let earlier = vec![
+        RecoveryCell::Text("unknown-aggregate".into()),
+        RecoveryCell::Null,
+        RecoveryCell::Null,
+        RecoveryCell::Text("{}".into()),
+    ];
+    for (table, column, width) in COLUMNS {
+        for payload in workspace_marker_payloads() {
+            let mut later = (0..width).map(|_| RecoveryCell::Null).collect::<Vec<_>>();
+            later[column] = RecoveryCell::Text(payload.into());
+            refuse(StoreRecoveryInventory::inspect_rows(
+                &provenance,
+                [("records", earlier.as_slice()), (table, later.as_slice())],
+                false,
+            ));
+        }
     }
 }

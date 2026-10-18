@@ -6,7 +6,7 @@ use crate::durable_input_projections_v1::{
     DurableDiscoveryRoundRequestV1, DurableDiscoveryRoundSummaryV1, LocalDurableDiscoveryConsentV1,
 };
 use crate::manual_enrollment::ManualRosterIntentTarget;
-use crate::{Access, ApiError, Engine, Mutation, Result};
+use crate::{Access, ApiError, Engine, Result};
 use serde::Serialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -15,6 +15,10 @@ use std::{
 use wholepact_core::{AgreementDraft, ParticipationIntent};
 use wholepact_storage_security::DatabaseKey;
 use wholepact_store::manual_enrollment::ManualEnrollmentRosterMember;
+use wholepact_store::private_workspace_origin_v1::PrivateWorkspaceOriginV1;
+
+#[path = "durable_private_workspace_v1/operation_v1.rs"]
+mod operation_v1;
 
 fn denied() -> ApiError {
     ApiError::new("DISCLOSURE_DENIED", "Exact original workspace, source principal and current native privacy permission are required")
@@ -248,9 +252,6 @@ pub struct PrivateWorkspaceStatusV1 {
     pub rounds: Vec<DurableDiscoveryRoundSummaryV1>,
     pub authorization_allowed: bool,
 }
-fn mutation_progress(mutation: Mutation) -> (u64, bool) {
-    (mutation.agreement.revision, mutation.replayed)
-}
 
 /// Exclusive API ownership of the fresh Engine/Store inside this facade. Not
 /// Clone, Debug, Serialize, Deref or AsRef. This does not prevent a trusted key
@@ -262,6 +263,7 @@ pub struct PrivateDurableCoordinatorV1<'source> {
     source: PrivateDurableWorkspaceSourceV1<'source>,
     scope: PrivateWorkspaceScopeV1,
     origin: [u8; 32],
+    marker: PrivateWorkspaceOriginV1,
 }
 impl<'source> PrivateDurableCoordinatorV1<'source> {
     /// Trusted-embedding data API, not proof of native dependency persistence.
@@ -274,8 +276,10 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
         destination: &Path,
         key: &DatabaseKey,
         retention_policy: &str,
+        native_association_digest: &str,
         consent: &dyn LocalPrivateWorkspaceConsentV1,
     ) -> Result<Self> {
+        crate::private_workspace_origin_v1::validate_association_digest(native_association_digest)?;
         let scope = scope(&source, destination, retention_policy)?;
         check_source_permission(
             &source,
@@ -291,9 +295,17 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
             .verify_original_encrypted_destination(destination)
             .map_err(crate::store_error)?;
         let engine = Engine::from_store(store);
+        let marker = crate::private_workspace_origin_v1::from_source(
+            &source,
+            access,
+            &scope,
+            native_association_digest,
+            origin,
+        )?;
         // Build ONLY nonspending seed metadata, not the source Envelope/history.
         let seed = &source.seed;
         let payload = serde_json::json!({
+            "private_workspace_origin_v1": marker,
             "owner_client_id": seed.owner_client_id, "intent_owners": seed.intent_owners,
             "terms_editing_origin": false,
             "view": { "agreement": seed.agreement, "terms_history": seed.terms_history,
@@ -307,7 +319,7 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
         let command = wholepact_store::CommandContext::for_request(
             &access.principal_id,
             "private-workspace-original-seed-v1",
-            &serde_json::json!((&source.seed_digest, &scope)),
+            &serde_json::json!((&source.seed_digest, &scope, &marker)),
         )
         .map_err(crate::store_error)?;
         check_source_permission(
@@ -326,6 +338,7 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
             source,
             scope,
             origin,
+            marker,
         };
         result.check(access, consent, PrivateWorkspaceActionV1::Create)?;
         Ok(result)
@@ -339,8 +352,10 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
         key: &DatabaseKey,
         expected_origin: [u8; 32],
         retention_policy: &str,
+        native_association_digest: &str,
         consent: &dyn LocalPrivateWorkspaceConsentV1,
     ) -> Result<Self> {
+        crate::private_workspace_origin_v1::validate_association_digest(native_association_digest)?;
         let scope = scope(&source, destination, retention_policy)?;
         check_source_permission(
             &source,
@@ -358,11 +373,19 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
         {
             return Err(damaged());
         }
+        let marker = crate::private_workspace_origin_v1::from_source(
+            &source,
+            access,
+            &scope,
+            native_association_digest,
+            expected_origin,
+        )?;
         let result = Self {
             engine: Engine::from_store(store),
             source,
             scope,
             origin: expected_origin,
+            marker,
         };
         result.check(access, consent, PrivateWorkspaceActionV1::Reopen)?;
         Ok(result)
@@ -370,6 +393,11 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
     /// Correlation needed by the exact native commit, never raw database access.
     pub fn original_origin(&self) -> [u8; 32] {
         self.origin
+    }
+    /// Consistency value for an actual native COMMIT, never permission or an
+    /// assertion that any native association already exists.
+    pub fn origin_marker_digest(&self) -> Result<String> {
+        self.marker.digest().map_err(crate::store_error)
     }
     fn check(
         &self,
@@ -387,7 +415,30 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
         {
             return Err(damaged());
         }
-        let envelope = self.engine.load(access, self.source.agreement_id())?;
+        let expected = crate::private_workspace_origin_v1::from_source(
+            &self.source,
+            access,
+            &self.scope,
+            &self.marker.native_association_digest,
+            self.origin,
+        )?;
+        if expected != self.marker {
+            return Err(damaged());
+        }
+        let record = self
+            .engine
+            .store
+            .get_agreement(self.source.agreement_id())
+            .map_err(crate::store_error)?
+            .ok_or_else(damaged)?;
+        let envelope = crate::decode_unprojected(&record)?;
+        self.require_original_envelope(&envelope)?;
+        check_source_permission(&self.source, access, &self.scope, consent, action)
+    }
+    fn require_original_envelope(&self, envelope: &crate::Envelope) -> Result<()> {
+        if envelope.private_workspace_origin_v1.as_ref() != Some(&self.marker) {
+            return Err(damaged());
+        }
         if envelope.owner_client_id != self.source.principal_id()
             || envelope.view.agreement != self.source.seed.agreement
             || envelope.view.terms_history != self.source.seed.terms_history
@@ -398,26 +449,37 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
         {
             return Err(denied());
         }
-        check_source_permission(&self.source, access, &self.scope, consent, action)
+        Ok(())
     }
     pub fn status(
         &self,
         access: &Access,
         consent: &dyn LocalPrivateWorkspaceConsentV1,
     ) -> Result<PrivateWorkspaceStatusV1> {
-        self.check(access, consent, PrivateWorkspaceActionV1::ReadStatus)?;
-        self.status_after(access, false)
-    }
-    fn status_after(&self, access: &Access, replayed: bool) -> Result<PrivateWorkspaceStatusV1> {
-        let envelope = self.engine.load(access, self.source.agreement_id())?;
+        let operation = self.operation(access, consent, PrivateWorkspaceActionV1::ReadStatus)?;
+        let envelope = operation.load()?;
+        // Stage A has no marked-workspace discovery command activation. Refuse
+        // unsupported state rather than disclose through the generic Engine.
+        if !envelope.durable_input_projections_v1.is_empty() {
+            return Err(ApiError::unsupported());
+        }
         Ok(PrivateWorkspaceStatusV1 {
             revision: envelope.view.revision,
-            replayed,
-            rounds: self
-                .engine
-                .durable_discovery_summaries_v1(access, self.source.agreement_id())?,
+            replayed: false,
+            rounds: vec![],
             authorization_allowed: false,
         })
+    }
+    fn operation<'op>(
+        &'op self,
+        access: &'op Access,
+        consent: &'op dyn LocalPrivateWorkspaceConsentV1,
+        action: PrivateWorkspaceActionV1,
+    ) -> Result<operation_v1::PrivateWorkspaceOperationV1<'op, 'source>> {
+        self.check(access, consent, action)?;
+        Ok(operation_v1::PrivateWorkspaceOperationV1::new(
+            self, access, consent, action,
+        ))
     }
     pub fn begin_discovery(
         &self,
@@ -429,28 +491,10 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
         disclosure: &dyn LocalDurableDiscoveryConsentV1,
     ) -> Result<PrivateWorkspaceStatusV1> {
         self.check(access, consent, PrivateWorkspaceActionV1::RetainDiscovery)?;
-        if Path::new(&request.protected_destination) != self.scope.protected_destination
-            || request.retention_policy != self.scope.retention_policy
-            || request
-                .owners
-                .iter()
-                .map(|o| o.account_id.clone())
-                .collect::<BTreeSet<_>>()
-                != self.scope.reviewer_account_ids.iter().cloned().collect()
-        {
-            return Err(denied());
-        }
-        let (mutation, _) = self.engine.begin_durable_discovery_v1(
-            access,
-            key,
-            self.source.agreement_id(),
-            revision,
-            request,
-            disclosure,
-        )?;
-        let (_, replayed) = mutation_progress(mutation);
-        self.check(access, consent, PrivateWorkspaceActionV1::RetainDiscovery)?;
-        self.status_after(access, replayed)
+        let _ = (key, revision, request, disclosure);
+        // Explicit Stage A boundary. No generic Engine bypass, native dispatch,
+        // receipt admission, or marker-aware discovery activation is provided.
+        Err(ApiError::unsupported())
     }
     pub fn retain_projection(
         &self,
@@ -463,18 +507,10 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
         disclosure: &dyn LocalDurableDiscoveryConsentV1,
     ) -> Result<PrivateWorkspaceStatusV1> {
         self.check(access, consent, PrivateWorkspaceActionV1::RetainProjection)?;
-        let mutation = self.engine.intake_durable_input_projection_v1(
-            access,
-            key,
-            self.source.agreement_id(),
-            candidate_id,
-            revision,
-            observation,
-            disclosure,
-        )?;
-        let (_, replayed) = mutation_progress(mutation);
-        self.check(access, consent, PrivateWorkspaceActionV1::RetainProjection)?;
-        self.status_after(access, replayed)
+        let _ = (key, candidate_id, revision, observation, disclosure);
+        // Explicit Stage A boundary. No generic Engine bypass, native dispatch,
+        // receipt admission, or marker-aware discovery activation is provided.
+        Err(ApiError::unsupported())
     }
     pub fn freeze_candidate(
         &self,
@@ -486,17 +522,10 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
         disclosure: &dyn LocalDurableDiscoveryConsentV1,
     ) -> Result<PrivateWorkspaceStatusV1> {
         self.check(access, consent, PrivateWorkspaceActionV1::FreezeCandidate)?;
-        let mutation = self.engine.freeze_durable_discovery_candidate_v1(
-            access,
-            key,
-            self.source.agreement_id(),
-            candidate_id,
-            revision,
-            disclosure,
-        )?;
-        let (_, replayed) = mutation_progress(mutation);
-        self.check(access, consent, PrivateWorkspaceActionV1::FreezeCandidate)?;
-        self.status_after(access, replayed)
+        let _ = (key, candidate_id, revision, disclosure);
+        // Explicit Stage A boundary. No generic Engine bypass, native dispatch,
+        // receipt admission, or marker-aware discovery activation is provided.
+        Err(ApiError::unsupported())
     }
 }
 fn scope(

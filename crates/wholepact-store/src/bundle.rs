@@ -129,7 +129,8 @@ impl JournalAdapter for CoordinationBundleAdapter<'_> {
             .lock()
             .map_err(|_| BundleError::Storage)?;
         // Complete bundles retain their broader construction scope, but do not
-        // qualify disclosure of private input projections in any saved revision.
+        // qualify disclosure of private input projections or any private-workspace
+        // marker in any saved revision, including an otherwise empty seed.
         crate::backup::validate_no_private_input_projections(&connection)
             .map_err(|_| BundleError::Integrity)?;
         crate::backup::validate_live_schema_and_rows(&connection, crate::SCHEMA_VERSION)

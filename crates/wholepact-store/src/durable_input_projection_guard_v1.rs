@@ -1,7 +1,7 @@
 //! Bounded storage-only guards for retained private discovery metadata.
 //! These checks establish destination correlation, never disclosure consent,
-//! native provenance or spending authority. Seed-only workspace export privacy
-//! still requires a separate first-write purpose boundary before activation.
+//! native provenance or spending authority. The first-write workspace marker
+//! is a distinct immutable storage purpose, never a native association issuer.
 use super::*;
 
 const PROJECTION_KEY: &str = "durable_input_projections_v1";
@@ -79,12 +79,16 @@ impl Store {
         connection: &Connection,
         payload: &Value,
     ) -> Result<()> {
+        self.check_private_workspace_origin_v1(connection, payload)?;
         // Only the top-level reserved map has a destination-checked encoding.
         // Refuse hidden nonempty reserved maps elsewhere, without interpreting
         // arbitrary user string contents as JSON or changing legacy keys.
         let mut remainder = payload.clone();
         if let Some(object) = remainder.as_object_mut() {
             object.remove(PROJECTION_KEY);
+            // Only the independently validated exact top-level marker is
+            // exempt here. Nested/unknown-wrapper occurrences still refuse.
+            object.remove(crate::private_workspace_origin_v1::PRIVATE_WORKSPACE_ORIGIN_KEY_V1);
         }
         crate::backup::validate_no_private_input_projections_json(&serde_json::to_string(
             &remainder,
@@ -243,3 +247,7 @@ mod parser_tests;
 #[cfg(all(test, target_os = "linux"))]
 #[path = "durable_input_projection_guard_v1_tests.rs"]
 mod tests;
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "private_workspace_guard_v1_tests.rs"]
+mod workspace_tests;

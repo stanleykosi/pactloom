@@ -23,6 +23,8 @@ const SCHEMA_VERSION: i64 = 5;
 pub mod backup;
 mod draft_history;
 mod durable_input_projection_guard_v1;
+mod private_workspace_guard_v1;
+pub mod private_workspace_origin_v1;
 const MAX_JSON_BYTES: usize = 1_048_576;
 pub const MAX_AGREEMENTS: u64 = 256;
 pub const MAX_AGREEMENTS_PER_PRINCIPAL: u64 = 64;
@@ -382,6 +384,13 @@ impl Store {
         let result = replay(&c, context)?;
         if let Some(result) = &result {
             self.check_durable_projection_destination_v1(&c, &result.record.payload)?;
+            self.check_private_workspace_saved_v1(
+                &c,
+                result,
+                &context.principal_id,
+                &result.record.id,
+                &operation_id(context),
+            )?;
         }
         Ok(result)
     }
@@ -421,6 +430,7 @@ impl Store {
         let record = read_record(&c, aggregate_type, id)?;
         if let Some(record) = &record {
             self.check_durable_projection_destination_v1(&c, &record.payload)?;
+            private_workspace_guard_v1::check_record(aggregate_type, id, &record.payload, None)?;
         }
         Ok(record)
     }
@@ -443,6 +453,12 @@ impl Store {
             .map(|row| {
                 let record = decode_record(row)?;
                 self.check_durable_projection_destination_v1(&c, &record.payload)?;
+                private_workspace_guard_v1::check_record(
+                    aggregate_type,
+                    &record.id,
+                    &record.payload,
+                    None,
+                )?;
                 Ok(record)
             })
             .collect()
@@ -487,20 +503,51 @@ impl Store {
         durable_input_projection_guard_v1::decode_record_payload(&encoded)?;
         let mut c = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         self.check_private_record_destinations(&c, &payload)?;
+        private_workspace_guard_v1::check_record(
+            aggregate_type,
+            id,
+            &payload,
+            Some(&context.principal_id),
+        )?;
         let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
         self.require_current_replay(&tx, context)?;
         crate::manual_enrollment::require_generic_request_not_manual(&tx, context)?;
         self.require_current_record_write(&tx, aggregate_type, id, &payload)?;
-        if let Some(existing) = replay(&tx, context)? {
-            self.check_durable_projection_destination_v1(&tx, &existing.record.payload)?;
-            if existing.record.id != id {
-                return Err(StoreError::IdempotencyConflict);
-            }
-            return Ok(existing);
+        if payload
+            .get(private_workspace_origin_v1::PRIVATE_WORKSPACE_ORIGIN_KEY_V1)
+            .is_none()
+        {
+            // A one-agreement private workspace cannot grow an unmarked generic
+            // namespace, even if its marker survives only in saved history.
+            backup::validate_no_private_workspace_origins(&tx)?;
         }
+        // Marker immutability is checked against the actual current row before
+        // even semantic replay. CAS still follows replay for legacy retries.
         let existing = read_record(&tx, aggregate_type, id)?;
         if let Some(existing) = &existing {
             self.check_durable_projection_destination_v1(&tx, &existing.payload)?;
+            private_workspace_guard_v1::check_record(aggregate_type, id, &existing.payload, None)?;
+        }
+        let saved = replay(&tx, context)?;
+        if let Some(saved) = &saved {
+            self.check_durable_projection_destination_v1(&tx, &saved.record.payload)?;
+        }
+        private_workspace_guard_v1::check_transition(
+            &tx,
+            aggregate_type,
+            id,
+            context,
+            existing.as_ref(),
+            &payload,
+            saved.as_ref(),
+            expected_revision,
+            event_kind,
+        )?;
+        if let Some(saved) = saved {
+            if saved.record.id != id {
+                return Err(StoreError::IdempotencyConflict);
+            }
+            return Ok(saved);
         }
         if aggregate_type == "agreement" && event_kind == "agreement_terms_revised" {
             let old = existing.as_ref().ok_or(StoreError::NotFound)?;
@@ -710,6 +757,13 @@ impl Store {
                 let result = durable_input_projection_guard_v1::decode_mutation_value(&result)?;
                 let saved: MutationResult = serde_json::from_value(result.clone())?;
                 self.check_durable_projection_destination_v1(&c, &saved.record.payload)?;
+                self.check_private_workspace_saved_v1(
+                    &c,
+                    &saved,
+                    &principal_id,
+                    &resource_id,
+                    &operation_id,
+                )?;
                 Ok(StoredOperation {
                     operation_id,
                     principal_id,

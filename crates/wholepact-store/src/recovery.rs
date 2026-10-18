@@ -562,8 +562,9 @@ fn stored(cells: &[RecoveryCell], offset: usize) -> Result<StoredRecord> {
     })
 }
 
-// Fixed executable policy for the four JSON-bearing metadata columns. Other
-// text cells are not JSON documents and must never be searched recursively.
+// Fixed executable policy for private projections and workspace markers in
+// the four JSON-bearing metadata columns. Other text cells are not JSON
+// documents and must never be searched recursively.
 fn private_input_projection_column(table: &str) -> Option<usize> {
     match table {
         "records" => Some(3),

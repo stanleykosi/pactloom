@@ -8,6 +8,7 @@ use wholepact_storage_security::{
 
 const SCOPE_ERROR: &str = "private input projection material is outside export or recovery scope";
 const PRIVATE: &str = r#"{"durable_input_projections_v\u0031":{"selected":"SYNTHETIC-PRIVATE"},"durable_input_projections_v1":{}}"#;
+const WORKSPACE_MARKER: &str = r#"{"private_workspace_origin_v1":{}}"#;
 const COLUMNS: [(&str, &str, usize); 4] = [
     ("records", "payload", 3),
     ("operations", "result", 5),
@@ -108,11 +109,21 @@ fn seal_generation(
 
 #[test]
 fn private_current_four_columns_refuse_snapshot_before_projection_without_source_changes() {
+    private_current_four_columns(PRIVATE);
+}
+
+#[test]
+fn workspace_marker_current_four_columns_refuse_snapshot_before_projection_without_source_changes()
+{
+    private_current_four_columns(WORKSPACE_MARKER);
+}
+
+fn private_current_four_columns(private: &str) {
     for (table, column, _) in COLUMNS {
         let f = Fixture::new(true);
         let c = f.store.connection.lock().unwrap();
         let edit = || {
-            c.execute(&format!("UPDATE {table} SET {column}=?1"), [PRIVATE])
+            c.execute(&format!("UPDATE {table} SET {column}=?1"), [private])
                 .unwrap();
         };
         match table {
@@ -127,6 +138,15 @@ fn private_current_four_columns_refuse_snapshot_before_projection_without_source
 
 #[test]
 fn private_originals_alone_refuse_snapshot_and_successor_before_destination_creation() {
+    private_originals_alone(PRIVATE);
+}
+
+#[test]
+fn workspace_marker_originals_alone_refuse_snapshot_and_successor_before_destination_creation() {
+    private_originals_alone(WORKSPACE_MARKER);
+}
+
+fn private_originals_alone(private: &str) {
     for (table, _, column) in COLUMNS {
         let f = Fixture::new(true);
         let c = f.store.connection.lock().unwrap();
@@ -135,7 +155,7 @@ fn private_originals_alone_refuse_snapshot_and_successor_before_destination_crea
             [table], |row| row.get(0),
         ).unwrap();
         let mut cells: Vec<serde_json::Value> = serde_json::from_str(&encoded).unwrap();
-        cells[column] = serde_json::Value::String(PRIVATE.into());
+        cells[column] = serde_json::Value::String(private.into());
         edit_immutable_row(&c, "store_generation_originals_no_update", || {
             c.execute("UPDATE store_generation_original_rows SET payload=?1 WHERE table_name=?2 AND ordinal=0", rusqlite::params![serde_json::to_string(&cells).unwrap(), table]).unwrap();
         });
@@ -172,110 +192,122 @@ fn private_originals_alone_refuse_snapshot_and_successor_before_destination_crea
 
 #[test]
 fn private_layer_history_alone_refuses_snapshot_and_successor_without_rewriting_sources() {
-    // First stage real, valid construction history through the existing public
-    // archive path. Corrupt only one encoded retained layer cell afterwards.
-    for wrapped in [false, true] {
-        let f = Fixture::new(true);
-        let output = tempfile::tempdir().unwrap();
-        fs::set_permissions(output.path(), fs::Permissions::from_mode(0o700)).unwrap();
-        let sealed = {
-            let _writer_exclusion = f.store.connection.lock().unwrap();
-            seal_generation(
-                &f.path(),
-                f.directory.path(),
-                &f.binding,
-                &f.provenance,
-                &key(0x61),
-                &output.path().join("parent.sqlite"),
-                crate::recovery::coordination_successor_template(),
+    private_layer_history(PRIVATE, &COLUMNS[3..]);
+}
+
+#[test]
+fn workspace_marker_all_layer_columns_refuse_snapshot_and_successor_without_rewriting_sources() {
+    private_layer_history(WORKSPACE_MARKER, &COLUMNS);
+}
+
+fn private_layer_history(private: &str, columns: &[(&str, &str, usize)]) {
+    // First stage valid construction history through the existing archive path.
+    // Corrupt only the selected retained base/original JSON cell afterwards.
+    for &(base_table, _, column) in columns {
+        for wrapped in [false, true] {
+            let f = Fixture::new(true);
+            let output = tempfile::tempdir().unwrap();
+            fs::set_permissions(output.path(), fs::Permissions::from_mode(0o700)).unwrap();
+            let sealed = {
+                let _writer_exclusion = f.store.connection.lock().unwrap();
+                seal_generation(
+                    &f.path(),
+                    f.directory.path(),
+                    &f.binding,
+                    &f.provenance,
+                    &key(0x61),
+                    &output.path().join("parent.sqlite"),
+                    crate::recovery::coordination_successor_template(),
+                )
+            };
+            let binding = GenerationBinding::new(&"75".repeat(32), &"76".repeat(32)).unwrap();
+            let path = output.path().join("layered.sqlite");
+            crate::recovery::stage_layered_coordination_successor(
+                &sealed,
+                &binding,
+                &path,
+                &key(0x77),
             )
-        };
-        let binding = GenerationBinding::new(&"75".repeat(32), &"76".repeat(32)).unwrap();
-        let path = output.path().join("layered.sqlite");
-        crate::recovery::stage_layered_coordination_successor(&sealed, &binding, &path, &key(0x77))
             .unwrap();
-        let store = Store::open_recovered_generation(
-            &path,
-            &key(0x77),
-            &binding,
-            sealed.source_provenance(),
-        )
-        .unwrap();
-        let c = store.connection.lock().unwrap();
-        let table = if wrapped {
-            "store_generation_original_rows"
-        } else {
-            "events"
-        };
-        let (ordinal, encoded): (i64, String) = c.query_row(
-            "SELECT ordinal,payload FROM store_generation_layer_rows WHERE layer=1 AND table_name=?1 ORDER BY ordinal LIMIT 1",
-            [table], |row| Ok((row.get(0)?, row.get(1)?)),
-        ).unwrap();
-        let mut row: serde_json::Value = serde_json::from_str(&encoded).unwrap();
-        if wrapped {
-            // Pick the retained original events row, not an arbitrary string.
-            let mut query = c.prepare("SELECT ordinal,payload FROM store_generation_layer_rows WHERE layer=1 AND table_name='store_generation_original_rows' ORDER BY ordinal").unwrap();
-            let (ordinal, encoded) = query
-                .query_map([], |row| {
-                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-                })
-                .unwrap()
-                .map(|row| row.unwrap())
-                .find(|(_, encoded)| {
-                    serde_json::from_str::<serde_json::Value>(encoded).unwrap()["cells"][0]
-                        == "events"
-                })
-                .unwrap();
-            let mut wrapper: serde_json::Value = serde_json::from_str(&encoded).unwrap();
-            let mut originals: Vec<serde_json::Value> =
-                serde_json::from_str(wrapper["cells"][2].as_str().unwrap()).unwrap();
-            originals[5] = serde_json::Value::String(PRIVATE.into());
-            wrapper["cells"][2] =
-                serde_json::Value::String(serde_json::to_string(&originals).unwrap());
-            edit_immutable_row(&c, "store_generation_layer_rows_no_update", || {
-                c.execute("UPDATE store_generation_layer_rows SET payload=?1 WHERE layer=1 AND table_name=?2 AND ordinal=?3", rusqlite::params![wrapper.to_string(), table, ordinal]).unwrap();
-            });
-        } else {
-            row["cells"][5] = serde_json::Value::String(PRIVATE.into());
-            edit_immutable_row(&c, "store_generation_layer_rows_no_update", || {
-                c.execute("UPDATE store_generation_layer_rows SET payload=?1 WHERE layer=1 AND table_name=?2 AND ordinal=?3", rusqlite::params![row.to_string(), table, ordinal]).unwrap();
-            });
-        }
-        crate::backup::validate_no_private_input_projections(&c).unwrap();
-        drop(c);
-        unchanged(output.path(), || {
-            refuse(RecoveredStoreSnapshot::open(
+            let store = Store::open_recovered_generation(
                 &path,
                 &key(0x77),
                 &binding,
                 sealed.source_provenance(),
-            ))
-        });
-        let archive_output = tempfile::tempdir().unwrap();
-        fs::set_permissions(archive_output.path(), fs::Permissions::from_mode(0o700)).unwrap();
-        let _writer_exclusion = store.connection.lock().unwrap();
-        let private = seal_generation(
-            &path,
-            output.path(),
-            &binding,
-            sealed.source_provenance(),
-            &key(0x77),
-            &archive_output.path().join("private-layer.sqlite"),
-            crate::recovery::coordination_layered_successor_template(),
-        );
-        let next = GenerationBinding::new(&"78".repeat(32), &"79".repeat(32)).unwrap();
-        let destination = archive_output.path().join("forbidden-successor.sqlite");
-        unchanged(output.path(), || {
-            unchanged(archive_output.path(), || {
-                refuse(crate::recovery::stage_layered_coordination_successor(
-                    &private,
-                    &next,
-                    &destination,
-                    &key(0x7a),
-                ));
-            })
-        });
-        assert!(!destination.exists());
+            )
+            .unwrap();
+            let c = store.connection.lock().unwrap();
+            let table = if wrapped {
+                "store_generation_original_rows"
+            } else {
+                base_table
+            };
+            let (ordinal, encoded) = {
+                let mut query = c.prepare("SELECT ordinal,payload FROM store_generation_layer_rows WHERE layer=1 AND table_name=?1 ORDER BY ordinal").unwrap();
+                let selected = query
+                    .query_map([table], |row| {
+                        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                    })
+                    .unwrap()
+                    .map(|row| row.unwrap())
+                    .find(|(_, encoded)| {
+                        !wrapped
+                            || serde_json::from_str::<serde_json::Value>(encoded).unwrap()["cells"]
+                                [0]
+                                == base_table
+                    })
+                    .unwrap();
+                selected
+            };
+            let mut row: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+            if wrapped {
+                let mut originals: Vec<serde_json::Value> =
+                    serde_json::from_str(row["cells"][2].as_str().unwrap()).unwrap();
+                originals[column] = serde_json::Value::String(private.into());
+                row["cells"][2] =
+                    serde_json::Value::String(serde_json::to_string(&originals).unwrap());
+            } else {
+                row["cells"][column] = serde_json::Value::String(private.into());
+            }
+            edit_immutable_row(&c, "store_generation_layer_rows_no_update", || {
+                c.execute("UPDATE store_generation_layer_rows SET payload=?1 WHERE layer=1 AND table_name=?2 AND ordinal=?3", rusqlite::params![row.to_string(), table, ordinal]).unwrap();
+            });
+            crate::backup::validate_no_private_input_projections(&c).unwrap();
+            drop(c);
+            unchanged(output.path(), || {
+                refuse(RecoveredStoreSnapshot::open(
+                    &path,
+                    &key(0x77),
+                    &binding,
+                    sealed.source_provenance(),
+                ))
+            });
+            let archive_output = tempfile::tempdir().unwrap();
+            fs::set_permissions(archive_output.path(), fs::Permissions::from_mode(0o700)).unwrap();
+            let _writer_exclusion = store.connection.lock().unwrap();
+            let private = seal_generation(
+                &path,
+                output.path(),
+                &binding,
+                sealed.source_provenance(),
+                &key(0x77),
+                &archive_output.path().join("private-layer.sqlite"),
+                crate::recovery::coordination_layered_successor_template(),
+            );
+            let next = GenerationBinding::new(&"78".repeat(32), &"79".repeat(32)).unwrap();
+            let destination = archive_output.path().join("forbidden-successor.sqlite");
+            unchanged(output.path(), || {
+                unchanged(archive_output.path(), || {
+                    refuse(crate::recovery::stage_layered_coordination_successor(
+                        &private,
+                        &next,
+                        &destination,
+                        &key(0x7a),
+                    ));
+                })
+            });
+            assert!(!destination.exists());
+        }
     }
 }
 
@@ -320,6 +352,15 @@ fn coverage() -> Coverage {
 
 #[test]
 fn private_four_columns_refuse_bundle_inventory_and_both_history_routes() {
+    private_bundle_inventory_and_history(PRIVATE);
+}
+
+#[test]
+fn workspace_marker_four_columns_refuse_bundle_inventory_and_both_history_routes() {
+    private_bundle_inventory_and_history(WORKSPACE_MARKER);
+}
+
+fn private_bundle_inventory_and_history(private: &str) {
     for (table, column, _) in COLUMNS {
         let f = Fixture::new(true);
         let checked = crate::bundle::CoordinationBundleAdapter::new(&f._source_store).unwrap();
@@ -327,12 +368,25 @@ fn private_four_columns_refuse_bundle_inventory_and_both_history_routes() {
             .connection
             .lock()
             .unwrap()
-            .execute(&format!("UPDATE {table} SET {column}=?1"), [PRIVATE])
+            .execute(&format!("UPDATE {table} SET {column}=?1"), [private])
             .unwrap();
-        assert!(matches!(
-            crate::bundle::CoordinationBundleAdapter::new(&f._source_store),
-            Err(BundleError::Integrity)
-        ));
+        // Finish ordinary fixture-read bookkeeping before the source baseline.
+        let retained: String = f
+            ._source_store
+            .connection
+            .lock()
+            .unwrap()
+            .query_row(&format!("SELECT {column} FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(retained == private);
+        unchanged(f.directory.path(), || {
+            assert!(matches!(
+                crate::bundle::CoordinationBundleAdapter::new(&f._source_store),
+                Err(BundleError::Integrity)
+            ));
+        });
         let output = tempfile::tempdir().unwrap();
         fs::set_permissions(output.path(), fs::Permissions::from_mode(0o700)).unwrap();
         // The source changed after adapter preflight. The under-lock scan must
@@ -340,18 +394,20 @@ fn private_four_columns_refuse_bundle_inventory_and_both_history_routes() {
         let checked_sources = [RegisteredJournal::new("coordination", &checked).unwrap()];
         let late_destination = output.path().join("late-refusal.sqlite");
         crate::bundle::reset_bundle_visitor_calls();
-        assert!(matches!(
-            bundle::snapshot(SnapshotRequest {
-                principal_id: "synthetic-history-admin",
-                profile_id: "synthetic-profile",
-                coverage: coverage(),
-                sources: &checked_sources,
-                destination: &late_destination,
-                key: &key(0x7b),
-                authority: &FixtureArchiveGate,
-            }),
-            Err(BundleError::Integrity)
-        ));
+        unchanged(f.directory.path(), || {
+            assert!(matches!(
+                bundle::snapshot(SnapshotRequest {
+                    principal_id: "synthetic-history-admin",
+                    profile_id: "synthetic-profile",
+                    coverage: coverage(),
+                    sources: &checked_sources,
+                    destination: &late_destination,
+                    key: &key(0x7b),
+                    authority: &FixtureArchiveGate,
+                }),
+                Err(BundleError::Integrity)
+            ));
+        });
         assert_eq!(crate::bundle::bundle_visitor_calls(), 0);
         // Generic bundle storage creates staging before invoking read_locked.
         // That staging artifact may remain after this late-race refusal; only
@@ -361,7 +417,16 @@ fn private_four_columns_refuse_bundle_inventory_and_both_history_routes() {
         // authorized visitors may already have run. Preserve the partial archive;
         // do not infer that it is empty or claim a successful backup.
         assert!(late_destination.is_file());
-        assert!(bundle::inspect(&late_destination, &key(0x7b)).is_err());
+        unchanged(output.path(), || {
+            assert!(bundle::inspect(&late_destination, &key(0x7b)).is_err());
+        });
+        let partial = tree(output.path())
+            .into_iter()
+            .filter(|(path, _)| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("late-refusal.sqlite"))
+            })
+            .collect::<BTreeMap<_, _>>();
         let archive = output.path().join("forged.sqlite");
         let restored = output.path().join("restored.sqlite");
         let adapter = ForgedMetadataAdapter(&f._source_store);
@@ -453,6 +518,13 @@ fn private_four_columns_refuse_bundle_inventory_and_both_history_routes() {
             crate::history::validate_successor_construction_history(&evidence),
             Err(BundleError::Integrity)
         ));
+        let after = tree(output.path());
+        assert!(
+            partial
+                .iter()
+                .all(|(path, state)| after.get(path) == Some(state)),
+            "late-refusal staging and its sidecars must remain preserved"
+        );
     }
 }
 

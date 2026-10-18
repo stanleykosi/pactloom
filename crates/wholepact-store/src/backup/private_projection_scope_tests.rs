@@ -415,3 +415,6 @@ fn exact_empty_private_metadata_keeps_legacy_backup_roundtrip_and_quarantine() {
     );
     fingerprint(dir.path());
 }
+
+#[path = "private_workspace_scope_tests.rs"]
+mod private_workspace_scope_tests;

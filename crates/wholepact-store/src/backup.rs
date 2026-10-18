@@ -29,6 +29,8 @@ const PRIVATE_CONSTRUCTION_SCOPE_ERROR: &str =
     "private construction material is outside coordination-only backup scope";
 const PRIVATE_INPUT_PROJECTION_SCOPE_ERROR: &str =
     "private input projection material is outside export or recovery scope";
+const PRIVATE_WORKSPACE_ORIGIN_SCOPE_ERROR: &str =
+    "private workspace origin material is outside this mutation scope";
 const ARCHIVE_SCHEMA: &str = "CREATE TABLE backup_manifest(singleton INTEGER PRIMARY KEY CHECK(singleton=1), format_version INTEGER NOT NULL, source_schema_version INTEGER NOT NULL, created_at_ms INTEGER NOT NULL, snapshot_digest TEXT NOT NULL, row_count INTEGER NOT NULL, data_bytes INTEGER NOT NULL, scope TEXT NOT NULL CHECK(scope='coordination_and_authority_only'));";
 
 struct Table {
@@ -132,8 +134,9 @@ pub struct AgreementRestoreReport {
 impl Store {
     /// Snapshot ALL records of this protected store, including idempotency,
     /// observations and unresolved effects. Not a participant-scoped disclosure.
-    /// Refuses durable private construction and input-projection material, including
-    /// history; this archive's scope and consent do not cover private witness journals.
+    /// Refuses durable private construction, input projections and workspace
+    /// markers, including history and zero-round seeds. This archive's scope and
+    /// consent do not cover private witness journals or private workspaces.
     /// The destination needs a separately provisioned independent key and a private
     /// directory. A failure leaves any partial destination untouched for inspection.
     pub fn backup_agreement_journal(
@@ -599,7 +602,8 @@ fn copy_tables(source: &Connection, destination: &Connection, version: i64) -> R
 }
 
 /// This legacy scope is feature-independent. Both private construction and
-/// input-projection keys are reserved even in builds without engine support.
+/// input-projection keys and workspace-origin markers are reserved even in builds
+/// without engine support. Marker presence always refuses, including null or {}.
 /// Mutation results and events may retain private metadata after a current record
 /// changes, so inspect all four raw columns before any typed decoding or export.
 fn validate_coordination_only_scope(connection: &Connection) -> Result<()> {
@@ -607,12 +611,21 @@ fn validate_coordination_only_scope(connection: &Connection) -> Result<()> {
 }
 
 /// Broader bundle, recovery and history profiles already qualify construction
-/// material. This distinct executable policy refuses only input projections;
-/// callers cannot use a permission flag to weaken the legacy archive policy.
+/// material. This distinct executable policy refuses input projections and any
+/// private-workspace marker. Callers cannot use a permission flag to weaken the
+/// legacy archive policy.
 /// Call on the already-held connection/read transaction before projecting rows,
 /// invoking visitors, or admitting a recovered generation.
 pub(crate) fn validate_no_private_input_projections(connection: &Connection) -> Result<()> {
     validate_private_metadata_scope(connection, PrivateMetadataScope::NoInputProjections)
+}
+
+/// Fixed namespace fence for unmarked mutations. Existing construction and
+/// projection encodings do not establish workspace purpose, so this profile
+/// leaves them unchanged while rejecting any current or historical marker.
+/// The caller holds the transaction; no Store callback or locking occurs here.
+pub(crate) fn validate_no_private_workspace_origins(connection: &Connection) -> Result<()> {
+    validate_private_metadata_scope(connection, PrivateMetadataScope::NoWorkspaceOrigins)
 }
 
 /// Raw-cell counterpart for events and other bounded non-exporting readers.
@@ -625,10 +638,12 @@ pub(crate) fn validate_no_private_input_projections_json(payload: &str) -> Resul
 enum PrivateMetadataScope {
     CoordinationOnly,
     NoInputProjections,
+    NoWorkspaceOrigins,
 }
 impl PrivateMetadataScope {
     fn reserves(self, key: &str) -> bool {
-        key == "durable_input_projections_v1"
+        (matches!(self, Self::CoordinationOnly | Self::NoInputProjections)
+            && key == "durable_input_projections_v1")
             || (matches!(self, Self::CoordinationOnly) && key == "durable_construction_v1")
     }
 
@@ -636,6 +651,7 @@ impl PrivateMetadataScope {
         match self {
             Self::CoordinationOnly => PRIVATE_CONSTRUCTION_SCOPE_ERROR,
             Self::NoInputProjections => PRIVATE_INPUT_PROJECTION_SCOPE_ERROR,
+            Self::NoWorkspaceOrigins => PRIVATE_WORKSPACE_ORIGIN_SCOPE_ERROR,
         }
     }
 }
@@ -690,8 +706,9 @@ fn validate_private_metadata_json(payload: &str, scope: PrivateMetadataScope) ->
 
 // Stream values and retain only each open object's decoded key set. Every
 // duplicate key, including escaped equivalents, is rejected before Value can
-// collapse it. Reserved fields must be exact empty objects, including when
-// nested in arrays or arbitrary unknown wrappers. Diagnostics reveal no data.
+// collapse it. Legacy reserved maps must be exact empty objects. Workspace
+// origin markers always refuse, even null or {}, including inside arrays and
+// unknown wrappers. Arbitrary strings stay opaque. Diagnostics reveal no data.
 enum PrivateMetadataShape {
     Any,
     EmptyObject,
@@ -763,6 +780,12 @@ impl<'de> Visitor<'de> for PrivateMetadataValue<'_> {
         }
         let mut keys = BTreeSet::new();
         while let Some(key) = values.next_key::<String>()? {
+            // Absence is the only legacy workspace encoding. This is not an
+            // EmptyObject map: even a marker-only zero-round seed is private.
+            // Match the decoded key before consuming or collapsing its value.
+            if key == crate::private_workspace_origin_v1::PRIVATE_WORKSPACE_ORIGIN_KEY_V1 {
+                return Err(de::Error::custom(self.scope.error()));
+            }
             let shape = if self.scope.reserves(&key) {
                 PrivateMetadataShape::EmptyObject
             } else {

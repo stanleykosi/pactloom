@@ -294,8 +294,9 @@ fn validate_snapshot_row_without_private_input_projections(
     if table == ORIGINALS.name {
         // A snapshot retains original-row wrappers one level deep. Their third
         // cell encodes the base SQL cells; scanning the wrapper alone would
-        // miss the JSON text inside it. Layers themselves are not recursive
-        // snapshots and are deliberately not traversed here.
+        // miss private projections or workspace markers in its JSON text. Layers
+        // themselves are not recursive snapshots and are deliberately not
+        // traversed here.
         let original_table = cells
             .first()
             .and_then(Value::as_str)

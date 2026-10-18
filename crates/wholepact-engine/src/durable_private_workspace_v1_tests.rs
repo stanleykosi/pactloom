@@ -96,7 +96,9 @@ fn original_and_replayed_mutations_never_export_embedded_agreement_or_operation(
         .get("agreement")
         .is_some());
     for mutation in [original, replay] {
-        let (revision, replayed) = mutation_progress(mutation);
+        // Shape-only projection check. Stage A does not execute a private
+        // command or turn this generic result into a private operation owner.
+        let (revision, replayed) = (mutation.agreement.revision, mutation.replayed);
         let status = PrivateWorkspaceStatusV1 {
             revision,
             replayed,
@@ -147,4 +149,22 @@ fn facade_has_no_generic_read_or_owner_escape_contract() {
     }
     assert!(implementation.contains("\"terms_editing_origin\": false"));
     assert!(!implementation.contains("source.engine.clone()"));
+}
+
+#[test]
+fn stage_a_read_owner_has_no_latent_generic_mutation_or_replay_method() {
+    // Supplemental structural assertion. There is deliberately no mutable
+    // method to call under ReadStatus, Create, or Reopen privacy permission.
+    let source = include_str!("durable_private_workspace_v1/operation_v1.rs");
+    for forbidden in [
+        "fn replay(",
+        "fn commit(",
+        "fn mutation(",
+        ".update_agreement(",
+        ".create_agreement(",
+        ".find_replay(",
+    ] {
+        assert!(!source.contains(forbidden));
+    }
+    assert!(source.contains("pub(super) fn load("));
 }

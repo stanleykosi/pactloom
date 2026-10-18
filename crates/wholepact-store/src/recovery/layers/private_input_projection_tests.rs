@@ -170,6 +170,113 @@ fn capture_refuses_private_originals_when_all_current_columns_are_harmless() {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(unchanged, encoded);
+        assert!(unchanged == encoded);
+    }
+}
+
+fn workspace_marker_payloads() -> [&'static str; 5] {
+    [
+        r#"{"private_workspace_origin_v1":{}}"#,
+        r#"{"private_workspace_origin_v1":null}"#,
+        r#"{"private_workspace_origin_v\u0031":{}}"#,
+        r#"{"private_workspace_origin_v1":null,"private_workspace_origin_v\u0031":{}}"#,
+        r#"{"nested":[{"private_workspace_origin_v1":{}}]}"#,
+    ]
+}
+
+#[test]
+fn workspace_marker_all_base_and_original_cells_refuse_before_layer_projection() {
+    for table in BASE
+        .iter()
+        .filter(|table| private_input_projection_column(table.name).is_some())
+    {
+        for payload in workspace_marker_payloads() {
+            for wrapped in [false, true] {
+                let c = Connection::open_in_memory().unwrap();
+                c.execute_batch(coordination_layered_successor_template().create_sql)
+                    .unwrap();
+                let base = cells(table, payload);
+                let (name, cells) = if wrapped {
+                    (
+                        ORIGINALS.name,
+                        vec![
+                            Value::String(table.name.into()),
+                            serde_json::json!(0),
+                            Value::String(serde_json::to_string(&base).unwrap()),
+                        ],
+                    )
+                } else {
+                    (table.name, base)
+                };
+                refuse(validate_snapshot_row_without_private_input_projections(
+                    name, &cells,
+                ));
+                let encoded = serde_json::to_string(&HistoricalRow { rowid: 1, cells }).unwrap();
+                let header = header(name, &encoded);
+                c.execute(
+                    "INSERT INTO store_generation_layers VALUES(1,?1,?2)",
+                    params![serde_json::to_string(&header).unwrap(), "0".repeat(64)],
+                )
+                .unwrap();
+                c.execute(
+                    "INSERT INTO store_generation_layer_rows VALUES(1,?1,0,?2)",
+                    params![name, encoded],
+                )
+                .unwrap();
+                refuse(load_layer_rows(&c, &header));
+            }
+        }
+    }
+}
+
+#[test]
+fn workspace_marker_originals_refuse_capture_with_harmless_current_columns() {
+    for table in BASE
+        .iter()
+        .filter(|table| private_input_projection_column(table.name).is_some())
+    {
+        for payload in workspace_marker_payloads() {
+            let c = Connection::open_in_memory().unwrap();
+            c.execute_batch(coordination_successor_template().create_sql)
+                .unwrap();
+            let encoded = serde_json::to_string(&cells(table, payload)).unwrap();
+            c.execute(
+                "INSERT INTO store_generation_original_rows VALUES(?1,0,?2)",
+                params![table.name, encoded],
+            )
+            .unwrap();
+            crate::backup::validate_no_private_input_projections(&c).unwrap();
+            refuse(read_rows(&c, &ORIGINALS, ""));
+            refuse(capture(&c));
+            let unchanged: String = c
+                .query_row(
+                    "SELECT payload FROM store_generation_original_rows",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(unchanged == encoded);
+        }
+    }
+}
+
+#[test]
+fn workspace_marker_strings_stay_opaque_outside_exact_layer_cells() {
+    for table in BASE
+        .iter()
+        .filter(|table| private_input_projection_column(table.name).is_some())
+    {
+        let mut harmless = cells(
+            table,
+            r#"{"durable_construction_v1":{"retained":true},"durable_input_projections_v1":{},"opaque":"{\"private_workspace_origin_v1\":{}}"}"#,
+        );
+        harmless[0] = Value::String(workspace_marker_payloads()[0].into());
+        validate_snapshot_row_without_private_input_projections(table.name, &harmless).unwrap();
+        let wrapper = vec![
+            Value::String(table.name.into()),
+            serde_json::json!(0),
+            Value::String(serde_json::to_string(&harmless).unwrap()),
+        ];
+        validate_snapshot_row_without_private_input_projections(ORIGINALS.name, &wrapper).unwrap();
     }
 }

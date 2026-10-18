@@ -1,7 +1,9 @@
-//! Inactive Stage A foundation. A first-write marker is immutable correlation,
+//! Stage A boundary. A first-write marker is immutable correlation,
 //! never evidence of native approval, a persisted PENDING, or spending power.
-//! Parent wiring and same-snapshot history/export guards remain required.
+//! Generic projection refusal is unconditional; native association activation
+//! remains separate from these data and storage checks.
 use crate::{ApiError, Result};
+use serde::Deserialize;
 use serde_json::Value;
 use wholepact_store::private_workspace_origin_v1::{
     PrivateWorkspaceOriginV1, PRIVATE_WORKSPACE_ORIGIN_KEY_V1,
@@ -12,6 +14,30 @@ fn damaged() -> ApiError {
         "RECOVERY_REQUIRED",
         "Private workspace origin is incompatible; preserve its original dependency and journals",
     )
+}
+
+pub(super) fn validate_association_digest(value: &str) -> Result<()> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(damaged());
+    }
+    Ok(())
+}
+
+pub(super) fn deserialize_present_marker<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<PrivateWorkspaceOriginV1>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    // This hook is invoked only for a present field; missing uses serde default.
+    // Deserialize the struct directly so explicit null cannot become None.
+    let marker = PrivateWorkspaceOriginV1::deserialize(deserializer)?;
+    marker.validate().map_err(serde::de::Error::custom)?;
+    Ok(Some(marker))
 }
 
 /// Generic projection boundary. Presence is enough to refuse, including a
@@ -103,3 +129,7 @@ pub(super) use actual_source::from_source;
 #[cfg(test)]
 #[path = "private_workspace_origin_v1_tests.rs"]
 mod tests;
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "private_workspace_origin_v1_integration_tests.rs"]
+mod integration_tests;

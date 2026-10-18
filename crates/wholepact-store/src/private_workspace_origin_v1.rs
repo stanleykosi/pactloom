@@ -1,7 +1,7 @@
 //! Inert first-write purpose data, not native approval or storage ownership.
 //!
-//! This leaf is intentionally not registered yet. Validation and the digest
-//! establish only a bounded canonical encoding. The caller must separately join
+//! Validation and the digest establish only a bounded canonical encoding.
+//! The caller must separately join
 //! every field to the actual selected source and original encrypted Store, and
 //! authenticate the native PENDING/COMMIT association before any activation.
 

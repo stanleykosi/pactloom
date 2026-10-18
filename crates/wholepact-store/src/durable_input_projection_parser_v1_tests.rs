@@ -19,6 +19,7 @@ fn invalid_json() -> Vec<String> {
         r#"{"x":1,"\u0078":2}"#.into(),
         r#"{"nested":[{"a":1,"a":2}]}"#.into(),
         r#"{"durable_input_projections_v1":{},"durable_input_projections_v\u0031":{}}"#.into(),
+        r#"{"private_workspace_origin_v1":{},"private_workspace_origin_v\u0031":{}}"#.into(),
         "{} {}".into(),
         "{\"truncated\":".into(),
         format!("{}0{}", "[".repeat(33), "]".repeat(33)),
@@ -126,6 +127,9 @@ fn every_event_kind_refuses_new_private_keys_independent_of_current_record() {
             r#"{"nested":{"durable_input_projections_v\u0031":{"round":"synthetic-private"}}}"#,
             r#"{"durable_input_projections_v1":null}"#,
             r#"{"durable_input_projections_v1":[]}"#,
+            r#"{"private_workspace_origin_v1":{}}"#,
+            r#"{"private_workspace_origin_v1":null}"#,
+            r#"{"nested":{"private_workspace_origin_v\u0031":{"source":"synthetic-private"}}}"#,
         ] {
             store
                 .connection
@@ -154,6 +158,17 @@ fn every_event_kind_refuses_new_private_keys_independent_of_current_record() {
     assert_eq!(
         store.events_after(0, 10).unwrap()[0].payload,
         serde_json::from_str::<Value>(raw).unwrap()
+    );
+    let raw = r#"{"opaque":"{\"private_workspace_origin_v1\":{}}"}"#;
+    store
+        .connection
+        .lock()
+        .unwrap()
+        .execute("UPDATE events SET payload=?1", [raw])
+        .unwrap();
+    assert!(
+        store.events_after(0, 10).unwrap()[0].payload
+            == serde_json::from_str::<Value>(raw).unwrap()
     );
 }
 
