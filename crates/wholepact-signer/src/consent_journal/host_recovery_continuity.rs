@@ -966,6 +966,11 @@ impl SignerConsentJournal {
     }
 }
 
-#[cfg(all(test, feature = "pending-birth-owner-signing", target_os = "linux"))]
+#[cfg(all(
+    test,
+    feature = "pending-birth-owner-signing",
+    feature = "synthetic-qualification",
+    target_os = "linux"
+))]
 #[path = "host_recovery_continuity_v5_tests.rs"]
 mod v5_tests;

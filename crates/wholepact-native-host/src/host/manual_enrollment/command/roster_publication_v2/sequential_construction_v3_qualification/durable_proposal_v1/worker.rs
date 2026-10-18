@@ -30,6 +30,7 @@ use wholepact_signer::authority_bridge::{
     preconstruction_ipc::PreconstructionRequest,
 };
 use wholepact_signer::native_ui::synthetic_born_joined_qualification::{
+    DurableAdmissionPreparationFailureV1, DurableAdmissionPreparationStageV1,
     DurableNativeEntryFailureV1, DurableNativeEntryStageV1, DurableNativeRecordsV1,
     EphemeralAcknowledgedBornV1, EphemeralDurableNativeV1, EphemeralExportedBirthV1,
     EphemeralFirstAnchorIntentV1, EphemeralFirstAnchorPublicationV1,
@@ -70,6 +71,28 @@ fn durable_entry_error(failure: DurableNativeEntryFailureV1) -> &'static str {
     let error = failure.into_error();
     diagnostic::emit(boundary, diagnostic::signer_error(&error));
     signer_error(error, "fresh durable original entry")
+}
+fn durable_admission_error(failure: DurableAdmissionPreparationFailureV1) -> &'static str {
+    use DurableAdmissionPreparationStageV1 as S;
+    let boundary = match failure.stage() {
+        S::FixtureState => B::SignerAdmissionFixtureState,
+        S::Source => B::SignerAdmissionSource,
+        S::History => B::SignerAdmissionHistory,
+        S::RetainedIntent => B::SignerAdmissionRetainedIntent,
+        S::Terms => B::SignerAdmissionTerms,
+        S::RequestBuilder => B::SignerAdmissionRequestBuilder,
+        S::ExactRequest => B::SignerAdmissionExactRequest,
+        S::LiveInterval => B::SignerAdmissionLiveInterval,
+        S::LocalIntent => B::SignerAdmissionLocalIntent,
+        S::IntentDisplay => B::SignerAdmissionIntentDisplay,
+        S::ReviewCustody => B::SignerAdmissionReviewCustody,
+        S::ReviewDisplay => B::SignerAdmissionReviewDisplay,
+        S::NativeStage => B::SignerAdmissionNativeStage,
+        S::WorkerCompletion => B::SignerAdmissionWorkerCompletion,
+    };
+    let error = failure.into_error();
+    diagnostic::emit(boundary, diagnostic::signer_error(&error));
+    signer_error(error, "source-bound exact durable admission preparation")
 }
 pub(super) const AGREEMENT_ID: &str = "synthetic-born-joined-agreement-v3";
 pub(super) const OBLIGATION_ID: &str = "synthetic-born-joined-obligation-v3";
@@ -725,7 +748,7 @@ fn execute(
             // request. Returning it is not a native approval or witness issuer.
             let request = entry
                 .prepare_durable_admission()
-                .map_err(|e| signer_error(e, "source-bound exact durable admission preparation"))?;
+                .map_err(durable_admission_error)?;
             (
                 State::Durable(entry),
                 R::DurableAdmissionRequest { index, request },

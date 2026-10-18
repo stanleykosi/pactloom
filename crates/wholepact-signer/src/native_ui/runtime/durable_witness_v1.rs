@@ -362,12 +362,20 @@ impl PreparedDurableWitnessAdmissionV1 {
             &history,
         )
         .map_err(|_| Error::RecoveryRequired)?;
-        Self::from_exact(owner, source, request)
+        Self::from_exact(
+            owner,
+            source,
+            request,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            &mut DurableAdmissionPreparationStageV1::ExactRequest,
+        )
     }
     pub(super) fn prepare_exact_retry(
         owner: &NativeWitnessWorkspace,
         source: Arc<DurableWitnessImportedSourceV1>,
         retained: RetainedDurablePaymentAdmissionIntentV1,
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        stage: &mut DurableAdmissionPreparationStageV1,
     ) -> Result<Self> {
         require_intent(&source, &retained)?;
         let history = source_history(owner, &source, CredentialRole::Owner, source.deadline()?)?;
@@ -381,14 +389,30 @@ impl PreparedDurableWitnessAdmissionV1 {
         {
             return Err(Error::RecoveryRequired);
         }
-        Self::from_exact(owner, source, retained.request().clone())
+        Self::from_exact(
+            owner,
+            source,
+            retained.request().clone(),
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            stage,
+        )
     }
     fn from_exact(
         owner: &NativeWitnessWorkspace,
         source: Arc<DurableWitnessImportedSourceV1>,
         request: OwnerControlRequest,
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        stage: &mut DurableAdmissionPreparationStageV1,
     ) -> Result<Self> {
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        {
+            *stage = DurableAdmissionPreparationStageV1::ExactRequest;
+        }
         require_request(&source, &request)?;
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        {
+            *stage = DurableAdmissionPreparationStageV1::LiveInterval;
+        }
         require_live(&request)?;
         let certificate = source
             .entry()
@@ -398,6 +422,10 @@ impl PreparedDurableWitnessAdmissionV1 {
             .signer
             .owner_certificate_digest
             .clone();
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        {
+            *stage = DurableAdmissionPreparationStageV1::LocalIntent;
+        }
         let prepared = source
             .session()
             .prepare_durable_payment_admission_intent_v1(
@@ -408,8 +436,16 @@ impl PreparedDurableWitnessAdmissionV1 {
                 source.enrollment_ref(),
                 source.manifest_ref(),
             )?;
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        {
+            *stage = DurableAdmissionPreparationStageV1::IntentDisplay;
+        }
         let display = format!("Admit this ONE exact durable payment candidate\n\n{}\n\nDurable witness serving and reopen are expressly approved for ONLY this unchanged body and interval, independently of this short native/data-disclosure window. No per-admission revocation exists after commit: cancel acts before commit, and stopping a server does not erase the record. Account exclusion remains available. The witness receives only these minimal account/input/economics/candidate commitments, never keys, FVKs, PCZTs, notes, witnesses or memos. Original budgets and exposure remain. Once acquired, ONLY the same live client key/session may reconnect; key loss or expiry requires separate recovery, not replacement. Separate fresh signing approval is still required.",
             prepared.display()?);
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        {
+            *stage = DurableAdmissionPreparationStageV1::ReviewCustody;
+        }
         let custody = ReviewCustody::new(
             owner,
             source,
@@ -835,6 +871,91 @@ pub(super) struct DurableWitnessRuntimeV1 {
     activation_retry: Option<Arc<ApprovedDurableWriterActivationV1>>,
     #[cfg(feature = "synthetic-born-joined-qualification")]
     qualification_completion: Option<(String, QualificationDurableWitnessCompletionV1)>,
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    qualification_preparation: QualificationDurablePreparationV1,
+}
+/// Closed synthetic diagnostics. These names carry no request or private data.
+#[cfg(feature = "synthetic-born-joined-qualification")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum DurableAdmissionPreparationStageV1 {
+    FixtureState,
+    Source,
+    History,
+    RetainedIntent,
+    Terms,
+    RequestBuilder,
+    ExactRequest,
+    LiveInterval,
+    LocalIntent,
+    IntentDisplay,
+    ReviewCustody,
+    ReviewDisplay,
+    NativeStage,
+    WorkerCompletion,
+}
+#[cfg(feature = "synthetic-born-joined-qualification")]
+pub struct DurableAdmissionPreparationFailureV1 {
+    stage: DurableAdmissionPreparationStageV1,
+    error: Error,
+}
+#[cfg(feature = "synthetic-born-joined-qualification")]
+impl DurableAdmissionPreparationFailureV1 {
+    pub(super) fn new(stage: DurableAdmissionPreparationStageV1, error: Error) -> Self {
+        Self { stage, error }
+    }
+    pub fn stage(&self) -> DurableAdmissionPreparationStageV1 {
+        self.stage
+    }
+    pub fn into_error(self) -> Error {
+        self.error
+    }
+}
+#[cfg(feature = "synthetic-born-joined-qualification")]
+#[derive(Default)]
+struct QualificationDurablePreparationV1 {
+    sequence: u64,
+    active: Option<u64>,
+    native_stage: Option<u64>,
+    failure: Option<(u64, DurableAdmissionPreparationFailureV1)>,
+    failure_seen: bool,
+}
+#[cfg(feature = "synthetic-born-joined-qualification")]
+impl QualificationDurablePreparationV1 {
+    fn begin(&mut self) -> Option<u64> {
+        self.failure = None;
+        self.failure_seen = false;
+        self.native_stage = None;
+        self.active = self.sequence.checked_add(1);
+        if let Some(next) = self.active {
+            self.sequence = next;
+        }
+        self.active
+    }
+    fn record(
+        &mut self,
+        attempt: Option<u64>,
+        stage: DurableAdmissionPreparationStageV1,
+        error: Error,
+    ) {
+        if let Some(attempt) = attempt.filter(|id| Some(*id) == self.active) {
+            if !self.failure_seen {
+                self.failure_seen = true;
+                self.failure = Some((
+                    attempt,
+                    DurableAdmissionPreparationFailureV1::new(stage, error),
+                ));
+            }
+        }
+    }
+    fn take(&mut self, attempt: u64) -> Option<DurableAdmissionPreparationFailureV1> {
+        if self.active == Some(attempt)
+            && self.failure.as_ref().is_some_and(|(id, _)| *id == attempt)
+        {
+            self.failure.take().map(|(_, failure)| failure)
+        } else {
+            None
+        }
+    }
 }
 /// Data-only observation of an actual worker result. Production decisions never
 /// consult it; neither the kind nor its exact review digest restores permission.
@@ -854,6 +975,15 @@ pub(super) enum DurableWitnessPreparedV1 {
     Reconciliation(PreparedDurableWriterReconciliationV1),
 }
 impl DurableWitnessRuntimeV1 {
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(super) fn record_qualification_native_stage_failure_v1(&mut self, error: Error) {
+        let attempt = self.qualification_preparation.native_stage;
+        self.qualification_preparation.record(
+            attempt,
+            DurableAdmissionPreparationStageV1::NativeStage,
+            error,
+        );
+    }
     #[cfg(feature = "synthetic-born-joined-qualification")]
     fn qualification_completion_v1(
         &self,
@@ -897,6 +1027,12 @@ impl DurableWitnessPreparedV1 {
     }
 }
 pub(super) enum DurableWitnessOutcomeV1 {
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    ObservedPreparation {
+        attempt: Option<u64>,
+        stage: DurableAdmissionPreparationStageV1,
+        outcome: Box<DurableWitnessOutcomeV1>,
+    },
     Prepared(Result<Box<DurableWitnessPreparedV1>>),
     HistoricalAdmission(Result<String>),
     Admission {
@@ -914,6 +1050,25 @@ pub(super) enum DurableWitnessOutcomeV1 {
     Reconciled(Result<DurableReconciliationOutcomeV1>),
 }
 impl NativeRuntime {
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(super) fn qualification_durable_admission_attempt_v1(&self) -> Option<u64> {
+        self.open
+            .as_ref()?
+            .durable_witness
+            .qualification_preparation
+            .active
+    }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(super) fn take_qualification_durable_admission_failure_v1(
+        &mut self,
+        attempt: u64,
+    ) -> Option<DurableAdmissionPreparationFailureV1> {
+        self.open
+            .as_mut()?
+            .durable_witness
+            .qualification_preparation
+            .take(attempt)
+    }
     #[cfg(feature = "synthetic-born-joined-qualification")]
     fn clear_qualification_durable_witness_completion_v1(&mut self) {
         if let Some(open) = self.open.as_mut() {
@@ -951,17 +1106,32 @@ impl NativeRuntime {
     pub(super) fn prepare_durable_admission_v1(&mut self, epoch: u64) -> Result<()> {
         #[cfg(feature = "synthetic-born-joined-qualification")]
         self.clear_qualification_durable_witness_completion_v1();
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        let attempt = self
+            .open
+            .as_mut()
+            .and_then(|open| open.durable_witness.qualification_preparation.begin());
         let open = self.open.as_ref().ok_or(Error::Locked)?;
         let source = open.durable_witness_source_v1()?;
         let owner = open.owner_witness.clone().ok_or(Error::Locked)?;
         self.start_witness_job(epoch, move |cancelled| {
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            let mut stage = DurableAdmissionPreparationStageV1::Source;
             let result = (|| {
                 if cancelled.load(Ordering::Acquire) {
                     return Err(Error::Locked);
                 }
                 source.check_current()?;
+                #[cfg(feature = "synthetic-born-joined-qualification")]
+                {
+                    stage = DurableAdmissionPreparationStageV1::History;
+                }
                 let history =
                     source_history(&owner, &source, CredentialRole::Owner, source.deadline()?)?;
+                #[cfg(feature = "synthetic-born-joined-qualification")]
+                {
+                    stage = DurableAdmissionPreparationStageV1::RetainedIntent;
+                }
                 if let Some(retained) = local_intent(&source)? {
                     require_intent(&source, &retained)?;
                     match history
@@ -977,7 +1147,11 @@ impl NativeRuntime {
                         Some(_) => return Err(Error::RecoveryRequired),
                         None => {
                             let prepared = PreparedDurableWitnessAdmissionV1::prepare_exact_retry(
-                                &owner, source, retained,
+                                &owner,
+                                source,
+                                retained,
+                                #[cfg(feature = "synthetic-born-joined-qualification")]
+                                &mut stage,
                             )?;
                             return Ok(DurableWitnessOutcomeV1::Prepared(Ok(Box::new(
                                 DurableWitnessPreparedV1::Admission(prepared),
@@ -991,21 +1165,40 @@ impl NativeRuntime {
                     .scope
                     .expires_at_ms
                     .min(history.account_policy().policy_expires_at_ms);
+                #[cfg(feature = "synthetic-born-joined-qualification")]
+                {
+                    stage = DurableAdmissionPreparationStageV1::Terms;
+                }
+                let admission_terms = terms(&source, from, until)?;
+                #[cfg(feature = "synthetic-born-joined-qualification")]
+                {
+                    stage = DurableAdmissionPreparationStageV1::RequestBuilder;
+                }
                 let request =
                     wholepact_authority::durable_payment_v1::prepare_durable_payment_request_v1(
-                        terms(&source, from, until)?,
+                        admission_terms,
                         &history,
                     )
                     .map_err(|_| Error::RecoveryRequired)?;
-                let prepared =
-                    PreparedDurableWitnessAdmissionV1::from_exact(&owner, source, request)?;
+                let prepared = PreparedDurableWitnessAdmissionV1::from_exact(
+                    &owner,
+                    source,
+                    request,
+                    #[cfg(feature = "synthetic-born-joined-qualification")]
+                    &mut stage,
+                )?;
                 Ok(DurableWitnessOutcomeV1::Prepared(Ok(Box::new(
                     DurableWitnessPreparedV1::Admission(prepared),
                 ))))
             })();
-            WitnessOutcome::DurablePaymentV1(
-                result.unwrap_or_else(|e| DurableWitnessOutcomeV1::Prepared(Err(e))),
-            )
+            let outcome = result.unwrap_or_else(|e| DurableWitnessOutcomeV1::Prepared(Err(e)));
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            let outcome = DurableWitnessOutcomeV1::ObservedPreparation {
+                attempt,
+                stage,
+                outcome: Box::new(outcome),
+            };
+            WitnessOutcome::DurablePaymentV1(outcome)
         })
     }
     pub(super) fn prepare_durable_session_v1(&mut self, epoch: u64) -> Result<()> {
@@ -1261,6 +1454,50 @@ pub(super) fn complete(
     outcome: DurableWitnessOutcomeV1,
 ) -> (&'static str, Option<(String, Result<String>, Operation)>) {
     #[cfg(feature = "synthetic-born-joined-qualification")]
+    if let DurableWitnessOutcomeV1::ObservedPreparation {
+        attempt,
+        stage,
+        outcome,
+    } = outcome
+    {
+        // The original owned Error is retained only as inert synthetic evidence.
+        // The existing production refusal remains no pending review.
+        if let DurableWitnessOutcomeV1::Prepared(Err(error)) = *outcome {
+            open.durable_witness.qualification_completion = None;
+            open.durable_witness
+                .qualification_preparation
+                .record(attempt, stage, error);
+            return ("Durable witness history or source was rejected. No new body, session or approval was substituted.", None);
+        }
+        let (message, prepared) = complete(open, *outcome);
+        if let Some((digest, display, operation)) = prepared {
+            if matches!(&operation, Operation::DurableWitnessV1(value)
+                if matches!(value.as_ref(), DurableWitnessPreparedV1::Admission(_)))
+            {
+                match display {
+                    Err(error) => {
+                        open.durable_witness.qualification_preparation.record(
+                            attempt,
+                            DurableAdmissionPreparationStageV1::ReviewDisplay,
+                            error,
+                        );
+                        return (message, None);
+                    }
+                    Ok(display) => {
+                        if attempt.is_some()
+                            && attempt == open.durable_witness.qualification_preparation.active
+                        {
+                            open.durable_witness.qualification_preparation.native_stage = attempt;
+                        }
+                        return (message, Some((digest, Ok(display), operation)));
+                    }
+                }
+            }
+            return (message, Some((digest, display, operation)));
+        }
+        return (message, None);
+    }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
     {
         // A failed/prepared/historical result clears prior success. Only actual
         // completion at this native owner records an exact review correlation.
@@ -1394,6 +1631,52 @@ impl NativeRuntime {
 #[cfg(test)]
 mod custody_tests {
     use super::*;
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    #[test]
+    fn admission_preparation_observer_preserves_first_error_and_exact_attempt() {
+        use DurableAdmissionPreparationStageV1 as S;
+        let mut observer = QualificationDurablePreparationV1::default();
+        let first = observer.begin().unwrap();
+        observer.record(
+            Some(first),
+            S::LocalIntent,
+            Error::ConsentJournal(JournalError::Expired),
+        );
+        observer.record(Some(first), S::WorkerCompletion, Error::ReviewMismatch);
+        assert!(observer.take(first + 1).is_none());
+        let failure = observer.take(first).unwrap();
+        assert!(failure.stage() == S::LocalIntent);
+        assert!(matches!(
+            failure.into_error(),
+            Error::ConsentJournal(JournalError::Expired)
+        ));
+        observer.record(Some(first), S::NativeStage, Error::Locked);
+        assert!(observer.take(first).is_none());
+        let next = observer.begin().unwrap();
+        assert_ne!(next, first);
+        observer.record(Some(first), S::Source, Error::Authentication);
+        assert!(observer.take(next).is_none());
+        observer.record(Some(next), S::Terms, Error::ReviewMismatch);
+        assert!(observer.take(next).unwrap().stage() == S::Terms);
+    }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    #[test]
+    fn admission_preparation_observer_reset_and_overflow_are_closed() {
+        use DurableAdmissionPreparationStageV1 as S;
+        let mut observer = QualificationDurablePreparationV1::default();
+        let first = observer.begin().unwrap();
+        observer.record(Some(first), S::History, Error::Uncertain);
+        let next = observer.begin().unwrap();
+        assert!(observer.take(first).is_none());
+        assert!(observer.take(next).is_none());
+        observer.sequence = u64::MAX;
+        assert!(observer.begin().is_none());
+        observer.record(None, S::Source, Error::Locked);
+        observer.record(Some(next), S::Source, Error::Locked);
+        assert!(observer.failure.is_none());
+        assert!(observer.native_stage.is_none());
+        assert!(observer.active.is_none());
+    }
     #[cfg(feature = "synthetic-born-joined-qualification")]
     #[test]
     fn completion_observer_does_not_turn_history_or_uncertainty_into_fresh_success() {

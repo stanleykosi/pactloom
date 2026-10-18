@@ -3489,8 +3489,20 @@ impl NativeRuntime {
             }
         };
         if let Some((digest, Ok(display), operation)) = prepared {
-            if let Ok(review) = ExactNativeReview::stage(&open.authority, &digest, display, epoch) {
-                self.pending = Some(PendingDecision { review, operation });
+            match ExactNativeReview::stage(&open.authority, &digest, display, epoch) {
+                Ok(review) => self.pending = Some(PendingDecision { review, operation }),
+                Err(_error) => {
+                    #[cfg(all(
+                        feature = "synthetic-born-joined-qualification",
+                        feature = "durable-proposal"
+                    ))]
+                    if matches!(&operation, Operation::DurableWitnessV1(value)
+                        if matches!(value.as_ref(), durable_witness_v1::DurableWitnessPreparedV1::Admission(_)))
+                    {
+                        open.durable_witness
+                            .record_qualification_native_stage_failure_v1(_error);
+                    }
+                }
             }
         }
     }
