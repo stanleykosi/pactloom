@@ -524,6 +524,34 @@ pub struct EphemeralHistoryServerV1 {
     listener_owner: Arc<AtomicUsize>,
 }
 impl EphemeralHistoryServerV1 {
+    /// Independent synthetic handle observations, not a coherent readiness or
+    /// accepting proof. Returns capped age/remaining microseconds, the existing
+    /// stop flag, optional thread completion, and a clamped/unavailable marker.
+    /// The start is derived from the same original 120-second constructor
+    /// interval; no server lifetime, socket, source check or gate is touched.
+    pub fn measurement_snapshot(&self) -> (Option<u64>, u64, bool, Option<bool>, bool) {
+        const MAX_US: u128 = 600_000_000;
+        let observed = Instant::now();
+        let age_us = self
+            .deadline
+            .checked_sub(Duration::from_secs(120))
+            .map(|started| observed.saturating_duration_since(started).as_micros());
+        let remaining_us = self
+            .deadline
+            .saturating_duration_since(observed)
+            .as_micros();
+        let clamped = age_us.map_or(true, |age| age > MAX_US) || remaining_us > MAX_US;
+        (
+            age_us.map(|age| age.min(MAX_US) as u64),
+            remaining_us.min(MAX_US) as u64,
+            self.stop.load(Ordering::Acquire),
+            self.thread
+                .as_ref()
+                .map(std::thread::JoinHandle::is_finished),
+            clamped,
+        )
+    }
+
     /// Irreversibly stop accepting NEW sockets on this particular finite
     /// synthetic server. The shared lock acknowledges quiescence before return:
     /// an accept already holding the lock must finish first, and no later

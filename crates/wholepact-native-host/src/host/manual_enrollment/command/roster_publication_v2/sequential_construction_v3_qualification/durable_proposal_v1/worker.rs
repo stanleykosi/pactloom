@@ -106,6 +106,7 @@ fn durable_admission_history_error(failure: DurableAdmissionHistoryFailureV1) {
         I::Refused => B::SignerAdmissionHistoryIoRefused,
         I::Other => B::SignerAdmissionHistoryIoOther,
     });
+    diagnostic::emit_history_measurement(failure.measurement());
     let (error, callback_error) = failure.into_errors();
     diagnostic::emit(boundary, diagnostic::authority_error(&error));
     if let Some(boundary) = io_boundary {

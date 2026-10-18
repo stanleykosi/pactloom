@@ -65,6 +65,17 @@ ROLLING_TRANSCRIPT_TESTS = tuple(PREFIX + 'rolling_transcript_v1::tests::' + nam
     'one_unconsumed_review_still_cannot_exceed_original_bound',
 ))
 AUTHORITY_PROJECTION_TESTS = (PREFIX + 'safe_diagnostics_v1::authority_error_projection_preserves_only_closed_variants',)
+HISTORY_MEASUREMENT_TESTS = tuple(PREFIX + 'safe_diagnostics_v1::' + name for name in (
+    'history_measurement_parser_requires_exact_bounded_fields',
+    'history_server_measurement_projection_preserves_null_zero_and_caps',
+    'history_measurement_capture_is_canonical_bounded_and_sticky',
+    'history_measurement_parser_preserves_unavailable_and_exhausted',
+))
+HISTORY_TRANSCRIPT_TESTS = tuple(PREFIX + 'rolling_transcript_v1::tests::' + name for name in (
+    'history_measurements_survive_split_lines_and_compaction_without_raw_text',
+    'history_measurement_copies_yield_before_original_chunk_budget',
+    'history_measurement_copies_yield_before_original_metadata_budget',
+))
 READ_WAVE_TESTS = tuple(PREFIX + 'observed_joined_v3::' + name for name in (
     'actual_read_wave_prepares_every_item_before_original_order_execution',
     'failed_read_wave_drops_prepared_values_without_execution_or_retry',
@@ -117,6 +128,30 @@ TIMING_AGGREGATE_PHASES = (
     'ConstructionConsumedAppend','ConstructionNamedOwner','ConstructionIntoNamed','ConstructionFinalOwner',
 )
 TIMING_PREFIX = '[JOINED_TIMING '
+HISTORY_MEASUREMENT_PREFIX = '[HISTORY_MEASUREMENT_V1 '
+HISTORY_SERVER_MEASUREMENT_PREFIX = '[HISTORY_SERVER_MEASUREMENT_V1 '
+HISTORY_DURATION_LIMIT_US = 600000000
+HISTORY_COUNT_LIMIT = 1000000
+HISTORY_PHASES = frozenset(('Snapshot','Page'))
+HISTORY_CHECK_SITES = frozenset(('ReplayInitial','ReplayAfterSnapshot','ReplayBeforePage',
+    'ReplayAfterPage','ReplayFinal','ExchangeInitial','BeforeConnect','AfterConnect',
+    'BeforeHandshakeIo','AfterHandshake','AfterPeerBinding','AfterRequestBuild',
+    'BeforeRequestWrite','AfterRequestWrite','AfterResponseRead'))
+HISTORY_CHECKPOINTS = frozenset(('EntryDeadline','DeadlineSelection','ConnectRemaining',
+    'BeforeCallback','Callback','AfterCallback','Operation','Validation'))
+HISTORY_SELECTED_LIMITS = frozenset(('Caller','Exchange'))
+HISTORY_SERVER_POINTS = ('BeforeAdmission','AfterAdmission')
+HISTORY_OPTIONAL_DURATIONS = frozenset(('selected_budget_us','caller_remaining_at_budget_start_us',
+    'caller_remaining_at_failure_us','selected_remaining_at_failure_us','exchange_elapsed_us'))
+HISTORY_COST_COUNTS = frozenset(('callback_calls','connect_calls','handshake_calls',
+    'frame_write_calls','frame_read_calls'))
+HISTORY_COST_DURATIONS = frozenset(('callback_us','callback_max_us','connect_us','handshake_us',
+    'frame_write_us','frame_read_us'))
+HISTORY_MEASUREMENT_FIELDS = frozenset(('version','phase','page_ordinal','check_site','checkpoint',
+    'selected_limit','history_elapsed_us','pre_budget_callback_calls','pre_budget_callback_us',
+    'history_cost','exchange_cost','clamped','incomplete')) | HISTORY_OPTIONAL_DURATIONS
+HISTORY_SERVER_MEASUREMENT_FIELDS = frozenset(('version','point','age_us','remaining_us',
+    'stopped','finished','clamped'))
 STORAGE_BOOTSTRAP_TEST = 'recovery_generation::layered::tests::native_layered_current_eight_nine_parent_provenance_is_exact_and_not_relabelable'
 SIGNER_VALIDATION_TESTS = (
     'account::birth::retired_historical_tests::birth_identity_one_derivation_preserves_both_original_commitments',
@@ -229,6 +264,116 @@ def distinct_object(pairs):
     return result
 
 
+def history_json(text, limit):
+    if len(text.encode('utf8')) > limit: raise ValueError('oversized history measurement')
+    def reject_constant(_):
+        raise ValueError('nonfinite history measurement')
+    try:
+        return json.loads(text,object_pairs_hook=distinct_object,parse_constant=reject_constant)
+    except (RecursionError,OverflowError):
+        raise ValueError('invalid history measurement') from None
+
+
+def history_bounded(value, limit):
+    return type(value) is int and 0 <= value <= limit
+
+
+def history_enum(value, values, nullable=False):
+    return (nullable and value is None) or (type(value) is str and value in values)
+
+
+def public_history_measurement(text):
+    """First-error observations only. Exchange cost is contained in history cost."""
+    row=history_json(text,4096)
+    if type(row) is not dict or set(row)!=HISTORY_MEASUREMENT_FIELDS:
+        raise ValueError('unexpected history measurement fields')
+    if type(row['version']) is not int or row['version']!=1:
+        raise ValueError('history measurement version')
+    for field,values,nullable in (('phase',HISTORY_PHASES,True),
+            ('check_site',HISTORY_CHECK_SITES,True),('checkpoint',HISTORY_CHECKPOINTS,False),
+            ('selected_limit',HISTORY_SELECTED_LIMITS,True)):
+        if not history_enum(row[field],values,nullable): raise ValueError('history measurement enum')
+    ordinal=row['page_ordinal']
+    if ordinal is not None and (not history_bounded(ordinal,4096) or ordinal==0):
+        raise ValueError('history page ordinal')
+    if (row['phase']=='Page') != (ordinal is not None): raise ValueError('history page context')
+    for field in HISTORY_OPTIONAL_DURATIONS:
+        if row[field] is not None and not history_bounded(row[field],HISTORY_DURATION_LIMIT_US):
+            raise ValueError('history optional duration')
+    for field in ('history_elapsed_us','pre_budget_callback_us'):
+        if not history_bounded(row[field],HISTORY_DURATION_LIMIT_US):
+            raise ValueError('history duration')
+    if not history_bounded(row['pre_budget_callback_calls'],1): raise ValueError('history pre-budget count')
+    if any(type(row[key]) is not bool for key in ('clamped','incomplete')):
+        raise ValueError('history measurement flag')
+    for field in ('history_cost','exchange_cost'):
+        cost=row[field]
+        if field=='exchange_cost' and cost is None: continue
+        if type(cost) is not dict or set(cost)!=HISTORY_COST_COUNTS|HISTORY_COST_DURATIONS:
+            raise ValueError('history cost fields')
+        if any(not history_bounded(cost[key],HISTORY_COUNT_LIMIT) for key in HISTORY_COST_COUNTS):
+            raise ValueError('history cost count')
+        if any(not history_bounded(cost[key],HISTORY_DURATION_LIMIT_US) for key in HISTORY_COST_DURATIONS):
+            raise ValueError('history cost duration')
+    return row
+
+
+def public_history_server_measurement(text):
+    """Independent server observation, never readiness or authority evidence."""
+    row=history_json(text,512)
+    if type(row) is not dict or set(row)!=HISTORY_SERVER_MEASUREMENT_FIELDS:
+        raise ValueError('unexpected history server measurement fields')
+    if type(row['version']) is not int or row['version']!=1:
+        raise ValueError('history server measurement version')
+    if not history_enum(row['point'],HISTORY_SERVER_POINTS): raise ValueError('history server point')
+    if row['age_us'] is not None and not history_bounded(row['age_us'],HISTORY_DURATION_LIMIT_US):
+        raise ValueError('history server age')
+    if not history_bounded(row['remaining_us'],HISTORY_DURATION_LIMIT_US):
+        raise ValueError('history server remaining')
+    if any(type(row[key]) is not bool for key in ('stopped','clamped')):
+        raise ValueError('history server flag')
+    if row['finished'] is not None and type(row['finished']) is not bool:
+        raise ValueError('history server finished')
+    return row
+
+
+class HistoryMeasurements:
+    """At most one failure and two independent server observations per run."""
+    def __init__(self):
+        self.client=None
+        self.client_invalid=False
+        self.server={}
+        self.server_invalid=False
+
+    def record(self, kind, value):
+        if kind=='history_measurement_invalid':
+            self.client_invalid=True; self.client=None
+        elif kind=='history_measurement':
+            if self.client_invalid: return
+            if self.client is not None:
+                self.client_invalid=True; self.client=None
+            else: self.client=value
+        elif kind=='history_server_measurement_invalid':
+            self.server_invalid=True; self.server.clear()
+        elif kind=='history_server_measurement':
+            if self.server_invalid: return
+            if value['point'] in self.server:
+                self.server_invalid=True; self.server.clear()
+            else: self.server[value['point']]=value
+
+    def emit(self):
+        if self.client_invalid:
+            print('CI_SYNTHETIC_HISTORY_MEASUREMENT invalid=true details_withheld=true',flush=True)
+        elif self.client is not None:
+            print(HISTORY_MEASUREMENT_PREFIX+json.dumps(self.client,separators=(',',':'),sort_keys=True)+']',flush=True)
+        if self.server_invalid:
+            print('CI_SYNTHETIC_HISTORY_SERVER_MEASUREMENT invalid=true details_withheld=true',flush=True)
+        else:
+            for point in HISTORY_SERVER_POINTS:
+                if point in self.server:
+                    print(HISTORY_SERVER_MEASUREMENT_PREFIX+json.dumps(self.server[point],separators=(',',':'),sort_keys=True)+']',flush=True)
+
+
 def public_timing(text):
     """Optional measurement, never success/authorization evidence or a clock."""
     if len(text.encode('utf8')) > 8192: raise ValueError('oversized timing')
@@ -330,6 +475,9 @@ def public_line(raw, name):
         candidate=raw[len(prefix):] if raw.startswith(prefix) else raw
         if candidate.startswith(TIMING_PREFIX.encode('ascii')):
             return ('timing_invalid',None)
+        for marker,kind in ((HISTORY_MEASUREMENT_PREFIX,'history_measurement'),
+                            (HISTORY_SERVER_MEASUREMENT_PREFIX,'history_server_measurement')):
+            if candidate.startswith(marker.encode('ascii')): return (kind+'_invalid',None)
         raise
     # No search inside arbitrary panic/text lines. Only libtest's exact prefix
     # or an entire standalone closed marker line is eligible for projection.
@@ -339,6 +487,18 @@ def public_line(raw, name):
     cleanup=CLEANUP.fullmatch(line)
     if cleanup and option_i32(cleanup[5]) and option_i32(cleanup[6]): return ('cleanup',line)
     if safe_failure(line): return ('failure',line)
+    if line=='CI_SYNTHETIC_HISTORY_MEASUREMENT invalid=true details_withheld=true':
+        return ('history_measurement_invalid',None)
+    if line=='CI_SYNTHETIC_HISTORY_SERVER_MEASUREMENT invalid=true details_withheld=true':
+        return ('history_server_measurement_invalid',None)
+    for marker,kind,parser in ((HISTORY_MEASUREMENT_PREFIX,'history_measurement',public_history_measurement),
+            (HISTORY_SERVER_MEASUREMENT_PREFIX,'history_server_measurement',public_history_server_measurement)):
+        if line.startswith(marker):
+            try:
+                if not line.endswith(']'): raise ValueError('history measurement framing')
+                return (kind,parser(line[len(marker):-1]))
+            except (ValueError,TypeError,KeyError,OverflowError,RecursionError):
+                return (kind+'_invalid',None)
     if line.startswith(TIMING_PREFIX):
         try:
             if not line.endswith(']'): raise ValueError('timing framing')
@@ -378,12 +538,12 @@ DURABLE_PROVIDER_METADATA_TEST = PREFIX + 'synthetic_born_provider_v1::durable_m
 
 def run_pure(executable):
     assert resource.getrlimit(resource.RLIMIT_CORE)[0] == 0
-    for name in PURE_TESTS + POLICY_ENVELOPE_TESTS + PROMPT_RENDERING_TESTS + LOWER_ERROR_TESTS + DENIAL_TESTS + ROLLING_TRANSCRIPT_TESTS + AUTHORITY_PROJECTION_TESTS + READ_WAVE_TESTS + TIMING_HOST_TESTS + (DURABLE_PROVIDER_METADATA_TEST,):
+    for name in PURE_TESTS + POLICY_ENVELOPE_TESTS + PROMPT_RENDERING_TESTS + LOWER_ERROR_TESTS + DENIAL_TESTS + ROLLING_TRANSCRIPT_TESTS + AUTHORITY_PROJECTION_TESTS + READ_WAVE_TESTS + HISTORY_MEASUREMENT_TESTS + HISTORY_TRANSCRIPT_TESTS + TIMING_HOST_TESTS + (DURABLE_PROVIDER_METADATA_TEST,):
         flags=['--exact',name,'--test-threads=1']
         listed=subprocess.run([executable,*flags,'--list'],capture_output=True,timeout=30,check=True)
         if not exact_listing(listed.stdout.decode(),name) or listed.stderr:
             raise ValueError('exact pure test not uniquely registered')
-        # These 44 fixed source-reviewed cases use only modeled process state,
+        # These 51 fixed source-reviewed cases use only modeled process state,
         # inert files, historical policy DTOs, fixed prompts, closed error kinds or
         # bounded private parsing state or data-only scanned-note mathematics. They create
         # no native/IPC/network/payment owners.
@@ -391,7 +551,7 @@ def run_pure(executable):
         if result.returncode!=0 or len(result.stdout)>1024*1024:
             print('CI_SYNTHETIC_PURE failed_test='+name,flush=True)
             raise RuntimeError('exact pure test failed; raw output withheld')
-    print('CI_SYNTHETIC_PURE passed=44 raw_output_discarded=true',flush=True)
+    print('CI_SYNTHETIC_PURE passed=51 raw_output_discarded=true',flush=True)
 
 def run_signer_validation(executable):
     assert resource.getrlimit(resource.RLIMIT_CORE)[0] == 0
@@ -551,6 +711,7 @@ def run(executable, phase):
     started=time.monotonic(); process=subprocess.Popen([executable,*flags,'--nocapture'],stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
     assert process.stdout is not None
     framing=BoundedLines(); total=0; cleanup=False; cleanup_observed=False; cleanups=0; cores=0; failures=0; outcome=None; status=None; timing=None; timing_count=0; timing_invalid=False
+    history_measurements=HistoryMeasurements()
     try:
         eof=False
         while not eof:
@@ -585,6 +746,9 @@ def run(executable, phase):
                     timing_count+=1
                     if timing_count>1 or phase!='full' or kind=='timing_invalid': timing_invalid=True
                     else: timing=value
+                elif kind in ('history_measurement','history_measurement_invalid',
+                              'history_server_measurement','history_server_measurement_invalid'):
+                    if phase=='durable-fixed-signing': history_measurements.record(kind,value)
                 elif kind=='outcome':
                     if phase!='full' or outcome is not None: raise ValueError('unexpected duplicate public outcome')
                     outcome=value
@@ -600,6 +764,8 @@ def run(executable, phase):
     # Measurement is optional and emitted only after the independently observed
     # process/root cleanup. Failure exit statuses still retain bounded timing;
     # malformed/missing/duplicate timing never changes the original result gate.
+    if phase=='durable-fixed-signing' and cleanup_observed:
+        history_measurements.emit()
     if phase=='full' and cleanup_observed:
         if timing_invalid:
             print('CI_SYNTHETIC_TIMING invalid=true details_withheld=true',flush=True)

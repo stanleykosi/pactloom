@@ -34,6 +34,8 @@ pub(super) struct Transcript<'a> {
     diagnostics: VecDeque<String>,
     #[cfg(feature = "synthetic-born-joined-qualification")]
     timing: crate::host::synthetic_roster_timing_v1::Capture,
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    history_measurements: super::safe_diagnostics_v1::HistoryMeasurementCapture,
 }
 
 impl<'a> Transcript<'a> {
@@ -65,11 +67,13 @@ impl<'a> Transcript<'a> {
             diagnostics: VecDeque::new(),
             #[cfg(feature = "synthetic-born-joined-qualification")]
             timing: Default::default(),
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            history_measurements: Default::default(),
         })
     }
 
     fn retained_bytes(&self) -> usize {
-        self.bytes.len() + self.timing_retained_bytes()
+        self.bytes.len() + self.timing_retained_bytes() + self.history_measurement_retained_bytes()
             + self.paths.values().flatten().map(|p| p.value.len()).sum::<usize>()
             + self.diagnostics.iter().map(String::len).sum::<usize>()
             + self.diagnostics.len().saturating_sub(1)
@@ -81,6 +85,16 @@ impl<'a> Transcript<'a> {
         #[cfg(not(feature = "synthetic-born-joined-qualification"))]
         { 0 }
     }
+    fn history_measurement_retained_bytes(&self) -> usize {
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        { self.history_measurements.retained_bytes() }
+        #[cfg(not(feature = "synthetic-born-joined-qualification"))]
+        { 0 }
+    }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(super) fn history_measurement_lines(&self) -> Vec<&str> {
+        self.history_measurements.public_lines()
+    }
     #[cfg(feature = "synthetic-born-joined-qualification")]
     pub(super) fn capture_timing(&mut self, bytes: &[u8]) { self.timing.feed(bytes); }
     #[cfg(feature = "synthetic-born-joined-qualification")]
@@ -91,6 +105,13 @@ impl<'a> Transcript<'a> {
     pub(super) fn append(&mut self, chunk: &[u8], root: &Path) -> Result<(), Failure> {
         #[cfg(feature = "synthetic-born-joined-qualification")]
         self.capture_timing(chunk);
+        // Optional retained copies yield to the original transcript budget.
+        // Their original raw PTY bytes still count normally; no raw limit is
+        // bypassed, and truly over-budget original text still fails below.
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        if chunk.len() > MAX_BYTES.saturating_sub(self.retained_bytes()) {
+            self.history_measurements.discard_for_budget();
+        }
         if chunk.len() > MAX_BYTES.saturating_sub(self.retained_bytes()) {
             return Err(Failure::OutputLimit);
         }
@@ -124,6 +145,11 @@ impl<'a> Transcript<'a> {
                     let new_count = (count + 1).min(MAX_DIAGNOSTICS);
                     retained = retained - removed - count.saturating_sub(1)
                         + entry.len() + new_count.saturating_sub(1);
+                    #[cfg(feature = "synthetic-born-joined-qualification")]
+                    if retained > MAX_BYTES {
+                        retained -= self.history_measurements.retained_bytes();
+                        self.history_measurements.discard_for_budget();
+                    }
                     if retained > MAX_BYTES {
                         return Err(Failure::OutputLimit);
                     }
@@ -137,6 +163,12 @@ impl<'a> Transcript<'a> {
             // bytes, and an incomplete scalar cannot contain the newline.
             let line = std::str::from_utf8(line).map_err(|_| Failure::InvalidUtf8)?;
             let line = line.trim_end_matches('\r');
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            {
+                let previous = self.history_measurements.retained_bytes();
+                self.history_measurements.capture_line(line, MAX_BYTES.saturating_sub(retained));
+                retained = retained - previous + self.history_measurements.retained_bytes();
+            }
             for (marker, path) in &mut self.paths {
                 // Preserve the original exact substring lookup, even when a
                 // prior terminal prompt has not supplied a line break. Only
@@ -152,6 +184,11 @@ impl<'a> Transcript<'a> {
                         return Err(Failure::InvalidPath);
                     }
                     retained = retained - path.as_ref().map_or(0, |p| p.value.len()) + value.len();
+                    #[cfg(feature = "synthetic-born-joined-qualification")]
+                    if retained > MAX_BYTES {
+                        retained -= self.history_measurements.retained_bytes();
+                        self.history_measurements.discard_for_budget();
+                    }
                     if retained > MAX_BYTES {
                         return Err(Failure::OutputLimit);
                     }
@@ -395,6 +432,86 @@ mod tests {
         transcript.append(&vec![b'x'; MAX_BYTES - metadata], root).unwrap();
         assert_eq!(transcript.append(b"x", root), Err(Failure::OutputLimit));
         assert_eq!(transcript.retained_bytes(), MAX_BYTES);
+    }
+
+    #[test]
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    fn history_measurements_survive_split_lines_and_compaction_without_raw_text() {
+        let root = Path::new("/tmp/owned");
+        let mut transcript = Transcript::new([]).unwrap();
+        let line = format!("[HISTORY_MEASUREMENT_V1 {}]\r\n",
+            super::super::safe_diagnostics_v1::HISTORY_MEASUREMENT_TEST_JSON);
+        let split = line.len() / 2;
+        transcript.append(&line.as_bytes()[..split], root).unwrap();
+        assert!(transcript.history_measurement_lines().is_empty());
+        transcript.append(&line.as_bytes()[split..], root).unwrap();
+        assert_eq!(transcript.history_measurement_lines().len(), 1);
+        transcript.consume(None).unwrap();
+        assert!(transcript.bytes.is_empty());
+        assert_eq!(transcript.retained_bytes(), transcript.timing_retained_bytes()
+            + transcript.history_measurement_lines()[0].len());
+        assert_eq!(transcript.summary(), "none");
+        transcript.append(b"private [HISTORY_MEASUREMENT_V1 {\"private\":\"payload\"}]\n", root).unwrap();
+        transcript.consume(None).unwrap();
+        assert_eq!(transcript.history_measurement_lines().len(), 1);
+        assert!(!transcript.history_measurement_lines()[0].contains("private"));
+        transcript.append(line.as_bytes(), root).unwrap();
+        transcript.consume(None).unwrap();
+        assert_eq!(transcript.history_measurement_retained_bytes(), 0);
+        assert!(transcript.history_measurement_lines()[0].contains("invalid=true"));
+        transcript.append(b"[HISTORY_SERVER_MEASUREMENT_V1 {\"private\":\"payload\"}]\n", root).unwrap();
+        transcript.consume(None).unwrap();
+        assert!(transcript.history_measurement_lines().iter().all(|line| !line.contains("payload")));
+    }
+
+    #[test]
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    fn history_measurement_copies_yield_before_original_chunk_budget() {
+        let root = Path::new("/tmp/owned");
+        let mut measured = Transcript::new([]).unwrap();
+        let mut original = Transcript::new([]).unwrap();
+        let line = format!("[HISTORY_MEASUREMENT_V1 {}]\n",
+            super::super::safe_diagnostics_v1::HISTORY_MEASUREMENT_TEST_JSON);
+        measured.append(line.as_bytes(), root).unwrap();
+        measured.consume(None).unwrap();
+        assert!(measured.history_measurement_retained_bytes() > 0);
+        let original_capacity = MAX_BYTES - original.timing_retained_bytes();
+        let chunk = vec![b'x'; original_capacity];
+        original.append(&chunk, root).unwrap();
+        measured.append(&chunk, root).unwrap();
+        assert_eq!(measured.retained_bytes(), original.retained_bytes());
+        assert_eq!(measured.history_measurement_retained_bytes(), 0);
+        assert!(measured.history_measurement_lines().iter().all(|line| line.contains("invalid=true")));
+        assert_eq!(original.append(b"x", root), Err(Failure::OutputLimit));
+        assert_eq!(measured.append(b"x", root), Err(Failure::OutputLimit));
+        // No raw limit bypass: only the optional already-validated retained
+        // copy was evicted. Its earlier raw line used the original budget.
+    }
+
+    #[test]
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    fn history_measurement_copies_yield_before_original_metadata_budget() {
+        let root = Path::new("/tmp/owned");
+        for metadata in ["[JOINED_DIAGNOSTIC Bootstrap Begin]\n",
+            "SYNTHETIC_JOINED_DRAFT_PATH=/tmp/owned/exact\n"] {
+            let mut measured = Transcript::new([MARKER]).unwrap();
+            let mut original = Transcript::new([MARKER]).unwrap();
+            let line = format!("[HISTORY_MEASUREMENT_V1 {}]\n",
+                super::super::safe_diagnostics_v1::HISTORY_MEASUREMENT_TEST_JSON);
+            measured.append(line.as_bytes(), root).unwrap();
+            measured.consume(None).unwrap();
+            let captured = measured.history_measurement_retained_bytes();
+            let filler = MAX_BYTES - measured.timing_retained_bytes() - captured - metadata.len() - 1;
+            let mut chunk = vec![b'x'; filler];
+            chunk.push(b'\n');
+            chunk.extend_from_slice(metadata.as_bytes());
+            original.append(&chunk, root).unwrap();
+            measured.append(&chunk, root).unwrap();
+            assert_eq!(measured.history_measurement_retained_bytes(), 0);
+            assert_eq!(measured.retained_bytes(), original.retained_bytes());
+            assert_eq!(measured.summary(), original.summary());
+            assert!(measured.history_measurement_lines().iter().all(|line| line.contains("invalid=true")));
+        }
     }
 
     #[test]

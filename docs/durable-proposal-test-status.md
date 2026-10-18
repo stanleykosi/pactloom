@@ -1,8 +1,16 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-18, 15:42 UTC.
+Updated: 2026-10-18, 16:44 UTC.
 
 **Incomplete implementation. No full native financial signing, public testnet settlement, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
+
+## CI10: consolidation insufficient; bounded cost measurement ready
+
+[Run 39141808756](https://github.com/stanleykosi/pactloom/actions/runs/39141808756), qualifier `769ba46a1bdf3c829d3bae1fad2e7353f78cdce5`, passed build (11m21s), Python91, Host44, bootstrap and owner-reopen baseline (256s), but fixed signing still failed at `SignerAdmissionHistoryExchangeDeadline:AuthorityPermission` before admission. All cleanup passed. Reducing redundant validation was insufficient; callback cost is not yet established as the sole cause.
+
+The next diagnostic-only checkpoint measures the actual failing exchange: phase/page ordinal, exact original check site, selected budget, unavailable versus exhausted remaining time, source callback count/sum/max, and complete connect/TLS/frame operation spans. It separates pre-budget callbacks, history totals and exchange subsets; these must not be added together. Two non-mutating fixture-server snapshots record bounded age/remaining, stop flag and optional thread-finished state around the same failed admission receive. No readiness, pure network cost, or authority claim is inferred from telemetry. Original checks, clock decisions, IO order, deadlines and returned results remain unchanged.
+
+Only strict bounded canonical measurement records cross the child transcript, under the original aggregate transcript limit and after verified process/root cleanup for the exact fixed-signing stage. Unknown, malformed, duplicated or oversized records are discarded; raw transcripts remain private. Overflow/clamping and incomplete capture are explicit. All-features Host+Signer+Authority build passed (8m50s); non-synthetic durable Signer lib-tests compiled (3m17s), with synthetic observer cases absent. Authority13 pure measurement cases, Host51 pure projection/retention cases, Signer41 selected validation cases and Python105 checks passed. Full native signing remains unverified pending measured rerun.
 
 ## CI9: exchange deadline identified; bounded validation consolidation tested locally
 
