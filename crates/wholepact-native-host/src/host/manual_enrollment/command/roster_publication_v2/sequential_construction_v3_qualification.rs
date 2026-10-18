@@ -704,6 +704,7 @@ fn foreground_child(stage: &str, inputs: &[Input<'_>]) -> std::io::Result<()> {
             .into_iter()
             .chain(transcript.admission_diagnostic_lines())
             .chain(transcript.durable_flow_lines())
+            .chain(transcript.durable_lifecycle_lines())
         {
             let _ = writeln!(std::io::stderr().lock(), "{line}");
         }

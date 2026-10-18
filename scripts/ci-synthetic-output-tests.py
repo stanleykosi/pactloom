@@ -499,12 +499,12 @@ class PublicOutputTests(unittest.TestCase):
         # Also reject a single oversized complete chunk and resume next line.
         self.assertEqual(framing.feed(b'x'*8193+marker+b'\n'+marker+b'\n'),[marker])
 
-    def test_rolling_preflight_preserves_ten_original_plus_nine_optional_cases(self):
+    def test_rolling_preflight_preserves_ten_original_plus_twelve_optional_cases(self):
         base=ROOT/'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2'
         source=(base/'sequential_construction_v3_qualification/rolling_transcript_v1.rs').read_text()
         names=re.findall(r'#\[test\]\s+(?:#\[cfg\(feature = "synthetic-born-joined-qualification"\)\]\s+)?fn (\w+)\(',source)
         all_expected=tuple(output.PREFIX+'rolling_transcript_v1::tests::'+name for name in names)
-        self.assertEqual(len(all_expected),19)
+        self.assertEqual(len(all_expected),22)
         self.assertEqual(set(all_expected),set(output.ROLLING_TRANSCRIPT_TESTS+output.HISTORY_TRANSCRIPT_TESTS+output.ADMISSION_TRANSCRIPT_TESTS+output.FLOW_TRANSCRIPT_TESTS))
         expected=tuple(name for name in all_expected if name not in output.HISTORY_TRANSCRIPT_TESTS+output.ADMISSION_TRANSCRIPT_TESTS+output.FLOW_TRANSCRIPT_TESTS)
         self.assertEqual(expected,output.ROLLING_TRANSCRIPT_TESTS)
@@ -1297,7 +1297,7 @@ class PublicTimingTests(unittest.TestCase):
         source=(ROOT/'scripts/ci-synthetic-output.py').read_text()
         self.assertIn(' + SIGNER_TIMING_TESTS + SIGNER_DURABLE_LABEL_TESTS + SIGNER_DURABLE_RECEIPT_TESTS:',source)
         self.assertIn(' + TIMING_HOST_TESTS + (DURABLE_PROVIDER_METADATA_TEST,):',source)
-        self.assertIn('CI_SYNTHETIC_PURE passed=72 ',source)
+        self.assertIn('CI_SYNTHETIC_PURE passed=80 ',source)
         self.assertIn('timing_counter_cases=3',source)
         self.assertIn("if status!=0 or not cleanup or cores!=1 or failures or (phase=='full' and outcome is None):",source)
         self.assertNotIn('eprintln!',signer)
@@ -2035,7 +2035,7 @@ class DurableEndpointGateTests(unittest.TestCase):
 class PublicDurableFlowTests(unittest.TestCase):
     base=ROOT/'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3_qualification'
     # Exact shared literal from the reviewed maximal fixture, not an operational history.
-    maximal='{"version":1,"operation":"WriterReconcile","first_error":{"stage":"AuthorizationSource","domain":"Signer","code":"ConsentJournal","nested_code":"JournalNamedRecipientHistoryUnsupported"},"terminal_error":{"stage":"AuthorizationSource","domain":"Signer","code":"ConsentJournal","nested_code":"JournalNamedRecipientHistoryUnsupported"},"fixture_result":"ReturnedErr","completion":{"purpose":"ActivationPrepare","result":"NotObserved","receive":"Disconnected","presentation":"NotObserved"},"call_outcomes":{"writer_acquire":"ReturnedErr","writer_activate":"ReturnedErr","active_verify":"ReturnedErr","reconciliation":"ReturnedErr","session_invalidation":"ReturnedErr","release":"ReturnedErr","request_retention":"ReturnedErr","reservation":"ReturnedErr","permit_retention":"ReturnedErr","key_use":"ReturnedErr","result_retention":"ReturnedErr"},"lower_call_measurement":{"purpose":"Activate","stage":"CommittedHeadValidation","authority_code":"ConstructionHistoryUnsupported","io_kind":"Timeout","callback_stage":"WorkspaceCurrent","measurement":{"phase":"Activate","check_site":"BeforeRequestWrite","checkpoint":"DeadlineSelection","selected_limit":"Exchange","selected_budget_us":600000000,"caller_remaining_at_budget_start_us":600000000,"caller_remaining_at_failure_us":600000000,"selected_remaining_at_failure_us":600000000,"operation_elapsed_us":600000000,"exchange_elapsed_us":600000000,"pre_budget_callback_calls":1,"pre_budget_callback_us":600000000,"operation_cost":{"callback_calls":1000000,"callback_us":600000000,"callback_max_us":600000000,"connect_calls":1000000,"connect_us":600000000,"handshake_calls":1000000,"handshake_us":600000000,"frame_write_calls":1000000,"frame_write_us":600000000,"frame_read_calls":1000000,"frame_read_us":600000000},"exchange_cost":{"callback_calls":1000000,"callback_us":600000000,"callback_max_us":600000000,"connect_calls":1000000,"connect_us":600000000,"handshake_calls":1000000,"handshake_us":600000000,"frame_write_calls":1000000,"frame_write_us":600000000,"frame_read_calls":1000000,"frame_read_us":600000000},"clamped":false,"incomplete":false}},"clamped":false,"incomplete":false}'
+    maximal='{"version":1,"operation":"WriterReconcile","first_error":{"stage":"AuthorizationSource","domain":"Signer","code":"ConsentJournal","nested_code":"JournalNamedRecipientHistoryUnsupported"},"terminal_error":{"stage":"AuthorizationSource","domain":"Signer","code":"ConsentJournal","nested_code":"JournalNamedRecipientHistoryUnsupported"},"fixture_result":"ReturnedErr","completion":{"purpose":"ActivationPrepare","result":"NotObserved","receive":"Disconnected","presentation":"NotObserved"},"call_outcomes":{"writer_acquire":"ReturnedErr","writer_activate":"ReturnedErr","active_verify":"ReturnedErr","reconciliation":"ReturnedErr","session_invalidation":"ReturnedErr","release":"ReturnedErr","request_retention":"ReturnedErr","reservation":"ReturnedErr","permit_retention":"ReturnedErr","key_use":"ReturnedErr","result_retention":"ReturnedErr"},"lower_call_measurement":{"purpose":"Activate","stage":"CommittedHeadValidation","authority_code":"ConstructionHistoryUnsupported","io_kind":"Timeout","callback_stage":"WorkspaceCurrent","measurement":{"phase":"Activate","check_site":"BeforeRequestWrite","checkpoint":"DeadlineSelection","selected_limit":"Exchange","selected_budget_us":600000000,"caller_remaining_at_budget_start_us":600000000,"caller_remaining_at_failure_us":600000000,"selected_remaining_at_failure_us":600000000,"operation_elapsed_us":600000000,"exchange_elapsed_us":600000000,"pre_budget_callback_calls":1,"pre_budget_callback_us":600000000,"operation_cost":{"callback_calls":1000000,"callback_us":600000000,"callback_max_us":600000000,"connect_calls":1000000,"connect_us":600000000,"handshake_calls":1000000,"handshake_us":600000000,"frame_write_calls":1000000,"frame_write_us":600000000,"frame_read_calls":1000000,"frame_read_us":600000000},"exchange_cost":{"callback_calls":1000000,"callback_us":600000000,"callback_max_us":600000000,"connect_calls":1000000,"connect_us":600000000,"handshake_calls":1000000,"handshake_us":600000000,"frame_write_calls":1000000,"frame_write_us":600000000,"frame_read_calls":1000000,"frame_read_us":600000000},"clamped":false,"incomplete":false}},"clamped":false,"incomplete":false,"after_drain":{"drain_result":"ReturnedErr","drain_error":{"stage":"Close","domain":"Signer","code":"ConsentJournal","nested_code":"JournalNamedRecipientHistoryUnsupported"},"worker_purpose":"ActivationPrepare","worker_result":"ReturnedErr","worker_error":{"stage":"AuthorizationSource","domain":"Signer","code":"ConsentJournal","nested_code":"JournalNamedRecipientHistoryUnsupported"},"call_outcomes":{"writer_acquire":"ReturnedErr","writer_activate":"ReturnedErr","active_verify":"ReturnedErr","reconciliation":"ReturnedErr","session_invalidation":"ReturnedErr","release":"ReturnedErr","request_retention":"ReturnedErr","reservation":"ReturnedErr","permit_retention":"ReturnedErr","key_use":"ReturnedErr","result_retention":"ReturnedErr"},"lower_call_measurement":null,"clamped":false,"incomplete":false}}'
 
     def record(self): return json.loads(self.maximal)
     def line(self,row=None): return output.FLOW_PREFIX+json.dumps(self.record() if row is None else row,separators=(',',':'))
@@ -2050,7 +2050,8 @@ class PublicDurableFlowTests(unittest.TestCase):
 
     def test_exact_maximal_production_canonical_parity_and_cap(self):
         row=output.public_durable_flow(self.maximal)
-        self.assertEqual(len(self.maximal.encode('utf8')),2130)
+        self.assertEqual(len(self.maximal.encode('utf8')),2937)
+        self.assertEqual(hashlib.sha256(self.maximal.encode()).hexdigest(),'4b232233f3895e69771e0a113a442d0687779d29e08f9772504da9b99f20c5bb')
         self.assertEqual(json.dumps(row,separators=(',',':')),self.maximal)
         escaped=self.maximal.replace('WriterReconcile','\\u0057riterReconcile',1)
         self.assertEqual(json.dumps(output.public_durable_flow(escaped),separators=(',',':')),self.maximal)
@@ -2089,7 +2090,7 @@ class PublicDurableFlowTests(unittest.TestCase):
 
     def test_numbers_booleans_required_nulls_and_objects_are_strict(self):
         original=self.record()
-        nullable={('first_error',),('terminal_error',),('lower_call_measurement',),
+        nullable={('after_drain',),('after_drain','lower_call_measurement'),('after_drain','drain_error','nested_code'),('after_drain','worker_error','nested_code'),('first_error',),('terminal_error',),('lower_call_measurement',),
             ('first_error','nested_code'),('terminal_error','nested_code'),('completion','purpose'),
             ('lower_call_measurement','io_kind'),('lower_call_measurement','callback_stage')}
         nullable|={('lower_call_measurement','measurement',key) for key in output.HISTORY_OPTIONAL_DURATIONS|{'phase','check_site','selected_limit','exchange_cost'}}
@@ -2109,7 +2110,7 @@ class PublicDurableFlowTests(unittest.TestCase):
                 if full not in nullable:
                     row=self.record(); self.at(row,path)[key]=None
                     with self.assertRaises(ValueError): self.valid(row)
-        row=self.record(); row['first_error']=None; row['terminal_error']=None; row['lower_call_measurement']=None
+        row=self.record(); row['after_drain']=None; row['first_error']=None; row['terminal_error']=None; row['lower_call_measurement']=None
         row['completion']=dict(purpose=None,result='NotObserved',receive='NotObserved',presentation='NotObserved')
         self.assertEqual(self.valid(row),row)
         row=self.record()
@@ -2150,7 +2151,7 @@ class PublicDurableFlowTests(unittest.TestCase):
         cases += [(('call_outcomes',),key,output.FLOW_CALL_OUTCOME) for key in output.FLOW_CALL_FIELDS]
         for path,field,values in cases:
             for value in values:
-                row=self.record(); self.at(row,path)[field]=value
+                row=self.record(); row['after_drain']=None; self.at(row,path)[field]=value
                 self.assertEqual(self.valid(row),row)
         for purpose in output.FLOW_TRANSPORT_PURPOSE:
             row=self.record(); lower=row['lower_call_measurement']; lower['purpose']=purpose; lower['measurement']['phase']=purpose
@@ -2178,7 +2179,7 @@ class PublicDurableFlowTests(unittest.TestCase):
                         valid &= receive not in ('Pending','Disconnected') or (result=='NotObserved' and presentation=='NotObserved')
                         valid &= presentation!='Accepted' or (receive=='Received' and result=='ReturnedOk')
                         valid &= presentation!='Suppressed' or receive in ('Received','Invalidated')
-                        row=self.record(); row['completion']=dict(purpose=purpose,result=result,receive=receive,presentation=presentation)
+                        row=self.record(); row['after_drain']=None; row['completion']=dict(purpose=purpose,result=result,receive=receive,presentation=presentation)
                         if valid: self.assertEqual(self.valid(row),row)
                         else:
                             with self.assertRaises(ValueError): self.valid(row)
@@ -2195,6 +2196,50 @@ class PublicDurableFlowTests(unittest.TestCase):
         for result in ('ReturnedOk','NotObserved',None):
             row=self.record(); row['fixture_result']=result
             with self.assertRaises(ValueError): self.valid(row)
+
+    def test_after_drain_distinguishes_worker_return_from_receive_and_initial_error(self):
+        row=self.record(); after=row['after_drain']
+        row['completion'].update(purpose='Acquire',result='NotObserved',receive='Pending',presentation='NotObserved')
+        after.update(worker_purpose='Acquire',worker_result='ReturnedOk',worker_error=None,drain_result='ReturnedOk',drain_error=None)
+        row['call_outcomes']['writer_acquire']='Entered'
+        after['call_outcomes']['writer_acquire']='ReturnedOk'
+        original=json.loads(json.dumps({key:value for key,value in row.items() if key!='after_drain'}))
+        self.assertEqual(self.valid(row),row)
+        self.assertEqual({key:value for key,value in row.items() if key!='after_drain'},original)
+        self.assertEqual(row['completion']['receive'],'Pending')
+        self.assertEqual(row['completion']['presentation'],'NotObserved')
+        for key,bad in [('drain_result','NotObserved'),('drain_error',row['first_error']),
+                ('worker_purpose','Activate'),('worker_error',row['first_error'])]:
+            changed=json.loads(json.dumps(row)); changed['after_drain'][key]=bad
+            with self.assertRaises(ValueError): self.valid(changed)
+        row['completion'].update(result='ReturnedErr',receive='Received',presentation='Suppressed')
+        with self.assertRaises(ValueError): self.valid(row)
+        row['after_drain']=None
+        self.assertEqual(self.valid(row),row)
+
+    def test_after_drain_final_calls_never_regress_or_duplicate_first_lower(self):
+        for old in output.FLOW_CALL_OUTCOME:
+            for new in output.FLOW_CALL_OUTCOME:
+                row=self.record(); row['call_outcomes']['writer_acquire']=old
+                row['after_drain']['call_outcomes']['writer_acquire']=new
+                expected=not ((old in ('ReturnedOk','ReturnedErr') and new!=old) or (old=='Entered' and new=='NotObserved'))
+                if expected: self.assertEqual(self.valid(row),row)
+                else:
+                    with self.assertRaises(ValueError): self.valid(row)
+        row=self.record(); row['after_drain']['lower_call_measurement']=row['lower_call_measurement']
+        with self.assertRaises(ValueError): self.valid(row)
+        row['lower_call_measurement']=None
+        self.assertEqual(self.valid(row),row)
+        for flag in ('clamped','incomplete'):
+            row['after_drain']['lower_call_measurement']['measurement'][flag]=True
+            with self.assertRaises(ValueError): self.valid(row)
+            row['after_drain'][flag]=True; self.assertEqual(self.valid(row),row)
+        row=self.record(); row['completion']['purpose']=None
+        row['completion']['receive']='Missing'
+        row['after_drain'].update(worker_purpose=None,worker_result='NotObserved',worker_error=None)
+        self.assertEqual(self.valid(row),row)
+        row['after_drain']['worker_result']='ReturnedOk'
+        with self.assertRaises(ValueError): self.valid(row)
 
     def test_singleton_malformed_duplicate_oversized_and_output_loss_are_optional(self):
         row=self.record(); raw=self.line().encode()
@@ -2269,13 +2314,147 @@ class PublicDurableFlowTests(unittest.TestCase):
             text=file.read_text()
             for name in names:
                 self.assertEqual(len(re.findall(r'fn '+name.rsplit('::',1)[1]+r'\(',text)),1)
-        self.assertEqual(len(output.FLOW_PROJECTION_TESTS)+len(output.FLOW_TRANSCRIPT_TESTS)+len(output.FLOW_HOST_TESTS),13)
+        self.assertEqual(len(output.FLOW_PROJECTION_TESTS)+len(output.FLOW_TRANSCRIPT_TESTS)+len(output.FLOW_HOST_TESTS),21)
         for struct,fields in [('PublicDurableFlow',output.FLOW_FIELDS),('PublicFlowError',output.FLOW_ERROR_FIELDS),
                 ('PublicFlowCompletion',output.FLOW_COMPLETION_FIELDS),('PublicFlowCallOutcomes',output.FLOW_CALL_FIELDS),
-                ('PublicFlowMeasurement',output.FLOW_MEASUREMENT_FIELDS),('PublicFlowLowerCall',output.FLOW_LOWER_FIELDS)]:
+                ('PublicFlowMeasurement',output.FLOW_MEASUREMENT_FIELDS),('PublicFlowLowerCall',output.FLOW_LOWER_FIELDS),
+                ('PublicFlowAfterDrain',output.FLOW_AFTER_FIELDS),('PublicDurableLifecycle',output.LIFECYCLE_FIELDS)]:
             body=source.split('struct '+struct+' {',1)[1].split('\n    }',1)[0]
             self.assertEqual(tuple(re.findall(r'^\s+([a-z_]+):',body,re.M)),fields)
             self.assertEqual(body.count('#[serde(deserialize_with = "required_history_nullable")]'),len(re.findall(r'^\s+[a-z_]+: Option<',body,re.M)))
+
+class PublicDurableLifecycleTests(unittest.TestCase):
+    maximal='{"version":1,"operation":"WriterReconcile","fixture_result":"ReturnedErr","owner_budget_us":120000000,"points":{"native_open_complete":{"age_us":100000000,"remaining_us":20000000},"pair_complete":{"age_us":100000000,"remaining_us":20000000},"witness_setup_complete":{"age_us":100000000,"remaining_us":20000000},"accept_complete":{"age_us":100000000,"remaining_us":20000000},"redisclosure_complete":{"age_us":100000000,"remaining_us":20000000},"import_complete":{"age_us":100000000,"remaining_us":20000000},"historical_lookup_complete":{"age_us":100000000,"remaining_us":20000000},"acquire_prepare_launch":{"age_us":100000000,"remaining_us":20000000},"acquire_prepare_complete":{"age_us":100000000,"remaining_us":20000000},"acquire_native_approval":{"age_us":100000000,"remaining_us":20000000},"acquire_worker_launch":{"age_us":100000000,"remaining_us":20000000},"fixture_failure":{"age_us":100000000,"remaining_us":20000000},"after_drain":{"age_us":100000000,"remaining_us":20000000}},"pending_wait":{"full_precheck":{"calls":1000000,"total_us":600000000,"max_us":600000000},"full_postcheck":{"calls":1000000,"total_us":600000000,"max_us":600000000},"liveness":{"calls":1000000,"total_us":600000000,"max_us":600000000},"poll":{"calls":1000000,"total_us":600000000,"max_us":600000000}},"worker_purpose":"ActivationPrepare","worker_started_to_client_entry_us":600000000,"worker_started_to_client_return_us":600000000,"clamped":false,"incomplete":false}'
+    base=PublicDurableFlowTests.base
+    objects=PublicDurableFlowTests.objects
+    at=PublicDurableFlowTests.at
+    def record(self): return json.loads(self.maximal)
+    def valid(self,row): return output.public_durable_lifecycle(json.dumps(row,separators=(',',':')))
+    def line(self,row=None): return output.LIFECYCLE_PREFIX+json.dumps(self.record() if row is None else row,separators=(',',':'))
+
+    def test_maximal_canonical_parity_caps_and_pairing(self):
+        row=self.valid(self.record())
+        self.assertEqual(len(self.maximal.encode()),1450)
+        self.assertEqual(hashlib.sha256(self.maximal.encode()).hexdigest(),'bc9da3afb31e95e9f28bb9df25cc205f1387cfb44b564ba22030f267714dff87')
+        self.assertEqual(json.dumps(row,separators=(',',':')),self.maximal)
+        source=(self.base/'safe_diagnostics_v1.rs').read_text()
+        golden=re.search(r'const DURABLE_LIFECYCLE_MAXIMAL_TEST_JSON: &str = r#"([^\n]+)"#;',source).group(1)
+        self.assertEqual(golden,self.maximal)
+        exact=self.maximal+' '*(2048-len(self.maximal))
+        self.assertEqual(output.public_durable_lifecycle(exact),row)
+        with self.assertRaises(ValueError): output.public_durable_lifecycle(exact+' ')
+        flow=output.DurableFlowDiagnostics(); flow.record('durable_flow',PublicDurableFlowTests().record())
+        capture=output.DurableLifecycleDiagnostics(); capture.record('durable_lifecycle',row)
+        saved=io.StringIO()
+        with contextlib.redirect_stdout(saved): capture.emit(flow)
+        self.assertEqual(saved.getvalue(),self.line()+'\n')
+        for mismatch in ('operation','purpose','after_drain','absent','duplicate'):
+            flow=output.DurableFlowDiagnostics(); value=PublicDurableFlowTests().record()
+            if mismatch=='operation': value['operation']='InitialSign'
+            if mismatch=='purpose':
+                value['completion']['purpose']='Acquire'; value['after_drain']['worker_purpose']='Acquire'
+            if mismatch=='after_drain': value['after_drain']=None
+            if mismatch!='absent': flow.record('durable_flow',value)
+            if mismatch=='duplicate': flow.record('durable_flow',value)
+            saved=io.StringIO()
+            with contextlib.redirect_stdout(saved): capture.emit(flow)
+            self.assertEqual(saved.getvalue(),output.LIFECYCLE_INVALID+'\n')
+
+    def test_every_scope_nullable_and_duplicate_rules(self):
+        original=self.record(); text=self.maximal
+        for path,obj in self.objects(original):
+            fragment=json.dumps(obj,separators=(',',':'))
+            changed=self.record(); self.at(changed,path)['private']='path/token'
+            with self.assertRaises(ValueError): self.valid(changed)
+            for key,value in obj.items():
+                changed=self.record(); del self.at(changed,path)[key]
+                with self.assertRaises(ValueError): self.valid(changed)
+                for spelling in (key,'\\u%04x'%ord(key[0])+key[1:]):
+                    duplicate='{'+json.dumps(spelling).replace('\\\\u','\\u')+':'+json.dumps(value,separators=(',',':'))+','+fragment[1:]
+                    with self.assertRaises(ValueError): output.public_durable_lifecycle(text.replace(fragment,duplicate,1))
+                for bad in ([],{},'private/path',True,-1,1.0):
+                    changed=self.record(); self.at(changed,path)[key]=bad
+                    # True is a valid value only in the actual boolean flag slots.
+                    if type(value) is bool and bad is True: continue
+                    with self.assertRaises(ValueError): self.valid(changed)
+        row=self.record()
+        row['points']={key:None for key in output.LIFECYCLE_POINT_FIELDS}
+        row.update(worker_purpose=None,worker_started_to_client_entry_us=None,worker_started_to_client_return_us=None)
+        self.assertEqual(self.valid(row),row)
+        for key in output.LIFECYCLE_POINT_FIELDS:
+            changed=json.loads(json.dumps(row)); del changed['points'][key]
+            with self.assertRaises(ValueError): self.valid(changed)
+
+    def test_deadline_cost_and_worker_scalar_arithmetic_is_strict(self):
+        for age,remaining in ((0,120000000),(119999999,1),(120000000,0),(600000000,0)):
+            row=self.record(); row['points']['fixture_failure']=dict(age_us=age,remaining_us=remaining)
+            self.assertEqual(self.valid(row),row)
+        for point in (dict(age_us=600000001,remaining_us=0),dict(age_us=1,remaining_us=120000000),
+                      dict(age_us=True,remaining_us=119999999),dict(age_us=120000000,remaining_us=1)):
+            row=self.record(); row['points']['fixture_failure']=point
+            with self.assertRaises(ValueError): self.valid(row)
+        for cost in (dict(calls=0,total_us=1,max_us=1),dict(calls=1,total_us=10,max_us=11),
+                     dict(calls=1,total_us=11,max_us=10),dict(calls=1000001,total_us=0,max_us=0),
+                     dict(calls=1,total_us=600000001,max_us=600000000)):
+            row=self.record(); row['pending_wait']['liveness']=cost
+            with self.assertRaises(ValueError): self.valid(row)
+        for entry,returned,valid in ((None,None,True),(0,None,True),(0,0,True),(2,1,False),(None,0,False),(600000001,None,False)):
+            row=self.record(); row.update(worker_started_to_client_entry_us=entry,worker_started_to_client_return_us=returned)
+            if valid: self.assertEqual(self.valid(row),row)
+            else:
+                with self.assertRaises(ValueError): self.valid(row)
+        for purpose in (None,'Import','Sign','ResultService','private'):
+            row=self.record(); row['worker_purpose']=purpose
+            with self.assertRaises(ValueError): self.valid(row)
+        for key,value in (('operation','InitialSign'),('owner_budget_us',120000001),('version',True),('fixture_result','ReturnedOk')):
+            row=self.record(); row[key]=value
+            with self.assertRaises(ValueError): self.valid(row)
+
+    def test_split_oversize_duplicate_and_optional_failure_handling(self):
+        raw=self.line().encode(); row=self.record()
+        self.assertEqual(output.public_line(raw,'fixed'),('durable_lifecycle',row))
+        self.assertEqual(output.public_line(b'test fixed ... '+raw,'fixed'),('durable_lifecycle',row))
+        self.assertIsNone(output.public_line(b'private '+raw,'fixed'))
+        self.assertIsNone(output.public_line((output.LIFECYCLE_PRIVATE_PREFIX+self.maximal+']').encode(),'fixed'))
+        flow=output.DurableFlowDiagnostics(); flow.record('durable_flow',PublicDurableFlowTests().record())
+        for first in (('durable_lifecycle',row),('durable_lifecycle_invalid',None)):
+            capture=output.DurableLifecycleDiagnostics(); capture.record(*first); capture.record('durable_lifecycle',row)
+            saved=io.StringIO()
+            with contextlib.redirect_stdout(saved): capture.emit(flow)
+            self.assertEqual(saved.getvalue(),output.LIFECYCLE_INVALID+'\n')
+        for candidate in (raw+b' private',output.LIFECYCLE_PREFIX.encode()+b'\xff',b'CI_SYNTHETIC_DURABLE_LIFECYCLE{}'):
+            self.assertEqual(output.public_line(candidate,'fixed'),('durable_lifecycle_invalid',None))
+        for prefix in (b'',b'test fixed ... '):
+            oversized=prefix+output.LIFECYCLE_PREFIX.encode()+b'x'*9000
+            self.assertEqual(output.public_line(oversized,'fixed'),('durable_lifecycle_invalid',None))
+            framing=output.BoundedLines('fixed'); lines=[]
+            for at in range(0,len(oversized),111): lines.extend(framing.feed(oversized[at:at+111]))
+            lines.extend(framing.feed(b'\n'))
+            self.assertEqual(lines,[output.LIFECYCLE_INVALID.encode()]); self.assertLessEqual(len(framing.pending),8192)
+        framing=output.BoundedLines('fixed'); cut=len(raw)//2
+        self.assertEqual(framing.feed(raw[:cut]),[]); self.assertEqual(framing.feed(raw[cut:]+b'\n'),[raw])
+        capture=output.DurableLifecycleDiagnostics(); capture.record('durable_lifecycle',row)
+        with mock.patch('builtins.print',side_effect=OSError('private')): capture.emit(flow)
+        with mock.patch.object(output.json,'dumps',side_effect=ValueError('private')): capture.emit(flow)
+
+    def test_lifecycle_uses_existing_cleanup_phase_and_aggregate_gates(self):
+        fake=PublicTimingTests().run_fake
+        lines=[PublicDurableFlowTests().line(),self.line()]
+        result=fake(lines,phase='durable-fixed-signing')
+        self.assertIn(output.LIFECYCLE_PREFIX,result)
+        self.assertLess(result.index('[JOINED_CLEANUP '),result.index(output.LIFECYCLE_PREFIX))
+        for kwargs in (dict(verified=False),dict(cleanup_present=False)):
+            self.assertNotIn(output.LIFECYCLE_PREFIX,fake(lines,phase='durable-fixed-signing',**kwargs))
+        for phase in ('initial','full','durable-owner-reopen'):
+            self.assertNotIn(output.LIFECYCLE_PREFIX,fake(lines,phase=phase,status=0))
+        rolling=(self.base/'rolling_transcript_v1.rs').read_text()
+        self.assertIn('pub(super) const MAX_BYTES: usize = 262_144;',rolling)
+        self.assertEqual(rolling.split('pub(super) fn tail(',1)[0].count('self.durable_lifecycle.discard_for_budget();'),3)
+        source=(ROOT/'scripts/ci-synthetic-output.py').read_text()
+        gate=source.split("if phase=='durable-fixed-signing' and cleanup_observed:",1)[1].split("if phase=='full'",1)[0]
+        self.assertIn('durable_lifecycle.emit(durable_flow)',gate)
+        self.assertIn('if total > 16*1024*1024:',source)
+
 
 if __name__=='__main__':
     unittest.main()

@@ -2125,7 +2125,8 @@ mod durable_flow_projection {
         CheckedHistoryCostV1, CheckedHistoryMeasurementV1, CheckedHistoryPhaseV1,
     };
     use wholepact_signer::native_ui::synthetic_born_joined_qualification::{
-        DurableFlowAuthorityCodeV1, DurableFlowCallOutcomeV1, DurableFlowCallbackStageV1,
+        DurableFlowAfterDrainV1, DurableFlowAuthorityCodeV1, DurableFlowCallOutcomeV1, DurableFlowCallOutcomesV1, DurableFlowCallbackStageV1,
+        DurableLifecycleDiagnosticV1, DurableLifecyclePointV1, DurablePendingWaitKindV1,
         DurableFlowDiagnosticV1, DurableFlowErrorCodeV1, DurableFlowErrorDomainV1,
         DurableFlowErrorV1, DurableFlowJobPurposeV1, DurableFlowNestedCodeV1,
         DurableFlowOperationV1, DurableFlowPresentationV1, DurableFlowReceiveV1,
@@ -2927,7 +2928,7 @@ mod durable_flow_projection {
         result_retention: String,
     }
     impl PublicFlowCallOutcomes {
-        fn valid(&self) -> bool {
+        fn values(&self) -> [&str; 11] {
             [
                 self.writer_acquire.as_str(),
                 self.writer_activate.as_str(),
@@ -2941,8 +2942,16 @@ mod durable_flow_projection {
                 self.key_use.as_str(),
                 self.result_retention.as_str(),
             ]
-            .into_iter()
-            .all(|value| FLOW_CALL_OUTCOME.contains(&value))
+        }
+        fn valid(&self) -> bool {
+            self.values().into_iter().all(|value| FLOW_CALL_OUTCOME.contains(&value))
+        }
+        fn progresses_from(&self, before: &Self) -> bool {
+            before.values().into_iter().zip(self.values()).all(|(old, new)| match old {
+                "ReturnedOk" | "ReturnedErr" => old == new,
+                "Entered" => new != "NotObserved",
+                _ => true,
+            })
         }
     }
     #[derive(serde::Deserialize, serde::Serialize)]
@@ -3030,6 +3039,78 @@ mod durable_flow_projection {
     }
     #[derive(serde::Deserialize, serde::Serialize)]
     #[serde(deny_unknown_fields)]
+    struct PublicFlowAfterDrain {
+        drain_result: String,
+        #[serde(deserialize_with = "required_history_nullable")]
+        drain_error: Option<PublicFlowError>,
+        #[serde(deserialize_with = "required_history_nullable")]
+        worker_purpose: Option<String>,
+        worker_result: String,
+        #[serde(deserialize_with = "required_history_nullable")]
+        worker_error: Option<PublicFlowError>,
+        call_outcomes: PublicFlowCallOutcomes,
+        #[serde(deserialize_with = "required_history_nullable")]
+        lower_call_measurement: Option<PublicFlowLowerCall>,
+        clamped: bool,
+        incomplete: bool,
+    }
+    impl PublicFlowAfterDrain {
+        fn valid(&self, initial: &PublicDurableFlow) -> bool {
+            matches!(self.drain_result.as_str(), "ReturnedOk" | "ReturnedErr")
+                && (self.drain_result == "ReturnedErr") == self.drain_error.is_some()
+                && self.drain_error.as_ref().is_none_or(|error| error.valid() && error.stage == "Close")
+                && optional_enum(self.worker_purpose.as_deref(), FLOW_JOB_PURPOSE)
+                && self.worker_purpose == initial.completion.purpose
+                && FLOW_RESULT.contains(&self.worker_result.as_str())
+                && (self.worker_result == "ReturnedErr") == self.worker_error.is_some()
+                && self.worker_error.as_ref().is_none_or(PublicFlowError::valid)
+                && (self.worker_purpose.is_some() || self.worker_result == "NotObserved")
+                && (initial.completion.receive != "Received"
+                    || self.worker_result == "NotObserved"
+                    || self.worker_result == initial.completion.result)
+                && self.call_outcomes.valid()
+                && self.call_outcomes.progresses_from(&initial.call_outcomes)
+                && self.lower_call_measurement.as_ref().is_none_or(|lower| {
+                    initial.lower_call_measurement.is_none()
+                        && lower.valid()
+                        && (!lower.measurement.clamped || self.clamped)
+                        && (!lower.measurement.incomplete || self.incomplete)
+                })
+        }
+    }
+    fn flow_calls(value: &DurableFlowCallOutcomesV1) -> PublicFlowCallOutcomes {
+        PublicFlowCallOutcomes {
+            writer_acquire: flow_call_outcome_label(value.writer_acquire()).into(),
+            writer_activate: flow_call_outcome_label(value.writer_activate()).into(),
+            active_verify: flow_call_outcome_label(value.active_verify()).into(),
+            reconciliation: flow_call_outcome_label(value.reconciliation()).into(),
+            session_invalidation: flow_call_outcome_label(value.session_invalidation()).into(),
+            release: flow_call_outcome_label(value.release()).into(),
+            request_retention: flow_call_outcome_label(value.request_retention()).into(),
+            reservation: flow_call_outcome_label(value.reservation()).into(),
+            permit_retention: flow_call_outcome_label(value.permit_retention()).into(),
+            key_use: flow_call_outcome_label(value.key_use()).into(),
+            result_retention: flow_call_outcome_label(value.result_retention()).into(),
+        }
+    }
+    fn flow_after(value: &DurableFlowAfterDrainV1) -> Option<PublicFlowAfterDrain> {
+        Some(PublicFlowAfterDrain {
+            drain_result: flow_result_label(value.drain_result()).into(),
+            drain_error: value.drain_error().map(flow_error),
+            worker_purpose: value.worker_purpose().map(|purpose| flow_job_purpose_label(purpose).into()),
+            worker_result: flow_result_label(value.worker_result()).into(),
+            worker_error: value.worker_error().map(flow_error),
+            call_outcomes: flow_calls(value.call_outcomes()),
+            lower_call_measurement: match value.lower_call_measurement() {
+                Some(lower) => Some(flow_lower(lower)?),
+                None => None,
+            },
+            clamped: value.clamped(),
+            incomplete: value.incomplete(),
+        })
+    }
+    #[derive(serde::Deserialize, serde::Serialize)]
+    #[serde(deny_unknown_fields)]
     struct PublicDurableFlow {
         version: u8,
         operation: String,
@@ -3044,6 +3125,8 @@ mod durable_flow_projection {
         lower_call_measurement: Option<PublicFlowLowerCall>,
         clamped: bool,
         incomplete: bool,
+        #[serde(deserialize_with = "required_history_nullable")]
+        after_drain: Option<PublicFlowAfterDrain>,
     }
     impl PublicDurableFlow {
         fn valid(&self) -> bool {
@@ -3057,6 +3140,7 @@ mod durable_flow_projection {
                     .is_none_or(PublicFlowError::valid)
                 && self.completion.valid()
                 && self.call_outcomes.valid()
+                && self.after_drain.as_ref().is_none_or(|after| after.valid(self))
                 && self.lower_call_measurement.as_ref().is_none_or(|lower| {
                     lower.valid()
                         && (!lower.measurement.clamped || self.clamped)
@@ -3168,22 +3252,14 @@ mod durable_flow_projection {
                 receive: flow_receive_label(completion.receive()).into(),
                 presentation: flow_presentation_label(completion.presentation()).into(),
             },
-            call_outcomes: PublicFlowCallOutcomes {
-                writer_acquire: flow_call_outcome_label(calls.writer_acquire()).into(),
-                writer_activate: flow_call_outcome_label(calls.writer_activate()).into(),
-                active_verify: flow_call_outcome_label(calls.active_verify()).into(),
-                reconciliation: flow_call_outcome_label(calls.reconciliation()).into(),
-                session_invalidation: flow_call_outcome_label(calls.session_invalidation()).into(),
-                release: flow_call_outcome_label(calls.release()).into(),
-                request_retention: flow_call_outcome_label(calls.request_retention()).into(),
-                reservation: flow_call_outcome_label(calls.reservation()).into(),
-                permit_retention: flow_call_outcome_label(calls.permit_retention()).into(),
-                key_use: flow_call_outcome_label(calls.key_use()).into(),
-                result_retention: flow_call_outcome_label(calls.result_retention()).into(),
-            },
+            call_outcomes: flow_calls(calls),
             lower_call_measurement,
             clamped: value.clamped(),
             incomplete: value.incomplete(),
+            after_drain: match value.after_drain() {
+                Some(after) => Some(flow_after(after)?),
+                None => None,
+            },
         })
     }
     // Both producer and consumers use this exact bounded, ordered serializer.
@@ -3208,10 +3284,20 @@ mod durable_flow_projection {
         let _ = writeln!(output, "\n{PRIVATE_PREFIX}{text}]");
     }
     pub(crate) fn emit_durable_flow(value: &DurableFlowDiagnosticV1) {
-        let Some(value) = flow_public(value) else {
-            return;
-        };
-        write_private_record(std::io::stderr().lock(), &value);
+        let Some(public) = flow_public(value) else { return; };
+        // Emit only a valid FLOW, then its exact paired final-once supplement.
+        if canonical_payload(&public).is_none() { return; }
+        let mut output = std::io::stderr().lock();
+        write_private_record(&mut output, &public);
+        if let Some(lifecycle) = value.lifecycle() {
+            let lifecycle = lifecycle_public(lifecycle);
+            if lifecycle.matches_flow(&public) {
+                if let Some(text) = lifecycle_canonical(&lifecycle) {
+                    use std::io::Write;
+                    let _ = writeln!(output, "\n{LIFECYCLE_PRIVATE_PREFIX}{text}]");
+                }
+            }
+        }
     }
     #[derive(Default)]
     pub(crate) struct DurableFlowCapture {
@@ -3260,8 +3346,212 @@ mod durable_flow_projection {
             }
         }
     }
+    const LIFECYCLE_PRIVATE_PREFIX: &str = "[DURABLE_LIFECYCLE_V1 ";
+    const LIFECYCLE_PUBLIC_PREFIX: &str = "CI_SYNTHETIC_DURABLE_LIFECYCLE ";
+    const LIFECYCLE_INVALID: &str =
+        "CI_SYNTHETIC_DURABLE_LIFECYCLE invalid=true details_withheld=true";
+    const LIFECYCLE_MAX_PAYLOAD: usize = 2048;
+    const LIFECYCLE_OWNER_BUDGET_US: u32 = 120_000_000;
+    const LIFECYCLE_JOB_PURPOSES: &[&str] = &[
+        "AcquirePrepare", "Acquire", "ActivationPrepare", "Activate", "ReconcilePrepare", "Reconcile",
+    ];
+
+    #[derive(serde::Deserialize, serde::Serialize)]
+    #[serde(deny_unknown_fields)]
+    struct PublicLifecyclePoint {
+        age_us: u32,
+        remaining_us: u32,
+    }
+    impl PublicLifecyclePoint {
+        fn valid(&self) -> bool {
+            self.age_us <= 600_000_000
+                && self.remaining_us == LIFECYCLE_OWNER_BUDGET_US.saturating_sub(self.age_us)
+        }
+    }
+    macro_rules! lifecycle_points {
+        ($($field:ident => $point:ident),+ $(,)?) => {
+            #[derive(serde::Deserialize, serde::Serialize)]
+            #[serde(deny_unknown_fields)]
+            struct PublicLifecyclePoints {
+                $(#[serde(deserialize_with = "required_history_nullable")]
+                $field: Option<PublicLifecyclePoint>,)+
+            }
+            impl PublicLifecyclePoints {
+                fn valid(&self) -> bool {
+                    [$(self.$field.as_ref(),)+].into_iter().flatten().all(PublicLifecyclePoint::valid)
+                }
+                fn from_source(value: &DurableLifecycleDiagnosticV1) -> Self {
+                    Self {$($field: value.point(DurableLifecyclePointV1::$point).map(|point| PublicLifecyclePoint {
+                        age_us: point.age_us(), remaining_us: point.remaining_us(),
+                    }),)+}
+                }
+            }
+        };
+    }
+    lifecycle_points! {
+        native_open_complete => NativeOpenComplete,
+        pair_complete => PairComplete,
+        witness_setup_complete => WitnessSetupComplete,
+        accept_complete => AcceptComplete,
+        redisclosure_complete => RedisclosureComplete,
+        import_complete => ImportComplete,
+        historical_lookup_complete => HistoricalLookupComplete,
+        acquire_prepare_launch => AcquirePrepareLaunch,
+        acquire_prepare_complete => AcquirePrepareComplete,
+        acquire_native_approval => AcquireNativeApproval,
+        acquire_worker_launch => AcquireWorkerLaunch,
+        fixture_failure => FixtureFailure,
+        after_drain => AfterDrain,
+    }
+    #[derive(serde::Deserialize, serde::Serialize)]
+    #[serde(deny_unknown_fields)]
+    struct PublicLifecycleCost {
+        calls: u32,
+        total_us: u32,
+        max_us: u32,
+    }
+    impl PublicLifecycleCost {
+        fn valid(&self, clamped: bool) -> bool {
+            self.calls <= 1_000_000
+                && self.total_us <= 600_000_000
+                && self.max_us <= self.total_us
+                && (self.calls != 0 || (self.total_us == 0 && self.max_us == 0))
+                && (clamped || u64::from(self.total_us) <= u64::from(self.calls) * u64::from(self.max_us))
+        }
+    }
+    macro_rules! lifecycle_costs {
+        ($($field:ident => $kind:ident),+ $(,)?) => {
+            #[derive(serde::Deserialize, serde::Serialize)]
+            #[serde(deny_unknown_fields)]
+            struct PublicLifecycleCosts { $($field: PublicLifecycleCost,)+ }
+            impl PublicLifecycleCosts {
+                fn valid(&self, clamped: bool) -> bool {
+                    [$(&self.$field,)+].into_iter().all(|cost| cost.valid(clamped))
+                }
+                fn from_source(value: &DurableLifecycleDiagnosticV1) -> Self {
+                    Self {$($field: {
+                        let cost = value.pending_wait(DurablePendingWaitKindV1::$kind);
+                        PublicLifecycleCost { calls: cost.calls(), total_us: cost.total_us(), max_us: cost.max_us() }
+                    },)+}
+                }
+            }
+        };
+    }
+    // Cumulative opted-in owner costs, inclusive/nonadditive with ages and spans.
+    lifecycle_costs! {
+        full_precheck => FullPrecheck,
+        full_postcheck => FullPostcheck,
+        liveness => Liveness,
+        poll => Poll,
+    }
+    #[derive(serde::Deserialize, serde::Serialize)]
+    #[serde(deny_unknown_fields)]
+    struct PublicDurableLifecycle {
+        version: u8,
+        operation: String,
+        fixture_result: String,
+        owner_budget_us: u32,
+        points: PublicLifecyclePoints,
+        pending_wait: PublicLifecycleCosts,
+        #[serde(deserialize_with = "required_history_nullable")]
+        worker_purpose: Option<String>,
+        #[serde(deserialize_with = "required_history_nullable")]
+        worker_started_to_client_entry_us: Option<u32>,
+        #[serde(deserialize_with = "required_history_nullable")]
+        worker_started_to_client_return_us: Option<u32>,
+        clamped: bool,
+        incomplete: bool,
+    }
+    impl PublicDurableLifecycle {
+        fn valid(&self) -> bool {
+            self.version == 1
+                && self.operation == "WriterReconcile"
+                && self.fixture_result == "ReturnedErr"
+                && self.owner_budget_us == LIFECYCLE_OWNER_BUDGET_US
+                && self.points.valid()
+                && self.pending_wait.valid(self.clamped)
+                && optional_enum(self.worker_purpose.as_deref(), LIFECYCLE_JOB_PURPOSES)
+                && duration(self.worker_started_to_client_entry_us)
+                && duration(self.worker_started_to_client_return_us)
+                && (self.worker_purpose.is_some()
+                    || (self.worker_started_to_client_entry_us.is_none()
+                        && self.worker_started_to_client_return_us.is_none()))
+                && self.worker_started_to_client_return_us.is_none_or(|returned| {
+                    self.worker_started_to_client_entry_us.is_some_and(|entry| returned >= entry)
+                })
+        }
+        fn matches_flow(&self, flow: &PublicDurableFlow) -> bool {
+            self.operation == flow.operation
+                && self.worker_purpose == flow.completion.purpose
+                && (self.points.after_drain.is_none() || flow.after_drain.is_some())
+        }
+    }
+    fn lifecycle_public(value: &DurableLifecycleDiagnosticV1) -> PublicDurableLifecycle {
+        PublicDurableLifecycle {
+            version: 1,
+            operation: flow_operation_label(value.operation()).into(),
+            fixture_result: flow_result_label(value.fixture_result()).into(),
+            owner_budget_us: value.owner_budget_us(),
+            points: PublicLifecyclePoints::from_source(value),
+            pending_wait: PublicLifecycleCosts::from_source(value),
+            worker_purpose: value.worker_purpose().map(|purpose| flow_job_purpose_label(purpose).into()),
+            worker_started_to_client_entry_us: value.worker_started_to_client_entry_us(),
+            worker_started_to_client_return_us: value.worker_started_to_client_return_us(),
+            clamped: value.clamped(),
+            incomplete: value.incomplete(),
+        }
+    }
+    fn lifecycle_canonical(value: &PublicDurableLifecycle) -> Option<String> {
+        if !value.valid() { return None; }
+        let text = serde_json::to_string(value).ok()?;
+        (text.len() <= LIFECYCLE_MAX_PAYLOAD).then_some(text)
+    }
+    fn lifecycle_parse(text: &str) -> Option<PublicDurableLifecycle> {
+        if text.len() > LIFECYCLE_MAX_PAYLOAD { return None; }
+        let value: PublicDurableLifecycle = serde_json::from_str(text).ok()?;
+        value.valid().then_some(value)
+    }
+    #[derive(Default)]
+    pub(crate) struct DurableLifecycleCapture {
+        record: Option<String>,
+        invalid: bool,
+    }
+    impl DurableLifecycleCapture {
+        pub(crate) fn retained_bytes(&self) -> usize {
+            self.record.as_ref().map_or(0, String::len)
+        }
+        pub(crate) fn discard_for_budget(&mut self) {
+            if self.record.take().is_some() { self.invalid = true; }
+        }
+        pub(crate) fn capture_line(&mut self, line: &str, available: usize) {
+            if !line.starts_with("[DURABLE_LIFECYCLE_V1") && line != LIFECYCLE_INVALID { return; }
+            if self.invalid { return; }
+            let canonical = line.strip_prefix(LIFECYCLE_PRIVATE_PREFIX)
+                .and_then(|line| line.strip_suffix(']'))
+                .and_then(lifecycle_parse).as_ref().and_then(lifecycle_canonical)
+                .map(|text| format!("{LIFECYCLE_PUBLIC_PREFIX}{text}"));
+            if self.record.is_none() {
+                if let Some(record) = canonical {
+                    if record.len() <= available { self.record = Some(record); return; }
+                }
+            }
+            self.record = None;
+            self.invalid = true;
+        }
+        pub(crate) fn public_lines(&self, flow: &DurableFlowCapture) -> Vec<&str> {
+            if self.invalid { return vec![LIFECYCLE_INVALID]; }
+            let Some(record) = self.record.as_deref() else { return vec![]; };
+            let paired = record.strip_prefix(LIFECYCLE_PUBLIC_PREFIX).and_then(lifecycle_parse)
+                .zip(flow.record.as_deref().and_then(|line| line.strip_prefix(PUBLIC_PREFIX)).and_then(parse_payload))
+                .is_some_and(|(lifecycle, flow)| lifecycle.matches_flow(&flow));
+            if paired { vec![record] } else { vec![LIFECYCLE_INVALID] }
+        }
+    }
     #[cfg(test)]
-    pub(crate) const DURABLE_FLOW_MAXIMAL_TEST_JSON: &str = r#"{"version":1,"operation":"WriterReconcile","first_error":{"stage":"AuthorizationSource","domain":"Signer","code":"ConsentJournal","nested_code":"JournalNamedRecipientHistoryUnsupported"},"terminal_error":{"stage":"AuthorizationSource","domain":"Signer","code":"ConsentJournal","nested_code":"JournalNamedRecipientHistoryUnsupported"},"fixture_result":"ReturnedErr","completion":{"purpose":"ActivationPrepare","result":"NotObserved","receive":"Disconnected","presentation":"NotObserved"},"call_outcomes":{"writer_acquire":"ReturnedErr","writer_activate":"ReturnedErr","active_verify":"ReturnedErr","reconciliation":"ReturnedErr","session_invalidation":"ReturnedErr","release":"ReturnedErr","request_retention":"ReturnedErr","reservation":"ReturnedErr","permit_retention":"ReturnedErr","key_use":"ReturnedErr","result_retention":"ReturnedErr"},"lower_call_measurement":{"purpose":"Activate","stage":"CommittedHeadValidation","authority_code":"ConstructionHistoryUnsupported","io_kind":"Timeout","callback_stage":"WorkspaceCurrent","measurement":{"phase":"Activate","check_site":"BeforeRequestWrite","checkpoint":"DeadlineSelection","selected_limit":"Exchange","selected_budget_us":600000000,"caller_remaining_at_budget_start_us":600000000,"caller_remaining_at_failure_us":600000000,"selected_remaining_at_failure_us":600000000,"operation_elapsed_us":600000000,"exchange_elapsed_us":600000000,"pre_budget_callback_calls":1,"pre_budget_callback_us":600000000,"operation_cost":{"callback_calls":1000000,"callback_us":600000000,"callback_max_us":600000000,"connect_calls":1000000,"connect_us":600000000,"handshake_calls":1000000,"handshake_us":600000000,"frame_write_calls":1000000,"frame_write_us":600000000,"frame_read_calls":1000000,"frame_read_us":600000000},"exchange_cost":{"callback_calls":1000000,"callback_us":600000000,"callback_max_us":600000000,"connect_calls":1000000,"connect_us":600000000,"handshake_calls":1000000,"handshake_us":600000000,"frame_write_calls":1000000,"frame_write_us":600000000,"frame_read_calls":1000000,"frame_read_us":600000000},"clamped":false,"incomplete":false}},"clamped":false,"incomplete":false}"#;
+    pub(crate) const DURABLE_FLOW_MAXIMAL_TEST_JSON: &str = r#"{"version":1,"operation":"WriterReconcile","first_error":{"stage":"AuthorizationSource","domain":"Signer","code":"ConsentJournal","nested_code":"JournalNamedRecipientHistoryUnsupported"},"terminal_error":{"stage":"AuthorizationSource","domain":"Signer","code":"ConsentJournal","nested_code":"JournalNamedRecipientHistoryUnsupported"},"fixture_result":"ReturnedErr","completion":{"purpose":"ActivationPrepare","result":"NotObserved","receive":"Disconnected","presentation":"NotObserved"},"call_outcomes":{"writer_acquire":"ReturnedErr","writer_activate":"ReturnedErr","active_verify":"ReturnedErr","reconciliation":"ReturnedErr","session_invalidation":"ReturnedErr","release":"ReturnedErr","request_retention":"ReturnedErr","reservation":"ReturnedErr","permit_retention":"ReturnedErr","key_use":"ReturnedErr","result_retention":"ReturnedErr"},"lower_call_measurement":{"purpose":"Activate","stage":"CommittedHeadValidation","authority_code":"ConstructionHistoryUnsupported","io_kind":"Timeout","callback_stage":"WorkspaceCurrent","measurement":{"phase":"Activate","check_site":"BeforeRequestWrite","checkpoint":"DeadlineSelection","selected_limit":"Exchange","selected_budget_us":600000000,"caller_remaining_at_budget_start_us":600000000,"caller_remaining_at_failure_us":600000000,"selected_remaining_at_failure_us":600000000,"operation_elapsed_us":600000000,"exchange_elapsed_us":600000000,"pre_budget_callback_calls":1,"pre_budget_callback_us":600000000,"operation_cost":{"callback_calls":1000000,"callback_us":600000000,"callback_max_us":600000000,"connect_calls":1000000,"connect_us":600000000,"handshake_calls":1000000,"handshake_us":600000000,"frame_write_calls":1000000,"frame_write_us":600000000,"frame_read_calls":1000000,"frame_read_us":600000000},"exchange_cost":{"callback_calls":1000000,"callback_us":600000000,"callback_max_us":600000000,"connect_calls":1000000,"connect_us":600000000,"handshake_calls":1000000,"handshake_us":600000000,"frame_write_calls":1000000,"frame_write_us":600000000,"frame_read_calls":1000000,"frame_read_us":600000000},"clamped":false,"incomplete":false}},"clamped":false,"incomplete":false,"after_drain":{"drain_result":"ReturnedErr","drain_error":{"stage":"Close","domain":"Signer","code":"ConsentJournal","nested_code":"JournalNamedRecipientHistoryUnsupported"},"worker_purpose":"ActivationPrepare","worker_result":"ReturnedErr","worker_error":{"stage":"AuthorizationSource","domain":"Signer","code":"ConsentJournal","nested_code":"JournalNamedRecipientHistoryUnsupported"},"call_outcomes":{"writer_acquire":"ReturnedErr","writer_activate":"ReturnedErr","active_verify":"ReturnedErr","reconciliation":"ReturnedErr","session_invalidation":"ReturnedErr","release":"ReturnedErr","request_retention":"ReturnedErr","reservation":"ReturnedErr","permit_retention":"ReturnedErr","key_use":"ReturnedErr","result_retention":"ReturnedErr"},"lower_call_measurement":null,"clamped":false,"incomplete":false}}"#;
+
+    #[cfg(test)]
+    pub(crate) const DURABLE_LIFECYCLE_MAXIMAL_TEST_JSON: &str = r#"{"version":1,"operation":"WriterReconcile","fixture_result":"ReturnedErr","owner_budget_us":120000000,"points":{"native_open_complete":{"age_us":100000000,"remaining_us":20000000},"pair_complete":{"age_us":100000000,"remaining_us":20000000},"witness_setup_complete":{"age_us":100000000,"remaining_us":20000000},"accept_complete":{"age_us":100000000,"remaining_us":20000000},"redisclosure_complete":{"age_us":100000000,"remaining_us":20000000},"import_complete":{"age_us":100000000,"remaining_us":20000000},"historical_lookup_complete":{"age_us":100000000,"remaining_us":20000000},"acquire_prepare_launch":{"age_us":100000000,"remaining_us":20000000},"acquire_prepare_complete":{"age_us":100000000,"remaining_us":20000000},"acquire_native_approval":{"age_us":100000000,"remaining_us":20000000},"acquire_worker_launch":{"age_us":100000000,"remaining_us":20000000},"fixture_failure":{"age_us":100000000,"remaining_us":20000000},"after_drain":{"age_us":100000000,"remaining_us":20000000}},"pending_wait":{"full_precheck":{"calls":1000000,"total_us":600000000,"max_us":600000000},"full_postcheck":{"calls":1000000,"total_us":600000000,"max_us":600000000},"liveness":{"calls":1000000,"total_us":600000000,"max_us":600000000},"poll":{"calls":1000000,"total_us":600000000,"max_us":600000000}},"worker_purpose":"ActivationPrepare","worker_started_to_client_entry_us":600000000,"worker_started_to_client_return_us":600000000,"clamped":false,"incomplete":false}"#;
 
     #[cfg(test)]
     mod tests {
@@ -3285,7 +3575,7 @@ mod durable_flow_projection {
             // This proves production DTO serializer/parser parity, not a runtime history.
             let value = parse_payload(DURABLE_FLOW_MAXIMAL_TEST_JSON).unwrap();
             let text = canonical_payload(&value).unwrap();
-            assert_eq!(text.len(), 2130);
+            assert_eq!(text.len(), 2937);
             assert!(text.len() <= MAX_PAYLOAD);
             assert_eq!(text, DURABLE_FLOW_MAXIMAL_TEST_JSON);
             let escaped = text.replacen("WriterReconcile", "\\u0057riterReconcile", 1);
@@ -3520,6 +3810,10 @@ mod durable_flow_projection {
                     let nullable = matches!(
                         field.as_str(),
                         "/first_error"
+                            | "/after_drain"
+                            | "/after_drain/lower_call_measurement"
+                            | "/after_drain/drain_error/nested_code"
+                            | "/after_drain/worker_error/nested_code"
                             | "/terminal_error"
                             | "/lower_call_measurement"
                             | "/first_error/nested_code"
@@ -3648,6 +3942,7 @@ mod durable_flow_projection {
             for state in FLOW_CALL_OUTCOME {
                 for key in original["call_outcomes"].as_object().unwrap().keys() {
                     let mut value = original.clone();
+                    value["after_drain"] = serde_json::Value::Null;
                     value["call_outcomes"][key] = serde_json::json!(state);
                     assert!(accepted(&value));
                 }
@@ -3680,6 +3975,7 @@ mod durable_flow_projection {
         #[test]
         fn durable_flow_null_completion_and_measurement_consistency() {
             let mut value = fixture();
+            value["after_drain"] = serde_json::Value::Null;
             value["first_error"] = serde_json::Value::Null;
             value["terminal_error"] = serde_json::Value::Null;
             value["lower_call_measurement"] = serde_json::Value::Null;
@@ -3734,6 +4030,170 @@ mod durable_flow_projection {
             assert!(accepted(&value));
             value["fixture_result"] = serde_json::json!("ReturnedOk");
             assert!(!accepted(&value));
+        }
+        #[test]
+        fn durable_flow_after_drain_preserves_initial_and_exact_worker_semantics() {
+            let mut value = fixture();
+            value["completion"] = serde_json::json!({"purpose":"Acquire","result":"NotObserved","receive":"Pending","presentation":"NotObserved"});
+            value["call_outcomes"]["writer_acquire"] = serde_json::json!("Entered");
+            value["after_drain"]["worker_purpose"] = serde_json::json!("Acquire");
+            value["after_drain"]["worker_result"] = serde_json::json!("ReturnedOk");
+            value["after_drain"]["worker_error"] = serde_json::Value::Null;
+            value["after_drain"]["drain_result"] = serde_json::json!("ReturnedOk");
+            value["after_drain"]["drain_error"] = serde_json::Value::Null;
+            value["after_drain"]["call_outcomes"]["writer_acquire"] = serde_json::json!("ReturnedOk");
+            let initial = value.clone();
+            assert!(accepted(&value));
+            let parsed = parse_payload(&value.to_string()).unwrap();
+            let roundtrip: serde_json::Value = serde_json::from_str(&canonical_payload(&parsed).unwrap()).unwrap();
+            for key in ["first_error", "terminal_error", "completion", "call_outcomes", "lower_call_measurement", "clamped", "incomplete"] {
+                assert_eq!(roundtrip[key], initial[key]);
+            }
+            assert_eq!(roundtrip["completion"]["receive"], "Pending");
+            assert_eq!(roundtrip["completion"]["presentation"], "NotObserved");
+            for (key, bad) in [
+                ("drain_result", serde_json::json!("NotObserved")),
+                ("drain_error", initial["first_error"].clone()),
+                ("worker_purpose", serde_json::json!("Activate")),
+                ("worker_error", initial["first_error"].clone()),
+            ] {
+                let mut changed = value.clone(); changed["after_drain"][key] = bad;
+                assert!(!accepted(&changed));
+            }
+            value["completion"]["result"] = serde_json::json!("ReturnedErr");
+            value["completion"]["receive"] = serde_json::json!("Received");
+            value["completion"]["presentation"] = serde_json::json!("Suppressed");
+            assert!(!accepted(&value));
+            value["after_drain"] = serde_json::Value::Null;
+            assert!(accepted(&value));
+        }
+        #[test]
+        fn durable_flow_after_drain_monotone_calls_and_unique_first_lower() {
+            for old in FLOW_CALL_OUTCOME {
+                for new in FLOW_CALL_OUTCOME {
+                    let mut value = fixture();
+                    value["call_outcomes"]["writer_acquire"] = serde_json::json!(old);
+                    value["after_drain"]["call_outcomes"]["writer_acquire"] = serde_json::json!(new);
+                    let valid = match *old {
+                        "ReturnedOk" | "ReturnedErr" => old == new,
+                        "Entered" => *new != "NotObserved",
+                        _ => true,
+                    };
+                    assert_eq!(accepted(&value), valid);
+                }
+            }
+            let mut value = fixture();
+            value["after_drain"]["lower_call_measurement"] = value["lower_call_measurement"].clone();
+            assert!(!accepted(&value));
+            value["lower_call_measurement"] = serde_json::Value::Null;
+            assert!(accepted(&value));
+            for flag in ["clamped", "incomplete"] {
+                value["after_drain"]["lower_call_measurement"]["measurement"][flag] = serde_json::json!(true);
+                assert!(!accepted(&value));
+                value["after_drain"][flag] = serde_json::json!(true);
+                assert!(accepted(&value));
+            }
+            let mut value = fixture();
+            value["completion"] = serde_json::json!({"purpose":null,"result":"NotObserved","receive":"Missing","presentation":"NotObserved"});
+            value["after_drain"]["worker_purpose"] = serde_json::Value::Null;
+            value["after_drain"]["worker_result"] = serde_json::json!("NotObserved");
+            value["after_drain"]["worker_error"] = serde_json::Value::Null;
+            assert!(accepted(&value));
+            value["after_drain"]["worker_result"] = serde_json::json!("ReturnedOk");
+            assert!(!accepted(&value));
+        }
+        #[test]
+        fn durable_lifecycle_maximal_canonical_cap_and_pairing() {
+            let value = lifecycle_parse(DURABLE_LIFECYCLE_MAXIMAL_TEST_JSON).unwrap();
+            let text = lifecycle_canonical(&value).unwrap();
+            assert_eq!(text, DURABLE_LIFECYCLE_MAXIMAL_TEST_JSON);
+            assert_eq!(text.len(), 1450);
+            let exact = format!("{}{}", text, " ".repeat(LIFECYCLE_MAX_PAYLOAD - text.len()));
+            assert_eq!(exact.len(), 2048);
+            assert_eq!(lifecycle_canonical(&lifecycle_parse(&exact).unwrap()).unwrap(), text);
+            assert!(lifecycle_parse(&(exact + " ")).is_none());
+            let mut flow = parse_payload(DURABLE_FLOW_MAXIMAL_TEST_JSON).unwrap();
+            assert!(value.matches_flow(&flow));
+            flow.operation = "InitialSign".into();
+            assert!(!value.matches_flow(&flow));
+            flow.operation = "WriterReconcile".into();
+            flow.completion.purpose = Some("Acquire".into());
+            assert!(!value.matches_flow(&flow));
+            flow.completion.purpose = Some("ActivationPrepare".into());
+            flow.after_drain = None;
+            assert!(!value.matches_flow(&flow));
+        }
+        #[test]
+        fn durable_lifecycle_exact_scopes_bounds_and_arithmetic() {
+            let original: serde_json::Value = serde_json::from_str(DURABLE_LIFECYCLE_MAXIMAL_TEST_JSON).unwrap();
+            let text = original.to_string();
+            let mut paths = Vec::new();
+            object_paths(&original, String::new(), &mut paths);
+            for path in paths {
+                let object = original.pointer(&path).unwrap().as_object().unwrap();
+                let fragment = original.pointer(&path).unwrap().to_string();
+                let mut changed = original.clone();
+                changed.pointer_mut(&path).unwrap()["private"] = serde_json::json!("path/token");
+                assert!(lifecycle_parse(&changed.to_string()).is_none());
+                for (key, entry) in object {
+                    let mut changed = original.clone();
+                    changed.pointer_mut(&path).unwrap().as_object_mut().unwrap().remove(key);
+                    assert!(lifecycle_parse(&changed.to_string()).is_none());
+                    for spelling in [key.clone(), format!("\\u{:04x}{}", key.as_bytes()[0], &key[1..])] {
+                        let duplicate = format!("{{\"{spelling}\":{entry},{}", &fragment[1..]);
+                        assert!(lifecycle_parse(&text.replacen(&fragment, &duplicate, 1)).is_none());
+                    }
+                    for bad in [serde_json::json!([]), serde_json::json!({}), serde_json::json!("private/path"), serde_json::json!(true), serde_json::json!(-1), serde_json::json!(1.0)] {
+                        if entry.is_boolean() && bad == serde_json::json!(true) { continue; }
+                        let mut changed = original.clone(); changed.pointer_mut(&path).unwrap()[key] = bad;
+                        assert!(lifecycle_parse(&changed.to_string()).is_none());
+                    }
+                }
+            }
+            for (age, remaining, valid) in [(0,120_000_000,true),(119_999_999,1,true),(120_000_000,0,true),(600_000_000,0,true),(600_000_001,0,false),(1,120_000_000,false)] {
+                let mut value = original.clone();
+                value["points"]["fixture_failure"] = serde_json::json!({"age_us":age,"remaining_us":remaining});
+                assert_eq!(lifecycle_parse(&value.to_string()).is_some(), valid);
+            }
+            for cost in [serde_json::json!({"calls":0,"total_us":1,"max_us":1}),serde_json::json!({"calls":1,"total_us":10,"max_us":11}),serde_json::json!({"calls":1,"total_us":11,"max_us":10}),serde_json::json!({"calls":1_000_001,"total_us":0,"max_us":0})] {
+                let mut value = original.clone(); value["pending_wait"]["liveness"] = cost;
+                assert!(lifecycle_parse(&value.to_string()).is_none());
+            }
+            for (entry, returned, valid) in [(None,None,true),(Some(0),None,true),(Some(0),Some(0),true),(Some(2),Some(1),false),(None,Some(0),false),(Some(600_000_001),None,false)] {
+                let mut value = original.clone();
+                value["worker_started_to_client_entry_us"] = serde_json::json!(entry);
+                value["worker_started_to_client_return_us"] = serde_json::json!(returned);
+                assert_eq!(lifecycle_parse(&value.to_string()).is_some(), valid);
+            }
+            let mut value = original;
+            for point in value["points"].as_object_mut().unwrap().values_mut() { *point = serde_json::Value::Null; }
+            value["worker_purpose"] = serde_json::Value::Null;
+            value["worker_started_to_client_entry_us"] = serde_json::Value::Null;
+            value["worker_started_to_client_return_us"] = serde_json::Value::Null;
+            assert!(lifecycle_parse(&value.to_string()).is_some());
+        }
+        #[test]
+        fn durable_lifecycle_capture_sticky_optional_and_paired() {
+            let valid = format!("{LIFECYCLE_PRIVATE_PREFIX}{DURABLE_LIFECYCLE_MAXIMAL_TEST_JSON}]");
+            let mut flow = DurableFlowCapture::default();
+            flow.capture_line(&format!("{PRIVATE_PREFIX}{DURABLE_FLOW_MAXIMAL_TEST_JSON}]"), 8192);
+            for first in [&valid, "[DURABLE_LIFECYCLE_V1 {\"private\":\"secret\"}]", LIFECYCLE_INVALID, "[DURABLE_LIFECYCLE_V1]"] {
+                let mut slot = DurableLifecycleCapture::default();
+                slot.capture_line(first, 8192); slot.capture_line(&valid, 8192);
+                assert_eq!(slot.public_lines(&flow), vec![LIFECYCLE_INVALID]);
+                assert_eq!(slot.retained_bytes(), 0);
+            }
+            let mut slot = DurableLifecycleCapture::default();
+            slot.capture_line(&format!("private {valid}"), 8192);
+            assert!(slot.public_lines(&flow).is_empty());
+            slot.capture_line(&valid, 8192);
+            assert_eq!(slot.public_lines(&flow), vec![format!("{LIFECYCLE_PUBLIC_PREFIX}{DURABLE_LIFECYCLE_MAXIMAL_TEST_JSON}").as_str()]);
+            assert_eq!(slot.public_lines(&DurableFlowCapture::default()), vec![LIFECYCLE_INVALID]);
+            slot.discard_for_budget();
+            assert_eq!(slot.public_lines(&flow), vec![LIFECYCLE_INVALID]);
+            let mut slot = DurableLifecycleCapture::default();
+            slot.capture_line(&valid, 1); slot.capture_line(&valid, 8192);
+            assert_eq!(slot.public_lines(&flow), vec![LIFECYCLE_INVALID]);
         }
         #[test]
         fn durable_flow_capture_is_sticky_bounded_and_independent() {
@@ -3792,6 +4252,6 @@ mod durable_flow_projection {
     }
 }
 #[cfg(all(test, feature = "synthetic-born-joined-qualification"))]
-pub(super) use durable_flow_projection::DURABLE_FLOW_MAXIMAL_TEST_JSON;
+pub(super) use durable_flow_projection::{DURABLE_FLOW_MAXIMAL_TEST_JSON, DURABLE_LIFECYCLE_MAXIMAL_TEST_JSON};
 #[cfg(feature = "synthetic-born-joined-qualification")]
-pub(super) use durable_flow_projection::{DurableFlowCapture, emit_durable_flow};
+pub(super) use durable_flow_projection::{DurableFlowCapture, DurableLifecycleCapture, emit_durable_flow};

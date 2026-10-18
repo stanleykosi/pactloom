@@ -20,19 +20,35 @@ pub use crate::native_ui::runtime::durable_proposal_qualification_v1::{
 };
 
 pub use crate::authority_bridge::durable_flow_diagnostics_v1::{
-    DurableFlowAuthorityCodeV1, DurableFlowCallOutcomeV1, DurableFlowCallOutcomesV1,
-    DurableFlowCallbackStageV1, DurableFlowCompletionV1, DurableFlowDiagnosticV1,
-    DurableFlowErrorCodeV1, DurableFlowErrorDomainV1, DurableFlowErrorV1, DurableFlowFailureV1,
-    DurableFlowJobPurposeV1, DurableFlowNestedCodeV1, DurableFlowObservationTokenV1,
-    DurableFlowOperationV1, DurableFlowPresentationV1, DurableFlowReceiveV1, DurableFlowResultV1,
-    DurableFlowStageV1, DurableFlowTransportFailureV1, DurableFlowTransportPurposeV1,
-    DurableFlowTransportStageV1,
+    DurableFlowAfterDrainV1, DurableFlowAuthorityCodeV1, DurableFlowCallOutcomeV1,
+    DurableFlowCallOutcomesV1, DurableFlowCallbackStageV1, DurableFlowCompletionV1,
+    DurableFlowDiagnosticV1, DurableFlowErrorCodeV1, DurableFlowErrorDomainV1, DurableFlowErrorV1,
+    DurableFlowFailureV1, DurableFlowJobPurposeV1, DurableFlowNestedCodeV1,
+    DurableFlowObservationTokenV1, DurableFlowOperationV1, DurableFlowPresentationV1,
+    DurableFlowReceiveV1, DurableFlowResultV1, DurableFlowStageV1, DurableFlowTransportFailureV1,
+    DurableFlowTransportPurposeV1, DurableFlowTransportStageV1, DurableLifecycleDiagnosticV1,
+    DurableLifecyclePointV1, DurableLifecyclePointMeasurementV1, DurablePendingWaitKindV1,
+    DurablePendingWaitCostV1,
 };
 
 pub struct EphemeralDurableNativeV1 {
     inner: DurableNativeFixtureV1,
 }
 impl EphemeralAcknowledgedBornV1 {
+    /// The same genuine opener, with opt-in inert owner-lifetime evidence only.
+    pub fn open_fresh_durable_diagnosed(
+        self,
+        proposal: wholepact_core::ProposalInput,
+        aggregate_budget_zatoshis: u64,
+    ) -> std::result::Result<EphemeralDurableNativeV1, DurableNativeEntryFailureV1> {
+        Ok(EphemeralDurableNativeV1 {
+            inner: DurableNativeFixtureV1::open_diagnosed(
+                self.original,
+                proposal,
+                aggregate_budget_zatoshis,
+            )?,
+        })
+    }
     /// This NEW focused entry authenticates the original born vault and journal.
     /// It does not carry a V3 construction owner or reuse any old native session.
     pub fn open_fresh_durable(

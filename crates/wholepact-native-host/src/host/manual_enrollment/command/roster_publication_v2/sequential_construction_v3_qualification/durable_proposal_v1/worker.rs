@@ -53,8 +53,9 @@ fn signer_error(error: wholepact_signer::Error, label: &'static str) -> &'static
     label
 }
 fn durable_flow_error(failure: DurableFlowFailureV1, label: &'static str) -> &'static str {
-    // Inert evidence is emitted before the original entry is dropped. The
-    // original fixture Error still controls the unchanged terminal mapping.
+    // The original fixture Error controls the unchanged terminal mapping.
+    // Writer reconciliation additionally retains inert evidence through its
+    // already-required entry drain before this single emission.
     if let Some(observed) = failure.diagnostic() {
         diagnostic::emit_durable_flow(observed);
     }
@@ -321,6 +322,7 @@ pub(super) enum JoinedSignerCommandV1 {
     PollRosterPublication(usize),
     CloseRosterPublication(usize),
     OpenDurable(usize, wholepact_core::ProposalInput),
+    OpenDurableObserved(usize, wholepact_core::ProposalInput),
     PollDurablePair(usize),
     ConfigureDurableWitness(usize),
     PrepareDurableAdmission(usize),
@@ -684,6 +686,7 @@ fn execute(
         | C::PollRosterPublication(i)
         | C::CloseRosterPublication(i)
         | C::OpenDurable(i, _)
+        | C::OpenDurableObserved(i, _)
         | C::PollDurablePair(i)
         | C::ConfigureDurableWitness(i)
         | C::PrepareDurableAdmission(i)
@@ -908,6 +911,30 @@ fn execute(
             };
             (State::Durable(Box::new(entry)), reply)
         }
+        (C::OpenDurableObserved(_, proposal), State::Acknowledged(account)) if index > 0 => {
+            // The same genuine opener and original deadline, with inert
+            // lifecycle observation only for the pre-acquire qualification.
+            let entry = account
+                .open_fresh_durable_diagnosed(proposal, 1_000_000)
+                .map_err(durable_entry_error)?;
+            let reply = R::DurablePeer {
+                index,
+                peer: JoinedSignerPeerV1 {
+                    endpoint: entry
+                        .endpoint()
+                        .map_err(|e| signer_error(e, "durable endpoint"))?,
+                    provider: entry
+                        .provider()
+                        .map_err(|e| signer_error(e, "durable provider"))?,
+                    deadline: entry
+                        .deadline()
+                        .map_err(|e| signer_error(e, "durable deadline"))?,
+                },
+                scope: entry.scope().clone(),
+                entry_digest: entry.native_entry_digest().into(),
+            };
+            (State::Durable(Box::new(entry)), reply)
+        }
         (C::PollDurablePair(_), State::Durable(mut entry)) => {
             poll_until(
                 entry
@@ -963,9 +990,17 @@ fn execute(
             (State::Durable(entry), R::Done { index })
         }
         (C::ReconcileDurableWriter(_), State::Durable(mut entry)) if index > 0 => {
-            entry
-                .reconcile_original_writer_diagnosed()
-                .map_err(|e| durable_flow_error(e, "exact current writer native reconciliation"))?;
+            if let Err(mut failure) = entry.reconcile_original_writer_diagnosed() {
+                // Preserve the original failure, but do not seal a pending
+                // worker's observations before the existing lock/cancel/drain.
+                // Finalization below performs no new operation or wait.
+                drop(entry);
+                failure.finalize_after_drain();
+                return Err(durable_flow_error(
+                    failure,
+                    "exact current writer native reconciliation",
+                ));
+            }
             (State::Durable(entry), R::Done { index })
         }
         (C::ConfigureDurableWallet(_, setup), State::Durable(mut entry)) if index > 0 => {
