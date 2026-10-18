@@ -1,8 +1,16 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-18, 21:32 UTC.
+Updated: 2026-10-18, 22:24 UTC.
 
 **Incomplete implementation. No full native financial signing, public testnet settlement, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
+
+## CI16: actual admission succeeded; pre-Acquire native owner expired
+
+[Run 39168503597](https://github.com/stanleykosi/pactloom/actions/runs/39168503597), qualifier `c011b1caea66edb5443cf220c38aea530897545b`, passed build/Python123/Host72/bootstrap/baseline/cleanup. The actual admission setup completed: witness verified its committed native receipt and exact immutable journal request/head, and signer verified AdmissionCommitted and the same retained intent. It then stopped during WriterReconcile/AcquirePrepare with NativeOwnerExpired and SignerLocked, before any Acquire call. This establishes admission progress, not two-owner financial signing or payment completion.
+
+The four-file synthetic-only correction deliberately drains/closes the old signer after admission, drops the old client, and creates a genuine fresh original owner entry. It pairs, configures the same original witness, accepts fresh refs and performs a distinct PreAcquire redisclosure/import/export. It starts the same committed financial server once immediately before authenticated historical lookup, and recognizes only the exact prior admission through the existing production HistoricalAdmission branch. It does not assign a runtime admission ID, approve a new admission, extend a deadline, or renew an acquired session. Existing Session preparation still refuses prior acquisition, active or pending writer state; post-Acquire recovery semantics remain unchanged.
+
+All-features Host+Signer build passed (6m50s); three pure historical-admission correlation negatives, one Host namespace regression, Host72 and Python123 passed. Pure tests do not construct native authority. Full native fresh reentry/acquisition/signing/retry is still pending qualification; public testnet settlement and OS-restart qualification are not established.
 
 ## CI15: admission callback cost measured; later-flow observation and consolidation
 
