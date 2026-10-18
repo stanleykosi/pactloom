@@ -748,6 +748,175 @@ fn held_original_lease_reuses_exact_fence_with_queued_revoker() {
 }
 
 #[test]
+fn preconstruction_lease_requires_exact_binding_account_and_one_fresh_snapshot() {
+    let f = Fixture::new();
+    let original = f.original();
+    let session = fixture::session(&f.journal, "synthetic-owner");
+    let lease = f
+        .journal
+        .acquire_preconstruction_records(
+            original.enrollment().reference(),
+            original.accepted_manifest().reference(),
+            &session,
+        )
+        .unwrap();
+    let foreign = Fixture::new();
+    DURABLE_BORN_SNAPSHOT_VALIDATIONS_V1.with(|count| count.set(0));
+    assert!(matches!(
+        foreign
+            .journal
+            .check_durable_born_entry_v1_under_preconstruction_lease(&foreign.genesis, &lease),
+        Err(JournalError::Permission)
+    ));
+    let mut wrong_account = f.genesis.clone();
+    wrong_account.identity.account_id = "de".repeat(32);
+    assert!(matches!(
+        f.journal
+            .check_durable_born_entry_v1_under_preconstruction_lease(&wrong_account, &lease),
+        Err(JournalError::Permission)
+    ));
+    DURABLE_BORN_SNAPSHOT_VALIDATIONS_V1.with(|count| assert_eq!(count.get(), 0));
+    for expected in 1..=2 {
+        f.journal
+            .check_durable_born_entry_v1_under_preconstruction_lease(&f.genesis, &lease)
+            .unwrap();
+        // One real full snapshot per helper invocation, never a prior success
+        // cache. This does not qualify a native runtime or transport callback.
+        DURABLE_BORN_SNAPSHOT_VALIDATIONS_V1.with(|count| assert_eq!(count.get(), expected));
+    }
+}
+
+#[test]
+fn preconstruction_lease_rechecks_exclusion_committed_after_earlier_snapshot() {
+    let f = Fixture::new();
+    let original = f.original();
+    f.check().unwrap();
+    let event = PermanentAccountExclusion {
+        version: 1,
+        identity: f.genesis.identity.clone(),
+        genesis_digest: f.genesis.digest().unwrap(),
+        operation_id: "retire-after-earlier-snapshot".into(),
+        native_review_digest: "cd".repeat(32),
+        reason: ExclusionReason::RetirementRequested,
+    };
+    event.validate().unwrap();
+    {
+        // Synthetic storage mutation under the same fence as restrictive
+        // publication. No native approval or production publication is forged.
+        let _fence = f.journal.authority_fence.write().unwrap();
+        let mut c = f.journal.connection.lock().unwrap();
+        let tx = c
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        tx.execute(
+            "INSERT INTO signer_account_use_exclusion VALUES(1,?1,?2,?3)",
+            params![
+                event.genesis_digest,
+                event.digest().unwrap(),
+                encode(&event).unwrap().as_str()
+            ],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+    }
+    assert!(!f.journal.account_state().unwrap().recovery_required);
+    let before = f.commitment();
+    let session = fixture::session(&f.journal, "synthetic-owner");
+    // Record acquisition alone intentionally reads historical records and does
+    // not inspect exclusion. The full check AFTER acquisition closes this gap.
+    let lease = f
+        .journal
+        .acquire_preconstruction_records(
+            original.enrollment().reference(),
+            original.accepted_manifest().reference(),
+            &session,
+        )
+        .unwrap();
+    lease.check_current().unwrap();
+    assert!(matches!(
+        f.journal
+            .check_durable_born_entry_v1_under_preconstruction_lease(&f.genesis, &lease),
+        Err(JournalError::Permission)
+    ));
+    assert_eq!(before, f.commitment());
+}
+
+#[test]
+fn preconstruction_lease_does_not_hide_second_live_handle_recovery() {
+    let f = Fixture::new();
+    let original = f.original();
+    let second =
+        SignerConsentJournal::open_durable_born_entry_v1(&f.path, &f.key, &f.genesis, &f.source)
+            .unwrap();
+    let session = fixture::session(&f.journal, "synthetic-owner");
+    let lease = f
+        .journal
+        .acquire_preconstruction_records(
+            original.enrollment().reference(),
+            original.accepted_manifest().reference(),
+            &session,
+        )
+        .unwrap();
+    f.journal
+        .check_durable_born_entry_v1_under_preconstruction_lease(&f.genesis, &lease)
+        .unwrap();
+    // An independent current19 connection has a distinct authority fence. The
+    // retained lease is not a global write exclusion or a cached snapshot.
+    second.require_recovery().unwrap();
+    let before = f.commitment();
+    assert!(matches!(
+        f.journal
+            .check_durable_born_entry_v1_under_preconstruction_lease(&f.genesis, &lease),
+        Err(JournalError::RecoveryRequired)
+    ));
+    assert_eq!(before, f.commitment());
+}
+
+#[test]
+fn held_preconstruction_lease_reuses_exact_fence_with_queued_revoker() {
+    use std::{
+        sync::mpsc,
+        time::{Duration, Instant},
+    };
+    let f = Arc::new(Fixture::new());
+    let original = f.original();
+    let (checked_tx, checked_rx) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let session = fixture::session(&f.journal, "synthetic-owner");
+        let lease = f
+            .journal
+            .acquire_preconstruction_records(
+                original.enrollment().reference(),
+                original.accepted_manifest().reference(),
+                &session,
+            )
+            .unwrap();
+        let revoker = Arc::clone(&f);
+        let (started_tx, started_rx) = mpsc::channel();
+        let revoke = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            revoker.journal.require_recovery().unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while f.journal.authority_fence.try_read().is_ok() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(f.journal.authority_fence.try_read().is_err());
+        f.journal
+            .check_durable_born_entry_v1_under_preconstruction_lease(&f.genesis, &lease)
+            .unwrap();
+        checked_tx.send(()).unwrap();
+        drop(lease);
+        revoke.join().unwrap();
+        assert!(matches!(f.check(), Err(JournalError::RecoveryRequired)));
+    });
+    // A recursive read-lock regression fails by timeout, not a hung test run.
+    checked_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    worker.join().unwrap();
+}
+
+#[test]
 fn actual_born_origin_refuses_every_older_format_even_without_genesis_cells() {
     let f = Fixture::new();
     for (version, schema) in [

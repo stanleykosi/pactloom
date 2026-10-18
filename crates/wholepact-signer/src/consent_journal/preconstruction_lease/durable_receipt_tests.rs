@@ -176,6 +176,33 @@ fn both_receipts_require_the_original_monotonic_review_window() {
 }
 
 #[test]
+fn earlier_success_does_not_renew_either_original_monotonic_receipt_window() {
+    for manifest in [false, true] {
+        let f = Fixture::new();
+        {
+            let earlier = f.lease();
+            earlier
+                .require_current_durable_disclosure_receipts_v1()
+                .unwrap();
+        }
+        let nonce = if manifest {
+            f.manifest.receipt().nonce()
+        } else {
+            f.enrollment.receipt().nonce()
+        };
+        fixture::expire_receipt_monotonically(&f.session, nonce);
+        let current = f.lease();
+        current.check_current().unwrap();
+        assert!(current.enrollment() == &f.enrollment);
+        assert!(current.manifest() == &f.manifest);
+        assert!(matches!(
+            current.require_current_durable_disclosure_receipts_v1(),
+            Err(JournalError::Expired)
+        ));
+    }
+}
+
+#[test]
 fn both_receipts_require_current_wall_clock_window() {
     let f = Fixture::new();
     for manifest in [false, true] {
