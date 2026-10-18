@@ -1,6 +1,6 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-18, 04:24 UTC.
+Updated: 2026-10-18, 04:52 UTC.
 
 **Incomplete implementation. No full native financial signing, public testnet settlement, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
 
@@ -12,9 +12,15 @@ All required gates passed: Python 87, focused Host 44, encrypted bootstrap, sign
 
 This is NOT financial signature release, an actual OS-process restart, an attended GUI test, Windows qualification, public-chain settlement, or a usable activated private Host workflow. The next isolated test is genuine independent native financial signing and exact signature union; its leaf is still inactive.
 
-Main implementation Stage A at `1a9dab79a5df3c99e7cd55d7979a40add75656e8` compiled in 5 minutes 35 seconds and passed all 86 selected first-write marker/history/privacy cases. Default Engine marker 10 and registration 5 cases passed, alongside workflow 7, selected-scope 3 and quarantine 1 integration cases. Durable-proposal-only unsupported configuration also passed marker 10 and registration 5 cases. These overlapping suites must not be summed into a unique total. Native own-association/Host entry, discovery issuer/schema 19 and marked discovery/material mutation commands remain inactive or explicitly unsupported.
+Main implementation Stage A at `1a9dab79a5df3c99e7cd55d7979a40add75656e8` compiled in 5 minutes 35 seconds and passed all 86 selected first-write marker/history/privacy cases. Default Engine marker 10 and registration 5 cases passed, alongside workflow 7, selected-scope 3 and quarantine 1 integration cases. Durable-proposal-only unsupported configuration also passed marker 10 and registration 5 cases. These overlapping suites must not be summed into a unique total. Native own-association/Host entry, unregistered discovery issuer/storage and marked discovery/material mutation commands remain inactive or explicitly unsupported.
 
 The sections below retain historical observations and failed-run diagnoses; older pending labels describe those earlier checkpoints, not the current gate above.
+
+## Build provenance correction and current signing prerequisite
+
+The main and isolated qualification checkouts previously shared a Cargo target directory. A later main Host build reused an older isolated workspace dependency, producing misleading missing-symbol errors. No feature visibility changes were justified. Separate initially empty `target-main` and `target-isolated` directories are now required. The main Host and Signer all-features release library test build succeeded from the empty main target in 11 minutes 28 seconds. This is compilation, not native signing qualification; the independent cold GitHub CI6 result is unaffected.
+
+The inactive signing helper also had one private field access corrected to the existing binding accessor without widening visibility. Genuine financial authority still requires a new exact owner-authenticated admission route and a signer-side immutable request retained before dispatch. A lost response must reconcile the same request, not create a different request/head. The financial-only schema proposal preserves original born journals by refusing old-born automatic migration before writes; dedicated original-born upgrade remains out of scope. None of this is yet an integrated financial signing pass.
 
 ## Observed local results
 

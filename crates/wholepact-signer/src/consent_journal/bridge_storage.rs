@@ -43,7 +43,8 @@ impl SignerConsentJournal {
             "SELECT * FROM signer_result_redeliveries ORDER BY operation_id",
         ];
         let account = self.account_state()?;
-        let permission = session.read_lease(&self.binding, &account)?;
+        let binding = self.binding();
+        let permission = session.read_lease(&binding, &account)?;
         let _fence = self
             .authority_fence
             .read()
