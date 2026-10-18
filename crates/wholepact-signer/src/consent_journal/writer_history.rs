@@ -11,6 +11,33 @@ use wholepact_authority::{
     OwnerControl, ReconciledAuthorityHistory, ReservationEvidenceRef, ReservationPermit,
 };
 
+/// Closed, read-only validation of one already-open read transaction. Only the
+/// two inventory schema passes repeat work completed by the ordered prefix;
+/// every remaining gate and full retained-history check still runs in order.
+/// No inventory, authority, validation token, or transaction ownership escapes.
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "pending-birth-owner-signing",
+    target_os = "linux"
+))]
+pub(super) fn validate_durable_born_snapshot_v1(
+    tx: &Transaction<'_>,
+    genesis: &wholepact_authority::account_use::AccountUseGenesis,
+    limits: (u64, u64),
+) -> Result<()> {
+    #[cfg(test)]
+    let _cost_validation = storage::enter_durable_born_validation_cost_v1();
+    let account = storage::validate_durable_born_prefix_v1(tx, genesis, limits)?;
+    // Typed original/release/exposure/input validation retains every local and
+    // imported online uncertainty. It does not import anything or clear rows.
+    #[cfg(test)]
+    let cost_inventory = storage::enter_durable_born_inventory_cost_v1();
+    let _inventory = WriterLocalInventory::read_durable_born_snapshot_cells(tx, &account, limits)?;
+    #[cfg(test)]
+    drop(cost_inventory);
+    storage::validate_durable_born_suffix_v1(tx, genesis, &account, limits)
+}
+
 pub(super) struct WriterLocalInventory {
     originals: Vec<OriginalAuthorizationEvidence>,
     remote_online: Vec<ReservationPermit>,
@@ -70,6 +97,43 @@ impl WriterLocalInventory {
         storage::check_account(c, account)?;
         storage::verify_schema(c)?;
         storage::bounded(c, limits)?;
+        Self::read_existing_origin_cells_body(c, account)
+    }
+
+    // Called only by the closed Transaction-bound validator above, immediately
+    // after its full schema/account-policy prefix on that same read snapshot.
+    // Preserve the generic reader's cheap gates and their original order;
+    // omit only its two already-completed complete schema passes.
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "pending-birth-owner-signing",
+        target_os = "linux"
+    ))]
+    fn read_durable_born_snapshot_cells(
+        tx: &Transaction<'_>,
+        account: &SignerAccountState,
+        limits: (u64, u64),
+    ) -> Result<Self> {
+        if tx.is_autocommit() {
+            return Err(JournalError::InvalidBinding);
+        }
+        storage::check_account(tx, account)?;
+        storage::require_no_unimplemented_reentry(tx)?;
+        named_recipient_inventory::require_absent(tx)?;
+        if tx.is_autocommit() {
+            return Err(JournalError::InvalidBinding);
+        }
+        storage::check_account(tx, account)?;
+        storage::bounded(tx, limits)?;
+        Self::read_existing_origin_cells_body(tx, account)
+    }
+
+    // Private shared typed-reader tail. Ordinary writer, transport and archive
+    // entry paths keep their existing schema checks before reaching this body.
+    fn read_existing_origin_cells_body(
+        c: &Connection,
+        account: &SignerAccountState,
+    ) -> Result<Self> {
         let offline = offline_history::read_existing_origin_cells(c, &account.account_id)?;
         let common_context_audit = construction_audit_v3::read_all(c, &account.account_id)?;
         let durable_payment_intents = read_durable_payment_admission_intents_v1(c)?;
