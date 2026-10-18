@@ -11,6 +11,12 @@ use crate::durable_input_projection_v1::{
 use sha2::{Digest, Sha256};
 use std::net::Shutdown;
 
+mod redisclosure;
+pub use redisclosure::{
+    NativeInputProjectionRedisclosureClientV1, PendingDurableInputProjectionRedeliveryV1,
+    PendingInputProjectionRedisclosurePairV1,
+};
+
 const MAX_PROJECTION_OPERATION: Duration = Duration::from_secs(120);
 const PAIR_COMMAND: &str = "request_durable_input_projection_pairing_v1";
 const REQUEST_COMMAND: &str = "request_durable_input_projection_v1";
@@ -314,6 +320,7 @@ impl PendingDurableInputProjectionV1<'_> {
         check_current()?;
         Ok(AuthenticatedDurableInputProjectionV1 {
             outbox: *outbox,
+            redelivery: None,
             signer_enrollment_reference: self.client.provider.native_enrollment_reference().into(),
             signer_process_instance: self.client.peer.instance().into(),
         })
@@ -326,12 +333,22 @@ impl PendingDurableInputProjectionV1<'_> {
 /// Deserialize, public constructor or conversion from a public outbox exists.
 pub struct AuthenticatedDurableInputProjectionV1 {
     outbox: DurableInputProjectionOutboxV1,
+    redelivery:
+        Option<crate::durable_input_projection_v1::redisclosure::DurableInputProjectionDeliveryV1>,
     signer_enrollment_reference: String,
     signer_process_instance: String,
 }
 impl AuthenticatedDurableInputProjectionV1 {
     pub fn outbox(&self) -> &DurableInputProjectionOutboxV1 {
         &self.outbox
+    }
+    /// A fresh one-hop delivery of the unchanged original, never a replacement
+    /// projection or a claim that its wallet observation was refreshed.
+    pub fn redelivery(
+        &self,
+    ) -> Option<&crate::durable_input_projection_v1::redisclosure::DurableInputProjectionDeliveryV1>
+    {
+        self.redelivery.as_ref()
     }
     pub fn signer_enrollment_reference(&self) -> &str {
         &self.signer_enrollment_reference
@@ -418,6 +435,72 @@ fn write_projection_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pair_response() -> ProjectionPairResponseV1 {
+        let scope = ProjectionPairScopeV1 { schema_version: 1,
+            purpose: wholepact_core::durable_input_projection_v1::DurableInputProjectionPurposeV1::DurablePlainFixedInputProjectionV1,
+            operation_id: "projection".into(), account_id: "a".repeat(64),
+            agreement_id: "agreement".into(), obligation_id: "obligation".into(),
+            participant_id: "participant".into(), intent_digest: "b".repeat(64) };
+        let instance = "c".repeat(64);
+        let token = "11".repeat(32);
+        let grant = "d".repeat(64);
+        ProjectionPairResponseV1 {
+            schema_version: 1,
+            accepted: true,
+            reason_code: INPUT_PROJECTION_PAIR_REASON_V1.into(),
+            grant_id: grant.clone(),
+            token_hex: token.clone(),
+            expires_in_seconds: 60,
+            binding: ProjectionChannelBindingV1 {
+                version: 1,
+                channel_binding_digest:
+                    crate::durable_input_projection_v1::projection_pairing_review_digest_v1(
+                        &scope, &instance, 1,
+                    )
+                    .unwrap(),
+                scope,
+                grant_id: grant,
+                authenticated_local_grant_digest: hex::encode(Sha256::digest(
+                    hex::decode(token).unwrap(),
+                )),
+                uid: unsafe { libc::geteuid() },
+                pid: std::process::id(),
+                process_instance: instance,
+                signer_generation: 1,
+            },
+        }
+    }
+
+    #[test]
+    fn pair_response_tampering_never_passes_exact_metadata_check() {
+        // This helper validates DATA only; it does not mint a client, native
+        // approval, process observation, or sealed provenance result.
+        let good = pair_response();
+        let scope = good.binding.scope.clone();
+        assert!(validate_pair_response(&good, &scope).is_ok());
+        for mutation in 0..12 {
+            let mut changed = pair_response();
+            match mutation {
+                0 => changed.grant_id = "e".repeat(64),
+                1 => changed.token_hex = "22".repeat(32),
+                2 => changed.binding.pid = changed.binding.pid.wrapping_add(1),
+                3 => changed.binding.uid = changed.binding.uid.wrapping_add(1),
+                4 => changed.binding.scope.operation_id.push_str("-other"),
+                5 => changed.expires_in_seconds = 0,
+                6 => changed.expires_in_seconds = 121,
+                7 => changed.reason_code = "LOCAL_PROCESS_REQUEST_SCOPE".into(),
+                8 => changed.schema_version = 2,
+                9 => changed.accepted = false,
+                10 => changed.binding.signer_generation = 0,
+                _ => changed.binding.authenticated_local_grant_digest = "f".repeat(64),
+            }
+            assert!(
+                validate_pair_response(&changed, &scope).is_err(),
+                "mutation {mutation}"
+            );
+        }
+    }
 
     #[test]
     fn projection_deadline_only_restricts_and_never_renews() {

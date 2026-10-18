@@ -10,6 +10,8 @@ use wholepact_core::durable_input_projection_v1::{
 };
 use zeroize::Zeroize;
 
+pub mod redisclosure;
+
 pub const MAX_INPUT_PROJECTION_FRAME_BYTES_V1: usize = 128 * 1024;
 pub const INPUT_PROJECTION_PAIR_REASON_V1: &str = "DURABLE_INPUT_PROJECTION_REQUEST_SCOPE_V1";
 

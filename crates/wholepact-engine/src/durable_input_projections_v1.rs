@@ -21,7 +21,8 @@ use wholepact_core::{
 use wholepact_protocol::construction::durable_projection_shape_v1::candidate_from_retained_projections_v1;
 use wholepact_signer_origin::{
     durable_input_projection_v1::{
-        DurableInputProjectionOutboxV1, DurableInputProjectionRequestV1,
+        redisclosure::DurableInputProjectionDeliveryV1, DurableInputProjectionOutboxV1,
+        DurableInputProjectionRequestV1,
     },
     AuthenticatedDurableInputProjectionV1,
 };
@@ -84,6 +85,11 @@ struct Intake {
     signer_enrollment_reference: String,
     signer_process_instance: String,
     outbox: DurableInputProjectionOutboxV1,
+    /// Optional fresh, independently approved delivery of this exact original
+    /// outbox after a lost response. It never replaces the original request,
+    /// projection, validity window or historical recipient provenance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    redelivery: Option<DurableInputProjectionDeliveryV1>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -179,6 +185,11 @@ impl Round {
         }
         for (account, intake) in &self.intakes {
             intake.outbox.validate().map_err(|_| damaged())?;
+            if let Some(delivery) = &intake.redelivery {
+                delivery
+                    .require_original(&intake.outbox)
+                    .map_err(|_| damaged())?;
+            }
             if Some(&intake.outbox.request) != self.requests.get(account)
                 || intake.signer_enrollment_reference.is_empty()
                 || intake.signer_enrollment_reference.len() > 128
@@ -444,6 +455,9 @@ impl Engine {
         let mut round = self.discovery_round(&envelope, candidate_id)?;
         let outbox = disclosure.outbox();
         outbox.validate().map_err(|_| damaged())?;
+        if let Some(delivery) = disclosure.redelivery() {
+            delivery.require_original(outbox).map_err(|_| damaged())?;
+        }
         let account = &outbox.request.intent.account_id;
         if round.requests.get(account) != Some(&outbox.request) {
             return Err(denied());
@@ -452,6 +466,7 @@ impl Engine {
             signer_enrollment_reference: disclosure.signer_enrollment_reference().into(),
             signer_process_instance: disclosure.signer_process_instance().into(),
             outbox: outbox.clone(),
+            redelivery: disclosure.redelivery().cloned(),
         };
         let command = crate::context(
             access,
