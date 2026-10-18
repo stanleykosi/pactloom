@@ -325,6 +325,7 @@ pub(super) enum JoinedSignerCommandV1 {
     ConfigureDurableWitness(usize),
     PrepareDurableAdmission(usize),
     ApproveDurableAdmission(usize),
+    ObserveCommittedDurableAdmission(usize, wholepact_authority::OwnerControlRequest),
     ReconcileDurableWriter(usize),
     ConfigureDurableWallet(usize, String),
     AcceptDurable(usize),
@@ -687,6 +688,7 @@ fn execute(
         | C::ConfigureDurableWitness(i)
         | C::PrepareDurableAdmission(i)
         | C::ApproveDurableAdmission(i)
+        | C::ObserveCommittedDurableAdmission(i, _)
         | C::ReconcileDurableWriter(i)
         | C::ConfigureDurableWallet(i, _)
         | C::AcceptDurable(i)
@@ -947,6 +949,17 @@ fn execute(
             entry
                 .approve_durable_admission_diagnosed()
                 .map_err(durable_admission_dispatch_error)?;
+            (State::Durable(entry), R::Done { index })
+        }
+        (C::ObserveCommittedDurableAdmission(_, expected), State::Durable(mut entry))
+            if index > 0 =>
+        {
+            // Historical recognition only. The existing runtime authenticates
+            // complete history and exact immutable local intent; no approval,
+            // replacement admission or writer session is created here.
+            entry
+                .observe_committed_durable_admission(&expected)
+                .map_err(durable_admission_error)?;
             (State::Durable(entry), R::Done { index })
         }
         (C::ReconcileDurableWriter(_), State::Durable(mut entry)) if index > 0 => {

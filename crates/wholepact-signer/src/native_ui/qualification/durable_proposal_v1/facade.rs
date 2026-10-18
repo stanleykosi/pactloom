@@ -20,13 +20,13 @@ pub use crate::native_ui::runtime::durable_proposal_qualification_v1::{
 };
 
 pub use crate::authority_bridge::durable_flow_diagnostics_v1::{
-    DurableFlowDiagnosticV1, DurableFlowFailureV1, DurableFlowObservationTokenV1,
-    DurableFlowOperationV1, DurableFlowResultV1, DurableFlowStageV1, DurableFlowErrorV1,
-    DurableFlowErrorDomainV1, DurableFlowErrorCodeV1, DurableFlowNestedCodeV1,
-    DurableFlowCompletionV1, DurableFlowJobPurposeV1, DurableFlowReceiveV1,
-    DurableFlowPresentationV1, DurableFlowCallOutcomesV1, DurableFlowCallOutcomeV1,
-    DurableFlowTransportFailureV1, DurableFlowTransportPurposeV1, DurableFlowTransportStageV1,
-    DurableFlowAuthorityCodeV1, DurableFlowCallbackStageV1,
+    DurableFlowAuthorityCodeV1, DurableFlowCallOutcomeV1, DurableFlowCallOutcomesV1,
+    DurableFlowCallbackStageV1, DurableFlowCompletionV1, DurableFlowDiagnosticV1,
+    DurableFlowErrorCodeV1, DurableFlowErrorDomainV1, DurableFlowErrorV1, DurableFlowFailureV1,
+    DurableFlowJobPurposeV1, DurableFlowNestedCodeV1, DurableFlowObservationTokenV1,
+    DurableFlowOperationV1, DurableFlowPresentationV1, DurableFlowReceiveV1, DurableFlowResultV1,
+    DurableFlowStageV1, DurableFlowTransportFailureV1, DurableFlowTransportPurposeV1,
+    DurableFlowTransportStageV1,
 };
 
 pub struct EphemeralDurableNativeV1 {
@@ -225,6 +225,15 @@ impl EphemeralDurableNativeV1 {
         &mut self,
     ) -> std::result::Result<(), DurableAdmissionDispatchFailureV1> {
         self.inner.approve_durable_admission_diagnosed()
+    }
+    /// Read authenticated complete history after a genuine fresh native entry
+    /// and reimport. The expected original request supplies correlation only;
+    /// no admission, approval, writer session or deadline is renewed.
+    pub fn observe_committed_durable_admission(
+        &mut self,
+        expected: &wholepact_authority::OwnerControlRequest,
+    ) -> std::result::Result<(), DurableAdmissionPreparationFailureV1> {
+        self.inner.observe_committed_durable_admission(expected)
     }
     pub fn reconcile_original_writer(&mut self) -> Result<()> {
         self.inner.reconcile_original_writer()

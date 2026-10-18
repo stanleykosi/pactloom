@@ -402,19 +402,38 @@ fn accept_records(
 }
 
 /// Reuse exact original proof bytes, but never reuse old local permission. The
-/// two distinct purposes keep pre-admission and post-reconciliation imports and
+/// three distinct purposes keep pre-admission, pre-acquire and post-reconciliation imports and
 /// linked disclosures immutable and separately identified.
+#[derive(Clone, Copy)]
+enum ReviewImportPurpose {
+    Admission,
+    PreAcquire,
+    Signing,
+}
+impl ReviewImportPurpose {
+    fn namespace(self) -> &'static str {
+        match self {
+            Self::Admission => "admission",
+            Self::PreAcquire => "preacquire",
+            Self::Signing => "signing",
+        }
+    }
+    fn requires_reconciled_writer(self) -> bool {
+        matches!(self, Self::Signing)
+    }
+}
 fn redisclose_and_import(
     input: &FixedSigningInputsV1<'_>,
     client: &OriginalHistoryClient,
     index: usize,
     records: &wholepact_signer::native_ui::synthetic_born_joined_qualification::DurableNativeRecordsV1,
-    financial: bool,
+    purpose: ReviewImportPurpose,
     revision: u64,
     trace: &mut HostTrace,
 ) -> Result<u64> {
     let worker = &input.original.signers;
-    let purpose = if financial { "signing" } else { "admission" };
+    let financial = purpose.requires_reconciled_writer();
+    let purpose = purpose.namespace();
     trace.begin(B::DurableHostRedisclosure);
     let original = &input.original_disclosures[index - 1];
     let renewed = DurableConstructionRedisclosureRequestV1 {
@@ -771,7 +790,7 @@ pub(super) fn exercise(input: FixedSigningInputsV1<'_>) -> Result<()> {
             &client,
             index,
             &admission_records,
-            false,
+            ReviewImportPurpose::Admission,
             revision,
             &mut trace,
         )?;
@@ -885,11 +904,79 @@ pub(super) fn exercise(input: FixedSigningInputsV1<'_>) -> Result<()> {
             }
         }
         signer_finished?;
+
+        // Admission is now exact committed history, not a reusable native
+        // window. Drain the old owner and obtain genuine fresh permissions
+        // BEFORE the first writer acquisition. No acquired client/session is
+        // ever replaced by this deliberately separate fixture phase.
+        drop(client);
+        trace.begin(B::DurableHostClose);
+        worker
+            .send(Command::CloseDurable(index))
+            .map_err(|error| trace.worker(error))?;
+        done(worker, index, &mut trace)?;
+        trace.begin(B::DurableHostOpen);
+        worker
+            .send(Command::OpenDurable(index, input.proposal.clone()))
+            .map_err(|error| trace.worker(error))?;
+        let (peer, scope) = match worker.receive().map_err(|error| trace.worker(error))? {
+            Reply::DurablePeer {
+                index: actual,
+                peer,
+                scope,
+                ..
+            } if actual == index => (peer, scope),
+            _ => return Err(trace.refused(Outcome::HostInvalid)),
+        };
+        trace.begin(B::DurableHostPairStatus);
+        worker
+            .send(Command::PollDurablePair(index))
+            .map_err(|error| trace.worker(error))?;
+        let client = OriginalHistoryClient::pair(
+            peer.provider,
+            &peer.endpoint,
+            "Synthetic-fixed-proposal-signer",
+            scope,
+        )
+        .map_err(|error| trace.bridge(error))?;
+        trace.begin(B::DurableHostPairObserved);
+        done(worker, index, &mut trace)?;
+        trace.begin(B::DurableHostWitnessSetup);
+        worker
+            .send(Command::ConfigureDurableWitness(index))
+            .map_err(|error| trace.worker(error))?;
+        done(worker, index, &mut trace)?;
+        let preacquire_records = accept_records(worker, index, &mut trace)?;
+        trace.check(
+            preacquire_records.enrollment_ref != admission_records.enrollment_ref
+                && preacquire_records.accepted_manifest_ref
+                    != admission_records.accepted_manifest_ref,
+        )?;
+        revision = redisclose_and_import(
+            &input,
+            &client,
+            index,
+            &preacquire_records,
+            ReviewImportPurpose::PreAcquire,
+            revision,
+            &mut trace,
+        )?;
+        trace.begin(B::DurableHostWitnessSetup);
+        // Open the SAME committed original namespace exactly once, immediately
+        // before the first history contact. Local setup/import above needs no
+        // witness socket. Its original bounded serving lifetime is unchanged.
         let financial_server = input
             .original
             .witness
             .serve_committed_durable_payment(&admission.operation_id)
             .map_err(|error| trace.authority(error))?;
+        worker
+            .send(Command::ObserveCommittedDurableAdmission(
+                index,
+                admission.clone(),
+            ))
+            .map_err(|error| trace.worker(error))?;
+        done(worker, index, &mut trace)?;
         trace.begin(B::DurableHostWriterReconcile);
         worker
             .send(Command::ReconcileDurableWriter(index))
@@ -899,8 +986,8 @@ pub(super) fn exercise(input: FixedSigningInputsV1<'_>) -> Result<()> {
         // Keep the same writer key/session, but require new native receipts.
         let records = accept_records(worker, index, &mut trace)?;
         trace.check(
-            records.enrollment_ref != admission_records.enrollment_ref
-                && records.accepted_manifest_ref != admission_records.accepted_manifest_ref,
+            records.enrollment_ref != preacquire_records.enrollment_ref
+                && records.accepted_manifest_ref != preacquire_records.accepted_manifest_ref,
         )?;
         trace.begin(B::DurableHostViewingSetup);
         worker
@@ -910,8 +997,15 @@ pub(super) fn exercise(input: FixedSigningInputsV1<'_>) -> Result<()> {
             ))
             .map_err(|error| trace.worker(error))?;
         done(worker, index, &mut trace)?;
-        revision =
-            redisclose_and_import(&input, &client, index, &records, true, revision, &mut trace)?;
+        revision = redisclose_and_import(
+            &input,
+            &client,
+            index,
+            &records,
+            ReviewImportPurpose::Signing,
+            revision,
+            &mut trace,
+        )?;
         trace.begin(B::DurableHostSign);
         worker
             .send(Command::SignDurableFixed(index, input.identity.clone()))
@@ -1121,4 +1215,33 @@ pub(super) fn exercise(input: FixedSigningInputsV1<'_>) -> Result<()> {
     // replacement proof, old-owner renewal or serialization is performed here.
     trace.complete();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ReviewImportPurpose;
+
+    #[test]
+    fn preacquire_import_has_distinct_ids_without_reconciled_writer_claim() {
+        let purposes = [
+            ReviewImportPurpose::Admission,
+            ReviewImportPurpose::PreAcquire,
+            ReviewImportPurpose::Signing,
+        ];
+        for (left, purpose) in purposes.iter().copied().enumerate() {
+            for other in purposes.iter().copied().skip(left + 1) {
+                for suffix in ["disclosure", "import", "export"] {
+                    assert_ne!(
+                        format!("durable-fixed-{}-{suffix}-1", purpose.namespace()),
+                        format!("durable-fixed-{}-{suffix}-1", other.namespace()),
+                    );
+                }
+            }
+        }
+        assert!(!ReviewImportPurpose::Admission.requires_reconciled_writer());
+        assert!(!ReviewImportPurpose::PreAcquire.requires_reconciled_writer());
+        assert!(ReviewImportPurpose::Signing.requires_reconciled_writer());
+        assert_eq!(ReviewImportPurpose::Admission.namespace(), "admission");
+        assert_eq!(ReviewImportPurpose::Signing.namespace(), "signing");
+    }
 }

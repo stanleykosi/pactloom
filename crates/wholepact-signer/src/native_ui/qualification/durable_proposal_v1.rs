@@ -13,7 +13,9 @@ pub use super::durable_witness_v1::{
     DurableAdmissionPreparationFailureV1, DurableAdmissionPreparationStageV1,
     DurableAdmissionRetentionV1,
 };
-use super::durable_witness_v1::{DurableWitnessPreparedV1, QualificationDurableWitnessCompletionV1};
+use super::durable_witness_v1::{
+    DurableWitnessPreparedV1, QualificationDurableWitnessCompletionV1,
+};
 use super::*;
 use crate::authority_bridge::durable_flow_diagnostics_v1::{
     self as flow_diag_v1, DurableFlowDiagnosticV1, DurableFlowFailureV1,
@@ -146,6 +148,32 @@ struct DurableFixtureAdmissionObservationV1 {
     digest: Option<String>,
     stage: DurableAdmissionDispatchStageV1,
     original_is_operational: bool,
+}
+
+// Inert correlation at the historical branch's return boundary, not a source,
+// native decision or session factory. The caller must first execute and drain
+// the real authenticated history operation. A prepared review is not history.
+fn require_historical_admission_observation_v1(
+    expected: &wholepact_authority::OwnerControlRequest,
+    observed: Option<&wholepact_authority::OwnerControlRequest>,
+    pending_review: bool,
+    witness_job: bool,
+    writer_receipt: bool,
+    writer_reconciled: bool,
+) -> Result<()> {
+    if pending_review
+        || witness_job
+        || writer_receipt
+        || writer_reconciled
+        || !matches!(
+            &expected.control,
+            wholepact_authority::OwnerControl::AdmitDurablePaymentV1 { .. }
+        )
+        || observed != Some(expected)
+    {
+        return Err(Error::ReviewMismatch);
+    }
+    Ok(())
 }
 
 impl DurableNativeFixtureV1 {
@@ -779,6 +807,81 @@ impl DurableNativeFixtureV1 {
         &mut self,
     ) -> std::result::Result<(), DurableAdmissionDispatchFailureV1> {
         self.approve_durable_admission_inner(true)
+    }
+    /// After genuine close/open, pairing, acceptance and data-only reimport,
+    /// inspect the SAME committed admission through the production historical
+    /// branch. The supplied body is only an equality expectation, never an ID
+    /// assignment, approval, retry, replacement admission or restored session.
+    pub(in crate::native_ui) fn observe_committed_durable_admission(
+        &mut self,
+        expected: &wholepact_authority::OwnerControlRequest,
+    ) -> std::result::Result<(), DurableAdmissionPreparationFailureV1> {
+        use DurableAdmissionPreparationStageV1 as S;
+        let mut stage = S::FixtureState;
+        let mut attempt = None;
+        let result = (|| -> Result<()> {
+            self.check()?;
+            let open = self.runtime.open.as_ref().ok_or(Error::Locked)?;
+            if self.phase != Phase::Imported
+                || self.admission.is_some()
+                || self.runtime.pending.is_some()
+                || open.witness_job.is_some()
+                || open.writer_receipt.is_some()
+                || open.writer_reconciled
+                || self.reconciled_records.is_some()
+                || self.reconciled_writer.is_some()
+                || self.signed.is_some()
+                || !matches!(
+                    &expected.control,
+                    wholepact_authority::OwnerControl::AdmitDurablePaymentV1 { .. }
+                )
+                || self
+                    .runtime
+                    .qualification_committed_durable_admission_v1()?
+                    .is_some()
+            {
+                return Err(Error::ReviewMismatch);
+            }
+            let records = self.records()?;
+            // Existing production preparation authenticates the complete original
+            // witness history and exact immutable local intent. Only its historical
+            // branch sets the observed ID without preparing a new native review.
+            stage = S::Source;
+            let started = self.runtime.prepare_durable_admission_v1(EPOCH);
+            attempt = self.runtime.qualification_durable_admission_attempt_v1();
+            started?;
+            stage = S::WorkerCompletion;
+            self.drain_witness_to_review()?;
+            stage = S::RetainedIntent;
+            let observed = self
+                .runtime
+                .qualification_committed_durable_admission_v1()?;
+            let open = self.runtime.open.as_ref().ok_or(Error::Locked)?;
+            require_historical_admission_observation_v1(
+                expected,
+                observed.as_ref(),
+                self.runtime.pending.is_some(),
+                open.witness_job.is_some(),
+                open.writer_receipt.is_some(),
+                open.writer_reconciled,
+            )?;
+            if self.records()? != records {
+                return Err(Error::ReviewMismatch);
+            }
+            self.admission = observed;
+            self.phase = Phase::Admitted;
+            // The unchanged subsequent Session preparation rejects any already
+            // recorded Acquire, pending/active session or lost original client key.
+            self.check()
+        })();
+        result.map_err(|error| {
+            attempt
+                .and_then(|attempt| {
+                    self.runtime
+                        .take_qualification_durable_admission_failure_v1(attempt)
+                })
+                .unwrap_or_else(|| DurableAdmissionPreparationFailureV1::new(stage, error))
+        })
     }
     fn approve_durable_admission_inner(
         &mut self,
@@ -1705,6 +1808,178 @@ fn require_plain_two_owner_manifest(proposal: &Proposal, own: &str) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Equality-only data. This constructs no native owner, authenticated
+    // history, retained intent, decision, admission or signing capability.
+    fn historical_admission_data() -> wholepact_authority::OwnerControlRequest {
+        use wholepact_authority::durable_payment_v1::{
+            DurableFixedCandidateBindingV1, DurablePaymentAdmissionRecordV1,
+            DurablePaymentAdmissionTermsV1,
+        };
+        wholepact_authority::OwnerControlRequest {
+            operation_id: "inert-original-admission".into(),
+            account_id: "11".repeat(32),
+            network_profile_id: "inert-network".into(),
+            writer_epoch: 1,
+            expected_head: wholepact_authority::AuthorityHead {
+                sequence: 4,
+                digest: "12".repeat(32),
+            },
+            control: wholepact_authority::OwnerControl::AdmitDurablePaymentV1 {
+                record: Box::new(DurablePaymentAdmissionRecordV1 {
+                    witness_native_review_digest: "13".repeat(32),
+                    terms: DurablePaymentAdmissionTermsV1 {
+                        version: 1,
+                        identity: wholepact_core::manual_enrollment::ManualAccountIdentity {
+                            account_id: "11".repeat(32),
+                            full_viewing_key_digest: "14".repeat(32),
+                            network_profile_id: "inert-network".into(),
+                            derivation_domain: "inert-domain".into(),
+                        },
+                        original_policy_digest: "15".repeat(32),
+                        original_genesis_digest: "16".repeat(32),
+                        original_birth_commit_digest: "17".repeat(32),
+                        original_roster_extension_digest: "18".repeat(32),
+                        original_enrollment_ref: "19".repeat(32),
+                        writer_certificate_digest: "1a".repeat(32),
+                        fixed: DurableFixedCandidateBindingV1 {
+                            schema_version: 1,
+                            network_profile_id: "inert-network".into(),
+                            agreement_id: "inert-agreement".into(),
+                            obligation_id: "inert-obligation".into(),
+                            proposal_id: "inert-proposal".into(),
+                            revision: 1,
+                            expiry_height: 2,
+                            proposal_digest: "1b".repeat(32),
+                            manifest_digest: "1c".repeat(32),
+                            unsigned_artifact_digest: "1d".repeat(32),
+                            proved_artifact_digest: "1e".repeat(32),
+                            effects_commitment: "1f".repeat(32),
+                            policy_digest: "20".repeat(32),
+                            review_binding: "21".repeat(32),
+                            action_mapping_digest: "22".repeat(32),
+                            anchor: "23".repeat(32),
+                            proposal_binding: "24".repeat(32),
+                        },
+                        authorization_id: "inert-authorization".into(),
+                        recipient_policy_scope_digest: "25".repeat(32),
+                        concrete_recipient_scope_digest: "26".repeat(32),
+                        inputs: vec![wholepact_authority::InputReservation {
+                            input_id: "inert-input".into(),
+                            nullifier: "27".repeat(32),
+                            action_index: 0,
+                            value_zatoshis: 50,
+                        }],
+                        maximum_debit_zatoshis: 40,
+                        fee_share_zatoshis: 2,
+                        transaction_fee_zatoshis: 4,
+                        valid_from_ms: 1,
+                        valid_until_ms: 2,
+                    },
+                }),
+            },
+        }
+    }
+
+    #[test]
+    fn historical_admission_observation_requires_exact_original_request() {
+        let expected = historical_admission_data();
+        assert!(require_historical_admission_observation_v1(
+            &expected,
+            Some(&expected),
+            false,
+            false,
+            false,
+            false,
+        )
+        .is_ok());
+        for field in 0..10 {
+            let mut changed = expected.clone();
+            match field {
+                0 => changed.operation_id.push_str("-replacement"),
+                1 => changed.account_id = "30".repeat(32),
+                2 => changed.network_profile_id.push_str("-other"),
+                3 => changed.writer_epoch += 1,
+                4 => changed.expected_head.sequence += 1,
+                5 => changed.expected_head.digest = "31".repeat(32),
+                6 => changed.control = wholepact_authority::OwnerControl::Pause,
+                _ => {
+                    let wholepact_authority::OwnerControl::AdmitDurablePaymentV1 { record } =
+                        &mut changed.control
+                    else {
+                        panic!("expected inert admission data");
+                    };
+                    match field {
+                        7 => record.terms.valid_until_ms += 1,
+                        8 => record.terms.fixed.proved_artifact_digest = "32".repeat(32),
+                        _ => record.terms.original_enrollment_ref = "33".repeat(32),
+                    }
+                }
+            }
+            assert!(matches!(
+                require_historical_admission_observation_v1(
+                    &expected,
+                    Some(&changed),
+                    false,
+                    false,
+                    false,
+                    false,
+                ),
+                Err(Error::ReviewMismatch)
+            ));
+        }
+    }
+
+    #[test]
+    fn historical_admission_observation_rejects_missing_or_non_admission_data() {
+        let expected = historical_admission_data();
+        // A supplied expectation/local retained intent without a successful
+        // historical observation cannot advance the fixture to Admitted.
+        assert!(matches!(
+            require_historical_admission_observation_v1(
+                &expected, None, false, false, false, false,
+            ),
+            Err(Error::ReviewMismatch)
+        ));
+        let mut not_admission = expected;
+        not_admission.control = wholepact_authority::OwnerControl::Pause;
+        assert!(matches!(
+            require_historical_admission_observation_v1(
+                &not_admission,
+                Some(&not_admission),
+                false,
+                false,
+                false,
+                false,
+            ),
+            Err(Error::ReviewMismatch)
+        ));
+    }
+
+    #[test]
+    fn historical_admission_observation_rejects_pending_review_job_or_writer() {
+        let expected = historical_admission_data();
+        for [pending, job, receipt, reconciled] in [
+            [true, false, false, false],
+            [false, true, false, false],
+            [false, false, true, false],
+            [false, false, false, true],
+            [true, true, true, true],
+        ] {
+            assert!(matches!(
+                require_historical_admission_observation_v1(
+                    &expected,
+                    Some(&expected),
+                    pending,
+                    job,
+                    receipt,
+                    reconciled,
+                ),
+                Err(Error::ReviewMismatch)
+            ));
+        }
+    }
+
     #[test]
     fn durable_inventory_comparison_does_not_hide_endpoint_directories_or_symlinks() {
         let root = tempfile::tempdir().unwrap();
