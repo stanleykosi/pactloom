@@ -499,12 +499,14 @@ class PublicOutputTests(unittest.TestCase):
         # Also reject a single oversized complete chunk and resume next line.
         self.assertEqual(framing.feed(b'x'*8193+marker+b'\n'+marker+b'\n'),[marker])
 
-    def test_rolling_preflight_is_ten_exact_pure_parser_cases(self):
+    def test_rolling_preflight_preserves_ten_original_plus_three_measurement_cases(self):
         base=ROOT/'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2'
         source=(base/'sequential_construction_v3_qualification/rolling_transcript_v1.rs').read_text()
         names=re.findall(r'#\[test\]\s+(?:#\[cfg\(feature = "synthetic-born-joined-qualification"\)\]\s+)?fn (\w+)\(',source)
-        expected=tuple(output.PREFIX+'rolling_transcript_v1::tests::'+name for name in names)
-        self.assertEqual(len(expected),10)
+        all_expected=tuple(output.PREFIX+'rolling_transcript_v1::tests::'+name for name in names)
+        self.assertEqual(len(all_expected),13)
+        self.assertEqual(set(all_expected),set(output.ROLLING_TRANSCRIPT_TESTS+output.HISTORY_TRANSCRIPT_TESTS))
+        expected=tuple(name for name in all_expected if name not in output.HISTORY_TRANSCRIPT_TESTS)
         self.assertEqual(expected,output.ROLLING_TRANSCRIPT_TESTS)
         self.assertIn('#[path = "sequential_construction_v3_qualification/rolling_transcript_v1.rs"]\nmod rolling_transcript_v1;',
                       (base/'sequential_construction_v3_qualification.rs').read_text())
@@ -1228,8 +1230,8 @@ class PublicTimingTests(unittest.TestCase):
             self.assertEqual(output.public_line(prefix+b'[JOINED_TIMING '+bytes([255])+b']','fixed'),('timing_invalid',None))
         with self.assertRaises(UnicodeError): output.public_line(b'private '+bytes([255]),'fixed')
 
-    def run_fake(self, timing_lines, status=101, verified=True):
-        name=output.TESTS['full'][0]
+    def run_fake(self, timing_lines, status=101, verified=True, phase='full'):
+        name=output.TESTS[phase][0]
         core='[JOINED_CORE_POLICY inherited_limit=Zero collector=Pipe process_dumpability=Unchanged crash_copy_absence_verified=false]'
         cleanup=('[JOINED_CLEANUP group_signal=AlreadyAbsentWhileLeaderOwned group_absence=OriginalGroupAbsentObserved '
                  'direct_child=Reaped root_cleanup='+('ClosedAndAbsenceVerified' if verified else 'CloseOrAbsenceUnverified')+
@@ -1237,7 +1239,7 @@ class PublicTimingTests(unittest.TestCase):
         failure='[JOINED_FAILURE exit=Some(101) signal=None core_dumped=false inputs=1/204 reason=ChildExit static_boundaries=EndInvariant:HostReceipt]'
         rows=[core,cleanup,*timing_lines]
         if status: rows.append(failure)
-        else:
+        elif phase=='full':
             # Use existing exact valid synthetic receipt; no private payload.
             rows.append(output.MARKER+json.dumps(PublicOutputTests().record()))
         payload=('\n'.join(rows)+'\n').encode()
@@ -1252,8 +1254,8 @@ class PublicTimingTests(unittest.TestCase):
              mock.patch.object(output.os,'read',side_effect=[payload,b'']), \
              mock.patch.dict(output.os.environ,{},clear=True), contextlib.redirect_stdout(captured):
             if status or not verified:
-                with self.assertRaises(RuntimeError): output.run('/verified/host','full')
-            else: output.run('/verified/host','full')
+                with self.assertRaises(RuntimeError): output.run('/verified/host',phase)
+            else: output.run('/verified/host',phase)
         process.kill.assert_not_called()
         return captured.getvalue()
 
@@ -1295,11 +1297,259 @@ class PublicTimingTests(unittest.TestCase):
         source=(ROOT/'scripts/ci-synthetic-output.py').read_text()
         self.assertIn(' + SIGNER_TIMING_TESTS + SIGNER_DURABLE_LABEL_TESTS + SIGNER_DURABLE_RECEIPT_TESTS:',source)
         self.assertIn(' + TIMING_HOST_TESTS + (DURABLE_PROVIDER_METADATA_TEST,):',source)
-        self.assertIn('CI_SYNTHETIC_PURE passed=44 ',source)
+        self.assertIn('CI_SYNTHETIC_PURE passed=51 ',source)
         self.assertIn('timing_counter_cases=3',source)
         self.assertIn("if status!=0 or not cleanup or cores!=1 or failures or (phase=='full' and outcome is None):",source)
         self.assertNotIn('eprintln!',signer)
         self.assertIn('let _ = writeln!',signer)
+
+class PublicHistoryMeasurementTests(unittest.TestCase):
+    base=ROOT/'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3_qualification'
+
+    def record(self):
+        source=(self.base/'safe_diagnostics_v1.rs').read_text()
+        fixture=re.search(r'const HISTORY_MEASUREMENT_TEST_JSON: &str = r#"(.*?)"#;',source,re.S).group(1)
+        return json.loads(fixture)
+
+    def server_record(self, point='BeforeAdmission'):
+        return dict(version=1,point=point,age_us=0,remaining_us=0,stopped=False,finished=None,clamped=False)
+
+    def line(self, row, server=False):
+        prefix=output.HISTORY_SERVER_MEASUREMENT_PREFIX if server else output.HISTORY_MEASUREMENT_PREFIX
+        return prefix+json.dumps(row,separators=(',',':'))+']'
+
+    def test_history_rust_fixture_and_all_closed_labels_are_accepted(self):
+        row=self.record()
+        self.assertEqual(output.public_history_measurement(json.dumps(row)),row)
+        self.assertEqual(set(row),output.HISTORY_MEASUREMENT_FIELDS)
+        for field,values in [('phase',output.HISTORY_PHASES),('check_site',output.HISTORY_CHECK_SITES),
+                             ('checkpoint',output.HISTORY_CHECKPOINTS),('selected_limit',output.HISTORY_SELECTED_LIMITS)]:
+            for value in values:
+                changed=self.record(); changed[field]=value
+                if field=='phase': changed['page_ordinal']=1 if value=='Page' else None
+                self.assertEqual(output.public_history_measurement(json.dumps(changed)),changed)
+        for point in output.HISTORY_SERVER_POINTS:
+            server=self.server_record(point)
+            self.assertEqual(output.public_history_server_measurement(json.dumps(server)),server)
+
+    def test_history_null_and_zero_and_incomplete_are_distinct(self):
+        row=self.record()
+        for field in output.HISTORY_OPTIONAL_DURATIONS | {'phase','page_ordinal','check_site','selected_limit','exchange_cost'}:
+            row[field]=None
+        row['incomplete']=True
+        self.assertEqual(output.public_history_measurement(json.dumps(row)),row)
+        for field in output.HISTORY_OPTIONAL_DURATIONS:
+            changed=dict(row,**{field:0})
+            parsed=output.public_history_measurement(json.dumps(changed))
+            self.assertEqual(parsed[field],0)
+            self.assertIsNotNone(parsed[field])
+        for age in (None,0,600000000):
+            for finished in (None,False,True):
+                row=self.server_record(); row.update(age_us=age,finished=finished,clamped=True)
+                self.assertEqual(output.public_history_server_measurement(json.dumps(row)),row)
+
+    def test_history_requires_every_field_including_nullable_and_flags(self):
+        for original,parser in [(self.record(),output.public_history_measurement),
+                                (self.server_record(),output.public_history_server_measurement)]:
+            for field in original:
+                changed=dict(original); del changed[field]
+                with self.assertRaises(ValueError): parser(json.dumps(changed))
+            for wrong in ([],None,True,dict(original,private='payload')):
+                with self.assertRaises(ValueError): parser(json.dumps(wrong))
+        for cost in ('history_cost','exchange_cost'):
+            for field in output.HISTORY_COST_COUNTS | output.HISTORY_COST_DURATIONS:
+                row=self.record(); del row[cost][field]
+                with self.assertRaises(ValueError): output.public_history_measurement(json.dumps(row))
+            for wrong in ([],True,{},dict(self.record()[cost],private='payload')):
+                row=self.record(); row[cost]=wrong
+                with self.assertRaises(ValueError): output.public_history_measurement(json.dumps(row))
+        row=self.record(); row['history_cost']=None
+        with self.assertRaises(ValueError): output.public_history_measurement(json.dumps(row))
+
+    def test_history_rejects_duplicate_keys_at_every_scope(self):
+        text=json.dumps(self.record(),separators=(',',':'))
+        for changed in [text.replace('"version":1','"version":1,"version":1',1),
+                        text.replace('"callback_calls":2','"callback_calls":2,"callback_calls":2',1),
+                        text.replace('"callback_calls":1','"callback_calls":1,"callback_calls":1',1),
+                        text.replace('"exchange_cost":','"exchange_cost":null,"exchange_cost":',1)]:
+            with self.assertRaises(ValueError): output.public_history_measurement(changed)
+        text=json.dumps(self.server_record(),separators=(',',':'))
+        for field in ('version','age_us','finished'):
+            value=json.dumps(self.server_record()[field])
+            changed=text.replace('"'+field+'":'+value,'"'+field+'":'+value+',"'+field+'":'+value,1)
+            with self.assertRaises(ValueError): output.public_history_server_measurement(changed)
+
+    def test_history_numeric_fields_reject_boolean_negative_float_and_overflow(self):
+        fields={field:600000000 for field in output.HISTORY_OPTIONAL_DURATIONS | {'history_elapsed_us','pre_budget_callback_us'}}
+        fields.update(version=1,pre_budget_callback_calls=1)
+        for field,limit in fields.items():
+            for bad in (True,False,-1,limit+1,1.0,float('nan'),float('inf'),float('-inf'),'0',{},[]):
+                row=self.record(); row[field]=bad
+                with self.assertRaises(ValueError): output.public_history_measurement(json.dumps(row))
+        for cost in ('history_cost','exchange_cost'):
+            for field in output.HISTORY_COST_COUNTS | output.HISTORY_COST_DURATIONS:
+                limit=1000000 if field in output.HISTORY_COST_COUNTS else 600000000
+                for bad in (True,False,-1,limit+1,1.0,float('nan'),None,'0'):
+                    row=self.record(); row[cost][field]=bad
+                    with self.assertRaises(ValueError): output.public_history_measurement(json.dumps(row))
+        for ordinal in (True,False,0,-1,4097,1.0,'1'):
+            row=self.record(); row.update(phase='Page',page_ordinal=ordinal)
+            with self.assertRaises(ValueError): output.public_history_measurement(json.dumps(row))
+
+    def test_history_server_types_and_bounds_are_strict(self):
+        for field in ('age_us','remaining_us'):
+            for bad in (True,False,-1,600000001,1.0,float('nan'),float('inf'),'0',{}):
+                row=self.server_record(); row[field]=bad
+                with self.assertRaises(ValueError): output.public_history_server_measurement(json.dumps(row))
+        for field in ('stopped','finished','clamped'):
+            for bad in (0,1,'false',{},[]):
+                row=self.server_record(); row[field]=bad
+                with self.assertRaises(ValueError): output.public_history_server_measurement(json.dumps(row))
+        for field,bad in [('remaining_us',None),('stopped',None),('clamped',None),('version',True),
+                          ('version',0),('version',2),('point',None),('point','Ready')]:
+            row=self.server_record(); row[field]=bad
+            with self.assertRaises(ValueError): output.public_history_server_measurement(json.dumps(row))
+
+    def test_history_free_form_enums_and_invalid_page_context_are_refused(self):
+        for field in ('phase','check_site','checkpoint','selected_limit'):
+            for bad in ('private','Snapshot/private','',True,0,[],{}):
+                row=self.record(); row[field]=bad
+                with self.assertRaises(ValueError): output.public_history_measurement(json.dumps(row))
+        for changes in [dict(phase='Page',page_ordinal=None),dict(phase=None,page_ordinal=1),
+                        dict(phase='Snapshot',page_ordinal=1),dict(checkpoint=None),
+                        dict(clamped=0),dict(incomplete=None)]:
+            with self.assertRaises(ValueError): output.public_history_measurement(json.dumps(dict(self.record(),**changes)))
+
+    def test_history_maximal_schema_fits_unchanged_output_bounds(self):
+        row=self.record(); row.update(phase='Page',page_ordinal=4096,pre_budget_callback_calls=1,
+                                     history_elapsed_us=600000000,pre_budget_callback_us=600000000,clamped=True)
+        for field in output.HISTORY_OPTIONAL_DURATIONS: row[field]=600000000
+        for field in ('history_cost','exchange_cost'):
+            row[field]={key:1000000 for key in output.HISTORY_COST_COUNTS}
+            row[field].update({key:600000000 for key in output.HISTORY_COST_DURATIONS})
+        self.assertLess(len(self.line(row).encode()),4096)
+        self.assertEqual(output.public_line(self.line(row).encode(),'fixed'),('history_measurement',row))
+        server=self.server_record(); server.update(age_us=600000000,remaining_us=600000000,finished=True,clamped=True)
+        self.assertLess(len(self.line(server,True).encode()),512)
+        self.assertEqual(output.public_line(self.line(server,True).encode(),'fixed'),('history_server_measurement',server))
+        with self.assertRaises(ValueError): output.public_history_measurement(' '*4097)
+        with self.assertRaises(ValueError): output.public_history_server_measurement(' '*513)
+        source=(ROOT/'scripts/ci-synthetic-output.py').read_text()
+        self.assertIn('if len(raw)>8192: return None',source)
+        self.assertIn('if total > 16*1024*1024:',source)
+
+    def test_history_framing_never_searches_inside_private_text(self):
+        for row,server,kind in [(self.record(),False,'history_measurement'),
+                                (self.server_record(),True,'history_server_measurement')]:
+            line=self.line(row,server)
+            for prefix in ('','test fixed ... '):
+                self.assertEqual(output.public_line((prefix+line).encode(),'fixed'),(kind,row))
+                marker=output.HISTORY_SERVER_MEASUREMENT_PREFIX if server else output.HISTORY_MEASUREMENT_PREFIX
+                self.assertEqual(output.public_line(prefix.encode()+marker.encode()+b'\xff]','fixed'),(kind+'_invalid',None))
+            self.assertIsNone(output.public_line(('private '+line).encode(),'fixed'))
+            for changed in (line+' private',line[:-1],line+line):
+                self.assertEqual(output.public_line(changed.encode(),'fixed'),(kind+'_invalid',None))
+            framing=output.BoundedLines()
+            raw=line.encode(); split=len(raw)//2
+            self.assertEqual(framing.feed(raw[:split]),[])
+            self.assertEqual(framing.feed(raw[split:]+b'\n'),[raw])
+        nested=output.HISTORY_MEASUREMENT_PREFIX+'['*1500+'0'+']'*1500+']'
+        self.assertEqual(output.public_line(nested.encode(),'fixed'),('history_measurement_invalid',None))
+
+    def test_history_emits_only_after_cleanup_and_never_changes_original_result(self):
+        lines=[self.line(self.record())]+[self.line(self.server_record(point),True) for point in output.HISTORY_SERVER_POINTS]
+        fake=PublicTimingTests().run_fake
+        failed=fake(lines,phase='durable-fixed-signing')
+        for prefix in (output.HISTORY_MEASUREMENT_PREFIX,output.HISTORY_SERVER_MEASUREMENT_PREFIX):
+            self.assertIn(prefix,failed)
+            self.assertLess(failed.index('[JOINED_CLEANUP '),failed.index(prefix))
+            self.assertNotIn(prefix,fake(lines,verified=False,phase='durable-fixed-signing'))
+        self.assertNotIn('passed=true',failed)
+        for rows in ([],lines,[lines[0],lines[0]],['[HISTORY_MEASUREMENT_V1 {"private":"payload"}]']):
+            success=fake(rows,status=0,phase='durable-fixed-signing')
+            self.assertIn('phase=durable-fixed-signing passed=true cleanup_verified=true',success)
+            self.assertNotIn('private',success); self.assertNotIn('payload',success)
+        for phase in ('initial','full','durable-owner-reopen'):
+            unrelated=fake(lines,status=0,phase=phase)
+            self.assertNotIn(output.HISTORY_MEASUREMENT_PREFIX,unrelated)
+            self.assertNotIn(output.HISTORY_SERVER_MEASUREMENT_PREFIX,unrelated)
+
+    def test_history_duplicate_records_are_sticky_and_separate_from_other_timings(self):
+        capture=output.HistoryMeasurements()
+        row=self.record(); before=self.server_record(); after=self.server_record('AfterAdmission')
+        capture.record('history_measurement',row)
+        capture.record('history_server_measurement',before)
+        capture.record('history_server_measurement',after)
+        capture.record('history_measurement',row)
+        capture.record('history_server_measurement',before)
+        capture.record('history_measurement',row)
+        captured=io.StringIO()
+        with contextlib.redirect_stdout(captured): capture.emit()
+        self.assertEqual(captured.getvalue(),'CI_SYNTHETIC_HISTORY_MEASUREMENT invalid=true details_withheld=true\n'
+                         'CI_SYNTHETIC_HISTORY_SERVER_MEASUREMENT invalid=true details_withheld=true\n')
+        self.assertEqual(output.public_line(captured.getvalue().splitlines()[0].encode(),'fixed'),('history_measurement_invalid',None))
+        self.assertEqual(output.public_line(captured.getvalue().splitlines()[1].encode(),'fixed'),('history_server_measurement_invalid',None))
+        self.assertNotIn('JOINED_TIMING',captured.getvalue())
+
+    def test_history_producer_getters_schema_and_closed_enums_correspond(self):
+        source=(self.base/'safe_diagnostics_v1.rs').read_text()
+        client=source.split('fn history_measurement_json(',1)[1].split('pub(super) fn emit_history_measurement(',1)[0]
+        cost=source.split('fn history_cost_json(',1)[1].split('fn history_measurement_json(',1)[0]
+        server=source.split('fn history_server_measurement_json(',1)[1].split('pub(super) fn emit_history_server_measurement(',1)[0]
+        self.assertEqual(set(re.findall(r'"([a-z_]+)":',client)),output.HISTORY_MEASUREMENT_FIELDS)
+        self.assertEqual(set(re.findall(r'"([a-z_]+)":',cost)),output.HISTORY_COST_COUNTS|output.HISTORY_COST_DURATIONS)
+        self.assertEqual(set(re.findall(r'"([a-z_]+)":',server)),output.HISTORY_SERVER_MEASUREMENT_FIELDS)
+        for field in output.HISTORY_MEASUREMENT_FIELDS-{'version'}:
+            self.assertIn('value.'+field+'()',client)
+        for field in output.HISTORY_COST_COUNTS|output.HISTORY_COST_DURATIONS:
+            self.assertIn('value.'+field+'()',cost)
+        authority=(ROOT/'crates/wholepact-authority/src/transport/history_diagnostics_v1.rs').read_text()
+        for type_name,values in [('CheckedHistoryPhaseV1',output.HISTORY_PHASES),
+            ('CheckedHistoryCheckSiteV1',output.HISTORY_CHECK_SITES),('CheckedHistoryCheckpointV1',output.HISTORY_CHECKPOINTS),
+            ('CheckedHistorySelectedLimitV1',output.HISTORY_SELECTED_LIMITS)]:
+            mappings=set(re.findall(type_name+r'::([A-Za-z0-9]+) => "([A-Za-z0-9]+)"',source))
+            self.assertEqual(mappings,{(value,value) for value in values})
+            body=re.search(r'pub enum '+type_name+r'\s*\{([^}]+)\}',authority).group(1)
+            self.assertEqual(set(re.findall(r'^\s*([A-Z][A-Za-z0-9]+),',body,re.M)),values)
+        for function in ('emit_history_measurement','emit_history_server_measurement'):
+            body=source.split('pub(super) fn '+function+'(',1)[1].split('\n}\n',1)[0]
+            self.assertIn('let _ = writeln!',body)
+            self.assertNotIn('eprintln!',body)
+        self.assertNotIn('Debug',client+cost+server)
+        self.assertIn('Exchange cost is a subset of history cost',client)
+
+    def test_history_required_nullable_parser_and_exact_cleanup_gate_are_preserved(self):
+        source=(self.base/'safe_diagnostics_v1.rs').read_text()
+        for struct in ('PublicHistoryMeasurement','PublicHistoryServerMeasurement'):
+            body=source.split('struct '+struct+' {',1)[1].split('\n}',1)[0]
+            nullable=re.findall(r'^    [a-z_]+: Option<',body,re.M)
+            self.assertEqual(body.count('#[serde(deserialize_with = "required_history_nullable")]'),len(nullable))
+        parent=self.base.with_suffix('.rs').read_text()
+        gate=parent.split('if stage == "durable-proposal-native-fixed-signing-v1"',1)[1].split('\n    if outcome.is_err()',1)[0]
+        self.assertIn('&& process.verified()',gate)
+        self.assertIn('&& root_cleanup == TemporaryRootCleanupV1::ClosedAndAbsenceVerified',gate)
+        self.assertIn('transcript.history_measurement_lines()',gate)
+        self.assertIn('let _ = writeln!',gate)
+        self.assertNotIn('outcome.is_ok()',gate)
+        transcript=(self.base/'rolling_transcript_v1.rs').read_text()
+        self.assertIn('pub(super) const MAX_BYTES: usize = 262_144;',transcript)
+        self.assertIn('self.timing_retained_bytes() + self.history_measurement_retained_bytes()',transcript)
+        self.assertEqual(transcript.split('pub(super) fn tail(',1)[0].count('self.history_measurements.discard_for_budget();'),3)
+
+    def test_history_seven_pure_filters_are_exact_source_backed_and_non_ipc(self):
+        cases=[(output.HISTORY_MEASUREMENT_TESTS,self.base/'safe_diagnostics_v1.rs'),
+               (output.HISTORY_TRANSCRIPT_TESTS,self.base/'rolling_transcript_v1.rs')]
+        names=[]
+        for selected,path in cases:
+            source=path.read_text()
+            for name in selected:
+                names.append(name)
+                self.assertEqual(source.count('fn '+name.rsplit('::',1)[1]+'()'),1)
+        self.assertEqual(len(names),7)
+        self.assertEqual(len(set(names)),7)
+        self.assertTrue(set(names).isdisjoint(row[0] for row in output.TESTS.values()))
+        self.assertTrue(set(names).isdisjoint(output.PURE_TESTS+output.TIMING_HOST_TESTS))
+
 
 class PublicCompilerOutputTests(unittest.TestCase):
     source='crates/wholepact-signer/src/account/birth/enrollment/roster_v2/inventory/candidate.rs'

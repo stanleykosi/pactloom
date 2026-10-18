@@ -691,6 +691,18 @@ fn foreground_child(stage: &str, inputs: &[Input<'_>]) -> std::io::Result<()> {
             let _ = writeln!(std::io::stderr().lock(), "[JOINED_TIMING {json}]");
         }
     }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    if stage == "durable-proposal-native-fixed-signing-v1"
+        && process.verified()
+        && root_cleanup == TemporaryRootCleanupV1::ClosedAndAbsenceVerified
+    {
+        // Only reparsed, bounded canonical records survive the private PTY.
+        // Optional observations survive a failed scenario but cannot replace
+        // its result or make an unverified cleanup look verified.
+        for line in transcript.history_measurement_lines() {
+            let _ = writeln!(std::io::stderr().lock(), "{line}");
+        }
+    }
     if outcome.is_err()
         || !process.verified()
         || root_cleanup != TemporaryRootCleanupV1::ClosedAndAbsenceVerified

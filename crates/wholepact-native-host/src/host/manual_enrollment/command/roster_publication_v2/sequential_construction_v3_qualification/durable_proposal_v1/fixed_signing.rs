@@ -776,10 +776,38 @@ pub(super) fn exercise(input: FixedSigningInputsV1<'_>) -> Result<()> {
             &mut trace,
         )?;
         trace.begin(B::DurableHostWitnessSetup);
+        let before_admission = history_server.measurement_snapshot();
         worker
             .send(Command::PrepareDurableAdmission(index))
             .map_err(|error| trace.worker(error))?;
-        let admission = match worker.receive().map_err(|error| trace.worker(error))? {
+        let admission_result = worker.receive();
+        let after_admission = history_server.measurement_snapshot();
+        // Both are independent handle observations, not a readiness proof.
+        // Emit only for the failed receive, before the original Result can
+        // unwind and drop the server. No output delays the measured dispatch,
+        // and earlier successful owners cannot supply this failure's snapshots.
+        if admission_result.is_err() {
+            for (point, (age_us, remaining_us, stopped, finished, clamped)) in [
+                (
+                    diagnostic::HistoryServerMeasurementPoint::BeforeAdmission,
+                    before_admission,
+                ),
+                (
+                    diagnostic::HistoryServerMeasurementPoint::AfterAdmission,
+                    after_admission,
+                ),
+            ] {
+                diagnostic::emit_history_server_measurement(
+                    point,
+                    age_us,
+                    remaining_us,
+                    stopped,
+                    finished,
+                    clamped,
+                );
+            }
+        }
+        let admission = match admission_result.map_err(|error| trace.worker(error))? {
             Reply::DurableAdmissionRequest {
                 index: actual,
                 request,

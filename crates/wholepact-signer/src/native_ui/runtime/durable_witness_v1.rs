@@ -10,7 +10,8 @@ use wholepact_authority::durable_payment_v1::{
 };
 #[cfg(feature = "synthetic-born-joined-qualification")]
 use wholepact_authority::transport::history_diagnostics_v1::{
-    CheckedHistoryFailureV1, CheckedHistoryIoKindV1, CheckedHistoryStageV1,
+    CheckedHistoryFailureV1, CheckedHistoryIoKindV1, CheckedHistoryMeasurementV1,
+    CheckedHistoryStageV1,
 };
 use wholepact_authority::{
     AccountSnapshot, OwnerControl, OwnerControlRequest, ReconciledAuthorityHistory,
@@ -965,6 +966,9 @@ impl DurableAdmissionHistoryFailureV1 {
     }
     pub fn io_kind(&self) -> Option<CheckedHistoryIoKindV1> {
         self.authority.io_kind()
+    }
+    pub fn measurement(&self) -> &CheckedHistoryMeasurementV1 {
+        self.authority.measurement()
     }
     pub fn into_errors(self) -> (wholepact_authority::AuthorityError, Option<Error>) {
         (self.authority.into_error(), self.callback)
