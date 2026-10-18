@@ -6,6 +6,12 @@
 //! changed by this inactive leaf. The commands must drive the existing runtime,
 //! never manufacture a decision, permit, wallet ticket, account association or
 //! signing source.
+//! Activation also requires a genuine, separately native-approved durable
+//! witness financial route. Original history serving is read-only, and the
+//! retained roster bootstrap admits only its original writer/publication and
+//! construction mutations. Neither is a financial issuer for this NEW profile.
+//! Do not register this positive driver or replace that refusal with a fixture
+//! capability, a generic journal, a copied scope, or a widened old allowlist.
 //! The caller lends the exact retained preproof originals after all prior owners
 //! close, while its actual witness/provider/temp custody remains alive. No proof
 //! is constructed here. Host privacy gates and the chain remain synthetic; this

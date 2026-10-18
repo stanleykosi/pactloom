@@ -1,8 +1,20 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-18, 01:34 UTC.
+Updated: 2026-10-18, 04:24 UTC.
 
-**Incomplete implementation. No native end-to-end, public testnet settlement, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
+**Incomplete implementation. No full native financial signing, public testnet settlement, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
+
+## Current qualified boundary
+
+[Native baseline run 39094611528](https://github.com/stanleykosi/pactloom/actions/runs/39094611528) **passed** at isolated commit `029d91d8a5f1ca890e1f646d15794fbcc1924359`. It exercises both sequential genuine native initial disclosures, encrypted retained contribution intake, real fixed proof construction, fresh native owner/session reapproval and redisclosure, and unchanged proof reopening. Host-local privacy permission issuers and chain responses remain synthetic.
+
+All required gates passed: Python 87, focused Host 44, encrypted bootstrap, signer validation 41, real endpoint-isolation test 1 (two cycles), authority renderer 6 and authority validation 3. Child/process-group/root and outer runtime-container cleanup were verified. Native phase took about 247 seconds; final gates completed at 04:12:03 UTC.
+
+This is NOT financial signature release, an actual OS-process restart, an attended GUI test, Windows qualification, public-chain settlement, or a usable activated private Host workflow. The next isolated test is genuine independent native financial signing and exact signature union; its leaf is still inactive.
+
+Main implementation Stage A at `1a9dab79a5df3c99e7cd55d7979a40add75656e8` compiled in 5 minutes 35 seconds and passed all 86 selected first-write marker/history/privacy cases. Default Engine marker 10 and registration 5 cases passed, alongside workflow 7, selected-scope 3 and quarantine 1 integration cases. Durable-proposal-only unsupported configuration also passed marker 10 and registration 5 cases. These overlapping suites must not be summed into a unique total. Native own-association/Host entry, discovery issuer/schema 19 and marked discovery/material mutation commands remain inactive or explicitly unsupported.
+
+The sections below retain historical observations and failed-run diagnoses; older pending labels describe those earlier checkpoints, not the current gate above.
 
 ## Observed local results
 
@@ -102,3 +114,9 @@ Four inactive marker helper/test leaves define strict first-write purpose consis
 Isolated current-receipt restriction compilation passed in 6 minutes 38 seconds. All five new encrypted receipt predicates, 44 focused Host cases, 41 signer validation cases and 87 Python output checks passed. Native run [39094611528](https://github.com/stanleykosi/pactloom/actions/runs/39094611528), isolated commit `029d91d8a5f1ca890e1f646d15794fbcc1924359`, is pending. The final CI-only real endpoint check remains gated by the full native baseline.
 
 Stage A first-write marker/Store history wrapper source is reviewed and frozen for compilation. It marks the seed in the same transaction, binds actual original destination/source, denies generic marked projection/replay/mutation outputs and extends historical export refusal to marker-only state. Store product history output is constrained to exactly the authenticated content that passed scanning; this is not physical-file quiescence or confidentiality from an approved key holder. Unused read-owner mutation helpers were removed. Marked discovery/material mutations remain Unsupported until a separate purpose-specific integration; native own-association/Host entry/schema19/discovery issuers remain inactive. The selected Stage A component tests are unrun.
+
+Full-signing integration exposed a genuine missing witness financial-admission route. The actual born journal permits only exact original bootstrap/history/non-signing construction scope; generic financial reservation is forbidden. Its original manual-extension enrollment is intentionally outside the immutable birth allowlist, and generic historical writer replay selects bootstrap semantics. A new purpose-specific immutable native admission/replay discriminator and explicit original-extension financial consent join are required; history-only/bootstrap permission must not be repurposed. This is currently design/review work, not implemented authority or a permission bypass.
+
+Seven source-reviewed inactive/fail-closed signing fixture/accessor files are checkpointed for compilation. They route genuine signer paths and compare actual retry wallet/job/review/reservation state, not only result bytes. The positive full-sign module/selector stays unregistered until the genuine witness financial issuer exists. Ordinary production routes and the passing baseline selector remain unchanged.
+
+Stage A compatibility reruns passed on the latest component graph: full Store backup 28, Engine recovery 10, exact Store event/CAS/replay/settlement 10 and old construction/V3 history 12. Default marker/registration tests passed 10+5, three default integration targets passed 7+3+1, and durable-proposal-only marker/registration tests passed 10+5. Suites overlap and are not a unique aggregate test count.

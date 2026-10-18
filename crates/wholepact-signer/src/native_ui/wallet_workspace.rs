@@ -243,6 +243,12 @@ pub(super) struct NativeWalletRevocation {
     active: Arc<AtomicBool>,
 }
 impl NativeWalletRevocation {
+    /// Qualification observes identity of the actual retained wallet permission.
+    /// This cannot create a workspace, renew its approval, or change revocation.
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(super) fn same_origin(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.active, &other.active)
+    }
     pub(super) fn revoke(&self) {
         self.active.store(false, Ordering::Release);
     }

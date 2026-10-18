@@ -87,6 +87,83 @@ pub(super) struct DurableSpendFlowV1 {
     imported: Arc<ImportedDurableReviewV1>,
 }
 
+// Qualification observes the exact production-prepared review. It cannot
+// extract a decision, continuation, wallet ticket or source capability.
+#[cfg(feature = "synthetic-born-joined-qualification")]
+impl DurableSpendFlowV1 {
+    pub(super) fn qualification_identity(
+        &self,
+    ) -> &wholepact_protocol::durable_proposal_v1::FixedProposalIdentityV1 {
+        self.prepared.identity()
+    }
+    pub(super) fn qualification_history(&self) -> authority_bridge::ipc::HistoryRequest {
+        let consent = self.prepared.prepared_spend().record();
+        authority_bridge::ipc::HistoryRequest {
+            authorization_id: consent.terms().authorization_id.clone(),
+            expected_original_consent_ref: consent.reference().into(),
+            expected_enrollment_ref: consent.terms().enrollment_ref.clone(),
+            expected_manifest_ref: consent.terms().accepted_manifest_ref.clone(),
+        }
+    }
+}
+
+#[cfg(feature = "synthetic-born-joined-qualification")]
+impl NativeRuntime {
+    /// Metadata only, through the same actual source and maintained retained
+    /// result reader as the production retry path. Missing committed output is
+    /// still recovery-required; this never exports or regenerates signatures.
+    pub(super) fn qualification_retained_durable_result_v1(
+        &self,
+        expected: &wholepact_protocol::durable_proposal_v1::FixedProposalIdentityV1,
+    ) -> Result<
+        Option<(
+            authority_bridge::ipc::HistoryRequest,
+            authority_bridge::AuthorizationCommit,
+        )>,
+    > {
+        let open = self.open.as_ref().ok_or(Error::Locked)?;
+        open.check_pairing()?;
+        let imported = open.durable_review.as_ref().ok_or(Error::ReviewMismatch)?;
+        imported
+            .check_data_source()
+            .map_err(|_| Error::ReviewMismatch)?;
+        if imported.fixed.verified().identity() != expected
+            || !Arc::ptr_eq(
+                open.durable_born_entry.as_ref().ok_or(Error::Unavailable)?,
+                &imported.source,
+            )
+        {
+            return Err(Error::ReviewMismatch);
+        }
+        let session = open.session.as_ref().ok_or(Error::Locked)?;
+        let Some(commit) = bridge::retained_manual_commit(
+            &imported.proposal_source(),
+            &open.journal,
+            session,
+            open.vault.account(),
+        )
+        .map_err(|_| Error::RecoveryRequired)?
+        else {
+            return Ok(None);
+        };
+        // The previous reader has dropped its journal lease before this read.
+        let original = open
+            .journal
+            .original_authorization(&commit.authorization_id, session)?
+            .ok_or(Error::RecoveryRequired)?;
+        if original.original_consent().reference() != commit.original_consent_ref {
+            return Err(Error::ReviewMismatch);
+        }
+        let history = authority_bridge::ipc::HistoryRequest {
+            authorization_id: commit.authorization_id.clone(),
+            expected_original_consent_ref: original.original_consent().reference().into(),
+            expected_enrollment_ref: original.enrollment().reference().into(),
+            expected_manifest_ref: original.accepted_manifest().reference().into(),
+        };
+        Ok(Some((history, commit)))
+    }
+}
+
 fn receive_durable(
     mut stream: UnixStream,
     peer: AuthenticatedPeer,

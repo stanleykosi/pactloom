@@ -8,15 +8,18 @@
 
 use super::*;
 use crate::authority_bridge::{
+    AuthorizationCommit,
     durable_construction_v1::{
         DurableConstructionCaptureRequestV1, DurableConstructionHistoryRequestV1,
         DurableConstructionRedisclosureRequestV1, DurableConstructionRequestV1,
     },
     durable_review_ipc_v1::DurableReviewDeliveryRequestV1,
+    ipc::HistoryRequest,
     preconstruction_ipc::PreconstructionRequest,
 };
 use crate::native_ui::pending_enrollment::born_pending_continuation::AcknowledgedBornFixture;
 use std::{collections::BTreeSet, ffi::OsString, path::PathBuf, time::Instant};
+use wholepact_protocol::durable_proposal_v1::FixedProposalIdentityV1;
 use wholepact_signer_origin::{InstalledSignerProvider, PairScope};
 
 const EPOCH: u64 = 1;
@@ -89,6 +92,8 @@ enum Phase {
     Disclosure,
     Disclosed,
     Imported,
+    FinancialImported,
+    Signed,
 }
 
 enum ExpectedDisclosure {
@@ -108,6 +113,9 @@ pub(in crate::native_ui) struct DurableNativeFixtureV1 {
     expected: Option<ExpectedDisclosure>,
     entry: String,
     original_inventory: BTreeSet<OsString>,
+    // Data-only assertions for this fixture's completed original. Neither the
+    // tuple nor these fingerprints can restore a production continuation.
+    signed: Option<(HistoryRequest, AuthorizationCommit, Vec<(u64, [u8; 32])>)>,
 }
 
 impl DurableNativeFixtureV1 {
@@ -211,6 +219,7 @@ impl DurableNativeFixtureV1 {
             expected: None,
             entry,
             original_inventory,
+            signed: None,
         })
     }
     fn check(&self) -> Result<()> {
@@ -579,6 +588,43 @@ impl DurableNativeFixtureV1 {
         }
         approve(&mut self.runtime)
     }
+    /// Separate exact new-profile helper. The old generic helper and the
+    /// import-only baseline do not gain a permissive operation fallback.
+    pub(in crate::native_ui) fn configure_durable_wallet(
+        &mut self,
+        setup_json: &str,
+    ) -> Result<()> {
+        self.check()?;
+        let open = self.runtime.open.as_ref().ok_or(Error::Locked)?;
+        if !matches!(self.phase, Phase::Accepted | Phase::Disclosed)
+            || self.runtime.pending.is_some()
+            || !open.writer_reconciled
+            || open.writer_receipt.is_none()
+            || open.wallet.is_some()
+            || open.wallet_job.is_some()
+            || open.durable_wallet_job.is_some()
+        {
+            return Err(Error::ReviewMismatch);
+        }
+        self.runtime.wallet_setup = Zeroizing::new(setup_json.into());
+        self.runtime.stage_wallet_setup(EPOCH)?;
+        if !matches!(
+            self.runtime.pending.as_ref().map(|p| &p.operation),
+            Some(Operation::DurableBornWalletV1(_))
+        ) {
+            return Err(Error::ReviewMismatch);
+        }
+        approve(&mut self.runtime)?;
+        self.runtime
+            .open
+            .as_ref()
+            .ok_or(Error::Locked)?
+            .wallet
+            .as_ref()
+            .ok_or(Error::ReviewMismatch)?
+            .check_current()?;
+        self.check()
+    }
     /// Uses only the credential lifetime retained by this original nominal
     /// witness fixture; neither arbitrary paths nor caller witness pins enter.
     pub(in crate::native_ui) fn configure_original_witness(&mut self) -> Result<()> {
@@ -619,6 +665,9 @@ impl DurableNativeFixtureV1 {
     }
     pub(in crate::native_ui) fn reconcile_original_writer(&mut self) -> Result<()> {
         self.check()?;
+        if self.phase != Phase::Paired || self.runtime.pending.is_some() {
+            return Err(Error::ReviewMismatch);
+        }
         self.runtime.prepare_writer_session(EPOCH)?;
         self.drain_witness_to_review()?;
         if !matches!(
@@ -656,6 +705,26 @@ impl DurableNativeFixtureV1 {
             .is_some_and(|o| o.writer_reconciled)
         {
             return Err(Error::ReviewMismatch);
+        }
+        // A successful production reconciliation asynchronously invalidates the
+        // old session. Wait for those ACTUAL completions before fresh receipts,
+        // without resetting cancellation, permission, pairing or any deadline.
+        loop {
+            self.check()?;
+            self.runtime.poll(EPOCH);
+            let open = self.runtime.open.as_ref().ok_or(Error::Locked)?;
+            if open.revocations.is_empty() {
+                if open.session.is_some()
+                    || open.enrollment.is_some()
+                    || open.manifest.is_some()
+                    || !open.writer_reconciled
+                    || self.runtime.pending.is_some()
+                {
+                    return Err(Error::ReviewMismatch);
+                }
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
         }
         self.check()
     }
@@ -713,6 +782,226 @@ impl DurableNativeFixtureV1 {
         }
         self.phase = Phase::Imported;
         Ok(true)
+    }
+
+    /// Financial import has its own restrictive phase; it does not relax the
+    /// import-only baseline's explicit prohibition on writer reconciliation.
+    pub(in crate::native_ui) fn poll_financial_import(
+        &mut self,
+        request: &DurableReviewDeliveryRequestV1,
+        identity: &FixedProposalIdentityV1,
+    ) -> Result<bool> {
+        self.poll_data_only()?;
+        if !matches!(self.phase, Phase::Disclosed | Phase::FinancialImported) {
+            return Err(Error::ReviewMismatch);
+        }
+        let open = self.runtime.open.as_ref().ok_or(Error::Locked)?;
+        if !open.writer_reconciled
+            || open.writer_receipt.is_none()
+            || open.wallet.is_none()
+            || open.wallet_job.is_some()
+            || open.durable_wallet_job.is_some()
+            || self.runtime.signing_job.is_some()
+            || !open.revocations.is_empty()
+        {
+            return Err(Error::ReviewMismatch);
+        }
+        open.wallet.as_ref().ok_or(Error::Locked)?.check_current()?;
+        let Some(imported) = &open.durable_review else {
+            return Ok(false);
+        };
+        if &imported.request != request || imported.fixed.verified().identity() != identity {
+            return Err(Error::ReviewMismatch);
+        }
+        let records = self.records()?;
+        if request.enrollment_ref != records.enrollment_ref
+            || request.accepted_manifest_ref != records.accepted_manifest_ref
+        {
+            return Err(Error::ReviewMismatch);
+        }
+        self.phase = Phase::FinancialImported;
+        Ok(true)
+    }
+
+    fn signing_ledger(&self) -> Result<Vec<(u64, [u8; 32])>> {
+        self.check()?;
+        let open = self.runtime.open.as_ref().ok_or(Error::Locked)?;
+        let snapshot = open
+            .journal
+            .qualification_durable_ledger_v1(open.session.as_deref().ok_or(Error::Locked)?)?;
+        self.check()?;
+        Ok(snapshot)
+    }
+    fn require_idle_financial_state(&self, identity: &FixedProposalIdentityV1) -> Result<()> {
+        self.check()?;
+        let open = self.runtime.open.as_ref().ok_or(Error::Locked)?;
+        if self.runtime.pending.is_some()
+            || self.runtime.signing_job.is_some()
+            || open.wallet_job.is_some()
+            || open.durable_wallet_job.is_some()
+            || open.durable_import_job.is_some()
+            || open.witness_job.is_some()
+            || !open.revocations.is_empty()
+            || !open.writer_reconciled
+            || open.writer_receipt.is_none()
+            || open.wallet.is_none()
+            || open
+                .durable_review
+                .as_ref()
+                .is_none_or(|i| i.fixed.verified().identity() != identity)
+        {
+            return Err(Error::ReviewMismatch);
+        }
+        Ok(())
+    }
+    pub(in crate::native_ui) fn sign_durable_fixed(
+        &mut self,
+        identity: &FixedProposalIdentityV1,
+    ) -> Result<(HistoryRequest, AuthorizationCommit)> {
+        self.require_idle_financial_state(identity)?;
+        if !matches!(self.phase, Phase::FinancialImported | Phase::Signed) {
+            return Err(Error::ReviewMismatch);
+        }
+        let before = self.signing_ledger()?;
+        if let Some((history, commit, retained_ledger)) = &self.signed {
+            if self.phase != Phase::Signed || retained_ledger != &before {
+                return Err(Error::ReviewMismatch);
+            }
+            let expected = (history.clone(), commit.clone());
+            let wallet_owner = self
+                .runtime
+                .open
+                .as_ref()
+                .ok_or(Error::Locked)?
+                .wallet
+                .as_ref()
+                .ok_or(Error::Locked)?
+                .revoke_handle();
+            // Invoke the REAL production retry entry point, not a fixture
+            // short-circuit. It must return synchronously without staging any
+            // review or job; every authority-ledger row must remain identical.
+            self.runtime.start_durable_wallet_review_v1(EPOCH)?;
+            self.require_idle_financial_state(identity)?;
+            let wallet_after = self
+                .runtime
+                .open
+                .as_ref()
+                .ok_or(Error::Locked)?
+                .wallet
+                .as_ref()
+                .ok_or(Error::Locked)?
+                .revoke_handle();
+            let actual = self
+                .runtime
+                .qualification_retained_durable_result_v1(identity)?
+                .ok_or(Error::RecoveryRequired)?;
+            if actual != expected
+                || !wallet_owner.same_origin(&wallet_after)
+                || self.signing_ledger()? != before
+                || self.runtime.last_receipt.as_deref()
+                    != Some(actual.1.original_consent_ref.as_str())
+            {
+                return Err(Error::ReviewMismatch);
+            }
+            return Ok(actual);
+        }
+        if self.phase != Phase::FinancialImported
+            || before.len() != 13
+            || before[..7].iter().any(|(count, _)| *count != 0)
+            || self
+                .runtime
+                .qualification_retained_durable_result_v1(identity)?
+                .is_some()
+        {
+            return Err(Error::ReviewMismatch);
+        }
+        let deadline = self.deadline()?;
+        self.runtime.start_durable_wallet_review_v1(EPOCH)?;
+        if self
+            .runtime
+            .open
+            .as_ref()
+            .is_none_or(|o| o.durable_wallet_job.is_none())
+        {
+            return Err(Error::ReviewMismatch);
+        }
+        loop {
+            self.check()?;
+            self.runtime.poll(EPOCH);
+            self.runtime.poll_durable_wallet_review_v1(EPOCH);
+            if self
+                .runtime
+                .open
+                .as_ref()
+                .is_none_or(|o| o.durable_wallet_job.is_none())
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let history = match self.runtime.pending.as_ref().map(|p| &p.operation) {
+            Some(Operation::DurableDisclosureV1 { flow, .. })
+                if flow.qualification_identity() == identity =>
+            {
+                flow.qualification_history()
+            }
+            _ => return Err(Error::ReviewMismatch),
+        };
+        let records = self.records()?;
+        if history.expected_enrollment_ref != records.enrollment_ref
+            || history.expected_manifest_ref != records.accepted_manifest_ref
+        {
+            return Err(Error::ReviewMismatch);
+        }
+        approve(&mut self.runtime)?;
+        match self.runtime.pending.as_ref().map(|p| &p.operation) {
+            Some(Operation::DurableSpendV1 { flow, .. })
+                if flow.qualification_identity() == identity
+                    && flow.qualification_history() == history => {}
+            _ => return Err(Error::ReviewMismatch),
+        }
+        approve(&mut self.runtime)?;
+        if self.runtime.signing_job.is_none() || self.runtime.open.is_some() {
+            return Err(Error::ReviewMismatch);
+        }
+        // During signing the genuine worker owns OpenAccount. Keep the same
+        // original deadline and peer checks; never synthesize another owner.
+        while self.runtime.signing_job.is_some() {
+            if Instant::now() >= deadline {
+                return Err(Error::ReviewMismatch);
+            }
+            self.runtime.poll_signing();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        self.require_idle_financial_state(identity)?;
+        let actual = self
+            .runtime
+            .qualification_retained_durable_result_v1(identity)?
+            .ok_or(Error::RecoveryRequired)?;
+        let after = self.signing_ledger()?;
+        let own_inputs = self
+            .proposal
+            .manifest()
+            .inputs
+            .iter()
+            .filter(|input| input.account_id == self.scope.account_id)
+            .count() as u64;
+        if actual.0 != history
+            || !actual.1.exposure_remains_uncertain
+            || self.runtime.last_receipt.as_deref() != Some(actual.1.original_consent_ref.as_str())
+            || after.len() != before.len()
+            || own_inputs == 0
+            || after[..7]
+                .iter()
+                .enumerate()
+                .any(|(index, (count, _))| *count != if index == 2 { own_inputs } else { 1 })
+            || after[7..] != before[7..]
+        {
+            return Err(Error::ReviewMismatch);
+        }
+        self.signed = Some((actual.0.clone(), actual.1.clone(), after));
+        self.phase = Phase::Signed;
+        Ok(actual)
     }
     pub(in crate::native_ui) fn close(mut self) -> Result<AcknowledgedBornFixture> {
         self.drain_close()?;
