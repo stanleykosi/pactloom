@@ -499,14 +499,14 @@ class PublicOutputTests(unittest.TestCase):
         # Also reject a single oversized complete chunk and resume next line.
         self.assertEqual(framing.feed(b'x'*8193+marker+b'\n'+marker+b'\n'),[marker])
 
-    def test_rolling_preflight_preserves_ten_original_plus_three_measurement_cases(self):
+    def test_rolling_preflight_preserves_ten_original_plus_nine_optional_cases(self):
         base=ROOT/'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2'
         source=(base/'sequential_construction_v3_qualification/rolling_transcript_v1.rs').read_text()
         names=re.findall(r'#\[test\]\s+(?:#\[cfg\(feature = "synthetic-born-joined-qualification"\)\]\s+)?fn (\w+)\(',source)
         all_expected=tuple(output.PREFIX+'rolling_transcript_v1::tests::'+name for name in names)
-        self.assertEqual(len(all_expected),16)
-        self.assertEqual(set(all_expected),set(output.ROLLING_TRANSCRIPT_TESTS+output.HISTORY_TRANSCRIPT_TESTS+output.ADMISSION_TRANSCRIPT_TESTS))
-        expected=tuple(name for name in all_expected if name not in output.HISTORY_TRANSCRIPT_TESTS+output.ADMISSION_TRANSCRIPT_TESTS)
+        self.assertEqual(len(all_expected),19)
+        self.assertEqual(set(all_expected),set(output.ROLLING_TRANSCRIPT_TESTS+output.HISTORY_TRANSCRIPT_TESTS+output.ADMISSION_TRANSCRIPT_TESTS+output.FLOW_TRANSCRIPT_TESTS))
+        expected=tuple(name for name in all_expected if name not in output.HISTORY_TRANSCRIPT_TESTS+output.ADMISSION_TRANSCRIPT_TESTS+output.FLOW_TRANSCRIPT_TESTS)
         self.assertEqual(expected,output.ROLLING_TRANSCRIPT_TESTS)
         self.assertIn('#[path = "sequential_construction_v3_qualification/rolling_transcript_v1.rs"]\nmod rolling_transcript_v1;',
                       (base/'sequential_construction_v3_qualification.rs').read_text())
@@ -1297,7 +1297,7 @@ class PublicTimingTests(unittest.TestCase):
         source=(ROOT/'scripts/ci-synthetic-output.py').read_text()
         self.assertIn(' + SIGNER_TIMING_TESTS + SIGNER_DURABLE_LABEL_TESTS + SIGNER_DURABLE_RECEIPT_TESTS:',source)
         self.assertIn(' + TIMING_HOST_TESTS + (DURABLE_PROVIDER_METADATA_TEST,):',source)
-        self.assertIn('CI_SYNTHETIC_PURE passed=59 ',source)
+        self.assertIn('CI_SYNTHETIC_PURE passed=72 ',source)
         self.assertIn('timing_counter_cases=3',source)
         self.assertIn("if status!=0 or not cleanup or cores!=1 or failures or (phase=='full' and outcome is None):",source)
         self.assertNotIn('eprintln!',signer)
@@ -1435,7 +1435,11 @@ class PublicHistoryMeasurementTests(unittest.TestCase):
         with self.assertRaises(ValueError): output.public_history_measurement(' '*4097)
         with self.assertRaises(ValueError): output.public_history_server_measurement(' '*513)
         source=(ROOT/'scripts/ci-synthetic-output.py').read_text()
-        self.assertIn('if len(raw)>8192: return None',source)
+        self.assertRegex(source,r'def public_line\(raw,\s*name\):\s+if len\(raw\)>8192:')
+        prefix=output.HISTORY_MEASUREMENT_PREFIX.encode('ascii')
+        at_limit=prefix+b' '*(8192-len(prefix)-1)+b']'
+        self.assertEqual(output.public_line(at_limit,'fixed'),('history_measurement_invalid',None))
+        self.assertIsNone(output.public_line(at_limit+b' ','fixed'))
         self.assertIn('if total > 16*1024*1024:',source)
 
     def test_history_framing_never_searches_inside_private_text(self):
@@ -1504,7 +1508,7 @@ class PublicHistoryMeasurementTests(unittest.TestCase):
         for field in output.HISTORY_COST_COUNTS|output.HISTORY_COST_DURATIONS:
             self.assertIn('value.'+field+'()',cost)
         authority=(ROOT/'crates/wholepact-authority/src/transport/history_diagnostics_v1.rs').read_text()
-        for type_name,values in [('CheckedHistoryPhaseV1',output.HISTORY_PHASES|{'Admission'}),
+        for type_name,values in [('CheckedHistoryPhaseV1',output.HISTORY_PHASES|{'Admission'}|output.FLOW_TRANSPORT_PURPOSE),
             ('CheckedHistoryCheckSiteV1',output.HISTORY_CHECK_SITES),('CheckedHistoryCheckpointV1',output.HISTORY_CHECKPOINTS),
             ('CheckedHistorySelectedLimitV1',output.HISTORY_SELECTED_LIMITS)]:
             mappings=set(re.findall(type_name+r'::([A-Za-z0-9]+) => "([A-Za-z0-9]+)"',source))
@@ -2026,6 +2030,252 @@ class DurableEndpointGateTests(unittest.TestCase):
                                     {'read':private,'kill':private,'wait':[private]}],failed=True)
         processes[1].kill.assert_called_once_with()
         processes[1].wait.assert_called_once_with(timeout=5)
+
+
+class PublicDurableFlowTests(unittest.TestCase):
+    base=ROOT/'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3_qualification'
+    # Exact shared literal from the reviewed maximal fixture, not an operational history.
+    maximal='{"version":1,"operation":"WriterReconcile","first_error":{"stage":"AuthorizationSource","domain":"Signer","code":"ConsentJournal","nested_code":"JournalNamedRecipientHistoryUnsupported"},"terminal_error":{"stage":"AuthorizationSource","domain":"Signer","code":"ConsentJournal","nested_code":"JournalNamedRecipientHistoryUnsupported"},"fixture_result":"ReturnedErr","completion":{"purpose":"ActivationPrepare","result":"NotObserved","receive":"Disconnected","presentation":"NotObserved"},"call_outcomes":{"writer_acquire":"ReturnedErr","writer_activate":"ReturnedErr","active_verify":"ReturnedErr","reconciliation":"ReturnedErr","session_invalidation":"ReturnedErr","release":"ReturnedErr","request_retention":"ReturnedErr","reservation":"ReturnedErr","permit_retention":"ReturnedErr","key_use":"ReturnedErr","result_retention":"ReturnedErr"},"lower_call_measurement":{"purpose":"Activate","stage":"CommittedHeadValidation","authority_code":"ConstructionHistoryUnsupported","io_kind":"Timeout","callback_stage":"WorkspaceCurrent","measurement":{"phase":"Activate","check_site":"BeforeRequestWrite","checkpoint":"DeadlineSelection","selected_limit":"Exchange","selected_budget_us":600000000,"caller_remaining_at_budget_start_us":600000000,"caller_remaining_at_failure_us":600000000,"selected_remaining_at_failure_us":600000000,"operation_elapsed_us":600000000,"exchange_elapsed_us":600000000,"pre_budget_callback_calls":1,"pre_budget_callback_us":600000000,"operation_cost":{"callback_calls":1000000,"callback_us":600000000,"callback_max_us":600000000,"connect_calls":1000000,"connect_us":600000000,"handshake_calls":1000000,"handshake_us":600000000,"frame_write_calls":1000000,"frame_write_us":600000000,"frame_read_calls":1000000,"frame_read_us":600000000},"exchange_cost":{"callback_calls":1000000,"callback_us":600000000,"callback_max_us":600000000,"connect_calls":1000000,"connect_us":600000000,"handshake_calls":1000000,"handshake_us":600000000,"frame_write_calls":1000000,"frame_write_us":600000000,"frame_read_calls":1000000,"frame_read_us":600000000},"clamped":false,"incomplete":false}},"clamped":false,"incomplete":false}'
+
+    def record(self): return json.loads(self.maximal)
+    def line(self,row=None): return output.FLOW_PREFIX+json.dumps(self.record() if row is None else row,separators=(',',':'))
+    def objects(self,row,path=()):
+        if type(row) is dict:
+            yield path,row
+            for key,value in row.items(): yield from self.objects(value,path+(key,))
+    def at(self,row,path):
+        for key in path: row=row[key]
+        return row
+    def valid(self,row): return output.public_durable_flow(json.dumps(row,separators=(',',':')))
+
+    def test_exact_maximal_production_canonical_parity_and_cap(self):
+        row=output.public_durable_flow(self.maximal)
+        self.assertEqual(len(self.maximal.encode('utf8')),2130)
+        self.assertEqual(json.dumps(row,separators=(',',':')),self.maximal)
+        escaped=self.maximal.replace('WriterReconcile','\\u0057riterReconcile',1)
+        self.assertEqual(json.dumps(output.public_durable_flow(escaped),separators=(',',':')),self.maximal)
+        source=(self.base/'safe_diagnostics_v1.rs').read_text()
+        golden=re.search(r'const DURABLE_FLOW_MAXIMAL_TEST_JSON: &str = r#"([^\n]+)"#;',source).group(1)
+        self.assertEqual(golden,self.maximal)
+        exact=self.maximal+' '*(4096-len(self.maximal.encode('utf8')))
+        self.assertEqual(output.public_durable_flow(exact),row)
+        with self.assertRaises(ValueError): output.public_durable_flow(exact+' ')
+        # Every object order is normalized, not forwarded from input formatting.
+        def reverse(value):
+            return {key:reverse(child) for key,child in reversed(list(value.items()))} if type(value) is dict else value
+        self.assertEqual(json.dumps(self.valid(reverse(row)),separators=(',',':')),self.maximal)
+        capture=output.DurableFlowDiagnostics(); capture.record('durable_flow',row)
+        saved=io.StringIO()
+        with contextlib.redirect_stdout(saved): capture.emit()
+        self.assertEqual(saved.getvalue(),output.FLOW_PREFIX+self.maximal+'\n')
+
+    def test_all_scopes_require_every_key_and_reject_duplicate_escaped_or_extra_keys(self):
+        original=self.record(); text=json.dumps(original,separators=(',',':'))
+        for path,obj in self.objects(original):
+            fragment=json.dumps(obj,separators=(',',':'))
+            row=self.record(); self.at(row,path)['private']='path/token/payload'
+            with self.assertRaises(ValueError): self.valid(row)
+            for key,value in obj.items():
+                row=self.record(); del self.at(row,path)[key]
+                with self.assertRaises(ValueError): self.valid(row)
+                for spelling in (key,'\\u%04x'%ord(key[0])+key[1:]):
+                    duplicate='{'+json.dumps(spelling).replace('\\\\u','\\u')+':'+json.dumps(value,separators=(',',':'))+','+fragment[1:]
+                    changed=text.replace(fragment,duplicate,1)
+                    with self.assertRaises(ValueError): output.public_durable_flow(changed)
+        for bad in (None,[],True,0,'private'):
+            with self.assertRaises(ValueError): output.public_durable_flow(json.dumps(bad))
+        for token in ('1.0','1e0','NaN','Infinity','-Infinity'):
+            with self.assertRaises(ValueError): output.public_durable_flow(self.maximal.replace('"version":1','"version":'+token,1))
+
+    def test_numbers_booleans_required_nulls_and_objects_are_strict(self):
+        original=self.record()
+        nullable={('first_error',),('terminal_error',),('lower_call_measurement',),
+            ('first_error','nested_code'),('terminal_error','nested_code'),('completion','purpose'),
+            ('lower_call_measurement','io_kind'),('lower_call_measurement','callback_stage')}
+        nullable|={('lower_call_measurement','measurement',key) for key in output.HISTORY_OPTIONAL_DURATIONS|{'phase','check_site','selected_limit','exchange_cost'}}
+        for path,obj in self.objects(original):
+            for key,value in obj.items():
+                full=path+(key,)
+                if type(value) is int:
+                    bound=1 if key in ('version','pre_budget_callback_calls') else 1000000 if key.endswith('_calls') else 600000000
+                    bads=(True,False,-1,bound+1,1.0,float('nan'),float('inf'),'0',{},[])
+                elif type(value) is bool: bads=(None,0,1,'false',{},[])
+                elif type(value) is str: bads=('private/path/token','',True,0,{},[])
+                elif type(value) is dict: bads=(True,0,'private',[])
+                else: bads=()
+                for bad in bads:
+                    row=self.record(); self.at(row,path)[key]=bad
+                    with self.assertRaises(ValueError): self.valid(row)
+                if full not in nullable:
+                    row=self.record(); self.at(row,path)[key]=None
+                    with self.assertRaises(ValueError): self.valid(row)
+        row=self.record(); row['first_error']=None; row['terminal_error']=None; row['lower_call_measurement']=None
+        row['completion']=dict(purpose=None,result='NotObserved',receive='NotObserved',presentation='NotObserved')
+        self.assertEqual(self.valid(row),row)
+        row=self.record()
+        for field in output.HISTORY_OPTIONAL_DURATIONS|{'phase','check_site','selected_limit','exchange_cost'}:
+            row['lower_call_measurement']['measurement'][field]=None
+        row['lower_call_measurement']['measurement']['operation_elapsed_us']=0
+        self.assertEqual(self.valid(row),row)
+
+    def test_every_domain_code_and_immediate_nested_combination_is_closed(self):
+        longest=0
+        nested=set().union(*output.FLOW_NESTED_CODES.values())
+        for domain,codes in output.FLOW_DOMAIN_CODES.items():
+            for code in codes:
+                permitted=output.FLOW_NESTED_CODES.get((domain,code),())
+                for inner in (None,*nested):
+                    error=dict(stage='AuthorizationSource',domain=domain,code=code,nested_code=inner)
+                    row=self.record(); row['first_error']=error
+                    if inner is None or inner in permitted:
+                        self.assertEqual(self.valid(row),row)
+                        longest=max(longest,len(json.dumps(error,separators=(',',':')).encode('utf8')))
+                    else:
+                        with self.assertRaises(ValueError): self.valid(row)
+        self.assertEqual(longest,129)
+        for domain,code in [('Wallet','Storage'),('Signer','SessionRequired'),('Bridge','Database'),('Authority','Io')]:
+            row=self.record(); row['first_error'].update(domain=domain,code=code,nested_code=None)
+            with self.assertRaises(ValueError): self.valid(row)
+
+    def test_every_enum_and_lower_purpose_uses_exact_finite_inventory(self):
+        cases=[((), 'operation',output.FLOW_OPERATION),
+            (('first_error',),'stage',output.FLOW_STAGE),
+            (('lower_call_measurement',),'stage',output.FLOW_TRANSPORT_STAGE),
+            (('lower_call_measurement',),'authority_code',output.FLOW_AUTHORITY_CODE),
+            (('lower_call_measurement',),'io_kind',output.ADMISSION_IO_KINDS),
+            (('lower_call_measurement',),'callback_stage',output.FLOW_CALLBACK_STAGE),
+            (('lower_call_measurement','measurement'),'check_site',output.ADMISSION_CHECK_SITES),
+            (('lower_call_measurement','measurement'),'checkpoint',output.HISTORY_CHECKPOINTS),
+            (('lower_call_measurement','measurement'),'selected_limit',output.HISTORY_SELECTED_LIMITS)]
+        cases += [(('call_outcomes',),key,output.FLOW_CALL_OUTCOME) for key in output.FLOW_CALL_FIELDS]
+        for path,field,values in cases:
+            for value in values:
+                row=self.record(); self.at(row,path)[field]=value
+                self.assertEqual(self.valid(row),row)
+        for purpose in output.FLOW_TRANSPORT_PURPOSE:
+            row=self.record(); lower=row['lower_call_measurement']; lower['purpose']=purpose; lower['measurement']['phase']=purpose
+            if purpose=='Reserve':
+                lower['measurement']['caller_remaining_at_budget_start_us']=None
+                lower['measurement']['caller_remaining_at_failure_us']=None
+            self.assertEqual(self.valid(row),row)
+            lower['measurement']['phase']=None; self.assertEqual(self.valid(row),row)
+            for phase in output.FLOW_TRANSPORT_PURPOSE- {purpose} | {'Snapshot','Page','Admission'}:
+                lower['measurement']['phase']=phase
+                with self.assertRaises(ValueError): self.valid(row)
+        for phase in output.FLOW_TRANSPORT_PURPOSE:
+            for old in (PublicHistoryMeasurementTests().record(),PublicAdmissionDiagnosticTests().records()[0]):
+                old['phase']=phase
+                parser=output.public_history_measurement if 'history_cost' in old else output.public_admission_measurement
+                with self.assertRaises(ValueError): parser(json.dumps(old))
+
+    def test_completion_truth_table_and_measurement_flags_preserve_uncertainty(self):
+        for purpose in (None,*output.FLOW_JOB_PURPOSE):
+            for result in output.FLOW_RESULT:
+                for receive in output.FLOW_RECEIVE:
+                    for presentation in output.FLOW_PRESENTATION:
+                        valid=(purpose is not None or (result=='NotObserved' and presentation=='NotObserved' and receive in ('NotObserved','Missing')))
+                        valid &= receive!='Received' or (purpose is not None and result in ('ReturnedOk','ReturnedErr'))
+                        valid &= receive not in ('Pending','Disconnected') or (result=='NotObserved' and presentation=='NotObserved')
+                        valid &= presentation!='Accepted' or (receive=='Received' and result=='ReturnedOk')
+                        valid &= presentation!='Suppressed' or receive in ('Received','Invalidated')
+                        row=self.record(); row['completion']=dict(purpose=purpose,result=result,receive=receive,presentation=presentation)
+                        if valid: self.assertEqual(self.valid(row),row)
+                        else:
+                            with self.assertRaises(ValueError): self.valid(row)
+        for flag in ('clamped','incomplete'):
+            row=self.record(); row['lower_call_measurement']['measurement'][flag]=True
+            with self.assertRaises(ValueError): self.valid(row)
+            row[flag]=True; self.assertEqual(self.valid(row),row)
+        row=self.record(); lower=row['lower_call_measurement']; lower['purpose']='Reserve'; lower['measurement']['phase']='Reserve'
+        with self.assertRaises(ValueError): self.valid(row)
+        lower['measurement']['caller_remaining_at_budget_start_us']=None; lower['measurement']['caller_remaining_at_failure_us']=None
+        self.assertEqual(self.valid(row),row)
+        lower['measurement']['selected_limit']='Caller'
+        with self.assertRaises(ValueError): self.valid(row)
+        for result in ('ReturnedOk','NotObserved',None):
+            row=self.record(); row['fixture_result']=result
+            with self.assertRaises(ValueError): self.valid(row)
+
+    def test_singleton_malformed_duplicate_oversized_and_output_loss_are_optional(self):
+        row=self.record(); raw=self.line().encode()
+        self.assertEqual(output.public_line(raw,'fixed'),('durable_flow',row))
+        self.assertEqual(output.public_line(b'test fixed ... '+raw,'fixed'),('durable_flow',row))
+        self.assertIsNone(output.public_line(b'private '+raw,'fixed'))
+        self.assertIsNone(output.public_line((output.FLOW_PRIVATE_PREFIX+self.maximal+']').encode(),'fixed'))
+        invalid=(output.FLOW_PREFIX+'{"private":"path/token/secret"}').encode()
+        for candidate in (invalid,raw+b' private',raw+raw,output.FLOW_PREFIX.encode()+b'\xff',b'CI_SYNTHETIC_DURABLE_FLOW{}'):
+            self.assertEqual(output.public_line(candidate,'fixed'),('durable_flow_invalid',None))
+        for sequence in ([('durable_flow',row)]*2,[('durable_flow_invalid',None),('durable_flow',row)],
+                         [('durable_flow',row),('durable_flow_invalid',None)]):
+            capture=output.DurableFlowDiagnostics()
+            for kind,value in sequence: capture.record(kind,value)
+            saved=io.StringIO()
+            with contextlib.redirect_stdout(saved): capture.emit()
+            self.assertEqual(saved.getvalue(),output.FLOW_INVALID+'\n')
+        for prefix in (b'',b'test fixed ... '):
+            oversized=prefix+output.FLOW_PREFIX.encode()+b'x'*9000
+            self.assertEqual(output.public_line(oversized,'fixed'),('durable_flow_invalid',None))
+            framing=output.BoundedLines('fixed'); lines=[]
+            for at in range(0,len(oversized),111): lines.extend(framing.feed(oversized[at:at+111]))
+            lines.extend(framing.feed(b'\n'))
+            self.assertEqual(lines,[output.FLOW_INVALID.encode()]); self.assertLessEqual(len(framing.pending),8192)
+        framing=output.BoundedLines('fixed'); cut=len(raw)//2
+        self.assertEqual(framing.feed(raw[:cut]),[]); self.assertEqual(framing.feed(raw[cut:]+b'\n'),[raw])
+        capture=output.DurableFlowDiagnostics(); capture.record('durable_flow',row)
+        with mock.patch('builtins.print',side_effect=OSError('private')): capture.emit()
+        with mock.patch.object(output.json,'dumps',side_effect=ValueError('private')): capture.emit()
+
+    def test_exact_phase_verified_cleanup_and_original_outcome_gates(self):
+        fake=PublicTimingTests().run_fake; line=self.line()
+        failed=fake([line],phase='durable-fixed-signing')
+        self.assertIn(output.FLOW_PREFIX,failed); self.assertNotIn('passed=true',failed)
+        self.assertLess(failed.index('[JOINED_CLEANUP '),failed.index(output.FLOW_PREFIX))
+        for kwargs in (dict(verified=False),dict(cleanup_present=False)):
+            self.assertNotIn(output.FLOW_PREFIX,fake([line],phase='durable-fixed-signing',**kwargs))
+        for phase in ('initial','full','durable-owner-reopen'):
+            self.assertNotIn(output.FLOW_PREFIX,fake([line],phase=phase,status=0))
+        for lines in ([],[line],[line,line],[output.FLOW_PREFIX+'{"private":"payload"}']):
+            result=fake(lines,phase='durable-fixed-signing',status=0)
+            self.assertIn('phase=durable-fixed-signing passed=true cleanup_verified=true',result)
+            self.assertNotIn('private',result); self.assertNotIn('payload',result)
+        parent=self.base.with_suffix('.rs').read_text()
+        gate=parent.split('if stage == "durable-proposal-native-fixed-signing-v1"',1)[1].split('\n    if outcome.is_err()',1)[0]
+        self.assertIn('&& process.verified()',gate); self.assertIn('&& root_cleanup == TemporaryRootCleanupV1::ClosedAndAbsenceVerified',gate)
+        self.assertIn('transcript.durable_flow_lines()',gate); self.assertNotIn('outcome.is_ok()',gate)
+        source=(ROOT/'scripts/ci-synthetic-output.py').read_text(); gate=source.split("if phase=='durable-fixed-signing' and cleanup_observed:",1)[1].split("if phase=='full'",1)[0]
+        self.assertIn('durable_flow.emit()',gate); self.assertIn('if total > 16*1024*1024:',source)
+        rolling=(self.base/'rolling_transcript_v1.rs').read_text()
+        self.assertIn('pub(super) const MAX_BYTES: usize = 262_144;',rolling)
+        self.assertEqual(rolling.split('pub(super) fn tail(',1)[0].count('self.durable_flow.discard_for_budget();'),3)
+
+    def test_production_getter_inventory_and_exact_non_native_selectors(self):
+        source=(self.base/'safe_diagnostics_v1.rs').read_text()
+        for typename,values in [('Operation',output.FLOW_OPERATION),('Stage',output.FLOW_STAGE),
+                ('ErrorDomain',output.FLOW_ERROR_DOMAIN),('JobPurpose',output.FLOW_JOB_PURPOSE),
+                ('Result',output.FLOW_RESULT),('Receive',output.FLOW_RECEIVE),('Presentation',output.FLOW_PRESENTATION),
+                ('CallOutcome',output.FLOW_CALL_OUTCOME),('TransportPurpose',output.FLOW_TRANSPORT_PURPOSE),
+                ('TransportStage',output.FLOW_TRANSPORT_STAGE),('AuthorityCode',output.FLOW_AUTHORITY_CODE),
+                ('CallbackStage',output.FLOW_CALLBACK_STAGE)]:
+            body=re.search(r'flow_labels!\s*\([^;]*?DurableFlow'+typename+r'V1,\s*\{(.*?)\}\s*\);',source,re.S).group(1)
+            self.assertEqual(set(re.findall(r'([A-Za-z]+)\s*=>\s*"([A-Za-z]+)"',body)),{(value,value) for value in values})
+        for typename,expected in [
+                ('ErrorCode',{(domain+code,code) for domain,codes in output.FLOW_DOMAIN_CODES.items() for code in codes}),
+                ('NestedCode',{(code,code) for codes in output.FLOW_NESTED_CODES.values() for code in codes})]:
+            body=re.search(r'flow_labels!\s*\([^;]*?DurableFlow'+typename+r'V1,\s*\{(.*?)\}\s*\);',source,re.S).group(1)
+            self.assertEqual(set(re.findall(r'([A-Za-z]+)\s*=>\s*"([A-Za-z]+)"',body)),expected)
+        for names,file in [(output.FLOW_PROJECTION_TESTS,self.base/'safe_diagnostics_v1.rs'),
+                (output.FLOW_TRANSCRIPT_TESTS,self.base/'rolling_transcript_v1.rs'),
+                (output.FLOW_HOST_TESTS,self.base/'durable_proposal_v1/worker.rs')]:
+            text=file.read_text()
+            for name in names:
+                self.assertEqual(len(re.findall(r'fn '+name.rsplit('::',1)[1]+r'\(',text)),1)
+        self.assertEqual(len(output.FLOW_PROJECTION_TESTS)+len(output.FLOW_TRANSCRIPT_TESTS)+len(output.FLOW_HOST_TESTS),13)
+        for struct,fields in [('PublicDurableFlow',output.FLOW_FIELDS),('PublicFlowError',output.FLOW_ERROR_FIELDS),
+                ('PublicFlowCompletion',output.FLOW_COMPLETION_FIELDS),('PublicFlowCallOutcomes',output.FLOW_CALL_FIELDS),
+                ('PublicFlowMeasurement',output.FLOW_MEASUREMENT_FIELDS),('PublicFlowLowerCall',output.FLOW_LOWER_FIELDS)]:
+            body=source.split('struct '+struct+' {',1)[1].split('\n    }',1)[0]
+            self.assertEqual(tuple(re.findall(r'^\s+([a-z_]+):',body,re.M)),fields)
+            self.assertEqual(body.count('#[serde(deserialize_with = "required_history_nullable")]'),len(re.findall(r'^\s+[a-z_]+: Option<',body,re.M)))
 
 if __name__=='__main__':
     unittest.main()

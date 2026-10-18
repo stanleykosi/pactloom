@@ -3,6 +3,86 @@
 //! An authenticated witness is required for each exact authorization; neither
 //! local history nor deserialized evidence can manufacture a permit or approval.
 //! Real enrollment/deployment remains separate from this source implementation.
+// With diagnostics disabled these expand to the exact original expression.
+macro_rules! flow_observe {
+    ($observer:expr, $stage:ident, $expression:expr) => {{
+        #[cfg(all(
+            feature = "synthetic-born-joined-qualification",
+            feature = "durable-proposal"
+        ))]
+        {
+            $crate::authority_bridge::durable_flow_diagnostics_v1::observe_result(
+                $observer,
+                $crate::authority_bridge::durable_flow_diagnostics_v1::DurableFlowStageV1::$stage,
+                $expression,
+            )
+        }
+        #[cfg(not(all(
+            feature = "synthetic-born-joined-qualification",
+            feature = "durable-proposal"
+        )))]
+        {
+            $expression
+        }
+    }};
+}
+#[cfg(feature = "authority-signing")]
+macro_rules! flow_observe_at {
+    ($observer:expr, $stage:expr, $expression:expr) => {{
+        #[cfg(all(
+            feature = "synthetic-born-joined-qualification",
+            feature = "durable-proposal"
+        ))]
+        {
+            $crate::authority_bridge::durable_flow_diagnostics_v1::observe_result(
+                $observer,
+                $stage,
+                $expression,
+            )
+        }
+        #[cfg(not(all(
+            feature = "synthetic-born-joined-qualification",
+            feature = "durable-proposal"
+        )))]
+        {
+            $expression
+        }
+    }};
+}
+macro_rules! flow_call {
+    ($observer:expr, $slot:ident, $stage:ident, $expression:expr) => {{
+        #[cfg(all(
+            feature = "synthetic-born-joined-qualification",
+            feature = "durable-proposal"
+        ))]
+        {
+            $crate::authority_bridge::durable_flow_diagnostics_v1::observe_call(
+                $observer,
+                $crate::authority_bridge::durable_flow_diagnostics_v1::DurableFlowCallV1::$slot,
+                $crate::authority_bridge::durable_flow_diagnostics_v1::DurableFlowStageV1::$stage,
+                || $expression,
+            )
+        }
+        #[cfg(not(all(
+            feature = "synthetic-born-joined-qualification",
+            feature = "durable-proposal"
+        )))]
+        {
+            $expression
+        }
+    }};
+}
+#[cfg(all(
+    feature = "synthetic-born-joined-qualification",
+    feature = "durable-proposal"
+))]
+pub(crate) mod durable_flow_diagnostics_v1;
+#[cfg(all(
+    feature = "synthetic-born-joined-qualification",
+    feature = "durable-proposal"
+))]
+use durable_flow_diagnostics_v1::DurableFlowObserverV1;
+
 #[cfg(all(
     feature = "authority-signing",
     feature = "native-ui",
@@ -151,6 +231,11 @@ pub fn prepare_authorization<'a>(
         expected_head,
         delivery,
         disclosure,
+        #[cfg(all(
+            feature = "synthetic-born-joined-qualification",
+            feature = "durable-proposal"
+        ))]
+        None,
     )
 }
 
@@ -170,13 +255,59 @@ pub(crate) fn prepare_authorization_from_durable_born_v1<'a>(
     delivery: AuthorizationDeliveryScope,
     disclosure: disclosure::ApprovedWitnessDisclosure,
 ) -> Result<PendingWitnessAuthorization<'a>> {
-    entry.check_current().map_err(|_| BridgeError::Permission)?;
+    prepare_authorization_from_durable_born_v1_inner(
+        entry,
+        session,
+        approval,
+        bytes,
+        expected_head,
+        delivery,
+        disclosure,
+        #[cfg(all(
+            feature = "synthetic-born-joined-qualification",
+            feature = "durable-proposal"
+        ))]
+        None,
+    )
+}
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "pending-birth-owner-signing",
+    feature = "native-ui",
+    target_os = "linux"
+))]
+#[allow(clippy::too_many_arguments)]
+fn prepare_authorization_from_durable_born_v1_inner<'a>(
+    entry: &'a crate::account::birth::enrollment::roster_v2::durable_entry_v1::FreshDurableBornEntryV1,
+    session: &'a SignerConsentSession,
+    approval: ApprovedSpendConsent,
+    bytes: &[u8],
+    expected_head: AuthorityHead,
+    delivery: AuthorizationDeliveryScope,
+    disclosure: disclosure::ApprovedWitnessDisclosure,
+    #[cfg(all(
+        feature = "synthetic-born-joined-qualification",
+        feature = "durable-proposal"
+    ))]
+    observer: Option<&DurableFlowObserverV1>,
+) -> Result<PendingWitnessAuthorization<'a>> {
+    flow_observe!(observer, AuthorizationSource, entry.check_current())
+        .map_err(|_| BridgeError::Permission)?;
     let journal = entry.journal().as_ref();
     let account = entry.account();
     if account.recovery_required() {
-        return Err(BridgeError::RecoveryRequired);
+        return flow_observe!(
+            observer,
+            AuthorizationSource,
+            Err(BridgeError::RecoveryRequired)
+        );
     }
-    let original = journal.record_durable_born_consent_release_v1(approval, entry)?;
+    let original = flow_call!(
+        observer,
+        Release,
+        Release,
+        journal.record_durable_born_consent_release_v1(approval, entry)
+    )?;
     let pending = complete_preparation(
         journal,
         session,
@@ -186,10 +317,18 @@ pub(crate) fn prepare_authorization_from_durable_born_v1<'a>(
         expected_head,
         delivery,
         disclosure,
+        #[cfg(all(
+            feature = "synthetic-born-joined-qualification",
+            feature = "durable-proposal"
+        ))]
+        observer,
     )?;
-    entry
-        .require_authorization_identity(account, journal, &pending.lease)
-        .map_err(|_| BridgeError::Permission)?;
+    flow_observe!(
+        observer,
+        AuthorizationSource,
+        entry.require_authorization_identity(account, journal, &pending.lease)
+    )
+    .map_err(|_| BridgeError::Permission)?;
     Ok(pending)
 }
 
@@ -203,28 +342,60 @@ fn complete_preparation<'a>(
     expected_head: AuthorityHead,
     delivery: AuthorizationDeliveryScope,
     disclosure: disclosure::ApprovedWitnessDisclosure,
+    #[cfg(all(
+        feature = "synthetic-born-joined-qualification",
+        feature = "durable-proposal"
+    ))]
+    observer: Option<&DurableFlowObserverV1>,
 ) -> Result<PendingWitnessAuthorization<'a>> {
-    let lease = journal.acquire_original_authorization(
-        &original.original_consent().terms().authorization_id,
-        session,
+    let lease = flow_observe!(
+        observer,
+        RequestRetain,
+        journal.acquire_original_authorization(
+            &original.original_consent().terms().authorization_id,
+            session,
+        )
     )?;
-    lease.require_current_spending_decision()?;
+    flow_observe!(
+        observer,
+        RequestRetain,
+        lease.require_current_spending_decision()
+    )?;
     if lease.evidence() != &original
-        || account.account_id().map_err(|_| BridgeError::Binding)?
+        || flow_observe!(observer, RequestRetain, account.account_id())
+            .map_err(|_| BridgeError::Binding)?
             != original.enrollment().account_id()
         || hex::encode(Sha256::digest(
-            account.fvk().map_err(|_| BridgeError::Binding)?.to_bytes(),
+            flow_observe!(observer, RequestRetain, account.fvk())
+                .map_err(|_| BridgeError::Binding)?
+                .to_bytes(),
         )) != original.enrollment().account_fvk_digest()
     {
-        return Err(BridgeError::Binding);
+        return flow_observe!(observer, RequestRetain, Err(BridgeError::Binding));
     }
-    disclosure.check(original.original_consent(), None)?;
-    disclosure.require_origin(&lease)?;
-    let mut request =
-        RetainedAuthorizationRequest::from_original(&original, bytes, expected_head, delivery)?;
+    flow_observe!(
+        observer,
+        RequestRetain,
+        disclosure.check(original.original_consent(), None)
+    )?;
+    flow_observe!(observer, RequestRetain, disclosure.require_origin(&lease))?;
+    let mut request = flow_observe!(
+        observer,
+        RequestRetain,
+        RetainedAuthorizationRequest::from_original(&original, bytes, expected_head, delivery)
+    )?;
     request.disclosure = Some(disclosure.record().clone());
-    request.validate_original(&original)?;
-    journal.bridge_retain_request(&lease, &request)?;
+    flow_observe!(
+        observer,
+        RequestRetain,
+        request.validate_original(&original)
+    )?;
+    flow_call!(
+        observer,
+        RequestRetention,
+        RequestRetain,
+        journal.bridge_retain_request(&lease, &request)
+    )?;
     Ok(PendingWitnessAuthorization {
         journal,
         account,
@@ -238,16 +409,83 @@ impl<'a> PendingWitnessAuthorization<'a> {
         self.request.reservation()
     }
     pub fn reserve(self, client: &AuthorityClient) -> Result<ReservedAuthorization<'a>> {
-        self.lease.require_current_authorization()?;
-        self.disclosure
-            .check(self.lease.evidence().original_consent(), Some(client))?;
-        self.disclosure.require_origin(&self.lease)?;
+        self.reserve_inner(
+            client,
+            #[cfg(all(
+                feature = "synthetic-born-joined-qualification",
+                feature = "durable-proposal"
+            ))]
+            None,
+        )
+    }
+    fn reserve_inner(
+        self,
+        client: &AuthorityClient,
+        #[cfg(all(
+            feature = "synthetic-born-joined-qualification",
+            feature = "durable-proposal"
+        ))]
+        observer: Option<&DurableFlowObserverV1>,
+    ) -> Result<ReservedAuthorization<'a>> {
+        flow_observe!(
+            observer,
+            Reserve,
+            self.lease.require_current_authorization()
+        )?;
+        flow_observe!(
+            observer,
+            Reserve,
+            self.disclosure
+                .check(self.lease.evidence().original_consent(), Some(client))
+        )?;
+        flow_observe!(
+            observer,
+            Reserve,
+            self.disclosure.require_origin(&self.lease)
+        )?;
         // The stored descriptor is used verbatim. Never refresh its expected head,
         // operation ID, expiry or inputs after timeout/lost response.
-        let permit = client.reserve(self.request.reservation.clone())?;
-        permit.matches_request(&self.request.reservation)?;
-        self.journal.bridge_retain_permit(&self.lease, &permit)?;
-        self.lease.require_current_authorization()?;
+        let permit = flow_call!(observer, Reservation, Reserve, {
+            #[cfg(all(
+                feature = "synthetic-born-joined-qualification",
+                feature = "durable-proposal"
+            ))]
+            {
+                if let Some(observer) = observer {
+                    observer.observe_transport(
+                        durable_flow_diagnostics_v1::DurableFlowTransportPurposeV1::Reserve,
+                        durable_flow_diagnostics_v1::DurableFlowStageV1::Reserve,
+                        None,
+                        client.reserve_diagnosed(self.request.reservation.clone()),
+                    )
+                } else {
+                    client.reserve(self.request.reservation.clone())
+                }
+            }
+            #[cfg(not(all(
+                feature = "synthetic-born-joined-qualification",
+                feature = "durable-proposal"
+            )))]
+            {
+                client.reserve(self.request.reservation.clone())
+            }
+        })?;
+        flow_observe!(
+            observer,
+            Reserve,
+            permit.matches_request(&self.request.reservation)
+        )?;
+        flow_call!(
+            observer,
+            PermitRetention,
+            PermitRetain,
+            self.journal.bridge_retain_permit(&self.lease, &permit)
+        )?;
+        flow_observe!(
+            observer,
+            PermitRetain,
+            self.lease.require_current_authorization()
+        )?;
         // This is the witness serialization point for grant pause/revoke. Only
         // the exact admitted operation may drain a subsequent control change.
         // A lost admission response is permanently uncertain, never reminted.

@@ -28,10 +28,34 @@ fn require_workspace_source(
     source: &DurableWitnessImportedSourceV1,
     role: CredentialRole,
 ) -> Result<()> {
+    require_workspace_source_inner(
+        workspace,
+        source,
+        role,
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        None,
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        flow_diag_v1::DurableFlowStageV1::FixtureState,
+    )
+}
+fn require_workspace_source_inner(
+    workspace: &NativeWitnessWorkspace,
+    source: &DurableWitnessImportedSourceV1,
+    role: CredentialRole,
+    #[cfg(feature = "synthetic-born-joined-qualification")] observer: Option<
+        &flow_diag_v1::DurableFlowObserverV1,
+    >,
+    #[cfg(feature = "synthetic-born-joined-qualification")] stage: flow_diag_v1::DurableFlowStageV1,
+) -> Result<()> {
     // This descriptor is data only. The complete source/journal/current-record
     // check follows it on EVERY callback and retains its own actual read fence.
     let disclosure = source.entry().original_witness_disclosure_data_v1()?;
-    source.check_current()?;
+    source.check_current_inner(
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        observer,
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        stage,
+    )?;
     let signer = &source.entry().record().account_record.terms.signer;
     let certificate = match role {
         CredentialRole::Owner => &signer.owner_certificate_digest,
@@ -56,6 +80,10 @@ fn source_history(
         deadline,
         #[cfg(feature = "synthetic-born-joined-qualification")]
         None,
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        None,
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        flow_diag_v1::DurableFlowStageV1::FixtureState,
     )
 }
 fn source_history_inner(
@@ -66,8 +94,24 @@ fn source_history_inner(
     #[cfg(feature = "synthetic-born-joined-qualification")] failure: Option<
         &mut Option<(CheckedHistoryFailureV1, Option<Error>)>,
     >,
+    #[cfg(feature = "synthetic-born-joined-qualification")] observer: Option<
+        &flow_diag_v1::DurableFlowObserverV1,
+    >,
+    #[cfg(feature = "synthetic-born-joined-qualification")] stage: flow_diag_v1::DurableFlowStageV1,
 ) -> Result<ReconciledAuthorityHistory> {
-    require_workspace_source(workspace, source, role)?;
+    durable_flow_observe_v1!(
+        observer,
+        stage,
+        require_workspace_source_inner(
+            workspace,
+            source,
+            role,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            observer,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            stage,
+        )
+    )?;
     #[cfg(feature = "synthetic-born-joined-qualification")]
     if let Some(failure) = failure {
         return workspace.durable_history_diagnosed_v1(
@@ -76,9 +120,21 @@ fn source_history_inner(
             failure,
         );
     }
-    workspace.durable_history_v1(deadline, || {
-        require_workspace_source(workspace, source, role)
-    })
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    {
+        workspace.durable_history_flow_v1(
+            deadline,
+            || require_workspace_source_inner(workspace, source, role, observer, stage),
+            observer,
+            stage,
+        )
+    }
+    #[cfg(not(feature = "synthetic-born-joined-qualification"))]
+    {
+        workspace.durable_history_v1(deadline, || {
+            require_workspace_source(workspace, source, role)
+        })
+    }
 }
 
 fn canonical<T: serde::Serialize>(domain: &str, value: &T) -> Result<String> {
@@ -108,6 +164,17 @@ fn terms(
     until: u64,
 ) -> Result<DurablePaymentAdmissionTermsV1> {
     source.check_current()?;
+    let result = terms_from_current_policy_records(source, from, until)?;
+    source.check_current()?;
+    Ok(result)
+}
+// Read-only reconstruction only. This owns and drops its actual policy lease;
+// the returned terms are inert data, never a successful current-source token.
+fn terms_from_current_policy_records(
+    source: &DurableWitnessImportedSourceV1,
+    from: u64,
+    until: u64,
+) -> Result<DurablePaymentAdmissionTermsV1> {
     let entry = source.entry();
     let extension = entry.record().extension()?;
     let old = &extension.account_extension;
@@ -194,7 +261,6 @@ fn terms(
     result.validate().map_err(|_| Error::ReviewMismatch)?;
     source.check_data_current_under_fence()?;
     drop(lease);
-    source.check_current()?;
     Ok(result)
 }
 fn admission_terms(request: &OwnerControlRequest) -> Result<&DurablePaymentAdmissionTermsV1> {
@@ -212,6 +278,48 @@ fn require_request(
         return Err(Error::ReviewMismatch);
     }
     Ok(())
+}
+// Fixed-order, fixed-terms kernel used only by the closed three-purpose callback
+// below. No closure receives a lease, connection or capability; no permission
+// or validation result escapes. Tests can exercise this exact sequence without
+// constructing an imported source or pretending to issue native custody.
+fn check_callback_terms_v1(
+    expected: &DurablePaymentAdmissionTermsV1,
+    early_custody: impl FnOnce() -> Result<()>,
+    reconstruct: impl FnOnce() -> Result<DurablePaymentAdmissionTermsV1>,
+    late_current: impl FnOnce() -> Result<()>,
+    final_custody: impl FnOnce() -> Result<()>,
+    #[cfg(feature = "synthetic-born-joined-qualification")] mut observation: Option<
+        &mut QualificationDurableAdmissionObservationV1,
+    >,
+) -> Result<()> {
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    if let Some(value) = observation.as_deref_mut() {
+        value.callback(DurableAdmissionCallbackStageV1::Custody, early_custody)?;
+    } else {
+        early_custody()?;
+    }
+    #[cfg(not(feature = "synthetic-born-joined-qualification"))]
+    early_custody()?;
+    let check_request = || {
+        let actual = reconstruct()?;
+        // This is a fresh actual acquisition and complete snapshot, not reuse
+        // of the earlier policy lease. Another live handle can change epoch or
+        // append history despite that handle's authority read fence.
+        late_current()?;
+        if &actual != expected {
+            return Err(Error::ReviewMismatch);
+        }
+        final_custody()
+    };
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    if let Some(value) = observation {
+        return value.callback(
+            DurableAdmissionCallbackStageV1::RequestValidation,
+            check_request,
+        );
+    }
+    check_request()
 }
 fn require_request_under_fence(
     source: &DurableWitnessImportedSourceV1,
@@ -340,6 +448,63 @@ impl ReviewCustody {
             &self.source.entry().native_binding(),
             &self.disclosure,
             &self.certificate,
+        )
+    }
+    // Exactly the Admission, Acquire and Activate transport callbacks use this
+    // closed read-only composition. Generic custody, native approval, retain
+    // and already-under-fence reconciliation deliberately keep their old gates.
+    fn callback_current_v1(
+        &self,
+        workspace: &NativeWitnessWorkspace,
+        request: &OwnerControlRequest,
+        #[cfg(feature = "synthetic-born-joined-qualification")] observation: Option<
+            &mut QualificationDurableAdmissionObservationV1,
+        >,
+    ) -> Result<()> {
+        let expected = admission_terms(request)?;
+        check_callback_terms_v1(
+            expected,
+            || {
+                // Deny-only source/peer/material/native preflight. The data
+                // checker takes no journal lock and also runs before acquisition
+                // inside check_current. No fence or permission is asserted here;
+                // the mandatory late full gate below must complete before TLS.
+                self.source.check_data_current_under_fence()?;
+                if Instant::now() >= self.deadline {
+                    return Err(Error::ReviewMismatch);
+                }
+                workspace.require_durable_instance_v1(&self.instance)?;
+                workspace.require_durable_credential_v1(
+                    &self.source.entry().native_binding(),
+                    &self.disclosure,
+                    &self.certificate,
+                )
+            },
+            || {
+                // Preserve the second early data gate at the former terms-entry
+                // boundary. All policy/receipt/export/FVK checks remain, and the
+                // policy lease is dropped inside this call before late_current.
+                self.source.check_data_current_under_fence()?;
+                terms_from_current_policy_records(
+                    &self.source,
+                    expected.valid_from_ms,
+                    expected.valid_until_ms,
+                )
+            },
+            || self.source.check_current(),
+            || {
+                if Instant::now() >= self.deadline {
+                    return Err(Error::ReviewMismatch);
+                }
+                workspace.require_durable_instance_v1(&self.instance)?;
+                workspace.require_durable_credential_v1(
+                    &self.source.entry().native_binding(),
+                    &self.disclosure,
+                    &self.certificate,
+                )
+            },
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            observation,
         )
     }
     fn decision(
@@ -616,12 +781,11 @@ impl DurableWitnessAdmissionDispatchV1 {
                 self.retained.request(),
                 self.custody.deadline,
                 || {
-                    value.callback(DurableAdmissionCallbackStageV1::Custody, || {
-                        self.custody.workspace(owner)
-                    })?;
-                    value.callback(DurableAdmissionCallbackStageV1::RequestValidation, || {
-                        require_request(&self.custody.source, self.retained.request())
-                    })
+                    self.custody.callback_current_v1(
+                        owner,
+                        self.retained.request(),
+                        Some(&mut *value),
+                    )
                 },
                 &mut failure,
             );
@@ -643,13 +807,19 @@ impl DurableWitnessAdmissionDispatchV1 {
             return result;
         }
         owner.durable_admit_v1(self.retained.request(), self.custody.deadline, || {
-            self.custody.workspace(owner)?;
-            require_request(&self.custody.source, self.retained.request())
+            self.custody.callback_current_v1(
+                owner,
+                self.retained.request(),
+                #[cfg(feature = "synthetic-born-joined-qualification")]
+                None,
+            )
         })
     }
 }
 
 pub(super) struct PreparedDurableWriterSessionV1 {
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    flow_observer: Option<flow_diag_v1::DurableFlowObserverV1>,
     custody: ReviewCustody,
     history: ReconciledAuthorityHistory,
     admission: OwnerControlRequest,
@@ -661,12 +831,39 @@ impl PreparedDurableWriterSessionV1 {
         source: Arc<DurableWitnessImportedSourceV1>,
         admission_operation_id: &str,
     ) -> Result<Self> {
-        source.check_current()?;
-        let history = source_history(
+        Self::prepare_inner(
+            workspace,
+            source,
+            admission_operation_id,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            None,
+        )
+    }
+    pub(super) fn prepare_inner(
+        workspace: &NativeWitnessWorkspace,
+        source: Arc<DurableWitnessImportedSourceV1>,
+        admission_operation_id: &str,
+        #[cfg(feature = "synthetic-born-joined-qualification")] observer: Option<
+            &flow_diag_v1::DurableFlowObserverV1,
+        >,
+    ) -> Result<Self> {
+        source.check_current_inner(
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            observer,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            flow_diag_v1::DurableFlowStageV1::AcquirePrepare,
+        )?;
+        let history = source_history_inner(
             workspace,
             &source,
             CredentialRole::Writer,
             source.deadline()?,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            None,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            observer,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            flow_diag_v1::DurableFlowStageV1::AcquirePrepare,
         )?;
         let intent = committed_intent(&source, &history, admission_operation_id)?;
         let admission = intent.request().clone();
@@ -703,6 +900,8 @@ impl PreparedDurableWriterSessionV1 {
             serde_json::to_string_pretty(&(&admission,&acquire,history.snapshot())).map_err(|_| Error::InvalidData)?);
         let custody = ReviewCustody::new(workspace, source, &certificate, digest, display)?;
         Ok(Self {
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            flow_observer: observer.cloned(),
             custody,
             history,
             admission,
@@ -730,23 +929,56 @@ impl ApprovedDurableWriterSessionV1 {
         &self,
         workspace: &NativeWitnessWorkspace,
     ) -> Result<WriterSessionReceipt> {
+        self.acquire_inner(
+            workspace,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            None,
+        )
+    }
+    pub(super) fn acquire_inner(
+        &self,
+        workspace: &NativeWitnessWorkspace,
+        #[cfg(feature = "synthetic-born-joined-qualification")] observer: Option<
+            &flow_diag_v1::DurableFlowObserverV1,
+        >,
+    ) -> Result<WriterSessionReceipt> {
         self.0.custody.workspace(workspace)?;
         require_live(&self.0.admission)?;
         // NEVER refresh history/head on retry: this exact captured pre-acquire
         // history belongs to the same actual client and its retained key.
-        workspace.durable_acquire_v1(
-            &self.0.history,
-            &self.0.admission.operation_id,
-            self.0.custody.deadline,
-            || {
-                self.0.custody.workspace(workspace)?;
-                require_request(&self.0.custody.source, &self.0.admission)
-            },
-        )
+        let check = || {
+            self.0.custody.callback_current_v1(
+                workspace,
+                &self.0.admission,
+                #[cfg(feature = "synthetic-born-joined-qualification")]
+                None,
+            )
+        };
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        {
+            workspace.durable_acquire_observed_v1(
+                &self.0.history,
+                &self.0.admission.operation_id,
+                self.0.custody.deadline,
+                check,
+                observer,
+            )
+        }
+        #[cfg(not(feature = "synthetic-born-joined-qualification"))]
+        {
+            workspace.durable_acquire_v1(
+                &self.0.history,
+                &self.0.admission.operation_id,
+                self.0.custody.deadline,
+                check,
+            )
+        }
     }
 }
 
 pub(super) struct PreparedDurableWriterActivationV1 {
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    flow_observer: Option<flow_diag_v1::DurableFlowObserverV1>,
     custody: ReviewCustody,
     history: ReconciledAuthorityHistory,
     admission: OwnerControlRequest,
@@ -760,8 +992,42 @@ impl PreparedDurableWriterActivationV1 {
         admission_operation_id: &str,
         receipt: WriterSessionReceipt,
     ) -> Result<Self> {
-        source.check_current()?;
-        let history = source_history(owner, &source, CredentialRole::Owner, source.deadline()?)?;
+        Self::prepare_inner(
+            owner,
+            source,
+            admission_operation_id,
+            receipt,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            None,
+        )
+    }
+    pub(super) fn prepare_inner(
+        owner: &NativeWitnessWorkspace,
+        source: Arc<DurableWitnessImportedSourceV1>,
+        admission_operation_id: &str,
+        receipt: WriterSessionReceipt,
+        #[cfg(feature = "synthetic-born-joined-qualification")] observer: Option<
+            &flow_diag_v1::DurableFlowObserverV1,
+        >,
+    ) -> Result<Self> {
+        source.check_current_inner(
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            observer,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            flow_diag_v1::DurableFlowStageV1::ActivationPrepare,
+        )?;
+        let history = source_history_inner(
+            owner,
+            &source,
+            CredentialRole::Owner,
+            source.deadline()?,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            None,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            observer,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            flow_diag_v1::DurableFlowStageV1::ActivationPrepare,
+        )?;
         let intent = committed_intent(&source, &history, admission_operation_id)?;
         let admission = intent.request().clone();
         require_live(&admission)?;
@@ -805,6 +1071,8 @@ impl PreparedDurableWriterActivationV1 {
             serde_json::to_string_pretty(&(&request,&admission,&receipt)).map_err(|_| Error::InvalidData)?);
         let custody = ReviewCustody::new(owner, source, &certificate, digest, display)?;
         Ok(Self {
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            flow_observer: observer.cloned(),
             custody,
             history,
             admission,
@@ -830,22 +1098,56 @@ impl PreparedDurableWriterActivationV1 {
 }
 impl ApprovedDurableWriterActivationV1 {
     pub(super) fn activate(&self, owner: &NativeWitnessWorkspace) -> Result<AccountSnapshot> {
+        self.activate_inner(
+            owner,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            None,
+        )
+    }
+    pub(super) fn activate_inner(
+        &self,
+        owner: &NativeWitnessWorkspace,
+        #[cfg(feature = "synthetic-born-joined-qualification")] observer: Option<
+            &flow_diag_v1::DurableFlowObserverV1,
+        >,
+    ) -> Result<AccountSnapshot> {
         self.0.custody.workspace(owner)?;
         require_live(&self.0.admission)?;
-        owner.durable_activate_v1(
-            &self.0.history,
-            &self.0.admission.operation_id,
-            &self.0.request,
-            self.0.custody.deadline,
-            || {
-                self.0.custody.workspace(owner)?;
-                require_request(&self.0.custody.source, &self.0.admission)
-            },
-        )
+        let check = || {
+            self.0.custody.callback_current_v1(
+                owner,
+                &self.0.admission,
+                #[cfg(feature = "synthetic-born-joined-qualification")]
+                None,
+            )
+        };
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        {
+            owner.durable_activate_observed_v1(
+                &self.0.history,
+                &self.0.admission.operation_id,
+                &self.0.request,
+                self.0.custody.deadline,
+                check,
+                observer,
+            )
+        }
+        #[cfg(not(feature = "synthetic-born-joined-qualification"))]
+        {
+            owner.durable_activate_v1(
+                &self.0.history,
+                &self.0.admission.operation_id,
+                &self.0.request,
+                self.0.custody.deadline,
+                check,
+            )
+        }
     }
 }
 
 pub(super) struct PreparedDurableWriterReconciliationV1 {
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    flow_observer: Option<flow_diag_v1::DurableFlowObserverV1>,
     source: Arc<DurableWitnessImportedSourceV1>,
     admission: OwnerControlRequest,
     prepared: PreparedWriterReconciliation,
@@ -868,17 +1170,63 @@ impl PreparedDurableWriterReconciliationV1 {
         source: Arc<DurableWitnessImportedSourceV1>,
         admission_operation_id: &str,
     ) -> Result<Self> {
-        source.check_current()?;
+        Self::prepare_inner(
+            workspace,
+            source,
+            admission_operation_id,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            None,
+        )
+    }
+    pub(super) fn prepare_inner(
+        workspace: &NativeWitnessWorkspace,
+        source: Arc<DurableWitnessImportedSourceV1>,
+        admission_operation_id: &str,
+        #[cfg(feature = "synthetic-born-joined-qualification")] observer: Option<
+            &flow_diag_v1::DurableFlowObserverV1,
+        >,
+    ) -> Result<Self> {
+        source.check_current_inner(
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            observer,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            flow_diag_v1::DurableFlowStageV1::ReconcilePrepare,
+        )?;
         let deadline = source
             .deadline()?
             .min(Instant::now() + Duration::from_secs(120));
-        let history = source_history(workspace, &source, CredentialRole::Writer, deadline)?;
+        let history = source_history_inner(
+            workspace,
+            &source,
+            CredentialRole::Writer,
+            deadline,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            None,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            observer,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            flow_diag_v1::DurableFlowStageV1::ReconcilePrepare,
+        )?;
         let intent = committed_intent(&source, &history, admission_operation_id)?;
         workspace.require_durable_credential_v1(
             &source.entry().native_binding(),
             history.disclosure(),
             &admission_terms(intent.request())?.writer_certificate_digest,
         )?;
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        let active = workspace.durable_active_observed_v1(
+            &history,
+            admission_operation_id,
+            deadline,
+            || {
+                source.check_current_inner(
+                    observer,
+                    flow_diag_v1::DurableFlowStageV1::ActiveVerification,
+                )
+            },
+            observer,
+        )?;
+        #[cfg(not(feature = "synthetic-born-joined-qualification"))]
         let active =
             workspace.durable_active_v1(&history, admission_operation_id, deadline, || {
                 source.check_current()
@@ -894,8 +1242,15 @@ impl PreparedDurableWriterReconciliationV1 {
                 active,
                 &intent,
             )?;
-        source.check_current()?;
+        source.check_current_inner(
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            observer,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            flow_diag_v1::DurableFlowStageV1::ReconcilePrepare,
+        )?;
         Ok(Self {
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            flow_observer: observer.cloned(),
             source,
             admission: intent.request().clone(),
             prepared,
@@ -940,12 +1295,26 @@ impl PreparedDurableWriterReconciliationV1 {
 }
 impl ApprovedDurableWriterReconciliationV1 {
     pub(super) fn reconcile(self) -> Result<DurableReconciliationOutcomeV1> {
+        self.reconcile_inner(
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            None,
+        )
+    }
+    fn reconcile_inner(
+        self,
+        #[cfg(feature = "synthetic-born-joined-qualification")] observer: Option<
+            &flow_diag_v1::DurableFlowObserverV1,
+        >,
+    ) -> Result<DurableReconciliationOutcomeV1> {
         self.source.check_current()?;
         require_request(&self.source, &self.admission)?;
         if Instant::now() >= self.deadline {
             return Err(Error::ReviewMismatch);
         }
-        let result =
+        let result = durable_flow_call_v1!(
+            observer,
+            flow_diag_v1::DurableFlowCallV1::Reconciliation,
+            flow_diag_v1::DurableFlowStageV1::ReconcileCall,
             self.source
                 .entry()
                 .journal()
@@ -953,34 +1322,68 @@ impl ApprovedDurableWriterReconciliationV1 {
                     if Instant::now() >= self.deadline {
                         return Err(JournalError::Permission);
                     }
-                    require_request_under_fence(&self.source, &self.admission)
-                        .map_err(|_| JournalError::Permission)
-                });
+                    durable_flow_observe_v1!(
+                        observer,
+                        flow_diag_v1::DurableFlowStageV1::ReconcileCall,
+                        require_request_under_fence(&self.source, &self.admission)
+                    )
+                    .map_err(|_| JournalError::Permission)
+                })
+        );
         // No post-invalidation current-source assertion. Committed/uncertain
         // outcomes are inert evidence, never continuation of the old import.
         // Even uncertainty drains local permission; it never resets remote state.
-        match result {
-            Ok(_) => {
-                let invalidated = self.source.session().invalidate();
-                Ok(if invalidated.is_ok() {
-                    DurableReconciliationOutcomeV1::Committed {
-                        review_digest: self.review_digest,
-                    }
-                } else {
-                    DurableReconciliationOutcomeV1::Uncertain {
-                        review_digest: self.review_digest,
-                    }
-                })
-            }
-            Err(JournalError::Database) => {
-                let _ = self.source.session().invalidate();
-                Ok(DurableReconciliationOutcomeV1::Uncertain {
-                    review_digest: self.review_digest,
-                })
-            }
-            // Proven pre-commit refusal leaves the original source intact.
-            Err(error) => Err(error.into()),
+        finish_durable_reconciliation_v1(
+            result,
+            self.review_digest,
+            || self.source.session().invalidate(),
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            observer,
+        )
+    }
+}
+
+// The actual reconciliation result mapping. An invalidation refusal or uncertain
+// database result remains Ok(Uncertain), not a newly invented operational Err.
+fn finish_durable_reconciliation_v1<T>(
+    result: std::result::Result<T, JournalError>,
+    review_digest: String,
+    invalidate: impl FnOnce() -> std::result::Result<(), JournalError>,
+    #[cfg(feature = "synthetic-born-joined-qualification")] observer: Option<
+        &flow_diag_v1::DurableFlowObserverV1,
+    >,
+) -> Result<DurableReconciliationOutcomeV1> {
+    match result {
+        Ok(_) => {
+            let invalidated = durable_flow_call_v1!(
+                observer,
+                flow_diag_v1::DurableFlowCallV1::SessionInvalidation,
+                flow_diag_v1::DurableFlowStageV1::Invalidate,
+                invalidate()
+            );
+            Ok(if invalidated.is_ok() {
+                DurableReconciliationOutcomeV1::Committed {
+                    review_digest: review_digest,
+                }
+            } else {
+                DurableReconciliationOutcomeV1::Uncertain {
+                    review_digest: review_digest,
+                }
+            })
         }
+        Err(JournalError::Database) => {
+            let _ = durable_flow_call_v1!(
+                observer,
+                flow_diag_v1::DurableFlowCallV1::SessionInvalidation,
+                flow_diag_v1::DurableFlowStageV1::Invalidate,
+                invalidate()
+            );
+            Ok(DurableReconciliationOutcomeV1::Uncertain {
+                review_digest: review_digest,
+            })
+        }
+        // Proven pre-commit refusal leaves the original source intact.
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -988,6 +1391,10 @@ impl ApprovedDurableWriterReconciliationV1 {
 /// any remote exposure. A new owner must resolve original authenticated history.
 #[derive(Default)]
 pub(super) struct DurableWitnessRuntimeV1 {
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(super) flow_observation: Option<flow_diag_v1::DurableFlowObserverV1>,
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(super) flow_import: Option<super::durable_review_v1::DurableFlowImportExpectationV1>,
     admission_id: Option<String>,
     admission_retry: Option<Arc<DurableWitnessAdmissionDispatchV1>>,
     session_retry: Option<Arc<ApprovedDurableWriterSessionV1>>,
@@ -1547,6 +1954,25 @@ impl DurableWitnessRuntimeV1 {
     }
 }
 impl DurableWitnessPreparedV1 {
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(super) fn flow_observer_v1(&self) -> Option<&flow_diag_v1::DurableFlowObserverV1> {
+        match self {
+            Self::Admission(_) => None,
+            Self::Session(value) => value.flow_observer.as_ref(),
+            Self::Activation(value) => value.flow_observer.as_ref(),
+            Self::Reconciliation(value) => value.flow_observer.as_ref(),
+        }
+    }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(super) fn flow_native_stage_v1(&self) -> flow_diag_v1::DurableFlowStageV1 {
+        use flow_diag_v1::DurableFlowStageV1 as S;
+        match self {
+            Self::Admission(_) => S::FixtureState,
+            Self::Session(_) => S::AcquireNative,
+            Self::Activation(_) => S::ActivationNative,
+            Self::Reconciliation(_) => S::ReconcileNative,
+        }
+    }
     pub(super) fn source_current(&self) -> bool {
         match self {
             Self::Admission(v) => v.custody.source.check_data_current_under_fence().is_ok(),
@@ -1644,7 +2070,10 @@ impl NativeRuntime {
         if let Some(open) = self.open.as_mut() {
             let state = &mut open.durable_witness.qualification_admission;
             let eligible = !state.taken
-                && state.active.as_ref().is_some_and(|(id, actual)| *id == attempt && actual == digest);
+                && state
+                    .active
+                    .as_ref()
+                    .is_some_and(|(id, actual)| *id == attempt && actual == digest);
             if let Some(observation) = state.take(attempt, digest) {
                 if observation.first_error.is_some() {
                     failure.stage = observation.stage;
@@ -1750,6 +2179,10 @@ impl NativeRuntime {
                     source.deadline()?,
                     #[cfg(feature = "synthetic-born-joined-qualification")]
                     Some(&mut history_failure),
+                    #[cfg(feature = "synthetic-born-joined-qualification")]
+                    None,
+                    #[cfg(feature = "synthetic-born-joined-qualification")]
+                    flow_diag_v1::DurableFlowStageV1::FixtureState,
                 )?;
                 #[cfg(feature = "synthetic-born-joined-qualification")]
                 {
@@ -1830,6 +2263,26 @@ impl NativeRuntime {
             WitnessOutcome::DurablePaymentV1(outcome)
         })
     }
+    fn start_flow_witness_job_v1(
+        &mut self,
+        epoch: u64,
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        purpose: flow_diag_v1::DurableFlowJobPurposeV1,
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        stage: flow_diag_v1::DurableFlowStageV1,
+        #[cfg(feature = "synthetic-born-joined-qualification")] observer: Option<
+            flow_diag_v1::DurableFlowObserverV1,
+        >,
+        work: impl FnOnce(Arc<AtomicBool>) -> WitnessOutcome + Send + 'static,
+    ) -> Result<()> {
+        let result = self.start_witness_job_inner(
+            epoch,
+            work,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            observer.clone().map(|observer| (observer, purpose, stage)),
+        );
+        durable_flow_observe_v1!(observer.as_ref(), stage, result)
+    }
     pub(super) fn prepare_durable_session_v1(&mut self, epoch: u64) -> Result<()> {
         #[cfg(feature = "synthetic-born-joined-qualification")]
         self.clear_qualification_durable_witness_completion_v1();
@@ -1844,16 +2297,34 @@ impl NativeRuntime {
             .admission_id
             .clone()
             .ok_or(Error::RecoveryRequired)?;
-        self.start_witness_job(epoch, move |cancelled| {
-            WitnessOutcome::DurablePaymentV1(DurableWitnessOutcomeV1::Prepared((|| {
-                if cancelled.load(Ordering::Acquire) {
-                    return Err(Error::Locked);
-                }
-                Ok(Box::new(DurableWitnessPreparedV1::Session(
-                    PreparedDurableWriterSessionV1::prepare(&witness, source, &id)?,
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        let observer = open.durable_witness.flow_observation.clone();
+        self.start_flow_witness_job_v1(
+            epoch,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            flow_diag_v1::DurableFlowJobPurposeV1::AcquirePrepare,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            flow_diag_v1::DurableFlowStageV1::AcquirePrepare,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            observer.clone(),
+            move |cancelled| {
+                WitnessOutcome::DurablePaymentV1(DurableWitnessOutcomeV1::Prepared((|| {
+                    if cancelled.load(Ordering::Acquire) {
+                        return Err(Error::Locked);
+                    }
+                    Ok(Box::new(DurableWitnessPreparedV1::Session(
+                        PreparedDurableWriterSessionV1::prepare_inner(
+                            &witness,
+                            source,
+                            &id,
+                            #[cfg(feature = "synthetic-born-joined-qualification")]
+                            observer.as_ref(),
+                        )?,
+                    )))
+                })(
                 )))
-            })()))
-        })
+            },
+        )
     }
     pub(super) fn prepare_durable_activation_v1(&mut self, epoch: u64) -> Result<()> {
         #[cfg(feature = "synthetic-born-joined-qualification")]
@@ -1870,16 +2341,35 @@ impl NativeRuntime {
             .clone()
             .ok_or(Error::RecoveryRequired)?;
         let receipt = open.writer_receipt.clone().ok_or(Error::RecoveryRequired)?;
-        self.start_witness_job(epoch, move |cancelled| {
-            WitnessOutcome::DurablePaymentV1(DurableWitnessOutcomeV1::Prepared((|| {
-                if cancelled.load(Ordering::Acquire) {
-                    return Err(Error::Locked);
-                }
-                Ok(Box::new(DurableWitnessPreparedV1::Activation(
-                    PreparedDurableWriterActivationV1::prepare(&owner, source, &id, receipt)?,
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        let observer = open.durable_witness.flow_observation.clone();
+        self.start_flow_witness_job_v1(
+            epoch,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            flow_diag_v1::DurableFlowJobPurposeV1::ActivationPrepare,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            flow_diag_v1::DurableFlowStageV1::ActivationPrepare,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            observer.clone(),
+            move |cancelled| {
+                WitnessOutcome::DurablePaymentV1(DurableWitnessOutcomeV1::Prepared((|| {
+                    if cancelled.load(Ordering::Acquire) {
+                        return Err(Error::Locked);
+                    }
+                    Ok(Box::new(DurableWitnessPreparedV1::Activation(
+                        PreparedDurableWriterActivationV1::prepare_inner(
+                            &owner,
+                            source,
+                            &id,
+                            receipt,
+                            #[cfg(feature = "synthetic-born-joined-qualification")]
+                            observer.as_ref(),
+                        )?,
+                    )))
+                })(
                 )))
-            })()))
-        })
+            },
+        )
     }
     pub(super) fn prepare_durable_reconciliation_v1(&mut self, epoch: u64) -> Result<()> {
         #[cfg(feature = "synthetic-born-joined-qualification")]
@@ -1892,16 +2382,34 @@ impl NativeRuntime {
             .admission_id
             .clone()
             .ok_or(Error::RecoveryRequired)?;
-        self.start_witness_job(epoch, move |cancelled| {
-            WitnessOutcome::DurablePaymentV1(DurableWitnessOutcomeV1::Prepared((|| {
-                if cancelled.load(Ordering::Acquire) {
-                    return Err(Error::Locked);
-                }
-                Ok(Box::new(DurableWitnessPreparedV1::Reconciliation(
-                    PreparedDurableWriterReconciliationV1::prepare(&witness, source, &id)?,
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        let observer = open.durable_witness.flow_observation.clone();
+        self.start_flow_witness_job_v1(
+            epoch,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            flow_diag_v1::DurableFlowJobPurposeV1::ReconcilePrepare,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            flow_diag_v1::DurableFlowStageV1::ReconcilePrepare,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            observer.clone(),
+            move |cancelled| {
+                WitnessOutcome::DurablePaymentV1(DurableWitnessOutcomeV1::Prepared((|| {
+                    if cancelled.load(Ordering::Acquire) {
+                        return Err(Error::Locked);
+                    }
+                    Ok(Box::new(DurableWitnessPreparedV1::Reconciliation(
+                        PreparedDurableWriterReconciliationV1::prepare_inner(
+                            &witness,
+                            source,
+                            &id,
+                            #[cfg(feature = "synthetic-born-joined-qualification")]
+                            observer.as_ref(),
+                        )?,
+                    )))
+                })(
                 )))
-            })()))
-        })
+            },
+        )
     }
     pub(super) fn approve_durable_witness_v1(
         &mut self,
@@ -1983,45 +2491,101 @@ impl NativeRuntime {
             }
             DurableWitnessPreparedV1::Session(value) => {
                 let witness = open.witness.clone().ok_or(Error::Locked)?;
-                let approved = Arc::new(value.approve(decision, &open.authority, &witness)?);
-                self.start_witness_job(epoch, move |cancelled| {
-                    let result = if cancelled.load(Ordering::Acquire) {
-                        Err(Error::Locked)
-                    } else {
-                        approved.acquire(&witness)
-                    };
-                    WitnessOutcome::DurablePaymentV1(DurableWitnessOutcomeV1::Session {
-                        approved,
-                        result,
-                    })
-                })
+                #[cfg(feature = "synthetic-born-joined-qualification")]
+                let observer = value.flow_observer.clone();
+                let approved = Arc::new(durable_flow_observe_v1!(
+                    observer.as_ref(),
+                    flow_diag_v1::DurableFlowStageV1::AcquireNative,
+                    value.approve(decision, &open.authority, &witness)
+                )?);
+                self.start_flow_witness_job_v1(
+                    epoch,
+                    #[cfg(feature = "synthetic-born-joined-qualification")]
+                    flow_diag_v1::DurableFlowJobPurposeV1::Acquire,
+                    #[cfg(feature = "synthetic-born-joined-qualification")]
+                    flow_diag_v1::DurableFlowStageV1::AcquireCall,
+                    #[cfg(feature = "synthetic-born-joined-qualification")]
+                    observer.clone(),
+                    move |cancelled| {
+                        let result = if cancelled.load(Ordering::Acquire) {
+                            Err(Error::Locked)
+                        } else {
+                            approved.acquire_inner(
+                                &witness,
+                                #[cfg(feature = "synthetic-born-joined-qualification")]
+                                observer.as_ref(),
+                            )
+                        };
+                        WitnessOutcome::DurablePaymentV1(DurableWitnessOutcomeV1::Session {
+                            approved,
+                            result,
+                        })
+                    },
+                )
             }
             DurableWitnessPreparedV1::Activation(value) => {
                 let owner = open.owner_witness.clone().ok_or(Error::Locked)?;
-                let approved = Arc::new(value.approve(decision, &open.authority, &owner)?);
-                self.start_witness_job(epoch, move |cancelled| {
-                    let result = if cancelled.load(Ordering::Acquire) {
-                        Err(Error::Locked)
-                    } else {
-                        approved.activate(&owner)
-                    };
-                    WitnessOutcome::DurablePaymentV1(DurableWitnessOutcomeV1::Activation {
-                        approved,
-                        result,
-                    })
-                })
-            }
-            DurableWitnessPreparedV1::Reconciliation(value) => {
-                let approved = value.approve(decision)?;
-                self.start_witness_job(epoch, move |cancelled| {
-                    WitnessOutcome::DurablePaymentV1(DurableWitnessOutcomeV1::Reconciled(
-                        if cancelled.load(Ordering::Acquire) {
+                #[cfg(feature = "synthetic-born-joined-qualification")]
+                let observer = value.flow_observer.clone();
+                let approved = Arc::new(durable_flow_observe_v1!(
+                    observer.as_ref(),
+                    flow_diag_v1::DurableFlowStageV1::ActivationNative,
+                    value.approve(decision, &open.authority, &owner)
+                )?);
+                self.start_flow_witness_job_v1(
+                    epoch,
+                    #[cfg(feature = "synthetic-born-joined-qualification")]
+                    flow_diag_v1::DurableFlowJobPurposeV1::Activate,
+                    #[cfg(feature = "synthetic-born-joined-qualification")]
+                    flow_diag_v1::DurableFlowStageV1::ActivationCall,
+                    #[cfg(feature = "synthetic-born-joined-qualification")]
+                    observer.clone(),
+                    move |cancelled| {
+                        let result = if cancelled.load(Ordering::Acquire) {
                             Err(Error::Locked)
                         } else {
-                            approved.reconcile()
-                        },
-                    ))
-                })
+                            approved.activate_inner(
+                                &owner,
+                                #[cfg(feature = "synthetic-born-joined-qualification")]
+                                observer.as_ref(),
+                            )
+                        };
+                        WitnessOutcome::DurablePaymentV1(DurableWitnessOutcomeV1::Activation {
+                            approved,
+                            result,
+                        })
+                    },
+                )
+            }
+            DurableWitnessPreparedV1::Reconciliation(value) => {
+                #[cfg(feature = "synthetic-born-joined-qualification")]
+                let observer = value.flow_observer.clone();
+                let approved = durable_flow_observe_v1!(
+                    observer.as_ref(),
+                    flow_diag_v1::DurableFlowStageV1::ReconcileNative,
+                    value.approve(decision)
+                )?;
+                self.start_flow_witness_job_v1(
+                    epoch,
+                    #[cfg(feature = "synthetic-born-joined-qualification")]
+                    flow_diag_v1::DurableFlowJobPurposeV1::Reconcile,
+                    #[cfg(feature = "synthetic-born-joined-qualification")]
+                    flow_diag_v1::DurableFlowStageV1::ReconcileCall,
+                    #[cfg(feature = "synthetic-born-joined-qualification")]
+                    observer.clone(),
+                    move |cancelled| {
+                        WitnessOutcome::DurablePaymentV1(DurableWitnessOutcomeV1::Reconciled(
+                            if cancelled.load(Ordering::Acquire) {
+                                Err(Error::Locked)
+                            } else {
+                                approved.reconcile_inner(
+                                    #[cfg(feature = "synthetic-born-joined-qualification")]
+                                    observer.as_ref(),
+                                )
+                            },
+                        ))
+                    },
+                )
             }
         }
     }
@@ -2121,9 +2685,78 @@ fn qualification_completion_from_outcome_v1(
         _ => None,
     }
 }
+#[cfg(feature = "synthetic-born-joined-qualification")]
+pub(super) fn observe_flow_worker_v1(
+    observer: &flow_diag_v1::DurableFlowObserverV1,
+    stage: flow_diag_v1::DurableFlowStageV1,
+    outcome: &WitnessOutcome,
+) {
+    if let WitnessOutcome::DurablePaymentV1(outcome) = outcome {
+        match outcome {
+            DurableWitnessOutcomeV1::Prepared(Err(error))
+            | DurableWitnessOutcomeV1::HistoricalAdmission(Err(error))
+            | DurableWitnessOutcomeV1::Reconciled(Err(error)) => {
+                observer.record_error(stage, error)
+            }
+            DurableWitnessOutcomeV1::Session {
+                result: Err(error), ..
+            }
+            | DurableWitnessOutcomeV1::Activation {
+                result: Err(error), ..
+            }
+            | DurableWitnessOutcomeV1::Admission {
+                result: Err(error), ..
+            } => observer.record_error(stage, error),
+            _ => {}
+        }
+    }
+}
+#[cfg(feature = "synthetic-born-joined-qualification")]
+pub(super) fn observe_flow_receive_v1(
+    job: &flow_diag_v1::DurableFlowJobObservationV1,
+    stage: flow_diag_v1::DurableFlowStageV1,
+    outcome: &WitnessOutcome,
+) {
+    if let WitnessOutcome::DurablePaymentV1(outcome) = outcome {
+        match outcome {
+            DurableWitnessOutcomeV1::Prepared(result) => job.received(stage, result),
+            DurableWitnessOutcomeV1::HistoricalAdmission(result) => job.received(stage, result),
+            DurableWitnessOutcomeV1::Reconciled(result) => job.received(stage, result),
+            DurableWitnessOutcomeV1::Session { result, .. } => job.received(stage, result),
+            DurableWitnessOutcomeV1::Activation { result, .. }
+            | DurableWitnessOutcomeV1::Admission { result, .. } => job.received(stage, result),
+            DurableWitnessOutcomeV1::ObservedPreparation { .. } => job.missing(),
+        }
+    } else {
+        job.missing();
+    }
+}
+fn durable_witness_display_result_v1(
+    result: Result<String>,
+    #[cfg(feature = "synthetic-born-joined-qualification")] observer: Option<
+        &flow_diag_v1::DurableFlowObserverV1,
+    >,
+    #[cfg(feature = "synthetic-born-joined-qualification")] stage: flow_diag_v1::DurableFlowStageV1,
+) -> Result<String> {
+    durable_flow_observe_v1!(observer, stage, result)
+}
 pub(super) fn complete(
     open: &mut OpenAccount,
     outcome: DurableWitnessOutcomeV1,
+) -> (&'static str, Option<(String, Result<String>, Operation)>) {
+    complete_inner(
+        open,
+        outcome,
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        None,
+    )
+}
+pub(super) fn complete_inner(
+    open: &mut OpenAccount,
+    outcome: DurableWitnessOutcomeV1,
+    #[cfg(feature = "synthetic-born-joined-qualification")] observer: Option<
+        &flow_diag_v1::DurableFlowObserverV1,
+    >,
 ) -> (&'static str, Option<(String, Result<String>, Operation)>) {
     #[cfg(feature = "synthetic-born-joined-qualification")]
     if let DurableWitnessOutcomeV1::ObservedPreparation {
@@ -2142,7 +2775,7 @@ pub(super) fn complete(
                 .record_with_history(attempt, stage, error, history_failure);
             return ("Durable witness history or source was rejected. No new body, session or approval was substituted.", None);
         }
-        let (message, prepared) = complete(open, *outcome);
+        let (message, prepared) = complete_inner(open, *outcome, observer);
         if let Some((digest, display, operation)) = prepared {
             if matches!(&operation, Operation::DurableWitnessV1(value)
                 if matches!(value.as_ref(), DurableWitnessPreparedV1::Admission(_)))
@@ -2180,7 +2813,9 @@ pub(super) fn complete(
     match outcome {
         DurableWitnessOutcomeV1::Prepared(Ok(value)) => {
             let digest = value.digest().into();
-            let display = value.display();
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            let stage = value.flow_native_stage_v1();
+            let display = durable_witness_display_result_v1(value.display(), #[cfg(feature = "synthetic-born-joined-qualification")] observer, #[cfg(feature = "synthetic-born-joined-qualification")] stage);
             (
                 "Review the exact source-bound durable witness operation.",
                 Some((digest, display, Operation::DurableWitnessV1(value))),
@@ -2340,6 +2975,237 @@ impl NativeRuntime {
 #[cfg(test)]
 mod custody_tests {
     use super::*;
+    // These are inert equality/order fixtures only. They are not a verified
+    // candidate, native source, approved request or current privacy authority.
+    fn callback_terms_data(purpose: &str) -> DurablePaymentAdmissionTermsV1 {
+        DurablePaymentAdmissionTermsV1 {
+            version: 1,
+            identity: wholepact_core::manual_enrollment::ManualAccountIdentity {
+                account_id: "11".repeat(32),
+                full_viewing_key_digest: "12".repeat(32),
+                network_profile_id: "data-only-network".into(),
+                derivation_domain: "data-only-domain".into(),
+            },
+            original_policy_digest: "13".repeat(32),
+            original_genesis_digest: "14".repeat(32),
+            original_birth_commit_digest: "15".repeat(32),
+            original_roster_extension_digest: "16".repeat(32),
+            original_enrollment_ref: "17".repeat(32),
+            writer_certificate_digest: "18".repeat(32),
+            fixed: DurableFixedCandidateBindingV1 {
+                schema_version: 1,
+                network_profile_id: "data-only-network".into(),
+                agreement_id: "data-only-agreement".into(),
+                obligation_id: "data-only-obligation".into(),
+                proposal_id: purpose.into(),
+                revision: 1,
+                expiry_height: 2,
+                proposal_digest: "19".repeat(32),
+                manifest_digest: "1a".repeat(32),
+                unsigned_artifact_digest: "1b".repeat(32),
+                proved_artifact_digest: "1c".repeat(32),
+                effects_commitment: "1d".repeat(32),
+                policy_digest: "1e".repeat(32),
+                review_binding: "1f".repeat(32),
+                action_mapping_digest: "20".repeat(32),
+                anchor: "21".repeat(32),
+                proposal_binding: "22".repeat(32),
+            },
+            authorization_id: "data-only-authorization".into(),
+            recipient_policy_scope_digest: "23".repeat(32),
+            concrete_recipient_scope_digest: "24".repeat(32),
+            inputs: vec![wholepact_authority::InputReservation {
+                input_id: "data-only-input".into(),
+                nullifier: "25".repeat(32),
+                action_index: 0,
+                value_zatoshis: 50,
+            }],
+            maximum_debit_zatoshis: 40,
+            fee_share_zatoshis: 2,
+            transaction_fee_zatoshis: 4,
+            valid_from_ms: 1,
+            valid_until_ms: 2,
+        }
+    }
+    #[test]
+    fn durable_callback_terms_kernel_checks_once_in_order_for_three_purposes() {
+        // The three concrete call sites are source-reviewed separately. These
+        // exercise their shared production kernel, not native custody issuance.
+        for purpose in ["admission", "acquire", "activate"] {
+            let expected = callback_terms_data(purpose);
+            let order = std::cell::RefCell::new(Vec::new());
+            let result = check_callback_terms_v1(
+                &expected,
+                || {
+                    order.borrow_mut().push(0);
+                    Ok(())
+                },
+                || {
+                    order.borrow_mut().push(1);
+                    Ok(expected.clone())
+                },
+                || {
+                    order.borrow_mut().push(2);
+                    Ok(())
+                },
+                || {
+                    order.borrow_mut().push(3);
+                    Ok(())
+                },
+                #[cfg(feature = "synthetic-born-joined-qualification")]
+                None,
+            );
+            assert!(result.is_ok());
+            assert!(*order.borrow() == [0, 1, 2, 3]);
+        }
+    }
+    #[test]
+    fn durable_callback_terms_kernel_preserves_each_error_and_short_circuits() {
+        for purpose in ["admission", "acquire", "activate"] {
+            let expected = callback_terms_data(purpose);
+            for fail_at in 0..4 {
+                let order = std::cell::RefCell::new(Vec::new());
+                let step = |at| -> Result<()> {
+                    order.borrow_mut().push(at);
+                    if at == fail_at {
+                        Err(Error::Io(std::io::Error::from_raw_os_error(1200 + at)))
+                    } else {
+                        Ok(())
+                    }
+                };
+                let result = check_callback_terms_v1(
+                    &expected,
+                    || step(0),
+                    || {
+                        step(1)?;
+                        Ok(expected.clone())
+                    },
+                    || step(2),
+                    || step(3),
+                    #[cfg(feature = "synthetic-born-joined-qualification")]
+                    None,
+                );
+                assert!(
+                    matches!(result, Err(Error::Io(error)) if error.raw_os_error() == Some(1200 + fail_at))
+                );
+                assert!(*order.borrow() == (0..=fail_at).collect::<Vec<_>>());
+            }
+        }
+    }
+    #[test]
+    fn durable_callback_terms_kernel_rejects_every_changed_field_after_late_check() {
+        fn leaf_paths(value: &serde_json::Value, prefix: &str, paths: &mut Vec<String>) {
+            match value {
+                serde_json::Value::Object(fields) => {
+                    for (name, value) in fields {
+                        leaf_paths(value, &format!("{prefix}/{name}"), paths);
+                    }
+                }
+                serde_json::Value::Array(values) => {
+                    for (index, value) in values.iter().enumerate() {
+                        leaf_paths(value, &format!("{prefix}/{index}"), paths);
+                    }
+                }
+                _ => paths.push(prefix.into()),
+            }
+        }
+        let expected = callback_terms_data("admission");
+        let encoded = serde_json::to_value(&expected).unwrap();
+        let mut paths = Vec::new();
+        leaf_paths(&encoded, "", &mut paths);
+        assert!(paths.len() == 40);
+        for path in paths {
+            let mut changed = encoded.clone();
+            let leaf = changed.pointer_mut(&path).unwrap();
+            match leaf {
+                serde_json::Value::String(value) => value.push('x'),
+                serde_json::Value::Number(value) => {
+                    *value = serde_json::Number::from(value.as_u64().unwrap() + 1);
+                }
+                _ => panic!("unexpected data-only fixture field"),
+            }
+            let actual: DurablePaymentAdmissionTermsV1 = serde_json::from_value(changed).unwrap();
+            let late_calls = std::cell::Cell::new(0);
+            let result = check_callback_terms_v1(
+                &expected,
+                || Ok(()),
+                || Ok(actual),
+                || {
+                    late_calls.set(late_calls.get() + 1);
+                    Ok(())
+                },
+                || panic!("changed complete terms must not reach final custody"),
+                #[cfg(feature = "synthetic-born-joined-qualification")]
+                None,
+            );
+            assert!(matches!(result, Err(Error::ReviewMismatch)));
+            assert!(late_calls.get() == 1);
+        }
+        for inputs in [Vec::new(), vec![expected.inputs[0].clone(); 2]] {
+            let mut actual = expected.clone();
+            actual.inputs = inputs;
+            assert!(matches!(
+                check_callback_terms_v1(
+                    &expected,
+                    || Ok(()),
+                    || Ok(actual),
+                    || Ok(()),
+                    || panic!("changed input set must not reach final custody"),
+                    #[cfg(feature = "synthetic-born-joined-qualification")]
+                    None,
+                ),
+                Err(Error::ReviewMismatch)
+            ));
+        }
+    }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    #[test]
+    fn durable_callback_terms_kernel_observation_preserves_order_and_result() {
+        for diagnosed in [false, true] {
+            for fail_at in [None, Some(0), Some(1), Some(2), Some(3)] {
+                let expected = callback_terms_data("admission");
+                let mut observation =
+                    QualificationDurableAdmissionObservationV1::new(1, "inert-review".into());
+                let order = std::cell::RefCell::new(Vec::new());
+                let step = |at| -> Result<()> {
+                    order.borrow_mut().push(at);
+                    if fail_at == Some(at) {
+                        Err(Error::Io(std::io::Error::from_raw_os_error(1300 + at)))
+                    } else {
+                        Ok(())
+                    }
+                };
+                let result = check_callback_terms_v1(
+                    &expected,
+                    || step(0),
+                    || {
+                        step(1)?;
+                        Ok(expected.clone())
+                    },
+                    || step(2),
+                    || step(3),
+                    diagnosed.then_some(&mut observation),
+                );
+                match fail_at {
+                    Some(at) => assert!(
+                        matches!(result, Err(Error::Io(error)) if error.raw_os_error() == Some(1300 + at))
+                    ),
+                    None => assert!(result.is_ok()),
+                }
+                assert!(*order.borrow() == (0..=fail_at.unwrap_or(3)).collect::<Vec<_>>());
+                assert!(observation.measurement.callback_custody_calls == diagnosed.then_some(1));
+                assert!(
+                    observation.measurement.request_validation_calls
+                        == (diagnosed && fail_at != Some(0)).then_some(1)
+                );
+                if !diagnosed {
+                    assert!(observation.measurement.callback_custody_us.is_none());
+                    assert!(observation.measurement.request_validation_us.is_none());
+                    assert!(observation.callback_stage.is_none());
+                }
+            }
+        }
+    }
     #[cfg(feature = "synthetic-born-joined-qualification")]
     #[test]
     fn admission_dispatch_first_error_is_inert_and_original_result_stays_separate() {
@@ -2449,10 +3315,10 @@ mod custody_tests {
     #[cfg(feature = "synthetic-born-joined-qualification")]
     #[test]
     fn admission_dispatch_none_clock_failed_span_null_and_caps_are_explicit() {
-        assert!(
-            admission_optional_clock(false, || panic!("observer None must not sample a clock"))
-                .is_none()
-        );
+        assert!(admission_optional_clock(false, || panic!(
+            "observer None must not sample a clock"
+        ))
+        .is_none());
         let mut observation = QualificationDurableAdmissionObservationV1::new(1, "review".into());
         assert!(observation.measurement.retention_us().is_none());
         assert!(observation.measurement.callback_custody_calls().is_none());
@@ -2613,5 +3479,124 @@ mod custody_tests {
         assert!(state.activation_retry.is_none());
         state = DurableWitnessRuntimeV1::default();
         assert!(state.admission_id.is_none());
+    }
+}
+
+#[cfg(all(test, feature = "synthetic-born-joined-qualification"))]
+mod durable_flow_reconciliation_tests {
+    use super::*;
+    use flow_diag_v1::{
+        DurableFlowCallOutcomeV1 as Call, DurableFlowCallV1 as Slot,
+        DurableFlowCollectorV1 as Collector, DurableFlowErrorCodeV1 as Code,
+        DurableFlowJobPurposeV1 as Purpose, DurableFlowOperationV1 as Operation,
+        DurableFlowResultV1 as Observed, DurableFlowStageV1 as Stage,
+    };
+    use std::cell::Cell;
+    #[test]
+    fn actual_reconciliation_database_error_stays_uncertain_with_separate_calls() {
+        let collector = Collector::default();
+        let observer = collector.arm(Operation::WriterReconcile);
+        let job = observer.job_start(Purpose::Reconcile, 7);
+        let calls = Cell::new(0);
+        let original: std::result::Result<(), JournalError> = durable_flow_call_v1!(
+            Some(&observer),
+            Slot::Reconciliation,
+            Stage::ReconcileCall,
+            Err(JournalError::Database)
+        );
+        let result = finish_durable_reconciliation_v1(
+            original,
+            "inert-digest".into(),
+            || {
+                calls.set(calls.get() + 1);
+                Ok(())
+            },
+            Some(&observer),
+        );
+        assert_eq!(calls.get(), 1);
+        assert!(
+            matches!(&result, Ok(DurableReconciliationOutcomeV1::Uncertain { review_digest }) if review_digest == "inert-digest")
+        );
+        job.received(Stage::ReconcileCall, &result);
+        let report = observer.finish(Observed::ReturnedErr).unwrap();
+        assert!(report.first_error().unwrap().code() == Code::JournalDatabase);
+        assert!(report.call_outcomes().reconciliation() == Call::ReturnedErr);
+        assert!(report.call_outcomes().session_invalidation() == Call::ReturnedOk);
+        assert!(report.completion().result() == Observed::ReturnedOk);
+    }
+    #[test]
+    fn actual_reconciliation_invalidation_error_stays_uncertain_without_postcheck() {
+        for diagnosed in [false, true] {
+            let collector = Collector::default();
+            let observer = collector.arm(Operation::WriterReconcile);
+            let calls = Cell::new(0);
+            let original: std::result::Result<(), JournalError> = durable_flow_call_v1!(
+                diagnosed.then_some(&observer),
+                Slot::Reconciliation,
+                Stage::ReconcileCall,
+                Ok(())
+            );
+            let result = finish_durable_reconciliation_v1(
+                original,
+                "inert-digest".into(),
+                || {
+                    calls.set(calls.get() + 1);
+                    Err(JournalError::Permission)
+                },
+                diagnosed.then_some(&observer),
+            );
+            assert_eq!(calls.get(), 1);
+            assert!(matches!(
+                result,
+                Ok(DurableReconciliationOutcomeV1::Uncertain { .. })
+            ));
+            if diagnosed {
+                let report = observer.finish(Observed::ReturnedErr).unwrap();
+                assert!(report.first_error().unwrap().code() == Code::JournalPermission);
+                assert!(report.first_error().unwrap().stage() == Stage::Invalidate);
+                assert!(report.call_outcomes().reconciliation() == Call::ReturnedOk);
+                assert!(report.call_outcomes().session_invalidation() == Call::ReturnedErr);
+            }
+        }
+    }
+    #[test]
+    fn actual_reconciliation_precommit_refusal_does_not_invalidate() {
+        let collector = Collector::default();
+        let observer = collector.arm(Operation::WriterReconcile);
+        let original: std::result::Result<(), JournalError> = durable_flow_call_v1!(
+            Some(&observer),
+            Slot::Reconciliation,
+            Stage::ReconcileCall,
+            Err(JournalError::Expired)
+        );
+        let result = finish_durable_reconciliation_v1(
+            original,
+            "inert-digest".into(),
+            || panic!("precommit refusal must preserve source"),
+            Some(&observer),
+        );
+        assert!(matches!(
+            result,
+            Err(Error::ConsentJournal(JournalError::Expired))
+        ));
+        let report = observer.finish(Observed::ReturnedErr).unwrap();
+        assert!(report.first_error().unwrap().code() == Code::JournalExpired);
+        assert!(report.call_outcomes().session_invalidation() == Call::NotObserved);
+    }
+    #[test]
+    fn actual_witness_display_old_job_cannot_populate_new_attempt() {
+        let collector = Collector::default();
+        let old = collector.arm(Operation::WriterReconcile);
+        let _job = old.job_start(Purpose::AcquirePrepare, 7);
+        let current = collector.arm(Operation::WriterReconcile);
+        let original = durable_witness_display_result_v1(
+            Err(Error::Verification),
+            Some(&old),
+            Stage::AcquireNative,
+        );
+        assert!(matches!(original, Err(Error::Verification)));
+        let report = current.finish(Observed::ReturnedErr).unwrap();
+        assert!(report.first_error().is_none());
+        assert!(report.incomplete());
     }
 }

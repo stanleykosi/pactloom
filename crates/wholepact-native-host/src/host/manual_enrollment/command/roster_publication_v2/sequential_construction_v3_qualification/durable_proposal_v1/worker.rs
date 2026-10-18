@@ -34,10 +34,10 @@ use wholepact_signer::native_ui::synthetic_born_joined_qualification::{
     DurableAdmissionDispatchFailureV1, DurableAdmissionDispatchStageV1,
     DurableAdmissionHistoryFailureV1, DurableAdmissionPreparationFailureV1,
     DurableAdmissionPreparationStageV1, DurableNativeEntryFailureV1, DurableNativeEntryStageV1,
-    DurableNativeRecordsV1, EphemeralAcknowledgedBornV1, EphemeralDurableNativeV1,
-    EphemeralExportedBirthV1, EphemeralFirstAnchorIntentV1, EphemeralFirstAnchorPublicationV1,
-    EphemeralOriginalRosterIntentV1, EphemeralPendingBornV1, EphemeralRosterPublicationV1,
-    OriginalBirthSetupV1,
+    DurableNativeRecordsV1, DurableFlowFailureV1, DurableFlowResultV1, EphemeralAcknowledgedBornV1,
+    EphemeralDurableNativeV1, EphemeralExportedBirthV1, EphemeralFirstAnchorIntentV1,
+    EphemeralFirstAnchorPublicationV1, EphemeralOriginalRosterIntentV1, EphemeralPendingBornV1,
+    EphemeralRosterPublicationV1, OriginalBirthSetupV1,
 };
 use wholepact_signer_origin::{
     InstalledSignerProvider, PairScope,
@@ -51,6 +51,14 @@ type Result<T> = std::result::Result<T, &'static str>;
 fn signer_error(error: wholepact_signer::Error, label: &'static str) -> &'static str {
     diagnostic::emit(B::SignerPollTerminal, diagnostic::signer_error(&error));
     label
+}
+fn durable_flow_error(failure: DurableFlowFailureV1, label: &'static str) -> &'static str {
+    // Inert evidence is emitted before the original entry is dropped. The
+    // original fixture Error still controls the unchanged terminal mapping.
+    if let Some(observed) = failure.diagnostic() {
+        diagnostic::emit_durable_flow(observed);
+    }
+    signer_error(failure.into_error(), label)
 }
 fn durable_entry_error(failure: DurableNativeEntryFailureV1) -> &'static str {
     use DurableNativeEntryStageV1 as S;
@@ -78,9 +86,9 @@ fn durable_entry_error(failure: DurableNativeEntryFailureV1) -> &'static str {
 fn checked_authority_boundary(
     stage: wholepact_authority::transport::history_diagnostics_v1::CheckedHistoryStageV1,
     admission: bool,
-) -> B {
+) -> Option<B> {
     use wholepact_authority::transport::history_diagnostics_v1::CheckedHistoryStageV1 as S;
-    match stage {
+    Some(match stage {
         S::CallerDeadline => {
             if admission {
                 B::SignerAdmissionCallCallerDeadline
@@ -139,11 +147,27 @@ fn checked_authority_boundary(
         S::AdmissionSnapshotValidation => B::SignerAdmissionCallSnapshotValidation,
         S::AdmissionCommittedHeadValidation => B::SignerAdmissionCallCommittedHeadValidation,
         S::AdmissionFinalValidation => B::SignerAdmissionCallFinalValidation,
-    }
+        S::FlowRequestValidation
+        | S::FlowBinding
+        | S::FlowSession
+        | S::FlowConnect
+        | S::FlowHandshake
+        | S::FlowPeerBinding
+        | S::FlowRequestBuild
+        | S::FlowRequestWrite
+        | S::FlowResponseRead
+        | S::FlowResponse
+        | S::FlowSnapshotValidation
+        | S::FlowReceiptValidation
+        | S::FlowCommittedHeadValidation
+        | S::FlowFinalValidation => return None,
+    })
 }
 fn durable_admission_history_error(failure: DurableAdmissionHistoryFailureV1) {
     use wholepact_authority::transport::history_diagnostics_v1::CheckedHistoryIoKindV1 as I;
-    let boundary = checked_authority_boundary(failure.stage(), false);
+    let Some(boundary) = checked_authority_boundary(failure.stage(), false) else {
+        return;
+    };
     let io_boundary = failure.io_kind().map(|kind| match kind {
         I::Timeout => B::SignerAdmissionHistoryIoTimeout,
         I::Closed => B::SignerAdmissionHistoryIoClosed,
@@ -190,7 +214,9 @@ fn durable_admission_error(mut failure: DurableAdmissionPreparationFailureV1) ->
 }
 fn durable_admission_call_error(failure: DurableAdmissionCallFailureV1) {
     use wholepact_authority::transport::history_diagnostics_v1::CheckedHistoryIoKindV1 as I;
-    let boundary = checked_authority_boundary(failure.stage(), true);
+    let Some(boundary) = checked_authority_boundary(failure.stage(), true) else {
+        return;
+    };
     let io_boundary = failure.io_kind().map(|kind| match kind {
         I::Timeout => B::SignerAdmissionCallIoTimeout,
         I::Closed => B::SignerAdmissionCallIoClosed,
@@ -925,8 +951,8 @@ fn execute(
         }
         (C::ReconcileDurableWriter(_), State::Durable(mut entry)) if index > 0 => {
             entry
-                .reconcile_original_writer()
-                .map_err(|e| signer_error(e, "exact current writer native reconciliation"))?;
+                .reconcile_original_writer_diagnosed()
+                .map_err(|e| durable_flow_error(e, "exact current writer native reconciliation"))?;
             (State::Durable(entry), R::Done { index })
         }
         (C::ConfigureDurableWallet(_, setup), State::Durable(mut entry)) if index > 0 => {
@@ -967,22 +993,41 @@ fn execute(
         (C::PollFinancialImport(_, request, identity), State::Durable(mut entry)) if index > 0 => {
             // This distinct command cannot weaken the baseline import-only
             // helper's requirement that no current writer was reconciled.
-            poll_until(
-                entry
-                    .deadline()
-                    .map_err(|e| signer_error(e, "financial import deadline"))?,
-                cancelled,
-                || entry.poll_financial_import(&request, &identity),
-                "exact fixed import with separately reconciled current writer",
-            )?;
+            // Arm before the original deadline/poll. The actual import launch
+            // binds this inert token; polling never resets or creates a job.
+            let token = entry.arm_financial_import_diagnostics(&request, &identity);
+            let result = (|| {
+                poll_until(
+                    entry
+                        .financial_import_deadline_diagnosed(&token)
+                        .map_err(|e| signer_error(e, "financial import deadline"))?,
+                    cancelled,
+                    || entry.poll_financial_import_diagnosed(&token, &request, &identity),
+                    "exact fixed import with separately reconciled current writer",
+                )
+            })();
+            let observed = entry.finish_financial_import_diagnostics(
+                token,
+                if result.is_ok() {
+                    DurableFlowResultV1::ReturnedOk
+                } else {
+                    DurableFlowResultV1::ReturnedErr
+                },
+            );
+            if result.is_err() {
+                if let Some(observed) = observed {
+                    diagnostic::emit_durable_flow(&observed);
+                }
+            }
+            result?;
             (State::Durable(entry), R::Done { index })
         }
         (C::SignDurableFixed(_, identity), State::Durable(mut entry)) if index > 0 => {
             // The real helper checks its original result/ledger on retry and
             // refuses any new native review, wallet job or reservation there.
-            let (history, commit) = entry
-                .sign_durable_fixed(&identity)
-                .map_err(|e| signer_error(e, "exact fixed native sign or retained-result retry"))?;
+            let (history, commit) = entry.sign_durable_fixed_diagnosed(&identity).map_err(|e| {
+                durable_flow_error(e, "exact fixed native sign or retained-result retry")
+            })?;
             (
                 State::Durable(entry),
                 R::DurableAuthorization {
@@ -995,20 +1040,37 @@ fn execute(
         (C::ServeDurableResult(_, stop), State::Durable(mut entry)) if index > 0 => {
             // Only poll the retained genuine native owner. The caller's stop
             // flag cannot approve a prompt or extend the original deadline.
-            poll_until(
-                entry
-                    .deadline()
-                    .map_err(|e| signer_error(e, "retained result service deadline"))?,
-                cancelled,
-                || {
-                    if stop.load(Ordering::Acquire) {
-                        return Ok(true);
-                    }
-                    entry.poll_data_only()?;
-                    Ok(false)
+            let token = entry.arm_result_service_diagnostics();
+            let result = (|| {
+                poll_until(
+                    entry
+                        .result_service_deadline_diagnosed(&token)
+                        .map_err(|e| signer_error(e, "retained result service deadline"))?,
+                    cancelled,
+                    || {
+                        if stop.load(Ordering::Acquire) {
+                            return Ok(true);
+                        }
+                        entry.poll_result_service_diagnosed(&token)?;
+                        Ok(false)
+                    },
+                    "nonapproving exact retained native result service",
+                )
+            })();
+            let observed = entry.finish_result_service_diagnostics(
+                token,
+                if result.is_ok() {
+                    DurableFlowResultV1::ReturnedOk
+                } else {
+                    DurableFlowResultV1::ReturnedErr
                 },
-                "nonapproving exact retained native result service",
-            )?;
+            );
+            if result.is_err() {
+                if let Some(observed) = observed {
+                    diagnostic::emit_durable_flow(&observed);
+                }
+            }
+            result?;
             (State::Durable(entry), R::Done { index })
         }
         (C::PollDisclosure(_), State::Durable(mut entry)) => {
@@ -1052,43 +1114,67 @@ mod admission_diagnostic_tests {
         use wholepact_authority::transport::history_diagnostics_v1::CheckedHistoryStageV1 as S;
         assert!(matches!(
             checked_authority_boundary(S::CallerDeadline, true),
-            B::SignerAdmissionCallCallerDeadline
+            Some(B::SignerAdmissionCallCallerDeadline)
         ));
         assert!(matches!(
             checked_authority_boundary(S::ExchangeDeadline, true),
-            B::SignerAdmissionCallExchangeDeadline
+            Some(B::SignerAdmissionCallExchangeDeadline)
         ));
         assert!(matches!(
             checked_authority_boundary(S::SourceCallback, true),
-            B::SignerAdmissionCallSourceCallback
+            Some(B::SignerAdmissionCallSourceCallback)
         ));
         assert!(matches!(
             checked_authority_boundary(S::Bounds, true),
-            B::SignerAdmissionCallBounds
+            Some(B::SignerAdmissionCallBounds)
         ));
         assert!(matches!(
             checked_authority_boundary(S::CallerDeadline, false),
-            B::SignerAdmissionHistoryCallerDeadline
+            Some(B::SignerAdmissionHistoryCallerDeadline)
         ));
         assert!(matches!(
             checked_authority_boundary(S::ExchangeDeadline, false),
-            B::SignerAdmissionHistoryExchangeDeadline
+            Some(B::SignerAdmissionHistoryExchangeDeadline)
         ));
         assert!(matches!(
             checked_authority_boundary(S::SourceCallback, false),
-            B::SignerAdmissionHistorySourceCallback
+            Some(B::SignerAdmissionHistorySourceCallback)
         ));
         assert!(matches!(
             checked_authority_boundary(S::Bounds, false),
-            B::SignerAdmissionHistoryBounds
+            Some(B::SignerAdmissionHistoryBounds)
         ));
         assert!(matches!(
             checked_authority_boundary(S::AdmissionRequestWrite, true),
-            B::SignerAdmissionCallRequestWrite
+            Some(B::SignerAdmissionCallRequestWrite)
         ));
         assert!(matches!(
             checked_authority_boundary(S::SnapshotRequestWrite, false),
-            B::SignerAdmissionHistorySnapshotRequestWrite
+            Some(B::SignerAdmissionHistorySnapshotRequestWrite)
         ));
+    }
+
+    #[test]
+    fn pure_flow_stages_are_never_reported_as_admission_or_history() {
+        use wholepact_authority::transport::history_diagnostics_v1::CheckedHistoryStageV1 as S;
+        for stage in [
+            S::FlowRequestValidation,
+            S::FlowBinding,
+            S::FlowSession,
+            S::FlowConnect,
+            S::FlowHandshake,
+            S::FlowPeerBinding,
+            S::FlowRequestBuild,
+            S::FlowRequestWrite,
+            S::FlowResponseRead,
+            S::FlowResponse,
+            S::FlowSnapshotValidation,
+            S::FlowReceiptValidation,
+            S::FlowCommittedHeadValidation,
+            S::FlowFinalValidation,
+        ] {
+            assert!(checked_authority_boundary(stage, false).is_none());
+            assert!(checked_authority_boundary(stage, true).is_none());
+        }
     }
 }

@@ -70,6 +70,10 @@ fn history_phase_label(value: CheckedHistoryPhaseV1) -> &'static str {
         CheckedHistoryPhaseV1::Snapshot => "Snapshot",
         CheckedHistoryPhaseV1::Page => "Page",
         CheckedHistoryPhaseV1::Admission => "Admission",
+        CheckedHistoryPhaseV1::Acquire => "Acquire",
+        CheckedHistoryPhaseV1::Activate => "Activate",
+        CheckedHistoryPhaseV1::Verify => "Verify",
+        CheckedHistoryPhaseV1::Reserve => "Reserve",
     }
 }
 
@@ -162,7 +166,10 @@ fn history_measurement_json(value: &CheckedHistoryMeasurementV1) -> serde_json::
 
 #[cfg(feature = "synthetic-born-joined-qualification")]
 pub(super) fn emit_history_measurement(value: &CheckedHistoryMeasurementV1) {
-    if value.phase() == Some(CheckedHistoryPhaseV1::Admission) {
+    if !matches!(
+        value.phase(),
+        None | Some(CheckedHistoryPhaseV1::Snapshot | CheckedHistoryPhaseV1::Page)
+    ) {
         return;
     }
     use std::io::Write;
@@ -237,7 +244,7 @@ where
 }
 
 #[cfg(feature = "synthetic-born-joined-qualification")]
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 struct PublicHistoryCost {
     callback_calls: u32,
@@ -826,6 +833,9 @@ fn witness_admission_json(value: &AdmissionWitnessDiagnosticV1) -> serde_json::V
 
 #[cfg(feature = "synthetic-born-joined-qualification")]
 pub(super) fn emit_admission_measurement(value: &CheckedHistoryMeasurementV1) {
+    if !matches!(value.phase(), None | Some(CheckedHistoryPhaseV1::Admission)) {
+        return;
+    }
     emit_admission_record(0, admission_measurement_json(value));
 }
 
@@ -2103,3 +2113,1685 @@ fn admission_capture_slots_are_independent_sticky_and_bounded() {
     capture.capture_line(&lines[2], 16384);
     assert_eq!(capture.public_lines()[1], ADMISSION_INVALID[2]);
 }
+
+// This failure-only schema is independent of unchanged History/Admission records.
+#[cfg(feature = "synthetic-born-joined-qualification")]
+mod durable_flow_projection {
+    use super::{
+        PublicHistoryCost, admission_io_kind_label, history_check_site_label,
+        history_checkpoint_label, history_selected_limit_label, required_history_nullable,
+    };
+    use wholepact_authority::transport::history_diagnostics_v1::{
+        CheckedHistoryCostV1, CheckedHistoryMeasurementV1, CheckedHistoryPhaseV1,
+    };
+    use wholepact_signer::native_ui::synthetic_born_joined_qualification::{
+        DurableFlowAuthorityCodeV1, DurableFlowCallOutcomeV1, DurableFlowCallbackStageV1,
+        DurableFlowDiagnosticV1, DurableFlowErrorCodeV1, DurableFlowErrorDomainV1,
+        DurableFlowErrorV1, DurableFlowJobPurposeV1, DurableFlowNestedCodeV1,
+        DurableFlowOperationV1, DurableFlowPresentationV1, DurableFlowReceiveV1,
+        DurableFlowResultV1, DurableFlowStageV1, DurableFlowTransportFailureV1,
+        DurableFlowTransportPurposeV1, DurableFlowTransportStageV1,
+    };
+    const PRIVATE_PREFIX: &str = "[DURABLE_FLOW_V1 ";
+    const PUBLIC_PREFIX: &str = "CI_SYNTHETIC_DURABLE_FLOW ";
+    const INVALID: &str = "CI_SYNTHETIC_DURABLE_FLOW invalid=true details_withheld=true";
+    const MAX_PAYLOAD: usize = 4096;
+    macro_rules! flow_labels {
+        ($function:ident, $inventory:ident, $ty:ident, {$($variant:ident => $label:literal),+ $(,)?}) => {
+            fn $function(value: $ty) -> &'static str {
+                match value { $($ty::$variant => $label),+ }
+            }
+            #[cfg(test)]
+            const $inventory: &[($ty, &str)] = &[$(($ty::$variant, $label)),+];
+        }
+    }
+    flow_labels!(flow_operation_label, FLOW_OPERATION_LABELS, DurableFlowOperationV1, {
+        WriterReconcile => "WriterReconcile",
+        FinancialImport => "FinancialImport",
+        InitialSign => "InitialSign",
+        RetainedRetry => "RetainedRetry",
+        ResultService => "ResultService",
+    });
+    flow_labels!(flow_stage_label, FLOW_STAGE_LABELS, DurableFlowStageV1, {
+        FixtureState => "FixtureState",
+        AcquirePrepare => "AcquirePrepare",
+        AcquireNative => "AcquireNative",
+        AcquireCall => "AcquireCall",
+        ActivationPrepare => "ActivationPrepare",
+        ActivationNative => "ActivationNative",
+        ActivationCall => "ActivationCall",
+        ActiveVerification => "ActiveVerification",
+        ReconcilePrepare => "ReconcilePrepare",
+        ReconcileNative => "ReconcileNative",
+        ReconcileCall => "ReconcileCall",
+        Invalidate => "Invalidate",
+        ImportReceive => "ImportReceive",
+        ImportPairing => "ImportPairing",
+        ImportSource => "ImportSource",
+        WalletSync => "WalletSync",
+        WalletSource => "WalletSource",
+        WitnessHead => "WitnessHead",
+        SpendStage => "SpendStage",
+        DisclosureDecision => "DisclosureDecision",
+        SpendDecision => "SpendDecision",
+        SigningLaunch => "SigningLaunch",
+        AuthorizationSource => "AuthorizationSource",
+        Release => "Release",
+        RequestRetain => "RequestRetain",
+        Reserve => "Reserve",
+        PermitRetain => "PermitRetain",
+        WalletGuard => "WalletGuard",
+        KeyUse => "KeyUse",
+        Derive => "Derive",
+        Sign => "Sign",
+        VerifySigned => "VerifySigned",
+        ResultRetain => "ResultRetain",
+        RetainedLookup => "RetainedLookup",
+        RetryInvariant => "RetryInvariant",
+        Completion => "Completion",
+        ResultService => "ResultService",
+        Close => "Close",
+    });
+    flow_labels!(flow_error_domain_label, FLOW_ERROR_DOMAIN_LABELS, DurableFlowErrorDomainV1, {
+        Signer => "Signer",
+        Bridge => "Bridge",
+        Authority => "Authority",
+        Journal => "Journal",
+        WalletKeyUse => "WalletKeyUse",
+        Store => "Store",
+    });
+    flow_labels!(flow_job_purpose_label, FLOW_JOB_PURPOSE_LABELS, DurableFlowJobPurposeV1, {
+        AcquirePrepare => "AcquirePrepare",
+        Acquire => "Acquire",
+        ActivationPrepare => "ActivationPrepare",
+        Activate => "Activate",
+        ReconcilePrepare => "ReconcilePrepare",
+        Reconcile => "Reconcile",
+        Import => "Import",
+        WalletReview => "WalletReview",
+        Sign => "Sign",
+        ResultService => "ResultService",
+    });
+    flow_labels!(flow_result_label, FLOW_RESULT_LABELS, DurableFlowResultV1, {
+        NotObserved => "NotObserved",
+        ReturnedOk => "ReturnedOk",
+        ReturnedErr => "ReturnedErr",
+    });
+    flow_labels!(flow_receive_label, FLOW_RECEIVE_LABELS, DurableFlowReceiveV1, {
+        NotObserved => "NotObserved",
+        Pending => "Pending",
+        Received => "Received",
+        Missing => "Missing",
+        Disconnected => "Disconnected",
+        Invalidated => "Invalidated",
+    });
+    flow_labels!(flow_presentation_label, FLOW_PRESENTATION_LABELS, DurableFlowPresentationV1, {
+        NotObserved => "NotObserved",
+        Accepted => "Accepted",
+        Suppressed => "Suppressed",
+    });
+    flow_labels!(flow_call_outcome_label, FLOW_CALL_OUTCOME_LABELS, DurableFlowCallOutcomeV1, {
+        NotObserved => "NotObserved",
+        Entered => "Entered",
+        ReturnedOk => "ReturnedOk",
+        ReturnedErr => "ReturnedErr",
+    });
+    flow_labels!(flow_transport_purpose_label, FLOW_TRANSPORT_PURPOSE_LABELS, DurableFlowTransportPurposeV1, {
+        Acquire => "Acquire",
+        Activate => "Activate",
+        Verify => "Verify",
+        Reserve => "Reserve",
+    });
+    flow_labels!(flow_transport_stage_label, FLOW_TRANSPORT_STAGE_LABELS, DurableFlowTransportStageV1, {
+        RequestValidation => "RequestValidation",
+        Binding => "Binding",
+        Session => "Session",
+        CallerDeadline => "CallerDeadline",
+        ExchangeDeadline => "ExchangeDeadline",
+        SourceCallback => "SourceCallback",
+        Connect => "Connect",
+        Handshake => "Handshake",
+        PeerBinding => "PeerBinding",
+        RequestBuild => "RequestBuild",
+        RequestWrite => "RequestWrite",
+        ResponseRead => "ResponseRead",
+        Response => "Response",
+        SnapshotValidation => "SnapshotValidation",
+        ReceiptValidation => "ReceiptValidation",
+        CommittedHeadValidation => "CommittedHeadValidation",
+        FinalValidation => "FinalValidation",
+        Bounds => "Bounds",
+    });
+    flow_labels!(flow_authority_code_label, FLOW_AUTHORITY_CODE_LABELS, DurableFlowAuthorityCodeV1, {
+        InvalidBinding => "InvalidBinding",
+        Permission => "Permission",
+        StaleHead => "StaleHead",
+        Conflict => "Conflict",
+        Inactive => "Inactive",
+        RecoveryRequired => "RecoveryRequired",
+        Expired => "Expired",
+        PolicyDenied => "PolicyDenied",
+        BudgetExceeded => "BudgetExceeded",
+        InputReserved => "InputReserved",
+        ObligationReserved => "ObligationReserved",
+        Limit => "Limit",
+        Storage => "Storage",
+        CorruptHistory => "CorruptHistory",
+        PermanentStopUnavailable => "PermanentStopUnavailable",
+        OfflineHistoryUnsupported => "OfflineHistoryUnsupported",
+        ConstructionHistoryUnsupported => "ConstructionHistoryUnsupported",
+        UnsupportedVersion => "UnsupportedVersion",
+        Authentication => "Authentication",
+        Uncertain => "Uncertain",
+        ResolutionUnavailable => "ResolutionUnavailable",
+        SessionRequired => "SessionRequired",
+        SessionPending => "SessionPending",
+    });
+    flow_labels!(flow_callback_stage_label, FLOW_CALLBACK_STAGE_LABELS, DurableFlowCallbackStageV1, {
+        WorkspaceCurrent => "WorkspaceCurrent",
+        CallerCurrent => "CallerCurrent",
+    });
+    flow_labels!(flow_error_code_label, FLOW_ERROR_CODE_LABELS, DurableFlowErrorCodeV1, {
+        SignerUnavailable => "Unavailable",
+        SignerPeerLifetimeUnavailable => "PeerLifetimeUnavailable",
+        SignerIo => "Io",
+        SignerAuthentication => "Authentication",
+        SignerInvalidData => "InvalidData",
+        SignerCrypto => "Crypto",
+        SignerLocked => "Locked",
+        SignerBackupRequired => "BackupRequired",
+        SignerRecoveryRequired => "RecoveryRequired",
+        SignerAlreadyOpen => "AlreadyOpen",
+        SignerReviewMismatch => "ReviewMismatch",
+        SignerVerification => "Verification",
+        SignerUncertain => "Uncertain",
+        SignerConsentJournal => "ConsentJournal",
+        SignerStore => "Store",
+        BridgeBinding => "Binding",
+        BridgeConflict => "Conflict",
+        BridgeMissing => "Missing",
+        BridgeUncertain => "Uncertain",
+        BridgeLimit => "Limit",
+        BridgePermission => "Permission",
+        BridgeRecoveryRequired => "RecoveryRequired",
+        BridgeCompleteOriginRecoveryUnavailable => "CompleteOriginRecoveryUnavailable",
+        BridgeVerification => "Verification",
+        BridgeSignerOriginUnavailable => "SignerOriginUnavailable",
+        BridgeJournal => "Journal",
+        BridgeAuthority => "Authority",
+        BridgeWallet => "Wallet",
+        BridgeIpc => "Ipc",
+        AuthorityInvalidBinding => "InvalidBinding",
+        AuthorityPermission => "Permission",
+        AuthorityStaleHead => "StaleHead",
+        AuthorityConflict => "Conflict",
+        AuthorityInactive => "Inactive",
+        AuthorityRecoveryRequired => "RecoveryRequired",
+        AuthorityExpired => "Expired",
+        AuthorityPolicyDenied => "PolicyDenied",
+        AuthorityBudgetExceeded => "BudgetExceeded",
+        AuthorityInputReserved => "InputReserved",
+        AuthorityObligationReserved => "ObligationReserved",
+        AuthorityLimit => "Limit",
+        AuthorityStorage => "Storage",
+        AuthorityCorruptHistory => "CorruptHistory",
+        AuthorityPermanentStopUnavailable => "PermanentStopUnavailable",
+        AuthorityOfflineHistoryUnsupported => "OfflineHistoryUnsupported",
+        AuthorityConstructionHistoryUnsupported => "ConstructionHistoryUnsupported",
+        AuthorityUnsupportedVersion => "UnsupportedVersion",
+        AuthorityAuthentication => "Authentication",
+        AuthorityUncertain => "Uncertain",
+        AuthorityResolutionUnavailable => "ResolutionUnavailable",
+        AuthoritySessionRequired => "SessionRequired",
+        AuthoritySessionPending => "SessionPending",
+        JournalStorage => "Storage",
+        JournalDatabase => "Database",
+        JournalPermission => "Permission",
+        JournalExpired => "Expired",
+        JournalRecoveryRequired => "RecoveryRequired",
+        JournalUnsupportedSchema => "UnsupportedSchema",
+        JournalOfflineHistoryUnsupported => "OfflineHistoryUnsupported",
+        JournalNamedRecipientHistoryUnsupported => "NamedRecipientHistoryUnsupported",
+        JournalConstructionHistoryUnsupported => "ConstructionHistoryUnsupported",
+        JournalInvalidBinding => "InvalidBinding",
+        JournalConflict => "Conflict",
+        JournalNotFound => "NotFound",
+        JournalLiveAuthorization => "LiveAuthorization",
+        JournalInputReserved => "InputReserved",
+        JournalBudgetExceeded => "BudgetExceeded",
+        JournalLimit => "Limit",
+        WalletKeyUsePermission => "Permission",
+        WalletKeyUsePolicy => "Policy",
+        WalletKeyUseSelectionExpired => "SelectionExpired",
+        WalletKeyUseStorage => "Storage",
+        WalletKeyUseRecoveryRequired => "RecoveryRequired",
+        WalletKeyUseStateChanged => "StateChanged",
+        WalletKeyUseExpiry => "Expiry",
+        WalletKeyUseSync => "Sync",
+        StoreStorageSecurity => "StorageSecurity",
+        StoreDatabase => "Database",
+        StoreEncoding => "Encoding",
+        StorePoisoned => "Poisoned",
+        StoreIdempotencyConflict => "IdempotencyConflict",
+        StoreRevisionConflict => "RevisionConflict",
+        StoreNotFound => "NotFound",
+        StoreAlreadyExists => "AlreadyExists",
+        StoreInvalidInput => "InvalidInput",
+        StoreUnsupportedSchema => "UnsupportedSchema",
+        StoreRecoveryRequired => "RecoveryRequired",
+        StoreWriterEpochMismatch => "WriterEpochMismatch",
+        StoreLiveAuthorizationExists => "LiveAuthorizationExists",
+        StoreInputReserved => "InputReserved",
+        StoreResourceExhausted => "ResourceExhausted",
+        StoreBudgetExceeded => "BudgetExceeded",
+        StoreInvalidTransition => "InvalidTransition",
+        StoreFile => "File",
+    });
+    flow_labels!(flow_nested_code_label, FLOW_NESTED_CODE_LABELS, DurableFlowNestedCodeV1, {
+        JournalStorage => "JournalStorage",
+        JournalDatabase => "JournalDatabase",
+        JournalPermission => "JournalPermission",
+        JournalExpired => "JournalExpired",
+        JournalRecoveryRequired => "JournalRecoveryRequired",
+        JournalUnsupportedSchema => "JournalUnsupportedSchema",
+        JournalOfflineHistoryUnsupported => "JournalOfflineHistoryUnsupported",
+        JournalNamedRecipientHistoryUnsupported => "JournalNamedRecipientHistoryUnsupported",
+        JournalConstructionHistoryUnsupported => "JournalConstructionHistoryUnsupported",
+        JournalInvalidBinding => "JournalInvalidBinding",
+        JournalConflict => "JournalConflict",
+        JournalNotFound => "JournalNotFound",
+        JournalLiveAuthorization => "JournalLiveAuthorization",
+        JournalInputReserved => "JournalInputReserved",
+        JournalBudgetExceeded => "JournalBudgetExceeded",
+        JournalLimit => "JournalLimit",
+        StoreStorageSecurity => "StoreStorageSecurity",
+        StoreDatabase => "StoreDatabase",
+        StoreEncoding => "StoreEncoding",
+        StorePoisoned => "StorePoisoned",
+        StoreIdempotencyConflict => "StoreIdempotencyConflict",
+        StoreRevisionConflict => "StoreRevisionConflict",
+        StoreNotFound => "StoreNotFound",
+        StoreAlreadyExists => "StoreAlreadyExists",
+        StoreInvalidInput => "StoreInvalidInput",
+        StoreUnsupportedSchema => "StoreUnsupportedSchema",
+        StoreRecoveryRequired => "StoreRecoveryRequired",
+        StoreWriterEpochMismatch => "StoreWriterEpochMismatch",
+        StoreLiveAuthorizationExists => "StoreLiveAuthorizationExists",
+        StoreInputReserved => "StoreInputReserved",
+        StoreResourceExhausted => "StoreResourceExhausted",
+        StoreBudgetExceeded => "StoreBudgetExceeded",
+        StoreInvalidTransition => "StoreInvalidTransition",
+        StoreFile => "StoreFile",
+        AuthorityInvalidBinding => "AuthorityInvalidBinding",
+        AuthorityPermission => "AuthorityPermission",
+        AuthorityStaleHead => "AuthorityStaleHead",
+        AuthorityConflict => "AuthorityConflict",
+        AuthorityInactive => "AuthorityInactive",
+        AuthorityRecoveryRequired => "AuthorityRecoveryRequired",
+        AuthorityExpired => "AuthorityExpired",
+        AuthorityPolicyDenied => "AuthorityPolicyDenied",
+        AuthorityBudgetExceeded => "AuthorityBudgetExceeded",
+        AuthorityInputReserved => "AuthorityInputReserved",
+        AuthorityObligationReserved => "AuthorityObligationReserved",
+        AuthorityLimit => "AuthorityLimit",
+        AuthorityStorage => "AuthorityStorage",
+        AuthorityCorruptHistory => "AuthorityCorruptHistory",
+        AuthorityPermanentStopUnavailable => "AuthorityPermanentStopUnavailable",
+        AuthorityOfflineHistoryUnsupported => "AuthorityOfflineHistoryUnsupported",
+        AuthorityConstructionHistoryUnsupported => "AuthorityConstructionHistoryUnsupported",
+        AuthorityUnsupportedVersion => "AuthorityUnsupportedVersion",
+        AuthorityAuthentication => "AuthorityAuthentication",
+        AuthorityUncertain => "AuthorityUncertain",
+        AuthorityResolutionUnavailable => "AuthorityResolutionUnavailable",
+        AuthoritySessionRequired => "AuthoritySessionRequired",
+        AuthoritySessionPending => "AuthoritySessionPending",
+        WalletKeyUsePermission => "WalletKeyUsePermission",
+        WalletKeyUsePolicy => "WalletKeyUsePolicy",
+        WalletKeyUseSelectionExpired => "WalletKeyUseSelectionExpired",
+        WalletKeyUseStorage => "WalletKeyUseStorage",
+        WalletKeyUseRecoveryRequired => "WalletKeyUseRecoveryRequired",
+        WalletKeyUseStateChanged => "WalletKeyUseStateChanged",
+        WalletKeyUseExpiry => "WalletKeyUseExpiry",
+        WalletKeyUseSync => "WalletKeyUseSync",
+        StorageSecurityUnsupportedPlatform => "StorageSecurityUnsupportedPlatform",
+        StorageSecurityQuarantinedDatabase => "StorageSecurityQuarantinedDatabase",
+        StorageSecurityRecoveredGeneration => "StorageSecurityRecoveredGeneration",
+        StorageSecurityGenerationArchive => "StorageSecurityGenerationArchive",
+        StorageSecurityUninitializedDatabase => "StorageSecurityUninitializedDatabase",
+        StorageSecurityUnsafePath => "StorageSecurityUnsafePath",
+        StorageSecurityAlreadyExists => "StorageSecurityAlreadyExists",
+        StorageSecurityMissingDatabase => "StorageSecurityMissingDatabase",
+        StorageSecurityPlaintextRefused => "StorageSecurityPlaintextRefused",
+        StorageSecurityUnqualifiedRuntime => "StorageSecurityUnqualifiedRuntime",
+        StorageSecurityAuthenticationFailed => "StorageSecurityAuthenticationFailed",
+        StorageSecurityDatabase => "StorageSecurityDatabase",
+        StorageSecurityIo => "StorageSecurityIo",
+        StorageSecuritySnapshotLimit => "StorageSecuritySnapshotLimit",
+        StorageSecuritySourceChanged => "StorageSecuritySourceChanged",
+        SyncAccessDenied => "SyncAccessDenied",
+        SyncInvalidRequest => "SyncInvalidRequest",
+        SyncInterrupted => "SyncInterrupted",
+        SyncReconciliationRequired => "SyncReconciliationRequired",
+        SyncInvalidResponse => "SyncInvalidResponse",
+        SyncResourceLimit => "SyncResourceLimit",
+        SyncNoCurrentObservation => "SyncNoCurrentObservation",
+        SyncWallet => "SyncWallet",
+        SyncChain => "SyncChain",
+    });
+    const FLOW_OPERATION: &[&str] = &[
+        "WriterReconcile",
+        "FinancialImport",
+        "InitialSign",
+        "RetainedRetry",
+        "ResultService",
+    ];
+    const FLOW_STAGE: &[&str] = &[
+        "FixtureState",
+        "AcquirePrepare",
+        "AcquireNative",
+        "AcquireCall",
+        "ActivationPrepare",
+        "ActivationNative",
+        "ActivationCall",
+        "ActiveVerification",
+        "ReconcilePrepare",
+        "ReconcileNative",
+        "ReconcileCall",
+        "Invalidate",
+        "ImportReceive",
+        "ImportPairing",
+        "ImportSource",
+        "WalletSync",
+        "WalletSource",
+        "WitnessHead",
+        "SpendStage",
+        "DisclosureDecision",
+        "SpendDecision",
+        "SigningLaunch",
+        "AuthorizationSource",
+        "Release",
+        "RequestRetain",
+        "Reserve",
+        "PermitRetain",
+        "WalletGuard",
+        "KeyUse",
+        "Derive",
+        "Sign",
+        "VerifySigned",
+        "ResultRetain",
+        "RetainedLookup",
+        "RetryInvariant",
+        "Completion",
+        "ResultService",
+        "Close",
+    ];
+    const FLOW_ERROR_DOMAIN: &[&str] = &[
+        "Signer",
+        "Bridge",
+        "Authority",
+        "Journal",
+        "WalletKeyUse",
+        "Store",
+    ];
+    const FLOW_JOB_PURPOSE: &[&str] = &[
+        "AcquirePrepare",
+        "Acquire",
+        "ActivationPrepare",
+        "Activate",
+        "ReconcilePrepare",
+        "Reconcile",
+        "Import",
+        "WalletReview",
+        "Sign",
+        "ResultService",
+    ];
+    const FLOW_RESULT: &[&str] = &["NotObserved", "ReturnedOk", "ReturnedErr"];
+    const FLOW_RECEIVE: &[&str] = &[
+        "NotObserved",
+        "Pending",
+        "Received",
+        "Missing",
+        "Disconnected",
+        "Invalidated",
+    ];
+    const FLOW_PRESENTATION: &[&str] = &["NotObserved", "Accepted", "Suppressed"];
+    const FLOW_CALL_OUTCOME: &[&str] = &["NotObserved", "Entered", "ReturnedOk", "ReturnedErr"];
+    const FLOW_TRANSPORT_PURPOSE: &[&str] = &["Acquire", "Activate", "Verify", "Reserve"];
+    const FLOW_TRANSPORT_STAGE: &[&str] = &[
+        "RequestValidation",
+        "Binding",
+        "Session",
+        "CallerDeadline",
+        "ExchangeDeadline",
+        "SourceCallback",
+        "Connect",
+        "Handshake",
+        "PeerBinding",
+        "RequestBuild",
+        "RequestWrite",
+        "ResponseRead",
+        "Response",
+        "SnapshotValidation",
+        "ReceiptValidation",
+        "CommittedHeadValidation",
+        "FinalValidation",
+        "Bounds",
+    ];
+    const FLOW_AUTHORITY_CODE: &[&str] = &[
+        "InvalidBinding",
+        "Permission",
+        "StaleHead",
+        "Conflict",
+        "Inactive",
+        "RecoveryRequired",
+        "Expired",
+        "PolicyDenied",
+        "BudgetExceeded",
+        "InputReserved",
+        "ObligationReserved",
+        "Limit",
+        "Storage",
+        "CorruptHistory",
+        "PermanentStopUnavailable",
+        "OfflineHistoryUnsupported",
+        "ConstructionHistoryUnsupported",
+        "UnsupportedVersion",
+        "Authentication",
+        "Uncertain",
+        "ResolutionUnavailable",
+        "SessionRequired",
+        "SessionPending",
+    ];
+    const FLOW_CALLBACK_STAGE: &[&str] = &["WorkspaceCurrent", "CallerCurrent"];
+    const FLOW_SIGNER_CODES: &[&str] = &[
+        "Unavailable",
+        "PeerLifetimeUnavailable",
+        "Io",
+        "Authentication",
+        "InvalidData",
+        "Crypto",
+        "Locked",
+        "BackupRequired",
+        "RecoveryRequired",
+        "AlreadyOpen",
+        "ReviewMismatch",
+        "Verification",
+        "Uncertain",
+        "ConsentJournal",
+        "Store",
+    ];
+    const FLOW_BRIDGE_CODES: &[&str] = &[
+        "Binding",
+        "Conflict",
+        "Missing",
+        "Uncertain",
+        "Limit",
+        "Permission",
+        "RecoveryRequired",
+        "CompleteOriginRecoveryUnavailable",
+        "Verification",
+        "SignerOriginUnavailable",
+        "Journal",
+        "Authority",
+        "Wallet",
+        "Ipc",
+    ];
+    const FLOW_AUTHORITY_CODES: &[&str] = &[
+        "InvalidBinding",
+        "Permission",
+        "StaleHead",
+        "Conflict",
+        "Inactive",
+        "RecoveryRequired",
+        "Expired",
+        "PolicyDenied",
+        "BudgetExceeded",
+        "InputReserved",
+        "ObligationReserved",
+        "Limit",
+        "Storage",
+        "CorruptHistory",
+        "PermanentStopUnavailable",
+        "OfflineHistoryUnsupported",
+        "ConstructionHistoryUnsupported",
+        "UnsupportedVersion",
+        "Authentication",
+        "Uncertain",
+        "ResolutionUnavailable",
+        "SessionRequired",
+        "SessionPending",
+    ];
+    const FLOW_JOURNAL_CODES: &[&str] = &[
+        "Storage",
+        "Database",
+        "Permission",
+        "Expired",
+        "RecoveryRequired",
+        "UnsupportedSchema",
+        "OfflineHistoryUnsupported",
+        "NamedRecipientHistoryUnsupported",
+        "ConstructionHistoryUnsupported",
+        "InvalidBinding",
+        "Conflict",
+        "NotFound",
+        "LiveAuthorization",
+        "InputReserved",
+        "BudgetExceeded",
+        "Limit",
+    ];
+    const FLOW_WALLET_KEY_USE_CODES: &[&str] = &[
+        "Permission",
+        "Policy",
+        "SelectionExpired",
+        "Storage",
+        "RecoveryRequired",
+        "StateChanged",
+        "Expiry",
+        "Sync",
+    ];
+    const FLOW_STORE_CODES: &[&str] = &[
+        "StorageSecurity",
+        "Database",
+        "Encoding",
+        "Poisoned",
+        "IdempotencyConflict",
+        "RevisionConflict",
+        "NotFound",
+        "AlreadyExists",
+        "InvalidInput",
+        "UnsupportedSchema",
+        "RecoveryRequired",
+        "WriterEpochMismatch",
+        "LiveAuthorizationExists",
+        "InputReserved",
+        "ResourceExhausted",
+        "BudgetExceeded",
+        "InvalidTransition",
+        "File",
+    ];
+    const FLOW_NESTED_JOURNAL: &[&str] = &[
+        "JournalStorage",
+        "JournalDatabase",
+        "JournalPermission",
+        "JournalExpired",
+        "JournalRecoveryRequired",
+        "JournalUnsupportedSchema",
+        "JournalOfflineHistoryUnsupported",
+        "JournalNamedRecipientHistoryUnsupported",
+        "JournalConstructionHistoryUnsupported",
+        "JournalInvalidBinding",
+        "JournalConflict",
+        "JournalNotFound",
+        "JournalLiveAuthorization",
+        "JournalInputReserved",
+        "JournalBudgetExceeded",
+        "JournalLimit",
+    ];
+    const FLOW_NESTED_STORE: &[&str] = &[
+        "StoreStorageSecurity",
+        "StoreDatabase",
+        "StoreEncoding",
+        "StorePoisoned",
+        "StoreIdempotencyConflict",
+        "StoreRevisionConflict",
+        "StoreNotFound",
+        "StoreAlreadyExists",
+        "StoreInvalidInput",
+        "StoreUnsupportedSchema",
+        "StoreRecoveryRequired",
+        "StoreWriterEpochMismatch",
+        "StoreLiveAuthorizationExists",
+        "StoreInputReserved",
+        "StoreResourceExhausted",
+        "StoreBudgetExceeded",
+        "StoreInvalidTransition",
+        "StoreFile",
+    ];
+    const FLOW_NESTED_AUTHORITY: &[&str] = &[
+        "AuthorityInvalidBinding",
+        "AuthorityPermission",
+        "AuthorityStaleHead",
+        "AuthorityConflict",
+        "AuthorityInactive",
+        "AuthorityRecoveryRequired",
+        "AuthorityExpired",
+        "AuthorityPolicyDenied",
+        "AuthorityBudgetExceeded",
+        "AuthorityInputReserved",
+        "AuthorityObligationReserved",
+        "AuthorityLimit",
+        "AuthorityStorage",
+        "AuthorityCorruptHistory",
+        "AuthorityPermanentStopUnavailable",
+        "AuthorityOfflineHistoryUnsupported",
+        "AuthorityConstructionHistoryUnsupported",
+        "AuthorityUnsupportedVersion",
+        "AuthorityAuthentication",
+        "AuthorityUncertain",
+        "AuthorityResolutionUnavailable",
+        "AuthoritySessionRequired",
+        "AuthoritySessionPending",
+    ];
+    const FLOW_NESTED_WALLET_KEY_USE: &[&str] = &[
+        "WalletKeyUsePermission",
+        "WalletKeyUsePolicy",
+        "WalletKeyUseSelectionExpired",
+        "WalletKeyUseStorage",
+        "WalletKeyUseRecoveryRequired",
+        "WalletKeyUseStateChanged",
+        "WalletKeyUseExpiry",
+        "WalletKeyUseSync",
+    ];
+    const FLOW_NESTED_STORAGE_SECURITY: &[&str] = &[
+        "StorageSecurityUnsupportedPlatform",
+        "StorageSecurityQuarantinedDatabase",
+        "StorageSecurityRecoveredGeneration",
+        "StorageSecurityGenerationArchive",
+        "StorageSecurityUninitializedDatabase",
+        "StorageSecurityUnsafePath",
+        "StorageSecurityAlreadyExists",
+        "StorageSecurityMissingDatabase",
+        "StorageSecurityPlaintextRefused",
+        "StorageSecurityUnqualifiedRuntime",
+        "StorageSecurityAuthenticationFailed",
+        "StorageSecurityDatabase",
+        "StorageSecurityIo",
+        "StorageSecuritySnapshotLimit",
+        "StorageSecuritySourceChanged",
+    ];
+    const FLOW_NESTED_SYNC: &[&str] = &[
+        "SyncAccessDenied",
+        "SyncInvalidRequest",
+        "SyncInterrupted",
+        "SyncReconciliationRequired",
+        "SyncInvalidResponse",
+        "SyncResourceLimit",
+        "SyncNoCurrentObservation",
+        "SyncWallet",
+        "SyncChain",
+    ];
+    const FLOW_CHECK_SITES: &[&str] = &[
+        "ExchangeInitial",
+        "BeforeConnect",
+        "AfterConnect",
+        "BeforeHandshakeIo",
+        "AfterHandshake",
+        "AfterPeerBinding",
+        "AfterRequestBuild",
+        "BeforeRequestWrite",
+        "AfterRequestWrite",
+        "AfterResponseRead",
+    ];
+    const FLOW_CHECKPOINTS: &[&str] = &[
+        "EntryDeadline",
+        "DeadlineSelection",
+        "ConnectRemaining",
+        "BeforeCallback",
+        "Callback",
+        "AfterCallback",
+        "Operation",
+        "Validation",
+    ];
+    fn flow_codes(domain: &str) -> Option<&'static [&'static str]> {
+        match domain {
+            "Signer" => Some(FLOW_SIGNER_CODES),
+            "Bridge" => Some(FLOW_BRIDGE_CODES),
+            "Authority" => Some(FLOW_AUTHORITY_CODES),
+            "Journal" => Some(FLOW_JOURNAL_CODES),
+            "WalletKeyUse" => Some(FLOW_WALLET_KEY_USE_CODES),
+            "Store" => Some(FLOW_STORE_CODES),
+            _ => None,
+        }
+    }
+    fn flow_nested(domain: &str, code: &str) -> &'static [&'static str] {
+        match (domain, code) {
+            ("Signer", "ConsentJournal") => FLOW_NESTED_JOURNAL,
+            ("Bridge", "Journal") => FLOW_NESTED_JOURNAL,
+            ("Signer", "Store") => FLOW_NESTED_STORE,
+            ("Bridge", "Authority") => FLOW_NESTED_AUTHORITY,
+            ("Bridge", "Wallet") => FLOW_NESTED_WALLET_KEY_USE,
+            ("Journal", "Storage") => FLOW_NESTED_STORAGE_SECURITY,
+            ("Store", "StorageSecurity") => FLOW_NESTED_STORAGE_SECURITY,
+            ("WalletKeyUse", "Sync") => FLOW_NESTED_SYNC,
+            _ => &[],
+        }
+    }
+    fn optional_enum(value: Option<&str>, members: &[&str]) -> bool {
+        value.is_none_or(|value| members.contains(&value))
+    }
+    fn duration(value: Option<u32>) -> bool {
+        value.is_none_or(|value| value <= 600_000_000)
+    }
+    #[derive(serde::Deserialize, serde::Serialize)]
+    #[serde(deny_unknown_fields)]
+    struct PublicFlowError {
+        stage: String,
+        domain: String,
+        code: String,
+        #[serde(deserialize_with = "required_history_nullable")]
+        nested_code: Option<String>,
+    }
+    impl PublicFlowError {
+        fn valid(&self) -> bool {
+            FLOW_STAGE.contains(&self.stage.as_str())
+                && flow_codes(&self.domain).is_some_and(|codes| codes.contains(&self.code.as_str()))
+                && self
+                    .nested_code
+                    .as_deref()
+                    .is_none_or(|code| flow_nested(&self.domain, &self.code).contains(&code))
+        }
+    }
+    #[derive(serde::Deserialize, serde::Serialize)]
+    #[serde(deny_unknown_fields)]
+    struct PublicFlowCompletion {
+        #[serde(deserialize_with = "required_history_nullable")]
+        purpose: Option<String>,
+        result: String,
+        receive: String,
+        presentation: String,
+    }
+    impl PublicFlowCompletion {
+        fn valid(&self) -> bool {
+            optional_enum(self.purpose.as_deref(), FLOW_JOB_PURPOSE)
+                && FLOW_RESULT.contains(&self.result.as_str())
+                && FLOW_RECEIVE.contains(&self.receive.as_str())
+                && FLOW_PRESENTATION.contains(&self.presentation.as_str())
+                && (self.purpose.is_some()
+                    || (self.result == "NotObserved"
+                        && self.presentation == "NotObserved"
+                        && matches!(self.receive.as_str(), "NotObserved" | "Missing")))
+                && (self.receive != "Received"
+                    || (self.purpose.is_some()
+                        && matches!(self.result.as_str(), "ReturnedOk" | "ReturnedErr")))
+                && (!matches!(self.receive.as_str(), "Pending" | "Disconnected")
+                    || (self.result == "NotObserved" && self.presentation == "NotObserved"))
+                && (self.presentation != "Accepted"
+                    || (self.receive == "Received" && self.result == "ReturnedOk"))
+                && (self.presentation != "Suppressed"
+                    || matches!(self.receive.as_str(), "Received" | "Invalidated"))
+        }
+    }
+    #[derive(serde::Deserialize, serde::Serialize)]
+    #[serde(deny_unknown_fields)]
+    struct PublicFlowCallOutcomes {
+        writer_acquire: String,
+        writer_activate: String,
+        active_verify: String,
+        reconciliation: String,
+        session_invalidation: String,
+        release: String,
+        request_retention: String,
+        reservation: String,
+        permit_retention: String,
+        key_use: String,
+        result_retention: String,
+    }
+    impl PublicFlowCallOutcomes {
+        fn valid(&self) -> bool {
+            [
+                self.writer_acquire.as_str(),
+                self.writer_activate.as_str(),
+                self.active_verify.as_str(),
+                self.reconciliation.as_str(),
+                self.session_invalidation.as_str(),
+                self.release.as_str(),
+                self.request_retention.as_str(),
+                self.reservation.as_str(),
+                self.permit_retention.as_str(),
+                self.key_use.as_str(),
+                self.result_retention.as_str(),
+            ]
+            .into_iter()
+            .all(|value| FLOW_CALL_OUTCOME.contains(&value))
+        }
+    }
+    #[derive(serde::Deserialize, serde::Serialize)]
+    #[serde(deny_unknown_fields)]
+    struct PublicFlowMeasurement {
+        #[serde(deserialize_with = "required_history_nullable")]
+        phase: Option<String>,
+        #[serde(deserialize_with = "required_history_nullable")]
+        check_site: Option<String>,
+        checkpoint: String,
+        #[serde(deserialize_with = "required_history_nullable")]
+        selected_limit: Option<String>,
+        #[serde(deserialize_with = "required_history_nullable")]
+        selected_budget_us: Option<u32>,
+        #[serde(deserialize_with = "required_history_nullable")]
+        caller_remaining_at_budget_start_us: Option<u32>,
+        #[serde(deserialize_with = "required_history_nullable")]
+        caller_remaining_at_failure_us: Option<u32>,
+        #[serde(deserialize_with = "required_history_nullable")]
+        selected_remaining_at_failure_us: Option<u32>,
+        operation_elapsed_us: u32,
+        #[serde(deserialize_with = "required_history_nullable")]
+        exchange_elapsed_us: Option<u32>,
+        pre_budget_callback_calls: u32,
+        pre_budget_callback_us: u32,
+        operation_cost: PublicHistoryCost,
+        #[serde(deserialize_with = "required_history_nullable")]
+        exchange_cost: Option<PublicHistoryCost>,
+        clamped: bool,
+        incomplete: bool,
+    }
+    impl PublicFlowMeasurement {
+        fn valid(&self, purpose: &str) -> bool {
+            self.phase.as_deref().is_none_or(|phase| phase == purpose)
+                && optional_enum(self.check_site.as_deref(), FLOW_CHECK_SITES)
+                && FLOW_CHECKPOINTS.contains(&self.checkpoint.as_str())
+                && optional_enum(self.selected_limit.as_deref(), &["Caller", "Exchange"])
+                && [
+                    self.selected_budget_us,
+                    self.caller_remaining_at_budget_start_us,
+                    self.caller_remaining_at_failure_us,
+                    self.selected_remaining_at_failure_us,
+                    self.exchange_elapsed_us,
+                ]
+                .into_iter()
+                .all(duration)
+                && self.operation_elapsed_us <= 600_000_000
+                && self.pre_budget_callback_us <= 600_000_000
+                && self.pre_budget_callback_calls <= 1
+                && self.operation_cost.valid()
+                && self
+                    .exchange_cost
+                    .as_ref()
+                    .is_none_or(PublicHistoryCost::valid)
+                && (purpose != "Reserve"
+                    || (self.caller_remaining_at_budget_start_us.is_none()
+                        && self.caller_remaining_at_failure_us.is_none()
+                        && optional_enum(self.selected_limit.as_deref(), &["Exchange"])))
+        }
+    }
+    #[derive(serde::Deserialize, serde::Serialize)]
+    #[serde(deny_unknown_fields)]
+    struct PublicFlowLowerCall {
+        purpose: String,
+        stage: String,
+        authority_code: String,
+        #[serde(deserialize_with = "required_history_nullable")]
+        io_kind: Option<String>,
+        #[serde(deserialize_with = "required_history_nullable")]
+        callback_stage: Option<String>,
+        measurement: PublicFlowMeasurement,
+    }
+    impl PublicFlowLowerCall {
+        fn valid(&self) -> bool {
+            FLOW_TRANSPORT_PURPOSE.contains(&self.purpose.as_str())
+                && FLOW_TRANSPORT_STAGE.contains(&self.stage.as_str())
+                && FLOW_AUTHORITY_CODE.contains(&self.authority_code.as_str())
+                && optional_enum(
+                    self.io_kind.as_deref(),
+                    &["Timeout", "Closed", "Refused", "Other"],
+                )
+                && optional_enum(self.callback_stage.as_deref(), FLOW_CALLBACK_STAGE)
+                && self.measurement.valid(&self.purpose)
+        }
+    }
+    #[derive(serde::Deserialize, serde::Serialize)]
+    #[serde(deny_unknown_fields)]
+    struct PublicDurableFlow {
+        version: u8,
+        operation: String,
+        #[serde(deserialize_with = "required_history_nullable")]
+        first_error: Option<PublicFlowError>,
+        #[serde(deserialize_with = "required_history_nullable")]
+        terminal_error: Option<PublicFlowError>,
+        fixture_result: String,
+        completion: PublicFlowCompletion,
+        call_outcomes: PublicFlowCallOutcomes,
+        #[serde(deserialize_with = "required_history_nullable")]
+        lower_call_measurement: Option<PublicFlowLowerCall>,
+        clamped: bool,
+        incomplete: bool,
+    }
+    impl PublicDurableFlow {
+        fn valid(&self) -> bool {
+            self.version == 1
+                && FLOW_OPERATION.contains(&self.operation.as_str())
+                && self.fixture_result == "ReturnedErr"
+                && self.first_error.as_ref().is_none_or(PublicFlowError::valid)
+                && self
+                    .terminal_error
+                    .as_ref()
+                    .is_none_or(PublicFlowError::valid)
+                && self.completion.valid()
+                && self.call_outcomes.valid()
+                && self.lower_call_measurement.as_ref().is_none_or(|lower| {
+                    lower.valid()
+                        && (!lower.measurement.clamped || self.clamped)
+                        && (!lower.measurement.incomplete || self.incomplete)
+                })
+        }
+    }
+    fn flow_error(value: &DurableFlowErrorV1) -> PublicFlowError {
+        PublicFlowError {
+            stage: flow_stage_label(value.stage()).into(),
+            domain: flow_error_domain_label(value.domain()).into(),
+            code: flow_error_code_label(value.code()).into(),
+            nested_code: value
+                .nested_code()
+                .map(|code| flow_nested_code_label(code).into()),
+        }
+    }
+    fn flow_cost(value: &CheckedHistoryCostV1) -> PublicHistoryCost {
+        PublicHistoryCost {
+            callback_calls: value.callback_calls(),
+            callback_us: value.callback_us(),
+            callback_max_us: value.callback_max_us(),
+            connect_calls: value.connect_calls(),
+            connect_us: value.connect_us(),
+            handshake_calls: value.handshake_calls(),
+            handshake_us: value.handshake_us(),
+            frame_write_calls: value.frame_write_calls(),
+            frame_write_us: value.frame_write_us(),
+            frame_read_calls: value.frame_read_calls(),
+            frame_read_us: value.frame_read_us(),
+        }
+    }
+    fn flow_phase(value: CheckedHistoryPhaseV1) -> Option<&'static str> {
+        match value {
+            CheckedHistoryPhaseV1::Acquire => Some("Acquire"),
+            CheckedHistoryPhaseV1::Activate => Some("Activate"),
+            CheckedHistoryPhaseV1::Verify => Some("Verify"),
+            CheckedHistoryPhaseV1::Reserve => Some("Reserve"),
+            CheckedHistoryPhaseV1::Snapshot
+            | CheckedHistoryPhaseV1::Page
+            | CheckedHistoryPhaseV1::Admission => None,
+        }
+    }
+    fn flow_measurement(value: &CheckedHistoryMeasurementV1) -> Option<PublicFlowMeasurement> {
+        // Reject an old purpose rather than reinterpret it as unavailable Flow.
+        let phase = match value.phase() {
+            Some(phase) => Some(flow_phase(phase)?.into()),
+            None => None,
+        };
+        Some(PublicFlowMeasurement {
+            phase,
+            check_site: value
+                .check_site()
+                .map(|site| history_check_site_label(site).into()),
+            checkpoint: history_checkpoint_label(value.checkpoint()).into(),
+            selected_limit: value
+                .selected_limit()
+                .map(|limit| history_selected_limit_label(limit).into()),
+            selected_budget_us: value.selected_budget_us(),
+            caller_remaining_at_budget_start_us: value.caller_remaining_at_budget_start_us(),
+            caller_remaining_at_failure_us: value.caller_remaining_at_failure_us(),
+            selected_remaining_at_failure_us: value.selected_remaining_at_failure_us(),
+            operation_elapsed_us: value.history_elapsed_us(),
+            exchange_elapsed_us: value.exchange_elapsed_us(),
+            pre_budget_callback_calls: value.pre_budget_callback_calls().into(),
+            pre_budget_callback_us: value.pre_budget_callback_us(),
+            operation_cost: flow_cost(value.history_cost()),
+            exchange_cost: value.exchange_cost().map(flow_cost),
+            clamped: value.clamped(),
+            incomplete: value.incomplete(),
+        })
+    }
+    fn flow_lower(value: &DurableFlowTransportFailureV1) -> Option<PublicFlowLowerCall> {
+        Some(PublicFlowLowerCall {
+            purpose: flow_transport_purpose_label(value.purpose()).into(),
+            stage: flow_transport_stage_label(value.stage()).into(),
+            authority_code: flow_authority_code_label(value.authority_code()).into(),
+            io_kind: value
+                .io_kind()
+                .map(|kind| admission_io_kind_label(kind).into()),
+            callback_stage: value
+                .callback_stage()
+                .map(|stage| flow_callback_stage_label(stage).into()),
+            measurement: flow_measurement(value.measurement())?,
+        })
+    }
+    fn flow_public(value: &DurableFlowDiagnosticV1) -> Option<PublicDurableFlow> {
+        // Never manufacture a record for a successful fixture.
+        if !matches!(value.fixture_result(), DurableFlowResultV1::ReturnedErr) {
+            return None;
+        }
+        let lower_call_measurement = match value.lower_call_measurement() {
+            Some(lower) => Some(flow_lower(lower)?),
+            None => None,
+        };
+        let completion = value.completion();
+        let calls = value.call_outcomes();
+        Some(PublicDurableFlow {
+            version: 1,
+            operation: flow_operation_label(value.operation()).into(),
+            first_error: value.first_error().map(flow_error),
+            terminal_error: value.terminal_error().map(flow_error),
+            fixture_result: flow_result_label(value.fixture_result()).into(),
+            completion: PublicFlowCompletion {
+                purpose: completion
+                    .purpose()
+                    .map(|purpose| flow_job_purpose_label(purpose).into()),
+                result: flow_result_label(completion.result()).into(),
+                receive: flow_receive_label(completion.receive()).into(),
+                presentation: flow_presentation_label(completion.presentation()).into(),
+            },
+            call_outcomes: PublicFlowCallOutcomes {
+                writer_acquire: flow_call_outcome_label(calls.writer_acquire()).into(),
+                writer_activate: flow_call_outcome_label(calls.writer_activate()).into(),
+                active_verify: flow_call_outcome_label(calls.active_verify()).into(),
+                reconciliation: flow_call_outcome_label(calls.reconciliation()).into(),
+                session_invalidation: flow_call_outcome_label(calls.session_invalidation()).into(),
+                release: flow_call_outcome_label(calls.release()).into(),
+                request_retention: flow_call_outcome_label(calls.request_retention()).into(),
+                reservation: flow_call_outcome_label(calls.reservation()).into(),
+                permit_retention: flow_call_outcome_label(calls.permit_retention()).into(),
+                key_use: flow_call_outcome_label(calls.key_use()).into(),
+                result_retention: flow_call_outcome_label(calls.result_retention()).into(),
+            },
+            lower_call_measurement,
+            clamped: value.clamped(),
+            incomplete: value.incomplete(),
+        })
+    }
+    // Both producer and consumers use this exact bounded, ordered serializer.
+    fn canonical_payload(value: &PublicDurableFlow) -> Option<String> {
+        if !value.valid() {
+            return None;
+        }
+        let text = serde_json::to_string(value).ok()?;
+        (text.len() <= MAX_PAYLOAD).then_some(text)
+    }
+    fn parse_payload(text: &str) -> Option<PublicDurableFlow> {
+        if text.len() > MAX_PAYLOAD {
+            return None;
+        }
+        let value: PublicDurableFlow = serde_json::from_str(text).ok()?;
+        value.valid().then_some(value)
+    }
+    fn write_private_record(mut output: impl std::io::Write, value: &PublicDurableFlow) {
+        let Some(text) = canonical_payload(value) else {
+            return;
+        };
+        let _ = writeln!(output, "\n{PRIVATE_PREFIX}{text}]");
+    }
+    pub(crate) fn emit_durable_flow(value: &DurableFlowDiagnosticV1) {
+        let Some(value) = flow_public(value) else {
+            return;
+        };
+        write_private_record(std::io::stderr().lock(), &value);
+    }
+    #[derive(Default)]
+    pub(crate) struct DurableFlowCapture {
+        record: Option<String>,
+        invalid: bool,
+    }
+    impl DurableFlowCapture {
+        pub(crate) fn retained_bytes(&self) -> usize {
+            self.record.as_ref().map_or(0, String::len)
+        }
+        pub(crate) fn discard_for_budget(&mut self) {
+            if self.record.take().is_some() {
+                self.invalid = true;
+            }
+        }
+        pub(crate) fn capture_line(&mut self, line: &str, available: usize) {
+            if !line.starts_with("[DURABLE_FLOW_V1") && line != INVALID {
+                return;
+            }
+            if self.invalid {
+                return;
+            }
+            let canonical = line
+                .strip_prefix(PRIVATE_PREFIX)
+                .and_then(|line| line.strip_suffix(']'))
+                .and_then(parse_payload)
+                .as_ref()
+                .and_then(canonical_payload)
+                .map(|text| format!("{PUBLIC_PREFIX}{text}"));
+            if self.record.is_none() {
+                if let Some(record) = canonical {
+                    if record.len() <= available {
+                        self.record = Some(record);
+                        return;
+                    }
+                }
+            }
+            self.record = None;
+            self.invalid = true;
+        }
+        pub(crate) fn public_lines(&self) -> Vec<&str> {
+            if self.invalid {
+                vec![INVALID]
+            } else {
+                self.record.as_deref().into_iter().collect()
+            }
+        }
+    }
+    #[cfg(test)]
+    pub(crate) const DURABLE_FLOW_MAXIMAL_TEST_JSON: &str = r#"{"version":1,"operation":"WriterReconcile","first_error":{"stage":"AuthorizationSource","domain":"Signer","code":"ConsentJournal","nested_code":"JournalNamedRecipientHistoryUnsupported"},"terminal_error":{"stage":"AuthorizationSource","domain":"Signer","code":"ConsentJournal","nested_code":"JournalNamedRecipientHistoryUnsupported"},"fixture_result":"ReturnedErr","completion":{"purpose":"ActivationPrepare","result":"NotObserved","receive":"Disconnected","presentation":"NotObserved"},"call_outcomes":{"writer_acquire":"ReturnedErr","writer_activate":"ReturnedErr","active_verify":"ReturnedErr","reconciliation":"ReturnedErr","session_invalidation":"ReturnedErr","release":"ReturnedErr","request_retention":"ReturnedErr","reservation":"ReturnedErr","permit_retention":"ReturnedErr","key_use":"ReturnedErr","result_retention":"ReturnedErr"},"lower_call_measurement":{"purpose":"Activate","stage":"CommittedHeadValidation","authority_code":"ConstructionHistoryUnsupported","io_kind":"Timeout","callback_stage":"WorkspaceCurrent","measurement":{"phase":"Activate","check_site":"BeforeRequestWrite","checkpoint":"DeadlineSelection","selected_limit":"Exchange","selected_budget_us":600000000,"caller_remaining_at_budget_start_us":600000000,"caller_remaining_at_failure_us":600000000,"selected_remaining_at_failure_us":600000000,"operation_elapsed_us":600000000,"exchange_elapsed_us":600000000,"pre_budget_callback_calls":1,"pre_budget_callback_us":600000000,"operation_cost":{"callback_calls":1000000,"callback_us":600000000,"callback_max_us":600000000,"connect_calls":1000000,"connect_us":600000000,"handshake_calls":1000000,"handshake_us":600000000,"frame_write_calls":1000000,"frame_write_us":600000000,"frame_read_calls":1000000,"frame_read_us":600000000},"exchange_cost":{"callback_calls":1000000,"callback_us":600000000,"callback_max_us":600000000,"connect_calls":1000000,"connect_us":600000000,"handshake_calls":1000000,"handshake_us":600000000,"frame_write_calls":1000000,"frame_write_us":600000000,"frame_read_calls":1000000,"frame_read_us":600000000},"clamped":false,"incomplete":false}},"clamped":false,"incomplete":false}"#;
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        fn fixture() -> serde_json::Value {
+            serde_json::from_str(DURABLE_FLOW_MAXIMAL_TEST_JSON).unwrap()
+        }
+        fn accepted(value: &serde_json::Value) -> bool {
+            parse_payload(&value.to_string()).is_some()
+        }
+        fn object_paths(value: &serde_json::Value, path: String, out: &mut Vec<String>) {
+            if let Some(object) = value.as_object() {
+                out.push(path.clone());
+                for (key, child) in object {
+                    object_paths(child, format!("{path}/{key}"), out);
+                }
+            }
+        }
+        #[test]
+        fn durable_flow_maximal_canonical_record_fits_fixed_slot() {
+            // This proves production DTO serializer/parser parity, not a runtime history.
+            let value = parse_payload(DURABLE_FLOW_MAXIMAL_TEST_JSON).unwrap();
+            let text = canonical_payload(&value).unwrap();
+            assert_eq!(text.len(), 2130);
+            assert!(text.len() <= MAX_PAYLOAD);
+            assert_eq!(text, DURABLE_FLOW_MAXIMAL_TEST_JSON);
+            let escaped = text.replacen("WriterReconcile", "\\u0057riterReconcile", 1);
+            assert_eq!(canonical_payload(&parse_payload(&escaped).unwrap()).unwrap(), text);
+            let mut slot = DurableFlowCapture::default();
+            slot.capture_line(&format!("{PRIVATE_PREFIX}{text}]"), 8192);
+            assert_eq!(
+                slot.public_lines(),
+                vec![format!("{PUBLIC_PREFIX}{text}").as_str()]
+            );
+            assert_eq!(
+                canonical_payload(&parse_payload(&text).unwrap()).unwrap(),
+                text
+            );
+        }
+        #[test]
+        fn durable_flow_maximal_error_pair_is_closed() {
+            let mut maximum = 0;
+            let all_nested: Vec<_> = FLOW_ERROR_DOMAIN
+                .iter()
+                .flat_map(|domain| {
+                    flow_codes(domain)
+                        .unwrap()
+                        .iter()
+                        .flat_map(move |code| flow_nested(domain, code).iter().copied())
+                })
+                .collect();
+            for domain in FLOW_ERROR_DOMAIN {
+                for code in flow_codes(domain).unwrap() {
+                    for nested in std::iter::once(None)
+                        .chain(flow_nested(domain, code).iter().copied().map(Some))
+                    {
+                        let error = PublicFlowError {
+                            stage: "AuthorizationSource".into(),
+                            domain: (*domain).into(),
+                            code: (*code).into(),
+                            nested_code: nested.map(str::to_owned),
+                        };
+                        assert!(error.valid());
+                        maximum = maximum.max(serde_json::to_string(&error).unwrap().len());
+                    }
+                    for nested in &all_nested {
+                        let error = PublicFlowError {
+                            stage: "AuthorizationSource".into(),
+                            domain: (*domain).into(),
+                            code: (*code).into(),
+                            nested_code: Some((*nested).into()),
+                        };
+                        assert_eq!(error.valid(), flow_nested(domain, code).contains(nested));
+                    }
+                }
+            }
+            assert_eq!(maximum, 129);
+            for (domain, code) in [
+                ("Wallet", "Storage"),
+                ("Signer", "SessionRequired"),
+                ("Bridge", "Database"),
+            ] {
+                let error = PublicFlowError {
+                    stage: "FixtureState".into(),
+                    domain: domain.into(),
+                    code: code.into(),
+                    nested_code: None,
+                };
+                assert!(!error.valid());
+            }
+        }
+        #[test]
+        fn durable_flow_maximal_component_lengths() {
+            let value = fixture();
+            for (values, selected) in [
+                (FLOW_OPERATION, "WriterReconcile"),
+                (FLOW_STAGE, "AuthorizationSource"),
+                (FLOW_JOB_PURPOSE, "ActivationPrepare"),
+                (FLOW_TRANSPORT_PURPOSE, "Activate"),
+                (FLOW_TRANSPORT_STAGE, "CommittedHeadValidation"),
+                (FLOW_AUTHORITY_CODE, "ConstructionHistoryUnsupported"),
+                (FLOW_CALLBACK_STAGE, "WorkspaceCurrent"),
+                (FLOW_CALL_OUTCOME, "ReturnedErr"),
+                (FLOW_CHECK_SITES, "BeforeRequestWrite"),
+                (FLOW_CHECKPOINTS, "DeadlineSelection"),
+                (&["Caller", "Exchange"][..], "Exchange"),
+                (&["Timeout", "Closed", "Refused", "Other"][..], "Timeout"),
+            ] {
+                assert_eq!(values.iter().map(|v| v.len()).max(), Some(selected.len()));
+                assert!(serde_json::to_string(selected).unwrap().len() >= 4); // null
+            }
+            let mut max_completion = 0;
+            for purpose in std::iter::once(None).chain(FLOW_JOB_PURPOSE.iter().copied().map(Some)) {
+                for result in FLOW_RESULT {
+                    for receive in FLOW_RECEIVE {
+                        for presentation in FLOW_PRESENTATION {
+                            let c = PublicFlowCompletion {
+                                purpose: purpose.map(str::to_owned),
+                                result: (*result).into(),
+                                receive: (*receive).into(),
+                                presentation: (*presentation).into(),
+                            };
+                            if c.valid() {
+                                max_completion =
+                                    max_completion.max(serde_json::to_string(&c).unwrap().len());
+                            }
+                        }
+                    }
+                }
+            }
+            assert_eq!(
+                max_completion,
+                serde_json::to_string(
+                    &parse_payload(DURABLE_FLOW_MAXIMAL_TEST_JSON)
+                        .unwrap()
+                        .completion
+                )
+                .unwrap()
+                .len()
+            );
+            assert_eq!(serde_json::to_string(&false).unwrap().len(), 5);
+            assert_eq!(600_000_000u32.to_string().len(), 9);
+            assert_eq!(1_000_000u32.to_string().len(), 7);
+            assert_eq!(value["call_outcomes"].as_object().unwrap().len(), 11);
+        }
+        #[test]
+        fn durable_flow_payload_cap_exact_boundary() {
+            let exact = format!(
+                "{}{}",
+                DURABLE_FLOW_MAXIMAL_TEST_JSON,
+                " ".repeat(MAX_PAYLOAD - DURABLE_FLOW_MAXIMAL_TEST_JSON.len())
+            );
+            assert_eq!(exact.len(), 4096);
+            assert_eq!(
+                canonical_payload(&parse_payload(&exact).unwrap()).unwrap(),
+                DURABLE_FLOW_MAXIMAL_TEST_JSON
+            );
+            assert!(parse_payload(&(exact + " ")).is_none());
+            assert!(parse_payload(&" ".repeat(4097)).is_none());
+        }
+        #[test]
+        fn durable_flow_getter_labels_are_closed() {
+            for (value, label) in FLOW_OPERATION_LABELS {
+                assert_eq!(flow_operation_label(*value), *label);
+                assert!(FLOW_OPERATION.contains(label));
+            }
+            for (value, label) in FLOW_STAGE_LABELS {
+                assert_eq!(flow_stage_label(*value), *label);
+                assert!(FLOW_STAGE.contains(label));
+            }
+            for (value, label) in FLOW_ERROR_DOMAIN_LABELS {
+                assert_eq!(flow_error_domain_label(*value), *label);
+                assert!(FLOW_ERROR_DOMAIN.contains(label));
+            }
+            for (value, label) in FLOW_JOB_PURPOSE_LABELS {
+                assert_eq!(flow_job_purpose_label(*value), *label);
+                assert!(FLOW_JOB_PURPOSE.contains(label));
+            }
+            for (value, label) in FLOW_RESULT_LABELS {
+                assert_eq!(flow_result_label(*value), *label);
+                assert!(FLOW_RESULT.contains(label));
+            }
+            for (value, label) in FLOW_RECEIVE_LABELS {
+                assert_eq!(flow_receive_label(*value), *label);
+                assert!(FLOW_RECEIVE.contains(label));
+            }
+            for (value, label) in FLOW_PRESENTATION_LABELS {
+                assert_eq!(flow_presentation_label(*value), *label);
+                assert!(FLOW_PRESENTATION.contains(label));
+            }
+            for (value, label) in FLOW_CALL_OUTCOME_LABELS {
+                assert_eq!(flow_call_outcome_label(*value), *label);
+                assert!(FLOW_CALL_OUTCOME.contains(label));
+            }
+            for (value, label) in FLOW_TRANSPORT_PURPOSE_LABELS {
+                assert_eq!(flow_transport_purpose_label(*value), *label);
+                assert!(FLOW_TRANSPORT_PURPOSE.contains(label));
+            }
+            for (value, label) in FLOW_TRANSPORT_STAGE_LABELS {
+                assert_eq!(flow_transport_stage_label(*value), *label);
+                assert!(FLOW_TRANSPORT_STAGE.contains(label));
+            }
+            for (value, label) in FLOW_AUTHORITY_CODE_LABELS {
+                assert_eq!(flow_authority_code_label(*value), *label);
+                assert!(FLOW_AUTHORITY_CODE.contains(label));
+            }
+            for (value, label) in FLOW_CALLBACK_STAGE_LABELS {
+                assert_eq!(flow_callback_stage_label(*value), *label);
+                assert!(FLOW_CALLBACK_STAGE.contains(label));
+            }
+            for (value, label) in FLOW_ERROR_CODE_LABELS {
+                assert_eq!(flow_error_code_label(*value), *label);
+            }
+            for (value, label) in FLOW_NESTED_CODE_LABELS {
+                assert_eq!(flow_nested_code_label(*value), *label);
+            }
+            for (value, expected) in [
+                (CheckedHistoryPhaseV1::Acquire, "Acquire"),
+                (CheckedHistoryPhaseV1::Activate, "Activate"),
+                (CheckedHistoryPhaseV1::Verify, "Verify"),
+                (CheckedHistoryPhaseV1::Reserve, "Reserve"),
+            ] {
+                assert_eq!(flow_phase(value), Some(expected));
+            }
+            for value in [
+                CheckedHistoryPhaseV1::Snapshot,
+                CheckedHistoryPhaseV1::Page,
+                CheckedHistoryPhaseV1::Admission,
+            ] {
+                assert_eq!(flow_phase(value), None);
+            }
+        }
+        #[test]
+        fn durable_flow_parser_requires_exact_scopes() {
+            let value = fixture();
+            let text = value.to_string();
+            let mut paths = Vec::new();
+            object_paths(&value, String::new(), &mut paths);
+            for path in paths {
+                let object = value.pointer(&path).unwrap().as_object().unwrap();
+                let fragment = value.pointer(&path).unwrap().to_string();
+                let mut unknown = value.clone();
+                unknown.pointer_mut(&path).unwrap()["private"] =
+                    serde_json::json!("secret payload");
+                assert!(!accepted(&unknown));
+                for (key, entry) in object {
+                    let mut missing = value.clone();
+                    missing
+                        .pointer_mut(&path)
+                        .unwrap()
+                        .as_object_mut()
+                        .unwrap()
+                        .remove(key);
+                    assert!(!accepted(&missing));
+                    let field = format!("{path}/{key}");
+                    let nullable = matches!(
+                        field.as_str(),
+                        "/first_error"
+                            | "/terminal_error"
+                            | "/lower_call_measurement"
+                            | "/first_error/nested_code"
+                            | "/terminal_error/nested_code"
+                            | "/completion/purpose"
+                            | "/lower_call_measurement/io_kind"
+                            | "/lower_call_measurement/callback_stage"
+                            | "/lower_call_measurement/measurement/phase"
+                            | "/lower_call_measurement/measurement/check_site"
+                            | "/lower_call_measurement/measurement/selected_limit"
+                            | "/lower_call_measurement/measurement/selected_budget_us"
+                            | "/lower_call_measurement/measurement/caller_remaining_at_budget_start_us"
+                            | "/lower_call_measurement/measurement/caller_remaining_at_failure_us"
+                            | "/lower_call_measurement/measurement/selected_remaining_at_failure_us"
+                            | "/lower_call_measurement/measurement/exchange_elapsed_us"
+                            | "/lower_call_measurement/measurement/exchange_cost"
+                    );
+                    if !nullable {
+                        let mut changed = value.clone();
+                        *changed.pointer_mut(&field).unwrap() = serde_json::Value::Null;
+                        assert!(!accepted(&changed));
+                    }
+                    if entry.is_object() {
+                        for bad in [
+                            serde_json::json!([]),
+                            serde_json::json!(false),
+                            serde_json::json!(1),
+                            serde_json::json!("private"),
+                        ] {
+                            let mut changed = value.clone();
+                            *changed.pointer_mut(&field).unwrap() = bad;
+                            assert!(!accepted(&changed));
+                        }
+                    }
+                    let duplicated = format!("{{\"{key}\":{entry},{}", &fragment[1..]);
+                    assert!(parse_payload(&text.replacen(&fragment, &duplicated, 1)).is_none());
+                    let escaped = format!("\\u{:04x}{}", key.as_bytes()[0], &key[1..]);
+                    let duplicated = format!("{{\"{escaped}\":{entry},{}", &fragment[1..]);
+                    assert!(parse_payload(&text.replacen(&fragment, &duplicated, 1)).is_none());
+                }
+            }
+            for token in [
+                "true",
+                "false",
+                "1.0",
+                "1e0",
+                "-1",
+                "NaN",
+                "Infinity",
+                "-Infinity",
+                "null",
+                "[]",
+                "{}",
+                "\"1\"",
+            ] {
+                let text = DURABLE_FLOW_MAXIMAL_TEST_JSON.replacen(
+                    "\"version\":1",
+                    &format!("\"version\":{token}"),
+                    1,
+                );
+                assert!(parse_payload(&text).is_none());
+            }
+        }
+        #[test]
+        fn durable_flow_parser_rejects_invalid_categories_and_bounds() {
+            let original = fixture();
+            let mut paths = Vec::new();
+            object_paths(&original, String::new(), &mut paths);
+            for path in paths {
+                for (key, entry) in original.pointer(&path).unwrap().as_object().unwrap() {
+                    if entry.is_number() {
+                        let max = if key == "version" || key == "pre_budget_callback_calls" {
+                            1
+                        } else if key.ends_with("_calls") {
+                            1_000_000
+                        } else {
+                            600_000_000
+                        };
+                        for bad in [
+                            serde_json::json!(true),
+                            serde_json::json!(false),
+                            serde_json::json!(-1),
+                            serde_json::json!(1.0),
+                            serde_json::json!(max + 1),
+                            serde_json::json!("0"),
+                            serde_json::json!([]),
+                            serde_json::json!({}),
+                        ] {
+                            let mut value = original.clone();
+                            value.pointer_mut(&path).unwrap()[key] = bad;
+                            assert!(!accepted(&value));
+                        }
+                    } else if entry.is_boolean() {
+                        for bad in [
+                            serde_json::json!(0),
+                            serde_json::json!(null),
+                            serde_json::json!("false"),
+                        ] {
+                            let mut value = original.clone();
+                            value.pointer_mut(&path).unwrap()[key] = bad;
+                            assert!(!accepted(&value));
+                        }
+                    } else if entry.is_string() {
+                        for bad in [
+                            serde_json::json!("private/path/token"),
+                            serde_json::json!(false),
+                            serde_json::json!([]),
+                        ] {
+                            let mut value = original.clone();
+                            value.pointer_mut(&path).unwrap()[key] = bad;
+                            assert!(!accepted(&value));
+                        }
+                    }
+                }
+            }
+            for operation in FLOW_OPERATION {
+                let mut value = original.clone();
+                value["operation"] = serde_json::json!(operation);
+                assert!(accepted(&value));
+            }
+            for stage in FLOW_STAGE {
+                let mut value = original.clone();
+                value["first_error"]["stage"] = serde_json::json!(stage);
+                assert!(accepted(&value));
+            }
+            for state in FLOW_CALL_OUTCOME {
+                for key in original["call_outcomes"].as_object().unwrap().keys() {
+                    let mut value = original.clone();
+                    value["call_outcomes"][key] = serde_json::json!(state);
+                    assert!(accepted(&value));
+                }
+            }
+            for (field, values) in [
+                ("stage", FLOW_TRANSPORT_STAGE),
+                ("authority_code", FLOW_AUTHORITY_CODE),
+                ("callback_stage", FLOW_CALLBACK_STAGE),
+            ] {
+                for member in values {
+                    let mut value = original.clone();
+                    value["lower_call_measurement"][field] = serde_json::json!(member);
+                    assert!(accepted(&value));
+                }
+            }
+            for purpose in FLOW_TRANSPORT_PURPOSE {
+                let mut value = original.clone();
+                value["lower_call_measurement"]["purpose"] = serde_json::json!(purpose);
+                value["lower_call_measurement"]["measurement"]["phase"] =
+                    serde_json::json!(purpose);
+                if *purpose == "Reserve" {
+                    value["lower_call_measurement"]["measurement"]["caller_remaining_at_budget_start_us"] =
+                        serde_json::Value::Null;
+                    value["lower_call_measurement"]["measurement"]["caller_remaining_at_failure_us"] =
+                        serde_json::Value::Null;
+                }
+                assert!(accepted(&value));
+            }
+        }
+        #[test]
+        fn durable_flow_null_completion_and_measurement_consistency() {
+            let mut value = fixture();
+            value["first_error"] = serde_json::Value::Null;
+            value["terminal_error"] = serde_json::Value::Null;
+            value["lower_call_measurement"] = serde_json::Value::Null;
+            for receive in ["NotObserved", "Missing"] {
+                value["completion"] = serde_json::json!({"purpose":null,"result":"NotObserved","receive":receive,"presentation":"NotObserved"});
+                assert!(accepted(&value));
+            }
+            for receive in ["Pending", "Disconnected", "Received", "Invalidated"] {
+                value["completion"]["receive"] = serde_json::json!(receive);
+                assert!(!accepted(&value));
+            }
+            for (result, receive, presentation, valid) in [
+                ("ReturnedOk", "Received", "Accepted", true),
+                ("ReturnedErr", "Received", "Accepted", false),
+                ("ReturnedErr", "Received", "Suppressed", true),
+                ("ReturnedOk", "Invalidated", "Suppressed", true),
+                ("NotObserved", "Invalidated", "Suppressed", true),
+                ("ReturnedOk", "Disconnected", "NotObserved", false),
+                ("ReturnedErr", "Missing", "NotObserved", true),
+                ("NotObserved", "Pending", "NotObserved", true),
+            ] {
+                value["completion"] = serde_json::json!({"purpose":"Import","result":result,"receive":receive,"presentation":presentation});
+                assert_eq!(accepted(&value), valid);
+            }
+            for flag in ["clamped", "incomplete"] {
+                let mut value = fixture();
+                value["lower_call_measurement"]["measurement"][flag] = serde_json::json!(true);
+                assert!(!accepted(&value));
+                value[flag] = serde_json::json!(true);
+                assert!(accepted(&value));
+            }
+            let mut value = fixture();
+            value["lower_call_measurement"]["measurement"]["phase"] = serde_json::json!("Verify");
+            assert!(!accepted(&value));
+            value["lower_call_measurement"]["measurement"]["phase"] = serde_json::Value::Null;
+            assert!(accepted(&value));
+            for field in [
+                "phase",
+                "check_site",
+                "selected_limit",
+                "selected_budget_us",
+                "caller_remaining_at_budget_start_us",
+                "caller_remaining_at_failure_us",
+                "selected_remaining_at_failure_us",
+                "exchange_elapsed_us",
+                "exchange_cost",
+            ] {
+                value["lower_call_measurement"]["measurement"][field] = serde_json::Value::Null;
+            }
+            value["lower_call_measurement"]["measurement"]["operation_elapsed_us"] =
+                serde_json::json!(0);
+            assert!(accepted(&value));
+            value["fixture_result"] = serde_json::json!("ReturnedOk");
+            assert!(!accepted(&value));
+        }
+        #[test]
+        fn durable_flow_capture_is_sticky_bounded_and_independent() {
+            let valid = format!("{PRIVATE_PREFIX}{DURABLE_FLOW_MAXIMAL_TEST_JSON}]");
+            for first in [
+                &valid,
+                "[DURABLE_FLOW_V1 {\"private\":\"secret\"}]",
+                INVALID,
+                "[DURABLE_FLOW_V1]",
+            ] {
+                let mut slot = DurableFlowCapture::default();
+                slot.capture_line(first, 8192);
+                slot.capture_line(&valid, 8192);
+                assert_eq!(slot.public_lines(), vec![INVALID]);
+                assert_eq!(slot.retained_bytes(), 0);
+            }
+            let mut slot = DurableFlowCapture::default();
+            slot.capture_line(&valid, 1);
+            slot.capture_line(&valid, 8192);
+            assert_eq!(slot.public_lines(), vec![INVALID]);
+            let mut slot = DurableFlowCapture::default();
+            slot.capture_line(&format!("private {valid}"), 8192);
+            assert!(slot.public_lines().is_empty());
+            slot.capture_line(&valid, 8192);
+            slot.discard_for_budget();
+            assert_eq!(slot.public_lines(), vec![INVALID]);
+            slot.capture_line(&valid, 8192);
+            assert_eq!(slot.public_lines(), vec![INVALID]);
+            let mut other = super::super::AdmissionDiagnosticCapture::default();
+            other.capture_line(
+                &format!(
+                    "[SIGNER_ADMISSION_V1 {}]",
+                    super::super::SIGNER_ADMISSION_TEST_JSON
+                ),
+                8192,
+            );
+            assert_eq!(other.public_lines().len(), 1);
+            assert!(!other.public_lines()[0].contains("invalid=true"));
+            struct FailedOutput;
+            impl std::io::Write for FailedOutput {
+                fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                    Err(std::io::Error::other("private sentinel"))
+                }
+                fn flush(&mut self) -> std::io::Result<()> {
+                    Err(std::io::Error::other("private sentinel"))
+                }
+            }
+            let value = parse_payload(DURABLE_FLOW_MAXIMAL_TEST_JSON).unwrap();
+            write_private_record(FailedOutput, &value); // Optional write error is ignored.
+            let mut invalid = value;
+            invalid.fixture_result = "ReturnedOk".into();
+            let mut bytes = Vec::new();
+            write_private_record(&mut bytes, &invalid);
+            assert!(bytes.is_empty()); // Invalid serialization input is withheld.
+        }
+    }
+}
+#[cfg(all(test, feature = "synthetic-born-joined-qualification"))]
+pub(super) use durable_flow_projection::DURABLE_FLOW_MAXIMAL_TEST_JSON;
+#[cfg(feature = "synthetic-born-joined-qualification")]
+pub(super) use durable_flow_projection::{DurableFlowCapture, emit_durable_flow};

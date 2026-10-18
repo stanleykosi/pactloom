@@ -87,6 +87,9 @@ ADMISSION_TRANSCRIPT_TESTS = tuple(PREFIX + 'rolling_transcript_v1::tests::' + n
     'admission_optional_copies_yield_to_original_chunk_budget',
     'admission_optional_copies_yield_to_original_metadata_budget',
 ))
+FLOW_PROJECTION_TESTS = tuple(PREFIX + 'safe_diagnostics_v1::durable_flow_projection::tests::' + name for name in ('durable_flow_maximal_canonical_record_fits_fixed_slot', 'durable_flow_maximal_error_pair_is_closed', 'durable_flow_maximal_component_lengths', 'durable_flow_payload_cap_exact_boundary', 'durable_flow_getter_labels_are_closed', 'durable_flow_parser_requires_exact_scopes', 'durable_flow_parser_rejects_invalid_categories_and_bounds', 'durable_flow_null_completion_and_measurement_consistency', 'durable_flow_capture_is_sticky_bounded_and_independent'))
+FLOW_TRANSCRIPT_TESTS = tuple(PREFIX + 'rolling_transcript_v1::tests::' + name for name in ('durable_flow_survives_split_lines_and_compaction', 'durable_flow_optional_copy_yields_to_original_chunk_budget', 'durable_flow_optional_copy_yields_to_original_metadata_budget'))
+FLOW_HOST_TESTS = (PREFIX + 'durable_proposal_v1::worker::admission_diagnostic_tests::pure_flow_stages_are_never_reported_as_admission_or_history',)
 ADMISSION_HOST_TESTS = (PREFIX + 'durable_proposal_v1::worker::admission_diagnostic_tests::pure_admission_boundary_routing_preserves_context',)
 READ_WAVE_TESTS = tuple(PREFIX + 'observed_joined_v3::' + name for name in (
     'actual_read_wave_prepares_every_item_before_original_order_execution',
@@ -192,6 +195,32 @@ ADMISSION_IO_KINDS = frozenset(['Timeout', 'Closed', 'Refused', 'Other'])
 SIGNER_ADMISSION_MEASUREMENT_FIELDS = SIGNER_ADMISSION_DURATIONS | SIGNER_ADMISSION_COUNTS | {'clamped','incomplete'}
 WITNESS_ADMISSION_FIELDS = frozenset(('version','first_semantic','first_connection','worker_result','fixture_result','worker_error','fixture_error','worker_stage','fixture_stage','completion','commit','controlled_result','snapshot_recorded','receipt_gate','final_correlation','cost','clamped','incomplete'))
 WITNESS_ADMISSION_ERROR_FIELDS = frozenset(('stage','attribution','io_kind','error'))
+
+# One bounded failure-only Flow slot. Existing History/Admission schemas stay closed.
+FLOW_PRIVATE_PREFIX = '[DURABLE_FLOW_V1 '
+FLOW_PREFIX = 'CI_SYNTHETIC_DURABLE_FLOW '
+FLOW_INVALID = 'CI_SYNTHETIC_DURABLE_FLOW invalid=true details_withheld=true'
+FLOW_FIELDS = ('version', 'operation', 'first_error', 'terminal_error', 'fixture_result', 'completion', 'call_outcomes', 'lower_call_measurement', 'clamped', 'incomplete')
+FLOW_MEASUREMENT_FIELDS = ('phase', 'check_site', 'checkpoint', 'selected_limit', 'selected_budget_us', 'caller_remaining_at_budget_start_us', 'caller_remaining_at_failure_us', 'selected_remaining_at_failure_us', 'operation_elapsed_us', 'exchange_elapsed_us', 'pre_budget_callback_calls', 'pre_budget_callback_us', 'operation_cost', 'exchange_cost', 'clamped', 'incomplete')
+FLOW_CALL_FIELDS = ('writer_acquire', 'writer_activate', 'active_verify', 'reconciliation', 'session_invalidation', 'release', 'request_retention', 'reservation', 'permit_retention', 'key_use', 'result_retention')
+FLOW_COST_FIELDS = ('callback_calls', 'callback_us', 'callback_max_us', 'connect_calls', 'connect_us', 'handshake_calls', 'handshake_us', 'frame_write_calls', 'frame_write_us', 'frame_read_calls', 'frame_read_us')
+FLOW_OPERATION = frozenset(('WriterReconcile', 'FinancialImport', 'InitialSign', 'RetainedRetry', 'ResultService'))
+FLOW_STAGE = frozenset(('FixtureState', 'AcquirePrepare', 'AcquireNative', 'AcquireCall', 'ActivationPrepare', 'ActivationNative', 'ActivationCall', 'ActiveVerification', 'ReconcilePrepare', 'ReconcileNative', 'ReconcileCall', 'Invalidate', 'ImportReceive', 'ImportPairing', 'ImportSource', 'WalletSync', 'WalletSource', 'WitnessHead', 'SpendStage', 'DisclosureDecision', 'SpendDecision', 'SigningLaunch', 'AuthorizationSource', 'Release', 'RequestRetain', 'Reserve', 'PermitRetain', 'WalletGuard', 'KeyUse', 'Derive', 'Sign', 'VerifySigned', 'ResultRetain', 'RetainedLookup', 'RetryInvariant', 'Completion', 'ResultService', 'Close'))
+FLOW_ERROR_DOMAIN = frozenset(('Signer', 'Bridge', 'Authority', 'Journal', 'WalletKeyUse', 'Store'))
+FLOW_JOB_PURPOSE = frozenset(('AcquirePrepare', 'Acquire', 'ActivationPrepare', 'Activate', 'ReconcilePrepare', 'Reconcile', 'Import', 'WalletReview', 'Sign', 'ResultService'))
+FLOW_RESULT = frozenset(('NotObserved', 'ReturnedOk', 'ReturnedErr'))
+FLOW_RECEIVE = frozenset(('NotObserved', 'Pending', 'Received', 'Missing', 'Disconnected', 'Invalidated'))
+FLOW_PRESENTATION = frozenset(('NotObserved', 'Accepted', 'Suppressed'))
+FLOW_CALL_OUTCOME = frozenset(('NotObserved', 'Entered', 'ReturnedOk', 'ReturnedErr'))
+FLOW_TRANSPORT_PURPOSE = frozenset(('Acquire', 'Activate', 'Verify', 'Reserve'))
+FLOW_TRANSPORT_STAGE = frozenset(('RequestValidation', 'Binding', 'Session', 'CallerDeadline', 'ExchangeDeadline', 'SourceCallback', 'Connect', 'Handshake', 'PeerBinding', 'RequestBuild', 'RequestWrite', 'ResponseRead', 'Response', 'SnapshotValidation', 'ReceiptValidation', 'CommittedHeadValidation', 'FinalValidation', 'Bounds'))
+FLOW_AUTHORITY_CODE = frozenset(('InvalidBinding', 'Permission', 'StaleHead', 'Conflict', 'Inactive', 'RecoveryRequired', 'Expired', 'PolicyDenied', 'BudgetExceeded', 'InputReserved', 'ObligationReserved', 'Limit', 'Storage', 'CorruptHistory', 'PermanentStopUnavailable', 'OfflineHistoryUnsupported', 'ConstructionHistoryUnsupported', 'UnsupportedVersion', 'Authentication', 'Uncertain', 'ResolutionUnavailable', 'SessionRequired', 'SessionPending'))
+FLOW_CALLBACK_STAGE = frozenset(('WorkspaceCurrent', 'CallerCurrent'))
+FLOW_DOMAIN_CODES = {'Signer': frozenset({'BackupRequired', 'Unavailable', 'PeerLifetimeUnavailable', 'Crypto', 'Locked', 'AlreadyOpen', 'ReviewMismatch', 'Verification', 'ConsentJournal', 'Store', 'RecoveryRequired', 'Authentication', 'InvalidData', 'Uncertain', 'Io'}), 'Bridge': frozenset({'Authority', 'Permission', 'Journal', 'CompleteOriginRecoveryUnavailable', 'Ipc', 'SignerOriginUnavailable', 'Verification', 'Missing', 'Wallet', 'RecoveryRequired', 'Conflict', 'Uncertain', 'Limit', 'Binding'}), 'Authority': frozenset({'Permission', 'Inactive', 'SessionRequired', 'RecoveryRequired', 'StaleHead', 'Conflict', 'Limit', 'ObligationReserved', 'Storage', 'OfflineHistoryUnsupported', 'BudgetExceeded', 'SessionPending', 'Uncertain', 'ConstructionHistoryUnsupported', 'Expired', 'Authentication', 'PermanentStopUnavailable', 'ResolutionUnavailable', 'InputReserved', 'InvalidBinding', 'PolicyDenied', 'CorruptHistory', 'UnsupportedVersion'}), 'Journal': frozenset({'Storage', 'Permission', 'ConstructionHistoryUnsupported', 'Database', 'Expired', 'OfflineHistoryUnsupported', 'NotFound', 'UnsupportedSchema', 'BudgetExceeded', 'RecoveryRequired', 'Conflict', 'LiveAuthorization', 'Limit', 'InputReserved', 'InvalidBinding', 'NamedRecipientHistoryUnsupported'}), 'WalletKeyUse': frozenset({'Storage', 'Permission', 'Expiry', 'Sync', 'Policy', 'RecoveryRequired', 'SelectionExpired', 'StateChanged'}), 'Store': frozenset({'Encoding', 'Database', 'RevisionConflict', 'ResourceExhausted', 'NotFound', 'UnsupportedSchema', 'InvalidInput', 'BudgetExceeded', 'StorageSecurity', 'RecoveryRequired', 'WriterEpochMismatch', 'LiveAuthorizationExists', 'IdempotencyConflict', 'AlreadyExists', 'InvalidTransition', 'Poisoned', 'InputReserved', 'File'})}
+FLOW_NESTED_CODES = {('Signer', 'ConsentJournal'): frozenset({'JournalNotFound', 'JournalUnsupportedSchema', 'JournalNamedRecipientHistoryUnsupported', 'JournalConstructionHistoryUnsupported', 'JournalDatabase', 'JournalInvalidBinding', 'JournalStorage', 'JournalRecoveryRequired', 'JournalLimit', 'JournalOfflineHistoryUnsupported', 'JournalBudgetExceeded', 'JournalPermission', 'JournalExpired', 'JournalLiveAuthorization', 'JournalInputReserved', 'JournalConflict'}), ('Bridge', 'Journal'): frozenset({'JournalNotFound', 'JournalUnsupportedSchema', 'JournalNamedRecipientHistoryUnsupported', 'JournalConstructionHistoryUnsupported', 'JournalDatabase', 'JournalInvalidBinding', 'JournalStorage', 'JournalRecoveryRequired', 'JournalLimit', 'JournalOfflineHistoryUnsupported', 'JournalBudgetExceeded', 'JournalPermission', 'JournalExpired', 'JournalLiveAuthorization', 'JournalInputReserved', 'JournalConflict'}), ('Signer', 'Store'): frozenset({'StoreIdempotencyConflict', 'StoreUnsupportedSchema', 'StoreRecoveryRequired', 'StoreLiveAuthorizationExists', 'StoreInvalidTransition', 'StoreAlreadyExists', 'StoreStorageSecurity', 'StoreNotFound', 'StoreInvalidInput', 'StoreInputReserved', 'StoreEncoding', 'StoreWriterEpochMismatch', 'StoreFile', 'StoreResourceExhausted', 'StoreDatabase', 'StoreBudgetExceeded', 'StorePoisoned', 'StoreRevisionConflict'}), ('Bridge', 'Authority'): frozenset({'AuthorityStorage', 'AuthorityBudgetExceeded', 'AuthorityInvalidBinding', 'AuthorityPermanentStopUnavailable', 'AuthorityStaleHead', 'AuthorityConstructionHistoryUnsupported', 'AuthorityUnsupportedVersion', 'AuthorityObligationReserved', 'AuthoritySessionPending', 'AuthorityPolicyDenied', 'AuthorityExpired', 'AuthorityLimit', 'AuthorityConflict', 'AuthorityInactive', 'AuthorityAuthentication', 'AuthorityUncertain', 'AuthorityInputReserved', 'AuthorityPermission', 'AuthorityRecoveryRequired', 'AuthorityResolutionUnavailable', 'AuthoritySessionRequired', 'AuthorityOfflineHistoryUnsupported', 'AuthorityCorruptHistory'}), ('Bridge', 'Wallet'): frozenset({'WalletKeyUseRecoveryRequired', 'WalletKeyUseStorage', 'WalletKeyUseSelectionExpired', 'WalletKeyUsePermission', 'WalletKeyUseExpiry', 'WalletKeyUseSync', 'WalletKeyUseStateChanged', 'WalletKeyUsePolicy'}), ('Journal', 'Storage'): frozenset({'StorageSecuritySourceChanged', 'StorageSecurityUnsupportedPlatform', 'StorageSecurityUnsafePath', 'StorageSecurityDatabase', 'StorageSecurityAuthenticationFailed', 'StorageSecurityQuarantinedDatabase', 'StorageSecurityIo', 'StorageSecurityRecoveredGeneration', 'StorageSecurityUnqualifiedRuntime', 'StorageSecurityUninitializedDatabase', 'StorageSecurityGenerationArchive', 'StorageSecurityAlreadyExists', 'StorageSecuritySnapshotLimit', 'StorageSecurityPlaintextRefused', 'StorageSecurityMissingDatabase'}), ('Store', 'StorageSecurity'): frozenset({'StorageSecuritySourceChanged', 'StorageSecurityUnsupportedPlatform', 'StorageSecurityUnsafePath', 'StorageSecurityDatabase', 'StorageSecurityAuthenticationFailed', 'StorageSecurityQuarantinedDatabase', 'StorageSecurityIo', 'StorageSecurityRecoveredGeneration', 'StorageSecurityUnqualifiedRuntime', 'StorageSecurityUninitializedDatabase', 'StorageSecurityGenerationArchive', 'StorageSecurityAlreadyExists', 'StorageSecuritySnapshotLimit', 'StorageSecurityPlaintextRefused', 'StorageSecurityMissingDatabase'}), ('WalletKeyUse', 'Sync'): frozenset({'SyncResourceLimit', 'SyncInterrupted', 'SyncNoCurrentObservation', 'SyncInvalidResponse', 'SyncChain', 'SyncReconciliationRequired', 'SyncWallet', 'SyncInvalidRequest', 'SyncAccessDenied'})}
+FLOW_ERROR_FIELDS = ('stage','domain','code','nested_code')
+FLOW_COMPLETION_FIELDS = ('purpose','result','receive','presentation')
+FLOW_LOWER_FIELDS = ('purpose','stage','authority_code','io_kind','callback_stage','measurement')
 
 STORAGE_BOOTSTRAP_TEST = 'recovery_generation::layered::tests::native_layered_current_eight_nine_parent_provenance_is_exact_and_not_relabelable'
 SIGNER_VALIDATION_TESTS = (
@@ -531,6 +560,125 @@ class AdmissionDiagnostics:
                 pass
 
 
+def flow_object(value, fields):
+    if type(value) is not dict or set(value)!=set(fields):
+        raise ValueError('flow exact fields')
+    return {key:value[key] for key in fields}
+
+
+def flow_error(value):
+    row=flow_object(value,FLOW_ERROR_FIELDS)
+    if not history_enum(row['stage'],FLOW_STAGE): raise ValueError('flow error stage')
+    domain=row['domain']; code=row['code']
+    if type(domain) is not str or domain not in FLOW_DOMAIN_CODES:
+        raise ValueError('flow error domain')
+    if not history_enum(code,FLOW_DOMAIN_CODES[domain]): raise ValueError('flow error code')
+    if not history_enum(row['nested_code'],FLOW_NESTED_CODES.get((domain,code),()),True):
+        raise ValueError('flow immediate nested code')
+    return row
+
+
+def flow_completion(value):
+    row=flow_object(value,FLOW_COMPLETION_FIELDS)
+    for field,values,nullable in (('purpose',FLOW_JOB_PURPOSE,True),('result',FLOW_RESULT,False),
+            ('receive',FLOW_RECEIVE,False),('presentation',FLOW_PRESENTATION,False)):
+        if not history_enum(row[field],values,nullable): raise ValueError('flow completion enum')
+    purpose,result,receive,presentation=(row[key] for key in FLOW_COMPLETION_FIELDS)
+    if purpose is None and (result!='NotObserved' or presentation!='NotObserved' or receive not in ('NotObserved','Missing')):
+        raise ValueError('flow no actual job')
+    if receive=='Received' and (purpose is None or result not in ('ReturnedOk','ReturnedErr')):
+        raise ValueError('flow received result')
+    if receive in ('Pending','Disconnected') and (result!='NotObserved' or presentation!='NotObserved'):
+        raise ValueError('flow unreceived result')
+    if presentation=='Accepted' and (receive!='Received' or result!='ReturnedOk'):
+        raise ValueError('flow accepted presentation')
+    if presentation=='Suppressed' and receive not in ('Received','Invalidated'):
+        raise ValueError('flow suppressed presentation')
+    return row
+
+
+def flow_cost(value):
+    row=flow_object(value,FLOW_COST_FIELDS)
+    for key in FLOW_COST_FIELDS:
+        bound=HISTORY_COUNT_LIMIT if key in HISTORY_COST_COUNTS else HISTORY_DURATION_LIMIT_US
+        if not history_bounded(row[key],bound): raise ValueError('flow cost bound')
+    return row
+
+
+def flow_measurement(value, purpose):
+    row=flow_object(value,FLOW_MEASUREMENT_FIELDS)
+    if not history_enum(row['phase'],{purpose},True): raise ValueError('flow phase purpose')
+    for field,values,nullable in (('check_site',ADMISSION_CHECK_SITES,True),
+            ('checkpoint',HISTORY_CHECKPOINTS,False),('selected_limit',HISTORY_SELECTED_LIMITS,True)):
+        if not history_enum(row[field],values,nullable): raise ValueError('flow measurement enum')
+    if any(not admission_duration(row[key]) for key in HISTORY_OPTIONAL_DURATIONS):
+        raise ValueError('flow duration')
+    for key in ('operation_elapsed_us','pre_budget_callback_us'):
+        if not history_bounded(row[key],HISTORY_DURATION_LIMIT_US): raise ValueError('flow duration')
+    if not history_bounded(row['pre_budget_callback_calls'],1): raise ValueError('flow pre-budget count')
+    admission_flags(row)
+    row['operation_cost']=flow_cost(row['operation_cost'])
+    if row['exchange_cost'] is not None: row['exchange_cost']=flow_cost(row['exchange_cost'])
+    if purpose=='Reserve' and (row['caller_remaining_at_budget_start_us'] is not None
+            or row['caller_remaining_at_failure_us'] is not None or row['selected_limit'] not in (None,'Exchange')):
+        raise ValueError('flow reserve has no caller bound')
+    return row
+
+
+def flow_lower(value):
+    row=flow_object(value,FLOW_LOWER_FIELDS)
+    for field,values,nullable in (('purpose',FLOW_TRANSPORT_PURPOSE,False),
+            ('stage',FLOW_TRANSPORT_STAGE,False),('authority_code',FLOW_AUTHORITY_CODE,False),
+            ('io_kind',ADMISSION_IO_KINDS,True),('callback_stage',FLOW_CALLBACK_STAGE,True)):
+        if not history_enum(row[field],values,nullable): raise ValueError('flow lower enum')
+    row['measurement']=flow_measurement(row['measurement'],row['purpose'])
+    return row
+
+
+def public_durable_flow(text):
+    row=flow_object(history_json(text,4096),FLOW_FIELDS)
+    if type(row['version']) is not int or row['version']!=1: raise ValueError('flow version')
+    if not history_enum(row['operation'],FLOW_OPERATION): raise ValueError('flow operation')
+    if row['fixture_result']!='ReturnedErr': raise ValueError('flow is failure-only')
+    for key in ('first_error','terminal_error'):
+        if row[key] is not None: row[key]=flow_error(row[key])
+    row['completion']=flow_completion(row['completion'])
+    calls=flow_object(row['call_outcomes'],FLOW_CALL_FIELDS)
+    if any(not history_enum(calls[key],FLOW_CALL_OUTCOME) for key in FLOW_CALL_FIELDS):
+        raise ValueError('flow call outcome')
+    row['call_outcomes']=calls
+    admission_flags(row)
+    if row['lower_call_measurement'] is not None:
+        lower=flow_lower(row['lower_call_measurement'])
+        row['lower_call_measurement']=lower
+        for key in ('clamped','incomplete'):
+            if lower['measurement'][key] and not row[key]: raise ValueError('flow lost lower flag')
+    return row
+
+
+class DurableFlowDiagnostics:
+    """One failure-only slot; malformed/duplicate/oversized evidence is sticky."""
+    def __init__(self):
+        self.value=None
+        self.invalid=False
+
+    def record(self, kind, value):
+        if kind not in ('durable_flow','durable_flow_invalid') or self.invalid: return
+        if kind=='durable_flow_invalid' or self.value is not None:
+            self.value=None; self.invalid=True
+        else: self.value=value
+
+    def emit(self):
+        try:
+            if self.invalid: print(FLOW_INVALID,flush=True)
+            elif self.value is not None:
+                # Revalidate, then serialize fixed field order, never forward text.
+                value=public_durable_flow(json.dumps(self.value,separators=(',',':')))
+                print(FLOW_PREFIX+json.dumps(value,separators=(',',':')),flush=True)
+        except (OSError,ValueError,TypeError,KeyError,OverflowError,RecursionError):
+            pass
+
+
 def public_timing(text):
     """Optional measurement, never success/authorization evidence or a clock."""
     if len(text.encode('utf8')) > 8192: raise ValueError('oversized timing')
@@ -623,13 +771,21 @@ def safe_failure(line):
         if not re.fullmatch(r'0|-?[1-9][0-9]{0,9}',errno) or not -(2**31)<=int(errno)<2**31: return False
     return True
 
+def flow_candidate(raw, name=None):
+    prefix=('test '+name+' ... ').encode('utf8') if name is not None else None
+    if prefix and raw.startswith(prefix): raw=raw[len(prefix):]
+    return raw.startswith(b'CI_SYNTHETIC_DURABLE_FLOW')
+
+
 def public_line(raw, name):
-    if len(raw)>8192: return None
+    if len(raw)>8192:
+        return ('durable_flow_invalid',None) if flow_candidate(raw,name) else None
     try:
         line=raw.decode('utf8','strict').rstrip('\r')
     except UnicodeError:
         prefix=('test '+name+' ... ').encode('utf8')
         candidate=raw[len(prefix):] if raw.startswith(prefix) else raw
+        if flow_candidate(candidate): return ('durable_flow_invalid',None)
         if candidate.startswith(TIMING_PREFIX.encode('ascii')):
             return ('timing_invalid',None)
         for marker,kind in ((HISTORY_MEASUREMENT_PREFIX,'history_measurement'),
@@ -644,6 +800,13 @@ def public_line(raw, name):
     cleanup=CLEANUP.fullmatch(line)
     if cleanup and option_i32(cleanup[5]) and option_i32(cleanup[6]): return ('cleanup',line)
     if safe_failure(line): return ('failure',line)
+    if line==FLOW_INVALID: return ('durable_flow_invalid',None)
+    if line.startswith('CI_SYNTHETIC_DURABLE_FLOW'):
+        try:
+            if not line.startswith(FLOW_PREFIX): raise ValueError('flow framing')
+            return ('durable_flow',public_durable_flow(line[len(FLOW_PREFIX):]))
+        except (ValueError,TypeError,KeyError,OverflowError,RecursionError):
+            return ('durable_flow_invalid',None)
     for slot,marker in enumerate(ADMISSION_INVALID):
         if line==marker: return (ADMISSION_KINDS[slot]+'_invalid',None)
     for marker,kind,parser in zip(ADMISSION_PREFIXES,ADMISSION_KINDS,ADMISSION_PARSERS):
@@ -677,7 +840,8 @@ def public_line(raw, name):
 
 class BoundedLines:
     """Oversized physical lines stay discarded until their actual newline."""
-    def __init__(self):
+    def __init__(self, name=None):
+        self.name=name
         self.pending=bytearray()
         self.discarding=False
 
@@ -688,6 +852,10 @@ class BoundedLines:
             part=chunk if split<0 else chunk[:split]
             if not self.discarding:
                 if len(self.pending)+len(part)>8192:
+                    # Preserve the raw cap. Only a fixed invalid notification,
+                    # never the oversized line, reaches the optional Flow slot.
+                    head=bytes(self.pending[:8192])+part[:8192-len(self.pending)]
+                    if flow_candidate(head,self.name): lines.append(FLOW_INVALID.encode('ascii'))
                     self.pending.clear()
                     self.discarding=True
                 else:
@@ -704,12 +872,12 @@ DURABLE_PROVIDER_METADATA_TEST = PREFIX + 'synthetic_born_provider_v1::durable_m
 
 def run_pure(executable):
     assert resource.getrlimit(resource.RLIMIT_CORE)[0] == 0
-    for name in PURE_TESTS + POLICY_ENVELOPE_TESTS + PROMPT_RENDERING_TESTS + LOWER_ERROR_TESTS + DENIAL_TESTS + ROLLING_TRANSCRIPT_TESTS + AUTHORITY_PROJECTION_TESTS + READ_WAVE_TESTS + HISTORY_MEASUREMENT_TESTS + HISTORY_TRANSCRIPT_TESTS + ADMISSION_PROJECTION_TESTS + ADMISSION_TRANSCRIPT_TESTS + ADMISSION_HOST_TESTS + TIMING_HOST_TESTS + (DURABLE_PROVIDER_METADATA_TEST,):
+    for name in PURE_TESTS + POLICY_ENVELOPE_TESTS + PROMPT_RENDERING_TESTS + LOWER_ERROR_TESTS + DENIAL_TESTS + ROLLING_TRANSCRIPT_TESTS + AUTHORITY_PROJECTION_TESTS + READ_WAVE_TESTS + HISTORY_MEASUREMENT_TESTS + HISTORY_TRANSCRIPT_TESTS + ADMISSION_PROJECTION_TESTS + ADMISSION_TRANSCRIPT_TESTS + ADMISSION_HOST_TESTS + FLOW_PROJECTION_TESTS + FLOW_TRANSCRIPT_TESTS + FLOW_HOST_TESTS + TIMING_HOST_TESTS + (DURABLE_PROVIDER_METADATA_TEST,):
         flags=['--exact',name,'--test-threads=1']
         listed=subprocess.run([executable,*flags,'--list'],capture_output=True,timeout=30,check=True)
         if not exact_listing(listed.stdout.decode(),name) or listed.stderr:
             raise ValueError('exact pure test not uniquely registered')
-        # These 59 fixed source-reviewed cases use only modeled process state,
+        # These 72 fixed source-reviewed cases use only modeled process state,
         # inert files, historical policy DTOs, fixed prompts, closed error kinds or
         # bounded private parsing state or data-only scanned-note mathematics. They create
         # no native/IPC/network/payment owners.
@@ -717,7 +885,7 @@ def run_pure(executable):
         if result.returncode!=0 or len(result.stdout)>1024*1024:
             print('CI_SYNTHETIC_PURE failed_test='+name,flush=True)
             raise RuntimeError('exact pure test failed; raw output withheld')
-    print('CI_SYNTHETIC_PURE passed=59 raw_output_discarded=true',flush=True)
+    print('CI_SYNTHETIC_PURE passed=72 raw_output_discarded=true',flush=True)
 
 def run_signer_validation(executable):
     assert resource.getrlimit(resource.RLIMIT_CORE)[0] == 0
@@ -876,9 +1044,10 @@ def run(executable, phase):
     assert exact_listing(listed.stdout.decode(),name) and not listed.stderr, 'Exact test not uniquely registered'
     started=time.monotonic(); process=subprocess.Popen([executable,*flags,'--nocapture'],stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
     assert process.stdout is not None
-    framing=BoundedLines(); total=0; cleanup=False; cleanup_observed=False; cleanups=0; cores=0; failures=0; outcome=None; status=None; timing=None; timing_count=0; timing_invalid=False
+    framing=BoundedLines(name); total=0; cleanup=False; cleanup_observed=False; cleanups=0; cores=0; failures=0; outcome=None; status=None; timing=None; timing_count=0; timing_invalid=False
     history_measurements=HistoryMeasurements()
     admission_diagnostics=AdmissionDiagnostics()
+    durable_flow=DurableFlowDiagnostics()
     try:
         eof=False
         while not eof:
@@ -918,6 +1087,8 @@ def run(executable, phase):
                     if phase=='durable-fixed-signing': history_measurements.record(kind,value)
                 elif kind in ADMISSION_KINDS or kind in tuple(name+'_invalid' for name in ADMISSION_KINDS):
                     if phase=='durable-fixed-signing': admission_diagnostics.record(kind,value)
+                elif kind in ('durable_flow','durable_flow_invalid'):
+                    if phase=='durable-fixed-signing': durable_flow.record(kind,value)
                 elif kind=='outcome':
                     if phase!='full' or outcome is not None: raise ValueError('unexpected duplicate public outcome')
                     outcome=value
@@ -936,6 +1107,7 @@ def run(executable, phase):
     if phase=='durable-fixed-signing' and cleanup_observed:
         history_measurements.emit()
         admission_diagnostics.emit()
+        durable_flow.emit()
     if phase=='full' and cleanup_observed:
         if timing_invalid:
             print('CI_SYNTHETIC_TIMING invalid=true details_withheld=true',flush=True)

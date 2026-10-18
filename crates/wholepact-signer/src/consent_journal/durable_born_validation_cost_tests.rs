@@ -455,6 +455,69 @@ fn encrypted_material_callback_components_are_measured() {
     );
 }
 
+#[test]
+fn encrypted_material_three_versus_one_checker_sequence_is_component_only() {
+    // Separate encrypted fixtures isolate the two bounded sequences. They are
+    // not OS-cold samples and do not instantiate Admission/Acquire/Activate,
+    // native custody, policy export, a peer or a callback. No speedup ratio or
+    // transport-budget claim follows from repeating this component 3 vs 1.
+    for invocations in [3u64, 1] {
+        let f = MaterialFixture::new();
+        f.assert_topology();
+        let before = f.logical_commitment();
+        DURABLE_BORN_SNAPSHOT_VALIDATIONS_V1.with(|count| count.set(0));
+        let mut snapshot_calls = 0;
+        let mut schema_calls = 0;
+        let mut material_calls = 0;
+        for ordinal in 1..=invocations {
+            let (result, costs) = measure(|| {
+                f.encrypted
+                    .journal
+                    .check_durable_born_entry_v1(&f.encrypted.genesis)
+            });
+            assert!(
+                result.is_ok(),
+                "component checker rejected material history"
+            );
+            assert!(costs.calls(Phase::SampleTotal) == 1);
+            assert!(costs.calls(Phase::SnapshotTotal) == 1);
+            assert!(costs.calls(Phase::SchemaTotal) == 1);
+            assert!(costs.calls(Phase::DurableMaterialRows) == 1);
+            assert!(!costs.is_clamped() && !costs.is_incomplete());
+            snapshot_calls += costs.calls(Phase::SnapshotTotal);
+            schema_calls += costs.calls(Phase::SchemaTotal);
+            material_calls += costs.calls(Phase::DurableMaterialRows);
+            DURABLE_BORN_SNAPSHOT_VALIDATIONS_V1.with(|count| assert!(count.get() == ordinal));
+            assert!(
+                before == f.logical_commitment(),
+                "component read changed history"
+            );
+            // Fixed labels, bounded individual counts/durations, and a boolean
+            // commitment comparison only. Never emit raw rows or commitments.
+            eprintln!(
+                "LOCAL_DURABLE_CHECKER_SEQUENCE_V1 component_only=true invocations={} ordinal={} snapshot_calls={} schema_calls={} material_calls={} sample_us={} snapshot_us={} schema_us={} material_us={} logical_commitment_unchanged=true",
+                invocations,
+                ordinal,
+                costs.calls(Phase::SnapshotTotal),
+                costs.calls(Phase::SchemaTotal),
+                costs.calls(Phase::DurableMaterialRows),
+                costs.inclusive_us(Phase::SampleTotal),
+                costs.inclusive_us(Phase::SnapshotTotal),
+                costs.inclusive_us(Phase::SchemaTotal),
+                costs.inclusive_us(Phase::DurableMaterialRows),
+            );
+        }
+        assert!(snapshot_calls == invocations);
+        assert!(schema_calls == invocations);
+        assert!(material_calls == invocations);
+        f.assert_topology();
+        assert!(
+            before == f.logical_commitment(),
+            "sequence changed material history"
+        );
+    }
+}
+
 // Differential readers deliberately share the retained SQLCipher handle. Each
 // uses a separate real Deferred transaction over the identical logical rows;
 // no decrypted copy, alternate schema or cached success is supplied to either.

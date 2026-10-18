@@ -105,7 +105,34 @@ macro_rules! admission_result {
         value
     }};
 }
-pub(super) use observed_history_result;
+// Flow adapters share the original expressions; None adds no clock or check.
+macro_rules! observed_flow_result {
+    ($observer:expr, $stage:ident, $result:expr) => {{
+        #[cfg(feature = "synthetic-qualification")]
+        if let Some(observer) = $observer {
+            observer.enter(CheckedHistoryStageV1::$stage);
+        }
+        let result = $result;
+        // Nested callbacks can leave a successful Callback checkpoint behind.
+        // A later error returned by this enclosing expression belongs here;
+        // any actual earlier callback failure is already preserved unchanged.
+        #[cfg(feature = "synthetic-qualification")]
+        if let Some(observer) = $observer {
+            observer.enter(CheckedHistoryStageV1::$stage);
+        }
+        observed_history_result!($observer, result)
+    }};
+}
+macro_rules! observed_flow_current {
+    ($observer:expr, $current:expr) => {{
+        #[cfg(feature = "synthetic-qualification")]
+        let result = history_diagnostics_v1::callback_observed($observer, || $current());
+        #[cfg(not(feature = "synthetic-qualification"))]
+        let result = $current();
+        result
+    }};
+}
+pub(super) use {observed_flow_current, observed_flow_result, observed_history_result};
 pub(crate) use {admission_measure, admission_result, admission_stage};
 
 pub fn certificate_digest(certificate: &CertificateDer<'_>) -> String {
@@ -1364,20 +1391,52 @@ impl AuthorityClient {
     /// No automatic new operation or new-head retry. On Uncertain retry this
     /// identical request, preserving the operation ID and every binding.
     pub fn reserve(&self, request: ReserveAuthorization) -> Result<AuthenticatedPermit> {
-        request.validate()?;
-        if request.account_id != self.account || request.network_profile_id != self.network {
-            return Err(AuthorityError::InvalidBinding);
+        self.reserve_observed(
+            request,
+            #[cfg(feature = "synthetic-qualification")]
+            None,
+        )
+    }
+    /// Data-only evidence from the ordinary no-caller-deadline reserve kernel.
+    #[cfg(feature = "synthetic-qualification")]
+    pub fn reserve_diagnosed(
+        &self,
+        request: ReserveAuthorization,
+    ) -> std::result::Result<AuthenticatedPermit, history_diagnostics_v1::CheckedHistoryFailureV1>
+    {
+        let observer = HistoryObserverV1::with_flow_deadline(None);
+        self.reserve_observed(request, Some(&observer))
+            .map_err(|error| observer.into_failure(error))
+    }
+    fn reserve_observed(
+        &self,
+        request: ReserveAuthorization,
+        #[cfg(feature = "synthetic-qualification")] observer: Option<&HistoryObserverV1>,
+    ) -> Result<AuthenticatedPermit> {
+        observed_flow_result!(observer, FlowRequestValidation, request.validate())?;
+        #[cfg(feature = "synthetic-qualification")]
+        if let Some(observer) = observer {
+            observer.enter(CheckedHistoryStageV1::FlowBinding);
         }
-        let session = self
-            .session
-            .lock()
-            .map_err(|_| AuthorityError::SessionRequired)?;
-        let session = session
-            .as_ref()
-            .filter(|s| s.receipt.is_some())
-            .ok_or(AuthorityError::SessionRequired)?;
+        if request.account_id != self.account || request.network_profile_id != self.network {
+            return observed_history_result!(observer, Err(AuthorityError::InvalidBinding));
+        }
+        let session = observed_flow_result!(
+            observer,
+            FlowSession,
+            self.session
+                .lock()
+                .map_err(|_| AuthorityError::SessionRequired)
+        )?;
+        let session = observed_history_result!(
+            observer,
+            session
+                .as_ref()
+                .filter(|s| s.receipt.is_some())
+                .ok_or(AuthorityError::SessionRequired)
+        )?;
         let mutation = AuthorityMutation::ReserveAuthorization(Box::new(request.clone()));
-        let response = self.call_with(|exporter| {
+        let build = |exporter: &[u8; 32]| {
             Ok(WireRequest::Mutate {
                 session_proof: Some(crate::session::proof(
                     &session.key,
@@ -1391,26 +1450,47 @@ impl AuthorityClient {
                 )?),
                 mutation: Box::new(mutation),
             })
-        })?;
+        };
+        #[cfg(feature = "synthetic-qualification")]
+        let response = match observer {
+            Some(observer) => {
+                self.call_with_inner(build, None, Some((observer, HistoryPhaseV1::Reserve)))
+            }
+            None => self.call_with(build),
+        }?;
+        #[cfg(not(feature = "synthetic-qualification"))]
+        let response = self.call_with(build)?;
+        #[cfg(feature = "synthetic-qualification")]
+        if let Some(observer) = observer {
+            observer.enter(CheckedHistoryStageV1::FlowResponse);
+        }
         match response {
             WireResponse::Mutation(MutationResult::Reserved(p)) => {
-                p.matches_request(&request)?;
+                observed_flow_result!(
+                    observer,
+                    FlowReceiptValidation,
+                    p.matches_request(&request)
+                )?;
                 if p.witness_id != self.witness || p.policy_digest != self.policy_digest {
-                    return Err(AuthorityError::Authentication);
+                    return observed_history_result!(observer, Err(AuthorityError::Authentication));
                 }
-                self.check_committed_head(
-                    &request.expected_head,
-                    &p.committed_head,
-                    AuthorityMutation::ReserveAuthorization(Box::new(request.clone())),
-                    p.reserved_at_ms,
-                    Some(p.writer_session_id.clone()),
+                observed_flow_result!(
+                    observer,
+                    FlowCommittedHeadValidation,
+                    self.check_committed_head(
+                        &request.expected_head,
+                        &p.committed_head,
+                        AuthorityMutation::ReserveAuthorization(Box::new(request.clone())),
+                        p.reserved_at_ms,
+                        Some(p.writer_session_id.clone()),
+                    )
                 )?;
                 Ok(AuthenticatedPermit {
                     descriptor: *p,
                     certificate_digest: self.tls.pinned_certificate.clone(),
                 })
             }
-            _ => Err(AuthorityError::InvalidBinding),
+            _ => observed_history_result!(observer, Err(AuthorityError::InvalidBinding)),
         }
     }
     /// Commits an exact dispatch intent for already-signed retained bytes. This
@@ -1586,21 +1666,41 @@ impl AuthorityClient {
         &self,
         build: impl FnOnce(&[u8; 32]) -> Result<WireRequest>,
     ) -> Result<WireResponse> {
-        self.call_with_inner(build, None)
+        self.call_with_inner(
+            build,
+            None,
+            #[cfg(feature = "synthetic-qualification")]
+            None,
+        )
     }
     fn call_with_until(
         &self,
         deadline: Instant,
         build: impl FnOnce(&[u8; 32]) -> Result<WireRequest>,
     ) -> Result<WireResponse> {
-        self.call_with_inner(build, Some(deadline))
+        self.call_with_inner(
+            build,
+            Some(deadline),
+            #[cfg(feature = "synthetic-qualification")]
+            None,
+        )
     }
     fn call_with_inner(
         &self,
         build: impl FnOnce(&[u8; 32]) -> Result<WireRequest>,
         caller_deadline: Option<Instant>,
+        #[cfg(feature = "synthetic-qualification")] observation: Option<(
+            &HistoryObserverV1,
+            HistoryPhaseV1,
+        )>,
     ) -> Result<WireResponse> {
-        self.call_with_inner_checked(build, caller_deadline, || Ok(()))
+        self.call_with_inner_checked_observed(
+            build,
+            caller_deadline,
+            || Ok(()),
+            #[cfg(feature = "synthetic-qualification")]
+            observation,
+        )
     }
     // A cancellation check is not a permission factory. Native callers retain
     // their actual owner and original absolute deadline through this exchange.
@@ -1878,14 +1978,27 @@ impl AuthorityClient {
                 response => Ok(response),
             }
         );
-        #[cfg(feature = "synthetic-qualification")]
-        if response.is_ok() {
-            if let Some(observer) = observer {
-                observer.end_exchange();
-            }
-        }
-        response
+        finish_checked_exchange_observed(
+            response,
+            #[cfg(feature = "synthetic-qualification")]
+            observer,
+        )
     }
+}
+
+// The original success-only reset runs before caller postresponse validation.
+// This helper moves the unchanged Result and owns no transport resource.
+fn finish_checked_exchange_observed<T>(
+    response: Result<T>,
+    #[cfg(feature = "synthetic-qualification")] observer: Option<&HistoryObserverV1>,
+) -> Result<T> {
+    #[cfg(feature = "synthetic-qualification")]
+    if response.is_ok() {
+        if let Some(observer) = observer {
+            observer.end_exchange();
+        }
+    }
+    response
 }
 
 #[derive(Clone)]

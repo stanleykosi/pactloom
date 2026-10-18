@@ -1,6 +1,47 @@
 //! Actual signer-owned native account, pairing, and consent workflow. No exported
 //! API can inject native decisions. This is source implementation; operating a
 //! real account remains an explicit user's native action, never a test fixture.
+// The original expression is evaluated once. Diagnostics borrow errors and
+// return the same owned Result; the None path adds no clock, check, or IO.
+macro_rules! durable_flow_observe_v1 {
+    ($observer:expr, $stage:expr, $original:expr) => {{
+        let original = $original;
+        #[cfg(all(
+            feature = "synthetic-born-joined-qualification",
+            feature = "durable-proposal"
+        ))]
+        let original = crate::authority_bridge::durable_flow_diagnostics_v1::observe_result(
+            $observer, $stage, original,
+        );
+        original
+    }};
+}
+macro_rules! durable_flow_call_v1 {
+    ($observer:expr, $call:expr, $stage:expr, $original:expr) => {{
+        #[cfg(all(
+            feature = "synthetic-born-joined-qualification",
+            feature = "durable-proposal"
+        ))]
+        if let Some(observer) = $observer {
+            observer.call_enter($call);
+        }
+        let original = $original;
+        #[cfg(all(
+            feature = "synthetic-born-joined-qualification",
+            feature = "durable-proposal"
+        ))]
+        if let Some(observer) = $observer {
+            observer.call_return($call, &original);
+        }
+        durable_flow_observe_v1!($observer, $stage, original)
+    }};
+}
+#[cfg(all(
+    feature = "synthetic-born-joined-qualification",
+    feature = "durable-proposal"
+))]
+use crate::authority_bridge::durable_flow_diagnostics_v1 as flow_diag_v1;
+
 #[cfg(feature = "pending-birth-owner-signing")]
 #[path = "qualification/born_consumed_named_entry_v1.rs"]
 mod born_consumed_named_entry_v1;
@@ -101,6 +142,14 @@ struct WalletJob {
 }
 #[cfg(feature = "authority-signing")]
 struct SigningJob {
+    #[cfg(all(
+        feature = "synthetic-born-joined-qualification",
+        feature = "durable-proposal"
+    ))]
+    flow: Option<(
+        flow_diag_v1::DurableFlowJobObservationV1,
+        flow_diag_v1::DurableFlowObserverV1,
+    )>,
     receive: std::sync::mpsc::Receiver<(
         OpenAccount,
         std::result::Result<authority_bridge::AuthorizationCommit, authority_bridge::BridgeError>,
@@ -157,6 +206,15 @@ enum WitnessOutcome {
 }
 #[cfg(feature = "authority-signing")]
 struct WitnessJob {
+    #[cfg(all(
+        feature = "synthetic-born-joined-qualification",
+        feature = "durable-proposal"
+    ))]
+    flow: Option<(
+        flow_diag_v1::DurableFlowJobObservationV1,
+        flow_diag_v1::DurableFlowObserverV1,
+        flow_diag_v1::DurableFlowStageV1,
+    )>,
     receive: std::sync::mpsc::Receiver<WitnessOutcome>,
     done: Arc<AtomicBool>,
     cancelled: Arc<AtomicBool>,
@@ -393,6 +451,11 @@ impl OpenAccount {
         true
     }
     fn invalidate_review(&mut self) {
+        #[cfg(all(
+            feature = "synthetic-born-joined-qualification",
+            feature = "durable-proposal"
+        ))]
+        let flow_observer = self.durable_witness.flow_observation.clone();
         #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
         {
             self.durable_witness = durable_witness_v1::DurableWitnessRuntimeV1::default();
@@ -417,6 +480,13 @@ impl OpenAccount {
                 wallet.revoke_handle().revoke();
             }
             if let Some(job) = self.witness_job.take() {
+                #[cfg(all(
+                    feature = "synthetic-born-joined-qualification",
+                    feature = "durable-proposal"
+                ))]
+                if let Some((flow, _, _)) = &job.flow {
+                    flow.invalidated();
+                }
                 job.cancelled.store(true, Ordering::Release);
                 self.revocations.push(job.done);
             }
@@ -435,7 +505,11 @@ impl OpenAccount {
             let done = Arc::new(AtomicBool::new(false));
             let finished = done.clone();
             std::thread::spawn(move || {
-                let _ = session.invalidate();
+                let _ = durable_flow_observe_v1!(
+                    flow_observer.as_ref(),
+                    flow_diag_v1::DurableFlowStageV1::Close,
+                    session.invalidate()
+                );
                 finished.store(true, Ordering::Release);
             });
             self.revocations.push(done);
@@ -472,6 +546,13 @@ impl OpenAccount {
                 wallet.revoke_handle().revoke();
             }
             if let Some(job) = self.witness_job.take() {
+                #[cfg(all(
+                    feature = "synthetic-born-joined-qualification",
+                    feature = "durable-proposal"
+                ))]
+                if let Some((flow, _, _)) = &job.flow {
+                    flow.invalidated();
+                }
                 job.cancelled.store(true, Ordering::Release);
                 self.revocations.push(job.done);
             }
@@ -481,7 +562,11 @@ impl OpenAccount {
             }
         }
         if let Some(session) = self.session.take() {
-            let _ = session.invalidate();
+            let _ = durable_flow_observe_v1!(
+                self.durable_witness.flow_observation.as_ref(),
+                flow_diag_v1::DurableFlowStageV1::Close,
+                session.invalidate()
+            );
         }
         // A disconnected client may still be completing an admitted commit.
         // Keep its source alive until the actual process ends or lease finishes.
@@ -876,8 +961,17 @@ impl NativeRuntime {
                 job.admission.close();
                 job.wallet_revoke.revoke();
                 let session = job.session.clone();
+                #[cfg(all(
+                    feature = "synthetic-born-joined-qualification",
+                    feature = "durable-proposal"
+                ))]
+                let flow_observer = job.flow.as_ref().map(|(_, observer)| observer.clone());
                 std::thread::spawn(move || {
-                    let _ = session.invalidate();
+                    let _ = durable_flow_observe_v1!(
+                        flow_observer.as_ref(),
+                        flow_diag_v1::DurableFlowStageV1::Close,
+                        session.invalidate()
+                    );
                 });
             }
         }
@@ -2236,6 +2330,11 @@ impl NativeRuntime {
                     });
                     open.born_bridge_active = true;
                     open.witness_job = Some(WitnessJob {
+                        #[cfg(all(
+                            feature = "synthetic-born-joined-qualification",
+                            feature = "durable-proposal"
+                        ))]
+                        flow: None,
                         receive,
                         done,
                         cancelled,
@@ -2294,6 +2393,11 @@ impl NativeRuntime {
                     });
                     open.born_bridge_active = true;
                     open.witness_job = Some(WitnessJob {
+                        #[cfg(all(
+                            feature = "synthetic-born-joined-qualification",
+                            feature = "durable-proposal"
+                        ))]
+                        flow: None,
                         receive,
                         done,
                         cancelled,
@@ -2346,6 +2450,11 @@ impl NativeRuntime {
                         let _ = send.send(WitnessOutcome::DispatchPrepared(result));
                     });
                     open.witness_job = Some(WitnessJob {
+                        #[cfg(all(
+                            feature = "synthetic-born-joined-qualification",
+                            feature = "durable-proposal"
+                        ))]
+                        flow: None,
                         receive,
                         done,
                         cancelled,
@@ -3124,6 +3233,31 @@ impl NativeRuntime {
         epoch: u64,
         work: impl FnOnce(Arc<AtomicBool>) -> WitnessOutcome + Send + 'static,
     ) -> Result<()> {
+        self.start_witness_job_inner(
+            epoch,
+            work,
+            #[cfg(all(
+                feature = "synthetic-born-joined-qualification",
+                feature = "durable-proposal"
+            ))]
+            None,
+        )
+    }
+    #[cfg(feature = "authority-signing")]
+    fn start_witness_job_inner(
+        &mut self,
+        epoch: u64,
+        work: impl FnOnce(Arc<AtomicBool>) -> WitnessOutcome + Send + 'static,
+        #[cfg(all(
+            feature = "synthetic-born-joined-qualification",
+            feature = "durable-proposal"
+        ))]
+        observation: Option<(
+            flow_diag_v1::DurableFlowObserverV1,
+            flow_diag_v1::DurableFlowJobPurposeV1,
+            flow_diag_v1::DurableFlowStageV1,
+        )>,
+    ) -> Result<()> {
         if self.pending.is_some() {
             return Err(Error::Locked);
         }
@@ -3139,12 +3273,36 @@ impl NativeRuntime {
         let done = Arc::new(AtomicBool::new(false));
         let complete = done.clone();
         let (send, receive) = std::sync::mpsc::sync_channel(1);
+        #[cfg(all(
+            feature = "synthetic-born-joined-qualification",
+            feature = "durable-proposal"
+        ))]
+        let flow = observation.map(|(observer, purpose, stage)| {
+            (observer.job_start(purpose, epoch), observer, stage)
+        });
+        #[cfg(all(
+            feature = "synthetic-born-joined-qualification",
+            feature = "durable-proposal"
+        ))]
+        let worker_flow = flow.clone();
         std::thread::spawn(move || {
             let _finished = WorkerCompletion(complete);
             let result = work(cancellation);
+            #[cfg(all(
+                feature = "synthetic-born-joined-qualification",
+                feature = "durable-proposal"
+            ))]
+            if let Some((_, observer, stage)) = &worker_flow {
+                durable_witness_v1::observe_flow_worker_v1(observer, *stage, &result);
+            }
             let _ = send.send(result);
         });
         open.witness_job = Some(WitnessJob {
+            #[cfg(all(
+                feature = "synthetic-born-joined-qualification",
+                feature = "durable-proposal"
+            ))]
+            flow,
             receive,
             done,
             cancelled,
@@ -3293,7 +3451,14 @@ impl NativeRuntime {
             let Some(job) = open.witness_job.as_ref() else {
                 return;
             };
-            match job.receive.try_recv() {
+            match durable_flow_try_receive_v1(
+                &job.receive,
+                #[cfg(all(
+                    feature = "synthetic-born-joined-qualification",
+                    feature = "durable-proposal"
+                ))]
+                job.flow.as_ref().map(|(flow, _, _)| flow),
+            ) {
                 Ok(value) => Some((open.witness_job.take().unwrap(), value)),
                 Err(std::sync::mpsc::TryRecvError::Empty) => None,
                 Err(_) => {
@@ -3313,10 +3478,17 @@ impl NativeRuntime {
             return;
         };
         let open = self.open.as_mut().unwrap();
-        if job.epoch != epoch
-            || job.cancelled.load(Ordering::Acquire)
-            || open.check_pairing().is_err()
-        {
+        if !witness_completion_allowed_v1(
+            &result,
+            job.epoch == epoch,
+            || job.cancelled.load(Ordering::Acquire),
+            || open.check_pairing().map(|_| ()),
+            #[cfg(all(
+                feature = "synthetic-born-joined-qualification",
+                feature = "durable-proposal"
+            ))]
+            job.flow.as_ref(),
+        ) {
             self.message = "Witness operation was invalidated. Any already admitted mutation remains in independent witness history.";
             #[cfg(all(
                 feature = "synthetic-born-joined-qualification",
@@ -3324,14 +3496,23 @@ impl NativeRuntime {
                 feature = "pending-birth-owner-signing"
             ))]
             if let WitnessOutcome::DurablePaymentV1(outcome) = result {
-                open.durable_witness.observe_admission_invalidated_v1(outcome);
+                open.durable_witness
+                    .observe_admission_invalidated_v1(outcome);
             }
             return;
         }
         let prepared = match result {
             #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
             WitnessOutcome::DurablePaymentV1(outcome) => {
-                let (message, prepared) = durable_witness_v1::complete(open, outcome);
+                let (message, prepared) = durable_witness_v1::complete_inner(
+                    open,
+                    outcome,
+                    #[cfg(all(
+                        feature = "synthetic-born-joined-qualification",
+                        feature = "durable-proposal"
+                    ))]
+                    job.flow.as_ref().map(|(_, observer, _)| observer),
+                );
                 self.message = message;
                 prepared
             }
@@ -3504,8 +3685,25 @@ impl NativeRuntime {
         };
         if let Some((digest, Ok(display), operation)) = prepared {
             match ExactNativeReview::stage(&open.authority, &digest, display, epoch) {
-                Ok(review) => self.pending = Some(PendingDecision { review, operation }),
+                Ok(review) => {
+                    #[cfg(all(
+                        feature = "synthetic-born-joined-qualification",
+                        feature = "durable-proposal"
+                    ))]
+                    if let Some((flow, _, _)) = &job.flow {
+                        flow.presentation(flow_diag_v1::DurableFlowPresentationV1::Accepted);
+                    }
+                    self.pending = Some(PendingDecision { review, operation });
+                }
                 Err(_error) => {
+                    #[cfg(all(
+                        feature = "synthetic-born-joined-qualification",
+                        feature = "durable-proposal"
+                    ))]
+                    if let Some((flow, observer, stage)) = &job.flow {
+                        observer.record_error(*stage, &_error);
+                        flow.presentation(flow_diag_v1::DurableFlowPresentationV1::Suppressed);
+                    }
                     #[cfg(all(
                         feature = "synthetic-born-joined-qualification",
                         feature = "durable-proposal"
@@ -3846,6 +4044,11 @@ impl NativeRuntime {
             }
         });
         self.signing_job = Some(SigningJob {
+            #[cfg(all(
+                feature = "synthetic-born-joined-qualification",
+                feature = "durable-proposal"
+            ))]
+            flow: None,
             receive,
             session,
             admission,
@@ -3965,6 +4168,11 @@ impl NativeRuntime {
             }
         });
         self.signing_job = Some(SigningJob {
+            #[cfg(all(
+                feature = "synthetic-born-joined-qualification",
+                feature = "durable-proposal"
+            ))]
+            flow: None,
             receive,
             session,
             admission,
@@ -3981,11 +4189,15 @@ impl NativeRuntime {
     }
     #[cfg(feature = "authority-signing")]
     fn poll_signing(&mut self) {
-        if self
-            .signing_job
-            .as_ref()
-            .is_some_and(|job| !job.lock_requested && job.peer.check_current().is_err())
-        {
+        if self.signing_job.as_ref().is_some_and(|job| {
+            !job.lock_requested
+                && durable_flow_observe_v1!(
+                    job.flow.as_ref().map(|(_, observer)| observer),
+                    flow_diag_v1::DurableFlowStageV1::Close,
+                    job.peer.check_current()
+                )
+                .is_err()
+        }) {
             // OpenAccount is owned by the worker during key use. Keep the exact
             // original peer alive/current check on the native side as well, and
             // serialize revocation behind any already-admitted journal lease.
@@ -3997,7 +4209,14 @@ impl NativeRuntime {
             let Some(job) = self.signing_job.as_ref() else {
                 return;
             };
-            match job.receive.try_recv() {
+            match durable_flow_try_receive_v1(
+                &job.receive,
+                #[cfg(all(
+                    feature = "synthetic-born-joined-qualification",
+                    feature = "durable-proposal"
+                ))]
+                job.flow.as_ref().map(|(flow, _)| flow),
+            ) {
                 Ok(value) => Some(value),
                 Err(std::sync::mpsc::TryRecvError::Empty) => None,
                 Err(_) => {
@@ -4014,7 +4233,11 @@ impl NativeRuntime {
                 let done = Arc::new(AtomicBool::new(false));
                 let finished = done.clone();
                 std::thread::spawn(move || {
-                    let _ = job.session.invalidate();
+                    let _ = durable_flow_observe_v1!(
+                        job.flow.as_ref().map(|(_, observer)| observer),
+                        flow_diag_v1::DurableFlowStageV1::Close,
+                        job.session.invalidate()
+                    );
                     finished.store(true, Ordering::Release);
                 });
                 self.closing_accounts.push(done);
@@ -4023,7 +4246,15 @@ impl NativeRuntime {
         }
         if let Some((open, result)) = result {
             let job = self.signing_job.take().unwrap();
-            if job.lock_requested {
+            if !signing_completion_presented_v1(
+                &result,
+                job.lock_requested,
+                #[cfg(all(
+                    feature = "synthetic-born-joined-qualification",
+                    feature = "durable-proposal"
+                ))]
+                job.flow.as_ref().map(|(flow, _)| flow),
+            ) {
                 let done = Arc::new(AtomicBool::new(false));
                 let finished = done.clone();
                 std::thread::spawn(move || {
@@ -4047,6 +4278,43 @@ impl NativeRuntime {
         }
     }
     fn approve(&mut self, focused: bool, epoch: u64) -> Result<()> {
+        #[cfg(all(
+            feature = "synthetic-born-joined-qualification",
+            feature = "durable-proposal"
+        ))]
+        let observation = self
+            .pending
+            .as_ref()
+            .and_then(|pending| match &pending.operation {
+                Operation::DurableSpendV1 { flow, .. } => flow
+                    .flow_observer
+                    .clone()
+                    .map(|observer| (observer, flow_diag_v1::DurableFlowStageV1::SpendDecision)),
+                Operation::DurableDisclosureV1 { flow, .. } => {
+                    flow.flow_observer.clone().map(|observer| {
+                        (
+                            observer,
+                            flow_diag_v1::DurableFlowStageV1::DisclosureDecision,
+                        )
+                    })
+                }
+                Operation::DurableWitnessV1(value) => value
+                    .flow_observer_v1()
+                    .cloned()
+                    .map(|observer| (observer, value.flow_native_stage_v1())),
+                _ => None,
+            });
+        let result = self.approve_inner(focused, epoch);
+        durable_flow_observe_v1!(
+            observation.as_ref().map(|(observer, _)| observer),
+            observation
+                .as_ref()
+                .map(|(_, stage)| *stage)
+                .unwrap_or(flow_diag_v1::DurableFlowStageV1::FixtureState),
+            result
+        )
+    }
+    fn approve_inner(&mut self, focused: bool, epoch: u64) -> Result<()> {
         let pending = self.pending.take().ok_or(Error::ReviewMismatch)?;
         #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
         if self
@@ -4057,9 +4325,35 @@ impl NativeRuntime {
         {
             return Err(Error::Unavailable);
         }
-        let decision = pending
-            .review
-            .consume_native_click(focused, epoch, &self.confirmation)?;
+        #[cfg(all(
+            feature = "synthetic-born-joined-qualification",
+            feature = "durable-proposal"
+        ))]
+        let flow_observer = match &pending.operation {
+            Operation::DurableSpendV1 { flow, .. }
+            | Operation::DurableDisclosureV1 { flow, .. } => flow.flow_observer.as_ref(),
+            Operation::DurableWitnessV1(value) => value.flow_observer_v1(),
+            _ => None,
+        };
+        #[cfg(all(
+            feature = "synthetic-born-joined-qualification",
+            feature = "durable-proposal"
+        ))]
+        let flow_stage = match &pending.operation {
+            Operation::DurableSpendV1 { .. } => flow_diag_v1::DurableFlowStageV1::SpendDecision,
+            Operation::DurableDisclosureV1 { .. } => {
+                flow_diag_v1::DurableFlowStageV1::DisclosureDecision
+            }
+            Operation::DurableWitnessV1(value) => value.flow_native_stage_v1(),
+            _ => flow_diag_v1::DurableFlowStageV1::FixtureState,
+        };
+        let decision = durable_flow_observe_v1!(
+            flow_observer,
+            flow_stage,
+            pending
+                .review
+                .consume_native_click(focused, epoch, &self.confirmation)
+        )?;
         self.confirmation.zeroize();
         #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
         if let Operation::DurableSpendV1 { flow, disclosure } = pending.operation {
@@ -6008,6 +6302,110 @@ impl NativeRuntime {
     }
 }
 
+#[cfg(feature = "authority-signing")]
+fn durable_flow_try_receive_v1<T>(
+    receive: &std::sync::mpsc::Receiver<T>,
+    #[cfg(all(
+        feature = "synthetic-born-joined-qualification",
+        feature = "durable-proposal"
+    ))]
+    flow: Option<&flow_diag_v1::DurableFlowJobObservationV1>,
+) -> std::result::Result<T, std::sync::mpsc::TryRecvError> {
+    let result = receive.try_recv();
+    #[cfg(all(
+        feature = "synthetic-born-joined-qualification",
+        feature = "durable-proposal"
+    ))]
+    if let Some(flow) = flow {
+        match &result {
+            Err(std::sync::mpsc::TryRecvError::Empty) => flow.pending(),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => flow.disconnected(),
+            Ok(_) => {}
+        }
+    }
+    result
+}
+#[cfg(feature = "authority-signing")]
+fn signing_completion_presented_v1<T>(
+    result: &authority_bridge::Result<T>,
+    lock_requested: bool,
+    #[cfg(all(
+        feature = "synthetic-born-joined-qualification",
+        feature = "durable-proposal"
+    ))]
+    flow: Option<&flow_diag_v1::DurableFlowJobObservationV1>,
+) -> bool {
+    #[cfg(all(
+        feature = "synthetic-born-joined-qualification",
+        feature = "durable-proposal"
+    ))]
+    if let Some(flow) = flow {
+        flow.received(flow_diag_v1::DurableFlowStageV1::Completion, result);
+        if lock_requested {
+            flow.presentation(flow_diag_v1::DurableFlowPresentationV1::Suppressed);
+        } else if result.is_ok() {
+            flow.presentation(flow_diag_v1::DurableFlowPresentationV1::Accepted);
+        }
+    }
+    #[cfg(not(all(
+        feature = "synthetic-born-joined-qualification",
+        feature = "durable-proposal"
+    )))]
+    let _ = result;
+    !lock_requested
+}
+#[cfg(feature = "authority-signing")]
+fn witness_completion_allowed_v1(
+    result: &WitnessOutcome,
+    epoch_matches: bool,
+    cancelled: impl FnOnce() -> bool,
+    pairing: impl FnOnce() -> Result<()>,
+    #[cfg(all(
+        feature = "synthetic-born-joined-qualification",
+        feature = "durable-proposal"
+    ))]
+    flow: Option<&(
+        flow_diag_v1::DurableFlowJobObservationV1,
+        flow_diag_v1::DurableFlowObserverV1,
+        flow_diag_v1::DurableFlowStageV1,
+    )>,
+) -> bool {
+    #[cfg(all(
+        feature = "synthetic-born-joined-qualification",
+        feature = "durable-proposal"
+    ))]
+    if let Some((job, _, stage)) = flow {
+        durable_witness_v1::observe_flow_receive_v1(job, *stage, result);
+    }
+    #[cfg(not(all(
+        feature = "synthetic-born-joined-qualification",
+        feature = "durable-proposal"
+    )))]
+    let _ = result;
+    if !epoch_matches
+        || cancelled()
+        || durable_flow_observe_v1!(
+            flow.map(|(_, observer, _)| observer),
+            flow.map(|(_, _, stage)| *stage)
+                .unwrap_or(flow_diag_v1::DurableFlowStageV1::Completion),
+            pairing()
+        )
+        .is_err()
+    {
+        #[cfg(all(
+            feature = "synthetic-born-joined-qualification",
+            feature = "durable-proposal"
+        ))]
+        if let Some((job, _, _)) = flow {
+            job.invalidated();
+            job.presentation(flow_diag_v1::DurableFlowPresentationV1::Suppressed);
+        }
+        false
+    } else {
+        true
+    }
+}
+
 /// Only exact disclosure workers may outlive blur; untagged history, dispatch
 /// and authorization delivery workers keep the preexisting full-lock behavior.
 fn history_requires_blur_lock(
@@ -6404,5 +6802,105 @@ mod quarantined_history_runtime_tests {
             assert!(!runtime.quarantined_history.is_active());
             assert!(runtime.open.is_none());
         }
+    }
+}
+
+#[cfg(all(
+    test,
+    feature = "synthetic-born-joined-qualification",
+    feature = "durable-proposal"
+))]
+mod durable_flow_poller_tests {
+    use super::*;
+    use flow_diag_v1::{
+        DurableFlowCollectorV1 as Collector, DurableFlowErrorCodeV1 as Code,
+        DurableFlowJobPurposeV1 as Purpose, DurableFlowOperationV1 as Operation,
+        DurableFlowPresentationV1 as Presentation, DurableFlowReceiveV1 as Receive,
+        DurableFlowResultV1 as Observed, DurableFlowStageV1 as Stage,
+    };
+    #[test]
+    fn actual_signing_poller_locked_success_and_error_preserve_original_results() {
+        for success in [false, true] {
+            for diagnosed in [false, true] {
+                let collector = Collector::default();
+                let observer = collector.arm(Operation::InitialSign);
+                let job = observer.job_start(Purpose::Sign, 17);
+                let result: authority_bridge::Result<Box<u8>> = if success {
+                    Ok(Box::new(3))
+                } else {
+                    Err(authority_bridge::BridgeError::Permission)
+                };
+                let ptr = result.as_ref().ok().map(|v| &**v as *const u8);
+                assert!(!signing_completion_presented_v1(
+                    &result,
+                    true,
+                    diagnosed.then_some(&job)
+                ));
+                assert_eq!(result.is_ok(), success);
+                assert_eq!(result.as_ref().ok().map(|v| &**v as *const u8), ptr);
+                if diagnosed {
+                    let report = observer.finish(Observed::ReturnedErr).unwrap();
+                    assert!(
+                        report.completion().result()
+                            == if success {
+                                Observed::ReturnedOk
+                            } else {
+                                Observed::ReturnedErr
+                            }
+                    );
+                    assert!(report.completion().presentation() == Presentation::Suppressed);
+                    assert_eq!(report.first_error().is_some(), !success);
+                    if !success {
+                        assert!(report.first_error().unwrap().code() == Code::BridgePermission);
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn actual_witness_poller_invalid_epoch_preserves_error_before_short_circuit() {
+        let collector = Collector::default();
+        let observer = collector.arm(Operation::WriterReconcile);
+        let job = observer.job_start(Purpose::AcquirePrepare, 7);
+        let flow = (job, observer.clone(), Stage::AcquirePrepare);
+        let outcome = WitnessOutcome::DurablePaymentV1(
+            durable_witness_v1::DurableWitnessOutcomeV1::Prepared(Err(Error::Verification)),
+        );
+        assert!(!witness_completion_allowed_v1(
+            &outcome,
+            false,
+            || panic!("cancel short circuit"),
+            || panic!("pairing short circuit"),
+            Some(&flow)
+        ));
+        let report = observer.finish(Observed::ReturnedErr).unwrap();
+        assert!(report.first_error().unwrap().code() == Code::SignerVerification);
+        assert!(report.completion().result() == Observed::ReturnedErr);
+        assert!(report.completion().receive() == Receive::Invalidated);
+    }
+    #[test]
+    fn actual_witness_poller_old_job_does_not_attribute_pairing_to_new_arm() {
+        let collector = Collector::default();
+        let old = collector.arm(Operation::WriterReconcile);
+        let flow = (
+            old.job_start(Purpose::AcquirePrepare, 7),
+            old.clone(),
+            Stage::AcquirePrepare,
+        );
+        let current = collector.arm(Operation::WriterReconcile);
+        let outcome = WitnessOutcome::DurablePaymentV1(
+            durable_witness_v1::DurableWitnessOutcomeV1::Prepared(Err(Error::Uncertain)),
+        );
+        assert!(!witness_completion_allowed_v1(
+            &outcome,
+            true,
+            || false,
+            || Err(Error::Authentication),
+            Some(&flow)
+        ));
+        let report = current.finish(Observed::ReturnedErr).unwrap();
+        assert!(report.first_error().is_none());
+        assert!(report.completion().result() == Observed::NotObserved);
+        assert!(report.incomplete());
     }
 }

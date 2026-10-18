@@ -43,6 +43,20 @@ pub enum CheckedHistoryStageV1 {
     AdmissionSnapshotValidation,
     AdmissionCommittedHeadValidation,
     AdmissionFinalValidation,
+    FlowRequestValidation,
+    FlowBinding,
+    FlowSession,
+    FlowConnect,
+    FlowHandshake,
+    FlowPeerBinding,
+    FlowRequestBuild,
+    FlowRequestWrite,
+    FlowResponseRead,
+    FlowResponse,
+    FlowSnapshotValidation,
+    FlowReceiptValidation,
+    FlowCommittedHeadValidation,
+    FlowFinalValidation,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -58,6 +72,10 @@ pub enum CheckedHistoryPhaseV1 {
     Snapshot,
     Page,
     Admission,
+    Acquire,
+    Activate,
+    Verify,
+    Reserve,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum CheckedHistoryCheckSiteV1 {
@@ -242,6 +260,7 @@ pub struct CheckedHistoryFailureV1 {
     stage: CheckedHistoryStageV1,
     io_kind: Option<CheckedHistoryIoKindV1>,
     error: AuthorityError,
+    returned_error: AuthorityError,
     measurement: CheckedHistoryMeasurementV1,
 }
 impl CheckedHistoryFailureV1 {
@@ -253,6 +272,15 @@ impl CheckedHistoryFailureV1 {
     }
     pub fn measurement(&self) -> &CheckedHistoryMeasurementV1 {
         &self.measurement
+    }
+    /// The first original category, before existing transport mappings.
+    pub fn error(&self) -> AuthorityError {
+        self.error
+    }
+    /// The exact original kernel return, independently of the first cause.
+    /// New diagnosed callers must forward this through their original mapping.
+    pub fn returned_error(&self) -> AuthorityError {
+        self.returned_error
     }
     /// The first original observed error, before any existing outer blanket
     /// mapping. Ordinary callers still receive their unchanged mapped error.
@@ -287,6 +315,11 @@ impl HistoryObserverV1 {
         observer.operation_phase = Some(CheckedHistoryPhaseV1::Admission);
         observer
     }
+    pub(super) fn with_flow_deadline(caller_deadline: Option<Instant>) -> Self {
+        let observer = Self::new_at(Instant::now(), caller_deadline);
+        observer.enter(CheckedHistoryStageV1::FlowRequestValidation);
+        observer
+    }
     fn new_at(started: Instant, caller_deadline: Option<Instant>) -> Self {
         Self {
             stage: Cell::new(CheckedHistoryStageV1::CallerDeadline),
@@ -307,7 +340,14 @@ impl HistoryObserverV1 {
         self.io_kind.set(None);
         self.check_site.set(None);
         self.checkpoint.set(match stage {
-            CheckedHistoryStageV1::AdmissionRequestValidation
+            CheckedHistoryStageV1::FlowRequestValidation
+            | CheckedHistoryStageV1::FlowBinding
+            | CheckedHistoryStageV1::FlowSession
+            | CheckedHistoryStageV1::FlowSnapshotValidation
+            | CheckedHistoryStageV1::FlowReceiptValidation
+            | CheckedHistoryStageV1::FlowCommittedHeadValidation
+            | CheckedHistoryStageV1::FlowFinalValidation
+            | CheckedHistoryStageV1::AdmissionRequestValidation
             | CheckedHistoryStageV1::AdmissionBinding
             | CheckedHistoryStageV1::AdmissionSnapshotValidation
             | CheckedHistoryStageV1::AdmissionCommittedHeadValidation
@@ -364,9 +404,14 @@ impl HistoryObserverV1 {
         if let Some(mut exchange) = self.exchange.get() {
             exchange.started = Some(started);
             exchange.selected = Some(selected);
+            // Reserve retains the ordinary no-caller-deadline socket path.
+            // This labels its selected observational bound, not a newly enforced
+            // whole-exchange deadline or a guarantee of a hard total ten seconds.
             exchange.selected_limit = Some(
-                if selected_deadline_stage(selected, self.caller_deadline)
-                    == CheckedHistoryStageV1::ExchangeDeadline
+                if (exchange.phase == CheckedHistoryPhaseV1::Reserve
+                    && self.caller_deadline.is_none())
+                    || selected_deadline_stage(selected, self.caller_deadline)
+                        == CheckedHistoryStageV1::ExchangeDeadline
                 {
                     CheckedHistorySelectedLimitV1::Exchange
                 } else {
@@ -502,6 +547,7 @@ impl HistoryObserverV1 {
                 stage,
                 io_kind,
                 error,
+                returned_error: error,
                 measurement: self.capture(now, false),
             })),
         }
@@ -528,11 +574,15 @@ impl HistoryObserverV1 {
     }
     pub(super) fn into_failure(self, error: AuthorityError) -> CheckedHistoryFailureV1 {
         match self.first.take() {
-            Some(first) => first,
+            Some(mut first) => {
+                first.returned_error = error;
+                first
+            }
             None => CheckedHistoryFailureV1 {
                 stage: self.stage.get(),
                 io_kind: self.io_kind.get(),
                 error,
+                returned_error: error,
                 measurement: self.capture(Instant::now(), true),
             },
         }
@@ -627,6 +677,27 @@ impl HistoryPhaseV1 {
         use CheckedHistoryStageV1 as S;
         use HistoryCallStepV1 as C;
         match (self, step) {
+            (Self::Acquire | Self::Activate | Self::Verify | Self::Reserve, C::Connect) => {
+                S::FlowConnect
+            }
+            (Self::Acquire | Self::Activate | Self::Verify | Self::Reserve, C::Handshake) => {
+                S::FlowHandshake
+            }
+            (Self::Acquire | Self::Activate | Self::Verify | Self::Reserve, C::PeerBinding) => {
+                S::FlowPeerBinding
+            }
+            (Self::Acquire | Self::Activate | Self::Verify | Self::Reserve, C::RequestBuild) => {
+                S::FlowRequestBuild
+            }
+            (Self::Acquire | Self::Activate | Self::Verify | Self::Reserve, C::RequestWrite) => {
+                S::FlowRequestWrite
+            }
+            (Self::Acquire | Self::Activate | Self::Verify | Self::Reserve, C::ResponseRead) => {
+                S::FlowResponseRead
+            }
+            (Self::Acquire | Self::Activate | Self::Verify | Self::Reserve, C::Response) => {
+                S::FlowResponse
+            }
             (Self::Admission, C::Connect) => S::AdmissionConnect,
             (Self::Admission, C::Handshake) => S::AdmissionHandshake,
             (Self::Admission, C::PeerBinding) => S::AdmissionPeerBinding,
@@ -718,6 +789,162 @@ pub(super) fn write_frame_observed<T: serde::Serialize>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pure_flow_phases_and_stages_are_purpose_distinct() {
+        use CheckedHistoryStageV1 as S;
+        use HistoryCallStepV1 as C;
+        for phase in [
+            HistoryPhaseV1::Acquire,
+            HistoryPhaseV1::Activate,
+            HistoryPhaseV1::Verify,
+            HistoryPhaseV1::Reserve,
+        ] {
+            for (step, expected) in [
+                (C::Connect, S::FlowConnect),
+                (C::Handshake, S::FlowHandshake),
+                (C::PeerBinding, S::FlowPeerBinding),
+                (C::RequestBuild, S::FlowRequestBuild),
+                (C::RequestWrite, S::FlowRequestWrite),
+                (C::ResponseRead, S::FlowResponseRead),
+                (C::Response, S::FlowResponse),
+            ] {
+                assert!(phase.stage(step) == expected);
+            }
+        }
+    }
+
+    #[test]
+    fn pure_flow_success_clears_exchange_before_postresponse_validation() {
+        let base = Instant::now();
+        for phase in [
+            HistoryPhaseV1::Acquire,
+            HistoryPhaseV1::Activate,
+            HistoryPhaseV1::Verify,
+            HistoryPhaseV1::Reserve,
+        ] {
+            let caller =
+                (phase != HistoryPhaseV1::Reserve).then_some(base + Duration::from_secs(30));
+            let observer = HistoryObserverV1::with_flow_deadline(caller);
+            assert!(observer.capture(base, false).phase().is_none());
+            observer.begin_exchange(phase);
+            observer.select_deadline(base, base + Duration::from_secs(10));
+            let before = observer.capture(base, false);
+            assert!(before.phase() == Some(phase));
+            assert!(before.selected_limit().is_some());
+            assert!(
+                super::super::finish_checked_exchange_observed(Ok(()), Some(&observer)).is_ok()
+            );
+            observer.enter(CheckedHistoryStageV1::FlowFinalValidation);
+            let original = observer.observe_authority(Err::<(), _>(AuthorityError::StaleHead));
+            let failure = observer.into_failure(original.err().unwrap());
+            let after = failure.measurement();
+            assert!(after.phase().is_none());
+            assert!(after.page_ordinal().is_none());
+            assert!(after.check_site().is_none());
+            assert!(after.selected_limit().is_none());
+            assert!(after.selected_budget_us().is_none());
+            assert!(after.selected_remaining_at_failure_us().is_none());
+            assert!(after.caller_remaining_at_budget_start_us().is_none());
+            assert!(after.exchange_elapsed_us().is_none());
+            assert!(after.exchange_cost().is_none());
+            assert_eq!(
+                after.caller_remaining_at_failure_us().is_some(),
+                caller.is_some()
+            );
+            assert!(failure.error() == AuthorityError::StaleHead);
+            assert!(failure.returned_error() == AuthorityError::StaleHead);
+        }
+        // A rejected exchange retains its still-relevant selected context.
+        let observer = HistoryObserverV1::with_flow_deadline(None);
+        observer.begin_exchange(HistoryPhaseV1::Reserve);
+        observer.select_deadline(base, base + Duration::from_secs(10));
+        let result = super::super::finish_checked_exchange_observed(
+            Err::<(), _>(AuthorityError::Permission),
+            Some(&observer),
+        );
+        assert!(matches!(result, Err(AuthorityError::Permission)));
+        assert!(observer.capture(base, false).phase() == Some(HistoryPhaseV1::Reserve));
+    }
+
+    #[test]
+    fn pure_flow_reserve_no_caller_bound_is_exchange_without_changing_old_labels() {
+        let base = Instant::now();
+        for (phase, caller, selected, expected) in [
+            (
+                HistoryPhaseV1::Reserve,
+                None,
+                base + Duration::from_secs(10),
+                CheckedHistorySelectedLimitV1::Exchange,
+            ),
+            (
+                HistoryPhaseV1::Acquire,
+                Some(base + Duration::from_secs(30)),
+                base + Duration::from_secs(10),
+                CheckedHistorySelectedLimitV1::Exchange,
+            ),
+            (
+                HistoryPhaseV1::Verify,
+                Some(base + Duration::from_secs(5)),
+                base + Duration::from_secs(5),
+                CheckedHistorySelectedLimitV1::Caller,
+            ),
+            (
+                HistoryPhaseV1::Snapshot,
+                None,
+                base + Duration::from_secs(10),
+                CheckedHistorySelectedLimitV1::Caller,
+            ),
+        ] {
+            let observer = HistoryObserverV1::new_at(base, caller);
+            observer.begin_exchange(phase);
+            observer.select_deadline(base, selected);
+            let measurement = observer.capture(base, false);
+            assert!(measurement.selected_limit() == Some(expected));
+            assert_eq!(
+                measurement.caller_remaining_at_budget_start_us().is_some(),
+                caller.is_some()
+            );
+            assert_eq!(
+                measurement.caller_remaining_at_failure_us().is_some(),
+                caller.is_some()
+            );
+        }
+    }
+
+    #[test]
+    fn pure_flow_frame_first_error_and_returned_error_remain_independent() {
+        for phase in [
+            HistoryPhaseV1::Acquire,
+            HistoryPhaseV1::Activate,
+            HistoryPhaseV1::Verify,
+            HistoryPhaseV1::Reserve,
+        ] {
+            for (bytes, expected) in [
+                (&[0_u8, 0, 0, 0][..], AuthorityError::Limit),
+                (&[0_u8, 0, 0, 1, b'x'][..], AuthorityError::InvalidBinding),
+            ] {
+                let observer = HistoryObserverV1::with_flow_deadline(None);
+                observer.begin_exchange(phase);
+                observer.enter(phase.stage(HistoryCallStepV1::ResponseRead));
+                let mut observed_bytes = bytes;
+                let read: Result<u8> = read_frame_observed(&mut observed_bytes, Some(&observer));
+                let mapped = read.map_err(|_| AuthorityError::Uncertain);
+                let mut plain_bytes = bytes;
+                let plain: Result<u8> = read_frame_observed(&mut plain_bytes, None);
+                let plain_mapped = plain.map_err(|_| AuthorityError::Uncertain);
+                assert_eq!(mapped, plain_mapped);
+                assert_eq!(observed_bytes, plain_bytes);
+                let failure = observer.into_failure(mapped.err().unwrap());
+                assert!(failure.stage() == CheckedHistoryStageV1::FlowResponseRead);
+                assert!(failure.error() == expected);
+                assert!(failure.returned_error() == AuthorityError::Uncertain);
+                assert!(failure.io_kind().is_none());
+                assert_eq!(failure.measurement().history_cost().frame_read_calls(), 1);
+                assert!(failure.into_error() == expected);
+            }
+        }
+    }
 
     #[test]
     fn pure_admission_phase_is_truthful_before_transport_and_during_validation() {
@@ -1269,6 +1496,8 @@ mod tests {
         assert!(matches!(mapped, Err(AuthorityError::Uncertain)));
         let failure = observer.into_failure(mapped.err().unwrap());
         assert!(failure.stage() == CheckedHistoryStageV1::PageResponseRead);
+        assert!(failure.error() == AuthorityError::Limit);
+        assert!(failure.returned_error() == AuthorityError::Uncertain);
         assert!(failure.io_kind().is_none());
         assert_eq!(failure.measurement().history_cost().frame_read_calls(), 1);
         assert!(!failure.measurement().incomplete());

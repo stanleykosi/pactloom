@@ -111,6 +111,9 @@ impl Fixture {
     }
     fn original(&self) -> OriginalAuthorizationEvidence {
         let session = fixture::session(&self.journal, "synthetic-owner");
+        self.original_in_session(&session)
+    }
+    fn original_in_session(&self, session: &SignerConsentSession) -> OriginalAuthorizationEvidence {
         let mut input =
             crate::consent_journal::tests::proposal("agreement-a", "obligation-a", "proposal-a")
                 .input()
@@ -142,7 +145,7 @@ impl Fixture {
         let enrollment = self
             .journal
             .record_enrollment(fixture::approve_enrollment(
-                &session,
+                session,
                 EnrollmentTerms {
                     account_id: self.genesis.identity.account_id.clone(),
                     agreement_id: "agreement-a".into(),
@@ -158,26 +161,42 @@ impl Fixture {
                         channel_binding_digest: "c3".repeat(32),
                     },
                     aggregate_budget_limit_zatoshis: 1_000_000_000,
-                    receipt: fixture::receipt(&session),
+                    receipt: fixture::receipt(session),
                 },
             ))
             .unwrap();
         let prepared = session.prepare_manifest(&enrollment, &proposal).unwrap();
-        let decision = fixture::decision(&session, prepared.review_digest());
+        let decision = fixture::decision(session, prepared.review_digest());
         let manifest = self
             .journal
             .record_accepted_manifest(session.approve_manifest(prepared, decision).unwrap())
             .unwrap();
         let mut terms = crate::consent_journal::tests::terms(
-            &session,
+            session,
             &enrollment,
             &manifest,
             "authorization-a",
         );
         terms.artifact_digest = proposal.input().artifact_digest.clone().unwrap();
         self.journal
-            .record_original_consent_release(fixture::approve_spend(&session, terms))
+            .record_original_consent_release(fixture::approve_spend(session, terms))
             .unwrap()
+    }
+    // Only the encrypted-journal component of a late gate. This does not
+    // construct or qualify native custody, policy export or a source owner.
+    fn check_current_preconstruction(
+        &self,
+        original: &OriginalAuthorizationEvidence,
+        session: &SignerConsentSession,
+    ) -> Result<()> {
+        let lease = self.journal.acquire_preconstruction_records(
+            original.enrollment().reference(),
+            original.accepted_manifest().reference(),
+            session,
+        )?;
+        self.journal
+            .check_durable_born_entry_v1_under_preconstruction_lease(&self.genesis, &lease)?;
+        lease.require_current_durable_disclosure_receipts_v1()
     }
     fn request(&self, original: &OriginalAuthorizationEvidence) -> RetainedAuthorizationRequest {
         let mut request = RetainedAuthorizationRequest::from_original(
@@ -794,10 +813,73 @@ fn preconstruction_lease_requires_exact_binding_account_and_one_fresh_snapshot()
 }
 
 #[test]
+fn late_preconstruction_acquisition_rejects_second_handle_epoch_after_early_success() {
+    let f = Fixture::new();
+    let session = fixture::session(&f.journal, "synthetic-owner");
+    let original = f.original_in_session(&session);
+    let second =
+        SignerConsentJournal::open_durable_born_entry_v1(&f.path, &f.key, &f.genesis, &f.source)
+            .unwrap();
+    assert!(second.binding() != f.journal.binding());
+    let early = f
+        .journal
+        .acquire_preconstruction_records(
+            original.enrollment().reference(),
+            original.accepted_manifest().reference(),
+            &session,
+        )
+        .unwrap();
+    f.journal
+        .check_durable_born_entry_v1_under_preconstruction_lease(&f.genesis, &early)
+        .unwrap();
+    early
+        .require_current_durable_disclosure_receipts_v1()
+        .unwrap();
+    {
+        // A synthetic epoch advance on a real second current19 connection.
+        // The first handle's held fence is not cross-handle write exclusion.
+        let _fence = second.authority_fence.write().unwrap();
+        second
+            .connection
+            .lock()
+            .unwrap()
+            .execute("UPDATE signer_account SET writer_epoch=8", [])
+            .unwrap();
+    }
+    let after_advance = f.commitment();
+    assert_eq!(f.journal.account_state().unwrap().writer_epoch, 8);
+    // These checks intentionally still accept historical epoch-7 receipts.
+    // Reusing them cannot substitute for the late actual record acquisition.
+    early.check_current().unwrap();
+    early
+        .require_current_durable_disclosure_receipts_v1()
+        .unwrap();
+    DURABLE_BORN_SNAPSHOT_VALIDATIONS_V1.with(|count| count.set(0));
+    f.journal
+        .check_durable_born_entry_v1_under_preconstruction_lease(&f.genesis, &early)
+        .unwrap();
+    DURABLE_BORN_SNAPSHOT_VALIDATIONS_V1.with(|count| assert_eq!(count.get(), 1));
+    drop(early);
+    assert!(matches!(
+        f.check_current_preconstruction(&original, &session),
+        Err(JournalError::Permission)
+    ));
+    // Denied acquisition never reaches another snapshot or renews the session.
+    DURABLE_BORN_SNAPSHOT_VALIDATIONS_V1.with(|count| assert_eq!(count.get(), 1));
+    assert_eq!(after_advance, f.commitment());
+    assert_eq!(f.journal.account_state().unwrap().writer_epoch, 8);
+}
+
+#[test]
 fn preconstruction_lease_rechecks_exclusion_committed_after_earlier_snapshot() {
     let f = Fixture::new();
-    let original = f.original();
-    f.check().unwrap();
+    let session = fixture::session(&f.journal, "synthetic-owner");
+    let original = f.original_in_session(&session);
+    let second =
+        SignerConsentJournal::open_durable_born_entry_v1(&f.path, &f.key, &f.genesis, &f.source)
+            .unwrap();
+    f.check_current_preconstruction(&original, &session)
+        .unwrap();
     let event = PermanentAccountExclusion {
         version: 1,
         identity: f.genesis.identity.clone(),
@@ -808,10 +890,10 @@ fn preconstruction_lease_rechecks_exclusion_committed_after_earlier_snapshot() {
     };
     event.validate().unwrap();
     {
-        // Synthetic storage mutation under the same fence as restrictive
-        // publication. No native approval or production publication is forged.
-        let _fence = f.journal.authority_fence.write().unwrap();
-        let mut c = f.journal.connection.lock().unwrap();
+        // Synthetic storage mutation through another actual live handle. No
+        // native approval or production publication is forged.
+        let _fence = second.authority_fence.write().unwrap();
+        let mut c = second.connection.lock().unwrap();
         let tx = c
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .unwrap();
@@ -828,7 +910,6 @@ fn preconstruction_lease_rechecks_exclusion_committed_after_earlier_snapshot() {
     }
     assert!(!f.journal.account_state().unwrap().recovery_required);
     let before = f.commitment();
-    let session = fixture::session(&f.journal, "synthetic-owner");
     // Record acquisition alone intentionally reads historical records and does
     // not inspect exclusion. The full check AFTER acquisition closes this gap.
     let lease = f
@@ -840,22 +921,27 @@ fn preconstruction_lease_rechecks_exclusion_committed_after_earlier_snapshot() {
         )
         .unwrap();
     lease.check_current().unwrap();
+    lease
+        .require_current_durable_disclosure_receipts_v1()
+        .unwrap();
+    DURABLE_BORN_SNAPSHOT_VALIDATIONS_V1.with(|count| count.set(0));
     assert!(matches!(
         f.journal
             .check_durable_born_entry_v1_under_preconstruction_lease(&f.genesis, &lease),
         Err(JournalError::Permission)
     ));
+    DURABLE_BORN_SNAPSHOT_VALIDATIONS_V1.with(|count| assert_eq!(count.get(), 1));
     assert_eq!(before, f.commitment());
 }
 
 #[test]
 fn preconstruction_lease_does_not_hide_second_live_handle_recovery() {
     let f = Fixture::new();
-    let original = f.original();
+    let session = fixture::session(&f.journal, "synthetic-owner");
+    let original = f.original_in_session(&session);
     let second =
         SignerConsentJournal::open_durable_born_entry_v1(&f.path, &f.key, &f.genesis, &f.source)
             .unwrap();
-    let session = fixture::session(&f.journal, "synthetic-owner");
     let lease = f
         .journal
         .acquire_preconstruction_records(
@@ -867,16 +953,127 @@ fn preconstruction_lease_does_not_hide_second_live_handle_recovery() {
     f.journal
         .check_durable_born_entry_v1_under_preconstruction_lease(&f.genesis, &lease)
         .unwrap();
+    lease
+        .require_current_durable_disclosure_receipts_v1()
+        .unwrap();
     // An independent current19 connection has a distinct authority fence. The
     // retained lease is not a global write exclusion or a cached snapshot.
     second.require_recovery().unwrap();
     let before = f.commitment();
+    lease.check_current().unwrap();
     assert!(matches!(
         f.journal
             .check_durable_born_entry_v1_under_preconstruction_lease(&f.genesis, &lease),
         Err(JournalError::RecoveryRequired)
     ));
+    drop(lease);
+    assert!(matches!(
+        f.check_current_preconstruction(&original, &session),
+        Err(JournalError::RecoveryRequired)
+    ));
     assert_eq!(before, f.commitment());
+    assert!(f.journal.account_state().unwrap().recovery_required);
+}
+
+#[test]
+fn late_preconstruction_snapshot_observes_supported_then_malformed_appends() {
+    let f = Fixture::new();
+    let session = fixture::session(&f.journal, "synthetic-owner");
+    let original = f.original_in_session(&session);
+    let second =
+        SignerConsentJournal::open_durable_born_entry_v1(&f.path, &f.key, &f.genesis, &f.source)
+            .unwrap();
+    f.check_current_preconstruction(&original, &session)
+        .unwrap();
+    let before_append = f.commitment();
+    let request = f.request(&original);
+    f.insert_request(&request);
+    let supported = f.commitment();
+    assert!(before_append != supported);
+    DURABLE_BORN_SNAPSHOT_VALIDATIONS_V1.with(|count| count.set(0));
+    f.check_current_preconstruction(&original, &session)
+        .unwrap();
+    DURABLE_BORN_SNAPSHOT_VALIDATIONS_V1.with(|count| assert_eq!(count.get(), 1));
+    assert_eq!(supported, f.commitment());
+    {
+        // A malformed append to a supported table must be inspected by the
+        // fresh snapshot, not hidden by the earlier successful read. The row
+        // is deliberately not a usable permit or native approval.
+        let _fence = second.authority_fence.read().unwrap();
+        second
+            .connection
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO signer_bridge_permits VALUES(?1,'{}')",
+                [&request.reservation.authorization_id],
+            )
+            .unwrap();
+    }
+    let malformed = f.commitment();
+    assert!(malformed != supported);
+    DURABLE_BORN_SNAPSHOT_VALIDATIONS_V1.with(|count| count.set(0));
+    assert!(f
+        .check_current_preconstruction(&original, &session)
+        .is_err());
+    DURABLE_BORN_SNAPSHOT_VALIDATIONS_V1.with(|count| assert_eq!(count.get(), 1));
+    assert_eq!(malformed, f.commitment());
+}
+
+#[test]
+fn late_preconstruction_acquisition_refuses_unsupported_sponsor_append() {
+    for bound in [false, true] {
+        let f = Fixture::new();
+        let session = fixture::session(&f.journal, "synthetic-owner");
+        let original = f.original_in_session(&session);
+        let second = SignerConsentJournal::open_durable_born_entry_v1(
+            &f.path, &f.key, &f.genesis, &f.source,
+        )
+        .unwrap();
+        f.check_current_preconstruction(&original, &session)
+            .unwrap();
+        {
+            let _fence = second.authority_fence.read().unwrap();
+            let mut connection = second.connection.lock().unwrap();
+            let tx = connection.transaction().unwrap();
+            // Inert unsupported history only. In particular, no active sponsor
+            // policy, approval or owner attribution is manufactured here.
+            let policy_key = "da".repeat(32);
+            tx.execute(
+                "INSERT INTO signer_sponsor_policy_events VALUES(?1,1,'{}')",
+                [&policy_key],
+            )
+            .unwrap();
+            if bound {
+                let binding = sponsor::SponsorPolicyBinding {
+                    policy_key: policy_key.clone(),
+                    version: 1,
+                    terms_digest: "db".repeat(32),
+                };
+                tx.execute(
+                    "INSERT INTO signer_sponsor_manifest_bindings VALUES(?1,?2,1,?3)",
+                    params![
+                        original.accepted_manifest().reference(),
+                        policy_key,
+                        encode(&binding).unwrap().as_str()
+                    ],
+                )
+                .unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        let before = f.commitment();
+        assert!(require_supported_tables(&f.journal.connection.lock().unwrap()).is_err());
+        // With and without a binding, acquisition must reread sponsor records.
+        // There is no cached successful policy lease to authorize this gate.
+        DURABLE_BORN_SNAPSHOT_VALIDATIONS_V1.with(|count| count.set(0));
+        assert!(f
+            .check_current_preconstruction(&original, &session)
+            .is_err());
+        DURABLE_BORN_SNAPSHOT_VALIDATIONS_V1.with(|count| assert_eq!(count.get(), 0));
+        assert!(f.check().is_err());
+        assert_eq!(before, f.commitment());
+    }
 }
 
 #[test]
