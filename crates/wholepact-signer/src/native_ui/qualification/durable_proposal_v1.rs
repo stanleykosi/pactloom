@@ -6,6 +6,9 @@
 //! decision, writer credential, wallet ticket or signing capability is exposed.
 //! A host leaf must independently own encrypted intake, proof and exact union.
 
+pub use super::durable_witness_v1::{
+    DurableAdmissionPreparationFailureV1, DurableAdmissionPreparationStageV1,
+};
 use super::durable_witness_v1::{
     DurableWitnessPreparedV1, QualificationDurableWitnessCompletionV1,
 };
@@ -684,33 +687,59 @@ impl DurableNativeFixtureV1 {
     }
     pub(in crate::native_ui) fn prepare_durable_admission(
         &mut self,
-    ) -> Result<wholepact_authority::OwnerControlRequest> {
-        self.check()?;
-        if self.phase != Phase::Imported
-            || self.admission.is_some()
-            || self.runtime.pending.is_some()
-        {
-            return Err(Error::ReviewMismatch);
-        }
-        self.runtime.prepare_durable_admission_v1(EPOCH)?;
-        self.drain_witness_to_review()?;
-        let request = match self.runtime.pending.as_ref().map(|p| &p.operation) {
-            Some(Operation::DurableWitnessV1(prepared)) => match prepared.as_ref() {
-                DurableWitnessPreparedV1::Admission(admission) => admission.request().clone(),
+    ) -> std::result::Result<
+        wholepact_authority::OwnerControlRequest,
+        DurableAdmissionPreparationFailureV1,
+    > {
+        use DurableAdmissionPreparationStageV1 as S;
+        let mut stage = S::FixtureState;
+        let mut attempt = None;
+        let result = (|| -> Result<wholepact_authority::OwnerControlRequest> {
+            self.check()?;
+            if self.phase != Phase::Imported
+                || self.admission.is_some()
+                || self.runtime.pending.is_some()
+            {
+                return Err(Error::ReviewMismatch);
+            }
+            stage = S::Source;
+            let started = self.runtime.prepare_durable_admission_v1(EPOCH);
+            attempt = self.runtime.qualification_durable_admission_attempt_v1();
+            started?;
+            stage = S::WorkerCompletion;
+            self.drain_witness_to_review()?;
+            // Counter exhaustion disables only the synthetic observation. It never
+            // changes native authorization or permits an uncorrelated result.
+            if attempt.is_none() {
+                return Err(Error::Unavailable);
+            }
+            let request = match self.runtime.pending.as_ref().map(|p| &p.operation) {
+                Some(Operation::DurableWitnessV1(prepared)) => match prepared.as_ref() {
+                    DurableWitnessPreparedV1::Admission(admission) => admission.request().clone(),
+                    _ => return Err(Error::ReviewMismatch),
+                },
                 _ => return Err(Error::ReviewMismatch),
-            },
-            _ => return Err(Error::ReviewMismatch),
-        };
-        if self
-            .runtime
-            .qualification_committed_durable_admission_v1()?
-            .is_some()
-        {
-            return Err(Error::ReviewMismatch);
-        }
-        self.admission = Some(request.clone());
-        self.phase = Phase::AdmissionPrepared;
-        Ok(request)
+            };
+            stage = S::Source;
+            if self
+                .runtime
+                .qualification_committed_durable_admission_v1()?
+                .is_some()
+            {
+                return Err(Error::ReviewMismatch);
+            }
+            self.admission = Some(request.clone());
+            self.phase = Phase::AdmissionPrepared;
+            Ok(request)
+        })();
+        result.map_err(|error| {
+            attempt
+                .and_then(|attempt| {
+                    self.runtime
+                        .take_qualification_durable_admission_failure_v1(attempt)
+                })
+                .unwrap_or_else(|| DurableAdmissionPreparationFailureV1::new(stage, error))
+        })
     }
     pub(in crate::native_ui) fn approve_durable_admission(&mut self) -> Result<()> {
         self.check()?;

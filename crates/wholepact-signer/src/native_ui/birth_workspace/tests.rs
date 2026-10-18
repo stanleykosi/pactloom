@@ -185,6 +185,7 @@ fn no_owner_cannot_stage_continue_or_publish_a_birth() {
     assert!(draft.owner.is_none());
 }
 
+#[cfg(feature = "synthetic-qualification")]
 fn construction_draft_fixture() -> (String, String, String, String) {
     let (accepted, _, _) = crate::manifest::tests::consent_fixture();
     let proposal = accepted.proposal.input().clone();
@@ -206,6 +207,7 @@ fn construction_draft_fixture() -> (String, String, String, String) {
         network,
     )
 }
+#[cfg(feature = "synthetic-qualification")]
 #[test]
 fn construction_scope_helper_changes_only_unpublished_scope_and_matching_policy_digest() {
     let (setup, proposal, account, network) = construction_draft_fixture();
@@ -239,6 +241,7 @@ fn construction_scope_helper_changes_only_unpublished_scope_and_matching_policy_
         1
     );
 }
+#[cfg(feature = "synthetic-qualification")]
 #[test]
 fn construction_scope_helper_rejects_wrong_actual_account_network_and_malformed_proposal() {
     let (setup, proposal, account, network) = construction_draft_fixture();

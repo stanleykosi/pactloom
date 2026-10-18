@@ -75,6 +75,15 @@ class PublicOutputTests(unittest.TestCase):
             self.assertFalse(output.safe_failure(self.failure(label+':/private/vault')))
         self.assertFalse(output.safe_failure(self.failure('DurableHostFinancialUnreviewed:Begin')))
 
+    def test_signer_admission_diagnostics_are_finite_and_redacted(self):
+        self.assertEqual(len(output.SIGNER_ADMISSION_BOUNDARIES),14)
+        self.assertFalse(output.SIGNER_ADMISSION_BOUNDARIES & output.DURABLE_HOST_BOUNDARIES)
+        for label in output.SIGNER_ADMISSION_BOUNDARIES:
+            self.assertTrue(output.safe_failure(self.failure(label+':SignerReviewMismatch')))
+            self.assertFalse(output.safe_failure(self.failure(label+':private-account-id')))
+            self.assertFalse(output.safe_failure(self.failure(label+':/private/vault')))
+        self.assertFalse(output.safe_failure(self.failure('SignerAdmissionUnreviewed:Begin')))
+
     def test_durable_label_case_is_exact_pure_and_uses_maintained_validator(self):
         name='native_ui::runtime::durable_entry_v1::tests::durable_fixture_pairing_labels_use_existing_identifier_grammar'
         self.assertEqual(output.SIGNER_DURABLE_LABEL_TESTS,(name,))

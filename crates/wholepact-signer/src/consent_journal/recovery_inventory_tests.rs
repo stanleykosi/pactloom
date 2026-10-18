@@ -473,6 +473,7 @@ fn complete_source_retains_genesis_permanent_exclusion_and_witness_ack_exactly()
     .unwrap();
 }
 
+#[cfg(feature = "synthetic-qualification")]
 #[test]
 fn pending_birth_metadata_uses_distinct_review_and_cannot_change_during_recheck() {
     use wholepact_authority::{AuthorityJournal, transport::synthetic};

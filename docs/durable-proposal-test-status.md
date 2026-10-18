@@ -1,8 +1,24 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-18, 06:37 UTC.
+Updated: 2026-10-18, 11:36 UTC.
 
 **Incomplete implementation. No full native financial signing, public testnet settlement, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
+
+## CI7: current baseline passed; first financial preparation failed
+
+[Run 39119532193](https://github.com/stanleykosi/pactloom/actions/runs/39119532193) used qualification commit `7ee8f0307c0f13298dcff0aa4f1a2b7cf5e2abcd`, the same exact tree as published implementation `7d61d944cbfc44c35080d95952cfdd5f21e100de`. The public-source approval was resolved before publication. The cold Host build (11m30s), Python89, Host44 and encrypted bootstrap passed. The genuine saved-contribution/native-owner reopening baseline passed in approximately257s on this new source tree.
+
+The distinct full-signing phase then failed before the first financial admission/signature. Its first owner's open/pair/configure/accept/redisclose/fixed-payload import completed, followed by `DurableHostWitnessSetup:Begin`, `SignerPollTerminal:SignerReviewMismatch`, and `DurableHostWitnessSetup:WorkerFailure`. The fixture currently collapses missing pending Admission after an underlying preparation/staging error into ReviewMismatch; this does not distinguish a field mismatch from expiry, history, source or another preparation failure. No validator or deadline change is justified by that aggregate code.
+
+Both native phases verified original process-group absence, child reap and private-root removal; the outer runtime container was empty and removed. Final signer/authority gates were not reached after the fail-fast financial phase. Complete financial signing, exact retry and signature union remain unqualified. The next step is closed, redacted observation of the actual failing preparation stage/error, retaining every existing approval and lifetime check.
+
+The following local/pending labels describe earlier timestamps and are retained as historical validation evidence, not current publication or native success status.
+
+## Diagnostic-only follow-up prepared for CI8
+
+The signer now retains the first actual preparation error and one of fourteen finite stages under an exact per-open synthetic attempt tag. The fixture consumes only its matching observation; it does not retry failed checks, renew clocks or change any authorization/production outcome. Public output still uses closed error classifications, never arbitrary error formatting or private values. The original CI7 cause remains unproven until this diagnostic run executes.
+
+The actual Host+Signer all-features graph compiled in 7m07s; four pure custody/observer tests (two new), Host44, signer41 and Python90 passed. A non-synthetic durable production library build passed in 2m08s. The corresponding lib-test profile exposed preexisting synthetic-fixture imports lacking test-only feature gates. Exactly five gates in three test files were corrected without enabling synthetic features in production or removing allfeatures cases. That non-synthetic lib-test build then passed in 2m28s, with twelve selected inert custody/parser/no-owner/schema checks passing and the synthetic diagnostics absent. No new native run or financial success is claimed by these checks.
 
 ## Latest local validation and pending native run
 

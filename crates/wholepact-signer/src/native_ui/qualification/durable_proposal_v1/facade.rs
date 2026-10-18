@@ -11,6 +11,7 @@ use crate::authority_bridge::{
 };
 use crate::native_ui::runtime::durable_proposal_qualification_v1::DurableNativeFixtureV1;
 pub use crate::native_ui::runtime::durable_proposal_qualification_v1::{
+    DurableAdmissionPreparationFailureV1, DurableAdmissionPreparationStageV1,
     DurableNativeEntryFailureV1, DurableNativeEntryStageV1, DurableNativeRecordsV1,
 };
 
@@ -122,7 +123,10 @@ impl EphemeralDurableNativeV1 {
     /// This neither approves nor retains the financial admission.
     pub fn prepare_durable_admission(
         &mut self,
-    ) -> Result<wholepact_authority::OwnerControlRequest> {
+    ) -> std::result::Result<
+        wholepact_authority::OwnerControlRequest,
+        DurableAdmissionPreparationFailureV1,
+    > {
         self.inner.prepare_durable_admission()
     }
     /// Consumes the actual pending review through the production native route,
