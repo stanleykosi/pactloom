@@ -62,6 +62,15 @@ class PublicOutputTests(unittest.TestCase):
         self.assertIn('fn '+name.rsplit('::',1)[1]+'()',source)
         self.assertIn('review::validate_label',source)
 
+    def test_durable_provider_metadata_uses_exact_data_only_selector(self):
+        name=output.PREFIX+'synthetic_born_provider_v1::durable_metadata_tests::durable_provider_metadata_satisfies_actual_material_decoder'
+        self.assertEqual(output.DURABLE_PROVIDER_METADATA_TEST,name)
+        base=ROOT/'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3_qualification'
+        source=(base/'synthetic_born_provider_v1/durable_metadata_tests.rs').read_text()
+        self.assertIn('fn '+name.rsplit('::',1)[1]+'()',source)
+        self.assertIn('HistoricalConstructionMaterialV1::decode',source)
+        self.assertIn('mod durable_metadata_tests;', (base/'synthetic_born_provider_v1.rs').read_text())
+
     def test_durable_fail_fast_order_preserves_final_regression_gates(self):
         shell=(ROOT/'scripts/ci-durable-native-linux.sh').read_text()
         early=['python3 -B scripts/ci-synthetic-output-tests.py',
@@ -1237,8 +1246,8 @@ class PublicTimingTests(unittest.TestCase):
                 self.assertEqual(len(re.findall(r'#\[test\]\s+fn '+name.rsplit('::',1)[1]+r'\(',source)),1)
         source=(ROOT/'scripts/ci-synthetic-output.py').read_text()
         self.assertIn(' + SIGNER_TIMING_TESTS + SIGNER_DURABLE_LABEL_TESTS:',source)
-        self.assertIn(' + TIMING_HOST_TESTS:',source)
-        self.assertIn('CI_SYNTHETIC_PURE passed=43 ',source)
+        self.assertIn(' + TIMING_HOST_TESTS + (DURABLE_PROVIDER_METADATA_TEST,):',source)
+        self.assertIn('CI_SYNTHETIC_PURE passed=44 ',source)
         self.assertIn('timing_counter_cases=3',source)
         self.assertIn("if status!=0 or not cleanup or cores!=1 or failures or (phase=='full' and outcome is None):",source)
         self.assertNotIn('eprintln!',signer)

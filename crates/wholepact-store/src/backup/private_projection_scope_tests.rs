@@ -73,6 +73,13 @@ fn replace_cell(connection: &Connection, table: &str, column: &str, raw: &str) {
     connection
         .execute(&format!("UPDATE {table} SET {column}=?1"), [raw])
         .unwrap();
+    // Finish ordinary fixture write/read setup before taking the preservation
+    // baseline. SQLite's first read after a write may advance the live SHM WAL
+    // read mark; the operation under test must not be used to normalize it.
+    assert!(
+        read_cell(connection, table, column) == raw,
+        "fixture must retain the exact raw cell"
+    );
 }
 fn private_cell(table: &str, original: &str) -> String {
     let mut value: Value = serde_json::from_str(original).unwrap();
@@ -85,9 +92,12 @@ fn private_cell(table: &str, original: &str) -> String {
     value.to_string()
 }
 
-// Reads can change atime. Contents, names, permissions, file identity and mtime
-// of every original SQLite file and sidecar must remain exactly unchanged.
-type FileFingerprint = (Vec<u8>, u32, u64, u64, i64, i64);
+// Reads can change atime. After ordinary fixture write/read setup, hashes of
+// every byte (including all SHM bytes), lengths, names, permissions, identity
+// and mtime must stay unchanged. This does not claim that the first-ever SQLite
+// read leaves WAL-index bookkeeping untouched. Never retain bytes in assertion
+// Debug output: a failing preservation check must not dump private file data.
+type FileFingerprint = ([u8; 32], u64, u32, u64, u64, i64, i64);
 fn fingerprint(dir: &Path) -> BTreeMap<std::path::PathBuf, FileFingerprint> {
     fs::read_dir(dir)
         .unwrap()
@@ -102,10 +112,12 @@ fn fingerprint(dir: &Path) -> BTreeMap<std::path::PathBuf, FileFingerprint> {
                     .windows(CANARY.len())
                     .any(|part| part == CANARY.as_bytes())
             );
+            let digest: [u8; 32] = Sha256::digest(&bytes).into();
             (
                 path,
                 (
-                    bytes,
+                    digest,
+                    meta.len(),
                     meta.mode(),
                     meta.dev(),
                     meta.ino(),
@@ -146,10 +158,13 @@ fn private_projection_in_each_column_refuses_backup_without_touching_originals()
             validate_no_private_input_projections(&source.connection.lock().unwrap()),
             PRIVATE_INPUT_PROJECTION_SCOPE_ERROR,
         );
-        assert_eq!(before, fingerprint(originals.path()));
-        assert_eq!(
-            raw,
-            read_cell(&source.connection.lock().unwrap(), table, column)
+        assert!(
+            before == fingerprint(originals.path()),
+            "refusal must preserve all original file and sidecar fingerprints"
+        );
+        assert!(
+            raw == read_cell(&source.connection.lock().unwrap(), table, column),
+            "refusal must preserve the exact raw cell"
         );
         replace_cell(&source.connection.lock().unwrap(), table, column, &original);
     }
@@ -208,10 +223,13 @@ fn duplicate_escaped_malformed_and_unbounded_json_cannot_hide_in_any_column() {
                 validate_no_private_input_projections(&source.connection.lock().unwrap()),
                 PRIVATE_INPUT_PROJECTION_SCOPE_ERROR,
             );
-            assert_eq!(before, fingerprint(originals.path()));
-            assert_eq!(
-                *raw,
-                read_cell(&source.connection.lock().unwrap(), table, column)
+            assert!(
+                before == fingerprint(originals.path()),
+                "refusal must preserve all original file and sidecar fingerprints"
+            );
+            assert!(
+                *raw == read_cell(&source.connection.lock().unwrap(), table, column),
+                "refusal must preserve the exact raw cell"
             );
         }
         replace_cell(&source.connection.lock().unwrap(), table, column, &original);
@@ -352,7 +370,10 @@ fn correctly_keyed_recomputed_archives_refuse_each_private_column_before_restore
                 PRIVATE_CONSTRUCTION_SCOPE_ERROR,
             );
             assert_no_destination(&destination);
-            assert_eq!(before, fingerprint(originals.path()));
+            assert!(
+                before == fingerprint(originals.path()),
+                "refusal must preserve all original file and sidecar fingerprints"
+            );
         }
         replace_cell(connection, table, column, &original);
     }
@@ -378,9 +399,9 @@ fn exact_empty_private_metadata_keeps_legacy_backup_roundtrip_and_quarantine() {
     .unwrap();
     assert!(report.recovery_required && !report.authorization_allowed);
     assert!(restored.recovery_state().unwrap().recovery_required);
-    assert_eq!(
-        original,
-        read_cell(&restored.connection.lock().unwrap(), "records", "payload")
+    assert!(
+        original == read_cell(&restored.connection.lock().unwrap(), "records", "payload"),
+        "restore must preserve the exact raw cell"
     );
     assert!(
         restored

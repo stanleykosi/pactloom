@@ -12,6 +12,7 @@ use crate::durable_input_projection_v1::{
 use sha2::{Digest, Sha256};
 use std::net::Shutdown;
 
+#[path = "durable_input_projection_v1_client/redisclosure.rs"]
 mod redisclosure;
 pub use redisclosure::{
     NativeInputProjectionRedisclosureClientV1, PendingDurableInputProjectionRedeliveryV1,

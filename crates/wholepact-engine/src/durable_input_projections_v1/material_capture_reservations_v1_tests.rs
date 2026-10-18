@@ -160,7 +160,7 @@ fn inert_round_roundtrip_preserves_predispatch_intent_and_exact_lost_reply_locat
     // Current expiry is deliberately irrelevant to historical integrity.
     assert!(request.scope.check_valid_at(1000).is_err());
     restored.validate(&id).unwrap();
-    assert_eq!(encoded, encode(&restored));
+    assert!(encoded == encode(&restored));
 }
 
 #[test]
@@ -511,6 +511,13 @@ fn encrypted_fixture() -> (
         .iter()
         .enumerate()
     {
+        // The original selected intent covers the explicitly bounded discovery
+        // budget. The later candidate may narrow its actual debit; that does
+        // not silently widen a previously selected, smaller intent.
+        let original_discovery = &round.requests[&participant.account_id].intent;
+        assert!(
+            participant.maximum_net_debit <= original_discovery.maximum_selection_debit().unwrap()
+        );
         engine
             .add_intent(
                 &access,
@@ -522,8 +529,8 @@ fn encrypted_fixture() -> (
                     agreement_id: agreement.clone(),
                     participant_id: participant.participant_id.clone(),
                     desired_contribution: participant.contribution,
-                    maximum_net_debit: participant.maximum_net_debit,
-                    fee_cap: participant.fee_cap,
+                    maximum_net_debit: original_discovery.maximum_selection_debit().unwrap(),
+                    fee_cap: original_discovery.maximum_fee_share,
                     conditions: vec![],
                     valid_until: None,
                     status: wholepact_core::IntentStatus::Active,

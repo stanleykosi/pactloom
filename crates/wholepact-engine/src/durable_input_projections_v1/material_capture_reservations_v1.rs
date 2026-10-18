@@ -181,7 +181,11 @@ fn reservation_command(
         "reserve_material_capture_v1",
         agreement_id,
         Some(revision),
-        &(candidate_id, request, source, anchor),
+        // This private retained command must correlate its saved replay key
+        // with its exact request digest. Generic command keys remain separate
+        // from request identity; only this new purpose adds the explicit join.
+        // This is data integrity, not authentication or a dispatch permission.
+        &(key, candidate_id, request, source, anchor),
     )
 }
 fn same_command(left: &CommandContext, right: &CommandContext) -> bool {
