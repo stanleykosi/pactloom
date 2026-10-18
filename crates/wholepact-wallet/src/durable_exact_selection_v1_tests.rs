@@ -380,7 +380,9 @@ async fn exact_recap_uses_actual_rows_and_rejects_substitution_staleness_and_loc
 
 #[tokio::test]
 async fn explicit_new_preproof_anchor_keeps_historical_context_and_exact_inputs() {
-    let (fake, endpoint, server, first_fvk) = fake_server(2).await;
+    let (fake, endpoint, server, first_fvk) = fake_server_with_second_commitment_block().await;
+    assert!(!fake.blocks[1].vtx[0].ironwood_actions.is_empty());
+    assert_ne!(fake.trees[1].ironwood_tree, fake.trees[2].ironwood_tree);
     let second_fvk = fake.owner_fvks[1].clone();
     let (_a, path_a, key_a) = database(&first_fvk);
     let (_b, path_b, key_b) = database(&second_fvk);
@@ -509,5 +511,57 @@ async fn explicit_new_preproof_anchor_keeps_historical_context_and_exact_inputs(
                 .is_err()
         );
     }
+    server.abort();
+}
+
+#[tokio::test]
+async fn empty_newer_height_without_checkpoint_refuses_as_unavailable() {
+    // An arbitrary newer block is not necessarily a retained witness checkpoint.
+    // An explicitly chosen unavailable anchor must refuse, never synthesize a
+    // root/checkpoint or silently fall back to a different height.
+    let (fake, endpoint, server, fvk) = fake_server(2).await;
+    assert!(fake.blocks[1].vtx.is_empty());
+    let (_directory, path, key) = database(&fvk);
+    let mut wallet = controller(&path, &key, &endpoint);
+    let old_height = u32::try_from(fake.blocks[0].height).unwrap();
+    let new_height = u32::try_from(fake.blocks[1].height).unwrap();
+    wallet
+        .synchronize(
+            &FixtureAccess(true),
+            SyncLimits {
+                anchor_height: Some(old_height),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        wallet
+            .wallet
+            .db
+            .anchor_computable(zcash_protocol::ShieldedPool::Ironwood, old_height.into())
+            .unwrap()
+    );
+    assert!(
+        !wallet
+            .wallet
+            .db
+            .anchor_computable(zcash_protocol::ShieldedPool::Ironwood, new_height.into())
+            .unwrap()
+    );
+    let result = wallet
+        .synchronize(
+            &FixtureAccess(true),
+            SyncLimits {
+                anchor_height: Some(new_height),
+                ..Default::default()
+            },
+        )
+        .await;
+    assert!(matches!(
+        result,
+        Err(SyncError::Wallet(WalletError::MissingWitness))
+    ));
+    assert!(wallet.accepted.is_none());
     server.abort();
 }

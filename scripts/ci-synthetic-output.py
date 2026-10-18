@@ -123,6 +123,7 @@ SIGNER_VALIDATION_TESTS = (
     'account::birth::active::tests::borrowed_original_is_exact_vault_scoped_and_checks_fresh_ciphertexts',
     'account::birth::active::tests::borrowed_original_cannot_be_issued_for_mismatched_held_origin',
 )
+SIGNER_DURABLE_LABEL_TESTS = ('native_ui::runtime::durable_entry_v1::tests::durable_fixture_pairing_labels_use_existing_identifier_grammar',)
 # This real LocalIpc regression is CI-only, never a pure/validation selection.
 SIGNER_DURABLE_ENDPOINT_TEST = 'native_ui::runtime::durable_entry_v1::tests::durable_endpoint_is_external_preserves_inventory_and_drains_before_cleanup'
 SIGNER_BOOKKEEPING_TESTS = (
@@ -387,7 +388,7 @@ def run_pure(executable):
 
 def run_signer_validation(executable):
     assert resource.getrlimit(resource.RLIMIT_CORE)[0] == 0
-    for name in SIGNER_VALIDATION_TESTS + SIGNER_BOOKKEEPING_TESTS + SIGNER_PRECONSTRUCTION_TESTS + SIGNER_BIRTH_LINK_TESTS + SIGNER_ENDPOINT_CHANNEL_TESTS + SIGNER_SNAPSHOT_STORAGE_TESTS + SIGNER_SHAPE_TAMPER_TESTS + SIGNER_REENTRY_COMPATIBILITY_TESTS + SIGNER_CALL_LOCAL_TESTS + SIGNER_AUDIT_STORAGE_TESTS + SIGNER_AUDIT_COMPATIBILITY_TESTS + SIGNER_NAMED_ORIGIN_SNAPSHOT_TESTS + SIGNER_LINEAGE_PREDICATE_TESTS + SIGNER_TIMING_TESTS:
+    for name in SIGNER_VALIDATION_TESTS + SIGNER_BOOKKEEPING_TESTS + SIGNER_PRECONSTRUCTION_TESTS + SIGNER_BIRTH_LINK_TESTS + SIGNER_ENDPOINT_CHANNEL_TESTS + SIGNER_SNAPSHOT_STORAGE_TESTS + SIGNER_SHAPE_TAMPER_TESTS + SIGNER_REENTRY_COMPATIBILITY_TESTS + SIGNER_CALL_LOCAL_TESTS + SIGNER_AUDIT_STORAGE_TESTS + SIGNER_AUDIT_COMPATIBILITY_TESTS + SIGNER_NAMED_ORIGIN_SNAPSHOT_TESTS + SIGNER_LINEAGE_PREDICATE_TESTS + SIGNER_TIMING_TESTS + SIGNER_DURABLE_LABEL_TESTS:
         flags=['--exact',name,'--test-threads=1']
         try:
             listed=subprocess.run([executable,*flags,'--list'],capture_output=True,timeout=30,check=True)
@@ -401,7 +402,7 @@ def run_signer_validation(executable):
             # cases, two call-local validation cases, one encrypted saved-digest
             # case, two signed-history audit compatibility cases and three encrypted
             # named-origin snapshot cases, two inert lineage equality cases, and three
-            # fixed timing-counter model cases. No socket,
+            # fixed timing-counter model cases and one actual label grammar case. No socket,
             # native authority or payment owner. Raw
             # output stays private; this size check is post-capture, not a claim
             # of an incremental memory cap. Each fixed case has its own bound.
@@ -411,7 +412,7 @@ def run_signer_validation(executable):
         except Exception:
             print('CI_SYNTHETIC_SIGNER_VALIDATION failed_test='+name+' raw_output_withheld=true',flush=True)
             raise
-    print('CI_SYNTHETIC_SIGNER_VALIDATION passed=35 crypto_file_cases=4 bookkeeping_cases=2 replay_cases=6 endpoint_channel_cases=4 snapshot_storage_cases=2 shape_tamper_cases=1 compatibility_cases=3 call_local_cases=2 audit_storage_cases=1 audit_compatibility_cases=2 named_origin_snapshot_cases=3 lineage_predicate_cases=2 timing_counter_cases=3 native_payment_verified=false raw_output_discarded=true',flush=True)
+    print('CI_SYNTHETIC_SIGNER_VALIDATION passed=36 crypto_file_cases=4 bookkeeping_cases=2 replay_cases=6 endpoint_channel_cases=4 snapshot_storage_cases=2 shape_tamper_cases=1 compatibility_cases=3 call_local_cases=2 audit_storage_cases=1 audit_compatibility_cases=2 named_origin_snapshot_cases=3 lineage_predicate_cases=2 timing_counter_cases=3 label_grammar_cases=1 native_payment_verified=false raw_output_discarded=true',flush=True)
 
 def run_signer_durable_endpoint(executable):
     """One CI-only LocalIpc case, with no child processes or public raw output."""

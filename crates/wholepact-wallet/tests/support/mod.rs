@@ -197,25 +197,29 @@ pub async fn fake_server(
 /// hook; this never supplies a production privacy policy or native authority.
 pub(crate) async fn fake_server_with_connection_hook(
     block_count: u32,
+    on_connection: impl FnMut(usize) + Send + 'static,
+) -> (Fake, String, tokio::task::JoinHandle<()>, FullViewingKey) {
+    fake_server_inner(block_count, on_connection, false).await
+}
+
+/// A real later synthetic commitment gives the maintained scanner a second
+/// checkpoint. Its unrelated owners do not add notes to either original wallet.
+/// No checkpoint rows or roots are injected into the wallet database.
+pub(crate) async fn fake_server_with_second_commitment_block()
+-> (Fake, String, tokio::task::JoinHandle<()>, FullViewingKey) {
+    fake_server_inner(2, |_| {}, true).await
+}
+
+async fn fake_server_inner(
+    block_count: u32,
     mut on_connection: impl FnMut(usize) + Send + 'static,
+    second_commitment_block: bool,
 ) -> (Fake, String, tokio::task::JoinHandle<()>, FullViewingKey) {
     use axum::serve::ListenerExt;
     let fixture = wholepact_wallet::wallet::SyntheticContributionFixture::generate();
     let fvk = FullViewingKey::from(fixture.owner_spending_key(0));
     let mut first = fixture.compact_block();
     first.time = now() as u32;
-    let mut tree = CommitmentTree::<MerkleHashOrchard, 32>::empty();
-    for action in &first.vtx[0].ironwood_actions {
-        tree.append(
-            Option::<MerkleHashOrchard>::from(MerkleHashOrchard::from_bytes(
-                &action.cmx.clone().try_into().unwrap(),
-            ))
-            .unwrap(),
-        )
-        .unwrap();
-    }
-    let mut encoded = Vec::new();
-    zcash_primitives::merkle_tree::write_commitment_tree(&tree, &mut encoded).unwrap();
     let mut trees = vec![TreeState {
         network: "test".into(),
         height: first.height - 1,
@@ -226,20 +230,47 @@ pub(crate) async fn fake_server_with_connection_hook(
         ironwood_tree: "000000".into(),
     }];
     let mut blocks = vec![first.clone()];
+    let mut cumulative_metadata = first.chain_metadata.unwrap();
     for i in 1..block_count {
         let previous = blocks.last().unwrap();
         let mut hash = [61; 32];
         hash[..4].copy_from_slice(&i.to_le_bytes());
+        let vtx = if second_commitment_block && i == 1 {
+            let unrelated = wholepact_wallet::wallet::SyntheticContributionFixture::generate();
+            let mut transactions = unrelated.compact_block().vtx;
+            assert_eq!(transactions.len(), 1);
+            // Compact transaction IDs and block hashes are explicitly fabricated
+            // public fixture data; note ciphertext/commitments are genuine.
+            transactions[0].txid = vec![62; 32];
+            cumulative_metadata.ironwood_commitment_tree_size +=
+                u32::try_from(transactions[0].ironwood_actions.len()).unwrap();
+            transactions
+        } else {
+            vec![]
+        };
         blocks.push(CompactBlock {
             height: first.height + u64::from(i),
             hash: hash.to_vec(),
             prev_hash: previous.hash.clone(),
             time: first.time,
-            chain_metadata: first.chain_metadata,
+            chain_metadata: Some(cumulative_metadata),
+            vtx,
             ..Default::default()
         });
     }
+    let mut tree = CommitmentTree::<MerkleHashOrchard, 32>::empty();
     for block in &blocks {
+        for action in block.vtx.iter().flat_map(|tx| &tx.ironwood_actions) {
+            tree.append(
+                Option::<MerkleHashOrchard>::from(MerkleHashOrchard::from_bytes(
+                    &action.cmx.clone().try_into().unwrap(),
+                ))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        let mut encoded = Vec::new();
+        zcash_primitives::merkle_tree::write_commitment_tree(&tree, &mut encoded).unwrap();
         trees.push(TreeState {
             network: "test".into(),
             height: block.height,

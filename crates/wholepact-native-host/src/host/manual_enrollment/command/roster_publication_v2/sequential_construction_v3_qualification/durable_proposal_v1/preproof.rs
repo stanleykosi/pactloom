@@ -421,7 +421,7 @@ async fn exercise_async(original: initial::DurableInitialV1) -> Result<()> {
         let client = OriginalHistoryClient::pair(
             peer.provider,
             &peer.endpoint,
-            "Synthetic durable constructor",
+            "Synthetic-durable-constructor",
             scope,
         )
         .map_err(|error| trace.bridge(error))?;
@@ -752,7 +752,7 @@ async fn exercise_async(original: initial::DurableInitialV1) -> Result<()> {
         let client = OriginalHistoryClient::pair(
             peer.provider,
             &peer.endpoint,
-            "Synthetic fresh durable reviewer",
+            "Synthetic-fresh-durable-reviewer",
             scope,
         )
         .map_err(|error| trace.bridge(error))?;

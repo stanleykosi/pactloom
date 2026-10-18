@@ -248,6 +248,29 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
+    #[test]
+    fn durable_fixture_pairing_labels_use_existing_identifier_grammar() {
+        // Exercise the SAME validator called before the history client opens
+        // a socket. These are unverified application labels, not authority.
+        for (valid, rejected) in [
+            (
+                "Synthetic-durable-constructor",
+                "Synthetic durable constructor",
+            ),
+            (
+                "Synthetic-fresh-durable-reviewer",
+                "Synthetic fresh durable reviewer",
+            ),
+            (
+                "Synthetic-fixed-proposal-signer",
+                "Synthetic fixed proposal signer",
+            ),
+        ] {
+            assert!(crate::review::validate_label(valid).is_ok());
+            assert!(crate::review::validate_label(rejected).is_err());
+        }
+    }
+
     fn inventory(root: &Path) -> BTreeMap<std::ffi::OsString, (bool, bool, bool)> {
         std::fs::read_dir(root)
             .unwrap()
