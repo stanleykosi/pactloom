@@ -8,6 +8,14 @@ use wholepact_authority::{
     WitnessDisclosureDescriptor,
 };
 
+#[cfg(test)]
+thread_local! {
+    // Test-local accounting only, never a cached validation or runtime authority.
+    static DURABLE_BORN_SNAPSHOT_VALIDATIONS_V1: std::cell::Cell<u64> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
 impl SignerConsentJournal {
     /// Existing current-schema encrypted storage only. Unlike the generic
     /// opener, this boundary never migrates, initializes, repairs or clears a
@@ -61,7 +69,26 @@ impl SignerConsentJournal {
         lease.check_current()
     }
 
-    // Only the two guarded routes above call this helper. It never escapes as
+    /// Reuse the exact preconstruction record lease's existing authority fence.
+    /// The full snapshot must follow acquisition: an exclusion can otherwise
+    /// commit between an earlier scan and that lease without changing recovery.
+    /// This checks retained history only; callers must separately require both
+    /// current disclosure receipts and the actual native/source/data bindings.
+    pub(crate) fn check_durable_born_entry_v1_under_preconstruction_lease(
+        &self,
+        genesis: &AccountUseGenesis,
+        lease: &PreconstructionRecordLease<'_>,
+    ) -> Result<()> {
+        lease.require_journal(&self.binding())?;
+        if lease.enrollment().account_id() != genesis.identity.account_id {
+            return Err(JournalError::Permission);
+        }
+        lease.check_current()?;
+        self.check_durable_born_entry_snapshot_v1(genesis)?;
+        lease.check_current()
+    }
+
+    // Only the three guarded routes above call this helper. It never escapes as
     // an unfenced checker or accepts a caller-asserted held-lock boolean.
     fn check_durable_born_entry_snapshot_v1(&self, genesis: &AccountUseGenesis) -> Result<()> {
         let mut c = self.connection.lock().map_err(|_| JournalError::Database)?;
@@ -70,6 +97,8 @@ impl SignerConsentJournal {
         }
         self.database_identity.check_current(&c)?;
         let tx = c.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        #[cfg(test)]
+        DURABLE_BORN_SNAPSHOT_VALIDATIONS_V1.with(|count| count.set(count.get() + 1));
         validate(&tx, genesis, self.capacity_limits())?;
         self.database_identity.check_current(&tx)?;
         tx.commit()?;

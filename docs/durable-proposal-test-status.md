@@ -1,8 +1,16 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-18, 11:36 UTC.
+Updated: 2026-10-18, 15:42 UTC.
 
 **Incomplete implementation. No full native financial signing, public testnet settlement, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
+
+## CI9: exchange deadline identified; bounded validation consolidation tested locally
+
+[Run 39138310777](https://github.com/stanleykosi/pactloom/actions/runs/39138310777), qualifier `70426c6df5a324c2ca16fc1ad1ade71c0e0befa2`, passed build, Python91, Host44, encrypted bootstrap and native owner-reopen baseline (152s). Full signing stopped before admission at `SignerAdmissionHistoryExchangeDeadline:AuthorityPermission`; all cleanup passed. This identifies the selected shorter exchange budget, not the precise stage or sole cost source. Successful IO may still have consumed time; no absence-of-network-delay claim is made.
+
+Source review found three complete journal validations per history callback. The reviewed consolidation reduces this to one complete snapshot under the exact preconstruction lease, then checks BOTH current receipts and all exact proposal, participant, source, peer and scope bindings. Immutable witness descriptor projection is inert and grants no authority. Every callback still revalidates; nothing is cached across transport boundaries, and deadlines are unchanged. A naive reorder was rejected because exclusion could commit between a prior scan and lease acquisition. The final implementation scans after acquiring the actual lease; it preserves existing Deferred snapshot semantics and does not claim global exclusion across independent handles.
+
+All-features Host+Signer compilation passed (7m02s); non-synthetic durable Signer lib-test compilation passed (2m43s). Both feature modes passed 15 durable-born entry and 6 receipt tests, including five new regressions for exact binding/account/one-snapshot count, exclusion after an earlier scan, changes from another live handle, queued revocation without recursive lock, and original receipt expiry. Python91 also passed. Native timeout resolution, full signing, safe retry and settlement are still pending contextual verification.
 
 ## CI7: current baseline passed; first financial preparation failed
 

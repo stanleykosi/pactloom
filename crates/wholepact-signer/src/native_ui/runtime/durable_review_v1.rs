@@ -101,15 +101,20 @@ impl OpenAccount {
 impl DurableWitnessImportedSourceV1 {
     pub(super) fn check_current(&self) -> Result<()> {
         self.check_data_current_under_fence()?;
-        self.entry().check_current()?;
-        // Drop this complete record lease before TLS, native waiting, or a
-        // second journal transaction. It cannot be carried into a write fence.
+        // Acquire this callback's actual fence BEFORE the complete snapshot.
+        // Record acquisition alone does not check permanent-stop exclusion.
+        // The fence is not global snapshot exclusion: other handles and
+        // immutable append paths retain their existing semantics.
         let lease = self.entry().journal().acquire_preconstruction_records(
             &self.imported.request.enrollment_ref,
             &self.imported.request.accepted_manifest_ref,
             &self.session,
         )?;
         lease.require_native_origin(&self.entry().native_binding())?;
+        self.entry()
+            .check_current_under_preconstruction_lease(&lease)?;
+        // Freshness of BOTH original receipts must follow the potentially
+        // expensive full scan; a generic lease liveness check is insufficient.
         lease.require_current_durable_disclosure_receipts_v1()?;
         if lease.enrollment().account_id() != self.entry().account().account_id()?
             || lease.enrollment().participant_id() != self.imported.peer.scope.participant_id
@@ -119,7 +124,11 @@ impl DurableWitnessImportedSourceV1 {
         {
             return Err(Error::ReviewMismatch);
         }
-        self.check_data_current_under_fence()
+        let result = self.check_data_current_under_fence();
+        // No receipt/fence or prior successful check survives into TLS, native
+        // waiting, a write transaction, or the next callback.
+        drop(lease);
+        result
     }
     /// Deny-only final gate. This method deliberately takes NO journal/session
     /// lock: callers already retain their real approval and journal write fence.

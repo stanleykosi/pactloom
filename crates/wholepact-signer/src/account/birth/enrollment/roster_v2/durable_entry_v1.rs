@@ -6,7 +6,7 @@
 //! former Host process to remain alive, or call the empty-journal initial-owner
 //! gate. Old reservations and uncertain results remain in the same journal.
 use super::*;
-use crate::consent_journal::OriginalAuthorizationLease;
+use crate::consent_journal::{OriginalAuthorizationLease, PreconstructionRecordLease};
 use crate::native_ui::PendingAccountNativeAuthority;
 use wholepact_authority::account_use::AccountUseGenesis;
 
@@ -144,6 +144,23 @@ impl FreshDurableBornEntryV1 {
         Ok(())
     }
 
+    /// A fresh complete snapshot under this callback's actual record fence.
+    /// The fence must already be held before validation so a completed stop or
+    /// recovery transition cannot hide in a scan-to-lease acquisition gap.
+    /// This does not exclude independent handles or ordinary immutable appends,
+    /// and it grants no permission that may survive the synchronous callback.
+    pub(crate) fn check_current_under_preconstruction_lease(
+        &self,
+        lease: &PreconstructionRecordLease<'_>,
+    ) -> Result<()> {
+        self.check_original_source_current()?;
+        lease.require_native_origin(&self.native_binding())?;
+        self.journal
+            .check_durable_born_entry_v1_under_preconstruction_lease(self.genesis(), lease)?;
+        self.owner.check_current()?;
+        Ok(())
+    }
+
     /// Same actual vault/journal identities, while preserving the held fence.
     pub(crate) fn require_authorization_identity(
         &self,
@@ -263,6 +280,21 @@ impl FreshDurableBornEntryV1 {
         self.check_current()?;
         let disclosure = self.retained.disclosure()?;
         self.check_current()?;
+        Ok(disclosure)
+    }
+
+    /// Inert descriptor from the actual immutable original source only. No
+    /// journal or receipt permission is checked or returned here. A caller
+    /// using this for a current operation must subsequently validate the
+    /// complete journal and current records under its own exact held fence.
+    /// This deliberately retains both original-source checks without nesting
+    /// complete journal scans around a data-only projection.
+    pub(crate) fn original_witness_disclosure_data_v1(
+        &self,
+    ) -> Result<wholepact_authority::WitnessDisclosureDescriptor> {
+        self.check_original_source_current()?;
+        let disclosure = self.retained.disclosure()?;
+        self.check_original_source_current()?;
         Ok(disclosure)
     }
 }

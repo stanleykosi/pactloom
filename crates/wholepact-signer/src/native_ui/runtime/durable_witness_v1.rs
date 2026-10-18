@@ -27,6 +27,9 @@ fn require_workspace_source(
     source: &DurableWitnessImportedSourceV1,
     role: CredentialRole,
 ) -> Result<()> {
+    // This descriptor is data only. The complete source/journal/current-record
+    // check follows it on EVERY callback and retains its own actual read fence.
+    let disclosure = source.entry().original_witness_disclosure_data_v1()?;
     source.check_current()?;
     let signer = &source.entry().record().account_record.terms.signer;
     let certificate = match role {
@@ -35,7 +38,7 @@ fn require_workspace_source(
     };
     workspace.require_durable_credential_v1(
         &source.entry().native_binding(),
-        &source.entry().original_witness_disclosure()?,
+        &disclosure,
         certificate,
     )
 }
