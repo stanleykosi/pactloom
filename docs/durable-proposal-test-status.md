@@ -1,8 +1,16 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-18, 16:44 UTC.
+Updated: 2026-10-18, 17:30 UTC.
 
 **Incomplete implementation. No full native financial signing, public testnet settlement, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
+
+## CI11: measured local callback bottleneck; immutable identity computation optimized
+
+[Run 39146492686](https://github.com/stanleykosi/pactloom/actions/runs/39146492686), qualifier `67f1d911a1316ce1a6faf6e9a2b51e65396f4351`, passed build (11m39s), Python105, Host51, bootstrap and owner-reopen baseline. Fixed signing failed at Snapshot / BeforeRequestWrite / AfterCallback: seven callbacks consumed 10.868488s within a 10s exchange budget (elapsed 10.869449s). Connect took 87 microseconds and complete TLS handshake took 792 microseconds; no frame read/write occurred. Caller had 28.219471s remaining. The server was observed running and not stopped before/after, with 25.854690s remaining afterward. Both phase and outer cleanup passed. The observed failure is dominated by local callback work, not connection delay or expiry of caller/server lifetime in this run.
+
+Source audit found fourteen repeated BIP39/ZIP32 derivations per callback solely to recompute immutable account-ID and FVK hashes. The reviewed account-only change retains those two canonical hashes computed from the existing mandatory constructor derivation. No seed, spending key, viewing key, successful permission result or deadline is cached. All source/file/journal/receipt/peer checks still run at every boundary. Serialization bytes, decode reconstruction and actual FVK/spending-key derivation are unchanged; no timeout or schema-replay changes are bundled.
+
+All-features Host+Signer build passed (6m56s); seven new identity tests plus five birth/recovery compatibility tests passed. Non-synthetic durable Signer lib-tests compiled (2m39s); seven identity tests plus the backup/recovery compatibility case passed. Tests compare independent canonical math and bytes, different entropy/index, constructor/decode/recover parity, negative gates, and getter derivation count. Native timing improvement and the full payment cycle remain unverified pending rerun.
 
 ## CI10: consolidation insufficient; bounded cost measurement ready
 

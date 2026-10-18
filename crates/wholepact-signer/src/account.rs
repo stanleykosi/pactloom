@@ -12,6 +12,11 @@ use zeroize::Zeroizing;
 const MAGIC: &[u8; 8] = b"WPACC002";
 const MAX_ACCOUNT: usize = 32 * 1024;
 
+#[cfg(test)]
+std::thread_local! {
+    static SPENDING_KEY_DERIVATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Produced only by the controlling-terminal confirmation flow. Not a DTO.
 pub struct ProvisioningConsent {
     pub(crate) privacy_domain: String,
@@ -38,6 +43,18 @@ pub struct BackupVerifiedAccount {
 pub struct DedicatedAccount {
     entropy: Zeroizing<[u8; 32]>,
     account_index: u32,
+    // Inert commitments to immutable entropy/index, never serialized or key-use
+    // permission. No seed, spending key, or viewing key is retained here.
+    account_id: String,
+    #[cfg_attr(
+        not(all(
+            feature = "authority-signing",
+            feature = "native-ui",
+            target_os = "linux"
+        )),
+        allow(dead_code)
+    )]
+    full_viewing_key_digest: String,
     privacy_domain: String,
     restored: bool,
     #[cfg(all(
@@ -137,9 +154,21 @@ impl DedicatedAccount {
         {
             return Err(Error::InvalidData);
         }
-        let account = Self {
+        // Reuse the constructor's mandatory successful derivation before this
+        // account can escape. Temporary key material is not part of the account.
+        let (account_id, full_viewing_key_digest) = {
+            let key = Self::derive_spending_key_from_entropy(&entropy, account_index)?;
+            let fvk = Zeroizing::new(FullViewingKey::from(&key).to_bytes());
+            (
+                Self::account_id_from_fvk(fvk.as_slice()),
+                hex::encode(Sha256::digest(fvk.as_slice())),
+            )
+        };
+        Ok(Self {
             entropy,
             account_index,
+            account_id,
+            full_viewing_key_digest,
             privacy_domain,
             restored,
             #[cfg(all(
@@ -160,9 +189,7 @@ impl DedicatedAccount {
                 target_os = "linux"
             ))]
             activation: None,
-        };
-        let _ = account.spending_key()?;
-        Ok(account)
+        })
     }
     pub fn recover(words: &str, account_index: u32, privacy_domain: String) -> Result<Self> {
         let mnemonic = parse_recovery(words)?;
@@ -221,13 +248,21 @@ impl DedicatedAccount {
         Ok(key)
     }
     fn derive_spending_key(&self) -> Result<SpendingKey> {
-        let seed = Zeroizing::new(self.mnemonic()?.to_seed_normalized(""));
+        Self::derive_spending_key_from_entropy(&self.entropy, self.account_index)
+    }
+    fn derive_spending_key_from_entropy(
+        entropy: &[u8; 32],
+        account_index: u32,
+    ) -> Result<SpendingKey> {
+        #[cfg(test)]
+        SPENDING_KEY_DERIVATIONS.with(|count| count.set(count.get() + 1));
+        let mnemonic =
+            Mnemonic::from_entropy_in(Language::English, entropy).map_err(|_| Error::Crypto)?;
+        let seed = Zeroizing::new(mnemonic.to_seed_normalized(""));
         SpendingKey::from_zip32_seed(
             seed.as_slice(),
             1,
-            self.account_index
-                .try_into()
-                .map_err(|_| Error::InvalidData)?,
+            account_index.try_into().map_err(|_| Error::InvalidData)?,
         )
         .map_err(|_| Error::Crypto)
     }
@@ -235,7 +270,7 @@ impl DedicatedAccount {
         Ok(FullViewingKey::from(&self.derive_spending_key()?))
     }
     pub fn account_id(&self) -> Result<String> {
-        Ok(Self::account_id_from_fvk(&self.fvk()?.to_bytes()))
+        Ok(self.account_id.clone())
     }
     fn account_id_from_fvk(fvk: &[u8]) -> String {
         let mut hash = Sha256::new();
@@ -243,18 +278,17 @@ impl DedicatedAccount {
         hash.update(fvk);
         hex::encode(hash.finalize())
     }
-    // Pure commitments from one actual derivation, never a caller-supplied key
-    // or a retained authority/cache. The temporary viewing bytes are zeroized.
+    // Pure commitments from the constructor's actual derivation, never a
+    // caller-supplied key or retained key-use authority.
     #[cfg(all(
         feature = "authority-signing",
         feature = "native-ui",
         target_os = "linux"
     ))]
     fn birth_identity_commitments(&self) -> Result<(String, String)> {
-        let fvk = Zeroizing::new(self.fvk()?.to_bytes());
         Ok((
-            Self::account_id_from_fvk(fvk.as_slice()),
-            hex::encode(Sha256::digest(fvk.as_slice())),
+            self.account_id.clone(),
+            self.full_viewing_key_digest.clone(),
         ))
     }
     pub fn privacy_domain(&self) -> &str {
@@ -703,6 +737,289 @@ impl AccountVault {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn derivation_count() -> usize {
+        SPENDING_KEY_DERIVATIONS.with(std::cell::Cell::get)
+    }
+
+    // Independent oracle: do not call DedicatedAccount's derivation or identity
+    // helpers. All inputs in these tests are fixed public, never-funded entropy.
+    fn canonical_identity_oracle(entropy: [u8; 32], account_index: u32) -> (String, String) {
+        let entropy = Zeroizing::new(entropy);
+        let mnemonic = Mnemonic::from_entropy_in(Language::English, entropy.as_slice()).unwrap();
+        let seed = Zeroizing::new(mnemonic.to_seed_normalized(""));
+        let key =
+            SpendingKey::from_zip32_seed(seed.as_slice(), 1, account_index.try_into().unwrap())
+                .unwrap();
+        let fvk = Zeroizing::new(FullViewingKey::from(&key).to_bytes());
+        let mut account_hash = Sha256::new();
+        account_hash.update(b"wholepact:dedicated-testnet-account:legacy-zip32:v1\0");
+        account_hash.update(fvk.as_slice());
+        (
+            hex::encode(account_hash.finalize()),
+            hex::encode(Sha256::digest(fvk.as_slice())),
+        )
+    }
+
+    #[test]
+    fn identity_commitments_match_independent_bip39_zip32_oracle() {
+        let mut identities = Vec::new();
+        for (entropy, index) in [
+            ([0x61; 32], 0),
+            ([0x62; 32], 0),
+            ([0x61; 32], 1),
+            ([0x61; 32], (1 << 31) - 1),
+        ] {
+            let before = derivation_count();
+            let account = DedicatedAccount::from_entropy(
+                Zeroizing::new(entropy),
+                index,
+                "synthetic-identity".into(),
+                false,
+            )
+            .unwrap();
+            let expected = canonical_identity_oracle(entropy, index);
+            assert_eq!(account.account_id().unwrap(), expected.0);
+            assert_eq!(account.full_viewing_key_digest, expected.1);
+            #[cfg(all(
+                feature = "authority-signing",
+                feature = "native-ui",
+                target_os = "linux"
+            ))]
+            assert_eq!(account.birth_identity_commitments().unwrap(), expected);
+            assert_eq!(derivation_count(), before + 1);
+            identities.push(expected);
+        }
+        for first in 0..identities.len() {
+            for second in first + 1..identities.len() {
+                assert_ne!(identities[first].0, identities[second].0);
+                assert_ne!(identities[first].1, identities[second].1);
+            }
+        }
+    }
+
+    #[test]
+    fn identity_commitments_ignore_privacy_domain() {
+        let first = DedicatedAccount::from_entropy(
+            Zeroizing::new([0x61; 32]),
+            7,
+            "synthetic-domain-a".into(),
+            false,
+        )
+        .unwrap();
+        let second = DedicatedAccount::from_entropy(
+            Zeroizing::new([0x61; 32]),
+            7,
+            "synthetic-domain-b".into(),
+            false,
+        )
+        .unwrap();
+        assert_ne!(first.privacy_domain(), second.privacy_domain());
+        assert_eq!(first.account_id().unwrap(), second.account_id().unwrap());
+        assert_eq!(
+            first.full_viewing_key_digest,
+            second.full_viewing_key_digest
+        );
+    }
+
+    #[test]
+    fn identity_commitments_decode_and_recover_recompute_and_preserve_quarantine() {
+        let expected = canonical_identity_oracle([0x62; 32], 11);
+        let before = derivation_count();
+        let account = DedicatedAccount::from_entropy(
+            Zeroizing::new([0x62; 32]),
+            11,
+            "synthetic-roundtrip".into(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(derivation_count(), before + 1);
+        let decoded = DedicatedAccount::decode(&account.encode()).unwrap();
+        assert_eq!(derivation_count(), before + 2);
+        let words = account.recovery_words().unwrap();
+        let recovered =
+            DedicatedAccount::recover(&words, 11, "synthetic-recovered".into()).unwrap();
+        assert_eq!(derivation_count(), before + 3);
+        let decoded_recovered = DedicatedAccount::decode(&recovered.encode()).unwrap();
+        assert_eq!(derivation_count(), before + 4);
+        for candidate in [&account, &decoded, &recovered, &decoded_recovered] {
+            assert_eq!(candidate.account_id().unwrap(), expected.0);
+            assert_eq!(candidate.full_viewing_key_digest, expected.1);
+        }
+        assert_eq!(derivation_count(), before + 4);
+        assert!(!account.restored && !account.recovery_required());
+        assert!(!decoded.restored && !decoded.recovery_required());
+        assert!(recovered.restored && recovered.recovery_required());
+        assert!(decoded_recovered.restored && decoded_recovered.recovery_required());
+        assert_eq!(decoded.privacy_domain(), account.privacy_domain());
+        assert_eq!(
+            decoded_recovered.privacy_domain(),
+            recovered.privacy_domain()
+        );
+    }
+
+    #[test]
+    fn identity_commitments_preserve_exact_legacy_encoding() {
+        let expected = canonical_identity_oracle([0x63; 32], (1 << 31) - 1);
+        for restored in [false, true] {
+            let account = DedicatedAccount::from_entropy(
+                Zeroizing::new([0x63; 32]),
+                (1 << 31) - 1,
+                "synthetic-legacy".into(),
+                restored,
+            )
+            .unwrap();
+            // Legacy bytes are laid out manually, without either new commitment.
+            let mut legacy = Zeroizing::new(vec![1, 1, restored as u8, 0xff, 0xff, 0xff, 0x7f]);
+            legacy.extend_from_slice(&[0x63; 32]);
+            legacy.extend_from_slice(&[16, 0]);
+            legacy.extend_from_slice(b"synthetic-legacy");
+            // Boolean comparisons intentionally cannot print entropy on failure.
+            assert!(account.encode().as_slice() == legacy.as_slice());
+            let decoded = DedicatedAccount::decode(&legacy).unwrap();
+            assert!(decoded.encode().as_slice() == legacy.as_slice());
+            assert_eq!(decoded.account_id().unwrap(), expected.0);
+            assert_eq!(decoded.full_viewing_key_digest, expected.1);
+            assert_eq!(decoded.restored, restored);
+            assert_eq!(decoded.recovery_required(), restored);
+        }
+    }
+
+    #[test]
+    fn identity_commitments_reject_malformed_and_high_index_inputs() {
+        let before = derivation_count();
+        let mut legacy = Zeroizing::new(vec![1, 1, 0, 0, 0, 0, 0]);
+        legacy.extend_from_slice(&[0x64; 32]);
+        legacy.extend_from_slice(&[16, 0]);
+        legacy.extend_from_slice(b"synthetic-legacy");
+        let mut malformed = vec![Zeroizing::new(Vec::new()), Zeroizing::new(vec![0; 40])];
+        for (offset, value) in [(0, 2), (1, 2), (2, 2), (39, 15), (41, b' '), (41, 0xff)] {
+            let mut bytes = legacy.clone();
+            bytes[offset] = value;
+            malformed.push(bytes);
+        }
+        let mut truncated = legacy.clone();
+        truncated.pop();
+        malformed.push(truncated);
+        let mut trailing = legacy.clone();
+        trailing.push(0);
+        malformed.push(trailing);
+        let mut empty_domain = legacy.clone();
+        empty_domain.truncate(41);
+        empty_domain[39..41].copy_from_slice(&[0, 0]);
+        malformed.push(empty_domain);
+        let mut long_domain = legacy.clone();
+        long_domain.resize(41 + 129, b'a');
+        long_domain[39..41].copy_from_slice(&[129, 0]);
+        malformed.push(long_domain);
+        for bytes in malformed {
+            assert!(matches!(
+                DedicatedAccount::decode(&bytes),
+                Err(Error::InvalidData)
+            ));
+        }
+        for domain in [String::new(), "invalid domain".into(), "a".repeat(129)] {
+            assert!(matches!(
+                DedicatedAccount::from_entropy(Zeroizing::new([0x64; 32]), 0, domain, false),
+                Err(Error::InvalidData)
+            ));
+        }
+        let words = Zeroizing::new(
+            Mnemonic::from_entropy_in(Language::English, &[0x64; 32])
+                .unwrap()
+                .to_string(),
+        );
+        for index in [1 << 31, u32::MAX] {
+            assert!(matches!(
+                DedicatedAccount::from_entropy(
+                    Zeroizing::new([0x64; 32]),
+                    index,
+                    "synthetic-legacy".into(),
+                    false,
+                ),
+                Err(Error::InvalidData)
+            ));
+            let mut bytes = legacy.clone();
+            bytes[3..7].copy_from_slice(&index.to_le_bytes());
+            assert!(matches!(
+                DedicatedAccount::decode(&bytes),
+                Err(Error::InvalidData)
+            ));
+            assert!(matches!(
+                DedicatedAccount::recover(&words, index, "synthetic-legacy".into()),
+                Err(Error::InvalidData)
+            ));
+        }
+        assert_eq!(derivation_count(), before);
+    }
+
+    #[test]
+    fn identity_commitments_repeat_without_deriving_keys() {
+        let expected = canonical_identity_oracle([0x65; 32], 3);
+        let before = derivation_count();
+        let account = DedicatedAccount::from_entropy(
+            Zeroizing::new([0x65; 32]),
+            3,
+            "synthetic-repeat".into(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(derivation_count(), before + 1);
+        for _ in 0..16 {
+            assert_eq!(account.account_id().unwrap(), expected.0);
+            #[cfg(all(
+                feature = "authority-signing",
+                feature = "native-ui",
+                target_os = "linux"
+            ))]
+            assert_eq!(account.birth_identity_commitments().unwrap(), expected);
+        }
+        assert_eq!(derivation_count(), before + 1);
+        let fvk = Zeroizing::new(account.fvk().unwrap().to_bytes());
+        assert_eq!(hex::encode(Sha256::digest(fvk.as_slice())), expected.1);
+        assert_eq!(derivation_count(), before + 2);
+        let key = account.spending_key().unwrap();
+        let fvk = Zeroizing::new(FullViewingKey::from(&key).to_bytes());
+        assert_eq!(hex::encode(Sha256::digest(fvk.as_slice())), expected.1);
+        assert_eq!(derivation_count(), before + 3);
+    }
+
+    #[cfg(all(
+        feature = "authority-signing",
+        feature = "native-ui",
+        target_os = "linux"
+    ))]
+    #[test]
+    fn identity_commitments_do_not_bypass_born_key_gate() {
+        let before = derivation_count();
+        let mut account = DedicatedAccount::from_entropy(
+            Zeroizing::new([0x66; 32]),
+            4,
+            "synthetic-born-gate".into(),
+            false,
+        )
+        .unwrap();
+        account.born_authority_pending = true;
+        let expected = canonical_identity_oracle([0x66; 32], 4);
+        for _ in 0..16 {
+            assert_eq!(account.account_id().unwrap(), expected.0);
+            assert_eq!(account.birth_identity_commitments().unwrap(), expected);
+        }
+        assert!(matches!(
+            account.require_generic_spending_source(),
+            Err(Error::Unavailable)
+        ));
+        assert!(matches!(account.spending_key(), Err(Error::Unavailable)));
+        assert_eq!(derivation_count(), before + 1);
+        // Viewing-key access still performs its original real derivation and
+        // does not authorize the generic spending-key path for a born account.
+        let fvk = Zeroizing::new(account.fvk().unwrap().to_bytes());
+        assert_eq!(hex::encode(Sha256::digest(fvk.as_slice())), expected.1);
+        assert_eq!(derivation_count(), before + 2);
+        assert!(matches!(account.spending_key(), Err(Error::Unavailable)));
+        assert_eq!(derivation_count(), before + 2);
+    }
+
     #[cfg(all(
         feature = "authority-signing",
         feature = "native-ui",
