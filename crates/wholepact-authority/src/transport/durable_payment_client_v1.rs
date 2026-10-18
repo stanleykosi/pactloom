@@ -17,12 +17,64 @@ impl AuthorityClient {
         deadline: Instant,
         mut check_current: impl FnMut() -> Result<()>,
     ) -> Result<AccountSnapshot> {
-        check_current()?;
+        self.admit_durable_payment_v1_checked_observed(
+            request,
+            deadline,
+            &mut check_current,
+            #[cfg(feature = "synthetic-qualification")]
+            None,
+        )
+    }
+
+    /// Inert synthetic evidence from this same admission and checked TLS kernel.
+    /// Any error still leaves remote commit uncertain; this is not a retry route.
+    #[cfg(feature = "synthetic-qualification")]
+    pub fn admit_durable_payment_v1_diagnosed_checked_until(
+        &self,
+        request: &OwnerControlRequest,
+        deadline: Instant,
+        mut check_current: impl FnMut() -> Result<()>,
+    ) -> std::result::Result<AccountSnapshot, history_diagnostics_v1::CheckedHistoryFailureV1> {
+        let observer = HistoryObserverV1::with_admission_deadline(deadline);
+        self.admit_durable_payment_v1_checked_observed(
+            request,
+            deadline,
+            &mut check_current,
+            Some(&observer),
+        )
+        .map_err(|error| observer.into_failure(error))
+    }
+
+    fn admit_durable_payment_v1_checked_observed(
+        &self,
+        request: &OwnerControlRequest,
+        deadline: Instant,
+        check_current: &mut impl FnMut() -> Result<()>,
+        #[cfg(feature = "synthetic-qualification")] observer: Option<&HistoryObserverV1>,
+    ) -> Result<AccountSnapshot> {
+        #[cfg(feature = "synthetic-qualification")]
+        let checked = history_diagnostics_v1::callback_observed(observer, || check_current());
+        #[cfg(not(feature = "synthetic-qualification"))]
+        let checked = check_current();
+        checked?;
+        #[cfg(feature = "synthetic-qualification")]
+        if let Some(observer) = observer {
+            observer.enter(CheckedHistoryStageV1::AdmissionRequestValidation);
+        }
         let OwnerControl::AdmitDurablePaymentV1 { record } = &request.control else {
-            return Err(AuthorityError::Permission);
+            return observed_history_result!(observer, Err(AuthorityError::Permission));
         };
-        record.validate_request(request, &self.disclosure_descriptor())?;
-        self.durable_payment_control_checked_v1(request, deadline, &mut check_current)
+        observed_history_result!(
+            observer,
+            record.validate_request(request, &self.disclosure_descriptor())
+        )?;
+        self.durable_payment_control_checked_v1(
+            request,
+            deadline,
+            check_current,
+            #[cfg(feature = "synthetic-qualification")]
+            observer,
+        )
     }
 
     /// Retain this same client's original request/key across every uncertain
@@ -162,7 +214,13 @@ impl AuthorityClient {
         )?;
         check_current()?;
         require_before_caller_deadline(deadline)?;
-        self.durable_payment_control_checked_v1(request, deadline, &mut check_current)
+        self.durable_payment_control_checked_v1(
+            request,
+            deadline,
+            &mut check_current,
+            #[cfg(feature = "synthetic-qualification")]
+            None,
+        )
     }
 
     pub fn verify_durable_payment_session_v1_checked_until(
@@ -236,11 +294,16 @@ impl AuthorityClient {
         request: &OwnerControlRequest,
         deadline: Instant,
         check_current: &mut impl FnMut() -> Result<()>,
+        #[cfg(feature = "synthetic-qualification")] observer: Option<&HistoryObserverV1>,
     ) -> Result<AccountSnapshot> {
-        if request.account_id != self.account || request.network_profile_id != self.network {
-            return Err(AuthorityError::InvalidBinding);
+        #[cfg(feature = "synthetic-qualification")]
+        if let Some(observer) = observer {
+            observer.enter(CheckedHistoryStageV1::AdmissionBinding);
         }
-        let response = self.call_with_inner_checked(
+        if request.account_id != self.account || request.network_profile_id != self.network {
+            return observed_history_result!(observer, Err(AuthorityError::InvalidBinding));
+        }
+        let response = self.call_with_inner_checked_observed(
             |_| {
                 Ok(WireRequest::Mutate {
                     mutation: Box::new(AuthorityMutation::OwnerControl(request.clone())),
@@ -249,21 +312,50 @@ impl AuthorityClient {
             },
             Some(deadline),
             &mut *check_current,
+            #[cfg(feature = "synthetic-qualification")]
+            observer.map(|observer| (observer, HistoryPhaseV1::Admission)),
         )?;
-        check_current()?;
+        #[cfg(feature = "synthetic-qualification")]
+        let checked = history_diagnostics_v1::callback_observed(observer, || check_current());
+        #[cfg(not(feature = "synthetic-qualification"))]
+        let checked = check_current();
+        checked?;
+        #[cfg(feature = "synthetic-qualification")]
+        if let Some(observer) = observer {
+            observer.enter(CheckedHistoryStageV1::AdmissionResponse);
+        }
         let WireResponse::Mutation(MutationResult::Controlled(snapshot)) = response else {
-            return Err(AuthorityError::InvalidBinding);
+            return observed_history_result!(observer, Err(AuthorityError::InvalidBinding));
         };
-        self.check_snapshot(&snapshot)?;
-        self.check_committed_head(
-            &request.expected_head,
-            &snapshot.head,
-            AuthorityMutation::OwnerControl(request.clone()),
-            snapshot.last_witness_time_ms,
-            None,
+        #[cfg(feature = "synthetic-qualification")]
+        if let Some(observer) = observer {
+            observer.enter(CheckedHistoryStageV1::AdmissionSnapshotValidation);
+        }
+        observed_history_result!(observer, self.check_snapshot(&snapshot))?;
+        #[cfg(feature = "synthetic-qualification")]
+        if let Some(observer) = observer {
+            observer.enter(CheckedHistoryStageV1::AdmissionCommittedHeadValidation);
+        }
+        observed_history_result!(
+            observer,
+            self.check_committed_head(
+                &request.expected_head,
+                &snapshot.head,
+                AuthorityMutation::OwnerControl(request.clone()),
+                snapshot.last_witness_time_ms,
+                None,
+            )
         )?;
-        check_current()?;
-        require_before_caller_deadline(deadline)?;
+        #[cfg(feature = "synthetic-qualification")]
+        let checked = history_diagnostics_v1::callback_observed(observer, || check_current());
+        #[cfg(not(feature = "synthetic-qualification"))]
+        let checked = check_current();
+        checked?;
+        #[cfg(feature = "synthetic-qualification")]
+        if let Some(observer) = observer {
+            observer.enter(CheckedHistoryStageV1::AdmissionFinalValidation);
+        }
+        observed_history_result!(observer, require_before_caller_deadline(deadline))?;
         Ok(snapshot)
     }
 }

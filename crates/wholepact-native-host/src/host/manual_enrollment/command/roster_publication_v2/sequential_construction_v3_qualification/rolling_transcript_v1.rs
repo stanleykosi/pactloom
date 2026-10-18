@@ -36,6 +36,8 @@ pub(super) struct Transcript<'a> {
     timing: crate::host::synthetic_roster_timing_v1::Capture,
     #[cfg(feature = "synthetic-born-joined-qualification")]
     history_measurements: super::safe_diagnostics_v1::HistoryMeasurementCapture,
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    admission_diagnostics: super::safe_diagnostics_v1::AdmissionDiagnosticCapture,
 }
 
 impl<'a> Transcript<'a> {
@@ -69,38 +71,76 @@ impl<'a> Transcript<'a> {
             timing: Default::default(),
             #[cfg(feature = "synthetic-born-joined-qualification")]
             history_measurements: Default::default(),
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            admission_diagnostics: Default::default(),
         })
     }
 
     fn retained_bytes(&self) -> usize {
-        self.bytes.len() + self.timing_retained_bytes() + self.history_measurement_retained_bytes()
-            + self.paths.values().flatten().map(|p| p.value.len()).sum::<usize>()
+        self.bytes.len()
+            + self.timing_retained_bytes()
+            + self.history_measurement_retained_bytes()
+            + self.admission_diagnostic_retained_bytes()
+            + self
+                .paths
+                .values()
+                .flatten()
+                .map(|p| p.value.len())
+                .sum::<usize>()
             + self.diagnostics.iter().map(String::len).sum::<usize>()
             + self.diagnostics.len().saturating_sub(1)
     }
 
     fn timing_retained_bytes(&self) -> usize {
         #[cfg(feature = "synthetic-born-joined-qualification")]
-        { crate::host::synthetic_roster_timing_v1::Capture::RETAINED_BYTES }
+        {
+            crate::host::synthetic_roster_timing_v1::Capture::RETAINED_BYTES
+        }
         #[cfg(not(feature = "synthetic-born-joined-qualification"))]
-        { 0 }
+        {
+            0
+        }
     }
     fn history_measurement_retained_bytes(&self) -> usize {
         #[cfg(feature = "synthetic-born-joined-qualification")]
-        { self.history_measurements.retained_bytes() }
+        {
+            self.history_measurements.retained_bytes()
+        }
         #[cfg(not(feature = "synthetic-born-joined-qualification"))]
-        { 0 }
+        {
+            0
+        }
+    }
+    fn admission_diagnostic_retained_bytes(&self) -> usize {
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        {
+            self.admission_diagnostics.retained_bytes()
+        }
+        #[cfg(not(feature = "synthetic-born-joined-qualification"))]
+        {
+            0
+        }
+    }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(super) fn admission_diagnostic_lines(&self) -> Vec<&str> {
+        self.admission_diagnostics.public_lines()
     }
     #[cfg(feature = "synthetic-born-joined-qualification")]
     pub(super) fn history_measurement_lines(&self) -> Vec<&str> {
         self.history_measurements.public_lines()
     }
     #[cfg(feature = "synthetic-born-joined-qualification")]
-    pub(super) fn capture_timing(&mut self, bytes: &[u8]) { self.timing.feed(bytes); }
+    pub(super) fn capture_timing(&mut self, bytes: &[u8]) {
+        self.timing.feed(bytes);
+    }
     #[cfg(feature = "synthetic-born-joined-qualification")]
-    pub(super) fn timing_json(&self) -> Option<String> { self.timing.public_json() }
+    pub(super) fn timing_json(&self) -> Option<String> {
+        self.timing.public_json()
+    }
     #[cfg(feature = "synthetic-born-joined-qualification")]
-    pub(super) fn finish_timing(&mut self, drained: bool) { self.timing.finish_input(drained); }
+    pub(super) fn finish_timing(&mut self, drained: bool) {
+        self.timing.finish_input(drained);
+    }
 
     pub(super) fn append(&mut self, chunk: &[u8], root: &Path) -> Result<(), Failure> {
         #[cfg(feature = "synthetic-born-joined-qualification")]
@@ -111,6 +151,7 @@ impl<'a> Transcript<'a> {
         #[cfg(feature = "synthetic-born-joined-qualification")]
         if chunk.len() > MAX_BYTES.saturating_sub(self.retained_bytes()) {
             self.history_measurements.discard_for_budget();
+            self.admission_diagnostics.discard_for_budget();
         }
         if chunk.len() > MAX_BYTES.saturating_sub(self.retained_bytes()) {
             return Err(Failure::OutputLimit);
@@ -144,11 +185,14 @@ impl<'a> Transcript<'a> {
                     };
                     let new_count = (count + 1).min(MAX_DIAGNOSTICS);
                     retained = retained - removed - count.saturating_sub(1)
-                        + entry.len() + new_count.saturating_sub(1);
+                        + entry.len()
+                        + new_count.saturating_sub(1);
                     #[cfg(feature = "synthetic-born-joined-qualification")]
                     if retained > MAX_BYTES {
-                        retained -= self.history_measurements.retained_bytes();
+                        retained -= self.history_measurements.retained_bytes()
+                            + self.admission_diagnostics.retained_bytes();
                         self.history_measurements.discard_for_budget();
+                        self.admission_diagnostics.discard_for_budget();
                     }
                     if retained > MAX_BYTES {
                         return Err(Failure::OutputLimit);
@@ -166,8 +210,13 @@ impl<'a> Transcript<'a> {
             #[cfg(feature = "synthetic-born-joined-qualification")]
             {
                 let previous = self.history_measurements.retained_bytes();
-                self.history_measurements.capture_line(line, MAX_BYTES.saturating_sub(retained));
+                self.history_measurements
+                    .capture_line(line, MAX_BYTES.saturating_sub(retained));
                 retained = retained - previous + self.history_measurements.retained_bytes();
+                let previous = self.admission_diagnostics.retained_bytes();
+                self.admission_diagnostics
+                    .capture_line(line, MAX_BYTES.saturating_sub(retained));
+                retained = retained - previous + self.admission_diagnostics.retained_bytes();
             }
             for (marker, path) in &mut self.paths {
                 // Preserve the original exact substring lookup, even when a
@@ -179,20 +228,25 @@ impl<'a> Transcript<'a> {
                         || value.contains(['\r', '\n', '\0'])
                         || !actual.is_absolute()
                         || !actual.starts_with(root)
-                        || actual.components().any(|c| matches!(c, Component::ParentDir))
+                        || actual
+                            .components()
+                            .any(|c| matches!(c, Component::ParentDir))
                     {
                         return Err(Failure::InvalidPath);
                     }
                     retained = retained - path.as_ref().map_or(0, |p| p.value.len()) + value.len();
                     #[cfg(feature = "synthetic-born-joined-qualification")]
                     if retained > MAX_BYTES {
-                        retained -= self.history_measurements.retained_bytes();
+                        retained -= self.history_measurements.retained_bytes()
+                            + self.admission_diagnostics.retained_bytes();
                         self.history_measurements.discard_for_budget();
+                        self.admission_diagnostics.discard_for_budget();
                     }
                     if retained > MAX_BYTES {
                         return Err(Failure::OutputLimit);
                     }
-                    let absolute_end = self.base.checked_add(end + 1).ok_or(Failure::OutputLimit)?;
+                    let absolute_end =
+                        self.base.checked_add(end + 1).ok_or(Failure::OutputLimit)?;
                     // Drop erases the replaced exact path before allocating its
                     // successor. Never retain another owner's stale path copy.
                     *path = None;
@@ -216,22 +270,30 @@ impl<'a> Transcript<'a> {
     }
 
     pub(super) fn finish_text(&self) -> Result<(), Failure> {
-        std::str::from_utf8(&self.bytes).map(|_| ()).map_err(|error| {
-            if error.error_len().is_none() {
-                Failure::IncompleteUtf8
-            } else {
-                Failure::InvalidUtf8
-            }
-        })
+        std::str::from_utf8(&self.bytes)
+            .map(|_| ())
+            .map_err(|error| {
+                if error.error_len().is_none() {
+                    Failure::IncompleteUtf8
+                } else {
+                    Failure::InvalidUtf8
+                }
+            })
     }
 
     /// The latest complete exact marker must precede this matched prompt, not
     /// merely occur later in the same read. A used marker cannot be reused.
     pub(super) fn path(&self, marker: &str, prompt_in_tail: usize) -> Result<&str, Failure> {
-        let prompt = self.base.checked_add(self.consumed)
+        let prompt = self
+            .base
+            .checked_add(self.consumed)
             .and_then(|position| position.checked_add(prompt_in_tail))
             .ok_or(Failure::OutputLimit)?;
-        let path = self.paths.get(marker).and_then(Option::as_ref).ok_or(Failure::MissingPath)?;
+        let path = self
+            .paths
+            .get(marker)
+            .and_then(Option::as_ref)
+            .ok_or(Failure::MissingPath)?;
         if path.end > prompt {
             return Err(Failure::MissingPath);
         }
@@ -262,7 +324,11 @@ impl<'a> Transcript<'a> {
         if self.diagnostics.is_empty() {
             "none".into()
         } else {
-            self.diagnostics.iter().cloned().collect::<Vec<_>>().join(",")
+            self.diagnostics
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(",")
         }
     }
 }
@@ -287,10 +353,13 @@ mod tests {
         use super::super::{Input, full_payment_inputs_v1};
         let inputs = full_payment_inputs_v1::inputs();
         assert_eq!(inputs.len(), 204);
-        let names = inputs.iter().filter_map(|input| match input {
-            Input::CapturedPath { marker, .. } => Some(*marker),
-            _ => None,
-        }).collect::<std::collections::BTreeSet<_>>();
+        let names = inputs
+            .iter()
+            .filter_map(|input| match input {
+                Input::CapturedPath { marker, .. } => Some(*marker),
+                _ => None,
+            })
+            .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(names.len(), 10);
         let transcript = Transcript::new(names.iter().copied()).unwrap();
         assert_eq!(transcript.paths.len(), 10);
@@ -301,22 +370,35 @@ mod tests {
     fn consumed_reviews_compact_without_replaying_old_prompts() {
         let root = Path::new("/tmp/owned");
         let mut transcript = Transcript::new([MARKER]).unwrap();
-        transcript.append(b"SYNTHETIC_JOINED_DRAFT_PATH=/tmp/owned/exact.json\r\n", root).unwrap();
+        transcript
+            .append(
+                b"SYNTHETIC_JOINED_DRAFT_PATH=/tmp/owned/exact.json\r\n",
+                root,
+            )
+            .unwrap();
         for _ in 0..16 {
             let mut chunk = vec![b'x'; 32_768];
             chunk.extend_from_slice(b"\nEXACT CURRENT PROMPT: ");
             transcript.append(&chunk, root).unwrap();
-            assert!(transcript.tail().unwrap().unwrap().ends_with("EXACT CURRENT PROMPT: "));
+            assert!(transcript
+                .tail()
+                .unwrap()
+                .unwrap()
+                .ends_with("EXACT CURRENT PROMPT: "));
             transcript.consume(None).unwrap();
             assert_eq!(transcript.tail().unwrap(), Some(""));
             assert!(transcript.retained_bytes() < 1024 + transcript.timing_retained_bytes());
         }
-        transcript.append(b"\nDIFFERENT CURRENT PROMPT: ", root).unwrap();
+        transcript
+            .append(b"\nDIFFERENT CURRENT PROMPT: ", root)
+            .unwrap();
         let tail = transcript.tail().unwrap().unwrap();
         assert!(!tail.contains("EXACT CURRENT PROMPT"));
         let position = tail.find("DIFFERENT CURRENT PROMPT").unwrap();
-        assert_eq!(transcript.path(MARKER, position).unwrap(), "/tmp/owned/exact.json");
-
+        assert_eq!(
+            transcript.path(MARKER, position).unwrap(),
+            "/tmp/owned/exact.json"
+        );
     }
 
     #[test]
@@ -331,22 +413,41 @@ mod tests {
     fn paths_require_complete_exact_markers_and_original_scope() {
         let root = Path::new("/tmp/owned");
         let mut transcript = Transcript::new([MARKER]).unwrap();
-        transcript.append(b"SYNTHETIC_JOINED_DRAFT_PATH=/tmp/owned/first", root).unwrap();
+        transcript
+            .append(b"SYNTHETIC_JOINED_DRAFT_PATH=/tmp/owned/first", root)
+            .unwrap();
         assert_eq!(transcript.path(MARKER, 0), Err(Failure::MissingPath));
         transcript.append(b".json\nPROMPT", root).unwrap();
         let prompt = transcript.tail().unwrap().unwrap().find("PROMPT").unwrap();
-        assert_eq!(transcript.path(MARKER, prompt).unwrap(), "/tmp/owned/first.json");
+        assert_eq!(
+            transcript.path(MARKER, prompt).unwrap(),
+            "/tmp/owned/first.json"
+        );
         transcript.consume(Some(MARKER)).unwrap();
         assert_eq!(transcript.path(MARKER, 0), Err(Failure::MissingPath));
         transcript.append(b"\nSYNTHETIC_JOINED_DRAFT_PATH_MORE=/tmp/owned/wrong\nSYNTHETIC_JOINED_DRAFT_PATH/tmp/owned/wrong\n", root).unwrap();
         assert_eq!(transcript.path(MARKER, 0), Err(Failure::MissingPath));
         transcript.append(b"prior prompt text SYNTHETIC_JOINED_DRAFT_PATH=/tmp/owned/older SYNTHETIC_JOINED_DRAFT_PATH=/tmp/owned/latest\nNEXT PROMPT", root).unwrap();
-        let prompt = transcript.tail().unwrap().unwrap().find("NEXT PROMPT").unwrap();
-        assert_eq!(transcript.path(MARKER, prompt).unwrap(), "/tmp/owned/latest");
+        let prompt = transcript
+            .tail()
+            .unwrap()
+            .unwrap()
+            .find("NEXT PROMPT")
+            .unwrap();
+        assert_eq!(
+            transcript.path(MARKER, prompt).unwrap(),
+            "/tmp/owned/latest"
+        );
         transcript.consume(Some(MARKER)).unwrap();
-        assert_eq!(transcript.append(b"SYNTHETIC_JOINED_DRAFT_PATH=/tmp/other/escape\n", root), Err(Failure::InvalidPath));
+        assert_eq!(
+            transcript.append(b"SYNTHETIC_JOINED_DRAFT_PATH=/tmp/other/escape\n", root),
+            Err(Failure::InvalidPath)
+        );
         let mut transcript = Transcript::new([MARKER]).unwrap();
-        assert_eq!(transcript.append(b"SYNTHETIC_JOINED_DRAFT_PATH=/tmp/owned/../escape\n", root), Err(Failure::InvalidPath));
+        assert_eq!(
+            transcript.append(b"SYNTHETIC_JOINED_DRAFT_PATH=/tmp/owned/../escape\n", root),
+            Err(Failure::InvalidPath)
+        );
     }
 
     #[test]
@@ -354,21 +455,55 @@ mod tests {
         let root = Path::new("/tmp/owned");
         let mut transcript = Transcript::new([MARKER, SECOND]).unwrap();
         transcript.append(b"SYNTHETIC_JOINED_DRAFT_PATH=/tmp/owned/old\nSYNTHETIC_JOINED_DRAFT_PATH=/tmp/owned/replacement\nSYNTHETIC_JOINED_CANDIDATE_SELECTION_PATH=/tmp/owned/second\nFIRST PROMPT", root).unwrap();
-        let position = transcript.tail().unwrap().unwrap().find("FIRST PROMPT").unwrap();
-        assert_eq!(transcript.path(MARKER, position).unwrap(), "/tmp/owned/replacement");
+        let position = transcript
+            .tail()
+            .unwrap()
+            .unwrap()
+            .find("FIRST PROMPT")
+            .unwrap();
+        assert_eq!(
+            transcript.path(MARKER, position).unwrap(),
+            "/tmp/owned/replacement"
+        );
         transcript.consume(Some(MARKER)).unwrap();
         transcript.append(b"\nSECOND PROMPT", root).unwrap();
-        let position = transcript.tail().unwrap().unwrap().find("SECOND PROMPT").unwrap();
-        assert_eq!(transcript.path(SECOND, position).unwrap(), "/tmp/owned/second");
+        let position = transcript
+            .tail()
+            .unwrap()
+            .unwrap()
+            .find("SECOND PROMPT")
+            .unwrap();
+        assert_eq!(
+            transcript.path(SECOND, position).unwrap(),
+            "/tmp/owned/second"
+        );
         assert_eq!(transcript.path(MARKER, position), Err(Failure::MissingPath));
         transcript.consume(Some(SECOND)).unwrap();
-        transcript.append(b"\nTHIRD PROMPT\nSYNTHETIC_JOINED_DRAFT_PATH=/tmp/owned/future\n", root).unwrap();
-        let position = transcript.tail().unwrap().unwrap().find("THIRD PROMPT").unwrap();
+        transcript
+            .append(
+                b"\nTHIRD PROMPT\nSYNTHETIC_JOINED_DRAFT_PATH=/tmp/owned/future\n",
+                root,
+            )
+            .unwrap();
+        let position = transcript
+            .tail()
+            .unwrap()
+            .unwrap()
+            .find("THIRD PROMPT")
+            .unwrap();
         assert_eq!(transcript.path(MARKER, position), Err(Failure::MissingPath));
         transcript.consume(None).unwrap();
         transcript.append(b"\nFOURTH PROMPT", root).unwrap();
-        let position = transcript.tail().unwrap().unwrap().find("FOURTH PROMPT").unwrap();
-        assert_eq!(transcript.path(MARKER, position).unwrap(), "/tmp/owned/future");
+        let position = transcript
+            .tail()
+            .unwrap()
+            .unwrap()
+            .find("FOURTH PROMPT")
+            .unwrap();
+        assert_eq!(
+            transcript.path(MARKER, position).unwrap(),
+            "/tmp/owned/future"
+        );
     }
 
     #[test]
@@ -406,18 +541,38 @@ mod tests {
         let mut transcript = Transcript::new([]).unwrap();
         // Multiple markers on one physical line remain invalid under the
         // existing whole-line closed parser; no fuzzy marker extraction.
-        transcript.append(b"[JOINED_DIAGNOSTIC Bootstrap Begin][JOINED_DIAGNOSTIC Session Complete]\n", root).unwrap();
+        transcript
+            .append(
+                b"[JOINED_DIAGNOSTIC Bootstrap Begin][JOINED_DIAGNOSTIC Session Complete]\n",
+                root,
+            )
+            .unwrap();
         assert_eq!(transcript.summary(), "none");
         transcript.consume(None).unwrap();
         for _ in 0..40 {
-            transcript.append(b"[JOINED_DIAGNOSTIC Bootstrap Begin]\n[JOINED_DIAGNOSTIC Session Complete]\n", root).unwrap();
+            transcript
+                .append(
+                    b"[JOINED_DIAGNOSTIC Bootstrap Begin]\n[JOINED_DIAGNOSTIC Session Complete]\n",
+                    root,
+                )
+                .unwrap();
             transcript.consume(None).unwrap();
         }
         let summary = transcript.summary();
         assert_eq!(summary.split(',').count(), MAX_DIAGNOSTICS);
-        assert_eq!(transcript.retained_bytes(), summary.len() + transcript.timing_retained_bytes());
+        assert_eq!(
+            transcript.retained_bytes(),
+            summary.len() + transcript.timing_retained_bytes()
+        );
         for (index, entry) in summary.split(',').enumerate() {
-            assert_eq!(entry, if index % 2 == 0 { "Bootstrap:Begin" } else { "Session:Complete" });
+            assert_eq!(
+                entry,
+                if index % 2 == 0 {
+                    "Bootstrap:Begin"
+                } else {
+                    "Session:Complete"
+                }
+            );
         }
     }
 
@@ -428,8 +583,13 @@ mod tests {
         transcript.append(b"SYNTHETIC_JOINED_DRAFT_PATH=/tmp/owned/exact\n[JOINED_DIAGNOSTIC Bootstrap Begin]\n", root).unwrap();
         transcript.consume(None).unwrap();
         let metadata = transcript.retained_bytes();
-        assert_eq!(metadata, "/tmp/owned/exact".len() + "Bootstrap:Begin".len() + transcript.timing_retained_bytes());
-        transcript.append(&vec![b'x'; MAX_BYTES - metadata], root).unwrap();
+        assert_eq!(
+            metadata,
+            "/tmp/owned/exact".len() + "Bootstrap:Begin".len() + transcript.timing_retained_bytes()
+        );
+        transcript
+            .append(&vec![b'x'; MAX_BYTES - metadata], root)
+            .unwrap();
         assert_eq!(transcript.append(b"x", root), Err(Failure::OutputLimit));
         assert_eq!(transcript.retained_bytes(), MAX_BYTES);
     }
@@ -439,8 +599,10 @@ mod tests {
     fn history_measurements_survive_split_lines_and_compaction_without_raw_text() {
         let root = Path::new("/tmp/owned");
         let mut transcript = Transcript::new([]).unwrap();
-        let line = format!("[HISTORY_MEASUREMENT_V1 {}]\r\n",
-            super::super::safe_diagnostics_v1::HISTORY_MEASUREMENT_TEST_JSON);
+        let line = format!(
+            "[HISTORY_MEASUREMENT_V1 {}]\r\n",
+            super::super::safe_diagnostics_v1::HISTORY_MEASUREMENT_TEST_JSON
+        );
         let split = line.len() / 2;
         transcript.append(&line.as_bytes()[..split], root).unwrap();
         assert!(transcript.history_measurement_lines().is_empty());
@@ -448,10 +610,17 @@ mod tests {
         assert_eq!(transcript.history_measurement_lines().len(), 1);
         transcript.consume(None).unwrap();
         assert!(transcript.bytes.is_empty());
-        assert_eq!(transcript.retained_bytes(), transcript.timing_retained_bytes()
-            + transcript.history_measurement_lines()[0].len());
+        assert_eq!(
+            transcript.retained_bytes(),
+            transcript.timing_retained_bytes() + transcript.history_measurement_lines()[0].len()
+        );
         assert_eq!(transcript.summary(), "none");
-        transcript.append(b"private [HISTORY_MEASUREMENT_V1 {\"private\":\"payload\"}]\n", root).unwrap();
+        transcript
+            .append(
+                b"private [HISTORY_MEASUREMENT_V1 {\"private\":\"payload\"}]\n",
+                root,
+            )
+            .unwrap();
         transcript.consume(None).unwrap();
         assert_eq!(transcript.history_measurement_lines().len(), 1);
         assert!(!transcript.history_measurement_lines()[0].contains("private"));
@@ -459,9 +628,17 @@ mod tests {
         transcript.consume(None).unwrap();
         assert_eq!(transcript.history_measurement_retained_bytes(), 0);
         assert!(transcript.history_measurement_lines()[0].contains("invalid=true"));
-        transcript.append(b"[HISTORY_SERVER_MEASUREMENT_V1 {\"private\":\"payload\"}]\n", root).unwrap();
+        transcript
+            .append(
+                b"[HISTORY_SERVER_MEASUREMENT_V1 {\"private\":\"payload\"}]\n",
+                root,
+            )
+            .unwrap();
         transcript.consume(None).unwrap();
-        assert!(transcript.history_measurement_lines().iter().all(|line| !line.contains("payload")));
+        assert!(transcript
+            .history_measurement_lines()
+            .iter()
+            .all(|line| !line.contains("payload")));
     }
 
     #[test]
@@ -470,8 +647,10 @@ mod tests {
         let root = Path::new("/tmp/owned");
         let mut measured = Transcript::new([]).unwrap();
         let mut original = Transcript::new([]).unwrap();
-        let line = format!("[HISTORY_MEASUREMENT_V1 {}]\n",
-            super::super::safe_diagnostics_v1::HISTORY_MEASUREMENT_TEST_JSON);
+        let line = format!(
+            "[HISTORY_MEASUREMENT_V1 {}]\n",
+            super::super::safe_diagnostics_v1::HISTORY_MEASUREMENT_TEST_JSON
+        );
         measured.append(line.as_bytes(), root).unwrap();
         measured.consume(None).unwrap();
         assert!(measured.history_measurement_retained_bytes() > 0);
@@ -481,7 +660,10 @@ mod tests {
         measured.append(&chunk, root).unwrap();
         assert_eq!(measured.retained_bytes(), original.retained_bytes());
         assert_eq!(measured.history_measurement_retained_bytes(), 0);
-        assert!(measured.history_measurement_lines().iter().all(|line| line.contains("invalid=true")));
+        assert!(measured
+            .history_measurement_lines()
+            .iter()
+            .all(|line| line.contains("invalid=true")));
         assert_eq!(original.append(b"x", root), Err(Failure::OutputLimit));
         assert_eq!(measured.append(b"x", root), Err(Failure::OutputLimit));
         // No raw limit bypass: only the optional already-validated retained
@@ -492,16 +674,21 @@ mod tests {
     #[cfg(feature = "synthetic-born-joined-qualification")]
     fn history_measurement_copies_yield_before_original_metadata_budget() {
         let root = Path::new("/tmp/owned");
-        for metadata in ["[JOINED_DIAGNOSTIC Bootstrap Begin]\n",
-            "SYNTHETIC_JOINED_DRAFT_PATH=/tmp/owned/exact\n"] {
+        for metadata in [
+            "[JOINED_DIAGNOSTIC Bootstrap Begin]\n",
+            "SYNTHETIC_JOINED_DRAFT_PATH=/tmp/owned/exact\n",
+        ] {
             let mut measured = Transcript::new([MARKER]).unwrap();
             let mut original = Transcript::new([MARKER]).unwrap();
-            let line = format!("[HISTORY_MEASUREMENT_V1 {}]\n",
-                super::super::safe_diagnostics_v1::HISTORY_MEASUREMENT_TEST_JSON);
+            let line = format!(
+                "[HISTORY_MEASUREMENT_V1 {}]\n",
+                super::super::safe_diagnostics_v1::HISTORY_MEASUREMENT_TEST_JSON
+            );
             measured.append(line.as_bytes(), root).unwrap();
             measured.consume(None).unwrap();
             let captured = measured.history_measurement_retained_bytes();
-            let filler = MAX_BYTES - measured.timing_retained_bytes() - captured - metadata.len() - 1;
+            let filler =
+                MAX_BYTES - measured.timing_retained_bytes() - captured - metadata.len() - 1;
             let mut chunk = vec![b'x'; filler];
             chunk.push(b'\n');
             chunk.extend_from_slice(metadata.as_bytes());
@@ -510,7 +697,10 @@ mod tests {
             assert_eq!(measured.history_measurement_retained_bytes(), 0);
             assert_eq!(measured.retained_bytes(), original.retained_bytes());
             assert_eq!(measured.summary(), original.summary());
-            assert!(measured.history_measurement_lines().iter().all(|line| line.contains("invalid=true")));
+            assert!(measured
+                .history_measurement_lines()
+                .iter()
+                .all(|line| line.contains("invalid=true")));
         }
     }
 
@@ -518,8 +708,116 @@ mod tests {
     fn one_unconsumed_review_still_cannot_exceed_original_bound() {
         let root = Path::new("/tmp/owned");
         let mut transcript = Transcript::new([]).unwrap();
-        transcript.append(&vec![b'x'; MAX_BYTES - transcript.timing_retained_bytes()], root).unwrap();
+        transcript
+            .append(
+                &vec![b'x'; MAX_BYTES - transcript.timing_retained_bytes()],
+                root,
+            )
+            .unwrap();
         assert_eq!(transcript.append(b"x", root), Err(Failure::OutputLimit));
         assert_eq!(transcript.retained_bytes(), MAX_BYTES);
+    }
+    #[test]
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    fn admission_diagnostics_survive_split_lines_and_compaction() {
+        use super::super::safe_diagnostics_v1::{
+            ADMISSION_MEASUREMENT_TEST_JSON, SIGNER_ADMISSION_TEST_JSON,
+            WITNESS_ADMISSION_TEST_JSON,
+        };
+        let root = Path::new("/tmp/owned");
+        let mut transcript = Transcript::new([]).unwrap();
+        for (prefix, json) in [
+            ("ADMISSION_MEASUREMENT_V1", ADMISSION_MEASUREMENT_TEST_JSON),
+            ("SIGNER_ADMISSION_V1", SIGNER_ADMISSION_TEST_JSON),
+            ("WITNESS_ADMISSION_V1", WITNESS_ADMISSION_TEST_JSON),
+        ] {
+            let line = format!("[{prefix} {json}]\r\n");
+            let before = transcript.admission_diagnostic_lines().len();
+            let split = line.len() / 2;
+            transcript.append(&line.as_bytes()[..split], root).unwrap();
+            assert_eq!(transcript.admission_diagnostic_lines().len(), before);
+            transcript.append(&line.as_bytes()[split..], root).unwrap();
+            transcript.consume(None).unwrap();
+            assert_eq!(transcript.admission_diagnostic_lines().len(), before + 1);
+        }
+        assert!(transcript.bytes.is_empty());
+        assert_eq!(
+            transcript.retained_bytes(),
+            transcript.timing_retained_bytes() + transcript.admission_diagnostic_retained_bytes()
+        );
+        transcript
+            .append(
+                b"private [SIGNER_ADMISSION_V1 {\"private\":\"payload\"}]\n",
+                root,
+            )
+            .unwrap();
+        transcript.consume(None).unwrap();
+        assert_eq!(transcript.admission_diagnostic_lines().len(), 3);
+        assert!(transcript
+            .admission_diagnostic_lines()
+            .iter()
+            .all(|line| !line.contains("private")));
+        transcript
+            .append(
+                b"CI_SYNTHETIC_SIGNER_ADMISSION invalid=true details_withheld=true\n",
+                root,
+            )
+            .unwrap();
+        transcript.consume(None).unwrap();
+        assert!(transcript.admission_diagnostic_lines()[1].contains("invalid=true"));
+    }
+
+    #[test]
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    fn admission_optional_copies_yield_to_original_chunk_budget() {
+        let root = Path::new("/tmp/owned");
+        let mut measured = Transcript::new([]).unwrap();
+        let mut original = Transcript::new([]).unwrap();
+        let line = format!(
+            "[WITNESS_ADMISSION_V1 {}]\n",
+            super::super::safe_diagnostics_v1::WITNESS_ADMISSION_TEST_JSON
+        );
+        measured.append(line.as_bytes(), root).unwrap();
+        measured.consume(None).unwrap();
+        assert!(measured.admission_diagnostic_retained_bytes() > 0);
+        let chunk = vec![b'x'; MAX_BYTES - original.timing_retained_bytes()];
+        original.append(&chunk, root).unwrap();
+        measured.append(&chunk, root).unwrap();
+        assert_eq!(measured.retained_bytes(), original.retained_bytes());
+        assert_eq!(measured.admission_diagnostic_retained_bytes(), 0);
+        assert!(measured.admission_diagnostic_lines()[0].contains("invalid=true"));
+        assert_eq!(original.append(b"x", root), Err(Failure::OutputLimit));
+        assert_eq!(measured.append(b"x", root), Err(Failure::OutputLimit));
+    }
+
+    #[test]
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    fn admission_optional_copies_yield_to_original_metadata_budget() {
+        let root = Path::new("/tmp/owned");
+        for metadata in [
+            "[JOINED_DIAGNOSTIC Bootstrap Begin]\n",
+            "SYNTHETIC_JOINED_DRAFT_PATH=/tmp/owned/exact\n",
+        ] {
+            let mut measured = Transcript::new([MARKER]).unwrap();
+            let mut original = Transcript::new([MARKER]).unwrap();
+            let line = format!(
+                "[SIGNER_ADMISSION_V1 {}]\n",
+                super::super::safe_diagnostics_v1::SIGNER_ADMISSION_TEST_JSON
+            );
+            measured.append(line.as_bytes(), root).unwrap();
+            measured.consume(None).unwrap();
+            let captured = measured.admission_diagnostic_retained_bytes();
+            let filler =
+                MAX_BYTES - measured.timing_retained_bytes() - captured - metadata.len() - 1;
+            let mut chunk = vec![b'x'; filler];
+            chunk.push(b'\n');
+            chunk.extend_from_slice(metadata.as_bytes());
+            original.append(&chunk, root).unwrap();
+            measured.append(&chunk, root).unwrap();
+            assert_eq!(measured.admission_diagnostic_retained_bytes(), 0);
+            assert_eq!(measured.retained_bytes(), original.retained_bytes());
+            assert_eq!(measured.summary(), original.summary());
+            assert!(measured.admission_diagnostic_lines()[0].contains("invalid=true"));
+        }
     }
 }

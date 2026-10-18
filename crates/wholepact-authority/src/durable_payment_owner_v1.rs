@@ -17,6 +17,9 @@ pub(crate) struct NativeDurablePaymentAdmissionSourceV1 {
     proposal: DurablePaymentAdmissionProposalV1,
     lease: Option<NativeWorkerLease>,
     committed: Option<AccountSnapshot>,
+    #[cfg(feature = "synthetic-qualification")]
+    admission_observer:
+        Option<crate::transport::admission_diagnostics_v1::AdmissionWitnessObserverV1>,
 }
 pub(crate) struct ConfiguredDurablePaymentWitnessV1 {
     journal: Arc<AuthorityJournal>,
@@ -132,9 +135,25 @@ pub(crate) fn arm_durable_payment_admission_v1(
         proposal,
         lease: Some(lease),
         committed: None,
+        #[cfg(feature = "synthetic-qualification")]
+        admission_observer: None,
     })
 }
 impl NativeDurablePaymentAdmissionSourceV1 {
+    #[cfg(feature = "synthetic-qualification")]
+    pub(crate) fn set_admission_observer(
+        &mut self,
+        observer: Option<crate::transport::admission_diagnostics_v1::AdmissionWitnessObserverV1>,
+    ) {
+        self.admission_observer = observer;
+    }
+    #[cfg(feature = "synthetic-qualification")]
+    pub(crate) fn admission_observer(
+        &self,
+    ) -> Option<&crate::transport::admission_diagnostics_v1::AdmissionWitnessObserverV1> {
+        self.admission_observer.as_ref()
+    }
+
     pub(crate) fn journal(&self) -> Arc<AuthorityJournal> {
         Arc::clone(&self.proposal.journal)
     }
@@ -169,6 +188,12 @@ impl NativeDurablePaymentAdmissionSourceV1 {
         {
             return Err(AuthorityError::Authentication);
         }
+        // Observe ONLY the success of the equality already evaluated above.
+        // This data cannot replace that equality or any currentness validation.
+        #[cfg(feature = "synthetic-qualification")]
+        if let Some(observer) = &self.admission_observer {
+            observer.exact_request_matched();
+        }
         self.proposal.validate_locked(ledger, now)
     }
     /// Only the exact append kernel calls this after journal/transaction preflight.
@@ -188,6 +213,10 @@ impl NativeDurablePaymentAdmissionSourceV1 {
     }
     pub(crate) fn record_committed(&mut self, snapshot: AccountSnapshot) {
         self.committed = Some(snapshot);
+        #[cfg(feature = "synthetic-qualification")]
+        if let Some(observer) = &self.admission_observer {
+            observer.snapshot_recorded();
+        }
     }
     pub(crate) fn committed(&self) -> Option<&AccountSnapshot> {
         self.committed.as_ref()

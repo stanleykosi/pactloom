@@ -12,52 +12,92 @@ impl AuthorityJournal {
         peer: &str,
         request: OwnerControlRequest,
     ) -> Result<MutationResult> {
-        source.check_open()?;
-        let c = self
-            .connection
-            .lock()
-            .map_err(|_| AuthorityError::Storage)?;
-        let tx = Transaction::new_unchecked(c.connection(), TransactionBehavior::Immediate)?;
-        authenticate_admission(&tx, peer)?;
-        let mut ledger = load(&tx)?;
-        let now = now_ms()?;
-        source.require_exact_locked(self, &ledger, peer, &request, now)?;
-        let event = Event {
-            mutation: AuthorityMutation::OwnerControl(request.clone()),
-            authenticated_certificate_digest: peer.into(),
-            witness_time_ms: now,
-            writer_session_id: None,
-            original_request_link: None,
-        };
-        ledger.authenticate_mutation(&event)?;
-        if ledger.replay(&event)?.is_some() {
-            return Err(AuthorityError::Uncertain);
-        }
-        // Correct lock order: journal lock and BEGIN IMMEDIATE + complete exact
-        // preflight precede OPEN -> PUBLISHING. Never hold publication during TLS.
-        let publication = source.take_publication_after_lock()?;
-        publication.check_current()?;
-        let previous = ledger.snapshot.head.digest.clone();
-        let result = ledger.apply(&event)?;
-        append_exact(&tx, &ledger, &event, &previous)?;
-        self.born_owner
-            .as_ref()
-            .ok_or(AuthorityError::Permission)?
-            .check_mutation_current()?;
-        publication.check_current()?;
-        let final_now = now_ms()?;
-        let OwnerControl::AdmitDurablePaymentV1 { record } = &request.control else {
-            return Err(AuthorityError::Permission);
-        };
-        if final_now < now || final_now >= record.terms.valid_until_ms {
-            return Err(AuthorityError::Expired);
-        }
-        tx.commit().map_err(|_| AuthorityError::Uncertain)?;
-        let MutationResult::Controlled(snapshot) = &result else {
-            return Err(AuthorityError::CorruptHistory);
-        };
-        source.record_committed(snapshot.clone());
-        Ok(result)
+        #[cfg(feature = "synthetic-qualification")]
+        let observer = source.admission_observer().cloned();
+        let result = (|| {
+            crate::transport::admission_stage!(observer.as_ref(), JournalPreflight);
+            source.check_open()?;
+            let c = self
+                .connection
+                .lock()
+                .map_err(|_| AuthorityError::Storage)?;
+            let tx = Transaction::new_unchecked(c.connection(), TransactionBehavior::Immediate)?;
+            authenticate_admission(&tx, peer)?;
+            let mut ledger = load(&tx)?;
+            let now = now_ms()?;
+            crate::transport::admission_stage!(observer.as_ref(), ExactRequest);
+            source.require_exact_locked(self, &ledger, peer, &request, now)?;
+            let event = Event {
+                mutation: AuthorityMutation::OwnerControl(request.clone()),
+                authenticated_certificate_digest: peer.into(),
+                witness_time_ms: now,
+                writer_session_id: None,
+                original_request_link: None,
+            };
+            ledger.authenticate_mutation(&event)?;
+            if ledger.replay(&event)?.is_some() {
+                return Err(AuthorityError::Uncertain);
+            }
+            // Correct lock order: journal lock and BEGIN IMMEDIATE + complete exact
+            // preflight precede OPEN -> PUBLISHING. Never hold publication during TLS.
+            crate::transport::admission_stage!(observer.as_ref(), Publication);
+            let publication = crate::transport::admission_measure!(
+                observer.as_ref(),
+                Publication,
+                source.take_publication_after_lock()
+            )?;
+            publication.check_current()?;
+            let previous = ledger.snapshot.head.digest.clone();
+            crate::transport::admission_stage!(observer.as_ref(), Apply);
+            let result = ledger.apply(&event)?;
+            crate::transport::admission_stage!(observer.as_ref(), Append);
+            crate::transport::admission_measure!(
+                observer.as_ref(),
+                Append,
+                append_exact(&tx, &ledger, &event, &previous)
+            )?;
+            crate::transport::admission_stage!(observer.as_ref(), FinalCurrent);
+            self.born_owner
+                .as_ref()
+                .ok_or(AuthorityError::Permission)?
+                .check_mutation_current()?;
+            publication.check_current()?;
+            let final_now = now_ms()?;
+            let OwnerControl::AdmitDurablePaymentV1 { record } = &request.control else {
+                return Err(AuthorityError::Permission);
+            };
+            if final_now < now || final_now >= record.terms.valid_until_ms {
+                return Err(AuthorityError::Expired);
+            }
+            crate::transport::admission_stage!(observer.as_ref(), Commit);
+            #[cfg(feature = "synthetic-qualification")]
+            if let Some(observer) = &observer {
+                observer.commit_entered();
+            }
+            let committed =
+                crate::transport::admission_measure!(observer.as_ref(), Commit, tx.commit());
+            #[cfg(feature = "synthetic-qualification")]
+            if let Some(observer) = &observer {
+                observer.commit_returned(&committed);
+            }
+            committed.map_err(|_| AuthorityError::Uncertain)?;
+            crate::transport::admission_stage!(observer.as_ref(), ControlledResult);
+            let MutationResult::Controlled(snapshot) = &result else {
+                #[cfg(feature = "synthetic-qualification")]
+                if let Some(observer) = &observer {
+                    observer.controlled_result(false);
+                }
+                return Err(AuthorityError::CorruptHistory);
+            };
+            #[cfg(feature = "synthetic-qualification")]
+            if let Some(observer) = &observer {
+                observer.controlled_result(true);
+            }
+            crate::transport::admission_stage!(observer.as_ref(), SnapshotRecord);
+            source.record_committed(snapshot.clone());
+            Ok(result)
+        })();
+        crate::transport::admission_result!(observer.as_ref(), observe_semantic, result)
     }
 
     pub(crate) fn mutate_durable_payment_v1(

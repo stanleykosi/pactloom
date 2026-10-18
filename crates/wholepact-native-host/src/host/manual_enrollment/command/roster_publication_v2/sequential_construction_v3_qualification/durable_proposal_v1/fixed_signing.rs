@@ -841,22 +841,50 @@ pub(super) fn exercise(input: FixedSigningInputsV1<'_>) -> Result<()> {
         // preparation. Starting the focused final click does not drain yet:
         // its real admission worker waits for this signer's original-owner mTLS.
         drop(history_server);
-        input
+        let admission_started = input
             .original
             .witness
-            .start_exact_durable_payment_admission(account_id, &admission)
-            .map_err(|error| trace.authority(error))?;
+            .start_exact_durable_payment_admission(account_id, &admission);
+        if admission_started.is_err() {
+            if let Some(observation) = input
+                .original
+                .witness
+                .take_durable_payment_admission_diagnostic_v1()
+            {
+                diagnostic::emit_witness_admission(&observation);
+            }
+        }
+        admission_started.map_err(|error| trace.authority(error))?;
         worker
             .send(Command::ApproveDurableAdmission(index))
             .map_err(|error| trace.worker(error))?;
-        input
+        let admission_finished = input
             .original
             .witness
-            .finish_exact_durable_payment_admission()
-            .map_err(|error| trace.authority(error))?;
+            .finish_exact_durable_payment_admission();
+        // Only inert observations survive this take. Keep the same snapshot
+        // through the original signer receive: remote commit can succeed even
+        // when its reply or local completion was not accepted. No extra read,
+        // retry or journal inspection is performed for this optional evidence.
+        let admission_observation = input
+            .original
+            .witness
+            .take_durable_payment_admission_diagnostic_v1();
+        if admission_finished.is_err() {
+            if let Some(observation) = admission_observation.as_ref() {
+                diagnostic::emit_witness_admission(observation);
+            }
+        }
+        admission_finished.map_err(|error| trace.authority(error))?;
         // The helper observes the real immutable local intent and committed
         // correlation. Its production approval retains intent BEFORE mTLS.
-        done(worker, index, &mut trace)?;
+        let signer_finished = done(worker, index, &mut trace);
+        if signer_finished.is_err() {
+            if let Some(observation) = admission_observation.as_ref() {
+                diagnostic::emit_witness_admission(observation);
+            }
+        }
+        signer_finished?;
         let financial_server = input
             .original
             .witness

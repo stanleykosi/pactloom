@@ -7,8 +7,11 @@
 //! A host leaf must independently own encrypted intake, proof and exact union.
 
 pub use super::durable_witness_v1::{
-    DurableAdmissionHistoryFailureV1, DurableAdmissionPreparationFailureV1,
-    DurableAdmissionPreparationStageV1,
+    DurableAdmissionCallFailureV1, DurableAdmissionCallbackStageV1, DurableAdmissionCompletionV1,
+    DurableAdmissionDispatchFailureV1, DurableAdmissionDispatchMeasurementV1,
+    DurableAdmissionDispatchStageV1, DurableAdmissionHistoryFailureV1,
+    DurableAdmissionPreparationFailureV1, DurableAdmissionPreparationStageV1,
+    DurableAdmissionRetentionV1,
 };
 use super::durable_witness_v1::{
     DurableWitnessPreparedV1, QualificationDurableWitnessCompletionV1,
@@ -129,6 +132,13 @@ pub(in crate::native_ui) struct DurableNativeFixtureV1 {
     admission: Option<wholepact_authority::OwnerControlRequest>,
     reconciled_records: Option<DurableNativeRecordsV1>,
     reconciled_writer: Option<(Arc<()>, wholepact_authority::WriterSessionReceipt)>,
+}
+
+struct DurableFixtureAdmissionObservationV1 {
+    attempt: Option<u64>,
+    digest: Option<String>,
+    stage: DurableAdmissionDispatchStageV1,
+    original_is_operational: bool,
 }
 
 impl DurableNativeFixtureV1 {
@@ -743,42 +753,99 @@ impl DurableNativeFixtureV1 {
         })
     }
     pub(in crate::native_ui) fn approve_durable_admission(&mut self) -> Result<()> {
-        self.check()?;
-        let expected = self
-            .admission
-            .as_ref()
-            .ok_or(Error::ReviewMismatch)?
-            .clone();
-        if self.phase != Phase::AdmissionPrepared {
-            return Err(Error::ReviewMismatch);
-        }
-        match self.runtime.pending.as_ref().map(|p| &p.operation) {
-            Some(Operation::DurableWitnessV1(prepared)) => match prepared.as_ref() {
-                DurableWitnessPreparedV1::Admission(admission)
-                    if admission.request() == &expected => {}
+        self.approve_durable_admission_inner(false)
+            .map_err(DurableAdmissionDispatchFailureV1::into_error)
+    }
+    pub(in crate::native_ui) fn approve_durable_admission_diagnosed(
+        &mut self,
+    ) -> std::result::Result<(), DurableAdmissionDispatchFailureV1> {
+        self.approve_durable_admission_inner(true)
+    }
+    fn approve_durable_admission_inner(
+        &mut self,
+        diagnosed: bool,
+    ) -> std::result::Result<(), DurableAdmissionDispatchFailureV1> {
+        // Reset inert state before this approval; exhausted counters only disable
+        // optional collection and never create another operational refusal.
+        self.runtime.reset_qualification_admission_dispatch_v1();
+        let mut observation = DurableFixtureAdmissionObservationV1 {
+            attempt: None,
+            digest: None,
+            stage: DurableAdmissionDispatchStageV1::FixtureState,
+            original_is_operational: true,
+        };
+        let result = (|| {
+            self.check()?;
+            let expected = self
+                .admission
+                .as_ref()
+                .ok_or(Error::ReviewMismatch)?
+                .clone();
+            if self.phase != Phase::AdmissionPrepared {
+                return Err(Error::ReviewMismatch);
+            }
+            observation.stage = DurableAdmissionDispatchStageV1::ReviewCorrelation;
+            match self.runtime.pending.as_ref().map(|p| &p.operation) {
+                Some(Operation::DurableWitnessV1(prepared)) => match prepared.as_ref() {
+                    DurableWitnessPreparedV1::Admission(admission)
+                        if admission.request() == &expected => {}
+                    _ => return Err(Error::ReviewMismatch),
+                },
                 _ => return Err(Error::ReviewMismatch),
-            },
-            _ => return Err(Error::ReviewMismatch),
+            }
+            // The unchanged native approval route retains the intent before mTLS.
+            // An uncertain response cannot advance the fixture's positive path.
+            observation.stage = DurableAdmissionDispatchStageV1::NativeApproval;
+            self.approve_durable_and_await_inner(
+                QualificationDurableWitnessCompletionV1::AdmissionCommitted,
+                if diagnosed {
+                    Some(&mut observation)
+                } else {
+                    None
+                },
+            )?;
+            observation.stage = DurableAdmissionDispatchStageV1::CommittedCorrelation;
+            if self
+                .runtime
+                .qualification_committed_durable_admission_v1()?
+                .as_ref()
+                != Some(&expected)
+            {
+                return Err(Error::ReviewMismatch);
+            }
+            self.phase = Phase::Admitted;
+            self.check()
+        })();
+        match result {
+            Ok(()) => {
+                self.runtime.reset_qualification_admission_dispatch_v1();
+                Ok(())
+            }
+            Err(error) => {
+                let failure = DurableAdmissionDispatchFailureV1::new(
+                    observation.stage,
+                    error,
+                    observation.original_is_operational,
+                );
+                Err(match (observation.attempt, observation.digest.as_deref()) {
+                    (Some(attempt), Some(digest)) => self
+                        .runtime
+                        .take_qualification_admission_dispatch_v1(attempt, digest, failure),
+                    _ => failure,
+                })
+            }
         }
-        // The unchanged native approval route retains the intent before mTLS.
-        // An uncertain response cannot advance the fixture's positive path.
-        self.approve_durable_and_await(
-            QualificationDurableWitnessCompletionV1::AdmissionCommitted,
-        )?;
-        if self
-            .runtime
-            .qualification_committed_durable_admission_v1()?
-            .as_ref()
-            != Some(&expected)
-        {
-            return Err(Error::ReviewMismatch);
-        }
-        self.phase = Phase::Admitted;
-        self.check()
     }
     fn approve_durable_and_await(
         &mut self,
         expected: QualificationDurableWitnessCompletionV1,
+    ) -> Result<()> {
+        self.approve_durable_and_await_inner(expected, None)
+    }
+    fn approve_durable_and_await_inner(
+        &mut self,
+        expected: QualificationDurableWitnessCompletionV1,
+        mut observation: Option<&mut DurableFixtureAdmissionObservationV1>,
     ) -> Result<()> {
         let digest = self
             .runtime
@@ -788,7 +855,25 @@ impl DurableNativeFixtureV1 {
             .review
             .digest()
             .to_owned();
-        approve(&mut self.runtime)?;
+        if let Some(value) = observation.as_deref_mut() {
+            value.attempt = self
+                .runtime
+                .begin_qualification_admission_dispatch_v1(digest.clone());
+            value.digest = Some(digest.clone());
+        }
+        let started = observation
+            .as_ref()
+            .filter(|value| value.attempt.is_some())
+            .map(|_| Instant::now());
+        let approved = approve(&mut self.runtime);
+        if let Some(started) = started {
+            self.runtime
+                .qualification_admission_native_cost_v1(started.elapsed());
+        }
+        approved?;
+        if let Some(value) = observation.as_deref_mut() {
+            value.stage = DurableAdmissionDispatchStageV1::WorkerCompletion;
+        }
         self.drain_witness_to_review()?;
         if self.runtime.pending.is_some()
             || self
@@ -796,6 +881,10 @@ impl DurableNativeFixtureV1 {
                 .qualification_durable_witness_completion_v1(&digest)
                 != Some(expected)
         {
+            if let Some(value) = observation.as_deref_mut() {
+                value.original_is_operational = false;
+                self.runtime.qualification_admission_missing_v1();
+            }
             return Err(Error::Uncertain);
         }
         self.check()

@@ -11,8 +11,11 @@ use crate::authority_bridge::{
 };
 use crate::native_ui::runtime::durable_proposal_qualification_v1::DurableNativeFixtureV1;
 pub use crate::native_ui::runtime::durable_proposal_qualification_v1::{
-    DurableAdmissionHistoryFailureV1, DurableAdmissionPreparationFailureV1,
-    DurableAdmissionPreparationStageV1, DurableNativeEntryFailureV1, DurableNativeEntryStageV1,
+    DurableAdmissionCallFailureV1, DurableAdmissionCallbackStageV1, DurableAdmissionCompletionV1,
+    DurableAdmissionDispatchFailureV1, DurableAdmissionDispatchMeasurementV1,
+    DurableAdmissionDispatchStageV1, DurableAdmissionHistoryFailureV1,
+    DurableAdmissionPreparationFailureV1, DurableAdmissionPreparationStageV1,
+    DurableAdmissionRetentionV1, DurableNativeEntryFailureV1, DurableNativeEntryStageV1,
     DurableNativeRecordsV1,
 };
 
@@ -134,6 +137,13 @@ impl EphemeralDurableNativeV1 {
     /// which retains the immutable intent before its first mutation frame.
     pub fn approve_durable_admission(&mut self) -> Result<()> {
         self.inner.approve_durable_admission()
+    }
+    /// Optional inert evidence from the same native approval and worker. The
+    /// operational result and existing completion requirements are unchanged.
+    pub fn approve_durable_admission_diagnosed(
+        &mut self,
+    ) -> std::result::Result<(), DurableAdmissionDispatchFailureV1> {
+        self.inner.approve_durable_admission_diagnosed()
     }
     pub fn reconcile_original_writer(&mut self) -> Result<()> {
         self.inner.reconcile_original_writer()

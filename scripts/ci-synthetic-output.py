@@ -76,6 +76,18 @@ HISTORY_TRANSCRIPT_TESTS = tuple(PREFIX + 'rolling_transcript_v1::tests::' + nam
     'history_measurement_copies_yield_before_original_chunk_budget',
     'history_measurement_copies_yield_before_original_metadata_budget',
 ))
+ADMISSION_PROJECTION_TESTS = tuple(PREFIX + 'safe_diagnostics_v1::' + name for name in (
+    'admission_parser_requires_every_exact_field_and_rejects_duplicates',
+    'admission_parser_preserves_unavailable_zero_and_commit_uncertainty',
+    'admission_parser_rejects_out_of_bounds_and_type_confused_scalars',
+    'admission_capture_slots_are_independent_sticky_and_bounded',
+))
+ADMISSION_TRANSCRIPT_TESTS = tuple(PREFIX + 'rolling_transcript_v1::tests::' + name for name in (
+    'admission_diagnostics_survive_split_lines_and_compaction',
+    'admission_optional_copies_yield_to_original_chunk_budget',
+    'admission_optional_copies_yield_to_original_metadata_budget',
+))
+ADMISSION_HOST_TESTS = (PREFIX + 'durable_proposal_v1::worker::admission_diagnostic_tests::pure_admission_boundary_routing_preserves_context',)
 READ_WAVE_TESTS = tuple(PREFIX + 'observed_joined_v3::' + name for name in (
     'actual_read_wave_prepares_every_item_before_original_order_execution',
     'failed_read_wave_drops_prepared_values_without_execution_or_retry',
@@ -152,6 +164,35 @@ HISTORY_MEASUREMENT_FIELDS = frozenset(('version','phase','page_ordinal','check_
     'history_cost','exchange_cost','clamped','incomplete')) | HISTORY_OPTIONAL_DURATIONS
 HISTORY_SERVER_MEASUREMENT_FIELDS = frozenset(('version','point','age_us','remaining_us',
     'stopped','finished','clamped'))
+
+# CI14 admission records are separate from the unchanged historical schema.
+ADMISSION_PREFIXES = ('[ADMISSION_MEASUREMENT_V1 ','[SIGNER_ADMISSION_V1 ','[WITNESS_ADMISSION_V1 ')
+ADMISSION_KINDS = ('admission_measurement','signer_admission','witness_admission')
+ADMISSION_INVALID = tuple('CI_SYNTHETIC_'+kind.upper()+' invalid=true details_withheld=true' for kind in ADMISSION_KINDS)
+ADMISSION_CHECK_SITES = HISTORY_CHECK_SITES - frozenset(('ReplayInitial','ReplayAfterSnapshot','ReplayBeforePage','ReplayAfterPage','ReplayFinal'))
+ADMISSION_MEASUREMENT_FIELDS = (HISTORY_MEASUREMENT_FIELDS - {'page_ordinal','history_elapsed_us','history_cost'}) | {'operation_elapsed_us','operation_cost'}
+SIGNER_ADMISSION_FIELDS = frozenset(('version','stage','completion','retention','original_error','callback_stage','measurement'))
+SIGNER_ADMISSION_DURATIONS = frozenset(['native_approval_us', 'retention_us', 'submit_preflight_us', 'callback_custody_us', 'callback_custody_max_us', 'request_validation_us', 'request_validation_max_us'])
+SIGNER_ADMISSION_COUNTS = frozenset(['callback_custody_calls', 'request_validation_calls'])
+SIGNER_ADMISSION_ERRORS = frozenset(['SignerUnavailable', 'SignerPeerLifetimeUnavailable', 'SignerIo', 'SignerAuthentication', 'SignerInvalidData', 'SignerCrypto', 'SignerLocked', 'SignerBackupRequired', 'SignerRecoveryRequired', 'SignerAlreadyOpen', 'SignerReviewMismatch', 'SignerVerification', 'SignerUncertain', 'SignerConsentJournal', 'SignerStore'])
+ADMISSION_AUTHORITY_ERRORS = frozenset(['AuthorityInvalidBinding', 'AuthorityPermission', 'AuthorityStaleHead', 'AuthorityConflict', 'AuthorityInactive', 'AuthorityRecoveryRequired', 'AuthorityExpired', 'AuthorityPolicyDenied', 'AuthorityBudgetExceeded', 'AuthorityInputReserved', 'AuthorityObligationReserved', 'AuthorityLimit', 'AuthorityStorage', 'AuthorityCorruptHistory', 'AuthorityPermanentStopUnavailable', 'AuthorityOfflineHistoryUnsupported', 'AuthorityConstructionHistoryUnsupported', 'AuthorityUnsupportedVersion', 'AuthorityAuthentication', 'AuthorityUncertain', 'AuthorityResolutionUnavailable', 'AuthoritySessionRequired', 'AuthoritySessionPending'])
+WITNESS_ADMISSION_SPANS = frozenset(['worker', 'source_arm', 'server_create', 'accept', 'connection', 'handshake', 'frame_read', 'dispatch', 'publication', 'append', 'commit', 'frame_write', 'fixture_finish'])
+SIGNER_ADMISSION_STAGES = frozenset(['FixtureState', 'ReviewCorrelation', 'NativeApproval', 'IntentRetention', 'SubmitCustody', 'SubmitIntent', 'SubmitInterval', 'SubmitWorkspace', 'AuthorityCall', 'WorkerCompletion', 'CommittedCorrelation'])
+SIGNER_ADMISSION_COMPLETIONS = frozenset(['NotObserved', 'ReturnedOk', 'ReturnedErr', 'Missing', 'Invalidated', 'Disconnected'])
+SIGNER_ADMISSION_RETENTIONS = frozenset(['NotObserved', 'Unconfirmed', 'Confirmed'])
+SIGNER_ADMISSION_CALLBACK_STAGES = frozenset(['WorkspaceCurrent', 'Custody', 'RequestValidation'])
+WITNESS_ADMISSION_STAGES = frozenset(['SourceArm', 'ServerCreate', 'ListenerAccept', 'ResultLookup', 'SocketBinding', 'WaitCurrent', 'TlsSetup', 'TlsHandshake', 'PeerBinding', 'FrameRead', 'SemanticDispatch', 'JournalPreflight', 'ExactRequest', 'Publication', 'Apply', 'Append', 'FinalCurrent', 'Commit', 'ControlledResult', 'SnapshotRecord', 'OutputCheck', 'FrameWrite', 'CloseFlush', 'WorkerDisplay', 'FixtureDrain', 'FixtureReceipt', 'FixtureCorrelation'])
+WITNESS_ADMISSION_ATTRIBUTIONS = frozenset(['SelectedServer', 'ExactRequest'])
+WITNESS_ADMISSION_RESULTS = frozenset(['NotObserved', 'ReturnedOk', 'ReturnedErr'])
+WITNESS_ADMISSION_COMPLETIONS = frozenset(['NotObserved', 'Received', 'Disconnected', 'Panicked'])
+WITNESS_ADMISSION_COMMITS = frozenset(['NotObserved', 'Entered', 'ReturnedOk', 'ReturnedErr'])
+WITNESS_ADMISSION_RECEIPT_GATES = frozenset(['NotObserved', 'Unfocused', 'EpochMismatch', 'Revoked', 'Closing', 'ClockRejected', 'Retained'])
+WITNESS_ADMISSION_CORRELATIONS = frozenset(['NotObserved', 'Matched', 'Rejected'])
+ADMISSION_IO_KINDS = frozenset(['Timeout', 'Closed', 'Refused', 'Other'])
+SIGNER_ADMISSION_MEASUREMENT_FIELDS = SIGNER_ADMISSION_DURATIONS | SIGNER_ADMISSION_COUNTS | {'clamped','incomplete'}
+WITNESS_ADMISSION_FIELDS = frozenset(('version','first_semantic','first_connection','worker_result','fixture_result','worker_error','fixture_error','worker_stage','fixture_stage','completion','commit','controlled_result','snapshot_recorded','receipt_gate','final_correlation','cost','clamped','incomplete'))
+WITNESS_ADMISSION_ERROR_FIELDS = frozenset(('stage','attribution','io_kind','error'))
+
 STORAGE_BOOTSTRAP_TEST = 'recovery_generation::layered::tests::native_layered_current_eight_nine_parent_provenance_is_exact_and_not_relabelable'
 SIGNER_VALIDATION_TESTS = (
     'account::birth::retired_historical_tests::birth_identity_one_derivation_preserves_both_original_commitments',
@@ -251,7 +292,8 @@ DURABLE_HOST_BOUNDARIES = frozenset('DurableHostOpen DurableHostPairStatus Durab
 DURABLE_FINANCIAL_BOUNDARIES = frozenset('DurableHostWitnessSetup DurableHostWriterReconcile DurableHostViewingSetup DurableHostSign DurableHostSignRetry DurableHostResultHistory DurableHostResultRetrieve DurableHostResultRelay DurableHostSignatureIntake DurableHostSignatureStatus DurableHostResultServiceStop DurableHostSignatureUnion DurableHostTransactionCheckpoint'.split())
 SIGNER_ADMISSION_BOUNDARIES = frozenset('SignerAdmissionFixtureState SignerAdmissionSource SignerAdmissionHistory SignerAdmissionRetainedIntent SignerAdmissionTerms SignerAdmissionRequestBuilder SignerAdmissionExactRequest SignerAdmissionLiveInterval SignerAdmissionLocalIntent SignerAdmissionIntentDisplay SignerAdmissionReviewCustody SignerAdmissionReviewDisplay SignerAdmissionNativeStage SignerAdmissionWorkerCompletion'.split())
 SIGNER_HISTORY_BOUNDARIES = frozenset('SignerAdmissionHistoryCallerDeadline SignerAdmissionHistoryExchangeDeadline SignerAdmissionHistorySourceCallback SignerAdmissionHistorySnapshotConnect SignerAdmissionHistorySnapshotHandshake SignerAdmissionHistorySnapshotPeerBinding SignerAdmissionHistorySnapshotRequestBuild SignerAdmissionHistorySnapshotRequestWrite SignerAdmissionHistorySnapshotResponseRead SignerAdmissionHistorySnapshotResponse SignerAdmissionHistorySnapshotValidation SignerAdmissionHistoryPageConnect SignerAdmissionHistoryPageHandshake SignerAdmissionHistoryPagePeerBinding SignerAdmissionHistoryPageRequestBuild SignerAdmissionHistoryPageRequestWrite SignerAdmissionHistoryPageResponseRead SignerAdmissionHistoryPageResponse SignerAdmissionHistoryPageValidation SignerAdmissionHistoryEventReplay SignerAdmissionHistoryFinalValidation SignerAdmissionHistoryBounds SignerAdmissionHistoryIoTimeout SignerAdmissionHistoryIoClosed SignerAdmissionHistoryIoRefused SignerAdmissionHistoryIoOther SignerAdmissionHistoryCallbackError'.split())
-BOUNDARIES = BOUNDARIES | DURABLE_ENTRY_BOUNDARIES | DURABLE_HOST_BOUNDARIES | DURABLE_FINANCIAL_BOUNDARIES | SIGNER_ADMISSION_BOUNDARIES | SIGNER_HISTORY_BOUNDARIES
+SIGNER_DISPATCH_BOUNDARIES = frozenset(['SignerAdmissionCallRequestValidation', 'SignerAdmissionCallBinding', 'SignerAdmissionCallConnect', 'SignerAdmissionCallHandshake', 'SignerAdmissionCallPeerBinding', 'SignerAdmissionCallRequestBuild', 'SignerAdmissionCallRequestWrite', 'SignerAdmissionCallResponseRead', 'SignerAdmissionCallResponse', 'SignerAdmissionCallSnapshotValidation', 'SignerAdmissionCallCommittedHeadValidation', 'SignerAdmissionCallFinalValidation', 'SignerAdmissionDispatchFixtureState', 'SignerAdmissionDispatchReviewCorrelation', 'SignerAdmissionDispatchNativeApproval', 'SignerAdmissionDispatchIntentRetention', 'SignerAdmissionDispatchSubmitCustody', 'SignerAdmissionDispatchSubmitIntent', 'SignerAdmissionDispatchSubmitInterval', 'SignerAdmissionDispatchSubmitWorkspace', 'SignerAdmissionDispatchAuthorityCall', 'SignerAdmissionDispatchWorkerCompletion', 'SignerAdmissionDispatchCommittedCorrelation', 'SignerAdmissionCallbackWorkspaceCurrent', 'SignerAdmissionCallbackCustody', 'SignerAdmissionCallbackRequestValidation', 'SignerAdmissionCallIoTimeout', 'SignerAdmissionCallIoClosed', 'SignerAdmissionCallIoRefused', 'SignerAdmissionCallIoOther', 'SignerAdmissionCallCallbackError', 'SignerAdmissionCallCallerDeadline', 'SignerAdmissionCallExchangeDeadline', 'SignerAdmissionCallSourceCallback', 'SignerAdmissionCallBounds'])
+BOUNDARIES = BOUNDARIES | SIGNER_DISPATCH_BOUNDARIES | DURABLE_ENTRY_BOUNDARIES | DURABLE_HOST_BOUNDARIES | DURABLE_FINANCIAL_BOUNDARIES | SIGNER_ADMISSION_BOUNDARIES | SIGNER_HISTORY_BOUNDARIES
 FALSE_FIELDS = {'public_network_settlement_verified','public_network_inclusion_verified','independent_consensus_verified','attended_native_acceptance_verified','clears_authorization_exposure','permits_replacement'}
 INT_FIELDS = {'schema','consensus_branch_id','expiry_height','submission_attempt','recipient_decrypted_zatoshis','recipient_owned_note_count','fabricated_inclusion_height','fabricated_tip_height','required_confirmations'}
 STRING_FIELDS = {'evidence_kind','transaction_id','transaction_bytes_sha256','network','submission_outcome'}
@@ -374,6 +416,121 @@ class HistoryMeasurements:
                     print(HISTORY_SERVER_MEASUREMENT_PREFIX+json.dumps(self.server[point],separators=(',',':'),sort_keys=True)+']',flush=True)
 
 
+def admission_object(value, fields):
+    if type(value) is not dict or set(value)!=fields:
+        raise ValueError('admission exact fields')
+    return value
+
+
+def admission_duration(value):
+    return value is None or history_bounded(value,HISTORY_DURATION_LIMIT_US)
+
+
+def admission_flags(row):
+    if any(type(row[key]) is not bool for key in ('clamped','incomplete')):
+        raise ValueError('admission observation flags')
+
+
+def public_admission_measurement(text):
+    row=admission_object(history_json(text,4096),ADMISSION_MEASUREMENT_FIELDS)
+    if type(row['version']) is not int or row['version']!=1: raise ValueError('admission version')
+    for field,values,nullable in (('phase',{'Admission'},True),('check_site',ADMISSION_CHECK_SITES,True),
+            ('checkpoint',HISTORY_CHECKPOINTS,False),('selected_limit',HISTORY_SELECTED_LIMITS,True)):
+        if not history_enum(row[field],values,nullable): raise ValueError('admission enum')
+    if any(not admission_duration(row[field]) for field in HISTORY_OPTIONAL_DURATIONS):
+        raise ValueError('admission optional duration')
+    for field in ('operation_elapsed_us','pre_budget_callback_us'):
+        if not history_bounded(row[field],HISTORY_DURATION_LIMIT_US): raise ValueError('admission duration')
+    if not history_bounded(row['pre_budget_callback_calls'],1): raise ValueError('admission pre-budget calls')
+    admission_flags(row)
+    for field in ('operation_cost','exchange_cost'):
+        cost=row[field]
+        if field=='exchange_cost' and cost is None: continue
+        admission_object(cost,HISTORY_COST_COUNTS|HISTORY_COST_DURATIONS)
+        if any(not history_bounded(cost[key],HISTORY_COUNT_LIMIT) for key in HISTORY_COST_COUNTS):
+            raise ValueError('admission cost count')
+        if any(not history_bounded(cost[key],HISTORY_DURATION_LIMIT_US) for key in HISTORY_COST_DURATIONS):
+            raise ValueError('admission cost duration')
+    return row
+
+
+def public_signer_admission(text):
+    row=admission_object(history_json(text,4096),SIGNER_ADMISSION_FIELDS)
+    if type(row['version']) is not int or row['version']!=1: raise ValueError('signer admission version')
+    for field,values,nullable in (('stage',SIGNER_ADMISSION_STAGES,False),
+            ('completion',SIGNER_ADMISSION_COMPLETIONS,False),('retention',SIGNER_ADMISSION_RETENTIONS,False),
+            ('original_error',SIGNER_ADMISSION_ERRORS,True),('callback_stage',SIGNER_ADMISSION_CALLBACK_STAGES,True)):
+        if not history_enum(row[field],values,nullable): raise ValueError('signer admission enum')
+    measured=row['measurement']
+    if measured is not None:
+        admission_object(measured,SIGNER_ADMISSION_MEASUREMENT_FIELDS)
+        admission_flags(measured)
+        if any(not admission_duration(measured[field]) for field in SIGNER_ADMISSION_DURATIONS):
+            raise ValueError('signer admission duration')
+        if any(measured[field] is not None and not history_bounded(measured[field],HISTORY_COUNT_LIMIT)
+               for field in SIGNER_ADMISSION_COUNTS):
+            raise ValueError('signer admission count')
+    return row
+
+
+def public_witness_admission(text):
+    row=admission_object(history_json(text,4096),WITNESS_ADMISSION_FIELDS)
+    if type(row['version']) is not int or row['version']!=1: raise ValueError('witness admission version')
+    for field,values,nullable in (('worker_result',WITNESS_ADMISSION_RESULTS,False),
+            ('fixture_result',WITNESS_ADMISSION_RESULTS,False),('worker_error',ADMISSION_AUTHORITY_ERRORS,True),
+            ('fixture_error',ADMISSION_AUTHORITY_ERRORS,True),('worker_stage',WITNESS_ADMISSION_STAGES,True),
+            ('fixture_stage',WITNESS_ADMISSION_STAGES,True),('completion',WITNESS_ADMISSION_COMPLETIONS,False),
+            ('commit',WITNESS_ADMISSION_COMMITS,False),('receipt_gate',WITNESS_ADMISSION_RECEIPT_GATES,False),
+            ('final_correlation',WITNESS_ADMISSION_CORRELATIONS,False)):
+        if not history_enum(row[field],values,nullable): raise ValueError('witness admission enum')
+    for field in ('controlled_result','snapshot_recorded'):
+        if row[field] is not None and type(row[field]) is not bool: raise ValueError('witness admission observation')
+    admission_flags(row)
+    for field in ('first_semantic','first_connection'):
+        error=row[field]
+        if error is None: continue
+        admission_object(error,WITNESS_ADMISSION_ERROR_FIELDS)
+        for key,values,nullable in (('stage',WITNESS_ADMISSION_STAGES,False),
+                ('attribution',WITNESS_ADMISSION_ATTRIBUTIONS,False),('io_kind',ADMISSION_IO_KINDS,True),
+                ('error',ADMISSION_AUTHORITY_ERRORS,False)):
+            if not history_enum(error[key],values,nullable): raise ValueError('witness admission error enum')
+    costs=admission_object(row['cost'],WITNESS_ADMISSION_SPANS)
+    for cost in costs.values():
+        admission_object(cost,{'calls','elapsed_us'})
+        if not history_bounded(cost['calls'],HISTORY_COUNT_LIMIT) or not admission_duration(cost['elapsed_us']):
+            raise ValueError('witness admission cost')
+    return row
+
+
+ADMISSION_PARSERS = (public_admission_measurement,public_signer_admission,public_witness_admission)
+
+
+class AdmissionDiagnostics:
+    """Three independent, first-record-only slots; invalidation is sticky."""
+    def __init__(self):
+        self.records=[None,None,None]
+        self.invalid=[False,False,False]
+
+    def record(self, kind, value):
+        for slot,name in enumerate(ADMISSION_KINDS):
+            if kind not in (name,name+'_invalid'): continue
+            if self.invalid[slot]: return
+            if kind==name+'_invalid' or self.records[slot] is not None:
+                self.records[slot]=None; self.invalid[slot]=True
+            else: self.records[slot]=value
+            return
+
+    def emit(self):
+        for slot,record in enumerate(self.records):
+            # Optional serialization/output errors never become operational failure.
+            try:
+                if self.invalid[slot]: print(ADMISSION_INVALID[slot],flush=True)
+                elif record is not None:
+                    print(ADMISSION_PREFIXES[slot]+json.dumps(record,separators=(',',':'),sort_keys=True)+']',flush=True)
+            except (OSError,ValueError,TypeError,OverflowError,RecursionError):
+                pass
+
+
 def public_timing(text):
     """Optional measurement, never success/authorization evidence or a clock."""
     if len(text.encode('utf8')) > 8192: raise ValueError('oversized timing')
@@ -476,7 +633,7 @@ def public_line(raw, name):
         if candidate.startswith(TIMING_PREFIX.encode('ascii')):
             return ('timing_invalid',None)
         for marker,kind in ((HISTORY_MEASUREMENT_PREFIX,'history_measurement'),
-                            (HISTORY_SERVER_MEASUREMENT_PREFIX,'history_server_measurement')):
+                            (HISTORY_SERVER_MEASUREMENT_PREFIX,'history_server_measurement'),*zip(ADMISSION_PREFIXES,ADMISSION_KINDS)):
             if candidate.startswith(marker.encode('ascii')): return (kind+'_invalid',None)
         raise
     # No search inside arbitrary panic/text lines. Only libtest's exact prefix
@@ -487,6 +644,15 @@ def public_line(raw, name):
     cleanup=CLEANUP.fullmatch(line)
     if cleanup and option_i32(cleanup[5]) and option_i32(cleanup[6]): return ('cleanup',line)
     if safe_failure(line): return ('failure',line)
+    for slot,marker in enumerate(ADMISSION_INVALID):
+        if line==marker: return (ADMISSION_KINDS[slot]+'_invalid',None)
+    for marker,kind,parser in zip(ADMISSION_PREFIXES,ADMISSION_KINDS,ADMISSION_PARSERS):
+        if line.startswith(marker):
+            try:
+                if not line.endswith(']'): raise ValueError('admission framing')
+                return (kind,parser(line[len(marker):-1]))
+            except (ValueError,TypeError,KeyError,OverflowError,RecursionError):
+                return (kind+'_invalid',None)
     if line=='CI_SYNTHETIC_HISTORY_MEASUREMENT invalid=true details_withheld=true':
         return ('history_measurement_invalid',None)
     if line=='CI_SYNTHETIC_HISTORY_SERVER_MEASUREMENT invalid=true details_withheld=true':
@@ -538,12 +704,12 @@ DURABLE_PROVIDER_METADATA_TEST = PREFIX + 'synthetic_born_provider_v1::durable_m
 
 def run_pure(executable):
     assert resource.getrlimit(resource.RLIMIT_CORE)[0] == 0
-    for name in PURE_TESTS + POLICY_ENVELOPE_TESTS + PROMPT_RENDERING_TESTS + LOWER_ERROR_TESTS + DENIAL_TESTS + ROLLING_TRANSCRIPT_TESTS + AUTHORITY_PROJECTION_TESTS + READ_WAVE_TESTS + HISTORY_MEASUREMENT_TESTS + HISTORY_TRANSCRIPT_TESTS + TIMING_HOST_TESTS + (DURABLE_PROVIDER_METADATA_TEST,):
+    for name in PURE_TESTS + POLICY_ENVELOPE_TESTS + PROMPT_RENDERING_TESTS + LOWER_ERROR_TESTS + DENIAL_TESTS + ROLLING_TRANSCRIPT_TESTS + AUTHORITY_PROJECTION_TESTS + READ_WAVE_TESTS + HISTORY_MEASUREMENT_TESTS + HISTORY_TRANSCRIPT_TESTS + ADMISSION_PROJECTION_TESTS + ADMISSION_TRANSCRIPT_TESTS + ADMISSION_HOST_TESTS + TIMING_HOST_TESTS + (DURABLE_PROVIDER_METADATA_TEST,):
         flags=['--exact',name,'--test-threads=1']
         listed=subprocess.run([executable,*flags,'--list'],capture_output=True,timeout=30,check=True)
         if not exact_listing(listed.stdout.decode(),name) or listed.stderr:
             raise ValueError('exact pure test not uniquely registered')
-        # These 51 fixed source-reviewed cases use only modeled process state,
+        # These 59 fixed source-reviewed cases use only modeled process state,
         # inert files, historical policy DTOs, fixed prompts, closed error kinds or
         # bounded private parsing state or data-only scanned-note mathematics. They create
         # no native/IPC/network/payment owners.
@@ -551,7 +717,7 @@ def run_pure(executable):
         if result.returncode!=0 or len(result.stdout)>1024*1024:
             print('CI_SYNTHETIC_PURE failed_test='+name,flush=True)
             raise RuntimeError('exact pure test failed; raw output withheld')
-    print('CI_SYNTHETIC_PURE passed=51 raw_output_discarded=true',flush=True)
+    print('CI_SYNTHETIC_PURE passed=59 raw_output_discarded=true',flush=True)
 
 def run_signer_validation(executable):
     assert resource.getrlimit(resource.RLIMIT_CORE)[0] == 0
@@ -712,6 +878,7 @@ def run(executable, phase):
     assert process.stdout is not None
     framing=BoundedLines(); total=0; cleanup=False; cleanup_observed=False; cleanups=0; cores=0; failures=0; outcome=None; status=None; timing=None; timing_count=0; timing_invalid=False
     history_measurements=HistoryMeasurements()
+    admission_diagnostics=AdmissionDiagnostics()
     try:
         eof=False
         while not eof:
@@ -749,6 +916,8 @@ def run(executable, phase):
                 elif kind in ('history_measurement','history_measurement_invalid',
                               'history_server_measurement','history_server_measurement_invalid'):
                     if phase=='durable-fixed-signing': history_measurements.record(kind,value)
+                elif kind in ADMISSION_KINDS or kind in tuple(name+'_invalid' for name in ADMISSION_KINDS):
+                    if phase=='durable-fixed-signing': admission_diagnostics.record(kind,value)
                 elif kind=='outcome':
                     if phase!='full' or outcome is not None: raise ValueError('unexpected duplicate public outcome')
                     outcome=value
@@ -766,6 +935,7 @@ def run(executable, phase):
     # malformed/missing/duplicate timing never changes the original result gate.
     if phase=='durable-fixed-signing' and cleanup_observed:
         history_measurements.emit()
+        admission_diagnostics.emit()
     if phase=='full' and cleanup_observed:
         if timing_invalid:
             print('CI_SYNTHETIC_TIMING invalid=true details_withheld=true',flush=True)
