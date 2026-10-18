@@ -14,6 +14,7 @@ macro_rules! labels {
     };
 }
 labels! { Boundary {
+    DurableEntryNativeOwnerCheck, DurableEntryVaultOpen, DurableEntryRetainedEnrollment, DurableEntryOriginalCommit, DurableEntryJournalOpen, DurableEntrySourceCheck, DurableEntryRuntimeActivation, DurableEntryWorkerResult, DurableEntryEndpointCreate, DurableEntryEndpointBind, DurableEntryEndpointPublish, DurableEntryPostEndpointSourceCheck, DurableEntryFixturePreflight, DurableEntryFixturePostActivation,
     ObservationClockRollback, ObservationClockWallExpired, ObservationClockMonotonicExpired, ObservationRetainedClockRead, ObservationRetainedClockDenied, ObservationAdmittedClockRead, ObservationAdmittedClockDenied,
     CompletionObservationDenied, CompletionPostReentryCurrent, CompletionReadBinding, CompletionConstructionTime, CompletionCallerBinding, CompletionConstructionRequest,
     EngineCheckpointClaim, EngineCheckpointPlan, EngineCheckpointRetained, EngineCheckpointParts, EngineCheckpointNative, EngineCheckpointHeld, EngineCheckpointRestriction, EngineCheckpointConstruct, EngineCheckpointInspect, EngineCheckpointActionLimit, EngineCheckpointConsent, EngineCheckpointReceipt, EngineCheckpointRecord, EngineCheckpointEnqueue, EngineCheckpointFinish, EngineCheckpointContext,

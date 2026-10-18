@@ -337,6 +337,10 @@ struct OpenAccount {
     // input but preserves already-approved scope and original expiry. No detached grants.
     session: Option<Arc<SignerConsentSession>>,
     ipc: LocalIpc,
+    // Fields drop in declaration order. IPC drains BEFORE its owned external
+    // temporary directory is removed; the original vault inventory is untouched.
+    #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+    durable_ipc_directory: Option<tempfile::TempDir>,
     pairing: Option<AuthenticatedPairing>,
     enrollment: Option<AccountEnrollmentRecord>,
     manifest: Option<AcceptedManifestRecord>,
@@ -562,6 +566,11 @@ impl RetirementNativeEntry {
 pub(super) struct NativeRuntime {
     #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
     durable_entry_job: Option<durable_entry_v1::DurableEntryJobV1>,
+    #[cfg(all(
+        feature = "synthetic-born-joined-qualification",
+        feature = "durable-proposal"
+    ))]
+    durable_entry_failure: Option<(durable_entry_v1::DurableEntryFailureStageV1, Error)>,
     #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
     named_verifier: super::named_verifier_owner::SetupWorkspace,
     #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
@@ -667,6 +676,11 @@ impl NativeRuntime {
         Self {
             #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
             durable_entry_job: None,
+            #[cfg(all(
+                feature = "synthetic-born-joined-qualification",
+                feature = "durable-proposal"
+            ))]
+            durable_entry_failure: None,
             #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
             named_verifier: super::named_verifier_owner::SetupWorkspace::default(),
             #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
@@ -1101,6 +1115,8 @@ impl NativeRuntime {
             durable_wallet_job: None,
             session: None,
             ipc,
+            #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+            durable_ipc_directory: None,
             pairing: None,
             enrollment: None,
             manifest: None,

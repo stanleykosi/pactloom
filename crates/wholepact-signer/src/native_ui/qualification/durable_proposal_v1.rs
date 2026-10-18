@@ -16,7 +16,7 @@ use crate::authority_bridge::{
     preconstruction_ipc::PreconstructionRequest,
 };
 use crate::native_ui::pending_enrollment::born_pending_continuation::AcknowledgedBornFixture;
-use std::{path::PathBuf, time::Instant};
+use std::{collections::BTreeSet, ffi::OsString, path::PathBuf, time::Instant};
 use wholepact_signer_origin::{InstalledSignerProvider, PairScope};
 
 const EPOCH: u64 = 1;
@@ -26,6 +26,59 @@ const EPOCH: u64 = 1;
 pub struct DurableNativeRecordsV1 {
     pub enrollment_ref: String,
     pub accepted_manifest_ref: String,
+}
+
+/// Closed synthetic diagnostics only. No source path, account, request or
+/// underlying error text is exposed by this finite phase classification.
+#[derive(Clone, Copy)]
+pub enum DurableNativeEntryStageV1 {
+    NativeOwnerCheck,
+    VaultOpen,
+    RetainedEnrollment,
+    OriginalCommit,
+    JournalOpen,
+    SourceCheck,
+    RuntimeActivation,
+    WorkerResult,
+    EndpointCreate,
+    EndpointBind,
+    EndpointPublish,
+    PostEndpointSourceCheck,
+    FixturePreflight,
+    FixturePostActivation,
+}
+
+pub struct DurableNativeEntryFailureV1 {
+    stage: DurableNativeEntryStageV1,
+    error: Error,
+}
+impl DurableNativeEntryFailureV1 {
+    pub fn stage(&self) -> DurableNativeEntryStageV1 {
+        self.stage
+    }
+    pub fn into_error(self) -> Error {
+        self.error
+    }
+}
+
+impl From<super::durable_entry_v1::DurableEntryFailureStageV1> for DurableNativeEntryStageV1 {
+    fn from(stage: super::durable_entry_v1::DurableEntryFailureStageV1) -> Self {
+        use super::durable_entry_v1::DurableEntryFailureStageV1 as S;
+        match stage {
+            S::NativeOwnerCheck => Self::NativeOwnerCheck,
+            S::VaultOpen => Self::VaultOpen,
+            S::RetainedEnrollment => Self::RetainedEnrollment,
+            S::OriginalCommit => Self::OriginalCommit,
+            S::JournalOpen => Self::JournalOpen,
+            S::SourceCheck => Self::SourceCheck,
+            S::RuntimeActivation => Self::RuntimeActivation,
+            S::WorkerResult => Self::WorkerResult,
+            S::EndpointCreate => Self::EndpointCreate,
+            S::EndpointBind => Self::EndpointBind,
+            S::EndpointPublish => Self::EndpointPublish,
+            S::PostEndpointSourceCheck => Self::PostEndpointSourceCheck,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -54,6 +107,7 @@ pub(in crate::native_ui) struct DurableNativeFixtureV1 {
     phase: Phase,
     expected: Option<ExpectedDisclosure>,
     entry: String,
+    original_inventory: BTreeSet<OsString>,
 }
 
 impl DurableNativeFixtureV1 {
@@ -61,6 +115,16 @@ impl DurableNativeFixtureV1 {
         original: AcknowledgedBornFixture,
         input: ProposalInput,
         budget: u64,
+    ) -> std::result::Result<Self, DurableNativeEntryFailureV1> {
+        let mut stage = DurableNativeEntryStageV1::FixturePreflight;
+        Self::open_checked(original, input, budget, &mut stage)
+            .map_err(|error| DurableNativeEntryFailureV1 { stage, error })
+    }
+    fn open_checked(
+        original: AcknowledgedBornFixture,
+        input: ProposalInput,
+        budget: u64,
+        stage: &mut DurableNativeEntryStageV1,
     ) -> Result<Self> {
         let proposal = Proposal::validate(input).map_err(|_| Error::Verification)?;
         require_plain_two_owner_manifest(&proposal, &original.account_id)?;
@@ -85,6 +149,10 @@ impl DurableNativeFixtureV1 {
             authorization_export: true,
             preconstruction_export: true,
         };
+        // Capture complete quiescent inventory. A live SQLite connection may
+        // temporarily create WAL/SHM files; compare again only after full drain.
+        // No unknown names, directories or symlinks are filtered from this check.
+        let original_inventory = original_inventory(&original.root)?;
         let mut runtime = NativeRuntime::new(None);
         runtime.root = original.root.to_str().ok_or(Error::InvalidData)?.into();
         runtime.password = Zeroizing::new(
@@ -98,12 +166,19 @@ impl DurableNativeFixtureV1 {
         {
             return Err(Error::ReviewMismatch);
         }
+        *stage = DurableNativeEntryStageV1::RuntimeActivation;
         runtime.begin_durable_entry_v1(true, EPOCH)?;
         while runtime.durable_entry_job.is_some() {
             runtime.poll_durable_entry_v1(true, EPOCH);
             std::thread::sleep(Duration::from_millis(2));
         }
-        let open = runtime.open.as_ref().ok_or(Error::RecoveryRequired)?;
+        if let Some((failed_stage, error)) = runtime.take_durable_entry_failure_for_qualification()
+        {
+            *stage = failed_stage.into();
+            return Err(error);
+        }
+        *stage = DurableNativeEntryStageV1::FixturePostActivation;
+        let open = runtime.open.as_ref().ok_or(Error::Unavailable)?;
         let source = open
             .durable_born_entry
             .as_ref()
@@ -121,6 +196,7 @@ impl DurableNativeFixtureV1 {
             || open.manifest.is_some()
             || open.writer_receipt.is_some()
             || open.writer_reconciled
+            || open.ipc.socket_path().starts_with(&original.root)
         {
             return Err(Error::ReviewMismatch);
         }
@@ -134,6 +210,7 @@ impl DurableNativeFixtureV1 {
             phase: Phase::Pair,
             expected: None,
             entry,
+            original_inventory,
         })
     }
     fn check(&self) -> Result<()> {
@@ -639,6 +716,10 @@ impl DurableNativeFixtureV1 {
     }
     pub(in crate::native_ui) fn close(mut self) -> Result<AcknowledgedBornFixture> {
         self.drain_close()?;
+        let original = self.original.as_ref().ok_or(Error::Locked)?;
+        if original_inventory(&original.root)? != self.original_inventory {
+            return Err(Error::ReviewMismatch);
+        }
         self.original.take().ok_or(Error::Locked)
     }
     fn drain_close(&mut self) -> Result<()> {
@@ -661,6 +742,20 @@ impl DurableNativeFixtureV1 {
         }
         Ok(())
     }
+}
+
+fn original_inventory(root: &Path) -> Result<BTreeSet<OsString>> {
+    let mut inventory = BTreeSet::new();
+    for entry in std::fs::read_dir(root)? {
+        let entry = entry?;
+        if !std::fs::symlink_metadata(entry.path())?.is_file()
+            || !inventory.insert(entry.file_name())
+            || inventory.len() > 128
+        {
+            return Err(Error::InvalidData);
+        }
+    }
+    Ok(inventory)
 }
 impl Drop for DurableNativeFixtureV1 {
     fn drop(&mut self) {
@@ -712,6 +807,27 @@ fn require_plain_two_owner_manifest(proposal: &Proposal, own: &str) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn durable_inventory_comparison_does_not_hide_endpoint_directories_or_symlinks() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("original"), b"synthetic public marker").unwrap();
+        let original = original_inventory(root.path()).unwrap();
+        std::fs::create_dir(root.path().join("local-apps")).unwrap();
+        assert!(matches!(
+            original_inventory(root.path()),
+            Err(Error::InvalidData)
+        ));
+        std::fs::remove_dir(root.path().join("local-apps")).unwrap();
+        std::os::unix::fs::symlink("original", root.path().join("linked")).unwrap();
+        assert!(matches!(
+            original_inventory(root.path()),
+            Err(Error::InvalidData)
+        ));
+        std::fs::remove_file(root.path().join("linked")).unwrap();
+        assert_eq!(original_inventory(root.path()).unwrap(), original);
+        std::fs::write(root.path().join("unexpected"), b"synthetic public marker").unwrap();
+        assert_ne!(original_inventory(root.path()).unwrap(), original);
+    }
     #[test]
     fn durable_focused_entry_rejects_unfocused_and_zero_epoch_before_effects() {
         let mut runtime = NativeRuntime::new(None);

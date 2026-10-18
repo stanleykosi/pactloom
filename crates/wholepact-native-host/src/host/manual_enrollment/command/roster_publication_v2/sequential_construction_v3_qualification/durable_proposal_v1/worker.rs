@@ -26,8 +26,9 @@ use wholepact_signer::authority_bridge::{
     preconstruction_ipc::PreconstructionRequest,
 };
 use wholepact_signer::native_ui::synthetic_born_joined_qualification::{
-    DurableNativeRecordsV1, EphemeralAcknowledgedBornV1, EphemeralDurableNativeV1,
-    EphemeralExportedBirthV1, EphemeralFirstAnchorIntentV1, EphemeralFirstAnchorPublicationV1,
+    DurableNativeEntryFailureV1, DurableNativeEntryStageV1, DurableNativeRecordsV1,
+    EphemeralAcknowledgedBornV1, EphemeralDurableNativeV1, EphemeralExportedBirthV1,
+    EphemeralFirstAnchorIntentV1, EphemeralFirstAnchorPublicationV1,
     EphemeralOriginalRosterIntentV1, EphemeralPendingBornV1, EphemeralRosterPublicationV1,
     OriginalBirthSetupV1,
 };
@@ -43,6 +44,28 @@ type Result<T> = std::result::Result<T, &'static str>;
 fn signer_error(error: wholepact_signer::Error, label: &'static str) -> &'static str {
     diagnostic::emit(B::SignerPollTerminal, diagnostic::signer_error(&error));
     label
+}
+fn durable_entry_error(failure: DurableNativeEntryFailureV1) -> &'static str {
+    use DurableNativeEntryStageV1 as S;
+    let boundary = match failure.stage() {
+        S::NativeOwnerCheck => B::DurableEntryNativeOwnerCheck,
+        S::VaultOpen => B::DurableEntryVaultOpen,
+        S::RetainedEnrollment => B::DurableEntryRetainedEnrollment,
+        S::OriginalCommit => B::DurableEntryOriginalCommit,
+        S::JournalOpen => B::DurableEntryJournalOpen,
+        S::SourceCheck => B::DurableEntrySourceCheck,
+        S::RuntimeActivation => B::DurableEntryRuntimeActivation,
+        S::WorkerResult => B::DurableEntryWorkerResult,
+        S::EndpointCreate => B::DurableEntryEndpointCreate,
+        S::EndpointBind => B::DurableEntryEndpointBind,
+        S::EndpointPublish => B::DurableEntryEndpointPublish,
+        S::PostEndpointSourceCheck => B::DurableEntryPostEndpointSourceCheck,
+        S::FixturePreflight => B::DurableEntryFixturePreflight,
+        S::FixturePostActivation => B::DurableEntryFixturePostActivation,
+    };
+    let error = failure.into_error();
+    diagnostic::emit(boundary, diagnostic::signer_error(&error));
+    signer_error(error, "fresh durable original entry")
 }
 pub(super) const AGREEMENT_ID: &str = "synthetic-born-joined-agreement-v3";
 pub(super) const OBLIGATION_ID: &str = "synthetic-born-joined-obligation-v3";
@@ -619,7 +642,7 @@ fn execute(
         (C::OpenDurable(_, proposal), State::Acknowledged(account)) if index > 0 => {
             let entry = account
                 .open_fresh_durable(proposal, 1_000_000)
-                .map_err(|e| signer_error(e, "fresh durable original entry"))?;
+                .map_err(durable_entry_error)?;
             let reply = R::DurablePeer {
                 index,
                 peer: JoinedSignerPeerV1 {

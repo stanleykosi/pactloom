@@ -10,7 +10,9 @@ use crate::authority_bridge::{
     preconstruction_ipc::PreconstructionRequest,
 };
 use crate::native_ui::runtime::durable_proposal_qualification_v1::DurableNativeFixtureV1;
-pub use crate::native_ui::runtime::durable_proposal_qualification_v1::DurableNativeRecordsV1;
+pub use crate::native_ui::runtime::durable_proposal_qualification_v1::{
+    DurableNativeEntryFailureV1, DurableNativeEntryStageV1, DurableNativeRecordsV1,
+};
 
 pub struct EphemeralDurableNativeV1 {
     inner: DurableNativeFixtureV1,
@@ -22,7 +24,7 @@ impl EphemeralAcknowledgedBornV1 {
         self,
         proposal: wholepact_core::ProposalInput,
         aggregate_budget_zatoshis: u64,
-    ) -> Result<EphemeralDurableNativeV1> {
+    ) -> std::result::Result<EphemeralDurableNativeV1, DurableNativeEntryFailureV1> {
         Ok(EphemeralDurableNativeV1 {
             inner: DurableNativeFixtureV1::open(
                 self.original,

@@ -339,14 +339,14 @@ fn stable_recipient_caps_and_exact_return_effects_are_independent_constraints() 
     let f = fixture();
     let (origin, _) = stable(&f.binding);
     let mut changed = f.manifest.proposal_input().clone();
-    changed.manifest.outputs[1].address = "usubstituted-own-return".into();
+    changed.manifest.outputs[1].address = "usubstitutedownreturn".into();
     // Stable policy produces an ownership obligation, not a blanket permission.
     let (_, returns) = origin
         .anchor
         .recipient_policy
         .validate_candidate_for_enrollment(&f.binding.original.terms, &changed)
         .unwrap();
-    assert_eq!(returns[0].address, "usubstituted-own-return");
+    assert_eq!(returns[0].address, "usubstitutedownreturn");
     let changed_proposal = wholepact_core::Proposal::validate(changed).unwrap();
     let changed_manifest = AcceptedManifestRecord::new(ManifestTerms {
         proposal: changed_proposal.input().clone(),

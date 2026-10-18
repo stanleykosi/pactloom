@@ -5,10 +5,11 @@ use super::*;
 use crate::wallet::sync_test_support::{
     controller, database_with_prior_height, fake_server_with_connection_hook,
 };
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 struct RevocableFixtureAccess {
     allowed: Arc<AtomicBool>,
+    permission_checks: AtomicUsize,
     account: AccountUuid,
     provider: BackendIdentity,
 }
@@ -19,6 +20,7 @@ impl LocalWalletAccess for RevocableFixtureAccess {
         provider: &BackendIdentity,
         _: WalletAccessPurpose,
     ) -> bool {
+        self.permission_checks.fetch_add(1, Ordering::SeqCst);
         account == self.account
             && provider.source_id == self.provider.source_id
             && provider.endpoint == self.provider.endpoint
@@ -40,6 +42,7 @@ async fn revoke_at_connection(connection: usize, prior_height: u32) {
     let mut wallet = controller(&path, &key, &endpoint);
     let access = RevocableFixtureAccess {
         allowed,
+        permission_checks: AtomicUsize::new(0),
         account: wallet.account_uuid(),
         provider: wallet.source.identity().clone(),
     };
@@ -52,7 +55,28 @@ async fn revoke_at_connection(connection: usize, prior_height: u32) {
             },
         )
         .await;
-    assert!(matches!(result, Err(SyncError::AccessDenied)));
+    // Closed kinds and finite topology counts only: never format a source
+    // error, wallet status, provider endpoint or private wallet material.
+    let outcome = match &result {
+        Ok(_) => "Ok",
+        Err(SyncError::AccessDenied) => "AccessDenied",
+        Err(SyncError::InvalidRequest) => "InvalidRequest",
+        Err(SyncError::Interrupted) => "Interrupted",
+        Err(SyncError::ReconciliationRequired) => "ReconciliationRequired",
+        Err(SyncError::InvalidResponse) => "InvalidResponse",
+        Err(SyncError::ResourceLimit) => "ResourceLimit",
+        Err(SyncError::NoCurrentObservation) => "NoCurrentObservation",
+        Err(SyncError::Wallet(WalletError::UnsupportedProfile)) => "WalletUnsupportedProfile",
+        Err(SyncError::Wallet(_)) => "WalletOther",
+        Err(SyncError::Chain(_)) => "Chain",
+    };
+    assert!(
+        matches!(result, Err(SyncError::AccessDenied)),
+        "outcome={outcome}; permission_checks={}; accepted_connections={}; context_rpcs={}",
+        access.permission_checks.load(Ordering::SeqCst),
+        fake.accepted_connections.load(Ordering::SeqCst),
+        fake.rpc_methods.lock().unwrap().len(),
+    );
     // The maintained ChainAdapter currently uses one actual connection for
     // each of these four context RPCs; the public sync channel is connection5.
     // Assert both lists/counts so any topology change is visible, never inferred

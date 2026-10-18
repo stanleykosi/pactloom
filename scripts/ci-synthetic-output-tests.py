@@ -37,6 +37,15 @@ class PublicOutputTests(unittest.TestCase):
         self.assertNotIn('python3 -B scripts/ci-synthetic-output.py "$executable" full',shell)
         self.assertIn('no full native signing, OS-process restart, public-chain settlement',shell)
 
+    def test_durable_entry_failure_stages_remain_closed_and_redacted(self):
+        self.assertEqual(len(output.DURABLE_ENTRY_BOUNDARIES),14)
+        for label in output.DURABLE_ENTRY_BOUNDARIES:
+            self.assertTrue(output.safe_failure(self.failure(label+':Begin')))
+            self.assertTrue(output.safe_failure(self.failure(label+':SignerRecoveryRequired')))
+            self.assertFalse(output.safe_failure(self.failure(label+':private-account-id')))
+        self.assertFalse(output.safe_failure(self.failure('DurableEntryUnreviewedStage:Begin')))
+        self.assertFalse(output.safe_failure(self.failure('DurableEntryVaultOpen:/private/vault')))
+
     def record(self):
         row={key:False for key in output.FALSE_FIELDS}
         row.update({key:1 for key in output.INT_FIELDS})

@@ -10,6 +10,25 @@ use crate::consent_journal::OriginalAuthorizationLease;
 use crate::native_ui::PendingAccountNativeAuthority;
 use wholepact_authority::account_use::AccountUseGenesis;
 
+/// Finite failure locations only: no paths, private data or OS error strings.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DurableEntryFailureStageV1 {
+    NativeOwnerCheck,
+    VaultOpen,
+    RetainedEnrollment,
+    OriginalCommit,
+    JournalOpen,
+    SourceCheck,
+    RuntimeActivation,
+    WorkerResult,
+    EndpointCreate,
+    EndpointBind,
+    EndpointPublish,
+    PostEndpointSourceCheck,
+}
+pub(crate) type DurableEntryOpenResultV1<T> =
+    std::result::Result<T, (DurableEntryFailureStageV1, Error)>;
+
 /// An actual locked original vault with a fresh genuine native owner. There is
 /// deliberately no Clone, Deserialize, from-record factory, key accessor,
 /// activation flag, writer-session conversion or authorization conversion.
@@ -29,43 +48,59 @@ impl FreshDurableBornEntryV1 {
         password: &[u8],
         owner: Arc<PendingAccountNativeAuthority>,
     ) -> Result<Self> {
-        owner.check_current()?;
-        owner.native().binding().bounded_deadline()?;
+        Self::open_diagnosed(root, password, owner).map_err(|(_, error)| error)
+    }
 
-        // This existing purpose-specific opener owns the actual private
-        // directory lock and authenticates the original born envelope, original
-        // target, birth request, original account/FVK and complete file inventory.
-        // It does not activate the account or make spending_key available.
-        let account = Arc::new(AccountVault::unlock_born_for_manual_roster_enrollment_v2(
-            root, password, &owner,
-        )?);
-        let retained = account
-            .retained_born_manual_roster_enrollment_v2(&owner)?
-            .ok_or(Error::RecoveryRequired)?;
-        retained.check_current_source(&owner)?;
-        if !account.directory.exists(ROSTER_COMMIT)? || !account.directory.exists(JOURNAL)? {
-            return Err(Error::RecoveryRequired);
-        }
+    /// The same opener, with its actual error and finite location preserved.
+    /// This never retries, repairs, skips or converts an original refusal.
+    pub(crate) fn open_diagnosed(
+        root: &Path,
+        password: &[u8],
+        owner: Arc<PendingAccountNativeAuthority>,
+    ) -> DurableEntryOpenResultV1<Self> {
+        let mut stage = DurableEntryFailureStageV1::NativeOwnerCheck;
+        let result = (|| -> Result<Self> {
+            owner.check_current()?;
+            owner.native().binding().bounded_deadline()?;
 
-        // This is a historical authenticated read. It checks exact original
-        // enrollment/intent and any original continuation/admission linkage,
-        // without treating its old timestamps or native session as current.
-        let original_commit = publication::read_commit(&retained)?;
-        let genesis = &retained.record.account_record.genesis;
-        let key = DatabaseKey::from_bytes(*retained.journal_key);
-        let journal = Arc::new(SignerConsentJournal::open_durable_born_entry_v1(
-            &account.directory.root().join(JOURNAL),
-            &key,
-            genesis,
-        )?);
-        let result = Self {
-            retained,
-            original_commit,
-            journal,
-            owner,
-        };
-        result.check_current()?;
-        Ok(result)
+            // Existing purpose-specific opener: actual directory lock,
+            // authenticated original envelope/account and complete inventory.
+            // No activation or spending-key access is created.
+            stage = DurableEntryFailureStageV1::VaultOpen;
+            let account = Arc::new(AccountVault::unlock_born_for_manual_roster_enrollment_v2(
+                root, password, &owner,
+            )?);
+            stage = DurableEntryFailureStageV1::RetainedEnrollment;
+            let retained = account
+                .retained_born_manual_roster_enrollment_v2(&owner)?
+                .ok_or(Error::RecoveryRequired)?;
+            retained.check_current_source(&owner)?;
+            if !account.directory.exists(ROSTER_COMMIT)? || !account.directory.exists(JOURNAL)? {
+                return Err(Error::RecoveryRequired);
+            }
+
+            // Historical evidence is never a current native/process owner.
+            stage = DurableEntryFailureStageV1::OriginalCommit;
+            let original_commit = publication::read_commit(&retained)?;
+            let genesis = &retained.record.account_record.genesis;
+            let key = DatabaseKey::from_bytes(*retained.journal_key);
+            stage = DurableEntryFailureStageV1::JournalOpen;
+            let journal = Arc::new(SignerConsentJournal::open_durable_born_entry_v1(
+                &account.directory.root().join(JOURNAL),
+                &key,
+                genesis,
+            )?);
+            let result = Self {
+                retained,
+                original_commit,
+                journal,
+                owner,
+            };
+            stage = DurableEntryFailureStageV1::SourceCheck;
+            result.check_current()?;
+            Ok(result)
+        })();
+        result.map_err(|error| (stage, error))
     }
 
     /// Rechecks real native/parent lifetime, the held ORIGINAL source and the

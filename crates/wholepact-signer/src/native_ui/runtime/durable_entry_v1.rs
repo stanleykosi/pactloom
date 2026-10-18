@@ -2,12 +2,44 @@
 //! enrollment is association evidence only; every process/native/writer action
 //! after this entry is fresh. The old V3 in-memory owner is never consulted.
 use super::*;
+pub(super) use crate::account::birth::enrollment::roster_v2::durable_entry_v1::DurableEntryFailureStageV1;
+use crate::account::birth::enrollment::roster_v2::durable_entry_v1::DurableEntryOpenResultV1;
 use crate::account::birth::enrollment::roster_v2::durable_entry_v1::FreshDurableBornEntryV1;
-use std::{path::PathBuf, sync::mpsc, time::Instant};
+use std::{os::unix::fs::PermissionsExt, path::PathBuf, sync::mpsc, time::Instant};
+
+/// Drop order is deliberate: the actual IPC worker/socket drains before its
+/// external private container is removed, including activation-error paths.
+struct DurableEntryEndpointV1 {
+    ipc: LocalIpc,
+    temporary: tempfile::TempDir,
+}
+fn create_durable_endpoint_v1(
+    original_root: &Path,
+) -> DurableEntryOpenResultV1<DurableEntryEndpointV1> {
+    let create = DurableEntryFailureStageV1::EndpointCreate;
+    let original = std::fs::canonicalize(original_root).map_err(|e| (create, Error::from(e)))?;
+    let parent =
+        std::fs::canonicalize(std::env::temp_dir()).map_err(|e| (create, Error::from(e)))?;
+    // Refuse an environment-selected temporary parent inside the original
+    // BEFORE creating anything there. Never remove/repair an unknown entry.
+    if parent.starts_with(&original) {
+        return Err((create, Error::InvalidData));
+    }
+    let temporary = tempfile::Builder::new()
+        .prefix("wholepact-durable-native-")
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir_in(parent)
+        .map_err(|e| (create, Error::from(e)))?;
+    let bind = DurableEntryFailureStageV1::EndpointBind;
+    let directory =
+        crate::files::PrivateDirectory::open(temporary.path()).map_err(|e| (bind, e))?;
+    let ipc = LocalIpc::bind(directory).map_err(|e| (bind, e))?;
+    Ok(DurableEntryEndpointV1 { ipc, temporary })
+}
 
 pub(super) struct DurableEntryJobV1 {
     owner: Arc<super::super::PendingAccountNativeAuthority>,
-    receive: mpsc::Receiver<Result<FreshDurableBornEntryV1>>,
+    receive: mpsc::Receiver<DurableEntryOpenResultV1<FreshDurableBornEntryV1>>,
     done: Arc<AtomicBool>,
     focus_epoch: u64,
     root: PathBuf,
@@ -46,6 +78,10 @@ impl NativeRuntime {
         }
         self.retirement_evidence_session
             .before_account_replacement()?;
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        {
+            self.durable_entry_failure = None;
+        }
         let deadline = Instant::now() + Duration::from_secs(120);
         let owner = Arc::new(super::super::PendingAccountNativeAuthority::enter_bounded(
             PendingBirthEntry {
@@ -64,7 +100,8 @@ impl NativeRuntime {
         let worker_owner = owner.clone();
         std::thread::spawn(move || {
             let _done = WorkerCompletion(worker_done);
-            let result = FreshDurableBornEntryV1::open(&worker_root, &password, worker_owner);
+            let result =
+                FreshDurableBornEntryV1::open_diagnosed(&worker_root, &password, worker_owner);
             let _ = send.send(result);
         });
         self.durable_entry_job = Some(DurableEntryJobV1 {
@@ -89,27 +126,37 @@ impl NativeRuntime {
         let Some(job) = self.durable_entry_job.as_ref() else {
             return;
         };
-        if !focused
-            || job.focus_epoch != epoch
-            || job.root != Path::new(&self.root)
-            || job.owner.check_current().is_err()
-        {
+        if !focused || job.focus_epoch != epoch || job.root != Path::new(&self.root) {
+            self.cancel_durable_entry_v1();
+            return;
+        }
+        if let Err(error) = job.owner.check_current() {
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            {
+                self.durable_entry_failure =
+                    Some((DurableEntryFailureStageV1::NativeOwnerCheck, error));
+            }
+            #[cfg(not(feature = "synthetic-born-joined-qualification"))]
+            let _ = error;
             self.cancel_durable_entry_v1();
             return;
         }
         let result = match job.receive.try_recv() {
             Ok(result) => result,
             Err(mpsc::TryRecvError::Empty) => return,
-            Err(mpsc::TryRecvError::Disconnected) => Err(Error::Unavailable),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Err((DurableEntryFailureStageV1::WorkerResult, Error::Unavailable))
+            }
         };
         let mut job = self.durable_entry_job.take().expect("pending job checked");
         let result = result.and_then(|source| {
+            let stage = DurableEntryFailureStageV1::RuntimeActivation;
             if self.open.is_some() || self.pending.is_some() || job.focus_epoch != epoch {
-                return Err(Error::ReviewMismatch);
+                return Err((stage, Error::ReviewMismatch));
             }
-            source.check_current()?;
+            source.check_current().map_err(|error| (stage, error))?;
             if !Arc::ptr_eq(source.native_owner(), &job.owner) {
-                return Err(Error::Authentication);
+                return Err((stage, Error::Authentication));
             }
             self.activate_durable_entry_v1(Arc::new(source))?;
             // Disable only this job's cancellation guard, not a native/born
@@ -117,26 +164,42 @@ impl NativeRuntime {
             job.focus_epoch = 0;
             Ok(())
         });
-        if result.is_err() {
+        if let Err((stage, error)) = result {
             job.owner.revoke_pending_now();
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            {
+                self.durable_entry_failure = Some((stage, error));
+            }
+            #[cfg(not(feature = "synthetic-born-joined-qualification"))]
+            let _ = (stage, error);
             self.message = "Fresh durable source authentication failed. Original history remains unchanged; preserve the original account and journal for recovery.";
         }
     }
-    fn activate_durable_entry_v1(&mut self, source: Arc<FreshDurableBornEntryV1>) -> Result<()> {
-        source.check_current()?;
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(super) fn take_durable_entry_failure_for_qualification(
+        &mut self,
+    ) -> Option<(DurableEntryFailureStageV1, Error)> {
+        self.durable_entry_failure.take()
+    }
+    fn activate_durable_entry_v1(
+        &mut self,
+        source: Arc<FreshDurableBornEntryV1>,
+    ) -> DurableEntryOpenResultV1<()> {
+        let stage = DurableEntryFailureStageV1::RuntimeActivation;
+        source.check_current().map_err(|error| (stage, error))?;
         self.retirement_evidence_session
-            .before_account_replacement()?;
-        let ipc_path = Path::new(&self.root).join("local-apps");
-        let directory = if ipc_path.exists() {
-            crate::files::PrivateDirectory::open(&ipc_path)?
-        } else {
-            crate::files::PrivateDirectory::create(&ipc_path)?
-        };
-        let ipc = LocalIpc::bind(directory)?;
+            .before_account_replacement()
+            .map_err(|error| (stage, error))?;
+        // The complete original vault inventory forbids subdirectories. Reuse
+        // the supported external private endpoint pattern, never widen it.
+        let endpoint = create_durable_endpoint_v1(Path::new(&self.root))?;
         source
             .native_owner()
-            .publish_pending_endpoint(ipc.socket_path())?;
-        source.check_current()?;
+            .publish_pending_endpoint(endpoint.ipc.socket_path())
+            .map_err(|error| (DurableEntryFailureStageV1::EndpointPublish, error))?;
+        source
+            .check_current()
+            .map_err(|error| (DurableEntryFailureStageV1::PostEndpointSourceCheck, error))?;
         self.open = Some(OpenAccount {
             vault: source.vault().clone(),
             journal: source.journal().clone(),
@@ -146,7 +209,8 @@ impl NativeRuntime {
             durable_import_job: None,
             durable_wallet_job: None,
             session: None,
-            ipc,
+            ipc: endpoint.ipc,
+            durable_ipc_directory: Some(endpoint.temporary),
             pairing: None,
             enrollment: None,
             manifest: None,
@@ -176,5 +240,61 @@ impl NativeRuntime {
         self.recovery.zeroize();
         self.message = "Original born account reopened with a fresh bounded native owner. Pair this actual process, freshly accept the same enrollment and manifest, and reconcile the original independent witness. No old spend permission was restored.";
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn inventory(root: &Path) -> BTreeMap<std::ffi::OsString, (bool, bool, bool)> {
+        std::fs::read_dir(root)
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                let kind = std::fs::symlink_metadata(entry.path()).unwrap().file_type();
+                (
+                    entry.file_name(),
+                    (kind.is_file(), kind.is_dir(), kind.is_symlink()),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn durable_endpoint_is_external_preserves_inventory_and_drains_before_cleanup() {
+        let original = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
+        // Storage-only fixture, not a native account/approval factory.
+        std::fs::write(
+            original.path().join("account.wp"),
+            b"synthetic inert original",
+        )
+        .unwrap();
+        std::fs::write(
+            original.path().join("authority.sqlite"),
+            b"synthetic inert journal",
+        )
+        .unwrap();
+        // An unsupported preexisting entry is never silently repaired/removed.
+        std::fs::create_dir(original.path().join("local-apps")).unwrap();
+        let before = inventory(original.path());
+        for _ in 0..2 {
+            let endpoint = create_durable_endpoint_v1(original.path())
+                .unwrap_or_else(|_| panic!("external endpoint setup failed"));
+            let directory = endpoint.temporary.path().to_path_buf();
+            let socket = endpoint.ipc.socket_path().to_path_buf();
+            assert!(!directory.starts_with(original.path()));
+            assert!(!socket.starts_with(original.path()));
+            assert!(socket.exists());
+            assert_eq!(inventory(original.path()), before);
+            drop(endpoint);
+            assert!(!socket.exists());
+            assert!(!directory.exists());
+            assert_eq!(inventory(original.path()), before);
+        }
     }
 }
