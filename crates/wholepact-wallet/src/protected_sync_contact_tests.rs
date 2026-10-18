@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 struct RevocableFixtureAccess {
     allowed: Arc<AtomicBool>,
     permission_checks: AtomicUsize,
+    deny_post_channel_check: bool,
     account: AccountUuid,
     provider: BackendIdentity,
 }
@@ -20,7 +21,10 @@ impl LocalWalletAccess for RevocableFixtureAccess {
         provider: &BackendIdentity,
         _: WalletAccessPurpose,
     ) -> bool {
-        self.permission_checks.fetch_add(1, Ordering::SeqCst);
+        let check = self.permission_checks.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.deny_post_channel_check && check == 3 {
+            self.allowed.store(false, Ordering::SeqCst);
+        }
         account == self.account
             && provider.source_id == self.provider.source_id
             && provider.endpoint == self.provider.endpoint
@@ -29,11 +33,11 @@ impl LocalWalletAccess for RevocableFixtureAccess {
     }
 }
 
-async fn revoke_at_connection(connection: usize, prior_height: u32) {
+async fn revoke_at_scan_boundary(post_channel: bool, prior_height: u32) {
     let allowed = Arc::new(AtomicBool::new(true));
     let revoke = allowed.clone();
     let (fake, endpoint, server, fvk) = fake_server_with_connection_hook(1, move |count| {
-        if count == connection {
+        if !post_channel && count == 4 {
             revoke.store(false, Ordering::SeqCst);
         }
     })
@@ -43,6 +47,7 @@ async fn revoke_at_connection(connection: usize, prior_height: u32) {
     let access = RevocableFixtureAccess {
         allowed,
         permission_checks: AtomicUsize::new(0),
+        deny_post_channel_check: post_channel,
         account: wallet.account_uuid(),
         provider: wallet.source.identity().clone(),
     };
@@ -77,11 +82,21 @@ async fn revoke_at_connection(connection: usize, prior_height: u32) {
         fake.accepted_connections.load(Ordering::SeqCst),
         fake.rpc_methods.lock().unwrap().len(),
     );
-    // The maintained ChainAdapter currently uses one actual connection for
-    // each of these four context RPCs; the public sync channel is connection5.
-    // Assert both lists/counts so any topology change is visible, never inferred
-    // from a sleep, elapsed time or a synthetic context substituted into sync.
-    assert_eq!(fake.accepted_connections.load(Ordering::SeqCst), connection);
+    assert_eq!(
+        access.permission_checks.load(Ordering::SeqCst),
+        if post_channel { 3 } else { 2 }
+    );
+    // The maintained adapter completes these four actual context RPCs first.
+    // Channel creation uses the maintained connect path, but a server accept
+    // callback is not a client-completion boundary and may not yet have run.
+    // Never wait for or infer a fifth accept. The post-channel test's exact
+    // boundary is permission check3, not a claim of revocation during I/O.
+    let connections = fake.accepted_connections.load(Ordering::SeqCst);
+    if post_channel {
+        assert!((4..=5).contains(&connections));
+    } else {
+        assert_eq!(connections, 4);
+    }
     assert_eq!(
         *fake.rpc_methods.lock().unwrap(),
         [
@@ -99,15 +114,17 @@ async fn revoke_at_connection(connection: usize, prior_height: u32) {
 
 #[tokio::test]
 async fn revocation_during_context_prevents_public_channel_contact() {
-    revoke_at_connection(4, 4_465_039).await;
+    revoke_at_scan_boundary(false, 4_465_039).await;
 }
 
 #[tokio::test]
-async fn revocation_during_channel_prevents_later_wallet_read_or_rpc() {
+async fn post_channel_permission_denial_prevents_wallet_read_and_further_rpc() {
     // A genuinely imported, unsupported pre-NU7 birthday is an ordering
     // sentinel: without the post-await access guard, sync would read it and
     // return UnsupportedProfile before the next RPC's access check. AccessDenied
-    // must win immediately after the actual channel await instead.
+    // must win at permission check3 after the actual channel await instead.
+    // This deliberately injects denial at that permission check, not at a
+    // server-accept hook whose scheduling cannot prove a pending client await.
     let prior = u32::try_from(wholepact_chain::NU7_ACTIVATION_HEIGHT).unwrap() - 2;
-    revoke_at_connection(5, prior).await;
+    revoke_at_scan_boundary(true, prior).await;
 }

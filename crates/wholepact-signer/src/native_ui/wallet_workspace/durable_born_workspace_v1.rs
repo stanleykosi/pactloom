@@ -5,7 +5,7 @@ use super::*;
 use crate::account::birth::enrollment::roster_v2::durable_entry_v1::FreshDurableBornEntryV1;
 use crate::files::PrivateDirectory;
 use std::{os::unix::fs::PermissionsExt, path::Path};
-use wholepact_storage_security::{DatabaseKey, create_encrypted};
+use wholepact_storage_security::{DatabaseFileIdentity, DatabaseKey, create_encrypted};
 
 const PURPOSE: &str = "fresh_born_ephemeral_viewing_wallet_v1";
 const RETENTION: &str = "current_native_owner_only";
@@ -61,12 +61,12 @@ impl DurableBornWalletConfigV1 {
 
 /// Retained actual source, not a record-based permission or a closure supplied
 /// by the host. Access checks deliberately take no journal authority lock.
-pub(super) struct DurableBornWalletSourceV1 {
+struct OriginalBornWalletSourceV1 {
     source: Arc<FreshDurableBornEntryV1>,
     account_id: String,
     fvk_digest: String,
 }
-impl DurableBornWalletSourceV1 {
+impl OriginalBornWalletSourceV1 {
     pub(super) fn check(&self, origin: &NativeAuthorityBinding) -> Result<()> {
         self.source.check_original_source_current()?;
         if &self.source.native_binding() != origin
@@ -78,6 +78,32 @@ impl DurableBornWalletSourceV1 {
             return Err(Error::ReviewMismatch);
         }
         origin.check_current()
+    }
+}
+
+/// Approved access source retains the ACTUAL factory-created database identity.
+/// A prepared source alone cannot construct this guard; the private constructor
+/// below supplies the identity only after authenticated creation and import.
+/// The workspace owns its exclusive PrivateDirectory until its controller closes.
+/// A retained-path check is not a replacement for maintained SQLite live-handle
+/// checks, which still apply to selection/key use; neither claims an OS sandbox.
+pub(super) struct DurableBornWalletSourceV1 {
+    original: OriginalBornWalletSourceV1,
+    wallet_identity: DatabaseFileIdentity,
+}
+impl DurableBornWalletSourceV1 {
+    pub(super) fn check(&self, origin: &NativeAuthorityBinding) -> Result<()> {
+        self.original.check(origin)?;
+        self.wallet_identity
+            .check_retained_owner_path()
+            .map_err(|_| Error::Verification)?;
+        self.original.check(origin)
+    }
+    pub(super) fn require_source(&self, source: &FreshDurableBornEntryV1) -> Result<()> {
+        if !std::ptr::eq(self.original.source.as_ref(), source) {
+            return Err(Error::Authentication);
+        }
+        self.check(&source.native_binding())
     }
 }
 
@@ -122,7 +148,7 @@ pub(in crate::native_ui) struct PreparedDurableBornWalletSetupV1 {
     config: DurableBornWalletConfigV1,
     chain: ChainAdapter,
     birthday: AccountBirthday,
-    source: DurableBornWalletSourceV1,
+    source: OriginalBornWalletSourceV1,
     native_origin: NativeAuthorityBinding,
     digest: String,
 }
@@ -135,7 +161,7 @@ impl PreparedDurableBornWalletSetupV1 {
         authority.check_current()?;
         source.check_current()?;
         let native_origin = authority.binding();
-        let source = DurableBornWalletSourceV1 {
+        let source = OriginalBornWalletSourceV1 {
             account_id: source.account().account_id()?,
             fvk_digest: hex::encode(Sha256::digest(source.account().fvk()?.to_bytes())),
             source,
@@ -267,7 +293,10 @@ impl PreparedDurableBornWalletSetupV1 {
                 active: Arc::new(AtomicBool::new(true)),
             },
             approved: decision.consumed_at(),
-            durable_source: Some(self.source),
+            durable_source: Some(DurableBornWalletSourceV1 {
+                original: self.source,
+                wallet_identity: identity,
+            }),
         };
         let workspace = NativeWalletWorkspace {
             controller,

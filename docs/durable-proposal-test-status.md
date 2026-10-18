@@ -1,6 +1,6 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-17, 23:48 UTC.
+Updated: 2026-10-18, 01:34 UTC.
 
 **Incomplete implementation. No native end-to-end, public testnet settlement, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
 
@@ -53,8 +53,10 @@ The cloud checkout and build cache were lost again on 2026-10-18 around 00:52 UT
 
 After restoring the workspace, checkpoint `354a961c6d8573198730bed032040626a94a94d1` compiled for native-host all-features tests (9 minutes 33 seconds) and signer all-features tests (4 minutes 52 seconds). The corrected signer groups then passed: 15 policy, eight bridge/return-ownership, six feature-enabled migration, ten born-journal and one redisclosure test, 40 total. The IPC endpoint regression was deliberately not executed locally.
 
-The isolated native retry is [39084949525](https://github.com/stanleykosi/pactloom/actions/runs/39084949525), pinned to that checkpoint. Its result is not yet recorded in this document. No full native signing, OS-process restart or testnet settlement follows from these component passes.
+The isolated native retry is [39084949525](https://github.com/stanleykosi/pactloom/actions/runs/39084949525), pinned to that checkpoint. It failed at session startup after all 53 initial inputs, with `SignerPollCancelled` and no new `DurableEntry` stage observed. Its preceding 72 Python, 35 signer, six renderer, three authority, 43 pure Host and encrypted-bootstrap checks passed; child/process-group/root and outer-container cleanup were verified. This does not establish that endpoint activation was reached. Session lifecycle diagnosis is required before another retry. No full native signing, OS-process restart or testnet settlement follows from these component passes.
 
 Future CI ordering runs the existing output/privacy self-tests, Host pure checks and encrypted bootstrap before the bounded native baseline, then requires all remaining signer/authority gates before overall success. The additional endpoint-isolation selector is a separate CI-only real-IPC test, never part of a local pure selection. Parser/selection mock tests passed 83 cases; the new CI gate itself still requires execution.
 
 Inactive production leaves remain incomplete and unregistered. Discovery planning now separates immutable historical discovery context from a newly approved common pre-proof construction anchor; post-proof anchor rules remain unchanged. The proposed ephemeral born viewing cache is explicitly limited by the remaining native-owner lifetime and short-history account envelope, not a general long-history availability solution. Production discovery/derived-manifest privacy must also be protected by an exclusive purpose-specific coordinator facade or equivalent complete view/export fencing, not only a hidden raw receipt field.
+
+The post-channel contact diagnostic observed three permission checks, four accepted connections and four context RPCs before unsupported-wallet access. The corrected component test injects denial at the actual third permission check rather than assuming a fifth server accept is an awaited client boundary. Its renamed claim is post-channel permission denial before wallet reads or further RPCs. A fresh compile and run are pending.
