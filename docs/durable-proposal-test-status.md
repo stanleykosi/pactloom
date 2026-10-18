@@ -28,6 +28,10 @@ The strict immutable admission/replay layer and narrow native witness one-record
 
 No socket/native owner was exercised by these component selections. Actual owner-mTLS admission, uncertain-delivery recovery, signer integration, financial signature release and the bounded native sequence remain unqualified. Signer intent storage/current-source reconciliation and actual source ownership for safe old-schema refusal are still being implemented. The complete Host/Signer graph must be rebuilt after those changes; this authority-only checkpoint is not an activated product.
 
+## Inactive signer source preservation checkpoint
+
+Six independent new signer leaves are retained as a source-only checkpoint: immutable admission intent and its focused tests, financial schema delta and schema tests, frozen historical18 SQL, and the source-bound native witness adapter. Their parent module/storage/runtime integration remains work in progress and is not included in this leaf-only checkpoint. These leaves are unregistered in this published tree, uncompiled and unexecuted; they do not activate schema19, change the qualified profile, or supply financial authority. This preserves recoverable work without publishing a partially wired active signer graph.
+
 ## Observed local results
 
 Pinned Rust 1.99.0, release builds, locked dependencies, maintained PCZT/proof implementation and encrypted SQLCipher journals were used. Tests used synthetic, never-funded accounts and no public-chain submission.
