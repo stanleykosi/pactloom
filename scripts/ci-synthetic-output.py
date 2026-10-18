@@ -369,22 +369,24 @@ class BoundedLines:
             chunk=chunk[split+1:]
         return lines
 
+DURABLE_PROVIDER_METADATA_TEST = PREFIX + 'synthetic_born_provider_v1::durable_metadata_tests::durable_provider_metadata_satisfies_actual_material_decoder'
+
 def run_pure(executable):
     assert resource.getrlimit(resource.RLIMIT_CORE)[0] == 0
-    for name in PURE_TESTS + POLICY_ENVELOPE_TESTS + PROMPT_RENDERING_TESTS + LOWER_ERROR_TESTS + DENIAL_TESTS + ROLLING_TRANSCRIPT_TESTS + AUTHORITY_PROJECTION_TESTS + READ_WAVE_TESTS + TIMING_HOST_TESTS:
+    for name in PURE_TESTS + POLICY_ENVELOPE_TESTS + PROMPT_RENDERING_TESTS + LOWER_ERROR_TESTS + DENIAL_TESTS + ROLLING_TRANSCRIPT_TESTS + AUTHORITY_PROJECTION_TESTS + READ_WAVE_TESTS + TIMING_HOST_TESTS + (DURABLE_PROVIDER_METADATA_TEST,):
         flags=['--exact',name,'--test-threads=1']
         listed=subprocess.run([executable,*flags,'--list'],capture_output=True,timeout=30,check=True)
         if not exact_listing(listed.stdout.decode(),name) or listed.stderr:
             raise ValueError('exact pure test not uniquely registered')
-        # These 43 fixed source-reviewed cases use only modeled process state,
+        # These 44 fixed source-reviewed cases use only modeled process state,
         # inert files, historical policy DTOs, fixed prompts, closed error kinds or
-        # bounded private parsing state. They create
+        # bounded private parsing state or data-only scanned-note mathematics. They create
         # no native/IPC/network/payment owners.
         result=subprocess.run([executable,*flags],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=30)
         if result.returncode!=0 or len(result.stdout)>1024*1024:
             print('CI_SYNTHETIC_PURE failed_test='+name,flush=True)
             raise RuntimeError('exact pure test failed; raw output withheld')
-    print('CI_SYNTHETIC_PURE passed=43 raw_output_discarded=true',flush=True)
+    print('CI_SYNTHETIC_PURE passed=44 raw_output_discarded=true',flush=True)
 
 def run_signer_validation(executable):
     assert resource.getrlimit(resource.RLIMIT_CORE)[0] == 0

@@ -273,6 +273,14 @@ fn reply(material: &SyntheticBornReceiverBlocksV1, method: &str, data: &[u8]) ->
         "GetLightdInfo" => {
             exact::<Empty>(data)?;
             Some(frame(&[LightdInfo {
+                // Truthful fixture software labels, not claims to run a real
+                // lightwalletd/zcashd or to provide consensus evidence. Durable
+                // historical material retains these exact nonempty reports.
+                version: "synthetic-born-provider-v1".into(),
+                zcashd_subversion: "synthetic-no-zcashd-backend".into(),
+                // Pinned upstream tag18 is named lightwallet_protocol_version;
+                // wholepact-chain's narrow wire projection calls it protocol_version.
+                lightwallet_protocol_version: "synthetic-compact-rpc-v1".into(),
                 chain_name: "test".into(),
                 sapling_activation_height: 280_000,
                 consensus_branch_id: "77190ad9".into(),
@@ -338,3 +346,7 @@ fn reply(material: &SyntheticBornReceiverBlocksV1, method: &str, data: &[u8]) ->
         _ => None,
     }
 }
+
+#[cfg(all(test, feature = "durable-proposal"))]
+#[path = "synthetic_born_provider_v1/durable_metadata_tests.rs"]
+mod durable_metadata_tests;
