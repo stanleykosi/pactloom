@@ -10,6 +10,16 @@ fn h(byte: char) -> String {
     byte.to_string().repeat(64)
 }
 
+fn private_dir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    dir
+}
+
 struct Fixture {
     binding: DurableBornPolicyBindingV1,
     terms: SpendConsentTerms,
@@ -400,6 +410,9 @@ fn mapping_substitution_and_unbounded_original_policy_are_rejected() {
     }
     let mut b = f.binding.clone();
     b.original.terms.issued_at_ms = 100_001;
+    // Keep the original policy internally valid so this isolates a review
+    // that predates it, rather than failing the source policy codec first.
+    b.original.terms.scope.maximum_permit_lifetime_ms = 60_000;
     rehash_original(&mut b);
     assert!(b
         .validate_consent(&f.terms, &f.enrollment, &f.manifest)
@@ -516,7 +529,7 @@ fn one_request_mapping_is_used_by_retained_validation_and_history() {
 #[test]
 fn retained_mapping_requires_actual_journal_genesis() {
     let f = Fixture::new();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = private_dir();
     let key = wholepact_storage_security::DatabaseKey::from_bytes([0x43; 32]);
     let journal = SignerConsentJournal::create_encrypted(
         &dir.path().join("source.sqlite"),
@@ -543,21 +556,49 @@ fn retained_mapping_requires_actual_journal_genesis() {
     validate_retained_original(&c, &original).unwrap();
     let mut changed = g.clone();
     changed.witness_id = "substituted-witness".into();
-    c.execute(
-        "UPDATE signer_account_use_genesis SET genesis_digest=?1,payload=?2",
-        rusqlite::params![
-            changed.digest().unwrap(),
-            serde_json::to_string(&changed).unwrap()
-        ],
+    // The maintained immutable-origin trigger must remain enforced.
+    assert!(c
+        .execute(
+            "UPDATE signer_account_use_genesis SET genesis_digest=?1,payload=?2",
+            rusqlite::params![
+                changed.digest().unwrap(),
+                serde_json::to_string(&changed).unwrap()
+            ],
+        )
+        .is_err());
+    validate_retained_original(&c, &original).unwrap();
+
+    // A separately created valid original journal is not this retained source,
+    // even when it deliberately shares the synthetic account label and FVK.
+    let other_dir = private_dir();
+    let other_key = wholepact_storage_security::DatabaseKey::from_bytes([0x45; 32]);
+    let other = SignerConsentJournal::create_encrypted(
+        &other_dir.path().join("other-source.sqlite"),
+        &other_key,
+        &h('1'),
+        7,
+        false,
     )
     .unwrap();
-    assert!(validate_retained_original(&c, &original).is_err());
+    let other_c = other.connection.lock().unwrap();
+    other_c
+        .execute(
+            "INSERT INTO signer_account_use_genesis VALUES(1,?1,?2,?3,?4)",
+            rusqlite::params![
+                changed.identity.account_id,
+                changed.identity.full_viewing_key_digest,
+                changed.digest().unwrap(),
+                serde_json::to_string(&changed).unwrap()
+            ],
+        )
+        .unwrap();
+    assert!(validate_retained_original(&other_c, &original).is_err());
 }
 
 #[test]
 fn generic_release_refuses_bound_consent_without_creating_exposure() {
     let f = Fixture::new();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = private_dir();
     let key = wholepact_storage_security::DatabaseKey::from_bytes([0x44; 32]);
     let journal = SignerConsentJournal::create_encrypted(
         &dir.path().join("source.sqlite"),

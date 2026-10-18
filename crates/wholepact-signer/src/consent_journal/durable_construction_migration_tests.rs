@@ -154,6 +154,9 @@ fn schema18_interruption_wrong_account_and_schema_drift_do_not_mutate_v17() {
     assert_eq!(before, rows(&c, V17_SCHEMA));
 }
 
+// Signed V3 approval verification is deliberately unavailable in the default
+// signer profile. This feature forwards the genuine authority verifier.
+#[cfg(feature = "pending-birth-owner-signing")]
 #[test]
 fn schema18_old_v3_typed_history_is_readable_without_rewriting_original_bytes() {
     let (inventory, evidence) =
@@ -185,6 +188,29 @@ fn schema18_old_v3_typed_history_is_readable_without_rewriting_original_bytes() 
     );
     assert!(storage::read_account(&c).unwrap().recovery_required);
     outbox_empty(&c);
+}
+
+#[cfg(not(feature = "pending-birth-owner-signing"))]
+#[test]
+fn schema18_default_refuses_unverifiable_v3_history_without_rewriting() {
+    // Exercise a fallible read of the exact original signed fixture, rather
+    // than treating the supported-profile fixture constructor's panic as
+    // refusal evidence. This is a read-only verifier-availability test, not
+    // typed migration coverage; the schema/rollback tests remain independent.
+    let raw: serde_json::Value = serde_json::from_str(include_str!(
+        "fixtures/common-context-authority-audit.synthetic.json"
+    ))
+    .expect("fixed synthetic JSON fixture");
+    for key in ["complete_history", "pre_reserve_history"] {
+        let history: wholepact_authority::ConstructionHistoryV2 =
+            serde_json::from_value(raw[key].clone()).expect("original V3 history shape");
+        let before = serde_json::to_vec(&history).unwrap();
+        assert!(matches!(
+            history.validate(),
+            Err(wholepact_authority::AuthorityError::ConstructionHistoryUnsupported)
+        ));
+        assert_eq!(before, serde_json::to_vec(&history).unwrap());
+    }
 }
 
 #[test]
@@ -232,6 +258,7 @@ fn schema18_backup_keeps_v17_template_frozen_and_distinct() {
 }
 
 #[cfg(all(
+    feature = "pending-birth-owner-signing",
     feature = "native-ui",
     feature = "authority-signing",
     target_os = "linux"
@@ -239,7 +266,7 @@ fn schema18_backup_keeps_v17_template_frozen_and_distinct() {
 #[test]
 fn schema18_sealed_v17_v3_backup_stays_readable_without_activating_or_mutating_source() {
     use std::{os::unix::fs::PermissionsExt, sync::Mutex};
-    use wholepact_storage_security::{DatabaseKey, bundle::*};
+    use wholepact_storage_security::{bundle::*, DatabaseKey};
 
     // This test-only adapter represents an already-enrolled historical schema.
     // It has no issuer, vault or signer-journal factory and exposes no connection
