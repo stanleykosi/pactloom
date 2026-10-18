@@ -275,6 +275,10 @@ enum Operation {
     Manifest(Box<PreparedManifestAcceptance>),
     #[cfg(feature = "authority-signing")]
     Wallet(Box<PreparedWalletSetup>),
+    #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+    DurableBornWalletV1(
+        Box<super::wallet_workspace::durable_born_workspace_v1::PreparedDurableBornWalletSetupV1>,
+    ),
     #[cfg(feature = "authority-signing")]
     Witness(Box<PreparedWitnessSetup>),
     #[cfg(feature = "authority-signing")]
@@ -2959,6 +2963,34 @@ impl NativeRuntime {
     #[cfg(feature = "authority-signing")]
     fn stage_wallet_setup(&mut self, epoch: u64) -> Result<()> {
         let open = self.open.as_ref().ok_or(Error::Locked)?;
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        if let Some(source) = &open.durable_born_entry {
+            // Preserve the same owner's partial scan state. Replacement needs
+            // explicit close and a fresh owner/setup, never a cache reset or an
+            // ordinary born-vault storage fallback.
+            if self.pending.is_some()
+                || open.wallet.is_some()
+                || open.wallet_job.is_some()
+                || open.durable_wallet_job.is_some()
+            {
+                return Err(Error::Locked);
+            }
+            let prepared = super::wallet_workspace::durable_born_workspace_v1::PreparedDurableBornWalletSetupV1::prepare(
+                &self.wallet_setup,
+                source.clone(),
+                &open.authority,
+            )?;
+            self.pending = Some(PendingDecision {
+                review: ExactNativeReview::stage(
+                    &open.authority,
+                    prepared.digest(),
+                    prepared.display()?,
+                    epoch,
+                )?,
+                operation: Operation::DurableBornWalletV1(Box::new(prepared)),
+            });
+            return Ok(());
+        }
         let prepared =
             PreparedWalletSetup::prepare(&self.wallet_setup, &open.vault, &open.authority)?;
         self.pending = Some(PendingDecision {
@@ -4337,6 +4369,19 @@ impl NativeRuntime {
                 open.wallet = Some(prepared.approve(decision, &open.authority, &open.vault)?);
                 self.message = "Native wallet setup accepted. Public synchronization and local selection require a separate native action.";
             }
+            #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+            Operation::DurableBornWalletV1(prepared) => {
+                let source = open.durable_born_entry.as_ref().ok_or(Error::Unavailable)?;
+                source.check_current()?;
+                if open.wallet.is_some()
+                    || open.wallet_job.is_some()
+                    || open.durable_wallet_job.is_some()
+                {
+                    return Err(Error::Locked);
+                }
+                open.wallet = Some(prepared.approve(decision, &open.authority)?);
+                self.message = "Fresh encrypted ephemeral viewing wallet accepted outside the original vault. Its original native deadline is unchanged; public synchronization, export and spending still require their separate actions.";
+            }
             #[cfg(feature = "authority-signing")]
             Operation::OwnerWitness(prepared) => {
                 let witness = prepared.approve(decision, &open.authority, &open.vault)?;
@@ -4475,6 +4520,11 @@ impl NativeRuntime {
                     Operation::Pair(_) | Operation::Provider(_) => unreachable!(),
                     #[cfg(feature = "durable-proposal")]
                     Operation::DurableConstructionV1(_) => unreachable!(),
+                    #[cfg(all(
+                        feature = "durable-proposal",
+                        feature = "pending-birth-owner-signing"
+                    ))]
+                    Operation::DurableBornWalletV1(_) => unreachable!(),
                     #[cfg(all(
                         feature = "authority-signing",
                         feature = "offline-review-foundation"

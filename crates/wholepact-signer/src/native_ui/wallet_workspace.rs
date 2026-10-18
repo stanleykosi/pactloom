@@ -2,6 +2,8 @@
 //! No app-supplied FVK, input-selection flag or context DTO becomes local authority.
 //! The only setup constructor consumes an exact signer-native decision. It makes
 //! no provider contact until the approved bounded asynchronous scan is requested.
+#[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+pub(super) mod durable_born_workspace_v1;
 #[cfg(feature = "durable-proposal")]
 mod durable_proposal_v1;
 
@@ -219,6 +221,8 @@ impl PreparedWalletSetup {
             origin: self.native_origin,
             revocation: revocation.clone(),
             approved: Instant::now(),
+            #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+            durable_source: None,
         };
         Ok(NativeWalletWorkspace {
             controller,
@@ -228,6 +232,8 @@ impl PreparedWalletSetup {
             policy: self.config.policy,
             maximum_blocks: self.config.maximum_blocks,
             ticket: None,
+            #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+            ephemeral_directory: None,
         })
     }
 }
@@ -247,6 +253,8 @@ struct NativeWalletAccess {
     origin: NativeAuthorityBinding,
     revocation: NativeWalletRevocation,
     approved: Instant,
+    #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+    durable_source: Option<durable_born_workspace_v1::DurableBornWalletSourceV1>,
 }
 impl NativeWalletAccess {
     fn check(&self) -> Result<()> {
@@ -255,6 +263,10 @@ impl NativeWalletAccess {
             || self.approved.elapsed() >= ACCESS_LIFETIME
         {
             return Err(Error::Locked);
+        }
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        if let Some(source) = &self.durable_source {
+            source.check(&self.origin)?;
         }
         Ok(())
     }
@@ -278,6 +290,10 @@ pub(super) struct NativeWalletWorkspace {
     policy: WalletKeyUsePolicy,
     maximum_blocks: u32,
     ticket: Option<WalletKeyUseTicket>,
+    // MUST remain last: the actual controller/connection closes before the
+    // retained directory lock and owned temporary directory are dropped.
+    #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+    ephemeral_directory: Option<durable_born_workspace_v1::DurableBornWalletDirectoryV1>,
 }
 impl NativeWalletWorkspace {
     pub(super) fn check_current(&self) -> Result<()> {

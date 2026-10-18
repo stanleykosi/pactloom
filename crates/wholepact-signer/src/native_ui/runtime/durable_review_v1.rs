@@ -773,7 +773,7 @@ pub(super) fn allowed_operation(operation: &Operation) -> bool {
         Operation::Pair(_)
             | Operation::Enroll(_)
             | Operation::Manifest(_)
-            | Operation::Wallet(_)
+            | Operation::DurableBornWalletV1(_)
             | Operation::Witness(_)
             | Operation::OwnerWitness(_)
             | Operation::WriterSession(_)

@@ -19,6 +19,13 @@ struct CurrentDurableReviewAccessV1<'a> {
 impl CurrentDurableReviewAccessV1<'_> {
     fn check(&self) -> Result<()> {
         self.native.check()?;
+        // This fixed born path requires the actual purpose-specific workspace
+        // and its retained database identity, never an ordinary wallet fallback.
+        self.native
+            .durable_source
+            .as_ref()
+            .ok_or(Error::Unavailable)?
+            .require_source(self.source)?;
         // No journal authority-fence acquisition here. Financial authorization
         // separately reuses its actual held lease at the specialized boundary.
         self.source.check_original_source_current()?;

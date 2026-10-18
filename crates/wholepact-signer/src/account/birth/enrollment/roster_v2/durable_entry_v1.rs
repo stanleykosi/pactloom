@@ -162,6 +162,13 @@ impl FreshDurableBornEntryV1 {
         &self.retained.account
     }
 
+    /// Actual held original directory, not a caller-selected destination. An
+    /// ephemeral viewing workspace must establish that its temporary parent is
+    /// outside this root BEFORE creating anything; this getter issues no access.
+    pub(crate) fn original_root(&self) -> &Path {
+        self.retained.account.directory.root()
+    }
+
     pub(crate) fn account(&self) -> &crate::account::DedicatedAccount {
         self.retained.account.account()
     }

@@ -228,20 +228,34 @@ async fn exact_recap_uses_actual_rows_and_rejects_substitution_staleness_and_loc
     let selected = a
         .select_exact_durable_contribution_v1(&FixtureAccess(true), &first_fvk, &scope, &expected)
         .unwrap();
-    let material = HistoricalConstructionMaterialV1::capture(&selected, &a).unwrap();
-    material.validate_for(&scope).unwrap();
+    // This real scanner fixture uses HTTP loopback. Exact maintained recapture
+    // succeeds, but it must NOT become a TLS-qualified durable material export.
+    assert!(HistoricalConstructionMaterialV1::capture(&selected, &a).is_err());
     assert_eq!(
-        material.input_ids().collect::<Vec<_>>(),
+        selected
+            .selection()
+            .notes()
+            .iter()
+            .map(|n| n.input_id.as_str())
+            .collect::<Vec<_>>(),
         expected
             .inputs
             .iter()
             .map(|n| n.input_id.as_str())
             .collect::<Vec<_>>()
     );
-    assert_eq!(
-        selected.selection().context().anchor_root,
-        expected.original_context.anchor_root
-    );
+    assert!(selected.selection().context() == &expected.original_context);
+    for (note, exact) in selected.selection().notes().iter().zip(&expected.inputs) {
+        assert_eq!(note.note.value().inner(), exact.value_zatoshis);
+        assert_eq!(
+            Some(orchard::note::ExtractedNoteCommitment::from(note.note.commitment()).to_bytes()),
+            exact.commitment
+        );
+        assert_eq!(
+            note.witness.root(note.note.commitment().into()).to_bytes(),
+            expected.construction_anchor.root
+        );
+    }
     let mut no_commitment = expected.clone();
     for n in &mut no_commitment.inputs {
         n.commitment = None;
@@ -406,11 +420,21 @@ async fn explicit_new_preproof_anchor_keeps_historical_context_and_exact_inputs(
     let scope = scope(&owners);
     let historical = expectation(&a, &owners[0]);
     let mut expected = historical.clone();
-    a.synchronize(&FixtureAccess(true), SyncLimits::default())
-        .await
-        .unwrap();
+    // A provider tip advancing does not imply the maintained default anchor
+    // advances. This test exercises an explicitly agreed NEW pre-proof anchor.
+    let new_height = u32::try_from(fake.blocks[1].height).unwrap();
+    assert!(new_height > old_height);
+    a.synchronize(
+        &FixtureAccess(true),
+        SyncLimits {
+            anchor_height: Some(new_height),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
     let current = &a.accepted.as_ref().unwrap().selection;
-    assert!(current.anchor_height > old_height);
+    assert_eq!(current.anchor_height, new_height);
     expected.construction_anchor = DurableExactConstructionAnchorV1 {
         height: current.anchor_height,
         block_hash_protocol: current.anchor_hash_protocol,
@@ -449,10 +473,28 @@ async fn explicit_new_preproof_anchor_keeps_historical_context_and_exact_inputs(
             .map(|n| n.input_id.as_str())
             .collect::<Vec<_>>()
     );
-    HistoricalConstructionMaterialV1::capture(&selected, &a)
-        .unwrap()
-        .validate_for(&scope)
-        .unwrap();
+    assert_eq!(
+        selected.selection().context().anchor_hash_protocol,
+        expected.construction_anchor.block_hash_protocol
+    );
+    assert_eq!(
+        selected.selection().context().anchor_root,
+        expected.construction_anchor.root
+    );
+    for (note, exact) in selected.selection().notes().iter().zip(&expected.inputs) {
+        assert_eq!(note.note.value().inner(), exact.value_zatoshis);
+        assert_eq!(
+            Some(orchard::note::ExtractedNoteCommitment::from(note.note.commitment()).to_bytes()),
+            exact.commitment
+        );
+        assert_eq!(
+            note.witness.root(note.note.commitment().into()).to_bytes(),
+            expected.construction_anchor.root
+        );
+    }
+    // Preserve the separate production HTTPS boundary; no endpoint rewriting
+    // or test-only material-authority constructor is used here.
+    assert!(HistoricalConstructionMaterialV1::capture(&selected, &a).is_err());
     for kind in 0..5 {
         let mut bad = expected.clone();
         match kind {
