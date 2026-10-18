@@ -60,7 +60,7 @@ impl SignerConsentJournal {
             .map_err(|_| JournalError::Permission)?;
         lease.require_journal(&self.binding())?;
         lease.require_native_origin(approved.source())?;
-        lease.check_current()?;
+        lease.require_current_durable_disclosure_receipts_v1()?;
         let request = approved.request();
         if lease.enrollment().reference() != request.enrollment_ref
             || lease.manifest().reference() != request.accepted_manifest_ref
@@ -90,7 +90,7 @@ impl SignerConsentJournal {
             approved
                 .check_current()
                 .map_err(|_| JournalError::Permission)?;
-            lease.check_current()?;
+            lease.require_current_durable_disclosure_receipts_v1()?;
             return Ok(existing);
         }
         validate_original_rows(&tx, &candidate)?;
@@ -101,7 +101,7 @@ impl SignerConsentJournal {
         approved
             .check_current()
             .map_err(|_| JournalError::Permission)?;
-        lease.check_current()?;
+        lease.require_current_durable_disclosure_receipts_v1()?;
         tx.commit()?;
         self.database_identity.check_current(&connection)?;
         Ok(candidate)

@@ -247,6 +247,9 @@ impl PreparedDurableConstructionV1 {
             )
             .map_err(error)?;
         lease.require_native_origin(authority).map_err(error)?;
+        lease
+            .require_current_durable_disclosure_receipts_v1()
+            .map_err(error)?;
         validate_original(&request, &lease).map_err(error)?;
         let digest = wholepact_core::proposal::canonical_digest(
             "wholepact:native-durable-construction-review:v1",
@@ -432,6 +435,7 @@ impl ApprovedDurableConstructionV1 {
             session,
         )?;
         lease.require_native_origin(&self.prepared.source)?;
+        lease.require_current_durable_disclosure_receipts_v1()?;
         validate_original(&self.prepared.request, &lease)?;
         // Commit is fenced against lock. Export holds that fence only across
         // each bounded syscall, never across the entire possibly slow delivery.
@@ -444,11 +448,12 @@ impl ApprovedDurableConstructionV1 {
             journal.record_durable_construction_v1(&self, &lease)?
         };
         self.check_current()?;
+        lease.require_current_durable_disclosure_receipts_v1()?;
         let deadline =
             (self.prepared.started + Duration::from_secs(120)).min(self.prepared.peer.deadline());
         let p = &mut self.prepared;
         write_bounded(&mut p.stream, outbox, deadline, &p.source, &p.peer, || {
-            lease.check_current()?;
+            lease.require_current_durable_disclosure_receipts_v1()?;
             p.request
                 .scope
                 .check_valid_at(now().map_err(|_| BridgeError::Permission)?)
