@@ -36,6 +36,11 @@ impl EphemeralNativeWitnessV1 {
         account_id: &str,
         request: &OwnerControlRequest,
     ) -> Result<()> {
+        // A failed NEW preflight must never expose a prior attempt's sidecar.
+        // Reset is inert; it neither checks nor revokes any native authority.
+        crate::transport::admission_diagnostics_v1::reset_observation(
+            &mut self.window.admission_observer,
+        );
         crate::hash(account_id)?;
         if !self.window.can_select()
             || !matches!(&self.durable_payment, FixturePhaseV1::Idle)
@@ -117,6 +122,8 @@ impl EphemeralNativeWitnessV1 {
             request,
         )?;
         self.durable_payment = FixturePhaseV1::Admitting(request.clone());
+        self.window.admission_observer =
+            Some(crate::transport::admission_diagnostics_v1::AdmissionWitnessObserverV1::new());
         // Continue, understood and focused final primary click are exactly the
         // existing native controls. No fixture constructs any decision/source.
         self.start_approve_exact()?;
@@ -130,55 +137,89 @@ impl EphemeralNativeWitnessV1 {
     /// retains its intent and dispatches. Only exact committed evidence permits
     /// the later separate original-namespace reopen; uncertainty stops here.
     pub fn finish_exact_durable_payment_admission(&mut self) -> Result<()> {
-        let FixturePhaseV1::Admitting(request) = &self.durable_payment else {
-            return Err(AuthorityError::Permission);
+        use crate::transport::admission_diagnostics_v1::{
+            AdmissionWitnessCorrelationV1, AdmissionWitnessStageV1,
         };
-        let request = request.clone();
-        if self.listener.bound.is_some()
-            || self.listener.server_handles.load(Ordering::Acquire) != 0
-        {
-            return Err(AuthorityError::Permission);
+        let observer = self.window.admission_observer.clone();
+        let stage = std::cell::Cell::new(AdmissionWitnessStageV1::FixtureDrain);
+        let result = crate::transport::admission_measure!(
+            observer.as_ref(),
+            FixtureFinish,
+            (|| {
+                let FixturePhaseV1::Admitting(request) = &self.durable_payment else {
+                    return Err(AuthorityError::Permission);
+                };
+                let request = request.clone();
+                if self.listener.bound.is_some()
+                    || self.listener.server_handles.load(Ordering::Acquire) != 0
+                {
+                    return Err(AuthorityError::Permission);
+                }
+                self.drain()?;
+                stage.set(AdmissionWitnessStageV1::FixtureReceipt);
+                if !self.window.can_select() {
+                    return Err(AuthorityError::Uncertain);
+                }
+                let receipt = self.completed_native_receipt()?;
+                if receipt.get("kind").and_then(serde_json::Value::as_str)
+                    != Some("durable_payment_admission_v1_committed")
+                {
+                    return Err(AuthorityError::Uncertain);
+                }
+                let committed_head: AuthorityHead = serde_json::from_value(
+                    receipt
+                        .get("committed_head")
+                        .cloned()
+                        .ok_or(AuthorityError::CorruptHistory)?,
+                )
+                .map_err(|_| AuthorityError::CorruptHistory)?;
+                {
+                    stage.set(AdmissionWitnessStageV1::FixtureCorrelation);
+                    // The actual worker has dropped its socket/source/namespace before
+                    // emitting completion. This is read-only correlation, not issuance.
+                    let journal = crate::witness_locator::open_born_history(
+                        self.original_namespace_input(&request.account_id)?,
+                    )?;
+                    journal.require_born_read_current()?;
+                    let connection = journal
+                        .connection
+                        .lock()
+                        .map_err(|_| AuthorityError::Storage)?;
+                    let ledger = crate::journal::load(connection.connection())?;
+                    ledger.require_supported_durable_payment_history_v1()?;
+                    if ledger.durable_payment_admission_v1(&request.operation_id)? != Some(&request)
+                        || ledger.snapshot.head != committed_head
+                        || request.expected_head.sequence.checked_add(1)
+                            != Some(committed_head.sequence)
+                    {
+                        if let Some(observer) = &observer {
+                            observer.final_correlation(AdmissionWitnessCorrelationV1::Rejected);
+                        }
+                        return Err(AuthorityError::Uncertain);
+                    }
+                    if let Some(observer) = &observer {
+                        observer.final_correlation(AdmissionWitnessCorrelationV1::Matched);
+                    }
+                    journal.require_born_read_current()?;
+                }
+                self.durable_payment = FixturePhaseV1::Verified(request);
+                Ok(())
+            })()
+        );
+        if let Some(observer) = &observer {
+            observer.fixture_result(stage.get(), &result);
         }
-        self.drain()?;
-        if !self.window.can_select() {
-            return Err(AuthorityError::Uncertain);
-        }
-        let receipt = self.completed_native_receipt()?;
-        if receipt.get("kind").and_then(serde_json::Value::as_str)
-            != Some("durable_payment_admission_v1_committed")
-        {
-            return Err(AuthorityError::Uncertain);
-        }
-        let committed_head: AuthorityHead = serde_json::from_value(
-            receipt
-                .get("committed_head")
-                .cloned()
-                .ok_or(AuthorityError::CorruptHistory)?,
+        result
+    }
+
+    /// Take this selected attempt's inert evidence once. It does not read the
+    /// journal, check freshness, infer rollback or authorize a later operation.
+    pub fn take_durable_payment_admission_diagnostic_v1(
+        &mut self,
+    ) -> Option<crate::transport::admission_diagnostics_v1::AdmissionWitnessDiagnosticV1> {
+        crate::transport::admission_diagnostics_v1::take_observation(
+            &mut self.window.admission_observer,
         )
-        .map_err(|_| AuthorityError::CorruptHistory)?;
-        {
-            // The actual worker has dropped its socket/source/namespace before
-            // emitting completion. This is read-only correlation, not issuance.
-            let journal = crate::witness_locator::open_born_history(
-                self.original_namespace_input(&request.account_id)?,
-            )?;
-            journal.require_born_read_current()?;
-            let connection = journal
-                .connection
-                .lock()
-                .map_err(|_| AuthorityError::Storage)?;
-            let ledger = crate::journal::load(connection.connection())?;
-            ledger.require_supported_durable_payment_history_v1()?;
-            if ledger.durable_payment_admission_v1(&request.operation_id)? != Some(&request)
-                || ledger.snapshot.head != committed_head
-                || request.expected_head.sequence.checked_add(1) != Some(committed_head.sequence)
-            {
-                return Err(AuthorityError::Uncertain);
-            }
-            journal.require_born_read_current()?;
-        }
-        self.durable_payment = FixturePhaseV1::Verified(request);
-        Ok(())
     }
 
     /// Reopen only the exact committed record through the shared production

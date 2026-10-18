@@ -1,8 +1,16 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-18, 19:21 UTC.
+Updated: 2026-10-18, 20:30 UTC.
 
 **Incomplete implementation. No full native financial signing, public testnet settlement, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
+
+## CI14: admission outcome remains uncertain; targeted observation qualified locally
+
+[Run 39158421083](https://github.com/stanleykosi/pactloom/actions/runs/39158421083), qualifier `4ec45e5ba3417af8f947d42976e36497d45babd1`, passed build (12m13s), Python105, Host51, bootstrap and native owner-reopen baseline (207s). It progressed past typed prepared witness correlation and dispatched signer approval, then failed with `SignerPollTerminal:SignerUncertain` and `DurableHostWitnessSetup:AuthorityUncertain`. Existing code erased the original retain/submit result and suppressed individual witness connection failures. Neither local intent retention nor remote commit can be established from that output; no new request or retry is justified by uncertainty. Cleanup passed.
+
+The next synthetic-only observation slice preserves exact-attempt local retain/submit failures, existing checked client transport/callback timing and original errors, selected witness server versus exact authenticated operation attribution, and independent append/commit/control/snapshot/receipt outcomes. Commit Entered or ReturnedErr remains uncertain; a retained witness result does not prove signer acceptance. Optional bounded canonical records survive only the existing verified cleanup gate; missing or invalid telemetry cannot change operation results. All production checks, IO order, deadlines and retry semantics remain.
+
+All-features Host+Signer+Authority build passed (8m43s) after adding the absent synthetic None initializer to the original construction server. Authority12, signer4, Host59 and Python114 focused tests passed. Non-synthetic durable Signer lib-tests compiled (3m07s). The whole-flow audit separately found later acquire/activate/reconcile/import/wallet/sign/result observer gaps; this admission slice is not comprehensive transaction diagnostic coverage. A separate reviewed later-flow observation plan is pending implementation and execution. Financial signing, exact retry, restart and settlement remain unverified.
 
 ## CI13: history preparation progressed; synthetic review correlation repaired
 

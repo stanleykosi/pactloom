@@ -31,6 +31,18 @@ pub enum CheckedHistoryStageV1 {
     EventReplay,
     FinalValidation,
     Bounds,
+    AdmissionRequestValidation,
+    AdmissionBinding,
+    AdmissionConnect,
+    AdmissionHandshake,
+    AdmissionPeerBinding,
+    AdmissionRequestBuild,
+    AdmissionRequestWrite,
+    AdmissionResponseRead,
+    AdmissionResponse,
+    AdmissionSnapshotValidation,
+    AdmissionCommittedHeadValidation,
+    AdmissionFinalValidation,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -45,6 +57,7 @@ pub enum CheckedHistoryIoKindV1 {
 pub enum CheckedHistoryPhaseV1 {
     Snapshot,
     Page,
+    Admission,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum CheckedHistoryCheckSiteV1 {
@@ -254,6 +267,7 @@ pub(super) struct HistoryObserverV1 {
     first: Cell<Option<CheckedHistoryFailureV1>>,
     started: Instant,
     caller_deadline: Option<Instant>,
+    operation_phase: Option<CheckedHistoryPhaseV1>,
     history_cost: Cell<CostAccumulator>,
     exchange: Cell<Option<ExchangeObservation>>,
     pages: Cell<u64>,
@@ -268,6 +282,11 @@ impl HistoryObserverV1 {
     pub(super) fn with_caller_deadline(deadline: Instant) -> Self {
         Self::new_at(Instant::now(), Some(deadline))
     }
+    pub(super) fn with_admission_deadline(deadline: Instant) -> Self {
+        let mut observer = Self::new_at(Instant::now(), Some(deadline));
+        observer.operation_phase = Some(CheckedHistoryPhaseV1::Admission);
+        observer
+    }
     fn new_at(started: Instant, caller_deadline: Option<Instant>) -> Self {
         Self {
             stage: Cell::new(CheckedHistoryStageV1::CallerDeadline),
@@ -275,6 +294,7 @@ impl HistoryObserverV1 {
             first: Cell::new(None),
             started,
             caller_deadline,
+            operation_phase: None,
             history_cost: Cell::new(CostAccumulator::default()),
             exchange: Cell::new(None),
             pages: Cell::new(0),
@@ -287,7 +307,12 @@ impl HistoryObserverV1 {
         self.io_kind.set(None);
         self.check_site.set(None);
         self.checkpoint.set(match stage {
-            CheckedHistoryStageV1::SnapshotValidation
+            CheckedHistoryStageV1::AdmissionRequestValidation
+            | CheckedHistoryStageV1::AdmissionBinding
+            | CheckedHistoryStageV1::AdmissionSnapshotValidation
+            | CheckedHistoryStageV1::AdmissionCommittedHeadValidation
+            | CheckedHistoryStageV1::AdmissionFinalValidation
+            | CheckedHistoryStageV1::SnapshotValidation
             | CheckedHistoryStageV1::PageValidation
             | CheckedHistoryStageV1::EventReplay
             | CheckedHistoryStageV1::FinalValidation
@@ -430,7 +455,9 @@ impl HistoryObserverV1 {
             &mut clamped,
         );
         CheckedHistoryMeasurementV1 {
-            phase: exchange.map(|exchange| exchange.phase),
+            phase: exchange
+                .map(|exchange| exchange.phase)
+                .or(self.operation_phase),
             page_ordinal,
             check_site: self.check_site.get(),
             checkpoint: self.checkpoint.get(),
@@ -558,7 +585,7 @@ fn finish_operation_observed_with_clock<T>(
     }
 }
 
-fn classify_io(kind: io::ErrorKind) -> CheckedHistoryIoKindV1 {
+pub(super) fn classify_io(kind: io::ErrorKind) -> CheckedHistoryIoKindV1 {
     match kind {
         io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => CheckedHistoryIoKindV1::Timeout,
         io::ErrorKind::UnexpectedEof
@@ -600,6 +627,13 @@ impl HistoryPhaseV1 {
         use CheckedHistoryStageV1 as S;
         use HistoryCallStepV1 as C;
         match (self, step) {
+            (Self::Admission, C::Connect) => S::AdmissionConnect,
+            (Self::Admission, C::Handshake) => S::AdmissionHandshake,
+            (Self::Admission, C::PeerBinding) => S::AdmissionPeerBinding,
+            (Self::Admission, C::RequestBuild) => S::AdmissionRequestBuild,
+            (Self::Admission, C::RequestWrite) => S::AdmissionRequestWrite,
+            (Self::Admission, C::ResponseRead) => S::AdmissionResponseRead,
+            (Self::Admission, C::Response) => S::AdmissionResponse,
             (Self::Snapshot, C::Connect) => S::SnapshotConnect,
             (Self::Snapshot, C::Handshake) => S::SnapshotHandshake,
             (Self::Snapshot, C::PeerBinding) => S::SnapshotPeerBinding,
@@ -684,6 +718,67 @@ pub(super) fn write_frame_observed<T: serde::Serialize>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pure_admission_phase_is_truthful_before_transport_and_during_validation() {
+        let observer =
+            HistoryObserverV1::with_admission_deadline(Instant::now() + Duration::from_secs(30));
+        observer.enter(CheckedHistoryStageV1::AdmissionRequestValidation);
+        let result: Result<()> = observer.observe_authority(Err(AuthorityError::Permission));
+        assert!(matches!(result, Err(AuthorityError::Permission)));
+        let failure = observer.into_failure(AuthorityError::Uncertain);
+        assert!(failure.stage() == CheckedHistoryStageV1::AdmissionRequestValidation);
+        assert!(failure.measurement().phase() == Some(CheckedHistoryPhaseV1::Admission));
+        assert!(failure.measurement().page_ordinal().is_none());
+        assert!(failure.measurement().check_site().is_none());
+        assert!(failure.measurement().checkpoint() == CheckedHistoryCheckpointV1::Validation);
+        assert!(matches!(failure.into_error(), AuthorityError::Permission));
+        let observer =
+            HistoryObserverV1::with_admission_deadline(Instant::now() + Duration::from_secs(30));
+        observer.begin_exchange(HistoryPhaseV1::Admission);
+        let started = Instant::now();
+        observer.select_deadline(started, started + Duration::from_secs(10));
+        // The shared kernel ends its selected transport exchange on success;
+        // later original caller-bound validation must not retain that limit.
+        observer.end_exchange();
+        observer.enter(CheckedHistoryStageV1::AdmissionCommittedHeadValidation);
+        let _: Result<()> = observer.observe_authority(Err(AuthorityError::CorruptHistory));
+        let failure = observer.into_failure(AuthorityError::Uncertain);
+        assert!(failure.measurement().phase() == Some(CheckedHistoryPhaseV1::Admission));
+        assert!(failure.measurement().selected_limit().is_none());
+        assert!(failure.measurement().selected_budget_us().is_none());
+        assert!(failure
+            .measurement()
+            .selected_remaining_at_failure_us()
+            .is_none());
+        assert!(failure.measurement().exchange_elapsed_us().is_none());
+        assert!(failure.measurement().exchange_cost().is_none());
+        assert!(failure
+            .measurement()
+            .caller_remaining_at_failure_us()
+            .is_some());
+        assert!(matches!(
+            failure.into_error(),
+            AuthorityError::CorruptHistory
+        ));
+    }
+
+    #[test]
+    fn pure_admission_transport_stages_are_never_snapshot_or_page() {
+        use CheckedHistoryStageV1 as S;
+        use HistoryCallStepV1 as C;
+        for (step, expected) in [
+            (C::Connect, S::AdmissionConnect),
+            (C::Handshake, S::AdmissionHandshake),
+            (C::PeerBinding, S::AdmissionPeerBinding),
+            (C::RequestBuild, S::AdmissionRequestBuild),
+            (C::RequestWrite, S::AdmissionRequestWrite),
+            (C::ResponseRead, S::AdmissionResponseRead),
+            (C::Response, S::AdmissionResponse),
+        ] {
+            assert!(HistoryPhaseV1::Admission.stage(step) == expected);
+        }
+    }
 
     fn callback_at(
         observer: &HistoryObserverV1,

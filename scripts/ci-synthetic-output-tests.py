@@ -504,9 +504,9 @@ class PublicOutputTests(unittest.TestCase):
         source=(base/'sequential_construction_v3_qualification/rolling_transcript_v1.rs').read_text()
         names=re.findall(r'#\[test\]\s+(?:#\[cfg\(feature = "synthetic-born-joined-qualification"\)\]\s+)?fn (\w+)\(',source)
         all_expected=tuple(output.PREFIX+'rolling_transcript_v1::tests::'+name for name in names)
-        self.assertEqual(len(all_expected),13)
-        self.assertEqual(set(all_expected),set(output.ROLLING_TRANSCRIPT_TESTS+output.HISTORY_TRANSCRIPT_TESTS))
-        expected=tuple(name for name in all_expected if name not in output.HISTORY_TRANSCRIPT_TESTS)
+        self.assertEqual(len(all_expected),16)
+        self.assertEqual(set(all_expected),set(output.ROLLING_TRANSCRIPT_TESTS+output.HISTORY_TRANSCRIPT_TESTS+output.ADMISSION_TRANSCRIPT_TESTS))
+        expected=tuple(name for name in all_expected if name not in output.HISTORY_TRANSCRIPT_TESTS+output.ADMISSION_TRANSCRIPT_TESTS)
         self.assertEqual(expected,output.ROLLING_TRANSCRIPT_TESTS)
         self.assertIn('#[path = "sequential_construction_v3_qualification/rolling_transcript_v1.rs"]\nmod rolling_transcript_v1;',
                       (base/'sequential_construction_v3_qualification.rs').read_text())
@@ -1230,14 +1230,14 @@ class PublicTimingTests(unittest.TestCase):
             self.assertEqual(output.public_line(prefix+b'[JOINED_TIMING '+bytes([255])+b']','fixed'),('timing_invalid',None))
         with self.assertRaises(UnicodeError): output.public_line(b'private '+bytes([255]),'fixed')
 
-    def run_fake(self, timing_lines, status=101, verified=True, phase='full'):
+    def run_fake(self, timing_lines, status=101, verified=True, phase='full', cleanup_present=True):
         name=output.TESTS[phase][0]
         core='[JOINED_CORE_POLICY inherited_limit=Zero collector=Pipe process_dumpability=Unchanged crash_copy_absence_verified=false]'
         cleanup=('[JOINED_CLEANUP group_signal=AlreadyAbsentWhileLeaderOwned group_absence=OriginalGroupAbsentObserved '
                  'direct_child=Reaped root_cleanup='+('ClosedAndAbsenceVerified' if verified else 'CloseOrAbsenceUnverified')+
                  f' exit=Some({status}) signal=None core_dumped=false]')
         failure='[JOINED_FAILURE exit=Some(101) signal=None core_dumped=false inputs=1/204 reason=ChildExit static_boundaries=EndInvariant:HostReceipt]'
-        rows=[core,cleanup,*timing_lines]
+        rows=[core]+([cleanup] if cleanup_present else [])+list(timing_lines)
         if status: rows.append(failure)
         elif phase=='full':
             # Use existing exact valid synthetic receipt; no private payload.
@@ -1253,7 +1253,7 @@ class PublicTimingTests(unittest.TestCase):
              mock.patch.object(output.select,'select',return_value=([stream],[],[])), \
              mock.patch.object(output.os,'read',side_effect=[payload,b'']), \
              mock.patch.dict(output.os.environ,{},clear=True), contextlib.redirect_stdout(captured):
-            if status or not verified:
+            if status or not verified or not cleanup_present:
                 with self.assertRaises(RuntimeError): output.run('/verified/host',phase)
             else: output.run('/verified/host',phase)
         process.kill.assert_not_called()
@@ -1297,7 +1297,7 @@ class PublicTimingTests(unittest.TestCase):
         source=(ROOT/'scripts/ci-synthetic-output.py').read_text()
         self.assertIn(' + SIGNER_TIMING_TESTS + SIGNER_DURABLE_LABEL_TESTS + SIGNER_DURABLE_RECEIPT_TESTS:',source)
         self.assertIn(' + TIMING_HOST_TESTS + (DURABLE_PROVIDER_METADATA_TEST,):',source)
-        self.assertIn('CI_SYNTHETIC_PURE passed=51 ',source)
+        self.assertIn('CI_SYNTHETIC_PURE passed=59 ',source)
         self.assertIn('timing_counter_cases=3',source)
         self.assertIn("if status!=0 or not cleanup or cores!=1 or failures or (phase=='full' and outcome is None):",source)
         self.assertNotIn('eprintln!',signer)
@@ -1504,7 +1504,7 @@ class PublicHistoryMeasurementTests(unittest.TestCase):
         for field in output.HISTORY_COST_COUNTS|output.HISTORY_COST_DURATIONS:
             self.assertIn('value.'+field+'()',cost)
         authority=(ROOT/'crates/wholepact-authority/src/transport/history_diagnostics_v1.rs').read_text()
-        for type_name,values in [('CheckedHistoryPhaseV1',output.HISTORY_PHASES),
+        for type_name,values in [('CheckedHistoryPhaseV1',output.HISTORY_PHASES|{'Admission'}),
             ('CheckedHistoryCheckSiteV1',output.HISTORY_CHECK_SITES),('CheckedHistoryCheckpointV1',output.HISTORY_CHECKPOINTS),
             ('CheckedHistorySelectedLimitV1',output.HISTORY_SELECTED_LIMITS)]:
             mappings=set(re.findall(type_name+r'::([A-Za-z0-9]+) => "([A-Za-z0-9]+)"',source))
@@ -1528,12 +1528,13 @@ class PublicHistoryMeasurementTests(unittest.TestCase):
         gate=parent.split('if stage == "durable-proposal-native-fixed-signing-v1"',1)[1].split('\n    if outcome.is_err()',1)[0]
         self.assertIn('&& process.verified()',gate)
         self.assertIn('&& root_cleanup == TemporaryRootCleanupV1::ClosedAndAbsenceVerified',gate)
-        self.assertIn('transcript.history_measurement_lines()',gate)
+        self.assertRegex(gate,r'\btranscript\s*\.\s*history_measurement_lines\s*\(\s*\)')
+        self.assertIn('transcript.admission_diagnostic_lines()',gate)
         self.assertIn('let _ = writeln!',gate)
         self.assertNotIn('outcome.is_ok()',gate)
         transcript=(self.base/'rolling_transcript_v1.rs').read_text()
         self.assertIn('pub(super) const MAX_BYTES: usize = 262_144;',transcript)
-        self.assertIn('self.timing_retained_bytes() + self.history_measurement_retained_bytes()',transcript)
+        self.assertRegex(transcript,r'self\.timing_retained_bytes\(\)\s*\+\s*self\.history_measurement_retained_bytes\(\)')
         self.assertEqual(transcript.split('pub(super) fn tail(',1)[0].count('self.history_measurements.discard_for_budget();'),3)
 
     def test_history_seven_pure_filters_are_exact_source_backed_and_non_ipc(self):
@@ -1549,6 +1550,230 @@ class PublicHistoryMeasurementTests(unittest.TestCase):
         self.assertEqual(len(set(names)),7)
         self.assertTrue(set(names).isdisjoint(row[0] for row in output.TESTS.values()))
         self.assertTrue(set(names).isdisjoint(output.PURE_TESTS+output.TIMING_HOST_TESTS))
+
+
+
+class PublicAdmissionDiagnosticTests(unittest.TestCase):
+    base=PublicHistoryMeasurementTests.base
+
+    def records(self):
+        source=(self.base/'safe_diagnostics_v1.rs').read_text()
+        return [json.loads(re.search(r'const '+name+r'_TEST_JSON: &str = r#"(.*?)"#;',source,re.S).group(1))
+                for name in ('ADMISSION_MEASUREMENT','SIGNER_ADMISSION','WITNESS_ADMISSION')]
+
+    def line(self, slot, row):
+        return output.ADMISSION_PREFIXES[slot]+json.dumps(row,separators=(',',':'))+']'
+
+    @staticmethod
+    def objects(row, path=()):
+        yield path,row
+        for key,value in row.items():
+            if type(value) is dict:
+                yield from PublicAdmissionDiagnosticTests.objects(value,path+(key,))
+
+    @staticmethod
+    def at(row,path):
+        for key in path: row=row[key]
+        return row
+
+    def test_all_required_keys_unknown_types_and_duplicate_fields_at_every_scope(self):
+        for slot,original in enumerate(self.records()):
+            parser=output.ADMISSION_PARSERS[slot]
+            self.assertEqual(parser(json.dumps(original)),original)
+            for path,obj in self.objects(original):
+                for field in obj:
+                    changed=json.loads(json.dumps(original)); del self.at(changed,path)[field]
+                    with self.assertRaises(ValueError): parser(json.dumps(changed))
+                    changed=json.loads(json.dumps(original)); self.at(changed,path)[field]=['private']
+                    with self.assertRaises(ValueError): parser(json.dumps(changed))
+                changed=json.loads(json.dumps(original)); self.at(changed,path)['private']='payload'
+                with self.assertRaises(ValueError): parser(json.dumps(changed))
+                field=next(iter(obj)); text=json.dumps(original,separators=(',',':'))
+                duplicate=text.replace('"'+field+'":','"'+field+'":null,"'+field+'":',1)
+                with self.assertRaises(ValueError): parser(duplicate)
+            for malformed in ([],None,True,'private'):
+                with self.assertRaises(ValueError): parser(json.dumps(malformed))
+
+    def test_every_scalar_refuses_boolean_float_negative_and_out_of_bounds(self):
+        for slot,original in enumerate(self.records()):
+            parser=output.ADMISSION_PARSERS[slot]
+            for path,obj in self.objects(original):
+                for key,value in obj.items():
+                    if type(value) is int or (value is None and key.endswith('_us')):
+                        maximum=1 if key in ('version','pre_budget_callback_calls') else 1000000 if key.endswith('_calls') or key=='calls' else 600000000
+                        for bad in (True,False,-1,maximum+1,1.0,float('nan'),float('inf'),float('-inf'),'0',{},[]):
+                            changed=json.loads(json.dumps(original)); self.at(changed,path)[key]=bad
+                            with self.assertRaises(ValueError): parser(json.dumps(changed))
+                    elif type(value) is bool:
+                        for bad in (0,1,'false',[],{},None):
+                            # Only the two explicit witness observations are nullable booleans.
+                            if bad is None and key in ('snapshot_recorded','controlled_result'): continue
+                            changed=json.loads(json.dumps(original)); self.at(changed,path)[key]=bad
+                            with self.assertRaises(ValueError): parser(json.dumps(changed))
+
+    def test_closed_enums_producers_and_wire_parser_sets_are_in_parity(self):
+        source=(self.base/'safe_diagnostics_v1.rs').read_text()
+        pairs=[('DurableAdmissionDispatchStageV1',output.SIGNER_ADMISSION_STAGES),
+               ('DurableAdmissionCompletionV1',output.SIGNER_ADMISSION_COMPLETIONS),
+               ('DurableAdmissionRetentionV1',output.SIGNER_ADMISSION_RETENTIONS),
+               ('DurableAdmissionCallbackStageV1',output.SIGNER_ADMISSION_CALLBACK_STAGES),
+               ('AdmissionWitnessStageV1',output.WITNESS_ADMISSION_STAGES),
+               ('AdmissionWitnessAttributionV1',output.WITNESS_ADMISSION_ATTRIBUTIONS),
+               ('AdmissionWitnessResultV1',output.WITNESS_ADMISSION_RESULTS),
+               ('AdmissionWitnessCompletionV1',output.WITNESS_ADMISSION_COMPLETIONS),
+               ('AdmissionWitnessCommitV1',output.WITNESS_ADMISSION_COMMITS),
+               ('AdmissionWitnessReceiptGateV1',output.WITNESS_ADMISSION_RECEIPT_GATES),
+               ('AdmissionWitnessCorrelationV1',output.WITNESS_ADMISSION_CORRELATIONS),
+               ('CheckedHistoryIoKindV1',output.ADMISSION_IO_KINDS)]
+        for name,values in pairs:
+            actual=set(re.findall(name+r'::([A-Za-z0-9]+) => "([A-Za-z0-9]+)"',source))
+            self.assertEqual(actual,{(value,value) for value in values})
+        def body(name): return source.split('fn '+name+'(',1)[1].split('\n}\n',1)[0]
+        for name,fields in [('admission_measurement_json',output.ADMISSION_MEASUREMENT_FIELDS),
+                ('signer_admission_json',output.SIGNER_ADMISSION_FIELDS),
+                ('signer_admission_measurement_json',output.SIGNER_ADMISSION_MEASUREMENT_FIELDS),
+                ('witness_admission_error_json',output.WITNESS_ADMISSION_ERROR_FIELDS)]:
+            self.assertEqual(set(re.findall(r'"([a-z_]+)":',body(name))),fields)
+        witness=body('witness_admission_json')
+        self.assertEqual(set(re.findall(r'"([a-z_]+)":',witness)),output.WITNESS_ADMISSION_FIELDS|output.WITNESS_ADMISSION_SPANS)
+        spans=set(re.findall(r'"([a-z_]+)"\s*:\s*witness_admission_cost_json\s*\(\s*value\.cost\s*\(\s*AdmissionWitnessSpanV1::([A-Za-z]+)\s*\)\s*\)',witness))
+        self.assertEqual({key for key,_ in spans},output.WITNESS_ADMISSION_SPANS)
+        self.assertEqual({variant for _,variant in spans},{''.join(word.title() for word in key.split('_')) for key in output.WITNESS_ADMISSION_SPANS})
+        self.assertEqual(set(re.findall(r'"([a-z_]+)":',body('witness_admission_cost_json'))),{'calls','elapsed_us'})
+        self.assertIn('value.history_elapsed_us()',body('admission_measurement_json'))
+        self.assertIn('value.history_cost()',body('admission_measurement_json'))
+        for name in ('PublicAdmissionMeasurement','PublicSignerAdmission','PublicSignerAdmissionMeasurement','PublicWitnessAdmission','PublicWitnessAdmissionError','PublicWitnessAdmissionCost'):
+            dto=source.split('struct '+name+' {',1)[1].split('\n}',1)[0]
+            self.assertEqual(dto.count('#[serde(deserialize_with = "required_history_nullable")]'),len(re.findall(r'^    [a-z_]+: Option<',dto,re.M)))
+
+    def test_every_closed_enum_accepts_exact_values_and_rejects_free_form(self):
+        cases=[(0,(),[('phase',{'Admission'}),('check_site',output.ADMISSION_CHECK_SITES),('checkpoint',output.HISTORY_CHECKPOINTS),('selected_limit',output.HISTORY_SELECTED_LIMITS)]),
+               (1,(),[('stage',output.SIGNER_ADMISSION_STAGES),('completion',output.SIGNER_ADMISSION_COMPLETIONS),('retention',output.SIGNER_ADMISSION_RETENTIONS),('original_error',output.SIGNER_ADMISSION_ERRORS),('callback_stage',output.SIGNER_ADMISSION_CALLBACK_STAGES)]),
+               (2,(),[('worker_result',output.WITNESS_ADMISSION_RESULTS),('fixture_result',output.WITNESS_ADMISSION_RESULTS),('worker_error',output.ADMISSION_AUTHORITY_ERRORS),('fixture_error',output.ADMISSION_AUTHORITY_ERRORS),('worker_stage',output.WITNESS_ADMISSION_STAGES),('fixture_stage',output.WITNESS_ADMISSION_STAGES),('completion',output.WITNESS_ADMISSION_COMPLETIONS),('commit',output.WITNESS_ADMISSION_COMMITS),('receipt_gate',output.WITNESS_ADMISSION_RECEIPT_GATES),('final_correlation',output.WITNESS_ADMISSION_CORRELATIONS)])]
+        for error in ('first_semantic','first_connection'):
+            cases.append((2,(error,),[('stage',output.WITNESS_ADMISSION_STAGES),('attribution',output.WITNESS_ADMISSION_ATTRIBUTIONS),('io_kind',output.ADMISSION_IO_KINDS),('error',output.ADMISSION_AUTHORITY_ERRORS)]))
+        for slot,path,fields in cases:
+            for field,values in fields:
+                for value in values:
+                    row=self.records()[slot]; self.at(row,path)[field]=value
+                    self.assertEqual(output.ADMISSION_PARSERS[slot](json.dumps(row)),row)
+                for bad in ('private','',0,True,{},[]):
+                    row=self.records()[slot]; self.at(row,path)[field]=bad
+                    with self.assertRaises(ValueError): output.ADMISSION_PARSERS[slot](json.dumps(row))
+
+    def test_null_is_unavailable_zero_is_measured_and_commit_is_never_inferred(self):
+        rows=self.records()
+        for field in output.HISTORY_OPTIONAL_DURATIONS|{'phase','check_site','selected_limit','exchange_cost'}: rows[0][field]=None
+        for field in output.SIGNER_ADMISSION_DURATIONS|output.SIGNER_ADMISSION_COUNTS: rows[1]['measurement'][field]=None
+        for field in ('first_semantic','first_connection','worker_error','fixture_error','worker_stage','fixture_stage','controlled_result','snapshot_recorded'): rows[2][field]=None
+        for slot,row in enumerate(rows): self.assertEqual(output.ADMISSION_PARSERS[slot](json.dumps(row)),row)
+        for slot,path,field in [(0,(),'selected_remaining_at_failure_us'),(1,('measurement',),'request_validation_us'),(2,('cost','commit'),'elapsed_us')]:
+            row=rows[slot]; self.at(row,path)[field]=0
+            self.assertEqual(output.ADMISSION_PARSERS[slot](json.dumps(row)),row)
+        for commit in output.WITNESS_ADMISSION_COMMITS:
+            row=rows[2]; row['commit']=commit
+            parsed=output.public_witness_admission(json.dumps(row))
+            self.assertEqual(parsed['commit'],commit)
+            self.assertIsNone(parsed['snapshot_recorded'])
+        rows[1]['measurement']=None; rows[1]['original_error']=None
+        rows[1]['completion']='Missing'; rows[1]['retention']='Unconfirmed'
+        self.assertEqual(output.public_signer_admission(json.dumps(rows[1])),rows[1])
+        history=PublicHistoryMeasurementTests().record(); history['phase']='Admission'
+        with self.assertRaises(ValueError): output.public_history_measurement(json.dumps(history))
+        for phase in ('Snapshot','Page'):
+            row=self.records()[0]; row['phase']=phase
+            with self.assertRaises(ValueError): output.public_admission_measurement(json.dumps(row))
+        for site in output.HISTORY_CHECK_SITES-output.ADMISSION_CHECK_SITES:
+            row=self.records()[0]; row['check_site']=site
+            with self.assertRaises(ValueError): output.public_admission_measurement(json.dumps(row))
+
+    def test_all_slots_framing_split_lines_and_oversize_never_expose_private_text(self):
+        for slot,row in enumerate(self.records()):
+            raw=self.line(slot,row).encode(); kind=output.ADMISSION_KINDS[slot]
+            for prefix in (b'',b'test fixed ... '):
+                self.assertEqual(output.public_line(prefix+raw,'fixed'),(kind,row))
+                self.assertEqual(output.public_line(prefix+output.ADMISSION_PREFIXES[slot].encode()+b'\xff]','fixed'),(kind+'_invalid',None))
+            self.assertIsNone(output.public_line(b'private '+raw,'fixed'))
+            for invalid in (raw+b' private',raw[:-1],raw+raw):
+                self.assertEqual(output.public_line(invalid,'fixed'),(kind+'_invalid',None))
+            framing=output.BoundedLines(); split=len(raw)//2
+            self.assertEqual(framing.feed(raw[:split]),[])
+            self.assertEqual(framing.feed(raw[split:]+b'\n'),[raw])
+            self.assertEqual(framing.feed(b'x'*8193+raw[:split]),[])
+            self.assertEqual(framing.feed(raw[split:]+b'\n'+raw+b'\n'),[raw])
+            with self.assertRaises(ValueError): output.ADMISSION_PARSERS[slot](' '*4097)
+            deep=output.ADMISSION_PREFIXES[slot]+'['*1500+'0'+']'*1500+']'
+            self.assertEqual(output.public_line(deep.encode(),'fixed'),(kind+'_invalid',None))
+
+    def test_new_slots_are_independent_sticky_and_do_not_overwrite(self):
+        rows=self.records(); capture=output.AdmissionDiagnostics()
+        for kind,row in zip(output.ADMISSION_KINDS,rows): capture.record(kind,row)
+        capture.record('signer_admission',rows[1])
+        capture.record('signer_admission',rows[1])
+        self.assertEqual(capture.records,[rows[0],None,rows[2]])
+        capture.record('witness_admission_invalid',None)
+        capture.record('witness_admission',rows[2])
+        saved=io.StringIO()
+        with contextlib.redirect_stdout(saved): capture.emit()
+        lines=saved.getvalue().splitlines()
+        self.assertEqual(output.public_line(lines[0].encode(),'fixed'),('admission_measurement',rows[0]))
+        self.assertEqual(lines[1:],list(output.ADMISSION_INVALID[1:]))
+        for slot in (1,2): self.assertEqual(output.public_line(lines[slot].encode(),'fixed'),(output.ADMISSION_KINDS[slot]+'_invalid',None))
+        with mock.patch('builtins.print',side_effect=OSError('private')): capture.emit()
+        with contextlib.redirect_stdout(io.StringIO()), mock.patch.object(output.json,'dumps',side_effect=ValueError('private')): capture.emit()
+
+    def test_cleanup_and_exact_phase_gates_preserve_original_outcome(self):
+        lines=[self.line(slot,row) for slot,row in enumerate(self.records())]
+        fake=PublicTimingTests().run_fake
+        failed=fake(lines,phase='durable-fixed-signing')
+        for prefix in output.ADMISSION_PREFIXES:
+            self.assertIn(prefix,failed)
+            self.assertLess(failed.index('[JOINED_CLEANUP '),failed.index(prefix))
+            self.assertNotIn(prefix,fake(lines,verified=False,phase='durable-fixed-signing'))
+            self.assertNotIn(prefix,fake(lines,status=0,cleanup_present=False,phase='durable-fixed-signing'))
+        self.assertNotIn('passed=true',failed)
+        for rows in ([],lines,[lines[1],lines[1]],['[WITNESS_ADMISSION_V1 {"private":"payload"}]']):
+            success=fake(rows,status=0,phase='durable-fixed-signing')
+            self.assertIn('phase=durable-fixed-signing passed=true cleanup_verified=true',success)
+            self.assertNotIn('private',success); self.assertNotIn('payload',success)
+        for phase in ('initial','full','durable-owner-reopen'):
+            other=fake(lines,status=0,phase=phase)
+            for prefix in output.ADMISSION_PREFIXES: self.assertNotIn(prefix,other)
+        source=(ROOT/'scripts/ci-synthetic-output.py').read_text()
+        gate=source.split("if phase=='durable-fixed-signing' and cleanup_observed:",1)[1].split("if phase=='full'",1)[0]
+        self.assertIn('admission_diagnostics.emit()',gate)
+        self.assertIn('if total > 16*1024*1024:',source)
+        transcript=(self.base/'rolling_transcript_v1.rs').read_text()
+        self.assertIn('pub(super) const MAX_BYTES: usize = 262_144;',transcript)
+        self.assertEqual(transcript.split('pub(super) fn tail(',1)[0].count('self.admission_diagnostics.discard_for_budget();'),3)
+        parent=self.base.with_suffix('.rs').read_text()
+        gate=parent.split('if stage == "durable-proposal-native-fixed-signing-v1"',1)[1].split('\n    if outcome.is_err()',1)[0]
+        self.assertIn('&& process.verified()',gate)
+        self.assertIn('&& root_cleanup == TemporaryRootCleanupV1::ClosedAndAbsenceVerified',gate)
+        self.assertIn('transcript.admission_diagnostic_lines()',gate)
+        self.assertNotIn('outcome.is_ok()',gate)
+
+    def test_bounded_maximal_records_and_exact_pure_selectors(self):
+        for slot,row in enumerate(self.records()):
+            for path,obj in self.objects(row):
+                for field,value in list(obj.items()):
+                    if field=='version': continue
+                    if field=='pre_budget_callback_calls': obj[field]=1
+                    elif type(value) is int or (value is None and field.endswith('_us')):
+                        obj[field]=1000000 if field.endswith('_calls') or field=='calls' else 600000000
+            self.assertLessEqual(len(json.dumps(row,separators=(',',':')).encode()),4096)
+            self.assertEqual(output.ADMISSION_PARSERS[slot](json.dumps(row)),row)
+        cases=[(output.ADMISSION_PROJECTION_TESTS,self.base/'safe_diagnostics_v1.rs'),
+               (output.ADMISSION_TRANSCRIPT_TESTS,self.base/'rolling_transcript_v1.rs'),
+               (output.ADMISSION_HOST_TESTS,self.base/'durable_proposal_v1/worker.rs')]
+        names=[]
+        for selected,path in cases:
+            source=path.read_text()
+            for name in selected:
+                names.append(name)
+                self.assertEqual(source.count('fn '+name.rsplit('::',1)[1]+'()'),1)
+        self.assertEqual(len(names),8); self.assertEqual(len(set(names)),8)
+        self.assertTrue(set(names).isdisjoint(row[0] for row in output.TESTS.values()))
 
 
 class PublicCompilerOutputTests(unittest.TestCase):

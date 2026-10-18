@@ -60,7 +60,13 @@ impl AuthorityServer {
     ) -> Result<Self> {
         source.check_open()?;
         source.require_endpoint(&tls.certificate_digest, actual_listen)?;
+        #[cfg(feature = "synthetic-qualification")]
+        let observer = source.admission_observer().cloned();
         let mut server = Self::new(source.journal(), tls);
+        #[cfg(feature = "synthetic-qualification")]
+        {
+            server.admission_observer = observer;
+        }
         server.durable_payment = Some(Arc::new(DurablePaymentServingV1::Admission(
             std::sync::Mutex::new(source),
         )));

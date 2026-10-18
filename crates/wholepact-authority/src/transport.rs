@@ -5,6 +5,8 @@ mod born_offline_clock_v1;
 mod born_offline_dispatch_v1;
 mod born_offline_owner_continuation_v1;
 pub use born_offline_dispatch_v1::AuthenticatedBornOfflineDispatchV1;
+#[cfg(feature = "synthetic-qualification")]
+pub mod admission_diagnostics_v1;
 mod born_offline_witness_v1;
 mod durable_payment_client_v1;
 mod durable_payment_server_v1;
@@ -67,6 +69,44 @@ macro_rules! observed_history_result {
         result
     }};
 }
+
+// Observations evaluate the original expression once. None and production
+// expansions take no new clock samples and own no operational resources.
+macro_rules! admission_stage {
+    ($observer:expr, $stage:ident) => {
+        #[cfg(feature = "synthetic-qualification")]
+        if let Some(observer) = $observer {
+            observer
+                .enter(crate::transport::admission_diagnostics_v1::AdmissionWitnessStageV1::$stage);
+        }
+    };
+}
+macro_rules! admission_measure {
+    ($observer:expr, $span:ident, $value:expr) => {{
+        #[cfg(feature = "synthetic-qualification")]
+        let span = crate::transport::admission_diagnostics_v1::start_span_observed(
+            $observer,
+            crate::transport::admission_diagnostics_v1::AdmissionWitnessSpanV1::$span,
+        );
+        let value = $value;
+        #[cfg(feature = "synthetic-qualification")]
+        drop(span);
+        value
+    }};
+}
+macro_rules! admission_result {
+    ($observer:expr, $method:ident, $value:expr) => {{
+        let value = $value;
+        #[cfg(feature = "synthetic-qualification")]
+        let value = match $observer {
+            Some(observer) => observer.$method(value),
+            None => value,
+        };
+        value
+    }};
+}
+pub(super) use observed_history_result;
+pub(crate) use {admission_measure, admission_result, admission_stage};
 
 pub fn certificate_digest(certificate: &CertificateDer<'_>) -> String {
     hex::encode(Sha256::digest(certificate.as_ref()))
@@ -1853,6 +1893,8 @@ pub struct AuthorityServer {
     journal: Arc<AuthorityJournal>,
     tls: ServerTls,
     handoff_scope: Option<construction_transport_server_v1::ConstructionTransportServingScopeV1>,
+    #[cfg(feature = "synthetic-qualification")]
+    admission_observer: Option<admission_diagnostics_v1::AdmissionWitnessObserverV1>,
     #[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
     durable_payment: Option<Arc<durable_payment_server_v1::DurablePaymentServingV1>>,
     #[cfg(all(feature="born-offline-witness-owner",target_os="linux"))]
@@ -1872,6 +1914,8 @@ impl AuthorityServer {
             journal,
             tls,
             handoff_scope: None,
+            #[cfg(feature = "synthetic-qualification")]
+            admission_observer: None,
             #[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
             durable_payment: None,
             #[cfg(all(feature = "born-offline-witness-owner", target_os = "linux"))]
@@ -1886,18 +1930,51 @@ impl AuthorityServer {
         self.serve_connection_before(socket, Instant::now() + IO_TIMEOUT)
     }
     fn serve_connection_before(&self, socket: TcpStream, deadline: Instant) -> Result<()> {
+        #[cfg(feature = "synthetic-qualification")]
+        let observer = self.admission_observer.as_ref();
+        #[cfg(feature = "synthetic-qualification")]
+        if let Some(observer) = observer {
+            observer.begin_connection();
+        }
+        let result = admission_measure!(
+            observer,
+            Connection,
+            self.serve_connection_before_observed(socket, deadline)
+        );
+        let result = admission_result!(observer, observe_connection, result);
+        #[cfg(feature = "synthetic-qualification")]
+        if let Some(observer) = observer {
+            observer.end_connection();
+        }
+        result
+    }
+    fn serve_connection_before_observed(&self, socket: TcpStream, deadline: Instant) -> Result<()> {
+        #[cfg(feature = "synthetic-qualification")]
+        let observer = self.admission_observer.as_ref();
+        admission_stage!(observer, SocketBinding);
         self.require_durable_payment_socket_v1(&socket)?;
+        admission_stage!(observer, WaitCurrent);
         self.check_durable_payment_wait_v1()?;
         let mut socket = DeadlineSocket { socket, deadline };
+        admission_stage!(observer, TlsSetup);
         let mut connection = ServerConnection::new(self.tls.config.clone())
             .map_err(|_| AuthorityError::Authentication)?;
         while connection.is_handshaking() {
+            admission_stage!(observer, WaitCurrent);
             self.check_durable_payment_wait_v1()?;
-            connection
-                .complete_io(&mut socket)
-                .map_err(|_| AuthorityError::Authentication)?;
+            admission_stage!(observer, TlsHandshake);
+            let completed =
+                admission_measure!(observer, Handshake, connection.complete_io(&mut socket));
+            #[cfg(feature = "synthetic-qualification")]
+            let completed = match observer {
+                Some(observer) => observer.observe_io(completed),
+                None => completed,
+            };
+            completed.map_err(|_| AuthorityError::Authentication)?;
         }
+        admission_stage!(observer, WaitCurrent);
         self.check_durable_payment_wait_v1()?;
+        admission_stage!(observer, PeerBinding);
         if connection.alpn_protocol() != Some(ALPN) {
             return Err(AuthorityError::Authentication);
         }
@@ -1932,17 +2009,40 @@ impl AuthorityServer {
                 .map_err(|_| AuthorityError::Authentication)?,
         );
         let mut stream = StreamOwned::new(connection, socket);
+        admission_stage!(observer, WaitCurrent);
         self.check_durable_payment_wait_v1()?;
+        admission_stage!(observer, FrameRead);
+        #[cfg(feature = "synthetic-qualification")]
+        let request: WireRequest = admission_diagnostics_v1::read_frame(&mut stream, observer)?;
+        #[cfg(not(feature = "synthetic-qualification"))]
         let request: WireRequest = read_frame(&mut stream)?;
+        admission_stage!(observer, WaitCurrent);
         self.check_durable_payment_wait_v1()?;
         if self.is_durable_payment_server_v1() {
-            let response = self
-                .serve_durable_payment_request_v1(&peer, &exporter, request)
+            admission_stage!(observer, SemanticDispatch);
+            let response = admission_measure!(
+                observer,
+                Dispatch,
+                self.serve_durable_payment_request_v1(&peer, &exporter, request)
+            );
+            let response = admission_result!(observer, observe_semantic, response)
                 .unwrap_or_else(WireResponse::Rejected);
+            admission_stage!(observer, OutputCheck);
             self.check_durable_payment_output_v1(&response)?;
+            admission_stage!(observer, FrameWrite);
+            #[cfg(feature = "synthetic-qualification")]
+            admission_diagnostics_v1::write_frame(&mut stream, &response, observer)?;
+            #[cfg(not(feature = "synthetic-qualification"))]
             write_frame(&mut stream, &response)?;
+            admission_stage!(observer, CloseFlush);
             stream.conn.send_close_notify();
-            stream.flush().map_err(|_| AuthorityError::Uncertain)?;
+            let flushed = stream.flush();
+            #[cfg(feature = "synthetic-qualification")]
+            let flushed = match observer {
+                Some(observer) => observer.observe_io(flushed),
+                None => flushed,
+            };
+            flushed.map_err(|_| AuthorityError::Uncertain)?;
             return Ok(());
         }
         if self.is_born_offline_server_v1()

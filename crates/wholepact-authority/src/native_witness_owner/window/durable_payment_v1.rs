@@ -70,6 +70,8 @@ pub(super) enum WorkV1 {
         tls: ServerTls,
         listener: TcpListener,
         clock: ReviewClock,
+        #[cfg(feature = "synthetic-qualification")]
+        observer: Option<crate::transport::admission_diagnostics_v1::AdmissionWitnessObserverV1>,
     },
 }
 pub(super) fn execute(work: WorkV1) -> Result<WorkResult> {
@@ -92,40 +94,132 @@ pub(super) fn execute(work: WorkV1) -> Result<WorkResult> {
             tls,
             listener,
             clock,
+            #[cfg(feature = "synthetic-qualification")]
+            observer,
         } => {
-            let listen = listener
-                .local_addr()
-                .map_err(|_| AuthorityError::Storage)?
-                .to_string();
-            let source = arm_durable_payment_admission_v1(decision)?;
-            let server = AuthorityServer::from_durable_payment_admission_v1(source, tls, &listen)?;
+            // The guard holds only inert measurements. Do not put this branch
+            // in a consuming closure: original owner drop order must stay intact.
+            #[cfg(feature = "synthetic-qualification")]
+            let _worker_span = observer.as_ref().map(|observer| {
+                observer.start_span(
+                    crate::transport::admission_diagnostics_v1::AdmissionWitnessSpanV1::Worker,
+                )
+            });
+            crate::transport::admission_stage!(observer.as_ref(), ServerCreate);
+            let listen = crate::transport::admission_result!(
+                observer.as_ref(),
+                observe_worker_failure,
+                listener.local_addr().map_err(|_| AuthorityError::Storage)
+            )?
+            .to_string();
+            crate::transport::admission_stage!(observer.as_ref(), SourceArm);
+            let source = crate::transport::admission_result!(
+                observer.as_ref(),
+                observe_worker_failure,
+                crate::transport::admission_result!(
+                    observer.as_ref(),
+                    observe_semantic,
+                    crate::transport::admission_measure!(
+                        observer.as_ref(),
+                        SourceArm,
+                        arm_durable_payment_admission_v1(decision)
+                    )
+                )
+            )?;
+            #[cfg(feature = "synthetic-qualification")]
+            let source = {
+                let mut source = source;
+                source.set_admission_observer(observer.clone());
+                source
+            };
+            crate::transport::admission_stage!(observer.as_ref(), ServerCreate);
+            let server = crate::transport::admission_result!(
+                observer.as_ref(),
+                observe_worker_failure,
+                crate::transport::admission_result!(
+                    observer.as_ref(),
+                    observe_semantic,
+                    crate::transport::admission_measure!(
+                        observer.as_ref(),
+                        ServerCreate,
+                        AuthorityServer::from_durable_payment_admission_v1(source, tls, &listen)
+                    )
+                )
+            )?;
             // No eight-worker generic serving loop and no detached source clones.
             // The retained same listener stays nonblocking; every socket receives
             // the maintained ten-second TLS bound and OPEN checks. Closing or
             // blur revokes OPEN. Once publication wins it can only drain exactly
             // this append; the GUI must report a committed/uncertain outcome.
             let snapshot = loop {
-                if let Some(snapshot) = server.durable_payment_admission_result_v1()? {
+                crate::transport::admission_stage!(observer.as_ref(), ResultLookup);
+                if let Some(snapshot) = crate::transport::admission_result!(
+                    observer.as_ref(),
+                    observe_worker_failure,
+                    crate::transport::admission_result!(
+                        observer.as_ref(),
+                        observe_semantic,
+                        server.durable_payment_admission_result_v1()
+                    )
+                )? {
                     break snapshot;
                 }
-                match listener.accept() {
+                crate::transport::admission_stage!(observer.as_ref(), ListenerAccept);
+                match crate::transport::admission_measure!(
+                    observer.as_ref(),
+                    Accept,
+                    listener.accept()
+                ) {
                     Ok((socket, _)) => {
                         let outcome = server.serve_connection(socket);
-                        if let Some(snapshot) = server
-                            .durable_payment_admission_result_v1()
-                            .map_err(|_| AuthorityError::Uncertain)?
-                        {
+                        crate::transport::admission_stage!(observer.as_ref(), ResultLookup);
+                        if let Some(snapshot) = crate::transport::admission_result!(
+                            observer.as_ref(),
+                            observe_worker_failure,
+                            crate::transport::admission_result!(
+                                observer.as_ref(),
+                                observe_semantic,
+                                server.durable_payment_admission_result_v1()
+                            )
+                            .map_err(|_| AuthorityError::Uncertain)
+                        )? {
                             break snapshot;
                         }
                         if outcome.is_err() {
-                            clock.check()?;
+                            crate::transport::admission_stage!(observer.as_ref(), WaitCurrent);
+                            crate::transport::admission_result!(
+                                observer.as_ref(),
+                                observe_worker_failure,
+                                clock.check()
+                            )?;
                         }
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        clock.check()?;
+                        crate::transport::admission_stage!(observer.as_ref(), WaitCurrent);
+                        crate::transport::admission_result!(
+                            observer.as_ref(),
+                            observe_worker_failure,
+                            clock.check()
+                        )?;
                         std::thread::sleep(Duration::from_millis(5));
                     }
-                    Err(_) => return Err(AuthorityError::Uncertain),
+                    Err(error) => {
+                        #[cfg(feature = "synthetic-qualification")]
+                        if let Some(observer) = &observer {
+                            let _ = observer.observe_io::<()>(Err(error));
+                        }
+                        #[cfg(not(feature = "synthetic-qualification"))]
+                        let _ = error;
+                        return crate::transport::admission_result!(
+                            observer.as_ref(),
+                            observe_worker_failure,
+                            crate::transport::admission_result!(
+                                observer.as_ref(),
+                                observe_connection,
+                                Err(AuthorityError::Uncertain)
+                            )
+                        );
+                    }
                 }
             };
             // Drain the one synchronous socket, then drop every namespace/source
@@ -133,14 +227,56 @@ pub(super) fn execute(work: WorkV1) -> Result<WorkResult> {
             // a competing lock, implicit server transition or lease extension.
             drop(server);
             drop(listener);
-            private_display(&serde_json::json!({
+            crate::transport::admission_stage!(observer.as_ref(), WorkerDisplay);
+            let result = private_display(&serde_json::json!({
                 "kind": "durable_payment_admission_v1_committed",
                 "committed_head": snapshot.head,
                 "notice": "The one reviewed financial admission is committed. This listener and namespace owner are closed. Later serving requires selecting the same immutable record in the original namespace. Closing the UI does not revoke this record; its explicit interval and existing account exclusions still apply. No financial reserve, signature, release or dispatch occurred here.",
-            })).map(|display| WorkResult::DurablePaymentAdmittedV1 { display, clock })
+            })).map(|display| WorkResult::DurablePaymentAdmittedV1 { display, clock });
+            #[cfg(feature = "synthetic-qualification")]
+            if let Some(observer) = &observer {
+                observer.worker_result(&result);
+            }
+            result
         }
     }
 }
+// The original receipt-only short circuit, with each predicate and clock invoked
+// at most once in the original order. This cannot create a native decision.
+pub(super) fn retain_receipt_v1(
+    focused: bool,
+    epoch_matches: impl FnOnce() -> bool,
+    not_revoked: impl FnOnce() -> bool,
+    not_closing: impl FnOnce() -> bool,
+    clock_accepted: impl FnOnce() -> bool,
+    #[cfg(feature = "synthetic-qualification")] observer: Option<
+        &crate::transport::admission_diagnostics_v1::AdmissionWitnessObserverV1,
+    >,
+) -> bool {
+    macro_rules! gate {
+        ($gate:ident, $retained:expr) => {{
+            #[cfg(feature = "synthetic-qualification")]
+            if let Some(observer) = observer {
+                observer.receipt_gate(crate::transport::admission_diagnostics_v1::AdmissionWitnessReceiptGateV1::$gate);
+            }
+            $retained
+        }};
+    }
+    if !focused {
+        gate!(Unfocused, false)
+    } else if !epoch_matches() {
+        gate!(EpochMismatch, false)
+    } else if !not_revoked() {
+        gate!(Revoked, false)
+    } else if !not_closing() {
+        gate!(Closing, false)
+    } else if !clock_accepted() {
+        gate!(ClockRejected, false)
+    } else {
+        gate!(Retained, true)
+    }
+}
+
 fn prepare(input: NamespaceOpenInput, fields: InputsV1) -> Result<PreparedNativeV1> {
     if fields.request_json.is_empty() || fields.request_json.len() > crate::MAX_FRAME_BYTES {
         return Err(AuthorityError::Limit);
@@ -247,4 +383,64 @@ pub(super) fn input_ui(window: &mut Window, ui: &mut egui::Ui, focused: bool) ->
         return true;
     }
     false
+}
+
+#[cfg(all(test, feature = "synthetic-qualification"))]
+mod admission_observation_tests {
+    use super::*;
+    use crate::transport::admission_diagnostics_v1::{
+        AdmissionWitnessObserverV1, AdmissionWitnessReceiptGateV1,
+    };
+    use std::cell::RefCell;
+
+    #[test]
+    fn pure_admission_receipt_gates_preserve_original_short_circuit_and_clock_count() {
+        use AdmissionWitnessReceiptGateV1::*;
+        for (reject, expected) in [
+            (0, Unfocused),
+            (1, EpochMismatch),
+            (2, Revoked),
+            (3, Closing),
+            (4, ClockRejected),
+            (5, Retained),
+        ] {
+            let original_trace = RefCell::new(Vec::new());
+            let original_check = |index| {
+                original_trace.borrow_mut().push(index);
+                reject != index
+            };
+            let original = reject != 0
+                && original_check(1)
+                && original_check(2)
+                && original_check(3)
+                && original_check(4);
+            for observed in [false, true] {
+                let observer = AdmissionWitnessObserverV1::new();
+                let trace = RefCell::new(Vec::new());
+                let check = |index| {
+                    trace.borrow_mut().push(index);
+                    reject != index
+                };
+                let retained = retain_receipt_v1(
+                    reject != 0,
+                    || check(1),
+                    || check(2),
+                    || check(3),
+                    || check(4),
+                    observed.then_some(&observer),
+                );
+                assert_eq!(retained, original);
+                assert_eq!(*trace.borrow(), *original_trace.borrow());
+                assert_eq!(
+                    trace.borrow().iter().filter(|&&index| index == 4).count(),
+                    if reject >= 4 { 1 } else { 0 }
+                );
+                if observed {
+                    assert!(observer.snapshot().receipt_gate() == expected);
+                } else {
+                    assert!(observer.snapshot().receipt_gate() == NotObserved);
+                }
+            }
+        }
+    }
 }

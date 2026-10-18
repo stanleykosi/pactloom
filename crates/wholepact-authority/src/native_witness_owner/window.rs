@@ -830,14 +830,27 @@ struct WorkerJob {
     thread: Option<JoinHandle<()>>,
     received: Option<Result<WorkResult>>,
     cleanup: bool,
+    #[cfg(feature = "synthetic-qualification")]
+    admission_observer:
+        Option<crate::transport::admission_diagnostics_v1::AdmissionWitnessObserverV1>,
 }
 impl WorkerJob {
     fn poll(&mut self) -> Option<Result<WorkResult>> {
         if self.received.is_none() {
             match self.receiver.try_recv() {
-                Ok(value) => self.received = Some(value),
+                Ok(value) => {
+                    #[cfg(feature = "synthetic-qualification")]
+                    if let Some(observer) = &self.admission_observer {
+                        observer.completion(crate::transport::admission_diagnostics_v1::AdmissionWitnessCompletionV1::Received);
+                    }
+                    self.received = Some(value);
+                }
                 Err(TryRecvError::Empty) => {}
                 Err(TryRecvError::Disconnected) => {
+                    #[cfg(feature = "synthetic-qualification")]
+                    if let Some(observer) = &self.admission_observer {
+                        observer.completion(crate::transport::admission_diagnostics_v1::AdmissionWitnessCompletionV1::Disconnected);
+                    }
                     self.received = Some(Err(AuthorityError::Uncertain))
                 }
             }
@@ -854,13 +867,22 @@ impl WorkerJob {
             // join. Re-read once after join so a successfully queued result is
             // not misreported as uncertain.
             if self.received.is_none() {
-                self.received = Some(
-                    self.receiver
-                        .try_recv()
-                        .unwrap_or(Err(AuthorityError::Uncertain)),
-                );
+                let received = self.receiver.try_recv();
+                #[cfg(feature = "synthetic-qualification")]
+                if let Some(observer) = &self.admission_observer {
+                    observer.completion(if received.is_ok() {
+                        crate::transport::admission_diagnostics_v1::AdmissionWitnessCompletionV1::Received
+                    } else {
+                        crate::transport::admission_diagnostics_v1::AdmissionWitnessCompletionV1::Disconnected
+                    });
+                }
+                self.received = Some(received.unwrap_or(Err(AuthorityError::Uncertain)));
             }
             if panicked {
+                #[cfg(feature = "synthetic-qualification")]
+                if let Some(observer) = &self.admission_observer {
+                    observer.completion(crate::transport::admission_diagnostics_v1::AdmissionWitnessCompletionV1::Panicked);
+                }
                 // A queued snapshot-bearing proposal still needs off-GUI
                 // disposal even when the finishing preparation worker panicked.
                 return Some(match self.received.take() {
@@ -890,6 +912,13 @@ fn launch_private_work(
     ctx: Option<egui::Context>,
 ) -> Result<WorkerJob> {
     let cleanup = matches!(&work, Work::Discard(_));
+    #[cfg(feature = "synthetic-qualification")]
+    let admission_observer = match &work {
+        Work::DurablePaymentV1(durable_payment_v1::WorkV1::Admit { observer, .. }) => {
+            observer.clone()
+        }
+        _ => None,
+    };
     // Spawn before transferring any heavyweight proposal. If spawning fails,
     // revoke first, then safely dispose locally: an exceptional synchronous
     // fallback, never a forgotten/leaked secret-bearing value or new authority.
@@ -1186,6 +1215,8 @@ fn launch_private_work(
         thread: Some(thread),
         received: None,
         cleanup,
+        #[cfg(feature = "synthetic-qualification")]
+        admission_observer,
     })
 }
 
@@ -1488,6 +1519,9 @@ pub(super) struct Window {
     close_when_idle: bool,
     disposal_failed: bool,
     last_installation_audit: Option<Zeroizing<String>>,
+    #[cfg(feature = "synthetic-qualification")]
+    admission_observer:
+        Option<crate::transport::admission_diagnostics_v1::AdmissionWitnessObserverV1>,
     message: &'static str,
 }
 impl Window {
@@ -1507,6 +1541,8 @@ impl Window {
             close_when_idle: false,
             disposal_failed: false,
             last_installation_audit: None,
+            #[cfg(feature = "synthetic-qualification")]
+            admission_observer: None,
             message: "Choose the existing owner public certificate and exact witness identity independently. The namespace root is fixed by the OS installation; request data cannot select another root.",
         }
     }
@@ -1671,8 +1707,15 @@ impl Window {
                 self.message = "The exact existing transport key and private mailboxes were retained in the original encrypted journal. This persistent import does not authorize a signature or payment. Preserve the complete namespace archive; uncertain outcomes must be inspected, never reset or replaced.";
             }
             Ok(WorkResult::DurablePaymentAdmittedV1 { display, clock }) => {
-                if focused && job.epoch == self.focus_epoch && !job.owner.revoke_requested()
-                    && !self.close_when_idle && clock.check().is_ok() {
+                if durable_payment_v1::retain_receipt_v1(
+                    focused,
+                    || job.epoch == self.focus_epoch,
+                    || !job.owner.revoke_requested(),
+                    || !self.close_when_idle,
+                    || clock.check().is_ok(),
+                    #[cfg(feature = "synthetic-qualification")]
+                    job.admission_observer.as_ref(),
+                ) {
                     self.last_archive_receipt = Some((clock, display));
                 }
                 self.message = "The exact durable financial admission was committed after original owner mTLS. This listener is closed. Closing this window does not revoke the approved interval. Reopen only the same original namespace and immutable record for bounded financial serving. No reserve, signature, release or dispatch occurred here.";
@@ -2368,6 +2411,8 @@ impl Window {
                         tls,
                         listener,
                         clock: historical_clock,
+                        #[cfg(feature = "synthetic-qualification")]
+                        observer: self.admission_observer.clone(),
                     })
                 }
                 Proposal::Setup(proposal) => Work::Install(Box::new(NativeSetupDecision {
@@ -2948,6 +2993,8 @@ mod tests {
             thread: Some(thread),
             received: None,
             cleanup: false,
+            #[cfg(feature = "synthetic-qualification")]
+            admission_observer: None,
         };
         assert!(job.poll().is_none());
         job.owner.revoke();
@@ -2993,6 +3040,8 @@ mod tests {
             thread: Some(thread),
             received: None,
             cleanup: true,
+            #[cfg(feature = "synthetic-qualification")]
+            admission_observer: None,
         });
         assert!(!window.can_select());
         window.discard();

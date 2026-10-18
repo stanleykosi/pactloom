@@ -525,6 +525,17 @@ impl PreparedDurableWitnessAdmissionV1 {
 }
 impl ApprovedDurableWitnessAdmissionV1 {
     pub(super) fn retain(self) -> Result<DurableWitnessAdmissionDispatchV1> {
+        self.retain_inner(
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            None,
+        )
+    }
+    fn retain_inner(
+        self,
+        #[cfg(feature = "synthetic-born-joined-qualification")] mut first_error: Option<
+            &mut Option<Error>,
+        >,
+    ) -> Result<DurableWitnessAdmissionDispatchV1> {
         self.custody.current()?;
         require_live(&self.request)?;
         let retained = self
@@ -536,8 +547,15 @@ impl ApprovedDurableWitnessAdmissionV1 {
                 if Instant::now() >= self.custody.deadline {
                     return Err(JournalError::Permission);
                 }
-                require_request_under_fence(&self.custody.source, &self.request)
-                    .map_err(|_| JournalError::Permission)
+                require_request_under_fence(&self.custody.source, &self.request).map_err(|_error| {
+                    #[cfg(feature = "synthetic-born-joined-qualification")]
+                    if let Some(first) = first_error.as_deref_mut() {
+                        if first.is_none() {
+                            *first = Some(_error);
+                        }
+                    }
+                    JournalError::Permission
+                })
             })?;
         if retained.request() != &self.request {
             return Err(Error::RecoveryRequired);
@@ -550,9 +568,80 @@ impl ApprovedDurableWitnessAdmissionV1 {
 }
 impl DurableWitnessAdmissionDispatchV1 {
     pub(super) fn submit(&self, owner: &NativeWitnessWorkspace) -> Result<AccountSnapshot> {
-        self.custody.workspace(owner)?;
-        require_intent(&self.custody.source, &self.retained)?;
-        require_live(self.retained.request())?;
+        self.submit_inner(
+            owner,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            None,
+        )
+    }
+    fn submit_inner(
+        &self,
+        owner: &NativeWitnessWorkspace,
+        #[cfg(feature = "synthetic-born-joined-qualification")] mut observation: Option<
+            &mut QualificationDurableAdmissionObservationV1,
+        >,
+    ) -> Result<AccountSnapshot> {
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        let started = admission_optional_clock(observation.is_some(), Instant::now);
+        let preflight = (|| {
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            if let Some(value) = observation.as_deref_mut() {
+                value.stage = DurableAdmissionDispatchStageV1::SubmitCustody;
+            }
+            self.custody.workspace(owner)?;
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            if let Some(value) = observation.as_deref_mut() {
+                value.stage = DurableAdmissionDispatchStageV1::SubmitIntent;
+            }
+            require_intent(&self.custody.source, &self.retained)?;
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            if let Some(value) = observation.as_deref_mut() {
+                value.stage = DurableAdmissionDispatchStageV1::SubmitInterval;
+            }
+            require_live(self.retained.request())
+        })();
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        if let (Some(value), Some(started)) = (observation.as_deref_mut(), started) {
+            value.measurement.submit_preflight_us = Some(admission_micros(
+                started.elapsed(),
+                &mut value.measurement.clamped,
+            ));
+        }
+        preflight?;
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        if let Some(value) = observation {
+            value.stage = DurableAdmissionDispatchStageV1::SubmitWorkspace;
+            let mut failure = None;
+            let result = owner.durable_admit_diagnosed_v1(
+                self.retained.request(),
+                self.custody.deadline,
+                || {
+                    value.callback(DurableAdmissionCallbackStageV1::Custody, || {
+                        self.custody.workspace(owner)
+                    })?;
+                    value.callback(DurableAdmissionCallbackStageV1::RequestValidation, || {
+                        require_request(&self.custody.source, self.retained.request())
+                    })
+                },
+                &mut failure,
+            );
+            if let Some((authority, callback, workspace_current)) = failure {
+                value.stage = DurableAdmissionDispatchStageV1::AuthorityCall;
+                let callback_stage = callback.as_ref().and_then(|_| {
+                    if workspace_current {
+                        Some(DurableAdmissionCallbackStageV1::WorkspaceCurrent)
+                    } else {
+                        value.callback_stage
+                    }
+                });
+                value.call_failure = Some(DurableAdmissionCallFailureV1 {
+                    authority,
+                    callback,
+                    callback_stage,
+                });
+            }
+            return result;
+        }
         owner.durable_admit_v1(self.retained.request(), self.custody.deadline, || {
             self.custody.workspace(owner)?;
             require_request(&self.custody.source, self.retained.request())
@@ -907,6 +996,8 @@ pub(super) struct DurableWitnessRuntimeV1 {
     qualification_completion: Option<(String, QualificationDurableWitnessCompletionV1)>,
     #[cfg(feature = "synthetic-born-joined-qualification")]
     qualification_preparation: QualificationDurablePreparationV1,
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    qualification_admission: QualificationDurableAdmissionV1,
 }
 /// Closed synthetic diagnostics. These names carry no request or private data.
 #[cfg(feature = "synthetic-born-joined-qualification")]
@@ -1034,6 +1125,363 @@ impl QualificationDurablePreparationV1 {
         }
     }
 }
+/// Finite, inert observations of one exact approval attempt. These never carry
+/// native custody, extend its lifetime, or authorize another operation.
+#[cfg(feature = "synthetic-born-joined-qualification")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum DurableAdmissionDispatchStageV1 {
+    FixtureState,
+    ReviewCorrelation,
+    NativeApproval,
+    IntentRetention,
+    SubmitCustody,
+    SubmitIntent,
+    SubmitInterval,
+    SubmitWorkspace,
+    AuthorityCall,
+    WorkerCompletion,
+    CommittedCorrelation,
+}
+#[cfg(feature = "synthetic-born-joined-qualification")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum DurableAdmissionCompletionV1 {
+    NotObserved,
+    ReturnedOk,
+    ReturnedErr,
+    Missing,
+    Invalidated,
+    Disconnected,
+}
+#[cfg(feature = "synthetic-born-joined-qualification")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum DurableAdmissionRetentionV1 {
+    NotObserved,
+    Unconfirmed,
+    Confirmed,
+}
+#[cfg(feature = "synthetic-born-joined-qualification")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum DurableAdmissionCallbackStageV1 {
+    WorkspaceCurrent,
+    Custody,
+    RequestValidation,
+}
+#[cfg(feature = "synthetic-born-joined-qualification")]
+#[derive(Default)]
+pub struct DurableAdmissionDispatchMeasurementV1 {
+    native_approval_us: Option<u32>,
+    retention_us: Option<u32>,
+    submit_preflight_us: Option<u32>,
+    callback_custody_calls: Option<u32>,
+    callback_custody_us: Option<u32>,
+    callback_custody_max_us: Option<u32>,
+    request_validation_calls: Option<u32>,
+    request_validation_us: Option<u32>,
+    request_validation_max_us: Option<u32>,
+    clamped: bool,
+    incomplete: bool,
+}
+#[cfg(feature = "synthetic-born-joined-qualification")]
+impl DurableAdmissionDispatchMeasurementV1 {
+    pub fn native_approval_us(&self) -> Option<u32> {
+        self.native_approval_us
+    }
+    pub fn retention_us(&self) -> Option<u32> {
+        self.retention_us
+    }
+    pub fn submit_preflight_us(&self) -> Option<u32> {
+        self.submit_preflight_us
+    }
+    pub fn callback_custody_calls(&self) -> Option<u32> {
+        self.callback_custody_calls
+    }
+    pub fn callback_custody_us(&self) -> Option<u32> {
+        self.callback_custody_us
+    }
+    pub fn callback_custody_max_us(&self) -> Option<u32> {
+        self.callback_custody_max_us
+    }
+    pub fn request_validation_calls(&self) -> Option<u32> {
+        self.request_validation_calls
+    }
+    pub fn request_validation_us(&self) -> Option<u32> {
+        self.request_validation_us
+    }
+    pub fn request_validation_max_us(&self) -> Option<u32> {
+        self.request_validation_max_us
+    }
+    pub fn clamped(&self) -> bool {
+        self.clamped
+    }
+    pub fn incomplete(&self) -> bool {
+        self.incomplete
+    }
+}
+#[cfg(feature = "synthetic-born-joined-qualification")]
+pub struct DurableAdmissionCallFailureV1 {
+    authority: CheckedHistoryFailureV1,
+    callback: Option<Error>,
+    callback_stage: Option<DurableAdmissionCallbackStageV1>,
+}
+#[cfg(feature = "synthetic-born-joined-qualification")]
+impl DurableAdmissionCallFailureV1 {
+    pub fn stage(&self) -> CheckedHistoryStageV1 {
+        self.authority.stage()
+    }
+    pub fn io_kind(&self) -> Option<CheckedHistoryIoKindV1> {
+        self.authority.io_kind()
+    }
+    pub fn measurement(&self) -> &CheckedHistoryMeasurementV1 {
+        self.authority.measurement()
+    }
+    pub fn callback_stage(&self) -> Option<DurableAdmissionCallbackStageV1> {
+        self.callback_stage
+    }
+    pub fn into_errors(self) -> (wholepact_authority::AuthorityError, Option<Error>) {
+        (self.authority.into_error(), self.callback)
+    }
+}
+#[cfg(feature = "synthetic-born-joined-qualification")]
+pub struct DurableAdmissionDispatchFailureV1 {
+    stage: DurableAdmissionDispatchStageV1,
+    error: Error,
+    original_error: Option<Error>,
+    original_is_operational: bool,
+    completion: DurableAdmissionCompletionV1,
+    retention: DurableAdmissionRetentionV1,
+    measurement: Option<DurableAdmissionDispatchMeasurementV1>,
+    call_failure: Option<DurableAdmissionCallFailureV1>,
+}
+#[cfg(feature = "synthetic-born-joined-qualification")]
+impl DurableAdmissionDispatchFailureV1 {
+    pub fn stage(&self) -> DurableAdmissionDispatchStageV1 {
+        self.stage
+    }
+    pub fn completion(&self) -> DurableAdmissionCompletionV1 {
+        self.completion
+    }
+    pub fn retention(&self) -> DurableAdmissionRetentionV1 {
+        self.retention
+    }
+    pub fn original_error(&self) -> Option<&Error> {
+        self.original_error
+            .as_ref()
+            .or_else(|| self.original_is_operational.then_some(&self.error))
+    }
+    pub fn measurement(&self) -> Option<&DurableAdmissionDispatchMeasurementV1> {
+        self.measurement.as_ref()
+    }
+    pub fn call_failure(&self) -> Option<&DurableAdmissionCallFailureV1> {
+        self.call_failure.as_ref()
+    }
+    pub fn take_call_failure(&mut self) -> Option<DurableAdmissionCallFailureV1> {
+        self.call_failure.take()
+    }
+    pub fn into_error(self) -> Error {
+        self.error
+    }
+    pub(super) fn new(
+        stage: DurableAdmissionDispatchStageV1,
+        error: Error,
+        original_is_operational: bool,
+    ) -> Self {
+        Self {
+            stage,
+            error,
+            original_error: None,
+            original_is_operational,
+            completion: DurableAdmissionCompletionV1::NotObserved,
+            retention: DurableAdmissionRetentionV1::NotObserved,
+            measurement: None,
+            call_failure: None,
+        }
+    }
+}
+#[cfg(feature = "synthetic-born-joined-qualification")]
+fn admission_optional_clock(observed: bool, now: impl FnOnce() -> Instant) -> Option<Instant> {
+    observed.then(now)
+}
+#[cfg(feature = "synthetic-born-joined-qualification")]
+fn admission_micros(elapsed: Duration, clamped: &mut bool) -> u32 {
+    const MAX: u128 = 600_000_000;
+    *clamped |= elapsed.as_micros() > MAX;
+    elapsed.as_micros().min(MAX) as u32
+}
+#[cfg(feature = "synthetic-born-joined-qualification")]
+fn admission_callback_cost(
+    calls: &mut Option<u32>,
+    total: &mut Option<u32>,
+    maximum: &mut Option<u32>,
+    elapsed: Duration,
+    clamped: &mut bool,
+) {
+    let count = u64::from(calls.unwrap_or(0)) + 1;
+    *clamped |= count > 1_000_000;
+    *calls = Some(count.min(1_000_000) as u32);
+    let micros = admission_micros(elapsed, clamped);
+    let sum = u64::from(total.unwrap_or(0)) + u64::from(micros);
+    *clamped |= sum > 600_000_000;
+    *total = Some(sum.min(600_000_000) as u32);
+    *maximum = Some(maximum.unwrap_or(0).max(micros));
+}
+#[cfg(feature = "synthetic-born-joined-qualification")]
+pub(super) struct QualificationDurableAdmissionObservationV1 {
+    attempt: u64,
+    digest: String,
+    stage: DurableAdmissionDispatchStageV1,
+    first_error: Option<Error>,
+    completion: DurableAdmissionCompletionV1,
+    retention: DurableAdmissionRetentionV1,
+    measurement: DurableAdmissionDispatchMeasurementV1,
+    call_failure: Option<DurableAdmissionCallFailureV1>,
+    callback_stage: Option<DurableAdmissionCallbackStageV1>,
+}
+#[cfg(feature = "synthetic-born-joined-qualification")]
+impl QualificationDurableAdmissionObservationV1 {
+    fn new(attempt: u64, digest: String) -> Self {
+        Self {
+            attempt,
+            digest,
+            stage: DurableAdmissionDispatchStageV1::NativeApproval,
+            first_error: None,
+            completion: DurableAdmissionCompletionV1::NotObserved,
+            retention: DurableAdmissionRetentionV1::NotObserved,
+            measurement: Default::default(),
+            call_failure: None,
+            callback_stage: None,
+        }
+    }
+    fn callback<T>(
+        &mut self,
+        stage: DurableAdmissionCallbackStageV1,
+        call: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        self.callback_stage = Some(stage);
+        let started = Instant::now();
+        let result = call();
+        let elapsed = started.elapsed();
+        let m = &mut self.measurement;
+        match stage {
+            DurableAdmissionCallbackStageV1::Custody => admission_callback_cost(
+                &mut m.callback_custody_calls,
+                &mut m.callback_custody_us,
+                &mut m.callback_custody_max_us,
+                elapsed,
+                &mut m.clamped,
+            ),
+            DurableAdmissionCallbackStageV1::RequestValidation => admission_callback_cost(
+                &mut m.request_validation_calls,
+                &mut m.request_validation_us,
+                &mut m.request_validation_max_us,
+                elapsed,
+                &mut m.clamped,
+            ),
+            DurableAdmissionCallbackStageV1::WorkspaceCurrent => {}
+        }
+        result
+    }
+}
+#[cfg(feature = "synthetic-born-joined-qualification")]
+#[derive(Default)]
+struct QualificationDurableAdmissionV1 {
+    sequence: u64,
+    active: Option<(u64, String)>,
+    observation: Option<QualificationDurableAdmissionObservationV1>,
+    native_approval_us: Option<u32>,
+    native_clamped: bool,
+    taken: bool,
+}
+#[cfg(feature = "synthetic-born-joined-qualification")]
+impl QualificationDurableAdmissionV1 {
+    fn reset(&mut self) {
+        self.active = None;
+        self.observation = None;
+        self.native_approval_us = None;
+        self.native_clamped = false;
+        self.taken = false;
+    }
+    fn begin(&mut self, digest: String) -> Option<u64> {
+        self.reset();
+        let next = self.sequence.checked_add(1)?;
+        self.sequence = next;
+        self.active = Some((next, digest));
+        Some(next)
+    }
+    fn worker(&self, digest: &str) -> Option<QualificationDurableAdmissionObservationV1> {
+        self.active
+            .as_ref()
+            .filter(|(_, actual)| actual == digest && !self.taken)
+            .map(|(attempt, digest)| {
+                QualificationDurableAdmissionObservationV1::new(*attempt, digest.clone())
+            })
+    }
+    fn record(
+        &mut self,
+        observation: Option<QualificationDurableAdmissionObservationV1>,
+        completion: DurableAdmissionCompletionV1,
+        dispatch_confirmed: bool,
+        error: Option<Error>,
+    ) {
+        let Some(mut observation) = observation else {
+            return;
+        };
+        if self.taken
+            || self.observation.is_some()
+            || !self.active.as_ref().is_some_and(|(attempt, digest)| {
+                *attempt == observation.attempt && digest == &observation.digest
+            })
+        {
+            return;
+        }
+        observation.completion = completion;
+        observation.retention = if dispatch_confirmed {
+            DurableAdmissionRetentionV1::Confirmed
+        } else {
+            DurableAdmissionRetentionV1::Unconfirmed
+        };
+        if observation.first_error.is_none() {
+            observation.first_error = error;
+        }
+        observation.measurement.incomplete |= matches!(
+            completion,
+            DurableAdmissionCompletionV1::Missing
+                | DurableAdmissionCompletionV1::Invalidated
+                | DurableAdmissionCompletionV1::Disconnected
+        );
+        self.observation = Some(observation);
+    }
+    fn absent(&mut self, completion: DurableAdmissionCompletionV1) {
+        let observation = self
+            .active
+            .as_ref()
+            .and_then(|(_, digest)| self.worker(digest));
+        let observation = observation.map(|mut value| {
+            value.stage = DurableAdmissionDispatchStageV1::WorkerCompletion;
+            value
+        });
+        self.record(observation, completion, false, None);
+    }
+    fn take(
+        &mut self,
+        attempt: u64,
+        digest: &str,
+    ) -> Option<QualificationDurableAdmissionObservationV1> {
+        if self.taken
+            || !self
+                .active
+                .as_ref()
+                .is_some_and(|(id, actual)| *id == attempt && actual == digest)
+        {
+            return None;
+        }
+        self.taken = true;
+        self.observation.take().map(|mut observation| {
+            observation.measurement.native_approval_us = self.native_approval_us;
+            observation.measurement.clamped |= self.native_clamped;
+            observation
+        })
+    }
+}
 /// Data-only observation of an actual worker result. Production decisions never
 /// consult it; neither the kind nor its exact review digest restores permission.
 #[cfg(feature = "synthetic-born-joined-qualification")]
@@ -1070,6 +1518,27 @@ impl DurableWitnessRuntimeV1 {
             .as_ref()
             .filter(|(digest, _)| digest == expected_review_digest)
             .map(|(_, kind)| *kind)
+    }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(super) fn observe_admission_disconnected_v1(&mut self) {
+        self.qualification_admission
+            .absent(DurableAdmissionCompletionV1::Disconnected);
+    }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(super) fn observe_admission_invalidated_v1(&mut self, outcome: DurableWitnessOutcomeV1) {
+        if let DurableWitnessOutcomeV1::Admission {
+            dispatch,
+            result,
+            observation,
+        } = outcome
+        {
+            self.qualification_admission.record(
+                observation,
+                DurableAdmissionCompletionV1::Invalidated,
+                dispatch.is_some(),
+                result.err(),
+            );
+        }
     }
     pub(super) fn discard_import_custody(&mut self) {
         self.admission_retry = None;
@@ -1116,6 +1585,8 @@ pub(super) enum DurableWitnessOutcomeV1 {
     Admission {
         dispatch: Option<Arc<DurableWitnessAdmissionDispatchV1>>,
         result: Result<AccountSnapshot>,
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        observation: Option<QualificationDurableAdmissionObservationV1>,
     },
     Session {
         approved: Arc<ApprovedDurableWriterSessionV1>,
@@ -1128,6 +1599,72 @@ pub(super) enum DurableWitnessOutcomeV1 {
     Reconciled(Result<DurableReconciliationOutcomeV1>),
 }
 impl NativeRuntime {
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(super) fn reset_qualification_admission_dispatch_v1(&mut self) {
+        if let Some(open) = self.open.as_mut() {
+            open.durable_witness.qualification_admission.reset();
+        }
+    }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(super) fn begin_qualification_admission_dispatch_v1(
+        &mut self,
+        digest: String,
+    ) -> Option<u64> {
+        self.open
+            .as_mut()?
+            .durable_witness
+            .qualification_admission
+            .begin(digest)
+    }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(super) fn qualification_admission_native_cost_v1(&mut self, elapsed: Duration) {
+        if let Some(open) = self.open.as_mut() {
+            let state = &mut open.durable_witness.qualification_admission;
+            if state.active.is_some() {
+                state.native_approval_us =
+                    Some(admission_micros(elapsed, &mut state.native_clamped));
+            }
+        }
+    }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(super) fn qualification_admission_missing_v1(&mut self) {
+        if let Some(open) = self.open.as_mut() {
+            open.durable_witness
+                .qualification_admission
+                .absent(DurableAdmissionCompletionV1::Missing);
+        }
+    }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(super) fn take_qualification_admission_dispatch_v1(
+        &mut self,
+        attempt: u64,
+        digest: &str,
+        mut failure: DurableAdmissionDispatchFailureV1,
+    ) -> DurableAdmissionDispatchFailureV1 {
+        if let Some(open) = self.open.as_mut() {
+            let state = &mut open.durable_witness.qualification_admission;
+            let eligible = !state.taken
+                && state.active.as_ref().is_some_and(|(id, actual)| *id == attempt && actual == digest);
+            if let Some(observation) = state.take(attempt, digest) {
+                if observation.first_error.is_some() {
+                    failure.stage = observation.stage;
+                }
+                failure.original_error = observation.first_error;
+                failure.completion = observation.completion;
+                failure.retention = observation.retention;
+                failure.measurement = Some(observation.measurement);
+                failure.call_failure = observation.call_failure;
+            } else if eligible {
+                failure.measurement = Some(DurableAdmissionDispatchMeasurementV1 {
+                    native_approval_us: state.native_approval_us,
+                    clamped: state.native_clamped,
+                    incomplete: true,
+                    ..Default::default()
+                });
+            }
+        }
+        failure
+    }
     #[cfg(feature = "synthetic-born-joined-qualification")]
     pub(super) fn qualification_durable_admission_attempt_v1(&self) -> Option<u64> {
         self.open
@@ -1378,26 +1915,66 @@ impl NativeRuntime {
         match prepared {
             DurableWitnessPreparedV1::Admission(value) => {
                 let owner = open.owner_witness.clone().ok_or(Error::Locked)?;
+                #[cfg(feature = "synthetic-born-joined-qualification")]
+                let mut observation = open
+                    .durable_witness
+                    .qualification_admission
+                    .worker(value.digest());
                 let approved = value.approve(decision, &open.authority, &owner)?;
                 self.start_witness_job(epoch, move |cancelled| {
                     let outcome = if cancelled.load(Ordering::Acquire) {
+                        #[cfg(feature = "synthetic-born-joined-qualification")]
+                        if let Some(value) = observation.as_mut() {
+                            value.stage = DurableAdmissionDispatchStageV1::WorkerCompletion;
+                        }
                         DurableWitnessOutcomeV1::Admission {
                             dispatch: None,
                             result: Err(Error::Locked),
+                            #[cfg(feature = "synthetic-born-joined-qualification")]
+                            observation,
                         }
                     } else {
-                        match approved.retain() {
+                        #[cfg(feature = "synthetic-born-joined-qualification")]
+                        let started = admission_optional_clock(observation.is_some(), Instant::now);
+                        #[cfg(feature = "synthetic-born-joined-qualification")]
+                        if let Some(value) = observation.as_mut() {
+                            value.stage = DurableAdmissionDispatchStageV1::IntentRetention;
+                        }
+                        #[cfg(feature = "synthetic-born-joined-qualification")]
+                        let retained = if let Some(value) = observation.as_mut() {
+                            approved.retain_inner(Some(&mut value.first_error))
+                        } else {
+                            approved.retain()
+                        };
+                        #[cfg(not(feature = "synthetic-born-joined-qualification"))]
+                        let retained = approved.retain();
+                        #[cfg(feature = "synthetic-born-joined-qualification")]
+                        if let (Some(value), Some(started)) = (observation.as_mut(), started) {
+                            value.measurement.retention_us = Some(admission_micros(
+                                started.elapsed(),
+                                &mut value.measurement.clamped,
+                            ));
+                        }
+                        match retained {
                             Ok(dispatch) => {
                                 let dispatch = Arc::new(dispatch);
-                                let result = dispatch.submit(&owner);
+                                let result = dispatch.submit_inner(
+                                    &owner,
+                                    #[cfg(feature = "synthetic-born-joined-qualification")]
+                                    observation.as_mut(),
+                                );
                                 DurableWitnessOutcomeV1::Admission {
                                     dispatch: Some(dispatch),
                                     result,
+                                    #[cfg(feature = "synthetic-born-joined-qualification")]
+                                    observation,
                                 }
                             }
                             Err(error) => DurableWitnessOutcomeV1::Admission {
                                 dispatch: None,
                                 result: Err(error),
+                                #[cfg(feature = "synthetic-born-joined-qualification")]
+                                observation,
                             },
                         }
                     };
@@ -1469,6 +2046,8 @@ impl NativeRuntime {
                     WitnessOutcome::DurablePaymentV1(DurableWitnessOutcomeV1::Admission {
                         dispatch: Some(dispatch),
                         result,
+                        #[cfg(feature = "synthetic-born-joined-qualification")]
+                        observation: None,
                     })
                 })
             }
@@ -1523,6 +2102,7 @@ fn qualification_completion_from_outcome_v1(
         DurableWitnessOutcomeV1::Admission {
             dispatch: Some(dispatch),
             result: Ok(_),
+            ..
         } => Some((dispatch.custody.digest.clone(), C::AdmissionCommitted)),
         DurableWitnessOutcomeV1::Session {
             approved,
@@ -1612,8 +2192,24 @@ pub(super) fn complete(
             open.durable_witness.admission_id = Some(id);
             ("Exact retained admission is committed in authenticated complete history. This is historical evidence, not renewed approval or a replacement session.", None)
         }
-        DurableWitnessOutcomeV1::Admission { dispatch, result } => {
+        DurableWitnessOutcomeV1::Admission {
+            dispatch,
+            result,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            observation,
+        } => {
             let Some(dispatch) = dispatch else {
+                #[cfg(feature = "synthetic-born-joined-qualification")]
+                open.durable_witness.qualification_admission.record(
+                    observation,
+                    if result.is_ok() {
+                        DurableAdmissionCompletionV1::ReturnedOk
+                    } else {
+                        DurableAdmissionCompletionV1::ReturnedErr
+                    },
+                    false,
+                    result.err(),
+                );
                 return ("No admission dispatch was confirmed. Inspect the original local intent before retrying; do not assume local retention or remote rollback, and never create a replacement body or ID.", None);
             };
             if result.is_ok() {
@@ -1625,6 +2221,17 @@ pub(super) fn complete(
             } else {
                 "Admission outcome is uncertain or blocked. The exact immutable local intent is retained; inspect authenticated full history, never replace its body, head or ID."
             };
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            open.durable_witness.qualification_admission.record(
+                observation,
+                if result.is_ok() {
+                    DurableAdmissionCompletionV1::ReturnedOk
+                } else {
+                    DurableAdmissionCompletionV1::ReturnedErr
+                },
+                true,
+                result.err(),
+            );
             (message, None)
         }
         DurableWitnessOutcomeV1::Session { approved, result } => {
@@ -1632,9 +2239,15 @@ pub(super) fn complete(
             match result {
                 Ok(receipt) => {
                     open.writer_receipt = Some(receipt);
-                    ("Exact durable writer session acquired. Separate original-owner activation is required.", None)
+                    (
+                        "Exact durable writer session acquired. Separate original-owner activation is required.",
+                        None,
+                    )
                 }
-                Err(_) => ("Writer acquisition is uncertain. Keep this same client/key and exact pre-acquire request; never prepare a replacement session.", None),
+                Err(_) => (
+                    "Writer acquisition is uncertain. Keep this same client/key and exact pre-acquire request; never prepare a replacement session.",
+                    None,
+                ),
             }
         }
         DurableWitnessOutcomeV1::Activation { approved, result } => {
@@ -1648,7 +2261,10 @@ pub(super) fn complete(
         }
         DurableWitnessOutcomeV1::Reconciled(result) => {
             if result.is_err() {
-                return ("Reconciliation was refused before commit. The original source and exposure remain unchanged; inspect the exact failure before a fresh review.", None);
+                return (
+                    "Reconciliation was refused before commit. The original source and exposure remain unchanged; inspect the exact failure before a fresh review.",
+                    None,
+                );
             }
             let committed = matches!(result, Ok(DurableReconciliationOutcomeV1::Committed { .. }));
             // The worker already waited for actual session invalidation. Drop
@@ -1726,6 +2342,161 @@ mod custody_tests {
     use super::*;
     #[cfg(feature = "synthetic-born-joined-qualification")]
     #[test]
+    fn admission_dispatch_first_error_is_inert_and_original_result_stays_separate() {
+        let mut state = QualificationDurableAdmissionV1::default();
+        let attempt = state.begin("exact-review".into()).unwrap();
+        let mut observation = state.worker("exact-review").unwrap();
+        observation.stage = DurableAdmissionDispatchStageV1::IntentRetention;
+        // This is the first original callback error before the existing mapped
+        // journal refusal; no journal, source or native decision is constructed.
+        observation.first_error = Some(Error::ReviewMismatch);
+        state.record(
+            Some(observation),
+            DurableAdmissionCompletionV1::ReturnedErr,
+            false,
+            Some(Error::ConsentJournal(JournalError::Permission)),
+        );
+        let observation = state.take(attempt, "exact-review").unwrap();
+        assert!(matches!(
+            observation.first_error.as_ref(),
+            Some(Error::ReviewMismatch)
+        ));
+        assert!(observation.retention == DurableAdmissionRetentionV1::Unconfirmed);
+        let mut failure = DurableAdmissionDispatchFailureV1::new(
+            DurableAdmissionDispatchStageV1::WorkerCompletion,
+            Error::Uncertain,
+            false,
+        );
+        failure.original_error = observation.first_error;
+        assert!(matches!(
+            failure.original_error(),
+            Some(Error::ReviewMismatch)
+        ));
+        assert!(matches!(failure.into_error(), Error::Uncertain));
+    }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    #[test]
+    fn admission_dispatch_reset_stale_digest_take_once_and_overflow_are_closed() {
+        let mut state = QualificationDurableAdmissionV1::default();
+        let first = state.begin("old-review".into()).unwrap();
+        let stale = state.worker("old-review").unwrap();
+        let next = state.begin("new-review".into()).unwrap();
+        assert!(state.worker("old-review").is_none());
+        state.record(
+            Some(stale),
+            DurableAdmissionCompletionV1::ReturnedErr,
+            false,
+            Some(Error::Locked),
+        );
+        assert!(state.observation.is_none());
+        assert!(state.take(first, "old-review").is_none());
+        assert!(state.take(next, "wrong-review").is_none());
+        let actual = state.worker("new-review");
+        state.record(
+            actual,
+            DurableAdmissionCompletionV1::ReturnedErr,
+            true,
+            Some(Error::Authentication),
+        );
+        assert!(state.take(next, "new-review").is_some());
+        assert!(state.take(next, "new-review").is_none());
+        assert!(state.worker("new-review").is_none());
+        state.sequence = u64::MAX;
+        assert!(state.begin("overflow-review".into()).is_none());
+        assert!(state.active.is_none());
+        assert!(state.observation.is_none());
+        assert!(state.worker("overflow-review").is_none());
+        // The absence of optional collection is not an operational Result.
+        let operational: Result<()> = Ok(());
+        assert!(operational.is_ok());
+    }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    #[test]
+    fn admission_dispatch_missing_invalidated_and_disconnected_are_not_failures_or_rollback() {
+        for completion in [
+            DurableAdmissionCompletionV1::Missing,
+            DurableAdmissionCompletionV1::Disconnected,
+        ] {
+            let mut state = QualificationDurableAdmissionV1::default();
+            let attempt = state.begin("review".into()).unwrap();
+            state.absent(completion);
+            let observed = state.take(attempt, "review").unwrap();
+            assert!(observed.completion == completion);
+            assert!(observed.first_error.is_none());
+            assert!(observed.retention == DurableAdmissionRetentionV1::Unconfirmed);
+            assert!(observed.measurement.incomplete());
+        }
+        let mut runtime = DurableWitnessRuntimeV1::default();
+        let attempt = runtime
+            .qualification_admission
+            .begin("review".into())
+            .unwrap();
+        let observation = runtime.qualification_admission.worker("review");
+        runtime.observe_admission_invalidated_v1(DurableWitnessOutcomeV1::Admission {
+            dispatch: None,
+            result: Err(Error::Authentication),
+            observation,
+        });
+        let observed = runtime
+            .qualification_admission
+            .take(attempt, "review")
+            .unwrap();
+        assert!(observed.completion == DurableAdmissionCompletionV1::Invalidated);
+        assert!(observed.retention == DurableAdmissionRetentionV1::Unconfirmed);
+        assert!(matches!(observed.first_error, Some(Error::Authentication)));
+        assert!(runtime.admission_id.is_none());
+    }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    #[test]
+    fn admission_dispatch_none_clock_failed_span_null_and_caps_are_explicit() {
+        assert!(
+            admission_optional_clock(false, || panic!("observer None must not sample a clock"))
+                .is_none()
+        );
+        let mut observation = QualificationDurableAdmissionObservationV1::new(1, "review".into());
+        assert!(observation.measurement.retention_us().is_none());
+        assert!(observation.measurement.callback_custody_calls().is_none());
+        let mut calls = 0;
+        let result: Result<()> =
+            observation.callback(DurableAdmissionCallbackStageV1::Custody, || {
+                calls += 1;
+                Err(Error::Locked)
+            });
+        assert!(matches!(result, Err(Error::Locked)));
+        assert_eq!(calls, 1);
+        assert_eq!(observation.measurement.callback_custody_calls(), Some(1));
+        assert!(observation.measurement.callback_custody_us().is_some());
+        assert!(observation.measurement.request_validation_calls().is_none());
+        let m = &mut observation.measurement;
+        m.request_validation_calls = Some(1_000_000);
+        admission_callback_cost(
+            &mut m.request_validation_calls,
+            &mut m.request_validation_us,
+            &mut m.request_validation_max_us,
+            Duration::from_secs(601),
+            &mut m.clamped,
+        );
+        assert_eq!(m.request_validation_calls(), Some(1_000_000));
+        assert_eq!(m.request_validation_us(), Some(600_000_000));
+        assert_eq!(m.request_validation_max_us(), Some(600_000_000));
+        assert!(m.clamped());
+        let mut zero_calls = None;
+        let mut zero_total = None;
+        let mut zero_max = None;
+        admission_callback_cost(
+            &mut zero_calls,
+            &mut zero_total,
+            &mut zero_max,
+            Duration::ZERO,
+            &mut false,
+        );
+        assert_eq!(
+            (zero_calls, zero_total, zero_max),
+            (Some(1), Some(0), Some(0))
+        );
+    }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    #[test]
     fn optional_history_diagnostic_does_not_change_original_preparation_error() {
         let mut failure = DurableAdmissionPreparationFailureV1::new(
             DurableAdmissionPreparationStageV1::History,
@@ -1795,7 +2566,8 @@ mod custody_tests {
         assert!(
             qualification_completion_from_outcome_v1(&DurableWitnessOutcomeV1::Admission {
                 dispatch: None,
-                result: Err(Error::Uncertain)
+                result: Err(Error::Uncertain),
+                observation: None,
             })
             .is_none()
         );

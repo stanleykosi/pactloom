@@ -30,6 +30,8 @@ use wholepact_signer::authority_bridge::{
     preconstruction_ipc::PreconstructionRequest,
 };
 use wholepact_signer::native_ui::synthetic_born_joined_qualification::{
+    DurableAdmissionCallFailureV1, DurableAdmissionCallbackStageV1,
+    DurableAdmissionDispatchFailureV1, DurableAdmissionDispatchStageV1,
     DurableAdmissionHistoryFailureV1, DurableAdmissionPreparationFailureV1,
     DurableAdmissionPreparationStageV1, DurableNativeEntryFailureV1, DurableNativeEntryStageV1,
     DurableNativeRecordsV1, EphemeralAcknowledgedBornV1, EphemeralDurableNativeV1,
@@ -72,14 +74,34 @@ fn durable_entry_error(failure: DurableNativeEntryFailureV1) -> &'static str {
     diagnostic::emit(boundary, diagnostic::signer_error(&error));
     signer_error(error, "fresh durable original entry")
 }
-fn durable_admission_history_error(failure: DurableAdmissionHistoryFailureV1) {
-    use wholepact_authority::transport::history_diagnostics_v1::{
-        CheckedHistoryIoKindV1 as I, CheckedHistoryStageV1 as S,
-    };
-    let boundary = match failure.stage() {
-        S::CallerDeadline => B::SignerAdmissionHistoryCallerDeadline,
-        S::ExchangeDeadline => B::SignerAdmissionHistoryExchangeDeadline,
-        S::SourceCallback => B::SignerAdmissionHistorySourceCallback,
+// Diagnostic routing only; this flag never participates in permission or IO.
+fn checked_authority_boundary(
+    stage: wholepact_authority::transport::history_diagnostics_v1::CheckedHistoryStageV1,
+    admission: bool,
+) -> B {
+    use wholepact_authority::transport::history_diagnostics_v1::CheckedHistoryStageV1 as S;
+    match stage {
+        S::CallerDeadline => {
+            if admission {
+                B::SignerAdmissionCallCallerDeadline
+            } else {
+                B::SignerAdmissionHistoryCallerDeadline
+            }
+        }
+        S::ExchangeDeadline => {
+            if admission {
+                B::SignerAdmissionCallExchangeDeadline
+            } else {
+                B::SignerAdmissionHistoryExchangeDeadline
+            }
+        }
+        S::SourceCallback => {
+            if admission {
+                B::SignerAdmissionCallSourceCallback
+            } else {
+                B::SignerAdmissionHistorySourceCallback
+            }
+        }
         S::SnapshotConnect => B::SignerAdmissionHistorySnapshotConnect,
         S::SnapshotHandshake => B::SignerAdmissionHistorySnapshotHandshake,
         S::SnapshotPeerBinding => B::SignerAdmissionHistorySnapshotPeerBinding,
@@ -98,8 +120,30 @@ fn durable_admission_history_error(failure: DurableAdmissionHistoryFailureV1) {
         S::PageValidation => B::SignerAdmissionHistoryPageValidation,
         S::EventReplay => B::SignerAdmissionHistoryEventReplay,
         S::FinalValidation => B::SignerAdmissionHistoryFinalValidation,
-        S::Bounds => B::SignerAdmissionHistoryBounds,
-    };
+        S::Bounds => {
+            if admission {
+                B::SignerAdmissionCallBounds
+            } else {
+                B::SignerAdmissionHistoryBounds
+            }
+        }
+        S::AdmissionRequestValidation => B::SignerAdmissionCallRequestValidation,
+        S::AdmissionBinding => B::SignerAdmissionCallBinding,
+        S::AdmissionConnect => B::SignerAdmissionCallConnect,
+        S::AdmissionHandshake => B::SignerAdmissionCallHandshake,
+        S::AdmissionPeerBinding => B::SignerAdmissionCallPeerBinding,
+        S::AdmissionRequestBuild => B::SignerAdmissionCallRequestBuild,
+        S::AdmissionRequestWrite => B::SignerAdmissionCallRequestWrite,
+        S::AdmissionResponseRead => B::SignerAdmissionCallResponseRead,
+        S::AdmissionResponse => B::SignerAdmissionCallResponse,
+        S::AdmissionSnapshotValidation => B::SignerAdmissionCallSnapshotValidation,
+        S::AdmissionCommittedHeadValidation => B::SignerAdmissionCallCommittedHeadValidation,
+        S::AdmissionFinalValidation => B::SignerAdmissionCallFinalValidation,
+    }
+}
+fn durable_admission_history_error(failure: DurableAdmissionHistoryFailureV1) {
+    use wholepact_authority::transport::history_diagnostics_v1::CheckedHistoryIoKindV1 as I;
+    let boundary = checked_authority_boundary(failure.stage(), false);
     let io_boundary = failure.io_kind().map(|kind| match kind {
         I::Timeout => B::SignerAdmissionHistoryIoTimeout,
         I::Closed => B::SignerAdmissionHistoryIoClosed,
@@ -143,6 +187,72 @@ fn durable_admission_error(mut failure: DurableAdmissionPreparationFailureV1) ->
     let error = failure.into_error();
     diagnostic::emit(boundary, diagnostic::signer_error(&error));
     signer_error(error, "source-bound exact durable admission preparation")
+}
+fn durable_admission_call_error(failure: DurableAdmissionCallFailureV1) {
+    use wholepact_authority::transport::history_diagnostics_v1::CheckedHistoryIoKindV1 as I;
+    let boundary = checked_authority_boundary(failure.stage(), true);
+    let io_boundary = failure.io_kind().map(|kind| match kind {
+        I::Timeout => B::SignerAdmissionCallIoTimeout,
+        I::Closed => B::SignerAdmissionCallIoClosed,
+        I::Refused => B::SignerAdmissionCallIoRefused,
+        I::Other => B::SignerAdmissionCallIoOther,
+    });
+    let callback_boundary = failure.callback_stage().map(|stage| match stage {
+        DurableAdmissionCallbackStageV1::WorkspaceCurrent => {
+            B::SignerAdmissionCallbackWorkspaceCurrent
+        }
+        DurableAdmissionCallbackStageV1::Custody => B::SignerAdmissionCallbackCustody,
+        DurableAdmissionCallbackStageV1::RequestValidation => {
+            B::SignerAdmissionCallbackRequestValidation
+        }
+    });
+    diagnostic::emit_admission_measurement(failure.measurement());
+    let (error, callback_error) = failure.into_errors();
+    diagnostic::emit(boundary, diagnostic::authority_error(&error));
+    if let Some(boundary) = io_boundary {
+        diagnostic::emit(boundary, diagnostic::authority_error(&error));
+    }
+    if let Some(error) = callback_error {
+        diagnostic::emit(
+            B::SignerAdmissionCallCallbackError,
+            diagnostic::signer_error(&error),
+        );
+        if let Some(boundary) = callback_boundary {
+            diagnostic::emit(boundary, diagnostic::signer_error(&error));
+        }
+    }
+}
+fn durable_admission_dispatch_error(
+    mut failure: DurableAdmissionDispatchFailureV1,
+) -> &'static str {
+    // Emit before this failed worker command drops its original entry. The Host
+    // awaits witness drainage before reading Done, so receipt consumption cannot
+    // be required for optional evidence. No telemetry changes the original error.
+    diagnostic::emit_signer_admission(&failure);
+    if let Some(call) = failure.take_call_failure() {
+        durable_admission_call_error(call);
+    }
+    use DurableAdmissionDispatchStageV1 as S;
+    let boundary = match failure.stage() {
+        S::FixtureState => B::SignerAdmissionDispatchFixtureState,
+        S::ReviewCorrelation => B::SignerAdmissionDispatchReviewCorrelation,
+        S::NativeApproval => B::SignerAdmissionDispatchNativeApproval,
+        S::IntentRetention => B::SignerAdmissionDispatchIntentRetention,
+        S::SubmitCustody => B::SignerAdmissionDispatchSubmitCustody,
+        S::SubmitIntent => B::SignerAdmissionDispatchSubmitIntent,
+        S::SubmitInterval => B::SignerAdmissionDispatchSubmitInterval,
+        S::SubmitWorkspace => B::SignerAdmissionDispatchSubmitWorkspace,
+        S::AuthorityCall => B::SignerAdmissionDispatchAuthorityCall,
+        S::WorkerCompletion => B::SignerAdmissionDispatchWorkerCompletion,
+        S::CommittedCorrelation => B::SignerAdmissionDispatchCommittedCorrelation,
+    };
+    if let Some(error) = failure.original_error() {
+        diagnostic::emit(boundary, diagnostic::signer_error(error));
+    }
+    signer_error(
+        failure.into_error(),
+        "native retained-intent durable admission",
+    )
 }
 pub(super) const AGREEMENT_ID: &str = "synthetic-born-joined-agreement-v3";
 pub(super) const OBLIGATION_ID: &str = "synthetic-born-joined-obligation-v3";
@@ -809,8 +919,8 @@ fn execute(
             // before the original owner mTLS submission. Uncertainty is final
             // for this positive fixture, never a reason to invent replacement.
             entry
-                .approve_durable_admission()
-                .map_err(|e| signer_error(e, "native retained-intent durable admission"))?;
+                .approve_durable_admission_diagnosed()
+                .map_err(durable_admission_dispatch_error)?;
             (State::Durable(entry), R::Done { index })
         }
         (C::ReconcileDurableWriter(_), State::Durable(mut entry)) if index > 0 => {
@@ -931,4 +1041,54 @@ fn execute(
     };
     *slot = Some(next);
     Ok(reply)
+}
+
+#[cfg(test)]
+mod admission_diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn pure_admission_boundary_routing_preserves_context() {
+        use wholepact_authority::transport::history_diagnostics_v1::CheckedHistoryStageV1 as S;
+        assert!(matches!(
+            checked_authority_boundary(S::CallerDeadline, true),
+            B::SignerAdmissionCallCallerDeadline
+        ));
+        assert!(matches!(
+            checked_authority_boundary(S::ExchangeDeadline, true),
+            B::SignerAdmissionCallExchangeDeadline
+        ));
+        assert!(matches!(
+            checked_authority_boundary(S::SourceCallback, true),
+            B::SignerAdmissionCallSourceCallback
+        ));
+        assert!(matches!(
+            checked_authority_boundary(S::Bounds, true),
+            B::SignerAdmissionCallBounds
+        ));
+        assert!(matches!(
+            checked_authority_boundary(S::CallerDeadline, false),
+            B::SignerAdmissionHistoryCallerDeadline
+        ));
+        assert!(matches!(
+            checked_authority_boundary(S::ExchangeDeadline, false),
+            B::SignerAdmissionHistoryExchangeDeadline
+        ));
+        assert!(matches!(
+            checked_authority_boundary(S::SourceCallback, false),
+            B::SignerAdmissionHistorySourceCallback
+        ));
+        assert!(matches!(
+            checked_authority_boundary(S::Bounds, false),
+            B::SignerAdmissionHistoryBounds
+        ));
+        assert!(matches!(
+            checked_authority_boundary(S::AdmissionRequestWrite, true),
+            B::SignerAdmissionCallRequestWrite
+        ));
+        assert!(matches!(
+            checked_authority_boundary(S::SnapshotRequestWrite, false),
+            B::SignerAdmissionHistorySnapshotRequestWrite
+        ));
+    }
 }

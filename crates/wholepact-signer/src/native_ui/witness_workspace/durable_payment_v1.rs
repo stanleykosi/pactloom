@@ -123,15 +123,81 @@ impl NativeWitnessWorkspace {
         &self,
         request: &OwnerControlRequest,
         deadline: Instant,
+        check: impl FnMut() -> Result<()>,
+    ) -> Result<AccountSnapshot> {
+        self.durable_admit_inner_v1(
+            request,
+            deadline,
+            check,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            None,
+        )
+    }
+
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(in crate::native_ui) fn durable_admit_diagnosed_v1(
+        &self,
+        request: &OwnerControlRequest,
+        deadline: Instant,
+        check: impl FnMut() -> Result<()>,
+        failure: &mut Option<(CheckedHistoryFailureV1, Option<Error>, bool)>,
+    ) -> Result<AccountSnapshot> {
+        self.durable_admit_inner_v1(request, deadline, check, Some(failure))
+    }
+
+    fn durable_admit_inner_v1(
+        &self,
+        request: &OwnerControlRequest,
+        deadline: Instant,
         mut check: impl FnMut() -> Result<()>,
+        #[cfg(feature = "synthetic-born-joined-qualification")] failure: Option<
+            &mut Option<(CheckedHistoryFailureV1, Option<Error>, bool)>,
+        >,
     ) -> Result<AccountSnapshot> {
         check()?;
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        let observed = failure.is_some();
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        let mut callback_failure = None;
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        let mut first_workspace_current = false;
+        let current = || {
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            let mut workspace_current = true;
+            self.check_current()
+                .and_then(|_| {
+                    #[cfg(feature = "synthetic-born-joined-qualification")]
+                    {
+                        workspace_current = false;
+                    }
+                    check()
+                })
+                .map_err(|_error| {
+                    #[cfg(feature = "synthetic-born-joined-qualification")]
+                    {
+                        if observed && callback_failure.is_none() {
+                            first_workspace_current = workspace_current;
+                        }
+                        observe_history_callback_error(observed, &mut callback_failure, _error)
+                    }
+                    #[cfg(not(feature = "synthetic-born-joined-qualification"))]
+                    wholepact_authority::AuthorityError::Permission
+                })
+        };
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        if let Some(failure) = failure {
+            return self
+                .client
+                .admit_durable_payment_v1_diagnosed_checked_until(request, deadline, current)
+                .map_err(|authority| {
+                    if failure.is_none() {
+                        *failure = Some((authority, callback_failure, first_workspace_current));
+                    }
+                    Error::Uncertain
+                });
+        }
         self.client
-            .admit_durable_payment_v1_checked_until(request, deadline, || {
-                self.check_current()
-                    .and_then(|_| check())
-                    .map_err(|_| wholepact_authority::AuthorityError::Permission)
-            })
+            .admit_durable_payment_v1_checked_until(request, deadline, current)
             .map_err(|_| Error::Uncertain)
     }
 

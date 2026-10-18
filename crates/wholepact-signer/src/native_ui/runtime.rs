@@ -3298,6 +3298,12 @@ impl NativeRuntime {
                 Err(std::sync::mpsc::TryRecvError::Empty) => None,
                 Err(_) => {
                     open.witness_job = None;
+                    #[cfg(all(
+                        feature = "synthetic-born-joined-qualification",
+                        feature = "durable-proposal",
+                        feature = "pending-birth-owner-signing"
+                    ))]
+                    open.durable_witness.observe_admission_disconnected_v1();
                     self.message = "Witness worker stopped with an uncertain outcome. Preserve exposure and reconcile; no replacement was authorized.";
                     None
                 }
@@ -3312,6 +3318,14 @@ impl NativeRuntime {
             || open.check_pairing().is_err()
         {
             self.message = "Witness operation was invalidated. Any already admitted mutation remains in independent witness history.";
+            #[cfg(all(
+                feature = "synthetic-born-joined-qualification",
+                feature = "durable-proposal",
+                feature = "pending-birth-owner-signing"
+            ))]
+            if let WitnessOutcome::DurablePaymentV1(outcome) = result {
+                open.durable_witness.observe_admission_invalidated_v1(outcome);
+            }
             return;
         }
         let prepared = match result {

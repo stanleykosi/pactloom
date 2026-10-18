@@ -699,7 +699,11 @@ fn foreground_child(stage: &str, inputs: &[Input<'_>]) -> std::io::Result<()> {
         // Only reparsed, bounded canonical records survive the private PTY.
         // Optional observations survive a failed scenario but cannot replace
         // its result or make an unverified cleanup look verified.
-        for line in transcript.history_measurement_lines() {
+        for line in transcript
+            .history_measurement_lines()
+            .into_iter()
+            .chain(transcript.admission_diagnostic_lines())
+        {
             let _ = writeln!(std::io::stderr().lock(), "{line}");
         }
     }
