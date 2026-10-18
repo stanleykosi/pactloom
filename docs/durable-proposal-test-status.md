@@ -1,8 +1,14 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-18, 18:47 UTC.
+Updated: 2026-10-18, 19:21 UTC.
 
 **Incomplete implementation. No full native financial signing, public testnet settlement, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
+
+## CI13: history preparation progressed; synthetic review correlation repaired
+
+[Run 39155844574](https://github.com/stanleykosi/pactloom/actions/runs/39155844574), qualifier `ca21c8155def174449b448b08aba1a617416d84a`, passed build (9m03s), Python105, Host51, bootstrap and native owner-reopen baseline (124s). The financial scenario reached the actual signer admission-request reply, exact fixed/bootstrap comparisons, and real prepared witness review, then failed at `DurableHostWitnessSetup:AuthorityCorruptHistory`. Source review identified a deterministic synthetic fixture bug: it parsed human-rendered Prepared.display as JSON, although Prepared::new appends a review digest and trust footer. This error is not evidence of corrupted stored history. The former history-preparation timeout did not stop this run; full financial approval/signing remains unverified.
+
+The two-file synthetic-only repair compares the actual prepared proposal's borrowed typed request with the expected request, rather than parsing human display text. It preserves all original preparation, owner reading phase, endpoint/pin, actual native controls and committed-receipt checks. Two pure tests prove the decorated display is not standalone JSON and exact correlation rejects nine request substitutions. All-features Host+Authority compilation passed (6m39s), both pure regressions and Host51 passed, and non-synthetic native-witness Authority library build passed (1m11s). No production authorization or deadline changes are included. All CI13 cleanup checks passed; later native admission/signing and settlement still require verification.
 
 ## CI12 and measured same-transaction schema reuse
 
