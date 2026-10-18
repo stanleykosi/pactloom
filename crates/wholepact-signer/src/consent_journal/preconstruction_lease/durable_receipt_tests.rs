@@ -54,6 +54,10 @@ impl Fixture {
             )
             .unwrap()
     }
+    fn commitment(&self) -> String {
+        writer_history::complete_journal_commitment(&self.journal.connection.lock().unwrap())
+            .unwrap()
+    }
 }
 
 #[test]
@@ -179,6 +183,7 @@ fn both_receipts_require_the_original_monotonic_review_window() {
 fn earlier_success_does_not_renew_either_original_monotonic_receipt_window() {
     for manifest in [false, true] {
         let f = Fixture::new();
+        let before = f.commitment();
         {
             let earlier = f.lease();
             earlier
@@ -199,25 +204,41 @@ fn earlier_success_does_not_renew_either_original_monotonic_receipt_window() {
             current.require_current_durable_disclosure_receipts_v1(),
             Err(JournalError::Expired)
         ));
+        assert_eq!(before, f.commitment());
     }
 }
 
 #[test]
 fn both_receipts_require_current_wall_clock_window() {
-    let f = Fixture::new();
     for manifest in [false, true] {
         for future in [false, true] {
+            let f = Fixture::new();
+            let before = f.commitment();
+            {
+                let earlier = f.lease();
+                earlier
+                    .require_current_durable_disclosure_receipts_v1()
+                    .unwrap();
+            }
             let mut lease = f.lease();
+            assert!(lease.enrollment() == &f.enrollment);
+            assert!(lease.manifest() == &f.manifest);
             let receipt = receipt_mut(&mut lease, manifest);
+            // Negative-only local snapshot fault injection represents a wall
+            // clock outside the original receipt interval. Earlier success
+            // cannot exempt either receipt from this later check. No row,
+            // issued nonce, original interval or session authority is renewed.
             if future {
                 receipt.reviewed_at_ms = u64::MAX;
             } else {
                 receipt.expires_at_ms = 0;
             }
+            lease.check_current().unwrap();
             assert!(matches!(
                 lease.require_current_durable_disclosure_receipts_v1(),
                 Err(JournalError::Expired)
             ));
+            assert_eq!(before, f.commitment());
         }
     }
 }

@@ -1,8 +1,18 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-18, 20:30 UTC.
+Updated: 2026-10-18, 21:32 UTC.
 
 **Incomplete implementation. No full native financial signing, public testnet settlement, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
+
+## CI15: admission callback cost measured; later-flow observation and consolidation
+
+[Run 39163818880](https://github.com/stanleykosi/pactloom/actions/runs/39163818880), qualifier `d3e80e268b28eeb0d863c9961ec44ac537ce0412`, passed build/Python114/Host59/bootstrap/baseline/cleanup, but admission timed out after handshake and its callback. Four callbacks consumed 10.831464s of 10.832339s elapsed against 10s; no frame was sent. Local intent retention returned Confirmed; caller had 16.375163s remaining. Witness observed a selected-server connection close during FrameRead, zero dispatch/append/commit calls, and later worker expiry. Commit remained NotObserved, not a general proof of rollback or retry permission.
+
+The later-flow diagnostic slice preserves original failure categories before lossy acquire/activate/reconcile/import/wallet/sign/retry mappings and polls. It ties observations to the original purpose/job/epoch/review, distinguishes first cause from terminal outcome, and records persistence CALL outcomes without inferring SQL or remote commit. Import is armed before actual job creation, not at polling; observations survive original close ordering without retaining native authority. Optional canonical output stays under existing bounds and cleanup gates. These tests establish specific diagnostic semantics, not universal coverage or native success; Engine nested multi-store commit details remain Unknown.
+
+The measured admission callback contained three complete source checks. The reviewed closed helper now applies only to Admission, Acquire and Activate callbacks: early data/native/peer/privacy/credential checks and policy reconstruction remain, followed by the ORIGINAL late fresh record acquisition, writer epoch/sponsor checks, complete snapshot, BOTH current receipts and final comparisons/deadlines. Generic terms/custody and under-write-fence reconciliation remain unchanged. No IO, write or decision precedes that late gate. Multi-invalid first-error precedence may differ, but every denial remains; no authority result is cached.
+
+Combined all-features build passed (6m44s). New later-flow signer35, Authority14 selected cases, consolidation8, Host72 and Python123 passed; affected born31/receipt6 also passed. Non-synthetic durable lib-tests compiled (3m05s); kernel3/born18/receipt6 passed. A component-only three-check sequence measured 211608+205483+198280 microseconds versus one check197263, with unchanged logical commitment; this does not measure genuine native source work or prove the request fits its deadline. Full native signing, exact retry and settlement await qualification.
 
 ## CI14: admission outcome remains uncertain; targeted observation qualified locally
 

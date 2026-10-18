@@ -10,6 +10,8 @@ use super::{
     disclosure::ApprovedWitnessDisclosure, protocol::AuthorizationDeliveryScope,
     AuthorizationCommit, BridgeError, Result,
 };
+#[cfg(feature = "synthetic-born-joined-qualification")]
+use super::durable_flow_diagnostics_v1::DurableFlowObserverV1;
 use crate::{
     account::DedicatedAccount,
     consent_journal::{
@@ -378,108 +380,275 @@ impl ApprovedDurableProposalAction {
         wallet: &mut ProtectedWalletSync,
         ticket: &WalletKeyUseTicket,
     ) -> Result<AuthorizationCommit> {
-        entry.check_current().map_err(|_| BridgeError::Permission)?;
+        self.authorize_from_durable_born_v1_inner(
+            entry,
+            session,
+            expected_head,
+            disclosure,
+            client,
+            wallet,
+            ticket,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            None,
+        )
+    }
+    #[cfg(all(feature = "synthetic-born-joined-qualification", target_os = "linux"))]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn authorize_from_durable_born_v1_diagnosed(
+        self,
+        entry: &crate::account::birth::enrollment::roster_v2::durable_entry_v1::FreshDurableBornEntryV1,
+        session: &SignerConsentSession,
+        expected_head: AuthorityHead,
+        disclosure: ApprovedWitnessDisclosure,
+        client: &AuthorityClient,
+        wallet: &mut ProtectedWalletSync,
+        ticket: &WalletKeyUseTicket,
+        observer: Option<&DurableFlowObserverV1>,
+    ) -> Result<AuthorizationCommit> {
+        self.authorize_from_durable_born_v1_inner(
+            entry,
+            session,
+            expected_head,
+            disclosure,
+            client,
+            wallet,
+            ticket,
+            observer,
+        )
+    }
+    #[cfg(all(
+        feature = "pending-birth-owner-signing",
+        feature = "native-ui",
+        target_os = "linux"
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn authorize_from_durable_born_v1_inner(
+        self,
+        entry: &crate::account::birth::enrollment::roster_v2::durable_entry_v1::FreshDurableBornEntryV1,
+        session: &SignerConsentSession,
+        expected_head: AuthorityHead,
+        disclosure: ApprovedWitnessDisclosure,
+        client: &AuthorityClient,
+        wallet: &mut ProtectedWalletSync,
+        ticket: &WalletKeyUseTicket,
+        #[cfg(feature = "synthetic-born-joined-qualification")] observer: Option<
+            &DurableFlowObserverV1,
+        >,
+    ) -> Result<AuthorizationCommit> {
+        flow_observe!(observer, AuthorizationSource, entry.check_current())
+            .map_err(|_| BridgeError::Permission)?;
         let journal = entry.journal().as_ref();
         let account = entry.account();
-        entry
-            .require_account_identity(account)
-            .map_err(|_| BridgeError::Permission)?;
-        entry
-            .require_journal_identity(journal)
-            .map_err(|_| BridgeError::Permission)?;
+        flow_observe!(
+            observer,
+            AuthorizationSource,
+            entry.require_account_identity(account)
+        )
+        .map_err(|_| BridgeError::Permission)?;
+        flow_observe!(
+            observer,
+            AuthorizationSource,
+            entry.require_journal_identity(journal)
+        )
+        .map_err(|_| BridgeError::Permission)?;
         if client.disclosure_descriptor()
-            != entry
-                .original_witness_disclosure()
-                .map_err(|_| BridgeError::Binding)?
+            != flow_observe!(
+                observer,
+                AuthorizationSource,
+                entry.original_witness_disclosure()
+            )
+            .map_err(|_| BridgeError::Binding)?
         {
-            return Err(BridgeError::Binding);
+            return flow_observe!(observer, AuthorizationSource, Err(BridgeError::Binding));
         }
-        let account_id = account.account_id().map_err(|_| BridgeError::Binding)?;
-        validate_original_binding(&self.proposal, &self.original, &account_id)?;
-        let binding = self
-            .original
-            .terms()
-            .durable_born_policy_v1
-            .as_ref()
-            .ok_or(BridgeError::Permission)?;
-        let enrollment = journal
-            .enrollment(&self.original.terms().enrollment_ref, session)?
-            .ok_or(BridgeError::Missing)?;
-        let manifest = journal
-            .accepted_manifest(&self.original.terms().accepted_manifest_ref, session)?
-            .ok_or(BridgeError::Missing)?;
+        let account_id = flow_observe!(observer, AuthorizationSource, account.account_id())
+            .map_err(|_| BridgeError::Binding)?;
+        flow_observe!(
+            observer,
+            AuthorizationSource,
+            validate_original_binding(&self.proposal, &self.original, &account_id)
+        )?;
+        let binding = flow_observe!(
+            observer,
+            AuthorizationSource,
+            self.original
+                .terms()
+                .durable_born_policy_v1
+                .as_ref()
+                .ok_or(BridgeError::Permission)
+        )?;
+        let enrollment = flow_observe!(
+            observer,
+            AuthorizationSource,
+            flow_observe!(
+                observer,
+                AuthorizationSource,
+                journal.enrollment(&self.original.terms().enrollment_ref, session)
+            )?
+            .ok_or(BridgeError::Missing)
+        )?;
+        let manifest = flow_observe!(
+            observer,
+            AuthorizationSource,
+            flow_observe!(
+                observer,
+                AuthorizationSource,
+                journal.accepted_manifest(&self.original.terms().accepted_manifest_ref, session)
+            )?
+            .ok_or(BridgeError::Missing)
+        )?;
         // Cache only an exact historical projection of the actual immutable
         // source, not permission. Repeated checks below revalidate that source
         // under the already-held original lease without reacquiring its fence.
         let original_policy = if binding.uses_stable_recipient_policy_v2() {
             Some(
-                entry
-                    .original_recipient_policy_export_v2()
-                    .map_err(|_| BridgeError::Binding)?,
+                flow_observe!(
+                    observer,
+                    AuthorizationSource,
+                    entry.original_recipient_policy_export_v2()
+                )
+                .map_err(|_| BridgeError::Binding)?,
             )
         } else {
             None
         };
-        let actual_fvk = account.fvk().map_err(|_| BridgeError::Binding)?;
+        let actual_fvk = flow_observe!(observer, AuthorizationSource, account.fvk())
+            .map_err(|_| BridgeError::Binding)?;
         let validate_policy = || {
             if let Some(original_policy) = &original_policy {
-                binding.validate_stable_original_source_v2(
-                    entry.record(),
-                    entry.genesis(),
-                    original_policy,
+                flow_observe!(
+                    observer,
+                    AuthorizationSource,
+                    binding.validate_stable_original_source_v2(
+                        entry.record(),
+                        entry.genesis(),
+                        original_policy,
+                    )
                 )?;
-                stable_returns_v2::verify_stable_returns_v2(
-                    &self.proposal,
-                    &self.inputs.input_actions,
-                    &self.inputs.output_actions,
-                    &actual_fvk,
-                    &account_id,
-                    &binding.stable_return_requirements_v2(&manifest)?,
+                flow_observe!(
+                    observer,
+                    AuthorizationSource,
+                    stable_returns_v2::verify_stable_returns_v2(
+                        &self.proposal,
+                        &self.inputs.input_actions,
+                        &self.inputs.output_actions,
+                        &actual_fvk,
+                        &account_id,
+                        &flow_observe!(
+                            observer,
+                            AuthorizationSource,
+                            binding.stable_return_requirements_v2(&manifest)
+                        )?,
+                    )
                 )
             } else {
                 // Only an explicitly exact historical profile can reach this
                 // validator; it rejects stable-policy records, never downgrades.
-                binding.validate_original_source(entry.record(), entry.genesis())?;
+                flow_observe!(
+                    observer,
+                    AuthorizationSource,
+                    binding.validate_original_source(entry.record(), entry.genesis())
+                )?;
                 Ok(())
             }
         };
-        validate_policy()?;
-        binding.validate_consent(self.original.terms(), &enrollment, &manifest)?;
-        binding.require_fixed_identity(self.proposal.identity())?;
-        binding.require_current_time(current_time_ms()?)?;
-        require_unreleased(
-            journal,
-            session,
-            self.proposal.identity(),
-            &self.original.terms().authorization_id,
-            &account_id,
+        flow_observe!(observer, AuthorizationSource, validate_policy())?;
+        flow_observe!(
+            observer,
+            AuthorizationSource,
+            binding.validate_consent(self.original.terms(), &enrollment, &manifest)
         )?;
-        check_ticket(&self.original, ticket)?;
+        flow_observe!(
+            observer,
+            AuthorizationSource,
+            binding.require_fixed_identity(self.proposal.identity())
+        )?;
+        flow_observe!(
+            observer,
+            AuthorizationSource,
+            binding.require_current_time(flow_observe!(
+                observer,
+                AuthorizationSource,
+                current_time_ms()
+            )?)
+        )?;
+        flow_observe!(
+            observer,
+            AuthorizationSource,
+            require_unreleased_inner(
+                journal,
+                session,
+                self.proposal.identity(),
+                &self.original.terms().authorization_id,
+                &account_id,
+                #[cfg(feature = "synthetic-born-joined-qualification")]
+                observer,
+            )
+        )?;
+        flow_observe!(
+            observer,
+            AuthorizationSource,
+            check_ticket_inner(
+                &self.original,
+                ticket,
+                #[cfg(feature = "synthetic-born-joined-qualification")]
+                observer,
+            )
+        )?;
         if ticket.evidence().fvk().to_bytes()
-            != account.fvk().map_err(|_| BridgeError::Binding)?.to_bytes()
+            != flow_observe!(observer, AuthorizationSource, account.fvk())
+                .map_err(|_| BridgeError::Binding)?
+                .to_bytes()
         {
-            return Err(BridgeError::Binding);
+            return flow_observe!(observer, AuthorizationSource, Err(BridgeError::Binding));
         }
-        disclosure.check(&self.original, Some(client))?;
+        flow_observe!(
+            observer,
+            AuthorizationSource,
+            disclosure.check(&self.original, Some(client))
+        )?;
         if disclosure.record().expected_head != expected_head {
-            return Err(BridgeError::Binding);
+            return flow_observe!(observer, AuthorizationSource, Err(BridgeError::Binding));
         }
         // Once prepare_authorization returns, its original lease already owns
         // the journal read fence. This callback must never recursively acquire
         // that fence behind a queued revocation writer. Full journal + origin
         // checks below reuse the actual held lease instead.
         let check = || {
-            entry
-                .check_original_source_current()
-                .map_err(|_| BridgeError::Permission)?;
-            validate_policy()?;
-            binding.validate_consent(self.original.terms(), &enrollment, &manifest)?;
-            binding.require_fixed_identity(self.proposal.identity())?;
-            binding.require_current_time(current_time_ms()?)?;
-            check_reload(&self.source, &self.proposal)
+            flow_observe!(
+                observer,
+                AuthorizationSource,
+                entry.check_original_source_current()
+            )
+            .map_err(|_| BridgeError::Permission)?;
+            flow_observe!(observer, AuthorizationSource, validate_policy())?;
+            flow_observe!(
+                observer,
+                AuthorizationSource,
+                binding.validate_consent(self.original.terms(), &enrollment, &manifest)
+            )?;
+            flow_observe!(
+                observer,
+                AuthorizationSource,
+                binding.require_fixed_identity(self.proposal.identity())
+            )?;
+            flow_observe!(
+                observer,
+                AuthorizationSource,
+                binding.require_current_time(flow_observe!(
+                    observer,
+                    AuthorizationSource,
+                    current_time_ms()
+                )?)
+            )?;
+            flow_observe!(
+                observer,
+                AuthorizationSource,
+                check_reload(&self.source, &self.proposal)
+            )
         };
-        check()?;
-        let pending = super::prepare_authorization_from_durable_born_v1(
+        flow_observe!(observer, AuthorizationSource, check())?;
+        let pending = super::prepare_authorization_from_durable_born_v1_inner(
             entry,
             session,
             self.approval,
@@ -489,18 +658,29 @@ impl ApprovedDurableProposalAction {
                 candidate_id: self.proposal.identity().proposal_id.clone(),
             },
             disclosure,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            observer,
         )?;
-        check()?;
-        entry
-            .require_authorization_identity(account, journal, &pending.lease)
-            .map_err(|_| BridgeError::Permission)?;
-        let reserved = pending.reserve(client)?;
-        reserved.authorize_with_wallet_from_durable_born_v1(
+        flow_observe!(observer, AuthorizationSource, check())?;
+        flow_observe!(
+            observer,
+            AuthorizationSource,
+            entry.require_authorization_identity(account, journal, &pending.lease)
+        )
+        .map_err(|_| BridgeError::Permission)?;
+        let reserved = pending.reserve_inner(
+            client,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            observer,
+        )?;
+        reserved.authorize_with_wallet_from_durable_born_v1_inner(
             wallet,
             ticket,
             &self.inputs,
             &check,
             entry,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            observer,
         )
     }
 }
@@ -528,19 +708,76 @@ pub fn retained_manual_commit(
     session: &SignerConsentSession,
     account: &DedicatedAccount,
 ) -> Result<Option<AuthorizationCommit>> {
-    let proposal = source()?;
-    let account_id = account.account_id().map_err(|_| BridgeError::Binding)?;
-    let authorization_id = manual_authorization_id(proposal.identity(), &account_id)?;
-    let Some(original) = journal.original_authorization(&authorization_id, session)? else {
+    retained_manual_commit_inner(
+        source,
+        journal,
+        session,
+        account,
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        None,
+    )
+}
+#[cfg(feature = "synthetic-born-joined-qualification")]
+pub(crate) fn retained_manual_commit_diagnosed(
+    source: &FixedProposalSource,
+    journal: &SignerConsentJournal,
+    session: &SignerConsentSession,
+    account: &DedicatedAccount,
+    observer: Option<&DurableFlowObserverV1>,
+) -> Result<Option<AuthorizationCommit>> {
+    retained_manual_commit_inner(source, journal, session, account, observer)
+}
+fn retained_manual_commit_inner(
+    source: &FixedProposalSource,
+    journal: &SignerConsentJournal,
+    session: &SignerConsentSession,
+    account: &DedicatedAccount,
+    #[cfg(feature = "synthetic-born-joined-qualification")] observer: Option<
+        &DurableFlowObserverV1,
+    >,
+) -> Result<Option<AuthorizationCommit>> {
+    let proposal = flow_observe!(observer, RetainedLookup, source())?;
+    let account_id = flow_observe!(observer, RetainedLookup, account.account_id())
+        .map_err(|_| BridgeError::Binding)?;
+    let authorization_id = flow_observe!(
+        observer,
+        RetainedLookup,
+        manual_authorization_id(proposal.identity(), &account_id)
+    )?;
+    let Some(original) = flow_observe!(
+        observer,
+        RetainedLookup,
+        journal.original_authorization(&authorization_id, session)
+    )?
+    else {
         return Ok(None);
     };
-    validate_original_binding(&proposal, original.original_consent(), &account_id)?;
-    let lease = journal.acquire_original_authorization(&authorization_id, session)?;
-    let result = journal
-        .bridge_result(&lease)
-        .map_err(recovery_if_incomplete)?;
-    check_reload(source, &proposal)?;
+    flow_observe!(
+        observer,
+        RetainedLookup,
+        validate_original_binding(&proposal, original.original_consent(), &account_id)
+    )?;
+    let lease = flow_observe!(
+        observer,
+        RetainedLookup,
+        journal.acquire_original_authorization(&authorization_id, session)
+    )?;
+    let result = retained_lookup_result(
+        journal.bridge_result(&lease),
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        observer,
+    )?;
+    flow_observe!(observer, RetainedLookup, check_reload(source, &proposal))?;
     Ok(Some(AuthorizationCommit::from(&result)))
+}
+
+fn retained_lookup_result<T>(
+    original: Result<T>,
+    #[cfg(feature = "synthetic-born-joined-qualification")] observer: Option<
+        &DurableFlowObserverV1,
+    >,
+) -> Result<T> {
+    flow_observe!(observer, RetainedLookup, original).map_err(recovery_if_incomplete)
 }
 
 fn recovery_if_incomplete(error: BridgeError) -> BridgeError {
@@ -557,7 +794,31 @@ fn require_unreleased(
     authorization_id: &str,
     account_id: &str,
 ) -> Result<()> {
-    if let Some(original) = journal.original_authorization(authorization_id, session)? {
+    require_unreleased_inner(
+        journal,
+        session,
+        identity,
+        authorization_id,
+        account_id,
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        None,
+    )
+}
+fn require_unreleased_inner(
+    journal: &SignerConsentJournal,
+    session: &SignerConsentSession,
+    identity: &FixedProposalIdentityV1,
+    authorization_id: &str,
+    account_id: &str,
+    #[cfg(feature = "synthetic-born-joined-qualification")] observer: Option<
+        &DurableFlowObserverV1,
+    >,
+) -> Result<()> {
+    if let Some(original) = flow_observe!(
+        observer,
+        AuthorizationSource,
+        journal.original_authorization(authorization_id, session)
+    )? {
         let t = original.original_consent().terms();
         if t.account_id != account_id
             || t.proposal_id != identity.proposal_id
@@ -679,12 +940,29 @@ fn validate_terms_binding(
 }
 
 fn check_ticket(original: &OriginalSpendConsent, ticket: &WalletKeyUseTicket) -> Result<()> {
+    check_ticket_inner(
+        original,
+        ticket,
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        None,
+    )
+}
+fn check_ticket_inner(
+    original: &OriginalSpendConsent,
+    ticket: &WalletKeyUseTicket,
+    #[cfg(feature = "synthetic-born-joined-qualification")] observer: Option<
+        &DurableFlowObserverV1,
+    >,
+) -> Result<()> {
     let t = original.terms();
-    let policy = t
-        .wallet_key_use_policy
-        .as_ref()
-        .ok_or(BridgeError::Permission)?;
-    ticket.validate_policy(policy)?;
+    let policy = flow_observe!(
+        observer,
+        WalletGuard,
+        t.wallet_key_use_policy
+            .as_ref()
+            .ok_or(BridgeError::Permission)
+    )?;
+    flow_observe!(observer, WalletGuard, ticket.validate_policy(policy))?;
     let evidence = ticket.evidence();
     let context = evidence.context();
     if evidence.account_id() != t.account_id
@@ -702,7 +980,7 @@ fn check_ticket(original: &OriginalSpendConsent, ticket: &WalletKeyUseTicket) ->
             })
         })
     {
-        return Err(BridgeError::Binding);
+        return flow_observe!(observer, WalletGuard, Err(BridgeError::Binding));
     }
     Ok(())
 }
@@ -710,3 +988,61 @@ fn check_ticket(original: &OriginalSpendConsent, ticket: &WalletKeyUseTicket) ->
 #[cfg(test)]
 #[path = "durable_proposal_v1_tests.rs"]
 mod tests;
+
+#[cfg(all(test, feature = "synthetic-born-joined-qualification"))]
+mod diagnostic_mapping_tests {
+    use super::*;
+    use super::super::durable_flow_diagnostics_v1::{
+        DurableFlowCollectorV1, DurableFlowErrorCodeV1, DurableFlowOperationV1,
+        DurableFlowResultV1, DurableFlowStageV1,
+    };
+    #[test]
+    fn durable_flow_retained_lookup_preserves_original_before_recovery_mapping() {
+        for missing in [false, true] {
+            let collector = DurableFlowCollectorV1::default();
+            let observer = collector.arm(DurableFlowOperationV1::RetainedRetry);
+            let original = if missing {
+                BridgeError::Missing
+            } else {
+                BridgeError::Uncertain
+            };
+            let result: Result<()> = retained_lookup_result(Err(original), Some(&observer));
+            assert!(matches!(result, Err(BridgeError::RecoveryRequired)));
+            let diagnostic = observer.finish(DurableFlowResultV1::ReturnedErr).unwrap();
+            let first = diagnostic.first_error().unwrap();
+            assert!(first.stage() == DurableFlowStageV1::RetainedLookup);
+            assert!(
+                first.code()
+                    == if missing {
+                        DurableFlowErrorCodeV1::BridgeMissing
+                    } else {
+                        DurableFlowErrorCodeV1::BridgeUncertain
+                    }
+            );
+        }
+        let ordinary: Result<()> = retained_lookup_result(Err(BridgeError::Missing), None);
+        assert!(matches!(ordinary, Err(BridgeError::RecoveryRequired)));
+    }
+    #[test]
+    fn durable_flow_retained_lookup_does_not_reconstruct_other_errors() {
+        let collector = DurableFlowCollectorV1::default();
+        let observer = collector.arm(DurableFlowOperationV1::RetainedRetry);
+        let original = BridgeError::Journal(crate::consent_journal::JournalError::Database);
+        let result: Result<()> = retained_lookup_result(Err(original), Some(&observer));
+        assert!(matches!(
+            result,
+            Err(BridgeError::Journal(
+                crate::consent_journal::JournalError::Database
+            ))
+        ));
+        assert!(
+            observer
+                .finish(DurableFlowResultV1::ReturnedErr)
+                .unwrap()
+                .first_error()
+                .unwrap()
+                .code()
+                == DurableFlowErrorCodeV1::BridgeJournal
+        );
+    }
+}

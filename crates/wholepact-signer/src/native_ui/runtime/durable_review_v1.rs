@@ -45,21 +45,52 @@ impl ImportedDurableReviewV1 {
         })
     }
     fn check_data_source(&self) -> authority_bridge::Result<()> {
+        self.check_data_source_inner(
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            None,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            flow_diag_v1::DurableFlowStageV1::ImportSource,
+        )
+    }
+    fn check_data_source_inner(
+        &self,
+        #[cfg(feature = "synthetic-born-joined-qualification")] observer: Option<
+            &flow_diag_v1::DurableFlowObserverV1,
+        >,
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        stage: flow_diag_v1::DurableFlowStageV1,
+    ) -> authority_bridge::Result<()> {
         // No recursive journal authority lock: financial preflight/held-lease
         // checks are performed separately by the specialized signer adapter.
-        self.source
-            .check_original_source_current()
+        durable_flow_observe_v1!(observer, stage, self.source.check_original_source_current())
             .map_err(bridge_error)?;
-        self.peer.check_current().map_err(bridge_error)?;
+        durable_flow_observe_v1!(observer, stage, self.peer.check_current())
+            .map_err(bridge_error)?;
         for scope in &self.scopes {
             scope.check_valid_at(now()?).map_err(bridge_error)?;
         }
         Ok(())
     }
     fn proposal_source(self: &Arc<Self>) -> bridge::FixedProposalSource {
+        self.proposal_source_inner(
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            None,
+        )
+    }
+    fn proposal_source_inner(
+        self: &Arc<Self>,
+        #[cfg(feature = "synthetic-born-joined-qualification")] observer: Option<
+            flow_diag_v1::DurableFlowObserverV1,
+        >,
+    ) -> bridge::FixedProposalSource {
         let retained = self.clone();
         Arc::new(move || {
-            retained.check_data_source()?;
+            retained.check_data_source_inner(
+                #[cfg(feature = "synthetic-born-joined-qualification")]
+                observer.as_ref(),
+                #[cfg(feature = "synthetic-born-joined-qualification")]
+                flow_diag_v1::DurableFlowStageV1::AuthorizationSource,
+            )?;
             Ok(retained.fixed.verified().clone())
         })
     }
@@ -100,15 +131,39 @@ impl OpenAccount {
 }
 impl DurableWitnessImportedSourceV1 {
     pub(super) fn check_current(&self) -> Result<()> {
-        self.check_data_current_under_fence()?;
+        self.check_current_inner(
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            None,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            flow_diag_v1::DurableFlowStageV1::ImportSource,
+        )
+    }
+    pub(super) fn check_current_inner(
+        &self,
+        #[cfg(feature = "synthetic-born-joined-qualification")] observer: Option<
+            &flow_diag_v1::DurableFlowObserverV1,
+        >,
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        stage: flow_diag_v1::DurableFlowStageV1,
+    ) -> Result<()> {
+        self.check_data_current_under_fence_inner(
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            observer,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            stage,
+        )?;
         // Acquire this callback's actual fence BEFORE the complete snapshot.
         // Record acquisition alone does not check permanent-stop exclusion.
         // The fence is not global snapshot exclusion: other handles and
         // immutable append paths retain their existing semantics.
-        let lease = self.entry().journal().acquire_preconstruction_records(
-            &self.imported.request.enrollment_ref,
-            &self.imported.request.accepted_manifest_ref,
-            &self.session,
+        let lease = durable_flow_observe_v1!(
+            observer,
+            stage,
+            self.entry().journal().acquire_preconstruction_records(
+                &self.imported.request.enrollment_ref,
+                &self.imported.request.accepted_manifest_ref,
+                &self.session,
+            )
         )?;
         lease.require_native_origin(&self.entry().native_binding())?;
         self.entry()
@@ -124,7 +179,12 @@ impl DurableWitnessImportedSourceV1 {
         {
             return Err(Error::ReviewMismatch);
         }
-        let result = self.check_data_current_under_fence();
+        let result = self.check_data_current_under_fence_inner(
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            observer,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            stage,
+        );
         // No receipt/fence or prior successful check survives into TLS, native
         // waiting, a write transaction, or the next callback.
         drop(lease);
@@ -133,9 +193,32 @@ impl DurableWitnessImportedSourceV1 {
     /// Deny-only final gate. This method deliberately takes NO journal/session
     /// lock: callers already retain their real approval and journal write fence.
     pub(super) fn check_data_current_under_fence(&self) -> Result<()> {
-        self.imported
-            .check_data_source()
-            .map_err(|_| Error::ReviewMismatch)?;
+        self.check_data_current_under_fence_inner(
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            None,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            flow_diag_v1::DurableFlowStageV1::ImportSource,
+        )
+    }
+    pub(super) fn check_data_current_under_fence_inner(
+        &self,
+        #[cfg(feature = "synthetic-born-joined-qualification")] observer: Option<
+            &flow_diag_v1::DurableFlowObserverV1,
+        >,
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        stage: flow_diag_v1::DurableFlowStageV1,
+    ) -> Result<()> {
+        durable_flow_observe_v1!(
+            observer,
+            stage,
+            self.imported.check_data_source_inner(
+                #[cfg(feature = "synthetic-born-joined-qualification")]
+                observer,
+                #[cfg(feature = "synthetic-born-joined-qualification")]
+                stage
+            )
+        )
+        .map_err(|_| Error::ReviewMismatch)?;
         if self.imported.scopes.len() != 2
             || self
                 .imported
@@ -172,11 +255,187 @@ impl DurableWitnessImportedSourceV1 {
         &self.imported.request.accepted_manifest_ref
     }
 }
+#[cfg(feature = "synthetic-born-joined-qualification")]
+fn flow_fingerprint_v1<T: serde::Serialize>(domain: &[u8], value: &T) -> Option<[u8; 32]> {
+    // Only fixed hashes survive. The sink is bounded by the existing durable
+    // wire payload ceiling and performs no filesystem/network IO or validation.
+    struct Sink {
+        hash: Sha256,
+        bytes: usize,
+    }
+    impl std::io::Write for Sink {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let count = self
+                .bytes
+                .checked_add(bytes.len())
+                .filter(|count| *count <= wire::MAX_DURABLE_REVIEW_PAYLOAD_BYTES_V1)
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidData))?;
+            self.hash.update(bytes);
+            self.bytes = count;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut sink = Sink {
+        hash: Sha256::new(),
+        bytes: 0,
+    };
+    sink.hash.update(domain);
+    serde_json::to_writer(&mut sink, value).ok()?;
+    Some(sink.hash.finalize().into())
+}
+#[cfg(feature = "synthetic-born-joined-qualification")]
+#[derive(Clone)]
+pub(super) struct DurableFlowImportExpectationV1 {
+    request: [u8; 32],
+    identity: [u8; 32],
+    epoch: u64,
+    observer: flow_diag_v1::DurableFlowObserverV1,
+}
+#[cfg(feature = "synthetic-born-joined-qualification")]
+struct DurableFlowImportBoundV1 {
+    identity: [u8; 32],
+    observer: flow_diag_v1::DurableFlowObserverV1,
+    job: flow_diag_v1::DurableFlowJobObservationV1,
+}
+#[cfg(feature = "synthetic-born-joined-qualification")]
+impl DurableFlowImportExpectationV1 {
+    pub(super) fn new(
+        request: &DurableReviewDeliveryRequestV1,
+        identity: &wholepact_protocol::durable_proposal_v1::FixedProposalIdentityV1,
+        epoch: u64,
+        observer: &flow_diag_v1::DurableFlowObserverV1,
+    ) -> Option<Self> {
+        let request = flow_fingerprint_v1(b"durable-flow-request-v1\0", request);
+        let identity = flow_fingerprint_v1(b"durable-flow-identity-v1\0", identity);
+        match (request, identity) {
+            (Some(request), Some(identity)) => Some(Self {
+                request,
+                identity,
+                epoch,
+                observer: observer.clone(),
+            }),
+            _ => {
+                observer.mark_incomplete();
+                None
+            }
+        }
+    }
+    pub(super) fn matches_poll(
+        &self,
+        request: &DurableReviewDeliveryRequestV1,
+        identity: &wholepact_protocol::durable_proposal_v1::FixedProposalIdentityV1,
+        epoch: u64,
+    ) -> bool {
+        self.epoch == epoch
+            && flow_fingerprint_v1(b"durable-flow-request-v1\0", request) == Some(self.request)
+            && flow_fingerprint_v1(b"durable-flow-identity-v1\0", identity) == Some(self.identity)
+    }
+    fn bind(
+        self,
+        request: &DurableReviewDeliveryRequestV1,
+        epoch: u64,
+    ) -> Option<DurableFlowImportBoundV1> {
+        if self.epoch != epoch
+            || flow_fingerprint_v1(b"durable-flow-request-v1\0", request) != Some(self.request)
+        {
+            self.observer.mark_incomplete();
+            return None;
+        }
+        let job = self
+            .observer
+            .job_start(flow_diag_v1::DurableFlowJobPurposeV1::Import, epoch);
+        Some(DurableFlowImportBoundV1 {
+            identity: self.identity,
+            observer: self.observer,
+            job,
+        })
+    }
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DurableImportDispositionV1 {
+    Invalidated,
+    Rejected,
+    Accepted,
+}
+// This is the actual poller's decision kernel, borrowing the original Result.
+// Caller ownership and result/job drop order remain where they originally were.
+fn durable_import_disposition_v1<T>(
+    result: &authority_bridge::Result<T>,
+    received: bool,
+    epoch_matches: bool,
+    pairing: impl FnOnce() -> Result<()>,
+    source: impl FnOnce(&T) -> authority_bridge::Result<()>,
+    #[cfg(feature = "synthetic-born-joined-qualification")] observation: Option<
+        &flow_diag_v1::DurableFlowJobObservationV1,
+    >,
+    #[cfg(feature = "synthetic-born-joined-qualification")] observer: Option<
+        &flow_diag_v1::DurableFlowObserverV1,
+    >,
+) -> DurableImportDispositionV1 {
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    if received {
+        if let Some(job) = observation {
+            job.received(flow_diag_v1::DurableFlowStageV1::ImportReceive, result);
+        }
+    }
+    #[cfg(not(feature = "synthetic-born-joined-qualification"))]
+    let _ = received;
+    if !epoch_matches
+        || durable_flow_observe_v1!(
+            observer,
+            flow_diag_v1::DurableFlowStageV1::ImportPairing,
+            pairing()
+        )
+        .is_err()
+    {
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        if let Some(job) = observation {
+            job.invalidated();
+            job.presentation(flow_diag_v1::DurableFlowPresentationV1::Suppressed);
+        }
+        return DurableImportDispositionV1::Invalidated;
+    }
+    let accepted = match result {
+        Ok(value) => durable_flow_observe_v1!(
+            observer,
+            flow_diag_v1::DurableFlowStageV1::ImportSource,
+            source(value)
+        )
+        .is_ok(),
+        Err(_) => false,
+    };
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    if received {
+        if let Some(job) = observation {
+            job.presentation(if accepted {
+                flow_diag_v1::DurableFlowPresentationV1::Accepted
+            } else {
+                flow_diag_v1::DurableFlowPresentationV1::Suppressed
+            });
+        }
+    }
+    if accepted {
+        DurableImportDispositionV1::Accepted
+    } else {
+        DurableImportDispositionV1::Rejected
+    }
+}
+
 pub(super) struct DurableImportJobV1 {
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    flow: Option<DurableFlowImportBoundV1>,
     receive: mpsc::Receiver<authority_bridge::Result<ImportedDurableReviewV1>>,
     epoch: u64,
 }
 pub(super) struct DurableWalletJobV1 {
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    flow: Option<(
+        flow_diag_v1::DurableFlowJobObservationV1,
+        flow_diag_v1::DurableFlowObserverV1,
+    )>,
     receive: mpsc::Receiver<(
         NativeWalletWorkspace,
         Result<(
@@ -190,6 +449,10 @@ pub(super) struct DurableWalletJobV1 {
     imported: Arc<ImportedDurableReviewV1>,
 }
 pub(super) struct DurableSpendFlowV1 {
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    flow_epoch: u64,
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(super) flow_observer: Option<flow_diag_v1::DurableFlowObserverV1>,
     prepared: PreparedDurableProposalReview,
     head: wholepact_authority::AuthorityHead,
     imported: Arc<ImportedDurableReviewV1>,
@@ -244,11 +507,12 @@ impl NativeRuntime {
             return Err(Error::ReviewMismatch);
         }
         let session = open.session.as_ref().ok_or(Error::Locked)?;
-        let Some(commit) = bridge::retained_manual_commit(
+        let Some(commit) = bridge::retained_manual_commit_diagnosed(
             &imported.proposal_source(),
             &open.journal,
             session,
             open.vault.account(),
+            open.durable_witness.flow_observation.as_ref(),
         )
         .map_err(|_| Error::RecoveryRequired)?
         else {
@@ -278,10 +542,18 @@ fn receive_durable(
     request: DurableReviewDeliveryRequestV1,
     source: Arc<FreshDurableBornEntryV1>,
     session: Arc<SignerConsentSession>,
+    #[cfg(feature = "synthetic-born-joined-qualification")] observer: Option<
+        &flow_diag_v1::DurableFlowObserverV1,
+    >,
 ) -> authority_bridge::Result<ImportedDurableReviewV1> {
     let deadline = Instant::now() + Duration::from_secs(120);
     request.validate()?;
-    source.check_current().map_err(bridge_error)?;
+    durable_flow_observe_v1!(
+        observer,
+        flow_diag_v1::DurableFlowStageV1::ImportSource,
+        source.check_current()
+    )
+    .map_err(bridge_error)?;
     let journal = source.journal();
     let original = journal.durable_construction_history_v1(&request.own_disclosure, &session)?;
     if original.redisclosure().is_some() {
@@ -338,7 +610,12 @@ fn receive_durable(
         source
             .check_original_source_current()
             .map_err(bridge_error)?;
-        peer.check_current().map_err(bridge_error)?;
+        durable_flow_observe_v1!(
+            observer,
+            flow_diag_v1::DurableFlowStageV1::ImportSource,
+            peer.check_current()
+        )
+        .map_err(bridge_error)?;
         lease.require_native_origin(&source.native_binding())?;
         lease.check_current()?;
         original_scope
@@ -511,7 +788,12 @@ fn receive_durable(
             .map(|c| c.request().scope.clone())
             .collect(),
     };
-    imported.check_data_source()?;
+    imported.check_data_source_inner(
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        observer,
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        flow_diag_v1::DurableFlowStageV1::ImportSource,
+    )?;
     wire::bounded_write(
         &mut stream,
         &DeliveryResponseV1::Imported {
@@ -537,8 +819,20 @@ impl OpenAccount {
         // correlation and the independent actual writer client's session key.
         self.durable_witness.discard_import_custody();
         self.durable_review = None;
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        if let Some(flow) = self
+            .durable_import_job
+            .as_ref()
+            .and_then(|job| job.flow.as_ref())
+        {
+            flow.job.invalidated();
+        }
         self.durable_import_job = None;
         if let Some(job) = self.durable_wallet_job.take() {
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            if let Some((flow, _)) = &job.flow {
+                flow.invalidated();
+            }
             job.revoke.revoke();
             self.revocations.push(job.done);
         }
@@ -590,6 +884,36 @@ impl NativeRuntime {
         request: DurableReviewDeliveryRequestV1,
         epoch: u64,
     ) -> Result<()> {
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        let observer = self
+            .open
+            .as_ref()
+            .and_then(|open| open.durable_witness.flow_import.as_ref())
+            .and_then(|expected| {
+                if expected.epoch == epoch
+                    && flow_fingerprint_v1(b"durable-flow-request-v1\0", &request)
+                        == Some(expected.request)
+                {
+                    Some(expected.observer.clone())
+                } else {
+                    expected.observer.mark_incomplete();
+                    None
+                }
+            });
+        let result = self.start_durable_import_inner_v1(stream, peer, request, epoch);
+        durable_flow_observe_v1!(
+            observer.as_ref(),
+            flow_diag_v1::DurableFlowStageV1::ImportReceive,
+            result
+        )
+    }
+    fn start_durable_import_inner_v1(
+        &mut self,
+        stream: UnixStream,
+        peer: AuthenticatedPeer,
+        request: DurableReviewDeliveryRequestV1,
+        epoch: u64,
+    ) -> Result<()> {
         let open = self.open.as_mut().ok_or(Error::Locked)?;
         open.check_pairing()?;
         if self.pending.is_some()
@@ -616,12 +940,38 @@ impl NativeRuntime {
         let source = open.durable_born_entry.clone().ok_or(Error::Unavailable)?;
         let session = open.session.clone().ok_or(Error::Locked)?;
         let (send, receive) = mpsc::channel();
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        let flow = open
+            .durable_witness
+            .flow_import
+            .take()
+            .and_then(|expected| expected.bind(&request, epoch));
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        let worker_observer = flow.as_ref().map(|flow| flow.observer.clone());
         let worker = std::thread::spawn(move || {
-            let _ = send.send(receive_durable(stream, peer, request, source, session));
+            let result = durable_flow_observe_v1!(
+                worker_observer.as_ref(),
+                flow_diag_v1::DurableFlowStageV1::ImportReceive,
+                receive_durable(
+                    stream,
+                    peer,
+                    request,
+                    source,
+                    session,
+                    #[cfg(feature = "synthetic-born-joined-qualification")]
+                    worker_observer.as_ref()
+                )
+            );
+            let _ = send.send(result);
         });
         open.history_workers.push(worker);
         open.durable_review = None;
-        open.durable_import_job = Some(DurableImportJobV1 { receive, epoch });
+        open.durable_import_job = Some(DurableImportJobV1 {
+            receive,
+            epoch,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            flow,
+        });
         self.message = "Receiving only the exact authorized fixed proposal into private memory. Full all-account verification is required; this request grants no approval or signature.";
         Ok(())
     }
@@ -632,17 +982,51 @@ impl NativeRuntime {
         let Some(job) = open.durable_import_job.as_ref() else {
             return;
         };
-        let result = match job.receive.try_recv() {
-            Ok(v) => v,
-            Err(mpsc::TryRecvError::Empty) => return,
-            Err(_) => Err(BridgeError::Ipc),
+        let (result, received) = match durable_flow_try_receive_v1(
+            &job.receive,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            job.flow.as_ref().map(|flow| &flow.job),
+        ) {
+            Ok(v) => (v, true),
+            Err(mpsc::TryRecvError::Empty) => {
+                return;
+            }
+            Err(_) => (Err(BridgeError::Ipc), false),
         };
         let job = open.durable_import_job.take().expect("checked import job");
-        if job.epoch != epoch || open.check_pairing().is_err() {
+        let disposition = durable_import_disposition_v1(
+            &result,
+            received,
+            job.epoch == epoch,
+            || open.check_pairing().map(|_| ()),
+            |imported| {
+                #[cfg(feature = "synthetic-born-joined-qualification")]
+                if let Some(flow) = &job.flow {
+                    if flow_fingerprint_v1(
+                        b"durable-flow-identity-v1\0",
+                        imported.fixed.verified().identity(),
+                    ) != Some(flow.identity)
+                    {
+                        flow.observer.mark_incomplete();
+                    }
+                }
+                imported.check_data_source_inner(
+                    #[cfg(feature = "synthetic-born-joined-qualification")]
+                    job.flow.as_ref().map(|flow| &flow.observer),
+                    #[cfg(feature = "synthetic-born-joined-qualification")]
+                    flow_diag_v1::DurableFlowStageV1::ImportSource,
+                )
+            },
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            job.flow.as_ref().map(|flow| &flow.job),
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            job.flow.as_ref().map(|flow| &flow.observer),
+        );
+        if disposition == DurableImportDispositionV1::Invalidated {
             return;
         }
         match result {
-            Ok(imported) if imported.check_data_source().is_ok() => {
+            Ok(imported) if disposition == DurableImportDispositionV1::Accepted => {
                 open.durable_review = Some(Arc::new(imported));
                 self.message = "Exact fixed proof and full two-account economics verified in private memory. Canonical accounts are not named people or prior peer approvals. Fresh wallet, witness and native spend decisions are still required.";
             }
@@ -653,8 +1037,67 @@ impl NativeRuntime {
     }
 }
 
+fn durable_wallet_completion_allowed_v1<T>(
+    result: &Result<T>,
+    epoch_matches: bool,
+    pairing: impl FnOnce() -> Result<()>,
+    #[cfg(feature = "synthetic-born-joined-qualification")] job: Option<
+        &flow_diag_v1::DurableFlowJobObservationV1,
+    >,
+    #[cfg(feature = "synthetic-born-joined-qualification")] observer: Option<
+        &flow_diag_v1::DurableFlowObserverV1,
+    >,
+) -> bool {
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    if let Some(job) = job {
+        job.received(flow_diag_v1::DurableFlowStageV1::WalletSync, result);
+    }
+    #[cfg(not(feature = "synthetic-born-joined-qualification"))]
+    let _ = result;
+    if !epoch_matches
+        || durable_flow_observe_v1!(
+            observer,
+            flow_diag_v1::DurableFlowStageV1::WalletSource,
+            pairing()
+        )
+        .is_err()
+    {
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        if let Some(job) = job {
+            job.invalidated();
+            job.presentation(flow_diag_v1::DurableFlowPresentationV1::Suppressed);
+        }
+        false
+    } else {
+        true
+    }
+}
+
 impl NativeRuntime {
     pub(super) fn start_durable_wallet_review_v1(&mut self, epoch: u64) -> Result<()> {
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        let observer = self
+            .open
+            .as_ref()
+            .and_then(|open| open.durable_witness.flow_observation.clone());
+        let result = self.start_durable_wallet_review_inner_v1(
+            epoch,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            observer.as_ref(),
+        );
+        durable_flow_observe_v1!(
+            observer.as_ref(),
+            flow_diag_v1::DurableFlowStageV1::WalletSync,
+            result
+        )
+    }
+    fn start_durable_wallet_review_inner_v1(
+        &mut self,
+        epoch: u64,
+        #[cfg(feature = "synthetic-born-joined-qualification")] observer: Option<
+            &flow_diag_v1::DurableFlowObserverV1,
+        >,
+    ) -> Result<()> {
         let open = self.open.as_mut().ok_or(Error::Locked)?;
         open.check_pairing()?;
         if !open.writer_reconciled
@@ -668,7 +1111,12 @@ impl NativeRuntime {
         }
         let imported = open.durable_review.clone().ok_or(Error::ReviewMismatch)?;
         imported
-            .check_data_source()
+            .check_data_source_inner(
+                #[cfg(feature = "synthetic-born-joined-qualification")]
+                observer,
+                #[cfg(feature = "synthetic-born-joined-qualification")]
+                flow_diag_v1::DurableFlowStageV1::WalletSource,
+            )
             .map_err(|_| Error::ReviewMismatch)?;
         let session = open.session.as_ref().ok_or(Error::Locked)?;
         if open
@@ -686,14 +1134,22 @@ impl NativeRuntime {
         {
             return Err(Error::ReviewMismatch);
         }
-        match bridge::retained_manual_commit(
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        let retained = bridge::retained_manual_commit_diagnosed(
+            &imported.proposal_source_inner(observer.cloned()),
+            &open.journal,
+            session,
+            open.vault.account(),
+            observer,
+        );
+        #[cfg(not(feature = "synthetic-born-joined-qualification"))]
+        let retained = bridge::retained_manual_commit(
             &imported.proposal_source(),
             &open.journal,
             session,
             open.vault.account(),
-        )
-        .map_err(|_| Error::RecoveryRequired)?
-        {
+        );
+        match retained.map_err(|_| Error::RecoveryRequired)? {
             Some(receipt) => {
                 self.last_receipt = Some(receipt.original_consent_ref);
                 self.message = "Exact original signature result already retained. Use original authenticated retrieval or a separately approved redelivery; no new wallet selection, reservation or key use was started.";
@@ -714,34 +1170,77 @@ impl NativeRuntime {
         let finished = done.clone();
         let (send, receive) = mpsc::channel();
         let worker_imported = imported.clone();
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        let flow = observer.map(|observer| {
+            (
+                observer.job_start(flow_diag_v1::DurableFlowJobPurposeV1::WalletReview, epoch),
+                observer.clone(),
+            )
+        });
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        let worker_observer = observer.cloned();
         std::thread::spawn(move || {
             let _done = WorkerCompletion(finished);
             let result = (|| {
                 worker_imported
-                    .check_data_source()
+                    .check_data_source_inner(
+                        #[cfg(feature = "synthetic-born-joined-qualification")]
+                        worker_observer.as_ref(),
+                        #[cfg(feature = "synthetic-born-joined-qualification")]
+                        flow_diag_v1::DurableFlowStageV1::WalletSource,
+                    )
                     .map_err(|_| Error::ReviewMismatch)?;
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
                     .map_err(|_| Error::Unavailable)?;
-                let inputs = runtime.block_on(wallet.synchronize_durable_review_v1(
-                    &worker_imported.fixed,
-                    &worker_imported.source,
-                    &worker_imported.peer,
-                ))?;
-                wallet.check_current()?;
+                let inputs = durable_flow_observe_v1!(
+                    worker_observer.as_ref(),
+                    flow_diag_v1::DurableFlowStageV1::WalletSync,
+                    runtime.block_on(wallet.synchronize_durable_review_v1(
+                        &worker_imported.fixed,
+                        &worker_imported.source,
+                        &worker_imported.peer,
+                    ))
+                )?;
+                durable_flow_observe_v1!(
+                    worker_observer.as_ref(),
+                    flow_diag_v1::DurableFlowStageV1::WalletSource,
+                    wallet.check_current()
+                )?;
                 worker_imported
-                    .check_data_source()
+                    .check_data_source_inner(
+                        #[cfg(feature = "synthetic-born-joined-qualification")]
+                        worker_observer.as_ref(),
+                        #[cfg(feature = "synthetic-born-joined-qualification")]
+                        flow_diag_v1::DurableFlowStageV1::WalletSource,
+                    )
                     .map_err(|_| Error::ReviewMismatch)?;
-                let head = witness.snapshot_head()?;
+                let head = durable_flow_observe_v1!(
+                    worker_observer.as_ref(),
+                    flow_diag_v1::DurableFlowStageV1::WitnessHead,
+                    witness.snapshot_head()
+                )?;
                 worker_imported
-                    .check_data_source()
+                    .check_data_source_inner(
+                        #[cfg(feature = "synthetic-born-joined-qualification")]
+                        worker_observer.as_ref(),
+                        #[cfg(feature = "synthetic-born-joined-qualification")]
+                        flow_diag_v1::DurableFlowStageV1::WalletSource,
+                    )
                     .map_err(|_| Error::ReviewMismatch)?;
                 Ok((inputs, head))
             })();
+            let result = durable_flow_observe_v1!(
+                worker_observer.as_ref(),
+                flow_diag_v1::DurableFlowStageV1::WalletSync,
+                result
+            );
             let _ = send.send((wallet, result));
         });
         open.durable_wallet_job = Some(DurableWalletJobV1 {
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            flow,
             receive,
             done,
             revoke,
@@ -758,9 +1257,15 @@ impl NativeRuntime {
         let Some(job) = open.durable_wallet_job.as_ref() else {
             return;
         };
-        let (wallet, result) = match job.receive.try_recv() {
+        let (wallet, result) = match durable_flow_try_receive_v1(
+            &job.receive,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            job.flow.as_ref().map(|(flow, _)| flow),
+        ) {
             Ok(value) => value,
-            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Empty) => {
+                return;
+            }
             Err(_) => {
                 open.durable_wallet_job = None;
                 self.message = "Exact durable wallet worker stopped; no approval was created.";
@@ -769,13 +1274,43 @@ impl NativeRuntime {
         };
         let job = open.durable_wallet_job.take().expect("checked wallet job");
         open.wallet = Some(wallet);
-        if job.epoch != epoch || open.check_pairing().is_err() {
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        let observer = job.flow.as_ref().map(|(_, observer)| observer.clone());
+        if !durable_wallet_completion_allowed_v1(
+            &result,
+            job.epoch == epoch,
+            || open.check_pairing().map(|_| ()),
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            job.flow.as_ref().map(|(flow, _)| flow),
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            observer.as_ref(),
+        ) {
             job.revoke.revoke();
             return;
         }
         let result = result.and_then(|(inputs, head)| {
-            self.stage_durable_spend_v1(job.imported, inputs, head, epoch)
+            self.stage_durable_spend_inner_v1(
+                job.imported,
+                inputs,
+                head,
+                epoch,
+                #[cfg(feature = "synthetic-born-joined-qualification")]
+                observer.as_ref(),
+            )
         });
+        let result = durable_flow_observe_v1!(
+            observer.as_ref(),
+            flow_diag_v1::DurableFlowStageV1::SpendStage,
+            result
+        );
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        if let Some((flow, _)) = &job.flow {
+            flow.presentation(if result.is_ok() {
+                flow_diag_v1::DurableFlowPresentationV1::Accepted
+            } else {
+                flow_diag_v1::DurableFlowPresentationV1::Suppressed
+            });
+        }
         if result.is_err() {
             self.message = "Fresh fixed-proposal checks failed or expired. Original data and existing exposure are preserved; no substitute transaction or consent was created.";
         }
@@ -787,31 +1322,60 @@ impl NativeRuntime {
         head: wholepact_authority::AuthorityHead,
         epoch: u64,
     ) -> Result<()> {
+        self.stage_durable_spend_inner_v1(
+            imported,
+            inputs,
+            head,
+            epoch,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            None,
+        )
+    }
+    fn stage_durable_spend_inner_v1(
+        &mut self,
+        imported: Arc<ImportedDurableReviewV1>,
+        inputs: crate::manifest::ReviewInputs,
+        head: wholepact_authority::AuthorityHead,
+        epoch: u64,
+        #[cfg(feature = "synthetic-born-joined-qualification")] observer: Option<
+            &flow_diag_v1::DurableFlowObserverV1,
+        >,
+    ) -> Result<()> {
         let open = self.open.as_ref().ok_or(Error::Locked)?;
         open.check_pairing()?;
         let session = open.session.as_ref().ok_or(Error::Locked)?;
-        let prepared = bridge::prepare_manual_review(
-            imported.proposal_source(),
-            &open.journal,
-            session,
-            open.enrollment.as_ref().ok_or(Error::ReviewMismatch)?,
-            open.manifest.as_ref().ok_or(Error::ReviewMismatch)?,
-            open.vault.account(),
-            inputs,
+        let prepared = durable_flow_observe_v1!(
+            observer,
+            flow_diag_v1::DurableFlowStageV1::SpendStage,
+            bridge::prepare_manual_review(
+                imported.proposal_source_inner(
+                    #[cfg(feature = "synthetic-born-joined-qualification")]
+                    observer.cloned()
+                ),
+                &open.journal,
+                session,
+                open.enrollment.as_ref().ok_or(Error::ReviewMismatch)?,
+                open.manifest.as_ref().ok_or(Error::ReviewMismatch)?,
+                open.vault.account(),
+                inputs,
+            )
         )
         .map_err(|_| Error::ReviewMismatch)?;
         // The original witnessed account-policy pin is not a fresh native
         // consent reference. Bind both explicitly, under the actual original
         // source, before either disclosure or spending review is displayed.
-        let prepared = prepared
-            .with_durable_born_policy_v1(
+        let prepared = durable_flow_observe_v1!(
+            observer,
+            flow_diag_v1::DurableFlowStageV1::SpendStage,
+            prepared.with_durable_born_policy_v1(
                 open.durable_born_entry
                     .as_deref()
                     .ok_or(Error::Unavailable)?,
                 open.enrollment.as_ref().ok_or(Error::ReviewMismatch)?,
                 open.manifest.as_ref().ok_or(Error::ReviewMismatch)?,
             )
-            .map_err(|_| Error::ReviewMismatch)?;
+        )
+        .map_err(|_| Error::ReviewMismatch)?;
         let witness = open.witness.as_ref().ok_or(Error::Locked)?;
         witness.check_current()?;
         let disclosure =
@@ -827,6 +1391,10 @@ impl NativeRuntime {
             review,
             operation: Operation::DurableDisclosureV1 {
                 flow: Box::new(DurableSpendFlowV1 {
+                    #[cfg(feature = "synthetic-born-joined-qualification")]
+                    flow_epoch: epoch,
+                    #[cfg(feature = "synthetic-born-joined-qualification")]
+                    flow_observer: observer.cloned(),
                     prepared,
                     head,
                     imported,
@@ -844,13 +1412,23 @@ impl NativeRuntime {
         epoch: u64,
     ) -> Result<()> {
         let open = self.open.as_ref().ok_or(Error::Locked)?;
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        let observer = flow.flow_observer.as_ref();
         open.check_pairing()?;
         flow.imported
-            .check_data_source()
+            .check_data_source_inner(
+                #[cfg(feature = "synthetic-born-joined-qualification")]
+                observer,
+                #[cfg(feature = "synthetic-born-joined-qualification")]
+                flow_diag_v1::DurableFlowStageV1::DisclosureDecision,
+            )
             .map_err(|_| Error::ReviewMismatch)?;
-        let disclosure = review
-            .approve(decision, &open.authority)
-            .map_err(|_| Error::Authentication)?;
+        let disclosure = durable_flow_observe_v1!(
+            observer,
+            flow_diag_v1::DurableFlowStageV1::DisclosureDecision,
+            review.approve(decision, &open.authority)
+        )
+        .map_err(|_| Error::Authentication)?;
         let display = format!(
             "AUTHORIZE THIS EXACT FIXED DURABLE PROPOSAL\n{}\n\nCOMPLETE ACCEPTED MANIFEST\n{}\n\nThis full-account profile verifies the exact accepted canonical account/FVK identities, real note/nullifier/action mapping, recipient and change outputs, fees and every account's net debit against the same proved transaction. It does NOT authenticate named people or organisations, distinct humans or funding sources, or prior peer approval. Required final spend signatures establish executable account control only when combined. No sponsor, matching or identity-dependent condition is supported.\n\nThis fresh one-action decision does not restore an old native approval. The current protected wallet and original independent witness are checked again before key use. Previously committed exposure remains reserved. Only this account's assigned detached signatures can be retained; this signer does not broadcast.",
             serde_json::to_string_pretty(flow.prepared.prepared_spend().record())
@@ -880,15 +1458,25 @@ impl NativeRuntime {
         decision: super::super::NativeDecision,
     ) -> Result<()> {
         let open = self.open.as_mut().ok_or(Error::Locked)?;
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        let observer = flow.flow_observer.clone();
         let peer = open.check_pairing()?.peer.clone();
         let session = open.session.clone().ok_or(Error::Locked)?;
         flow.imported
-            .check_data_source()
+            .check_data_source_inner(
+                #[cfg(feature = "synthetic-born-joined-qualification")]
+                observer.as_ref(),
+                #[cfg(feature = "synthetic-born-joined-qualification")]
+                flow_diag_v1::DurableFlowStageV1::SigningLaunch,
+            )
             .map_err(|_| Error::ReviewMismatch)?;
-        let approved = flow
-            .prepared
-            .approve(&session, session.native_decision(decision)?)
-            .map_err(|_| Error::ReviewMismatch)?;
+        let approved = durable_flow_observe_v1!(
+            observer.as_ref(),
+            flow_diag_v1::DurableFlowStageV1::SpendDecision,
+            flow.prepared
+                .approve(&session, session.native_decision(decision)?)
+        )
+        .map_err(|_| Error::ReviewMismatch)?;
         let source = open.durable_born_entry.clone().ok_or(Error::Unavailable)?;
         if !Arc::ptr_eq(&source, &flow.imported.source) {
             return Err(Error::Authentication);
@@ -902,15 +1490,50 @@ impl NativeRuntime {
         let mut open = self.open.take().ok_or(Error::Locked)?;
         let worker_session = session.clone();
         let (send, receive) = mpsc::sync_channel(1);
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        let observation = observer.as_ref().map(|observer| {
+            (
+                observer.job_start(flow_diag_v1::DurableFlowJobPurposeV1::Sign, flow.flow_epoch),
+                observer.clone(),
+            )
+        });
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        let worker_observer = observer;
         std::thread::spawn(move || {
             let result = (|| {
-                open.check_pairing().map_err(bridge_error)?;
-                source
-                    .require_account_identity(open.vault.account())
-                    .map_err(bridge_error)?;
-                source
-                    .require_journal_identity(&open.journal)
-                    .map_err(bridge_error)?;
+                durable_flow_observe_v1!(
+                    worker_observer.as_ref(),
+                    flow_diag_v1::DurableFlowStageV1::AuthorizationSource,
+                    open.check_pairing()
+                )
+                .map_err(bridge_error)?;
+                durable_flow_observe_v1!(
+                    worker_observer.as_ref(),
+                    flow_diag_v1::DurableFlowStageV1::AuthorizationSource,
+                    source.require_account_identity(open.vault.account())
+                )
+                .map_err(bridge_error)?;
+                durable_flow_observe_v1!(
+                    worker_observer.as_ref(),
+                    flow_diag_v1::DurableFlowStageV1::AuthorizationSource,
+                    source.require_journal_identity(&open.journal)
+                )
+                .map_err(bridge_error)?;
+                #[cfg(feature = "synthetic-born-joined-qualification")]
+                return approved.authorize_from_durable_born_v1_diagnosed(
+                    &source,
+                    &worker_session,
+                    flow.head,
+                    disclosure,
+                    witness.client(),
+                    open.wallet
+                        .as_mut()
+                        .ok_or(BridgeError::Permission)?
+                        .wallet_mut(),
+                    &ticket,
+                    worker_observer.as_ref(),
+                );
+                #[cfg(not(feature = "synthetic-born-joined-qualification"))]
                 approved.authorize_from_durable_born_v1(
                     &source,
                     &worker_session,
@@ -924,11 +1547,18 @@ impl NativeRuntime {
                     &ticket,
                 )
             })();
+            let result = durable_flow_observe_v1!(
+                worker_observer.as_ref(),
+                flow_diag_v1::DurableFlowStageV1::Completion,
+                result
+            );
             if let Err(unsent) = send.send((open, result)) {
                 unsent.0 .0.close();
             }
         });
         self.signing_job = Some(SigningJob {
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            flow: observation,
             receive,
             session,
             admission,
@@ -1081,4 +1711,290 @@ pub(super) fn check_configured_witnesses(open: &OpenAccount) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(all(test, feature = "synthetic-born-joined-qualification"))]
+mod durable_flow_import_tests {
+    use super::*;
+    use flow_diag_v1::{
+        DurableFlowCollectorV1 as Collector, DurableFlowErrorCodeV1 as Code,
+        DurableFlowJobPurposeV1 as Purpose, DurableFlowOperationV1 as Operation,
+        DurableFlowPresentationV1 as Presentation, DurableFlowReceiveV1 as Receive,
+        DurableFlowResultV1 as Observed, DurableFlowStageV1 as Stage,
+    };
+    use std::cell::Cell;
+
+    #[test]
+    fn actual_import_poller_distinguishes_disconnected_from_returned_ipc() {
+        for returned in [false, true] {
+            let collector = Collector::default();
+            let observer = collector.arm(Operation::FinancialImport);
+            let job = observer.job_start(Purpose::Import, 7);
+            let (send, receive) = mpsc::channel::<authority_bridge::Result<()>>();
+            if returned {
+                send.send(Err(BridgeError::Ipc)).unwrap();
+            }
+            drop(send);
+            let (result, received) = match durable_flow_try_receive_v1(&receive, Some(&job)) {
+                Ok(result) => (result, true),
+                Err(mpsc::TryRecvError::Disconnected) => (Err(BridgeError::Ipc), false),
+                _ => panic!("unexpected pending channel"),
+            };
+            assert!(
+                durable_import_disposition_v1(
+                    &result,
+                    received,
+                    true,
+                    || Ok(()),
+                    |_| panic!("error has no source"),
+                    Some(&job),
+                    Some(&observer)
+                ) == DurableImportDispositionV1::Rejected
+            );
+            assert!(matches!(result, Err(BridgeError::Ipc)));
+            let report = observer.finish(Observed::ReturnedErr).unwrap();
+            if returned {
+                assert!(report.first_error().unwrap().code() == Code::BridgeIpc);
+                assert!(report.completion().result() == Observed::ReturnedErr);
+                assert!(report.completion().receive() == Receive::Received);
+            } else {
+                assert!(report.first_error().is_none());
+                assert!(report.completion().result() == Observed::NotObserved);
+                assert!(report.completion().receive() == Receive::Disconnected);
+            }
+        }
+    }
+    #[test]
+    fn actual_import_poller_invalid_epoch_skips_pairing_and_source() {
+        let collector = Collector::default();
+        let observer = collector.arm(Operation::FinancialImport);
+        let job = observer.job_start(Purpose::Import, 7);
+        let result: authority_bridge::Result<()> = Err(BridgeError::Verification);
+        assert!(
+            durable_import_disposition_v1(
+                &result,
+                true,
+                false,
+                || panic!("pairing short circuit"),
+                |_| panic!("source short circuit"),
+                Some(&job),
+                Some(&observer)
+            ) == DurableImportDispositionV1::Invalidated
+        );
+        let report = observer.finish(Observed::ReturnedErr).unwrap();
+        assert!(report.first_error().unwrap().code() == Code::BridgeVerification);
+        assert!(report.completion().result() == Observed::ReturnedErr);
+        assert!(report.completion().receive() == Receive::Invalidated);
+        assert!(report.completion().presentation() == Presentation::Suppressed);
+    }
+    #[test]
+    fn actual_import_poller_keeps_success_and_source_failure_separate() {
+        for diagnosed in [false, true] {
+            let collector = Collector::default();
+            let observer = collector.arm(Operation::FinancialImport);
+            let job = observer.job_start(Purpose::Import, 7);
+            let source_calls = Cell::new(0);
+            let original = Box::new(19u8);
+            let address = &*original as *const u8;
+            let result = Ok(original);
+            assert!(
+                durable_import_disposition_v1(
+                    &result,
+                    true,
+                    true,
+                    || Ok(()),
+                    |value| {
+                        assert!(std::ptr::eq(&**value, address));
+                        source_calls.set(source_calls.get() + 1);
+                        Err(BridgeError::Permission)
+                    },
+                    diagnosed.then_some(&job),
+                    diagnosed.then_some(&observer)
+                ) == DurableImportDispositionV1::Rejected
+            );
+            assert_eq!(source_calls.get(), 1);
+            assert!(std::ptr::eq(&**result.as_ref().unwrap(), address));
+            if diagnosed {
+                let report = observer.finish(Observed::ReturnedErr).unwrap();
+                assert!(report.first_error().unwrap().stage() == Stage::ImportSource);
+                assert!(report.first_error().unwrap().code() == Code::BridgePermission);
+                assert!(report.completion().result() == Observed::ReturnedOk);
+                assert!(report.completion().presentation() == Presentation::Suppressed);
+            }
+        }
+    }
+    #[test]
+    fn actual_import_poller_pending_does_not_invent_result_or_cause() {
+        let collector = Collector::default();
+        let observer = collector.arm(Operation::FinancialImport);
+        let job = observer.job_start(Purpose::Import, 7);
+        let (_send, receive) = mpsc::channel::<authority_bridge::Result<()>>();
+        for _ in 0..3 {
+            assert!(matches!(
+                durable_flow_try_receive_v1(&receive, Some(&job)),
+                Err(mpsc::TryRecvError::Empty)
+            ));
+        }
+        let report = observer.finish(Observed::ReturnedErr).unwrap();
+        assert!(report.first_error().is_none());
+        assert!(report.completion().receive() == Receive::Pending);
+        assert!(report.completion().result() == Observed::NotObserved);
+    }
+    #[test]
+    fn actual_wallet_poller_old_job_pairing_error_cannot_enter_new_attempt() {
+        let collector = Collector::default();
+        let old = collector.arm(Operation::InitialSign);
+        let job = old.job_start(Purpose::WalletReview, 7);
+        let current = collector.arm(Operation::InitialSign);
+        let current_job = current.job_start(Purpose::WalletReview, 8);
+        let calls = Cell::new(0);
+        let result: Result<()> = Ok(());
+        assert!(!durable_wallet_completion_allowed_v1(
+            &result,
+            true,
+            || {
+                calls.set(calls.get() + 1);
+                Err(Error::Authentication)
+            },
+            Some(&job),
+            Some(&old)
+        ));
+        assert_eq!(calls.get(), 1);
+        // Stage completion uses this same job-bound observer, never the current arm.
+        let staged: Result<()> =
+            durable_flow_observe_v1!(Some(&old), Stage::SpendStage, Err(Error::Verification));
+        assert!(matches!(staged, Err(Error::Verification)));
+        current_job.pending();
+        let report = current.finish(Observed::ReturnedErr).unwrap();
+        assert!(report.first_error().is_none());
+        assert!(report.completion().result() == Observed::NotObserved);
+        assert!(report.completion().receive() == Receive::Pending);
+        assert!(report.incomplete());
+    }
+    #[test]
+    fn actual_wallet_poller_invalid_epoch_keeps_original_error_without_pairing() {
+        let collector = Collector::default();
+        let observer = collector.arm(Operation::InitialSign);
+        let job = observer.job_start(Purpose::WalletReview, 7);
+        let result: Result<()> = Err(Error::Uncertain);
+        assert!(!durable_wallet_completion_allowed_v1(
+            &result,
+            false,
+            || panic!("pairing short circuit"),
+            Some(&job),
+            Some(&observer)
+        ));
+        assert!(matches!(result, Err(Error::Uncertain)));
+        let report = observer.finish(Observed::ReturnedErr).unwrap();
+        assert!(report.first_error().unwrap().code() == Code::SignerUncertain);
+        assert!(report.completion().receive() == Receive::Invalidated);
+    }
+    #[test]
+    fn actual_import_expectation_binds_once_and_rejects_mismatched_or_stale_attribution() {
+        use wholepact_protocol::durable_proposal_v1::FixedProposalIdentityV1;
+        use crate::authority_bridge::durable_construction_v1::DurableConstructionHistoryRequestV1;
+        let hash = |value: char| value.to_string().repeat(64);
+        let request = DurableReviewDeliveryRequestV1 {
+            operation_id: "inert-import".into(),
+            enrollment_ref: hash('a'),
+            accepted_manifest_ref: hash('b'),
+            own_disclosure: DurableConstructionHistoryRequestV1 {
+                operation_id: "inert-disclosure".into(),
+                expected_request_digest: hash('c'),
+            },
+            current_disclosure: None,
+            proposal_binding: hash('d'),
+        };
+        let identity = FixedProposalIdentityV1 {
+            schema_version: 1,
+            network_profile_id: "inert-network".into(),
+            agreement_id: "inert-agreement".into(),
+            obligation_id: "inert-obligation".into(),
+            proposal_id: "inert-proposal".into(),
+            revision: 1,
+            expiry_height: 1,
+            proposal_digest: hash('1'),
+            manifest_digest: hash('2'),
+            unsigned_artifact_digest: hash('3'),
+            proved_artifact_digest: hash('4'),
+            effects_commitment: hash('5'),
+            policy_digest: hash('6'),
+            review_binding: hash('7'),
+            action_mapping_digest: hash('8'),
+            anchor: hash('9'),
+            proposal_binding: hash('d'),
+        };
+        let collector = Collector::default();
+        let observer = collector.arm(Operation::FinancialImport);
+        let expected =
+            DurableFlowImportExpectationV1::new(&request, &identity, 7, &observer).unwrap();
+        assert!(expected.matches_poll(&request, &identity, 7));
+        let mut wrong_request = request.clone();
+        wrong_request.operation_id.push('x');
+        let mut wrong_identity = identity.clone();
+        wrong_identity.proposal_id.push('x');
+        assert!(!expected.matches_poll(&wrong_request, &identity, 7));
+        assert!(!expected.matches_poll(&request, &wrong_identity, 7));
+        assert!(!expected.matches_poll(&request, &identity, 8));
+        assert!(expected.clone().bind(&wrong_request, 7).is_none());
+        assert!(expected.clone().bind(&request, 8).is_none());
+        let bound = expected.clone().bind(&request, 7).unwrap();
+        let (send, receive) = mpsc::channel::<authority_bridge::Result<()>>();
+        for _ in 0..3 {
+            assert!(expected.matches_poll(&request, &identity, 7));
+            assert!(matches!(
+                durable_flow_try_receive_v1(&receive, Some(&bound.job)),
+                Err(mpsc::TryRecvError::Empty)
+            ));
+        }
+        // An actual failed receive needs no fabricated successful imported identity.
+        send.send(Err(BridgeError::Ipc)).unwrap();
+        let result = durable_flow_try_receive_v1(&receive, Some(&bound.job)).unwrap();
+        assert!(
+            durable_import_disposition_v1(
+                &result,
+                true,
+                true,
+                || Ok(()),
+                |_| panic!("error has no imported identity"),
+                Some(&bound.job),
+                Some(&bound.observer)
+            ) == DurableImportDispositionV1::Rejected
+        );
+        let report = observer.finish(Observed::ReturnedErr).unwrap();
+        assert!(report.first_error().unwrap().code() == Code::BridgeIpc);
+        assert!(report.completion().purpose() == Some(Purpose::Import));
+        assert!(report.completion().result() == Observed::ReturnedErr);
+        let old = collector.arm(Operation::FinancialImport);
+        let stale = DurableFlowImportExpectationV1::new(&request, &identity, 7, &old).unwrap();
+        let current = collector.arm(Operation::FinancialImport);
+        let stale_bound = stale.bind(&request, 7).unwrap();
+        let actual: authority_bridge::Result<()> = Err(BridgeError::Verification);
+        assert!(
+            durable_import_disposition_v1(
+                &actual,
+                true,
+                true,
+                || Ok(()),
+                |_| panic!("error has no source"),
+                Some(&stale_bound.job),
+                Some(&stale_bound.observer)
+            ) == DurableImportDispositionV1::Rejected
+        );
+        let report = current.finish(Observed::ReturnedErr).unwrap();
+        assert!(report.first_error().is_none());
+        assert!(report.completion().purpose().is_none());
+        assert!(report.incomplete());
+    }
+    #[test]
+    fn bounded_import_fingerprint_is_domain_separated_and_rejects_overflow() {
+        let small = "inert correlation only";
+        assert!(flow_fingerprint_v1(b"durable-flow-request-v1\0", &small).is_some());
+        assert!(
+            flow_fingerprint_v1(b"durable-flow-request-v1\0", &small)
+                != flow_fingerprint_v1(b"durable-flow-identity-v1\0", &small)
+        );
+        let oversized = "x".repeat(wire::MAX_DURABLE_REVIEW_PAYLOAD_BYTES_V1 + 1);
+        assert!(flow_fingerprint_v1(b"durable-flow-request-v1\0", &oversized).is_none());
+    }
 }

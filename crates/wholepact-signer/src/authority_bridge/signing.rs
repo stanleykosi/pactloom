@@ -44,21 +44,32 @@ impl KeySource<'_> {
         account: &DedicatedAccount,
         journal: &SignerConsentJournal,
         lease: &OriginalAuthorizationLease<'_>,
+        #[cfg(all(
+            feature = "synthetic-born-joined-qualification",
+            feature = "durable-proposal"
+        ))]
+        observer: Option<&DurableFlowObserverV1>,
     ) -> Result<()> {
         let _ = (journal, lease);
         match self {
-            Self::Generic => account
-                .require_generic_spending_source()
-                .map_err(|_| BridgeError::Permission),
+            Self::Generic => flow_observe!(
+                observer,
+                AuthorizationSource,
+                account.require_generic_spending_source()
+            )
+            .map_err(|_| BridgeError::Permission),
             #[cfg(all(
                 feature = "durable-proposal",
                 feature = "pending-birth-owner-signing",
                 feature = "native-ui",
                 target_os = "linux"
             ))]
-            Self::DurableBorn(source) => source
-                .require_authorization_identity(account, journal, lease)
-                .map_err(|_| BridgeError::Permission),
+            Self::DurableBorn(source) => flow_observe!(
+                observer,
+                AuthorizationSource,
+                source.require_authorization_identity(account, journal, lease)
+            )
+            .map_err(|_| BridgeError::Permission),
             Self::Lifetime(_) => Err(BridgeError::Permission),
         }
     }
@@ -154,7 +165,17 @@ impl ReservedAuthorization<'_> {
         inputs: &ReviewInputs,
         wallet: &HeldWalletKeyUse<'_>,
     ) -> Result<AuthorizationCommit> {
-        self.sign_and_retain_held(inputs, wallet, &|| Ok(()), KeySource::Generic)
+        self.sign_and_retain_held(
+            inputs,
+            wallet,
+            &|| Ok(()),
+            KeySource::Generic,
+            #[cfg(all(
+                feature = "synthetic-born-joined-qualification",
+                feature = "durable-proposal"
+            ))]
+            None,
+        )
     }
     /// Concrete composition: acquire the maintained signer-owned wallet lock and
     /// recheck exactly the original policy, then sign and commit while it is held.
@@ -175,7 +196,18 @@ impl ReservedAuthorization<'_> {
         inputs: &ReviewInputs,
         check: &dyn Fn() -> Result<()>,
     ) -> Result<AuthorizationCommit> {
-        self.authorize_with_wallet_source(wallet, ticket, inputs, check, KeySource::Generic)
+        self.authorize_with_wallet_source(
+            wallet,
+            ticket,
+            inputs,
+            check,
+            KeySource::Generic,
+            #[cfg(all(
+                feature = "synthetic-born-joined-qualification",
+                feature = "durable-proposal"
+            ))]
+            None,
+        )
     }
     #[cfg(all(
         feature = "durable-proposal",
@@ -191,12 +223,49 @@ impl ReservedAuthorization<'_> {
         check: &dyn Fn() -> Result<()>,
         source: &FreshDurableBornEntryV1,
     ) -> Result<AuthorizationCommit> {
+        self.authorize_with_wallet_from_durable_born_v1_inner(
+            wallet,
+            ticket,
+            inputs,
+            check,
+            source,
+            #[cfg(all(
+                feature = "synthetic-born-joined-qualification",
+                feature = "durable-proposal"
+            ))]
+            None,
+        )
+    }
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "pending-birth-owner-signing",
+        feature = "native-ui",
+        target_os = "linux"
+    ))]
+    pub(super) fn authorize_with_wallet_from_durable_born_v1_inner(
+        self,
+        wallet: &mut ProtectedWalletSync,
+        ticket: &WalletKeyUseTicket,
+        inputs: &ReviewInputs,
+        check: &dyn Fn() -> Result<()>,
+        source: &FreshDurableBornEntryV1,
+        #[cfg(all(
+            feature = "synthetic-born-joined-qualification",
+            feature = "durable-proposal"
+        ))]
+        observer: Option<&DurableFlowObserverV1>,
+    ) -> Result<AuthorizationCommit> {
         self.authorize_with_wallet_source(
             wallet,
             ticket,
             inputs,
             check,
             KeySource::DurableBorn(source),
+            #[cfg(all(
+                feature = "synthetic-born-joined-qualification",
+                feature = "durable-proposal"
+            ))]
+            observer,
         )
     }
     fn authorize_with_wallet_source(
@@ -206,33 +275,63 @@ impl ReservedAuthorization<'_> {
         inputs: &ReviewInputs,
         check: &dyn Fn() -> Result<()>,
         source: KeySource<'_>,
+        #[cfg(all(
+            feature = "synthetic-born-joined-qualification",
+            feature = "durable-proposal"
+        ))]
+        observer: Option<&DurableFlowObserverV1>,
     ) -> Result<AuthorizationCommit> {
-        check()?;
+        flow_observe!(observer, WalletGuard, check())?;
         source.check(
             self.pending.account,
             self.pending.journal,
             &self.pending.lease,
+            #[cfg(all(
+                feature = "synthetic-born-joined-qualification",
+                feature = "durable-proposal"
+            ))]
+            observer,
         )?;
         let original = self.pending.lease.evidence().original_consent().terms();
-        let policy = original
-            .wallet_key_use_policy
-            .as_ref()
-            .ok_or(BridgeError::Permission)?;
-        let fvk = self
-            .pending
-            .account
-            .fvk()
+        let policy = flow_observe!(
+            observer,
+            WalletGuard,
+            original
+                .wallet_key_use_policy
+                .as_ref()
+                .ok_or(BridgeError::Permission)
+        )?;
+        let fvk = flow_observe!(observer, WalletGuard, self.pending.account.fvk())
             .map_err(|_| BridgeError::Binding)?;
         let permission = OriginalWalletPermission {
             lease: &self.pending.lease,
+            #[cfg(all(
+                feature = "synthetic-born-joined-qualification",
+                feature = "durable-proposal"
+            ))]
+            observer,
         };
-        wallet.with_key_use_guard(
-            &permission,
-            ticket,
-            &fvk,
-            policy,
-            original.transaction_expiry_height,
-            |held| self.sign_and_retain_held(inputs, held, check, source),
+        flow_observe!(
+            observer,
+            WalletGuard,
+            wallet.with_key_use_guard(
+                &permission,
+                ticket,
+                &fvk,
+                policy,
+                original.transaction_expiry_height,
+                |held| self.sign_and_retain_held(
+                    inputs,
+                    held,
+                    check,
+                    source,
+                    #[cfg(all(
+                        feature = "synthetic-born-joined-qualification",
+                        feature = "durable-proposal"
+                    ))]
+                    observer,
+                ),
+            )
         )
     }
     fn sign_and_retain_held(
@@ -241,24 +340,47 @@ impl ReservedAuthorization<'_> {
         wallet: &HeldWalletKeyUse<'_>,
         check: &dyn Fn() -> Result<()>,
         source: KeySource<'_>,
+        #[cfg(all(
+            feature = "synthetic-born-joined-qualification",
+            feature = "durable-proposal"
+        ))]
+        observer: Option<&DurableFlowObserverV1>,
     ) -> Result<AuthorizationCommit> {
-        check()?;
+        flow_observe!(observer, WalletGuard, check())?;
         let p = &self.pending;
-        source.check(p.account, p.journal, &p.lease)?;
-        p.lease.require_current_authorization()?;
-        self.check_automatic_admission()?;
-        wallet.check_current()?;
-        self.permit.matches_request(&p.request.reservation)?;
+        source.check(
+            p.account,
+            p.journal,
+            &p.lease,
+            #[cfg(all(
+                feature = "synthetic-born-joined-qualification",
+                feature = "durable-proposal"
+            ))]
+            observer,
+        )?;
+        flow_observe!(
+            observer,
+            WalletGuard,
+            p.lease.require_current_authorization()
+        )?;
+        flow_observe!(observer, WalletGuard, self.check_automatic_admission())?;
+        flow_observe!(observer, WalletGuard, wallet.check_current())?;
+        flow_observe!(
+            observer,
+            WalletGuard,
+            self.permit.matches_request(&p.request.reservation)
+        )?;
         let original = p.lease.evidence();
         let t = original.original_consent().terms();
-        let bytes = p.request.artifact()?;
-        let fvk = p.account.fvk().map_err(|_| BridgeError::Binding)?;
+        let bytes = flow_observe!(observer, WalletGuard, p.request.artifact())?;
+        let fvk = flow_observe!(observer, WalletGuard, p.account.fvk())
+            .map_err(|_| BridgeError::Binding)?;
         let wallet_evidence = wallet.evidence();
         if wallet_evidence.account_id() != t.account_id
             || wallet_evidence.fvk().to_bytes() != fvk.to_bytes()
             || wallet.transaction_expiry_height() != t.transaction_expiry_height
         {
-            return Err(BridgeError::Binding);
+            return flow_observe!(observer, WalletGuard, Err(BridgeError::Binding));
         }
         let context = wallet_evidence.context();
         if context.tip_height != t.wallet_snapshot.tip_height
@@ -268,7 +390,7 @@ impl ReservedAuthorization<'_> {
             || hex::encode(context.anchor_root) != t.wallet_snapshot.anchor_root
             || wallet_evidence.inputs().len() != t.input_bindings.len()
         {
-            return Err(BridgeError::Binding);
+            return flow_observe!(observer, WalletGuard, Err(BridgeError::Binding));
         }
         for i in &t.input_bindings {
             if !wallet_evidence.inputs().iter().any(|w| {
@@ -276,31 +398,48 @@ impl ReservedAuthorization<'_> {
                     && hex::encode(w.nullifier()) == i.nullifier
                     && w.value_zatoshis() == i.value_zatoshis
             }) {
-                return Err(BridgeError::Binding);
+                return flow_observe!(observer, WalletGuard, Err(BridgeError::Binding));
             }
         }
-        validate_original_wallet_policy(t, wallet)?;
-        let proposal = wholepact_core::Proposal::validate(
-            original.accepted_manifest().proposal_input().clone(),
+        flow_observe!(
+            observer,
+            WalletGuard,
+            validate_original_wallet_policy(t, wallet)
+        )?;
+        let proposal = flow_observe!(
+            observer,
+            WalletGuard,
+            wholepact_core::Proposal::validate(
+                original.accepted_manifest().proposal_input().clone(),
+            )
+            .map_err(|_| BridgeError::Binding)
+        )?;
+        flow_observe!(
+            observer,
+            WalletGuard,
+            crate::manifest::reconcile(&AcceptedManifest { proposal }, inputs, &t.account_id, &fvk)
         )
-        .map_err(|_| BridgeError::Binding)?;
-        crate::manifest::reconcile(&AcceptedManifest { proposal }, inputs, &t.account_id, &fvk)
-            .map_err(|_| BridgeError::Verification)?;
-        let reviewed = wholepact_protocol::review::verify_review(&bytes, &inputs.policy)
-            .map_err(|_| BridgeError::Verification)?;
-        let owner = inputs
+        .map_err(|_| BridgeError::Verification)?;
+        let reviewed = flow_observe!(
+            observer,
+            WalletGuard,
+            wholepact_protocol::review::verify_review(&bytes, &inputs.policy)
+                .map_err(|_| BridgeError::Verification)
+        )?;
+        let owner =
+            flow_observe!(observer, WalletGuard, inputs
             .policy
             .participants
             .iter()
             .position(|p| p.account_id == t.account_id && p.fvk.to_bytes() == fvk.to_bytes())
-            .ok_or(BridgeError::Binding)?;
+            .ok_or(BridgeError::Binding))?;
         if reviewed.review_binding() != t.review_binding
             || reviewed.shielded_sighash() != t.effects_digest
             || reviewed.net_debits_zatoshis().get(owner) != Some(&t.maximum_debit_zatoshis)
             || reviewed.fee_zatoshis() != t.transaction_fee_zatoshis
             || inputs.policy.participants[owner].fee_share_zatoshis != t.fee_share_zatoshis
         {
-            return Err(BridgeError::Binding);
+            return flow_observe!(observer, WalletGuard, Err(BridgeError::Binding));
         }
         let actual: Vec<_> = inputs
             .policy
@@ -317,16 +456,24 @@ impl ReservedAuthorization<'_> {
                 })
             })
         {
-            return Err(BridgeError::Binding);
+            return flow_observe!(observer, WalletGuard, Err(BridgeError::Binding));
         }
-        wholepact_protocol::proving::verify_proved_candidate(
-            &bytes,
-            &inputs.policy,
-            &t.review_binding,
-            wholepact_protocol::proving::ProvingLimits { maximum_actions: 8 },
-        )
-        .map_err(|_| BridgeError::Verification)?;
-        let parsed = Pczt::parse(&bytes).map_err(|_| BridgeError::Verification)?;
+        flow_observe!(
+            observer,
+            WalletGuard,
+            wholepact_protocol::proving::verify_proved_candidate(
+                &bytes,
+                &inputs.policy,
+                &t.review_binding,
+                wholepact_protocol::proving::ProvingLimits { maximum_actions: 8 },
+            )
+            .map_err(|_| BridgeError::Verification)
+        )?;
+        let parsed = flow_observe!(
+            observer,
+            WalletGuard,
+            Pczt::parse(&bytes).map_err(|_| BridgeError::Verification)
+        )?;
         if inputs.policy.inputs.iter().any(|i| {
             parsed
                 .ironwood()
@@ -334,38 +481,70 @@ impl ReservedAuthorization<'_> {
                 .get(i.action_index)
                 .is_none_or(|a| a.spend().spend_auth_sig().is_some())
         }) {
-            return Err(BridgeError::Verification);
+            return flow_observe!(observer, WalletGuard, Err(BridgeError::Verification));
         }
         // Commit before deriving the spending key or signing anything. No error
         // below is allowed to clear this fence or produce another signature.
-        check()?;
+        flow_observe!(observer, KeyUse, check())?;
         if self.automatic_admission.is_some() {
-            p.journal.bridge_begin_authorized_key_use(
-                &p.lease,
-                &self.permit,
-                self.automatic_admission.as_ref(),
+            flow_call!(
+                observer,
+                KeyUse,
+                KeyUse,
+                p.journal.bridge_begin_authorized_key_use(
+                    &p.lease,
+                    &self.permit,
+                    self.automatic_admission.as_ref(),
+                )
             )?;
         } else {
-            p.journal.bridge_begin_key_use(&p.lease, &self.permit)?;
+            flow_call!(
+                observer,
+                KeyUse,
+                KeyUse,
+                p.journal.bridge_begin_key_use(&p.lease, &self.permit)
+            )?;
         }
-        check()?;
-        p.lease.require_current_authorization()?;
-        self.check_automatic_admission()?;
-        wallet.check_current()?;
-        let key_use_check = || {
-            check()?;
-            source.check(p.account, p.journal, &p.lease)?;
-            p.lease.require_current_authorization()?;
-            self.check_automatic_admission()?;
-            self.permit.matches_request(&p.request.reservation)?;
-            wallet.check_current()?;
-            Ok(())
-        };
-        key_use_check()?;
+        flow_observe!(observer, KeyUse, check())?;
+        flow_observe!(observer, KeyUse, p.lease.require_current_authorization())?;
+        flow_observe!(observer, KeyUse, self.check_automatic_admission())?;
+        flow_observe!(observer, KeyUse, wallet.check_current())?;
+        let key_use_check =
+            |#[cfg(all(
+                feature = "synthetic-born-joined-qualification",
+                feature = "durable-proposal"
+            ))]
+             stage: durable_flow_diagnostics_v1::DurableFlowStageV1| {
+                flow_observe_at!(observer, stage, check())?;
+                source.check(
+                    p.account,
+                    p.journal,
+                    &p.lease,
+                    #[cfg(all(
+                        feature = "synthetic-born-joined-qualification",
+                        feature = "durable-proposal"
+                    ))]
+                    observer,
+                )?;
+                flow_observe_at!(observer, stage, p.lease.require_current_authorization())?;
+                flow_observe_at!(observer, stage, self.check_automatic_admission())?;
+                flow_observe_at!(
+                    observer,
+                    stage,
+                    self.permit.matches_request(&p.request.reservation)
+                )?;
+                flow_observe_at!(observer, stage, wallet.check_current())?;
+                Ok(())
+            };
+        key_use_check(
+            #[cfg(all(
+                feature = "synthetic-born-joined-qualification",
+                feature = "durable-proposal"
+            ))]
+            durable_flow_diagnostics_v1::DurableFlowStageV1::Derive,
+        )?;
         let sk = match source {
-            KeySource::Generic => p
-                .account
-                .spending_key()
+            KeySource::Generic => flow_observe!(observer, Derive, p.account.spending_key())
                 .map_err(|_| BridgeError::Verification)?,
             #[cfg(all(
                 feature = "durable-proposal",
@@ -376,33 +555,65 @@ impl ReservedAuthorization<'_> {
             KeySource::DurableBorn(_) => {
                 // The only token constructor is after bridge_begin_key_use.
                 // It cannot be reconstructed from the durable row on restart.
+                let derive_check = || {
+                    key_use_check(
+                        #[cfg(all(
+                            feature = "synthetic-born-joined-qualification",
+                            feature = "durable-proposal"
+                        ))]
+                        durable_flow_diagnostics_v1::DurableFlowStageV1::Derive,
+                    )
+                };
                 let fence = DurableBornKeyUseFenceV1 {
                     account: p.account,
-                    check: &key_use_check,
+                    check: &derive_check,
                 };
-                p.account
-                    .derive_durable_born_spending_key_v1(&fence)
-                    .map_err(|_| BridgeError::Verification)?
+                flow_observe!(
+                    observer,
+                    Derive,
+                    p.account.derive_durable_born_spending_key_v1(&fence)
+                )
+                .map_err(|_| BridgeError::Verification)?
             }
-            KeySource::Lifetime(_) => return Err(BridgeError::Permission),
+            KeySource::Lifetime(_) => {
+                return flow_observe!(observer, Derive, Err(BridgeError::Permission))
+            }
         };
         let ask = SpendAuthorizingKey::from(&sk);
-        let mut signer = Signer::new(parsed).map_err(|_| BridgeError::Verification)?;
+        let mut signer = flow_observe!(
+            observer,
+            Sign,
+            Signer::new(parsed).map_err(|_| BridgeError::Verification)
+        )?;
         for input in &actual {
             // Recheck each actual action under the same held wallet/native
             // leases; interruption after a prior action retains the fence.
-            key_use_check()?;
-            signer
-                .sign_ironwood(UnwrapErr(SysRng), input.action_index, &ask)
-                .map_err(|_| BridgeError::Verification)?;
+            key_use_check(
+                #[cfg(all(
+                    feature = "synthetic-born-joined-qualification",
+                    feature = "durable-proposal"
+                ))]
+                durable_flow_diagnostics_v1::DurableFlowStageV1::Sign,
+            )?;
+            flow_observe!(
+                observer,
+                Sign,
+                signer
+                    .sign_ironwood(UnwrapErr(SysRng), input.action_index, &ask)
+                    .map_err(|_| BridgeError::Verification)
+            )?;
         }
         let signed = signer.finish();
         let mut signatures = Vec::with_capacity(actual.len());
         for input in actual {
-            let signature = signed.ironwood().actions()[input.action_index]
-                .spend()
-                .spend_auth_sig()
-                .ok_or(BridgeError::Verification)?;
+            let signature = flow_observe!(
+                observer,
+                VerifySigned,
+                signed.ironwood().actions()[input.action_index]
+                    .spend()
+                    .spend_auth_sig()
+                    .ok_or(BridgeError::Verification)
+            )?;
             signatures.push(SignatureRecord {
                 action_index: input.action_index,
                 signature_hex: hex::encode(signature),
@@ -422,25 +633,35 @@ impl ReservedAuthorization<'_> {
                 }
             })
             .finish();
-        if pczt::v2::Pczt::try_from(normalized)
-            .map_err(|_| BridgeError::Verification)?
-            .serialize()
+        if flow_observe!(
+            observer,
+            VerifySigned,
+            pczt::v2::Pczt::try_from(normalized).map_err(|_| BridgeError::Verification)
+        )?
+        .serialize()
             != *bytes
         {
-            return Err(BridgeError::Verification);
+            return flow_observe!(observer, VerifySigned, Err(BridgeError::Verification));
         }
         let signed_bytes = Zeroizing::new(
-            pczt::v2::Pczt::try_from(signed)
-                .map_err(|_| BridgeError::Verification)?
-                .serialize(),
+            flow_observe!(
+                observer,
+                VerifySigned,
+                pczt::v2::Pczt::try_from(signed).map_err(|_| BridgeError::Verification)
+            )?
+            .serialize(),
         );
         if signed_bytes.len() > protocol::MAX_ARTIFACT_BYTES
-            || wholepact_protocol::review::verify_review(&signed_bytes, &inputs.policy)
-                .map_err(|_| BridgeError::Verification)?
-                .review_binding()
+            || flow_observe!(
+                observer,
+                VerifySigned,
+                wholepact_protocol::review::verify_review(&signed_bytes, &inputs.policy)
+                    .map_err(|_| BridgeError::Verification)
+            )?
+            .review_binding()
                 != t.review_binding
         {
-            return Err(BridgeError::Verification);
+            return flow_observe!(observer, VerifySigned, Err(BridgeError::Verification));
         }
         let payload = SignaturePayload {
             schema_version: 1,
@@ -451,23 +672,41 @@ impl ReservedAuthorization<'_> {
             account_id: &t.account_id,
             signatures,
         };
-        let outbox_payload =
-            Zeroizing::new(serde_json::to_string(&payload).map_err(|_| BridgeError::Binding)?);
+        let outbox_payload = Zeroizing::new(flow_observe!(
+            observer,
+            ResultRetain,
+            serde_json::to_string(&payload).map_err(|_| BridgeError::Binding)
+        )?);
         if outbox_payload.len() > protocol::MAX_OUTBOX_BYTES {
-            return Err(BridgeError::Limit);
+            return flow_observe!(observer, ResultRetain, Err(BridgeError::Limit));
         }
         let result = RetainedAuthorizationResult {
             authorization_id: t.authorization_id.clone(),
             original_consent_ref: original.original_consent().reference().into(),
-            request_digest: p.request.reservation.request_digest()?,
+            request_digest: flow_observe!(
+                observer,
+                ResultRetain,
+                p.request.reservation.request_digest()
+            )?,
             result_digest: hex::encode(Sha256::digest(&signed_bytes)),
             signed_pczt_hex: hex::encode(&signed_bytes),
             outbox_digest: hex::encode(Sha256::digest(outbox_payload.as_bytes())),
             outbox_payload: outbox_payload.to_string(),
         };
-        key_use_check()?;
-        p.lease.check_current()?;
-        p.journal.bridge_retain_result(&p.lease, &result)?;
+        key_use_check(
+            #[cfg(all(
+                feature = "synthetic-born-joined-qualification",
+                feature = "durable-proposal"
+            ))]
+            durable_flow_diagnostics_v1::DurableFlowStageV1::ResultRetain,
+        )?;
+        flow_observe!(observer, ResultRetain, p.lease.check_current())?;
+        flow_call!(
+            observer,
+            ResultRetention,
+            ResultRetain,
+            p.journal.bridge_retain_result(&p.lease, &result)
+        )?;
         Ok(AuthorizationCommit::from(&result))
     }
 }
@@ -490,15 +729,23 @@ fn validate_original_wallet_policy(
 
 struct OriginalWalletPermission<'a, 'session> {
     lease: &'a OriginalAuthorizationLease<'session>,
+    #[cfg(all(
+        feature = "synthetic-born-joined-qualification",
+        feature = "durable-proposal"
+    ))]
+    observer: Option<&'a DurableFlowObserverV1>,
 }
 impl HeldWalletPermission for OriginalWalletPermission<'_, '_> {
     fn check_current(
         &self,
         scope: &WalletKeyUseScope<'_>,
     ) -> std::result::Result<(), WalletKeyUseError> {
-        self.lease
-            .require_current_authorization()
-            .map_err(|_| WalletKeyUseError::Permission)?;
+        flow_observe!(
+            self.observer,
+            WalletGuard,
+            self.lease.require_current_authorization()
+        )
+        .map_err(|_| WalletKeyUseError::Permission)?;
         let original = self.lease.evidence();
         let t = original.original_consent().terms();
         if scope.account_id != t.account_id

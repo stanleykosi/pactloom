@@ -73,7 +73,7 @@ impl AuthorityClient {
             deadline,
             check_current,
             #[cfg(feature = "synthetic-qualification")]
-            observer,
+            observer.map(|observer| (observer, HistoryPhaseV1::Admission)),
         )
     }
 
@@ -87,38 +87,99 @@ impl AuthorityClient {
         deadline: Instant,
         mut check_current: impl FnMut() -> Result<()>,
     ) -> Result<WriterSessionReceipt> {
-        check_current()?;
-        require_before_caller_deadline(deadline)?;
-        history.durable_payment_online_permits_v1(admission_operation_id)?;
-        let admission = history
-            .durable_payment_admission_v1(admission_operation_id)?
-            .ok_or(AuthorityError::Permission)?;
+        self.acquire_durable_payment_writer_v1_observed(
+            history,
+            admission_operation_id,
+            deadline,
+            &mut check_current,
+            #[cfg(feature = "synthetic-qualification")]
+            None,
+        )
+    }
+    #[cfg(feature = "synthetic-qualification")]
+    pub fn acquire_durable_payment_writer_v1_diagnosed_checked_until(
+        &self,
+        history: &ReconciledAuthorityHistory,
+        admission_operation_id: &str,
+        deadline: Instant,
+        mut check_current: impl FnMut() -> Result<()>,
+    ) -> std::result::Result<WriterSessionReceipt, history_diagnostics_v1::CheckedHistoryFailureV1>
+    {
+        let observer = HistoryObserverV1::with_flow_deadline(Some(deadline));
+        self.acquire_durable_payment_writer_v1_observed(
+            history,
+            admission_operation_id,
+            deadline,
+            &mut check_current,
+            Some(&observer),
+        )
+        .map_err(|error| observer.into_failure(error))
+    }
+    fn acquire_durable_payment_writer_v1_observed(
+        &self,
+        history: &ReconciledAuthorityHistory,
+        admission_operation_id: &str,
+        deadline: Instant,
+        check_current: &mut impl FnMut() -> Result<()>,
+        #[cfg(feature = "synthetic-qualification")] observer: Option<&HistoryObserverV1>,
+    ) -> Result<WriterSessionReceipt> {
+        observed_flow_current!(observer, check_current)?;
+        observed_flow_result!(
+            observer,
+            CallerDeadline,
+            require_before_caller_deadline(deadline)
+        )?;
+        observed_flow_result!(
+            observer,
+            FlowRequestValidation,
+            history.durable_payment_online_permits_v1(admission_operation_id)
+        )?;
+        let admission = observed_history_result!(
+            observer,
+            observed_history_result!(
+                observer,
+                history.durable_payment_admission_v1(admission_operation_id)
+            )?
+            .ok_or(AuthorityError::Permission)
+        )?;
         let OwnerControl::AdmitDurablePaymentV1 { record } = &admission.control else {
-            return Err(AuthorityError::CorruptHistory);
+            return observed_history_result!(observer, Err(AuthorityError::CorruptHistory));
         };
-        let operation_id = record.acquire_operation_id(admission)?;
+        let operation_id =
+            observed_history_result!(observer, record.acquire_operation_id(admission))?;
+        #[cfg(feature = "synthetic-qualification")]
+        if let Some(observer) = observer {
+            observer.enter(CheckedHistoryStageV1::FlowBinding);
+        }
         if history.disclosure != self.disclosure_descriptor()
             || history.snapshot.writer_certificate_digest != self.tls.client_certificate
             || record.terms.writer_certificate_digest != self.tls.client_certificate
         {
-            return Err(AuthorityError::Permission);
+            return observed_history_result!(observer, Err(AuthorityError::Permission));
         }
         if history.snapshot.writer_status == WriterStatus::Quarantined {
-            return Err(AuthorityError::RecoveryRequired);
+            return observed_history_result!(observer, Err(AuthorityError::RecoveryRequired));
         }
-        let mut state = lock_born_session_until(&self.session, deadline, &mut check_current)?;
+        let mut state = observed_flow_result!(
+            observer,
+            FlowSession,
+            lock_born_session_until(&self.session, deadline, &mut || observed_flow_current!(
+                observer,
+                check_current
+            ))
+        )?;
         if let Some(session) = state.as_ref() {
             if session.request.operation_id != operation_id
                 || session.request.expected_head != history.snapshot.head
             {
-                return Err(AuthorityError::Conflict);
+                return observed_history_result!(observer, Err(AuthorityError::Conflict));
             }
         } else if history.committed_operation_ids.contains(&operation_id) {
             // A used operation without this client's retained original key is
             // recovery, never a new exporter/session with the same or fresh ID.
-            return Err(AuthorityError::RecoveryRequired);
+            return observed_history_result!(observer, Err(AuthorityError::RecoveryRequired));
         }
-        let response = self.call_with_inner_checked(
+        let response = self.call_with_inner_checked_observed(
             |exporter| {
                 let retry = state.is_some();
                 if state.is_none() {
@@ -159,13 +220,27 @@ impl AuthorityClient {
                 })
             },
             Some(deadline),
-            &mut check_current,
+            &mut *check_current,
+            #[cfg(feature = "synthetic-qualification")]
+            observer.map(|observer| (observer, HistoryPhaseV1::Acquire)),
         )?;
-        check_current()?;
+        observed_flow_current!(observer, check_current)?;
+        #[cfg(feature = "synthetic-qualification")]
+        if let Some(observer) = observer {
+            observer.enter(CheckedHistoryStageV1::FlowResponse);
+        }
         let WireResponse::Mutation(MutationResult::WriterPending(receipt)) = response else {
-            return Err(AuthorityError::InvalidBinding);
+            return observed_history_result!(observer, Err(AuthorityError::InvalidBinding));
         };
-        let session = state.as_mut().ok_or(AuthorityError::SessionRequired)?;
+        let session = observed_flow_result!(
+            observer,
+            FlowSession,
+            state.as_mut().ok_or(AuthorityError::SessionRequired)
+        )?;
+        #[cfg(feature = "synthetic-qualification")]
+        if let Some(observer) = observer {
+            observer.enter(CheckedHistoryStageV1::FlowReceiptValidation);
+        }
         if receipt.session_id != session.request.session_id
             || receipt.writer_certificate_digest != self.tls.client_certificate
             || receipt.writer_epoch != session.request.writer_epoch
@@ -175,20 +250,28 @@ impl AuthorityClient {
             || receipt.expires_at_ms <= receipt.acquired_at_ms
             || receipt.expires_at_ms > record.terms.valid_until_ms
         {
-            return Err(AuthorityError::Authentication);
+            return observed_history_result!(observer, Err(AuthorityError::Authentication));
         }
-        self.check_committed_head(
-            &session.request.expected_head,
-            &receipt.acquired_head,
-            AuthorityMutation::AcquireWriter(session.request.clone()),
-            receipt.acquired_at_ms,
-            None,
+        observed_flow_result!(
+            observer,
+            FlowCommittedHeadValidation,
+            self.check_committed_head(
+                &session.request.expected_head,
+                &receipt.acquired_head,
+                AuthorityMutation::AcquireWriter(session.request.clone()),
+                receipt.acquired_at_ms,
+                None,
+            )
         )?;
         // Retain the authentic receipt even when a final restriction fails. It
         // remains inert until all checks pass; deleting it would lose retry state.
         session.receipt = Some(receipt.clone());
-        check_current()?;
-        require_before_caller_deadline(deadline)?;
+        observed_flow_current!(observer, check_current)?;
+        observed_flow_result!(
+            observer,
+            CallerDeadline,
+            require_before_caller_deadline(deadline)
+        )?;
         Ok(receipt)
     }
 
@@ -203,23 +286,70 @@ impl AuthorityClient {
         deadline: Instant,
         mut check_current: impl FnMut() -> Result<()>,
     ) -> Result<AccountSnapshot> {
-        check_current()?;
-        validate_pending_activation_v1(
+        self.activate_durable_payment_writer_v1_observed(
             history,
             admission_operation_id,
-            request,
-            &self.disclosure_descriptor(),
-            &self.tls.client_certificate,
-            now_ms()?,
-        )?;
-        check_current()?;
-        require_before_caller_deadline(deadline)?;
-        self.durable_payment_control_checked_v1(
             request,
             deadline,
             &mut check_current,
             #[cfg(feature = "synthetic-qualification")]
             None,
+        )
+    }
+    #[cfg(feature = "synthetic-qualification")]
+    pub fn activate_durable_payment_writer_v1_diagnosed_checked_until(
+        &self,
+        history: &ReconciledAuthorityHistory,
+        admission_operation_id: &str,
+        request: &OwnerControlRequest,
+        deadline: Instant,
+        mut check_current: impl FnMut() -> Result<()>,
+    ) -> std::result::Result<AccountSnapshot, history_diagnostics_v1::CheckedHistoryFailureV1> {
+        let observer = HistoryObserverV1::with_flow_deadline(Some(deadline));
+        self.activate_durable_payment_writer_v1_observed(
+            history,
+            admission_operation_id,
+            request,
+            deadline,
+            &mut check_current,
+            Some(&observer),
+        )
+        .map_err(|error| observer.into_failure(error))
+    }
+    fn activate_durable_payment_writer_v1_observed(
+        &self,
+        history: &ReconciledAuthorityHistory,
+        admission_operation_id: &str,
+        request: &OwnerControlRequest,
+        deadline: Instant,
+        check_current: &mut impl FnMut() -> Result<()>,
+        #[cfg(feature = "synthetic-qualification")] observer: Option<&HistoryObserverV1>,
+    ) -> Result<AccountSnapshot> {
+        observed_flow_current!(observer, check_current)?;
+        observed_flow_result!(
+            observer,
+            FlowRequestValidation,
+            validate_pending_activation_v1(
+                history,
+                admission_operation_id,
+                request,
+                &self.disclosure_descriptor(),
+                &self.tls.client_certificate,
+                observed_history_result!(observer, now_ms())?,
+            )
+        )?;
+        observed_flow_current!(observer, check_current)?;
+        observed_flow_result!(
+            observer,
+            CallerDeadline,
+            require_before_caller_deadline(deadline)
+        )?;
+        self.durable_payment_control_checked_v1(
+            request,
+            deadline,
+            check_current,
+            #[cfg(feature = "synthetic-qualification")]
+            observer.map(|observer| (observer, HistoryPhaseV1::Activate)),
         )
     }
 
@@ -230,25 +360,86 @@ impl AuthorityClient {
         deadline: Instant,
         mut check_current: impl FnMut() -> Result<()>,
     ) -> Result<AuthenticatedWriterSession> {
-        check_current()?;
-        history
-            .durable_payment_admission_v1(admission_operation_id)?
-            .ok_or(AuthorityError::Permission)?;
-        if history.disclosure != self.disclosure_descriptor() {
-            return Err(AuthorityError::Authentication);
+        self.verify_durable_payment_session_v1_observed(
+            history,
+            admission_operation_id,
+            deadline,
+            &mut check_current,
+            #[cfg(feature = "synthetic-qualification")]
+            None,
+        )
+    }
+    #[cfg(feature = "synthetic-qualification")]
+    pub fn verify_durable_payment_session_v1_diagnosed_checked_until(
+        &self,
+        history: &ReconciledAuthorityHistory,
+        admission_operation_id: &str,
+        deadline: Instant,
+        mut check_current: impl FnMut() -> Result<()>,
+    ) -> std::result::Result<
+        AuthenticatedWriterSession,
+        history_diagnostics_v1::CheckedHistoryFailureV1,
+    > {
+        let observer = HistoryObserverV1::with_flow_deadline(Some(deadline));
+        self.verify_durable_payment_session_v1_observed(
+            history,
+            admission_operation_id,
+            deadline,
+            &mut check_current,
+            Some(&observer),
+        )
+        .map_err(|error| observer.into_failure(error))
+    }
+    fn verify_durable_payment_session_v1_observed(
+        &self,
+        history: &ReconciledAuthorityHistory,
+        admission_operation_id: &str,
+        deadline: Instant,
+        check_current: &mut impl FnMut() -> Result<()>,
+        #[cfg(feature = "synthetic-qualification")] observer: Option<&HistoryObserverV1>,
+    ) -> Result<AuthenticatedWriterSession> {
+        observed_flow_current!(observer, check_current)?;
+        observed_flow_result!(
+            observer,
+            FlowRequestValidation,
+            observed_history_result!(
+                observer,
+                history.durable_payment_admission_v1(admission_operation_id)
+            )?
+            .ok_or(AuthorityError::Permission)
+        )?;
+        #[cfg(feature = "synthetic-qualification")]
+        if let Some(observer) = observer {
+            observer.enter(CheckedHistoryStageV1::FlowBinding);
         }
-        let state = lock_born_session_until(&self.session, deadline, &mut check_current)?;
-        let session = state.as_ref().ok_or(AuthorityError::RecoveryRequired)?;
-        let receipt = session
-            .receipt
-            .as_ref()
-            .ok_or(AuthorityError::SessionRequired)?;
+        if history.disclosure != self.disclosure_descriptor() {
+            return observed_history_result!(observer, Err(AuthorityError::Authentication));
+        }
+        let state = observed_flow_result!(
+            observer,
+            FlowSession,
+            lock_born_session_until(&self.session, deadline, &mut || observed_flow_current!(
+                observer,
+                check_current
+            ))
+        )?;
+        let session = observed_history_result!(
+            observer,
+            state.as_ref().ok_or(AuthorityError::RecoveryRequired)
+        )?;
+        let receipt = observed_history_result!(
+            observer,
+            session
+                .receipt
+                .as_ref()
+                .ok_or(AuthorityError::SessionRequired)
+        )?;
         if crate::session::session_id(&session.key) != receipt.session_id {
-            return Err(AuthorityError::Authentication);
+            return observed_history_result!(observer, Err(AuthorityError::Authentication));
         }
         let observed = Instant::now();
-        let observed_at_ms = now_ms()?;
-        let response = self.call_with_inner_checked(
+        let observed_at_ms = observed_history_result!(observer, now_ms())?;
+        let response = self.call_with_inner_checked_observed(
             |_| {
                 Ok(WireRequest::Snapshot {
                     account_id: self.account.clone(),
@@ -256,24 +447,41 @@ impl AuthorityClient {
                 })
             },
             Some(deadline),
-            &mut check_current,
+            &mut *check_current,
+            #[cfg(feature = "synthetic-qualification")]
+            observer.map(|observer| (observer, HistoryPhaseV1::Verify)),
         )?;
+        #[cfg(feature = "synthetic-qualification")]
+        if let Some(observer) = observer {
+            observer.enter(CheckedHistoryStageV1::FlowResponse);
+        }
         let WireResponse::Snapshot(snapshot) = response else {
-            return Err(AuthorityError::InvalidBinding);
+            return observed_history_result!(observer, Err(AuthorityError::InvalidBinding));
         };
-        check_current()?;
-        self.check_snapshot(&snapshot)?;
-        snapshot.require_unfenced_transport(&receipt.session_id)?;
+        observed_flow_current!(observer, check_current)?;
+        observed_flow_result!(
+            observer,
+            FlowSnapshotValidation,
+            self.check_snapshot(&snapshot)
+        )?;
+        observed_history_result!(
+            observer,
+            snapshot.require_unfenced_transport(&receipt.session_id)
+        )?;
         if snapshot != history.snapshot {
-            return Err(AuthorityError::StaleHead);
+            return observed_history_result!(observer, Err(AuthorityError::StaleHead));
+        }
+        #[cfg(feature = "synthetic-qualification")]
+        if let Some(observer) = observer {
+            observer.enter(CheckedHistoryStageV1::FlowReceiptValidation);
         }
         if snapshot.writer_status != WriterStatus::Active
             || snapshot.active_writer_session.as_ref() != Some(receipt)
             || receipt.writer_certificate_digest != self.tls.client_certificate
             || receipt.writer_epoch != snapshot.writer_epoch
-            || now_ms()? >= receipt.expires_at_ms
+            || observed_history_result!(observer, now_ms())? >= receipt.expires_at_ms
         {
-            return Err(AuthorityError::SessionRequired);
+            return observed_history_result!(observer, Err(AuthorityError::SessionRequired));
         }
         let active = AuthenticatedWriterSession {
             observed,
@@ -281,11 +489,19 @@ impl AuthorityClient {
             snapshot,
             receipt: receipt.clone(),
             disclosure: self.disclosure_descriptor(),
-            history_digest: history.history_digest()?,
+            history_digest: observed_history_result!(observer, history.history_digest())?,
         };
-        history.require_durable_payment_session_v1(admission_operation_id, &active)?;
-        check_current()?;
-        require_before_caller_deadline(deadline)?;
+        observed_flow_result!(
+            observer,
+            FlowFinalValidation,
+            history.require_durable_payment_session_v1(admission_operation_id, &active)
+        )?;
+        observed_flow_current!(observer, check_current)?;
+        observed_flow_result!(
+            observer,
+            CallerDeadline,
+            require_before_caller_deadline(deadline)
+        )?;
         Ok(active)
     }
 
@@ -294,11 +510,22 @@ impl AuthorityClient {
         request: &OwnerControlRequest,
         deadline: Instant,
         check_current: &mut impl FnMut() -> Result<()>,
-        #[cfg(feature = "synthetic-qualification")] observer: Option<&HistoryObserverV1>,
+        #[cfg(feature = "synthetic-qualification")] observation: Option<(
+            &HistoryObserverV1,
+            HistoryPhaseV1,
+        )>,
     ) -> Result<AccountSnapshot> {
         #[cfg(feature = "synthetic-qualification")]
+        let observer = observation.map(|(observer, _)| observer);
+        #[cfg(feature = "synthetic-qualification")]
         if let Some(observer) = observer {
-            observer.enter(CheckedHistoryStageV1::AdmissionBinding);
+            observer.enter(
+                if observation.is_some_and(|(_, phase)| phase == HistoryPhaseV1::Activate) {
+                    CheckedHistoryStageV1::FlowBinding
+                } else {
+                    CheckedHistoryStageV1::AdmissionBinding
+                },
+            );
         }
         if request.account_id != self.account || request.network_profile_id != self.network {
             return observed_history_result!(observer, Err(AuthorityError::InvalidBinding));
@@ -313,7 +540,7 @@ impl AuthorityClient {
             Some(deadline),
             &mut *check_current,
             #[cfg(feature = "synthetic-qualification")]
-            observer.map(|observer| (observer, HistoryPhaseV1::Admission)),
+            observation,
         )?;
         #[cfg(feature = "synthetic-qualification")]
         let checked = history_diagnostics_v1::callback_observed(observer, || check_current());
@@ -322,19 +549,37 @@ impl AuthorityClient {
         checked?;
         #[cfg(feature = "synthetic-qualification")]
         if let Some(observer) = observer {
-            observer.enter(CheckedHistoryStageV1::AdmissionResponse);
+            observer.enter(
+                if observation.is_some_and(|(_, phase)| phase == HistoryPhaseV1::Activate) {
+                    CheckedHistoryStageV1::FlowResponse
+                } else {
+                    CheckedHistoryStageV1::AdmissionResponse
+                },
+            );
         }
         let WireResponse::Mutation(MutationResult::Controlled(snapshot)) = response else {
             return observed_history_result!(observer, Err(AuthorityError::InvalidBinding));
         };
         #[cfg(feature = "synthetic-qualification")]
         if let Some(observer) = observer {
-            observer.enter(CheckedHistoryStageV1::AdmissionSnapshotValidation);
+            observer.enter(
+                if observation.is_some_and(|(_, phase)| phase == HistoryPhaseV1::Activate) {
+                    CheckedHistoryStageV1::FlowSnapshotValidation
+                } else {
+                    CheckedHistoryStageV1::AdmissionSnapshotValidation
+                },
+            );
         }
         observed_history_result!(observer, self.check_snapshot(&snapshot))?;
         #[cfg(feature = "synthetic-qualification")]
         if let Some(observer) = observer {
-            observer.enter(CheckedHistoryStageV1::AdmissionCommittedHeadValidation);
+            observer.enter(
+                if observation.is_some_and(|(_, phase)| phase == HistoryPhaseV1::Activate) {
+                    CheckedHistoryStageV1::FlowCommittedHeadValidation
+                } else {
+                    CheckedHistoryStageV1::AdmissionCommittedHeadValidation
+                },
+            );
         }
         observed_history_result!(
             observer,
@@ -353,7 +598,13 @@ impl AuthorityClient {
         checked?;
         #[cfg(feature = "synthetic-qualification")]
         if let Some(observer) = observer {
-            observer.enter(CheckedHistoryStageV1::AdmissionFinalValidation);
+            observer.enter(
+                if observation.is_some_and(|(_, phase)| phase == HistoryPhaseV1::Activate) {
+                    CheckedHistoryStageV1::FlowFinalValidation
+                } else {
+                    CheckedHistoryStageV1::AdmissionFinalValidation
+                },
+            );
         }
         observed_history_result!(observer, require_before_caller_deadline(deadline))?;
         Ok(snapshot)
@@ -418,6 +669,76 @@ fn validate_pending_activation_v1(
 mod tests {
     use super::*;
     use crate::durable_payment_v1::tests::{activate, admitted_fixture, history};
+    #[cfg(feature = "synthetic-qualification")]
+    #[test]
+    fn pure_flow_enclosing_failure_does_not_invent_callback_failure() {
+        for callback_error in [None, Some(AuthorityError::Conflict)] {
+            let observer = HistoryObserverV1::with_flow_deadline(None);
+            let optional = Some(&observer);
+            let mut calls = 0;
+            let result: Result<()> = observed_flow_result!(
+                optional,
+                FlowSession,
+                (|| {
+                    let mut current = || {
+                        calls += 1;
+                        callback_error.map_or(Ok(()), Err)
+                    };
+                    observed_flow_current!(optional, current)?;
+                    Err(AuthorityError::Permission)
+                })()
+            );
+            assert_eq!(calls, 1);
+            let failure = observer.into_failure(result.err().unwrap());
+            if let Some(error) = callback_error {
+                assert!(failure.error() == error);
+                assert!(failure.stage() == CheckedHistoryStageV1::SourceCallback);
+                assert!(failure.measurement().checkpoint() == HistoryCheckpointV1::Callback);
+            } else {
+                assert!(failure.error() == AuthorityError::Permission);
+                assert!(failure.stage() == CheckedHistoryStageV1::FlowSession);
+                assert!(failure.measurement().checkpoint() == HistoryCheckpointV1::Validation);
+            }
+            assert_eq!(failure.measurement().history_cost().callback_calls(), 1);
+        }
+    }
+
+    #[cfg(feature = "synthetic-qualification")]
+    #[test]
+    fn pure_flow_existing_session_lock_callback_runs_once_and_keeps_original_error() {
+        for enabled in [false, true] {
+            let observer = HistoryObserverV1::with_flow_deadline(Some(
+                Instant::now() + Duration::from_secs(30),
+            ));
+            let optional = enabled.then_some(&observer);
+            let mutex = std::sync::Mutex::new(());
+            let mut calls = 0;
+            let mut current = || {
+                calls += 1;
+                Err(AuthorityError::Conflict)
+            };
+            let result = observed_flow_result!(
+                optional,
+                FlowSession,
+                lock_born_session_until(
+                    &mutex,
+                    Instant::now() + Duration::from_secs(30),
+                    &mut || observed_flow_current!(optional, current)
+                )
+            );
+            assert!(matches!(result, Err(AuthorityError::Conflict)));
+            assert_eq!(calls, 1);
+            if enabled {
+                let failure = observer.into_failure(result.err().unwrap());
+                assert!(failure.stage() == CheckedHistoryStageV1::SourceCallback);
+                assert!(failure.error() == AuthorityError::Conflict);
+                assert!(failure.returned_error() == AuthorityError::Conflict);
+                assert!(failure.measurement().phase().is_none());
+                assert_eq!(failure.measurement().history_cost().callback_calls(), 1);
+            }
+        }
+    }
+
     #[test]
     fn activation_uses_distinct_owner_certificate_and_pending_history_not_writer_key() {
         let (birth, mut ledger, mut events, admission) = admitted_fixture();

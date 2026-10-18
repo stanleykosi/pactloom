@@ -13,10 +13,12 @@ pub use super::durable_witness_v1::{
     DurableAdmissionPreparationFailureV1, DurableAdmissionPreparationStageV1,
     DurableAdmissionRetentionV1,
 };
-use super::durable_witness_v1::{
-    DurableWitnessPreparedV1, QualificationDurableWitnessCompletionV1,
-};
+use super::durable_witness_v1::{DurableWitnessPreparedV1, QualificationDurableWitnessCompletionV1};
 use super::*;
+use crate::authority_bridge::durable_flow_diagnostics_v1::{
+    self as flow_diag_v1, DurableFlowDiagnosticV1, DurableFlowFailureV1,
+    DurableFlowObservationTokenV1, DurableFlowOperationV1, DurableFlowResultV1, DurableFlowStageV1,
+};
 use crate::authority_bridge::{
     durable_construction_v1::{
         DurableConstructionCaptureRequestV1, DurableConstructionHistoryRequestV1,
@@ -132,6 +134,11 @@ pub(in crate::native_ui) struct DurableNativeFixtureV1 {
     admission: Option<wholepact_authority::OwnerControlRequest>,
     reconciled_records: Option<DurableNativeRecordsV1>,
     reconciled_writer: Option<(Arc<()>, wholepact_authority::WriterSessionReceipt)>,
+    // This owner is inert data only and survives the real OpenAccount close.
+    flow_collector: flow_diag_v1::DurableFlowCollectorV1,
+    flow_observation: Option<flow_diag_v1::DurableFlowObserverV1>,
+    flow_service: Option<flow_diag_v1::DurableFlowJobObservationV1>,
+    flow_import_expected: Option<super::durable_review_v1::DurableFlowImportExpectationV1>,
 }
 
 struct DurableFixtureAdmissionObservationV1 {
@@ -246,14 +253,26 @@ impl DurableNativeFixtureV1 {
             admission: None,
             reconciled_records: None,
             reconciled_writer: None,
+            flow_collector: Default::default(),
+            flow_observation: None,
+            flow_service: None,
+            flow_import_expected: None,
         })
     }
     fn check(&self) -> Result<()> {
         let original = self.original.as_ref().ok_or(Error::Locked)?;
         let open = self.runtime.open.as_ref().ok_or(Error::Locked)?;
         let source = open.durable_born_entry.as_ref().ok_or(Error::Locked)?;
-        source.check_current()?;
-        if open.vault.account_id()? != original.account_id
+        flow_diag_v1::observe_result(
+            self.flow_observation.as_ref(),
+            DurableFlowStageV1::FixtureState,
+            source.check_current(),
+        )?;
+        if flow_diag_v1::observe_result(
+            self.flow_observation.as_ref(),
+            DurableFlowStageV1::FixtureState,
+            open.vault.account_id(),
+        )? != original.account_id
             || open.authority.binding().entry_digest() != self.entry
             || open.authority.binding() != source.native_binding()
         {
@@ -885,12 +904,112 @@ impl DurableNativeFixtureV1 {
                 value.original_is_operational = false;
                 self.runtime.qualification_admission_missing_v1();
             }
+            self.missing_flow_completion_v1();
             return Err(Error::Uncertain);
         }
         self.check()
     }
+    fn arm_flow_v1(&mut self, operation: DurableFlowOperationV1) -> DurableFlowObservationTokenV1 {
+        let observer = self.flow_collector.arm(operation);
+        self.flow_observation = Some(observer.clone());
+        self.flow_service = None;
+        self.flow_import_expected = None;
+        if let Some(open) = self.runtime.open.as_mut() {
+            open.durable_witness.flow_observation = Some(observer.clone());
+            open.durable_witness.flow_import = None;
+        }
+        DurableFlowObservationTokenV1::new(observer)
+    }
+    fn matching_flow_v1<'a>(
+        &self,
+        token: &'a DurableFlowObservationTokenV1,
+    ) -> Option<&'a flow_diag_v1::DurableFlowObserverV1> {
+        if self
+            .flow_observation
+            .as_ref()
+            .is_some_and(|active| active.same_attempt(token.observer()))
+        {
+            Some(token.observer())
+        } else {
+            token.observer().mark_incomplete();
+            None
+        }
+    }
+    fn observe_fixture_result_v1<T>(
+        observer: Option<&flow_diag_v1::DurableFlowObserverV1>,
+        stage: DurableFlowStageV1,
+        result: &Result<T>,
+    ) {
+        if let (Some(observer), Err(error)) = (observer, result) {
+            // A typed final fixture fallback is not evidence of a worker cause.
+            observer.record_terminal(stage, error);
+        }
+    }
+    fn missing_flow_result_v1<T>(
+        observer: Option<&flow_diag_v1::DurableFlowObserverV1>,
+        result: Result<T>,
+    ) -> Result<T> {
+        if result.is_err() {
+            if let Some(observer) = observer {
+                observer.missing_completion();
+            }
+        }
+        result
+    }
+    fn missing_flow_completion_v1(&self) {
+        if let Some(observer) = &self.flow_observation {
+            observer.missing_completion();
+        }
+    }
+    fn finish_flow_v1(
+        &mut self,
+        token: DurableFlowObservationTokenV1,
+        result: DurableFlowResultV1,
+    ) -> Option<DurableFlowDiagnosticV1> {
+        self.matching_flow_v1(&token)?;
+        if let Some(open) = self.runtime.open.as_mut() {
+            if open
+                .durable_witness
+                .flow_observation
+                .as_ref()
+                .is_some_and(|active| active.same_attempt(token.observer()))
+            {
+                open.durable_witness.flow_observation = None;
+                open.durable_witness.flow_import = None;
+            }
+        }
+        self.flow_observation = None;
+        self.flow_service = None;
+        self.flow_import_expected = None;
+        token.observer().finish(result)
+    }
+    pub(in crate::native_ui) fn reconcile_original_writer_diagnosed(
+        &mut self,
+    ) -> std::result::Result<(), DurableFlowFailureV1> {
+        let token = self.arm_flow_v1(DurableFlowOperationV1::WriterReconcile);
+        let mut stage = DurableFlowStageV1::FixtureState;
+        let result = self.reconcile_original_writer_inner(&mut stage);
+        Self::observe_fixture_result_v1(Some(token.observer()), stage, &result);
+        let diagnostic = self.finish_flow_v1(
+            token,
+            if result.is_ok() {
+                DurableFlowResultV1::ReturnedOk
+            } else {
+                DurableFlowResultV1::ReturnedErr
+            },
+        );
+        result.map_err(|error| DurableFlowFailureV1::new(error, diagnostic))
+    }
     pub(in crate::native_ui) fn reconcile_original_writer(&mut self) -> Result<()> {
-        self.check()?;
+        self.reconcile_original_writer_inner(&mut DurableFlowStageV1::FixtureState)
+    }
+    fn reconcile_original_writer_inner(&mut self, stage: &mut DurableFlowStageV1) -> Result<()> {
+        let observation = self.flow_observation.clone();
+        flow_diag_v1::observe_result(
+            observation.as_ref(),
+            DurableFlowStageV1::FixtureState,
+            self.check(),
+        )?;
         if self.phase != Phase::Admitted
             || self.runtime.pending.is_some()
             || self
@@ -908,15 +1027,23 @@ impl DurableNativeFixtureV1 {
         if open.writer_receipt.is_some() || open.writer_reconciled {
             return Err(Error::ReviewMismatch);
         }
-        self.runtime.prepare_durable_session_v1(EPOCH)?;
+        *stage = DurableFlowStageV1::AcquirePrepare;
+        flow_diag_v1::observe_result(
+            observation.as_ref(),
+            DurableFlowStageV1::AcquirePrepare,
+            self.runtime.prepare_durable_session_v1(EPOCH),
+        )?;
+        *stage = DurableFlowStageV1::Completion;
         self.drain_witness_to_review()?;
         if !matches!(
             self.runtime.pending.as_ref().map(|p| &p.operation),
             Some(Operation::DurableWitnessV1(prepared))
                 if matches!(prepared.as_ref(), DurableWitnessPreparedV1::Session(_))
         ) {
+            self.missing_flow_completion_v1();
             return Err(Error::ReviewMismatch);
         }
+        *stage = DurableFlowStageV1::Completion;
         self.approve_durable_and_await(QualificationDurableWitnessCompletionV1::SessionAcquired)?;
         let receipt = self
             .runtime
@@ -927,30 +1054,47 @@ impl DurableNativeFixtureV1 {
             .as_ref()
             .ok_or(Error::ReviewMismatch)?
             .clone();
-        self.runtime.prepare_durable_activation_v1(EPOCH)?;
+        *stage = DurableFlowStageV1::ActivationPrepare;
+        flow_diag_v1::observe_result(
+            observation.as_ref(),
+            DurableFlowStageV1::ActivationPrepare,
+            self.runtime.prepare_durable_activation_v1(EPOCH),
+        )?;
+        *stage = DurableFlowStageV1::Completion;
         self.drain_witness_to_review()?;
         if !matches!(
             self.runtime.pending.as_ref().map(|p| &p.operation),
             Some(Operation::DurableWitnessV1(prepared))
                 if matches!(prepared.as_ref(), DurableWitnessPreparedV1::Activation(_))
         ) {
+            self.missing_flow_completion_v1();
             return Err(Error::ReviewMismatch);
         }
+        *stage = DurableFlowStageV1::Completion;
         self.approve_durable_and_await(
             QualificationDurableWitnessCompletionV1::ActivationCommitted,
         )?;
-        self.runtime.prepare_durable_reconciliation_v1(EPOCH)?;
+        *stage = DurableFlowStageV1::ReconcilePrepare;
+        flow_diag_v1::observe_result(
+            observation.as_ref(),
+            DurableFlowStageV1::ReconcilePrepare,
+            self.runtime.prepare_durable_reconciliation_v1(EPOCH),
+        )?;
+        *stage = DurableFlowStageV1::Completion;
         self.drain_witness_to_review()?;
         if !matches!(
             self.runtime.pending.as_ref().map(|p| &p.operation),
             Some(Operation::DurableWitnessV1(prepared))
                 if matches!(prepared.as_ref(), DurableWitnessPreparedV1::Reconciliation(_))
         ) {
+            self.missing_flow_completion_v1();
             return Err(Error::ReviewMismatch);
         }
+        *stage = DurableFlowStageV1::Completion;
         self.approve_durable_and_await(
             QualificationDurableWitnessCompletionV1::ReconciliationCommitted,
         )?;
+        *stage = DurableFlowStageV1::Completion;
         // Observe actual invalidation and drain. Never refresh or rewrite the
         // old session, references, import, pairing or original owner deadline.
         loop {
@@ -987,14 +1131,15 @@ impl DurableNativeFixtureV1 {
         Ok(())
     }
     fn drain_witness_to_review(&mut self) -> Result<()> {
-        let done = self
+        let job = self
             .runtime
             .open
             .as_ref()
             .ok_or(Error::Locked)?
             .witness_job
             .as_ref()
-            .ok_or(Error::ReviewMismatch)?
+            .ok_or(Error::ReviewMismatch);
+        let done = Self::missing_flow_result_v1(self.flow_observation.as_ref(), job)?
             .done
             .clone();
         loop {
@@ -1075,7 +1220,11 @@ impl DurableNativeFixtureV1 {
         {
             return Err(Error::ReviewMismatch);
         }
-        open.wallet.as_ref().ok_or(Error::Locked)?.check_current()?;
+        flow_diag_v1::observe_result(
+            self.flow_observation.as_ref(),
+            DurableFlowStageV1::WalletSource,
+            open.wallet.as_ref().ok_or(Error::Locked)?.check_current(),
+        )?;
         let Some(imported) = &open.durable_review else {
             return Ok(false);
         };
@@ -1090,6 +1239,134 @@ impl DurableNativeFixtureV1 {
         }
         self.phase = Phase::FinancialImported;
         Ok(true)
+    }
+
+    pub(in crate::native_ui) fn arm_financial_import_diagnostics(
+        &mut self,
+        request: &DurableReviewDeliveryRequestV1,
+        identity: &FixedProposalIdentityV1,
+    ) -> DurableFlowObservationTokenV1 {
+        let token = self.arm_flow_v1(DurableFlowOperationV1::FinancialImport);
+        if let Some(open) = self.runtime.open.as_mut() {
+            if open.durable_import_job.is_some() || open.durable_review.is_some() {
+                token.observer().mark_incomplete();
+            } else {
+                let expected = super::durable_review_v1::DurableFlowImportExpectationV1::new(
+                    request,
+                    identity,
+                    EPOCH,
+                    token.observer(),
+                );
+                self.flow_import_expected = expected.clone();
+                open.durable_witness.flow_import = expected;
+            }
+        } else {
+            token.observer().mark_incomplete();
+        }
+        token
+    }
+    pub(in crate::native_ui) fn financial_import_deadline_diagnosed(
+        &self,
+        token: &DurableFlowObservationTokenV1,
+    ) -> Result<Instant> {
+        let result = flow_diag_v1::observe_result(
+            self.matching_flow_v1(token),
+            DurableFlowStageV1::FixtureState,
+            self.deadline(),
+        );
+        Self::observe_fixture_result_v1(
+            self.matching_flow_v1(token),
+            DurableFlowStageV1::FixtureState,
+            &result,
+        );
+        result
+    }
+    pub(in crate::native_ui) fn poll_financial_import_diagnosed(
+        &mut self,
+        token: &DurableFlowObservationTokenV1,
+        request: &DurableReviewDeliveryRequestV1,
+        identity: &FixedProposalIdentityV1,
+    ) -> Result<bool> {
+        // Ordinary runtime polls may already have consumed this same real job.
+        // No poll arms, replaces, finishes, or takes its diagnostic attempt.
+        if self.matching_flow_v1(token).is_some()
+            && self
+                .flow_import_expected
+                .as_ref()
+                .is_none_or(|expected| !expected.matches_poll(request, identity, EPOCH))
+        {
+            token.observer().mark_incomplete();
+        }
+        let result = self.poll_financial_import(request, identity);
+        Self::observe_fixture_result_v1(
+            self.matching_flow_v1(token),
+            DurableFlowStageV1::FixtureState,
+            &result,
+        );
+        result
+    }
+    pub(in crate::native_ui) fn finish_financial_import_diagnostics(
+        &mut self,
+        token: DurableFlowObservationTokenV1,
+        result: DurableFlowResultV1,
+    ) -> Option<DurableFlowDiagnosticV1> {
+        self.finish_flow_v1(token, result)
+    }
+    pub(in crate::native_ui) fn arm_result_service_diagnostics(
+        &mut self,
+    ) -> DurableFlowObservationTokenV1 {
+        let token = self.arm_flow_v1(DurableFlowOperationV1::ResultService);
+        self.flow_service = Some(
+            token
+                .observer()
+                .job_start(flow_diag_v1::DurableFlowJobPurposeV1::ResultService, EPOCH),
+        );
+        token
+    }
+    pub(in crate::native_ui) fn result_service_deadline_diagnosed(
+        &self,
+        token: &DurableFlowObservationTokenV1,
+    ) -> Result<Instant> {
+        let result = flow_diag_v1::observe_result(
+            self.matching_flow_v1(token),
+            DurableFlowStageV1::ResultService,
+            self.deadline(),
+        );
+        Self::observe_fixture_result_v1(
+            self.matching_flow_v1(token),
+            DurableFlowStageV1::ResultService,
+            &result,
+        );
+        result
+    }
+    pub(in crate::native_ui) fn poll_result_service_diagnosed(
+        &mut self,
+        token: &DurableFlowObservationTokenV1,
+    ) -> Result<()> {
+        let result = self.poll_data_only();
+        let result = flow_diag_v1::observe_result(
+            self.matching_flow_v1(token),
+            DurableFlowStageV1::ResultService,
+            result,
+        );
+        Self::observe_fixture_result_v1(
+            self.matching_flow_v1(token),
+            DurableFlowStageV1::ResultService,
+            &result,
+        );
+        result
+    }
+    pub(in crate::native_ui) fn finish_result_service_diagnostics(
+        &mut self,
+        token: DurableFlowObservationTokenV1,
+        result: DurableFlowResultV1,
+    ) -> Option<DurableFlowDiagnosticV1> {
+        if self.matching_flow_v1(&token).is_some() {
+            if let Some(job) = &self.flow_service {
+                job.completed(result);
+            }
+        }
+        self.finish_flow_v1(token, result)
     }
 
     fn signing_ledger(&self) -> Result<Vec<(u64, [u8; 32])>> {
@@ -1132,16 +1409,52 @@ impl DurableNativeFixtureV1 {
         }
         Ok(())
     }
+    pub(in crate::native_ui) fn sign_durable_fixed_diagnosed(
+        &mut self,
+        identity: &FixedProposalIdentityV1,
+    ) -> std::result::Result<(HistoryRequest, AuthorizationCommit), DurableFlowFailureV1> {
+        let operation = if self.signed.is_some() {
+            DurableFlowOperationV1::RetainedRetry
+        } else {
+            DurableFlowOperationV1::InitialSign
+        };
+        let token = self.arm_flow_v1(operation);
+        let mut stage = DurableFlowStageV1::FixtureState;
+        let result = self.sign_durable_fixed_inner(identity, &mut stage);
+        Self::observe_fixture_result_v1(Some(token.observer()), stage, &result);
+        let diagnostic = self.finish_flow_v1(
+            token,
+            if result.is_ok() {
+                DurableFlowResultV1::ReturnedOk
+            } else {
+                DurableFlowResultV1::ReturnedErr
+            },
+        );
+        result.map_err(|error| DurableFlowFailureV1::new(error, diagnostic))
+    }
     pub(in crate::native_ui) fn sign_durable_fixed(
         &mut self,
         identity: &FixedProposalIdentityV1,
     ) -> Result<(HistoryRequest, AuthorizationCommit)> {
-        self.require_idle_financial_state(identity)?;
+        self.sign_durable_fixed_inner(identity, &mut DurableFlowStageV1::FixtureState)
+    }
+    fn sign_durable_fixed_inner(
+        &mut self,
+        identity: &FixedProposalIdentityV1,
+        stage: &mut DurableFlowStageV1,
+    ) -> Result<(HistoryRequest, AuthorizationCommit)> {
+        let observation = self.flow_observation.clone();
+        flow_diag_v1::observe_result(
+            observation.as_ref(),
+            DurableFlowStageV1::FixtureState,
+            self.require_idle_financial_state(identity),
+        )?;
         if !matches!(self.phase, Phase::FinancialImported | Phase::Signed) {
             return Err(Error::ReviewMismatch);
         }
         let before = self.signing_ledger()?;
         if let Some((history, commit, retained_ledger)) = &self.signed {
+            *stage = DurableFlowStageV1::RetryInvariant;
             if self.phase != Phase::Signed || retained_ledger != &before {
                 return Err(Error::ReviewMismatch);
             }
@@ -1158,6 +1471,7 @@ impl DurableNativeFixtureV1 {
             // Invoke the REAL production retry entry point, not a fixture
             // short-circuit. It must return synchronously without staging any
             // review or job; every authority-ledger row must remain identical.
+            *stage = DurableFlowStageV1::RetainedLookup;
             self.runtime.start_durable_wallet_review_v1(EPOCH)?;
             self.require_idle_financial_state(identity)?;
             let wallet_after = self
@@ -1195,13 +1509,16 @@ impl DurableNativeFixtureV1 {
             return Err(Error::ReviewMismatch);
         }
         let deadline = self.deadline()?;
+        *stage = DurableFlowStageV1::WalletSync;
         self.runtime.start_durable_wallet_review_v1(EPOCH)?;
+        *stage = DurableFlowStageV1::Completion;
         if self
             .runtime
             .open
             .as_ref()
             .is_none_or(|o| o.durable_wallet_job.is_none())
         {
+            self.missing_flow_completion_v1();
             return Err(Error::ReviewMismatch);
         }
         loop {
@@ -1218,13 +1535,17 @@ impl DurableNativeFixtureV1 {
             }
             std::thread::sleep(Duration::from_millis(2));
         }
+        *stage = DurableFlowStageV1::Completion;
         let history = match self.runtime.pending.as_ref().map(|p| &p.operation) {
             Some(Operation::DurableDisclosureV1 { flow, .. })
                 if flow.qualification_identity() == identity =>
             {
                 flow.qualification_history()
             }
-            _ => return Err(Error::ReviewMismatch),
+            _ => {
+                self.missing_flow_completion_v1();
+                return Err(Error::ReviewMismatch);
+            }
         };
         let records = self.records()?;
         if history.expected_enrollment_ref != records.enrollment_ref
@@ -1232,17 +1553,26 @@ impl DurableNativeFixtureV1 {
         {
             return Err(Error::ReviewMismatch);
         }
+        *stage = DurableFlowStageV1::DisclosureDecision;
         approve(&mut self.runtime)?;
+        *stage = DurableFlowStageV1::Completion;
         match self.runtime.pending.as_ref().map(|p| &p.operation) {
             Some(Operation::DurableSpendV1 { flow, .. })
                 if flow.qualification_identity() == identity
                     && flow.qualification_history() == history => {}
-            _ => return Err(Error::ReviewMismatch),
+            _ => {
+                self.missing_flow_completion_v1();
+                return Err(Error::ReviewMismatch);
+            }
         }
+        *stage = DurableFlowStageV1::SpendDecision;
         approve(&mut self.runtime)?;
+        *stage = DurableFlowStageV1::Completion;
         if self.runtime.signing_job.is_none() || self.runtime.open.is_some() {
+            self.missing_flow_completion_v1();
             return Err(Error::ReviewMismatch);
         }
+        *stage = DurableFlowStageV1::Completion;
         // During signing the genuine worker owns OpenAccount. Keep the same
         // original deadline and peer checks; never synthesize another owner.
         while self.runtime.signing_job.is_some() {
@@ -1405,5 +1735,65 @@ mod tests {
         assert!(runtime.open.is_none());
         assert!(runtime.pending.is_none());
         assert!(runtime.closing_accounts.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod durable_flow_fixture_tests {
+    use super::*;
+    use flow_diag_v1::{
+        DurableFlowCollectorV1 as Collector, DurableFlowErrorCodeV1 as Code,
+        DurableFlowJobPurposeV1 as Purpose, DurableFlowReceiveV1 as Receive,
+    };
+    #[test]
+    fn actual_fixture_missing_completion_records_terminal_without_inventing_first() {
+        let collector = Collector::default();
+        let observer = collector.arm(DurableFlowOperationV1::InitialSign);
+        let result: Result<()> = DurableNativeFixtureV1::missing_flow_result_v1(
+            Some(&observer),
+            Err(Error::RecoveryRequired),
+        );
+        DurableNativeFixtureV1::observe_fixture_result_v1(
+            Some(&observer),
+            DurableFlowStageV1::Completion,
+            &result,
+        );
+        assert!(matches!(result, Err(Error::RecoveryRequired)));
+        let report = observer.finish(DurableFlowResultV1::ReturnedErr).unwrap();
+        assert!(report.first_error().is_none());
+        assert!(report.terminal_error().unwrap().code() == Code::SignerRecoveryRequired);
+        assert!(report.terminal_error().unwrap().stage() == DurableFlowStageV1::Completion);
+        assert!(report.completion().receive() == Receive::Missing);
+        assert!(report.completion().result() == DurableFlowResultV1::NotObserved);
+        assert!(report.completion().purpose().is_none());
+    }
+    #[test]
+    fn actual_fixture_fallback_retains_real_source_failure_and_observed_result() {
+        let collector = Collector::default();
+        let observer = collector.arm(DurableFlowOperationV1::InitialSign);
+        let job = observer.job_start(Purpose::WalletReview, 7);
+        let original: Result<()> = flow_diag_v1::observe_result(
+            Some(&observer),
+            DurableFlowStageV1::WalletSource,
+            Err(Error::Authentication),
+        );
+        job.received(DurableFlowStageV1::WalletSync, &original);
+        let fallback: Result<()> = DurableNativeFixtureV1::missing_flow_result_v1(
+            Some(&observer),
+            Err(Error::ReviewMismatch),
+        );
+        DurableNativeFixtureV1::observe_fixture_result_v1(
+            Some(&observer),
+            DurableFlowStageV1::Completion,
+            &fallback,
+        );
+        let report = observer.finish(DurableFlowResultV1::ReturnedErr).unwrap();
+        assert!(report.first_error().unwrap().code() == Code::SignerAuthentication);
+        assert!(report.first_error().unwrap().stage() == DurableFlowStageV1::WalletSource);
+        assert!(report.terminal_error().unwrap().code() == Code::SignerReviewMismatch);
+        assert!(report.terminal_error().unwrap().stage() == DurableFlowStageV1::Completion);
+        assert!(report.completion().result() == DurableFlowResultV1::ReturnedErr);
+        assert!(report.completion().receive() == Receive::Missing);
+        assert!(report.completion().purpose() == Some(Purpose::WalletReview));
     }
 }
