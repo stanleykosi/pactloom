@@ -59,7 +59,9 @@ fn mathematical_material(owner: &WalletContribution, info: &LightdInfo) -> serde
             "branch_id": format!("0x{}", info.consensus_branch_id),
             "lightwalletd_version": info.version,
             "backend_subversion": info.zcashd_subversion,
-            "protocol_version": info.protocol_version,
+            // Upstream and chain's narrow projection share protobuf tag18;
+            // the latter deliberately calls this field protocol_version.
+            "protocol_version": info.lightwallet_protocol_version,
             "request_started": 1_800_000_000u64,
             "observed_at": 1_800_000_001u64,
             "valid_until": 1_800_000_060u64
@@ -97,7 +99,7 @@ fn durable_provider_metadata_satisfies_actual_material_decoder() {
     let info: LightdInfo = exact(&response[5..]).unwrap();
     assert!(info.version == "synthetic-born-provider-v1");
     assert!(info.zcashd_subversion == "synthetic-no-zcashd-backend");
-    assert!(info.protocol_version == "synthetic-compact-rpc-v1");
+    assert!(info.lightwallet_protocol_version == "synthetic-compact-rpc-v1");
     assert!(info.chain_name == "test");
     assert!(info.sapling_activation_height == 280_000);
     assert!(info.consensus_branch_id == "77190ad9");
