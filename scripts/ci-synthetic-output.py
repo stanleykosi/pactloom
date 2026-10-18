@@ -87,8 +87,8 @@ ADMISSION_TRANSCRIPT_TESTS = tuple(PREFIX + 'rolling_transcript_v1::tests::' + n
     'admission_optional_copies_yield_to_original_chunk_budget',
     'admission_optional_copies_yield_to_original_metadata_budget',
 ))
-FLOW_PROJECTION_TESTS = tuple(PREFIX + 'safe_diagnostics_v1::durable_flow_projection::tests::' + name for name in ('durable_flow_maximal_canonical_record_fits_fixed_slot', 'durable_flow_maximal_error_pair_is_closed', 'durable_flow_maximal_component_lengths', 'durable_flow_payload_cap_exact_boundary', 'durable_flow_getter_labels_are_closed', 'durable_flow_parser_requires_exact_scopes', 'durable_flow_parser_rejects_invalid_categories_and_bounds', 'durable_flow_null_completion_and_measurement_consistency', 'durable_flow_capture_is_sticky_bounded_and_independent'))
-FLOW_TRANSCRIPT_TESTS = tuple(PREFIX + 'rolling_transcript_v1::tests::' + name for name in ('durable_flow_survives_split_lines_and_compaction', 'durable_flow_optional_copy_yields_to_original_chunk_budget', 'durable_flow_optional_copy_yields_to_original_metadata_budget'))
+FLOW_PROJECTION_TESTS = tuple(PREFIX + 'safe_diagnostics_v1::durable_flow_projection::tests::' + name for name in ('durable_flow_maximal_canonical_record_fits_fixed_slot', 'durable_flow_maximal_error_pair_is_closed', 'durable_flow_maximal_component_lengths', 'durable_flow_payload_cap_exact_boundary', 'durable_flow_getter_labels_are_closed', 'durable_flow_parser_requires_exact_scopes', 'durable_flow_parser_rejects_invalid_categories_and_bounds', 'durable_flow_null_completion_and_measurement_consistency', 'durable_flow_capture_is_sticky_bounded_and_independent', 'durable_flow_after_drain_preserves_initial_and_exact_worker_semantics', 'durable_flow_after_drain_monotone_calls_and_unique_first_lower', 'durable_lifecycle_maximal_canonical_cap_and_pairing', 'durable_lifecycle_exact_scopes_bounds_and_arithmetic', 'durable_lifecycle_capture_sticky_optional_and_paired'))
+FLOW_TRANSCRIPT_TESTS = tuple(PREFIX + 'rolling_transcript_v1::tests::' + name for name in ('durable_flow_survives_split_lines_and_compaction', 'durable_flow_optional_copy_yields_to_original_chunk_budget', 'durable_flow_optional_copy_yields_to_original_metadata_budget', 'durable_lifecycle_split_compaction_and_pairing', 'durable_lifecycle_optional_copy_yields_to_original_chunk_budget', 'durable_lifecycle_optional_copy_yields_to_original_metadata_budget'))
 FLOW_HOST_TESTS = (PREFIX + 'durable_proposal_v1::worker::admission_diagnostic_tests::pure_flow_stages_are_never_reported_as_admission_or_history',)
 ADMISSION_HOST_TESTS = (PREFIX + 'durable_proposal_v1::worker::admission_diagnostic_tests::pure_admission_boundary_routing_preserves_context',)
 READ_WAVE_TESTS = tuple(PREFIX + 'observed_joined_v3::' + name for name in (
@@ -200,7 +200,7 @@ WITNESS_ADMISSION_ERROR_FIELDS = frozenset(('stage','attribution','io_kind','err
 FLOW_PRIVATE_PREFIX = '[DURABLE_FLOW_V1 '
 FLOW_PREFIX = 'CI_SYNTHETIC_DURABLE_FLOW '
 FLOW_INVALID = 'CI_SYNTHETIC_DURABLE_FLOW invalid=true details_withheld=true'
-FLOW_FIELDS = ('version', 'operation', 'first_error', 'terminal_error', 'fixture_result', 'completion', 'call_outcomes', 'lower_call_measurement', 'clamped', 'incomplete')
+FLOW_FIELDS = ('version', 'operation', 'first_error', 'terminal_error', 'fixture_result', 'completion', 'call_outcomes', 'lower_call_measurement', 'clamped', 'incomplete', 'after_drain')
 FLOW_MEASUREMENT_FIELDS = ('phase', 'check_site', 'checkpoint', 'selected_limit', 'selected_budget_us', 'caller_remaining_at_budget_start_us', 'caller_remaining_at_failure_us', 'selected_remaining_at_failure_us', 'operation_elapsed_us', 'exchange_elapsed_us', 'pre_budget_callback_calls', 'pre_budget_callback_us', 'operation_cost', 'exchange_cost', 'clamped', 'incomplete')
 FLOW_CALL_FIELDS = ('writer_acquire', 'writer_activate', 'active_verify', 'reconciliation', 'session_invalidation', 'release', 'request_retention', 'reservation', 'permit_retention', 'key_use', 'result_retention')
 FLOW_COST_FIELDS = ('callback_calls', 'callback_us', 'callback_max_us', 'connect_calls', 'connect_us', 'handshake_calls', 'handshake_us', 'frame_write_calls', 'frame_write_us', 'frame_read_calls', 'frame_read_us')
@@ -221,6 +221,14 @@ FLOW_NESTED_CODES = {('Signer', 'ConsentJournal'): frozenset({'JournalNotFound',
 FLOW_ERROR_FIELDS = ('stage','domain','code','nested_code')
 FLOW_COMPLETION_FIELDS = ('purpose','result','receive','presentation')
 FLOW_LOWER_FIELDS = ('purpose','stage','authority_code','io_kind','callback_stage','measurement')
+FLOW_AFTER_FIELDS = ('drain_result','drain_error','worker_purpose','worker_result','worker_error','call_outcomes','lower_call_measurement','clamped','incomplete')
+LIFECYCLE_PRIVATE_PREFIX = '[DURABLE_LIFECYCLE_V1 '
+LIFECYCLE_PREFIX = 'CI_SYNTHETIC_DURABLE_LIFECYCLE '
+LIFECYCLE_INVALID = 'CI_SYNTHETIC_DURABLE_LIFECYCLE invalid=true details_withheld=true'
+LIFECYCLE_FIELDS = ('version','operation','fixture_result','owner_budget_us','points','pending_wait','worker_purpose','worker_started_to_client_entry_us','worker_started_to_client_return_us','clamped','incomplete')
+LIFECYCLE_POINT_FIELDS = ('native_open_complete','pair_complete','witness_setup_complete','accept_complete','redisclosure_complete','import_complete','historical_lookup_complete','acquire_prepare_launch','acquire_prepare_complete','acquire_native_approval','acquire_worker_launch','fixture_failure','after_drain')
+LIFECYCLE_WAIT_FIELDS = ('full_precheck','full_postcheck','liveness','poll')
+LIFECYCLE_JOB_PURPOSE = frozenset(('AcquirePrepare','Acquire','ActivationPrepare','Activate','ReconcilePrepare','Reconcile'))
 
 STORAGE_BOOTSTRAP_TEST = 'recovery_generation::layered::tests::native_layered_current_eight_nine_parent_provenance_is_exact_and_not_relabelable'
 SIGNER_VALIDATION_TESTS = (
@@ -635,6 +643,47 @@ def flow_lower(value):
     return row
 
 
+def flow_calls(value):
+    row=flow_object(value,FLOW_CALL_FIELDS)
+    if any(not history_enum(row[key],FLOW_CALL_OUTCOME) for key in FLOW_CALL_FIELDS):
+        raise ValueError('flow call outcome')
+    return row
+
+
+def flow_after(value, initial):
+    row=flow_object(value,FLOW_AFTER_FIELDS)
+    if not history_enum(row['drain_result'],('ReturnedOk','ReturnedErr')):
+        raise ValueError('flow drain result')
+    if not history_enum(row['worker_purpose'],FLOW_JOB_PURPOSE,True) or row['worker_purpose']!=initial['completion']['purpose']:
+        raise ValueError('flow exact job purpose')
+    if not history_enum(row['worker_result'],FLOW_RESULT): raise ValueError('flow worker result')
+    for prefix in ('drain','worker'):
+        error=row[prefix+'_error']
+        if error is not None: row[prefix+'_error']=flow_error(error)
+        if (row[prefix+'_result']=='ReturnedErr')!=(error is not None):
+            raise ValueError('flow return error consistency')
+    if row['drain_error'] is not None and row['drain_error']['stage']!='Close':
+        raise ValueError('flow drain stage')
+    if row['worker_purpose'] is None and row['worker_result']!='NotObserved':
+        raise ValueError('flow worker without job')
+    before=initial['completion']
+    if before['receive']=='Received' and row['worker_result']!='NotObserved' and row['worker_result']!=before['result']:
+        raise ValueError('flow conflicting worker return')
+    row['call_outcomes']=flow_calls(row['call_outcomes'])
+    for key,old in initial['call_outcomes'].items():
+        new=row['call_outcomes'][key]
+        if (old in ('ReturnedOk','ReturnedErr') and new!=old) or (old=='Entered' and new=='NotObserved'):
+            raise ValueError('flow regressed call')
+    admission_flags(row)
+    if row['lower_call_measurement'] is not None:
+        if initial['lower_call_measurement'] is not None: raise ValueError('flow duplicate first lower')
+        row['lower_call_measurement']=flow_lower(row['lower_call_measurement'])
+        for key in ('clamped','incomplete'):
+            if row['lower_call_measurement']['measurement'][key] and not row[key]:
+                raise ValueError('flow lost after lower flag')
+    return row
+
+
 def public_durable_flow(text):
     row=flow_object(history_json(text,4096),FLOW_FIELDS)
     if type(row['version']) is not int or row['version']!=1: raise ValueError('flow version')
@@ -643,16 +692,14 @@ def public_durable_flow(text):
     for key in ('first_error','terminal_error'):
         if row[key] is not None: row[key]=flow_error(row[key])
     row['completion']=flow_completion(row['completion'])
-    calls=flow_object(row['call_outcomes'],FLOW_CALL_FIELDS)
-    if any(not history_enum(calls[key],FLOW_CALL_OUTCOME) for key in FLOW_CALL_FIELDS):
-        raise ValueError('flow call outcome')
-    row['call_outcomes']=calls
+    row['call_outcomes']=flow_calls(row['call_outcomes'])
     admission_flags(row)
     if row['lower_call_measurement'] is not None:
         lower=flow_lower(row['lower_call_measurement'])
         row['lower_call_measurement']=lower
         for key in ('clamped','incomplete'):
             if lower['measurement'][key] and not row[key]: raise ValueError('flow lost lower flag')
+    if row['after_drain'] is not None: row['after_drain']=flow_after(row['after_drain'],row)
     return row
 
 
@@ -675,6 +722,75 @@ class DurableFlowDiagnostics:
                 # Revalidate, then serialize fixed field order, never forward text.
                 value=public_durable_flow(json.dumps(self.value,separators=(',',':')))
                 print(FLOW_PREFIX+json.dumps(value,separators=(',',':')),flush=True)
+        except (OSError,ValueError,TypeError,KeyError,OverflowError,RecursionError):
+            pass
+
+
+def public_durable_lifecycle(text):
+    row=flow_object(history_json(text,2048),LIFECYCLE_FIELDS)
+    if type(row['version']) is not int or row['version']!=1: raise ValueError('lifecycle version')
+    if row['operation']!='WriterReconcile' or row['fixture_result']!='ReturnedErr':
+        raise ValueError('lifecycle failure scope')
+    if type(row['owner_budget_us']) is not int or row['owner_budget_us']!=120000000:
+        raise ValueError('lifecycle original budget')
+    admission_flags(row)
+    points=flow_object(row['points'],LIFECYCLE_POINT_FIELDS)
+    for key,value in points.items():
+        if value is None: continue
+        point=flow_object(value,('age_us','remaining_us'))
+        if not history_bounded(point['age_us'],HISTORY_DURATION_LIMIT_US) or not history_bounded(point['remaining_us'],120000000):
+            raise ValueError('lifecycle point bounds')
+        if point['remaining_us']!=max(120000000-point['age_us'],0):
+            raise ValueError('lifecycle original deadline')
+        points[key]=point
+    row['points']=points
+    # Cumulative opted-in owner costs, inclusive/nonadditive with ages and spans.
+    wait=flow_object(row['pending_wait'],LIFECYCLE_WAIT_FIELDS)
+    for key,value in wait.items():
+        cost=flow_object(value,('calls','total_us','max_us'))
+        if not history_bounded(cost['calls'],HISTORY_COUNT_LIMIT) or any(not history_bounded(cost[field],HISTORY_DURATION_LIMIT_US) for field in ('total_us','max_us')):
+            raise ValueError('lifecycle cost bounds')
+        if cost['max_us']>cost['total_us'] or (cost['calls']==0 and (cost['total_us'] or cost['max_us'])) or (not row['clamped'] and cost['total_us']>cost['calls']*cost['max_us']):
+            raise ValueError('lifecycle cost consistency')
+        wait[key]=cost
+    row['pending_wait']=wait
+    if not history_enum(row['worker_purpose'],LIFECYCLE_JOB_PURPOSE,True):
+        raise ValueError('lifecycle worker purpose')
+    entry=row['worker_started_to_client_entry_us']; returned=row['worker_started_to_client_return_us']
+    if not admission_duration(entry) or not admission_duration(returned): raise ValueError('lifecycle worker duration')
+    if row['worker_purpose'] is None and (entry is not None or returned is not None):
+        raise ValueError('lifecycle worker without job')
+    if returned is not None and (entry is None or returned<entry):
+        raise ValueError('lifecycle worker return before entry')
+    return row
+
+
+def lifecycle_matches_flow(value, flow):
+    return (flow is not None and value['operation']==flow['operation']
+        and value['worker_purpose']==flow['completion']['purpose']
+        and (value['points']['after_drain'] is None or flow['after_drain'] is not None))
+
+
+class DurableLifecycleDiagnostics:
+    """One optional owner-lifetime slot, paired only with its failure FLOW."""
+    def __init__(self):
+        self.value=None
+        self.invalid=False
+
+    def record(self, kind, value):
+        if kind not in ('durable_lifecycle','durable_lifecycle_invalid') or self.invalid: return
+        if kind=='durable_lifecycle_invalid' or self.value is not None:
+            self.value=None; self.invalid=True
+        else: self.value=value
+
+    def emit(self, flow):
+        try:
+            if self.invalid: print(LIFECYCLE_INVALID,flush=True)
+            elif self.value is not None:
+                value=public_durable_lifecycle(json.dumps(self.value,separators=(',',':')))
+                other=None if flow.invalid or flow.value is None else public_durable_flow(json.dumps(flow.value,separators=(',',':')))
+                if not lifecycle_matches_flow(value,other): print(LIFECYCLE_INVALID,flush=True)
+                else: print(LIFECYCLE_PREFIX+json.dumps(value,separators=(',',':')),flush=True)
         except (OSError,ValueError,TypeError,KeyError,OverflowError,RecursionError):
             pass
 
@@ -771,21 +887,31 @@ def safe_failure(line):
         if not re.fullmatch(r'0|-?[1-9][0-9]{0,9}',errno) or not -(2**31)<=int(errno)<2**31: return False
     return True
 
-def flow_candidate(raw, name=None):
+def diagnostic_candidate(raw, marker, name=None):
     prefix=('test '+name+' ... ').encode('utf8') if name is not None else None
     if prefix and raw.startswith(prefix): raw=raw[len(prefix):]
-    return raw.startswith(b'CI_SYNTHETIC_DURABLE_FLOW')
+    return raw.startswith(marker)
+
+
+def flow_candidate(raw, name=None):
+    return diagnostic_candidate(raw,b'CI_SYNTHETIC_DURABLE_FLOW',name)
+
+
+def lifecycle_candidate(raw, name=None):
+    return diagnostic_candidate(raw,b'CI_SYNTHETIC_DURABLE_LIFECYCLE',name)
 
 
 def public_line(raw, name):
     if len(raw)>8192:
-        return ('durable_flow_invalid',None) if flow_candidate(raw,name) else None
+        if flow_candidate(raw,name): return ('durable_flow_invalid',None)
+        return ('durable_lifecycle_invalid',None) if lifecycle_candidate(raw,name) else None
     try:
         line=raw.decode('utf8','strict').rstrip('\r')
     except UnicodeError:
         prefix=('test '+name+' ... ').encode('utf8')
         candidate=raw[len(prefix):] if raw.startswith(prefix) else raw
         if flow_candidate(candidate): return ('durable_flow_invalid',None)
+        if lifecycle_candidate(candidate): return ('durable_lifecycle_invalid',None)
         if candidate.startswith(TIMING_PREFIX.encode('ascii')):
             return ('timing_invalid',None)
         for marker,kind in ((HISTORY_MEASUREMENT_PREFIX,'history_measurement'),
@@ -807,6 +933,13 @@ def public_line(raw, name):
             return ('durable_flow',public_durable_flow(line[len(FLOW_PREFIX):]))
         except (ValueError,TypeError,KeyError,OverflowError,RecursionError):
             return ('durable_flow_invalid',None)
+    if line==LIFECYCLE_INVALID: return ('durable_lifecycle_invalid',None)
+    if line.startswith('CI_SYNTHETIC_DURABLE_LIFECYCLE'):
+        try:
+            if not line.startswith(LIFECYCLE_PREFIX): raise ValueError('lifecycle framing')
+            return ('durable_lifecycle',public_durable_lifecycle(line[len(LIFECYCLE_PREFIX):]))
+        except (ValueError,TypeError,KeyError,OverflowError,RecursionError):
+            return ('durable_lifecycle_invalid',None)
     for slot,marker in enumerate(ADMISSION_INVALID):
         if line==marker: return (ADMISSION_KINDS[slot]+'_invalid',None)
     for marker,kind,parser in zip(ADMISSION_PREFIXES,ADMISSION_KINDS,ADMISSION_PARSERS):
@@ -856,6 +989,7 @@ class BoundedLines:
                     # never the oversized line, reaches the optional Flow slot.
                     head=bytes(self.pending[:8192])+part[:8192-len(self.pending)]
                     if flow_candidate(head,self.name): lines.append(FLOW_INVALID.encode('ascii'))
+                    if lifecycle_candidate(head,self.name): lines.append(LIFECYCLE_INVALID.encode('ascii'))
                     self.pending.clear()
                     self.discarding=True
                 else:
@@ -877,7 +1011,7 @@ def run_pure(executable):
         listed=subprocess.run([executable,*flags,'--list'],capture_output=True,timeout=30,check=True)
         if not exact_listing(listed.stdout.decode(),name) or listed.stderr:
             raise ValueError('exact pure test not uniquely registered')
-        # These 72 fixed source-reviewed cases use only modeled process state,
+        # These 80 fixed source-reviewed cases use only modeled process state,
         # inert files, historical policy DTOs, fixed prompts, closed error kinds or
         # bounded private parsing state or data-only scanned-note mathematics. They create
         # no native/IPC/network/payment owners.
@@ -885,7 +1019,7 @@ def run_pure(executable):
         if result.returncode!=0 or len(result.stdout)>1024*1024:
             print('CI_SYNTHETIC_PURE failed_test='+name,flush=True)
             raise RuntimeError('exact pure test failed; raw output withheld')
-    print('CI_SYNTHETIC_PURE passed=72 raw_output_discarded=true',flush=True)
+    print('CI_SYNTHETIC_PURE passed=80 raw_output_discarded=true',flush=True)
 
 def run_signer_validation(executable):
     assert resource.getrlimit(resource.RLIMIT_CORE)[0] == 0
@@ -1048,6 +1182,7 @@ def run(executable, phase):
     history_measurements=HistoryMeasurements()
     admission_diagnostics=AdmissionDiagnostics()
     durable_flow=DurableFlowDiagnostics()
+    durable_lifecycle=DurableLifecycleDiagnostics()
     try:
         eof=False
         while not eof:
@@ -1089,6 +1224,8 @@ def run(executable, phase):
                     if phase=='durable-fixed-signing': admission_diagnostics.record(kind,value)
                 elif kind in ('durable_flow','durable_flow_invalid'):
                     if phase=='durable-fixed-signing': durable_flow.record(kind,value)
+                elif kind in ('durable_lifecycle','durable_lifecycle_invalid'):
+                    if phase=='durable-fixed-signing': durable_lifecycle.record(kind,value)
                 elif kind=='outcome':
                     if phase!='full' or outcome is not None: raise ValueError('unexpected duplicate public outcome')
                     outcome=value
@@ -1108,6 +1245,7 @@ def run(executable, phase):
         history_measurements.emit()
         admission_diagnostics.emit()
         durable_flow.emit()
+        durable_lifecycle.emit(durable_flow)
     if phase=='full' and cleanup_observed:
         if timing_invalid:
             print('CI_SYNTHETIC_TIMING invalid=true details_withheld=true',flush=True)

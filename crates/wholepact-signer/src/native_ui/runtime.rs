@@ -3285,15 +3285,40 @@ impl NativeRuntime {
             feature = "durable-proposal"
         ))]
         let worker_flow = flow.clone();
+        #[cfg(all(
+            feature = "synthetic-born-joined-qualification",
+            feature = "durable-proposal"
+        ))]
+        if let Some((job, observer, _)) = &flow {
+            let point = match job.purpose() {
+                Some(flow_diag_v1::DurableFlowJobPurposeV1::AcquirePrepare) => {
+                    Some(flow_diag_v1::DurableLifecyclePointV1::AcquirePrepareLaunch)
+                }
+                Some(flow_diag_v1::DurableFlowJobPurposeV1::Acquire) => {
+                    Some(flow_diag_v1::DurableLifecyclePointV1::AcquireWorkerLaunch)
+                }
+                _ => None,
+            };
+            if let Some(point) = point {
+                observer.lifecycle_point(point);
+            }
+        }
         std::thread::spawn(move || {
             let _finished = WorkerCompletion(complete);
+            #[cfg(all(
+                feature = "synthetic-born-joined-qualification",
+                feature = "durable-proposal"
+            ))]
+            if let Some((job, _, _)) = &worker_flow {
+                job.started();
+            }
             let result = work(cancellation);
             #[cfg(all(
                 feature = "synthetic-born-joined-qualification",
                 feature = "durable-proposal"
             ))]
-            if let Some((_, observer, stage)) = &worker_flow {
-                durable_witness_v1::observe_flow_worker_v1(observer, *stage, &result);
+            if let Some((job, _, stage)) = &worker_flow {
+                durable_witness_v1::observe_flow_worker_v1(job, *stage, &result);
             }
             let _ = send.send(result);
         });

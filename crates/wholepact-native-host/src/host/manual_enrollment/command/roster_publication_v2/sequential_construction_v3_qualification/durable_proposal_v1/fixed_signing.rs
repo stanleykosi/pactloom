@@ -917,7 +917,7 @@ pub(super) fn exercise(input: FixedSigningInputsV1<'_>) -> Result<()> {
         done(worker, index, &mut trace)?;
         trace.begin(B::DurableHostOpen);
         worker
-            .send(Command::OpenDurable(index, input.proposal.clone()))
+            .send(Command::OpenDurableObserved(index, input.proposal.clone()))
             .map_err(|error| trace.worker(error))?;
         let (peer, scope) = match worker.receive().map_err(|error| trace.worker(error))? {
             Reply::DurablePeer {

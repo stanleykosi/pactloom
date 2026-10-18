@@ -40,6 +40,8 @@ pub(super) struct Transcript<'a> {
     admission_diagnostics: super::safe_diagnostics_v1::AdmissionDiagnosticCapture,
     #[cfg(feature = "synthetic-born-joined-qualification")]
     durable_flow: super::safe_diagnostics_v1::DurableFlowCapture,
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    durable_lifecycle: super::safe_diagnostics_v1::DurableLifecycleCapture,
 }
 
 impl<'a> Transcript<'a> {
@@ -77,6 +79,8 @@ impl<'a> Transcript<'a> {
             admission_diagnostics: Default::default(),
             #[cfg(feature = "synthetic-born-joined-qualification")]
             durable_flow: Default::default(),
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            durable_lifecycle: Default::default(),
         })
     }
 
@@ -86,6 +90,7 @@ impl<'a> Transcript<'a> {
             + self.history_measurement_retained_bytes()
             + self.admission_diagnostic_retained_bytes()
             + self.durable_flow_retained_bytes()
+            + self.durable_lifecycle_retained_bytes()
             + self
                 .paths
                 .values()
@@ -136,6 +141,16 @@ impl<'a> Transcript<'a> {
             0
         }
     }
+    fn durable_lifecycle_retained_bytes(&self) -> usize {
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        { self.durable_lifecycle.retained_bytes() }
+        #[cfg(not(feature = "synthetic-born-joined-qualification"))]
+        { 0 }
+    }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(super) fn durable_lifecycle_lines(&self) -> Vec<&str> {
+        self.durable_lifecycle.public_lines(&self.durable_flow)
+    }
     #[cfg(feature = "synthetic-born-joined-qualification")]
     pub(super) fn durable_flow_lines(&self) -> Vec<&str> {
         self.durable_flow.public_lines()
@@ -172,6 +187,7 @@ impl<'a> Transcript<'a> {
             self.history_measurements.discard_for_budget();
             self.admission_diagnostics.discard_for_budget();
             self.durable_flow.discard_for_budget();
+            self.durable_lifecycle.discard_for_budget();
         }
         if chunk.len() > MAX_BYTES.saturating_sub(self.retained_bytes()) {
             return Err(Failure::OutputLimit);
@@ -211,10 +227,12 @@ impl<'a> Transcript<'a> {
                     if retained > MAX_BYTES {
                         retained -= self.history_measurements.retained_bytes()
                             + self.admission_diagnostics.retained_bytes()
-                            + self.durable_flow.retained_bytes();
+                            + self.durable_flow.retained_bytes()
+                            + self.durable_lifecycle.retained_bytes();
                         self.history_measurements.discard_for_budget();
                         self.admission_diagnostics.discard_for_budget();
                         self.durable_flow.discard_for_budget();
+                        self.durable_lifecycle.discard_for_budget();
                     }
                     if retained > MAX_BYTES {
                         return Err(Failure::OutputLimit);
@@ -243,6 +261,10 @@ impl<'a> Transcript<'a> {
                 self.durable_flow
                     .capture_line(line, MAX_BYTES.saturating_sub(retained));
                 retained = retained - previous + self.durable_flow.retained_bytes();
+                let previous = self.durable_lifecycle.retained_bytes();
+                self.durable_lifecycle
+                    .capture_line(line, MAX_BYTES.saturating_sub(retained));
+                retained = retained - previous + self.durable_lifecycle.retained_bytes();
             }
             for (marker, path) in &mut self.paths {
                 // Preserve the original exact substring lookup, even when a
@@ -265,10 +287,12 @@ impl<'a> Transcript<'a> {
                     if retained > MAX_BYTES {
                         retained -= self.history_measurements.retained_bytes()
                             + self.admission_diagnostics.retained_bytes()
-                            + self.durable_flow.retained_bytes();
+                            + self.durable_flow.retained_bytes()
+                            + self.durable_lifecycle.retained_bytes();
                         self.history_measurements.discard_for_budget();
                         self.admission_diagnostics.discard_for_budget();
                         self.durable_flow.discard_for_budget();
+                        self.durable_lifecycle.discard_for_budget();
                     }
                     if retained > MAX_BYTES {
                         return Err(Failure::OutputLimit);
@@ -926,4 +950,63 @@ mod tests {
             assert!(measured.durable_flow_lines()[0].contains("invalid=true"));
         }
     }
+    #[test]
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    fn durable_lifecycle_split_compaction_and_pairing() {
+        let root = Path::new("/tmp/owned");
+        let mut transcript = Transcript::new([]).unwrap();
+        let flow = format!("[DURABLE_FLOW_V1 {}]\n", super::super::safe_diagnostics_v1::DURABLE_FLOW_MAXIMAL_TEST_JSON);
+        let lifecycle = format!("[DURABLE_LIFECYCLE_V1 {}]\r\n", super::super::safe_diagnostics_v1::DURABLE_LIFECYCLE_MAXIMAL_TEST_JSON);
+        transcript.append(flow.as_bytes(), root).unwrap();
+        let split = lifecycle.len() / 2;
+        transcript.append(&lifecycle.as_bytes()[..split], root).unwrap();
+        assert!(transcript.durable_lifecycle_lines().is_empty());
+        transcript.append(&lifecycle.as_bytes()[split..], root).unwrap();
+        transcript.consume(None).unwrap();
+        assert!(transcript.bytes.is_empty());
+        assert!(transcript.durable_lifecycle_lines()[0].starts_with("CI_SYNTHETIC_DURABLE_LIFECYCLE {"));
+        assert_eq!(transcript.retained_bytes(), transcript.timing_retained_bytes() + transcript.durable_flow_retained_bytes() + transcript.durable_lifecycle_retained_bytes());
+        transcript.append(lifecycle.as_bytes(), root).unwrap();
+        assert!(transcript.durable_lifecycle_lines()[0].contains("invalid=true"));
+        assert!(!transcript.durable_flow_lines()[0].contains("invalid=true"));
+    }
+    #[test]
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    fn durable_lifecycle_optional_copy_yields_to_original_chunk_budget() {
+        let root = Path::new("/tmp/owned");
+        let mut measured = Transcript::new([]).unwrap();
+        let mut original = Transcript::new([]).unwrap();
+        let lines = format!("[DURABLE_FLOW_V1 {}]\n[DURABLE_LIFECYCLE_V1 {}]\n", super::super::safe_diagnostics_v1::DURABLE_FLOW_MAXIMAL_TEST_JSON, super::super::safe_diagnostics_v1::DURABLE_LIFECYCLE_MAXIMAL_TEST_JSON);
+        measured.append(lines.as_bytes(), root).unwrap();
+        measured.consume(None).unwrap();
+        assert!(measured.durable_lifecycle_retained_bytes() > 0);
+        let chunk = vec![b'x'; MAX_BYTES - original.timing_retained_bytes()];
+        original.append(&chunk, root).unwrap(); measured.append(&chunk, root).unwrap();
+        assert_eq!(measured.retained_bytes(), original.retained_bytes());
+        assert_eq!(measured.durable_lifecycle_retained_bytes(), 0);
+        assert_eq!(measured.durable_flow_retained_bytes(), 0);
+        assert!(measured.durable_lifecycle_lines()[0].contains("invalid=true"));
+        assert_eq!(original.append(b"x", root), Err(Failure::OutputLimit));
+        assert_eq!(measured.append(b"x", root), Err(Failure::OutputLimit));
+    }
+    #[test]
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    fn durable_lifecycle_optional_copy_yields_to_original_metadata_budget() {
+        let root = Path::new("/tmp/owned");
+        for metadata in ["[JOINED_DIAGNOSTIC Bootstrap Begin]\n", "SYNTHETIC_JOINED_DRAFT_PATH=/tmp/owned/exact\n"] {
+            let mut measured = Transcript::new([MARKER]).unwrap();
+            let mut original = Transcript::new([MARKER]).unwrap();
+            let lines = format!("[DURABLE_FLOW_V1 {}]\n[DURABLE_LIFECYCLE_V1 {}]\n", super::super::safe_diagnostics_v1::DURABLE_FLOW_MAXIMAL_TEST_JSON, super::super::safe_diagnostics_v1::DURABLE_LIFECYCLE_MAXIMAL_TEST_JSON);
+            measured.append(lines.as_bytes(), root).unwrap(); measured.consume(None).unwrap();
+            let filler = MAX_BYTES - measured.timing_retained_bytes() - measured.durable_flow_retained_bytes() - measured.durable_lifecycle_retained_bytes() - metadata.len() - 1;
+            let mut chunk = vec![b'x'; filler]; chunk.push(b'\n'); chunk.extend_from_slice(metadata.as_bytes());
+            original.append(&chunk, root).unwrap(); measured.append(&chunk, root).unwrap();
+            assert_eq!(measured.durable_lifecycle_retained_bytes(), 0);
+            assert_eq!(measured.durable_flow_retained_bytes(), 0);
+            assert_eq!(measured.retained_bytes(), original.retained_bytes());
+            assert_eq!(measured.summary(), original.summary());
+            assert!(measured.durable_lifecycle_lines()[0].contains("invalid=true"));
+        }
+    }
+
 }

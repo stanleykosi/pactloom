@@ -3,8 +3,9 @@
 //! SQL commit or rollback. No diagnostic lock is held across operational work.
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
+use std::time::{Duration, Instant};
 use wholepact_authority::transport::history_diagnostics_v1::{
     CheckedHistoryFailureV1, CheckedHistoryIoKindV1, CheckedHistoryMeasurementV1,
     CheckedHistoryPhaseV1, CheckedHistoryStageV1,
@@ -491,6 +492,239 @@ impl DurableFlowTransportFailureV1 {
         self.failure.measurement()
     }
 }
+const LIFECYCLE_BUDGET_US: u32 = 120_000_000;
+const LIFECYCLE_CAP_US: u32 = 600_000_000;
+const LIFECYCLE_COUNT_CAP: u32 = 1_000_000;
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum DurableLifecyclePointV1 {
+    NativeOpenComplete,
+    PairComplete,
+    WitnessSetupComplete,
+    AcceptComplete,
+    RedisclosureComplete,
+    ImportComplete,
+    HistoricalLookupComplete,
+    AcquirePrepareLaunch,
+    AcquirePrepareComplete,
+    AcquireNativeApproval,
+    AcquireWorkerLaunch,
+    FixtureFailure,
+    AfterDrain,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum DurablePendingWaitKindV1 {
+    FullPrecheck,
+    FullPostcheck,
+    Liveness,
+    Poll,
+}
+#[derive(Clone, Copy)]
+pub struct DurableLifecyclePointMeasurementV1 {
+    age_us: u32,
+    remaining_us: u32,
+}
+impl DurableLifecyclePointMeasurementV1 {
+    scalars! { age_us: u32, remaining_us: u32 }
+}
+#[derive(Clone, Copy, Default)]
+pub struct DurablePendingWaitCostV1 {
+    calls: u32,
+    total_us: u32,
+    max_us: u32,
+}
+impl DurablePendingWaitCostV1 {
+    scalars! { calls: u32, total_us: u32, max_us: u32 }
+}
+pub struct DurableLifecycleDiagnosticV1 {
+    operation: DurableFlowOperationV1,
+    fixture_result: DurableFlowResultV1,
+    owner_budget_us: u32,
+    points: [Option<DurableLifecyclePointMeasurementV1>; 13],
+    pending_wait: [DurablePendingWaitCostV1; 4],
+    worker_purpose: Option<DurableFlowJobPurposeV1>,
+    worker_started_to_client_entry_us: Option<u32>,
+    worker_started_to_client_return_us: Option<u32>,
+    clamped: bool,
+    incomplete: bool,
+}
+impl DurableLifecycleDiagnosticV1 {
+    scalars! { operation: DurableFlowOperationV1, fixture_result: DurableFlowResultV1,
+    owner_budget_us: u32, worker_purpose: Option<DurableFlowJobPurposeV1>,
+    worker_started_to_client_entry_us: Option<u32>,
+    worker_started_to_client_return_us: Option<u32>, clamped: bool, incomplete: bool }
+    pub fn point(
+        &self,
+        point: DurableLifecyclePointV1,
+    ) -> Option<DurableLifecyclePointMeasurementV1> {
+        self.points[point as usize]
+    }
+    pub fn pending_wait(&self, kind: DurablePendingWaitKindV1) -> DurablePendingWaitCostV1 {
+        self.pending_wait[kind as usize]
+    }
+}
+#[derive(Default)]
+struct LifecycleDataV1 {
+    points: [Option<DurableLifecyclePointMeasurementV1>; 13],
+    pending_wait: [DurablePendingWaitCostV1; 4],
+    clamped: bool,
+}
+#[derive(Default)]
+struct LifecycleSharedV1 {
+    data: Mutex<LifecycleDataV1>,
+    incomplete: AtomicBool,
+}
+/// Fixed-size inert owner measurements. No source, native owner or authority is retained.
+#[derive(Clone)]
+pub(crate) struct DurableLifecycleObserverV1 {
+    original_start: Option<Instant>,
+    shared: Arc<LifecycleSharedV1>,
+}
+impl DurableLifecycleObserverV1 {
+    pub(crate) fn new(original_deadline: Instant) -> Self {
+        Self {
+            original_start: original_deadline.checked_sub(Duration::from_secs(120)),
+            shared: Arc::new(LifecycleSharedV1::default()),
+        }
+    }
+    fn update(&self, apply: impl FnOnce(&mut LifecycleDataV1)) {
+        if let Ok(mut data) = self.shared.data.try_lock() {
+            apply(&mut data);
+        } else {
+            self.shared.incomplete.store(true, Ordering::Release);
+        }
+    }
+    pub(crate) fn point(&self, point: DurableLifecyclePointV1) {
+        self.point_at(point, Instant::now());
+    }
+    pub(crate) fn point_at(&self, point: DurableLifecyclePointV1, now: Instant) {
+        let Some(age) = self
+            .original_start
+            .and_then(|start| now.checked_duration_since(start))
+        else {
+            self.shared.incomplete.store(true, Ordering::Release);
+            return;
+        };
+        self.update(|data| {
+            if data.points[point as usize].is_some() {
+                self.shared.incomplete.store(true, Ordering::Release);
+                return;
+            }
+            let age_us = lifecycle_micros(age, &mut data.clamped);
+            data.points[point as usize] = Some(DurableLifecyclePointMeasurementV1 {
+                age_us,
+                remaining_us: LIFECYCLE_BUDGET_US.saturating_sub(age_us),
+            });
+        });
+    }
+    pub(crate) fn cost(&self, kind: DurablePendingWaitKindV1, elapsed: Duration) {
+        self.update(|data| {
+            let micros = lifecycle_micros(elapsed, &mut data.clamped);
+            let value = &mut data.pending_wait[kind as usize];
+            if value.calls == LIFECYCLE_COUNT_CAP {
+                data.clamped = true;
+            } else {
+                value.calls += 1;
+            }
+            let total = u64::from(value.total_us) + u64::from(micros);
+            if total > u64::from(LIFECYCLE_CAP_US) {
+                data.clamped = true;
+            }
+            value.total_us = total.min(u64::from(LIFECYCLE_CAP_US)) as u32;
+            value.max_us = value.max_us.max(micros);
+        });
+    }
+    fn snapshot(
+        &self,
+        operation: DurableFlowOperationV1,
+        purpose: Option<DurableFlowJobPurposeV1>,
+        timing: WorkerTimingV1,
+        flow_incomplete: bool,
+    ) -> Option<DurableLifecycleDiagnosticV1> {
+        if operation != DurableFlowOperationV1::WriterReconcile {
+            return None;
+        }
+        let Ok(data) = self.shared.data.try_lock() else {
+            self.shared.incomplete.store(true, Ordering::Release);
+            return None;
+        };
+        Some(DurableLifecycleDiagnosticV1 {
+            operation,
+            fixture_result: DurableFlowResultV1::ReturnedErr,
+            owner_budget_us: LIFECYCLE_BUDGET_US,
+            points: data.points,
+            pending_wait: data.pending_wait,
+            worker_purpose: purpose,
+            worker_started_to_client_entry_us: timing.client_entry_us,
+            worker_started_to_client_return_us: timing.client_return_us,
+            clamped: data.clamped || timing.clamped,
+            incomplete: flow_incomplete
+                || timing.incomplete
+                || self.original_start.is_none()
+                || self.shared.incomplete.load(Ordering::Acquire),
+        })
+    }
+}
+fn lifecycle_micros(duration: Duration, clamped: &mut bool) -> u32 {
+    let micros = duration.as_micros();
+    if micros > u128::from(LIFECYCLE_CAP_US) {
+        *clamped = true;
+    }
+    micros.min(u128::from(LIFECYCLE_CAP_US)) as u32
+}
+fn lifecycle_optional_clock(observed: bool, now: impl FnOnce() -> Instant) -> Option<Instant> {
+    observed.then(now)
+}
+pub(crate) fn observe_pending_wait_v1<T>(
+    observer: Option<&DurableLifecycleObserverV1>,
+    kind: DurablePendingWaitKindV1,
+    call: impl FnOnce() -> T,
+) -> T {
+    let start = lifecycle_optional_clock(observer.is_some(), Instant::now);
+    let original = call();
+    if let (Some(observer), Some(start)) = (observer, start) {
+        observer.cost(kind, start.elapsed());
+    }
+    original
+}
+#[derive(Clone, Copy, Default)]
+struct WorkerTimingV1 {
+    identity: Option<JobIdentity>,
+    thread: Option<std::thread::ThreadId>,
+    started: Option<Instant>,
+    client_entry_us: Option<u32>,
+    client_return_us: Option<u32>,
+    clamped: bool,
+    incomplete: bool,
+}
+/// A final-only supplement. Worker return is not UI receipt or acceptance.
+pub struct DurableFlowAfterDrainV1 {
+    drain_result: DurableFlowResultV1,
+    drain_error: Option<DurableFlowErrorV1>,
+    worker_purpose: Option<DurableFlowJobPurposeV1>,
+    worker_result: DurableFlowResultV1,
+    worker_error: Option<DurableFlowErrorV1>,
+    call_outcomes: DurableFlowCallOutcomesV1,
+    lower_call_measurement: Option<Arc<DurableFlowTransportFailureV1>>,
+    clamped: bool,
+    incomplete: bool,
+}
+impl DurableFlowAfterDrainV1 {
+    scalars! { drain_result: DurableFlowResultV1,
+    worker_purpose: Option<DurableFlowJobPurposeV1>, worker_result: DurableFlowResultV1,
+    clamped: bool, incomplete: bool }
+    pub fn drain_error(&self) -> Option<&DurableFlowErrorV1> {
+        self.drain_error.as_ref()
+    }
+    pub fn worker_error(&self) -> Option<&DurableFlowErrorV1> {
+        self.worker_error.as_ref()
+    }
+    pub fn call_outcomes(&self) -> &DurableFlowCallOutcomesV1 {
+        &self.call_outcomes
+    }
+    pub fn lower_call_measurement(&self) -> Option<&DurableFlowTransportFailureV1> {
+        self.lower_call_measurement.as_deref()
+    }
+}
 pub struct DurableFlowDiagnosticV1 {
     operation: DurableFlowOperationV1,
     first_error: Option<DurableFlowErrorV1>,
@@ -498,7 +732,9 @@ pub struct DurableFlowDiagnosticV1 {
     fixture_result: DurableFlowResultV1,
     completion: DurableFlowCompletionV1,
     call_outcomes: DurableFlowCallOutcomesV1,
-    lower_call_measurement: Option<DurableFlowTransportFailureV1>,
+    lower_call_measurement: Option<Arc<DurableFlowTransportFailureV1>>,
+    after_drain: Option<DurableFlowAfterDrainV1>,
+    lifecycle: Option<DurableLifecycleDiagnosticV1>,
     clamped: bool,
     incomplete: bool,
 }
@@ -518,17 +754,71 @@ impl DurableFlowDiagnosticV1 {
         &self.call_outcomes
     }
     pub fn lower_call_measurement(&self) -> Option<&DurableFlowTransportFailureV1> {
-        self.lower_call_measurement.as_ref()
+        self.lower_call_measurement.as_deref()
+    }
+    pub fn after_drain(&self) -> Option<&DurableFlowAfterDrainV1> {
+        self.after_drain.as_ref()
+    }
+    pub fn lifecycle(&self) -> Option<&DurableLifecycleDiagnosticV1> {
+        self.lifecycle.as_ref()
     }
 }
 /// Owns the exact fixture error, without cloning, reconstructing or formatting it.
 pub struct DurableFlowFailureV1 {
     error: crate::Error,
     diagnostic: Option<DurableFlowDiagnosticV1>,
+    pending: Option<(DurableFlowObserverV1, Option<JobIdentity>)>,
 }
 impl DurableFlowFailureV1 {
     pub(crate) fn new(error: crate::Error, diagnostic: Option<DurableFlowDiagnosticV1>) -> Self {
-        Self { error, diagnostic }
+        Self {
+            error,
+            diagnostic,
+            pending: None,
+        }
+    }
+    pub(crate) fn new_pending(error: crate::Error, observer: DurableFlowObserverV1) -> Self {
+        let snapshot = observer.failure_snapshot();
+        let (diagnostic, identity) = match snapshot {
+            Some((diagnostic, identity)) => (Some(diagnostic), identity),
+            None => (None, None),
+        };
+        Self {
+            error,
+            diagnostic,
+            pending: Some((observer, identity)),
+        }
+    }
+    /// Call only after the original entry was dropped. This reads inert data;
+    /// it does not drain, wait, retry, inspect history or change the error.
+    pub fn finalize_after_drain(&mut self) {
+        let Some((observer, identity)) = self.pending.take() else {
+            return;
+        };
+        let initial_lower = self
+            .diagnostic
+            .as_ref()
+            .is_some_and(|d| d.lower_call_measurement.is_some());
+        let initial_result = self
+            .diagnostic
+            .as_ref()
+            .map(|d| d.completion.result)
+            .unwrap_or(DurableFlowResultV1::NotObserved);
+        let Some(after) = observer.finish_after_drain(identity, initial_lower, initial_result)
+        else {
+            return;
+        };
+        if let Some(diagnostic) = self.diagnostic.as_mut() {
+            diagnostic.lifecycle = observer.lifecycle.as_ref().and_then(|lifecycle| {
+                lifecycle.snapshot(
+                    diagnostic.operation,
+                    identity.map(|job| job.purpose),
+                    after.worker_timing,
+                    after.diagnostic.incomplete,
+                )
+            });
+            diagnostic.after_drain = Some(after.diagnostic);
+        }
     }
     pub fn error(&self) -> &crate::Error {
         &self.error
@@ -973,7 +1263,11 @@ struct ActiveObservation {
     completion: DurableFlowCompletionV1,
     calls: DurableFlowCallOutcomesV1,
     invalid_calls: u16,
-    lower: Option<DurableFlowTransportFailureV1>,
+    lower: Option<Arc<DurableFlowTransportFailureV1>>,
+    worker_result: DurableFlowResultV1,
+    worker_error: Option<DurableFlowErrorV1>,
+    worker_timing: WorkerTimingV1,
+    drain: Option<(DurableFlowResultV1, Option<DurableFlowErrorV1>)>,
     next_job: u64,
     job: Option<JobIdentity>,
 }
@@ -1002,6 +1296,7 @@ pub(crate) struct DurableFlowObserverV1 {
     shared: Arc<SharedData>,
     attempt: Option<u64>,
     operation: DurableFlowOperationV1,
+    lifecycle: Option<DurableLifecycleObserverV1>,
 }
 #[derive(Clone)]
 pub(crate) struct DurableFlowJobObservationV1 {
@@ -1014,6 +1309,7 @@ impl DurableFlowCollectorV1 {
             shared: self.shared.clone(),
             attempt: None,
             operation,
+            lifecycle: None,
         };
         // Invalidate every preceding token BEFORE attempting the data lock.
         // MAX is a permanent exhausted generation and is never a valid attempt.
@@ -1049,6 +1345,10 @@ impl DurableFlowCollectorV1 {
             calls: DurableFlowCallOutcomesV1::default(),
             invalid_calls: 0,
             lower: None,
+            worker_result: DurableFlowResultV1::NotObserved,
+            worker_error: None,
+            worker_timing: WorkerTimingV1::default(),
+            drain: None,
             next_job: 0,
             job: None,
         });
@@ -1057,6 +1357,63 @@ impl DurableFlowCollectorV1 {
     }
 }
 impl DurableFlowObserverV1 {
+    pub(crate) fn with_lifecycle(mut self, lifecycle: Option<&DurableLifecycleObserverV1>) -> Self {
+        self.lifecycle = lifecycle.cloned();
+        self
+    }
+    pub(crate) fn lifecycle_point(&self, point: DurableLifecyclePointV1) {
+        if let Some(lifecycle) = &self.lifecycle {
+            lifecycle.point(point);
+        }
+    }
+    fn client_sample(&self) -> Option<(Instant, std::thread::ThreadId)> {
+        self.lifecycle
+            .as_ref()
+            .map(|_| (Instant::now(), std::thread::current().id()))
+    }
+    fn client_span(
+        &self,
+        active: &mut ActiveObservation,
+        purpose: DurableFlowJobPurposeV1,
+        sample: Option<(Instant, std::thread::ThreadId)>,
+        returning: bool,
+    ) {
+        let Some((now, thread)) = sample else {
+            return;
+        };
+        let timing = &mut active.worker_timing;
+        if active.job.is_none()
+            || active.job != timing.identity
+            || active.job.map(|job| job.purpose) != Some(purpose)
+            || timing.thread != Some(thread)
+        {
+            timing.incomplete = true;
+            return;
+        }
+        let Some(elapsed) = timing
+            .started
+            .and_then(|started| now.checked_duration_since(started))
+        else {
+            timing.incomplete = true;
+            return;
+        };
+        if (returning && (timing.client_entry_us.is_none() || timing.client_return_us.is_some()))
+            || (!returning && timing.client_entry_us.is_some())
+        {
+            timing.incomplete = true;
+            return;
+        }
+        let micros = lifecycle_micros(elapsed, &mut timing.clamped);
+        if returning {
+            if timing.client_entry_us.is_some_and(|entry| micros < entry) {
+                timing.incomplete = true;
+                return;
+            }
+            timing.client_return_us = Some(micros);
+        } else {
+            timing.client_entry_us = Some(micros);
+        }
+    }
     pub(crate) fn operation(&self) -> DurableFlowOperationV1 {
         self.operation
     }
@@ -1117,6 +1474,13 @@ impl DurableFlowObserverV1 {
         });
     }
     pub(crate) fn call_enter(&self, slot: DurableFlowCallV1) {
+        let purpose = match slot {
+            DurableFlowCallV1::WriterAcquire => Some(DurableFlowJobPurposeV1::Acquire),
+            DurableFlowCallV1::WriterActivate => Some(DurableFlowJobPurposeV1::Activate),
+            DurableFlowCallV1::ActiveVerify => Some(DurableFlowJobPurposeV1::ReconcilePrepare),
+            _ => None,
+        };
+        let sample = purpose.and_then(|_| self.client_sample());
         self.update(|active| {
             let bit = 1u16 << (slot as u8);
             if active.invalid_calls & bit != 0 {
@@ -1126,6 +1490,9 @@ impl DurableFlowObserverV1 {
             let value = active.calls.slot(slot);
             if *value == DurableFlowCallOutcomeV1::NotObserved {
                 *value = DurableFlowCallOutcomeV1::Entered;
+                if let Some(purpose) = purpose {
+                    self.client_span(active, purpose, sample, false);
+                }
             } else {
                 active.invalid_calls |= bit;
                 self.mark_incomplete();
@@ -1191,6 +1558,9 @@ impl DurableFlowObserverV1 {
                     epoch,
                 };
                 active.job = Some(identity);
+                active.worker_result = DurableFlowResultV1::NotObserved;
+                active.worker_error = None;
+                active.worker_timing = WorkerTimingV1::default();
                 active.completion = DurableFlowCompletionV1 {
                     purpose: Some(purpose),
                     result: DurableFlowResultV1::NotObserved,
@@ -1211,6 +1581,19 @@ impl DurableFlowObserverV1 {
         callback_stage: Option<DurableFlowCallbackStageV1>,
         result: std::result::Result<T, CheckedHistoryFailureV1>,
     ) -> std::result::Result<T, wholepact_authority::AuthorityError> {
+        let worker_purpose = match purpose {
+            DurableFlowTransportPurposeV1::Acquire => Some(DurableFlowJobPurposeV1::Acquire),
+            DurableFlowTransportPurposeV1::Activate => Some(DurableFlowJobPurposeV1::Activate),
+            DurableFlowTransportPurposeV1::Verify => {
+                Some(DurableFlowJobPurposeV1::ReconcilePrepare)
+            }
+            DurableFlowTransportPurposeV1::Reserve => None,
+        };
+        if let Some(purpose) = worker_purpose {
+            if let Some(sample) = self.client_sample() {
+                self.update(|active| self.client_span(active, purpose, Some(sample), true));
+            }
+        }
         match result {
             Ok(value) => Ok(value),
             Err(failure) => {
@@ -1231,7 +1614,7 @@ impl DurableFlowObserverV1 {
                     };
                     self.update(|active| {
                         if active.lower.is_none() {
-                            active.lower = Some(lower);
+                            active.lower = Some(Arc::new(lower));
                         }
                     });
                 }
@@ -1282,29 +1665,161 @@ impl DurableFlowObserverV1 {
         if result == DurableFlowResultV1::ReturnedOk {
             return None;
         }
-        let (clamped, lower_incomplete) = active
-            .lower
-            .as_ref()
-            .map(|lower| {
-                (
-                    lower.measurement().clamped(),
-                    lower.measurement().incomplete(),
-                )
-            })
-            .unwrap_or((false, false));
-        Some(DurableFlowDiagnosticV1 {
+        Some(self.snapshot_active(&active, result))
+    }
+    fn snapshot_active(
+        &self,
+        active: &ActiveObservation,
+        result: DurableFlowResultV1,
+    ) -> DurableFlowDiagnosticV1 {
+        let (clamped, lower_incomplete) = lower_flags(active.lower.as_deref());
+        DurableFlowDiagnosticV1 {
             operation: active.operation,
             first_error: active.first_error,
             terminal_error: active.terminal_error,
             fixture_result: result,
             completion: active.completion,
             call_outcomes: active.calls,
-            lower_call_measurement: active.lower,
+            lower_call_measurement: active.lower.clone(),
+            after_drain: None,
+            lifecycle: None,
             clamped,
             incomplete: lower_incomplete
                 || self.shared.incomplete_generation.load(Ordering::Acquire) >= active.attempt,
+        }
+    }
+    /// The early view does not seal or consume the same worker's collector.
+    fn failure_snapshot(&self) -> Option<(DurableFlowDiagnosticV1, Option<JobIdentity>)> {
+        self.update(|active| {
+            let diagnostic = self.snapshot_active(active, DurableFlowResultV1::ReturnedErr);
+            if self.attempt != Some(self.shared.generation.load(Ordering::Acquire)) {
+                self.mark_incomplete();
+                None
+            } else {
+                Some((diagnostic, active.job))
+            }
+        })
+        .flatten()
+    }
+    pub(crate) fn record_drain<T>(&self, original: &std::result::Result<T, crate::Error>) {
+        let error = original
+            .as_ref()
+            .err()
+            .map(|e| e.classify(DurableFlowStageV1::Close));
+        self.update(|active| {
+            if active.drain.is_some() {
+                self.mark_incomplete();
+                return;
+            }
+            active.drain = Some((
+                if original.is_ok() {
+                    DurableFlowResultV1::ReturnedOk
+                } else {
+                    DurableFlowResultV1::ReturnedErr
+                },
+                error,
+            ));
+        });
+    }
+    fn finish_after_drain(
+        &self,
+        identity: Option<JobIdentity>,
+        initial_lower: bool,
+        initial_result: DurableFlowResultV1,
+    ) -> Option<FinishedAfterDrainV1> {
+        let Ok(mut data) = self.shared.data.try_lock() else {
+            self.mark_incomplete();
+            return None;
+        };
+        let Some(active) = data
+            .active
+            .as_ref()
+            .filter(|a| Some(a.attempt) == self.attempt && a.operation == self.operation)
+        else {
+            self.mark_incomplete();
+            return None;
+        };
+        let Some((drain_result, drain_error)) = active.drain else {
+            self.mark_incomplete();
+            return None;
+        };
+        let Some(attempt) = self.attempt else {
+            self.mark_incomplete();
+            return None;
+        };
+        let Some(sealed) = attempt.checked_add(1) else {
+            self.mark_incomplete();
+            return None;
+        };
+        if self
+            .shared
+            .generation
+            .compare_exchange(attempt, sealed, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            self.mark_incomplete();
+            return None;
+        }
+        let active = data.active.take()?;
+        if active.job != identity {
+            // A same-attempt replacement job cannot donate any late CALL,
+            // lower-transport, worker or timing evidence to the initial job.
+            self.mark_incomplete();
+            return None;
+        }
+        let (worker_result, worker_error, worker_timing) = if identity.is_some() {
+            (
+                active.worker_result,
+                active.worker_error,
+                active.worker_timing,
+            )
+        } else {
+            (
+                DurableFlowResultV1::NotObserved,
+                None,
+                WorkerTimingV1::default(),
+            )
+        };
+        let consistent = initial_result == DurableFlowResultV1::NotObserved
+            || worker_result == DurableFlowResultV1::NotObserved
+            || initial_result == worker_result;
+        let lower = if initial_lower { None } else { active.lower };
+        let (clamped, lower_incomplete) = lower_flags(lower.as_deref());
+        Some(FinishedAfterDrainV1 {
+            diagnostic: DurableFlowAfterDrainV1 {
+                drain_result,
+                drain_error,
+                worker_purpose: identity.map(|job| job.purpose),
+                worker_result: if consistent {
+                    worker_result
+                } else {
+                    DurableFlowResultV1::NotObserved
+                },
+                worker_error: if consistent { worker_error } else { None },
+                call_outcomes: active.calls,
+                lower_call_measurement: lower,
+                clamped,
+                incomplete: !consistent
+                    || lower_incomplete
+                    || self.shared.incomplete_generation.load(Ordering::Acquire) >= attempt,
+            },
+            worker_timing,
         })
     }
+}
+struct FinishedAfterDrainV1 {
+    diagnostic: DurableFlowAfterDrainV1,
+    worker_timing: WorkerTimingV1,
+}
+fn lower_flags(lower: Option<&DurableFlowTransportFailureV1>) -> (bool, bool) {
+    lower
+        .map(|lower| {
+            (
+                lower.measurement().clamped(),
+                lower.measurement().incomplete(),
+            )
+        })
+        .unwrap_or((false, false))
 }
 fn job_matches_operation(
     operation: DurableFlowOperationV1,
@@ -1328,6 +1843,50 @@ fn job_matches_operation(
     }
 }
 impl DurableFlowJobObservationV1 {
+    pub(crate) fn purpose(&self) -> Option<DurableFlowJobPurposeV1> {
+        self.identity.map(|identity| identity.purpose)
+    }
+    pub(crate) fn started(&self) {
+        let Some((started, thread)) = self.observer.client_sample() else {
+            return;
+        };
+        self.update(|active| {
+            if active.worker_timing.started.is_some() {
+                active.worker_timing.incomplete = true;
+                return;
+            }
+            active.worker_timing = WorkerTimingV1 {
+                identity: self.identity,
+                thread: Some(thread),
+                started: Some(started),
+                ..WorkerTimingV1::default()
+            };
+        });
+    }
+    /// Observe the actual borrowed worker return before its unchanged send.
+    /// This never changes receive, presentation, or the fixture's error.
+    pub(crate) fn returned<T, E: DurableFlowClassifyV1>(
+        &self,
+        stage: DurableFlowStageV1,
+        original: &std::result::Result<T, E>,
+    ) {
+        let category = original.as_ref().err().map(|e| e.classify(stage));
+        self.update(|active| {
+            if active.worker_result != DurableFlowResultV1::NotObserved {
+                self.observer.mark_incomplete();
+                return;
+            }
+            active.worker_result = if original.is_ok() {
+                DurableFlowResultV1::ReturnedOk
+            } else {
+                DurableFlowResultV1::ReturnedErr
+            };
+            active.worker_error = category;
+            if active.first_error.is_none() {
+                active.first_error = category;
+            }
+        });
+    }
     fn update(&self, apply: impl FnOnce(&mut ActiveObservation)) {
         self.observer.update(|active| {
             if self.identity.is_none() || active.job != self.identity {
@@ -1571,6 +2130,407 @@ mod tests {
             Some(value) => value,
             None => panic!("expected inert failure data"),
         }
+    }
+    #[test]
+    fn durable_flow_pending_snapshot_preserves_original_failure_and_observes_actual_return_after_drain(
+    ) {
+        for worker_ok in [false, true] {
+            let collector = DurableFlowCollectorV1::default();
+            let observer = collector.arm(DurableFlowOperationV1::WriterReconcile);
+            let job = observer.job_start(DurableFlowJobPurposeV1::Acquire, 3);
+            observer.call_enter(DurableFlowCallV1::WriterAcquire);
+            let original_error = crate::Error::Io(std::io::Error::from_raw_os_error(1761));
+            observer.record_terminal(DurableFlowStageV1::AcquireCall, &original_error);
+            let mut failure = DurableFlowFailureV1::new_pending(original_error, observer.clone());
+            let initial = failure.diagnostic().unwrap();
+            assert!(initial.completion().receive() == DurableFlowReceiveV1::Pending);
+            assert!(initial.completion().result() == DurableFlowResultV1::NotObserved);
+            assert!(initial.first_error().is_none());
+            assert!(initial.after_drain().is_none());
+            assert!(initial.call_outcomes().writer_acquire() == DurableFlowCallOutcomeV1::Entered);
+            let original: std::result::Result<(), crate::Error> = if worker_ok {
+                Ok(())
+            } else {
+                Err(crate::Error::Locked)
+            };
+            job.invalidated();
+            job.returned(DurableFlowStageV1::AcquireCall, &original);
+            observer.call_return(DurableFlowCallV1::WriterAcquire, &original);
+            observer.record_drain(&Ok::<(), crate::Error>(()));
+            failure.finalize_after_drain();
+            failure.finalize_after_drain();
+            let initial = failure.diagnostic().unwrap();
+            assert!(initial.completion().receive() == DurableFlowReceiveV1::Pending);
+            assert!(initial.completion().result() == DurableFlowResultV1::NotObserved);
+            assert!(initial.completion().presentation() == DurableFlowPresentationV1::NotObserved);
+            assert!(initial.first_error().is_none());
+            assert!(initial.terminal_error().unwrap().code() == DurableFlowErrorCodeV1::SignerIo);
+            assert!(initial.call_outcomes().writer_acquire() == DurableFlowCallOutcomeV1::Entered);
+            let after = initial.after_drain().unwrap();
+            assert!(
+                after.drain_result() == DurableFlowResultV1::ReturnedOk
+                    && after.drain_error().is_none()
+            );
+            assert!(after.worker_purpose() == Some(DurableFlowJobPurposeV1::Acquire));
+            assert!(
+                after.worker_result()
+                    == if worker_ok {
+                        DurableFlowResultV1::ReturnedOk
+                    } else {
+                        DurableFlowResultV1::ReturnedErr
+                    }
+            );
+            assert!(after.worker_error().is_some() == !worker_ok);
+            assert!(
+                after.call_outcomes().writer_acquire()
+                    == if worker_ok {
+                        DurableFlowCallOutcomeV1::ReturnedOk
+                    } else {
+                        DurableFlowCallOutcomeV1::ReturnedErr
+                    }
+            );
+            assert!(!after.incomplete());
+            assert!(
+                matches!(failure.into_error(), crate::Error::Io(error) if error.raw_os_error() == Some(1761))
+            );
+        }
+    }
+    #[test]
+    fn durable_flow_worker_borrow_preserves_nonclone_result_once_after_receiver_drop_and_cancel() {
+        for cancelled in [false, true] {
+            let collector = DurableFlowCollectorV1::default();
+            let observer = collector.arm(DurableFlowOperationV1::WriterReconcile);
+            let job = observer.job_start(DurableFlowJobPurposeV1::Acquire, 9);
+            let mut failure =
+                DurableFlowFailureV1::new_pending(crate::Error::Locked, observer.clone());
+            let drops = Arc::new(AtomicUsize::new(0));
+            let error = NonCloneError {
+                allocation: Box::new(19),
+                drops: drops.clone(),
+            };
+            let pointer: *const u8 = &*error.allocation;
+            let (send, receive) = std::sync::mpsc::sync_channel(1);
+            drop(receive);
+            let calls = Cell::new(0);
+            let work = || {
+                calls.set(calls.get() + 1);
+                if cancelled {
+                    Err(error)
+                } else {
+                    drop(error);
+                    Ok(Box::new(23))
+                }
+            };
+            let original = work();
+            job.returned(DurableFlowStageV1::AcquireCall, &original);
+            let forwarded = send.send(original).err().unwrap().0;
+            assert!(calls.get() == 1);
+            if cancelled {
+                let Err(original) = forwarded else {
+                    panic!("cancelled worker error changed");
+                };
+                assert!(std::ptr::eq(pointer, &*original.allocation));
+                assert!(drops.load(Ordering::Relaxed) == 0);
+                drop(original);
+            } else {
+                assert!(matches!(forwarded, Ok(value) if *value == 23));
+            }
+            assert!(drops.load(Ordering::Relaxed) == 1);
+            observer.record_drain(&Ok::<(), crate::Error>(()));
+            failure.finalize_after_drain();
+            let diagnostic = failure.diagnostic().unwrap();
+            assert!(diagnostic.completion().receive() == DurableFlowReceiveV1::Pending);
+            assert!(
+                diagnostic.completion().presentation() == DurableFlowPresentationV1::NotObserved
+            );
+            assert!(
+                diagnostic.after_drain().unwrap().worker_result()
+                    == if cancelled {
+                        DurableFlowResultV1::ReturnedErr
+                    } else {
+                        DurableFlowResultV1::ReturnedOk
+                    }
+            );
+        }
+    }
+    #[test]
+    fn durable_flow_after_drain_absence_error_and_duplicate_are_honest() {
+        let collector = DurableFlowCollectorV1::default();
+        let observer = collector.arm(DurableFlowOperationV1::WriterReconcile);
+        let mut absent = DurableFlowFailureV1::new_pending(crate::Error::Locked, observer.clone());
+        absent.finalize_after_drain();
+        assert!(absent.diagnostic().unwrap().after_drain().is_none());
+        assert!(matches!(absent.into_error(), crate::Error::Locked));
+        let observer = collector.arm(DurableFlowOperationV1::WriterReconcile);
+        let mut failure =
+            DurableFlowFailureV1::new_pending(crate::Error::Uncertain, observer.clone());
+        observer.record_drain(&Err::<(), _>(crate::Error::Authentication));
+        observer.record_drain(&Ok::<(), crate::Error>(()));
+        failure.finalize_after_drain();
+        let after = failure.diagnostic().unwrap().after_drain().unwrap();
+        assert!(after.drain_result() == DurableFlowResultV1::ReturnedErr);
+        assert!(
+            after.drain_error().unwrap().code() == DurableFlowErrorCodeV1::SignerAuthentication
+        );
+        assert!(after.drain_error().unwrap().stage() == DurableFlowStageV1::Close);
+        assert!(after.worker_purpose().is_none());
+        assert!(
+            after.worker_result() == DurableFlowResultV1::NotObserved
+                && after.worker_error().is_none()
+        );
+        assert!(after.incomplete());
+        assert!(matches!(failure.into_error(), crate::Error::Uncertain));
+    }
+    #[test]
+    fn durable_flow_after_drain_rearm_stale_job_contention_and_duplicates_never_attribute_results()
+    {
+        for mode in 0..5 {
+            let collector = DurableFlowCollectorV1::default();
+            let observer = collector.arm(DurableFlowOperationV1::WriterReconcile);
+            let job = observer.job_start(DurableFlowJobPurposeV1::Acquire, 1);
+            let mut failure =
+                DurableFlowFailureV1::new_pending(crate::Error::Locked, observer.clone());
+            match mode {
+                0 => {
+                    let current = collector.arm(DurableFlowOperationV1::WriterReconcile);
+                    job.returned(
+                        DurableFlowStageV1::AcquireCall,
+                        &Err::<(), _>(crate::Error::Authentication),
+                    );
+                    observer.record_drain(&Ok::<(), crate::Error>(()));
+                    failure.finalize_after_drain();
+                    assert!(failure.diagnostic().unwrap().after_drain().is_none());
+                    assert!(failed(&current).first_error().is_none());
+                }
+                1 => {
+                    let next = observer.job_start(DurableFlowJobPurposeV1::Acquire, 2);
+                    job.returned(
+                        DurableFlowStageV1::AcquireCall,
+                        &Err::<(), _>(crate::Error::Authentication),
+                    );
+                    next.returned(DurableFlowStageV1::AcquireCall, &Ok::<(), crate::Error>(()));
+                    observer.record_drain(&Ok::<(), crate::Error>(()));
+                    failure.finalize_after_drain();
+                    assert!(failure.diagnostic().unwrap().after_drain().is_none());
+                }
+                2 => {
+                    let guard = collector.shared.data.lock().unwrap();
+                    job.returned(
+                        DurableFlowStageV1::AcquireCall,
+                        &Err::<(), _>(crate::Error::Authentication),
+                    );
+                    drop(guard);
+                    observer.record_drain(&Ok::<(), crate::Error>(()));
+                    failure.finalize_after_drain();
+                    let after = failure.diagnostic().unwrap().after_drain().unwrap();
+                    assert!(
+                        after.worker_result() == DurableFlowResultV1::NotObserved
+                            && after.worker_error().is_none()
+                    );
+                    assert!(after.incomplete());
+                }
+                3 => {
+                    job.returned(DurableFlowStageV1::AcquireCall, &Ok::<(), crate::Error>(()));
+                    job.returned(
+                        DurableFlowStageV1::AcquireCall,
+                        &Err::<(), _>(crate::Error::Authentication),
+                    );
+                    observer.record_drain(&Ok::<(), crate::Error>(()));
+                    failure.finalize_after_drain();
+                    let after = failure.diagnostic().unwrap().after_drain().unwrap();
+                    assert!(
+                        after.worker_result() == DurableFlowResultV1::ReturnedOk
+                            && after.worker_error().is_none()
+                    );
+                    assert!(after.incomplete());
+                }
+                _ => {
+                    let guard = collector.shared.data.lock().unwrap();
+                    let mut missing =
+                        DurableFlowFailureV1::new_pending(crate::Error::Locked, observer.clone());
+                    drop(guard);
+                    observer.record_drain(&Ok::<(), crate::Error>(()));
+                    missing.finalize_after_drain();
+                    assert!(missing.diagnostic().is_none());
+                    assert!(matches!(missing.into_error(), crate::Error::Locked));
+                }
+            }
+        }
+    }
+    #[test]
+    fn durable_flow_after_drain_original_received_result_mismatch_is_not_rewritten() {
+        let collector = DurableFlowCollectorV1::default();
+        let observer = collector.arm(DurableFlowOperationV1::WriterReconcile);
+        let job = observer.job_start(DurableFlowJobPurposeV1::Acquire, 1);
+        job.received(DurableFlowStageV1::AcquireCall, &Ok::<(), crate::Error>(()));
+        let mut failure = DurableFlowFailureV1::new_pending(crate::Error::Locked, observer.clone());
+        job.returned(
+            DurableFlowStageV1::AcquireCall,
+            &Err::<(), _>(crate::Error::Authentication),
+        );
+        observer.record_drain(&Ok::<(), crate::Error>(()));
+        failure.finalize_after_drain();
+        let diagnostic = failure.diagnostic().unwrap();
+        assert!(diagnostic.completion().receive() == DurableFlowReceiveV1::Received);
+        assert!(diagnostic.completion().result() == DurableFlowResultV1::ReturnedOk);
+        let after = diagnostic.after_drain().unwrap();
+        assert!(
+            after.worker_result() == DurableFlowResultV1::NotObserved
+                && after.worker_error().is_none()
+        );
+        assert!(after.incomplete());
+    }
+    #[test]
+    fn durable_lifecycle_fixed_deadline_cost_caps_first_points_and_none_clock_are_explicit() {
+        assert!(lifecycle_optional_clock(false, || panic!("None must not read a clock")).is_none());
+        let calls = Cell::new(0);
+        let original = observe_pending_wait_v1(None, DurablePendingWaitKindV1::Liveness, || {
+            calls.set(calls.get() + 1);
+            Err::<(), _>(crate::Error::Locked)
+        });
+        assert!(calls.get() == 1 && matches!(original, Err(crate::Error::Locked)));
+        let start = Instant::now();
+        let lifecycle = DurableLifecycleObserverV1::new(start + Duration::from_secs(120));
+        lifecycle.point_at(
+            DurableLifecyclePointV1::NativeOpenComplete,
+            start + Duration::from_secs(2),
+        );
+        lifecycle.point_at(
+            DurableLifecyclePointV1::NativeOpenComplete,
+            start + Duration::from_secs(3),
+        );
+        lifecycle.point_at(
+            DurableLifecyclePointV1::AfterDrain,
+            start + Duration::from_secs(601),
+        );
+        lifecycle.cost(DurablePendingWaitKindV1::Poll, Duration::from_micros(7));
+        lifecycle.cost(DurablePendingWaitKindV1::Poll, Duration::from_micros(11));
+        lifecycle.cost(DurablePendingWaitKindV1::Liveness, Duration::from_secs(601));
+        {
+            let mut data = lifecycle.shared.data.lock().unwrap();
+            data.pending_wait[DurablePendingWaitKindV1::FullPrecheck as usize].calls =
+                LIFECYCLE_COUNT_CAP;
+        }
+        lifecycle.cost(DurablePendingWaitKindV1::FullPrecheck, Duration::ZERO);
+        let diagnostic = lifecycle
+            .snapshot(
+                DurableFlowOperationV1::WriterReconcile,
+                None,
+                WorkerTimingV1::default(),
+                false,
+            )
+            .unwrap();
+        let point = diagnostic
+            .point(DurableLifecyclePointV1::NativeOpenComplete)
+            .unwrap();
+        assert!(point.age_us() == 2_000_000 && point.remaining_us() == 118_000_000);
+        let point = diagnostic
+            .point(DurableLifecyclePointV1::AfterDrain)
+            .unwrap();
+        assert!(point.age_us() == LIFECYCLE_CAP_US && point.remaining_us() == 0);
+        let cost = diagnostic.pending_wait(DurablePendingWaitKindV1::Poll);
+        assert!(cost.calls() == 2 && cost.total_us() == 18 && cost.max_us() == 11);
+        assert!(
+            diagnostic
+                .pending_wait(DurablePendingWaitKindV1::Liveness)
+                .total_us()
+                == LIFECYCLE_CAP_US
+        );
+        assert!(
+            diagnostic
+                .pending_wait(DurablePendingWaitKindV1::FullPrecheck)
+                .calls()
+                == LIFECYCLE_COUNT_CAP
+        );
+        assert!(diagnostic.clamped() && diagnostic.incomplete());
+        assert!(diagnostic.worker_purpose().is_none());
+        assert!(diagnostic.worker_started_to_client_entry_us().is_none());
+        assert!(diagnostic.worker_started_to_client_return_us().is_none());
+        assert!(lifecycle
+            .snapshot(
+                DurableFlowOperationV1::InitialSign,
+                None,
+                WorkerTimingV1::default(),
+                false
+            )
+            .is_none());
+    }
+    #[test]
+    fn durable_lifecycle_actual_worker_thread_job_and_attempt_gate_client_spans() {
+        let collector = DurableFlowCollectorV1::default();
+        let lifecycle = DurableLifecycleObserverV1::new(Instant::now() + Duration::from_secs(120));
+        let observer = collector
+            .arm(DurableFlowOperationV1::WriterReconcile)
+            .with_lifecycle(Some(&lifecycle));
+        let job = observer.job_start(DurableFlowJobPurposeV1::Acquire, 1);
+        job.started();
+        let wrong_thread = observer.clone();
+        std::thread::spawn(move || {
+            let sample = wrong_thread.client_sample();
+            wrong_thread.update(|active| {
+                wrong_thread.client_span(active, DurableFlowJobPurposeV1::Acquire, sample, false)
+            });
+        })
+        .join()
+        .unwrap();
+        assert!(observer
+            .update(|active| active.worker_timing.client_entry_us)
+            .flatten()
+            .is_none());
+        observer.call_enter(DurableFlowCallV1::WriterAcquire);
+        let returned = observer.observe_transport(
+            DurableFlowTransportPurposeV1::Acquire,
+            DurableFlowStageV1::AcquireCall,
+            None,
+            Ok::<(), CheckedHistoryFailureV1>(()),
+        );
+        assert!(returned.is_ok());
+        observer.call_return(DurableFlowCallV1::WriterAcquire, &returned);
+        let mut failure = DurableFlowFailureV1::new_pending(crate::Error::Locked, observer.clone());
+        assert!(failure.diagnostic().unwrap().lifecycle().is_none());
+        observer.record_drain(&Ok::<(), crate::Error>(()));
+        failure.finalize_after_drain();
+        let diagnostic = failure.diagnostic().unwrap().lifecycle().unwrap();
+        assert!(diagnostic.worker_purpose() == Some(DurableFlowJobPurposeV1::Acquire));
+        assert!(diagnostic.worker_started_to_client_entry_us().is_some());
+        assert!(
+            diagnostic.worker_started_to_client_return_us()
+                >= diagnostic.worker_started_to_client_entry_us()
+        );
+        assert!(diagnostic.incomplete());
+
+        let observer = collector
+            .arm(DurableFlowOperationV1::WriterReconcile)
+            .with_lifecycle(Some(&lifecycle));
+        let old = observer.job_start(DurableFlowJobPurposeV1::Acquire, 2);
+        old.started();
+        let next = observer.job_start(DurableFlowJobPurposeV1::Acquire, 3);
+        let next_worker = next.clone();
+        std::thread::spawn(move || next_worker.started())
+            .join()
+            .unwrap();
+        old.started();
+        observer.call_enter(DurableFlowCallV1::WriterAcquire);
+        assert!(observer
+            .update(|active| active.worker_timing.client_entry_us)
+            .flatten()
+            .is_none());
+        old.returned(
+            DurableFlowStageV1::AcquireCall,
+            &Err::<(), _>(crate::Error::Authentication),
+        );
+        assert!(
+            observer.update(|active| active.worker_result).unwrap()
+                == DurableFlowResultV1::NotObserved
+        );
+        let current = collector
+            .arm(DurableFlowOperationV1::WriterReconcile)
+            .with_lifecycle(Some(&lifecycle));
+        next.started();
+        assert!(current
+            .update(|active| active.worker_timing.started)
+            .flatten()
+            .is_none());
     }
     const CALLS: [DurableFlowCallV1; 11] = [
         DurableFlowCallV1::WriterAcquire,

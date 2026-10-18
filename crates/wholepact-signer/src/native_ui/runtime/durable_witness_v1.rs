@@ -2498,6 +2498,12 @@ impl NativeRuntime {
                     flow_diag_v1::DurableFlowStageV1::AcquireNative,
                     value.approve(decision, &open.authority, &witness)
                 )?);
+                #[cfg(feature = "synthetic-born-joined-qualification")]
+                if let Some(observer) = &observer {
+                    observer.lifecycle_point(
+                        flow_diag_v1::DurableLifecyclePointV1::AcquireNativeApproval,
+                    );
+                }
                 self.start_flow_witness_job_v1(
                     epoch,
                     #[cfg(feature = "synthetic-born-joined-qualification")]
@@ -2687,27 +2693,19 @@ fn qualification_completion_from_outcome_v1(
 }
 #[cfg(feature = "synthetic-born-joined-qualification")]
 pub(super) fn observe_flow_worker_v1(
-    observer: &flow_diag_v1::DurableFlowObserverV1,
+    job: &flow_diag_v1::DurableFlowJobObservationV1,
     stage: flow_diag_v1::DurableFlowStageV1,
     outcome: &WitnessOutcome,
 ) {
     if let WitnessOutcome::DurablePaymentV1(outcome) = outcome {
         match outcome {
-            DurableWitnessOutcomeV1::Prepared(Err(error))
-            | DurableWitnessOutcomeV1::HistoricalAdmission(Err(error))
-            | DurableWitnessOutcomeV1::Reconciled(Err(error)) => {
-                observer.record_error(stage, error)
-            }
-            DurableWitnessOutcomeV1::Session {
-                result: Err(error), ..
-            }
-            | DurableWitnessOutcomeV1::Activation {
-                result: Err(error), ..
-            }
-            | DurableWitnessOutcomeV1::Admission {
-                result: Err(error), ..
-            } => observer.record_error(stage, error),
-            _ => {}
+            DurableWitnessOutcomeV1::Prepared(result) => job.returned(stage, result),
+            DurableWitnessOutcomeV1::HistoricalAdmission(result) => job.returned(stage, result),
+            DurableWitnessOutcomeV1::Reconciled(result) => job.returned(stage, result),
+            DurableWitnessOutcomeV1::Session { result, .. } => job.returned(stage, result),
+            DurableWitnessOutcomeV1::Activation { result, .. }
+            | DurableWitnessOutcomeV1::Admission { result, .. } => job.returned(stage, result),
+            DurableWitnessOutcomeV1::ObservedPreparation { .. } => {}
         }
     }
 }
@@ -3492,6 +3490,65 @@ mod durable_flow_reconciliation_tests {
         DurableFlowResultV1 as Observed, DurableFlowStageV1 as Stage,
     };
     use std::cell::Cell;
+    #[test]
+    fn actual_worker_hook_retains_ok_and_err_after_receiver_drop_without_ui_receipt() {
+        for successful in [false, true] {
+            let collector = Collector::default();
+            let observer = collector.arm(Operation::WriterReconcile);
+            let job = observer.job_start(Purpose::Reconcile, 11);
+            observer.record_error(Stage::ReconcileCall, &JournalError::Database);
+            observer.record_terminal(Stage::FixtureState, &Error::Locked);
+            let mut failure =
+                flow_diag_v1::DurableFlowFailureV1::new_pending(Error::Locked, observer.clone());
+            let (send, receive) = std::sync::mpsc::sync_channel(1);
+            drop(receive);
+            let calls = Cell::new(0);
+            let work = || {
+                calls.set(calls.get() + 1);
+                WitnessOutcome::DurablePaymentV1(DurableWitnessOutcomeV1::Reconciled(
+                    if successful {
+                        Ok(DurableReconciliationOutcomeV1::Uncertain {
+                            review_digest: "inert-only".into(),
+                        })
+                    } else {
+                        Err(Error::Authentication)
+                    },
+                ))
+            };
+            let original = work();
+            observe_flow_worker_v1(&job, Stage::ReconcileCall, &original);
+            let forwarded = send.send(original).err().unwrap().0;
+            assert!(calls.get() == 1);
+            match forwarded {
+                WitnessOutcome::DurablePaymentV1(DurableWitnessOutcomeV1::Reconciled(result)) => {
+                    assert!(result.is_ok() == successful)
+                }
+                _ => panic!("original worker outcome changed"),
+            }
+            observer.record_drain(&Ok::<(), Error>(()));
+            failure.finalize_after_drain();
+            let initial = failure.diagnostic().unwrap();
+            assert!(initial.first_error().unwrap().code() == Code::JournalDatabase);
+            assert!(initial.terminal_error().unwrap().code() == Code::SignerLocked);
+            assert!(initial.completion().receive() == flow_diag_v1::DurableFlowReceiveV1::Pending);
+            assert!(initial.completion().result() == Observed::NotObserved);
+            assert!(
+                initial.completion().presentation()
+                    == flow_diag_v1::DurableFlowPresentationV1::NotObserved
+            );
+            let after = initial.after_drain().unwrap();
+            assert!(
+                after.worker_result()
+                    == if successful {
+                        Observed::ReturnedOk
+                    } else {
+                        Observed::ReturnedErr
+                    }
+            );
+            assert!(after.worker_error().is_some() == !successful);
+            assert!(matches!(failure.into_error(), Error::Locked));
+        }
+    }
     #[test]
     fn actual_reconciliation_database_error_stays_uncertain_with_separate_calls() {
         let collector = Collector::default();

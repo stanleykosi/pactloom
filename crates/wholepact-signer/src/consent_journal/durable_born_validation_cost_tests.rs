@@ -1059,3 +1059,297 @@ fn encrypted_material_orphan_uncertainties_match_legacy() {
     }
     f.assert_valid_baseline();
 }
+
+// Include the exact fixture wait kernel, not a rewritten test model or an
+// expanded native_ui API. These inert callbacks qualify sequencing only: they
+// do not instantiate or qualify native liveness, consent, source or authority.
+#[path = "../native_ui/qualification/durable_proposal_v1/witness_wait_v1.rs"]
+mod witness_wait_v1;
+
+const WAIT_PENDING_POLLS: usize = 4;
+// A deadlock-cleanup watchdog only, never a performance or transport deadline.
+const WAIT_CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[derive(Clone, Copy)]
+enum QueuedWaitChange {
+    Unchanged,
+    Recovery,
+    OutboxColumn,
+}
+
+impl QueuedWaitChange {
+    fn apply(self, connection: &mut Connection, f: &MaterialFixture) {
+        if matches!(self, Self::Unchanged) {
+            return;
+        }
+        assert_exact_executable_schema(connection);
+        let tx = checked(connection.transaction());
+        match self {
+            Self::Unchanged => unreachable!(),
+            Self::Recovery => {
+                assert!(
+                    checked(tx.execute("UPDATE signer_account SET recovery_required=1", [])) == 1
+                );
+            }
+            Self::OutboxColumn => {
+                let trigger: String = checked(tx.query_row(
+                    "SELECT sql FROM sqlite_schema WHERE name='signer_durable_construction_outbox_no_update'",
+                    [],
+                    |row| row.get(0),
+                ));
+                checked(
+                    tx.execute_batch("DROP TRIGGER signer_durable_construction_outbox_no_update"),
+                );
+                assert!(checked(tx.execute(
+                    "UPDATE signer_durable_construction_outbox SET request_digest=?1 WHERE operation_id=?2",
+                    params![hash_label(0xe8), f.rows[2].request.operation_id],
+                )) == 1);
+                checked(tx.execute_batch(&trigger));
+            }
+        }
+        assert_exact_executable_schema(&tx);
+        checked(tx.commit());
+    }
+}
+
+struct WaitHolderObservation {
+    explicitly_released: bool,
+    before: String,
+    after: String,
+}
+
+struct WaitHolderRelease(Option<std::sync::mpsc::Sender<()>>);
+
+impl WaitHolderRelease {
+    fn release(&mut self) {
+        if let Some(sender) = self.0.take() {
+            // A disconnected holder has already released its mutex. Cleanup
+            // must not panic, including while unwinding another assertion.
+            let _ = sender.send(());
+        }
+    }
+}
+
+impl Drop for WaitHolderRelease {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+struct EncryptedWaitState<'scope, 'fixture> {
+    fixture: &'fixture MaterialFixture,
+    start: Option<std::sync::mpsc::Sender<()>>,
+    held: std::sync::mpsc::Receiver<()>,
+    release: WaitHolderRelease,
+    worker: Option<std::thread::ScopedJoinHandle<'scope, Option<WaitHolderObservation>>>,
+    observation: Option<WaitHolderObservation>,
+    entries: usize,
+    live_checks: usize,
+    polls: usize,
+    sleeps: usize,
+    exits: usize,
+}
+
+impl EncryptedWaitState<'_, '_> {
+    fn assert_pending_contention(&self) {
+        assert!(self.entries == 1 && self.exits == 0);
+        DURABLE_BORN_SNAPSHOT_VALIDATIONS_V1.with(|count| assert!(count.get() == 1));
+        assert!(matches!(
+            self.fixture.encrypted.journal.connection.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        ));
+    }
+
+    fn finish_worker(&mut self) {
+        self.release.release();
+        // Disconnect the start channel too, so an entry failure cannot leave
+        // the scoped worker waiting for a command that will never arrive.
+        self.start.take();
+        if let Some(worker) = self.worker.take() {
+            self.observation = checked(worker.join());
+        }
+    }
+}
+
+impl Drop for EncryptedWaitState<'_, '_> {
+    fn drop(&mut self) {
+        // This runs before thread::scope joins on panic or early return. The
+        // holder's bounded receive additionally breaks an accidental scan
+        // while it owns the mutex, rather than hanging the whole test runner.
+        self.release.release();
+        self.start.take();
+    }
+}
+
+fn encrypted_material_wait_component(change: QueuedWaitChange) {
+    use std::sync::mpsc;
+
+    let f = MaterialFixture::new();
+    f.assert_topology();
+    let original = f.logical_commitment();
+    DURABLE_BORN_SNAPSHOT_VALIDATIONS_V1.with(|count| count.set(0));
+    std::thread::scope(|scope| {
+        let (start_tx, start_rx) = mpsc::channel();
+        let (held_tx, held_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let fixture = &f;
+        let worker = scope.spawn(move || {
+            if start_rx.recv().is_err() {
+                return None;
+            }
+            // The same retained SQLCipher connection used by both full
+            // production checks, not a mock lock or another journal handle.
+            let mut connection = checked(fixture.encrypted.journal.connection.lock());
+            let before = checked(writer_history::complete_journal_commitment(&connection));
+            if held_tx.send(()).is_err() {
+                return None;
+            }
+            let explicitly_released = release_rx.recv_timeout(WAIT_CLEANUP_TIMEOUT).is_ok();
+            if explicitly_released {
+                change.apply(&mut connection, fixture);
+            }
+            let after = checked(writer_history::complete_journal_commitment(&connection));
+            drop(connection);
+            Some(WaitHolderObservation {
+                explicitly_released,
+                before,
+                after,
+            })
+        });
+        let mut state = EncryptedWaitState {
+            fixture: &f,
+            start: Some(start_tx),
+            held: held_rx,
+            release: WaitHolderRelease(Some(release_tx)),
+            worker: Some(worker),
+            observation: None,
+            entries: 0,
+            live_checks: 0,
+            polls: 0,
+            sleeps: 0,
+            exits: 0,
+        };
+        let (result, costs) = measure(|| {
+            witness_wait_v1::run(
+                &mut state,
+                |state| {
+                    state.entries += 1;
+                    state.fixture.encrypted.check()?;
+                    checked(
+                        state
+                            .start
+                            .as_ref()
+                            .expect("holder start channel missing")
+                            .send(()),
+                    );
+                    checked(state.held.recv_timeout(WAIT_CLEANUP_TIMEOUT));
+                    Ok(())
+                },
+                |state| {
+                    // Inert component liveness only. The actual native owner
+                    // is neither manufactured nor emulated by this callback.
+                    state.assert_pending_contention();
+                    state.live_checks += 1;
+                    Ok(())
+                },
+                |state| {
+                    state.assert_pending_contention();
+                    state.polls += 1;
+                    assert!(state.polls <= WAIT_PENDING_POLLS);
+                    assert!(state.live_checks == state.polls);
+                    if state.polls == WAIT_PENDING_POLLS {
+                        state.finish_worker();
+                        true
+                    } else {
+                        false
+                    }
+                },
+                |state| {
+                    assert!(state.worker.is_none());
+                    assert!(state
+                        .observation
+                        .as_ref()
+                        .is_some_and(|o| o.explicitly_released));
+                    assert!(state.polls == WAIT_PENDING_POLLS);
+                    state.exits += 1;
+                    // No cached success: queued changes must be observed by
+                    // this unchanged full production checker after joining.
+                    state.fixture.encrypted.check()
+                },
+                |state| {
+                    state.assert_pending_contention();
+                    state.sleeps += 1;
+                    assert!(state.sleeps == state.polls);
+                },
+            )
+        });
+        // Cleanup precedes every result/count assertion, including an early
+        // kernel error that never reached its completion poll or exit check.
+        state.finish_worker();
+        assert!(state.entries == 1 && state.exits == 1);
+        assert!(state.live_checks == WAIT_PENDING_POLLS);
+        assert!(state.polls == WAIT_PENDING_POLLS);
+        assert!(state.sleeps == WAIT_PENDING_POLLS - 1);
+        DURABLE_BORN_SNAPSHOT_VALIDATIONS_V1.with(|count| assert!(count.get() == 2));
+        assert!(costs.calls(Phase::SnapshotTotal) == 2);
+        assert!(costs.calls(Phase::SchemaTotal) == 2);
+        assert!(costs.calls(Phase::DurableMaterialRows) == 2);
+        assert!(!costs.is_clamped() && !costs.is_incomplete());
+        let observed = state
+            .observation
+            .take()
+            .expect("holder observation missing");
+        assert!(observed.explicitly_released);
+        assert!(original == observed.before);
+        assert!(
+            observed.after == f.logical_commitment(),
+            "final checker changed retained rows"
+        );
+        match change {
+            QueuedWaitChange::Unchanged => {
+                assert!(result.is_ok(), "unchanged history was refused");
+                assert!(original == observed.after, "component wait changed history");
+            }
+            QueuedWaitChange::Recovery => {
+                assert!(matches!(result, Err(JournalError::RecoveryRequired)));
+                assert!(
+                    original != observed.after,
+                    "queued recovery was not recorded"
+                );
+                f.change_rows(&[], false, |connection| {
+                    checked(
+                        connection.execute("UPDATE signer_account SET recovery_required=0", []),
+                    );
+                });
+            }
+            QueuedWaitChange::OutboxColumn => {
+                assert!(matches!(result, Err(JournalError::InvalidBinding)));
+                assert!(
+                    original != observed.after,
+                    "queued corruption was not recorded"
+                );
+                f.replace_outbox(2, &f.rows[2]);
+            }
+        }
+    });
+    f.assert_topology();
+    assert!(
+        original == f.logical_commitment(),
+        "original 1+2 material history was not retained"
+    );
+}
+
+#[test]
+fn encrypted_material_wait_progresses_while_real_journal_mutex_is_held() {
+    encrypted_material_wait_component(QueuedWaitChange::Unchanged);
+}
+
+#[test]
+fn encrypted_material_wait_exit_refuses_worker_queued_recovery() {
+    encrypted_material_wait_component(QueuedWaitChange::Recovery);
+}
+
+#[test]
+fn encrypted_material_wait_exit_refuses_worker_queued_corruption() {
+    encrypted_material_wait_component(QueuedWaitChange::OutboxColumn);
+}

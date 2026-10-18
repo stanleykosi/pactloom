@@ -1,8 +1,18 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-18, 22:24 UTC.
+Updated: 2026-10-18, 23:28 UTC.
 
 **Incomplete implementation. No full native financial signing, public testnet settlement, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
+
+## CI17: fresh admission reentry passed; pending Acquire expiry and fixture contention
+
+[Run 39172206943](https://github.com/stanleykosi/pactloom/actions/runs/39172206943), qualifier `525d8b9e90ee0660eb62da5f8ddaa2d41602a1f1`, passed build/Python123/Host72/bootstrap/baseline/cleanup. Genuine fresh entry and authenticated exact historical admission recognition completed. Native Acquire approval and worker launch were reached, but the owner expired while the Acquire worker was Pending. All NotObserved call fields describe the diagnostic snapshot before Drop drained that worker, not proof that no eventual acquisition effect occurred. No replacement acquisition or repeated reentry is justified from that evidence. Full signing remains unverified.
+
+Source review found extra synthetic wait-loop work: full source/journal validation on every pending poll, sharing the worker's encrypted connection mutex. Ordinary production polling only checks native/peer liveness while pending. The fixture-only correction retains full entry/exit checks, actual native parent/revocation/deadline, peer and immutable identity checks inside the wait, and all original production receive/worker checks. A deterministic encrypted-mutex test exercises the same wait kernel, progress without a full pending scan, unchanged commitment, and final recovery/corruption refusal. It does not prove full native timing.
+
+WriterReconcile failure observations now retain an immutable initial error and same-job worker evidence through the existing cancel/drain/Drop, without added IO, history reads, wait extensions or retries. Worker return is not UI receipt. A bounded opt-in fresh-owner lifecycle record separates stage and pending-wait costs; observer-None paths do not gain clocks. Original output limits and cleanup gates remain. This terminal-after-drain extension is specifically WriterReconcile, not universal commit certainty for every later stage.
+
+All-features Host+Signer build passed (6m38s) after a nested module-path fix. Nineteen new signer test registrations (including the shared wait kernel compiled twice), Host80 and Python130 passed. Non-synthetic durable Signer lib-tests compiled (2m21s), with synthetic worker/fixture tests absent. Native effectiveness and the full payment cycle still await qualification.
 
 ## CI16: actual admission succeeded; pre-Acquire native owner expired
 
