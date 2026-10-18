@@ -17,6 +17,7 @@ pub(super) struct WriterLocalInventory {
     offline: OfflineHistoryInventory,
     commitment: String,
     common_context_audit: CommonContextSignerAuditInventoryV1,
+    durable_payment_intents: Vec<RetainedDurablePaymentAdmissionIntentV1>,
 }
 impl WriterLocalInventory {
     /// Borrowed historical review evidence; neither accessor grants mutation.
@@ -71,6 +72,7 @@ impl WriterLocalInventory {
         storage::bounded(c, limits)?;
         let offline = offline_history::read_existing_origin_cells(c, &account.account_id)?;
         let common_context_audit = construction_audit_v3::read_all(c, &account.account_id)?;
+        let durable_payment_intents = read_durable_payment_admission_intents_v1(c)?;
         let mut q = c.prepare("SELECT authorization_id,reference,nonce,enrollment_ref,manifest_ref FROM signer_original_consents ORDER BY authorization_id")?;
         let mut originals = Vec::new();
         for row in q.query_map([], |r| {
@@ -182,6 +184,7 @@ impl WriterLocalInventory {
             offline,
             commitment,
             common_context_audit,
+            durable_payment_intents,
         })
     }
     /// Recovery is stricter than an ordinary writer handoff: every retained
@@ -337,6 +340,9 @@ impl PreparedWriterHistory {
         local: &WriterLocalInventory,
         history: &ReconciledAuthorityHistory,
     ) -> Result<Self> {
+        if !local.durable_payment_intents.is_empty() {
+            return Err(JournalError::RecoveryRequired);
+        }
         let union = local.offline_history().reconcile_reservations(history)?;
         let complete_construction = history
             .construction_history_v2()
@@ -984,4 +990,265 @@ pub(super) fn validate_permanent_stop_archive_cells(
     Ok(
         serde_json::json!({"all_local_original_online_consent_terms":online,"all_retained_remote_online_reservations":local.remote_online,"retained_legacy_offline_origins":offline,"named_recipient_history":named,"named_recipient_exposure":"UNKNOWN; every named original, Started marker and result remains retained. The existing financial projection does not account for named origins and cannot activate a writer.","offline_enrollments":local.offline.enrollments(),"offline_intents":local.offline.reservation_intents(),"complete_common_context_audit":audit,"complete_local_journal_commitment":local.commitment(),"remote_exposure":"UNKNOWN until independent complete authenticated witness replay; local absence is never emptiness or no-exposure evidence"}),
     )
+}
+
+/// A nominally distinct complete-history plan. Never constructed through the
+/// legacy offline/construction projections, which rightly deny this purpose.
+#[derive(Serialize)]
+pub(super) struct PreparedDurableWriterHistoryV1 {
+    online: Vec<ReservationPermit>,
+    local_commitment: String,
+    intent: RetainedDurablePaymentAdmissionIntentV1,
+    admission: wholepact_authority::OwnerControlRequest,
+    authority_history_digest: String,
+}
+impl PreparedDurableWriterHistoryV1 {
+    pub(super) fn prepare(
+        c: &Connection,
+        account: &SignerAccountState,
+        limits: (u64, u64),
+        local: &WriterLocalInventory,
+        history: &ReconciledAuthorityHistory,
+        active: &wholepact_authority::AuthenticatedWriterSession,
+        intent: &RetainedDurablePaymentAdmissionIntentV1,
+    ) -> Result<Self> {
+        let stored = account_use_storage::inspect(c, &account.account_id)?;
+        let genesis = stored.genesis().ok_or(JournalError::RecoveryRequired)?;
+        validate_durable_local_profile(c, genesis, limits)?;
+        if local.durable_payment_intents.len() != 1
+            || local.durable_payment_intents.first() != Some(intent)
+            || !local.offline.enrollments().is_empty()
+            || !local.offline.reservation_intents().is_empty()
+            || !local.offline.admitted_origins().is_empty()
+            || !local.common_context_audit.rows.is_empty()
+        {
+            return Err(JournalError::RecoveryRequired);
+        }
+        let request = intent.request();
+        let admission = history
+            .durable_payment_admission_v1(&request.operation_id)
+            .map_err(|_| JournalError::InvalidBinding)?
+            .ok_or(JournalError::RecoveryRequired)?;
+        history
+            .require_durable_payment_session_v1(&request.operation_id, active)
+            .map_err(|_| JournalError::RecoveryRequired)?;
+        let OwnerControl::AdmitDurablePaymentV1 { record } = &admission.control else {
+            return Err(JournalError::InvalidBinding);
+        };
+        if admission != request
+            || intent.disclosure() != history.disclosure()
+            || intent.owner_certificate_digest()
+                != history.account_policy().owner_certificate_digest
+            || record.terms.identity.account_id != genesis.identity.account_id
+            || record.terms.identity.full_viewing_key_digest
+                != genesis.identity.full_viewing_key_digest
+            || record.terms.identity.network_profile_id != genesis.identity.network_profile_id
+            || record.terms.identity.derivation_domain != genesis.identity.derivation_domain
+            || record.terms.original_genesis_digest
+                != genesis.digest().map_err(|_| JournalError::InvalidBinding)?
+            || history.pending_birth_commit().is_none_or(|birth| {
+                birth.request.native_birth_digest != genesis.native_birth_digest
+            })
+        {
+            return Err(JournalError::InvalidBinding);
+        }
+        // This complete typed accessor proves the real birth plus all FOUR
+        // bootstrap/InitialV2 events and each admission/session/OnlineV2 origin.
+        // It is NOT a filtered reservation_evidence iterator or empty projection.
+        let online = history
+            .durable_payment_online_permits_v1(&request.operation_id)
+            .map_err(|_| JournalError::RecoveryRequired)?
+            .to_vec();
+        let debit = online.iter().try_fold(0_u64, |sum, p| {
+            sum.checked_add(p.request.maximum_debit_zatoshis)
+                .ok_or(JournalError::Limit)
+        })?;
+        let inputs = online
+            .iter()
+            .flat_map(|p| &p.request.inputs)
+            .try_fold(0_u64, |sum, i| {
+                sum.checked_add(i.value_zatoshis).ok_or(JournalError::Limit)
+            })?;
+        if history.snapshot().outstanding_reservations != online.len() as u64
+            || history.snapshot().outstanding_debit_zatoshis != debit
+            || history.snapshot().reserved_input_value_zatoshis != inputs
+        {
+            return Err(JournalError::InvalidBinding);
+        }
+        let prepared = Self {
+            online,
+            local_commitment: local.commitment().into(),
+            intent: intent.clone(),
+            admission: admission.clone(),
+            authority_history_digest: history
+                .history_digest()
+                .map_err(|_| JournalError::InvalidBinding)?,
+        };
+        prepared.validate_origins(local)?;
+        Ok(prepared)
+    }
+    pub(super) fn len(&self) -> usize {
+        self.online.len()
+    }
+    pub(super) fn require_unchanged_local(&self, local: &WriterLocalInventory) -> Result<()> {
+        if self.local_commitment != local.commitment
+            || local.durable_payment_intents.len() != 1
+            || local.durable_payment_intents.first() != Some(&self.intent)
+        {
+            return Err(JournalError::Conflict);
+        }
+        self.validate_origins(local)
+    }
+    fn validate_origins(&self, local: &WriterLocalInventory) -> Result<()> {
+        if !local.offline.enrollments().is_empty()
+            || !local.offline.reservation_intents().is_empty()
+            || !local.offline.admitted_origins().is_empty()
+            || !local.common_context_audit.rows.is_empty()
+        {
+            return Err(JournalError::RecoveryRequired);
+        }
+        let online: BTreeMap<_, _> = self
+            .online
+            .iter()
+            .map(|p| (p.request.authorization_id.as_str(), p))
+            .collect();
+        if online.len() != self.online.len() {
+            return Err(JournalError::Conflict);
+        }
+        for retained in &local.remote_online {
+            if online
+                .get(retained.request.authorization_id.as_str())
+                .copied()
+                != Some(retained)
+            {
+                return Err(JournalError::Conflict);
+            }
+        }
+        for original in &local.originals {
+            if let Some(permit) = online.get(
+                original
+                    .original_consent()
+                    .terms()
+                    .authorization_id
+                    .as_str(),
+            ) {
+                validate_original_permit(original, permit)?;
+            }
+            // Unmatched uncertain originals/releases remain in the unchanged
+            // complete local snapshot. Nothing here deletes or refunds them.
+        }
+        Ok(())
+    }
+    pub(super) fn require_supported_local(
+        &self,
+        c: &Connection,
+        account: &SignerAccountState,
+        limits: (u64, u64),
+    ) -> Result<()> {
+        let stored = account_use_storage::inspect(c, &account.account_id)?;
+        validate_durable_local_profile(
+            c,
+            stored.genesis().ok_or(JournalError::RecoveryRequired)?,
+            limits,
+        )
+    }
+    pub(super) fn import(&self, tx: &Transaction<'_>, account: &str) -> Result<()> {
+        for permit in &self.online {
+            authority::retain_remote_exposure(tx, permit, account)?;
+        }
+        let expected: BTreeMap<_, _> = self
+            .online
+            .iter()
+            .map(|p| (p.request.authorization_id.as_str(), p))
+            .collect();
+        let mut q = tx.prepare("SELECT authorization_id,payload FROM signer_remote_exposures ORDER BY authorization_id")?;
+        let actual = q
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        if actual.len() != expected.len() {
+            return Err(JournalError::Conflict);
+        }
+        for (id, raw) in actual {
+            let permit: ReservationPermit = decode(raw)?;
+            if expected.get(id.as_str()).copied() != Some(&permit) {
+                return Err(JournalError::Conflict);
+            }
+        }
+        Ok(())
+    }
+}
+
+// Unsupported/default profiles retain inert evidence but cannot prepare or
+// import this financial branch. No native authority is issued by feature gates.
+fn validate_durable_local_profile(
+    c: &Connection,
+    genesis: &wholepact_authority::account_use::AccountUseGenesis,
+    limits: (u64, u64),
+) -> Result<()> {
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "pending-birth-owner-signing",
+        target_os = "linux"
+    ))]
+    {
+        storage::validate_durable_payment_local_history_v1(c, genesis, limits)
+    }
+    #[cfg(not(all(
+        feature = "durable-proposal",
+        feature = "pending-birth-owner-signing",
+        target_os = "linux"
+    )))]
+    {
+        let _ = (c, genesis, limits);
+        Err(JournalError::RecoveryRequired)
+    }
+}
+
+#[cfg(test)]
+mod durable_payment_commitment_tests_v1 {
+    use super::*;
+    // These are inert SQL-cell commitment tests, not valid financial history,
+    // native approval fixtures or a successful financial qualification route.
+    #[test]
+    fn complete_local_commitment_retains_intent_body_head_and_historical_refs() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch("CREATE TABLE signer_durable_payment_admission_intents(operation_id TEXT PRIMARY KEY,authorization_id TEXT,request_digest TEXT,enrollment_ref TEXT,manifest_ref TEXT,payload TEXT);").unwrap();
+        let empty = complete_journal_commitment(&c).unwrap();
+        c.execute("INSERT INTO signer_durable_payment_admission_intents VALUES('op','auth','digest','original enrollment','original manifest','exact body and original head')",[]).unwrap();
+        let retained = complete_journal_commitment(&c).unwrap();
+        assert_ne!(empty, retained);
+        for column in [
+            "operation_id",
+            "authorization_id",
+            "request_digest",
+            "enrollment_ref",
+            "manifest_ref",
+            "payload",
+        ] {
+            let tx = c.unchecked_transaction().unwrap();
+            tx.execute(
+                &format!("UPDATE signer_durable_payment_admission_intents SET {column}='changed'"),
+                [],
+            )
+            .unwrap();
+            assert_ne!(retained, complete_journal_commitment(&tx).unwrap());
+            tx.rollback().unwrap();
+            assert_eq!(retained, complete_journal_commitment(&c).unwrap());
+        }
+    }
+    #[test]
+    fn complete_local_commitment_does_not_drop_material_or_uncertain_exposure_cells() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch("CREATE TABLE signer_durable_construction_outbox(payload TEXT); CREATE TABLE signer_release_intents(payload TEXT); INSERT INTO signer_durable_construction_outbox VALUES('original capture and redisclosure'); INSERT INTO signer_release_intents VALUES('uncertain original release');").unwrap();
+        let complete = complete_journal_commitment(&c).unwrap();
+        for table in [
+            "signer_durable_construction_outbox",
+            "signer_release_intents",
+        ] {
+            let tx = c.unchecked_transaction().unwrap();
+            tx.execute(&format!("DELETE FROM {table}"), []).unwrap();
+            assert_ne!(complete, complete_journal_commitment(&tx).unwrap());
+            tx.rollback().unwrap();
+        }
+    }
 }

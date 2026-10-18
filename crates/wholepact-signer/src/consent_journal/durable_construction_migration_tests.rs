@@ -54,6 +54,7 @@ fn outbox_empty(c: &Connection) {
 
 #[test]
 fn schema18_every_exact_legacy_schema_gets_only_an_empty_outbox() {
+    use std::os::unix::fs::PermissionsExt;
     for (version, sql) in [
         (8, V8_SCHEMA),
         (9, V9_SCHEMA),
@@ -65,27 +66,73 @@ fn schema18_every_exact_legacy_schema_gets_only_an_empty_outbox() {
         (15, V15_SCHEMA),
         (16, V16_SCHEMA),
         (17, V17_SCHEMA),
+        (18, V18_SCHEMA),
     ] {
-        let mut c = source(sql, version, ACCOUNT);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let directory = crate::files::PrivateDirectory::open(dir.path()).unwrap();
+        let path = dir.path().join("original.sqlite");
+        let owner = directory
+            .signer_journal_source_owner_for_test(&path)
+            .unwrap();
+        let key = wholepact_storage_security::DatabaseKey::from_bytes([179; 32]);
+        let encrypted = wholepact_storage_security::create_encrypted(&path, &key).unwrap();
+        let c = encrypted.connection();
+        c.execute_batch(sql).unwrap();
+        c.pragma_update(None, "application_id", APPLICATION_ID)
+            .unwrap();
+        c.pragma_update(None, "user_version", version).unwrap();
+        c.execute("INSERT INTO signer_account VALUES(1,?1,7,1)", [ACCOUNT])
+            .unwrap();
         c.execute("INSERT INTO signer_sponsor_policy_events VALUES('synthetic-inert-policy',1,'exact original bytes')", []).unwrap();
-        let before = rows(&c, sql);
-        match version {
-            8 => migrate_v8(&mut c),
-            9 => migrate_v9(&mut c),
-            10 => migrate_v10(&mut c, ACCOUNT),
-            11 => migrate_v11(&mut c, ACCOUNT),
-            12 => migrate_v12(&mut c, ACCOUNT),
-            13 => migrate_v13(&mut c, ACCOUNT),
-            14 => migrate_v14(&mut c, ACCOUNT),
-            15 => migrate_v15(&mut c, ACCOUNT),
-            16 => migrate_v16(&mut c, ACCOUNT),
-            17 => migrate_v17(&mut c, ACCOUNT),
-            _ => unreachable!(),
+        let before = rows(c, sql);
+        drop(encrypted);
+        let files = || -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+            std::fs::read_dir(dir.path())
+                .unwrap()
+                .map(|entry| {
+                    let path = entry.unwrap().path();
+                    let bytes = std::fs::read(&path).unwrap();
+                    (path, bytes)
+                })
+                .collect()
+        };
+        let bytes = files();
+        let result = SignerConsentJournal::open_encrypted(&path, &key, ACCOUNT, &owner);
+        if version <= 11 {
+            // UNKNOWN pre-genesis format is not proof of ordinary provenance.
+            assert!(matches!(result, Err(JournalError::RecoveryRequired)));
+            assert!(
+                bytes == files(),
+                "UNKNOWN schema {version} changed retained files"
+            );
+            let snapshot =
+                wholepact_storage_security::open_encrypted_read_snapshot(&path, &key).unwrap();
+            verify_exact_schema(snapshot.connection(), sql).unwrap();
+            assert_eq!(before, rows(snapshot.connection(), sql));
+            assert_eq!(
+                snapshot
+                    .connection()
+                    .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                version
+            );
+            continue;
         }
-        .unwrap();
+        let journal = result.unwrap();
+        let c = journal.connection.lock().unwrap();
         verify_exact_schema(&c, SCHEMA).unwrap();
         assert_eq!(before, rows(&c, sql));
         outbox_empty(&c);
+        assert_eq!(
+            c.query_row(
+                "SELECT count(*) FROM signer_durable_payment_admission_intents",
+                [],
+                |r| r.get::<_, u64>(0)
+            )
+            .unwrap(),
+            0
+        );
         let account = storage::read_account(&c).unwrap();
         assert_eq!(account.writer_epoch, 7);
         assert!(account.recovery_required);
@@ -250,11 +297,25 @@ fn schema18_backup_keeps_v17_template_frozen_and_distinct() {
     assert_eq!(recovery_template(17).unwrap().schema_version, 17);
     assert_eq!(
         recovery_template(18).unwrap().create_sql.as_bytes(),
+        V18_SCHEMA.as_bytes()
+    );
+    assert_eq!(recovery_template(18).unwrap().schema_version, 18);
+    assert_eq!(
+        recovery_template(19).unwrap().create_sql.as_bytes(),
         SCHEMA.as_bytes()
     );
-    assert_eq!(SignerConsentBundleAdapter::template().schema_version, 18);
+    assert_eq!(SignerConsentBundleAdapter::template().schema_version, 19);
+    assert_eq!(
+        SignerConsentBundleAdapter::template().create_sql.as_bytes(),
+        SCHEMA.as_bytes()
+    );
     assert!(SCHEMA.as_bytes().starts_with(V17_SCHEMA.as_bytes()));
+    assert!(SCHEMA.as_bytes().starts_with(V18_SCHEMA.as_bytes()));
     assert!(!V17_SCHEMA.contains("signer_durable_construction_outbox"));
+    assert!(V18_SCHEMA.contains("signer_durable_construction_outbox"));
+    assert!(!V18_SCHEMA.contains("signer_durable_payment_admission_intents"));
+    assert!(SCHEMA.contains("signer_durable_payment_admission_intents"));
+    assert_ne!(V18_SCHEMA.as_bytes(), SCHEMA.as_bytes());
 }
 
 #[cfg(all(
@@ -293,6 +354,7 @@ fn schema18_sealed_v17_v3_backup_stays_readable_without_activating_or_mutating_s
     let account = &evidence.request.account_id;
     let dir = tempfile::tempdir().unwrap();
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let private_directory = crate::files::PrivateDirectory::open(dir.path()).unwrap();
     let original_path = dir.path().join("synthetic-v17-original.sqlite");
     let original_key = DatabaseKey::from_bytes([0x71; 32]);
     let c = wholepact_storage_security::create_encrypted(&original_path, &original_key)
@@ -348,7 +410,15 @@ fn schema18_sealed_v17_v3_backup_stays_readable_without_activating_or_mutating_s
     })
     .unwrap();
     assert!(!report.authorization_allowed);
-    assert!(SignerConsentJournal::open_encrypted(&restored, &restored_key, account).is_err());
+    assert!(SignerConsentJournal::open_encrypted(
+        &restored,
+        &restored_key,
+        account,
+        &private_directory
+            .signer_journal_source_owner_for_test(&restored)
+            .unwrap()
+    )
+    .is_err());
     let sealed = recovery::VerifiedSignerRecoverySource::open(
         history::HistoryOpenRequest {
             archive: &archive,

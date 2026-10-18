@@ -5,7 +5,7 @@ use super::*;
 mod recovery_inventory;
 use crate::native_ui::{NativeAuthority, NativeAuthorityBinding, NativeDecision};
 use recovery_inventory::PreparedRecoveryHistory;
-use rusqlite::{Connection, TransactionBehavior, params, params_from_iter, types::Value};
+use rusqlite::{params, params_from_iter, types::Value, Connection, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::{
     path::{Path, PathBuf},
@@ -16,11 +16,11 @@ use wholepact_authority::{
     WitnessDisclosureDescriptor,
 };
 use wholepact_storage_security::{
-    DatabaseKey,
     bundle::{
-        JournalKind, JournalTemplate,
         recovery::{RecoveryCell, RecoveryProvenance, RecoveryTable, VerifiedSignerRecoverySource},
+        JournalKind, JournalTemplate,
     },
+    DatabaseKey,
 };
 
 static V8_TEMPLATE: JournalTemplate = JournalTemplate {
@@ -83,6 +83,13 @@ static V17_TEMPLATE: JournalTemplate = JournalTemplate {
     schema_version: 17,
     create_sql: recovery_migration::V17_SCHEMA,
 };
+// Frozen historical18 must never alias the current financial19 template.
+static V18_TEMPLATE: JournalTemplate = JournalTemplate {
+    kind: JournalKind::SignerConsentAuthority,
+    application_id: APPLICATION_ID,
+    schema_version: 18,
+    create_sql: recovery_migration::V18_SCHEMA,
+};
 pub(crate) fn recovery_template(version: i64) -> Result<&'static JournalTemplate> {
     match version {
         8 => Ok(&V8_TEMPLATE),
@@ -95,9 +102,60 @@ pub(crate) fn recovery_template(version: i64) -> Result<&'static JournalTemplate
         15 => Ok(&V15_TEMPLATE),
         16 => Ok(&V16_TEMPLATE),
         17 => Ok(&V17_TEMPLATE),
-        18 => Ok(SignerConsentBundleAdapter::template()),
+        18 => Ok(&V18_TEMPLATE),
+        19 => Ok(SignerConsentBundleAdapter::template()),
         _ => Err(JournalError::UnsupportedSchema),
     }
+}
+
+/// Current financial intent is retained historical data, not a legacy recovery
+/// capability. This slice does not implement a financial successor protocol.
+fn require_supported_recovery_source(source: &VerifiedSignerRecoverySource) -> Result<()> {
+    require_no_old_born_recovery_source(source)?;
+    offline_history::require_legacy_recovery_source(source)?;
+    require_no_durable_payment_recovery(source)
+}
+fn require_no_durable_payment_recovery(source: &VerifiedSignerRecoverySource) -> Result<()> {
+    if source.tables().iter().any(|table| {
+        table.name() == "signer_durable_payment_admission_intents" && !table.rows().is_empty()
+    }) {
+        return Err(JournalError::RecoveryRequired);
+    }
+    Ok(())
+}
+
+/// Denial-only compatibility boundary, not an account-origin classifier. A
+/// successor is not an implicit upgrade route for any original born8..18 file.
+/// Examine all sealed rows, including malformed or orphaned evidence, before
+/// opening or creating a writable target. Historical readers do not call this.
+fn require_no_old_born_recovery_source(source: &VerifiedSignerRecoverySource) -> Result<()> {
+    if source.provenance().schema_version < 19
+        && source.tables().iter().any(|table| {
+            matches!(
+                table.name(),
+                "signer_account_use_genesis"
+                    | "signer_account_use_exclusion"
+                    | "signer_account_use_witness_ack"
+            ) && !table.rows().is_empty()
+        })
+    {
+        return Err(JournalError::RecoveryRequired);
+    }
+    Ok(())
+}
+
+fn require_no_old_born_recovery_history(
+    source: &VerifiedSignerRecoverySource,
+    history: &wholepact_authority::ReconciledAuthorityHistory,
+) -> Result<()> {
+    require_no_old_born_recovery_source(source)?;
+    // Pre-genesis formats8..11 prove no account origin. Actual authenticated
+    // witness genesis independently forbids a rollback-format born upgrade.
+    if source.provenance().schema_version < 19 && history.account_use_history().genesis().is_some()
+    {
+        return Err(JournalError::RecoveryRequired);
+    }
+    Ok(())
 }
 
 fn validate_component_coverage(source: &VerifiedSignerRecoverySource) -> Result<()> {
@@ -144,7 +202,7 @@ impl RecoveryActivationInventory {
             .map_err(|_| JournalError::InvalidBinding)?;
         let (account, epoch) = source_account(source)?;
         validate_component_coverage(source)?;
-        offline_history::require_legacy_recovery_source(source)?;
+        require_supported_recovery_source(source)?;
         if account != witness.account_id
             || !target_profile.is_absolute()
             || target_profile.exists()
@@ -153,7 +211,7 @@ impl RecoveryActivationInventory {
                 .map_err(|_| JournalError::InvalidBinding)?
                 != target_profile.parent().unwrap()
             || source.provenance().application_id != APPLICATION_ID
-            || !matches!(source.provenance().schema_version, 8..=18)
+            || !matches!(source.provenance().schema_version, 8..=19)
         {
             return Err(JournalError::InvalidBinding);
         }
@@ -182,7 +240,7 @@ impl RecoveryActivationInventory {
             .validate()
             .map_err(|_| JournalError::InvalidBinding)?;
         validate_component_coverage(source)?;
-        offline_history::require_legacy_recovery_source(source)?;
+        require_supported_recovery_source(source)?;
         if source.wallet().map(|w| w.provenance()) != inventory.wallet_provenance.as_ref()
             || source.provenance() != &inventory.provenance
             || account != inventory.witness.account_id
@@ -450,6 +508,7 @@ impl ApprovedRecoveryActivation {
         fresh: AuthenticatedRecoveryFence,
         target_journal: &Path,
         key: &DatabaseKey,
+        source: &Arc<SignerJournalSourceOwner>,
     ) -> Result<RecoveryActivationReceipt> {
         let p = self.0;
         p.check_native()?;
@@ -498,44 +557,66 @@ impl ApprovedRecoveryActivation {
             .map_err(|_| JournalError::Permission)?;
         fresh.check_current().map_err(|_| JournalError::Expired)?;
         p.check_native()?;
-        let existed = target_journal.exists();
-        let mut c = if existed {
-            wholepact_storage_security::open_encrypted(target_journal, key)?.into_connection()
-        } else {
-            wholepact_storage_security::create_encrypted(target_journal, key)?.into_connection()
+        // Actual successor directory custody covers every raw target handle,
+        // including replay/failure and the final fsync. No source migration.
+        let source_open = source.begin(target_journal)?;
+        source_open.require_exclusive()?;
+        let existed = match std::fs::symlink_metadata(target_journal) {
+            Ok(_) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(_) => return Err(JournalError::Database),
         };
+        let encrypted = if existed {
+            // This is an exclusive FIRST target open, never live19 reuse.
+            // Ordinary open already refused an uninitialized target; preserve
+            // that behavior, now without touching original sidecars on denial.
+            let snapshot =
+                wholepact_storage_security::open_encrypted_read_snapshot(target_journal, key)?;
+            let original_identity = snapshot.source_database_identity()?;
+            {
+                let tx = rusqlite::Transaction::new_unchecked(
+                    snapshot.connection(),
+                    TransactionBehavior::Deferred,
+                )?;
+                record = validate_existing_successor(
+                    &tx,
+                    &p.source,
+                    &p.history,
+                    &record,
+                    &p.account_use_retention,
+                )?;
+                tx.commit()?;
+            }
+            snapshot.check_source_unchanged()?;
+            source_open.require_exclusive()?;
+            let encrypted =
+                wholepact_storage_security::open_encrypted_quiescent(target_journal, key)?;
+            if encrypted.database_identity()? != original_identity {
+                return Err(JournalError::InvalidBinding);
+            }
+            encrypted
+        } else {
+            wholepact_storage_security::create_encrypted(target_journal, key)?
+        };
+        let database_identity = encrypted.database_identity()?;
+        let mut c = encrypted.into_connection();
         c.execute_batch(
             "PRAGMA foreign_keys=ON; PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;",
         )?;
         let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let objects: i64 = tx.query_row("SELECT count(*) FROM sqlite_schema", [], |r| r.get(0))?;
-        if existed && objects != 0 {
-            storage::verify_schema(&tx)?;
-            let saved:String=tx.query_row("SELECT payload FROM signer_recovery_generations WHERE generation_id=?1 AND phase='committed'",[&record.generation_id],|r|r.get(0))?;
-            let saved: RecoveryActivationRecord = decode(saved)?;
-            // New native review/session receipts may differ after restart. All
-            // fixed operation, target, provenance and fenced epoch fields may not.
-            let mut comparable = saved.clone();
-            comparable.review_digest = record.review_digest.clone();
-            comparable.history_digest = record.history_digest.clone();
-            if comparable != record {
-                return Err(JournalError::Conflict);
-            }
-            record = saved;
-            let mut expected = Connection::open_in_memory()?;
-            let expected_tx = expected.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            populate_successor(
-                &expected_tx,
+        if existed {
+            record = validate_existing_successor(
+                &tx,
                 &p.source,
                 &p.history,
                 &record,
                 &p.account_use_retention,
             )?;
-            verify_identical_rows(&tx, &expected_tx)?;
         } else {
             let application: i64 = tx.pragma_query_value(None, "application_id", |r| r.get(0))?;
             let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-            if application != 0 || version != 0 {
+            if application != 0 || version != 0 || objects != 0 {
                 return Err(JournalError::Conflict);
             }
             populate_successor(
@@ -548,6 +629,8 @@ impl ApprovedRecoveryActivation {
         }
         fresh.check_current().map_err(|_| JournalError::Expired)?;
         p.check_native()?;
+        database_identity.check_current(&tx)?;
+        source_open.require_exclusive()?;
         tx.commit()?;
         c.close().map_err(|_| JournalError::Database)?;
         std::fs::File::open(target_journal)
@@ -565,12 +648,54 @@ impl ApprovedRecoveryActivation {
         })
     }
 }
+/// Exact current19 successor replay on either immutable copy or final held tx.
+/// This validates retained data only; the caller supplies the live native lease.
+fn validate_existing_successor(
+    c: &Connection,
+    source: &VerifiedSignerRecoverySource,
+    history: &PreparedRecoveryHistory,
+    requested: &RecoveryActivationRecord,
+    retention: &account_use_recovery::RecoveryAccountUseRetention,
+) -> Result<RecoveryActivationRecord> {
+    validate_successor_target_identity(c, &requested.account_id)?;
+    let saved:String=c.query_row("SELECT payload FROM signer_recovery_generations WHERE generation_id=?1 AND phase='committed'",[&requested.generation_id],|r|r.get(0))?;
+    let saved: RecoveryActivationRecord = decode(saved)?;
+    // New native review/session receipts may differ after restart. No fixed
+    // operation, target, original provenance or fenced epoch may change.
+    let mut comparable = saved.clone();
+    comparable.review_digest = requested.review_digest.clone();
+    comparable.history_digest = requested.history_digest.clone();
+    if comparable != *requested {
+        return Err(JournalError::Conflict);
+    }
+    let mut expected = Connection::open_in_memory()?;
+    let expected_tx = expected.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    populate_successor(&expected_tx, source, history, &saved, retention)?;
+    verify_identical_rows(c, &expected_tx)?;
+    Ok(saved)
+}
+
+fn validate_successor_target_identity(c: &Connection, account_id: &str) -> Result<()> {
+    let application: i64 = c.pragma_query_value(None, "application_id", |r| r.get(0))?;
+    let version: i64 = c.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    if application != APPLICATION_ID || version != SCHEMA_VERSION {
+        return Err(JournalError::UnsupportedSchema);
+    }
+    storage::verify_schema(c)?;
+    storage::bounded(c, (MAX_BACKUP_ROWS, MAX_BACKUP_ENCODED_BYTES))?;
+    if storage::read_account(c)?.account_id != account_id {
+        return Err(JournalError::InvalidBinding);
+    }
+    Ok(())
+}
+
 fn validate_fence(
     source: &VerifiedSignerRecoverySource,
     inventory: &RecoveryActivationInventory,
     fence: &AuthenticatedRecoveryFence,
 ) -> Result<()> {
     fence.check_current().map_err(|_| JournalError::Expired)?;
+    require_no_old_born_recovery_history(source, fence.history())?;
     validate_component_coverage(source)?;
     if source.wallet().map(|w| w.provenance()) != inventory.wallet_provenance.as_ref() {
         return Err(JournalError::InvalidBinding);
@@ -642,6 +767,8 @@ fn validate_union(
     source: &VerifiedSignerRecoverySource,
     history: &wholepact_authority::ReconciledAuthorityHistory,
 ) -> Result<PreparedRecoveryHistory> {
+    require_no_old_born_recovery_history(source, history)?;
+    require_no_durable_payment_recovery(source)?;
     validate_witness_continuity(source, history)?;
     PreparedRecoveryHistory::read(source, history)
 }
@@ -754,12 +881,18 @@ fn populate_successor(
     record: &RecoveryActivationRecord,
     account_use_retention: &account_use_recovery::RecoveryAccountUseRetention,
 ) -> Result<()> {
+    // Repeat original-born refusal before any DDL, including an independently
+    // reconciled witness genesis that a pre-genesis source cannot erase.
+    require_no_old_born_recovery_source(source)?;
+    if source.provenance().schema_version < 19 && account_use_retention.genesis().is_some() {
+        return Err(JournalError::RecoveryRequired);
+    }
     // Before even creating schema: unsupported history cannot leave partial
     // active-generation rows through an internal mistaken caller.
     history.require_enabled()?;
     // Retained disclosure bytes are historical data, never portable native
     // decisions. Recheck before any successor schema or authority mutation.
-    offline_history::require_legacy_recovery_source(source)?;
+    require_supported_recovery_source(source)?;
     c.execute_batch(SCHEMA)?;
     c.execute_batch("PRAGMA defer_foreign_keys=ON;")?;
     import_all(c, source)?;
@@ -1001,3 +1134,100 @@ fn online_permit<'a>(
 #[path = "informational_read.rs"]
 mod informational_read;
 pub(crate) use informational_read::QuarantinedJournalRead;
+
+#[cfg(test)]
+mod financial_schema_template_tests {
+    use super::*;
+
+    #[test]
+    fn exclusive_target_identity_denies_old_unknown_wrong_key_account_without_writes() {
+        use std::{collections::BTreeMap, fs, os::unix::fs::PermissionsExt, path::PathBuf};
+        for version in [8, 11, 18, 19, 20] {
+            let dir = tempfile::tempdir().unwrap();
+            fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+            let directory = crate::files::PrivateDirectory::open(dir.path()).unwrap();
+            let path = dir.path().join("authority.sqlite");
+            let source = directory.signer_journal_source_owner().unwrap();
+            let key = DatabaseKey::from_bytes([180; 32]);
+            let encrypted = wholepact_storage_security::create_encrypted(&path, &key).unwrap();
+            let schema = match version {
+                8 => recovery_migration::V8_SCHEMA,
+                11 => recovery_migration::V11_SCHEMA,
+                18 => recovery_migration::V18_SCHEMA,
+                _ => SCHEMA,
+            };
+            encrypted.connection().execute_batch(schema).unwrap();
+            encrypted
+                .connection()
+                .execute(
+                    "INSERT INTO signer_account VALUES(1,'actual-target',7,1)",
+                    [],
+                )
+                .unwrap();
+            encrypted
+                .connection()
+                .pragma_update(None, "application_id", APPLICATION_ID)
+                .unwrap();
+            encrypted
+                .connection()
+                .pragma_update(None, "user_version", version)
+                .unwrap();
+            drop(encrypted);
+            let files = || -> BTreeMap<PathBuf, Vec<u8>> {
+                fs::read_dir(dir.path())
+                    .unwrap()
+                    .map(|entry| {
+                        let p = entry.unwrap().path();
+                        let b = fs::read(&p).unwrap();
+                        (p, b)
+                    })
+                    .collect()
+            };
+            let before = files();
+            let owner = source.begin(&path).unwrap();
+            owner.require_exclusive().unwrap();
+            assert!(wholepact_storage_security::open_encrypted_read_snapshot(
+                &path,
+                &DatabaseKey::from_bytes([181; 32])
+            )
+            .is_err());
+            assert!(before == files(), "wrong target key changed files");
+            let snapshot =
+                wholepact_storage_security::open_encrypted_read_snapshot(&path, &key).unwrap();
+            assert!(
+                validate_successor_target_identity(snapshot.connection(), "other-target").is_err()
+            );
+            assert!(before == files(), "wrong target identity changed files");
+            if version == 19 {
+                validate_successor_target_identity(snapshot.connection(), "actual-target").unwrap();
+            } else {
+                assert!(matches!(
+                    validate_successor_target_identity(snapshot.connection(), "actual-target"),
+                    Err(JournalError::UnsupportedSchema)
+                ));
+            }
+            assert!(before == files(), "old or unknown target changed files");
+        }
+    }
+
+    #[test]
+    fn frozen18_and_financial19_templates_are_exact_and_distinct() {
+        let frozen = recovery_template(18).unwrap();
+        let current = recovery_template(19).unwrap();
+        assert_eq!(frozen.schema_version, 18);
+        assert_eq!(frozen.create_sql, recovery_migration::V18_SCHEMA);
+        assert_eq!(current.schema_version, 19);
+        assert_eq!(current.create_sql, SCHEMA);
+        assert!(!frozen
+            .create_sql
+            .contains("signer_durable_payment_admission_intents"));
+        assert!(current
+            .create_sql
+            .contains("signer_durable_payment_admission_intents"));
+        let old = Connection::open_in_memory().unwrap();
+        old.execute_batch(frozen.create_sql).unwrap();
+        recovery_migration::verify_exact_schema(&old, recovery_migration::V18_SCHEMA).unwrap();
+        assert!(recovery_migration::verify_exact_schema(&old, SCHEMA).is_err());
+        assert!(recovery_template(20).is_err());
+    }
+}

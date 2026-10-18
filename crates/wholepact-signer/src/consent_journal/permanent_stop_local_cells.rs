@@ -2,7 +2,7 @@
 //! creates no current witness, native permission, signing or settlement authority.
 use super::super::*;
 use rusqlite::Connection;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use wholepact_authority::{
     AutomaticKeyUseAdmission, WitnessDisclosureDescriptor, WriterSessionReceipt,
@@ -57,6 +57,23 @@ pub(super) fn validate(
         bytes: 0,
     };
     enrollments(c, account, &mut display)?;
+    for intent in read_durable_payment_admission_intents_v1(c)? {
+        // Commitments and historical linkage only. No PCZT/FVK/notes or
+        // mutable success claim; native expiry does not erase the intent.
+        display.push("signer_durable_payment_admission_intents", json!({
+            "operation_id": intent.request().operation_id,
+            "request": intent.request(),
+            "witness": intent.disclosure(),
+            "owner_certificate_digest": intent.owner_certificate_digest(),
+            "enrollment_ref": intent.enrollment_ref(),
+            "manifest_ref": intent.manifest_ref(),
+            "native_receipt": intent.native_receipt(),
+            "native_review_digest": intent.native_review_digest(),
+            "history_digest": intent.history_digest()?,
+            "authority": "historical intent only; remote outcome requires exact authenticated history"
+        }))?;
+    }
+
     bridge(c, account, &mut display)?;
     writers(c, account, &mut display)?;
     sponsors(c, account, &mut display)?;

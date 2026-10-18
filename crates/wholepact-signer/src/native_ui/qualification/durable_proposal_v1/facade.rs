@@ -118,6 +118,18 @@ impl EphemeralDurableNativeV1 {
     pub fn configure_original_witness(&mut self) -> Result<()> {
         self.inner.configure_original_witness()
     }
+    /// Returns ordinary request data from the genuine pending native review.
+    /// This neither approves nor retains the financial admission.
+    pub fn prepare_durable_admission(
+        &mut self,
+    ) -> Result<wholepact_authority::OwnerControlRequest> {
+        self.inner.prepare_durable_admission()
+    }
+    /// Consumes the actual pending review through the production native route,
+    /// which retains the immutable intent before its first mutation frame.
+    pub fn approve_durable_admission(&mut self) -> Result<()> {
+        self.inner.approve_durable_admission()
+    }
     pub fn reconcile_original_writer(&mut self) -> Result<()> {
         self.inner.reconcile_original_writer()
     }

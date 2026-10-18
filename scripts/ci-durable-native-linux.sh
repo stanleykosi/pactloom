@@ -103,6 +103,7 @@ TMPDIR="$runtime_root" python3 -B scripts/ci-synthetic-output-tests.py
 TMPDIR="$runtime_root" python3 -B scripts/ci-synthetic-output.py "$executable" pure
 TMPDIR="$runtime_root" python3 -B scripts/ci-synthetic-output.py "$executable" storage-bootstrap
 TMPDIR="$runtime_root" python3 -B scripts/ci-synthetic-output.py "$executable" durable-owner-reopen
+TMPDIR="$runtime_root" python3 -B scripts/ci-synthetic-output.py "$executable" durable-fixed-signing
 # The private account/envelope regressions live in the signer lib, not the Host
 # executable. Reuse this exact release target and dependencies; do not run a
 # broad signer suite or any ignored/native tests during this separate build.
@@ -165,4 +166,4 @@ python3 -B scripts/ci-synthetic-output.py "$authority_executable" authority-rend
 rmdir -- "$runtime_root"
 trap - EXIT
 echo 'CI_RUNTIME_CONTAINER empty_removed=true'
-printf '%s\n' 'All listed regressions and synthetic-only durable native-owner/session reopen checks passed; no full native signing, OS-process restart, public-chain settlement, attended GUI, Windows or production activation claimed.'
+printf '%s\n' 'All listed regressions and synthetic-only durable native-owner/session reopening and exact fixed signing checks passed; no OS-process restart, public-chain settlement, attended GUI, Windows or production activation claimed.'

@@ -27,7 +27,7 @@ impl SignerConsentJournal {
         // 0..7: consent, release, reserved inputs, request, permit, key-use,
         // result+outbox. Remaining entries cover current receipts, reconciled
         // remote exposure and explicit redelivery, all unchanged by retry.
-        const QUERIES: [&str; 13] = [
+        const QUERIES: [&str; 14] = [
             "SELECT * FROM signer_original_consents ORDER BY reference",
             "SELECT * FROM signer_release_intents ORDER BY authorization_id",
             "SELECT * FROM signer_input_reservations ORDER BY account_id,input_id",
@@ -41,6 +41,7 @@ impl SignerConsentJournal {
             "SELECT * FROM signer_remote_exposures ORDER BY authorization_id",
             "SELECT * FROM signer_remote_inputs ORDER BY authorization_id,nullifier",
             "SELECT * FROM signer_result_redeliveries ORDER BY operation_id",
+            "SELECT * FROM signer_durable_payment_admission_intents ORDER BY authorization_id",
         ];
         let account = self.account_state()?;
         let binding = self.binding();

@@ -19,6 +19,7 @@ fn h(n: u8) -> String {
     format!("{n:064x}")
 }
 struct Fixture {
+    private_directory: crate::files::PrivateDirectory,
     dir: tempfile::TempDir,
     key: DatabaseKey,
     journal: SignerConsentJournal,
@@ -33,12 +34,16 @@ impl Fixture {
             std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         }
         let key = DatabaseKey::from_bytes(random32());
+        let private_directory = crate::files::PrivateDirectory::open(dir.path()).unwrap();
         let journal = SignerConsentJournal::create_encrypted(
             &dir.path().join("synthetic-original.sqlite"),
             &key,
             ACCOUNT,
             1,
             false,
+            &private_directory
+                .signer_journal_source_owner_for_test(&dir.path().join("synthetic-original.sqlite"))
+                .unwrap(),
         )
         .unwrap();
         let session = authority::fixture::session(&journal, "synthetic-owner");
@@ -260,6 +265,7 @@ impl Fixture {
         tx.commit().unwrap();
         drop(c);
         Self {
+            private_directory,
             dir,
             key,
             journal,
@@ -466,7 +472,15 @@ fn named_nonempty_encrypted_archive_preserves_exact_rows_and_restored_denial() {
     })
     .unwrap();
     assert!(!report.authorization_allowed);
-    assert!(SignerConsentJournal::open_encrypted(&restored, &restored_key, ACCOUNT).is_err());
+    assert!(SignerConsentJournal::open_encrypted(
+        &restored,
+        &restored_key,
+        ACCOUNT,
+        &f.private_directory
+            .signer_journal_source_owner_for_test(&restored)
+            .unwrap()
+    )
+    .is_err());
     let source = recovery::VerifiedSignerRecoverySource::open(
         history::HistoryOpenRequest {
             archive: &archive,
@@ -532,6 +546,9 @@ fn named_nonempty_encrypted_archive_preserves_exact_rows_and_restored_denial() {
         &f.dir.path().join("synthetic-original.sqlite"),
         &f.key,
         ACCOUNT,
+        &f.private_directory
+            .signer_journal_source_owner_for_test(&f.dir.path().join("synthetic-original.sqlite"))
+            .unwrap(),
     )
     .unwrap();
     // Reopening returns exactly the original preview/ciphertext bytes; this

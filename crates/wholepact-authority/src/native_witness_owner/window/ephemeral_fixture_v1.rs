@@ -12,8 +12,8 @@ use std::{
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex, TryLockError,
-        atomic::{AtomicBool, Ordering},
     },
     time::Instant,
 };
@@ -26,6 +26,8 @@ const UNDERSTOOD: &str = "I reviewed this complete exact operation and its perma
 const AUTHORIZE: &str = "Authorize this exact one-time owner operation";
 const PROFILE: &str = "ironwood-testnet-nu7-candidate";
 
+#[path = "ephemeral_fixture_v1/durable_payment_v1.rs"]
+mod durable_payment_v1;
 #[path = "ephemeral_fixture_v1/public_control_navigation_v1.rs"]
 mod public_control_navigation_v1;
 #[path = "ephemeral_fixture_v1/roster_v3.rs"]
@@ -96,11 +98,34 @@ pub struct EphemeralNativeWitnessV1 {
     construction_client_grants: std::collections::BTreeSet<String>,
     construction_client_scope_revoked: Arc<AtomicBool>,
     installation: Arc<EphemeralWitnessInstallation>,
-    listener: TcpListener,
+    listener: OriginalListenerV1,
+    durable_payment: durable_payment_v1::FixturePhaseV1,
     tls: ServerTls,
     server_certificate_digest: String,
     owner_certificate: Vec<u8>,
     root: PathBuf,
+}
+// The original socket can be handed off only to the real native admission
+// listener, then rebound at the same address after that worker fully drains.
+// All existing fixture phases keep their original bound-listener behavior.
+struct OriginalListenerV1 {
+    bound: Option<TcpListener>,
+    address: std::net::SocketAddr,
+    server_handles: Arc<AtomicUsize>,
+}
+impl OriginalListenerV1 {
+    fn local_addr(&self) -> std::io::Result<std::net::SocketAddr> {
+        self.bound
+            .as_ref()
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::PermissionDenied))?
+            .local_addr()
+    }
+    fn try_clone(&self) -> std::io::Result<TcpListener> {
+        self.bound
+            .as_ref()
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::PermissionDenied))?
+            .try_clone()
+    }
 }
 impl EphemeralNativeWitnessV1 {
     pub fn new() -> Result<Self> {
@@ -164,7 +189,12 @@ impl EphemeralNativeWitnessV1 {
             construction_client_grants: std::collections::BTreeSet::new(),
             construction_client_scope_revoked: Arc::new(AtomicBool::new(false)),
             installation,
-            listener,
+            listener: OriginalListenerV1 {
+                address: listener.local_addr().map_err(|_| AuthorityError::Storage)?,
+                bound: Some(listener),
+                server_handles: Arc::new(AtomicUsize::new(0)),
+            },
+            durable_payment: durable_payment_v1::FixturePhaseV1::Idle,
             server_certificate_digest: crate::transport::certificate_digest(&certificate),
             tls,
             owner_certificate,
@@ -340,11 +370,15 @@ impl EphemeralNativeWitnessV1 {
                 drop(server);
             })
             .map_err(|_| AuthorityError::Storage)?;
+        // Count live handles, not just accepting threads. An admission handoff
+        // requires Drop to join every original server before releasing its socket.
+        self.listener.server_handles.fetch_add(1, Ordering::AcqRel);
         Ok(EphemeralHistoryServerV1 {
             stop,
             accept_gate,
             deadline,
             thread: Some(thread),
+            listener_owner: self.listener.server_handles.clone(),
         })
     }
 
@@ -358,27 +392,25 @@ impl EphemeralNativeWitnessV1 {
                 // prepare branch, not the disabled production entry or a raw
                 // owner constructor. Exact review and final commit stay in the
                 // unchanged real Window controller.
-                entry
-                    .area()
-                    .show(ui.ctx(), |ui| {
-                        let focused = ui
-                            .ctx()
-                            .input(|i| i.focused && i.viewport().focused == Some(true));
-                        if ui
-                            .add_enabled(self.window.can_select(), egui::Button::new(entry.label()))
-                            .clicked_by(egui::PointerButton::Primary)
-                            && focused
-                        {
-                            match entry {
-                                QualifiedEntry::ConstructionPlan => self
-                                    .window
-                                    .prepare_manual_roster_construction_v3_from_primary(ui.ctx()),
-                                QualifiedEntry::ConstructionTransport => self
-                                    .window
-                                    .prepare_construction_transport_grant_v1_from_primary(ui.ctx()),
-                            }
+                entry.area().show(ui.ctx(), |ui| {
+                    let focused = ui
+                        .ctx()
+                        .input(|i| i.focused && i.viewport().focused == Some(true));
+                    if ui
+                        .add_enabled(self.window.can_select(), egui::Button::new(entry.label()))
+                        .clicked_by(egui::PointerButton::Primary)
+                        && focused
+                    {
+                        match entry {
+                            QualifiedEntry::ConstructionPlan => self
+                                .window
+                                .prepare_manual_roster_construction_v3_from_primary(ui.ctx()),
+                            QualifiedEntry::ConstructionTransport => self
+                                .window
+                                .prepare_construction_transport_grant_v1_from_primary(ui.ctx()),
                         }
-                    });
+                    }
+                });
             }
         })
     }
@@ -432,6 +464,16 @@ impl EphemeralNativeWitnessV1 {
         Ok(())
     }
     fn approve_exact(&mut self) -> Result<()> {
+        self.start_approve_exact()?;
+        self.drain()?;
+        if self.window.pending.is_some() || !self.window.can_select() {
+            return Err(AuthorityError::Uncertain);
+        }
+        Ok(())
+    }
+    // Same focused UI path as approve_exact, without waiting for its worker.
+    // The exact admission worker must await the independent signer owner-mTLS.
+    fn start_approve_exact(&mut self) -> Result<()> {
         if self
             .window
             .pending
@@ -454,10 +496,6 @@ impl EphemeralNativeWitnessV1 {
         self.window.confirmation = Zeroizing::new(pending.phrase());
         self.click(UNDERSTOOD)?;
         self.click(AUTHORIZE)?;
-        self.drain()?;
-        if self.window.pending.is_some() || !self.window.can_select() {
-            return Err(AuthorityError::Uncertain);
-        }
         Ok(())
     }
 }
@@ -483,6 +521,7 @@ pub struct EphemeralHistoryServerV1 {
     accept_gate: Arc<Mutex<bool>>,
     deadline: Instant,
     thread: Option<std::thread::JoinHandle<()>>,
+    listener_owner: Arc<AtomicUsize>,
 }
 impl EphemeralHistoryServerV1 {
     /// Irreversibly stop accepting NEW sockets on this particular finite
@@ -580,6 +619,7 @@ impl Drop for EphemeralHistoryServerV1 {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+        self.listener_owner.fetch_sub(1, Ordering::AcqRel);
     }
 }
 fn fixture_input(events: Vec<egui::Event>, focused: bool) -> egui::RawInput {
@@ -713,21 +753,17 @@ mod tests {
         let fixture = EphemeralNativeWitnessV1::new().unwrap();
         let original = fixture.origin().unwrap();
         assert!(!original.witness_id.is_empty());
-        assert!(
-            original
-                .endpoint
-                .to_socket_addrs()
-                .unwrap()
-                .all(|a| a.ip().is_loopback())
-        );
-        assert!(
-            fixture
-                .installation
-                .probe()
-                .unwrap()
-                .require_absent()
-                .is_err()
-        );
+        assert!(original
+            .endpoint
+            .to_socket_addrs()
+            .unwrap()
+            .all(|a| a.ip().is_loopback()));
+        assert!(fixture
+            .installation
+            .probe()
+            .unwrap()
+            .require_absent()
+            .is_err());
         let files = fixture
             .installation
             .probe()

@@ -133,12 +133,14 @@ impl NativeWitnessWorkspace {
         let (source, account_id, writer, owner, writer_pin, owner_pin) = approved.into_parts();
         (
             Self {
+                instance: std::sync::Arc::new(()),
                 source: source.clone(),
                 account_id: account_id.clone(),
                 client: writer,
                 writer_certificate_digest: writer_pin,
             },
             Self {
+                instance: std::sync::Arc::new(()),
                 source,
                 account_id,
                 client: owner,

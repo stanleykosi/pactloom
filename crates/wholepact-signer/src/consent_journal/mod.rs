@@ -133,8 +133,21 @@ mod recovery_activation;
 ))]
 pub(crate) use recovery_activation::*;
 mod types;
+pub(crate) use authority::durable_payment_admission_intent_v1;
 pub use authority::*;
+pub(crate) use durable_payment_admission_intent_v1::{
+    read_durable_payment_admission_intents_v1, RetainedDurablePaymentAdmissionIntentV1,
+};
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "native-ui",
+    target_os = "linux"
+))]
+pub(crate) use durable_payment_admission_intent_v1::{
+    ApprovedDurablePaymentAdmissionIntentV1, PreparedDurablePaymentAdmissionIntentV1,
+};
 pub use storage::{OriginalAuthorizationLease, SignerConsentBundleAdapter, SignerConsentJournal};
+pub(crate) use storage::SignerJournalSourceOwner;
 pub use types::*;
 
 use serde::{de::DeserializeOwned, Serialize};
@@ -143,7 +156,7 @@ use wholepact_core::proposal::canonical_digest;
 use zeroize::Zeroizing;
 
 const APPLICATION_ID: i64 = 0x57505343;
-const SCHEMA_VERSION: i64 = 18;
+const SCHEMA_VERSION: i64 = 19;
 const MAX_RECORD_BYTES: usize = 512 * 1024;
 const MAX_BACKUP_ROWS: u64 = 100_000;
 const MAX_BACKUP_ENCODED_BYTES: u64 = 64 * 1024 * 1024;
@@ -165,7 +178,7 @@ pub enum JournalError {
     #[error("signer journal requires writer and exposure reconciliation")]
     RecoveryRequired,
     #[error(
-        "unsupported signer journal schema; only exact v8 through v17 additive schema extensions are supported"
+        "unsupported signer journal schema; only exact proven-nonborn v12 through v18 additive extensions are supported"
     )]
     UnsupportedSchema,
     #[error("offline reservation history requires a qualified typed signer recovery consumer")]
@@ -387,3 +400,7 @@ pub use named_recipient_setup::OriginalNamedSetupMetadataV1;
 
 #[cfg(feature = "synthetic-born-joined-qualification")]
 pub use named_recipient_setup::{OriginalNamedPaymentArtifactsV1, OriginalNamedReturnReferencesV1};
+
+#[cfg(test)]
+#[path = "durable_payment_admission_schema19_tests.rs"]
+mod durable_payment_admission_schema19_tests;

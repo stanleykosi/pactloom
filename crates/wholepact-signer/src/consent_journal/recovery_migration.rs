@@ -1,6 +1,9 @@
 //! Exact transactional schema extension; migration never clears recovery state.
 use super::*;
 use rusqlite::{Connection, TransactionBehavior};
+pub(super) const V18_SCHEMA: &str = include_str!("schema_v18.sql");
+pub(super) const DURABLE_PAYMENT_ADMISSION_SCHEMA: &str =
+    include_str!("durable_payment_admission_schema_v19.sql");
 pub(super) const V17_SCHEMA: &str = include_str!("schema_v17.sql");
 pub(super) const DURABLE_CONSTRUCTION_SCHEMA: &str =
     include_str!("durable_construction_schema_v18.sql");
@@ -38,155 +41,147 @@ pub(super) fn verify_exact_schema(c: &Connection, sql: &str) -> Result<()> {
     }
     Ok(())
 }
-pub(super) fn migrate_v8(c: &mut Connection) -> Result<()> {
-    migrate(c, false)
-}
-fn migrate(c: &mut Connection, inject_failure: bool) -> Result<()> {
-    let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let application: i64 = tx.pragma_query_value(None, "application_id", |r| r.get(0))?;
-    let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if application != APPLICATION_ID || version != 8 {
+/// Authenticated-copy preflight for the ordinary opener. The caller must retain
+/// the actual directory/quiescence owner and carry the snapshot's source identity
+/// into its eventual writable open. A version is not account-origin proof.
+///
+/// Frozen8..11 remain UNKNOWN provenance. Frozen12..18 are accepted only when
+/// ALL account-use tables are empty. Known-born callers must independently use
+/// the current-schema-only opener even if an old file claims a pre-genesis format.
+pub(super) fn preflight_open(c: &Connection, account_id: &str) -> Result<i64> {
+    let application: i64 = c.pragma_query_value(None, "application_id", |r| r.get(0))?;
+    let version: i64 = c.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    if application != APPLICATION_ID {
         return Err(JournalError::UnsupportedSchema);
     }
-    verify_exact_schema(&tx, V8_SCHEMA)?;
-    tx.execute_batch(RECOVERY_SCHEMA)?;
-    tx.execute_batch(AUTOMATION_SCHEMA)?;
-    tx.execute_batch(OFFLINE_SCHEMA)?;
-    tx.execute_batch(ACCOUNT_USE_SCHEMA)?;
-    tx.execute_batch(OFFLINE_RECEIPTS_SCHEMA)?;
-    tx.execute_batch(COMMON_CONTEXT_AUDIT_SCHEMA)?;
-    tx.execute_batch(COMMON_CONTEXT_REENTRY_SCHEMA)?;
-    tx.execute_batch(NAMED_RECIPIENT_SCHEMA)?;
-    tx.execute_batch(BORN_DISPATCH_SCHEMA)?;
-    tx.execute_batch(DURABLE_CONSTRUCTION_SCHEMA)?;
+    let schema = match version {
+        8 => V8_SCHEMA,
+        9 => V9_SCHEMA,
+        10 => V10_SCHEMA,
+        11 => V11_SCHEMA,
+        12 => V12_SCHEMA,
+        13 => V13_SCHEMA,
+        14 => V14_SCHEMA,
+        15 => V15_SCHEMA,
+        16 => V16_SCHEMA,
+        17 => V17_SCHEMA,
+        18 => V18_SCHEMA,
+        SCHEMA_VERSION => SCHEMA,
+        _ => return Err(JournalError::UnsupportedSchema),
+    };
+    verify_exact_schema(c, schema)?;
+    if storage::read_account(c)?.account_id != account_id {
+        return Err(JournalError::InvalidBinding);
+    }
+    if (12..=18).contains(&version) {
+        // Inspect every row, not only singleton=1. Even malformed or orphaned
+        // account-use evidence forbids this ordinary schema-only migration.
+        for table in [
+            "signer_account_use_genesis",
+            "signer_account_use_exclusion",
+            "signer_account_use_witness_ack",
+        ] {
+            let present: bool =
+                c.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {table})"), [], |r| {
+                    r.get(0)
+                })?;
+            if present {
+                return Err(JournalError::RecoveryRequired);
+            }
+        }
+        let state = account_use_storage::inspect(c, account_id)?;
+        if state.genesis().is_some() || state.exclusion().is_some() || state.witness_ack().is_some()
+        {
+            return Err(JournalError::RecoveryRequired);
+        }
+    } else if version == SCHEMA_VERSION {
+        // Current journals retain their existing typed/account-use restrictions;
+        // do not mistake a permitted current historical genesis for migration.
+        storage::verify_schema(c)?;
+    }
+    Ok(version)
+}
+
+/// Exact additive NONBORN migration only. No existing row, rowid, account,
+/// writer epoch, recovery flag, exposure or receipt is rewritten.
+fn migrate_from(
+    c: &mut Connection,
+    account_id: &str,
+    expected_version: i64,
+    inject_failure: bool,
+) -> Result<()> {
+    let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    // Repeat the complete pre-writable classification under the same transaction
+    // as DDL. Neither a previously observed version nor a caller flag is proof.
+    if !(8..=18).contains(&expected_version) || preflight_open(&tx, account_id)? != expected_version
+    {
+        return Err(JournalError::UnsupportedSchema);
+    }
+    for (introduced, sql) in [
+        (9, RECOVERY_SCHEMA),
+        (10, AUTOMATION_SCHEMA),
+        (11, OFFLINE_SCHEMA),
+        (12, ACCOUNT_USE_SCHEMA),
+        (13, OFFLINE_RECEIPTS_SCHEMA),
+        (14, COMMON_CONTEXT_AUDIT_SCHEMA),
+        (15, COMMON_CONTEXT_REENTRY_SCHEMA),
+        (16, NAMED_RECIPIENT_SCHEMA),
+        (17, BORN_DISPATCH_SCHEMA),
+        (18, DURABLE_CONSTRUCTION_SCHEMA),
+        (19, DURABLE_PAYMENT_ADMISSION_SCHEMA),
+    ] {
+        if expected_version < introduced {
+            tx.execute_batch(sql)?;
+        }
+    }
     if inject_failure {
         return Err(JournalError::Database);
     }
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-    // The ONLY writes are new empty schema objects and the schema version.
-    // No account, policy, consent, release, witness or budget rows are modified.
     verify_exact_schema(&tx, SCHEMA)?;
-    tx.commit()?;
-    Ok(())
-}
-
-pub(super) fn migrate_v9(c: &mut Connection) -> Result<()> {
-    let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let application: i64 = tx.pragma_query_value(None, "application_id", |r| r.get(0))?;
-    let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if application != APPLICATION_ID || version != 9 {
-        return Err(JournalError::UnsupportedSchema);
+    let financial_intents: i64 = tx.query_row(
+        "SELECT count(*) FROM signer_durable_payment_admission_intents",
+        [],
+        |r| r.get(0),
+    )?;
+    if financial_intents != 0 {
+        return Err(JournalError::InvalidBinding);
     }
-    verify_exact_schema(&tx, V9_SCHEMA)?;
-    tx.execute_batch(AUTOMATION_SCHEMA)?;
-    tx.execute_batch(OFFLINE_SCHEMA)?;
-    tx.execute_batch(ACCOUNT_USE_SCHEMA)?;
-    tx.execute_batch(OFFLINE_RECEIPTS_SCHEMA)?;
-    tx.execute_batch(COMMON_CONTEXT_AUDIT_SCHEMA)?;
-    tx.execute_batch(COMMON_CONTEXT_REENTRY_SCHEMA)?;
-    tx.execute_batch(NAMED_RECIPIENT_SCHEMA)?;
-    tx.execute_batch(BORN_DISPATCH_SCHEMA)?;
-    tx.execute_batch(DURABLE_CONSTRUCTION_SCHEMA)?;
-    tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-    verify_exact_schema(&tx, SCHEMA)?;
+    // No synthetic genesis or financial/native/writer authority is introduced.
     tx.commit()?;
     Ok(())
 }
 
-/// Exact additive v10 migration. Account identity is checked before writes;
-/// no legacy payload/reference, writer epoch, recovery flag or budget changes.
+pub(super) fn migrate_v8(c: &mut Connection, account_id: &str) -> Result<()> {
+    migrate(c, account_id, false)
+}
+fn migrate(c: &mut Connection, account_id: &str, inject_failure: bool) -> Result<()> {
+    migrate_from(c, account_id, 8, inject_failure)
+}
+
+pub(super) fn migrate_v9(c: &mut Connection, account_id: &str) -> Result<()> {
+    migrate_from(c, account_id, 9, false)
+}
+
 pub(super) fn migrate_v10(c: &mut Connection, account_id: &str) -> Result<()> {
     migrate_v10_inner(c, account_id, false)
 }
 fn migrate_v10_inner(c: &mut Connection, account_id: &str, inject_failure: bool) -> Result<()> {
-    let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let application: i64 = tx.pragma_query_value(None, "application_id", |r| r.get(0))?;
-    let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if application != APPLICATION_ID || version != 10 {
-        return Err(JournalError::UnsupportedSchema);
-    }
-    verify_exact_schema(&tx, V10_SCHEMA)?;
-    if storage::read_account(&tx)?.account_id != account_id {
-        return Err(JournalError::InvalidBinding);
-    }
-    tx.execute_batch(OFFLINE_SCHEMA)?;
-    tx.execute_batch(ACCOUNT_USE_SCHEMA)?;
-    tx.execute_batch(OFFLINE_RECEIPTS_SCHEMA)?;
-    tx.execute_batch(COMMON_CONTEXT_AUDIT_SCHEMA)?;
-    tx.execute_batch(COMMON_CONTEXT_REENTRY_SCHEMA)?;
-    tx.execute_batch(NAMED_RECIPIENT_SCHEMA)?;
-    tx.execute_batch(BORN_DISPATCH_SCHEMA)?;
-    tx.execute_batch(DURABLE_CONSTRUCTION_SCHEMA)?;
-    if inject_failure {
-        return Err(JournalError::Database);
-    }
-    tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-    verify_exact_schema(&tx, SCHEMA)?;
-    tx.commit()?;
-    Ok(())
+    migrate_from(c, account_id, 10, inject_failure)
 }
 
-/// Empty additive migration preserves all old evidence and unknown provenance.
 pub(super) fn migrate_v11(c: &mut Connection, account_id: &str) -> Result<()> {
     migrate_v11_inner(c, account_id, false)
 }
 fn migrate_v11_inner(c: &mut Connection, account_id: &str, inject_failure: bool) -> Result<()> {
-    let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let application: i64 = tx.pragma_query_value(None, "application_id", |r| r.get(0))?;
-    let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if application != APPLICATION_ID || version != 11 {
-        return Err(JournalError::UnsupportedSchema);
-    }
-    verify_exact_schema(&tx, V11_SCHEMA)?;
-    if storage::read_account(&tx)?.account_id != account_id {
-        return Err(JournalError::InvalidBinding);
-    }
-    tx.execute_batch(ACCOUNT_USE_SCHEMA)?;
-    tx.execute_batch(OFFLINE_RECEIPTS_SCHEMA)?;
-    tx.execute_batch(COMMON_CONTEXT_AUDIT_SCHEMA)?;
-    tx.execute_batch(COMMON_CONTEXT_REENTRY_SCHEMA)?;
-    tx.execute_batch(NAMED_RECIPIENT_SCHEMA)?;
-    tx.execute_batch(BORN_DISPATCH_SCHEMA)?;
-    tx.execute_batch(DURABLE_CONSTRUCTION_SCHEMA)?;
-    if inject_failure {
-        return Err(JournalError::Database);
-    }
-    // Never insert genesis, clear quarantine, rewrite offline exposure, or replace
-    // any lifetime account/policy row during a schema-only migration.
-    tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-    verify_exact_schema(&tx, SCHEMA)?;
-    tx.commit()?;
-    Ok(())
+    migrate_from(c, account_id, 11, inject_failure)
 }
 
-/// Exact additive v12-to-v13 extension. Old genesis/exclusions stay untouched.
 pub(super) fn migrate_v12(c: &mut Connection, account_id: &str) -> Result<()> {
     migrate_v12_inner(c, account_id, false)
 }
 fn migrate_v12_inner(c: &mut Connection, account_id: &str, inject_failure: bool) -> Result<()> {
-    let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let application: i64 = tx.pragma_query_value(None, "application_id", |r| r.get(0))?;
-    let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if application != APPLICATION_ID || version != 12 {
-        return Err(JournalError::UnsupportedSchema);
-    }
-    verify_exact_schema(&tx, V12_SCHEMA)?;
-    if storage::read_account(&tx)?.account_id != account_id {
-        return Err(JournalError::InvalidBinding);
-    }
-    tx.execute_batch(OFFLINE_RECEIPTS_SCHEMA)?;
-    tx.execute_batch(COMMON_CONTEXT_AUDIT_SCHEMA)?;
-    tx.execute_batch(COMMON_CONTEXT_REENTRY_SCHEMA)?;
-    tx.execute_batch(NAMED_RECIPIENT_SCHEMA)?;
-    tx.execute_batch(BORN_DISPATCH_SCHEMA)?;
-    tx.execute_batch(DURABLE_CONSTRUCTION_SCHEMA)?;
-    if inject_failure {
-        return Err(JournalError::Database);
-    }
-    tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-    verify_exact_schema(&tx, SCHEMA)?;
-    tx.commit()?;
-    Ok(())
+    migrate_from(c, account_id, 12, inject_failure)
 }
 
 #[cfg(test)]
@@ -210,7 +205,7 @@ mod tests {
     fn v8_extension_preserves_every_original_row_and_recovery_flag() {
         let mut c = fixture();
         let before = snapshot_rows(&c);
-        migrate_v8(&mut c).unwrap();
+        migrate_v8(&mut c, "synthetic-restored-account").unwrap();
         assert_eq!(before, snapshot_rows(&c));
         assert_eq!(
             c.query_row(
@@ -231,7 +226,7 @@ mod tests {
     fn interrupted_v8_extension_rolls_back_schema_and_rows() {
         let mut c = fixture();
         let before = snapshot_rows(&c);
-        assert!(migrate(&mut c, true).is_err());
+        assert!(migrate(&mut c, "synthetic-restored-account", true).is_err());
         verify_exact_schema(&c, V8_SCHEMA).unwrap();
         assert_eq!(before, snapshot_rows(&c));
         assert_eq!(
@@ -253,7 +248,7 @@ mod tests {
         )
         .unwrap();
         let before = snapshot_rows(&c);
-        migrate_v9(&mut c).unwrap();
+        migrate_v9(&mut c, "synthetic-v9-account").unwrap();
         assert_eq!(before, snapshot_rows(&c));
         verify_exact_schema(&c, SCHEMA).unwrap();
         assert_eq!(
@@ -274,7 +269,7 @@ mod tests {
         drift
             .execute_batch("CREATE TABLE unexpected_authority(x TEXT)")
             .unwrap();
-        assert!(migrate_v9(&mut drift).is_err());
+        assert!(migrate_v9(&mut drift, "synthetic-v9-account").is_err());
         assert_eq!(
             drift
                 .pragma_query_value(None, "user_version", |r| r.get::<_, u64>(0))
@@ -473,34 +468,13 @@ mod tests {
     }
 }
 
-/// Exact schema13 predecessor is authenticated before the additive v14 write.
+/// Exact schema13 NONBORN predecessor is authenticated before any additive write.
 /// No original payload, recovered flag, epoch or accounting row is rewritten.
 pub(super) fn migrate_v13(c: &mut Connection, account_id: &str) -> Result<()> {
     migrate_v13_inner(c, account_id, false)
 }
 fn migrate_v13_inner(c: &mut Connection, account_id: &str, fail: bool) -> Result<()> {
-    let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let application: i64 = tx.pragma_query_value(None, "application_id", |r| r.get(0))?;
-    let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if application != APPLICATION_ID || version != 13 {
-        return Err(JournalError::UnsupportedSchema);
-    }
-    verify_exact_schema(&tx, V13_SCHEMA)?;
-    if storage::read_account(&tx)?.account_id != account_id {
-        return Err(JournalError::InvalidBinding);
-    }
-    tx.execute_batch(COMMON_CONTEXT_AUDIT_SCHEMA)?;
-    tx.execute_batch(COMMON_CONTEXT_REENTRY_SCHEMA)?;
-    tx.execute_batch(NAMED_RECIPIENT_SCHEMA)?;
-    tx.execute_batch(BORN_DISPATCH_SCHEMA)?;
-    tx.execute_batch(DURABLE_CONSTRUCTION_SCHEMA)?;
-    if fail {
-        return Err(JournalError::Database);
-    }
-    tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-    verify_exact_schema(&tx, SCHEMA)?;
-    tx.commit()?;
-    Ok(())
+    migrate_from(c, account_id, 13, fail)
 }
 #[cfg(test)]
 mod common_context_migration_tests {
@@ -543,32 +517,12 @@ mod common_context_migration_tests {
     }
 }
 
-/// Exact additive v14-to-v15 migration. No retained row is rewritten.
+/// Exact additive schema14 NONBORN migration. No retained row is rewritten.
 pub(super) fn migrate_v14(c: &mut Connection, account_id: &str) -> Result<()> {
     migrate_v14_inner(c, account_id, false)
 }
 fn migrate_v14_inner(c: &mut Connection, account_id: &str, fail: bool) -> Result<()> {
-    let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let application: i64 = tx.pragma_query_value(None, "application_id", |r| r.get(0))?;
-    let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if application != APPLICATION_ID || version != 14 {
-        return Err(JournalError::UnsupportedSchema);
-    }
-    verify_exact_schema(&tx, V14_SCHEMA)?;
-    if storage::read_account(&tx)?.account_id != account_id {
-        return Err(JournalError::InvalidBinding);
-    }
-    tx.execute_batch(COMMON_CONTEXT_REENTRY_SCHEMA)?;
-    tx.execute_batch(NAMED_RECIPIENT_SCHEMA)?;
-    tx.execute_batch(BORN_DISPATCH_SCHEMA)?;
-    tx.execute_batch(DURABLE_CONSTRUCTION_SCHEMA)?;
-    if fail {
-        return Err(JournalError::Database);
-    }
-    tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-    verify_exact_schema(&tx, SCHEMA)?;
-    tx.commit()?;
-    Ok(())
+    migrate_from(c, account_id, 14, fail)
 }
 
 #[cfg(test)]
@@ -641,31 +595,12 @@ mod reentry_foundation_migration_tests {
     }
 }
 
-/// Exact additive v15-to-v16 migration. Original bytes and quarantine survive.
+/// Exact additive schema15 NONBORN migration. Original rows and quarantine survive.
 pub(super) fn migrate_v15(c: &mut Connection, account_id: &str) -> Result<()> {
     migrate_v15_inner(c, account_id, false)
 }
 fn migrate_v15_inner(c: &mut Connection, account_id: &str, fail: bool) -> Result<()> {
-    let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let application: i64 = tx.pragma_query_value(None, "application_id", |r| r.get(0))?;
-    let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if application != APPLICATION_ID || version != 15 {
-        return Err(JournalError::UnsupportedSchema);
-    }
-    verify_exact_schema(&tx, V15_SCHEMA)?;
-    if storage::read_account(&tx)?.account_id != account_id {
-        return Err(JournalError::InvalidBinding);
-    }
-    tx.execute_batch(NAMED_RECIPIENT_SCHEMA)?;
-    tx.execute_batch(BORN_DISPATCH_SCHEMA)?;
-    tx.execute_batch(DURABLE_CONSTRUCTION_SCHEMA)?;
-    if fail {
-        return Err(JournalError::Database);
-    }
-    tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-    verify_exact_schema(&tx, SCHEMA)?;
-    tx.commit()?;
-    Ok(())
+    migrate_from(c, account_id, 15, fail)
 }
 
 #[cfg(test)]
@@ -677,53 +612,240 @@ pub(super) fn migrate_v16(c: &mut Connection, account_id: &str) -> Result<()> {
     migrate_v16_inner(c, account_id, false)
 }
 fn migrate_v16_inner(c: &mut Connection, account_id: &str, fail: bool) -> Result<()> {
-    let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let application: i64 = tx.pragma_query_value(None, "application_id", |r| r.get(0))?;
-    let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if application != APPLICATION_ID || version != 16 {
-        return Err(JournalError::UnsupportedSchema);
-    }
-    verify_exact_schema(&tx, V16_SCHEMA)?;
-    if storage::read_account(&tx)?.account_id != account_id {
-        return Err(JournalError::InvalidBinding);
-    }
-    tx.execute_batch(BORN_DISPATCH_SCHEMA)?;
-    tx.execute_batch(DURABLE_CONSTRUCTION_SCHEMA)?;
-    if fail {
-        return Err(JournalError::Database);
-    }
-    tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-    verify_exact_schema(&tx, SCHEMA)?;
-    tx.commit()?;
-    Ok(())
+    migrate_from(c, account_id, 16, fail)
 }
 
-/// Exact additive v17-to-v18 extension. Retained V3 evidence remains byte-for-byte
-/// original; the empty disclosure outbox creates no native or writer authority.
+/// Exact additive schema17 NONBORN extension. Retained evidence remains
+/// original; new empty outboxes create no native, financial or writer authority.
 pub(super) fn migrate_v17(c: &mut Connection, account_id: &str) -> Result<()> {
     migrate_v17_inner(c, account_id, false)
 }
 fn migrate_v17_inner(c: &mut Connection, account_id: &str, fail: bool) -> Result<()> {
-    let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let application: i64 = tx.pragma_query_value(None, "application_id", |r| r.get(0))?;
-    let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if application != APPLICATION_ID || version != 17 {
-        return Err(JournalError::UnsupportedSchema);
-    }
-    verify_exact_schema(&tx, V17_SCHEMA)?;
-    if storage::read_account(&tx)?.account_id != account_id {
-        return Err(JournalError::InvalidBinding);
-    }
-    tx.execute_batch(DURABLE_CONSTRUCTION_SCHEMA)?;
-    if fail {
-        return Err(JournalError::Database);
-    }
-    tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-    verify_exact_schema(&tx, SCHEMA)?;
-    tx.commit()?;
-    Ok(())
+    migrate_from(c, account_id, 17, fail)
 }
 
 #[cfg(test)]
 #[path = "durable_construction_migration_tests.rs"]
 mod durable_construction_migration_tests;
+
+/// Financial-only schema19 extension. Original BORN18 is deliberately unsupported.
+pub(super) fn migrate_v18(c: &mut Connection, account_id: &str) -> Result<()> {
+    migrate_from(c, account_id, 18, false)
+}
+
+#[cfg(test)]
+mod financial_only_migration_tests {
+    use super::*;
+    use rusqlite::{params, types::Value};
+    use wholepact_authority::account_use::{AccountUseGenesis, AccountUseIdentity};
+
+    const ACCOUNT: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+    const FROZEN: [(i64, &str); 11] = [
+        (8, V8_SCHEMA),
+        (9, V9_SCHEMA),
+        (10, V10_SCHEMA),
+        (11, V11_SCHEMA),
+        (12, V12_SCHEMA),
+        (13, V13_SCHEMA),
+        (14, V14_SCHEMA),
+        (15, V15_SCHEMA),
+        (16, V16_SCHEMA),
+        (17, V17_SCHEMA),
+        (18, V18_SCHEMA),
+    ];
+
+    fn source(version: i64, schema: &str) -> Connection {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(schema).unwrap();
+        c.pragma_update(None, "application_id", APPLICATION_ID)
+            .unwrap();
+        c.pragma_update(None, "user_version", version).unwrap();
+        c.execute("INSERT INTO signer_account VALUES(1,?1,7,1)", [ACCOUNT])
+            .unwrap();
+        c
+    }
+    fn rows(c: &Connection, schema: &str) -> Vec<(String, Vec<Vec<Value>>)> {
+        let reference = Connection::open_in_memory().unwrap();
+        reference.execute_batch(schema).unwrap();
+        let mut q = reference
+            .prepare("SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name")
+            .unwrap();
+        let tables = q
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        tables
+            .into_iter()
+            .map(|name| {
+                let mut q = c
+                    .prepare(&format!("SELECT rowid,* FROM {name} ORDER BY rowid"))
+                    .unwrap();
+                let width = q.column_count();
+                let rows = q
+                    .query_map([], |r| (0..width).map(|i| r.get(i)).collect())
+                    .unwrap()
+                    .collect::<std::result::Result<Vec<Vec<Value>>, _>>()
+                    .unwrap();
+                (name, rows)
+            })
+            .collect()
+    }
+    fn genesis() -> AccountUseGenesis {
+        AccountUseGenesis {
+            version: 1,
+            identity: AccountUseIdentity {
+                account_id: ACCOUNT.into(),
+                full_viewing_key_digest: "22".repeat(32),
+                network_profile_id: "synthetic".into(),
+                derivation_domain: "dedicated-testnet-legacy-zip32-v1".into(),
+            },
+            witness_id: "synthetic-witness".into(),
+            witness_origin_digest: "33".repeat(32),
+            owner_certificate_digest: "44".repeat(32),
+            native_birth_digest: "55".repeat(32),
+        }
+    }
+    fn insert_genesis(c: &Connection) {
+        let g = genesis();
+        c.execute(
+            "INSERT INTO signer_account_use_genesis VALUES(1,?1,?2,?3,?4)",
+            params![
+                ACCOUNT,
+                g.identity.full_viewing_key_digest,
+                g.digest().unwrap(),
+                serde_json::to_string(&g).unwrap(),
+            ],
+        )
+        .unwrap();
+        assert!(account_use_storage::inspect(c, ACCOUNT)
+            .unwrap()
+            .genesis()
+            .is_some());
+    }
+
+    #[test]
+    fn every_nonborn_frozen_version_extends_atomically_without_rewriting_original_rows() {
+        for (version, schema) in FROZEN {
+            let mut c = source(version, schema);
+            c.execute("INSERT INTO signer_sponsor_policy_events(rowid,policy_key,version,payload) VALUES(41,'synthetic-original-policy',1,'retained exact original payload')", []).unwrap();
+            let before = rows(&c, schema);
+            assert_eq!(preflight_open(&c, ACCOUNT).unwrap(), version);
+            assert!(migrate_from(&mut c, ACCOUNT, version, true).is_err());
+            verify_exact_schema(&c, schema).unwrap();
+            assert_eq!(before, rows(&c, schema));
+            assert_eq!(
+                c.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                version
+            );
+            migrate_from(&mut c, ACCOUNT, version, false).unwrap();
+            verify_exact_schema(&c, SCHEMA).unwrap();
+            assert_eq!(before, rows(&c, schema));
+            assert_eq!(
+                c.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                19
+            );
+            assert_eq!(
+                c.query_row(
+                    "SELECT count(*) FROM signer_durable_payment_admission_intents",
+                    [],
+                    |r| r.get::<_, u64>(0)
+                )
+                .unwrap(),
+                0
+            );
+            let state = account_use_storage::inspect(&c, ACCOUNT).unwrap();
+            assert!(state.genesis().is_none());
+            assert!(state.exclusion().is_none());
+            assert!(state.witness_ack().is_none());
+            let account = storage::read_account(&c).unwrap();
+            assert_eq!(account.writer_epoch, 7);
+            assert!(account.recovery_required);
+        }
+    }
+
+    #[test]
+    fn every_old_account_use_row_refuses_preflight_and_transaction_before_ddl() {
+        for (version, schema) in FROZEN.into_iter().filter(|(version, _)| *version >= 12) {
+            // These malformed/orphaned rows are deliberate inert corruption,
+            // not valid authority. The complete empty-table gate must see them.
+            for insert in [
+                "INSERT INTO signer_account_use_genesis VALUES(1,'foreign','invalid','invalid','not-json')",
+                "INSERT INTO signer_account_use_exclusion VALUES(1,'absent-genesis','invalid','not-json')",
+                "INSERT INTO signer_account_use_witness_ack VALUES('absent-exclusion','invalid','invalid','invalid','not-json')",
+            ] {
+                let mut c = source(version, schema);
+                c.pragma_update(None, "foreign_keys", false).unwrap();
+                c.execute(insert, []).unwrap();
+                let before = rows(&c, schema);
+                assert!(preflight_open(&c, ACCOUNT).is_err());
+                assert!(migrate_from(&mut c, ACCOUNT, version, false).is_err());
+                verify_exact_schema(&c, schema).unwrap();
+                assert_eq!(before, rows(&c, schema));
+                assert_eq!(c.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0)).unwrap(), version);
+            }
+            let mut born = source(version, schema);
+            insert_genesis(&born);
+            let before = rows(&born, schema);
+            assert!(preflight_open(&born, ACCOUNT).is_err());
+            assert!(migrate_from(&mut born, ACCOUNT, version, false).is_err());
+            verify_exact_schema(&born, schema).unwrap();
+            assert_eq!(before, rows(&born, schema));
+        }
+    }
+
+    #[test]
+    fn preflight_is_read_only_and_rejects_wrong_identity_application_or_extra_schema() {
+        for (version, schema) in FROZEN {
+            let mut c = source(version, schema);
+            let before = rows(&c, schema);
+            c.pragma_update(None, "query_only", true).unwrap();
+            assert_eq!(preflight_open(&c, ACCOUNT).unwrap(), version);
+            assert!(preflight_open(&c, "wrong-account").is_err());
+            assert_eq!(before, rows(&c, schema));
+            c.pragma_update(None, "query_only", false).unwrap();
+            assert!(migrate_from(&mut c, "wrong-account", version, false).is_err());
+            verify_exact_schema(&c, schema).unwrap();
+            c.pragma_update(None, "application_id", APPLICATION_ID + 1)
+                .unwrap();
+            assert!(preflight_open(&c, ACCOUNT).is_err());
+            assert!(migrate_from(&mut c, ACCOUNT, version, false).is_err());
+            c.pragma_update(None, "application_id", APPLICATION_ID)
+                .unwrap();
+            c.execute_batch("CREATE TABLE unsupported_discovery_authority(payload TEXT)")
+                .unwrap();
+            assert!(preflight_open(&c, ACCOUNT).is_err());
+            assert!(migrate_from(&mut c, ACCOUNT, version, false).is_err());
+            assert_eq!(before, rows(&c, schema));
+            assert_eq!(
+                c.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                version
+            );
+        }
+    }
+
+    #[test]
+    fn account_use_inserted_after_preflight_is_rejected_again_inside_migration() {
+        let mut c = source(18, V18_SCHEMA);
+        assert_eq!(preflight_open(&c, ACCOUNT).unwrap(), 18);
+        insert_genesis(&c);
+        let before = rows(&c, V18_SCHEMA);
+        assert!(migrate_v18(&mut c, ACCOUNT).is_err());
+        verify_exact_schema(&c, V18_SCHEMA).unwrap();
+        assert_eq!(before, rows(&c, V18_SCHEMA));
+    }
+
+    #[test]
+    fn frozen18_is_not_19_and_current19_keeps_existing_valid_genesis_rules() {
+        let old = source(19, V18_SCHEMA);
+        assert!(preflight_open(&old, ACCOUNT).is_err());
+        let current = source(19, SCHEMA);
+        assert_eq!(preflight_open(&current, ACCOUNT).unwrap(), 19);
+        insert_genesis(&current);
+        assert_eq!(preflight_open(&current, ACCOUNT).unwrap(), 19);
+        assert!(verify_exact_schema(&current, V18_SCHEMA).is_err());
+    }
+}

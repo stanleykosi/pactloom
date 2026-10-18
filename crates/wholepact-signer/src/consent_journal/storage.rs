@@ -6,6 +6,13 @@ use super::*;
 ))]
 #[path = "durable_born_entry_v1.rs"]
 mod durable_born_entry_v1;
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "pending-birth-owner-signing",
+    target_os = "linux"
+))]
+pub(crate) use durable_born_entry_v1::validate_durable_payment_local_history_v1;
+
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::{
     path::Path,
@@ -23,6 +30,124 @@ pub(super) static TEMPLATE: JournalTemplate = JournalTemplate {
     create_sql: SCHEMA,
 };
 
+/// Concrete actual-directory custody for one original signer database. This
+/// never authenticates a key or grants account/native/financial permission.
+pub(crate) struct SignerJournalSourceOwner {
+    directory: crate::files::RetainedDirectoryExclusion,
+    path: std::path::PathBuf,
+    state: Mutex<std::sync::Weak<LiveCurrent19Source>>,
+}
+struct LiveCurrent19Source {
+    identity: wholepact_storage_security::DatabaseFileIdentity,
+    account_id: String,
+    owner: Arc<SignerJournalSourceOwner>,
+}
+/// The connection MUST drop before registration, including errors and unwind.
+struct OpenedSignerSource {
+    connection: Connection,
+    identity: wholepact_storage_security::DatabaseFileIdentity,
+    registration: Arc<LiveCurrent19Source>,
+}
+pub(super) struct OriginalSourceOpen<'a> {
+    owner: &'a Arc<SignerJournalSourceOwner>,
+    state: std::sync::MutexGuard<'a, std::sync::Weak<LiveCurrent19Source>>,
+}
+impl SignerJournalSourceOwner {
+    pub(crate) fn new(
+        directory: crate::files::RetainedDirectoryExclusion,
+        child: &str,
+    ) -> crate::Result<Self> {
+        directory.check_current()?;
+        if child.is_empty()
+            || child.len() > 160
+            || child == "."
+            || child == ".."
+            || !child
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+        {
+            return Err(crate::Error::InvalidData);
+        }
+        let path = directory.root().join(child);
+        Ok(Self {
+            directory,
+            path,
+            state: Mutex::new(std::sync::Weak::new()),
+        })
+    }
+    pub(super) fn begin<'a>(self: &'a Arc<Self>, path: &Path) -> Result<OriginalSourceOpen<'a>> {
+        self.directory
+            .check_current()
+            .map_err(|_| JournalError::Permission)?;
+        let parent = path.parent().ok_or(JournalError::InvalidBinding)?;
+        if std::fs::canonicalize(parent).map_err(|_| JournalError::InvalidBinding)?
+            != self.directory.root()
+            || path.file_name() != self.path.file_name()
+        {
+            return Err(JournalError::InvalidBinding);
+        }
+        let state = self.state.lock().map_err(|_| JournalError::Permission)?;
+        self.directory
+            .check_current()
+            .map_err(|_| JournalError::Permission)?;
+        Ok(OriginalSourceOpen { owner: self, state })
+    }
+}
+impl OriginalSourceOpen<'_> {
+    pub(super) fn require_exclusive(&self) -> Result<()> {
+        if self.state.upgrade().is_some() {
+            return Err(JournalError::Conflict);
+        }
+        self.owner
+            .directory
+            .check_current()
+            .map_err(|_| JournalError::Permission)
+    }
+    fn register(
+        &mut self,
+        connection: &Connection,
+        identity: &wholepact_storage_security::DatabaseFileIdentity,
+        account_id: &str,
+    ) -> Result<Arc<LiveCurrent19Source>> {
+        self.owner
+            .directory
+            .check_current()
+            .map_err(|_| JournalError::Permission)?;
+        identity.check_current(connection)?;
+        let application: i64 =
+            connection.pragma_query_value(None, "application_id", |r| r.get(0))?;
+        let version: i64 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        if application != APPLICATION_ID
+            || version != SCHEMA_VERSION
+            || read_account(connection)?.account_id != account_id
+        {
+            return Err(JournalError::InvalidBinding);
+        }
+        verify_schema(connection)?;
+        identity.check_current(connection)?;
+        self.owner
+            .directory
+            .check_current()
+            .map_err(|_| JournalError::Permission)?;
+        if let Some(live) = self.state.upgrade() {
+            if live.identity != *identity
+                || live.account_id != account_id
+                || !Arc::ptr_eq(&live.owner, self.owner)
+            {
+                return Err(JournalError::InvalidBinding);
+            }
+            return Ok(live);
+        }
+        let live = Arc::new(LiveCurrent19Source {
+            identity: identity.clone(),
+            account_id: account_id.into(),
+            owner: Arc::clone(self.owner),
+        });
+        *self.state = Arc::downgrade(&live);
+        Ok(live)
+    }
+}
+
 /// Only AccountVault can open this private authority. It never yields a Store,
 /// database key, generic SQL connection, generic record writer or release token.
 pub struct SignerConsentJournal {
@@ -38,22 +163,41 @@ pub struct SignerConsentJournal {
     >,
     #[cfg(test)]
     pub(super) capacity_limits: (u64, u64),
+    // LAST: SQLite and all its final checkpoint work close before source custody.
+    source_registration: Arc<LiveCurrent19Source>,
 }
 impl SignerConsentJournal {
+    fn from_owned_source(opened: OpenedSignerSource) -> Self {
+        Self {
+            connection: Mutex::new(opened.connection),
+            database_identity: opened.identity,
+            binding: SignerJournalBinding(Arc::new(())),
+            authority_fence: RwLock::new(()),
+            #[cfg(feature = "authority-signing")]
+            settlement_nodes: Mutex::new(std::collections::BTreeMap::new()),
+            #[cfg(test)]
+            capacity_limits: (MAX_BACKUP_ROWS, MAX_BACKUP_ENCODED_BYTES),
+            source_registration: opened.registration,
+        }
+    }
     pub(crate) fn create_encrypted(
         path: &Path,
         key: &DatabaseKey,
         account_id: &str,
         writer_epoch: u64,
         recovery_required: bool,
+        source: &Arc<SignerJournalSourceOwner>,
     ) -> Result<Self> {
         id(account_id)?;
         let epoch = i64::try_from(writer_epoch).map_err(|_| JournalError::InvalidBinding)?;
         if epoch <= 0 {
             return Err(JournalError::InvalidBinding);
         }
+        let mut owner = source.begin(path)?;
+        owner.require_exclusive()?;
+        // Declared after owner: all raw SQLite cleanup precedes owner unlock.
         let encrypted = wholepact_storage_security::create_encrypted(path, key)?;
-        let database_identity = encrypted.database_identity()?;
+        let identity = encrypted.database_identity()?;
         let mut connection = encrypted.into_connection();
         configure(&connection)?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -66,66 +210,23 @@ impl SignerConsentJournal {
         tx.pragma_update(None, "application_id", APPLICATION_ID)?;
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.commit()?;
-        database_identity.check_current(&connection)?;
-        Ok(Self {
-            connection: Mutex::new(connection),
-            database_identity,
-            binding: SignerJournalBinding(Arc::new(())),
-            authority_fence: RwLock::new(()),
-            #[cfg(feature = "authority-signing")]
-            settlement_nodes: Mutex::new(std::collections::BTreeMap::new()),
-            #[cfg(test)]
-            capacity_limits: (MAX_BACKUP_ROWS, MAX_BACKUP_ENCODED_BYTES),
-        })
+        let registration = owner.register(&connection, &identity, account_id)?;
+        Ok(Self::from_owned_source(OpenedSignerSource {
+            connection,
+            identity,
+            registration,
+        }))
     }
-    pub(crate) fn open_encrypted(path: &Path, key: &DatabaseKey, account_id: &str) -> Result<Self> {
-        let encrypted = wholepact_storage_security::open_encrypted(path, key)?;
-        let database_identity = encrypted.database_identity()?;
-        let mut connection = encrypted.into_connection();
-        let initial_version: i64 =
-            connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if matches!(initial_version, 8..=17) && read_account(&connection)?.account_id != account_id
-        {
-            return Err(JournalError::InvalidBinding);
-        }
-        if initial_version == 8 {
-            recovery_migration::migrate_v8(&mut connection)?;
-        }
-        if initial_version == 9 {
-            recovery_migration::migrate_v9(&mut connection)?;
-        }
-        if initial_version == 10 {
-            recovery_migration::migrate_v10(&mut connection, account_id)?;
-        }
-        if initial_version == 11 {
-            recovery_migration::migrate_v11(&mut connection, account_id)?;
-        }
-        if initial_version == 12 {
-            recovery_migration::migrate_v12(&mut connection, account_id)?;
-        }
-        if initial_version == 13 {
-            recovery_migration::migrate_v13(&mut connection, account_id)?;
-        }
-        if initial_version == 14 {
-            recovery_migration::migrate_v14(&mut connection, account_id)?;
-        }
-        if initial_version == 15 {
-            recovery_migration::migrate_v15(&mut connection, account_id)?;
-        }
-        if initial_version == 16 {
-            recovery_migration::migrate_v16(&mut connection, account_id)?;
-        }
-        if initial_version == 17 {
-            recovery_migration::migrate_v17(&mut connection, account_id)?;
-        }
-        let application: i64 =
-            connection.pragma_query_value(None, "application_id", |r| r.get(0))?;
-        let version: i64 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if application != APPLICATION_ID || version != SCHEMA_VERSION {
-            return Err(JournalError::UnsupportedSchema);
-        }
-        verify_schema(&connection)?;
-        let generations: i64 = connection.query_row(
+    pub(crate) fn open_encrypted(
+        path: &Path,
+        key: &DatabaseKey,
+        account_id: &str,
+        source: &Arc<SignerJournalSourceOwner>,
+    ) -> Result<Self> {
+        let mut owner = source.begin(path)?;
+        let opened =
+            open_preflighted_encrypted(&mut owner, path, key, account_id, None, &|_| Ok(()))?;
+        let generations: u64 = opened.connection.query_row(
             "SELECT count(*) FROM signer_recovery_generations",
             [],
             |r| r.get(0),
@@ -133,22 +234,35 @@ impl SignerConsentJournal {
         if generations != 0 {
             return Err(JournalError::RecoveryRequired);
         }
-        let account = read_account(&connection)?;
-        if account.account_id != account_id {
-            return Err(JournalError::InvalidBinding);
+        Ok(Self::from_owned_source(opened))
+    }
+    /// Actual born origin always chooses current-only, even if old cells claim
+    /// UNKNOWN pre-genesis or were removed. There is no born schema upgrade.
+    #[cfg(all(feature = "pending-birth-owner-signing", target_os = "linux"))]
+    pub(crate) fn open_known_born_encrypted(
+        path: &Path,
+        key: &DatabaseKey,
+        genesis: &wholepact_authority::account_use::AccountUseGenesis,
+        source: &Arc<SignerJournalSourceOwner>,
+    ) -> Result<Self> {
+        let mut owner = source.begin(path)?;
+        let opened = open_preflighted_encrypted(
+            &mut owner,
+            path,
+            key,
+            &genesis.identity.account_id,
+            Some(genesis),
+            &|_| Ok(()),
+        )?;
+        let generations: u64 = opened.connection.query_row(
+            "SELECT count(*) FROM signer_recovery_generations",
+            [],
+            |r| r.get(0),
+        )?;
+        if generations != 0 {
+            return Err(JournalError::RecoveryRequired);
         }
-        configure(&connection)?;
-        database_identity.check_current(&connection)?;
-        Ok(Self {
-            connection: Mutex::new(connection),
-            database_identity,
-            binding: SignerJournalBinding(Arc::new(())),
-            authority_fence: RwLock::new(()),
-            #[cfg(feature = "authority-signing")]
-            settlement_nodes: Mutex::new(std::collections::BTreeMap::new()),
-            #[cfg(test)]
-            capacity_limits: (MAX_BACKUP_ROWS, MAX_BACKUP_ENCODED_BYTES),
-        })
+        Ok(Self::from_owned_source(opened))
     }
     #[cfg(all(
         feature = "native-ui",
@@ -160,79 +274,24 @@ impl SignerConsentJournal {
         key: &DatabaseKey,
         account_id: &str,
         proof: &crate::account::VerifiedProfileActivation,
+        source: &Arc<SignerJournalSourceOwner>,
     ) -> Result<Self> {
-        let encrypted = wholepact_storage_security::open_encrypted(path, key)?;
-        let database_identity = encrypted.database_identity()?;
-        let mut connection = encrypted.into_connection();
-        let initial_version: i64 =
-            connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if matches!(initial_version, 8..=17) && read_account(&connection)?.account_id != account_id
-        {
-            return Err(JournalError::InvalidBinding);
-        }
-        if initial_version == 8 {
-            recovery_migration::migrate_v8(&mut connection)?;
-        }
-        if initial_version == 9 {
-            recovery_migration::migrate_v9(&mut connection)?;
-        }
-        if initial_version == 10 {
-            recovery_migration::migrate_v10(&mut connection, account_id)?;
-        }
-        if initial_version == 11 {
-            recovery_migration::migrate_v11(&mut connection, account_id)?;
-        }
-        if initial_version == 12 {
-            recovery_migration::migrate_v12(&mut connection, account_id)?;
-        }
-        if initial_version == 13 {
-            recovery_migration::migrate_v13(&mut connection, account_id)?;
-        }
-        if initial_version == 14 {
-            recovery_migration::migrate_v14(&mut connection, account_id)?;
-        }
-        if initial_version == 15 {
-            recovery_migration::migrate_v15(&mut connection, account_id)?;
-        }
-        if initial_version == 16 {
-            recovery_migration::migrate_v16(&mut connection, account_id)?;
-        }
-        if initial_version == 17 {
-            recovery_migration::migrate_v17(&mut connection, account_id)?;
-        }
-        let application: i64 =
-            connection.pragma_query_value(None, "application_id", |r| r.get(0))?;
-        let version: i64 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if application != APPLICATION_ID || version != SCHEMA_VERSION {
-            return Err(JournalError::UnsupportedSchema);
-        }
-        verify_schema(&connection)?;
+        let mut owner = source.begin(path)?;
+        let opened =
+            open_preflighted_encrypted(&mut owner, path, key, account_id, None, &|_| Ok(()))?;
         let record = proof.record();
         let payload = encode(record)?;
-        let rows:i64=connection.query_row("SELECT count(*) FROM signer_recovery_generations WHERE generation_id=?1 AND operation_id=?2 AND inventory_digest=?3 AND fence_digest=?4 AND writer_epoch=?5 AND payload=?6",params![record.generation_id,record.operation_id,record.inventory_digest,record.fence_digest,record.writer_epoch,payload.as_str()],|r|r.get(0))?;
-        if rows != 2 {
-            return Err(JournalError::RecoveryRequired);
-        }
-        let account = read_account(&connection)?;
-        if account.account_id != account_id
+        let rows:i64=opened.connection.query_row("SELECT count(*) FROM signer_recovery_generations WHERE generation_id=?1 AND operation_id=?2 AND inventory_digest=?3 AND fence_digest=?4 AND writer_epoch=?5 AND payload=?6",params![record.generation_id,record.operation_id,record.inventory_digest,record.fence_digest,record.writer_epoch,payload.as_str()],|r|r.get(0))?;
+        let account = read_account(&opened.connection)?;
+        if rows != 2
+            || account.account_id != account_id
             || account.account_id != record.account_id
             || account.writer_epoch < record.writer_epoch
             || account.recovery_required
         {
             return Err(JournalError::RecoveryRequired);
         }
-        configure(&connection)?;
-        database_identity.check_current(&connection)?;
-        Ok(Self {
-            connection: Mutex::new(connection),
-            database_identity,
-            binding: SignerJournalBinding(Arc::new(())),
-            authority_fence: RwLock::new(()),
-            #[cfg(feature = "authority-signing")]
-            settlement_nodes: Mutex::new(std::collections::BTreeMap::new()),
-            #[cfg(test)]
-            capacity_limits: (MAX_BACKUP_ROWS, MAX_BACKUP_ENCODED_BYTES),
-        })
+        Ok(Self::from_owned_source(opened))
     }
     pub fn binding(&self) -> SignerJournalBinding {
         self.binding.clone()
@@ -787,6 +846,143 @@ pub(super) fn check_account(c: &Connection, expected: &SignerAccountState) -> Re
     Ok(())
 }
 
+/// Exclusive FIRST opens use immutable-copy preflight. A genuine live exact19
+/// registration permits maintained ordinary multi-open; its wrong-key failures
+/// retain ordinary sidecar semantics and make no byte-preservation claim.
+fn open_preflighted_encrypted(
+    owner: &mut OriginalSourceOpen<'_>,
+    path: &Path,
+    key: &DatabaseKey,
+    account_id: &str,
+    known_born: Option<&wholepact_authority::account_use::AccountUseGenesis>,
+    extra: &dyn Fn(&Connection) -> Result<()>,
+) -> Result<OpenedSignerSource> {
+    id(account_id)?;
+    let current = owner.state.upgrade();
+    if let Some(live) = current.as_ref() {
+        if live.account_id != account_id || !Arc::ptr_eq(&live.owner, owner.owner) {
+            return Err(JournalError::InvalidBinding);
+        }
+        owner
+            .owner
+            .directory
+            .check_current()
+            .map_err(|_| JournalError::Permission)?;
+        live.identity.check_retained_owner_path()?;
+        let encrypted = wholepact_storage_security::open_encrypted(path, key)?;
+        let identity = encrypted.database_identity()?;
+        if identity != live.identity {
+            return Err(JournalError::InvalidBinding);
+        }
+        let mut connection = encrypted.into_connection();
+        {
+            let tx = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
+            if preflight_original(&tx, account_id, known_born)? != SCHEMA_VERSION {
+                return Err(JournalError::UnsupportedSchema);
+            }
+            extra(&tx)?;
+            identity.check_current(&tx)?;
+            tx.commit()?;
+        }
+        configure(&connection)?;
+        let registration = owner.register(&connection, &identity, account_id)?;
+        return Ok(OpenedSignerSource {
+            connection,
+            identity,
+            registration,
+        });
+    }
+    owner.require_exclusive()?;
+    let snapshot = wholepact_storage_security::open_encrypted_read_snapshot(path, key)?;
+    let original_identity = snapshot.source_database_identity()?;
+    let initial_version = {
+        let tx = rusqlite::Transaction::new_unchecked(
+            snapshot.connection(),
+            TransactionBehavior::Deferred,
+        )?;
+        let version = preflight_original(&tx, account_id, known_born)?;
+        // A source-owner token proves custody, not origin. No current approved
+        // caller proves8..11 ordinary provenance, so UNKNOWN stays unsupported.
+        if (8..=11).contains(&version) {
+            return Err(JournalError::RecoveryRequired);
+        }
+        extra(&tx)?;
+        tx.commit()?;
+        version
+    };
+    snapshot.check_source_unchanged()?;
+    owner
+        .owner
+        .directory
+        .check_current()
+        .map_err(|_| JournalError::Permission)?;
+    let encrypted = wholepact_storage_security::open_encrypted_quiescent(path, key)?;
+    let identity = encrypted.database_identity()?;
+    if identity != original_identity {
+        return Err(JournalError::InvalidBinding);
+    }
+    let mut connection = encrypted.into_connection();
+    identity.check_current(&connection)?;
+    if preflight_original(&connection, account_id, known_born)? != initial_version {
+        return Err(JournalError::Conflict);
+    }
+    drop(snapshot);
+    match initial_version {
+        12 => recovery_migration::migrate_v12(&mut connection, account_id)?,
+        13 => recovery_migration::migrate_v13(&mut connection, account_id)?,
+        14 => recovery_migration::migrate_v14(&mut connection, account_id)?,
+        15 => recovery_migration::migrate_v15(&mut connection, account_id)?,
+        16 => recovery_migration::migrate_v16(&mut connection, account_id)?,
+        17 => recovery_migration::migrate_v17(&mut connection, account_id)?,
+        18 => recovery_migration::migrate_v18(&mut connection, account_id)?,
+        SCHEMA_VERSION => {}
+        _ => return Err(JournalError::UnsupportedSchema),
+    }
+    {
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        if preflight_original(&tx, account_id, known_born)? != SCHEMA_VERSION {
+            return Err(JournalError::UnsupportedSchema);
+        }
+        extra(&tx)?;
+        identity.check_current(&tx)?;
+        tx.commit()?;
+    }
+    configure(&connection)?;
+    let registration = owner.register(&connection, &identity, account_id)?;
+    Ok(OpenedSignerSource {
+        connection,
+        identity,
+        registration,
+    })
+}
+fn preflight_original(
+    c: &Connection,
+    account_id: &str,
+    known_born: Option<&wholepact_authority::account_use::AccountUseGenesis>,
+) -> Result<i64> {
+    if let Some(genesis) = known_born {
+        genesis
+            .validate()
+            .map_err(|_| JournalError::InvalidBinding)?;
+        let application: i64 = c.pragma_query_value(None, "application_id", |r| r.get(0))?;
+        let version: i64 = c.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        if application != APPLICATION_ID || version != SCHEMA_VERSION {
+            return Err(JournalError::UnsupportedSchema);
+        }
+        verify_schema(c)?;
+        let account = read_account(c)?;
+        if account.account_id != account_id
+            || account_id != genesis.identity.account_id
+            || account_use_storage::inspect(c, account_id)?.genesis() != Some(genesis)
+        {
+            return Err(JournalError::InvalidBinding);
+        }
+        Ok(version)
+    } else {
+        recovery_migration::preflight_open(c, account_id)
+    }
+}
+
 fn configure(c: &Connection) -> Result<()> {
     c.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA max_page_count=32768;")?;
     Ok(())
@@ -799,6 +995,17 @@ fn configure(c: &Connection) -> Result<()> {
 // There are no BLOB or REAL cells in this schema. This dominates the bundle's
 // exact Row/Cell JSON encoding without duplicating its private serialization.
 const CAPACITY_TABLES: &[(&str, &[&str])] = &[
+    (
+        "signer_durable_payment_admission_intents",
+        &[
+            "operation_id",
+            "authorization_id",
+            "request_digest",
+            "enrollment_ref",
+            "manifest_ref",
+            "payload",
+        ],
+    ),
     (
         "signer_durable_construction_outbox",
         &[
@@ -1475,6 +1682,20 @@ fn verify_schema_before_common_audit(c: &Connection) -> Result<()> {
     offline_receipts::validate_all(c, &read_account(c)?.account_id)?;
     account_use_storage::inspect(c, &read_account(c)?.account_id)?;
     named_recipient_inventory::validate_archive_rows(c, &read_account(c)?.account_id)?;
+    durable_payment_admission_intent_v1::validate_rows(c)?;
+    #[cfg(not(all(
+        feature = "durable-proposal",
+        feature = "native-ui",
+        target_os = "linux"
+    )))]
+    if c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM signer_durable_payment_admission_intents)",
+        [],
+        |r| r.get::<_, bool>(0),
+    )? {
+        return Err(JournalError::RecoveryRequired);
+    }
+
     #[cfg(all(
         feature = "durable-proposal",
         feature = "native-ui",
@@ -1563,7 +1784,14 @@ impl SignerConsentJournal {
             .map_err(|_| JournalError::InvalidBinding)?;
         let path = proof.journal_path();
         let key = proof.journal_key();
-        let mut journal = Self::open_encrypted(&path, &key, &proof.genesis().identity.account_id)?;
+        let mut journal = Self::open_known_born_encrypted(
+            &path,
+            &key,
+            proof.genesis(),
+            &proof
+                .journal_source_owner()
+                .map_err(|_| JournalError::Permission)?,
+        )?;
         journal.check_common_context_authorized_reentry_owner(
             &CommonContextAuthorizedReentryOwnerInput {
                 genesis: proof.genesis(),
@@ -1599,7 +1827,14 @@ impl SignerConsentJournal {
             .map_err(|_| JournalError::Permission)?;
         let path = proof.journal_path();
         let key = proof.journal_key();
-        let mut journal = Self::open_encrypted(&path, &key, &proof.genesis().identity.account_id)?;
+        let mut journal = Self::open_known_born_encrypted(
+            &path,
+            &key,
+            proof.genesis(),
+            &proof
+                .journal_source_owner()
+                .map_err(|_| JournalError::Permission)?,
+        )?;
         let actual = journal.consumed_born_named_inventory_v1(
             proof.genesis(),
             proof.writer_epoch(),
@@ -1614,5 +1849,306 @@ impl SignerConsentJournal {
             .map_err(|_| JournalError::Permission)?;
         journal.binding = proof.original_binding().clone();
         Ok(journal)
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod source_owner_tests {
+    use super::*;
+    use std::{collections::BTreeMap, fs, os::unix::fs::PermissionsExt, path::PathBuf};
+
+    struct SyntheticSource {
+        source: Arc<SignerJournalSourceOwner>,
+        directory: crate::files::PrivateDirectory,
+        path: PathBuf,
+        key: DatabaseKey,
+        _temp: tempfile::TempDir,
+    }
+    impl SyntheticSource {
+        fn new() -> Self {
+            let temp = tempfile::tempdir().unwrap();
+            fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+            let directory = crate::files::PrivateDirectory::open(temp.path()).unwrap();
+            let path = temp.path().join("source.sqlite");
+            let source = directory
+                .signer_journal_source_owner_for_test(&path)
+                .unwrap();
+            Self {
+                source,
+                directory,
+                path,
+                key: DatabaseKey::from_bytes([177; 32]),
+                _temp: temp,
+            }
+        }
+        fn create(&self) -> SignerConsentJournal {
+            SignerConsentJournal::create_encrypted(
+                &self.path,
+                &self.key,
+                "synthetic-source",
+                7,
+                false,
+                &self.source,
+            )
+            .unwrap()
+        }
+        fn files(&self) -> BTreeMap<PathBuf, Vec<u8>> {
+            fs::read_dir(self.path.parent().unwrap())
+                .unwrap()
+                .map(|entry| {
+                    let path = entry.unwrap().path();
+                    let bytes = fs::read(&path).unwrap();
+                    (path, bytes)
+                })
+                .collect()
+        }
+        fn old(&self, version: i64, schema: &str) {
+            // Dedicated synthetic raw fixture is closed before classification.
+            let c = wholepact_storage_security::create_encrypted(&self.path, &self.key).unwrap();
+            c.connection().execute_batch(schema).unwrap();
+            c.connection()
+                .execute(
+                    "INSERT INTO signer_account VALUES(1,'synthetic-source',7,0)",
+                    [],
+                )
+                .unwrap();
+            c.connection()
+                .pragma_update(None, "application_id", APPLICATION_ID)
+                .unwrap();
+            c.connection()
+                .pragma_update(None, "user_version", version)
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn live_journal_retains_actual_directory_lock_after_directory_owner_drops() {
+        let f = SyntheticSource::new();
+        let journal = f.create();
+        let SyntheticSource {
+            source,
+            directory,
+            path,
+            key: _,
+            _temp,
+        } = f;
+        drop(directory);
+        drop(source);
+        assert!(crate::files::PrivateDirectory::open_existing(path.parent().unwrap()).is_err());
+        drop(journal);
+        crate::files::PrivateDirectory::open_existing(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn concurrent_first_opens_publish_only_one_actual_current19_registration() {
+        let f = SyntheticSource::new();
+        drop(f.create());
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let source = Arc::clone(&f.source);
+                let path = f.path.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let journal = SignerConsentJournal::open_encrypted(
+                        &path,
+                        &DatabaseKey::from_bytes([177; 32]),
+                        "synthetic-source",
+                        &source,
+                    )
+                    .unwrap();
+                    journal
+                })
+            })
+            .collect();
+        let mut journals = handles.into_iter().map(|h| h.join().unwrap());
+        let first = journals.next().unwrap();
+        let second = journals.next().unwrap();
+        assert!(Arc::ptr_eq(
+            &first.source_registration,
+            &second.source_registration
+        ));
+        assert!(first.binding() != second.binding());
+    }
+
+    #[test]
+    fn known_live_current19_reopens_during_existing_writer_without_snapshot() {
+        let f = SyntheticSource::new();
+        let first = f.create();
+        let mut c = first.connection.lock().unwrap();
+        let tx = c
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        tx.execute(
+            "UPDATE signer_account SET writer_epoch=writer_epoch WHERE singleton=1",
+            [],
+        )
+        .unwrap();
+        let second =
+            SignerConsentJournal::open_encrypted(&f.path, &f.key, "synthetic-source", &f.source)
+                .unwrap();
+        assert!(Arc::ptr_eq(
+            &first.source_registration,
+            &second.source_registration
+        ));
+        tx.rollback().unwrap();
+    }
+
+    #[test]
+    fn exclusive_first_open_wrong_key_account_unknown_or_objects_preserves_all_files() {
+        for version in 8..=11 {
+            let f = SyntheticSource::new();
+            let schema = match version {
+                8 => recovery_migration::V8_SCHEMA,
+                9 => recovery_migration::V9_SCHEMA,
+                10 => recovery_migration::V10_SCHEMA,
+                _ => recovery_migration::V11_SCHEMA,
+            };
+            f.old(version, schema);
+            let before = f.files();
+            assert!(matches!(
+                SignerConsentJournal::open_encrypted(
+                    &f.path,
+                    &f.key,
+                    "synthetic-source",
+                    &f.source
+                ),
+                Err(JournalError::RecoveryRequired)
+            ));
+            assert!(
+                before == f.files(),
+                "UNKNOWN schema {version} changed retained files"
+            );
+            assert!(f.source.state.lock().unwrap().upgrade().is_none());
+        }
+        let f = SyntheticSource::new();
+        drop(f.create());
+        let before = f.files();
+        assert!(SignerConsentJournal::open_encrypted(
+            &f.path,
+            &DatabaseKey::from_bytes([178; 32]),
+            "synthetic-source",
+            &f.source
+        )
+        .is_err());
+        assert!(before == f.files(), "retained encrypted files changed");
+        assert!(SignerConsentJournal::open_encrypted(
+            &f.path,
+            &f.key,
+            "different-account",
+            &f.source
+        )
+        .is_err());
+        assert!(before == f.files(), "retained encrypted files changed");
+        let c = wholepact_storage_security::open_encrypted(&f.path, &f.key).unwrap();
+        c.connection()
+            .execute_batch("CREATE TABLE foreign_object(value TEXT)")
+            .unwrap();
+        drop(c);
+        let before = f.files();
+        assert!(SignerConsentJournal::open_encrypted(
+            &f.path,
+            &f.key,
+            "synthetic-source",
+            &f.source
+        )
+        .is_err());
+        assert!(before == f.files(), "retained encrypted files changed");
+    }
+
+    #[test]
+    fn failed_or_panicked_first_open_never_publishes_registration() {
+        let f = SyntheticSource::new();
+        drop(f.create());
+        {
+            let mut owner = f.source.begin(&f.path).unwrap();
+            assert!(open_preflighted_encrypted(
+                &mut owner,
+                &f.path,
+                &f.key,
+                "synthetic-source",
+                None,
+                &|_| Err(JournalError::Permission)
+            )
+            .is_err());
+            assert!(owner.state.upgrade().is_none());
+        }
+        let calls = std::cell::Cell::new(0);
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut owner = f.source.begin(&f.path).unwrap();
+            let _ = open_preflighted_encrypted(
+                &mut owner,
+                &f.path,
+                &f.key,
+                "synthetic-source",
+                None,
+                &|_| {
+                    calls.set(calls.get() + 1);
+                    if calls.get() == 2 {
+                        panic!("synthetic failure after original allocation");
+                    }
+                    Ok(())
+                },
+            );
+        }));
+        assert!(panic.is_err());
+        assert_eq!(calls.get(), 2);
+        let state = match f.source.state.lock() {
+            Err(poisoned) => poisoned.into_inner(),
+            Ok(_) => panic!("first-open unwind must poison source state"),
+        };
+        assert!(state.upgrade().is_none());
+        drop(state);
+        assert!(SignerConsentJournal::open_encrypted(
+            &f.path,
+            &f.key,
+            "synthetic-source",
+            &f.source
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn actual_file_replacement_and_cross_child_hardlink_cannot_reuse_owner() {
+        let f = SyntheticSource::new();
+        let journal = f.create();
+        let alias = f.path.with_file_name("alias.sqlite");
+        let alias_source = f
+            .directory
+            .signer_journal_source_owner_for_test(&alias)
+            .unwrap();
+        assert!(!Arc::ptr_eq(&f.source, &alias_source));
+        fs::hard_link(&f.path, &alias).unwrap();
+        let before = f.files();
+        assert!(SignerConsentJournal::open_encrypted(
+            &alias,
+            &f.key,
+            "synthetic-source",
+            &alias_source
+        )
+        .is_err());
+        assert!(before == f.files(), "retained encrypted files changed");
+        fs::remove_file(&alias).unwrap();
+        // Checkpoint before copying, then retain the original live handle while
+        // replacing its pathname with a different inode carrying equal bytes.
+        journal
+            .connection
+            .lock()
+            .unwrap()
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+            .unwrap();
+        fs::copy(&f.path, &alias).unwrap();
+        fs::set_permissions(&alias, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::rename(&alias, &f.path).unwrap();
+        let before = f.files();
+        assert!(SignerConsentJournal::open_encrypted(
+            &f.path,
+            &f.key,
+            "synthetic-source",
+            &f.source
+        )
+        .is_err());
+        assert!(before == f.files(), "retained encrypted files changed");
     }
 }

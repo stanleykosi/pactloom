@@ -1,8 +1,16 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-18, 05:16 UTC.
+Updated: 2026-10-18, 06:37 UTC.
 
 **Incomplete implementation. No full native financial signing, public testnet settlement, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
+
+## Latest local validation and pending native run
+
+The integrated full-sign fixture graph compiled with actual Host+Signer all features in 7 minutes 28 seconds. All 49 focused signer/source-ownership checks and all 25 selected compatibility checks passed, including both previously failing fixture cases after their narrow corrections. The existing Host44 and signer41 selected regressions also passed. Default signer compilation passed in 2 minutes 58 seconds; 25 present focused/default-refusal checks and 17 selected compatibility checks passed. Configurations overlap and are not a unique test total.
+
+The exact new ignored Linux selector is now registered alongside the unchanged baseline. Final selector compilation passed in 1 minute 44 seconds; each exact selector was verified using `--ignored --list` only. The 89 Python parser/selection tests and shell syntax check pass. No native selector has been executed locally. The new native signing sequence, its original 120-second owner lifetime, exact mTLS/retry behavior and cleanup remain unqualified until the authorized isolated runner executes them.
+
+Publication is currently paused awaiting explicit approval for the public source disclosure. The last verified published implementation commit is `ff57cdfa17421689906146a3a6ae2824463bea7e`; later local checkpoints are not on GitHub and no new CI run has started. The older CI6 result below remains evidence for its exact earlier commit, not this new source tree. No mainnet/testnet funds were used and no settlement is claimed.
 
 ## Current qualified boundary
 
@@ -31,6 +39,16 @@ No socket/native owner was exercised by these component selections. Actual owner
 ## Inactive signer source preservation checkpoint
 
 Six independent new signer leaves are retained as a source-only checkpoint: immutable admission intent and its focused tests, financial schema delta and schema tests, frozen historical18 SQL, and the source-bound native witness adapter. Their parent module/storage/runtime integration remains work in progress and is not included in this leaf-only checkpoint. These leaves are unregistered in this published tree, uncompiled and unexecuted; they do not activate schema19, change the qualified profile, or supply financial authority. This preserves recoverable work without publishing a partially wired active signer graph.
+
+## Integrated signer/source-ownership checkpoint, not native qualification
+
+The actual Host+Signer all-features release library graph compiled in 6 minutes 51 seconds after correcting module imports, narrow validator visibility and exhaustive handling of the new runtime operation. Source review covers retained exact pre-dispatch intent, current-source/peer/privacy checks, distinct complete-history reconciliation, real directory/file custody, frozen18 historical readers and financial19 source classification.
+
+Focused component results: 47 of 48 passed; compatibility selection: 24 of 25 passed. Both failures were diagnosed in test setup/expectations: the frozen18 snapshot fixture used a profile rejected by its unchanged existing BackupGate, and one historical-template test still equated version18 with the new current schema. This checkpoint contains the reviewed fixture-profile and frozen18/current19 expectation corrections, but those two corrections have NOT yet been rerun. Do not report these selections as fully green. No native GUI/IPC or financial owner ran in these selections.
+
+Compatibility limits are explicit: unknown-origin schemas8–11 and old-born automatic upgrade/successor creation are refused before writable source allocation. Exact supported nonborn12–18 migration, frozen historical reads and new financial19 births are distinct. Existing proven-live19 additional opens keep ordinary sidecar behavior; only the exclusive first-open refusal paths claim preserved original main/WAL/SHM/journal contents. User/funded wallets were not opened. The signer historical data APIs do not yet provide an expired-scope joined-history UI. Actual native financial signing, OS-process restart and testnet settlement remain unqualified.
+
+The previously preserved inactive leaves are now integrated into this source checkpoint. Full-sign fixture wiring remains a separate in-progress increment and the positive selector is still inactive. Thirteen finite financial diagnostics were added to the closed public parser; its 88 Python tests pass, without enabling any native test.
 
 ## Observed local results
 

@@ -940,6 +940,7 @@ mod tests {
         assert_eq!(storage::capacity_estimate(&c).unwrap().0, 5);
     }
     struct SyntheticSponsorFixture {
+        private_directory: crate::files::PrivateDirectory,
         _dir: tempfile::TempDir,
         journal: SignerConsentJournal,
         session: SignerConsentSession,
@@ -961,12 +962,16 @@ mod tests {
                     .unwrap();
             }
             let key = wholepact_storage_security::DatabaseKey::from_bytes([89; 32]);
+            let private_directory = crate::files::PrivateDirectory::open(dir.path()).unwrap();
             let journal = SignerConsentJournal::create_encrypted(
                 &dir.path().join("synthetic-sponsor"),
                 &key,
                 "account-alice",
                 1,
                 false,
+                &private_directory
+                    .signer_journal_source_owner_for_test(&dir.path().join("synthetic-sponsor"))
+                    .unwrap(),
             )
             .unwrap();
             let session = authority::fixture::session(&journal, "synthetic-owner");
@@ -1054,6 +1059,7 @@ mod tests {
             }
             drop(c);
             Self {
+                private_directory,
                 _dir: dir,
                 journal,
                 session,
@@ -1214,7 +1220,14 @@ mod tests {
         .unwrap();
         assert!(!report.authorization_allowed);
         assert!(matches!(
-            SignerConsentJournal::open_encrypted(&restored, &restored_key, "account-alice"),
+            SignerConsentJournal::open_encrypted(
+                &restored,
+                &restored_key,
+                "account-alice",
+                &f.private_directory
+                    .signer_journal_source_owner_for_test(&restored)
+                    .unwrap()
+            ),
             Err(JournalError::Storage(
                 StorageSecurityError::QuarantinedDatabase
             ))

@@ -16,6 +16,7 @@ import time
 
 PREFIX = 'host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification::'
 TESTS = {
+    'durable-fixed-signing': (PREFIX + 'durable_proposal_v1::durable_proposal_native_fixed_signing_retains_exact_results', 1080),
     'durable-owner-reopen': (PREFIX + 'durable_proposal_v1::durable_proposal_native_owner_reopen_retains_exact_fixed_proof', 1080),
     'initial': (PREFIX + 'initial_joined_v3::actual_three_born_initial_roster_publications_preserve_refusal', 300),
     'full': (PREFIX + 'full_payment_inputs_v1::actual_three_born_full_payment_uses_one_original_synthetic_path', 1080),
@@ -212,7 +213,8 @@ OUTCOMES = frozenset('ExactPermission ExactLineage ExactBinding ExactStorage Exa
 IO_KINDS = frozenset('NotFound PermissionDenied AlreadyExists InvalidInput InvalidData AddrInUse AddrNotAvailable WouldBlock TimedOut Interrupted Unsupported Other'.split())
 DURABLE_ENTRY_BOUNDARIES = frozenset('DurableEntryNativeOwnerCheck DurableEntryVaultOpen DurableEntryRetainedEnrollment DurableEntryOriginalCommit DurableEntryJournalOpen DurableEntrySourceCheck DurableEntryRuntimeActivation DurableEntryWorkerResult DurableEntryEndpointCreate DurableEntryEndpointBind DurableEntryEndpointPublish DurableEntryPostEndpointSourceCheck DurableEntryFixturePreflight DurableEntryFixturePostActivation'.split())
 DURABLE_HOST_BOUNDARIES = frozenset('DurableHostOpen DurableHostPairStatus DurableHostPairObserved DurableHostAccept DurableHostInitialDisclosure DurableHostInitialObserved DurableHostRecipient DurableHostCaptureSetup DurableHostCapture DurableHostCaptureObserved DurableHostCaptureCommitted DurableHostIntake DurableHostClose DurableHostObserve DurableHostCheckpoint DurableHostProof DurableHostFreeze DurableHostReload DurableHostRedisclosure DurableHostReviewReady DurableHostReviewExport DurableHostReviewImported DurableHostProviderStop'.split())
-BOUNDARIES = BOUNDARIES | DURABLE_ENTRY_BOUNDARIES | DURABLE_HOST_BOUNDARIES
+DURABLE_FINANCIAL_BOUNDARIES = frozenset('DurableHostWitnessSetup DurableHostWriterReconcile DurableHostViewingSetup DurableHostSign DurableHostSignRetry DurableHostResultHistory DurableHostResultRetrieve DurableHostResultRelay DurableHostSignatureIntake DurableHostSignatureStatus DurableHostResultServiceStop DurableHostSignatureUnion DurableHostTransactionCheckpoint'.split())
+BOUNDARIES = BOUNDARIES | DURABLE_ENTRY_BOUNDARIES | DURABLE_HOST_BOUNDARIES | DURABLE_FINANCIAL_BOUNDARIES
 FALSE_FIELDS = {'public_network_settlement_verified','public_network_inclusion_verified','independent_consensus_verified','attended_native_acceptance_verified','clears_authorization_exposure','permits_replacement'}
 INT_FIELDS = {'schema','consensus_branch_id','expiry_height','submission_attempt','recipient_decrypted_zatoshis','recipient_owned_note_count','fabricated_inclusion_height','fabricated_tip_height','required_confirmations'}
 STRING_FIELDS = {'evidence_kind','transaction_id','transaction_bytes_sha256','network','submission_outcome'}
@@ -536,7 +538,7 @@ def run_storage_bootstrap(executable):
 
 def phase_selection(phase):
     name, seconds = TESTS[phase]
-    flags = ['--exact', name, '--test-threads=1'] + (['--ignored'] if phase in ('full','durable-owner-reopen') else [])
+    flags = ['--exact', name, '--test-threads=1'] + (['--ignored'] if phase in ('full','durable-owner-reopen','durable-fixed-signing') else [])
     return name, seconds, flags
 
 def run(executable, phase):

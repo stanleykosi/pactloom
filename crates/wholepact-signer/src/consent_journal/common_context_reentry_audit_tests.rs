@@ -503,8 +503,18 @@ fn signed_handoff_encrypted_six_phase_reopen_is_exact_and_atomic() {
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let path = dir.path().join("never-funded-handoff-journal.sqlite");
     let key = DatabaseKey::from_bytes([81; 32]);
-    let mut journal =
-        SignerConsentJournal::create_encrypted(&path, &key, account, 1, false).unwrap();
+    let private_directory = crate::files::PrivateDirectory::open(dir.path()).unwrap();
+    let mut journal = SignerConsentJournal::create_encrypted(
+        &path,
+        &key,
+        account,
+        1,
+        false,
+        &private_directory
+            .signer_journal_source_owner_for_test(&path)
+            .unwrap(),
+    )
+    .unwrap();
     journal
         .retain_common_context_audit_v3(&audit.original.rows[0])
         .unwrap();
@@ -553,7 +563,15 @@ fn signed_handoff_encrypted_six_phase_reopen_is_exact_and_atomic() {
         }
     }
     drop(journal);
-    let journal = SignerConsentJournal::open_encrypted(&path, &key, account).unwrap();
+    let journal = SignerConsentJournal::open_encrypted(
+        &path,
+        &key,
+        account,
+        &private_directory
+            .signer_journal_source_owner_for_test(&path)
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(
         serde_json::to_vec(
             &common_context_reentry_audit_v1::read_complete(
@@ -660,7 +678,15 @@ fn signed_handoff_encrypted_six_phase_reopen_is_exact_and_atomic() {
     })
     .unwrap();
     assert!(!report.authorization_allowed);
-    assert!(SignerConsentJournal::open_encrypted(&restored, &restored_key, account).is_err());
+    assert!(SignerConsentJournal::open_encrypted(
+        &restored,
+        &restored_key,
+        account,
+        &private_directory
+            .signer_journal_source_owner_for_test(&restored)
+            .unwrap()
+    )
+    .is_err());
     let source = wholepact_storage_security::bundle::recovery::VerifiedSignerRecoverySource::open(
         history::HistoryOpenRequest {
             archive: &archive,
@@ -727,12 +753,18 @@ fn signed_handoff_reopen_requires_exact_authorized_only_original_journal() {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let key = DatabaseKey::from_bytes([84; 32]);
+    let private_directory = crate::files::PrivateDirectory::open(dir.path()).unwrap();
     let journal = SignerConsentJournal::create_encrypted(
         &dir.path().join("never-funded-authorized-only.sqlite"),
         &key,
         account,
         1,
         false,
+        &private_directory
+            .signer_journal_source_owner_for_test(
+                &dir.path().join("never-funded-authorized-only.sqlite"),
+            )
+            .unwrap(),
     )
     .unwrap();
     journal
@@ -847,26 +879,45 @@ fn with_owner_snapshot_fixture(test: impl FnOnce(&SignerConsentJournal, &HostRec
         .permissions(std::fs::Permissions::from_mode(0o700))
         .tempdir()
         .unwrap();
+    let private_directory = crate::files::PrivateDirectory::open(dir.path()).unwrap();
     let journal = SignerConsentJournal::create_encrypted(
         &dir.path().join("never-funded-snapshot.sqlite"),
         &DatabaseKey::from_bytes([85; 32]),
         &genesis.identity.account_id,
         1,
         false,
-    ).unwrap();
-    journal.connection.lock().unwrap().execute(
-        "INSERT INTO signer_account_use_genesis VALUES(1,?1,?2,?3,?4)",
-        rusqlite::params![
-            genesis.identity.account_id,
-            genesis.identity.full_viewing_key_digest,
-            genesis.digest().unwrap(),
-            encode(genesis).unwrap().as_str()
-        ],
-    ).unwrap();
-    journal.retain_common_context_audit_v3(&audit.original.rows[0]).unwrap();
-    journal.retain_common_context_reentry_audit_v1(
-        audit.reentry.rows.iter().find(|r| r.phase() == "authorized").unwrap(),
-    ).unwrap();
+        &private_directory
+            .signer_journal_source_owner_for_test(&dir.path().join("never-funded-snapshot.sqlite"))
+            .unwrap(),
+    )
+    .unwrap();
+    journal
+        .connection
+        .lock()
+        .unwrap()
+        .execute(
+            "INSERT INTO signer_account_use_genesis VALUES(1,?1,?2,?3,?4)",
+            rusqlite::params![
+                genesis.identity.account_id,
+                genesis.identity.full_viewing_key_digest,
+                genesis.digest().unwrap(),
+                encode(genesis).unwrap().as_str()
+            ],
+        )
+        .unwrap();
+    journal
+        .retain_common_context_audit_v3(&audit.original.rows[0])
+        .unwrap();
+    journal
+        .retain_common_context_reentry_audit_v1(
+            audit
+                .reentry
+                .rows
+                .iter()
+                .find(|r| r.phase() == "authorized")
+                .unwrap(),
+        )
+        .unwrap();
     test(&journal, &value);
 }
 

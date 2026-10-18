@@ -524,12 +524,16 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let key = wholepact_storage_security::DatabaseKey::from_bytes([0x64; 32]);
+        let private_directory = crate::files::PrivateDirectory::open(temp.path()).unwrap();
         let journal = crate::consent_journal::SignerConsentJournal::create_encrypted(
             &temp.path().join("synthetic-peer.db"),
             &key,
             "synthetic-account",
             1,
             false,
+            &private_directory
+                .signer_journal_source_owner_for_test(&temp.path().join("synthetic-peer.db"))
+                .unwrap(),
         )
         .unwrap();
         let authority = source();
@@ -618,12 +622,18 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let key = wholepact_storage_security::DatabaseKey::from_bytes([0x61; 32]);
+        let private_directory = crate::files::PrivateDirectory::open(temp.path()).unwrap();
         let journal = crate::consent_journal::SignerConsentJournal::create_encrypted(
             &temp.path().join("synthetic-native-source.db"),
             &key,
             "synthetic-account",
             1,
             false,
+            &private_directory
+                .signer_journal_source_owner_for_test(
+                    &temp.path().join("synthetic-native-source.db"),
+                )
+                .unwrap(),
         )
         .unwrap();
         let first = source();

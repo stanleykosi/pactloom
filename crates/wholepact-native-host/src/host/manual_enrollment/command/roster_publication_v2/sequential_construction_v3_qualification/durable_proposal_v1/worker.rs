@@ -13,7 +13,9 @@ use std::{
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
-use wholepact_authority::{AccountPolicy, native_witness_owner::EphemeralWitnessOriginV1};
+use wholepact_authority::{
+    AccountPolicy, OwnerControlRequest, native_witness_owner::EphemeralWitnessOriginV1,
+};
 use wholepact_core::born_recipient_policy_v2::{
     BornConstructionRecipientPolicyV2, BornOriginalLimitsV2, BornOwnReturnRuleV2,
     BornRecipientLimitV2,
@@ -112,6 +114,8 @@ pub(super) enum JoinedSignerCommandV1 {
     OpenDurable(usize, wholepact_core::ProposalInput),
     PollDurablePair(usize),
     ConfigureDurableWitness(usize),
+    PrepareDurableAdmission(usize),
+    ApproveDurableAdmission(usize),
     ReconcileDurableWriter(usize),
     ConfigureDurableWallet(usize, String),
     AcceptDurable(usize),
@@ -175,6 +179,10 @@ pub(super) enum JoinedSignerReplyV1 {
         index: usize,
         history: HistoryRequest,
         commit: AuthorizationCommit,
+    },
+    DurableAdmissionRequest {
+        index: usize,
+        request: OwnerControlRequest,
     },
     Done {
         index: usize,
@@ -468,6 +476,8 @@ fn execute(
         | C::OpenDurable(i, _)
         | C::PollDurablePair(i)
         | C::ConfigureDurableWitness(i)
+        | C::PrepareDurableAdmission(i)
+        | C::ApproveDurableAdmission(i)
         | C::ReconcileDurableWriter(i)
         | C::ConfigureDurableWallet(i, _)
         | C::AcceptDurable(i)
@@ -708,6 +718,26 @@ fn execute(
             entry
                 .configure_original_witness()
                 .map_err(|e| signer_error(e, "exact original witness native selection"))?;
+            (State::Durable(entry), R::Done { index })
+        }
+        (C::PrepareDurableAdmission(_), State::Durable(mut entry)) if index > 0 => {
+            // Only the actual current imported source prepares this inert
+            // request. Returning it is not a native approval or witness issuer.
+            let request = entry
+                .prepare_durable_admission()
+                .map_err(|e| signer_error(e, "source-bound exact durable admission preparation"))?;
+            (
+                State::Durable(entry),
+                R::DurableAdmissionRequest { index, request },
+            )
+        }
+        (C::ApproveDurableAdmission(_), State::Durable(mut entry)) if index > 0 => {
+            // The production native approval retains its immutable intent
+            // before the original owner mTLS submission. Uncertainty is final
+            // for this positive fixture, never a reason to invent replacement.
+            entry
+                .approve_durable_admission()
+                .map_err(|e| signer_error(e, "native retained-intent durable admission"))?;
             (State::Durable(entry), R::Done { index })
         }
         (C::ReconcileDurableWriter(_), State::Durable(mut entry)) if index > 0 => {

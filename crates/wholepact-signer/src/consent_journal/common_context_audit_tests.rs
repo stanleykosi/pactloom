@@ -76,7 +76,18 @@ fn modeled_common_context_encrypted_journal_backup_preserves_every_original_phas
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let path = dir.path().join("never-funded-synthetic-journal.sqlite");
     let key = DatabaseKey::from_bytes([71; 32]);
-    let journal = SignerConsentJournal::create_encrypted(&path, &key, account, 1, false).unwrap();
+    let private_directory = crate::files::PrivateDirectory::open(dir.path()).unwrap();
+    let journal = SignerConsentJournal::create_encrypted(
+        &path,
+        &key,
+        account,
+        1,
+        false,
+        &private_directory
+            .signer_journal_source_owner_for_test(&path)
+            .unwrap(),
+    )
+    .unwrap();
     for phase in ["read_admitted", "reserved", "consumed"] {
         let row = inventory.rows.iter().find(|r| r.phase() == phase).unwrap();
         journal.retain_common_context_audit_v3(row).unwrap();
@@ -112,7 +123,15 @@ fn modeled_common_context_encrypted_journal_backup_preserves_every_original_phas
         storage::capacity_estimate(&journal.connection.lock().unwrap()).unwrap()
     );
     drop(journal);
-    let journal = SignerConsentJournal::open_encrypted(&path, &key, account).unwrap();
+    let journal = SignerConsentJournal::open_encrypted(
+        &path,
+        &key,
+        account,
+        &private_directory
+            .signer_journal_source_owner_for_test(&path)
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(
         serde_json::to_vec(
             &construction_audit_v3::read_all(&journal.connection.lock().unwrap(), account).unwrap()
@@ -167,7 +186,15 @@ fn modeled_common_context_encrypted_journal_backup_preserves_every_original_phas
     })
     .unwrap();
     assert!(!report.authorization_allowed);
-    assert!(SignerConsentJournal::open_encrypted(&restored, &restored_key, account).is_err());
+    assert!(SignerConsentJournal::open_encrypted(
+        &restored,
+        &restored_key,
+        account,
+        &private_directory
+            .signer_journal_source_owner_for_test(&restored)
+            .unwrap()
+    )
+    .is_err());
     let source = wholepact_storage_security::bundle::recovery::VerifiedSignerRecoverySource::open(
         history::HistoryOpenRequest {
             archive: &archive,

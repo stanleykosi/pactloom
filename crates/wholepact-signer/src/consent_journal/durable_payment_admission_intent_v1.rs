@@ -5,8 +5,9 @@ use super::*;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use wholepact_authority::{
-    account_use_link::account_use_witness_origin_digest, DurablePaymentAdmissionRecordV1,
-    OwnerControl, OwnerControlRequest, WitnessDisclosureDescriptor,
+    account_use_link::account_use_witness_origin_digest,
+    durable_payment_v1::DurablePaymentAdmissionRecordV1, OwnerControl, OwnerControlRequest,
+    WitnessDisclosureDescriptor,
 };
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -331,6 +332,7 @@ mod issuance {
                         return Err(JournalError::Conflict);
                     }
                 }
+                journal.database_identity.check_current(&tx)?;
                 lease.check_current()?;
                 tx.commit()?;
             }
@@ -414,6 +416,7 @@ mod issuance {
                     return Err(JournalError::Permission);
                 }
             }
+            self.database_identity.check_current(&tx)?;
             lease.check_current()?;
             tx.commit()?;
             Ok(retained)

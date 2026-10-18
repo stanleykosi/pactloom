@@ -21,6 +21,22 @@ pub(super) struct InputsV1 {
     trusted_client_root_der: String,
 }
 impl InputsV1 {
+    // Ordinary form data only. Preparation, exact review, final primary click
+    // and native authority construction remain in the unchanged Window path.
+    #[cfg(feature = "synthetic-qualification")]
+    pub(super) fn set_synthetic_form_data(
+        &mut self,
+        request_json: String,
+        server_certificate_der: String,
+        server_private_key_pkcs8_der: String,
+        trusted_client_root_der: String,
+    ) {
+        self.discard();
+        self.request_json = Zeroizing::new(request_json);
+        self.server_certificate_der = server_certificate_der;
+        self.server_private_key_pkcs8_der = server_private_key_pkcs8_der;
+        self.trusted_client_root_der = trusted_client_root_der;
+    }
     pub(super) fn discard(&mut self) {
         self.request_json.zeroize();
         self.server_certificate_der.zeroize();

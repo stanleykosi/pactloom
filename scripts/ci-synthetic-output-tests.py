@@ -28,6 +28,18 @@ class PublicOutputTests(unittest.TestCase):
         self.assertNotIn('--ignored',output.phase_selection('initial')[2])
         with self.assertRaises(KeyError): output.phase_selection('arbitrary')
 
+    def test_durable_fixed_signing_is_exact_ignored_and_preserves_bounds(self):
+        name,seconds,flags=output.phase_selection('durable-fixed-signing')
+        self.assertEqual(name,output.PREFIX+'durable_proposal_v1::durable_proposal_native_fixed_signing_retains_exact_results')
+        self.assertEqual(seconds,1080)
+        self.assertEqual(flags,['--exact',name,'--test-threads=1','--ignored'])
+        self.assertNotEqual(name,output.TESTS['durable-owner-reopen'][0])
+        shell=(ROOT/'scripts/ci-durable-native-linux.sh').read_text()
+        call='python3 -B scripts/ci-synthetic-output.py "$executable" durable-fixed-signing'
+        self.assertEqual(shell.count(call),1)
+        workflow=(ROOT/'.github/workflows/durable-native-linux.yml').read_text()
+        self.assertIn('timeout-minutes: 150',workflow)
+
     def test_durable_runner_does_not_claim_full_payment_or_process_restart(self):
         shell=(ROOT/'scripts/ci-durable-native-linux.sh').read_text()
         workflow=(ROOT/'.github/workflows/durable-native-linux.yml').read_text()
@@ -35,7 +47,7 @@ class PublicOutputTests(unittest.TestCase):
         self.assertIn('branches: [qualification/durable-proposal-v1]',workflow)
         self.assertIn('python3 -B scripts/ci-synthetic-output.py "$executable" durable-owner-reopen',shell)
         self.assertNotIn('python3 -B scripts/ci-synthetic-output.py "$executable" full',shell)
-        self.assertIn('no full native signing, OS-process restart, public-chain settlement',shell)
+        self.assertIn('no OS-process restart, public-chain settlement',shell)
 
     def test_durable_entry_failure_stages_remain_closed_and_redacted(self):
         self.assertEqual(len(output.DURABLE_ENTRY_BOUNDARIES),14)
@@ -53,6 +65,15 @@ class PublicOutputTests(unittest.TestCase):
             self.assertFalse(output.safe_failure(self.failure(label+':private-account-id')))
             self.assertFalse(output.safe_failure(self.failure(label+':/private/vault')))
         self.assertFalse(output.safe_failure(self.failure('DurableHostUnreviewedStage:Begin')))
+
+    def test_durable_financial_stages_remain_closed_and_redacted(self):
+        self.assertEqual(len(output.DURABLE_FINANCIAL_BOUNDARIES),13)
+        self.assertFalse(output.DURABLE_FINANCIAL_BOUNDARIES & output.DURABLE_HOST_BOUNDARIES)
+        for label in output.DURABLE_FINANCIAL_BOUNDARIES:
+            self.assertTrue(output.safe_failure(self.failure(label+':Begin')))
+            self.assertFalse(output.safe_failure(self.failure(label+':private-account-id')))
+            self.assertFalse(output.safe_failure(self.failure(label+':/private/vault')))
+        self.assertFalse(output.safe_failure(self.failure('DurableHostFinancialUnreviewed:Begin')))
 
     def test_durable_label_case_is_exact_pure_and_uses_maintained_validator(self):
         name='native_ui::runtime::durable_entry_v1::tests::durable_fixture_pairing_labels_use_existing_identifier_grammar'
@@ -84,7 +105,8 @@ class PublicOutputTests(unittest.TestCase):
         early=['python3 -B scripts/ci-synthetic-output-tests.py',
                'python3 -B scripts/ci-synthetic-output.py "$executable" pure',
                'python3 -B scripts/ci-synthetic-output.py "$executable" storage-bootstrap',
-               'python3 -B scripts/ci-synthetic-output.py "$executable" durable-owner-reopen']
+               'python3 -B scripts/ci-synthetic-output.py "$executable" durable-owner-reopen',
+               'python3 -B scripts/ci-synthetic-output.py "$executable" durable-fixed-signing']
         positions=[shell.index('TMPDIR="$runtime_root" '+line) for line in early]
         self.assertEqual(positions,sorted(positions))
         signer_build=shell.index('cargo test --locked --release -p wholepact-signer ')

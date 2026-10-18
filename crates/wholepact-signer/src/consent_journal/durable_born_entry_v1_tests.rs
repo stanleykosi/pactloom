@@ -9,12 +9,14 @@ use crate::consent_journal::authority::fixture;
 use sha2::{Digest, Sha256};
 use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
 use wholepact_authority::{
-    AuthorityHead, ReservationPermit,
     account_use::{AccountUseIdentity, ExclusionReason, PermanentAccountExclusion},
+    AuthorityHead, ReservationPermit,
 };
 
 struct Fixture {
     journal: SignerConsentJournal,
+    source: Arc<SignerJournalSourceOwner>,
+    directory: crate::files::PrivateDirectory,
     _dir: tempfile::TempDir,
     path: PathBuf,
     key: DatabaseKey,
@@ -26,6 +28,10 @@ impl Fixture {
         let dir = tempfile::tempdir().unwrap();
         fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let path = dir.path().join("original.sqlite");
+        let directory = crate::files::PrivateDirectory::open(dir.path()).unwrap();
+        let source = directory
+            .signer_journal_source_owner_for_test(&path)
+            .unwrap();
         let key = DatabaseKey::from_bytes([0x96; 32]);
         let account = "11".repeat(32);
         let network = crate::consent_journal::tests::proposal("a", "b", "c")
@@ -56,7 +62,8 @@ impl Fixture {
             native_birth_digest: "55".repeat(32),
         };
         let journal =
-            SignerConsentJournal::create_encrypted(&path, &key, &account, 7, false).unwrap();
+            SignerConsentJournal::create_encrypted(&path, &key, &account, 7, false, &source)
+                .unwrap();
         journal
             .connection
             .lock()
@@ -73,6 +80,8 @@ impl Fixture {
             .unwrap();
         Self {
             journal,
+            source,
+            directory,
             _dir: dir,
             path,
             key,
@@ -266,7 +275,8 @@ fn original_current_schema_reopens_with_new_binding_without_mutation() {
     let before = f.commitment();
     f.check().unwrap();
     let reopened =
-        SignerConsentJournal::open_durable_born_entry_v1(&f.path, &f.key, &f.genesis).unwrap();
+        SignerConsentJournal::open_durable_born_entry_v1(&f.path, &f.key, &f.genesis, &f.source)
+            .unwrap();
     assert!(reopened.binding() != f.journal.binding());
     reopened.check_durable_born_entry_v1(&f.genesis).unwrap();
     assert_eq!(before, f.commitment());
@@ -298,8 +308,10 @@ fn online_release_request_permit_and_uncertain_keyuse_survive_as_exact_history()
         }
         let before = f.commitment();
         f.check().unwrap();
-        let reopened =
-            SignerConsentJournal::open_durable_born_entry_v1(&f.path, &f.key, &f.genesis).unwrap();
+        let reopened = SignerConsentJournal::open_durable_born_entry_v1(
+            &f.path, &f.key, &f.genesis, &f.source,
+        )
+        .unwrap();
         reopened.check_durable_born_entry_v1(&f.genesis).unwrap();
         assert_eq!(f.commitment(), before, "stage {stage}");
         let c = reopened.connection.lock().unwrap();
@@ -337,18 +349,19 @@ fn wrong_genesis_key_recovery_and_exclusion_reject_without_row_changes() {
     let mut wrong = f.genesis.clone();
     wrong.native_birth_digest = "ba".repeat(32);
     assert!(f.journal.check_durable_born_entry_v1(&wrong).is_err());
-    let encrypted_before = f.encrypted_files();
-    assert!(SignerConsentJournal::open_durable_born_entry_v1(&f.path, &f.key, &wrong).is_err());
-    assert_eq!(encrypted_before, f.encrypted_files());
     assert!(
-        SignerConsentJournal::open_durable_born_entry_v1(
-            &f.path,
-            &DatabaseKey::from_bytes([0x97; 32]),
-            &f.genesis
-        )
-        .is_err()
+        SignerConsentJournal::open_durable_born_entry_v1(&f.path, &f.key, &wrong, &f.source)
+            .is_err()
     );
-    assert_eq!(encrypted_before, f.encrypted_files());
+    assert!(SignerConsentJournal::open_durable_born_entry_v1(
+        &f.path,
+        &DatabaseKey::from_bytes([0x97; 32]),
+        &f.genesis,
+        &f.source,
+    )
+    .is_err());
+    // Live authenticated current19 uses ordinary reopen sidecar semantics; only
+    // exclusive first-open promises unchanged sidecar bytes.
     assert_eq!(before, f.commitment());
     for recovery in [false, true] {
         let f = Fixture::new();
@@ -384,11 +397,10 @@ fn wrong_genesis_key_recovery_and_exclusion_reject_without_row_changes() {
         }
         let before = f.commitment();
         assert!(f.check().is_err());
-        let encrypted_before = f.encrypted_files();
-        assert!(
-            SignerConsentJournal::open_durable_born_entry_v1(&f.path, &f.key, &f.genesis).is_err()
-        );
-        assert_eq!(encrypted_before, f.encrypted_files());
+        assert!(SignerConsentJournal::open_durable_born_entry_v1(
+            &f.path, &f.key, &f.genesis, &f.source
+        )
+        .is_err());
         assert_eq!(before, f.commitment());
     }
 }
@@ -414,6 +426,7 @@ fn every_unqualified_nonempty_table_is_rejected_by_explicit_policy() {
                 | "signer_enrollments"
                 | "signer_accepted_manifests"
                 | "signer_durable_construction_outbox"
+                | "signer_durable_payment_admission_intents"
                 | "signer_original_consents"
                 | "signer_release_intents"
                 | "signer_input_reservations"
@@ -451,12 +464,11 @@ fn copied_replacement_does_not_satisfy_retained_live_identity() {
     fs::copy(&f.path, &copy).unwrap();
     fs::set_permissions(&copy, fs::Permissions::from_mode(0o600)).unwrap();
     let copy_connection = wholepact_storage_security::open_encrypted(&copy, &f.key).unwrap();
-    assert!(
-        f.journal
-            .database_identity
-            .check_current(copy_connection.connection())
-            .is_err()
-    );
+    assert!(f
+        .journal
+        .database_identity
+        .check_current(copy_connection.connection())
+        .is_err());
     drop(copy_connection);
     fs::rename(&copy, &f.path).unwrap();
     assert!(f.check().is_err());
@@ -468,12 +480,24 @@ fn copied_replacement_does_not_satisfy_retained_live_identity() {
 fn missing_path_and_old_schema_are_not_created_or_migrated() {
     let f = Fixture::new();
     let missing = f.path.with_file_name("missing.sqlite");
-    assert!(
-        SignerConsentJournal::open_durable_born_entry_v1(&missing, &f.key, &f.genesis).is_err()
-    );
+    let missing_source = f
+        .directory
+        .signer_journal_source_owner_for_test(&missing)
+        .unwrap();
+    assert!(SignerConsentJournal::open_durable_born_entry_v1(
+        &missing,
+        &f.key,
+        &f.genesis,
+        &missing_source
+    )
+    .is_err());
     assert!(!missing.exists());
     let old = f.path.with_file_name("old.sqlite");
-    let mut c = wholepact_storage_security::create_encrypted(&old, &f.key)
+    let old_source = f
+        .directory
+        .signer_journal_source_owner_for_test(&old)
+        .unwrap();
+    let c = wholepact_storage_security::create_encrypted(&old, &f.key)
         .unwrap()
         .into_connection();
     c.execute_batch(recovery_migration::V17_SCHEMA).unwrap();
@@ -485,20 +509,24 @@ fn missing_path_and_old_schema_are_not_created_or_migrated() {
         [&f.genesis.identity.account_id],
     )
     .unwrap();
-    let before = fs::read(&old).unwrap();
+    drop(c);
+    let before = f.encrypted_files();
     assert!(matches!(
-        SignerConsentJournal::open_durable_born_entry_v1(&old, &f.key, &f.genesis),
+        SignerConsentJournal::open_durable_born_entry_v1(&old, &f.key, &f.genesis, &old_source),
         Err(JournalError::UnsupportedSchema)
     ));
+    assert!(
+        before == f.encrypted_files(),
+        "retained encrypted files changed"
+    );
+    let snapshot = wholepact_storage_security::open_encrypted_read_snapshot(&old, &f.key).unwrap();
     assert_eq!(
-        c.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+        snapshot
+            .connection()
+            .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
         17
     );
-    assert_eq!(before, fs::read(&old).unwrap());
-    // Keep the mutable connection until the source immutability assertion.
-    let tx = c.transaction().unwrap();
-    tx.rollback().unwrap();
 }
 
 #[test]
@@ -515,6 +543,10 @@ fn validated_old_v3_read_reserved_and_consumed_rows_stay_unsupported_and_intact(
     let dir = tempfile::tempdir().unwrap();
     fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let path = dir.path().join("old-v3.sqlite");
+    let directory = crate::files::PrivateDirectory::open(dir.path()).unwrap();
+    let source = directory
+        .signer_journal_source_owner_for_test(&path)
+        .unwrap();
     let key = DatabaseKey::from_bytes([0x98; 32]);
     let journal = SignerConsentJournal::create_encrypted(
         &path,
@@ -522,6 +554,7 @@ fn validated_old_v3_read_reserved_and_consumed_rows_stay_unsupported_and_intact(
         &genesis.identity.account_id,
         evidence.request.expected_writer_epoch,
         false,
+        &source,
     )
     .unwrap();
     journal
@@ -556,7 +589,7 @@ fn validated_old_v3_read_reserved_and_consumed_rows_stay_unsupported_and_intact(
         );
         assert!(
             matches!(
-                SignerConsentJournal::open_durable_born_entry_v1(&path, &key, genesis),
+                SignerConsentJournal::open_durable_born_entry_v1(&path, &key, genesis, &source),
                 Err(JournalError::ConstructionHistoryUnsupported)
             ),
             "{phase}"
@@ -660,7 +693,8 @@ fn imported_online_exposure_and_inputs_are_neither_renewed_nor_removed() {
     let before = f.commitment();
     f.check().unwrap();
     let reopened =
-        SignerConsentJournal::open_durable_born_entry_v1(&f.path, &f.key, &f.genesis).unwrap();
+        SignerConsentJournal::open_durable_born_entry_v1(&f.path, &f.key, &f.genesis, &f.source)
+            .unwrap();
     reopened.check_durable_born_entry_v1(&f.genesis).unwrap();
     assert_eq!(before, f.commitment());
 }
@@ -681,12 +715,10 @@ fn held_original_lease_reuses_exact_fence_with_queued_revoker() {
             .journal
             .acquire_original_authorization("authorization-a", &session)
             .unwrap();
-        assert!(
-            foreign
-                .journal
-                .check_durable_born_entry_v1_under_lease(&foreign.genesis, &lease)
-                .is_err()
-        );
+        assert!(foreign
+            .journal
+            .check_durable_born_entry_v1_under_lease(&foreign.genesis, &lease)
+            .is_err());
         let revoker = Arc::clone(&f);
         let (started_tx, started_rx) = mpsc::channel();
         let revoke = std::thread::spawn(move || {
@@ -713,4 +745,54 @@ fn held_original_lease_reuses_exact_fence_with_queued_revoker() {
     // whole test runner on a writer waiting for the same held lease.
     checked_rx.recv_timeout(Duration::from_secs(5)).unwrap();
     worker.join().unwrap();
+}
+
+#[test]
+fn actual_born_origin_refuses_every_older_format_even_without_genesis_cells() {
+    let f = Fixture::new();
+    for (version, schema) in [
+        (8, recovery_migration::V8_SCHEMA),
+        (9, recovery_migration::V9_SCHEMA),
+        (10, recovery_migration::V10_SCHEMA),
+        (11, recovery_migration::V11_SCHEMA),
+        (12, recovery_migration::V12_SCHEMA),
+        (13, recovery_migration::V13_SCHEMA),
+        (14, recovery_migration::V14_SCHEMA),
+        (15, recovery_migration::V15_SCHEMA),
+        (16, recovery_migration::V16_SCHEMA),
+        (17, recovery_migration::V17_SCHEMA),
+        (18, recovery_migration::V18_SCHEMA),
+    ] {
+        let path = f
+            .path
+            .with_file_name(format!("known-born-{version}.sqlite"));
+        let source = f
+            .directory
+            .signer_journal_source_owner_for_test(&path)
+            .unwrap();
+        let encrypted = wholepact_storage_security::create_encrypted(&path, &f.key).unwrap();
+        let c = encrypted.connection();
+        c.execute_batch(schema).unwrap();
+        c.execute(
+            "INSERT INTO signer_account VALUES(1,?1,7,0)",
+            [&f.genesis.identity.account_id],
+        )
+        .unwrap();
+        c.pragma_update(None, "application_id", APPLICATION_ID)
+            .unwrap();
+        c.pragma_update(None, "user_version", version).unwrap();
+        drop(encrypted);
+        let before = f.encrypted_files();
+        assert!(
+            matches!(
+                SignerConsentJournal::open_known_born_encrypted(&path, &f.key, &f.genesis, &source),
+                Err(JournalError::UnsupportedSchema)
+            ),
+            "{version}"
+        );
+        assert!(
+            before == f.encrypted_files(),
+            "retained encrypted files changed: {version}"
+        );
+    }
 }

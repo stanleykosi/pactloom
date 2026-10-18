@@ -225,14 +225,26 @@ impl LocalDurableReviewExportConsentV1 for ExactExport {
 }
 
 pub(super) fn exercise(original: initial::DurableInitialV1) -> Result<()> {
+    exercise_inner(original, false)
+}
+
+/// Separate compiled path; the ordinary baseline never enters financial work.
+pub(super) fn exercise_with_fixed_signing(original: initial::DurableInitialV1) -> Result<()> {
+    exercise_inner(original, true)
+}
+
+fn exercise_inner(original: initial::DurableInitialV1, fixed_signing: bool) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
         .build()
         .map_err(fail)?;
-    runtime.block_on(exercise_async(original))
+    runtime.block_on(exercise_async(original, fixed_signing))
 }
-async fn exercise_async(original: initial::DurableInitialV1) -> Result<()> {
+async fn exercise_async(
+    mut original: initial::DurableInitialV1,
+    fixed_signing: bool,
+) -> Result<()> {
     use wholepact_wallet::wallet::synthetic_born_receiver_blocks_v1::{
         SyntheticBornChainSpecV1, SyntheticBornReceiverBlocksV1,
     };
@@ -896,6 +908,29 @@ async fn exercise_async(original: initial::DurableInitialV1) -> Result<()> {
         trace.complete();
     }
     drop(reloaded);
+    if fixed_signing {
+        // The same real provider, witness, original account custodians and
+        // protected Engine/proof journals remain alive. No serialized receipt
+        // reconstructs authority, and the immutable proof is never rebuilt.
+        super::fixed_signing::exercise(super::fixed_signing::FixedSigningInputsV1 {
+            original: &mut original,
+            engine: &engine,
+            jobs: &jobs,
+            access: &access,
+            candidate_id: &candidate.candidate_id,
+            proposal: &candidate.proposal,
+            identity: &identity,
+            job_id: &job,
+            proof_consent: &privacy,
+            material_consent: &privacy,
+            original_disclosures: &original_disclosures,
+            export_sources: &export_sources,
+            birthday: &birthday,
+            source: &source_identity,
+            protected_root: &root,
+            revision,
+        })?;
+    }
     drop(jobs);
     drop(engine);
     drop(left);

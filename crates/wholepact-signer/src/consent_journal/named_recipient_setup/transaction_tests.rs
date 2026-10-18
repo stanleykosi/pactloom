@@ -614,6 +614,7 @@ fn assert_ciphertext_only(path: &Path) {
 #[test]
 fn setup_real_profile_backup_restores_as_history_without_live_profile_conversion() {
     let f = Fixture::new();
+    let private_directory = crate::files::PrivateDirectory::open(f.dir.path()).unwrap();
     let live = f.approve(f.prepare(&f.selected));
     let original = f.retained_payload(live.reference());
     let account_id = f.vault.account_id().unwrap();
@@ -651,7 +652,15 @@ fn setup_real_profile_backup_restores_as_history_without_live_profile_conversion
     assert!(!report.authorization_allowed);
     // The restored DB cannot supply the SignerConsentJournal required by
     // prepare/approve. No test-only promotion/reset constructor is introduced.
-    assert!(SignerConsentJournal::open_encrypted(&restored, &restored_key, &account_id).is_err());
+    assert!(SignerConsentJournal::open_encrypted(
+        &restored,
+        &restored_key,
+        &account_id,
+        &private_directory
+            .signer_journal_source_owner_for_test(&restored)
+            .unwrap()
+    )
+    .is_err());
     let source = recovery::VerifiedSignerRecoverySource::open(
         history::HistoryOpenRequest {
             archive: &archive,

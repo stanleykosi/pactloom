@@ -18,18 +18,40 @@ pub fn open_born_durable_payment_v1_for_server(
     tls: ServerTls,
     actual_listen: &str,
 ) -> Result<AuthorityServer> {
-    let journal = crate::born_history_server::open_born_history_for_server(
-        namespace_json,
-        &tls.certificate_digest,
+    if namespace_json.is_empty() || namespace_json.len() > 16 * 1024 {
+        return Err(AuthorityError::Limit);
+    }
+    let input: crate::witness_locator::NamespaceOpenInput =
+        serde_json::from_slice(namespace_json).map_err(|_| AuthorityError::InvalidBinding)?;
+    AuthorityServer::from_born_durable_payment_namespace_v1(
+        input,
+        admission_operation_id,
+        tls,
         actual_listen,
-    )?;
-    let owner = ConfiguredDurablePaymentWitnessV1::from_original(journal, admission_operation_id)?;
-    owner.require_endpoint(&tls.certificate_digest, actual_listen)?;
-    let mut server = AuthorityServer::new(owner.journal(), tls);
-    server.durable_payment = Some(Arc::new(DurablePaymentServingV1::Committed(owner)));
-    Ok(server)
+    )
 }
 impl AuthorityServer {
+    // Shared original-namespace opener, not a scope/source constructor. Ordinary
+    // JSON cannot carry the serde-skipped nominal synthetic installation owner.
+    #[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
+    pub(crate) fn from_born_durable_payment_namespace_v1(
+        input: crate::witness_locator::NamespaceOpenInput,
+        admission_operation_id: &str,
+        tls: ServerTls,
+        actual_listen: &str,
+    ) -> Result<Self> {
+        let journal = crate::born_history_server::open_born_history_from_namespace(
+            input,
+            &tls.certificate_digest,
+            actual_listen,
+        )?;
+        let owner =
+            ConfiguredDurablePaymentWitnessV1::from_original(journal, admission_operation_id)?;
+        owner.require_endpoint(&tls.certificate_digest, actual_listen)?;
+        let mut server = Self::new(owner.journal(), tls);
+        server.durable_payment = Some(Arc::new(DurablePaymentServingV1::Committed(owner)));
+        Ok(server)
+    }
     #[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
     pub(crate) fn from_durable_payment_admission_v1(
         source: NativeDurablePaymentAdmissionSourceV1,

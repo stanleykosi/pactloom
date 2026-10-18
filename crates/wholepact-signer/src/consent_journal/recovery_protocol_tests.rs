@@ -207,10 +207,15 @@ fn recovery_preserves_originals_source_and_exact_successor_replay() {
         std::fs::Permissions::from_mode(0o700),
     )
     .unwrap();
+    let private_directory =
+        crate::files::PrivateDirectory::open(inventory.target_profile()).unwrap();
     let path = inventory.target_profile().join("authority.sqlite");
+    let successor_source = private_directory
+        .signer_journal_source_owner_for_test(&path)
+        .unwrap();
     let key = DatabaseKey::from_bytes([0x93; 32]);
     let receipt = approve(&f, &archive, inventory.clone(), &native)
-        .commit(fence(&f, &inventory), &path, &key)
+        .commit(fence(&f, &inventory), &path, &key, &successor_source)
         .unwrap();
     receipt.check_current().unwrap();
     let first = receipt.record().clone();
@@ -230,7 +235,7 @@ fn recovery_preserves_originals_source_and_exact_successor_replay() {
     ));
 
     assert!(matches!(
-        SignerConsentJournal::open_encrypted(&path, &key, "account-alice"),
+        SignerConsentJournal::open_encrypted(&path, &key, "account-alice", &successor_source),
         Err(JournalError::RecoveryRequired)
     ));
     let c = wholepact_storage_security::open_encrypted(&path, &key)
@@ -275,7 +280,7 @@ fn recovery_preserves_originals_source_and_exact_successor_replay() {
     );
     drop(c);
     let replay = approve(&f, &archive, inventory.clone(), &native)
-        .commit(fence(&f, &inventory), &path, &key)
+        .commit(fence(&f, &inventory), &path, &key, &successor_source)
         .unwrap();
     assert!(replay.record() == &first);
     assert_eq!(before, std::fs::read(&archive.restored).unwrap());
@@ -291,7 +296,8 @@ fn recovery_preserves_originals_source_and_exact_successor_replay() {
         approve(&f, &archive, inventory.clone(), &native).commit(
             fence(&f, &inventory),
             &path,
-            &key
+            &key,
+            &successor_source
         ),
         Err(JournalError::Conflict)
     ));
@@ -326,6 +332,9 @@ fn recovery_imports_witness_only_reservations_without_creating_original_consent(
         "account-alice",
         1,
         false,
+        &f.private_directory
+            .signer_journal_source_owner_for_test(&f._directory.path().join("older-empty.sqlite"))
+            .unwrap(),
     )
     .unwrap();
     pin_source(&f, &empty);
@@ -353,10 +362,15 @@ fn recovery_imports_witness_only_reservations_without_creating_original_consent(
         std::fs::Permissions::from_mode(0o700),
     )
     .unwrap();
+    let private_directory =
+        crate::files::PrivateDirectory::open(inventory.target_profile()).unwrap();
     let path = inventory.target_profile().join("authority.sqlite");
+    let successor_source = private_directory
+        .signer_journal_source_owner_for_test(&path)
+        .unwrap();
     let key = DatabaseKey::from_bytes([0x96; 32]);
     approve(&f, &archive, inventory.clone(), &native)
-        .commit(fence(&f, &inventory), &path, &key)
+        .commit(fence(&f, &inventory), &path, &key, &successor_source)
         .unwrap();
     let c = wholepact_storage_security::open_encrypted(&path, &key)
         .unwrap()

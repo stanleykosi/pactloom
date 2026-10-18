@@ -6,9 +6,11 @@
 //! decision, writer credential, wallet ticket or signing capability is exposed.
 //! A host leaf must independently own encrypted intake, proof and exact union.
 
+use super::durable_witness_v1::{
+    DurableWitnessPreparedV1, QualificationDurableWitnessCompletionV1,
+};
 use super::*;
 use crate::authority_bridge::{
-    AuthorizationCommit,
     durable_construction_v1::{
         DurableConstructionCaptureRequestV1, DurableConstructionHistoryRequestV1,
         DurableConstructionRedisclosureRequestV1, DurableConstructionRequestV1,
@@ -16,6 +18,7 @@ use crate::authority_bridge::{
     durable_review_ipc_v1::DurableReviewDeliveryRequestV1,
     ipc::HistoryRequest,
     preconstruction_ipc::PreconstructionRequest,
+    AuthorizationCommit,
 };
 use crate::native_ui::pending_enrollment::born_pending_continuation::AcknowledgedBornFixture;
 use std::{collections::BTreeSet, ffi::OsString, path::PathBuf, time::Instant};
@@ -92,6 +95,8 @@ enum Phase {
     Disclosure,
     Disclosed,
     Imported,
+    AdmissionPrepared,
+    Admitted,
     FinancialImported,
     Signed,
 }
@@ -116,6 +121,10 @@ pub(in crate::native_ui) struct DurableNativeFixtureV1 {
     // Data-only assertions for this fixture's completed original. Neither the
     // tuple nor these fingerprints can restore a production continuation.
     signed: Option<(HistoryRequest, AuthorizationCommit, Vec<(u64, [u8; 32])>)>,
+    // Inert correlations only. These never reconstruct a review or permission.
+    admission: Option<wholepact_authority::OwnerControlRequest>,
+    reconciled_records: Option<DurableNativeRecordsV1>,
+    reconciled_writer: Option<(Arc<()>, wholepact_authority::WriterSessionReceipt)>,
 }
 
 impl DurableNativeFixtureV1 {
@@ -220,6 +229,9 @@ impl DurableNativeFixtureV1 {
             entry,
             original_inventory,
             signed: None,
+            admission: None,
+            reconciled_records: None,
+            reconciled_writer: None,
         })
     }
     fn check(&self) -> Result<()> {
@@ -320,8 +332,15 @@ impl DurableNativeFixtureV1 {
             return Err(Error::ReviewMismatch);
         }
         approve(&mut self.runtime)?;
+        let records = self.records()?;
+        if self.reconciled_records.as_ref().is_some_and(|old| {
+            old.enrollment_ref == records.enrollment_ref
+                || old.accepted_manifest_ref == records.accepted_manifest_ref
+        }) {
+            return Err(Error::ReviewMismatch);
+        }
         self.phase = Phase::Accepted;
-        self.records()
+        Ok(records)
     }
     pub(in crate::native_ui) fn records(&self) -> Result<DurableNativeRecordsV1> {
         self.check()?;
@@ -663,52 +682,158 @@ impl DurableNativeFixtureV1 {
         self.runtime.stage_owner_witness_setup(EPOCH)?;
         approve(&mut self.runtime)
     }
-    pub(in crate::native_ui) fn reconcile_original_writer(&mut self) -> Result<()> {
+    pub(in crate::native_ui) fn prepare_durable_admission(
+        &mut self,
+    ) -> Result<wholepact_authority::OwnerControlRequest> {
         self.check()?;
-        if self.phase != Phase::Paired || self.runtime.pending.is_some() {
-            return Err(Error::ReviewMismatch);
-        }
-        self.runtime.prepare_writer_session(EPOCH)?;
-        self.drain_witness_to_review()?;
-        if !matches!(
-            self.runtime.pending.as_ref().map(|p| &p.operation),
-            Some(Operation::WriterSession(_))
-        ) {
-            return Err(Error::ReviewMismatch);
-        }
-        approve(&mut self.runtime)?;
-        self.drain_witness_to_review()?;
-        self.runtime.prepare_writer_activation(EPOCH)?;
-        self.drain_witness_to_review()?;
-        if !matches!(
-            self.runtime.pending.as_ref().map(|p| &p.operation),
-            Some(Operation::WriterActivation(_))
-        ) {
-            return Err(Error::ReviewMismatch);
-        }
-        approve(&mut self.runtime)?;
-        self.drain_witness_to_review()?;
-        self.runtime.prepare_writer_reconciliation(EPOCH)?;
-        self.drain_witness_to_review()?;
-        if !matches!(
-            self.runtime.pending.as_ref().map(|p| &p.operation),
-            Some(Operation::Reconcile(_))
-        ) {
-            return Err(Error::ReviewMismatch);
-        }
-        approve(&mut self.runtime)?;
-        self.drain_witness_to_review()?;
-        if !self
-            .runtime
-            .open
-            .as_ref()
-            .is_some_and(|o| o.writer_reconciled)
+        if self.phase != Phase::Imported
+            || self.admission.is_some()
+            || self.runtime.pending.is_some()
         {
             return Err(Error::ReviewMismatch);
         }
-        // A successful production reconciliation asynchronously invalidates the
-        // old session. Wait for those ACTUAL completions before fresh receipts,
-        // without resetting cancellation, permission, pairing or any deadline.
+        self.runtime.prepare_durable_admission_v1(EPOCH)?;
+        self.drain_witness_to_review()?;
+        let request = match self.runtime.pending.as_ref().map(|p| &p.operation) {
+            Some(Operation::DurableWitnessV1(prepared)) => match prepared.as_ref() {
+                DurableWitnessPreparedV1::Admission(admission) => admission.request().clone(),
+                _ => return Err(Error::ReviewMismatch),
+            },
+            _ => return Err(Error::ReviewMismatch),
+        };
+        if self
+            .runtime
+            .qualification_committed_durable_admission_v1()?
+            .is_some()
+        {
+            return Err(Error::ReviewMismatch);
+        }
+        self.admission = Some(request.clone());
+        self.phase = Phase::AdmissionPrepared;
+        Ok(request)
+    }
+    pub(in crate::native_ui) fn approve_durable_admission(&mut self) -> Result<()> {
+        self.check()?;
+        let expected = self
+            .admission
+            .as_ref()
+            .ok_or(Error::ReviewMismatch)?
+            .clone();
+        if self.phase != Phase::AdmissionPrepared {
+            return Err(Error::ReviewMismatch);
+        }
+        match self.runtime.pending.as_ref().map(|p| &p.operation) {
+            Some(Operation::DurableWitnessV1(prepared)) => match prepared.as_ref() {
+                DurableWitnessPreparedV1::Admission(admission)
+                    if admission.request() == &expected => {}
+                _ => return Err(Error::ReviewMismatch),
+            },
+            _ => return Err(Error::ReviewMismatch),
+        }
+        // The unchanged native approval route retains the intent before mTLS.
+        // An uncertain response cannot advance the fixture's positive path.
+        self.approve_durable_and_await(
+            QualificationDurableWitnessCompletionV1::AdmissionCommitted,
+        )?;
+        if self
+            .runtime
+            .qualification_committed_durable_admission_v1()?
+            .as_ref()
+            != Some(&expected)
+        {
+            return Err(Error::ReviewMismatch);
+        }
+        self.phase = Phase::Admitted;
+        self.check()
+    }
+    fn approve_durable_and_await(
+        &mut self,
+        expected: QualificationDurableWitnessCompletionV1,
+    ) -> Result<()> {
+        let digest = self
+            .runtime
+            .pending
+            .as_ref()
+            .ok_or(Error::ReviewMismatch)?
+            .review
+            .digest()
+            .to_owned();
+        approve(&mut self.runtime)?;
+        self.drain_witness_to_review()?;
+        if self.runtime.pending.is_some()
+            || self
+                .runtime
+                .qualification_durable_witness_completion_v1(&digest)
+                != Some(expected)
+        {
+            return Err(Error::Uncertain);
+        }
+        self.check()
+    }
+    pub(in crate::native_ui) fn reconcile_original_writer(&mut self) -> Result<()> {
+        self.check()?;
+        if self.phase != Phase::Admitted
+            || self.runtime.pending.is_some()
+            || self
+                .runtime
+                .qualification_committed_durable_admission_v1()?
+                .as_ref()
+                != self.admission.as_ref()
+        {
+            return Err(Error::ReviewMismatch);
+        }
+        let old_records = self.records()?;
+        let open = self.runtime.open.as_ref().ok_or(Error::Locked)?;
+        let writer = open.witness.as_ref().ok_or(Error::Locked)?.clone();
+        let owner = open.owner_witness.as_ref().ok_or(Error::Locked)?.clone();
+        if open.writer_receipt.is_some() || open.writer_reconciled {
+            return Err(Error::ReviewMismatch);
+        }
+        self.runtime.prepare_durable_session_v1(EPOCH)?;
+        self.drain_witness_to_review()?;
+        if !matches!(
+            self.runtime.pending.as_ref().map(|p| &p.operation),
+            Some(Operation::DurableWitnessV1(prepared))
+                if matches!(prepared.as_ref(), DurableWitnessPreparedV1::Session(_))
+        ) {
+            return Err(Error::ReviewMismatch);
+        }
+        self.approve_durable_and_await(QualificationDurableWitnessCompletionV1::SessionAcquired)?;
+        let receipt = self
+            .runtime
+            .open
+            .as_ref()
+            .ok_or(Error::Locked)?
+            .writer_receipt
+            .as_ref()
+            .ok_or(Error::ReviewMismatch)?
+            .clone();
+        self.runtime.prepare_durable_activation_v1(EPOCH)?;
+        self.drain_witness_to_review()?;
+        if !matches!(
+            self.runtime.pending.as_ref().map(|p| &p.operation),
+            Some(Operation::DurableWitnessV1(prepared))
+                if matches!(prepared.as_ref(), DurableWitnessPreparedV1::Activation(_))
+        ) {
+            return Err(Error::ReviewMismatch);
+        }
+        self.approve_durable_and_await(
+            QualificationDurableWitnessCompletionV1::ActivationCommitted,
+        )?;
+        self.runtime.prepare_durable_reconciliation_v1(EPOCH)?;
+        self.drain_witness_to_review()?;
+        if !matches!(
+            self.runtime.pending.as_ref().map(|p| &p.operation),
+            Some(Operation::DurableWitnessV1(prepared))
+                if matches!(prepared.as_ref(), DurableWitnessPreparedV1::Reconciliation(_))
+        ) {
+            return Err(Error::ReviewMismatch);
+        }
+        self.approve_durable_and_await(
+            QualificationDurableWitnessCompletionV1::ReconciliationCommitted,
+        )?;
+        // Observe actual invalidation and drain. Never refresh or rewrite the
+        // old session, references, import, pairing or original owner deadline.
         loop {
             self.check()?;
             self.runtime.poll(EPOCH);
@@ -717,8 +842,15 @@ impl DurableNativeFixtureV1 {
                 if open.session.is_some()
                     || open.enrollment.is_some()
                     || open.manifest.is_some()
+                    || open.durable_review.is_some()
+                    || open.durable_import_job.is_some()
+                    || open.durable_wallet_job.is_some()
+                    || open.witness_job.is_some()
                     || !open.writer_reconciled
                     || self.runtime.pending.is_some()
+                    || !Arc::ptr_eq(open.witness.as_ref().ok_or(Error::Locked)?, &writer)
+                    || !Arc::ptr_eq(open.owner_witness.as_ref().ok_or(Error::Locked)?, &owner)
+                    || open.writer_receipt.as_ref() != Some(&receipt)
                 {
                     return Err(Error::ReviewMismatch);
                 }
@@ -726,9 +858,26 @@ impl DurableNativeFixtureV1 {
             }
             std::thread::sleep(Duration::from_millis(2));
         }
-        self.check()
+        self.check()?;
+        self.reconciled_records = Some(old_records);
+        self.reconciled_writer = Some((writer.durable_instance_v1(), receipt));
+        self.expected = None;
+        // This phase change is allowed only after the observations above. The
+        // subsequent acceptance still invokes the genuine fresh native route.
+        self.phase = Phase::Paired;
+        Ok(())
     }
     fn drain_witness_to_review(&mut self) -> Result<()> {
+        let done = self
+            .runtime
+            .open
+            .as_ref()
+            .ok_or(Error::Locked)?
+            .witness_job
+            .as_ref()
+            .ok_or(Error::ReviewMismatch)?
+            .done
+            .clone();
         loop {
             self.check()?;
             self.runtime.poll_witness(EPOCH);
@@ -737,6 +886,7 @@ impl DurableNativeFixtureV1 {
                 .open
                 .as_ref()
                 .is_none_or(|o| o.witness_job.is_none())
+                && done.load(Ordering::Acquire)
             {
                 break;
             }
@@ -835,6 +985,14 @@ impl DurableNativeFixtureV1 {
     fn require_idle_financial_state(&self, identity: &FixedProposalIdentityV1) -> Result<()> {
         self.check()?;
         let open = self.runtime.open.as_ref().ok_or(Error::Locked)?;
+        let (instance, receipt) = self
+            .reconciled_writer
+            .as_ref()
+            .ok_or(Error::ReviewMismatch)?;
+        open.witness
+            .as_ref()
+            .ok_or(Error::Locked)?
+            .require_durable_instance_v1(instance)?;
         if self.runtime.pending.is_some()
             || self.runtime.signing_job.is_some()
             || open.wallet_job.is_some()
@@ -844,6 +1002,7 @@ impl DurableNativeFixtureV1 {
             || !open.revocations.is_empty()
             || !open.writer_reconciled
             || open.writer_receipt.is_none()
+            || open.writer_receipt.as_ref() != Some(receipt)
             || open.wallet.is_none()
             || open
                 .durable_review
@@ -906,7 +1065,8 @@ impl DurableNativeFixtureV1 {
             return Ok(actual);
         }
         if self.phase != Phase::FinancialImported
-            || before.len() != 13
+            || before.len() != 14
+            || before[13].0 != 1
             || before[..7].iter().any(|(count, _)| *count != 0)
             || self
                 .runtime

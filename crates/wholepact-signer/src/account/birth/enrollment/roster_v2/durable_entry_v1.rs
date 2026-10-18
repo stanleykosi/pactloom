@@ -89,6 +89,7 @@ impl FreshDurableBornEntryV1 {
                 &account.directory.root().join(JOURNAL),
                 &key,
                 genesis,
+                &account.directory.signer_journal_source_owner()?,
             )?);
             let result = Self {
                 retained,

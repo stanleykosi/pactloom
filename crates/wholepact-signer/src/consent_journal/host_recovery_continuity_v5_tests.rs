@@ -30,12 +30,16 @@ fn source(
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let key = wholepact_storage_security::DatabaseKey::from_bytes([0x74; 32]);
+    let private_directory = crate::files::PrivateDirectory::open(dir.path()).unwrap();
     let journal = SignerConsentJournal::create_encrypted(
         &dir.path().join("never-funded-historical.wp"),
         &key,
         account,
         1,
         recovery_required,
+        &private_directory
+            .signer_journal_source_owner_for_test(&dir.path().join("never-funded-historical.wp"))
+            .unwrap(),
     )
     .unwrap();
     {

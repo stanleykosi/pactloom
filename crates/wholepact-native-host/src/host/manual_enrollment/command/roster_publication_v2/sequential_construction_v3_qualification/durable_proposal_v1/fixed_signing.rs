@@ -1,17 +1,11 @@
-//! INACTIVE follow-on leaf: no parent declaration or runnable selector yet.
+//! Ignored Linux synthetic qualification follow-on; never run locally.
 //!
-//! Registration requires the separately reviewed real-native worker commands
-//! named below, plus the separately approved DurableHost signing-stage enum
-//! additions and paired public parser allowlist. Those registered files are not
-//! changed by this inactive leaf. The commands must drive the existing runtime,
-//! never manufacture a decision, permit, wallet ticket, account association or
-//! signing source.
-//! Activation also requires a genuine, separately native-approved durable
-//! witness financial route. Original history serving is read-only, and the
-//! retained roster bootstrap admits only its original writer/publication and
-//! construction mutations. Neither is a financial issuer for this NEW profile.
-//! Do not register this positive driver or replace that refusal with a fixture
-//! capability, a generic journal, a copied scope, or a widened old allowlist.
+//! Every command drives the existing runtime, never a manufactured decision,
+//! permit, wallet ticket, account association or signing source. Original history
+//! serving prepares only the current native imported source. Only the separate
+//! genuine focused witness admission and original-owner mTLS may commit this
+//! NEW financial record; its narrow committed server is reopened afterward.
+//! No copied scope, generic journal or widened old bootstrap allowlist is used.
 //! The caller lends the exact retained preproof originals after all prior owners
 //! close, while its actual witness/provider/temp custody remains alive. No proof
 //! is constructed here. Host privacy gates and the chain remain synthetic; this
@@ -69,7 +63,7 @@ use wholepact_wallet::wallet::protected_sync::{BackendIdentity, TreeState};
 /// The eventual separate preproof wrapper supplies these actual originals at
 /// its final pre-provider-shutdown boundary. The baseline wrapper stays unchanged.
 pub(super) struct FixedSigningInputsV1<'a> {
-    pub original: &'a initial::DurableInitialV1,
+    pub original: &'a mut initial::DurableInitialV1,
     pub engine: &'a Engine,
     pub jobs: &'a ProofJobStore,
     pub access: &'a Access,
@@ -193,6 +187,9 @@ impl HostTrace {
             E::Ipc => Outcome::BridgeIpc,
         };
         self.refused(outcome)
+    }
+    fn authority(&mut self, error: wholepact_authority::AuthorityError) -> Error {
+        self.refused(diagnostic::authority_error(&error))
     }
     fn engine(&mut self, error: wholepact_engine::ApiError) -> Error {
         // Only exact maintained codes select output; private explanatory text,
@@ -385,6 +382,153 @@ fn viewing_setup(input: &FixedSigningInputsV1<'_>) -> Result<String> {
     .map_err(invalid)
 }
 
+fn accept_records(
+    worker: &worker::JoinedSignerWorkerV1,
+    index: usize,
+    trace: &mut HostTrace,
+) -> Result<wholepact_signer::native_ui::synthetic_born_joined_qualification::DurableNativeRecordsV1>
+{
+    trace.begin(B::DurableHostAccept);
+    worker
+        .send(Command::AcceptDurable(index))
+        .map_err(|error| trace.worker(error))?;
+    match worker.receive().map_err(|error| trace.worker(error))? {
+        Reply::Records {
+            index: actual,
+            records,
+        } if actual == index => Ok(records),
+        _ => Err(trace.refused(Outcome::HostInvalid)),
+    }
+}
+
+/// Reuse exact original proof bytes, but never reuse old local permission. The
+/// two distinct purposes keep pre-admission and post-reconciliation imports and
+/// linked disclosures immutable and separately identified.
+fn redisclose_and_import(
+    input: &FixedSigningInputsV1<'_>,
+    client: &OriginalHistoryClient,
+    index: usize,
+    records: &wholepact_signer::native_ui::synthetic_born_joined_qualification::DurableNativeRecordsV1,
+    financial: bool,
+    revision: u64,
+    trace: &mut HostTrace,
+) -> Result<u64> {
+    let worker = &input.original.signers;
+    let purpose = if financial { "signing" } else { "admission" };
+    trace.begin(B::DurableHostRedisclosure);
+    let original = &input.original_disclosures[index - 1];
+    let renewed = DurableConstructionRedisclosureRequestV1 {
+        operation_id: format!("durable-fixed-{purpose}-disclosure-{index}"),
+        original: DurableConstructionRedisclosureSourceV1 {
+            operation_id: original.operation_id.clone(),
+            expected_request_digest: Some(original.expected_request_digest.clone()),
+        },
+        enrollment_ref: records.enrollment_ref.clone(),
+        accepted_manifest_ref: records.accepted_manifest_ref.clone(),
+    };
+    worker
+        .send(Command::ArmRedisclosure(index, renewed.clone()))
+        .map_err(|error| trace.worker(error))?;
+    done(worker, index, trace)?;
+    worker
+        .send(Command::PollDisclosure(index))
+        .map_err(|error| trace.worker(error))?;
+    let current = client
+        .redisclose_durable_construction_v1(&renewed)
+        .map_err(|error| trace.bridge(error))?;
+    done(worker, index, trace)?;
+    let link = current
+        .outbox()
+        .redisclosure()
+        .ok_or_else(|| trace.refused(Outcome::HostInvalid))?;
+    trace.check(
+        link.original_operation_id == original.operation_id
+            && link.original_request_digest == original.expected_request_digest,
+    )?;
+    let current_disclosure = DurableConstructionHistoryRequestV1 {
+        operation_id: current.outbox().request().operation_id.clone(),
+        expected_request_digest: current.outbox().request_digest().into(),
+    };
+    drop(current);
+    let request = DurableReviewDeliveryRequestV1 {
+        operation_id: format!("durable-fixed-{purpose}-import-{index}"),
+        enrollment_ref: records.enrollment_ref.clone(),
+        accepted_manifest_ref: records.accepted_manifest_ref.clone(),
+        own_disclosure: original.clone(),
+        current_disclosure: Some(current_disclosure),
+        proposal_binding: input.identity.proposal_binding.clone(),
+    };
+    trace.begin(B::DurableHostReviewReady);
+    let command = if financial {
+        Command::PollFinancialImport(index, request.clone(), input.identity.clone())
+    } else {
+        // This remains the unchanged import-only assertion: no writer receipt,
+        // reconciliation, wallet/signing job or approval is created by import.
+        Command::PollImport(index, request.clone(), input.identity.clone())
+    };
+    worker.send(command).map_err(|error| trace.worker(error))?;
+    let recipient = client
+        .prepare_durable_review_delivery_v1(&request)
+        .map_err(|error| trace.bridge(error))?;
+    let export_gate = ExactExport {
+        principal: &input.access.principal_id,
+        fixed: input.identity,
+        recipient: recipient.descriptor().clone(),
+        sources: input.export_sources,
+    };
+    trace.begin(B::DurableHostReviewExport);
+    let delivered = input
+        .engine
+        .deliver_durable_proposal_for_native_review_v1(
+            input.access,
+            &format!("durable-fixed-{purpose}-export-{index}"),
+            input.candidate_id,
+            revision,
+            LocalProofJob {
+                job_id: input.job_id,
+                jobs: input.jobs,
+                consent: input.proof_consent,
+            },
+            recipient,
+            input.material_consent,
+            &export_gate,
+        )
+        .map_err(|error| trace.engine(error))?;
+    trace.begin(B::DurableHostReviewImported);
+    done(worker, index, trace)?;
+    Ok(delivered.agreement.revision)
+}
+
+fn wall_clock_ms() -> Result<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(invalid)?
+        .as_millis()
+        .try_into()
+        .map_err(invalid)
+}
+
+/// Only wait for the actual original publication fence before opening a fresh
+/// native owner. No clock is changed, no human gap or expired-owner continuation
+/// is claimed, and the enclosing unchanged child timeout remains authoritative.
+fn wait_original_publication(deadline_ms: u64, trace: &mut HostTrace) -> Result<()> {
+    let at = wall_clock_ms().map_err(|error| trace.host(error))?;
+    if at < deadline_ms {
+        let deadline = Instant::now()
+            .checked_add(Duration::from_millis(deadline_ms - at))
+            .ok_or_else(|| trace.refused(Outcome::HostInvalid))?;
+        while Instant::now() < deadline {
+            std::thread::sleep(
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .min(Duration::from_millis(20)),
+            );
+        }
+    }
+    let after = wall_clock_ms().map_err(|error| trace.host(error))?;
+    trace.check(after >= deadline_ms)
+}
+
 /// The envelope is only an explicitly synthetic local relay of exact bytes
 /// retrieved from the original native outbox. It NEVER creates the account
 /// association: that comes exclusively from the real held native history lease.
@@ -558,6 +702,38 @@ pub(super) fn exercise(input: FixedSigningInputsV1<'_>) -> Result<()> {
     let worker = &input.original.signers;
     let mut revision = input.revision;
     for index in 1..=2 {
+        trace.begin(B::DurableHostWitnessSetup);
+        let account_id = &input.original.born[index].account_id;
+        let bootstrap = input
+            .original
+            .witness
+            .observe_original_roster_attempt_v2(account_id)
+            .map_err(|error| trace.authority(error))?;
+        trace.check(
+            bootstrap.attempt.sequence == 1
+                && bootstrap.attempt.continuation.is_none()
+                && bootstrap.attempt.snapshot.head.sequence == 4
+                && bootstrap
+                    .extension
+                    .account_extension
+                    .terms
+                    .identity
+                    .account_id
+                    == *account_id,
+        )?;
+        let publication_deadline = bootstrap
+            .attempt
+            .last_publication_deadline_ms()
+            .ok_or_else(|| trace.refused(Outcome::HostInvalid))?;
+        trace.check(publication_deadline <= input.original.expiry_ms)?;
+        wait_original_publication(publication_deadline, &mut trace)?;
+        // Informational serving cannot admit this financial record. It exists
+        // only while the signer derives its exact request from complete history.
+        let history_server = input
+            .original
+            .witness
+            .serve_original_history()
+            .map_err(|error| trace.authority(error))?;
         trace.begin(B::DurableHostOpen);
         worker
             .send(Command::OpenDurable(index, input.proposal.clone()))
@@ -589,24 +765,87 @@ pub(super) fn exercise(input: FixedSigningInputsV1<'_>) -> Result<()> {
             .send(Command::ConfigureDurableWitness(index))
             .map_err(|error| trace.worker(error))?;
         done(worker, index, &mut trace)?;
+        let admission_records = accept_records(worker, index, &mut trace)?;
+        revision = redisclose_and_import(
+            &input,
+            &client,
+            index,
+            &admission_records,
+            false,
+            revision,
+            &mut trace,
+        )?;
+        trace.begin(B::DurableHostWitnessSetup);
+        worker
+            .send(Command::PrepareDurableAdmission(index))
+            .map_err(|error| trace.worker(error))?;
+        let admission = match worker.receive().map_err(|error| trace.worker(error))? {
+            Reply::DurableAdmissionRequest {
+                index: actual,
+                request,
+            } if actual == index => request,
+            _ => return Err(trace.refused(Outcome::HostInvalid)),
+        };
+        let wholepact_authority::OwnerControl::AdmitDurablePaymentV1 { record } =
+            &admission.control
+        else {
+            return Err(trace.refused(Outcome::HostInvalid));
+        };
+        let actual_fixed = serde_json::to_value(&record.terms.fixed)
+            .map_err(|_| trace.refused(Outcome::HostInvalid))?;
+        let expected_fixed = serde_json::to_value(input.identity)
+            .map_err(|_| trace.refused(Outcome::HostInvalid))?;
+        let extension_digest = bootstrap
+            .extension
+            .digest()
+            .map_err(|error| trace.authority(error))?;
+        trace.check(
+            admission.account_id == *account_id
+                && admission.network_profile_id == input.identity.network_profile_id
+                && admission.expected_head == bootstrap.attempt.snapshot.head
+                && admission.writer_epoch == bootstrap.attempt.snapshot.writer_epoch
+                && record.terms.original_roster_extension_digest == extension_digest
+                && record.terms.original_enrollment_ref
+                    == bootstrap.extension.account_extension.enrollment_ref
+                && actual_fixed == expected_fixed,
+        )?;
+        // The SAME original endpoint must be unbound before production witness
+        // preparation. Starting the focused final click does not drain yet:
+        // its real admission worker waits for this signer's original-owner mTLS.
+        drop(history_server);
+        input
+            .original
+            .witness
+            .start_exact_durable_payment_admission(account_id, &admission)
+            .map_err(|error| trace.authority(error))?;
+        worker
+            .send(Command::ApproveDurableAdmission(index))
+            .map_err(|error| trace.worker(error))?;
+        input
+            .original
+            .witness
+            .finish_exact_durable_payment_admission()
+            .map_err(|error| trace.authority(error))?;
+        // The helper observes the real immutable local intent and committed
+        // correlation. Its production approval retains intent BEFORE mTLS.
+        done(worker, index, &mut trace)?;
+        let financial_server = input
+            .original
+            .witness
+            .serve_committed_durable_payment(&admission.operation_id)
+            .map_err(|error| trace.authority(error))?;
         trace.begin(B::DurableHostWriterReconcile);
         worker
             .send(Command::ReconcileDurableWriter(index))
             .map_err(|error| trace.worker(error))?;
         done(worker, index, &mut trace)?;
-        // The helper must drain real reconciliation revocations first. Only
-        // these new current-origin records may bind subsequent redisclosure.
-        trace.begin(B::DurableHostAccept);
-        worker
-            .send(Command::AcceptDurable(index))
-            .map_err(|error| trace.worker(error))?;
-        let records = match worker.receive().map_err(|error| trace.worker(error))? {
-            Reply::Records {
-                index: actual,
-                records,
-            } if actual == index => records,
-            _ => return Err(trace.refused(Outcome::HostInvalid)),
-        };
+        // Actual reconciliation invalidates the old local permission/import.
+        // Keep the same writer key/session, but require new native receipts.
+        let records = accept_records(worker, index, &mut trace)?;
+        trace.check(
+            records.enrollment_ref != admission_records.enrollment_ref
+                && records.accepted_manifest_ref != admission_records.accepted_manifest_ref,
+        )?;
         trace.begin(B::DurableHostViewingSetup);
         worker
             .send(Command::ConfigureDurableWallet(
@@ -615,85 +854,8 @@ pub(super) fn exercise(input: FixedSigningInputsV1<'_>) -> Result<()> {
             ))
             .map_err(|error| trace.worker(error))?;
         done(worker, index, &mut trace)?;
-        trace.begin(B::DurableHostRedisclosure);
-        let original = &input.original_disclosures[index - 1];
-        let renewed = DurableConstructionRedisclosureRequestV1 {
-            operation_id: format!("durable-fixed-signing-disclosure-{index}"),
-            original: DurableConstructionRedisclosureSourceV1 {
-                operation_id: original.operation_id.clone(),
-                expected_request_digest: Some(original.expected_request_digest.clone()),
-            },
-            enrollment_ref: records.enrollment_ref.clone(),
-            accepted_manifest_ref: records.accepted_manifest_ref.clone(),
-        };
-        worker
-            .send(Command::ArmRedisclosure(index, renewed.clone()))
-            .map_err(|error| trace.worker(error))?;
-        done(worker, index, &mut trace)?;
-        worker
-            .send(Command::PollDisclosure(index))
-            .map_err(|error| trace.worker(error))?;
-        let current = client
-            .redisclose_durable_construction_v1(&renewed)
-            .map_err(|error| trace.bridge(error))?;
-        done(worker, index, &mut trace)?;
-        let link = current
-            .outbox()
-            .redisclosure()
-            .ok_or_else(|| trace.refused(Outcome::HostInvalid))?;
-        trace.check(
-            link.original_operation_id == original.operation_id
-                && link.original_request_digest == original.expected_request_digest,
-        )?;
-        let current_disclosure = DurableConstructionHistoryRequestV1 {
-            operation_id: current.outbox().request().operation_id.clone(),
-            expected_request_digest: current.outbox().request_digest().into(),
-        };
-        drop(current);
-        let request = DurableReviewDeliveryRequestV1 {
-            operation_id: format!("durable-fixed-signing-import-{index}"),
-            enrollment_ref: records.enrollment_ref.clone(),
-            accepted_manifest_ref: records.accepted_manifest_ref.clone(),
-            own_disclosure: original.clone(),
-            current_disclosure: Some(current_disclosure),
-            proposal_binding: input.identity.proposal_binding.clone(),
-        };
-        // Separate financial-import driver: do not weaken the baseline's
-        // import-only assertion that no writer was reconciled there.
-        trace.begin(B::DurableHostReviewReady);
-        worker
-            .send(Command::PollFinancialImport(
-                index,
-                request.clone(),
-                input.identity.clone(),
-            ))
-            .map_err(|error| trace.worker(error))?;
-        let recipient = client
-            .prepare_durable_review_delivery_v1(&request)
-            .map_err(|error| trace.bridge(error))?;
-        let export_gate = ExactExport {
-            principal: &input.access.principal_id,
-            fixed: input.identity,
-            recipient: recipient.descriptor().clone(),
-            sources: input.export_sources,
-        };
-        trace.begin(B::DurableHostReviewExport);
-        let delivered = input
-            .engine
-            .deliver_durable_proposal_for_native_review_v1(
-                input.access,
-                &format!("durable-fixed-signing-export-{index}"),
-                input.candidate_id,
-                revision,
-                local(),
-                recipient,
-                input.material_consent,
-                &export_gate,
-            )
-            .map_err(|error| trace.engine(error))?;
-        revision = delivered.agreement.revision;
-        trace.begin(B::DurableHostReviewImported);
-        done(worker, index, &mut trace)?;
+        revision =
+            redisclose_and_import(&input, &client, index, &records, true, revision, &mut trace)?;
         trace.begin(B::DurableHostSign);
         worker
             .send(Command::SignDurableFixed(index, input.identity.clone()))
@@ -706,9 +868,9 @@ pub(super) fn exercise(input: FixedSigningInputsV1<'_>) -> Result<()> {
         trace.begin(B::DurableHostSignRetry);
         // Exact retry must resolve the same retained original, not reserve a
         // replacement authorization ID or execute another wallet/key operation.
-        // These metadata comparisons alone are insufficient: the future real
-        // driver MUST assert the retained-result fast path with no new review,
-        // wallet/signing job or reservation, and unchanged relevant ledger rows.
+        // The genuine helper additionally asserts the production retained fast
+        // path has no new review, wallet/signing job, reservation, intent or
+        // other authority-ledger change. Metadata equality alone is insufficient.
         worker
             .send(Command::SignDurableFixed(index, input.identity.clone()))
             .map_err(|error| trace.worker(error))?;
@@ -819,6 +981,9 @@ pub(super) fn exercise(input: FixedSigningInputsV1<'_>) -> Result<()> {
             .send(Command::CloseDurable(index))
             .map_err(|error| trace.worker(error))?;
         done(worker, index, &mut trace)?;
+        // Join this account's exact original witness service before selecting
+        // the next owner in the retained namespace. No exposure is cleared.
+        drop(financial_server);
         trace.begin(B::DurableHostSignatureStatus);
         let status = input
             .engine

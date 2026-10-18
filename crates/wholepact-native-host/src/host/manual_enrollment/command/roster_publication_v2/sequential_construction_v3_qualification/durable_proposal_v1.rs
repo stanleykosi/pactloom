@@ -8,6 +8,8 @@
     feature = "durable-proposal"
 ))]
 use super::*;
+#[path = "durable_proposal_v1/fixed_signing.rs"]
+mod fixed_signing;
 #[path = "durable_proposal_v1/initial.rs"]
 mod initial;
 #[path = "durable_proposal_v1/preproof.rs"]
@@ -23,9 +25,23 @@ pub(super) fn exercise_stage(terminal: crate::terminal::Terminal) -> Result<()> 
     preproof::exercise(initial)
 }
 
+/// Separate fixed-signing stage, selected only by its explicit ignored test.
+pub(super) fn exercise_fixed_signing_stage(terminal: crate::terminal::Terminal) -> Result<()> {
+    let initial = initial::prepare(terminal)?;
+    preproof::exercise_with_fixed_signing(initial)
+}
+
 #[test]
 #[ignore = "Explicit approved isolated Linux synthetic runner only; no local native IPC execution"]
 fn durable_proposal_native_owner_reopen_retains_exact_fixed_proof() {
     foreground_child("durable-proposal-native-owner-reopen-v1", &inputs())
         .expect("genuine native disclosure, encrypted intake and fixed proof after closed owner associations");
+}
+
+#[test]
+#[ignore = "Explicit approved isolated Linux synthetic runner only; no local native IPC execution"]
+fn durable_proposal_native_fixed_signing_retains_exact_results() {
+    foreground_child("durable-proposal-native-fixed-signing-v1", &inputs()).expect(
+        "genuine native fixed signing and exact retained results; no chain consensus or submission",
+    );
 }

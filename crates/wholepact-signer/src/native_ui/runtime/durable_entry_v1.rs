@@ -206,6 +206,7 @@ impl NativeRuntime {
             authority: OpenNativeAuthority::DurableBorn(source.native_owner().clone()),
             durable_born_entry: Some(source),
             durable_review: None,
+            durable_witness: durable_witness_v1::DurableWitnessRuntimeV1::default(),
             durable_import_job: None,
             durable_wallet_job: None,
             session: None,

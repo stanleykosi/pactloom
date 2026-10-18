@@ -31,6 +31,7 @@ impl SignerConsentJournal {
         // Old encrypted artifacts keep their own exact schema and bytes. This
         // is read-only; backup inspection must never migrate the source tree.
         for (version, schema) in [
+            (18, recovery_migration::V18_SCHEMA),
             (17, recovery_migration::V17_SCHEMA),
             (16, recovery_migration::V16_SCHEMA),
             (15, recovery_migration::V15_SCHEMA),
@@ -70,31 +71,50 @@ impl SignerConsentJournal {
         let namespace = genesis.digest().map_err(|_| JournalError::InvalidBinding)?;
         let intent = publication.intent_digest();
         let plan = PlannedWitnessBirthInitialization::new(&namespace, intent, &path, &key)?;
-        let mut connection = match std::fs::symlink_metadata(&path) {
+        let source = publication
+            .journal_source_owner()
+            .map_err(|_| JournalError::Permission)?;
+        let mut source_open = source.begin(&path)?;
+        if source_open.state.upgrade().is_some() {
+            let opened = open_preflighted_encrypted(
+                &mut source_open,
+                &path,
+                &key,
+                &genesis.identity.account_id,
+                Some(genesis),
+                &|c| verify_born_initial(c, genesis, epoch),
+            )?;
+            return Ok(Self::from_owned_source(opened));
+        }
+        source_open.require_exclusive()?;
+        let (mut connection, database_identity) = match std::fs::symlink_metadata(&path) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                wholepact_storage_security::create_encrypted(&path, &key)?.into_connection()
+                let encrypted = wholepact_storage_security::create_encrypted(&path, &key)?;
+                let identity = encrypted.database_identity()?;
+                (encrypted.into_connection(), identity)
             }
             Err(_) => return Err(JournalError::Database),
             Ok(_) => match plan.inspect(&path, &key, &namespace, intent)? {
-                PlannedWitnessBirthInspection::AuthenticatedEmpty => plan
-                    .resume(&path, &key, &namespace, intent)?
-                    .into_connection(),
+                PlannedWitnessBirthInspection::AuthenticatedEmpty => {
+                    let encrypted = plan.resume(&path, &key, &namespace, intent)?;
+                    let identity = encrypted.database_identity()?;
+                    (encrypted.into_connection(), identity)
+                }
                 PlannedWitnessBirthInspection::Initialized(read) => {
                     verify_born_initial(read.connection(), genesis, epoch)?;
                     drop(read);
                     publication
                         .check_current()
                         .map_err(|_| JournalError::Permission)?;
-                    let existing = Self::open_encrypted(&path, &key, &genesis.identity.account_id)?;
-                    verify_born_initial(
-                        &*existing
-                            .connection
-                            .lock()
-                            .map_err(|_| JournalError::Database)?,
-                        genesis,
-                        epoch,
+                    let opened = open_preflighted_encrypted(
+                        &mut source_open,
+                        &path,
+                        &key,
+                        &genesis.identity.account_id,
+                        Some(genesis),
+                        &|c| verify_born_initial(c, genesis, epoch),
                     )?;
-                    return Ok(existing);
+                    return Ok(Self::from_owned_source(opened));
                 }
             },
         };
@@ -129,17 +149,16 @@ impl SignerConsentJournal {
             .check_current()
             .map_err(|_| JournalError::Permission)?;
         tx.commit()?;
-        drop(connection);
-        let result = Self::open_encrypted(&path, &key, &genesis.identity.account_id)?;
-        verify_born_initial(
-            &*result
-                .connection
-                .lock()
-                .map_err(|_| JournalError::Database)?,
-            genesis,
-            epoch as u64,
+        let registration = source_open.register(
+            &connection,
+            &database_identity,
+            &genesis.identity.account_id,
         )?;
-        Ok(result)
+        Ok(Self::from_owned_source(OpenedSignerSource {
+            connection,
+            identity: database_identity,
+            registration,
+        }))
     }
 }
 fn verify_born_identity(c: &Connection, genesis: &AccountUseGenesis, epoch: u64) -> Result<()> {

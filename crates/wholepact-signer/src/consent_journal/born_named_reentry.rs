@@ -206,7 +206,7 @@ mod tests {
         c
     }
     #[test]
-    fn consumed_reentry_commitment_accepts_complete_actual_schema18() {
+    fn consumed_reentry_commitment_accepts_complete_actual_schema19() {
         fn actual_schema() -> Connection {
             let c = Connection::open_in_memory().unwrap();
             c.execute_batch(SCHEMA).unwrap();
@@ -217,7 +217,7 @@ mod tests {
             // An inert recovery-required row is not a vault, actual genesis,
             // consumed origin, native grant or SignerConsentJournal owner.
             c.execute(
-                "INSERT INTO signer_account VALUES(1,'inert-schema18-commitment',1,1)",
+                "INSERT INTO signer_account VALUES(1,'inert-schema19-commitment',1,1)",
                 [],
             )
             .unwrap();
@@ -225,14 +225,14 @@ mod tests {
             storage::bounded(&c, (MAX_BACKUP_ROWS, MAX_BACKUP_ENCODED_BYTES)).unwrap();
             c
         }
-        assert_eq!(SCHEMA_VERSION, 18);
+        assert_eq!(SCHEMA_VERSION, 19);
         let original = actual_schema();
         let changed = actual_schema();
         let tables: u64 = original.query_row(
             "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'",
             [], |r| r.get(0),
         ).unwrap();
-        assert_eq!(tables, 49);
+        assert_eq!(tables, 50);
         for table in [
             "signer_named_recipient_started",
             "signer_named_recipient_results",

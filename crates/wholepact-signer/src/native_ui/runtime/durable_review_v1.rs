@@ -4,12 +4,12 @@
 use super::*;
 use crate::account::birth::enrollment::roster_v2::durable_entry_v1::FreshDurableBornEntryV1;
 use crate::authority_bridge::{
-    BridgeError,
     durable_proposal_v1::{self as bridge, PreparedDurableProposalReview},
     durable_review_ipc_v1::{
         self as wire, DeliveryCommandV1, DeliveryResponseV1, DurableReviewDeliveryReceiptV1,
         DurableReviewDeliveryRequestV1, DurableReviewPayloadV1,
     },
+    BridgeError,
 };
 use crate::native_ui::durable_proposal_v1::VerifiedDurableEconomicsV1;
 use sha2::{Digest, Sha256};
@@ -62,6 +62,105 @@ impl ImportedDurableReviewV1 {
             retained.check_data_source()?;
             Ok(retained.fixed.verified().clone())
         })
+    }
+}
+
+/// Custody of the actual imported privacy source, not mathematical evidence or
+/// a caller-supplied disclosure claim. Only the live OpenAccount can mint it.
+pub(super) struct DurableWitnessImportedSourceV1 {
+    imported: Arc<ImportedDurableReviewV1>,
+    session: Arc<SignerConsentSession>,
+}
+impl OpenAccount {
+    pub(super) fn durable_witness_source_v1(&self) -> Result<Arc<DurableWitnessImportedSourceV1>> {
+        let pairing = self.check_pairing()?;
+        let imported = self.durable_review.as_ref().ok_or(Error::ReviewMismatch)?;
+        if !Arc::ptr_eq(
+            &imported.source,
+            self.durable_born_entry.as_ref().ok_or(Error::Unavailable)?,
+        ) || self
+            .enrollment
+            .as_ref()
+            .is_none_or(|e| e.reference() != imported.request.enrollment_ref)
+            || self
+                .manifest
+                .as_ref()
+                .is_none_or(|m| m.reference() != imported.request.accepted_manifest_ref)
+        {
+            return Err(Error::ReviewMismatch);
+        }
+        imported.peer.require_same_grant(&pairing.peer)?;
+        let source = Arc::new(DurableWitnessImportedSourceV1 {
+            imported: imported.clone(),
+            session: self.session.clone().ok_or(Error::Locked)?,
+        });
+        source.check_current()?;
+        Ok(source)
+    }
+}
+impl DurableWitnessImportedSourceV1 {
+    pub(super) fn check_current(&self) -> Result<()> {
+        self.check_data_current_under_fence()?;
+        self.entry().check_current()?;
+        // Drop this complete record lease before TLS, native waiting, or a
+        // second journal transaction. It cannot be carried into a write fence.
+        let lease = self.entry().journal().acquire_preconstruction_records(
+            &self.imported.request.enrollment_ref,
+            &self.imported.request.accepted_manifest_ref,
+            &self.session,
+        )?;
+        lease.require_native_origin(&self.entry().native_binding())?;
+        lease.require_current_durable_disclosure_receipts_v1()?;
+        if lease.enrollment().account_id() != self.entry().account().account_id()?
+            || lease.enrollment().participant_id() != self.imported.peer.scope.participant_id
+            || lease.manifest().manifest_digest()
+                != self.fixed().verified().identity().manifest_digest
+            || lease.manifest().proposal_input() != self.fixed().proposal().input()
+        {
+            return Err(Error::ReviewMismatch);
+        }
+        self.check_data_current_under_fence()
+    }
+    /// Deny-only final gate. This method deliberately takes NO journal/session
+    /// lock: callers already retain their real approval and journal write fence.
+    pub(super) fn check_data_current_under_fence(&self) -> Result<()> {
+        self.imported
+            .check_data_source()
+            .map_err(|_| Error::ReviewMismatch)?;
+        if self.imported.scopes.len() != 2
+            || self
+                .imported
+                .scopes
+                .iter()
+                .any(|s| s.proposal != *self.fixed().proposal().input())
+            || self.imported.peer.native_origin != self.entry().native_binding()
+            || Instant::now() >= self.deadline()?
+        {
+            return Err(Error::ReviewMismatch);
+        }
+        Ok(())
+    }
+    pub(super) fn deadline(&self) -> Result<Instant> {
+        Ok(self
+            .imported
+            .peer
+            .deadline()
+            .min(self.entry().native_binding().bounded_deadline()?))
+    }
+    pub(super) fn fixed(&self) -> &VerifiedDurableEconomicsV1 {
+        &self.imported.fixed
+    }
+    pub(super) fn entry(&self) -> &FreshDurableBornEntryV1 {
+        &self.imported.source
+    }
+    pub(super) fn session(&self) -> &SignerConsentSession {
+        &self.session
+    }
+    pub(super) fn enrollment_ref(&self) -> &str {
+        &self.imported.request.enrollment_ref
+    }
+    pub(super) fn manifest_ref(&self) -> &str {
+        &self.imported.request.accepted_manifest_ref
     }
 }
 pub(super) struct DurableImportJobV1 {
@@ -424,6 +523,10 @@ fn receive_durable(
 
 impl OpenAccount {
     pub(super) fn clear_durable_review_v1(&mut self) {
+        // The retry wrappers retain the same private imported evidence. Drop
+        // that custody on EVERY clear path while preserving inert admission
+        // correlation and the independent actual writer client's session key.
+        self.durable_witness.discard_import_custody();
         self.durable_review = None;
         self.durable_import_job = None;
         if let Some(job) = self.durable_wallet_job.take() {
@@ -446,6 +549,7 @@ impl NativeRuntime {
             match &pending.operation {
                 Operation::DurableDisclosureV1 { flow, .. }
                 | Operation::DurableSpendV1 { flow, .. } => !flow.imported.material_time_current(),
+                Operation::DurableWitnessV1(prepared) => !prepared.source_current(),
                 _ => false,
             }
         });
@@ -458,7 +562,9 @@ impl NativeRuntime {
         if self.pending.as_ref().is_some_and(|pending| {
             matches!(
                 pending.operation,
-                Operation::DurableDisclosureV1 { .. } | Operation::DurableSpendV1 { .. }
+                Operation::DurableDisclosureV1 { .. }
+                    | Operation::DurableSpendV1 { .. }
+                    | Operation::DurableWitnessV1(_)
             )
         }) {
             self.pending = None;
@@ -810,7 +916,7 @@ impl NativeRuntime {
                 )
             })();
             if let Err(unsent) = send.send((open, result)) {
-                unsent.0.0.close();
+                unsent.0 .0.close();
             }
         });
         self.signing_job = Some(SigningJob {
@@ -853,9 +959,7 @@ pub(super) fn allowed_operation(operation: &Operation) -> bool {
             | Operation::DurableBornWalletV1(_)
             | Operation::Witness(_)
             | Operation::OwnerWitness(_)
-            | Operation::WriterSession(_)
-            | Operation::WriterActivation(_)
-            | Operation::Reconcile(_)
+            | Operation::DurableWitnessV1(_)
             | Operation::Preconstruction(_)
             | Operation::DurableConstructionV1(_)
             | Operation::Redelivery { .. }

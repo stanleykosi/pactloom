@@ -6,8 +6,8 @@ use sha2::{Digest, Sha256};
 use std::os::unix::fs::PermissionsExt;
 use wholepact_authority::{
     account_use::{AccountUseGenesis, AccountUseIdentity},
-    AuthorityHead, DurableFixedCandidateBindingV1, DurablePaymentAdmissionTermsV1,
-    InputReservation,
+    durable_payment_v1::{DurableFixedCandidateBindingV1, DurablePaymentAdmissionTermsV1},
+    AuthorityHead, InputReservation,
 };
 
 fn authority_digest<T: Serialize>(domain: &str, value: &T) -> String {
@@ -57,6 +57,10 @@ impl Fixture {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let directory = crate::files::PrivateDirectory::open(dir.path()).unwrap();
+        let source = directory
+            .signer_journal_source_owner_for_test(&dir.path().join("intent.sqlite"))
+            .unwrap();
         let account = "11".repeat(32);
         let journal = SignerConsentJournal::create_encrypted(
             &dir.path().join("intent.sqlite"),
@@ -64,6 +68,7 @@ impl Fixture {
             &account,
             1,
             false,
+            &source,
         )
         .unwrap();
         let session = fixture::session(&journal, "synthetic-owner");
