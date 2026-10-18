@@ -48,3 +48,13 @@ The later stable-V2 signer all-features test executable compiled. Eight bridge/r
 The scanner contact regression currently passes the context-to-channel case but fails the post-channel case; closed diagnostics are being added before diagnosing or changing its test synchronization. Both must pass before this regression is considered covered.
 
 The cloud checkout and build cache were lost again on 2026-10-18 around 00:52 UTC. The published checkpoint was restored and its commit/tree verified. Unpublished source edits are being recovered and separately checkpointed. Earlier test observations remain historical results; they are not claims that the restored workspace has already repeated those runs.
+
+## Rebuilt checkpoint and focused rerun
+
+After restoring the workspace, checkpoint `354a961c6d8573198730bed032040626a94a94d1` compiled for native-host all-features tests (9 minutes 33 seconds) and signer all-features tests (4 minutes 52 seconds). The corrected signer groups then passed: 15 policy, eight bridge/return-ownership, six feature-enabled migration, ten born-journal and one redisclosure test, 40 total. The IPC endpoint regression was deliberately not executed locally.
+
+The isolated native retry is [39084949525](https://github.com/stanleykosi/pactloom/actions/runs/39084949525), pinned to that checkpoint. Its result is not yet recorded in this document. No full native signing, OS-process restart or testnet settlement follows from these component passes.
+
+Future CI ordering runs the existing output/privacy self-tests, Host pure checks and encrypted bootstrap before the bounded native baseline, then requires all remaining signer/authority gates before overall success. The additional endpoint-isolation selector is a separate CI-only real-IPC test, never part of a local pure selection. Parser/selection mock tests passed 83 cases; the new CI gate itself still requires execution.
+
+Inactive production leaves remain incomplete and unregistered. Discovery planning now separates immutable historical discovery context from a newly approved common pre-proof construction anchor; post-proof anchor rules remain unchanged. The proposed ephemeral born viewing cache is explicitly limited by the remaining native-owner lifetime and short-history account envelope, not a general long-history availability solution. Production discovery/derived-manifest privacy must also be protected by an exclusive purpose-specific coordinator facade or equivalent complete view/export fencing, not only a hidden raw receipt field.

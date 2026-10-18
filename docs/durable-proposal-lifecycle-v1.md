@@ -4,7 +4,7 @@ Status: implementation contract, not a qualified capability. Existing V3 financi
 
 ## Product invariant
 
-Independent account owners authorize their assigned debit in one exact joint shielded transaction. The coordinator holds no spending keys and cannot redirect, increase, or detach the approved effects. Agreement progress, released authorization exposure, and chain observations are separate state axes. Completion is not guaranteed.
+Each account owner authorizes their assigned debit in one exact joint shielded transaction. The coordinator holds no spending keys and cannot redirect, increase, or detach the approved effects. Agreement progress, released authorization exposure, and chain observations are separate state axes. Completion is not guaranteed.
 
 ## Initial qualification profile
 

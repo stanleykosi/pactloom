@@ -123,6 +123,8 @@ SIGNER_VALIDATION_TESTS = (
     'account::birth::active::tests::borrowed_original_is_exact_vault_scoped_and_checks_fresh_ciphertexts',
     'account::birth::active::tests::borrowed_original_cannot_be_issued_for_mismatched_held_origin',
 )
+# This real LocalIpc regression is CI-only, never a pure/validation selection.
+SIGNER_DURABLE_ENDPOINT_TEST = 'native_ui::runtime::durable_entry_v1::tests::durable_endpoint_is_external_preserves_inventory_and_drains_before_cleanup'
 SIGNER_BOOKKEEPING_TESTS = (
     'account::birth::enrollment::roster_v2::inventory::tests::challenge_bookkeeping_requires_successful_checked_send_first',
     'account::birth::enrollment::roster_v2::inventory::candidate::tests::candidate_nonce_is_retained_only_after_fully_checked_send_success',
@@ -410,6 +412,67 @@ def run_signer_validation(executable):
             raise
     print('CI_SYNTHETIC_SIGNER_VALIDATION passed=35 crypto_file_cases=4 bookkeeping_cases=2 replay_cases=6 endpoint_channel_cases=4 snapshot_storage_cases=2 shape_tamper_cases=1 compatibility_cases=3 call_local_cases=2 audit_storage_cases=1 audit_compatibility_cases=2 named_origin_snapshot_cases=3 lineage_predicate_cases=2 timing_counter_cases=3 native_payment_verified=false raw_output_discarded=true',flush=True)
 
+def run_signer_durable_endpoint(executable):
+    """One CI-only LocalIpc case, with no child processes or public raw output."""
+    try:
+        if (os.environ.get('GITHUB_ACTIONS')!='true' or
+                os.environ.get('RUNNER_OS')!='Linux' or sys.platform!='linux'):
+            raise ValueError('endpoint regression is isolated Linux CI only')
+        if resource.getrlimit(resource.RLIMIT_CORE)[0]!=0:
+            raise ValueError('endpoint regression requires own zero core limit')
+        name=SIGNER_DURABLE_ENDPOINT_TEST
+        flags=['--exact',name,'--test-threads=1']
+        for listing,seconds,limit in ((True,30,8192),(False,120,1024*1024)):
+            # Both phases stream instead of capture_output/communicate. Only
+            # the bounded listing is retained; runtime bytes are discarded.
+            deadline=time.monotonic()+seconds
+            process=subprocess.Popen(
+                [executable,*flags,('--list' if listing else '--nocapture')],
+                stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,
+                stderr=(subprocess.PIPE if listing else subprocess.STDOUT))
+            status=None
+            try:
+                streams=[process.stdout]+([process.stderr] if listing else [])
+                listed=bytearray(); total=0; stderr_seen=False
+                while streams:
+                    remaining=deadline-time.monotonic()
+                    if remaining<=0: raise TimeoutError('endpoint phase deadline')
+                    ready,_,_=select.select(streams,[],[],min(0.2,remaining))
+                    for stream in ready:
+                        chunk=os.read(stream.fileno(),min(65536,limit-total+1))
+                        if not chunk:
+                            streams.remove(stream)
+                            continue
+                        total+=len(chunk)
+                        if total>limit: raise ValueError('endpoint output bound exceeded')
+                        if listing:
+                            if stream is process.stdout: listed.extend(chunk)
+                            else: stderr_seen=True
+                # EOF alone is not completion. Keep exit observation inside
+                # this phase's original deadline, not an extra runtime grant.
+                remaining=deadline-time.monotonic()
+                if remaining<=0: raise TimeoutError('endpoint exit observation deadline')
+                status=process.wait(timeout=remaining)
+                if status!=0: raise RuntimeError('endpoint phase exited unsuccessfully')
+                if listing and (stderr_seen or not exact_listing(listed.decode('utf8','strict'),name)):
+                    raise ValueError('endpoint test not uniquely registered')
+            finally:
+                if status is None:
+                    # Only this direct, thread-only test process is owned. A
+                    # forced stop never proves endpoint/runtime-root cleanup.
+                    try: process.kill()
+                    except Exception: pass
+                    try: process.wait(timeout=5)
+                    except Exception: pass
+                if process.stdout is not None: process.stdout.close()
+                if process.stderr is not None: process.stderr.close()
+    except Exception:
+        print('CI_SYNTHETIC_SIGNER_DURABLE_ENDPOINT passed=false cleanup_unverified=true raw_output_withheld=true',flush=True)
+        raise RuntimeError('CI-only endpoint regression failed; details withheld') from None
+    # Actual test assertions cover both bind/drain cycles. The outer shell must
+    # still verify its isolated runtime container is empty before job success.
+    print('CI_SYNTHETIC_SIGNER_DURABLE_ENDPOINT passed=1 endpoint_cycles=2 native_payment_verified=false runtime_root_cleanup_pending=true raw_output_discarded=true',flush=True)
+
 def run_authority_rendering(executable):
     assert resource.getrlimit(resource.RLIMIT_CORE)[0] == 0
     for name in AUTHORITY_RENDERER_TESTS:
@@ -547,11 +610,12 @@ def run(executable, phase):
 
 if __name__=='__main__':
     try:
-        assert len(sys.argv)==3 and sys.argv[2] in {*TESTS,'pure','storage-bootstrap','signer-validation','authority-rendering'}
+        assert len(sys.argv)==3 and sys.argv[2] in {*TESTS,'pure','storage-bootstrap','signer-validation','signer-durable-endpoint','authority-rendering'}
         exe=pathlib.Path(sys.argv[1]).resolve(strict=True)
         assert exe.is_file() and exe.is_relative_to(pathlib.Path(os.environ['CARGO_TARGET_DIR']).resolve(strict=True))
         if sys.argv[2]=='pure': run_pure(str(exe))
         elif sys.argv[2]=='signer-validation': run_signer_validation(str(exe))
+        elif sys.argv[2]=='signer-durable-endpoint': run_signer_durable_endpoint(str(exe))
         elif sys.argv[2]=='authority-rendering':
             run_authority_rendering(str(exe))
             run_authority_validation(str(exe))

@@ -53,14 +53,27 @@ impl DurableExactInputV1 {
     }
 }
 
+/// Separately approved pre-proof construction anchor. This DTO does not approve
+/// an anchor or authenticate the provider that reported it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct DurableExactConstructionAnchorV1 {
+    pub height: u32,
+    pub block_hash_protocol: [u8; 32],
+    pub root: [u8; 32],
+}
+
 /// Historical data restrictions, not an authenticated projection by themselves.
-/// Inputs must be strictly ordered by canonical input ID. A caller choosing a
-/// new pre-proof anchor must explicitly approve a new expectation; this API does
-/// not change the supplied anchor or alter an already-frozen PCZT.
+/// Inputs must be strictly ordered by canonical input ID. The caller must join
+/// the unchanged original context and every commitment to its authenticated
+/// projection, and separately obtain new native construction-anchor consent.
+/// This pre-proof API never re-anchors an already-frozen PCZT. It rechecks old
+/// block ancestry, not a possibly pruned historical tree checkpoint; only the
+/// newly approved anchor supplies current witnesses for the new construction.
 #[derive(Clone)]
 pub struct DurableExactSelectionExpectationV1 {
     pub provider: BackendIdentity,
     pub original_context: SelectionContext,
+    pub construction_anchor: DurableExactConstructionAnchorV1,
     pub inputs: Vec<DurableExactInputV1>,
 }
 
@@ -132,15 +145,21 @@ impl ProtectedWalletSync {
         let chain = accepted.chain.clone();
         let started = accepted.monotonic_started;
         let original = &expected.original_context;
+        let anchor = &expected.construction_anchor;
         let target = current
             .tip_height
             .checked_add(1)
             .ok_or(DurableConstructionError::Stale)?;
         if self.phase != SyncPhase::SnapshotMatched
             || chain.source() != &expected.provider
-            || current.anchor_height != original.anchor_height
-            || current.anchor_hash_protocol != original.anchor_hash_protocol
-            || current.anchor_root != original.anchor_root
+            || current.anchor_height != anchor.height
+            || current.anchor_hash_protocol != anchor.block_hash_protocol
+            || current.anchor_root != anchor.root
+            || anchor.height < original.anchor_height
+            || anchor.height > current.tip_height
+            || (anchor.height == original.anchor_height
+                && (anchor.block_hash_protocol != original.anchor_hash_protocol
+                    || anchor.root != original.anchor_root))
             || original.anchor_height > original.tip_height
             || current
                 .tip_height
@@ -199,6 +218,7 @@ impl ProtectedWalletSync {
                     return Err(DurableConstructionError::Binding);
                 }
                 for (height, hash) in [(original.tip_height, original.tip_hash_protocol),
+                    (original.anchor_height, original.anchor_hash_protocol),
                     (current.tip_height, current.tip_hash_protocol), (current.anchor_height, current.anchor_hash_protocol)] {
                     if db.get_block_hash(height.into()).map_err(|_| DurableConstructionError::Storage)?.map(|b| b.0) != Some(hash) {
                         return Err(DurableConstructionError::Stale);

@@ -152,6 +152,11 @@ fn expectation(
     DurableExactSelectionExpectationV1 {
         provider: wallet.source.identity().clone(),
         original_context: selected.selection().context().clone(),
+        construction_anchor: DurableExactConstructionAnchorV1 {
+            height: selected.selection().context().anchor_height,
+            block_hash_protocol: selected.selection().context().anchor_hash_protocol,
+            root: selected.selection().context().anchor_root,
+        },
         inputs,
     }
 }
@@ -356,5 +361,111 @@ async fn exact_recap_uses_actual_rows_and_rejects_substitution_staleness_and_loc
         a.select_exact_durable_contribution_v1(&FixtureAccess(true), &first_fvk, &scope, &expected)
             .is_err()
     );
+    server.abort();
+}
+
+#[tokio::test]
+async fn explicit_new_preproof_anchor_keeps_historical_context_and_exact_inputs() {
+    let (fake, endpoint, server, first_fvk) = fake_server(2).await;
+    let second_fvk = fake.owner_fvks[1].clone();
+    let (_a, path_a, key_a) = database(&first_fvk);
+    let (_b, path_b, key_b) = database(&second_fvk);
+    let mut a = controller(&path_a, &key_a, &endpoint);
+    let mut b = controller(&path_b, &key_b, &endpoint);
+    let old_height = u32::try_from(fake.blocks[0].height).unwrap();
+    for wallet in [&mut a, &mut b] {
+        wallet
+            .synchronize(
+                &FixtureAccess(true),
+                SyncLimits {
+                    anchor_height: Some(old_height),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let owners = vec![
+        a.select_contribution(
+            &FixtureAccess(true),
+            &first_fvk,
+            &canonical_durable_account_id(&first_fvk),
+            105_000,
+            &[],
+        )
+        .unwrap(),
+        b.select_contribution(
+            &FixtureAccess(true),
+            &second_fvk,
+            &canonical_durable_account_id(&second_fvk),
+            210_000,
+            &[],
+        )
+        .unwrap(),
+    ];
+    let scope = scope(&owners);
+    let historical = expectation(&a, &owners[0]);
+    let mut expected = historical.clone();
+    a.synchronize(&FixtureAccess(true), SyncLimits::default())
+        .await
+        .unwrap();
+    let current = &a.accepted.as_ref().unwrap().selection;
+    assert!(current.anchor_height > old_height);
+    expected.construction_anchor = DurableExactConstructionAnchorV1 {
+        height: current.anchor_height,
+        block_hash_protocol: current.anchor_hash_protocol,
+        root: current.anchor_root,
+    };
+    // No silent anchor replacement: retaining the old construction expectation
+    // refuses against this newly observed anchor, even though the inputs remain.
+    assert!(
+        a.select_exact_durable_contribution_v1(
+            &FixtureAccess(true),
+            &first_fvk,
+            &scope,
+            &historical
+        )
+        .is_err()
+    );
+    let selected = a
+        .select_exact_durable_contribution_v1(&FixtureAccess(true), &first_fvk, &scope, &expected)
+        .unwrap();
+    assert!(expected.original_context == historical.original_context);
+    assert!(expected.inputs == historical.inputs);
+    assert_eq!(
+        selected.selection().context().anchor_height,
+        expected.construction_anchor.height
+    );
+    assert_eq!(
+        selected
+            .selection()
+            .notes()
+            .iter()
+            .map(|n| n.input_id.as_str())
+            .collect::<Vec<_>>(),
+        expected
+            .inputs
+            .iter()
+            .map(|n| n.input_id.as_str())
+            .collect::<Vec<_>>()
+    );
+    HistoricalConstructionMaterialV1::capture(&selected, &a)
+        .unwrap()
+        .validate_for(&scope)
+        .unwrap();
+    for kind in 0..5 {
+        let mut bad = expected.clone();
+        match kind {
+            0 => bad.original_context.tip_hash_protocol[0] ^= 1,
+            1 => bad.original_context.anchor_hash_protocol[0] ^= 1,
+            2 => bad.construction_anchor.root[0] ^= 1,
+            3 => bad.construction_anchor.block_hash_protocol[0] ^= 1,
+            _ => bad.construction_anchor.height = old_height - 1,
+        }
+        assert!(
+            a.select_exact_durable_contribution_v1(&FixtureAccess(true), &first_fvk, &scope, &bad)
+                .is_err()
+        );
+    }
     server.abort();
 }

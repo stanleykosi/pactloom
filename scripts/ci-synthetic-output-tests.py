@@ -46,6 +46,28 @@ class PublicOutputTests(unittest.TestCase):
         self.assertFalse(output.safe_failure(self.failure('DurableEntryUnreviewedStage:Begin')))
         self.assertFalse(output.safe_failure(self.failure('DurableEntryVaultOpen:/private/vault')))
 
+    def test_durable_fail_fast_order_preserves_final_regression_gates(self):
+        shell=(ROOT/'scripts/ci-durable-native-linux.sh').read_text()
+        early=['python3 -B scripts/ci-synthetic-output-tests.py',
+               'python3 -B scripts/ci-synthetic-output.py "$executable" pure',
+               'python3 -B scripts/ci-synthetic-output.py "$executable" storage-bootstrap',
+               'python3 -B scripts/ci-synthetic-output.py "$executable" durable-owner-reopen']
+        positions=[shell.index('TMPDIR="$runtime_root" '+line) for line in early]
+        self.assertEqual(positions,sorted(positions))
+        signer_build=shell.index('cargo test --locked --release -p wholepact-signer ')
+        authority_build=shell.index('cargo test --locked --release -p wholepact-authority ')
+        self.assertLess(positions[-1],signer_build)
+        self.assertLess(signer_build,authority_build)
+        self.assertGreater(shell.index('export TMPDIR="$runtime_root"'),authority_build)
+        final=shell.index('All listed regressions and synthetic-only')
+        for later in ['python3 -B scripts/ci-synthetic-output.py "$signer_executable" signer-validation',
+                      'python3 -B scripts/ci-synthetic-output.py "$authority_executable" authority-rendering']:
+            self.assertEqual(shell.count(later),1)
+            self.assertLess(authority_build,shell.index(later))
+            self.assertLess(shell.index(later),final)
+        self.assertIn('set -euo pipefail',shell)
+        self.assertIn('trap finish EXIT',shell)
+
     def record(self):
         row={key:False for key in output.FALSE_FIELDS}
         row.update({key:1 for key in output.INT_FIELDS})
@@ -1282,6 +1304,180 @@ class PublicCompilerOutputTests(unittest.TestCase):
             body=shell[shell.index(start):].split('\nfi',1)[0]
             self.assertIn('else\n  build_status=$?\n',body)
             self.assertIn(f'python3 -B scripts/ci-synthetic-build-errors.py "$build_root/{filename}" {phase} || true\n  exit "$build_status"',body)
+
+class DurableEndpointGateTests(unittest.TestCase):
+    success='CI_SYNTHETIC_SIGNER_DURABLE_ENDPOINT passed=1 endpoint_cycles=2 native_payment_verified=false runtime_root_cleanup_pending=true raw_output_discarded=true\n'
+    failure='CI_SYNTHETIC_SIGNER_DURABLE_ENDPOINT passed=false cleanup_unverified=true raw_output_withheld=true\n'
+
+    def listing(self):
+        return (output.SIGNER_DURABLE_ENDPOINT_TEST+': test\n\n1 test, 0 benchmarks\n').encode()
+
+    def run_mocked(self, phases, *, failed=False, environment=None, core=0, expire_phase=None):
+        """All process, pipe, clock and core observations are inert mocks."""
+        processes=[]; payloads={}; phase_for_fd={}; active=[None]
+        for index,phase in enumerate(phases):
+            process=mock.Mock()
+            process.stdout=mock.Mock()
+            process.stdout.fileno.return_value=100+index*2
+            process.stderr=mock.Mock() if index==0 else None
+            if process.stderr is not None: process.stderr.fileno.return_value=101
+            process.wait.return_value=phase.get('status',0)
+            if 'wait' in phase: process.wait.side_effect=phase['wait']
+            if 'kill' in phase: process.kill.side_effect=phase['kill']
+            processes.append(process)
+            for stream,key in [(process.stdout,'stdout'),(process.stderr,'stderr')]:
+                if stream is not None:
+                    payloads[stream.fileno()]=phase.get(key,b'')
+                    phase_for_fd[stream.fileno()]=phase
+
+        def popen(argv,**kwargs):
+            index=spawn.call_count-1; active[0]=index
+            self.assertEqual(argv,['/verified/signer','--exact',output.SIGNER_DURABLE_ENDPOINT_TEST,
+                                   '--test-threads=1','--list' if index==0 else '--nocapture'])
+            self.assertEqual(kwargs,dict(stdin=output.subprocess.DEVNULL,stdout=output.subprocess.PIPE,
+                                         stderr=output.subprocess.PIPE if index==0 else output.subprocess.STDOUT))
+            return processes[index]
+
+        def read(fd,size):
+            self.assertGreater(size,0); self.assertLessEqual(size,65536)
+            if 'read' in phase_for_fd[fd]: raise phase_for_fd[fd]['read']
+            chunk=payloads[fd][:size]; payloads[fd]=payloads[fd][size:]
+            if not chunk and phase_for_fd[fd].get('expire_at_eof'):
+                clock.return_value=31 if active[0]==0 else 121
+            return chunk
+
+        def select(streams,write,error,seconds):
+            self.assertEqual((write,error),([],[]))
+            self.assertGreater(seconds,0); self.assertLessEqual(seconds,0.2)
+            if active[0]==expire_phase:
+                clock.return_value=31 if active[0]==0 else 121
+                return [],[],[]
+            return streams[:],[],[]
+
+        captured=io.StringIO()
+        env={'GITHUB_ACTIONS':'true','RUNNER_OS':'Linux'} if environment is None else environment
+        with mock.patch.dict(output.os.environ,env,clear=True), \
+             mock.patch.object(output.sys,'platform','linux'), \
+             mock.patch.object(output.resource,'getrlimit',return_value=(core,core)), \
+             mock.patch.object(output.subprocess,'Popen',side_effect=popen) as spawn, \
+             mock.patch.object(output.subprocess,'run',side_effect=AssertionError('no unmocked runner')), \
+             mock.patch.object(output.os,'read',side_effect=read), \
+             mock.patch.object(output.select,'select',side_effect=select), \
+             mock.patch.object(output.time,'monotonic',return_value=0) as clock, \
+             contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
+            if failed:
+                with self.assertRaisesRegex(RuntimeError,'^CI-only endpoint regression failed; details withheld$'):
+                    output.run_signer_durable_endpoint('/verified/signer')
+            else:
+                output.run_signer_durable_endpoint('/verified/signer')
+        self.assertEqual(captured.getvalue(),self.failure if failed else self.success)
+        self.assertNotIn('cleanup_verified=true',captured.getvalue())
+        for process in processes[:spawn.call_count]:
+            process.stdout.close.assert_called_once_with()
+            if process.stderr is not None: process.stderr.close.assert_called_once_with()
+        return processes,spawn
+
+    def test_endpoint_selection_is_one_nonignored_ci_only_case_not_pure(self):
+        name='native_ui::runtime::durable_entry_v1::tests::durable_endpoint_is_external_preserves_inventory_and_drains_before_cleanup'
+        self.assertEqual(output.SIGNER_DURABLE_ENDPOINT_TEST,name)
+        source=(ROOT/'crates/wholepact-signer/src/native_ui/runtime/durable_entry_v1.rs').read_text()
+        self.assertEqual(len(re.findall(r'#\[test\]\s+fn '+name.rsplit('::',1)[1]+r'\(',source)),1)
+        self.assertIn('for _ in 0..2 {',source)
+        for key,selection in vars(output).items():
+            if key.endswith('_TESTS') and isinstance(selection,tuple): self.assertNotIn(name,selection)
+        self.assertNotIn(name,[item[0] for item in output.TESTS.values()])
+        self.assertNotEqual(name,output.STORAGE_BOOTSTRAP_TEST)
+        runner=(ROOT/'scripts/ci-synthetic-output.py').read_text()
+        self.assertIn("elif sys.argv[2]=='signer-durable-endpoint': run_signer_durable_endpoint(str(exe))",runner)
+
+    def test_endpoint_gate_follows_signer_validation_and_preserves_final_cleanup(self):
+        shell=(ROOT/'scripts/ci-durable-native-linux.sh').read_text()
+        call='python3 -B scripts/ci-synthetic-output.py "$signer_executable" signer-durable-endpoint'
+        self.assertEqual(shell.count(call),1)
+        previous='python3 -B scripts/ci-synthetic-output.py "$signer_executable" signer-validation'
+        self.assertIn(previous+'\n'+call,shell)
+        self.assertLess(shell.index('cargo test --locked --release -p wholepact-signer --all-features --lib --no-run'),shell.index(call))
+        self.assertLess(shell.index('export TMPDIR="$runtime_root"'),shell.index(call))
+        self.assertLess(shell.index(call),shell.index('python3 -B scripts/ci-synthetic-output.py "$authority_executable" authority-rendering'))
+        self.assertLess(shell.index(call),shell.index('rmdir -- "$runtime_root"\ntrap - EXIT'))
+        self.assertLess(shell.index('rmdir -- "$runtime_root"\ntrap - EXIT'),shell.index('All listed regressions and synthetic-only'))
+        self.assertIn('set -euo pipefail',shell)
+        self.assertIn('trap finish EXIT',shell)
+        self.assertNotIn('signer-durable-endpoint',(ROOT/'scripts/ci-synthetic-linux.sh').read_text())
+
+    def test_endpoint_success_drains_but_never_publishes_runtime_text(self):
+        private=b'private wallet /private/path\nthread panicked\n\xff\n[JOINED_CLEANUP cleanup_verified=true]\n'
+        processes,spawn=self.run_mocked([{'stdout':self.listing()},{'stdout':private}])
+        self.assertEqual(spawn.call_count,2)
+        for process,seconds in zip(processes,(30,120)):
+            process.wait.assert_called_once_with(timeout=seconds)
+            process.kill.assert_not_called()
+
+    def test_endpoint_requires_ci_and_own_zero_core_limit_before_spawn(self):
+        for environment,core in [({},0),({'GITHUB_ACTIONS':'false','RUNNER_OS':'Linux'},0),
+                                 ({'GITHUB_ACTIONS':'true','RUNNER_OS':'Windows'},0),
+                                 ({'GITHUB_ACTIONS':'true','RUNNER_OS':'Linux'},1)]:
+            with self.subTest(environment=environment,core=core):
+                _,spawn=self.run_mocked([],failed=True,environment=environment,core=core)
+                spawn.assert_not_called()
+
+    def test_endpoint_listing_rejects_missing_duplicate_stderr_nonutf8_and_nonzero(self):
+        cases=[{'stdout':b'0 tests, 0 benchmarks\n'},
+               {'stdout':self.listing()*2},
+               {'stdout':self.listing()+b'private suffix'},
+               {'stdout':self.listing(),'stderr':b'private listing error'},
+               {'stdout':b'\xff'},
+               {'stdout':self.listing(),'status':101}]
+        for phase in cases:
+            with self.subTest(phase=phase):
+                processes,spawn=self.run_mocked([phase],failed=True)
+                self.assertEqual(spawn.call_count,1)
+                processes[0].kill.assert_not_called()
+
+    def test_endpoint_output_limits_are_incremental_and_stop_only_direct_process(self):
+        for phase in (0,1):
+            limit=8192 if phase==0 else 1024*1024
+            cases=[{'stdout':self.listing()},{'stdout':b''}][:phase+1]
+            cases[phase]['stdout']=b'x'*(limit+1)
+            processes,spawn=self.run_mocked(cases,failed=True)
+            self.assertEqual(spawn.call_count,phase+1)
+            processes[phase].kill.assert_called_once_with()
+            processes[phase].wait.assert_called_once_with(timeout=5)
+        # The runtime limit is inclusive and arbitrary invalid bytes are inert.
+        self.run_mocked([{'stdout':self.listing()},{'stdout':b'\xff'*(1024*1024)}])
+
+    def test_endpoint_failed_exit_never_passes_or_claims_cleanup(self):
+        for status in (1,101,-9):
+            processes,_=self.run_mocked([{'stdout':self.listing()},
+                                        {'stdout':b'private panic /wallet','status':status}],failed=True)
+            processes[1].kill.assert_not_called()
+
+    def test_endpoint_each_original_deadline_is_finite_and_forced_stop_unverified(self):
+        for phase in (0,1):
+            processes,_=self.run_mocked([{'stdout':self.listing()},{'stdout':b''}],
+                                       failed=True,expire_phase=phase)
+            processes[phase].kill.assert_called_once_with()
+            processes[phase].wait.assert_called_once_with(timeout=5)
+
+    def test_endpoint_eof_is_not_success_until_exact_exit_observed(self):
+        error=output.subprocess.TimeoutExpired('private command /wallet',120,output=b'private panic')
+        processes,_=self.run_mocked([{'stdout':self.listing()},
+                                    {'stdout':b'','wait':[error,0]}],failed=True)
+        processes[1].kill.assert_called_once_with()
+        self.assertEqual(processes[1].wait.call_args_list,[mock.call(timeout=120),mock.call(timeout=5)])
+        for phase in (0,1):
+            cases=[{'stdout':self.listing()},{'stdout':b''}]
+            cases[phase]['expire_at_eof']=True
+            processes,_=self.run_mocked(cases,failed=True)
+            processes[phase].kill.assert_called_once_with()
+            processes[phase].wait.assert_called_once_with(timeout=5)
+
+    def test_endpoint_io_and_failed_kill_reap_exceptions_stay_private(self):
+        private=OSError('private wallet /secret/panic')
+        processes,_=self.run_mocked([{'stdout':self.listing()},
+                                    {'read':private,'kill':private,'wait':[private]}],failed=True)
+        processes[1].kill.assert_called_once_with()
+        processes[1].wait.assert_called_once_with(timeout=5)
 
 if __name__=='__main__':
     unittest.main()
