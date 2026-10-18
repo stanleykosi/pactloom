@@ -1,5 +1,6 @@
-//! INACTIVE foundation: register only with the exact native dependency/consent
-//! composition. This exclusive facade, not a shared Engine redaction convention,
+//! Crate-private compiler foundation, not an activated native Host workspace.
+//! The exact native dependency/consent composition remains required for use.
+//! This exclusive facade, not a shared Engine redaction convention,
 //! is the privacy boundary. Original association is history, never spending power.
 use crate::durable_input_projections_v1::{
     DurableDiscoveryRoundRequestV1, DurableDiscoveryRoundSummaryV1, LocalDurableDiscoveryConsentV1,
@@ -47,7 +48,7 @@ pub struct PrivateDurableWorkspaceSourceV1<'source> {
 }
 impl Engine {
     /// Read-only source getter. Does not admit discovery on this shared Engine.
-    pub fn private_durable_workspace_source_v1<'source>(
+    pub(crate) fn private_durable_workspace_source_v1<'source>(
         &'source self,
         access: &Access,
         agreement_id: &str,

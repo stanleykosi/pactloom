@@ -160,6 +160,12 @@ impl StoreRecoveryInventory {
         rows: impl IntoIterator<Item = (&'a str, &'a [RecoveryCell])>,
         recovered: bool,
     ) -> Result<Self> {
+        // No record projection precedes the full raw retained-history pass.
+        // Keep the JSON text intact here: Value would erase duplicate keys.
+        let rows = rows.into_iter().collect::<Vec<_>>();
+        for (table, cells) in &rows {
+            validate_no_private_input_projection_cells(table, cells)?;
+        }
         let supports_v3 = construction_v3_supported_by_provenance(provenance)?;
         let supports_v4 = construction_v4_supported_by_provenance(provenance)?;
         let supports_v5 = construction_v5_supported_by_provenance(provenance)?;
@@ -206,7 +212,7 @@ impl StoreRecoveryInventory {
                     }
                     use crate::manual_enrollment::{
                         ADDITIONAL_PUBLICATION_V3, CONTINUATION, CONTINUATION_V3, CONTINUATION_V4,
-                        ENROLLMENT, EXCLUSION, INITIAL_PUBLICATION_V2, SCOPE, PERMANENT_STOP_V1,
+                        ENROLLMENT, EXCLUSION, INITIAL_PUBLICATION_V2, PERMANENT_STOP_V1, SCOPE,
                     };
                     match kind {
                         ENROLLMENT => manual_enrollments
@@ -365,7 +371,9 @@ impl StoreRecoveryInventory {
             },
         )?;
         crate::manual_enrollment::validate_permanent_stop_set(
-            &manual_permanent_stops, &manual_additions_v3, &manual_exclusions,
+            &manual_permanent_stops,
+            &manual_additions_v3,
+            &manual_exclusions,
         )?;
         crate::manual_enrollment::construction_claim_v2::validate_construction_set(
             &inventory.construction_claims,
@@ -553,6 +561,58 @@ fn stored(cells: &[RecoveryCell], offset: usize) -> Result<StoredRecord> {
         updated_at_ms: integer(cells, offset + 4)?,
     })
 }
+
+// Fixed executable policy for the four JSON-bearing metadata columns. Other
+// text cells are not JSON documents and must never be searched recursively.
+fn private_input_projection_column(table: &str) -> Option<usize> {
+    match table {
+        "records" => Some(3),
+        "operations" | "events" => Some(5),
+        "idempotency" => Some(3),
+        _ => None,
+    }
+}
+
+fn validate_no_private_input_projection_cells(table: &str, cells: &[RecoveryCell]) -> Result<()> {
+    if let Some(index) = private_input_projection_column(table) {
+        crate::backup::validate_no_private_input_projections_json(text(cells, index)?)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_no_private_input_projection_tables(tables: &[RecoveryTable]) -> Result<()> {
+    for table in tables {
+        for row in table.rows() {
+            validate_no_private_input_projection_cells(table.name(), row.cells())?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_no_private_input_projection_values(table: &str, cells: &[Value]) -> Result<()> {
+    if let Some(index) = private_input_projection_column(table) {
+        let payload = cells
+            .get(index)
+            .and_then(Value::as_str)
+            .ok_or(StoreError::RecoveryRequired)?;
+        crate::backup::validate_no_private_input_projections_json(payload)?;
+    }
+    Ok(())
+}
+
+fn original_cells_without_private_input_projections(
+    table: &str,
+    encoded: &str,
+) -> Result<Vec<Value>> {
+    // The original row is an array of SQL cells, not the JSON payload itself.
+    // Strictly bound its encoding, then scan the actual still-raw JSON string
+    // at the table's known offset before anybody decodes that string to Value.
+    crate::backup::validate_no_private_input_projections_json(encoded)?;
+    let cells: Vec<Value> = serde_json::from_str(encoded)?;
+    validate_no_private_input_projection_values(table, &cells)?;
+    Ok(cells)
+}
+
 fn text(cells: &[RecoveryCell], index: usize) -> Result<&str> {
     match cells.get(index) {
         Some(RecoveryCell::Text(value)) => Ok(value),
@@ -677,18 +737,10 @@ pub(crate) fn construction_encoding_support(
     version: i64,
 ) -> Result<(bool, bool, bool)> {
     match (application, version) {
-        (0, 1 | 2) | (RECOVERED_GENERATION_APPLICATION_ID, 2 | 3) => {
-            Ok((false, false, false))
-        }
-        (0, 3) | (RECOVERED_GENERATION_APPLICATION_ID, 4 | 5) => {
-            Ok((true, false, false))
-        }
-        (0, 4) | (RECOVERED_GENERATION_APPLICATION_ID, 6 | 7) => {
-            Ok((true, true, false))
-        }
-        (0, 5) | (RECOVERED_GENERATION_APPLICATION_ID, 8 | 9) => {
-            Ok((true, true, true))
-        }
+        (0, 1 | 2) | (RECOVERED_GENERATION_APPLICATION_ID, 2 | 3) => Ok((false, false, false)),
+        (0, 3) | (RECOVERED_GENERATION_APPLICATION_ID, 4 | 5) => Ok((true, false, false)),
+        (0, 4) | (RECOVERED_GENERATION_APPLICATION_ID, 6 | 7) => Ok((true, true, false)),
+        (0, 5) | (RECOVERED_GENERATION_APPLICATION_ID, 8 | 9) => Ok((true, true, true)),
         _ => Err(StoreError::RecoveryRequired),
     }
 }
@@ -723,9 +775,7 @@ fn require_construction_support(
     destination: (bool, bool, bool),
     source: (bool, bool, bool),
 ) -> Result<()> {
-    if (!destination.0 && source.0)
-        || (!destination.1 && source.1)
-        || (!destination.2 && source.2)
+    if (!destination.0 && source.0) || (!destination.1 && source.1) || (!destination.2 && source.2)
     {
         Err(StoreError::RecoveryRequired)
     } else {
@@ -1127,6 +1177,9 @@ fn validate_generation(
     provenance: &RecoveryProvenance,
     binding: &GenerationBinding,
 ) -> Result<()> {
+    // This must precede both the single-generation and layered paths, including
+    // any construction decoding or protected manual snapshot projection.
+    crate::backup::validate_no_private_input_projections(c)?;
     let source_support = construction_encoding_supported_by_provenance(provenance)?;
     let template = layers::generation_template(c)?;
     let support = construction_encoding_support(template.application_id, template.schema_version)?;
@@ -1166,7 +1219,7 @@ fn validate_originals(c: &Connection, provenance: &RecoveryProvenance) -> Result
     )?;
     for row in q.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
         let (table, encoded) = row?;
-        let cells: Vec<Value> = serde_json::from_str(&encoded)?;
+        let cells = original_cells_without_private_input_projections(&table, &encoded)?;
         if table == "records"
             && cells
                 .first()
@@ -1736,3 +1789,6 @@ mod tests {
 
 #[cfg(test)]
 mod historical_provenance_v5_encoding_tests;
+
+#[cfg(test)]
+mod private_input_projection_tests;

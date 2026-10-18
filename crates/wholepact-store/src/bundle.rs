@@ -79,14 +79,40 @@ pub fn coordination_template() -> &'static JournalTemplate {
 pub struct CoordinationBundleAdapter<'a> {
     store: &'a Store,
 }
+
+// Same-thread test observation only, never a production callback or policy
+// control. It distinguishes refusal before the visitor from later failure.
+#[cfg(test)]
+std::thread_local! {
+    static BUNDLE_VISITOR_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_bundle_visitor_calls() {
+    BUNDLE_VISITOR_CALLS.with(|calls| calls.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn bundle_visitor_calls() -> usize {
+    BUNDLE_VISITOR_CALLS.with(std::cell::Cell::get)
+}
+
 impl<'a> CoordinationBundleAdapter<'a> {
     pub fn new(store: &'a Store) -> Result<Self, BundleError> {
         if store.protection != StorageProtection::Encrypted {
             return Err(BundleError::Invalid);
         }
+        // Preflight before a caller can hand this adapter to bundle staging;
+        // read_locked repeats the check on the actual export snapshot.
+        {
+            let connection = store.connection.lock().map_err(|_| BundleError::Storage)?;
+            crate::backup::validate_no_private_input_projections(&connection)
+                .map_err(|_| BundleError::Integrity)?;
+        }
         Ok(Self { store })
     }
 }
+
 impl JournalAdapter for CoordinationBundleAdapter<'_> {
     fn template(&self) -> &'static JournalTemplate {
         &TEMPLATE
@@ -102,6 +128,10 @@ impl JournalAdapter for CoordinationBundleAdapter<'_> {
             .connection
             .lock()
             .map_err(|_| BundleError::Storage)?;
+        // Complete bundles retain their broader construction scope, but do not
+        // qualify disclosure of private input projections in any saved revision.
+        crate::backup::validate_no_private_input_projections(&connection)
+            .map_err(|_| BundleError::Integrity)?;
         crate::backup::validate_live_schema_and_rows(&connection, crate::SCHEMA_VERSION)
             .map_err(|_| BundleError::Integrity)?;
         let version: i64 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -110,6 +140,8 @@ impl JournalAdapter for CoordinationBundleAdapter<'_> {
         if version != crate::SCHEMA_VERSION || application != 0 {
             return Err(BundleError::Unsupported);
         }
+        #[cfg(test)]
+        BUNDLE_VISITOR_CALLS.with(|calls| calls.set(calls.get() + 1));
         visitor(&connection)
     }
 }

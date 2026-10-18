@@ -34,6 +34,21 @@ pub mod born_offline_saved_proof_v1;
 pub mod candidates;
 #[cfg(all(feature = "durable-proposal", target_os = "linux"))]
 pub mod durable_construction_v1;
+// Compiler/component qualification only. These modules deliberately expose no
+// shared-Engine discovery API or public private-workspace factory. Native
+// discovery issuance and the Host dependency/privacy boundary remain inactive.
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "manual-admission",
+    target_os = "linux"
+))]
+pub(crate) mod durable_input_projections_v1;
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "manual-admission",
+    target_os = "linux"
+))]
+pub(crate) mod durable_private_workspace_v1;
 #[cfg(feature = "durable-proposal")]
 pub mod durable_proposals_v1;
 pub mod financial_preflight;
@@ -215,6 +230,10 @@ pub struct AgreementView {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Envelope {
+    /// Recognized even without this profile: unsupported builds must refuse
+    /// nonempty private history rather than silently project its derived view.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    durable_input_projections_v1: std::collections::BTreeMap<String, Value>,
     /// Private purpose-distinct disclosure receipts. Never projected in views.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     durable_construction_v1: std::collections::BTreeMap<String, Value>,
@@ -477,6 +496,7 @@ impl Engine {
         }
         let now = now();
         let envelope = Envelope {
+            durable_input_projections_v1: Default::default(),
             durable_construction_v1: Default::default(),
             durable_proposals_v1: Default::default(),
             terms_editing_origin: true,
@@ -895,10 +915,28 @@ fn decode(record: &StoredRecord) -> Result<Envelope> {
     })?;
     if envelope.durable_proposals_v1.len() > MAX_PROPOSALS
         || envelope.durable_construction_v1.len() > 4
+        || envelope.durable_input_projections_v1.len() > 4
     {
         return Err(ApiError::new(
             "RECOVERY_REQUIRED",
             "Durable proposal inventory exceeds its bound",
+        ));
+    }
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "manual-admission",
+        target_os = "linux"
+    ))]
+    durable_input_projections_v1::validate_stored(&envelope)?;
+    #[cfg(not(all(
+        feature = "durable-proposal",
+        feature = "manual-admission",
+        target_os = "linux"
+    )))]
+    if !envelope.durable_input_projections_v1.is_empty() {
+        return Err(ApiError::new(
+            "RECOVERY_REQUIRED",
+            "Private discovery history requires its compatible protected workspace; preserve the original journal",
         ));
     }
     #[cfg(feature = "durable-proposal")]
@@ -1022,3 +1060,7 @@ fn store_error(error: wholepact_store::StoreError) -> ApiError {
 
 #[cfg(feature = "submission-handoff")]
 pub mod settlement_fanout;
+
+#[cfg(test)]
+#[path = "durable_discovery_registration_tests.rs"]
+mod durable_discovery_registration_tests;

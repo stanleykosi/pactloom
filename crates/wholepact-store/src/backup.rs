@@ -8,7 +8,11 @@ use serde::{
     de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor},
 };
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeMap, fmt, fs, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt, fs,
+    path::Path,
+};
 pub use wholepact_storage_security::DatabaseKey;
 use wholepact_storage_security::{
     EncryptedReadSnapshot, create_encrypted, open_encrypted_read_snapshot,
@@ -23,6 +27,8 @@ const MAX_FILE_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_CELL_BYTES: usize = 4 * 1024 * 1024;
 const PRIVATE_CONSTRUCTION_SCOPE_ERROR: &str =
     "private construction material is outside coordination-only backup scope";
+const PRIVATE_INPUT_PROJECTION_SCOPE_ERROR: &str =
+    "private input projection material is outside export or recovery scope";
 const ARCHIVE_SCHEMA: &str = "CREATE TABLE backup_manifest(singleton INTEGER PRIMARY KEY CHECK(singleton=1), format_version INTEGER NOT NULL, source_schema_version INTEGER NOT NULL, created_at_ms INTEGER NOT NULL, snapshot_digest TEXT NOT NULL, row_count INTEGER NOT NULL, data_bytes INTEGER NOT NULL, scope TEXT NOT NULL CHECK(scope='coordination_and_authority_only'));";
 
 struct Table {
@@ -126,8 +132,8 @@ pub struct AgreementRestoreReport {
 impl Store {
     /// Snapshot ALL records of this protected store, including idempotency,
     /// observations and unresolved effects. Not a participant-scoped disclosure.
-    /// Refuses durable private construction material, including mutation history;
-    /// this archive's scope and consent do not cover private witness journals.
+    /// Refuses durable private construction and input-projection material, including
+    /// history; this archive's scope and consent do not cover private witness journals.
     /// The destination needs a separately provisioned independent key and a private
     /// directory. A failure leaves any partial destination untouched for inspection.
     pub fn backup_agreement_journal(
@@ -152,10 +158,11 @@ impl Store {
         }
         validate_schema(&snapshot, SCHEMA_VERSION, false)?;
         validate_integrity(&snapshot)?;
-        let stats = inspect_rows(&snapshot, SCHEMA_VERSION)?;
-        // Check the actual bounded snapshot, not a prior inventory or the calling
-        // principal's visible agreements. No destination exists before this check.
+        // Check the actual bounded raw snapshot before any typed inspection, not
+        // a prior inventory or the calling principal's visible agreements. No
+        // destination exists before this check.
         validate_coordination_only_scope(&snapshot)?;
+        let stats = inspect_rows(&snapshot, SCHEMA_VERSION)?;
         let destination = destination.as_ref();
         let mut archive = create_encrypted(destination, backup_key)?.into_connection();
         archive.pragma_update(None, "max_page_count", 32768)?;
@@ -591,53 +598,131 @@ fn copy_tables(source: &Connection, destination: &Connection, version: i64) -> R
     Ok(())
 }
 
-/// This legacy scope is feature-independent. The engine retains private viewing
-/// keys, selected notes and witnesses in an opaque envelope field even in builds
-/// without construction support. Mutation results retain old envelopes after a
-/// current record changes, so they must be checked as well. Call only after the
-/// row/cell bounds have been validated, in the same read transaction.
+/// This legacy scope is feature-independent. Both private construction and
+/// input-projection keys are reserved even in builds without engine support.
+/// Mutation results and events may retain private metadata after a current record
+/// changes, so inspect all four raw columns before any typed decoding or export.
 fn validate_coordination_only_scope(connection: &Connection) -> Result<()> {
+    validate_private_metadata_scope(connection, PrivateMetadataScope::CoordinationOnly)
+}
+
+/// Broader bundle, recovery and history profiles already qualify construction
+/// material. This distinct executable policy refuses only input projections;
+/// callers cannot use a permission flag to weaken the legacy archive policy.
+/// Call on the already-held connection/read transaction before projecting rows,
+/// invoking visitors, or admitting a recovered generation.
+pub(crate) fn validate_no_private_input_projections(connection: &Connection) -> Result<()> {
+    validate_private_metadata_scope(connection, PrivateMetadataScope::NoInputProjections)
+}
+
+/// Raw-cell counterpart for events and other bounded non-exporting readers.
+/// Parse before Value collapse so duplicate and escaped keys cannot hide data.
+pub(crate) fn validate_no_private_input_projections_json(payload: &str) -> Result<()> {
+    validate_private_metadata_json(payload, PrivateMetadataScope::NoInputProjections)
+}
+
+#[derive(Clone, Copy)]
+enum PrivateMetadataScope {
+    CoordinationOnly,
+    NoInputProjections,
+}
+impl PrivateMetadataScope {
+    fn reserves(self, key: &str) -> bool {
+        key == "durable_input_projections_v1"
+            || (matches!(self, Self::CoordinationOnly) && key == "durable_construction_v1")
+    }
+
+    fn error(self) -> &'static str {
+        match self {
+            Self::CoordinationOnly => PRIVATE_CONSTRUCTION_SCOPE_ERROR,
+            Self::NoInputProjections => PRIVATE_INPUT_PROJECTION_SCOPE_ERROR,
+        }
+    }
+}
+
+fn validate_private_metadata_scope(
+    connection: &Connection,
+    scope: PrivateMetadataScope,
+) -> Result<()> {
     let mut query = connection.prepare(
         "SELECT payload FROM records UNION ALL SELECT result FROM operations \
          UNION ALL SELECT result FROM idempotency UNION ALL SELECT payload FROM events",
     )?;
     let mut rows = query.query([])?;
+    let mut count = 0u64;
+    let mut bytes = 0u64;
     while let Some(row) = rows.next()? {
-        let payload: String = row.get(0)?;
-        let mut decoder = serde_json::Deserializer::from_str(&payload);
-        CoordinationOnlyValue {
-            empty_object_only: false,
+        count = count.checked_add(1).ok_or(StoreError::ResourceExhausted)?;
+        let ValueRef::Text(raw) = row.get_ref(0)? else {
+            return Err(StoreError::InvalidInput(scope.error()));
+        };
+        bytes = bytes
+            .checked_add(raw.len() as u64)
+            .ok_or(StoreError::ResourceExhausted)?;
+        if count > MAX_ROWS || bytes > MAX_DATA_BYTES {
+            return Err(StoreError::ResourceExhausted);
         }
-        .deserialize(&mut decoder)
-        .and_then(|()| decoder.end())
-        .map_err(|_| StoreError::InvalidInput(PRIVATE_CONSTRUCTION_SCOPE_ERROR))?;
+        let payload =
+            std::str::from_utf8(raw).map_err(|_| StoreError::InvalidInput(scope.error()))?;
+        validate_private_metadata_json(payload, scope)?;
     }
     Ok(())
 }
 
-// Stream every field, including duplicates, instead of materializing Value:
-// last-key-wins decoding must not hide a private map behind a later empty map.
-// A present reserved field must be exactly an empty object. Malformed JSON or
-// any other field encoding fails closed, without reflecting private data.
-struct CoordinationOnlyValue {
-    empty_object_only: bool,
+fn validate_private_metadata_json(payload: &str, scope: PrivateMetadataScope) -> Result<()> {
+    // The archive limit is deliberately separate from the 1 MiB record limit:
+    // mutation result wrappers and other archive cells have an existing 4 MiB cap.
+    if payload.len() > MAX_CELL_BYTES {
+        return Err(StoreError::InvalidInput(scope.error()));
+    }
+    let mut decoder = serde_json::Deserializer::from_str(payload);
+    let mut nodes = 0usize;
+    PrivateMetadataValue {
+        scope,
+        shape: PrivateMetadataShape::Any,
+        nodes: &mut nodes,
+        depth: 0,
+    }
+    .deserialize(&mut decoder)
+    .and_then(|()| decoder.end())
+    .map_err(|_| StoreError::InvalidInput(scope.error()))
 }
-impl<'de> DeserializeSeed<'de> for CoordinationOnlyValue {
+
+// Stream values and retain only each open object's decoded key set. Every
+// duplicate key, including escaped equivalents, is rejected before Value can
+// collapse it. Reserved fields must be exact empty objects, including when
+// nested in arrays or arbitrary unknown wrappers. Diagnostics reveal no data.
+enum PrivateMetadataShape {
+    Any,
+    EmptyObject,
+}
+struct PrivateMetadataValue<'a> {
+    scope: PrivateMetadataScope,
+    shape: PrivateMetadataShape,
+    nodes: &'a mut usize,
+    depth: usize,
+}
+impl<'de> DeserializeSeed<'de> for PrivateMetadataValue<'_> {
     type Value = ();
 
     fn deserialize<D: Deserializer<'de>>(self, decoder: D) -> std::result::Result<(), D::Error> {
-        if self.empty_object_only {
-            decoder.deserialize_map(self)
-        } else {
-            decoder.deserialize_any(self)
+        *self.nodes += 1;
+        if self.depth > wholepact_core::strict_json::MAX_JSON_DEPTH
+            || *self.nodes > wholepact_core::strict_json::MAX_JSON_NODES
+        {
+            return Err(de::Error::custom(self.scope.error()));
+        }
+        match self.shape {
+            PrivateMetadataShape::EmptyObject => decoder.deserialize_map(self),
+            PrivateMetadataShape::Any => decoder.deserialize_any(self),
         }
     }
 }
-impl<'de> Visitor<'de> for CoordinationOnlyValue {
+impl<'de> Visitor<'de> for PrivateMetadataValue<'_> {
     type Value = ();
 
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("coordination-only JSON value")
+        formatter.write_str("bounded JSON within the private metadata scope")
     }
     fn visit_bool<E: de::Error>(self, _: bool) -> std::result::Result<(), E> {
         Ok(())
@@ -659,23 +744,38 @@ impl<'de> Visitor<'de> for CoordinationOnlyValue {
     }
     fn visit_seq<A: SeqAccess<'de>>(self, mut values: A) -> std::result::Result<(), A::Error> {
         while values
-            .next_element_seed(CoordinationOnlyValue {
-                empty_object_only: false,
+            .next_element_seed(PrivateMetadataValue {
+                scope: self.scope,
+                shape: PrivateMetadataShape::Any,
+                nodes: self.nodes,
+                depth: self.depth + 1,
             })?
             .is_some()
         {}
         Ok(())
     }
     fn visit_map<A: MapAccess<'de>>(self, mut values: A) -> std::result::Result<(), A::Error> {
-        if self.empty_object_only {
+        if matches!(self.shape, PrivateMetadataShape::EmptyObject) {
             return match values.next_key::<de::IgnoredAny>()? {
                 None => Ok(()),
-                Some(_) => Err(de::Error::custom(PRIVATE_CONSTRUCTION_SCOPE_ERROR)),
+                Some(_) => Err(de::Error::custom(self.scope.error())),
             };
         }
+        let mut keys = BTreeSet::new();
         while let Some(key) = values.next_key::<String>()? {
-            values.next_value_seed(CoordinationOnlyValue {
-                empty_object_only: key == "durable_construction_v1",
+            let shape = if self.scope.reserves(&key) {
+                PrivateMetadataShape::EmptyObject
+            } else {
+                PrivateMetadataShape::Any
+            };
+            if !keys.insert(key) {
+                return Err(de::Error::custom(self.scope.error()));
+            }
+            values.next_value_seed(PrivateMetadataValue {
+                scope: self.scope,
+                shape,
+                nodes: self.nodes,
+                depth: self.depth + 1,
             })?;
         }
         Ok(())
@@ -726,15 +826,15 @@ fn validate_archive(connection: &Connection) -> Result<AgreementBackupSummary> {
     }
     validate_schema(connection, version, true)?;
     validate_integrity(connection)?;
+    // A correctly keyed archive and recomputed digest cannot broaden its scope.
+    // Stream raw cells before construction inspection can decode any Value.
+    validate_coordination_only_scope(connection)?;
     let stats = inspect_rows(connection, version)?;
     if digest != stats.digest || rows != stats.rows || bytes != stats.bytes {
         return Err(StoreError::InvalidInput(
             "agreement archive content mismatch",
         ));
     }
-    // A correctly keyed archive and recomputed digest cannot broaden the scope
-    // declared by its manifest. Inspection and restore enforce the same boundary.
-    validate_coordination_only_scope(connection)?;
     Ok(AgreementBackupSummary {
         format_version: ARCHIVE_VERSION as u32,
         source_schema_version: version as u32,
@@ -791,3 +891,6 @@ mod historical_provenance_v5_marker_tests;
 
 #[cfg(all(test, target_os = "linux"))]
 mod private_material_scope_tests;
+
+#[cfg(all(test, target_os = "linux"))]
+mod private_projection_scope_tests;

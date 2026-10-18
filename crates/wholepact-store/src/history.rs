@@ -59,6 +59,11 @@ fn validate_construction_history(
     if provenance.kind != JournalKind::CoordinationAuthority || provenance.application_id != 0 {
         return Err(BundleError::Unsupported);
     }
+    // Run over all four raw JSON columns before making the records-only
+    // construction view. Event payloads remain opaque rather than being
+    // mistaken for agreement envelopes or ignored because they are historical.
+    crate::recovery::validate_no_private_input_projection_tables(tables)
+        .map_err(|_| BundleError::Integrity)?;
     let template = crate::bundle::coordination_template_for_schema(provenance.schema_version)?;
     let records = tables
         .iter()

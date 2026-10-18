@@ -1,6 +1,7 @@
-//! Installed-origin, projection-ONLY client. Intended as a gated child of
-//! client.rs, but deliberately unregistered until the complete native route is
-//! qualified. No ordinary pairing/client/session or manual lease is constructed.
+//! Installed-origin, projection-ONLY client compiled as a private child for
+//! component qualification. Only its opaque receipt is exported; launch/pair
+//! handles and the native server route remain unavailable to external callers.
+//! No ordinary pairing/client/session or manual lease is constructed.
 use super::*;
 use crate::durable_input_projection_v1::{
     DurableInputProjectionOutboxV1, DurableInputProjectionRequestV1,

@@ -1769,6 +1769,13 @@ pub use permanent_stop_v1_client::{PendingPermanentStopV1, PermanentStopLeaseV1}
 mod named_verifier_policy_client;
 pub use named_verifier_policy_client::{NamedVerifierPolicyLease, PendingNamedVerifierPolicy};
 
+// Only the non-constructible observation crosses the crate boundary. New
+// discovery launch/pair/pending handles remain private until native issuance,
+// journal migration and foreground Host privacy are separately qualified.
+#[path = "durable_input_projection_v1_client.rs"]
+mod durable_input_projection_v1_client;
+pub use durable_input_projection_v1_client::AuthenticatedDurableInputProjectionV1;
+
 #[cfg(test)]
 mod checked_local_connect_tests {
     use super::*;
