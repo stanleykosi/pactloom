@@ -1313,6 +1313,8 @@ impl NativeRuntime {
         Ok(())
     }
     fn poll(&mut self, epoch: u64) {
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        self.poll_durable_material_lifetime_v1();
         if self.pending.as_ref().is_some_and(|p| p.review.expired()) {
             self.pending = None;
             self.confirmation.zeroize();

@@ -98,6 +98,28 @@ pub fn parse_json_unique(input: &[u8]) -> Result<Value> {
             "JSON body exceeds 1 MiB",
         ));
     }
+    parse_json_unique_inner(input)
+}
+
+// Explicit aggregate envelopes may contain several independently bounded
+// artifacts. This is never the default parser limit or a caller-provided wire
+// setting. Depth and node budgets remain identical for every entry point.
+const MAX_CALLER_CAPPED_JSON_BYTES: usize = 5 * MAX_JSON_BYTES;
+
+fn parse_json_unique_with_byte_limit(input: &[u8], maximum_bytes: usize) -> Result<Value> {
+    if maximum_bytes == 0
+        || maximum_bytes > MAX_CALLER_CAPPED_JSON_BYTES
+        || input.len() > maximum_bytes
+    {
+        return Err(CoreError::new(
+            ErrorCode::ResourceLimit,
+            "JSON body exceeds the explicit bounded import limit",
+        ));
+    }
+    parse_json_unique_inner(input)
+}
+
+fn parse_json_unique_inner(input: &[u8]) -> Result<Value> {
     let mut budget = Budget::default();
     let mut deserializer = serde_json::Deserializer::from_slice(input);
     let parsed = Seed {
@@ -128,6 +150,22 @@ pub fn parse_json_unique(input: &[u8]) -> Result<Value> {
 
 pub fn parse_typed_json<T: DeserializeOwned>(input: &[u8]) -> Result<T> {
     serde_json::from_value(parse_json_unique(input)?).map_err(|_| {
+        CoreError::new(
+            ErrorCode::InvalidTerms,
+            "JSON fields, types, or monetary encodings do not match the required schema",
+        )
+    })
+}
+
+/// Explicit bounded aggregate import. The trusted caller must supply its
+/// protocol constant, not a value from the request. The hard ceiling is 5 MiB;
+/// duplicate-key, depth (32), node-count (16,384), typed-schema and trailing-data
+/// checks are unchanged. Ordinary `parse_typed_json` remains limited to 1 MiB.
+pub fn parse_typed_json_with_byte_limit<T: DeserializeOwned>(
+    input: &[u8],
+    maximum_bytes: usize,
+) -> Result<T> {
+    serde_json::from_value(parse_json_unique_with_byte_limit(input, maximum_bytes)?).map_err(|_| {
         CoreError::new(
             ErrorCode::InvalidTerms,
             "JSON fields, types, or monetary encodings do not match the required schema",
@@ -166,6 +204,106 @@ mod tests {
                 .unwrap_err()
                 .code,
             ErrorCode::ResourceLimit
+        );
+    }
+    #[test]
+    fn explicit_aggregate_limit_does_not_change_default_or_hard_ceiling() {
+        let source = format!("\"{}\"", "a".repeat(MAX_JSON_BYTES));
+        assert_eq!(
+            parse_typed_json::<String>(source.as_bytes())
+                .unwrap_err()
+                .code,
+            ErrorCode::ResourceLimit
+        );
+        assert_eq!(
+            parse_typed_json_with_byte_limit::<String>(source.as_bytes(), source.len())
+                .unwrap()
+                .len(),
+            MAX_JSON_BYTES
+        );
+        assert!(
+            parse_typed_json_with_byte_limit::<String>(source.as_bytes(), source.len() - 1)
+                .is_err()
+        );
+        for limit in [0, MAX_CALLER_CAPPED_JSON_BYTES + 1, usize::MAX] {
+            assert_eq!(
+                parse_typed_json_with_byte_limit::<Value>(b"{}", limit)
+                    .unwrap_err()
+                    .code,
+                ErrorCode::ResourceLimit
+            );
+        }
+        let boundary = format!("\"{}\"", "b".repeat(MAX_CALLER_CAPPED_JSON_BYTES - 2));
+        assert!(
+            parse_typed_json_with_byte_limit::<String>(
+                boundary.as_bytes(),
+                MAX_CALLER_CAPPED_JSON_BYTES
+            )
+            .is_ok()
+        );
+        let too_large = format!("{} ", boundary);
+        assert_eq!(
+            parse_typed_json_with_byte_limit::<String>(
+                too_large.as_bytes(),
+                MAX_CALLER_CAPPED_JSON_BYTES
+            )
+            .unwrap_err()
+            .code,
+            ErrorCode::ResourceLimit
+        );
+    }
+    #[test]
+    fn explicit_aggregate_preserves_strict_depth_nodes_and_duplicate_checks() {
+        for source in [
+            r#"{"a":1,"a":2}"#,
+            r#"{"a":1,"\u0061":2}"#,
+            r#"{"nested":{"x":1,"x":2}}"#,
+            "{} {}",
+        ] {
+            assert!(
+                parse_typed_json_with_byte_limit::<Value>(
+                    source.as_bytes(),
+                    MAX_CALLER_CAPPED_JSON_BYTES
+                )
+                .is_err()
+            );
+        }
+        let deep = format!(
+            "{}0{}",
+            "[".repeat(MAX_JSON_DEPTH + 1),
+            "]".repeat(MAX_JSON_DEPTH + 1)
+        );
+        let wide = format!("[{}0]", "0,".repeat(MAX_JSON_NODES));
+        for source in [deep, wide] {
+            assert_eq!(
+                parse_typed_json_with_byte_limit::<Value>(
+                    source.as_bytes(),
+                    MAX_CALLER_CAPPED_JSON_BYTES
+                )
+                .unwrap_err()
+                .code,
+                ErrorCode::ResourceLimit
+            );
+        }
+        let allowed_depth = format!(
+            "{}0{}",
+            "[".repeat(MAX_JSON_DEPTH),
+            "]".repeat(MAX_JSON_DEPTH)
+        );
+        assert!(
+            parse_typed_json_with_byte_limit::<Value>(
+                allowed_depth.as_bytes(),
+                MAX_CALLER_CAPPED_JSON_BYTES
+            )
+            .is_ok()
+        );
+        let allowed_nodes = format!("[{}0]", "0,".repeat(MAX_JSON_NODES - 2));
+        assert!(
+            parse_typed_json_with_byte_limit::<Value>(
+                allowed_nodes.as_bytes(),
+                MAX_CALLER_CAPPED_JSON_BYTES
+            )
+            .is_ok()
         );
     }
 }

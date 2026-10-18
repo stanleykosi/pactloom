@@ -1,6 +1,6 @@
 //! Native-reviewed writer handoff imports exposure, never original consent.
 use super::*;
-use rusqlite::{OptionalExtension, TransactionBehavior, params};
+use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use wholepact_authority::{
     AuthenticatedWriterSession, ReconciledAuthorityHistory, ReservationPermit,
 };
@@ -285,36 +285,12 @@ pub(in crate::consent_journal) fn retain_remote_exposure(
     if let Some(local) = local {
         let original: OriginalSpendConsent = decode(local)?;
         original.validate()?;
-        let t = original.terms();
-        if original.reference() != request.original_consent_ref
-            || t.authorization_id != request.authorization_id
-            || t.account_id != request.account_id
-            || t.obligation_id != request.obligation_id
-            || t.maximum_debit_zatoshis != request.maximum_debit_zatoshis
-            || t.receipt.writer_epoch != request.writer_epoch
-            || t.enrollment_ref != request.enrollment_ref
-            || t.accepted_manifest_ref != request.accepted_manifest_ref
-            || t.agreement_id != request.agreement_id
-            || t.proposal_id != request.proposal_id
-            || t.proposal_digest != request.proposal_digest
-            || t.manifest_digest != request.manifest_digest
-            || t.effects_digest != request.effects_digest
-            || t.artifact_digest != request.artifact_digest
-            || t.review_binding != request.review_binding
-            || t.fee_share_zatoshis != request.fee_share_zatoshis
-            || t.transaction_fee_zatoshis != request.transaction_fee_zatoshis
-            || t.transaction_expiry_height != request.transaction_expiry_height
-            || t.receipt.reviewed_at_ms != request.reviewed_at_ms
-            || t.input_bindings.len() != request.inputs.len()
-            || t.input_bindings.iter().zip(&request.inputs).any(|(a, b)| {
-                a.input_id != b.input_id
-                    || a.nullifier != b.nullifier
-                    || a.action_index != b.action_index
-                    || a.value_zatoshis != b.value_zatoshis
-            })
-        {
+        let retained = storage::read_original(c, &original.terms().authorization_id)?
+            .ok_or(JournalError::InvalidBinding)?;
+        if retained.original_consent() != &original {
             return Err(JournalError::Conflict);
         }
+        writer_history::validate_original_permit(&retained, permit)?;
     }
     c.execute(
         "INSERT INTO signer_remote_exposures VALUES(?1,?2,?3,?4,?5,?6)",

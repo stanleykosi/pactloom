@@ -26,6 +26,14 @@ use std::{
 #[path = "sequential_construction_v3_qualification/synthetic_provider_tls_v1.rs"]
 mod synthetic_provider_tls_v1;
 
+// Shares only the process/PTY test harness, not the old V3 construction owner.
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "synthetic-born-joined-qualification"
+))]
+#[path = "sequential_construction_v3_qualification/durable_proposal_v1.rs"]
+mod durable_proposal_v1;
+
 #[cfg(feature = "synthetic-born-joined-qualification")]
 #[path = "sequential_construction_v3_qualification/constructed_joined_v3.rs"]
 mod constructed_joined_v3;
@@ -118,11 +126,9 @@ fn finite_prompt_rendering_preserves_exact_terminal_purpose() {
         assert_eq!(rendered.as_str(), expected);
         assert!(!source.contains(rendered.as_str()));
         assert!(format!("prefix {expected} suffix").contains(rendered.as_str()));
-        assert!(
-            !expected
-                .replace("Exact purpose", "Other purpose")
-                .contains(rendered.as_str())
-        );
+        assert!(!expected
+            .replace("Exact purpose", "Other purpose")
+            .contains(rendered.as_str()));
     }
     let ascii = "ASCII purpose: ~!09, keep spaces and newline\n";
     assert_eq!(
@@ -435,7 +441,9 @@ fn foreground_child(stage: &str, inputs: &[Input<'_>]) -> std::io::Result<()> {
                         break;
                     };
                     if length == 0
-                        || transcript.append(&chunk[..length], child.temporary_root()).is_err()
+                        || transcript
+                            .append(&chunk[..length], child.temporary_root())
+                            .is_err()
                     {
                         break;
                     }
@@ -509,10 +517,8 @@ fn foreground_child(stage: &str, inputs: &[Input<'_>]) -> std::io::Result<()> {
                     let Some(prompt) = tail.find(expected.as_str()) else {
                         continue;
                     };
-                    let path = harness_transcript(
-                        &mut failure_reason,
-                        transcript.path(marker, prompt),
-                    )?;
+                    let path =
+                        harness_transcript(&mut failure_reason, transcript.path(marker, prompt))?;
                     harness_io(
                         &mut failure_reason,
                         HarnessFailureReason::WriteIo,
@@ -592,23 +598,35 @@ fn foreground_child(stage: &str, inputs: &[Input<'_>]) -> std::io::Result<()> {
         let mut drained = false;
         let flags = if process.verified() {
             unsafe { libc::fcntl(master.as_raw_fd(), libc::F_GETFL) }
-        } else { -1 };
+        } else {
+            -1
+        };
         // This descriptor belongs only to the already-reaped child fixture.
         // Failure to make the final reads nonblocking only loses telemetry.
-        if flags >= 0 && unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } >= 0 {
+        if flags >= 0
+            && unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) }
+                >= 0
+        {
             for _ in 0..64 {
                 let mut descriptor = libc::pollfd {
-                    fd: master.as_raw_fd(), events: libc::POLLIN, revents: 0,
+                    fd: master.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
                 };
                 let ready = unsafe { libc::poll(&mut descriptor, 1, 0) };
-                if ready < 0 || descriptor.revents & (libc::POLLERR | libc::POLLNVAL) != 0 { break; }
+                if ready < 0 || descriptor.revents & (libc::POLLERR | libc::POLLNVAL) != 0 {
+                    break;
+                }
                 if ready == 0 || descriptor.revents & libc::POLLIN == 0 {
                     drained = true;
                     break;
                 }
                 let mut chunk = zeroize::Zeroizing::new([0u8; 4096]);
                 match master.read(&mut chunk[..]) {
-                    Ok(0) => { drained = true; break; }
+                    Ok(0) => {
+                        drained = true;
+                        break;
+                    }
                     Ok(length) => transcript.capture_timing(&chunk[..length]),
                     Err(_) => break,
                 }
@@ -661,7 +679,8 @@ fn foreground_child(stage: &str, inputs: &[Input<'_>]) -> std::io::Result<()> {
             .is_some_and(|status| status.core_dumped()),
     );
     #[cfg(feature = "synthetic-born-joined-qualification")]
-    if stage == "three-born-full-payment-v1" && process.verified()
+    if stage == "three-born-full-payment-v1"
+        && process.verified()
         && root_cleanup == TemporaryRootCleanupV1::ClosedAndAbsenceVerified
     {
         if let Some(json) = transcript.timing_json() {
@@ -799,6 +818,14 @@ fn synthetic_foreground_child() {
         assert!(start.elapsed() < Duration::from_secs(3));
         return;
     }
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "synthetic-born-joined-qualification"
+    ))]
+    if stage == "durable-proposal-native-owner-reopen-v1" {
+        durable_proposal_v1::exercise_stage(terminal).unwrap();
+        return;
+    }
     #[cfg(feature = "synthetic-born-joined-qualification")]
     if stage == "three-born-initial-roster-v3" {
         initial_joined_v3::exercise_initial_audit_stage(terminal).unwrap();
@@ -877,14 +904,12 @@ fn synthetic_foreground_child() {
             Ok(())
         })
         .unwrap();
-    assert!(
-        approval
-            .effect(&mut || {
-                effects += 1;
-                Ok(())
-            })
-            .is_err()
-    );
+    assert!(approval
+        .effect(&mut || {
+            effects += 1;
+            Ok(())
+        })
+        .is_err());
     assert_eq!(effects, 1);
     host.authority.fence.revoke().unwrap();
     drop(host);

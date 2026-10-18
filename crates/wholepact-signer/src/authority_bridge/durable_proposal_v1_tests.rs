@@ -33,6 +33,7 @@ fn identity() -> FixedProposalIdentityV1 {
 
 fn terms(identity: &FixedProposalIdentityV1) -> SpendConsentTerms {
     SpendConsentTerms {
+        durable_born_policy_v1: None,
         automation: None,
         sponsor_policy: None,
         sponsor_owner_attestation_digest: None,
@@ -99,12 +100,18 @@ fn authorization_identifier_is_stable_per_fixed_candidate_and_actual_account() {
     let alice = manual_authorization_id(&identity, "never-funded-alice").unwrap();
     let bob = manual_authorization_id(&identity, "never-funded-bob").unwrap();
     assert_ne!(alice, bob);
-    assert_eq!(alice, manual_authorization_id(&identity, "never-funded-alice").unwrap());
+    assert_eq!(
+        alice,
+        manual_authorization_id(&identity, "never-funded-alice").unwrap()
+    );
     assert!(alice.starts_with("durable-v1-"));
     assert!(alice.len() <= 128);
     let mut replacement = identity.clone();
     replacement.proposal_binding = hash('f');
-    assert_ne!(alice, manual_authorization_id(&replacement, "never-funded-alice").unwrap());
+    assert_ne!(
+        alice,
+        manual_authorization_id(&replacement, "never-funded-alice").unwrap()
+    );
     // Changing an attempt time or current wallet tip is not an input to this
     // identifier, so a restart cannot mint another attempt for the same payment.
 }
@@ -129,6 +136,7 @@ fn original_binding_rejects_replacement_artifact_anchor_terms_and_retry_id() {
     let original = terms(&identity);
     validate_terms_binding(&identity, &original, "never-funded-alice").unwrap();
     let changes: &[fn(&mut SpendConsentTerms)] = &[
+        |t| t.sponsor_owner_attestation_digest = Some(hash('f')),
         |t| t.authorization_id = "new-attempt-id".into(),
         |t| t.account_id = "never-funded-bob".into(),
         |t| t.agreement_id.push_str("-replacement"),
@@ -173,8 +181,20 @@ fn fixed_data_does_not_freeze_or_renew_the_native_wallet_tip() {
 
 #[test]
 fn missing_or_uncertain_persisted_result_requires_recovery_not_resigning() {
-    assert!(matches!(recovery_if_incomplete(BridgeError::Missing), BridgeError::RecoveryRequired));
-    assert!(matches!(recovery_if_incomplete(BridgeError::Uncertain), BridgeError::RecoveryRequired));
-    assert!(matches!(recovery_if_incomplete(BridgeError::Binding), BridgeError::Binding));
-    assert!(matches!(recovery_if_incomplete(BridgeError::Permission), BridgeError::Permission));
+    assert!(matches!(
+        recovery_if_incomplete(BridgeError::Missing),
+        BridgeError::RecoveryRequired
+    ));
+    assert!(matches!(
+        recovery_if_incomplete(BridgeError::Uncertain),
+        BridgeError::RecoveryRequired
+    ));
+    assert!(matches!(
+        recovery_if_incomplete(BridgeError::Binding),
+        BridgeError::Binding
+    ));
+    assert!(matches!(
+        recovery_if_incomplete(BridgeError::Permission),
+        BridgeError::Permission
+    ));
 }

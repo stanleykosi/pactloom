@@ -341,6 +341,9 @@ pub struct OriginalSpendConsent {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SpendConsentTerms {
+    /// Inert exact historical policy mapping; omitted legacy values keep their original hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durable_born_policy_v1: Option<DurableBornPolicyBindingV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub automation: Option<AutomationConsentBinding>,
     pub sponsor_policy: Option<SponsorPolicyBinding>,
@@ -426,7 +429,12 @@ impl OriginalSpendConsent {
         } else if t.sponsor_owner_attestation_digest.is_some() {
             return Err(JournalError::InvalidBinding);
         }
-        if let Some(automatic) = &t.automation { automatic.validate()?; }
+        if let Some(binding) = &t.durable_born_policy_v1 {
+            binding.validate()?;
+        }
+        if let Some(automatic) = &t.automation {
+            automatic.validate()?;
+        }
         t.transport.validate()?;
         t.receipt.validate()?;
         if t.input_bindings.is_empty()

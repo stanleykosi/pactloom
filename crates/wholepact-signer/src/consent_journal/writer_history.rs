@@ -2,13 +2,13 @@
 //! explicitly disabled at preparation, commit and import boundaries. No public
 //! importer, DTO approval or original-consent/key-use/result manufacture exists.
 use super::*;
-use rusqlite::{Connection, OptionalExtension, Transaction, params, types::ValueRef};
+use rusqlite::{params, types::ValueRef, Connection, OptionalExtension, Transaction};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use wholepact_authority::{
-    OwnerControl, ReconciledAuthorityHistory, ReservationEvidenceRef, ReservationPermit,
     manual_roster_construction_v2::ManualRosterConstructionHistoryRecordV2,
     offline::{OfflineAuthorizationAdmission, OfflineEnrollmentPolicy},
+    OwnerControl, ReconciledAuthorityHistory, ReservationEvidenceRef, ReservationPermit,
 };
 
 pub(super) struct WriterLocalInventory {
@@ -148,7 +148,7 @@ impl WriterLocalInventory {
                 r.inputs.iter().map(|i| i.nullifier.as_str()),
             )?;
             if let Some(original) = original_by_id.get(authorization.as_str()) {
-                validate_original_permit(original.original_consent(), &permit)?;
+                validate_original_permit(original, &permit)?;
             }
             remote_online.push(permit);
         }
@@ -218,7 +218,7 @@ impl WriterLocalInventory {
             let permit = online
                 .get(consent.terms().authorization_id.as_str())
                 .ok_or(JournalError::RecoveryRequired)?;
-            validate_original_permit(consent, permit)?;
+            validate_original_permit(original, permit)?;
         }
         Ok(())
     }
@@ -580,7 +580,7 @@ impl PreparedWriterHistory {
                 return Err(JournalError::Conflict);
             }
             if let Some(remote) = online.get(t.authorization_id.as_str()) {
-                validate_original_permit(original.original_consent(), remote)?;
+                validate_original_permit(original, remote)?;
             }
             // An unmatched online original remains in the exact local snapshot;
             // writer handoff does not delete it or confer a new native lifetime.
@@ -815,19 +815,35 @@ fn retain_offline_exposure(
 }
 
 pub(super) fn validate_original_permit(
-    original: &OriginalSpendConsent,
+    original: &OriginalAuthorizationEvidence,
     permit: &ReservationPermit,
 ) -> Result<()> {
-    let t = original.terms();
+    let consent = original.original_consent();
+    let t = consent.terms();
+    let (enrollment_ref, recipient_scope_digest) =
+        durable_born_policy_v1::witness_policy_scope(original)?;
     let r = &permit.request;
-    if original.reference() != r.original_consent_ref
+    if consent.reference() != r.original_consent_ref
         || t.automation.as_ref().map(|a| &a.grant) != r.automation.as_ref()
         || t.authorization_id != r.authorization_id
+        || t.authorization_id != r.operation_id
+        || original
+            .accepted_manifest()
+            .proposal_input()
+            .manifest
+            .agreement
+            .network_profile_id
+            != r.network_profile_id
         || t.account_id != r.account_id
         || t.obligation_id != r.obligation_id
         || t.maximum_debit_zatoshis != r.maximum_debit_zatoshis
         || t.receipt.writer_epoch != r.writer_epoch
-        || t.enrollment_ref != r.enrollment_ref
+        || enrollment_ref != r.enrollment_ref
+        || recipient_scope_digest != r.recipient_scope_digest
+        || t.automation
+            .as_ref()
+            .map_or(t.receipt.expires_at_ms(), |a| a.authorization_expires_at_ms)
+            != r.permit_expires_at_ms
         || t.accepted_manifest_ref != r.accepted_manifest_ref
         || t.agreement_id != r.agreement_id
         || t.proposal_id != r.proposal_id

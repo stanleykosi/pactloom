@@ -37,6 +37,13 @@ pub(super) struct ImportedDurableReviewV1 {
     scopes: Vec<DurableConstructionScopeV1>,
 }
 impl ImportedDurableReviewV1 {
+    fn material_time_current(&self) -> bool {
+        now().is_ok_and(|time| {
+            self.scopes.iter().all(|scope| {
+                time >= scope.valid_from_unix_seconds && time < scope.valid_until_unix_seconds
+            })
+        })
+    }
     fn check_data_source(&self) -> authority_bridge::Result<()> {
         // No recursive journal authority lock: financial preflight/held-lease
         // checks are performed separately by the specialized signer adapter.
@@ -262,7 +269,8 @@ fn receive_durable(
         return Err(BridgeError::Binding);
     }
     let payload: DurableReviewPayloadV1 =
-        wholepact_core::parse_typed_json(&bytes).map_err(|_| BridgeError::Binding)?;
+        wholepact_core::strict_json::parse_typed_json_with_byte_limit(&bytes, wire::MAX_PAYLOAD)
+            .map_err(|_| BridgeError::Binding)?;
     if payload.encode()?.as_slice() != bytes.as_slice() {
         return Err(BridgeError::Binding);
     }
@@ -348,6 +356,41 @@ impl OpenAccount {
     }
 }
 impl NativeRuntime {
+    pub(super) fn poll_durable_material_lifetime_v1(&mut self) {
+        let material_expired = self.open.as_ref().is_some_and(|open| {
+            open.durable_review
+                .as_ref()
+                .is_some_and(|review| !review.material_time_current())
+                || open
+                    .durable_wallet_job
+                    .as_ref()
+                    .is_some_and(|job| !job.imported.material_time_current())
+        }) || self.pending.as_ref().is_some_and(|pending| {
+            match &pending.operation {
+                Operation::DurableDisclosureV1 { flow, .. }
+                | Operation::DurableSpendV1 { flow, .. } => !flow.imported.material_time_current(),
+                _ => false,
+            }
+        });
+        if !material_expired {
+            return;
+        }
+        if let Some(open) = self.open.as_mut() {
+            open.clear_durable_review_v1();
+        }
+        if self.pending.as_ref().is_some_and(|pending| {
+            matches!(
+                pending.operation,
+                Operation::DurableDisclosureV1 { .. } | Operation::DurableSpendV1 { .. }
+            )
+        }) {
+            self.pending = None;
+            self.confirmation.zeroize();
+        }
+        // Only unusable private memory and derived work are discarded. The
+        // original outboxes, release intents, reservations and source remain.
+        self.message = "The original material-use window ended. Imported private review data and derived pending review were discarded; retained history and financial exposure were not changed.";
+    }
     pub(super) fn start_durable_import_v1(
         &mut self,
         stream: UnixStream,
@@ -559,6 +602,18 @@ impl NativeRuntime {
             inputs,
         )
         .map_err(|_| Error::ReviewMismatch)?;
+        // The original witnessed account-policy pin is not a fresh native
+        // consent reference. Bind both explicitly, under the actual original
+        // source, before either disclosure or spending review is displayed.
+        let prepared = prepared
+            .with_durable_born_policy_v1(
+                open.durable_born_entry
+                    .as_deref()
+                    .ok_or(Error::Unavailable)?,
+                open.enrollment.as_ref().ok_or(Error::ReviewMismatch)?,
+                open.manifest.as_ref().ok_or(Error::ReviewMismatch)?,
+            )
+            .map_err(|_| Error::ReviewMismatch)?;
         let witness = open.witness.as_ref().ok_or(Error::Locked)?;
         witness.check_current()?;
         let disclosure =

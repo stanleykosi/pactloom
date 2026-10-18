@@ -19,6 +19,24 @@ build_errors=importlib.util.module_from_spec(build_spec)
 build_spec.loader.exec_module(build_errors)
 
 class PublicOutputTests(unittest.TestCase):
+    def test_durable_owner_reopen_is_an_exact_ignored_distinct_phase(self):
+        name,seconds,flags=output.phase_selection('durable-owner-reopen')
+        self.assertEqual(name,output.PREFIX+'durable_proposal_v1::durable_proposal_native_owner_reopen_retains_exact_fixed_proof')
+        self.assertEqual(seconds,1080)
+        self.assertEqual(flags,['--exact',name,'--test-threads=1','--ignored'])
+        self.assertNotEqual(name,output.TESTS['full'][0])
+        self.assertNotIn('--ignored',output.phase_selection('initial')[2])
+        with self.assertRaises(KeyError): output.phase_selection('arbitrary')
+
+    def test_durable_runner_does_not_claim_full_payment_or_process_restart(self):
+        shell=(ROOT/'scripts/ci-durable-native-linux.sh').read_text()
+        workflow=(ROOT/'.github/workflows/durable-native-linux.yml').read_text()
+        self.assertIn('refs/heads/qualification/durable-proposal-v1',shell)
+        self.assertIn('branches: [qualification/durable-proposal-v1]',workflow)
+        self.assertIn('python3 -B scripts/ci-synthetic-output.py "$executable" durable-owner-reopen',shell)
+        self.assertNotIn('python3 -B scripts/ci-synthetic-output.py "$executable" full',shell)
+        self.assertIn('no full native signing, OS-process restart, public-chain settlement',shell)
+
     def record(self):
         row={key:False for key in output.FALSE_FIELDS}
         row.update({key:1 for key in output.INT_FIELDS})

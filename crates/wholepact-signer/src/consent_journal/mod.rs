@@ -24,7 +24,14 @@ pub use sponsor::{
 #[cfg(target_os = "linux")]
 mod born_dispatch_storage;
 mod bridge_storage;
-#[cfg(all(feature = "durable-proposal", feature = "native-ui", target_os = "linux"))]
+pub(crate) mod durable_born_policy_v1;
+pub(crate) use durable_born_policy_v1::validate_retained_original as validate_retained_durable_born_original_v1;
+pub use durable_born_policy_v1::DurableBornPolicyBindingV1;
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "native-ui",
+    target_os = "linux"
+))]
 pub(crate) mod durable_construction_v1;
 #[cfg(target_os = "linux")]
 pub(crate) use born_dispatch_storage::RetainedBornDispatchV1;
@@ -130,7 +137,7 @@ pub use authority::*;
 pub use storage::{OriginalAuthorizationLease, SignerConsentBundleAdapter, SignerConsentJournal};
 pub use types::*;
 
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{de::DeserializeOwned, Serialize};
 use std::sync::Arc;
 use wholepact_core::proposal::canonical_digest;
 use zeroize::Zeroizing;

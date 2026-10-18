@@ -16,6 +16,7 @@ import time
 
 PREFIX = 'host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification::'
 TESTS = {
+    'durable-owner-reopen': (PREFIX + 'durable_proposal_v1::durable_proposal_native_owner_reopen_retains_exact_fixed_proof', 1080),
     'initial': (PREFIX + 'initial_joined_v3::actual_three_born_initial_roster_publications_preserve_refusal', 300),
     'full': (PREFIX + 'full_payment_inputs_v1::actual_three_born_full_payment_uses_one_original_synthetic_path', 1080),
 }
@@ -462,10 +463,14 @@ def run_storage_bootstrap(executable):
         raise RuntimeError('exact encrypted bootstrap regression failed')
     print('CI_SYNTHETIC_ENCRYPTED_BOOTSTRAP passed=true native_payment_verified=false',flush=True)
 
+def phase_selection(phase):
+    name, seconds = TESTS[phase]
+    flags = ['--exact', name, '--test-threads=1'] + (['--ignored'] if phase in ('full','durable-owner-reopen') else [])
+    return name, seconds, flags
+
 def run(executable, phase):
     assert resource.getrlimit(resource.RLIMIT_CORE)[0] == 0
-    name, seconds = TESTS[phase]
-    flags = ['--exact', name, '--test-threads=1'] + (['--ignored'] if phase=='full' else [])
+    name, seconds, flags = phase_selection(phase)
     listed=subprocess.run([executable,*flags,'--list'],capture_output=True,timeout=30,check=True)
     assert exact_listing(listed.stdout.decode(),name) and not listed.stderr, 'Exact test not uniquely registered'
     started=time.monotonic(); process=subprocess.Popen([executable,*flags,'--nocapture'],stdout=subprocess.PIPE,stderr=subprocess.STDOUT)

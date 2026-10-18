@@ -194,6 +194,7 @@ pub(super) fn terms(
     authorization: &str,
 ) -> SpendConsentTerms {
     SpendConsentTerms {
+        durable_born_policy_v1: None,
         automation: None,
         sponsor_policy: None,
         sponsor_owner_attestation_digest: None,
@@ -708,9 +709,22 @@ fn maintained_pczt_review_prepares_exact_consent_and_rejects_artifact_substituti
     let m = journal
         .record_accepted_manifest(s.approve_manifest(prepared, native).unwrap())
         .unwrap();
-    let expected_roster: Vec<_> = inputs.policy.participants.iter().map(|p| (p.account_id.clone(),hex::encode(Sha256::digest(p.fvk.to_bytes())))).collect();
+    let expected_roster: Vec<_> = inputs
+        .policy
+        .participants
+        .iter()
+        .map(|p| {
+            (
+                p.account_id.clone(),
+                hex::encode(Sha256::digest(p.fvk.to_bytes())),
+            )
+        })
+        .collect();
     let prepared = prepare_synthetic_spend(&s, &e, &m, &bytes, inputs).unwrap();
-    assert_eq!(prepared.reviewed_owner_fvks().unwrap(),expected_roster.as_slice());
+    assert_eq!(
+        prepared.reviewed_owner_fvks().unwrap(),
+        expected_roster.as_slice()
+    );
     assert_eq!(
         prepared.record().terms().artifact_digest,
         hex::encode(Sha256::digest(&bytes))
@@ -1086,13 +1100,23 @@ fn unexpired_wall_clock_cannot_revive_monotonically_expired_native_decision() {
 fn synthetic_settlement_source() -> wholepact_chain::local_node::LocalNodeSourceDescriptor {
     use wholepact_chain::local_node::*;
     LocalNodeSourceDescriptor {
-        source_id: "synthetic-signer-node".into(), endpoint: "127.0.0.1:12345".into(),
-        server_name: "localhost".into(), pinned_certificate_sha256: "11".repeat(32),
-        client_certificate_sha256: "22".repeat(32), trusted_root_sha256: vec!["33".repeat(32)],
-        node_release: ZEBRA_RELEASE.into(), node_source_commit: ZEBRA_SOURCE_COMMIT.into(),
-        network: "testnet".into(), consensus_branch_id: wholepact_chain::NU7_BRANCH_ID,
+        source_id: "synthetic-signer-node".into(),
+        endpoint: "127.0.0.1:12345".into(),
+        server_name: "localhost".into(),
+        pinned_certificate_sha256: "11".repeat(32),
+        client_certificate_sha256: "22".repeat(32),
+        trusted_root_sha256: vec!["33".repeat(32)],
+        node_release: ZEBRA_RELEASE.into(),
+        node_source_commit: ZEBRA_SOURCE_COMMIT.into(),
+        network: "testnet".into(),
+        consensus_branch_id: wholepact_chain::NU7_BRANCH_ID,
         activation_height: wholepact_chain::NU7_ACTIVATION_HEIGHT,
-        confirmation_policy: wholepact_chain::ConfirmationPolicy::new(10,10,vec!["synthetic-signer-node".into()]).unwrap(),
+        confirmation_policy: wholepact_chain::ConfirmationPolicy::new(
+            10,
+            10,
+            vec!["synthetic-signer-node".into()],
+        )
+        .unwrap(),
     }
 }
 
@@ -1101,19 +1125,53 @@ fn synthetic_settlement_source() -> wholepact_chain::local_node::LocalNodeSource
 #[test]
 fn settlement_source_requires_exact_native_decision_and_rejects_replacement() {
     let f = Fixture::new();
-    let prepare = || f.session.prepare_settlement_source(&f.journal,synthetic_settlement_source(),"44".repeat(32)).unwrap();
+    let prepare = || {
+        f.session
+            .prepare_settlement_source(&f.journal, synthetic_settlement_source(), "44".repeat(32))
+            .unwrap()
+    };
     let prepared = prepare();
-    assert!(f.session.approve_settlement_source(prepared,decision(&f.session,&"00".repeat(32))).is_err());
+    assert!(f
+        .session
+        .approve_settlement_source(prepared, decision(&f.session, &"00".repeat(32)))
+        .is_err());
     let prepared = prepare();
-    let reviewed = decision(&f.session,prepared.review_digest());
-    let source = f.journal.record_settlement_source(f.session.approve_settlement_source(prepared,reviewed).unwrap()).unwrap();
-    assert!(f.journal.settlement_source(source.reference(),&f.session).unwrap() == source);
-    let mut changed = synthetic_settlement_source(); changed.endpoint = "127.0.0.1:12346".into();
-    let prepared = f.session.prepare_settlement_source(&f.journal,changed,"44".repeat(32)).unwrap();
-    let reviewed = decision(&f.session,prepared.review_digest());
-    assert!(matches!(f.journal.record_settlement_source(f.session.approve_settlement_source(prepared,reviewed).unwrap()),Err(JournalError::Conflict)));
-    let mut invalid = synthetic_settlement_source(); invalid.endpoint = "192.0.2.1:12345".into();
-    assert!(f.session.prepare_settlement_source(&f.journal,invalid,"44".repeat(32)).is_err());
+    let reviewed = decision(&f.session, prepared.review_digest());
+    let source = f
+        .journal
+        .record_settlement_source(
+            f.session
+                .approve_settlement_source(prepared, reviewed)
+                .unwrap(),
+        )
+        .unwrap();
+    assert!(
+        f.journal
+            .settlement_source(source.reference(), &f.session)
+            .unwrap()
+            == source
+    );
+    let mut changed = synthetic_settlement_source();
+    changed.endpoint = "127.0.0.1:12346".into();
+    let prepared = f
+        .session
+        .prepare_settlement_source(&f.journal, changed, "44".repeat(32))
+        .unwrap();
+    let reviewed = decision(&f.session, prepared.review_digest());
+    assert!(matches!(
+        f.journal.record_settlement_source(
+            f.session
+                .approve_settlement_source(prepared, reviewed)
+                .unwrap()
+        ),
+        Err(JournalError::Conflict)
+    ));
+    let mut invalid = synthetic_settlement_source();
+    invalid.endpoint = "192.0.2.1:12345".into();
+    assert!(f
+        .session
+        .prepare_settlement_source(&f.journal, invalid, "44".repeat(32))
+        .is_err());
 }
 
 /// A held lease is historical permission, never a way around a later recovery fence.
@@ -1121,11 +1179,27 @@ fn settlement_source_requires_exact_native_decision_and_rejects_replacement() {
 #[test]
 fn settlement_dispatch_fence_rechecks_durable_recovery_for_held_lease() {
     let f = Fixture::new();
-    f.journal.record_original_consent_release(approve_spend(&f.session,f.terms())).unwrap();
-    let lease = f.journal.acquire_original_authorization("authorization-a",&f.session).unwrap();
+    f.journal
+        .record_original_consent_release(approve_spend(&f.session, f.terms()))
+        .unwrap();
+    let lease = f
+        .journal
+        .acquire_original_authorization("authorization-a", &f.session)
+        .unwrap();
     f.journal.revalidate_settlement_authority(&lease).unwrap();
-    f.journal.connection.lock().unwrap().execute("UPDATE signer_account SET recovery_required=1 WHERE singleton=1",[]).unwrap();
-    assert!(matches!(f.journal.revalidate_settlement_authority(&lease),Err(crate::authority_bridge::BridgeError::RecoveryRequired)));
+    f.journal
+        .connection
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE signer_account SET recovery_required=1 WHERE singleton=1",
+            [],
+        )
+        .unwrap();
+    assert!(matches!(
+        f.journal.revalidate_settlement_authority(&lease),
+        Err(crate::authority_bridge::BridgeError::RecoveryRequired)
+    ));
 }
 
 /// Fabricated ledger history only: this deliberately bypasses the live issuer
@@ -1134,10 +1208,23 @@ fn settlement_dispatch_fence_rechecks_durable_recovery_for_held_lease() {
 #[test]
 fn settlement_missing_runtime_source_appends_reopen_and_never_mutates_original() {
     let f = Fixture::new();
-    let original = f.journal.record_original_consent_release(approve_spend(&f.session,f.terms())).unwrap();
-    let prepared = f.session.prepare_settlement_source(&f.journal,synthetic_settlement_source(),"44".repeat(32)).unwrap();
-    let reviewed = decision(&f.session,prepared.review_digest());
-    let source = f.journal.record_settlement_source(f.session.approve_settlement_source(prepared,reviewed).unwrap()).unwrap();
+    let original = f
+        .journal
+        .record_original_consent_release(approve_spend(&f.session, f.terms()))
+        .unwrap();
+    let prepared = f
+        .session
+        .prepare_settlement_source(&f.journal, synthetic_settlement_source(), "44".repeat(32))
+        .unwrap();
+    let reviewed = decision(&f.session, prepared.review_digest());
+    let source = f
+        .journal
+        .record_settlement_source(
+            f.session
+                .approve_settlement_source(prepared, reviewed)
+                .unwrap(),
+        )
+        .unwrap();
     let payload = serde_json::json!({
         "original_consent_ref":original.original_consent().reference(), "request_digest":"55".repeat(32),
         "source":source,
@@ -1154,17 +1241,48 @@ fn settlement_missing_runtime_source_appends_reopen_and_never_mutates_original()
         "consumed_nullifiers":["aa".repeat(32)]
     }).to_string();
     {
-        let c=f.journal.connection.lock().unwrap();
+        let c = f.journal.connection.lock().unwrap();
         c.execute("INSERT INTO signer_settlement_events(evidence_id,authorization_id,source_ref,kind,payload) VALUES(?1,'authorization-a',?2,'canonical_consumed',?3)",rusqlite::params!["dd".repeat(32),source.reference(),payload]).unwrap();
     }
-    let lease=f.journal.acquire_original_authorization("authorization-a",&f.session).unwrap();
-    assert!(matches!(f.journal.revalidate_settlement_authority(&lease),Err(crate::authority_bridge::BridgeError::RecoveryRequired)));
-    assert!(matches!(f.journal.revalidate_settlement_authority(&lease),Err(crate::authority_bridge::BridgeError::RecoveryRequired)));
-    let c=f.journal.connection.lock().unwrap();
-    assert_eq!(c.query_row("SELECT count(*) FROM signer_settlement_events",[],|r|r.get::<_,u64>(0)).unwrap(),2);
-    assert_eq!(c.query_row("SELECT kind FROM signer_settlement_events ORDER BY sequence DESC LIMIT 1",[],|r|r.get::<_,String>(0)).unwrap(),"reopened");
-    assert!(storage::read_original(&c,"authorization-a").unwrap().unwrap()==original);
-    assert!(c.execute("DELETE FROM signer_settlement_events",[]).is_err());
+    let lease = f
+        .journal
+        .acquire_original_authorization("authorization-a", &f.session)
+        .unwrap();
+    assert!(matches!(
+        f.journal.revalidate_settlement_authority(&lease),
+        Err(crate::authority_bridge::BridgeError::RecoveryRequired)
+    ));
+    assert!(matches!(
+        f.journal.revalidate_settlement_authority(&lease),
+        Err(crate::authority_bridge::BridgeError::RecoveryRequired)
+    ));
+    let c = f.journal.connection.lock().unwrap();
+    assert_eq!(
+        c.query_row("SELECT count(*) FROM signer_settlement_events", [], |r| r
+            .get::<_, u64>(
+            0
+        ))
+        .unwrap(),
+        2
+    );
+    assert_eq!(
+        c.query_row(
+            "SELECT kind FROM signer_settlement_events ORDER BY sequence DESC LIMIT 1",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "reopened"
+    );
+    assert!(
+        storage::read_original(&c, "authorization-a")
+            .unwrap()
+            .unwrap()
+            == original
+    );
+    assert!(c
+        .execute("DELETE FROM signer_settlement_events", [])
+        .is_err());
 }
 
 /// Synthetic missing-source conflict history; no live node or funds.
@@ -1172,10 +1290,23 @@ fn settlement_missing_runtime_source_appends_reopen_and_never_mutates_original()
 #[test]
 fn canonical_conflict_missing_runtime_source_reopens_and_preserves_original() {
     let f = Fixture::new();
-    let original = f.journal.record_original_consent_release(approve_spend(&f.session,f.terms())).unwrap();
-    let prepared = f.session.prepare_settlement_source(&f.journal,synthetic_settlement_source(),"44".repeat(32)).unwrap();
-    let reviewed = decision(&f.session,prepared.review_digest());
-    let source = f.journal.record_settlement_source(f.session.approve_settlement_source(prepared,reviewed).unwrap()).unwrap();
+    let original = f
+        .journal
+        .record_original_consent_release(approve_spend(&f.session, f.terms()))
+        .unwrap();
+    let prepared = f
+        .session
+        .prepare_settlement_source(&f.journal, synthetic_settlement_source(), "44".repeat(32))
+        .unwrap();
+    let reviewed = decision(&f.session, prepared.review_digest());
+    let source = f
+        .journal
+        .record_settlement_source(
+            f.session
+                .approve_settlement_source(prepared, reviewed)
+                .unwrap(),
+        )
+        .unwrap();
     let payload = serde_json::json!({
         "original_consent_ref":original.original_consent().reference(), "request_digest":"55".repeat(32),
         "source":source,
@@ -1192,15 +1323,46 @@ fn canonical_conflict_missing_runtime_source_reopens_and_preserves_original() {
         "consumed_nullifiers":["aa".repeat(32)]
     }).to_string();
     {
-        let c=f.journal.connection.lock().unwrap();
+        let c = f.journal.connection.lock().unwrap();
         c.execute("INSERT INTO signer_settlement_events(evidence_id,authorization_id,source_ref,kind,payload) VALUES(?1,'authorization-a',?2,'canonical_conflict',?3)",rusqlite::params!["dd".repeat(32),source.reference(),payload]).unwrap();
     }
-    let lease=f.journal.acquire_original_authorization("authorization-a",&f.session).unwrap();
-    assert!(matches!(f.journal.revalidate_settlement_authority(&lease),Err(crate::authority_bridge::BridgeError::RecoveryRequired)));
-    assert!(matches!(f.journal.revalidate_settlement_authority(&lease),Err(crate::authority_bridge::BridgeError::RecoveryRequired)));
-    let c=f.journal.connection.lock().unwrap();
-    assert_eq!(c.query_row("SELECT count(*) FROM signer_settlement_events",[],|r|r.get::<_,u64>(0)).unwrap(),2);
-    assert_eq!(c.query_row("SELECT kind FROM signer_settlement_events ORDER BY sequence DESC LIMIT 1",[],|r|r.get::<_,String>(0)).unwrap(),"reopened");
-    assert!(storage::read_original(&c,"authorization-a").unwrap().unwrap()==original);
-    assert!(c.execute("DELETE FROM signer_settlement_events",[]).is_err());
+    let lease = f
+        .journal
+        .acquire_original_authorization("authorization-a", &f.session)
+        .unwrap();
+    assert!(matches!(
+        f.journal.revalidate_settlement_authority(&lease),
+        Err(crate::authority_bridge::BridgeError::RecoveryRequired)
+    ));
+    assert!(matches!(
+        f.journal.revalidate_settlement_authority(&lease),
+        Err(crate::authority_bridge::BridgeError::RecoveryRequired)
+    ));
+    let c = f.journal.connection.lock().unwrap();
+    assert_eq!(
+        c.query_row("SELECT count(*) FROM signer_settlement_events", [], |r| r
+            .get::<_, u64>(
+            0
+        ))
+        .unwrap(),
+        2
+    );
+    assert_eq!(
+        c.query_row(
+            "SELECT kind FROM signer_settlement_events ORDER BY sequence DESC LIMIT 1",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "reopened"
+    );
+    assert!(
+        storage::read_original(&c, "authorization-a")
+            .unwrap()
+            .unwrap()
+            == original
+    );
+    assert!(c
+        .execute("DELETE FROM signer_settlement_events", [])
+        .is_err());
 }

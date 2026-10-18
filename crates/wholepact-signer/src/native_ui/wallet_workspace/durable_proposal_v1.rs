@@ -23,8 +23,10 @@ impl NativeWalletWorkspace {
             return Err(Error::Verification);
         }
         let (original_material, original_scope) = fixed.original_for_account(&self.account_id)?;
+        // No material use or remote synchronization against a substituted
+        // provider, account, birthday or protected database is permitted.
         self.controller
-            .verify_account_fvk(&self.fvk)
+            .validate_durable_material_source_v1(original_material, original_scope, &self.fvk)
             .map_err(|_| Error::Verification)?;
         self.controller
             .synchronize(

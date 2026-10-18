@@ -413,6 +413,7 @@ impl SignerConsentSession {
         input_bindings.sort_by(|a, b| a.input_id.cmp(&b.input_id));
         let selection = &inputs.own_selection.context;
         let t = SpendConsentTerms {
+            durable_born_policy_v1: None,
             automation: None,
             sponsor_policy: None,
             sponsor_owner_attestation_digest: None,
@@ -715,6 +716,29 @@ impl PreparedManifestAcceptance {
     }
 }
 impl PreparedSpendConsent {
+    /// Pre-decision binding only. This changes the exact native review hash;
+    /// neither an existing approval nor an old original release can be remapped.
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "native-ui",
+        target_os = "linux"
+    ))]
+    pub(crate) fn with_durable_born_policy_v1(
+        mut self,
+        binding: DurableBornPolicyBindingV1,
+        enrollment: &AccountEnrollmentRecord,
+        manifest: &AcceptedManifestRecord,
+    ) -> Result<Self> {
+        if self.0.record.terms.durable_born_policy_v1.is_some() {
+            return Err(JournalError::Conflict);
+        }
+        binding.validate_consent(&self.0.record.terms, enrollment, manifest)?;
+        binding.require_current_time(now_ms()?)?;
+        self.0.record.terms.durable_born_policy_v1 = Some(binding);
+        self.0.record = OriginalSpendConsent::new(self.0.record.terms)?;
+        self.0.review_digest = self.0.record.reference.clone();
+        Ok(self)
+    }
     pub(super) fn reviewed_owner_fvks(&self) -> Result<&[(String, String)]> {
         self.1.as_deref().ok_or(JournalError::Permission)
     }

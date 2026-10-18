@@ -139,7 +139,71 @@ pub fn prepare_authorization<'a>(
     if account.recovery_required() {
         return Err(BridgeError::RecoveryRequired);
     }
+    // The public journal method refuses explicit durable-born policy terms.
+    // Only the purpose-specific actual-source entry below may release those.
     let original = journal.record_original_consent_release(approval)?;
+    complete_preparation(
+        journal,
+        session,
+        account,
+        original,
+        bytes,
+        expected_head,
+        delivery,
+        disclosure,
+    )
+}
+
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "pending-birth-owner-signing",
+    feature = "native-ui",
+    target_os = "linux"
+))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepare_authorization_from_durable_born_v1<'a>(
+    entry: &'a crate::account::birth::enrollment::roster_v2::durable_entry_v1::FreshDurableBornEntryV1,
+    session: &'a SignerConsentSession,
+    approval: ApprovedSpendConsent,
+    bytes: &[u8],
+    expected_head: AuthorityHead,
+    delivery: AuthorizationDeliveryScope,
+    disclosure: disclosure::ApprovedWitnessDisclosure,
+) -> Result<PendingWitnessAuthorization<'a>> {
+    entry.check_current().map_err(|_| BridgeError::Permission)?;
+    let journal = entry.journal().as_ref();
+    let account = entry.account();
+    if account.recovery_required() {
+        return Err(BridgeError::RecoveryRequired);
+    }
+    let original = journal.record_durable_born_consent_release_v1(approval, entry)?;
+    let pending = complete_preparation(
+        journal,
+        session,
+        account,
+        original,
+        bytes,
+        expected_head,
+        delivery,
+        disclosure,
+    )?;
+    entry
+        .require_authorization_identity(account, journal, &pending.lease)
+        .map_err(|_| BridgeError::Permission)?;
+    Ok(pending)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn complete_preparation<'a>(
+    journal: &'a SignerConsentJournal,
+    session: &'a SignerConsentSession,
+    account: &'a DedicatedAccount,
+    original: crate::consent_journal::OriginalAuthorizationEvidence,
+    bytes: &[u8],
+    expected_head: AuthorityHead,
+    delivery: AuthorizationDeliveryScope,
+    disclosure: disclosure::ApprovedWitnessDisclosure,
+) -> Result<PendingWitnessAuthorization<'a>> {
     let lease = journal.acquire_original_authorization(
         &original.original_consent().terms().authorization_id,
         session,

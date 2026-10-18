@@ -730,3 +730,9 @@ pub use crate::consent_journal::{
 pub fn emit_synthetic_timing_summary() {
     super::born_manual_roster_v2::emit_synthetic_timing_summary();
 }
+
+#[cfg(feature = "durable-proposal")]
+#[path = "durable_proposal_v1/facade.rs"]
+mod durable_proposal_fixture;
+#[cfg(feature = "durable-proposal")]
+pub use durable_proposal_fixture::*;

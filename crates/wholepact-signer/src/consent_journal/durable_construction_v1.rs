@@ -4,11 +4,52 @@
 use super::*;
 use crate::authority_bridge::durable_construction_v1::{
     DurableConstructionHistoryRequestV1, DurableConstructionOutboxV1,
+    DurableConstructionRedisclosureSourceV1,
 };
 use crate::native_ui::durable_construction_v1::ApprovedDurableConstructionV1;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 impl SignerConsentJournal {
+    /// Native staging only: an exact operation may be located even when the
+    /// original response (and its digest) was lost before intake. This method
+    /// returns no transport response and grants no export. The caller must show
+    /// the loaded immutable digest/scope and obtain a NEW exact native decision.
+    /// The ordinary history route below retains its mandatory expected digest.
+    pub(crate) fn prepare_durable_construction_redisclosure_source_v1(
+        &self,
+        request: &DurableConstructionRedisclosureSourceV1,
+        session: &SignerConsentSession,
+    ) -> Result<DurableConstructionOutboxV1> {
+        request
+            .validate()
+            .map_err(|_| JournalError::InvalidBinding)?;
+        let account = self.account_state()?;
+        if account.recovery_required {
+            return Err(JournalError::RecoveryRequired);
+        }
+        let permission = session.read_lease(&self.binding(), &account)?;
+        let _fence = self
+            .authority_fence
+            .read()
+            .map_err(|_| JournalError::Permission)?;
+        let c = self.connection.lock().map_err(|_| JournalError::Database)?;
+        self.database_identity.check_current(&c)?;
+        storage::check_account(&c, &account)?;
+        let outbox = read(&c, &request.operation_id)?.ok_or(JournalError::NotFound)?;
+        let enrollment = storage::read_enrollment(&c, &outbox.request().enrollment_ref)?
+            .ok_or(JournalError::NotFound)?;
+        if request
+            .expected_request_digest
+            .as_ref()
+            .is_some_and(|digest| outbox.request_digest() != digest)
+            || enrollment.principal_id() != permission.principal
+        {
+            return Err(JournalError::InvalidBinding);
+        }
+        permission.check_current()?;
+        Ok(outbox)
+    }
+
     pub(crate) fn record_durable_construction_v1(
         &self,
         approved: &ApprovedDurableConstructionV1,

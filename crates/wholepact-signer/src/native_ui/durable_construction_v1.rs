@@ -173,7 +173,7 @@ impl PreparedDurableConstructionV1 {
         // Read only inside the signer under a current native session. No old
         // material or prior consent is exported before this NEW exact decision.
         let original = journal
-            .durable_construction_history_v1(&request.original, session)
+            .prepare_durable_construction_redisclosure_source_v1(&request.original, session)
             .map_err(error)?;
         if original.redisclosure().is_some() {
             return Err(Error::ReviewMismatch);
@@ -185,9 +185,11 @@ impl PreparedDurableConstructionV1 {
         };
         let mut next = original.request().clone();
         next.operation_id = request.operation_id;
+        next.enrollment_ref = request.enrollment_ref;
+        next.accepted_manifest_ref = request.accepted_manifest_ref;
         next.scope.constructor.authenticated_local_grant_digest = peer.key_digest.clone();
         next.scope.prover.authenticated_local_grant_digest = peer.key_digest.clone();
-        let prepared = Self::prepare_internal(
+        let mut prepared = Self::prepare_internal(
             next,
             Some(link),
             peer,
@@ -202,6 +204,12 @@ impl PreparedDurableConstructionV1 {
             .map_err(error)?
             .validate_redisclosure_of(&original)
             .map_err(error)?;
+        prepared.display.push_str(&format!(
+            "\nHistorical ORIGINAL request digest: {}\nHistorical ORIGINAL enrollment: {}\nHistorical ORIGINAL accepted manifest: {}\nThese original records remain historical; only the separately verified current records above support this new native decision.",
+            original.request_digest(),
+            original.request().enrollment_ref,
+            original.request().accepted_manifest_ref,
+        ));
         Ok(prepared)
     }
     #[allow(clippy::too_many_arguments)]
@@ -258,8 +266,9 @@ impl PreparedDurableConstructionV1 {
             "LEGACY EXACT TRANSPORT AUDIENCE: Reviewer fingerprints name only the exact intended transport keys. This local channel does not authenticate those remote keys or people. This scope does NOT authorize local account-scoped forwarding; a new explicit purpose-specific scope is required."
         };
         let redisclosure_notice = redisclosure.as_ref().map(|link| format!(
-            "NEW IRREVERSIBLE REDISCLOSURE of original operation {} / outbox {}. This is not replay, restoration, renewal, or extension of the previous recipient grant. Exact original material, manifest, purpose, destination, retention, reviewer audience and validity ceiling remain unchanged. You are approving another copy to the CURRENT authenticated local application.\n\n",
-            link.original_operation_id, link.original_outbox_reference
+            "NEW IRREVERSIBLE REDISCLOSURE of original operation {} / outbox {}. This is not replay, restoration, renewal, or extension of the previous recipient grant. Exact original material, manifest, purpose, destination, retention, reviewer audience and validity ceiling remain unchanged. Fresh current-native enrollment {} and accepted manifest {} are independently checked; the original records do not regain authority. You are approving another copy to the CURRENT authenticated local application.\n\n",
+            link.original_operation_id, link.original_outbox_reference,
+            request.enrollment_ref, request.accepted_manifest_ref
         )).unwrap_or_default();
         // Show the scope and exact material commitment, NOT raw viewing material.
         let display = Zeroizing::new(format!(

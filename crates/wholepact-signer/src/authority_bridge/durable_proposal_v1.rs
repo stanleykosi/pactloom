@@ -7,8 +7,8 @@
 //! this adapter never creates a second attempt: only the exact already-retained
 //! result may be delivered through the existing recipient-authenticated IPC.
 use super::{
-    AuthorizationCommit, BridgeError, Result, disclosure::ApprovedWitnessDisclosure,
-    protocol::AuthorizationDeliveryScope,
+    disclosure::ApprovedWitnessDisclosure, protocol::AuthorizationDeliveryScope,
+    AuthorizationCommit, BridgeError, Result,
 };
 use crate::{
     account::DedicatedAccount,
@@ -26,7 +26,7 @@ use wholepact_protocol::{
     durable_proposal_v1::{FixedProposalIdentityV1, VerifiedFixedProposal},
     review_manifest::{policy_fingerprint, verify_manifest_policy},
 };
-use wholepact_wallet::wallet::protected_sync::{ProtectedWalletSync, key_use::WalletKeyUseTicket};
+use wholepact_wallet::wallet::protected_sync::{key_use::WalletKeyUseTicket, ProtectedWalletSync};
 
 /// Reloads the exact protected proposal record and its independently retained
 /// full policy. A caller must not hold a database lock across this callback or
@@ -139,6 +139,41 @@ pub fn prepare_manual_review(
 }
 
 impl PreparedDurableProposalReview {
+    /// Bind original witness policy only through the actual freshly opened
+    /// source, before witness disclosure and the native spending decision. The
+    /// fresh enrollment/manifest and their same-native-origin checks remain
+    /// independent of historical policy association.
+    #[cfg(all(
+        feature = "pending-birth-owner-signing",
+        feature = "native-ui",
+        target_os = "linux"
+    ))]
+    pub(crate) fn with_durable_born_policy_v1(
+        mut self,
+        entry: &crate::account::birth::enrollment::roster_v2::durable_entry_v1::FreshDurableBornEntryV1,
+        enrollment: &AccountEnrollmentRecord,
+        manifest: &AcceptedManifestRecord,
+    ) -> Result<Self> {
+        entry.check_current().map_err(|_| BridgeError::Permission)?;
+        let binding = crate::consent_journal::DurableBornPolicyBindingV1::from_original_source(
+            entry.record(),
+            enrollment,
+            manifest,
+            self.proposal.identity(),
+        )?;
+        self.prepared = self
+            .prepared
+            .with_durable_born_policy_v1(binding, enrollment, manifest)?;
+        let account_id = entry
+            .account()
+            .account_id()
+            .map_err(|_| BridgeError::Binding)?;
+        validate_original_binding(&self.proposal, self.prepared.record(), &account_id)?;
+        check_reload(&self.source, &self.proposal)?;
+        entry.check_current().map_err(|_| BridgeError::Permission)?;
+        Ok(self)
+    }
+
     /// Borrowed for the existing native spending display and separate exact
     /// witness-disclosure review. No extraction of approval is provided.
     pub fn prepared_spend(&self) -> &PreparedSpendConsent {
@@ -276,6 +311,22 @@ impl ApprovedDurableProposalAction {
         }
         let account_id = account.account_id().map_err(|_| BridgeError::Binding)?;
         validate_original_binding(&self.proposal, &self.original, &account_id)?;
+        let binding = self
+            .original
+            .terms()
+            .durable_born_policy_v1
+            .as_ref()
+            .ok_or(BridgeError::Permission)?;
+        let enrollment = journal
+            .enrollment(&self.original.terms().enrollment_ref, session)?
+            .ok_or(BridgeError::Missing)?;
+        let manifest = journal
+            .accepted_manifest(&self.original.terms().accepted_manifest_ref, session)?
+            .ok_or(BridgeError::Missing)?;
+        binding.validate_original_source(entry.record(), entry.genesis())?;
+        binding.validate_consent(self.original.terms(), &enrollment, &manifest)?;
+        binding.require_fixed_identity(self.proposal.identity())?;
+        binding.require_current_time(current_time_ms()?)?;
         require_unreleased(
             journal,
             session,
@@ -301,13 +352,16 @@ impl ApprovedDurableProposalAction {
             entry
                 .check_original_source_current()
                 .map_err(|_| BridgeError::Permission)?;
+            binding.validate_original_source(entry.record(), entry.genesis())?;
+            binding.validate_consent(self.original.terms(), &enrollment, &manifest)?;
+            binding.require_fixed_identity(self.proposal.identity())?;
+            binding.require_current_time(current_time_ms()?)?;
             check_reload(&self.source, &self.proposal)
         };
         check()?;
-        let pending = super::prepare_authorization(
-            journal,
+        let pending = super::prepare_authorization_from_durable_born_v1(
+            entry,
             session,
-            account,
             self.approval,
             self.proposal.private_proved_pczt_bytes(),
             expected_head,
@@ -329,6 +383,20 @@ impl ApprovedDurableProposalAction {
             entry,
         )
     }
+}
+
+#[cfg(all(
+    feature = "pending-birth-owner-signing",
+    feature = "native-ui",
+    target_os = "linux"
+))]
+fn current_time_ms() -> Result<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| BridgeError::Permission)?
+        .as_millis()
+        .try_into()
+        .map_err(|_| BridgeError::Permission)
 }
 
 /// Read only the receipt for an already persisted exact result. This does not
@@ -469,6 +537,8 @@ fn validate_terms_binding(
     account_id: &str,
 ) -> Result<()> {
     if t.automation.is_some()
+        || t.sponsor_policy.is_some()
+        || t.sponsor_owner_attestation_digest.is_some()
         || t.account_id != account_id
         || t.authorization_id != manual_authorization_id(identity, account_id)?
         || t.agreement_id != identity.agreement_id

@@ -6,14 +6,14 @@ use super::*;
 ))]
 #[path = "durable_born_entry_v1.rs"]
 mod durable_born_entry_v1;
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::{
     path::Path,
     sync::{Mutex, RwLock, RwLockReadGuard},
 };
 use wholepact_storage_security::{
-    DatabaseKey,
     bundle::{BackupReadPermit, BundleError, JournalAdapter, JournalKind, JournalTemplate},
+    DatabaseKey,
 };
 
 pub(super) static TEMPLATE: JournalTemplate = JournalTemplate {
@@ -370,10 +370,52 @@ impl SignerConsentJournal {
         approved: ApprovedSpendConsent,
     ) -> Result<OriginalAuthorizationEvidence> {
         let a = approved.0;
-        if a.record.terms().automation.is_some() {
+        if a.record.terms().automation.is_some()
+            || a.record.terms().durable_born_policy_v1.is_some()
+        {
             return Err(JournalError::Permission);
         }
         self.record_consent_release(a)
+    }
+    /// Only the actual freshly opened original born source may consume this
+    /// explicit profile. Saved policy mappings are historical data, not a
+    /// replacement for native authority or the actual original vault/journal.
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "pending-birth-owner-signing",
+        feature = "native-ui",
+        target_os = "linux"
+    ))]
+    pub(crate) fn record_durable_born_consent_release_v1(
+        &self,
+        approved: ApprovedSpendConsent,
+        entry: &crate::account::birth::enrollment::roster_v2::durable_entry_v1::FreshDurableBornEntryV1,
+    ) -> Result<OriginalAuthorizationEvidence> {
+        entry
+            .require_journal_identity(self)
+            .map_err(|_| JournalError::Permission)?;
+        let terms = approved.0.record.terms();
+        let binding = terms
+            .durable_born_policy_v1
+            .as_ref()
+            .ok_or(JournalError::Permission)?;
+        binding.validate_original_source(entry.record(), entry.genesis())?;
+        binding.require_current_time(now_ms()?)?;
+        if terms.automation.is_some()
+            || terms.sponsor_policy.is_some()
+            || terms.sponsor_owner_attestation_digest.is_some()
+            || entry
+                .account()
+                .account_id()
+                .map_err(|_| JournalError::InvalidBinding)?
+                != terms.account_id
+        {
+            return Err(JournalError::InvalidBinding);
+        }
+        // record_consent_release rechecks the complete current local records,
+        // exact mapping and persisted genesis in its own transaction, before
+        // appending any irreversible release or input reservation.
+        self.record_consent_release(approved.0)
     }
     pub(super) fn record_consent_release(
         &self,
@@ -409,6 +451,7 @@ impl SignerConsentJournal {
             release,
         };
         validate_linkage(&result)?;
+        validate_retained_durable_born_original_v1(&tx, &result)?;
         sponsor::current_for_consent(&tx, t)?;
         automation::current_for_consent(&tx, t)?;
         account_use_storage::require_not_excluded(&tx, &account.account_id)?;
@@ -1256,6 +1299,7 @@ pub(super) fn read_original(
         release,
     };
     validate_linkage(&result)?;
+    validate_retained_durable_born_original_v1(c, &result)?;
     Ok(Some(result))
 }
 pub(super) fn same_native_origin(a: &NativeConsentReceipt, b: &NativeConsentReceipt) -> bool {

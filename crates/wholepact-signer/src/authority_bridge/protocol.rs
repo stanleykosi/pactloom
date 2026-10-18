@@ -53,11 +53,9 @@ impl RetainedAuthorizationRequest {
             return Err(BridgeError::Binding);
         }
         // The native receipt fixes the time window. The caller cannot extend it.
-        let recipient_scope_digest = wholepact_core::proposal::canonical_digest(
-            "wholepact:signer-exact-authorization-recipient:v1",
-            &(original.enrollment().transport(), &delivery),
-        )
-        .map_err(|_| BridgeError::Binding)?;
+        let (witness_enrollment_ref, recipient_scope_digest) =
+            crate::consent_journal::durable_born_policy_v1::witness_policy_scope(original)
+                .map_err(|_| BridgeError::Binding)?;
         let reservation = ReserveAuthorization {
             automation: t.automation.as_ref().map(|a| a.grant.clone()),
             operation_id: t.authorization_id.clone(),
@@ -73,7 +71,7 @@ impl RetainedAuthorizationRequest {
             expected_head,
             authorization_id: t.authorization_id.clone(),
             original_consent_ref: c.reference().into(),
-            enrollment_ref: original.enrollment().reference().into(),
+            enrollment_ref: witness_enrollment_ref,
             accepted_manifest_ref: original.accepted_manifest().reference().into(),
             agreement_id: t.agreement_id.clone(),
             obligation_id: t.obligation_id.clone(),

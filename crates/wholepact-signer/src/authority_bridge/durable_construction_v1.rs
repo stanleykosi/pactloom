@@ -68,16 +68,39 @@ impl DurableConstructionHistoryRequestV1 {
 }
 /// A NEW native disclosure to the current authenticated local application.
 /// It can recover bytes lost before intake, but cannot renew their validity.
+/// An absent digest permits only staging this exact original operation for a
+/// new native decision. It does not permit history, metadata or material export.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DurableConstructionRedisclosureSourceV1 {
+    pub operation_id: String,
+    pub expected_request_digest: Option<String>,
+}
+impl DurableConstructionRedisclosureSourceV1 {
+    pub fn validate(&self) -> Result<()> {
+        crate::review::validate_label(&self.operation_id).map_err(|_| BridgeError::Binding)?;
+        if let Some(digest) = &self.expected_request_digest {
+            hash(digest)?;
+        }
+        Ok(())
+    }
+}
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DurableConstructionRedisclosureRequestV1 {
     pub operation_id: String,
-    pub original: DurableConstructionHistoryRequestV1,
+    pub original: DurableConstructionRedisclosureSourceV1,
+    /// Freshly accepted records from the current native owner. Historical
+    /// record references never regain their previous native origin on reload.
+    pub enrollment_ref: String,
+    pub accepted_manifest_ref: String,
 }
 impl DurableConstructionRedisclosureRequestV1 {
     pub fn validate(&self) -> Result<()> {
         crate::review::validate_label(&self.operation_id).map_err(|_| BridgeError::Binding)?;
         self.original.validate()?;
+        hash(&self.enrollment_ref)?;
+        hash(&self.accepted_manifest_ref)?;
         if self.operation_id == self.original.operation_id {
             return Err(BridgeError::Binding);
         }
@@ -141,6 +164,11 @@ impl DurableConstructionOutboxV1 {
         }
         let mut expected = original.request.clone();
         expected.operation_id = self.request.operation_id.clone();
+        // These current references are independently joined to the same exact
+        // account/FVK/participant/proposal by native preparation and the journal.
+        // Only references change; the original row and its origin remain inert.
+        expected.enrollment_ref = self.request.enrollment_ref.clone();
+        expected.accepted_manifest_ref = self.request.accepted_manifest_ref.clone();
         expected.scope.constructor.authenticated_local_grant_digest =
             self.recipient_grant_digest.clone();
         expected.scope.prover.authenticated_local_grant_digest =
@@ -314,7 +342,13 @@ impl OriginalHistoryClient {
         let received = self.receive_durable_construction_v1(stream, &request.operation_id, None)?;
         let link = received.outbox.redisclosure().ok_or(BridgeError::Binding)?;
         if link.original_operation_id != request.original.operation_id
-            || link.original_request_digest != request.original.expected_request_digest
+            || request
+                .original
+                .expected_request_digest
+                .as_ref()
+                .is_some_and(|digest| &link.original_request_digest != digest)
+            || received.outbox.request().enrollment_ref != request.enrollment_ref
+            || received.outbox.request().accepted_manifest_ref != request.accepted_manifest_ref
         {
             return Err(BridgeError::Binding);
         }
@@ -352,6 +386,40 @@ impl OriginalHistoryClient {
             signer_enrollment_reference: observed.provider_enrollment_reference,
             signer_process_instance: observed.process_instance,
         })
+    }
+}
+
+#[cfg(test)]
+mod redisclosure_request_tests {
+    use super::*;
+
+    #[test]
+    fn fresh_reference_request_is_data_only_and_refuses_legacy_shape() {
+        let request = DurableConstructionRedisclosureRequestV1 {
+            operation_id: "new-disclosure".into(),
+            original: DurableConstructionRedisclosureSourceV1 {
+                operation_id: "original-disclosure".into(),
+                expected_request_digest: Some("11".repeat(32)),
+            },
+            enrollment_ref: "22".repeat(32),
+            accepted_manifest_ref: "33".repeat(32),
+        };
+        request.validate().unwrap();
+        let mut native_stage_only = request.clone();
+        native_stage_only.original.expected_request_digest = None;
+        native_stage_only.validate().unwrap();
+        // The ordinary history request still refuses an absent expected digest.
+        let locator = serde_json::to_value(&native_stage_only.original).unwrap();
+        assert!(serde_json::from_value::<DurableConstructionHistoryRequestV1>(locator).is_err());
+        let mut raw = serde_json::to_value(&request).unwrap();
+        raw.as_object_mut().unwrap().remove("enrollment_ref");
+        assert!(serde_json::from_value::<DurableConstructionRedisclosureRequestV1>(raw).is_err());
+        let mut replay = request.clone();
+        replay.operation_id = replay.original.operation_id.clone();
+        assert!(replay.validate().is_err());
+        let mut malformed = request;
+        malformed.accepted_manifest_ref = "not-an-accepted-record".into();
+        assert!(malformed.validate().is_err());
     }
 }
 
