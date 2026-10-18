@@ -4,10 +4,10 @@
 //! computation never grants human approval, disclosure, signing, or submission.
 #![forbid(unsafe_code)]
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeSet, path::Path, sync::Arc};
-use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use uuid::Uuid;
 use wholepact_core::{AgreementDraft, CoreError, IntentStatus, ParticipationIntent};
 use wholepact_store::{CommandContext, MutationResult, Store, StoredEvent, StoredRecord};
@@ -34,6 +34,21 @@ pub mod born_offline_saved_proof_v1;
 pub mod candidates;
 #[cfg(all(feature = "durable-proposal", target_os = "linux"))]
 pub mod durable_construction_v1;
+// Compiler/component qualification only. These modules deliberately expose no
+// shared-Engine discovery API or public private-workspace factory. Native
+// discovery issuance and the Host dependency/privacy boundary remain inactive.
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "manual-admission",
+    target_os = "linux"
+))]
+pub(crate) mod durable_input_projections_v1;
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "manual-admission",
+    target_os = "linux"
+))]
+pub(crate) mod durable_private_workspace_v1;
 #[cfg(feature = "durable-proposal")]
 pub mod durable_proposals_v1;
 pub mod financial_preflight;
@@ -65,6 +80,7 @@ pub mod native_requests;
 pub mod native_settlement_requests;
 pub mod participant_records;
 pub mod planning;
+mod private_workspace_origin_v1;
 #[cfg(feature = "local-proof-jobs")]
 pub mod proof_jobs;
 pub mod recovery;
@@ -215,6 +231,18 @@ pub struct AgreementView {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Envelope {
+    /// Recognized in every build. Present null/malformed is never legacy.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "private_workspace_origin_v1::deserialize_present_marker"
+    )]
+    private_workspace_origin_v1:
+        Option<wholepact_store::private_workspace_origin_v1::PrivateWorkspaceOriginV1>,
+    /// Recognized even without this profile: unsupported builds must refuse
+    /// nonempty private history rather than silently project its derived view.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    durable_input_projections_v1: std::collections::BTreeMap<String, Value>,
     /// Private purpose-distinct disclosure receipts. Never projected in views.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     durable_construction_v1: std::collections::BTreeMap<String, Value>,
@@ -477,6 +505,8 @@ impl Engine {
         }
         let now = now();
         let envelope = Envelope {
+            private_workspace_origin_v1: None,
+            durable_input_projections_v1: Default::default(),
             durable_construction_v1: Default::default(),
             durable_proposals_v1: Default::default(),
             terms_editing_origin: true,
@@ -767,6 +797,7 @@ impl Engine {
         mut envelope: Envelope,
         kind: &str,
     ) -> Result<Mutation> {
+        private_workspace_origin_v1::refuse_public_payload(&encode(&envelope)?)?;
         envelope.view.revision = revision
             .checked_add(1)
             .ok_or_else(|| ApiError::new("RESOURCE_EXHAUSTED", "Revision limit reached"))?;
@@ -887,18 +918,62 @@ fn encode(envelope: &Envelope) -> Result<Value> {
     serde_json::to_value(envelope).map_err(|_| internal())
 }
 fn decode(record: &StoredRecord) -> Result<Envelope> {
+    private_workspace_origin_v1::refuse_public_payload(&record.payload)?;
+    decode_unprojected(record)
+}
+// Only the exclusive source-owned private facade may use this decoder on a
+// marked record. It is not a generic projection or caller-selected bypass.
+fn decode_unprojected(record: &StoredRecord) -> Result<Envelope> {
     let mut envelope: Envelope = serde_json::from_value(record.payload.clone()).map_err(|_| {
         ApiError::new(
             "RECOVERY_REQUIRED",
             "Stored agreement schema is incompatible or damaged; preserve the journal",
         )
     })?;
+    if let Some(marker) = &envelope.private_workspace_origin_v1 {
+        marker.validate().map_err(|_| {
+            ApiError::new(
+                "RECOVERY_REQUIRED",
+                "Private workspace origin is incompatible; preserve the original journal",
+            )
+        })?;
+        if marker.agreement_id != record.id
+            || marker.agreement_id != envelope.view.agreement.agreement_id
+            || marker.obligation_id != envelope.view.agreement.obligation_id
+            || marker.principal_id != envelope.owner_client_id
+        {
+            return Err(ApiError::new(
+                "RECOVERY_REQUIRED",
+                "Private workspace origin does not match its record",
+            ));
+        }
+        #[cfg(not(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux")))]
+        return Err(ApiError::new("RECOVERY_REQUIRED", "Private workspace history requires its compatible protected owner; preserve the original journal"));
+    }
     if envelope.durable_proposals_v1.len() > MAX_PROPOSALS
         || envelope.durable_construction_v1.len() > 4
+        || envelope.durable_input_projections_v1.len() > 4
     {
         return Err(ApiError::new(
             "RECOVERY_REQUIRED",
             "Durable proposal inventory exceeds its bound",
+        ));
+    }
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "manual-admission",
+        target_os = "linux"
+    ))]
+    durable_input_projections_v1::validate_stored(&envelope)?;
+    #[cfg(not(all(
+        feature = "durable-proposal",
+        feature = "manual-admission",
+        target_os = "linux"
+    )))]
+    if !envelope.durable_input_projections_v1.is_empty() {
+        return Err(ApiError::new(
+            "RECOVERY_REQUIRED",
+            "Private discovery history requires its compatible protected workspace; preserve the original journal",
         ));
     }
     #[cfg(feature = "durable-proposal")]
@@ -1022,3 +1097,7 @@ fn store_error(error: wholepact_store::StoreError) -> ApiError {
 
 #[cfg(feature = "submission-handoff")]
 pub mod settlement_fanout;
+
+#[cfg(test)]
+#[path = "durable_discovery_registration_tests.rs"]
+mod durable_discovery_registration_tests;

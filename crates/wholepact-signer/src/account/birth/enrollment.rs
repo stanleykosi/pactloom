@@ -12,7 +12,7 @@ use wholepact_authority::manual_enrollment::{
     ManualEnrollmentExtension,
 };
 use wholepact_authority::{
-    ReconciledAuthorityHistory, WriterStatus, account_use::AccountUseGenesis,
+    account_use::AccountUseGenesis, ReconciledAuthorityHistory, WriterStatus,
 };
 use wholepact_core::manual_enrollment::{
     BornManualEnrollmentTerms, BornManualScope, BornManualSignerBinding, ManualAccountIdentity,
@@ -740,6 +740,15 @@ impl BornEnrollmentPublication<'_> {
             .directory
             .root()
             .join(JOURNAL)
+    }
+    pub(crate) fn journal_source_owner(
+        &self,
+    ) -> Result<Arc<crate::consent_journal::SignerJournalSourceOwner>> {
+        self.prepared
+            .retained
+            .account
+            .directory
+            .signer_journal_source_owner()
     }
     pub(crate) fn journal_key(&self) -> DatabaseKey {
         DatabaseKey::from_bytes(*self.prepared.retained.journal_key)

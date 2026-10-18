@@ -18,6 +18,10 @@ use wholepact_storage_security::{
 #[path = "construction_staging_preservation_tests.rs"]
 mod layered_staging;
 
+#[cfg(test)]
+#[path = "../recovery/private_projection_preservation_tests.rs"]
+mod private_projection_preservation;
+
 // Synthetic bundle integrity fixture, never native or financial consent.
 struct FixtureArchiveGate;
 impl BundleLease for FixtureArchiveGate {

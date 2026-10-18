@@ -1,6 +1,6 @@
 //! Exact per-owner recapture under a genuine fresh non-spending lease.
-//! This leaf is inactive until its parent and exclusive Engine coordinator are
-//! wired. Public restrictions are data, NOT authenticated historical provenance.
+//! This restrictive adapter does not activate the private Host coordinator.
+//! Public restrictions are data, NOT authenticated historical provenance.
 //! Only the Engine's private original-intake owner can supply that historical
 //! join; neither this DTO nor the deny-only callback can issue signer authority.
 use super::{

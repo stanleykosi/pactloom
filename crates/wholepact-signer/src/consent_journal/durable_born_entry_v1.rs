@@ -4,8 +4,8 @@
 //! writer, financial admission, old V3 owner, or reusable signing capability.
 use super::*;
 use wholepact_authority::{
-    WitnessDisclosureDescriptor, account_use::AccountUseGenesis,
-    account_use_link::account_use_witness_origin_digest,
+    account_use::AccountUseGenesis, account_use_link::account_use_witness_origin_digest,
+    WitnessDisclosureDescriptor,
 };
 
 impl SignerConsentJournal {
@@ -17,50 +17,18 @@ impl SignerConsentJournal {
         path: &Path,
         key: &DatabaseKey,
         genesis: &AccountUseGenesis,
+        source: &Arc<SignerJournalSourceOwner>,
     ) -> Result<Self> {
-        // Reject invalid or unsupported retained history on a private encrypted
-        // snapshot before a writable SQLite handle can touch source sidecars.
-        // The genuine caller's exclusive directory ownership is required for
-        // this quiescent preflight and the subsequent live-handle allocation.
-        let snapshot = wholepact_storage_security::open_encrypted_read_snapshot(path, key)?;
-        let original_identity = snapshot.source_database_identity()?;
-        {
-            let tx = rusqlite::Transaction::new_unchecked(
-                snapshot.connection(),
-                TransactionBehavior::Deferred,
-            )?;
-            validate(&tx, genesis, (MAX_BACKUP_ROWS, MAX_BACKUP_ENCODED_BYTES))?;
-            tx.commit()?;
-        }
-        snapshot.check_source_unchanged()?;
-        let encrypted = wholepact_storage_security::open_encrypted_quiescent(path, key)?;
-        let database_identity = encrypted.database_identity()?;
-        if database_identity != original_identity {
-            return Err(JournalError::InvalidBinding);
-        }
-        drop(snapshot);
-        let mut connection = encrypted.into_connection();
-        {
-            let tx = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
-            database_identity.check_current(&tx)?;
-            validate(&tx, genesis, (MAX_BACKUP_ROWS, MAX_BACKUP_ENCODED_BYTES))?;
-            database_identity.check_current(&tx)?;
-            tx.commit()?;
-        }
-        configure(&connection)?;
-        database_identity.check_current(&connection)?;
-        Ok(Self {
-            connection: Mutex::new(connection),
-            database_identity,
-            // A NEW local binding. Never resurrect the drained V3 binding or
-            // reconstruct a session from serialized historical receipts.
-            binding: SignerJournalBinding(Arc::new(())),
-            authority_fence: RwLock::new(()),
-            #[cfg(feature = "authority-signing")]
-            settlement_nodes: Mutex::new(std::collections::BTreeMap::new()),
-            #[cfg(test)]
-            capacity_limits: (MAX_BACKUP_ROWS, MAX_BACKUP_ENCODED_BYTES),
-        })
+        let mut owner = source.begin(path)?;
+        let opened = open_preflighted_encrypted(
+            &mut owner,
+            path,
+            key,
+            &genesis.identity.account_id,
+            Some(genesis),
+            &|c| validate(c, genesis, (MAX_BACKUP_ROWS, MAX_BACKUP_ENCODED_BYTES)),
+        )?;
+        Ok(Self::from_owned_source(opened))
     }
 
     /// One fresh read transaction, under the retained live file identity. All
@@ -146,6 +114,39 @@ fn validate(c: &Connection, genesis: &AccountUseGenesis, limits: (u64, u64)) -> 
     Ok(())
 }
 
+/// Same-snapshot complete supported local DATA ancestry for the purpose-
+/// distinct writer reconciliation. No WriterLocalInventory recursion, current
+/// receipt expiry, native decision, source ownership, or financial permission.
+pub(crate) fn validate_durable_payment_local_history_v1(
+    c: &Connection,
+    genesis: &AccountUseGenesis,
+    limits: (u64, u64),
+) -> Result<()> {
+    if c.is_autocommit() {
+        return Err(JournalError::InvalidBinding);
+    }
+    genesis
+        .validate()
+        .map_err(|_| JournalError::InvalidBinding)?;
+    verify_schema(c)?;
+    bounded(c, limits)?;
+    let account = read_account(c)?;
+    let stored = account_use_storage::inspect(c, &account.account_id)?;
+    if account.account_id != genesis.identity.account_id || stored.genesis() != Some(genesis) {
+        return Err(JournalError::InvalidBinding);
+    }
+    if account.recovery_required {
+        return Err(JournalError::RecoveryRequired);
+    }
+    if stored.exclusion().is_some() || stored.witness_ack().is_some() {
+        return Err(JournalError::Permission);
+    }
+    require_supported_tables(c)?;
+    permanent_stop::validate_retained_local_cells(c, &account, limits)?;
+    bind_original_namespace(c, genesis)?;
+    Ok(())
+}
+
 fn require_supported_tables(c: &Connection) -> Result<()> {
     // Exact schema was verified first. A future table is refused when nonempty
     // until its semantics are explicitly qualified, rather than ignored.
@@ -157,6 +158,7 @@ fn require_supported_tables(c: &Connection) -> Result<()> {
                 | "signer_enrollments"
                 | "signer_accepted_manifests"
                 | "signer_durable_construction_outbox"
+                | "signer_durable_payment_admission_intents"
                 | "signer_original_consents"
                 | "signer_release_intents"
                 | "signer_input_reservations"
@@ -205,6 +207,12 @@ fn require_witness(
 }
 
 fn bind_original_namespace(c: &Connection, genesis: &AccountUseGenesis) -> Result<()> {
+    for intent in read_durable_payment_admission_intents_v1(c)? {
+        require_witness(intent.disclosure(), genesis)?;
+        if intent.owner_certificate_digest() != genesis.owner_certificate_digest {
+            return Err(JournalError::InvalidBinding);
+        }
+    }
     let mut q = c.prepare("SELECT reference FROM signer_enrollments ORDER BY reference")?;
     for row in q.query_map([], |r| r.get::<_, String>(0))? {
         let enrollment = read_enrollment(c, &row?)?.ok_or(JournalError::NotFound)?;

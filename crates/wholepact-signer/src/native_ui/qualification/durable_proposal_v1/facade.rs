@@ -96,8 +96,39 @@ impl EphemeralDurableNativeV1 {
     pub fn configure_native_wallet(&mut self, exact_setup_json: &str) -> Result<()> {
         self.inner.configure_wallet(exact_setup_json)
     }
+    pub fn configure_durable_wallet(&mut self, exact_setup_json: &str) -> Result<()> {
+        self.inner.configure_durable_wallet(exact_setup_json)
+    }
+    pub fn poll_financial_import(
+        &mut self,
+        request: &DurableReviewDeliveryRequestV1,
+        identity: &wholepact_protocol::durable_proposal_v1::FixedProposalIdentityV1,
+    ) -> Result<bool> {
+        self.inner.poll_financial_import(request, identity)
+    }
+    pub fn sign_durable_fixed(
+        &mut self,
+        identity: &wholepact_protocol::durable_proposal_v1::FixedProposalIdentityV1,
+    ) -> Result<(
+        crate::authority_bridge::ipc::HistoryRequest,
+        crate::authority_bridge::AuthorizationCommit,
+    )> {
+        self.inner.sign_durable_fixed(identity)
+    }
     pub fn configure_original_witness(&mut self) -> Result<()> {
         self.inner.configure_original_witness()
+    }
+    /// Returns ordinary request data from the genuine pending native review.
+    /// This neither approves nor retains the financial admission.
+    pub fn prepare_durable_admission(
+        &mut self,
+    ) -> Result<wholepact_authority::OwnerControlRequest> {
+        self.inner.prepare_durable_admission()
+    }
+    /// Consumes the actual pending review through the production native route,
+    /// which retains the immutable intent before its first mutation frame.
+    pub fn approve_durable_admission(&mut self) -> Result<()> {
+        self.inner.approve_durable_admission()
     }
     pub fn reconcile_original_writer(&mut self) -> Result<()> {
         self.inner.reconcile_original_writer()

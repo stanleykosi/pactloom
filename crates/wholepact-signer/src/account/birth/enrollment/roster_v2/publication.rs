@@ -45,7 +45,10 @@ pub(super) fn check_history(
     let origin = original(&retained.account)?;
     let audit = origin
         .anchor()
-        .audit_original_roster_preconstruction_witness_link(history, &retained.record.extension()?)?;
+        .audit_original_roster_preconstruction_witness_link(
+            history,
+            &retained.record.extension()?,
+        )?;
     history
         .require_original_roster_preconstruction_history()
         .map_err(|_| Error::Unavailable)?;
@@ -321,6 +324,15 @@ impl BornRosterEnrollmentPublicationV2<'_> {
             .directory
             .root()
             .join(JOURNAL)
+    }
+    pub(crate) fn journal_source_owner(
+        &self,
+    ) -> Result<Arc<crate::consent_journal::SignerJournalSourceOwner>> {
+        self.prepared
+            .retained
+            .account
+            .directory
+            .signer_journal_source_owner()
     }
     pub(crate) fn journal_key(&self) -> DatabaseKey {
         DatabaseKey::from_bytes(*self.prepared.retained.journal_key)

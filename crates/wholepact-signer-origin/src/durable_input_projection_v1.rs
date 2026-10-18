@@ -257,6 +257,7 @@ impl Drop for ProjectionPairResponseV1 {
 /// Only these two purpose-specific operations exist. This is not AppRequest.
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(from = "StrictProjectionRequestV1")]
 pub enum ProjectionRequestV1 {
     Status,
     Project {
@@ -265,6 +266,7 @@ pub enum ProjectionRequestV1 {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(from = "StrictProjectionResponseV1")]
 pub enum ProjectionResponseV1 {
     Current {
         binding: ProjectionChannelBindingV1,
@@ -273,6 +275,46 @@ pub enum ProjectionResponseV1 {
         outbox: Box<DurableInputProjectionOutboxV1>,
     },
     Denied,
+}
+// Serde internally tagged UNIT variants otherwise ignore extra object fields,
+// even with deny_unknown_fields. Empty STRUCT variants enforce the same strict
+// grammar as the data-bearing variants, while these conversions preserve the
+// public API and exact existing serialization. This does not grant authority.
+#[derive(Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
+enum StrictProjectionRequestV1 {
+    Status {},
+    Project {
+        request: Box<DurableInputProjectionRequestV1>,
+    },
+}
+impl From<StrictProjectionRequestV1> for ProjectionRequestV1 {
+    fn from(value: StrictProjectionRequestV1) -> Self {
+        match value {
+            StrictProjectionRequestV1::Status {} => Self::Status,
+            StrictProjectionRequestV1::Project { request } => Self::Project { request },
+        }
+    }
+}
+#[derive(Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+enum StrictProjectionResponseV1 {
+    Current {
+        binding: ProjectionChannelBindingV1,
+    },
+    Retained {
+        outbox: Box<DurableInputProjectionOutboxV1>,
+    },
+    Denied {},
+}
+impl From<StrictProjectionResponseV1> for ProjectionResponseV1 {
+    fn from(value: StrictProjectionResponseV1) -> Self {
+        match value {
+            StrictProjectionResponseV1::Current { binding } => Self::Current { binding },
+            StrictProjectionResponseV1::Retained { outbox } => Self::Retained { outbox },
+            StrictProjectionResponseV1::Denied {} => Self::Denied,
+        }
+    }
 }
 pub fn decode_projection_response_v1(bytes: &[u8]) -> Result<ProjectionResponseV1> {
     if bytes.is_empty() || bytes.len() > MAX_INPUT_PROJECTION_FRAME_BYTES_V1 {
@@ -385,5 +427,37 @@ mod tests {
             decode_projection_response_v1(&vec![b' '; MAX_INPUT_PROJECTION_FRAME_BYTES_V1 + 1])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn empty_projection_variants_preserve_wire_and_refuse_extra_fields() {
+        let status = br#"{"operation":"status"}"#;
+        let denied = br#"{"status":"denied"}"#;
+        assert_eq!(
+            serde_json::to_vec(&ProjectionRequestV1::Status).unwrap(),
+            status
+        );
+        assert_eq!(
+            serde_json::to_vec(&ProjectionResponseV1::Denied).unwrap(),
+            denied
+        );
+        assert!(matches!(
+            serde_json::from_slice::<ProjectionRequestV1>(status),
+            Ok(ProjectionRequestV1::Status)
+        ));
+        assert!(matches!(
+            decode_projection_response_v1(denied),
+            Ok(ProjectionResponseV1::Denied)
+        ));
+        for field in ["request", "authorization_export", "rescan", "binding"] {
+            let mut request = serde_json::json!({"operation":"status"});
+            request[field] = true.into();
+            assert!(serde_json::from_value::<ProjectionRequestV1>(request).is_err());
+            let mut response = serde_json::json!({"status":"denied"});
+            response[field] = true.into();
+            assert!(
+                decode_projection_response_v1(&serde_json::to_vec(&response).unwrap()).is_err()
+            );
+        }
     }
 }

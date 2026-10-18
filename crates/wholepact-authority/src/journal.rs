@@ -2,7 +2,7 @@ use crate::{
     policy::{Event, Ledger},
     *,
 };
-use rusqlite::{Connection, Transaction, TransactionBehavior, params};
+use rusqlite::{params, Connection, Transaction, TransactionBehavior};
 use std::{path::Path, sync::Mutex};
 use wholepact_storage_security::{DatabaseKey, EncryptedConnection};
 
@@ -28,6 +28,10 @@ mod born_offline_dispatch_journal_v1;
 #[cfg(all(feature = "born-offline-witness-owner", target_os = "linux"))]
 #[path = "born_offline_witness_journal_v1.rs"]
 mod born_offline_witness_journal_v1;
+
+#[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
+#[path = "durable_payment_journal_v1.rs"]
+mod durable_payment_journal_v1;
 
 const APPLICATION_ID: i64 = 0x57504157;
 const SCHEMA_VERSION: i64 = 6;
@@ -342,7 +346,8 @@ impl AuthorityJournal {
                 | AuthorityMutation::ReserveBornOfflineV1(_)
                 | AuthorityMutation::AuthorizeBornOfflineDispatchV1(_)
                 | AuthorityMutation::OwnerControl(OwnerControlRequest {
-                    control: OwnerControl::EnrollBornOfflineV1 { .. }
+                    control: OwnerControl::AdmitDurablePaymentV1 { .. }
+                        | OwnerControl::EnrollBornOfflineV1 { .. }
                         | OwnerControl::InstallBornOfflineArtifactsV1 { .. }
                         | OwnerControl::GrantConstructionTransportV1 { .. }
                         | OwnerControl::ApproveManualRosterConstructionV3 { .. }
@@ -411,7 +416,8 @@ impl AuthorityJournal {
             AuthorityMutation::ClaimConstructionTransportV1(_)
                 | AuthorityMutation::UseConstructionTransportV1(_)
                 | AuthorityMutation::OwnerControl(OwnerControlRequest {
-                    control: OwnerControl::GrantConstructionTransportV1 { .. },
+                    control: OwnerControl::AdmitDurablePaymentV1 { .. }
+                        | OwnerControl::GrantConstructionTransportV1 { .. },
                     ..
                 })
         ) {
@@ -1155,6 +1161,7 @@ pub(crate) fn load(c: &Connection) -> Result<Ledger> {
     if matches!(version, 5..=7) {
         let birth = crate::pending_birth_storage::read(c, &ledger.policy)?;
         ledger.validate_manual_birth(birth.as_ref())?;
+        ledger.validate_durable_payment_birth_v1(birth.as_ref())?;
         ledger.validate_born_offline_birth_v1(birth.as_ref())?;
     } else if ledger.policy.account_use_genesis.is_some() {
         return Err(AuthorityError::CorruptHistory);
@@ -1615,3 +1622,7 @@ mod manual_roster_construction_encrypted_tests_v2;
 #[cfg(all(test, feature = "pending-birth-foundation", target_os = "linux"))]
 #[path = "manual_roster_construction_encrypted_tests_v3.rs"]
 mod manual_roster_construction_encrypted_tests_v3;
+
+#[cfg(test)]
+#[path = "durable_payment_encrypted_tests_v1.rs"]
+mod durable_payment_encrypted_tests_v1;

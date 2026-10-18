@@ -952,6 +952,9 @@ pub use writer_reconciliation::*;
 // The always-compiled typed writer kernel also preserves online exposure.
 pub(super) use writer_reconciliation::retain_remote_exposure;
 
+#[path = "durable_payment_admission_intent_v1.rs"]
+pub(crate) mod durable_payment_admission_intent_v1;
+
 #[path = "redelivery_authority.rs"]
 mod redelivery_authority;
 pub use redelivery_authority::*;

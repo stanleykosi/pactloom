@@ -98,8 +98,8 @@ fn named_schema16_every_exact_legacy_template_gets_empty_extension() {
         let mut c = source(sql, version);
         let before = rows(&c, sql);
         match version {
-            8 => migrate_v8(&mut c),
-            9 => migrate_v9(&mut c),
+            8 => migrate_v8(&mut c, "synthetic-v16-migration"),
+            9 => migrate_v9(&mut c, "synthetic-v16-migration"),
             10 => migrate_v10(&mut c, "synthetic-v16-migration"),
             11 => migrate_v11(&mut c, "synthetic-v16-migration"),
             12 => migrate_v12(&mut c, "synthetic-v16-migration"),
@@ -168,11 +168,15 @@ fn named_schema16_keeps_legacy_versioned_backup_templates_exact() {
         (15, V15_SCHEMA),
         (16, V16_SCHEMA),
         (17, V17_SCHEMA),
-        (18, SCHEMA),
+        (18, V18_SCHEMA),
+        (19, SCHEMA),
     ] {
         let template = recovery_template(version).unwrap();
         assert_eq!(template.schema_version, version);
-        assert_eq!(template.create_sql.as_bytes(), sql.as_bytes());
+        assert!(
+            template.create_sql.as_bytes() == sql.as_bytes(),
+            "versioned backup template bytes changed"
+        );
     }
     assert!(SCHEMA.as_bytes().starts_with(V15_SCHEMA.as_bytes()));
 }

@@ -5,11 +5,60 @@ use wholepact_authority::{
     AuthenticatedWriterSession, ReconciledAuthorityHistory, ReservationPermit,
 };
 
+// Purpose is minted only by the corresponding complete-history constructor.
+// Legacy review domains and serialization continue to use the inner old value.
+enum WriterHistory {
+    Legacy(writer_history::PreparedWriterHistory),
+    Durable(writer_history::PreparedDurableWriterHistoryV1),
+}
+impl WriterHistory {
+    fn len(&self) -> usize {
+        match self {
+            Self::Legacy(v) => v.len(),
+            Self::Durable(v) => v.len(),
+        }
+    }
+    fn has_offline(&self) -> bool {
+        matches!(self, Self::Legacy(v) if v.has_offline())
+    }
+    fn legacy_online_permits(&self) -> Result<&[ReservationPermit]> {
+        match self {
+            Self::Legacy(v) => v.legacy_online_permits(),
+            Self::Durable(_) => Err(JournalError::RecoveryRequired),
+        }
+    }
+    fn require_supported(
+        &self,
+        tx: &rusqlite::Connection,
+        account: &SignerAccountState,
+        limits: (u64, u64),
+    ) -> Result<()> {
+        match self {
+            Self::Legacy(v) => {
+                v.require_enabled()?;
+                offline_history::require_legacy_journal(tx)
+            }
+            Self::Durable(v) => v.require_supported_local(tx, account, limits),
+        }
+    }
+    fn require_unchanged_local(&self, local: &writer_history::WriterLocalInventory) -> Result<()> {
+        match self {
+            Self::Legacy(v) => v.require_unchanged_local(local),
+            Self::Durable(v) => v.require_unchanged_local(local),
+        }
+    }
+    fn import(&self, tx: &rusqlite::Transaction<'_>, account: &str) -> Result<()> {
+        match self {
+            Self::Legacy(v) => v.import_enabled(tx, account),
+            Self::Durable(v) => v.import(tx, account),
+        }
+    }
+}
 struct WriterReconciliation {
     account: SignerAccountState,
     receipt: NativeConsentReceipt,
     active: AuthenticatedWriterSession,
-    history: writer_history::PreparedWriterHistory,
+    history: WriterHistory,
     review_digest: String,
 }
 pub struct PreparedWriterReconciliation(Pending<WriterReconciliation>);
@@ -23,9 +72,9 @@ impl PreparedWriterReconciliation {
     pub fn display(&self) -> Result<String> {
         let _lease = self.0.session.read()?;
         let r = &self.0.record;
-        let detail = if r.history.has_offline() {
+        let detail = if let WriterHistory::Durable(history) = &r.history {
             serde_json::to_string_pretty(&(
-                "wholepact:signer-writer-reconciliation:v2",
+                "wholepact:signer-durable-payment-writer-reconciliation:v1",
                 &r.account.account_id,
                 r.account.writer_epoch,
                 &r.receipt,
@@ -33,19 +82,35 @@ impl PreparedWriterReconciliation {
                 r.active.snapshot(),
                 r.active.receipt(),
                 r.active.history_digest(),
-                &r.history,
+                history,
             ))
+        } else if let WriterHistory::Legacy(history) = &r.history {
+            if history.has_offline() {
+                serde_json::to_string_pretty(&(
+                    "wholepact:signer-writer-reconciliation:v2",
+                    &r.account.account_id,
+                    r.account.writer_epoch,
+                    &r.receipt,
+                    r.active.disclosure(),
+                    r.active.snapshot(),
+                    r.active.receipt(),
+                    r.active.history_digest(),
+                    history,
+                ))
+            } else {
+                serde_json::to_string_pretty(&(
+                    &r.account.account_id,
+                    r.account.writer_epoch,
+                    &r.receipt,
+                    r.active.disclosure(),
+                    r.active.snapshot(),
+                    r.active.receipt(),
+                    r.active.history_digest(),
+                    r.history.legacy_online_permits()?,
+                ))
+            }
         } else {
-            serde_json::to_string_pretty(&(
-                &r.account.account_id,
-                r.account.writer_epoch,
-                &r.receipt,
-                r.active.disclosure(),
-                r.active.snapshot(),
-                r.active.receipt(),
-                r.active.history_digest(),
-                r.history.legacy_online_permits()?,
-            ))
+            return Err(JournalError::InvalidBinding);
         }
         .map_err(|_| JournalError::InvalidBinding)?;
         if detail.len() > MAX_RECORD_BYTES {
@@ -71,6 +136,95 @@ impl PreparedWriterReconciliation {
     }
 }
 impl SignerConsentSession {
+    /// Complete durable-purpose history only, joined to the exact retained
+    /// native-approved local intent in the SAME original-journal snapshot.
+    pub(crate) fn prepare_durable_payment_writer_reconciliation_v1(
+        &self,
+        journal: &SignerConsentJournal,
+        history: ReconciledAuthorityHistory,
+        active: AuthenticatedWriterSession,
+        intent: &RetainedDurablePaymentAdmissionIntentV1,
+    ) -> Result<PreparedWriterReconciliation> {
+        let account = journal.account_state()?;
+        let lease = self.read_lease(&journal.binding(), &account)?;
+        lease.check_current()?;
+        if account.recovery_required {
+            return Err(JournalError::RecoveryRequired);
+        }
+        let snapshot = active.snapshot();
+        if history.snapshot() != snapshot
+            || history.disclosure() != active.disclosure()
+            || history
+                .history_digest()
+                .map_err(|_| JournalError::InvalidBinding)?
+                != active.history_digest()
+            || snapshot.account_id != account.account_id
+            || snapshot.writer_epoch < account.writer_epoch
+            || snapshot.writer_epoch > i64::MAX as u64
+            || snapshot.active_writer_session.as_ref() != Some(active.receipt())
+            || active.receipt().writer_epoch != snapshot.writer_epoch
+            || active.receipt().disclosure != *active.disclosure()
+            || now_ms()? >= active.receipt().expires_at_ms
+        {
+            return Err(JournalError::InvalidBinding);
+        }
+        let retained = {
+            let mut connection = journal
+                .connection
+                .lock()
+                .map_err(|_| JournalError::Database)?;
+            journal.database_identity.check_current(&connection)?;
+            let tx = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
+            journal.database_identity.check_current(&tx)?;
+            let local = writer_history::WriterLocalInventory::read(
+                &tx,
+                &account,
+                journal.capacity_limits(),
+            )?;
+            let prepared = writer_history::PreparedDurableWriterHistoryV1::prepare(
+                &tx,
+                &account,
+                journal.capacity_limits(),
+                &local,
+                &history,
+                &active,
+                intent,
+            )?;
+            lease.check_current()?;
+            if now_ms()? >= active.receipt().expires_at_ms {
+                return Err(JournalError::Expired);
+            }
+            journal.database_identity.check_current(&tx)?;
+            tx.rollback()?;
+            prepared
+        };
+        let receipt = self.receipt()?;
+        let review_digest = digest(
+            "wholepact:signer-durable-payment-writer-reconciliation:v1",
+            &(
+                &account.account_id,
+                account.writer_epoch,
+                &receipt,
+                active.disclosure(),
+                snapshot,
+                active.receipt(),
+                active.history_digest(),
+                &retained,
+            ),
+        )?;
+        let record = WriterReconciliation {
+            account,
+            receipt,
+            active,
+            history: WriterHistory::Durable(retained),
+            review_digest: review_digest.clone(),
+        };
+        Ok(PreparedWriterReconciliation(Pending::new(
+            record,
+            review_digest,
+            &self.inner,
+        )))
+    }
     /// Only complete authenticated history and this live client's independently
     /// owner-activated session can propose an epoch transition. Raw snapshots
     /// and serialized receipts have no conversion to this operation.
@@ -161,7 +315,7 @@ impl SignerConsentSession {
             account,
             receipt,
             active,
-            history: retained,
+            history: WriterHistory::Legacy(retained),
             review_digest: review_digest.clone(),
         };
         Ok(PreparedWriterReconciliation(Pending::new(
@@ -188,6 +342,29 @@ impl SignerConsentJournal {
         &self,
         approved: ApprovedWriterReconciliation,
     ) -> Result<SignerAccountState> {
+        if !matches!(&approved.0.record.history, WriterHistory::Legacy(_)) {
+            return Err(JournalError::Permission);
+        }
+        self.reconcile_writer_kernel(approved, None)
+    }
+    /// Additional deny-only source restriction for the nominal durable branch.
+    /// The callback runs inside the existing fence/transaction and MUST NOT
+    /// acquire a journal or session fence recursively.
+    pub(crate) fn reconcile_writer_checked_v1(
+        &self,
+        approved: ApprovedWriterReconciliation,
+        mut check_current: impl FnMut() -> Result<()>,
+    ) -> Result<SignerAccountState> {
+        if !matches!(&approved.0.record.history, WriterHistory::Durable(_)) {
+            return Err(JournalError::Permission);
+        }
+        self.reconcile_writer_kernel(approved, Some(&mut check_current))
+    }
+    fn reconcile_writer_kernel(
+        &self,
+        approved: ApprovedWriterReconciliation,
+        mut check_current: Option<&mut dyn FnMut() -> Result<()>>,
+    ) -> Result<SignerAccountState> {
         let a = approved.0;
         let r = &a.record;
         let lease = a.lease(&self.binding(), &r.account, &r.receipt)?;
@@ -198,10 +375,13 @@ impl SignerConsentJournal {
         let mut connection = self.connection.lock().map_err(|_| JournalError::Database)?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         storage::check_account(&tx, &r.account)?;
+        if matches!(&r.history, WriterHistory::Durable(_)) {
+            self.database_identity.check_current(&tx)?;
+        }
         // Refuse before ANY mutation. This gate is also enforced by the import
         // kernel so offline plans cannot accidentally bypass it internally.
-        r.history.require_enabled()?;
-        offline_history::require_legacy_journal(&tx)?;
+        r.history
+            .require_supported(&tx, &r.account, self.capacity_limits())?;
         let local =
             writer_history::WriterLocalInventory::read(&tx, &r.account, self.capacity_limits())?;
         r.history.require_unchanged_local(&local)?;
@@ -222,7 +402,10 @@ impl SignerConsentJournal {
                 return Err(JournalError::Conflict);
             }
         }
-        r.history.import_enabled(&tx, &r.account.account_id)?;
+        if let Some(check) = check_current.as_mut() {
+            check()?;
+        }
+        r.history.import(&tx, &r.account.account_id)?;
         let payload = encode(&(r.active.receipt(), &r.receipt, r.active.history_digest()))?;
         tx.execute(
             "INSERT OR IGNORE INTO signer_writer_reconciliations VALUES(?1,?2,?3,?4,?5,?6)",
@@ -243,6 +426,12 @@ impl SignerConsentJournal {
         lease.check_current()?;
         if now_ms()? >= r.active.receipt().expires_at_ms {
             return Err(JournalError::Expired);
+        }
+        if matches!(&r.history, WriterHistory::Durable(_)) {
+            self.database_identity.check_current(&tx)?;
+        }
+        if let Some(check) = check_current.as_mut() {
+            check()?;
         }
         tx.commit()?;
         Ok(SignerAccountState {

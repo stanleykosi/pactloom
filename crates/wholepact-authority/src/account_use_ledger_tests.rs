@@ -221,6 +221,7 @@ fn exclusion_history() -> (
     ]);
     (
         ReconciledAuthorityHistory {
+            durable_payment_history_supported_v1: false,
             construction_transport_history:
                 crate::construction_transport_handoff_v1::ConstructionTransportHistoryV1 {
                     version: 1,
@@ -444,6 +445,7 @@ fn complete_exclusion_ack_keeps_offline_exposure_and_legacy_gate() {
         pinned_server_certificate_digest: h('9'),
     };
     let mut history = ReconciledAuthorityHistory {
+        durable_payment_history_supported_v1: false,
         construction_transport_history:
             crate::construction_transport_handoff_v1::ConstructionTransportHistoryV1 {
                 version: 1,

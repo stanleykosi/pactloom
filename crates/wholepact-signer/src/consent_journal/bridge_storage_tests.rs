@@ -11,6 +11,7 @@ use wholepact_authority::{AccountPolicy, AuthorityHead, AuthorityJournal, transp
 use wholepact_storage_security::DatabaseKey;
 
 struct Fixture {
+    private_directory: crate::files::PrivateDirectory,
     _directory: tempfile::TempDir,
     path: std::path::PathBuf,
     key: DatabaseKey,
@@ -27,8 +28,18 @@ impl Fixture {
         std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let path = directory.path().join("signer.sqlite");
         let key = DatabaseKey::from_bytes([0x74; 32]);
-        let journal =
-            SignerConsentJournal::create_encrypted(&path, &key, "account-alice", 1, false).unwrap();
+        let private_directory = crate::files::PrivateDirectory::open(directory.path()).unwrap();
+        let journal = SignerConsentJournal::create_encrypted(
+            &path,
+            &key,
+            "account-alice",
+            1,
+            false,
+            &private_directory
+                .signer_journal_source_owner_for_test(&path)
+                .unwrap(),
+        )
+        .unwrap();
         let session = fixture::session(&journal, "synthetic-owner");
         let bytes = b"never-funded-local-bridge-artifact-canary";
         let mut proposal_input = proposal("agreement-a", "obligation-a", "proposal-a")
@@ -93,6 +104,7 @@ impl Fixture {
         .unwrap()
         .head;
         Self {
+            private_directory,
             _directory: directory,
             path,
             key,
@@ -219,7 +231,15 @@ fn reopened_history_replays_exact_result_but_never_reconstructs_spend_approval()
         f.journal.bridge_begin_key_use(&lease, &permit).unwrap();
         f.journal.bridge_retain_result(&lease, &f.result()).unwrap();
     }
-    let reopened = SignerConsentJournal::open_encrypted(&f.path, &f.key, "account-alice").unwrap();
+    let reopened = SignerConsentJournal::open_encrypted(
+        &f.path,
+        &f.key,
+        "account-alice",
+        &f.private_directory
+            .signer_journal_source_owner_for_test(&f.path)
+            .unwrap(),
+    )
+    .unwrap();
     let fresh = fixture::session(&reopened, "synthetic-owner");
     let lease = reopened
         .acquire_original_authorization("authorization-a", &fresh)
@@ -330,7 +350,15 @@ fn writer_reconciliation_keeps_originals_imports_remote_exposure_and_fences_stal
     f.journal
         .record_original_consent_release(fixture::approve_spend(&f.session, t))
         .unwrap();
-    let reopened = SignerConsentJournal::open_encrypted(&f.path, &f.key, "account-alice").unwrap();
+    let reopened = SignerConsentJournal::open_encrypted(
+        &f.path,
+        &f.key,
+        "account-alice",
+        &f.private_directory
+            .signer_journal_source_owner_for_test(&f.path)
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(
         reopened
             .connection
@@ -653,16 +681,23 @@ fn dispatch_retry_retains_exact_head_deadline_backend_and_original_result() {
     ));
     assert!(f.journal.bridge_result(&lease).unwrap() == f.result());
     assert!(f.journal.bridge_begin_key_use(&lease, &permit).is_err());
-    assert!(
-        f.journal
-            .connection
-            .lock()
-            .unwrap()
-            .execute("DELETE FROM signer_dispatch_requests", [])
-            .is_err()
-    );
+    assert!(f
+        .journal
+        .connection
+        .lock()
+        .unwrap()
+        .execute("DELETE FROM signer_dispatch_requests", [])
+        .is_err());
     drop(lease);
-    let reopened = SignerConsentJournal::open_encrypted(&f.path, &f.key, "account-alice").unwrap();
+    let reopened = SignerConsentJournal::open_encrypted(
+        &f.path,
+        &f.key,
+        "account-alice",
+        &f.private_directory
+            .signer_journal_source_owner_for_test(&f.path)
+            .unwrap(),
+    )
+    .unwrap();
     let session = fixture::session(&reopened, "synthetic-owner");
     let lease = reopened
         .acquire_original_authorization("authorization-a", &session)

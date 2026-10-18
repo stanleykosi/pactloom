@@ -160,6 +160,9 @@ fn verify_source_layout(source: &VerifiedSignerRecoverySource) -> Result<()> {
     {
         return Err(JournalError::InvalidBinding);
     }
+    // Version18 is the immutable pre-financial template. Version19 is the
+    // distinct exact financial-only template; unknown/discovery layouts cannot
+    // be reclassified merely because their table names overlap.
     let template = recovery_template(source.provenance().schema_version)?;
     let reference = Connection::open_in_memory()?;
     reference.execute_batch(template.create_sql)?;
@@ -219,3 +222,169 @@ fn receipt_inventory(c: &Connection, account: &str) -> Result<Vec<RecoveryReceip
 #[cfg(test)]
 #[path = "recovery_inventory_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod frozen18_inventory_tests {
+    use super::*;
+    use std::{os::unix::fs::PermissionsExt, sync::Mutex};
+    use wholepact_storage_security::bundle::*;
+
+    struct HistoricalAdapter(Mutex<Connection>);
+    impl JournalAdapter for HistoricalAdapter {
+        fn template(&self) -> &'static JournalTemplate {
+            recovery_template(18).unwrap()
+        }
+        fn read_locked(
+            &self,
+            permit: &BackupReadPermit<'_>,
+            visitor: &mut dyn FnMut(&Connection) -> std::result::Result<(), BundleError>,
+        ) -> std::result::Result<(), BundleError> {
+            permit.check(self)?;
+            let c = self.0.lock().unwrap();
+            recovery_migration::verify_exact_schema(&c, recovery_migration::V18_SCHEMA)
+                .map_err(|_| BundleError::Integrity)?;
+            visitor(&c)
+        }
+    }
+    fn files(path: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
+        ["", "-wal", "-shm", "-journal"]
+            .into_iter()
+            .map(|suffix| {
+                let p = PathBuf::from(format!("{}{suffix}", path.display()));
+                let bytes = match std::fs::read(&p) {
+                    Ok(bytes) => Some(bytes),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(error) => panic!("cannot inspect synthetic file: {error}"),
+                };
+                (p, bytes)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn sealed18_is_readable_and_materialized_only_in_rollback_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let original = dir.path().join("synthetic-original18.sqlite");
+        let archive = dir.path().join("synthetic-archive18.sqlite");
+        let restored = dir.path().join("synthetic-restored18.sqlite");
+        let original_key = DatabaseKey::from_bytes([0x61; 32]);
+        let archive_key = DatabaseKey::from_bytes([0x62; 32]);
+        let restored_key = DatabaseKey::from_bytes([0x63; 32]);
+        let c = wholepact_storage_security::create_encrypted(&original, &original_key)
+            .unwrap()
+            .into_connection();
+        c.execute_batch(recovery_migration::V18_SCHEMA).unwrap();
+        c.pragma_update(None, "application_id", APPLICATION_ID)
+            .unwrap();
+        c.pragma_update(None, "user_version", 18).unwrap();
+        let genesis = wholepact_authority::account_use::AccountUseGenesis {
+            version: 1,
+            identity: wholepact_authority::account_use::AccountUseIdentity {
+                account_id: "11".repeat(32),
+                full_viewing_key_digest: "22".repeat(32),
+                network_profile_id: "synthetic".into(),
+                derivation_domain: "dedicated-testnet-legacy-zip32-v1".into(),
+            },
+            witness_id: "synthetic-witness".into(),
+            witness_origin_digest: "33".repeat(32),
+            owner_certificate_digest: "44".repeat(32),
+            native_birth_digest: "55".repeat(32),
+        };
+        // Historical synthetic data only; this is not a birth or native issuer.
+        let account = genesis.identity.account_id.clone();
+        c.execute("INSERT INTO signer_account VALUES(1,?1,7,0)", [&account])
+            .unwrap();
+        c.execute(
+            "INSERT INTO signer_account_use_genesis VALUES(1,?1,?2,?3,?4)",
+            params![
+                account,
+                genesis.identity.full_viewing_key_digest,
+                genesis.digest().unwrap(),
+                serde_json::to_string(&genesis).unwrap(),
+            ],
+        )
+        .unwrap();
+        let adapter = HistoricalAdapter(Mutex::new(c));
+        let sources = [RegisteredJournal::new("signer-authority", &adapter).unwrap()];
+        let gate = crate::consent_journal::tests::BackupGate;
+        snapshot(SnapshotRequest {
+            principal_id: "synthetic-owner",
+            profile_id: "synthetic-signer-profile",
+            coverage: crate::account::backup::coverage(false),
+            sources: &sources,
+            destination: &archive,
+            key: &archive_key,
+            authority: &gate,
+        })
+        .unwrap();
+        restore(RestoreRequest {
+            principal_id: "synthetic-owner",
+            profile_id: "synthetic-signer-profile",
+            archive: &archive,
+            key: &archive_key,
+            targets: &[RestoreTarget {
+                component_id: "signer-authority",
+                template: recovery_template(18).unwrap(),
+                destination: &restored,
+                key: &restored_key,
+            }],
+            authority: &gate,
+        })
+        .unwrap();
+        let sealed = VerifiedSignerRecoverySource::open(
+            history::HistoryOpenRequest {
+                archive: &archive,
+                archive_key: &archive_key,
+                component_id: "signer-authority",
+                restored_component: &restored,
+                restored_key: &restored_key,
+            },
+            recovery_template(18).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(sealed.provenance().schema_version, 18);
+        // An authenticated old born archive remains readable historical data,
+        // but it cannot be a writable successor/implicit financial19 upgrade.
+        assert!(matches!(
+            require_no_old_born_recovery_source(&sealed),
+            Err(JournalError::RecoveryRequired)
+        ));
+        assert!(!sealed
+            .tables()
+            .iter()
+            .any(|t| t.name() == "signer_durable_payment_admission_intents"));
+        let before = [files(&original), files(&archive), files(&restored)];
+        with_complete_source(&sealed, |tx| {
+            recovery_migration::verify_exact_schema(tx, SCHEMA)?;
+            assert_eq!(storage::read_account(tx)?.writer_epoch, 7);
+            assert!(!storage::read_account(tx)?.recovery_required);
+            assert!(account_use_storage::inspect(tx, &account)?.genesis() == Some(&genesis));
+            let empty: i64 = tx.query_row(
+                "SELECT count(*) FROM signer_durable_payment_admission_intents",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(empty, 0);
+            Ok(())
+        })
+        .unwrap();
+        assert!(matches!(
+            super::super::require_no_old_born_recovery_source(&sealed),
+            Err(JournalError::RecoveryRequired)
+        ));
+        let informational = QuarantinedJournalRead::from_verified(sealed, &account).unwrap();
+        assert_eq!(informational.writer_epoch(), 7);
+        assert!(
+            before == [files(&original), files(&archive), files(&restored)],
+            "sealed historical files changed"
+        );
+        let c = adapter.0.lock().unwrap();
+        recovery_migration::verify_exact_schema(&c, recovery_migration::V18_SCHEMA).unwrap();
+        assert_eq!(
+            c.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            18
+        );
+    }
+}

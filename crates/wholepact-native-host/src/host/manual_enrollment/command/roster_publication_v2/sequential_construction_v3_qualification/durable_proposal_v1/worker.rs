@@ -13,16 +13,20 @@ use std::{
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
-use wholepact_authority::{AccountPolicy, native_witness_owner::EphemeralWitnessOriginV1};
+use wholepact_authority::{
+    AccountPolicy, OwnerControlRequest, native_witness_owner::EphemeralWitnessOriginV1,
+};
 use wholepact_core::born_recipient_policy_v2::{
     BornConstructionRecipientPolicyV2, BornOriginalLimitsV2, BornOwnReturnRuleV2,
     BornRecipientLimitV2,
 };
 use wholepact_signer::authority_bridge::{
+    AuthorizationCommit,
     durable_construction_v1::{
         DurableConstructionCaptureRequestV1, DurableConstructionRedisclosureRequestV1,
     },
     durable_review_ipc_v1::DurableReviewDeliveryRequestV1,
+    ipc::HistoryRequest,
     preconstruction_ipc::PreconstructionRequest,
 };
 use wholepact_signer::native_ui::synthetic_born_joined_qualification::{
@@ -109,6 +113,11 @@ pub(super) enum JoinedSignerCommandV1 {
     CloseRosterPublication(usize),
     OpenDurable(usize, wholepact_core::ProposalInput),
     PollDurablePair(usize),
+    ConfigureDurableWitness(usize),
+    PrepareDurableAdmission(usize),
+    ApproveDurableAdmission(usize),
+    ReconcileDurableWriter(usize),
+    ConfigureDurableWallet(usize, String),
     AcceptDurable(usize),
     ArmInitial(usize, PreconstructionRequest),
     ArmCapture(usize, DurableConstructionCaptureRequestV1),
@@ -118,6 +127,16 @@ pub(super) enum JoinedSignerCommandV1 {
         DurableReviewDeliveryRequestV1,
         wholepact_protocol::durable_proposal_v1::FixedProposalIdentityV1,
     ),
+    PollFinancialImport(
+        usize,
+        DurableReviewDeliveryRequestV1,
+        wholepact_protocol::durable_proposal_v1::FixedProposalIdentityV1,
+    ),
+    SignDurableFixed(
+        usize,
+        wholepact_protocol::durable_proposal_v1::FixedProposalIdentityV1,
+    ),
+    ServeDurableResult(usize, Arc<AtomicBool>),
     PollDisclosure(usize),
     CaptureCommitted(usize),
     CloseDurable(usize),
@@ -155,6 +174,15 @@ pub(super) enum JoinedSignerReplyV1 {
     CaptureCommitted {
         index: usize,
         reference: String,
+    },
+    DurableAuthorization {
+        index: usize,
+        history: HistoryRequest,
+        commit: AuthorizationCommit,
+    },
+    DurableAdmissionRequest {
+        index: usize,
+        request: OwnerControlRequest,
     },
     Done {
         index: usize,
@@ -447,11 +475,19 @@ fn execute(
         | C::CloseRosterPublication(i)
         | C::OpenDurable(i, _)
         | C::PollDurablePair(i)
+        | C::ConfigureDurableWitness(i)
+        | C::PrepareDurableAdmission(i)
+        | C::ApproveDurableAdmission(i)
+        | C::ReconcileDurableWriter(i)
+        | C::ConfigureDurableWallet(i, _)
         | C::AcceptDurable(i)
         | C::ArmInitial(i, _)
         | C::ArmCapture(i, _)
         | C::ArmRedisclosure(i, _)
         | C::PollImport(i, _, _)
+        | C::PollFinancialImport(i, _, _)
+        | C::SignDurableFixed(i, _)
+        | C::ServeDurableResult(i, _)
         | C::PollDisclosure(i)
         | C::CaptureCommitted(i)
         | C::CloseDurable(i) => *i,
@@ -678,6 +714,44 @@ fn execute(
                 .map_err(|e| signer_error(e, "fresh exact enrollment and manifest"))?;
             (State::Durable(entry), R::Records { index, records })
         }
+        (C::ConfigureDurableWitness(_), State::Durable(mut entry)) if index > 0 => {
+            entry
+                .configure_original_witness()
+                .map_err(|e| signer_error(e, "exact original witness native selection"))?;
+            (State::Durable(entry), R::Done { index })
+        }
+        (C::PrepareDurableAdmission(_), State::Durable(mut entry)) if index > 0 => {
+            // Only the actual current imported source prepares this inert
+            // request. Returning it is not a native approval or witness issuer.
+            let request = entry
+                .prepare_durable_admission()
+                .map_err(|e| signer_error(e, "source-bound exact durable admission preparation"))?;
+            (
+                State::Durable(entry),
+                R::DurableAdmissionRequest { index, request },
+            )
+        }
+        (C::ApproveDurableAdmission(_), State::Durable(mut entry)) if index > 0 => {
+            // The production native approval retains its immutable intent
+            // before the original owner mTLS submission. Uncertainty is final
+            // for this positive fixture, never a reason to invent replacement.
+            entry
+                .approve_durable_admission()
+                .map_err(|e| signer_error(e, "native retained-intent durable admission"))?;
+            (State::Durable(entry), R::Done { index })
+        }
+        (C::ReconcileDurableWriter(_), State::Durable(mut entry)) if index > 0 => {
+            entry
+                .reconcile_original_writer()
+                .map_err(|e| signer_error(e, "exact current writer native reconciliation"))?;
+            (State::Durable(entry), R::Done { index })
+        }
+        (C::ConfigureDurableWallet(_, setup), State::Durable(mut entry)) if index > 0 => {
+            entry
+                .configure_durable_wallet(&setup)
+                .map_err(|e| signer_error(e, "fresh exact durable viewing wallet native setup"))?;
+            (State::Durable(entry), R::Done { index })
+        }
         (C::ArmInitial(_, request), State::Durable(mut entry)) => {
             entry
                 .expect_initial_disclosure(request)
@@ -704,6 +778,53 @@ fn execute(
                 cancelled,
                 || entry.poll_exact_import(&request, &identity),
                 "exact memory-only fixed import",
+            )?;
+            (State::Durable(entry), R::Done { index })
+        }
+        (C::PollFinancialImport(_, request, identity), State::Durable(mut entry)) if index > 0 => {
+            // This distinct command cannot weaken the baseline import-only
+            // helper's requirement that no current writer was reconciled.
+            poll_until(
+                entry
+                    .deadline()
+                    .map_err(|e| signer_error(e, "financial import deadline"))?,
+                cancelled,
+                || entry.poll_financial_import(&request, &identity),
+                "exact fixed import with separately reconciled current writer",
+            )?;
+            (State::Durable(entry), R::Done { index })
+        }
+        (C::SignDurableFixed(_, identity), State::Durable(mut entry)) if index > 0 => {
+            // The real helper checks its original result/ledger on retry and
+            // refuses any new native review, wallet job or reservation there.
+            let (history, commit) = entry
+                .sign_durable_fixed(&identity)
+                .map_err(|e| signer_error(e, "exact fixed native sign or retained-result retry"))?;
+            (
+                State::Durable(entry),
+                R::DurableAuthorization {
+                    index,
+                    history,
+                    commit,
+                },
+            )
+        }
+        (C::ServeDurableResult(_, stop), State::Durable(mut entry)) if index > 0 => {
+            // Only poll the retained genuine native owner. The caller's stop
+            // flag cannot approve a prompt or extend the original deadline.
+            poll_until(
+                entry
+                    .deadline()
+                    .map_err(|e| signer_error(e, "retained result service deadline"))?,
+                cancelled,
+                || {
+                    if stop.load(Ordering::Acquire) {
+                        return Ok(true);
+                    }
+                    entry.poll_data_only()?;
+                    Ok(false)
+                },
+                "nonapproving exact retained native result service",
             )?;
             (State::Durable(entry), R::Done { index })
         }

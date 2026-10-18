@@ -71,12 +71,16 @@ mod tests {
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let key = wholepact_storage_security::DatabaseKey::from_bytes([71; 32]);
         let account = "a".repeat(64);
+        let private_directory = crate::files::PrivateDirectory::open(dir.path()).unwrap();
         let journal = SignerConsentJournal::create_encrypted(
             &dir.path().join("signer"),
             &key,
             &account,
             1,
             false,
+            &private_directory
+                .signer_journal_source_owner_for_test(&dir.path().join("signer"))
+                .unwrap(),
         )
         .unwrap();
         let expected = AccountUseGenesis {

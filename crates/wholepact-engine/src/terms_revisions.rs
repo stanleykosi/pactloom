@@ -132,6 +132,7 @@ impl Engine {
         principal: &str,
         mut e: Envelope,
     ) -> Result<AgreementView> {
+        crate::private_workspace_origin_v1::refuse_public_payload(&encode(&e)?)?;
         // Returning terms to a second principal is a disclosure boundary too.
         // Close the local editing window before any such snapshot escapes.
         if principal != e.owner_client_id

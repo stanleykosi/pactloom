@@ -354,25 +354,49 @@ impl Ledger {
         }
         if let Some(session_id) = event.writer_session_id.as_deref() {
             self.require_unfenced_transport(session_id)?;
+            self.require_unfenced_durable_payment_session_v1(session_id)?;
+        }
+        let durable_admission = self.selected_durable_payment_admission_v1()?.cloned();
+        if let Some(admission) = &durable_admission {
+            if matches!(
+                &event.mutation,
+                AuthorityMutation::AcquireWriter(_)
+                    | AuthorityMutation::ReserveAuthorization(_)
+                    | AuthorityMutation::OwnerControl(OwnerControlRequest {
+                        control: OwnerControl::ActivateWriter { .. },
+                        ..
+                    })
+            ) {
+                self.require_durable_payment_mutation_v1(
+                    &admission.operation_id,
+                    &event.mutation,
+                    event.writer_session_id.as_deref(),
+                    event.witness_time_ms,
+                )?;
+            } else if event.writer_session_id.is_some() {
+                return Err(AuthorityError::Permission);
+            }
         }
         // Bootstrap replay uses the same exact-attempt route as live admission.
         // Non-bootstrap events retain their own rules and remain readable under
         // later exclusion/quarantine; none become supported manual live history.
-        if matches!(
-            &event.mutation,
-            AuthorityMutation::AcquireWriter(_)
-                | AuthorityMutation::ReserveManualRosterConstructionV3(_)
-                | AuthorityMutation::ConsumeManualRosterConstructionV3(_)
-                | AuthorityMutation::ReserveManualRosterConstructionV2(_)
-                | AuthorityMutation::ConsumeManualRosterConstructionV2(_)
-                | AuthorityMutation::AdmitBornManualEnrollment(_)
-                | AuthorityMutation::AdmitBornManualEnrollmentV2(_)
-                | AuthorityMutation::AdmitBornManualRosterEnrollmentV2(_)
-                | AuthorityMutation::OwnerControl(OwnerControlRequest {
-                    control: OwnerControl::ActivateWriter { .. },
-                    ..
-                })
-        ) {
+        if durable_admission.is_none()
+            && matches!(
+                &event.mutation,
+                AuthorityMutation::AcquireWriter(_)
+                    | AuthorityMutation::ReserveManualRosterConstructionV3(_)
+                    | AuthorityMutation::ConsumeManualRosterConstructionV3(_)
+                    | AuthorityMutation::ReserveManualRosterConstructionV2(_)
+                    | AuthorityMutation::ConsumeManualRosterConstructionV2(_)
+                    | AuthorityMutation::AdmitBornManualEnrollment(_)
+                    | AuthorityMutation::AdmitBornManualEnrollmentV2(_)
+                    | AuthorityMutation::AdmitBornManualRosterEnrollmentV2(_)
+                    | AuthorityMutation::OwnerControl(OwnerControlRequest {
+                        control: OwnerControl::ActivateWriter { .. },
+                        ..
+                    })
+            )
+        {
             if let Some(extension) = self.manual_roster_extension()? {
                 self.require_manual_roster_bootstrap_scope_v2(
                     &extension.extension.digest()?,
@@ -595,7 +619,10 @@ impl Ledger {
                 {
                     return Err(AuthorityError::Expired);
                 }
-                if !self.policy.enrollment_refs.contains(&r.enrollment_ref)
+                // The NEW exact admission alone associates its original extension
+                // reference. The immutable birth allowlist is never changed.
+                if (!self.policy.enrollment_refs.contains(&r.enrollment_ref)
+                    && durable_admission.is_none())
                     || !self.policy.agreement_ids.contains(&r.agreement_id)
                     || !self
                         .policy
@@ -770,7 +797,18 @@ impl Ledger {
                     .witness_time_ms
                     .checked_add(300_000)
                     .ok_or(AuthorityError::Expired)?
-                    .min(self.policy.policy_expires_at_ms);
+                    .min(self.policy.policy_expires_at_ms)
+                    .min(
+                        durable_admission
+                            .as_ref()
+                            .and_then(|r| match &r.control {
+                                OwnerControl::AdmitDurablePaymentV1 { record } => {
+                                    Some(record.terms.valid_until_ms)
+                                }
+                                _ => None,
+                            })
+                            .unwrap_or(u64::MAX),
+                    );
                 if expires <= event.witness_time_ms {
                     return Err(AuthorityError::Expired);
                 }
@@ -844,6 +882,14 @@ impl Ledger {
                 }
                 self.fence(&r.expected_head, r.writer_epoch)?;
                 match &r.control {
+                    OwnerControl::AdmitDurablePaymentV1 { .. } => {
+                        if event.writer_session_id.is_some() {
+                            return Err(AuthorityError::Permission);
+                        }
+                        self.validate_new_durable_payment_admission_v1(r, event.witness_time_ms)?;
+                        // Common tail closes only pointers; historical receipts,
+                        // stored keys, construction fences and exposure stay intact.
+                    }
                     OwnerControl::InstallBornOfflineArtifactsV1 { record } => {
                         if r.operation_id != record.binding.owner_operation_id()?
                             || r.expected_head != record.binding.expected_head
@@ -1088,6 +1134,7 @@ impl Ledger {
             AuthorityMutation::OwnerControl(r) => matches!(
                 &r.control,
                 OwnerControl::ActivateWriter { .. }
+                    | OwnerControl::AdmitDurablePaymentV1 { .. }
                     | OwnerControl::EnrollBornOfflineV1 { .. }
                     | OwnerControl::InstallBornOfflineArtifactsV1 { .. }
                     | OwnerControl::GrantConstructionTransportV1 { .. }

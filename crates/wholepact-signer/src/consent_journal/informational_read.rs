@@ -19,10 +19,10 @@ impl QuarantinedJournalRead {
         if source.wallet().is_some() {
             return Err(JournalError::RecoveryRequired);
         }
-        // Keep the previously supported v17 source readable through its frozen
+        // Keep the previously supported v17/v18 sources readable through their frozen
         // exact template. Materialization is rollback-only and never migrates
         // the sealed source, rewrites genesis or issues a current capability.
-        if !matches!(source.provenance().schema_version, 17 | SCHEMA_VERSION) {
+        if !matches!(source.provenance().schema_version, 17 | 18 | SCHEMA_VERSION) {
             return Err(JournalError::UnsupportedSchema);
         }
         let account = recovery_inventory::with_complete_source(&source, |tx| {

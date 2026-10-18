@@ -10,6 +10,95 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use wholepact_authority::AuthenticatedPermit;
 
 impl SignerConsentJournal {
+    /// Read-only qualification evidence. Counts and exact row fingerprints are
+    /// compared across the real retained-result retry, never used as authority.
+    /// Result and original outbox share the one atomic results row.
+    #[cfg(all(
+        feature = "synthetic-born-joined-qualification",
+        feature = "durable-proposal"
+    ))]
+    pub(crate) fn qualification_durable_ledger_v1(
+        &self,
+        session: &SignerConsentSession,
+    ) -> Result<Vec<(u64, [u8; 32])>> {
+        use rusqlite::types::ValueRef;
+        use sha2::{Digest, Sha256};
+        // Fixed names/order only. No caller-controlled SQL or metadata export.
+        // 0..7: consent, release, reserved inputs, request, permit, key-use,
+        // result+outbox. Remaining entries cover current receipts, reconciled
+        // remote exposure and explicit redelivery, all unchanged by retry.
+        const QUERIES: [&str; 14] = [
+            "SELECT * FROM signer_original_consents ORDER BY reference",
+            "SELECT * FROM signer_release_intents ORDER BY authorization_id",
+            "SELECT * FROM signer_input_reservations ORDER BY account_id,input_id",
+            "SELECT * FROM signer_bridge_requests ORDER BY authorization_id",
+            "SELECT * FROM signer_bridge_permits ORDER BY authorization_id",
+            "SELECT * FROM signer_bridge_keyuse ORDER BY authorization_id",
+            "SELECT * FROM signer_bridge_results ORDER BY authorization_id",
+            "SELECT * FROM signer_enrollments ORDER BY reference",
+            "SELECT * FROM signer_accepted_manifests ORDER BY reference",
+            "SELECT * FROM signer_writer_reconciliations ORDER BY review_digest",
+            "SELECT * FROM signer_remote_exposures ORDER BY authorization_id",
+            "SELECT * FROM signer_remote_inputs ORDER BY authorization_id,nullifier",
+            "SELECT * FROM signer_result_redeliveries ORDER BY operation_id",
+            "SELECT * FROM signer_durable_payment_admission_intents ORDER BY authorization_id",
+        ];
+        let account = self.account_state()?;
+        let binding = self.binding();
+        let permission = session.read_lease(&binding, &account)?;
+        let _fence = self
+            .authority_fence
+            .read()
+            .map_err(|_| JournalError::Permission)?;
+        let connection = self.connection.lock().map_err(|_| JournalError::Database)?;
+        storage::check_account(&connection, &account)?;
+        self.database_identity.check_current(&connection)?;
+        storage::bounded(&connection, self.capacity_limits())?;
+        let mut result = Vec::new();
+        for query in QUERIES {
+            permission.check_current()?;
+            let mut hash = Sha256::new();
+            hash.update(b"wholepact:qualification-durable-ledger:v1\0");
+            hash.update(query.as_bytes());
+            let mut statement = connection.prepare(query)?;
+            let columns = statement.column_count();
+            let mut rows = statement.query([])?;
+            let mut count = 0u64;
+            while let Some(row) = rows.next()? {
+                count += 1;
+                hash.update(count.to_le_bytes());
+                hash.update((columns as u64).to_le_bytes());
+                for column in 0..columns {
+                    match row.get_ref(column)? {
+                        ValueRef::Null => hash.update([0]),
+                        ValueRef::Integer(value) => {
+                            hash.update([1]);
+                            hash.update(value.to_le_bytes());
+                        }
+                        ValueRef::Real(value) => {
+                            hash.update([2]);
+                            hash.update(value.to_bits().to_le_bytes());
+                        }
+                        ValueRef::Text(value) => {
+                            hash.update([3]);
+                            hash.update((value.len() as u64).to_le_bytes());
+                            hash.update(value);
+                        }
+                        ValueRef::Blob(value) => {
+                            hash.update([4]);
+                            hash.update((value.len() as u64).to_le_bytes());
+                            hash.update(value);
+                        }
+                    }
+                }
+            }
+            result.push((count, hash.finalize().into()));
+        }
+        self.database_identity.check_current(&connection)?;
+        permission.check_current()?;
+        Ok(result)
+    }
+
     pub(crate) fn bridge_retain_request(
         &self,
         lease: &OriginalAuthorizationLease<'_>,

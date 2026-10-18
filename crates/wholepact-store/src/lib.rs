@@ -22,6 +22,9 @@ use thiserror::Error;
 const SCHEMA_VERSION: i64 = 5;
 pub mod backup;
 mod draft_history;
+mod durable_input_projection_guard_v1;
+mod private_workspace_guard_v1;
+pub mod private_workspace_origin_v1;
 const MAX_JSON_BYTES: usize = 1_048_576;
 pub const MAX_AGREEMENTS: u64 = 256;
 pub const MAX_AGREEMENTS_PER_PRINCIPAL: u64 = 64;
@@ -378,7 +381,18 @@ impl Store {
         let c = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         self.require_current_replay(&c, context)?;
         crate::manual_enrollment::require_generic_request_not_manual(&c, context)?;
-        replay(&c, context)
+        let result = replay(&c, context)?;
+        if let Some(result) = &result {
+            self.check_durable_projection_destination_v1(&c, &result.record.payload)?;
+            self.check_private_workspace_saved_v1(
+                &c,
+                result,
+                &context.principal_id,
+                &result.record.id,
+                &operation_id(context),
+            )?;
+        }
+        Ok(result)
     }
     pub fn create_agreement(
         &self,
@@ -413,7 +427,12 @@ impl Store {
     }
     pub fn get_record(&self, aggregate_type: &str, id: &str) -> Result<Option<StoredRecord>> {
         let c = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
-        read_record(&c, aggregate_type, id)
+        let record = read_record(&c, aggregate_type, id)?;
+        if let Some(record) = &record {
+            self.check_durable_projection_destination_v1(&c, &record.payload)?;
+            private_workspace_guard_v1::check_record(aggregate_type, id, &record.payload, None)?;
+        }
+        Ok(record)
     }
     pub fn list_records(&self, aggregate_type: &str) -> Result<Vec<StoredRecord>> {
         let c = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
@@ -430,7 +449,19 @@ impl Store {
         let raw = query
             .query_map([aggregate_type], record_row)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        raw.into_iter().map(decode_record).collect()
+        raw.into_iter()
+            .map(|row| {
+                let record = decode_record(row)?;
+                self.check_durable_projection_destination_v1(&c, &record.payload)?;
+                private_workspace_guard_v1::check_record(
+                    aggregate_type,
+                    &record.id,
+                    &record.payload,
+                    None,
+                )?;
+                Ok(record)
+            })
+            .collect()
     }
     /// Generic atomic metadata mutation. Immutable proposals use creation only;
     /// updates of a `proposal` aggregate are always rejected.
@@ -469,19 +500,55 @@ impl Store {
             ));
         }
         let encoded = encode(&payload)?;
+        durable_input_projection_guard_v1::decode_record_payload(&encoded)?;
         let mut c = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
-        self.check_durable_private_destination(&c, &payload)?;
+        self.check_private_record_destinations(&c, &payload)?;
+        private_workspace_guard_v1::check_record(
+            aggregate_type,
+            id,
+            &payload,
+            Some(&context.principal_id),
+        )?;
         let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
         self.require_current_replay(&tx, context)?;
         crate::manual_enrollment::require_generic_request_not_manual(&tx, context)?;
         self.require_current_record_write(&tx, aggregate_type, id, &payload)?;
-        if let Some(existing) = replay(&tx, context)? {
-            if existing.record.id != id {
+        if payload
+            .get(private_workspace_origin_v1::PRIVATE_WORKSPACE_ORIGIN_KEY_V1)
+            .is_none()
+        {
+            // A one-agreement private workspace cannot grow an unmarked generic
+            // namespace, even if its marker survives only in saved history.
+            backup::validate_no_private_workspace_origins(&tx)?;
+        }
+        // Marker immutability is checked against the actual current row before
+        // even semantic replay. CAS still follows replay for legacy retries.
+        let existing = read_record(&tx, aggregate_type, id)?;
+        if let Some(existing) = &existing {
+            self.check_durable_projection_destination_v1(&tx, &existing.payload)?;
+            private_workspace_guard_v1::check_record(aggregate_type, id, &existing.payload, None)?;
+        }
+        let saved = replay(&tx, context)?;
+        if let Some(saved) = &saved {
+            self.check_durable_projection_destination_v1(&tx, &saved.record.payload)?;
+        }
+        private_workspace_guard_v1::check_transition(
+            &tx,
+            aggregate_type,
+            id,
+            context,
+            existing.as_ref(),
+            &payload,
+            saved.as_ref(),
+            expected_revision,
+            event_kind,
+        )?;
+        if let Some(saved) = saved {
+            if saved.record.id != id {
                 return Err(StoreError::IdempotencyConflict);
             }
-            return Ok(existing);
+            return Ok(saved);
         }
-        let existing = read_record(&tx, aggregate_type, id)?;
         if aggregate_type == "agreement" && event_kind == "agreement_terms_revised" {
             let old = existing.as_ref().ok_or(StoreError::NotFound)?;
             if expected_revision != Some(old.revision) {
@@ -546,11 +613,20 @@ impl Store {
             replayed: false,
         };
         let serialized = serde_json::to_string(&result)?;
+        // The complete saved wrapper must be readable under the same raw
+        // depth/node budget, not only its separately bounded record payload.
+        durable_input_projection_guard_v1::decode_mutation_value(&serialized)?;
         tx.execute("INSERT INTO operations(operation_id,principal_id,kind,resource_id,status,result,created_at_ms,updated_at_ms) VALUES(?1,?2,?3,?4,'succeeded',?5,?6,?6)", params![operation_id,context.principal_id,event_kind,id,serialized,now])?;
         tx.execute("INSERT INTO idempotency(principal_id,idempotency_key,request_digest,result) VALUES(?1,?2,?3,?4)", params![context.principal_id,context.idempotency_key,context.request_digest,serialized])?;
-        self.check_durable_private_destination(&tx, &result.record.payload)?;
+        #[cfg(test)]
+        durable_input_projection_guard_v1::run_commit_hook(false);
+        self.check_private_record_destinations(&tx, &result.record.payload)?;
         tx.commit()?;
-        self.check_durable_private_destination(&c, &result.record.payload)?;
+        #[cfg(test)]
+        durable_input_projection_guard_v1::run_commit_hook(true);
+        // A refusal here cannot undo the committed mutation. Preserve all
+        // durable evidence; never retry as though no operation took place.
+        self.check_private_record_destinations(&c, &result.record.payload)?;
         Ok(result)
     }
 
@@ -640,6 +716,12 @@ impl Store {
                     operation_id,
                     occurred_at_ms,
                 )| {
+                    let payload = durable_input_projection_guard_v1::decode_live_event(
+                        &payload,
+                        &aggregate_type,
+                        &aggregate_id,
+                        rev,
+                    )?;
                     Ok(StoredEvent {
                         event_id: format!("event_{seq}"),
                         sequence: seq as u64,
@@ -647,7 +729,7 @@ impl Store {
                         aggregate_id,
                         aggregate_revision: rev as u64,
                         kind,
-                        payload: serde_json::from_str(&payload)?,
+                        payload,
                         operation_id,
                         occurred_at_ms,
                     })
@@ -672,13 +754,23 @@ impl Store {
                 created_at_ms,
                 updated_at_ms,
             )| {
+                let result = durable_input_projection_guard_v1::decode_mutation_value(&result)?;
+                let saved: MutationResult = serde_json::from_value(result.clone())?;
+                self.check_durable_projection_destination_v1(&c, &saved.record.payload)?;
+                self.check_private_workspace_saved_v1(
+                    &c,
+                    &saved,
+                    &principal_id,
+                    &resource_id,
+                    &operation_id,
+                )?;
                 Ok(StoredOperation {
                     operation_id,
                     principal_id,
                     kind,
                     resource_id,
                     status,
-                    result: serde_json::from_str(&result)?,
+                    result,
                     created_at_ms,
                     updated_at_ms,
                 })
@@ -705,7 +797,7 @@ fn decode_record(
         id,
         revision: u64::try_from(revision)
             .map_err(|_| StoreError::InvalidInput("negative stored revision"))?,
-        payload: serde_json::from_str(&payload)?,
+        payload: durable_input_projection_guard_v1::decode_record_payload(&payload)?,
         created_at_ms,
         updated_at_ms,
     })
@@ -730,7 +822,9 @@ fn replay(c: &Connection, context: &CommandContext) -> Result<Option<MutationRes
             if digest != context.request_digest {
                 return Err(StoreError::IdempotencyConflict);
             }
-            let mut result: MutationResult = serde_json::from_str(&result)?;
+            let mut result: MutationResult = serde_json::from_value(
+                durable_input_projection_guard_v1::decode_mutation_value(&result)?,
+            )?;
             result.replayed = true;
             Ok(result)
         })

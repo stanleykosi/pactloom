@@ -10,6 +10,7 @@ fn amount(n: u64) -> Amount {
     Amount::from_zatoshis(n).unwrap()
 }
 struct Fixture {
+    private_directory: crate::files::PrivateDirectory,
     _dir: tempfile::TempDir,
     path: std::path::PathBuf,
     key: DatabaseKey,
@@ -28,8 +29,18 @@ impl Fixture {
         }
         let path = dir.path().join("synthetic-automation-journal");
         let key = DatabaseKey::from_bytes([42; 32]);
-        let journal =
-            SignerConsentJournal::create_encrypted(&path, &key, "account-alice", 1, false).unwrap();
+        let private_directory = crate::files::PrivateDirectory::open(dir.path()).unwrap();
+        let journal = SignerConsentJournal::create_encrypted(
+            &path,
+            &key,
+            "account-alice",
+            1,
+            false,
+            &private_directory
+                .signer_journal_source_owner_for_test(&path)
+                .unwrap(),
+        )
+        .unwrap();
         let session = fixture::session(&journal, "synthetic-owner");
         let mut input =
             crate::consent_journal::tests::proposal("agreement-a", "obligation-a", "proposal-a")
@@ -75,6 +86,7 @@ impl Fixture {
             .record_accepted_manifest(session.approve_manifest(p, decision).unwrap())
             .unwrap();
         Self {
+            private_directory,
             _dir: dir,
             path,
             key,
@@ -324,17 +336,23 @@ fn automation_restart_and_recovery_epoch_do_not_reissue_consent() {
         .journal
         .record_automatic_consent_release(f.automatic(&g))
         .unwrap();
-    let reopened = SignerConsentJournal::open_encrypted(&f.path, &f.key, "account-alice").unwrap();
+    let reopened = SignerConsentJournal::open_encrypted(
+        &f.path,
+        &f.key,
+        "account-alice",
+        &f.private_directory
+            .signer_journal_source_owner_for_test(&f.path)
+            .unwrap(),
+    )
+    .unwrap();
     let session = fixture::session(&reopened, "synthetic-owner");
-    assert!(
-        reopened
-            .original_automatic_authorization_lease(
-                "synthetic-auto-authorization",
-                &session,
-                &continuation
-            )
-            .is_err()
-    );
+    assert!(reopened
+        .original_automatic_authorization_lease(
+            "synthetic-auto-authorization",
+            &session,
+            &continuation
+        )
+        .is_err());
     assert_eq!(reopened.automation_grants(&session).unwrap().len(), 1);
     // Synthetic successor epoch models the recovery writer fence. Historical
     // grant rows remain unchanged, but the old epoch can never become eligible.
@@ -637,9 +655,15 @@ fn automation_backup_preserves_grant_and_exact_consent_only_as_quarantined_histo
     })
     .unwrap();
     assert!(!report.authorization_allowed);
-    assert!(
-        SignerConsentJournal::open_encrypted(&restored, &restored_key, "account-alice").is_err()
-    );
+    assert!(SignerConsentJournal::open_encrypted(
+        &restored,
+        &restored_key,
+        "account-alice",
+        &f.private_directory
+            .signer_journal_source_owner_for_test(&restored)
+            .unwrap()
+    )
+    .is_err());
     let source = VerifiedSignerRecoverySource::open(
         history::HistoryOpenRequest {
             archive: &archive,
@@ -696,20 +720,26 @@ fn restarted_native_owner_can_only_reduce_retained_same_epoch_grant() {
         .journal
         .record_automatic_consent_release(f.automatic(&grant))
         .unwrap();
-    let reopened = SignerConsentJournal::open_encrypted(&f.path, &f.key, "account-alice").unwrap();
+    let reopened = SignerConsentJournal::open_encrypted(
+        &f.path,
+        &f.key,
+        "account-alice",
+        &f.private_directory
+            .signer_journal_source_owner_for_test(&f.path)
+            .unwrap(),
+    )
+    .unwrap();
     let fresh = fixture::session(&reopened, "synthetic-owner");
-    assert!(
-        fresh
-            .prepare_automation_grant(
-                &reopened,
-                &f.enrollment,
-                grant.policy.clone(),
-                grant.terms.clone(),
-                grant.witness.clone(),
-                AutomationGrantStatus::Active
-            )
-            .is_err()
-    );
+    assert!(fresh
+        .prepare_automation_grant(
+            &reopened,
+            &f.enrollment,
+            grant.policy.clone(),
+            grant.terms.clone(),
+            grant.witness.clone(),
+            AutomationGrantStatus::Active
+        )
+        .is_err());
     let prepare_pause = fresh
         .prepare_automation_grant(
             &reopened,

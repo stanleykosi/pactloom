@@ -1,7 +1,7 @@
 //! Dedicated participation account source model. No CLI provisioning route is
 //! enabled. Only the trusted controlling-terminal flow can create a new account
 //! for persistence; tests exercise temporary synthetic entropy.
-use crate::{Error, Result, files::PrivateDirectory, vault};
+use crate::{files::PrivateDirectory, vault, Error, Result};
 use bip39::{Language, Mnemonic};
 use orchard::keys::{FullViewingKey, SpendingKey};
 use sha2::{Digest, Sha256};
@@ -565,6 +565,7 @@ impl AccountVault {
             &self.account_id()?,
             1,
             self.account.restored,
+            &self.directory.signer_journal_source_owner()?,
         )?;
         self.authority_initialized = true;
         self.persist()?;
@@ -607,6 +608,7 @@ impl AccountVault {
                 &key,
                 &self.account_id()?,
                 &verified,
+                &self.directory.signer_journal_source_owner()?,
             )?;
             self.account.activation = Some(verified);
             return Ok(journal);
@@ -615,6 +617,7 @@ impl AccountVault {
             &self.directory.root().join("authority.sqlite"),
             &key,
             &self.account_id()?,
+            &self.directory.signer_journal_source_owner()?,
         )?;
         if !self.authority_initialized || self.account.restored {
             store.require_recovery()?;

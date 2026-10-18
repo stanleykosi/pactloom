@@ -220,6 +220,7 @@ impl Drop for ProjectionRedisclosurePairResponseV1 {
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(from = "StrictProjectionRedisclosureRequestV1")]
 pub enum ProjectionRedisclosureRequestV1 {
     Status,
     Redisclose {
@@ -228,6 +229,7 @@ pub enum ProjectionRedisclosureRequestV1 {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(from = "StrictProjectionRedisclosureResponseV1")]
 pub enum ProjectionRedisclosureResponseV1 {
     Current {
         binding: ProjectionRedisclosureChannelBindingV1,
@@ -237,6 +239,51 @@ pub enum ProjectionRedisclosureResponseV1 {
         delivery: Box<DurableInputProjectionDeliveryV1>,
     },
     Denied,
+}
+// Empty struct variants are necessary: internally tagged unit variants ignore
+// extra fields. The private parse shape retains the public wire/API unchanged.
+#[derive(Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
+enum StrictProjectionRedisclosureRequestV1 {
+    Status {},
+    Redisclose {
+        request: Box<DurableInputProjectionRedisclosureRequestV1>,
+    },
+}
+impl From<StrictProjectionRedisclosureRequestV1> for ProjectionRedisclosureRequestV1 {
+    fn from(value: StrictProjectionRedisclosureRequestV1) -> Self {
+        match value {
+            StrictProjectionRedisclosureRequestV1::Status {} => Self::Status,
+            StrictProjectionRedisclosureRequestV1::Redisclose { request } => {
+                Self::Redisclose { request }
+            }
+        }
+    }
+}
+#[derive(Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+enum StrictProjectionRedisclosureResponseV1 {
+    Current {
+        binding: ProjectionRedisclosureChannelBindingV1,
+    },
+    Retained {
+        original: Box<DurableInputProjectionOutboxV1>,
+        delivery: Box<DurableInputProjectionDeliveryV1>,
+    },
+    Denied {},
+}
+impl From<StrictProjectionRedisclosureResponseV1> for ProjectionRedisclosureResponseV1 {
+    fn from(value: StrictProjectionRedisclosureResponseV1) -> Self {
+        match value {
+            StrictProjectionRedisclosureResponseV1::Current { binding } => {
+                Self::Current { binding }
+            }
+            StrictProjectionRedisclosureResponseV1::Retained { original, delivery } => {
+                Self::Retained { original, delivery }
+            }
+            StrictProjectionRedisclosureResponseV1::Denied {} => Self::Denied,
+        }
+    }
 }
 /// The complete response must fit the UNCHANGED frame cap before native
 /// approval and before commit. No higher limit or partial JSON fallback.
@@ -335,5 +382,42 @@ mod tests {
             decode_redisclosure_response_v1(&vec![b' '; MAX_INPUT_PROJECTION_FRAME_BYTES_V1])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn empty_redisclosure_variants_preserve_wire_and_refuse_extra_fields() {
+        let status = br#"{"operation":"status"}"#;
+        let denied = br#"{"status":"denied"}"#;
+        assert_eq!(
+            serde_json::to_vec(&ProjectionRedisclosureRequestV1::Status).unwrap(),
+            status
+        );
+        assert_eq!(
+            serde_json::to_vec(&ProjectionRedisclosureResponseV1::Denied).unwrap(),
+            denied
+        );
+        assert!(matches!(
+            wholepact_core::parse_typed_json::<ProjectionRedisclosureRequestV1>(status),
+            Ok(ProjectionRedisclosureRequestV1::Status)
+        ));
+        assert!(matches!(
+            decode_redisclosure_response_v1(denied),
+            Ok(ProjectionRedisclosureResponseV1::Denied)
+        ));
+        for field in ["request", "authorization_export", "rescan", "binding"] {
+            let mut request = serde_json::json!({"operation":"status"});
+            request[field] = true.into();
+            assert!(
+                wholepact_core::parse_typed_json::<ProjectionRedisclosureRequestV1>(
+                    &serde_json::to_vec(&request).unwrap()
+                )
+                .is_err()
+            );
+            let mut response = serde_json::json!({"status":"denied"});
+            response[field] = true.into();
+            assert!(
+                decode_redisclosure_response_v1(&serde_json::to_vec(&response).unwrap()).is_err()
+            );
+        }
     }
 }

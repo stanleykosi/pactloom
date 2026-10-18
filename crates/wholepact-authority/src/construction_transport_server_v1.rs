@@ -216,6 +216,8 @@ impl AuthorityServer {
         Ok(Self {
             journal,
             tls,
+            #[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
+            durable_payment: None,
             #[cfg(all(feature = "offline-witness-owner", target_os = "linux"))]
             offline_witness: None,
             #[cfg(all(feature = "born-offline-witness-owner", target_os = "linux"))]

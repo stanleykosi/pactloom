@@ -105,6 +105,7 @@ fn private_dir() -> tempfile::TempDir {
     dir
 }
 struct Fixture {
+    private_directory: crate::files::PrivateDirectory,
     dir: tempfile::TempDir,
     key: DatabaseKey,
     journal: SignerConsentJournal,
@@ -116,12 +117,16 @@ impl Fixture {
     fn new() -> Self {
         let dir = private_dir();
         let key = DatabaseKey::from_bytes([71; 32]);
+        let private_directory = crate::files::PrivateDirectory::open(dir.path()).unwrap();
         let journal = SignerConsentJournal::create_encrypted(
             &dir.path().join("signer"),
             &key,
             "account-alice",
             1,
             false,
+            &private_directory
+                .signer_journal_source_owner_for_test(&dir.path().join("signer"))
+                .unwrap(),
         )
         .unwrap();
         let session = session(&journal, "synthetic-owner");
@@ -132,6 +137,7 @@ impl Fixture {
             1_000_000_000,
         );
         Self {
+            private_directory,
             dir,
             key,
             journal,
@@ -275,12 +281,21 @@ fn immutable_original_reference_and_exact_release_survive_encrypted_reopen() {
     assert!(SignerConsentJournal::open_encrypted(
         &f.dir.path().join("signer"),
         &DatabaseKey::from_bytes([72; 32]),
-        "account-alice"
+        "account-alice",
+        &f.private_directory
+            .signer_journal_source_owner_for_test(&f.dir.path().join("signer"))
+            .unwrap()
     )
     .is_err());
-    let reopened =
-        SignerConsentJournal::open_encrypted(&f.dir.path().join("signer"), &f.key, "account-alice")
-            .unwrap();
+    let reopened = SignerConsentJournal::open_encrypted(
+        &f.dir.path().join("signer"),
+        &f.key,
+        "account-alice",
+        &f.private_directory
+            .signer_journal_source_owner_for_test(&f.dir.path().join("signer"))
+            .unwrap(),
+    )
+    .unwrap();
     let session = session(&reopened, "synthetic-owner");
     assert!(
         reopened
@@ -491,18 +506,33 @@ fn outstanding_obligations_inputs_and_aggregate_budget_remain_reserved() {
 #[test]
 fn wrong_schema_interrupted_initialization_and_restored_account_never_reinitialize() {
     let dir = private_dir();
+    let private_directory = crate::files::PrivateDirectory::open(dir.path()).unwrap();
     let key = DatabaseKey::from_bytes([73; 32]);
     let path = dir.path().join("legacy");
     let legacy = wholepact_store::Store::create_encrypted(&path, &key).unwrap();
     drop(legacy);
     assert!(matches!(
-        SignerConsentJournal::open_encrypted(&path, &key, "account-alice"),
+        SignerConsentJournal::open_encrypted(
+            &path,
+            &key,
+            "account-alice",
+            &private_directory
+                .signer_journal_source_owner_for_test(&path)
+                .unwrap()
+        ),
         Err(JournalError::UnsupportedSchema)
     ));
     let incomplete = dir.path().join("interrupted");
     drop(wholepact_storage_security::create_encrypted(&incomplete, &key).unwrap());
     assert!(matches!(
-        SignerConsentJournal::open_encrypted(&incomplete, &key, "account-alice"),
+        SignerConsentJournal::open_encrypted(
+            &incomplete,
+            &key,
+            "account-alice",
+            &private_directory
+                .signer_journal_source_owner_for_test(&incomplete)
+                .unwrap()
+        ),
         Err(JournalError::Storage(
             StorageSecurityError::UninitializedDatabase
         ))
@@ -518,11 +548,18 @@ fn wrong_schema_interrupted_initialization_and_restored_account_never_reinitiali
     drop(f.session);
     drop(f.journal);
     assert!(
-        SignerConsentJournal::open_encrypted(&f.dir.path().join("signer"), &f.key, "account-alice")
-            .unwrap()
-            .account_state()
-            .unwrap()
-            .recovery_required
+        SignerConsentJournal::open_encrypted(
+            &f.dir.path().join("signer"),
+            &f.key,
+            "account-alice",
+            &f.private_directory
+                .signer_journal_source_owner_for_test(&f.dir.path().join("signer"))
+                .unwrap()
+        )
+        .unwrap()
+        .account_state()
+        .unwrap()
+        .recovery_required
     );
 }
 pub(super) struct BackupGate;
@@ -652,7 +689,14 @@ fn typed_signer_bundle_inventory_roundtrip_always_restores_to_quarantine() {
     .unwrap();
     assert!(!report.authorization_allowed);
     assert!(matches!(
-        SignerConsentJournal::open_encrypted(&restored, &restored_key, "account-alice"),
+        SignerConsentJournal::open_encrypted(
+            &restored,
+            &restored_key,
+            "account-alice",
+            &f.private_directory
+                .signer_journal_source_owner_for_test(&restored)
+                .unwrap()
+        ),
         Err(JournalError::Storage(
             StorageSecurityError::QuarantinedDatabase
         ))
@@ -668,12 +712,16 @@ fn maintained_pczt_review_prepares_exact_consent_and_rejects_artifact_substituti
     let fvk_digest = hex::encode(Sha256::digest(inputs.policy.participants[0].fvk.to_bytes()));
     let dir = private_dir();
     let key = DatabaseKey::from_bytes([79; 32]);
+    let private_directory = crate::files::PrivateDirectory::open(dir.path()).unwrap();
     let journal = SignerConsentJournal::create_encrypted(
         &dir.path().join("signer"),
         &key,
         &account_id,
         1,
         false,
+        &private_directory
+            .signer_journal_source_owner_for_test(&dir.path().join("signer"))
+            .unwrap(),
     )
     .unwrap();
     let s = session(&journal, "synthetic-owner");
@@ -923,7 +971,14 @@ fn earlier_incompatible_signer_schema_draft_is_refused_without_migration() {
     drop(f.session);
     drop(f.journal);
     assert!(matches!(
-        SignerConsentJournal::open_encrypted(&f.dir.path().join("signer"), &f.key, "account-alice"),
+        SignerConsentJournal::open_encrypted(
+            &f.dir.path().join("signer"),
+            &f.key,
+            "account-alice",
+            &f.private_directory
+                .signer_journal_source_owner_for_test(&f.dir.path().join("signer"))
+                .unwrap()
+        ),
         Err(JournalError::UnsupportedSchema)
     ));
 }

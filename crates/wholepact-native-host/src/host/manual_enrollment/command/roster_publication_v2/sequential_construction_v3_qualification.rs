@@ -390,6 +390,7 @@ fn foreground_child(stage: &str, inputs: &[Input<'_>]) -> std::io::Result<()> {
             | "three-born-constructed-checkpoint-v3"
             | "three-born-full-payment-v1"
             | "durable-proposal-native-owner-reopen-v1"
+            | "durable-proposal-native-fixed-signing-v1"
     ) {
         900
     } else {
@@ -825,6 +826,14 @@ fn synthetic_foreground_child() {
     ))]
     if stage == "durable-proposal-native-owner-reopen-v1" {
         durable_proposal_v1::exercise_stage(terminal).unwrap();
+        return;
+    }
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "synthetic-born-joined-qualification"
+    ))]
+    if stage == "durable-proposal-native-fixed-signing-v1" {
+        durable_proposal_v1::exercise_fixed_signing_stage(terminal).unwrap();
         return;
     }
     #[cfg(feature = "synthetic-born-joined-qualification")]

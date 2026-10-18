@@ -16,12 +16,18 @@ impl Fixture {
         let directory = tempfile::tempdir().unwrap();
         std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let key = wholepact_storage_security::DatabaseKey::from_bytes([117; 32]);
+        let private_directory = crate::files::PrivateDirectory::open(directory.path()).unwrap();
         let journal = SignerConsentJournal::create_encrypted(
             &directory.path().join("synthetic-receipts.sqlite"),
             &key,
             "account-alice",
             1,
             false,
+            &private_directory
+                .signer_journal_source_owner_for_test(
+                    &directory.path().join("synthetic-receipts.sqlite"),
+                )
+                .unwrap(),
         )
         .unwrap();
         let session = fixture::session(&journal, "synthetic-owner");

@@ -55,10 +55,14 @@ impl BornPermanentStopSourceV1 {
         publication::read_commit(&retained)?;
         let path = retained.account.directory.root().join(JOURNAL);
         let key = DatabaseKey::from_bytes(*retained.journal_key);
-        let journal = Arc::new(SignerConsentJournal::open_encrypted(
+        // The retained original vault is actual born-origin evidence. Every
+        // older format must fail before a writable handle, even if the file
+        // claims to be pre-genesis; no ordinary migration is permitted here.
+        let journal = Arc::new(SignerConsentJournal::open_known_born_encrypted(
             &path,
             &key,
-            &retained.record.account_record.genesis.identity.account_id,
+            &retained.record.account_record.genesis,
+            &retained.account.directory.signer_journal_source_owner()?,
         )?);
         let epoch = journal.account_state()?.writer_epoch;
         let result = Self {

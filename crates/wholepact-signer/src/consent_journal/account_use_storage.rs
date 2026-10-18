@@ -384,12 +384,16 @@ mod backup_tests {
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let account = "11".repeat(32);
         let key = DatabaseKey::from_bytes([41; 32]);
+        let private_directory = crate::files::PrivateDirectory::open(dir.path()).unwrap();
         let journal = SignerConsentJournal::create_encrypted(
             &dir.path().join("source.sqlite"),
             &key,
             &account,
             1,
             true,
+            &private_directory
+                .signer_journal_source_owner_for_test(&dir.path().join("source.sqlite"))
+                .unwrap(),
         )
         .unwrap();
         // Modeled immutable historical rows. No native birth or witness approval
@@ -495,7 +499,14 @@ mod backup_tests {
         .unwrap();
         assert!(!report.authorization_allowed);
         assert!(matches!(
-            SignerConsentJournal::open_encrypted(&restored, &restored_key, &account),
+            SignerConsentJournal::open_encrypted(
+                &restored,
+                &restored_key,
+                &account,
+                &private_directory
+                    .signer_journal_source_owner_for_test(&restored)
+                    .unwrap()
+            ),
             Err(JournalError::Storage(
                 StorageSecurityError::QuarantinedDatabase
             ))

@@ -532,12 +532,16 @@ fn retained_mapping_requires_actual_journal_genesis() {
     let f = Fixture::new();
     let dir = private_dir();
     let key = wholepact_storage_security::DatabaseKey::from_bytes([0x43; 32]);
+    let private_directory = crate::files::PrivateDirectory::open(dir.path()).unwrap();
     let journal = SignerConsentJournal::create_encrypted(
         &dir.path().join("source.sqlite"),
         &key,
         &h('1'),
         7,
         false,
+        &private_directory
+            .signer_journal_source_owner_for_test(&dir.path().join("source.sqlite"))
+            .unwrap(),
     )
     .unwrap();
     let c = journal.connection.lock().unwrap();
@@ -573,12 +577,16 @@ fn retained_mapping_requires_actual_journal_genesis() {
     // even when it deliberately shares the synthetic account label and FVK.
     let other_dir = private_dir();
     let other_key = wholepact_storage_security::DatabaseKey::from_bytes([0x45; 32]);
+    let other_private_directory = crate::files::PrivateDirectory::open(other_dir.path()).unwrap();
     let other = SignerConsentJournal::create_encrypted(
         &other_dir.path().join("other-source.sqlite"),
         &other_key,
         &h('1'),
         7,
         false,
+        &other_private_directory
+            .signer_journal_source_owner_for_test(&other_dir.path().join("other-source.sqlite"))
+            .unwrap(),
     )
     .unwrap();
     let other_c = other.connection.lock().unwrap();
@@ -601,12 +609,16 @@ fn generic_release_refuses_bound_consent_without_creating_exposure() {
     let f = Fixture::new();
     let dir = private_dir();
     let key = wholepact_storage_security::DatabaseKey::from_bytes([0x44; 32]);
+    let private_directory = crate::files::PrivateDirectory::open(dir.path()).unwrap();
     let journal = SignerConsentJournal::create_encrypted(
         &dir.path().join("source.sqlite"),
         &key,
         &h('1'),
         7,
         false,
+        &private_directory
+            .signer_journal_source_owner_for_test(&dir.path().join("source.sqlite"))
+            .unwrap(),
     )
     .unwrap();
     let session = authority::fixture::session(&journal, "fresh-native-owner");

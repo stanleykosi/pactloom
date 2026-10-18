@@ -1,7 +1,7 @@
 //! Native-reviewed, read-only-selected witness configuration. No credential
 //! generation, installation, remote setup or silent enrollment is performed.
 use super::{NativeAuthority, NativeAuthorityBinding, NativeDecision};
-use crate::{Error, Result, account::AccountVault};
+use crate::{account::AccountVault, Error, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -15,6 +15,9 @@ use wholepact_authority::{
     WitnessDisclosureDescriptor, WriterStatus,
 };
 use zeroize::Zeroizing;
+
+#[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+mod durable_payment_v1;
 
 const MAX_CONFIG: usize = 16 * 1024;
 const MAX_CREDENTIAL: usize = 16 * 1024;
@@ -180,6 +183,7 @@ impl PreparedWitnessSetup {
             return Err(Error::ReviewMismatch);
         }
         Ok(NativeWitnessWorkspace {
+            instance: std::sync::Arc::new(()),
             source: self.source,
             account_id: self.account_id,
             client: self.client,
@@ -189,6 +193,7 @@ impl PreparedWitnessSetup {
 }
 
 pub(super) struct NativeWitnessWorkspace {
+    instance: std::sync::Arc<()>,
     source: NativeAuthorityBinding,
     account_id: String,
     client: AuthorityClient,
@@ -686,12 +691,14 @@ impl NativeWitnessWorkspace {
         let (source, account_id, writer, owner, writer_pin, owner_pin) = approved.into_parts();
         (
             Self {
+                instance: std::sync::Arc::new(()),
                 source: source.clone(),
                 account_id: account_id.clone(),
                 client: writer,
                 writer_certificate_digest: writer_pin,
             },
             Self {
+                instance: std::sync::Arc::new(()),
                 source,
                 account_id,
                 client: owner,
@@ -732,8 +739,15 @@ impl NativeWitnessWorkspace {
         if disclosure.account_id != terms.identity.account_id
             || disclosure.policy_digest != terms.original_policy_digest
             || disclosure != actual.construction().reservation.session.disclosure
-        { return Err(Error::ReviewMismatch); }
-        Ok(Self { source: owner.native().binding(), account_id:terms.identity.account_id.clone(),
-            client, writer_certificate_digest:terms.signer.owner_certificate_digest.clone() })
+        {
+            return Err(Error::ReviewMismatch);
+        }
+        Ok(Self {
+            instance: std::sync::Arc::new(()),
+            source: owner.native().binding(),
+            account_id: terms.identity.account_id.clone(),
+            client,
+            writer_certificate_digest: terms.signer.owner_certificate_digest.clone(),
+        })
     }
 }

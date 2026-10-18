@@ -21,12 +21,16 @@ impl SourceFixture {
         let dir = tempfile::tempdir().unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let private_directory = crate::files::PrivateDirectory::open(dir.path()).unwrap();
         let journal = SignerConsentJournal::create_encrypted(
             &dir.path().join("synthetic-source.sqlite"),
             &DatabaseKey::from_bytes([0x71; 32]),
             account,
             1,
             false,
+            &private_directory
+                .signer_journal_source_owner_for_test(&dir.path().join("synthetic-source.sqlite"))
+                .unwrap(),
         )
         .unwrap();
         Self { dir, journal }

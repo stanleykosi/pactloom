@@ -56,6 +56,7 @@ impl Store {
         crate::validate_id(obligation)?;
         let mut c = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        refuse_private_projection_settlement(&tx, snapshot, updates)?;
         if self.generation_fenced(&tx, "obligation", obligation)? {
             return Err(StoreError::RecoveryRequired);
         }
@@ -238,8 +239,10 @@ impl Store {
         let checkpoint = encode(&serde_json::json!({
             "release": intent, "evidence_id": evidence_id, "provenance": provenance
         }))?;
+        crate::backup::validate_no_private_input_projections_json(&checkpoint)?;
         let mut c = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        refuse_private_projection_settlement(&tx, snapshot, updates)?;
         if crate::backup::read_recovery_state(&tx)?.recovery_required && !self.recovered_generation
         {
             return Err(StoreError::RecoveryRequired);
@@ -365,4 +368,24 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+}
+
+// This bounded profile adds no alternate settlement write or replay capability
+// for private discovery data. Scan actual current and saved results, not merely
+// caller-supplied snapshots, before even an idempotent early return. Old
+// construction-only histories retain their existing settlement semantics.
+fn refuse_private_projection_settlement(
+    connection: &rusqlite::Connection,
+    snapshot: &[StoredRecord],
+    updates: &[(String, serde_json::Value)],
+) -> Result<()> {
+    crate::backup::validate_no_private_input_projections(connection)?;
+    for payload in snapshot
+        .iter()
+        .map(|record| &record.payload)
+        .chain(updates.iter().map(|(_, payload)| payload))
+    {
+        crate::backup::validate_no_private_input_projections_json(&encode(payload)?)?;
+    }
+    Ok(())
 }

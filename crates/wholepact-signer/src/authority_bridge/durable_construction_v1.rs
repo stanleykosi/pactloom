@@ -3,6 +3,10 @@
 //! this signer connection to remain alive. Public records are historical data;
 //! only the actual authenticated client can produce an intake owner. Same-grant
 //! redelivery cannot authorize a new pairing after restart; that needs a new native disclosure.
+// Restriction-only exact recapture. This does not enable a discovery issuer or
+// accept caller metadata as authenticated provenance.
+pub mod exact_capture_v1;
+
 use super::{BridgeError, Result, ipc::OriginalHistoryClient};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;

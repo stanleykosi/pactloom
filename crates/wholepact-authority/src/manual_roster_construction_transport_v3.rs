@@ -15,6 +15,9 @@ impl AuthorityClient {
         continuation: &ManualRosterSessionContinuationV2,
         request: &ManualRosterConstructionReservationRequestV3,
     ) -> Result<AuthenticatedManualRosterConstructionReservationV3> {
+        // Admission-only history is not an empty old financial projection.
+        // Refuse before any owner/session check or network contact.
+        history.require_no_durable_payment_v1()?;
         if !history.offline_permits.is_empty() || !history.born_offline_permits.is_empty() {
             return Err(AuthorityError::OfflineHistoryUnsupported);
         }
@@ -211,5 +214,22 @@ impl AuthorityClient {
         };
         result.check_current()?;
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod durable_payment_precontact_tests {
+    use super::*;
+    #[test]
+    fn admission_only_history_fails_the_legacy_v3_precontact_gate() {
+        let (birth, _, events, _) = crate::durable_payment_v1::tests::admitted_fixture();
+        let history = crate::durable_payment_v1::tests::history(&birth, &events);
+        assert!(history.permits.is_empty());
+        assert!(history.offline_permits.is_empty());
+        assert!(history.born_offline_permits.is_empty());
+        assert!(matches!(
+            history.require_no_durable_payment_v1(),
+            Err(AuthorityError::PolicyDenied)
+        ));
     }
 }

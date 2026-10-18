@@ -172,12 +172,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let private_directory = crate::files::PrivateDirectory::open(dir.path()).unwrap();
         let journal = SignerConsentJournal::create_encrypted(
             &dir.path().join("audit-source"),
             &DatabaseKey::from_bytes([74; 32]),
             "account-alice",
             1,
             false,
+            &private_directory
+                .signer_journal_source_owner_for_test(&dir.path().join("audit-source"))
+                .unwrap(),
         )
         .unwrap();
         let origin = crate::native_ui::recovery_test_authority();

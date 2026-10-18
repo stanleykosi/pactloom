@@ -27,7 +27,13 @@ use wholepact_signer_origin::{
     AuthenticatedDurableInputProjectionV1,
 };
 
+#[path = "durable_input_projections_v1/exact_material_v1.rs"]
+pub(crate) mod exact_material_v1;
+#[path = "durable_input_projections_v1/material_capture_reservations_v1.rs"]
+pub(crate) mod material_capture_reservations_v1;
+
 const MAX_ROUNDS: usize = 4;
+const MAX_ROUND_BYTES: usize = 2 * 1024 * 1024;
 
 /// Non-authorizing organizer claims. The native signer independently joins the
 /// actual account, original recipient policy and current source before export.
@@ -103,6 +109,10 @@ struct Round {
     requests: BTreeMap<String, DurableInputProjectionRequestV1>,
     intakes: BTreeMap<String, Intake>,
     frozen_manifest_digest: Option<String>,
+    /// Immutable material-free, disclosed-or-unknown operation history. Never
+    /// clear this on cancellation, expiry, native failure or lost response.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    capture_intents: BTreeMap<String, material_capture_reservations_v1::MaterialCaptureIntentV1>,
 }
 
 /// Sanitized progress only. No input identifiers, values, addresses, source
@@ -112,6 +122,7 @@ pub struct DurableDiscoveryRoundSummaryV1 {
     pub candidate_id: String,
     pub retained_owner_count: usize,
     pub candidate_frozen: bool,
+    pub material_capture_intent_count: usize,
     pub cancellation_requested: bool,
     pub authorization_allowed: bool,
 }
@@ -139,6 +150,7 @@ fn summary(id: &str, round: &Round, cancelled: bool) -> DurableDiscoveryRoundSum
         candidate_id: id.into(),
         retained_owner_count: round.intakes.len(),
         candidate_frozen: round.frozen_manifest_digest.is_some(),
+        material_capture_intent_count: round.capture_intents.len(),
         cancellation_requested: cancelled,
         authorization_allowed: false,
     }
@@ -201,10 +213,15 @@ impl Round {
         if self.frozen_manifest_digest.is_some() && self.intakes.len() != 2 {
             return Err(damaged());
         }
-        Ok(())
+        material_capture_reservations_v1::validate_history(self, id)
     }
     fn candidate(&self, id: &str) -> Result<Proposal> {
         self.validate(id)?;
+        self.candidate_from_validated_receipts()
+    }
+    /// Only used after base receipt validation. Historical intent validation
+    /// calls this too, so it must not recursively validate capture history.
+    fn candidate_from_validated_receipts(&self) -> Result<Proposal> {
         if self.intakes.len() != 2 {
             return Err(ApiError::new(
                 "MISSING_EVIDENCE",
@@ -228,9 +245,21 @@ pub(crate) fn validate_stored(envelope: &Envelope) -> Result<()> {
     if envelope.durable_input_projections_v1.len() > MAX_ROUNDS {
         return Err(damaged());
     }
+    let mut operations = BTreeSet::new();
     for (id, value) in &envelope.durable_input_projections_v1 {
-        let round: Round = serde_json::from_value(value.clone()).map_err(|_| damaged())?;
+        let round = decode_round_value(value)?;
+        for operation in round
+            .requests
+            .values()
+            .map(|r| &r.operation_id)
+            .chain(round.capture_intents.keys())
+        {
+            if !operations.insert(operation.clone()) {
+                return Err(damaged());
+            }
+        }
         round.validate(id)?;
+        material_capture_reservations_v1::validate_admitted_history(envelope, id, &round)?;
         let first = round.requests.values().next().ok_or_else(damaged)?;
         // Later terms editing may make a round stale, but never relabel history.
         if first.intent.agreement.agreement_id != envelope.view.agreement.agreement_id
@@ -387,6 +416,7 @@ impl Engine {
             requests,
             intakes: BTreeMap::new(),
             frozen_manifest_digest: None,
+            capture_intents: BTreeMap::new(),
         };
         self.check_discovery(
             access,
@@ -641,14 +671,12 @@ impl Engine {
     }
 
     fn discovery_round(&self, envelope: &Envelope, id: &str) -> Result<Round> {
-        let round: Round = serde_json::from_value(
+        let round = decode_round_value(
             envelope
                 .durable_input_projections_v1
                 .get(id)
-                .ok_or_else(damaged)?
-                .clone(),
-        )
-        .map_err(|_| damaged())?;
+                .ok_or_else(damaged)?,
+        )?;
         round.validate(id)?;
         Ok(round)
     }
@@ -700,8 +728,20 @@ impl Engine {
     }
 }
 
+fn decode_round_bytes(bytes: &[u8]) -> Result<Round> {
+    // Keep the existing strict duplicate-key, unknown-field, depth and node
+    // rejection, including nested candidate extension data. The enclosing raw
+    // Store decoder must also reject duplicates before constructing a Value.
+    wholepact_core::strict_json::parse_typed_json_with_byte_limit(bytes, MAX_ROUND_BYTES)
+        .map_err(|_| damaged())
+}
+fn decode_round_value(value: &serde_json::Value) -> Result<Round> {
+    decode_round_bytes(&serde_json::to_vec(value).map_err(|_| damaged())?)
+}
 fn put(envelope: &mut Envelope, id: &str, round: &Round) -> Result<()> {
     round.validate(id)?;
+    let raw = serde_json::to_vec(round).map_err(|_| damaged())?;
+    decode_round_bytes(&raw)?;
     envelope.durable_input_projections_v1.insert(
         id.into(),
         serde_json::to_value(round).map_err(|_| damaged())?,

@@ -8,6 +8,10 @@
 #![cfg(target_os = "linux")]
 
 mod client;
+// Inert strict wire data and an opaque observed receipt are compiled for the
+// private coordinator. No discovery client factory or native server is exposed.
+pub mod durable_input_projection_v1;
+pub use client::AuthenticatedDurableInputProjectionV1;
 pub mod framing;
 pub mod manual;
 pub mod manual_candidate_selection;

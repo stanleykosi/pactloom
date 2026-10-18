@@ -274,6 +274,7 @@ fn read_rows(c: &Connection, table: &'static Table, predicate: &str) -> Result<V
             rowid: row.get(0)?,
             cells,
         };
+        validate_snapshot_row_without_private_input_projections(table.name, &historical.cells)?;
         let size = serde_json::to_vec(&historical)?.len();
         bytes = bytes
             .checked_add(size)
@@ -285,6 +286,35 @@ fn read_rows(c: &Connection, table: &'static Table, predicate: &str) -> Result<V
     }
     Ok(rows)
 }
+
+fn validate_snapshot_row_without_private_input_projections(
+    table: &str,
+    cells: &[Value],
+) -> Result<()> {
+    if table == ORIGINALS.name {
+        // A snapshot retains original-row wrappers one level deep. Their third
+        // cell encodes the base SQL cells; scanning the wrapper alone would
+        // miss private projections or workspace markers in its JSON text. Layers
+        // themselves are not recursive snapshots and are deliberately not
+        // traversed here.
+        let original_table = cells
+            .first()
+            .and_then(Value::as_str)
+            .ok_or(StoreError::RecoveryRequired)?;
+        if !BASE.iter().any(|base| base.name == original_table) {
+            return Err(StoreError::RecoveryRequired);
+        }
+        let encoded = cells
+            .get(2)
+            .and_then(Value::as_str)
+            .ok_or(StoreError::RecoveryRequired)?;
+        original_cells_without_private_input_projections(original_table, encoded)?;
+    } else {
+        validate_no_private_input_projection_values(table, cells)?;
+    }
+    Ok(())
+}
+
 type CapturedSnapshot = (Vec<CapturedRow>, Vec<(String, usize)>, usize);
 
 fn capture(c: &Connection) -> Result<CapturedSnapshot> {
@@ -678,7 +708,9 @@ fn load_layer_rows(c: &Connection, header: &Layer) -> Result<Vec<CapturedRow>> {
             return Err(StoreError::RecoveryRequired);
         }
         *count += 1;
+        crate::backup::validate_no_private_input_projections_json(&payload)?;
         let row: HistoricalRow = serde_json::from_str(&payload)?;
+        validate_snapshot_row_without_private_input_projections(table.name, &row.cells)?;
         if row.cells.len() != table.columns.split(',').count()
             || serde_json::to_string(&row)? != payload
             || !rowids.insert((table.name, row.rowid))
@@ -757,7 +789,8 @@ fn restrictions(table: &str, cells: &[Value]) -> Result<Vec<(&'static str, Strin
                 )?);
             }
             if kind == crate::manual_enrollment::PERMANENT_STOP_V1 {
-                let audit: crate::manual_enrollment::ManualPermanentStopPublicationV1 = strict_value(payload.clone())?;
+                let audit: crate::manual_enrollment::ManualPermanentStopPublicationV1 =
+                    strict_value(payload.clone())?;
                 result.push(("operation", audit.exclusion.operation_id));
             }
             if kind == crate::manual_enrollment::CONTINUATION {
@@ -1071,7 +1104,8 @@ fn validate_layered_for_template(
                             RECOVERED_GENERATION_APPLICATION_ID,
                             old.parent_schema_version,
                         )?,
-                    ).is_ok() => {}
+                    )
+                    .is_ok() => {}
             None if header.previous_layer_digest.is_none() => (),
             _ => return Err(StoreError::RecoveryRequired),
         }
@@ -1126,3 +1160,6 @@ fn validate_layered_for_template(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod private_input_projection_tests;

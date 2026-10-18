@@ -605,7 +605,12 @@ impl AccountVault {
             .map_err(|_| Error::RecoveryRequired)?;
         }
         let key = wholepact_storage_security::DatabaseKey::from_bytes(*successor.authority_key);
-        let receipt = approved.commit(fresh, &target.join("authority.sqlite"), &key)?;
+        let receipt = approved.commit(
+            fresh,
+            &target.join("authority.sqlite"),
+            &key,
+            &successor.directory.signer_journal_source_owner()?,
+        )?;
         receipt.check_current()?;
         let record = receipt.record().clone();
         if record.account_id != successor.account_id()?

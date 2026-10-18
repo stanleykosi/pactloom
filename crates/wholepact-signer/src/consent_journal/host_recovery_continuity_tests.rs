@@ -104,6 +104,11 @@ fn host_continuity_preserves_witness_only_exposure_without_fabricating_originals
         "account-alice",
         1,
         false,
+        &f.private_directory
+            .signer_journal_source_owner_for_test(
+                &f._directory.path().join("empty-surviving-signer.sqlite"),
+            )
+            .unwrap(),
     )
     .unwrap();
     let session = fixture::session(&other, "synthetic-empty-owner");

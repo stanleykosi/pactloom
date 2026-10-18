@@ -290,6 +290,14 @@ impl FreshCommonContextJournalReopen<'_> {
     pub(crate) fn journal_path(&self) -> PathBuf {
         self.retained.account.directory.root().join(JOURNAL)
     }
+    pub(crate) fn journal_source_owner(
+        &self,
+    ) -> Result<Arc<crate::consent_journal::SignerJournalSourceOwner>> {
+        self.retained
+            .account
+            .directory
+            .signer_journal_source_owner()
+    }
     pub(crate) fn journal_key(&self) -> DatabaseKey {
         DatabaseKey::from_bytes(*self.retained.journal_key)
     }
