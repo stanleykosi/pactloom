@@ -14,6 +14,18 @@ pub(super) enum FixturePhaseV1 {
     Verified(OwnerControlRequest),
 }
 
+// Correlate inert typed data only. Human review text is not a wire format, and
+// matching this data neither checks freshness nor supplies native approval.
+fn require_exact_retained_request(
+    retained: &OwnerControlRequest,
+    requested: &OwnerControlRequest,
+) -> Result<()> {
+    if retained != requested {
+        return Err(AuthorityError::Conflict);
+    }
+    Ok(())
+}
+
 impl EphemeralNativeWitnessV1 {
     /// The caller first drops its informational server, after the signer has
     /// finished preparing this actual request from the imported fixed source.
@@ -98,18 +110,12 @@ impl EphemeralNativeWitnessV1 {
             &self.server_certificate_digest,
             &original_address.to_string(),
         )?;
-        let display: serde_json::Value = serde_json::from_str(&pending.prepared.display)
-            .map_err(|_| AuthorityError::CorruptHistory)?;
-        let displayed_request: OwnerControlRequest = serde_json::from_value(
-            display
-                .get("request")
-                .cloned()
-                .ok_or(AuthorityError::CorruptHistory)?,
-        )
-        .map_err(|_| AuthorityError::CorruptHistory)?;
-        if &displayed_request != request {
-            return Err(AuthorityError::Conflict);
-        }
+        require_exact_retained_request(
+            prepared
+                .proposal
+                .retained_request_for_synthetic_qualification(),
+            request,
+        )?;
         self.durable_payment = FixturePhaseV1::Admitting(request.clone());
         // Continue, understood and focused final primary click are exactly the
         // existing native controls. No fixture constructs any decision/source.
@@ -212,5 +218,84 @@ impl EphemeralNativeWitnessV1 {
         let serving = self.serve_exact_server(server)?;
         self.durable_payment = FixturePhaseV1::Idle;
         Ok(serving)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request_data() -> OwnerControlRequest {
+        let (birth, _, events, terms) = crate::durable_payment_v1::tests::fixture();
+        let request = crate::durable_payment_v1::tests::admission(&birth, &events, terms);
+        let OwnerControl::AdmitDurablePaymentV1 { record } = &request.control else {
+            panic!("expected inert durable admission data");
+        };
+        assert!(record
+            .validate_request(&request, &birth.request.disclosure)
+            .is_ok());
+        request
+    }
+
+    #[test]
+    fn pure_durable_payment_human_review_footer_is_not_standalone_json() {
+        // Pure presentation-format regression, not native execution. Reproduce
+        // Prepared::new's human footer with the actual Window sanitizer and
+        // notice, without constructing a proposal, source, decision or owner.
+        let display =
+            serde_json::to_string_pretty(&serde_json::json!({ "request": request_data() }))
+                .unwrap();
+        let digest = crate::durable_payment_v1::tests::h('f');
+        assert!(serde_json::from_str::<serde_json::Value>(&display).is_ok());
+        let human_review = inert_text(&format!(
+            "{display}\n\nExact owner review digest: {digest}\n\n{TRUST_NOTICE}"
+        ));
+        assert!(serde_json::from_str::<serde_json::Value>(&human_review).is_err());
+    }
+
+    #[test]
+    fn pure_durable_payment_retained_request_correlation_is_exact() {
+        // Genuine-shaped inert request data from pure history helpers. The
+        // same correlation helper runs before the fixture's real native click.
+        let retained = request_data();
+        assert!(require_exact_retained_request(&retained, &retained.clone()).is_ok());
+        fn change_digest(value: &mut String) {
+            let first = if value.starts_with('0') { "1" } else { "0" };
+            value.replace_range(..1, first);
+        }
+        let changes: [(&str, fn(&mut OwnerControlRequest)); 9] = [
+            ("operation", |r| r.operation_id.push_str("-different")),
+            ("account", |r| change_digest(&mut r.account_id)),
+            ("network", |r| r.network_profile_id.push_str("-different")),
+            ("head sequence", |r| r.expected_head.sequence += 1),
+            ("head digest", |r| {
+                change_digest(&mut r.expected_head.digest)
+            }),
+            ("epoch", |r| r.writer_epoch += 1),
+            ("control", |r| r.control = OwnerControl::Pause),
+            ("fixed revision", |r| {
+                let OwnerControl::AdmitDurablePaymentV1 { record } = &mut r.control else {
+                    panic!("expected inert durable admission data");
+                };
+                record.terms.fixed.revision += 1;
+            }),
+            ("fixed artifact digest", |r| {
+                let OwnerControl::AdmitDurablePaymentV1 { record } = &mut r.control else {
+                    panic!("expected inert durable admission data");
+                };
+                change_digest(&mut record.terms.fixed.proved_artifact_digest);
+            }),
+        ];
+        for (field, change) in changes {
+            let mut requested = retained.clone();
+            change(&mut requested);
+            assert!(
+                matches!(
+                    require_exact_retained_request(&retained, &requested),
+                    Err(AuthorityError::Conflict)
+                ),
+                "changed {field} must not correlate"
+            );
+        }
     }
 }

@@ -24,6 +24,12 @@ pub(crate) struct ConfiguredDurablePaymentWitnessV1 {
     disclosure: WitnessDisclosureDescriptor,
 }
 impl DurablePaymentAdmissionProposalV1 {
+    /// Borrow retained request data for synthetic correlation only. This does
+    /// not check freshness or provide native approval, a source or a grant.
+    #[cfg(feature = "synthetic-qualification")]
+    pub(crate) fn retained_request_for_synthetic_qualification(&self) -> &OwnerControlRequest {
+        &self.expected
+    }
     pub(crate) fn review_digest(&self) -> Result<String> {
         self.check_current()?;
         crate::durable_payment_v1::request_native_review_digest_v1(&self.expected, &self.disclosure)
