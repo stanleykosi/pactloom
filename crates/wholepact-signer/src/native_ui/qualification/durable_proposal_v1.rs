@@ -7,7 +7,8 @@
 //! A host leaf must independently own encrypted intake, proof and exact union.
 
 pub use super::durable_witness_v1::{
-    DurableAdmissionPreparationFailureV1, DurableAdmissionPreparationStageV1,
+    DurableAdmissionHistoryFailureV1, DurableAdmissionPreparationFailureV1,
+    DurableAdmissionPreparationStageV1,
 };
 use super::durable_witness_v1::{
     DurableWitnessPreparedV1, QualificationDurableWitnessCompletionV1,

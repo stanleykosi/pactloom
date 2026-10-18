@@ -8,6 +8,10 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use wholepact_authority::durable_payment_v1::{
     DurableFixedCandidateBindingV1, DurablePaymentAdmissionTermsV1,
 };
+#[cfg(feature = "synthetic-born-joined-qualification")]
+use wholepact_authority::transport::history_diagnostics_v1::{
+    CheckedHistoryFailureV1, CheckedHistoryIoKindV1, CheckedHistoryStageV1,
+};
 use wholepact_authority::{
     AccountSnapshot, OwnerControl, OwnerControlRequest, ReconciledAuthorityHistory,
     WitnessDisclosureDescriptor, WriterSessionReceipt,
@@ -41,7 +45,33 @@ fn source_history(
     role: CredentialRole,
     deadline: Instant,
 ) -> Result<ReconciledAuthorityHistory> {
+    source_history_inner(
+        workspace,
+        source,
+        role,
+        deadline,
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        None,
+    )
+}
+fn source_history_inner(
+    workspace: &NativeWitnessWorkspace,
+    source: &DurableWitnessImportedSourceV1,
+    role: CredentialRole,
+    deadline: Instant,
+    #[cfg(feature = "synthetic-born-joined-qualification")] failure: Option<
+        &mut Option<(CheckedHistoryFailureV1, Option<Error>)>,
+    >,
+) -> Result<ReconciledAuthorityHistory> {
     require_workspace_source(workspace, source, role)?;
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    if let Some(failure) = failure {
+        return workspace.durable_history_diagnosed_v1(
+            deadline,
+            || require_workspace_source(workspace, source, role),
+            failure,
+        );
+    }
     workspace.durable_history_v1(deadline, || {
         require_workspace_source(workspace, source, role)
     })
@@ -897,17 +927,44 @@ pub enum DurableAdmissionPreparationStageV1 {
 pub struct DurableAdmissionPreparationFailureV1 {
     stage: DurableAdmissionPreparationStageV1,
     error: Error,
+    history: Option<DurableAdmissionHistoryFailureV1>,
 }
 #[cfg(feature = "synthetic-born-joined-qualification")]
 impl DurableAdmissionPreparationFailureV1 {
     pub(super) fn new(stage: DurableAdmissionPreparationStageV1, error: Error) -> Self {
-        Self { stage, error }
+        Self {
+            stage,
+            error,
+            history: None,
+        }
     }
     pub fn stage(&self) -> DurableAdmissionPreparationStageV1 {
         self.stage
     }
     pub fn into_error(self) -> Error {
         self.error
+    }
+    pub fn take_history_failure(&mut self) -> Option<DurableAdmissionHistoryFailureV1> {
+        self.history.take()
+    }
+}
+/// Inert error evidence from one actual checked history read. It cannot start a
+/// request, expose history, restore a source or alter the main refusal result.
+#[cfg(feature = "synthetic-born-joined-qualification")]
+pub struct DurableAdmissionHistoryFailureV1 {
+    authority: CheckedHistoryFailureV1,
+    callback: Option<Error>,
+}
+#[cfg(feature = "synthetic-born-joined-qualification")]
+impl DurableAdmissionHistoryFailureV1 {
+    pub fn stage(&self) -> CheckedHistoryStageV1 {
+        self.authority.stage()
+    }
+    pub fn io_kind(&self) -> Option<CheckedHistoryIoKindV1> {
+        self.authority.io_kind()
+    }
+    pub fn into_errors(self) -> (wholepact_authority::AuthorityError, Option<Error>) {
+        (self.authority.into_error(), self.callback)
     }
 }
 #[cfg(feature = "synthetic-born-joined-qualification")]
@@ -937,12 +994,25 @@ impl QualificationDurablePreparationV1 {
         stage: DurableAdmissionPreparationStageV1,
         error: Error,
     ) {
+        self.record_with_history(attempt, stage, error, None);
+    }
+    fn record_with_history(
+        &mut self,
+        attempt: Option<u64>,
+        stage: DurableAdmissionPreparationStageV1,
+        error: Error,
+        history: Option<DurableAdmissionHistoryFailureV1>,
+    ) {
         if let Some(attempt) = attempt.filter(|id| Some(*id) == self.active) {
             if !self.failure_seen {
                 self.failure_seen = true;
                 self.failure = Some((
                     attempt,
-                    DurableAdmissionPreparationFailureV1::new(stage, error),
+                    DurableAdmissionPreparationFailureV1 {
+                        stage,
+                        error,
+                        history,
+                    },
                 ));
             }
         }
@@ -1031,6 +1101,7 @@ pub(super) enum DurableWitnessOutcomeV1 {
     ObservedPreparation {
         attempt: Option<u64>,
         stage: DurableAdmissionPreparationStageV1,
+        history_failure: Option<DurableAdmissionHistoryFailureV1>,
         outcome: Box<DurableWitnessOutcomeV1>,
     },
     Prepared(Result<Box<DurableWitnessPreparedV1>>),
@@ -1117,6 +1188,8 @@ impl NativeRuntime {
         self.start_witness_job(epoch, move |cancelled| {
             #[cfg(feature = "synthetic-born-joined-qualification")]
             let mut stage = DurableAdmissionPreparationStageV1::Source;
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            let mut history_failure = None;
             let result = (|| {
                 if cancelled.load(Ordering::Acquire) {
                     return Err(Error::Locked);
@@ -1126,8 +1199,14 @@ impl NativeRuntime {
                 {
                     stage = DurableAdmissionPreparationStageV1::History;
                 }
-                let history =
-                    source_history(&owner, &source, CredentialRole::Owner, source.deadline()?)?;
+                let history = source_history_inner(
+                    &owner,
+                    &source,
+                    CredentialRole::Owner,
+                    source.deadline()?,
+                    #[cfg(feature = "synthetic-born-joined-qualification")]
+                    Some(&mut history_failure),
+                )?;
                 #[cfg(feature = "synthetic-born-joined-qualification")]
                 {
                     stage = DurableAdmissionPreparationStageV1::RetainedIntent;
@@ -1196,6 +1275,12 @@ impl NativeRuntime {
             let outcome = DurableWitnessOutcomeV1::ObservedPreparation {
                 attempt,
                 stage,
+                history_failure: history_failure.map(|(authority, callback)| {
+                    DurableAdmissionHistoryFailureV1 {
+                        authority,
+                        callback,
+                    }
+                }),
                 outcome: Box::new(outcome),
             };
             WitnessOutcome::DurablePaymentV1(outcome)
@@ -1457,6 +1542,7 @@ pub(super) fn complete(
     if let DurableWitnessOutcomeV1::ObservedPreparation {
         attempt,
         stage,
+        history_failure,
         outcome,
     } = outcome
     {
@@ -1466,7 +1552,7 @@ pub(super) fn complete(
             open.durable_witness.qualification_completion = None;
             open.durable_witness
                 .qualification_preparation
-                .record(attempt, stage, error);
+                .record_with_history(attempt, stage, error, history_failure);
             return ("Durable witness history or source was rejected. No new body, session or approval was substituted.", None);
         }
         let (message, prepared) = complete(open, *outcome);
@@ -1631,6 +1717,18 @@ impl NativeRuntime {
 #[cfg(test)]
 mod custody_tests {
     use super::*;
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    #[test]
+    fn optional_history_diagnostic_does_not_change_original_preparation_error() {
+        let mut failure = DurableAdmissionPreparationFailureV1::new(
+            DurableAdmissionPreparationStageV1::History,
+            Error::Uncertain,
+        );
+        assert!(failure.take_history_failure().is_none());
+        assert!(failure.take_history_failure().is_none());
+        assert!(failure.stage() == DurableAdmissionPreparationStageV1::History);
+        assert!(matches!(failure.into_error(), Error::Uncertain));
+    }
     #[cfg(feature = "synthetic-born-joined-qualification")]
     #[test]
     fn admission_preparation_observer_preserves_first_error_and_exact_attempt() {
