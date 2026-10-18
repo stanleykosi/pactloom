@@ -14,6 +14,7 @@ macro_rules! labels {
     };
 }
 labels! { Boundary {
+    DurableHostOpen, DurableHostPairStatus, DurableHostPairObserved, DurableHostAccept, DurableHostInitialDisclosure, DurableHostInitialObserved, DurableHostRecipient, DurableHostCaptureSetup, DurableHostCapture, DurableHostCaptureObserved, DurableHostCaptureCommitted, DurableHostIntake, DurableHostClose, DurableHostObserve, DurableHostCheckpoint, DurableHostProof, DurableHostFreeze, DurableHostReload, DurableHostRedisclosure, DurableHostReviewReady, DurableHostReviewExport, DurableHostReviewImported, DurableHostProviderStop,
     DurableEntryNativeOwnerCheck, DurableEntryVaultOpen, DurableEntryRetainedEnrollment, DurableEntryOriginalCommit, DurableEntryJournalOpen, DurableEntrySourceCheck, DurableEntryRuntimeActivation, DurableEntryWorkerResult, DurableEntryEndpointCreate, DurableEntryEndpointBind, DurableEntryEndpointPublish, DurableEntryPostEndpointSourceCheck, DurableEntryFixturePreflight, DurableEntryFixturePostActivation,
     ObservationClockRollback, ObservationClockWallExpired, ObservationClockMonotonicExpired, ObservationRetainedClockRead, ObservationRetainedClockDenied, ObservationAdmittedClockRead, ObservationAdmittedClockDenied,
     CompletionObservationDenied, CompletionPostReentryCurrent, CompletionReadBinding, CompletionConstructionTime, CompletionCallerBinding, CompletionConstructionRequest,

@@ -46,6 +46,14 @@ class PublicOutputTests(unittest.TestCase):
         self.assertFalse(output.safe_failure(self.failure('DurableEntryUnreviewedStage:Begin')))
         self.assertFalse(output.safe_failure(self.failure('DurableEntryVaultOpen:/private/vault')))
 
+    def test_durable_host_first_failure_stages_remain_closed_and_redacted(self):
+        self.assertEqual(len(output.DURABLE_HOST_BOUNDARIES),23)
+        for label in output.DURABLE_HOST_BOUNDARIES:
+            self.assertTrue(output.safe_failure(self.failure(label+':Begin')))
+            self.assertFalse(output.safe_failure(self.failure(label+':private-account-id')))
+            self.assertFalse(output.safe_failure(self.failure(label+':/private/vault')))
+        self.assertFalse(output.safe_failure(self.failure('DurableHostUnreviewedStage:Begin')))
+
     def test_durable_fail_fast_order_preserves_final_regression_gates(self):
         shell=(ROOT/'scripts/ci-durable-native-linux.sh').read_text()
         early=['python3 -B scripts/ci-synthetic-output-tests.py',

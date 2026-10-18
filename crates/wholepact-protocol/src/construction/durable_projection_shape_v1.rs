@@ -1,8 +1,8 @@
 //! Pure economic planning from historical metadata, never an authenticated
 //! intake, current unspentness proof, disclosure permission or spend approval.
-//! This leaf is intentionally unregistered until the native discovery route and
-//! Engine receipt joins are complete. The actual constructor still independently
-//! computes the fee from its real maintained builder and exact selected notes.
+//! Registration provides only inert arithmetic, not a native discovery issuer or
+//! Engine receipt admission. The actual constructor still independently computes
+//! the fee from its real maintained builder and exact selected notes.
 use std::collections::{BTreeMap, BTreeSet};
 use wholepact_core::{
     allocate_fees, durable_input_projection_v1::DurableInputProjectionV1, Amount, ClaimedInput,

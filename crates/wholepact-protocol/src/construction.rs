@@ -5,15 +5,17 @@
 //! approval, account associations, disclosure permission and chain freshness before
 //! passing private data here. No witness-bearing type implements Debug or Serialize.
 
+pub mod durable_projection_shape_v1;
+
 use crate::review::{
-    CryptographicReview, InputPolicy, OutputPolicy, OutputPurpose, ParticipantPolicy, ReviewPolicy,
-    decode_testnet_receiver, verify_review,
+    decode_testnet_receiver, verify_review, CryptographicReview, InputPolicy, OutputPolicy,
+    OutputPurpose, ParticipantPolicy, ReviewPolicy,
 };
 use orchard::{
-    Address, Anchor, Note,
     keys::{FullViewingKey, Scope},
     note::NoteVersion,
     tree::MerklePath,
+    Address, Anchor, Note,
 };
 use pczt::roles::{creator::Creator, io_finalizer::IoFinalizer};
 use rand::{rand_core::UnwrapErr, rngs::SysRng};
@@ -108,7 +110,11 @@ pub struct ConstructedProposal {
 }
 
 fn check(ok: bool, reason: &str) -> Result<(), String> {
-    if ok { Ok(()) } else { Err(reason.into()) }
+    if ok {
+        Ok(())
+    } else {
+        Err(reason.into())
+    }
 }
 fn bounded_text(s: &str, max: usize) -> bool {
     !s.trim().is_empty() && s.len() <= max && !s.chars().any(char::is_control)

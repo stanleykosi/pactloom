@@ -390,7 +390,7 @@ impl HistoricalNoteV1 {
 
 // Exact existing dedicated-account identity derivation. An arbitrary host label
 // is not account ownership, even when the rest of the note mathematics agrees.
-fn canonical_durable_account_id(fvk: &FullViewingKey) -> String {
+pub(super) fn canonical_durable_account_id(fvk: &FullViewingKey) -> String {
     let mut hash = Sha256::new();
     hash.update(b"wholepact:dedicated-testnet-account:legacy-zip32:v1\0");
     hash.update(fvk.to_bytes());

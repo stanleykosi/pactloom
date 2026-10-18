@@ -176,6 +176,45 @@ impl LocalPrivateWorkspaceConsentV1 for CurrentNativePrivacy<'_, '_> {
             && self.check().is_ok()
     }
 }
+/// Mirror financial_attachments::target_check using the actual held roots,
+/// not caller directory labels. Both descendants and ancestors are forbidden.
+fn require_external_workspace_root(directory: &Directory, root: &Path) -> Result<()> {
+    directory.external_destination(root)?;
+    let actual = directory.path("profile.lock")?;
+    if actual.parent().ok_or(Error::Invalid)?.starts_with(root) {
+        return Err(Error::Invalid);
+    }
+    Ok(())
+}
+/// Bounded destination-coverage check only, not a history or financial gate.
+/// Authenticated pending/committed extra dependencies cannot be ignored, but
+/// this first slice has no nominal actual-owner hook for their Directory locks.
+/// Do not substitute registry path labels for such owners or old V3 liveness.
+fn require_primary_only_destination_coverage(
+    entries: &[crate::financial_inventory::Attachment],
+    actual_primary_root: &Path,
+) -> Result<()> {
+    if entries.len() != 1
+        || entries[0].role != crate::financial_inventory::AttachmentRole::PrimaryFinancial
+        || entries[0].account.is_some()
+        || entries[0].directory != actual_primary_root
+    {
+        return Err(Error::RecoveryFinancialUnsupported);
+    }
+    Ok(())
+}
+fn check_workspace_destination(host: &Host, root: &Path) -> Result<()> {
+    host.require_manual_session()?;
+    let primary = host.financial.as_ref().ok_or(Error::Locked)?;
+    // This authenticates the actual original primary and its registry anchor,
+    // without promoting that historical association to spending authority.
+    primary.manual_original_primary_origin_digest(&host.directory, &host.secrets)?;
+    let entries = crate::financial_inventory::read_current(&host.directory, &host.secrets)?;
+    require_primary_only_destination_coverage(&entries, &primary.current_directory()?)?;
+    require_external_workspace_root(&host.directory, root)?;
+    require_external_workspace_root(&primary.directory, root)
+}
+
 fn association(
     host: &Host,
     committed: &ManualCommittedTarget<'_>,
@@ -189,7 +228,7 @@ fn association(
     committed.check_current()?;
     committed.coverage().require_complete()?;
     crate::files::validate_absolute(root)?;
-    host.directory.external_destination(root)?;
+    check_workspace_destination(host, root)?;
     if source.generation_id() != committed.generation_id()
         || source.inventory_digest() != committed.inventory_digest()
         || source.principal_id() != host.access()?.principal_id
@@ -303,6 +342,7 @@ impl Host {
                 .ok_or(Error::Authentication)?
                 .check_current(self.access()?)?;
             refuse_unqualified_private_workspace_backup_v1(&self.directory)?;
+            check_workspace_destination(self, root)?;
             if present(root)? {
                 return Err(Error::Authentication);
             }
@@ -318,6 +358,9 @@ impl Host {
             let pending_ciphertext_digest = bytes_digest(&sealed);
             // A crash after PENDING is preserved and refuses reopen without the
             // original completed file; NEVER continue by initializing an empty DB.
+            // Recheck the same actual roots after pending durability and directly
+            // before create. Any new/unknown dependency preserves PENDING and denies.
+            check_workspace_destination(self, root)?;
             let directory = Directory::create(root)?;
             privacy.check()?;
             let coordinator = PrivateDurableCoordinatorV1::create_new(

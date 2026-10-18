@@ -140,3 +140,78 @@ fn financial_attachment_role_cannot_be_relabelled_as_private_dependency() {
     committed.association_digest = digest(&pending.association).unwrap();
     assert!(require_original_registry(&pending, &committed, &current, &"2".repeat(64)).is_err());
 }
+
+#[test]
+fn workspace_target_cannot_be_inside_or_above_any_actual_held_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let host = Directory::create(&temp.path().join("original-host")).unwrap();
+    let primary = Directory::create(&temp.path().join("original-primary")).unwrap();
+    let target = primary.path("forbidden-new-child").unwrap();
+    // The original defect: excluding Host alone is insufficient.
+    require_external_workspace_root(&host, &target).unwrap();
+    assert!(require_external_workspace_root(&primary, &target).is_err());
+    assert!(
+        require_external_workspace_root(&host, &host.path("forbidden-child").unwrap()).is_err()
+    );
+    assert!(require_external_workspace_root(&primary, temp.path()).is_err());
+    assert!(!target.exists());
+    assert!(!host.path(PENDING).unwrap().exists());
+    let separate = temp.path().join("separate-new-workspace");
+    require_external_workspace_root(&host, &separate).unwrap();
+    require_external_workspace_root(&primary, &separate).unwrap();
+}
+#[test]
+fn destination_preflight_rejects_symlink_alias_of_actual_primary() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("original-primary");
+    let primary = Directory::create(&root).unwrap();
+    let alias = temp.path().join("primary-alias");
+    std::os::unix::fs::symlink(&root, &alias).unwrap();
+    assert!(require_external_workspace_root(&primary, &alias.join("forbidden-new-child")).is_err());
+    assert!(!root.join("forbidden-new-child").exists());
+}
+#[test]
+fn additional_authenticated_dependency_needs_actual_owner_coverage() {
+    use crate::financial_inventory::{Attachment, AttachmentRole};
+    let primary = Path::new("/actual/primary");
+    let mut entries = vec![Attachment {
+        directory: primary.into(),
+        role: AttachmentRole::PrimaryFinancial,
+        account: None,
+    }];
+    require_primary_only_destination_coverage(&entries, primary).unwrap();
+    // read_current includes this restriction for pending as well as committed
+    // attachments. Its authenticated path is not a substitute for a held owner.
+    entries.push(Attachment {
+        directory: "/actual/participant".into(),
+        role: AttachmentRole::ParticipantWallet,
+        account: Some("account-a".into()),
+    });
+    assert!(require_primary_only_destination_coverage(&entries, primary).is_err());
+    entries.pop();
+    assert!(
+        require_primary_only_destination_coverage(&entries, Path::new("/substituted/primary"))
+            .is_err()
+    );
+}
+#[test]
+fn actual_root_checks_precede_pending_and_repeat_before_directory_creation() {
+    let source = include_str!("durable_private_workspace_v1.rs");
+    let create = source
+        .split("pub(in crate::host) fn create_private_durable_workspace_v1")
+        .nth(1)
+        .unwrap()
+        .split("pub(in crate::host) fn reopen_private_durable_workspace_v1")
+        .next()
+        .unwrap();
+    let pending = create.find("self.directory.write_new(PENDING").unwrap();
+    let directory = create.find("Directory::create(root)").unwrap();
+    let checks = create
+        .match_indices("check_workspace_destination(self, root)?")
+        .map(|(position, _)| position)
+        .collect::<Vec<_>>();
+    assert!(checks.iter().any(|position| *position < pending));
+    assert!(checks
+        .iter()
+        .any(|position| pending < *position && *position < directory));
+}

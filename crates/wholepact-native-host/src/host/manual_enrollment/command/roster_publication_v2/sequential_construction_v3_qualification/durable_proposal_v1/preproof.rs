@@ -1,5 +1,6 @@
 //! All private source material enters through the genuine per-owner native
 //! disclosure and maintained protected scanner, never a fixture key getter.
+use super::safe_diagnostics_v1::{self as diagnostic, Boundary as B, Outcome};
 use super::worker::{JoinedSignerCommandV1 as Command, JoinedSignerReplyV1 as Reply};
 use super::*;
 use wholepact_core::{
@@ -49,6 +50,91 @@ fn fail(_: impl std::fmt::Display) -> Error {
 }
 fn stage(_: &'static str) -> Error {
     Error::Authentication
+}
+
+/// Local diagnostic state only: it never polls, contacts a peer or changes a
+/// lifetime. A pending phase is reported before the original worker is dropped,
+/// so cleanup cancellation cannot conceal the first Host-side failure.
+struct HostTrace {
+    active: Option<B>,
+}
+impl HostTrace {
+    fn new() -> Self {
+        Self { active: None }
+    }
+    fn begin(&mut self, boundary: B) {
+        self.complete();
+        diagnostic::emit(boundary, Outcome::Begin);
+        self.active = Some(boundary);
+    }
+    fn complete(&mut self) {
+        if let Some(boundary) = self.active.take() {
+            diagnostic::emit(boundary, Outcome::Complete);
+        }
+    }
+    fn refused(&mut self, outcome: Outcome) -> Error {
+        if let Some(boundary) = self.active.take() {
+            diagnostic::emit(boundary, outcome);
+        }
+        Error::Authentication
+    }
+    fn bridge(&mut self, error: wholepact_signer::authority_bridge::BridgeError) -> Error {
+        use wholepact_signer::authority_bridge::BridgeError as E;
+        let outcome = match error {
+            E::Binding => Outcome::BridgeBinding,
+            E::Conflict => Outcome::BridgeConflict,
+            E::Missing => Outcome::BridgeMissing,
+            E::Uncertain => Outcome::BridgeUncertain,
+            E::Limit => Outcome::BridgeLimit,
+            E::Permission => Outcome::BridgePermission,
+            E::RecoveryRequired => Outcome::BridgeRecoveryRequired,
+            E::CompleteOriginRecoveryUnavailable => {
+                Outcome::BridgeCompleteOriginRecoveryUnavailable
+            }
+            E::Verification => Outcome::BridgeVerification,
+            E::SignerOriginUnavailable => Outcome::BridgeSignerOriginUnavailable,
+            E::Journal(_) => Outcome::BridgeJournal,
+            E::Authority(_) => Outcome::BridgeAuthority,
+            E::Wallet(_) => Outcome::BridgeWallet,
+            E::Ipc => Outcome::BridgeIpc,
+        };
+        self.refused(outcome)
+    }
+    fn engine(&mut self, error: wholepact_engine::ApiError) -> Error {
+        // Only exact maintained codes select output; private explanatory text,
+        // operation IDs and structured details are deliberately never formatted.
+        let outcome = match error.code.as_str() {
+            "MANUAL_CONSTRUCTION_DENIED" => Outcome::EngineManualConstructionDenied,
+            "RETAINED_INPUT_OBSERVATION_UNAVAILABLE" => {
+                Outcome::EngineRetainedObservationUnavailable
+            }
+            "CANDIDATE_VERIFICATION_FAILED" => Outcome::EngineCandidateVerificationFailed,
+            "IDEMPOTENCY_CONFLICT" => Outcome::EngineIdempotencyConflict,
+            "REVISION_CONFLICT" => Outcome::EngineRevisionConflict,
+            "NOT_FOUND" => Outcome::EngineNotFound,
+            "INVALID_REQUEST" => Outcome::EngineInvalidRequest,
+            "RECOVERY_REQUIRED" => Outcome::EngineRecoveryRequired,
+            "LIVE_AUTHORIZATION_EXISTS" => Outcome::EngineLiveAuthorizationExists,
+            "RESOURCE_EXHAUSTED" => Outcome::EngineResourceExhausted,
+            "INVALID_TRANSITION" => Outcome::EngineInvalidTransition,
+            "STORAGE_PROTECTION_REQUIRED" => Outcome::EngineStorageProtectionRequired,
+            "STORAGE_UNAVAILABLE" => Outcome::EngineStorageUnavailable,
+            "ACCESS_DENIED" => Outcome::EngineAccessDenied,
+            _ => Outcome::EngineUnclassified,
+        };
+        self.refused(outcome)
+    }
+}
+impl Drop for HostTrace {
+    fn drop(&mut self) {
+        // Covers correlation/shape and remaining generically mapped setup,
+        // reload or provider errors. HostAuthentication is only this fixture's
+        // collapsed fallback category, not evidence of an authentication cause.
+        // It cannot overwrite an already recorded typed first failure.
+        if let Some(boundary) = self.active.take() {
+            diagnostic::emit(boundary, Outcome::HostAuthentication);
+        }
+    }
 }
 fn amount(v: u64) -> wholepact_core::Amount {
     v.to_string().parse().expect("bounded constant amount")
@@ -150,6 +236,7 @@ async fn exercise_async(original: initial::DurableInitialV1) -> Result<()> {
     use wholepact_wallet::wallet::synthetic_born_receiver_blocks_v1::{
         SyntheticBornChainSpecV1, SyntheticBornReceiverBlocksV1,
     };
+    let mut trace = HostTrace::new();
     let block_time: u32 = now()?.try_into().map_err(fail)?;
     // Maintained constructor rechecks actual ZIP317: two spends/one recipient
     // pad to two Ironwood actions, fee10,000. Each exact input155,000 has no change.
@@ -310,6 +397,7 @@ async fn exercise_async(original: initial::DurableInitialV1) -> Result<()> {
     // admitted, old lease/client/runtime destroyed, then the second owner opens.
     for index in 1..=2 {
         let account = &original.born[index];
+        trace.begin(B::DurableHostOpen);
         original
             .signers
             .send(Command::OpenDurable(index, candidate.proposal.clone()))
@@ -325,6 +413,7 @@ async fn exercise_async(original: initial::DurableInitialV1) -> Result<()> {
         };
         old_entries.push(entry);
         old_deadlines.push(peer.deadline);
+        trace.begin(B::DurableHostPairStatus);
         original
             .signers
             .send(Command::PollDurablePair(index))
@@ -335,8 +424,10 @@ async fn exercise_async(original: initial::DurableInitialV1) -> Result<()> {
             "Synthetic durable constructor",
             scope,
         )
-        .map_err(fail)?;
+        .map_err(|error| trace.bridge(error))?;
+        trace.begin(B::DurableHostPairObserved);
         done(&original.signers, index)?;
+        trace.begin(B::DurableHostAccept);
         original
             .signers
             .send(Command::AcceptDurable(index))
@@ -386,6 +477,7 @@ async fn exercise_async(original: initial::DurableInitialV1) -> Result<()> {
                 },
             },
         };
+        trace.begin(B::DurableHostInitialDisclosure);
         original
             .signers
             .send(Command::ArmInitial(index, initial.clone()))
@@ -395,11 +487,16 @@ async fn exercise_async(original: initial::DurableInitialV1) -> Result<()> {
             .signers
             .send(Command::PollDisclosure(index))
             .map_err(stage)?;
-        let initial_lease = client.request_preconstruction(&initial).map_err(fail)?;
+        let initial_lease = client
+            .request_preconstruction(&initial)
+            .map_err(|error| trace.bridge(error))?;
+        trace.begin(B::DurableHostInitialObserved);
         done(&original.signers, index)?;
+        trace.begin(B::DurableHostRecipient);
         let recipient = client
             .durable_construction_recipient_v1(PRINCIPAL)
-            .map_err(fail)?;
+            .map_err(|error| trace.bridge(error))?;
+        trace.begin(B::DurableHostCaptureSetup);
         let from = now()?;
         let capture = DurableConstructionCaptureRequestV1 {
             operation_id: format!("durable-native-original-{index}"),
@@ -439,13 +536,15 @@ async fn exercise_async(original: initial::DurableInitialV1) -> Result<()> {
             .send(Command::PollDisclosure(index))
             .map_err(stage)?;
         let wallet_key = DatabaseKey::from_bytes([210 + index as u8; 32]);
-        let destination = create_encrypted(&wallet_path, &wallet_key).map_err(fail)?;
+        let destination = create_encrypted(&wallet_path, &wallet_key)
+            .map_err(|_| trace.refused(Outcome::StoreStorageSecurity))?;
         let adapter = wholepact_chain::ChainAdapter::testnet(
             &source_identity.source_id,
             &source_identity.endpoint,
             wholepact_chain::NetworkPolicy::default(),
         )
         .map_err(fail)?;
+        trace.begin(B::DurableHostCapture);
         let (wallet, disclosure) = client
             .capture_and_request_durable_construction_v1(
                 initial_lease,
@@ -454,8 +553,10 @@ async fn exercise_async(original: initial::DurableInitialV1) -> Result<()> {
                 capture,
             )
             .await
-            .map_err(fail)?;
+            .map_err(|error| trace.bridge(error))?;
+        trace.begin(B::DurableHostCaptureObserved);
         done(&original.signers, index)?;
+        trace.begin(B::DurableHostCaptureCommitted);
         original
             .signers
             .send(Command::CaptureCommitted(index))
@@ -479,6 +580,7 @@ async fn exercise_async(original: initial::DurableInitialV1) -> Result<()> {
             material_digest: outbox.material_digest().into(),
             scope_digest: outbox.request().scope.digest().map_err(fail)?,
         });
+        trace.begin(B::DurableHostIntake);
         let admitted = engine
             .intake_durable_construction_v1(
                 &access,
@@ -488,8 +590,9 @@ async fn exercise_async(original: initial::DurableInitialV1) -> Result<()> {
                 disclosure,
                 &privacy,
             )
-            .map_err(fail)?;
+            .map_err(|error| trace.engine(error))?;
         revision = admitted.agreement.revision;
+        trace.begin(B::DurableHostClose);
         // Keep no native disclosure lease or authenticated caller association.
         drop(client);
         original
@@ -499,12 +602,15 @@ async fn exercise_async(original: initial::DurableInitialV1) -> Result<()> {
         done(&original.signers, index)?;
         privacy.wallets.push(wallet.account_uuid());
         wallets.push(wallet);
+        trace.complete();
     }
+    trace.begin(B::DurableHostReload);
     drop(engine);
     let engine =
         Engine::from_store(Store::open_encrypted(&metadata_path, &metadata_key).map_err(fail)?);
     let [mut left, mut right]: [ProtectedWalletSync; 2] =
         wallets.try_into().map_err(|_| Error::Invalid)?;
+    trace.begin(B::DurableHostObserve);
     let left_observed = engine
         .observe_durable_construction_v1(
             &access,
@@ -515,7 +621,8 @@ async fn exercise_async(original: initial::DurableInitialV1) -> Result<()> {
             &privacy,
         )
         .await
-        .map_err(fail)?;
+        .map_err(|error| trace.engine(error))?;
+    trace.begin(B::DurableHostObserve);
     let right_observed = engine
         .observe_durable_construction_v1(
             &access,
@@ -526,7 +633,8 @@ async fn exercise_async(original: initial::DurableInitialV1) -> Result<()> {
             &privacy,
         )
         .await
-        .map_err(fail)?;
+        .map_err(|error| trace.engine(error))?;
+    trace.begin(B::DurableHostCheckpoint);
     let jobs = ProofJobStore::from_encrypted_connection(
         create_encrypted(&jobs_path, &proof_key).map_err(fail)?,
     )
@@ -546,10 +654,11 @@ async fn exercise_async(original: initial::DurableInitialV1) -> Result<()> {
             &privacy,
             &privacy,
         )
-        .map_err(fail)?;
+        .map_err(|error| trace.engine(error))?;
     let job = checkpointed.agreement.candidates[0].proof_jobs[0]
         .job_id
         .clone();
+    trace.begin(B::DurableHostProof);
     let proved = engine
         .run_candidate_proof_locally(
             &access,
@@ -562,7 +671,8 @@ async fn exercise_async(original: initial::DurableInitialV1) -> Result<()> {
                 consent: &privacy,
             },
         )
-        .map_err(fail)?;
+        .map_err(|error| trace.engine(error))?;
+    trace.begin(B::DurableHostFreeze);
     let frozen = engine
         .freeze_durable_proposal_v1(
             &access,
@@ -575,7 +685,7 @@ async fn exercise_async(original: initial::DurableInitialV1) -> Result<()> {
                 consent: &privacy,
             },
         )
-        .map_err(fail)?;
+        .map_err(|error| trace.engine(error))?;
     let mut revision = frozen.agreement.revision;
     let fixed = engine
         .load_durable_proposal_for_local_review_v1(
@@ -587,11 +697,12 @@ async fn exercise_async(original: initial::DurableInitialV1) -> Result<()> {
                 consent: &privacy,
             },
         )
-        .map_err(fail)?;
+        .map_err(|error| trace.engine(error))?;
     let identity = fixed.identity().clone();
     drop(fixed);
     drop(jobs);
     drop(engine);
+    trace.begin(B::DurableHostReload);
     // Reopen both ORIGINAL encrypted journals: never rebuild proof/randomness.
     let engine =
         Engine::from_store(Store::open_encrypted(&metadata_path, &metadata_key).map_err(fail)?);
@@ -609,12 +720,13 @@ async fn exercise_async(original: initial::DurableInitialV1) -> Result<()> {
                 consent: &privacy,
             },
         )
-        .map_err(fail)?;
+        .map_err(|error| trace.engine(error))?;
     if reloaded.identity() != &identity {
         return Err(Error::Authentication);
     }
     export_sources.sort_by(|a, b| a.account_id.cmp(&b.account_id));
     for index in 1..=2 {
+        trace.begin(B::DurableHostOpen);
         original
             .signers
             .send(Command::OpenDurable(index, candidate.proposal.clone()))
@@ -632,6 +744,7 @@ async fn exercise_async(original: initial::DurableInitialV1) -> Result<()> {
         // This run does not claim a long human gap: elapsed may be false, and no
         // arbitrary sleep or fake clock is introduced to manufacture expiry.
         let _original_native_deadline_elapsed = Instant::now() >= old_deadlines[index - 1];
+        trace.begin(B::DurableHostPairStatus);
         original
             .signers
             .send(Command::PollDurablePair(index))
@@ -642,8 +755,10 @@ async fn exercise_async(original: initial::DurableInitialV1) -> Result<()> {
             "Synthetic fresh durable reviewer",
             scope,
         )
-        .map_err(fail)?;
+        .map_err(|error| trace.bridge(error))?;
+        trace.begin(B::DurableHostPairObserved);
         done(&original.signers, index)?;
+        trace.begin(B::DurableHostAccept);
         original
             .signers
             .send(Command::AcceptDurable(index))
@@ -675,6 +790,7 @@ async fn exercise_async(original: initial::DurableInitialV1) -> Result<()> {
             enrollment_ref: records.enrollment_ref.clone(),
             accepted_manifest_ref: records.accepted_manifest_ref.clone(),
         };
+        trace.begin(B::DurableHostRedisclosure);
         original
             .signers
             .send(Command::ArmRedisclosure(index, renewed.clone()))
@@ -686,7 +802,7 @@ async fn exercise_async(original: initial::DurableInitialV1) -> Result<()> {
             .map_err(stage)?;
         let current = client
             .redisclose_durable_construction_v1(&renewed)
-            .map_err(fail)?;
+            .map_err(|error| trace.bridge(error))?;
         done(&original.signers, index)?;
         let current_ref = DurableConstructionHistoryRequestV1 {
             operation_id: current.outbox().request().operation_id.clone(),
@@ -713,6 +829,7 @@ async fn exercise_async(original: initial::DurableInitialV1) -> Result<()> {
             current_disclosure: Some(current_ref),
             proposal_binding: identity.proposal_binding.clone(),
         };
+        trace.begin(B::DurableHostReviewReady);
         original
             .signers
             .send(Command::PollImport(
@@ -723,7 +840,7 @@ async fn exercise_async(original: initial::DurableInitialV1) -> Result<()> {
             .map_err(stage)?;
         let recipient = client
             .prepare_durable_review_delivery_v1(&request)
-            .map_err(fail)?;
+            .map_err(|error| trace.bridge(error))?;
         let export = ExactExport {
             identity: identity.clone(),
             recipient: recipient.descriptor().clone(),
@@ -731,6 +848,7 @@ async fn exercise_async(original: initial::DurableInitialV1) -> Result<()> {
         };
         // Ready is metadata only. Human delay must not trip the former two-second
         // read timeout; the unchanged absolute native lease still limits the wait.
+        trace.begin(B::DurableHostReviewExport);
         std::thread::sleep(Duration::from_millis(2250));
         let delivered = engine
             .deliver_durable_proposal_for_native_review_v1(
@@ -747,8 +865,9 @@ async fn exercise_async(original: initial::DurableInitialV1) -> Result<()> {
                 &privacy,
                 &export,
             )
-            .map_err(fail)?;
+            .map_err(|error| trace.engine(error))?;
         revision = delivered.agreement.revision;
+        trace.begin(B::DurableHostReviewImported);
         done(&original.signers, index)?;
         let unchanged = engine
             .load_durable_proposal_for_local_review_v1(
@@ -760,11 +879,12 @@ async fn exercise_async(original: initial::DurableInitialV1) -> Result<()> {
                     consent: &privacy,
                 },
             )
-            .map_err(fail)?;
+            .map_err(|error| trace.engine(error))?;
         if unchanged.identity() != &identity {
             return Err(Error::Authentication);
         }
         drop(unchanged);
+        trace.begin(B::DurableHostClose);
         // Imported is memory-only verified data, not approval, signed retention,
         // a writer permit or a session that can survive closing this owner.
         drop(client);
@@ -773,13 +893,16 @@ async fn exercise_async(original: initial::DurableInitialV1) -> Result<()> {
             .send(Command::CloseDurable(index))
             .map_err(stage)?;
         done(&original.signers, index)?;
+        trace.complete();
     }
     drop(reloaded);
     drop(jobs);
     drop(engine);
     drop(left);
     drop(right);
+    trace.begin(B::DurableHostProviderStop);
     provider.shutdown().await.map_err(fail)?;
+    trace.complete();
     drop(original); // Revokes/joins worker and original witness before TempDir.
     Ok(())
 }

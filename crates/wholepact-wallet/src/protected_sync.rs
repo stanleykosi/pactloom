@@ -7,6 +7,9 @@ pub mod born_post_return_inputs_v1;
 #[path = "durable_construction_v1.rs"]
 pub mod durable_construction_v1;
 #[cfg(target_os = "linux")]
+#[path = "durable_exact_selection_v1.rs"]
+pub mod durable_exact_selection_v1;
+#[cfg(target_os = "linux")]
 #[path = "exact_input_observation.rs"]
 pub mod exact_input_observation;
 #[path = "wallet_key_use.rs"]
@@ -22,7 +25,7 @@ use wholepact_chain::{ChainError, PublicSyncChannel};
 pub use zcash_client_backend::proto::service::TreeState;
 use zcash_client_backend::proto::{
     compact_formats::CompactBlock,
-    service::{BlockId, BlockRange, compact_tx_streamer_client::CompactTxStreamerClient},
+    service::{compact_tx_streamer_client::CompactTxStreamerClient, BlockId, BlockRange},
 };
 
 const BATCH_BLOCKS: u32 = 32;
