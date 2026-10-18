@@ -1,8 +1,18 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-18, 17:30 UTC.
+Updated: 2026-10-18, 18:47 UTC.
 
 **Incomplete implementation. No full native financial signing, public testnet settlement, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
+
+## CI12 and measured same-transaction schema reuse
+
+[Run 39150006328](https://github.com/stanleykosi/pactloom/actions/runs/39150006328), qualifier `49c92595b2d6cd3978f2db1e9c61aca0a691fdb9`, passed build, Python105, Host51, bootstrap and owner-reopen baseline, but the same pre-request exchange timeout persisted. Seven callbacks took 10.793398s, compared with 10.868488s previously; identity-hash retention was not a material remedy. Caller/server still had time and no frame was sent; cleanup passed.
+
+A reviewed local no-socket encrypted fixture reproduces one original material outbox plus two direct redisclosures. It runs the actual read-only journal checker without issuing native authority. The baseline component took 565656 / 591803 / 598972 microseconds for first/repeated scans. Three full schema passes dominated, including repeated material validation and reference schema construction. This is journal-component evidence, not full native callback equivalence.
+
+The bounded optimization performs one complete schema/material pass inside the same actual database read transaction, then every unique inventory, exposure, local-cell, account, namespace and policy check. Generic/open/transport/archive readers keep their existing verification. Every callback starts a new validation; no cross-callback authority or content cache is used. Exact-order legacy comparison and corruption tests cover schema/trigger mismatch, restored-schema semantic corruption, original/direct-link and enrollment/manifest joins, unsupported/orphan rows, recovery/exclusion and mutation between calls. Logical commitments remain unchanged.
+
+After optimization, the same local component measured 200844 / 198287 / 193960 microseconds (about 65–68% lower), with exactly one schema/material pass and no clamped/incomplete records. All-features Host+Signer build passed after test-only import/type fixes (4m38s); durable-born27, receipt6, collector5, generic-writer13 and permanent-stop5 tests passed. Non-synthetic durable Signer lib-tests compiled (2m36s), and born15/receipt6/writer13 passed. Native timeout resolution and full signing still require contextual qualification.
 
 ## CI11: measured local callback bottleneck; immutable identity computation optimized
 

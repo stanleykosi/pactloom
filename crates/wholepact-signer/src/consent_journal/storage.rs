@@ -6,12 +6,44 @@ use super::*;
 ))]
 #[path = "durable_born_entry_v1.rs"]
 mod durable_born_entry_v1;
+#[cfg(test)]
+#[path = "validation_cost_v1.rs"]
+mod validation_cost_v1;
 #[cfg(all(
     feature = "durable-proposal",
     feature = "pending-birth-owner-signing",
     target_os = "linux"
 ))]
 pub(crate) use durable_born_entry_v1::validate_durable_payment_local_history_v1;
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "pending-birth-owner-signing",
+    target_os = "linux"
+))]
+pub(super) use durable_born_entry_v1::{
+    validate_durable_born_prefix_v1, validate_durable_born_suffix_v1,
+};
+
+// Keep the observer's types private while measuring the closed snapshot path
+// with the same phase boundaries as the ordinary durable-born validator.
+#[cfg(all(
+    test,
+    feature = "durable-proposal",
+    feature = "pending-birth-owner-signing",
+    target_os = "linux"
+))]
+pub(super) fn enter_durable_born_validation_cost_v1() -> impl Drop {
+    validation_cost_v1::enter(validation_cost_v1::Phase::ValidationTotal)
+}
+#[cfg(all(
+    test,
+    feature = "durable-proposal",
+    feature = "pending-birth-owner-signing",
+    target_os = "linux"
+))]
+pub(super) fn enter_durable_born_inventory_cost_v1() -> impl Drop {
+    validation_cost_v1::enter(validation_cost_v1::Phase::Inventory)
+}
 
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::{
@@ -1619,9 +1651,19 @@ pub(super) fn require_no_unimplemented_reentry(c: &Connection) -> Result<()> {
     Ok(())
 }
 pub(super) fn verify_schema(c: &Connection) -> Result<()> {
+    #[cfg(test)]
+    let _cost_schema = validation_cost_v1::enter(validation_cost_v1::Phase::SchemaTotal);
     verify_schema_before_common_audit(c)?;
+    #[cfg(test)]
+    let cost_construction = validation_cost_v1::enter(validation_cost_v1::Phase::ConstructionAudit);
     construction_audit_v3::read_all(c, &read_account(c)?.account_id)?;
+    #[cfg(test)]
+    drop(cost_construction);
+    #[cfg(test)]
+    let cost_common = validation_cost_v1::enter(validation_cost_v1::Phase::CommonAudit);
     common_context_reentry_audit_v1::read_complete(c, &read_account(c)?.account_id)?;
+    #[cfg(test)]
+    drop(cost_common);
     Ok(())
 }
 
@@ -1652,9 +1694,15 @@ impl ValidatedCommonAudit<'_> {
 /// audit, so no separate, discarded replay is necessary in this same snapshot.
 #[cfg(all(feature = "pending-birth-owner-signing", target_os = "linux"))]
 pub(super) fn verify_schema_with_common_audit(c: &Connection) -> Result<ValidatedCommonAudit<'_>> {
+    #[cfg(test)]
+    let _cost_schema = validation_cost_v1::enter(validation_cost_v1::Phase::SchemaTotal);
     verify_schema_before_common_audit(c)?;
     let account = read_account(c)?.account_id;
+    #[cfg(test)]
+    let cost_common = validation_cost_v1::enter(validation_cost_v1::Phase::CommonAudit);
     let inventory = common_context_reentry_audit_v1::read_complete(c, &account)?;
+    #[cfg(test)]
+    drop(cost_common);
     Ok(ValidatedCommonAudit {
         account,
         inventory,
@@ -1671,18 +1719,60 @@ fn verify_schema_before_common_audit(c: &Connection) -> Result<()> {
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
+    #[cfg(test)]
+    let cost_reference_open =
+        validation_cost_v1::enter(validation_cost_v1::Phase::SchemaReferenceOpen);
     let expected = Connection::open_in_memory()?;
+    #[cfg(test)]
+    drop(cost_reference_open);
+    #[cfg(test)]
+    let cost_reference_build =
+        validation_cost_v1::enter(validation_cost_v1::Phase::SchemaReferenceBuild);
     expected.execute_batch(SCHEMA)?;
+    #[cfg(test)]
+    drop(cost_reference_build);
+    #[cfg(test)]
+    let cost_compare = validation_cost_v1::enter(validation_cost_v1::Phase::SchemaCompare);
     if objects(c)? != objects(&expected)? {
         return Err(JournalError::UnsupportedSchema);
     }
+    #[cfg(test)]
+    drop(cost_compare);
+    #[cfg(test)]
+    let cost_capacity = validation_cost_v1::enter(validation_cost_v1::Phase::SchemaCapacity);
     verify_capacity_schema(c)?;
+    #[cfg(test)]
+    drop(cost_capacity);
+    #[cfg(test)]
+    let cost_bounds = validation_cost_v1::enter(validation_cost_v1::Phase::SchemaBounds);
     bounded(c, (MAX_BACKUP_ROWS, MAX_BACKUP_ENCODED_BYTES))?;
+    #[cfg(test)]
+    drop(cost_bounds);
+    #[cfg(test)]
+    let cost_offline = validation_cost_v1::enter(validation_cost_v1::Phase::OfflineHistory);
     offline_history::read_all(c, &read_account(c)?.account_id)?;
+    #[cfg(test)]
+    drop(cost_offline);
+    #[cfg(test)]
+    let cost_receipts = validation_cost_v1::enter(validation_cost_v1::Phase::OfflineReceipts);
     offline_receipts::validate_all(c, &read_account(c)?.account_id)?;
+    #[cfg(test)]
+    drop(cost_receipts);
+    #[cfg(test)]
+    let cost_account_use = validation_cost_v1::enter(validation_cost_v1::Phase::SchemaAccountUse);
     account_use_storage::inspect(c, &read_account(c)?.account_id)?;
+    #[cfg(test)]
+    drop(cost_account_use);
+    #[cfg(test)]
+    let cost_named = validation_cost_v1::enter(validation_cost_v1::Phase::NamedRecipientHistory);
     named_recipient_inventory::validate_archive_rows(c, &read_account(c)?.account_id)?;
+    #[cfg(test)]
+    drop(cost_named);
+    #[cfg(test)]
+    let cost_intents = validation_cost_v1::enter(validation_cost_v1::Phase::AdmissionIntents);
     durable_payment_admission_intent_v1::validate_rows(c)?;
+    #[cfg(test)]
+    drop(cost_intents);
     #[cfg(not(all(
         feature = "durable-proposal",
         feature = "native-ui",
@@ -1701,7 +1791,12 @@ fn verify_schema_before_common_audit(c: &Connection) -> Result<()> {
         feature = "native-ui",
         target_os = "linux"
     ))]
-    durable_construction_v1::validate_rows(c)?;
+    {
+        #[cfg(test)]
+        let _cost_material =
+            validation_cost_v1::enter(validation_cost_v1::Phase::DurableMaterialRows);
+        durable_construction_v1::validate_rows(c)?;
+    }
     #[cfg(not(all(
         feature = "durable-proposal",
         feature = "native-ui",

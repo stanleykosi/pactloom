@@ -91,28 +91,73 @@ impl SignerConsentJournal {
     // Only the three guarded routes above call this helper. It never escapes as
     // an unfenced checker or accepts a caller-asserted held-lock boolean.
     fn check_durable_born_entry_snapshot_v1(&self, genesis: &AccountUseGenesis) -> Result<()> {
+        #[cfg(test)]
+        let _cost_snapshot = validation_cost_v1::enter(validation_cost_v1::Phase::SnapshotTotal);
+        #[cfg(test)]
+        let cost_lock = validation_cost_v1::enter(validation_cost_v1::Phase::ConnectionLock);
         let mut c = self.connection.lock().map_err(|_| JournalError::Database)?;
+        #[cfg(test)]
+        drop(cost_lock);
         if !c.is_autocommit() {
             return Err(JournalError::Database);
         }
+        #[cfg(test)]
+        let cost_identity = validation_cost_v1::enter(validation_cost_v1::Phase::IdentityBefore);
         self.database_identity.check_current(&c)?;
+        #[cfg(test)]
+        drop(cost_identity);
+        #[cfg(test)]
+        let cost_begin = validation_cost_v1::enter(validation_cost_v1::Phase::TransactionBegin);
         let tx = c.transaction_with_behavior(TransactionBehavior::Deferred)?;
         #[cfg(test)]
+        drop(cost_begin);
+        #[cfg(test)]
         DURABLE_BORN_SNAPSHOT_VALIDATIONS_V1.with(|count| count.set(count.get() + 1));
-        validate(&tx, genesis, self.capacity_limits())?;
+        writer_history::validate_durable_born_snapshot_v1(&tx, genesis, self.capacity_limits())?;
+        #[cfg(test)]
+        let cost_identity = validation_cost_v1::enter(validation_cost_v1::Phase::IdentityAfter);
         self.database_identity.check_current(&tx)?;
+        #[cfg(test)]
+        drop(cost_identity);
+        #[cfg(test)]
+        let cost_commit = validation_cost_v1::enter(validation_cost_v1::Phase::TransactionCommit);
         tx.commit()?;
+        #[cfg(test)]
+        drop(cost_commit);
         Ok(())
     }
 }
 
 fn validate(c: &Connection, genesis: &AccountUseGenesis, limits: (u64, u64)) -> Result<()> {
+    #[cfg(test)]
+    let _cost_validation = validation_cost_v1::enter(validation_cost_v1::Phase::ValidationTotal);
+    let account = validate_durable_born_prefix_v1(c, genesis, limits)?;
+    // The ordinary opener retains the complete generic inventory path.
+    #[cfg(test)]
+    let cost_inventory = validation_cost_v1::enter(validation_cost_v1::Phase::Inventory);
+    let _inventory = writer_history::WriterLocalInventory::read(c, &account, limits)?;
+    #[cfg(test)]
+    drop(cost_inventory);
+    validate_durable_born_suffix_v1(c, genesis, &account, limits)
+}
+
+/// Ordered full-schema and account-policy validation. The returned account is
+/// inert historical data, not proof or a capability to bypass other readers.
+pub(in crate::consent_journal) fn validate_durable_born_prefix_v1(
+    c: &Connection,
+    genesis: &AccountUseGenesis,
+    limits: (u64, u64),
+) -> Result<SignerAccountState> {
     if c.is_autocommit() {
         return Err(JournalError::InvalidBinding);
     }
+    #[cfg(test)]
+    let cost_genesis = validation_cost_v1::enter(validation_cost_v1::Phase::GenesisValidation);
     genesis
         .validate()
         .map_err(|_| JournalError::InvalidBinding)?;
+    #[cfg(test)]
+    drop(cost_genesis);
     let application: i64 = c.pragma_query_value(None, "application_id", |r| r.get(0))?;
     let version: i64 = c.pragma_query_value(None, "user_version", |r| r.get(0))?;
     if application != APPLICATION_ID || version != SCHEMA_VERSION {
@@ -120,6 +165,8 @@ fn validate(c: &Connection, genesis: &AccountUseGenesis, limits: (u64, u64)) -> 
     }
     verify_schema(c)?;
     bounded(c, limits)?;
+    #[cfg(test)]
+    let cost_account = validation_cost_v1::enter(validation_cost_v1::Phase::AccountState);
     let account = read_account(c)?;
     let stored = account_use_storage::inspect(c, &account.account_id)?;
     if account.account_id != genesis.identity.account_id || stored.genesis() != Some(genesis) {
@@ -131,14 +178,28 @@ fn validate(c: &Connection, genesis: &AccountUseGenesis, limits: (u64, u64)) -> 
     if stored.exclusion().is_some() || stored.witness_ack().is_some() {
         return Err(JournalError::Permission);
     }
+    #[cfg(test)]
+    drop(cost_account);
     require_supported_tables(c)?;
-    // Typed original/release/exposure/input validation retains every local and
-    // imported online uncertainty. It does not import anything or clear rows.
-    let _inventory = writer_history::WriterLocalInventory::read(c, &account, limits)?;
+    Ok(account)
+}
+
+/// Complete retained local-cell validation and original namespace joins, in
+/// their original order after the caller's complete typed inventory read.
+pub(in crate::consent_journal) fn validate_durable_born_suffix_v1(
+    c: &Connection,
+    genesis: &AccountUseGenesis,
+    account: &SignerAccountState,
+    limits: (u64, u64),
+) -> Result<()> {
     // Existing complete local typed readers cover enrollment/manifest links,
     // bridge requests, permits, key-use fences, results, deliveries and writer
     // receipts. They validate history only, never manufacture live authority.
-    permanent_stop::validate_retained_local_cells(c, &account, limits)?;
+    #[cfg(test)]
+    let cost_local_cells = validation_cost_v1::enter(validation_cost_v1::Phase::LocalCells);
+    permanent_stop::validate_retained_local_cells(c, account, limits)?;
+    #[cfg(test)]
+    drop(cost_local_cells);
     bind_original_namespace(c, genesis)?;
     Ok(())
 }
@@ -177,6 +238,8 @@ pub(crate) fn validate_durable_payment_local_history_v1(
 }
 
 fn require_supported_tables(c: &Connection) -> Result<()> {
+    #[cfg(test)]
+    let _cost_policy = validation_cost_v1::enter(validation_cost_v1::Phase::SupportedTablePolicy);
     // Exact schema was verified first. A future table is refused when nonempty
     // until its semantics are explicitly qualified, rather than ignored.
     for (table, _) in CAPACITY_TABLES {
@@ -236,6 +299,8 @@ fn require_witness(
 }
 
 fn bind_original_namespace(c: &Connection, genesis: &AccountUseGenesis) -> Result<()> {
+    #[cfg(test)]
+    let _cost_namespace = validation_cost_v1::enter(validation_cost_v1::Phase::NamespaceBinding);
     for intent in read_durable_payment_admission_intents_v1(c)? {
         require_witness(intent.disclosure(), genesis)?;
         if intent.owner_certificate_digest() != genesis.owner_certificate_digest {

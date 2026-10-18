@@ -25,6 +25,18 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
+        Self::with_identity(AccountUseIdentity {
+            account_id: "11".repeat(32),
+            full_viewing_key_digest: "fa".repeat(32),
+            network_profile_id: crate::consent_journal::tests::proposal("a", "b", "c")
+                .manifest()
+                .agreement
+                .network_profile_id
+                .clone(),
+            derivation_domain: "dedicated-testnet-legacy-zip32-v1".into(),
+        })
+    }
+    fn with_identity(identity: AccountUseIdentity) -> Self {
         let dir = tempfile::tempdir().unwrap();
         fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let path = dir.path().join("original.sqlite");
@@ -33,12 +45,8 @@ impl Fixture {
             .signer_journal_source_owner_for_test(&path)
             .unwrap();
         let key = DatabaseKey::from_bytes([0x96; 32]);
-        let account = "11".repeat(32);
-        let network = crate::consent_journal::tests::proposal("a", "b", "c")
-            .manifest()
-            .agreement
-            .network_profile_id
-            .clone();
+        let account = identity.account_id.clone();
+        let network = identity.network_profile_id.clone();
         let disclosure = WitnessDisclosureDescriptor {
             endpoint: "127.0.0.1:443".into(),
             server_name: "synthetic-witness.example".into(),
@@ -50,12 +58,7 @@ impl Fixture {
         };
         let genesis = AccountUseGenesis {
             version: 1,
-            identity: AccountUseIdentity {
-                account_id: account.clone(),
-                full_viewing_key_digest: "fa".repeat(32),
-                network_profile_id: network,
-                derivation_domain: "dedicated-testnet-legacy-zip32-v1".into(),
-            },
+            identity,
             witness_id: disclosure.witness_id.clone(),
             witness_origin_digest: account_use_witness_origin_digest(&disclosure).unwrap(),
             owner_certificate_digest: "44".repeat(32),
@@ -268,6 +271,10 @@ impl Fixture {
             .unwrap();
     }
 }
+
+#[cfg(feature = "synthetic-qualification")]
+#[path = "durable_born_validation_cost_tests.rs"]
+mod cost_measurement;
 
 #[test]
 fn original_current_schema_reopens_with_new_binding_without_mutation() {
