@@ -87,6 +87,22 @@ impl PreconstructionRecordLease<'_> {
         }
         Ok(())
     }
+    /// Restriction for a NEW durable disclosure, never a spending permission.
+    /// Historical acquisition intentionally remains readable under a later
+    /// session. New disclosure additionally needs BOTH receipts to have been
+    /// issued by this held current session, with their original live nonces and
+    /// monotonic review windows. The existing receipt predicate checks those
+    /// facts without reacquiring the journal fence or a native publication lock.
+    /// Callers must still check the actual native origin and exact scope/material.
+    #[cfg(feature = "durable-proposal")]
+    pub(crate) fn require_current_durable_disclosure_receipts_v1(&self) -> Result<()> {
+        self.check_current()?;
+        self.permission
+            .require_spending_decision(self.enrollment.receipt())?;
+        self.permission
+            .require_spending_decision(self.manifest.receipt())?;
+        self.check_current()
+    }
     #[cfg(all(feature = "native-ui", target_os = "linux"))]
     pub(crate) fn require_native_origin(
         &self,
@@ -95,3 +111,7 @@ impl PreconstructionRecordLease<'_> {
         self.permission.require_native_origin(origin)
     }
 }
+
+#[cfg(all(test, feature = "durable-proposal"))]
+#[path = "preconstruction_lease/durable_receipt_tests.rs"]
+mod durable_receipt_tests;
