@@ -366,13 +366,12 @@ async fn exercise_async(original: initial::DurableInitialV1) -> Result<()> {
                 wallet_destination: wallet_path.to_str().ok_or(Error::Invalid)?.into(),
                 reviewer_account_ids: privacy.accounts.clone(),
                 privacy_domain: account.privacy_domain.clone(),
-                purpose: "Exact initial native per-owner protected import for new durable profile"
-                    .into(),
+                purpose: "construct_exact_accepted_candidate".into(),
                 retention_policy: RETENTION.into(),
                 provider: PreconstructionProvider {
                     source_id: source_identity.source_id.clone(),
                     endpoint: source_identity.endpoint.clone(),
-                    trust_profile: source_identity.trust_profile.clone(),
+                    trust_profile: source_identity.trust_profile.into(),
                 },
                 minimum_confirmations: 1,
                 maximum_blocks: 16,

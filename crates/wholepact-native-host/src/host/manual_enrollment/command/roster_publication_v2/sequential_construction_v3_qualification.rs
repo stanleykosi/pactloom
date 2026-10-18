@@ -389,6 +389,7 @@ fn foreground_child(stage: &str, inputs: &[Input<'_>]) -> std::io::Result<()> {
             | "three-born-all-observations-v3"
             | "three-born-constructed-checkpoint-v3"
             | "three-born-full-payment-v1"
+            | "durable-proposal-native-owner-reopen-v1"
     ) {
         900
     } else {

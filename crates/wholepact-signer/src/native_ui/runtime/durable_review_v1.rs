@@ -532,9 +532,15 @@ impl NativeRuntime {
                     .enable_all()
                     .build()
                     .map_err(|_| Error::Unavailable)?;
-                let inputs = runtime
-                    .block_on(wallet.synchronize_durable_review_v1(&worker_imported.fixed))?;
+                let inputs = runtime.block_on(wallet.synchronize_durable_review_v1(
+                    &worker_imported.fixed,
+                    &worker_imported.source,
+                    &worker_imported.peer,
+                ))?;
                 wallet.check_current()?;
+                worker_imported
+                    .check_data_source()
+                    .map_err(|_| Error::ReviewMismatch)?;
                 let head = witness.snapshot_head()?;
                 worker_imported
                     .check_data_source()

@@ -37,8 +37,8 @@ use incrementalmerkletree::frontier::CommitmentTree;
 use orchard::tree::MerkleHashOrchard;
 use prost::Message;
 use std::sync::{
-    Arc,
-    atomic::{AtomicU8, Ordering},
+    Arc, Mutex,
+    atomic::{AtomicU8, AtomicUsize, Ordering},
 };
 use wholepact_chain::NetworkPolicy;
 use wholepact_storage_security::{DatabaseKey, create_encrypted, open_encrypted};
@@ -51,6 +51,8 @@ pub struct Fake {
     pub blocks: Arc<Vec<CompactBlock>>,
     pub trees: Arc<Vec<TreeState>>,
     pub mode: Arc<AtomicU8>,
+    pub accepted_connections: Arc<AtomicUsize>,
+    pub rpc_methods: Arc<Mutex<Vec<String>>>,
 }
 pub const SHORT: u8 = 1;
 pub const WRONG_TREE_HEIGHT: u8 = 2;
@@ -78,6 +80,7 @@ fn framed<M: Message>(messages: &[M]) -> Vec<u8> {
 }
 async fn handle(State(fake): State<Fake>, request: Request) -> Response<Body> {
     let method = request.uri().path().rsplit('/').next().unwrap().to_owned();
+    fake.rpc_methods.lock().unwrap().push(method.clone());
     assert!(!request.headers().contains_key("authorization"));
     let bytes = axum::body::to_bytes(request.into_body(), 4096)
         .await
@@ -187,6 +190,16 @@ async fn handle(State(fake): State<Fake>, request: Request) -> Response<Body> {
 pub async fn fake_server(
     block_count: u32,
 ) -> (Fake, String, tokio::task::JoinHandle<()>, FullViewingKey) {
+    fake_server_with_connection_hook(block_count, |_| {}).await
+}
+
+/// Test-only actual connection observation. The default fixture installs no
+/// hook; this never supplies a production privacy policy or native authority.
+pub(crate) async fn fake_server_with_connection_hook(
+    block_count: u32,
+    mut on_connection: impl FnMut(usize) + Send + 'static,
+) -> (Fake, String, tokio::task::JoinHandle<()>, FullViewingKey) {
+    use axum::serve::ListenerExt;
     let fixture = wholepact_wallet::wallet::SyntheticContributionFixture::generate();
     let fvk = FullViewingKey::from(fixture.owner_spending_key(0));
     let mut first = fixture.compact_block();
@@ -245,9 +258,16 @@ pub async fn fake_server(
         blocks: Arc::new(blocks),
         trees: Arc::new(trees),
         mode: Arc::new(AtomicU8::new(0)),
+        accepted_connections: Arc::new(AtomicUsize::new(0)),
+        rpc_methods: Arc::new(Mutex::new(Vec::new())),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let connections = fake.accepted_connections.clone();
+    let listener = listener.tap_io(move |_| {
+        let count = connections.fetch_add(1, Ordering::SeqCst) + 1;
+        on_connection(count);
+    });
     let app = Router::new()
         .route("/{*path}", post(handle))
         .with_state(fake.clone());
@@ -272,6 +292,12 @@ pub fn ephemeral_database_key() -> DatabaseKey {
     DatabaseKey::from_bytes(key_bytes)
 }
 pub fn database(fvk: &FullViewingKey) -> (tempfile::TempDir, std::path::PathBuf, DatabaseKey) {
+    database_with_prior_height(fvk, 4_465_039)
+}
+pub(crate) fn database_with_prior_height(
+    fvk: &FullViewingKey,
+    prior_height: u32,
+) -> (tempfile::TempDir, std::path::PathBuf, DatabaseKey) {
     let directory = tempfile::tempdir().unwrap();
     #[cfg(unix)]
     {
@@ -287,7 +313,7 @@ pub fn database(fvk: &FullViewingKey) -> (tempfile::TempDir, std::path::PathBuf,
         .import_dedicated_fvk(
             fvk,
             AccountBirthday::from_parts(
-                ChainState::empty(4_465_039u32.into(), BlockHash([50; 32])),
+                ChainState::empty(prior_height.into(), BlockHash([50; 32])),
                 None,
             ),
         )

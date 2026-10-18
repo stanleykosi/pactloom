@@ -395,7 +395,10 @@ impl ProtectedWalletSync {
             return Err(SyncError::InvalidResponse);
         }
         self.provider_tip_height = Some(tip);
-        let mut client = Client::new(self.source.public_sync_channel().await?)
+        self.require_access(access, WalletAccessPurpose::SynchronizePublicBlocks)?;
+        let channel = self.source.public_sync_channel().await?;
+        self.require_access(access, WalletAccessPurpose::SynchronizePublicBlocks)?;
+        let mut client = Client::new(channel)
             .max_decoding_message_size(MAX_MESSAGE_BYTES)
             .max_encoding_message_size(1024);
         let scanned = self.scanned_height()?;
@@ -850,6 +853,10 @@ impl BlockSource for SnapshotBlocks {
 #[cfg(all(test, feature = "synthetic-qualification"))]
 #[path = "protected_sync_tests.rs"]
 mod tests;
+
+#[cfg(all(test, feature = "synthetic-qualification"))]
+#[path = "protected_sync_contact_tests.rs"]
+mod contact_tests;
 
 // A process-local monotonic bound complements wallclock freshness. A backwards
 // clock adjustment must never extend an accepted generation's useful lifetime.
