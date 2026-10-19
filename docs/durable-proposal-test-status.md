@@ -1,8 +1,18 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-19, 15:45 UTC.
+Updated: 2026-10-19, 16:43 UTC.
 
-**The bounded synthetic native two-owner fixed-signing fixture passed. Product qualification remains incomplete: no public testnet settlement, OS-process restart recovery, attended GUI reliability, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
+**CI33 passed the bounded synthetic original-private-workspace completed-fixed SIGKILL/fresh-process read-only reopen path and all listed regressions. Product qualification remains incomplete: no public testnet settlement, restarted acquired financial session, attended GUI reliability, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
+
+## CI33 PASS: actual original-workspace completed-fixed restart and all listed regression gates
+
+[Run 39280666819](https://github.com/stanleykosi/pactloom/actions/runs/39280666819), qualifier `b26eb558feb3d2d5feb38c083da0c90eced0e800`, source implementation `e14e4a90808c9c3f696e0e8e7abb14d180486ca4`, tree `ecad6b90353c698c623eb797ec4d175b4cdc26ae`, passed. GitHub Actions' incident delayed status reporting; retrieved job logs establish the result, and the run API subsequently confirmed terminal success at the16:42 UTC check.
+
+At16:09:28 UTC the actual source-owning producer completed and cryptographically verified its fixed checkpoint, was SIGKILLed, and was reaped with original group absence observed. A fresh process reopened the same original files read-only. Exact identity, checkpoint and idempotency were preserved; the reader succeeded with no effects and verified cleanup. The private-workspace marker explicitly leaves authorization/distribution/public-chain/attended-native flags false. This is real isolated synthetic process-death/reopen evidence, not a process simulation.
+
+Later separate fixture gates passed: durable owner/session reopen16:11:29; durable fixed signing16:19:09; same-request Acquire reply-loss recovery16:23:20. Signer validation41, endpoint1 with2 cycles, authority renderer6 and immutable replay3 passed, followed by empty runtime-container removal and the all-gates success marker16:34:44. Early Python153, Host97, encrypted bootstrap and real TCP overlap also passed.
+
+These separate fresh phases must not be stitched into a claim that the restarted private artifact completed one joint payment. Still unqualified: that same artifact's financial admission, both signatures, extraction, actual submission and settlement; acquired financial-session restart; portable backup recovery; attended GUI/Windows; deployment. Future delivery scope requires its own explicit authority and lineage, never reuse of the local checkpoint AdmitOriginal or existing read-only compound views. Existing v1 behavior and no-export boundaries remain unchanged.
 
 ## CI32: observation timeout cleared; repeated permission composition still ages held chain evidence
 
