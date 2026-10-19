@@ -1957,7 +1957,10 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
                     "private_verified_fixed_frozen_v2" => EffectV2::FreezeVerifiedFixed,
                     _ => return Err(damaged()),
                 };
-                operation_v1::validate_delta(before, &envelope, purpose)?;
+                // require_original_envelope above validates this exact envelope's
+                // shape. `previous` is the immutable owned envelope validated on
+                // the preceding iteration; neither is mutated before this join.
+                operation_v1::validate_delta_after_checked_shapes_v2(before, &envelope, purpose)?;
             } else if event.kind != "agreement.created"
                 || !envelope.view.candidates.is_empty()
                 || !envelope.durable_construction_v1.is_empty()

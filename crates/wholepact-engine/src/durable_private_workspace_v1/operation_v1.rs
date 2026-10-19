@@ -333,6 +333,16 @@ pub(super) fn validate_shape(e: &Envelope) -> Result<()> {
 pub(super) fn validate_delta(before: &Envelope, after: &Envelope, purpose: EffectV2) -> Result<()> {
     validate_shape(before)?;
     validate_shape(after)?;
+    validate_delta_after_checked_shapes_v2(before, after, purpose)
+}
+/// Pure delta tail for the closed history reader only. Both exact immutable
+/// envelopes must already have passed `validate_shape` in this same traversal.
+/// All mutation/default callers use `validate_delta`, including its shape checks.
+pub(super) fn validate_delta_after_checked_shapes_v2(
+    before: &Envelope,
+    after: &Envelope,
+    purpose: EffectV2,
+) -> Result<()> {
     if after.view.revision != before.view.revision.checked_add(1).ok_or_else(damaged)?
         || time::OffsetDateTime::parse(
             &after.view.updated_at,

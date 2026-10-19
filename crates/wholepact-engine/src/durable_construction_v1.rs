@@ -432,8 +432,11 @@ impl Engine {
         consent: &dyn LocalDurableMaterialConsentV1,
         action: DurableMaterialActionV1,
     ) -> std::result::Result<(), MaterialCheckErrorV2> {
+        // The same immutable intake remains borrowed through both live checks
+        // and consent. Only its mathematical/serialized self-consistency is
+        // reused; current scope time and original Store origin are checked twice.
+        intake.outbox.validate().map_err(|_| damaged())?;
         let check = || -> std::result::Result<(), MaterialCheckErrorV2> {
-            intake.outbox.validate().map_err(|_| damaged())?;
             let scope = &intake.outbox.request().scope;
             scope.check_valid_at(now()?)?;
             if intake.principal_id != access.principal_id
