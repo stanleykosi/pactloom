@@ -1,8 +1,18 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-19, 20:34 UTC.
+Updated: 2026-10-19, 22:56 UTC.
 
 **CI33 passed the bounded synthetic original-private-workspace completed-fixed SIGKILL/fresh-process read-only reopen path and all listed regressions. Product qualification remains incomplete: no public testnet settlement, restarted acquired financial session, attended GUI reliability, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
+
+## CI36: recipient currentness write reaches a closed pipe; targeted pending-wait correction
+
+[Run 39332119510](https://github.com/stanleykosi/pactloom/actions/runs/39332119510), qualifier `e65da477c3384ddd72d89ccbb22c7d4d12f4ce75`, source `a8e7a486abcf1264bcfe8bd223200386ecf4232b`, passed build (12m56s), pure97, encrypted bootstrap and observation preflight. At 22:28:42 UTC the first observed pair was DeliveryRecipientWriteIo / OriginIoBrokenPipe, producer inputs111/117. Reader did not start; producer was reaped with group absence, root cleanup closed/absent and empty runtime removal verified. Admission/history/fixed completion remains unverified. Checkpoint58's non-synthetic build and all24 exact compatible checks passed before this run.
+
+The actual recipient-currentness write failed because the connection was closed, but the server's closing predicate is not established. Source review found no probe-count cap or inherent held-journal deadlock. The server also enforces an older native120-second entry, created before KDF/pairing/manifest/redisclosure, while the client prepares a later120-second window. These are distinct authorities and cannot be silently rebound, renewed or replaced. No deadline increase is proposed.
+
+A concrete V2/V1 discrepancy is corrected in four paths: V2's pending-import poll repeatedly performed full encrypted history audits every2ms while export work ran. The new borrowed wait uses the maintained V1 pattern: full entry audit, actual owner/pair/account/entry/epoch/request/attempt checks for every pending poll, and full authenticated final audit before successful completion. Terminal state is single-use. All production receive/publication/adoption checks and deadlines remain intact. A same-attempt completed error can be retained before expired/canceled-source cleanup, but queued success stays buffered for the unchanged production adoption gates. No asynchronous success becomes authorization through the diagnostic drain.
+
+Nineteen new focused same-kernel tests target audit counts, liveness/entry/final denial, request/attempt isolation, terminal reuse and owned result buffering. They do not manufacture a positive native owner or prove timing fit. Unchanged encrypted snapshot-mutation evidence and unrelated prior test results are reused by source/build identity rather than rerun. The all-feature Host/Signer release library build (7m01s) and all19 exact focused tests pass. Non-synthetic compilation remains pending at preparation. A consuming Host payload/later-entry redesign is deferred; this checkpoint fixes redundant pending audits but does not yet prove CI36's cause or a successful durable payment.
 
 ## CI35: first-owner export commit denied before this invocation's Store update
 

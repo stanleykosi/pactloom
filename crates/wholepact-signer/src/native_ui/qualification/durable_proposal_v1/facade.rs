@@ -328,6 +328,27 @@ pub use crate::native_ui::runtime::durable_proposal_qualification_v1::{
 pub struct EphemeralDurableDeliveryNativeV2 {
     inner:crate::native_ui::runtime::durable_proposal_qualification_v1::DurableDeliveryNativeFixtureV2,
 }
+/// Exclusive borrowed wait for one exact import into the actual v2 entry.
+/// A completed wait grants no admission, writer, signing or reuse authority.
+pub struct EphemeralDurableDeliveryImportWaitV2<'a> {
+    inner:
+        crate::native_ui::runtime::durable_proposal_qualification_v1::DurableDeliveryImportWaitV2<
+            'a,
+        >,
+}
+impl EphemeralDurableDeliveryImportWaitV2<'_> {
+    pub fn deadline(&self) -> Instant {
+        self.inner.deadline()
+    }
+    pub fn poll(&mut self) -> Result<bool> {
+        self.inner.poll()
+    }
+    /// Takes only this attempt's actual owned failure, even after liveness ends.
+    /// A queued success remains behind all original runtime adoption checks.
+    pub fn take_failure(&mut self) -> Option<DurableDeliveryFailureV2> {
+        self.inner.take_failure()
+    }
+}
 impl EphemeralAcknowledgedBornV1 {
     pub fn open_fresh_durable_delivery_v2(
         self,
@@ -338,6 +359,23 @@ impl EphemeralAcknowledgedBornV1 {
     }
 }
 impl EphemeralDurableDeliveryNativeV2 {
+    /// Diagnostic-only drain of an already accepted exact import's queued Err.
+    /// No job is started and queued Ok is left for the original adoption gates.
+    pub fn drain_import_failure_before_wait(
+        &mut self,
+        request: &DurableReviewDeliveryRequestV1,
+    ) -> Option<DurableDeliveryFailureV2> {
+        self.inner.drain_import_failure_before_wait(request)
+    }
+    pub fn begin_import_wait<'a>(
+        &'a mut self,
+        request: &'a DurableReviewDeliveryRequestV1,
+        identity: &'a wholepact_protocol::durable_proposal_v1::FixedProposalIdentityV1,
+    ) -> Result<EphemeralDurableDeliveryImportWaitV2<'a>> {
+        Ok(EphemeralDurableDeliveryImportWaitV2 {
+            inner: self.inner.begin_import_wait(request, identity)?,
+        })
+    }
     /// Synthetic-only same-original process reentry. Paths/config are inert
     /// inputs: the actual production source opener and native owner reverify
     /// the original encrypted files. No acknowledged fixture is reconstructed.
