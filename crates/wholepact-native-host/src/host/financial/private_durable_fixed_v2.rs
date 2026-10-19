@@ -1082,6 +1082,231 @@ impl LocalWalletAccess for CurrentScanAccessV2<'_, '_> {
     }
 }
 
+fn check_stage_material_ceiling_v3(scope: &DurableConstructionScopeV1, now: u64) -> Result<()> {
+    use wholepact_wallet::wallet::protected_sync::durable_construction_v1::DurableConstructionError as E;
+    scope.check_valid_at(now).map_err(|error| {
+        let cause = match &error {
+            E::Invalid => PrivateDiagnosticCauseV1::Invalid,
+            E::Binding => PrivateDiagnosticCauseV1::Binding,
+            E::Stale => PrivateDiagnosticCauseV1::Stale,
+            E::Storage | E::Sync(_) => PrivateDiagnosticCauseV1::Unclassified,
+        };
+        host_private_primary_v1(
+            PrivateDiagnosticOperationV1::OpenOriginal,
+            PrivateDiagnosticSiteV1::HostMaterialScope,
+            PrivateDiagnosticFamilyV1::DurableConstruction,
+            cause,
+        );
+        Error::Permission
+    })
+}
+/// Reuses the original actual roster/source/material predicates, without any
+/// historical permission cache. Both absolute ceilings are checked every time.
+pub(in crate::host) fn check_stage_material_review_v3(
+    host: &Host,
+    owner: &PrivateWorkspaceOwnerV1<'_>,
+    review: &wholepact_engine::PrivateFixedStageReviewV3,
+) -> Result<()> {
+    let materials = review.materials();
+    if materials.len() != 2 {
+        return Err(Error::Authentication);
+    }
+    let first = materials[0].scope();
+    let current = CurrentMaterialPrivacyV2 {
+        host,
+        owner,
+        candidate_id: Some(&first.proposal.proposal_id),
+        exact_proposal: Some(&first.proposal),
+        allowed: 1,
+        approved: Mutex::new(Vec::new()),
+    };
+    let mut accounts = BTreeSet::new();
+    for material in materials {
+        if !valid_commitment(material.material_digest())
+            || !accounts.insert(&material.scope().account_id)
+        {
+            return Err(Error::Authentication);
+        }
+        check_stage_material_ceiling_v3(material.scope(), wall_seconds()?)?;
+        current.scope_current(material.scope())?;
+    }
+    // Source/roster reads above may take time. Neither original ceiling may
+    // expire while the other member is checked.
+    let now = wall_seconds()?;
+    for material in materials {
+        check_stage_material_ceiling_v3(material.scope(), now)?;
+    }
+    Ok(())
+}
+#[derive(Clone, Serialize, PartialEq, Eq)]
+struct StageScanBindingV3 {
+    account_id: String,
+    account_uuid: String,
+    scope_digest: String,
+    backend: BackendIdentity,
+    directory_identity: String,
+    database_origin: String,
+    destination: PathBuf,
+}
+/// Nominal binding assembled only from retained process-local cache owners.
+/// It contains no key/wallet/material and cannot itself grant any permission.
+#[derive(Serialize)]
+pub(in crate::host) struct StageScanBindingsV3 {
+    cache_root: PathBuf,
+    cache_directory_identity: String,
+    owners: Vec<StageScanBindingV3>,
+}
+fn stage_scan_scope_digest_v3(scope: &DurableConstructionScopeV1) -> Result<String> {
+    wholepact_core::proposal::canonical_digest("wholepact:private-fixed-scan-scope:v3", scope)
+        .map_err(|_| Error::Invalid)
+}
+impl StageScanBindingsV3 {
+    fn from_actual(
+        cache: &OriginalConstructionScanCacheV2,
+        captured: &[Option<(DurableConstructionScopeV1, BackendIdentity)>; 2],
+    ) -> Result<Self> {
+        cache.check()?;
+        let mut owners = Vec::new();
+        for (wallet, captured) in cache.wallets.iter().zip(captured) {
+            let (scope, backend) = captured.as_ref().ok_or(Error::Invalid)?;
+            owners.push(StageScanBindingV3 {
+                account_id: scope.account_id.clone(),
+                account_uuid: format!(
+                    "{:?}",
+                    wallet.wallet.as_ref().ok_or(Error::Invalid)?.account_uuid()
+                ),
+                scope_digest: stage_scan_scope_digest_v3(scope)?,
+                backend: backend.clone(),
+                directory_identity: wallet
+                    .directory
+                    .as_ref()
+                    .ok_or(Error::Invalid)?
+                    .manual_target_identity_digest()?,
+                database_origin: hex::encode(
+                    wallet
+                        .origin
+                        .as_ref()
+                        .ok_or(Error::Invalid)?
+                        .origin_commitment(),
+                ),
+                destination: wallet.destination()?,
+            });
+        }
+        Ok(Self {
+            cache_root: cache.root.clone(),
+            cache_directory_identity: cache
+                .directory
+                .as_ref()
+                .ok_or(Error::Invalid)?
+                .manual_target_identity_digest()?,
+            owners,
+        })
+    }
+    pub(in crate::host) fn check_review(
+        &self,
+        review: &wholepact_engine::PrivateFixedStageReviewV3,
+    ) -> Result<()> {
+        if self.owners.len() != 2 || review.materials().len() != 2 {
+            return Err(Error::Authentication);
+        }
+        for owner in &self.owners {
+            if review
+                .materials()
+                .iter()
+                .filter(|m| {
+                    m.scope().account_id == owner.account_id
+                        && stage_scan_scope_digest_v3(m.scope())
+                            .is_ok_and(|digest| digest == owner.scope_digest)
+                })
+                .count()
+                != 1
+            {
+                return Err(Error::Authentication);
+            }
+        }
+        if self.owners[0].account_id == self.owners[1].account_id {
+            return Err(Error::Authentication);
+        }
+        Ok(())
+    }
+    fn matches_actual(&self, gate: &CurrentScanAccessV3<'_, '_, '_>) -> Result<()> {
+        gate.cache_directory.check()?;
+        if gate.cache_directory.manual_target_identity_digest()? != self.cache_directory_identity
+            || gate.cache_directory.path("profile.lock")?.parent()
+                != Some(self.cache_root.as_path())
+        {
+            return Err(Error::Authentication);
+        }
+        gate.directory.check()?;
+        gate.directory
+            .inventory_of(&["wallet.sqlite"], &["profile.lock"])?;
+        gate.origin
+            .check_retained_owner_path()
+            .map_err(|_| Error::Authentication)?;
+        let directory = gate.directory.manual_target_identity_digest()?;
+        let destination = gate.directory.path("wallet.sqlite")?;
+        let digest = stage_scan_scope_digest_v3(gate.scope)?;
+        let account = format!("{:?}", gate.account);
+        let origin = hex::encode(gate.origin.origin_commitment());
+        let actual = StageScanBindingV3 {
+            account_id: gate.scope.account_id.clone(),
+            account_uuid: account,
+            scope_digest: digest,
+            backend: gate.backend.clone(),
+            directory_identity: directory,
+            database_origin: origin,
+            destination,
+        };
+        if !stage_scan_binding_matches_v3(&self.owners, &actual) {
+            return Err(Error::Authentication);
+        }
+        Ok(())
+    }
+}
+fn stage_scan_binding_matches_v3(
+    owners: &[StageScanBindingV3],
+    actual: &StageScanBindingV3,
+) -> bool {
+    owners.iter().filter(|owner| *owner == actual).count() == 1
+}
+/// Consumes the completed stage before any next-stage disclosure can begin.
+/// The next operation is called at most once, including on refusal.
+fn after_completed_stage_v3<T, R>(previous: T, next: impl FnOnce() -> Result<R>) -> Result<R> {
+    drop(previous);
+    next()
+}
+struct CurrentScanAccessV3<'a, 'owner, 'host> {
+    stage:
+        &'a crate::host::durable_private_workspace_v1::OwnedPrivateWorkspaceStageV3<'owner, 'host>,
+    cache_directory: &'a Directory,
+    directory: &'a Directory,
+    origin: &'a DatabaseFileIdentity,
+    account: AccountUuid,
+    backend: &'a BackendIdentity,
+    scope: &'a DurableConstructionScopeV1,
+}
+impl LocalWalletAccess for CurrentScanAccessV3<'_, '_, '_> {
+    fn permits(
+        &self,
+        account: AccountUuid,
+        backend: &BackendIdentity,
+        purpose: WalletAccessPurpose,
+    ) -> bool {
+        self.account == account
+            && self.backend == backend
+            && matches!(
+                purpose,
+                WalletAccessPurpose::SynchronizePublicBlocks
+                    | WalletAccessPurpose::SelectPrivateContribution
+            )
+            && self
+                .stage
+                .scan_bindings()
+                .is_some_and(|bindings| observed_host_permission(bindings.matches_actual(self)))
+            && observed_host_permission(self.stage.check_callback())
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(in crate::host) enum PrivateCaptureStageV2 {
     BeforeInitial,
@@ -1479,93 +1704,62 @@ impl<'host> PrivateFixedSessionV2<'host> {
         if self.captured.iter().any(Option::is_none) {
             return Err(Error::Invalid);
         }
-        let material = CurrentMaterialPrivacyV2::new(
-            self.host,
-            &self.owner,
-            self.candidate.candidate_id(),
-            Some(self.candidate.proposal()),
-            1,
-        );
-        let proof = CurrentProofPrivacyV2 {
-            material: &material,
-            allowed: vec![
-                LocalAction::InspectStatus,
-                LocalAction::RetainPrivateWitnesses,
-            ],
-            approved: Mutex::new(Vec::new()),
-        };
+        let coordinator = self.owner.stage_coordinator_v3();
+        let checkpoint_key = self.original_checkpoint_key()?;
+        let checkpoint_diagnostic =
+            begin_private_diagnostic_invocation_v1(PrivateDiagnosticOperationV1::Checkpoint);
         begin_private_stage(PrivateBoundaryV2::Observe);
-        let observe = self
-            .owner
-            .exact_fixed_action_v2(PrivateWorkspaceActionV1::ObserveExactMaterial)?;
+        let inspection = self.owner.inspect_fixed_stage_v3()?;
+        let review = coordinator
+            .inspect_prepare_stage_v3(self.host.access()?, &inspection)
+            .map_err(|error| observe_engine_stage_review_v3(PrivateBoundaryV2::Observe, error))?;
+        let prepare = self.owner.approve_fixed_stage_v3(
+            inspection,
+            review,
+            Some(StageScanBindingsV3::from_actual(
+                &self.cache,
+                &self.captured,
+            )?),
+            || self.cache.check(),
+        )?;
         let mut fresh = Vec::new();
-        let mut scan_approvals = Vec::new();
         for index in 0..2 {
             let (scope, backend) = self.captured[index].as_ref().ok_or(Error::Invalid)?;
             let wallet = &mut self.cache.wallets[index];
             wallet.check()?;
-            let native = self.host.terminal.approve_historical(&format!(
-                "Observe this exact retained private construction input through its original process-only wallet and approved public-block provider.\nAccount: {}\nWallet: {}\nProvider: {}\nNo alternate inputs, refreshed material ceiling, financial admission or chain-validity assertion is permitted.",
-                scope.account_id, wallet.destination()?.display(), backend.endpoint,
-            ))?;
             let sync = wallet.wallet.as_mut().ok_or(Error::Invalid)?;
-            let gate = CurrentScanAccessV2 {
-                host: self.host,
-                workspace: &self.owner,
+            let gate = CurrentScanAccessV3 {
+                cache_directory: self.cache.directory.as_ref().ok_or(Error::Invalid)?,
+                stage: &prepare,
                 directory: wallet.directory.as_ref().ok_or(Error::Invalid)?,
                 origin: wallet.origin.as_ref().ok_or(Error::Invalid)?,
                 account: sync.account_uuid(),
                 backend,
                 scope,
-                native: &native,
             };
-            observe.check()?;
+            prepare.check()?;
             fresh.push(
-                observe
-                    .coordinator()
+                coordinator
                     .observe_exact_material_v2(
                         self.host.access()?,
                         self.candidate.candidate_id(),
                         &scope.account_id,
                         sync,
-                        &observe,
-                        &material,
+                        &prepare,
+                        &prepare,
                         &gate,
                     )
                     .await
                     .map_err(observe_engine_observation)?,
             );
-            observe.check()?;
-            native.check()?;
-            scan_approvals.push(native);
+            prepare.check()?;
         }
         complete_private_stage(PrivateBoundaryV2::Observe);
         begin_private_stage(PrivateBoundaryV2::Checkpoint);
-        let checkpoint_diagnostic =
-            begin_private_diagnostic_invocation_v1(PrivateDiagnosticOperationV1::Checkpoint);
-        private_host_result_at_v1(
-            PrivateDiagnosticSiteV1::HostCheckpointEntry,
-            material.check_complete(),
-        )?;
-        let checkpoint_key = private_host_result_at_v1(
-            PrivateDiagnosticSiteV1::HostCheckpointEntry,
-            self.original_checkpoint_key(),
-        )?;
-        let checkpoint_action = self
-            .owner
-            .exact_fixed_action_v2(PrivateWorkspaceActionV1::CheckpointExactOriginal)
-            .map_err(|error| {
-                observe_private_host_current_at_v1(
-                    PrivateDiagnosticSiteV1::HostCheckpointAction,
-                    &error,
-                );
-                error
-            })?;
         let prepared = {
             let [left, right] = &mut self.cache.wallets;
-            checkpoint_action
-                .coordinator()
-                .prepare_checkpoint_exact_original_v2(
+            coordinator
+                .prepare_checkpoint_for_stage_v3(
                     self.host.access()?,
                     &checkpoint_key,
                     self.candidate.candidate_id(),
@@ -1583,54 +1777,62 @@ impl<'host> PrivateFixedSessionV2<'host> {
                         .map_err(|_| Error::Permission)?,
                     ],
                     wholepact_protocol::proving::ProvingLimits { maximum_actions: 8 },
-                    &checkpoint_action,
-                    &proof,
-                    &material,
+                    &prepare,
+                    &prepare,
+                    &prepare,
                 )
                 .map_err(observe_engine_checkpoint)?
         };
-        // Preparation has released both held wallet locks before the exact
-        // artifact review. Discard its observations, never re-clock or clone
-        // them. The same original native approvals and absolute material bounds
-        // must admit a single new observation pass, with no further dialogs.
+        // All held construction/source postchecks have completed. These are
+        // data, not renewed observations or a transferable preparation grant.
         drop(fresh);
-        let cached_material = CachedMaterialPrivacyV2(&material);
-        let cached_proof = CachedProofPrivacyV2(&proof);
+        let inspection = after_completed_stage_v3(prepare, || self.owner.inspect_fixed_stage_v3())?;
+        let review = prepared
+            .inspect_admission_stage_v3(self.host.access()?, &inspection)
+            .map_err(|error| {
+                observe_engine_stage_review_v3(PrivateBoundaryV2::Checkpoint, error)
+            })?;
+        let admit = self.owner.approve_fixed_stage_v3(
+            inspection,
+            review,
+            Some(StageScanBindingsV3::from_actual(
+                &self.cache,
+                &self.captured,
+            )?),
+            || self.cache.check(),
+        )?;
+        // Every dialog is complete before this single genuine final scan pass.
         let mut fresh = Vec::new();
         for index in 0..2 {
             let (scope, backend) = self.captured[index].as_ref().ok_or(Error::Invalid)?;
             let wallet = &mut self.cache.wallets[index];
             wallet.check()?;
-            let native = scan_approvals.get(index).ok_or(Error::Invalid)?;
             let sync = wallet.wallet.as_mut().ok_or(Error::Invalid)?;
-            let gate = CurrentScanAccessV2 {
-                host: self.host,
-                workspace: &self.owner,
+            let gate = CurrentScanAccessV3 {
+                cache_directory: self.cache.directory.as_ref().ok_or(Error::Invalid)?,
+                stage: &admit,
                 directory: wallet.directory.as_ref().ok_or(Error::Invalid)?,
                 origin: wallet.origin.as_ref().ok_or(Error::Invalid)?,
                 account: sync.account_uuid(),
                 backend,
                 scope,
-                native,
             };
-            observe.check()?;
+            admit.check()?;
             fresh.push(
-                observe
-                    .coordinator()
+                coordinator
                     .observe_exact_material_v2(
                         self.host.access()?,
                         self.candidate.candidate_id(),
                         &scope.account_id,
                         sync,
-                        &observe,
-                        &cached_material,
+                        &admit,
+                        &admit,
                         &gate,
                     )
                     .await
                     .map_err(observe_engine_observation)?,
             );
-            observe.check()?;
-            native.check()?;
+            admit.check()?;
         }
         let checkpoint = {
             let [left, right] = &mut self.cache.wallets;
@@ -1649,9 +1851,9 @@ impl<'host> PrivateFixedSessionV2<'host> {
                         )
                         .map_err(|_| Error::Permission)?,
                     ],
-                    &checkpoint_action,
-                    &cached_proof,
-                    &cached_material,
+                    &admit,
+                    &admit,
+                    &admit,
                 )
                 .map_err(observe_engine_checkpoint)?
         };
@@ -1664,100 +1866,83 @@ impl<'host> PrivateFixedSessionV2<'host> {
         )?;
         private_host_result_at_v1(
             PrivateDiagnosticSiteV1::HostCheckpointPostcheck,
-            checkpoint_action.check(),
+            admit.check(),
         )?;
         drop(fresh);
-        drop(observe);
+        drop(admit);
         complete_private_stage(PrivateBoundaryV2::Checkpoint);
         drop(checkpoint_diagnostic);
         begin_private_stage(PrivateBoundaryV2::Proof);
-        let prove_action = self
+        let inspection = self.owner.inspect_fixed_stage_v3()?;
+        let review = attempt
+            .inspect_proof_stage_v3(self.host.access()?, &inspection)
+            .map_err(|error| observe_engine_stage_review_v3(PrivateBoundaryV2::Proof, error))?;
+        let prove = self
             .owner
-            .exact_fixed_action_v2(PrivateWorkspaceActionV1::ProveOriginalOnce)?;
-        let prove_material = CurrentMaterialPrivacyV2::new(
-            self.host,
-            &self.owner,
-            self.candidate.candidate_id(),
-            Some(self.candidate.proposal()),
-            1,
-        );
-        let prove_privacy = CurrentProofPrivacyV2 {
-            material: &prove_material,
-            allowed: vec![
-                LocalAction::InspectStatus,
-                LocalAction::RetainPrivateWitnesses,
-                LocalAction::ProveLocally,
-            ],
-            approved: Mutex::new(Vec::new()),
-        };
+            .approve_fixed_stage_v3(inspection, review, None, || Ok(()))?;
         let proved = run_original_proof_foreground_v2(
             self.host,
-            prove_action.coordinator(),
+            coordinator,
             attempt,
             &fix_step_key(&self.key, "prove")?,
             revision,
-            &prove_action,
-            &prove_privacy,
-            &prove_material,
+            &prove,
+            &prove,
+            &prove,
         )?;
-        prove_action.check()?;
+        prove.check()?;
         self.revision = proved.revision;
-        drop(prove_action);
-        drop(checkpoint_action);
+        drop(prove);
         complete_private_stage(PrivateBoundaryV2::Proof);
         begin_private_stage(PrivateBoundaryV2::Freeze);
         let freeze_diagnostic =
             begin_private_diagnostic_invocation_v1(PrivateDiagnosticOperationV1::Freeze);
-        let freeze_material = CurrentMaterialPrivacyV2::new(
-            self.host,
-            &self.owner,
-            self.candidate.candidate_id(),
-            Some(self.candidate.proposal()),
-            1,
-        );
-        let freeze_proof = CurrentProofPrivacyV2 {
-            material: &freeze_material,
-            allowed: vec![LocalAction::InspectStatus, LocalAction::ReadPrivateArtifact],
-            approved: Mutex::new(Vec::new()),
-        };
-        let frozen = self.owner.with_exact_fixed_v2(
-            PrivateWorkspaceActionV1::FreezeVerifiedFixed,
-            |coordinator, privacy| {
-                coordinator
-                    .freeze_verified_fixed_v2(
-                        self.host.access()?,
-                        &fix_step_key(&self.key, "freeze")?,
-                        self.candidate.candidate_id(),
-                        &checkpoint_key,
-                        self.revision,
-                        privacy,
-                        &freeze_proof,
-                        &freeze_material,
-                    )
-                    .map_err(observe_engine_freeze)
-            },
-        )?;
+        let inspection = self.owner.inspect_fixed_stage_v3()?;
+        let review = coordinator
+            .inspect_freeze_stage_v3(self.host.access()?, &inspection)
+            .map_err(|error| observe_engine_stage_review_v3(PrivateBoundaryV2::Freeze, error))?;
+        let freeze = self
+            .owner
+            .approve_fixed_stage_v3(inspection, review, None, || Ok(()))?;
+        let frozen = coordinator
+            .freeze_verified_fixed_v2(
+                self.host.access()?,
+                &fix_step_key(&self.key, "freeze")?,
+                self.candidate.candidate_id(),
+                &checkpoint_key,
+                self.revision,
+                &freeze,
+                &freeze,
+                &freeze,
+            )
+            .map_err(observe_engine_freeze)?;
+        freeze.check()?;
         self.revision = frozen.revision;
+        drop(freeze);
         complete_private_stage(PrivateBoundaryV2::Freeze);
         drop(freeze_diagnostic);
         begin_private_stage(PrivateBoundaryV2::Read);
         let _read_diagnostic =
             begin_private_diagnostic_invocation_v1(PrivateDiagnosticOperationV1::ReadFixed);
-        self.owner.with_exact_fixed_v2(
-            PrivateWorkspaceActionV1::ReadVerifiedFixed,
-            |coordinator, privacy| {
-                coordinator
-                    .read_verified_fixed_v2(
-                        self.host.access()?,
-                        self.candidate.candidate_id(),
-                        &checkpoint_key,
-                        privacy,
-                        &freeze_proof,
-                        &freeze_material,
-                    )
-                    .map_err(observe_engine_read)
-            },
-        )
+        let inspection = self.owner.inspect_fixed_stage_v3()?;
+        let review = coordinator
+            .inspect_saved_read_stage_v3(self.host.access()?, &inspection)
+            .map_err(|error| observe_engine_stage_review_v3(PrivateBoundaryV2::Read, error))?;
+        let read = self
+            .owner
+            .approve_fixed_stage_v3(inspection, review, None, || Ok(()))?;
+        let fixed = coordinator
+            .read_verified_fixed_v2(
+                self.host.access()?,
+                self.candidate.candidate_id(),
+                &checkpoint_key,
+                &read,
+                &read,
+                &read,
+            )
+            .map_err(observe_engine_read)?;
+        read.check()?;
+        Ok(fixed)
     }
 }
 
@@ -1851,12 +2036,12 @@ fn run_original_proof_foreground_v2<'op, 'source>(
     attempt: wholepact_engine::OriginalProofAttemptV2<'op, 'source>,
     key: &str,
     revision: u64,
-    workspace: &crate::host::durable_private_workspace_v1::OwnedPrivateWorkspaceActionV2<
+    workspace: &crate::host::durable_private_workspace_v1::OwnedPrivateWorkspaceStageV3<
         '_,
         'source,
     >,
-    proof: &CurrentProofPrivacyV2<'_, '_>,
-    material: &CurrentMaterialPrivacyV2<'_, '_>,
+    proof: &dyn LocalProofConsent,
+    material: &dyn LocalDurableMaterialConsentV1,
 ) -> Result<wholepact_engine::PrivateWorkspaceStatusV1> {
     use std::sync::atomic::{AtomicBool, Ordering};
     private_host_result_at_v1(
@@ -2099,27 +2284,17 @@ impl Host {
             PrivateDiagnosticSiteV1::HostReadOpen,
             self.reopen_private_workspace_registered_v1(root),
         )?;
-        let material = CurrentMaterialPrivacyV2 {
-            host: self,
-            owner: &owner,
-            candidate_id: None,
-            exact_proposal: None,
-            allowed: 1,
-            approved: Mutex::new(Vec::new()),
-        };
-        let proof = CurrentProofPrivacyV2 {
-            material: &material,
-            allowed: vec![LocalAction::InspectStatus, LocalAction::ReadPrivateArtifact],
-            approved: Mutex::new(Vec::new()),
-        };
-        owner.with_exact_fixed_v2(
-            PrivateWorkspaceActionV1::ReadVerifiedFixed,
-            |coordinator, privacy| {
-                coordinator
-                    .read_only_original_fixed_v2(self.access()?, privacy, &proof, &material)
-                    .map_err(observe_engine_read)
-            },
-        )
+        let coordinator = owner.stage_coordinator_v3();
+        let inspection = owner.inspect_fixed_stage_v3()?;
+        let review = coordinator
+            .inspect_saved_read_stage_v3(self.access()?, &inspection)
+            .map_err(|error| observe_engine_stage_review_v3(PrivateBoundaryV2::Read, error))?;
+        let read = owner.approve_fixed_stage_v3(inspection, review, None, || Ok(()))?;
+        let fixed = coordinator
+            .read_only_original_fixed_v2(self.access()?, &read, &read, &read)
+            .map_err(observe_engine_read)?;
+        read.check()?;
+        Ok(fixed)
     }
     pub(in crate::host) fn private_durable_read_fixed_v1_command(&self, root: &Path) -> Result<()> {
         let fixed = self.private_durable_read_fixed_v2(root)?;
@@ -3875,6 +4050,66 @@ fn observe_engine(boundary: PrivateBoundaryV2, error: wholepact_engine::ApiError
     observe_failure(boundary, engine_category(&error));
     Error::from(error)
 }
+fn stage_review_cause_v3(
+    error: &wholepact_engine::ApiError,
+) -> Option<(PrivateDiagnosticEngineCodeV1, PrivateDiagnosticCauseV1)> {
+    let code = match error.code.as_str() {
+        "DURABLE_CONSTRUCTION_UNAVAILABLE" => {
+            PrivateDiagnosticEngineCodeV1::DURABLE_CONSTRUCTION_UNAVAILABLE
+        }
+        "DISCLOSURE_DENIED"
+            if error
+                .details
+                .get("private_original_job_error_v1")
+                .and_then(serde_json::Value::as_str)
+                == Some("consent_denied") =>
+        {
+            PrivateDiagnosticEngineCodeV1::DISCLOSURE_DENIED
+        }
+        _ => return None,
+    };
+    let detail = error
+        .details
+        .get("private_fixed_stage_cause_v3")?
+        .as_object()?;
+    if detail.len() != 2 || detail.get("family")?.as_str()? != "DurableConstruction" {
+        return None;
+    }
+    let cause = match detail.get("cause")?.as_str()? {
+        "Invalid" => PrivateDiagnosticCauseV1::Invalid,
+        "Binding" => PrivateDiagnosticCauseV1::Binding,
+        "Stale" => PrivateDiagnosticCauseV1::Stale,
+        _ => return None,
+    };
+    Some((code, cause))
+}
+/// New metadata inspection only: finite cause, original call site, no claimed
+/// execution snapshot. Ordinary effect diagnostics retain their old path.
+fn observe_engine_stage_review_v3(
+    boundary: PrivateBoundaryV2,
+    error: wholepact_engine::ApiError,
+) -> Error {
+    if let Some((engine_code, cause)) = stage_review_cause_v3(&error) {
+        let (operation, site) = boundary.diagnostic_v1().unwrap_or((
+            PrivateDiagnosticOperationV1::Checkpoint,
+            PrivateDiagnosticSiteV1::HostCheckpointEntry,
+        ));
+        record_private_primary_v1(
+            PrivateDiagnosticPrimaryV1 {
+                operation,
+                site,
+                engine_code,
+                family: PrivateDiagnosticFamilyV1::DurableConstruction,
+                cause,
+            },
+            None,
+        );
+        observe_failure(boundary, engine_category(&error));
+        Error::from(error)
+    } else {
+        observe_engine(boundary, error)
+    }
+}
 fn observe_engine_current(error: wholepact_engine::ApiError) -> Error {
     #[cfg(all(test, feature = "synthetic-born-joined-qualification"))]
     PRIVATE_CURRENT_BOUNDARY_V2.with(|stage| {
@@ -4868,5 +5103,150 @@ mod tests {
                 Some(("PrivateWorkspaceProof", "HostPermission"))
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod closed_stage_lifecycle_v3_tests {
+    use super::*;
+    #[test]
+    fn completed_prepare_owner_drops_before_next_review_and_refusal_is_single_call() {
+        let trace = std::cell::RefCell::new(Vec::new());
+        struct Completed<'a>(&'a std::cell::RefCell<Vec<&'static str>>);
+        impl Drop for Completed<'_> {
+            fn drop(&mut self) {
+                self.0.borrow_mut().push("prepare-dropped");
+            }
+        }
+        let result: Result<()> = after_completed_stage_v3(Completed(&trace), || {
+            trace.borrow_mut().push("admission-inspection-review");
+            Err(Error::Permission)
+        });
+        assert!(matches!(result, Err(Error::Permission)));
+        assert_eq!(
+            *trace.borrow(),
+            ["prepare-dropped", "admission-inspection-review"]
+        );
+    }
+    #[test]
+    fn actual_scan_binding_match_requires_each_owner_provider_and_scope_field() {
+        let binding = StageScanBindingV3 {
+            account_id: "account-a".into(),
+            account_uuid: "original-uuid".into(),
+            scope_digest: "scope-commitment".into(),
+            backend: BackendIdentity {
+                source_id: "original-source".into(),
+                endpoint: "https://example.invalid".into(),
+                trust_profile: "original-provider",
+            },
+            directory_identity: "original-directory".into(),
+            database_origin: "original-database".into(),
+            destination: PathBuf::from("/inert/original/wallet.sqlite"),
+        };
+        let owners = [binding.clone()];
+        assert!(stage_scan_binding_matches_v3(&owners, &binding));
+        assert!(!stage_scan_binding_matches_v3(&[], &binding));
+        assert!(!stage_scan_binding_matches_v3(
+            &[binding.clone(), binding.clone()],
+            &binding
+        ));
+        for change in [
+            |b: &mut StageScanBindingV3| b.account_id.push('x'),
+            |b: &mut StageScanBindingV3| b.account_uuid.push('x'),
+            |b: &mut StageScanBindingV3| b.scope_digest.push('x'),
+            |b: &mut StageScanBindingV3| b.backend.source_id.push('x'),
+            |b: &mut StageScanBindingV3| b.backend.endpoint.push('x'),
+            |b: &mut StageScanBindingV3| b.backend.trust_profile = "substitute",
+            |b: &mut StageScanBindingV3| b.directory_identity.push('x'),
+            |b: &mut StageScanBindingV3| b.database_origin.push('x'),
+            |b: &mut StageScanBindingV3| b.destination.push("substitute"),
+        ] {
+            let mut changed = binding.clone();
+            change(&mut changed);
+            assert!(!stage_scan_binding_matches_v3(&owners, &changed));
+        }
+    }
+}
+
+#[cfg(test)]
+mod stage_review_error_v3_tests {
+    use super::*;
+    fn error(cause: &str) -> wholepact_engine::ApiError {
+        let mut error =
+            wholepact_engine::ApiError::new("DURABLE_CONSTRUCTION_UNAVAILABLE", "private canary");
+        error.details["private_fixed_stage_cause_v3"] =
+            serde_json::json!({"family":"DurableConstruction","cause":cause});
+        error
+    }
+    #[test]
+    fn stage_review_cause_accepts_only_exact_existing_finite_shape() {
+        for (cause, expected) in [
+            ("Invalid", PrivateDiagnosticCauseV1::Invalid),
+            ("Binding", PrivateDiagnosticCauseV1::Binding),
+            ("Stale", PrivateDiagnosticCauseV1::Stale),
+        ] {
+            assert_eq!(
+                stage_review_cause_v3(&error(cause)),
+                Some((
+                    PrivateDiagnosticEngineCodeV1::DURABLE_CONSTRUCTION_UNAVAILABLE,
+                    expected
+                ))
+            );
+        }
+        for cause in ["PRIVATE/path", "Permission", "Storage", "Unclassified"] {
+            assert!(stage_review_cause_v3(&error(cause)).is_none());
+        }
+        let mut unknown = error("Stale");
+        unknown.details["private_fixed_stage_cause_v3"]["extra"] = serde_json::json!(true);
+        assert!(stage_review_cause_v3(&unknown).is_none());
+        let mut wrong = error("Stale");
+        wrong.details["private_fixed_stage_cause_v3"]["family"] = serde_json::json!("Host");
+        assert!(stage_review_cause_v3(&wrong).is_none());
+        wrong = error("Stale");
+        wrong.code = "INVALID_REQUEST".into();
+        assert!(stage_review_cause_v3(&wrong).is_none());
+        let mut job = error("Stale");
+        job.code = "DISCLOSURE_DENIED".into();
+        assert!(stage_review_cause_v3(&job).is_none());
+        job.details["private_original_job_error_v1"] = serde_json::json!("verification_failed");
+        assert!(stage_review_cause_v3(&job).is_none());
+        job.details["private_original_job_error_v1"] = serde_json::json!("consent_denied");
+        assert_eq!(
+            stage_review_cause_v3(&job),
+            Some((
+                PrivateDiagnosticEngineCodeV1::DISCLOSURE_DENIED,
+                PrivateDiagnosticCauseV1::Stale
+            ))
+        );
+    }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    #[test]
+    fn stage_review_error_preserves_first_cause_without_execution_evidence() {
+        let _scope = begin_private_fixed_diagnostic_scope_v1();
+        let _invocation =
+            begin_private_diagnostic_invocation_v1(PrivateDiagnosticOperationV1::Proof);
+        let mut original = error("Stale");
+        original.code = "DISCLOSURE_DENIED".into();
+        original.details["private_original_job_error_v1"] = serde_json::json!("consent_denied");
+        let _ = observe_engine_stage_review_v3(PrivateBoundaryV2::Proof, original);
+        let first = private_fixed_diagnostic_snapshot_v1().unwrap();
+        assert_eq!(first.primary.operation, PrivateDiagnosticOperationV1::Proof);
+        assert_eq!(
+            first.primary.site,
+            PrivateDiagnosticSiteV1::HostProofPrecheck
+        );
+        assert_eq!(
+            first.primary.family,
+            PrivateDiagnosticFamilyV1::DurableConstruction
+        );
+        assert_eq!(first.primary.cause, PrivateDiagnosticCauseV1::Stale);
+        assert_eq!(
+            first.primary.engine_code,
+            PrivateDiagnosticEngineCodeV1::DISCLOSURE_DENIED
+        );
+        assert!(first.evidence.is_none());
+        assert!(first.worker.is_none());
+        let _ = observe_engine_stage_review_v3(PrivateBoundaryV2::Read, error("Binding"));
+        assert_eq!(private_fixed_diagnostic_snapshot_v1(), Some(first));
     }
 }

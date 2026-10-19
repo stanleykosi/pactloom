@@ -88,7 +88,102 @@ impl HistoricalOutput {
         Ok(())
     }
 }
+// BEGIN private fixed stage V3 kernels.
+/// This is the exact fixed-width framing written by confirm_checked: eight
+/// random bytes become sixteen hexadecimal digits. Bound the full escaped
+/// review and framing together before admitting any private disclosure.
+const PRIVATE_FIXED_STAGE_PROMPT_V3: &str =
+    "\nType APPROVE 0000000000000000 to approve this exact operation, or anything else to reject: ";
+
+fn bound_private_fixed_stage_review_v3(detail: &str) -> Result<()> {
+    let maximum = wholepact_storage_security::bundle::recovery::evidence::history::MAX_HISTORICAL_METADATA_BYTES;
+    if detail.len() > maximum
+        || sanitize(detail)
+            .len()
+            .checked_add(PRIVATE_FIXED_STAGE_PROMPT_V3.len())
+            .is_none_or(|length| length > maximum)
+    {
+        return Err(Error::Invalid);
+    }
+    Ok(())
+}
+
+/// Shared ordering only; neither callback nor this kernel can create authority.
+fn private_fixed_stage_disclosure_v3(
+    mut inspection: impl FnMut() -> Result<()>,
+    source: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    inspection()?;
+    source()?;
+    // Source validation may be expensive. Inspection must still authorize the
+    // disclosure immediately after it, before confirm_checked writes bytes.
+    inspection()
+}
+
+/// A genuine response starts the new fixed budget before source postchecks.
+/// The returned value is inert checked data, not a native approval factory.
+fn private_fixed_stage_response_v3<T>(
+    review: impl FnOnce() -> Result<()>,
+    after_response: impl FnOnce() -> Result<T>,
+) -> Result<(Instant, T)> {
+    review()?;
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let checked = after_response()?;
+    check_private_fixed_stage_deadline_v3(deadline)?;
+    Ok((deadline, checked))
+}
+
+/// Restriction-only final gate; a supplied instant cannot construct approval.
+fn check_private_fixed_stage_deadline_v3(deadline: Instant) -> Result<()> {
+    if Instant::now() >= deadline {
+        return Err(Error::Permission);
+    }
+    Ok(())
+}
+// END private fixed stage V3 kernels.
+
 impl Terminal {
+    // BEGIN private fixed stage V3 terminal issuer.
+    /// Issue a separately reviewed closed private-fixed stage, never renew the
+    /// inspection that permitted its disclosure. Both source callbacks are
+    /// private admission checks and must not re-lock this Terminal.
+    pub(crate) fn approve_private_fixed_stage_v3(
+        &self,
+        prior: &HistoricalApproval,
+        detail: &str,
+        before_disclosure: impl FnOnce() -> Result<()>,
+        after_response: impl FnOnce() -> Result<()>,
+    ) -> Result<HistoricalApproval> {
+        if !Arc::ptr_eq(&self.0, &prior.terminal.0) {
+            return Err(Error::Permission);
+        }
+        bound_private_fixed_stage_review_v3(detail)?;
+        let (deadline, foreground_file) = private_fixed_stage_response_v3(
+            || {
+                self.confirm_checked(detail, || {
+                    private_fixed_stage_disclosure_v3(|| prior.check(), before_disclosure)
+                })
+            },
+            || {
+                let file = self.0.lock().map_err(|_| Error::Terminal)?;
+                foreground(&file)?;
+                // Inspection has completed. Only actual source, session,
+                // revocation and original material ceilings are checked here.
+                after_response()?;
+                foreground(&file)?;
+                Ok(file.try_clone()?)
+            },
+        )?;
+        let approval = HistoricalApproval {
+            terminal: self.clone(),
+            foreground_file,
+            deadline,
+            spent: AtomicBool::new(false),
+        };
+        approval.check()?;
+        Ok(approval)
+    }
+    // END private fixed stage V3 terminal issuer.
     pub(crate) fn historical_output(&self) -> Result<HistoricalOutput> {
         let file = self.0.lock().map_err(|_| Error::Terminal)?;
         foreground(&file)?;
@@ -161,6 +256,309 @@ impl Terminal {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // BEGIN private fixed stage V3 tests.
+    #[test]
+    fn private_fixed_stage_v3_complete_bound_includes_escaping_and_challenge() {
+        let maximum = wholepact_storage_security::bundle::recovery::evidence::history::MAX_HISTORICAL_METADATA_BYTES;
+        let exact = "x".repeat(maximum - PRIVATE_FIXED_STAGE_PROMPT_V3.len());
+        assert!(bound_private_fixed_stage_review_v3(&exact).is_ok());
+        assert!(matches!(
+            bound_private_fixed_stage_review_v3(&(exact + "x")),
+            Err(Error::Invalid)
+        ));
+        let escaped = "é".repeat(24_000);
+        assert!(escaped.len() < maximum);
+        assert!(matches!(
+            bound_private_fixed_stage_review_v3(&escaped),
+            Err(Error::Invalid)
+        ));
+    }
+
+    #[test]
+    fn private_fixed_stage_v3_disclosure_checks_original_inspection_then_source_once() {
+        use std::cell::RefCell;
+        let trace = RefCell::new(Vec::new());
+        assert!(
+            private_fixed_stage_disclosure_v3(
+                || {
+                    trace.borrow_mut().push("original inspection");
+                    Ok(())
+                },
+                || {
+                    trace
+                        .borrow_mut()
+                        .push("actual source and original material ceilings");
+                    Ok(())
+                },
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            *trace.borrow(),
+            vec![
+                "original inspection",
+                "actual source and original material ceilings",
+                "original inspection"
+            ]
+        );
+        trace.borrow_mut().clear();
+        assert!(matches!(
+            private_fixed_stage_disclosure_v3(
+                || {
+                    trace.borrow_mut().push("expired original inspection");
+                    Err(Error::Permission)
+                },
+                || {
+                    trace.borrow_mut().push("must not run");
+                    Ok(())
+                },
+            ),
+            Err(Error::Permission)
+        ));
+        assert_eq!(*trace.borrow(), vec!["expired original inspection"]);
+        trace.borrow_mut().clear();
+        assert!(matches!(
+            private_fixed_stage_disclosure_v3(
+                || {
+                    trace.borrow_mut().push("original inspection");
+                    Ok(())
+                },
+                || {
+                    trace.borrow_mut().push("refused source");
+                    Err(Error::Invalid)
+                },
+            ),
+            Err(Error::Invalid)
+        ));
+        assert_eq!(
+            *trace.borrow(),
+            vec!["original inspection", "refused source"]
+        );
+    }
+
+    #[test]
+    fn private_fixed_stage_v3_inspection_expiry_during_source_denies_disclosure() {
+        use std::cell::{Cell, RefCell};
+        let current = Cell::new(true);
+        let trace = RefCell::new(Vec::new());
+        assert!(matches!(
+            private_fixed_stage_disclosure_v3(
+                || {
+                    trace.borrow_mut().push("inspection");
+                    if current.get() {
+                        Ok(())
+                    } else {
+                        Err(Error::Permission)
+                    }
+                },
+                || {
+                    trace.borrow_mut().push("source expires inspection");
+                    current.set(false);
+                    Ok(())
+                },
+            ),
+            Err(Error::Permission)
+        ));
+        assert_eq!(
+            *trace.borrow(),
+            vec!["inspection", "source expires inspection", "inspection"]
+        );
+    }
+
+    #[test]
+    fn private_fixed_stage_v3_response_captures_budget_before_source_once() {
+        use std::cell::{Cell, RefCell};
+        let trace = RefCell::new(Vec::new());
+        let inspection_current = Cell::new(true);
+        let response_completed = Cell::new(None);
+        let source_started = Cell::new(None);
+        // Inert kernel control only: no terminal/native/source authority is
+        // fabricated. Expiry during human deliberation is not rechecked after
+        // that already-authorized disclosure and affirmative response.
+        let (deadline, ()) = private_fixed_stage_response_v3(
+            || {
+                private_fixed_stage_disclosure_v3(
+                    || {
+                        assert!(inspection_current.get());
+                        trace.borrow_mut().push("inspection");
+                        Ok(())
+                    },
+                    || {
+                        trace.borrow_mut().push("disclosure source");
+                        Ok(())
+                    },
+                )?;
+                inspection_current.set(false);
+                trace.borrow_mut().push("affirmative response");
+                response_completed.set(Some(Instant::now()));
+                Ok(())
+            },
+            || {
+                source_started.set(Some(Instant::now()));
+                assert!(!inspection_current.get());
+                trace.borrow_mut().push("post-response source only");
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(deadline >= response_completed.get().unwrap() + Duration::from_secs(120));
+        assert!(deadline <= source_started.get().unwrap() + Duration::from_secs(120));
+        assert_eq!(
+            *trace.borrow(),
+            vec![
+                "inspection",
+                "disclosure source",
+                "inspection",
+                "affirmative response",
+                "post-response source only"
+            ]
+        );
+    }
+
+    #[test]
+    fn private_fixed_stage_v3_response_preserves_first_error_without_reissue() {
+        use std::cell::Cell;
+        let reviews = Cell::new(0);
+        let postchecks = Cell::new(0);
+        assert!(matches!(
+            private_fixed_stage_response_v3(
+                || {
+                    reviews.set(reviews.get() + 1);
+                    Err(Error::Permission)
+                },
+                || {
+                    postchecks.set(postchecks.get() + 1);
+                    Ok(())
+                },
+            ),
+            Err(Error::Permission)
+        ));
+        assert_eq!((reviews.get(), postchecks.get()), (1, 0));
+        reviews.set(0);
+        assert!(matches!(
+            private_fixed_stage_response_v3(
+                || {
+                    reviews.set(reviews.get() + 1);
+                    Ok(())
+                },
+                || {
+                    postchecks.set(postchecks.get() + 1);
+                    Err::<(), _>(Error::Invalid)
+                },
+            ),
+            Err(Error::Invalid)
+        ));
+        assert_eq!((reviews.get(), postchecks.get()), (1, 1));
+    }
+
+    #[test]
+    fn private_fixed_stage_v3_expired_new_stage_budget_denies_without_reissue() {
+        // Exercise the response kernel's restriction-only final gate without
+        // fabricating a native owner or waiting out the genuine fixed budget.
+        let ended_stage_deadline = Instant::now();
+        assert!(matches!(
+            check_private_fixed_stage_deadline_v3(ended_stage_deadline),
+            Err(Error::Permission)
+        ));
+        assert!(matches!(
+            check_private_fixed_stage_deadline_v3(ended_stage_deadline),
+            Err(Error::Permission)
+        ));
+    }
+
+    #[test]
+    fn private_fixed_stage_v3_expired_disconnected_or_rebound_inspection_never_discloses() {
+        use std::cell::Cell;
+        for expired in [false, true] {
+            let prior = HistoricalApproval::denied_for_test(expired);
+            let terminal = prior.terminal.clone();
+            let before = Cell::new(0);
+            let after = Cell::new(0);
+            {
+                // The real original check is safe under the original mutex:
+                // its private duplicate neither re-locks nor admits this file.
+                let held = terminal.0.lock().unwrap();
+                let disclosure = private_fixed_stage_disclosure_v3(
+                    || prior.check(),
+                    || {
+                        before.set(before.get() + 1);
+                        Ok(())
+                    },
+                );
+                if expired {
+                    assert!(matches!(disclosure, Err(Error::Permission)));
+                } else {
+                    assert!(matches!(disclosure, Err(Error::Terminal)));
+                }
+                assert_eq!(held.metadata().unwrap().len(), 0);
+            }
+            assert_eq!(before.get(), 0);
+            assert!(
+                terminal
+                    .approve_private_fixed_stage_v3(
+                        &prior,
+                        "synthetic private stage metadata",
+                        || {
+                            before.set(before.get() + 1);
+                            Ok(())
+                        },
+                        || {
+                            after.set(after.get() + 1);
+                            Ok(())
+                        },
+                    )
+                    .is_err()
+            );
+            assert_eq!((before.get(), after.get()), (0, 0));
+            assert_eq!(terminal.0.lock().unwrap().metadata().unwrap().len(), 0);
+            let other = Terminal::disconnected_for_test();
+            assert!(matches!(
+                other.approve_private_fixed_stage_v3(
+                    &prior,
+                    "synthetic private stage metadata",
+                    || {
+                        before.set(before.get() + 1);
+                        Ok(())
+                    },
+                    || {
+                        after.set(after.get() + 1);
+                        Ok(())
+                    },
+                ),
+                Err(Error::Permission)
+            ));
+            assert_eq!((before.get(), after.get()), (0, 0));
+            assert_eq!(other.0.lock().unwrap().metadata().unwrap().len(), 0);
+        }
+    }
+
+    #[test]
+    fn private_fixed_stage_v3_oversize_review_never_checks_source_or_discloses() {
+        use std::cell::Cell;
+        let prior = HistoricalApproval::denied_for_test(false);
+        let terminal = prior.terminal.clone();
+        let before = Cell::new(false);
+        let after = Cell::new(false);
+        assert!(matches!(
+            terminal.approve_private_fixed_stage_v3(
+                &prior,
+                &"é".repeat(24_000),
+                || {
+                    before.set(true);
+                    Ok(())
+                },
+                || {
+                    after.set(true);
+                    Ok(())
+                },
+            ),
+            Err(Error::Invalid)
+        ));
+        assert!(!before.get());
+        assert!(!after.get());
+        assert_eq!(terminal.0.lock().unwrap().metadata().unwrap().len(), 0);
+    }
+    // END private fixed stage V3 tests.
     #[test]
     fn historical_deadline_and_disconnect_never_deliver() {
         for expired in [false, true] {

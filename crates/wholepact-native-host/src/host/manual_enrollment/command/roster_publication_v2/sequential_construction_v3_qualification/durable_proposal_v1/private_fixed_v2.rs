@@ -271,16 +271,21 @@ fn review(detail:&'static str)->Input<'static> { Input::ExactReview { detail,app
 
 
 
-fn producer_inputs()->Vec<Input<'static>> {
-    let mut inputs=initial::inputs();
+fn producer_inputs() -> Vec<Input<'static>> {
+    let mut inputs = initial::inputs();
     inputs.push(review("Inspect the exact original Host roster, current agreement and complete original terms for nonbinding coordinator source selection."));
     inputs.push(review("Record exactly two NONBINDING coordinator-owned intent claims and select their unchanged amounts on this actual original Host."));
-    inputs.push(Input::Text { prompt:"Storage passphrase for private workspace anchor: ",response:PASSWORD });
+    inputs.push(Input::Text {
+        prompt: "Storage passphrase for private workspace anchor: ",
+        response: PASSWORD,
+    });
     inputs.push(review("Read exact current selected original source and complete historical terms for NONSPENDING private coordination."));
     inputs.push(review("Register exact immutable private dependency."));
-    open_inputs(&mut inputs,true);
+    open_inputs(&mut inputs, true);
     inputs.push(review("Read exact current selected original source and complete historical terms for NONSPENDING private coordination."));
-    inputs.push(review("Open ONLY the exact initialized original private workspace."));
+    inputs.push(review(
+        "Open ONLY the exact initialized original private workspace.",
+    ));
     inputs.push(review("Operation: read sanitized progress."));
     inputs.push(review("Prepare exactly this one claims-only candidate in the fresh initialized original private workspace."));
     inputs.push(review("Operation: prepare exact candidate."));
@@ -288,39 +293,34 @@ fn producer_inputs()->Vec<Input<'static>> {
         inputs.push(review("Request genuine initial native viewing disclosure and durable capture for this exact original selected owner."));
         inputs.push(review("Operation: retain exact sealed material."));
         inputs.push(review("Allow this exact original private material for sealed initial durable retention in this current native command?"));
-        if index==1 { inputs.push(review("Allow this exact original private material for sealed initial durable retention in this current native command?")); }
+        if index == 1 {
+            inputs.push(review("Allow this exact original private material for sealed initial durable retention in this current native command?"));
+        }
     }
-    inputs.push(review("Permit one exact current nonspending workspace effect: observe current exact material."));
-    for _ in 0..2 {
-        inputs.push(review("Observe this exact retained private construction input through its original process-only wallet and approved public-block provider."));
-        inputs.push(review("Allow this exact original private material for bounded original construction/proof/fixed verification in this current native command?"));
+    for detail in [
+        "Approve V3 private fixed stage Prepare.",
+        "Approve V3 private fixed stage AdmitOriginal.",
+        "Approve V3 private fixed stage ProveOriginal.",
+        "Approve V3 private fixed stage FreezeFixed.",
+        "Approve V3 private fixed stage ReadFixed.",
+    ] {
+        inputs.push(review("Inspect exact original private V3 stage metadata."));
+        inputs.push(review(detail));
     }
-    inputs.push(review("Permit one exact current nonspending workspace effect: checkpoint one original constructor."));
-    inputs.push(review("Allow RetainPrivateWitnesses for this exact original private workspace checkpoint?"));
-    inputs.push(review("Permit one exact current nonspending workspace effect: run one newly committed original proof."));
-    for _ in 0..2 { inputs.push(review("Allow this exact original private material for bounded original construction/proof/fixed verification in this current native command?")); }
-    inputs.push(review("Allow InspectStatus for this exact original private workspace checkpoint?"));
-    inputs.push(review("Allow ProveLocally for this exact original private workspace checkpoint?"));
-    inputs.push(review("Allow RetainPrivateWitnesses for this exact original private workspace checkpoint?"));
-    inputs.push(review("Operation: freeze verified fixed identity."));
-    for _ in 0..2 { inputs.push(review("Allow this exact original private material for bounded original construction/proof/fixed verification in this current native command?")); }
-    inputs.push(review("Allow InspectStatus for this exact original private workspace checkpoint?"));
-    inputs.push(review("Allow ReadPrivateArtifact for this exact original private workspace checkpoint?"));
-    inputs.push(review("Operation: read retained verified fixed identity."));
     inputs.push(review("SYNTHETIC ORIGINAL WORKSPACE: keep these already verified original owners live for controlled process death."));
     inputs
 }
-fn reader_inputs()->Vec<Input<'static>> {
-    let mut inputs=Vec::new();open_inputs(&mut inputs,false);
+fn reader_inputs() -> Vec<Input<'static>> {
+    let mut inputs = Vec::new();
+    open_inputs(&mut inputs, false);
     inputs.push(review("Read exact current selected original source and complete historical terms for NONSPENDING private coordination."));
-    inputs.push(review("Open ONLY the exact initialized original private workspace."));
-    inputs.push(review("Operation: read retained verified fixed identity."));
-    for _ in 0..2 { inputs.push(review("Allow this exact original private material for bounded original construction/proof/fixed verification in this current native command?")); }
-    inputs.push(review("Allow InspectStatus for this exact original private workspace checkpoint?"));
-    inputs.push(review("Allow ReadPrivateArtifact for this exact original private workspace checkpoint?"));
+    inputs.push(review(
+        "Open ONLY the exact initialized original private workspace.",
+    ));
+    inputs.push(review("Inspect exact original private V3 stage metadata."));
+    inputs.push(review("Approve V3 private fixed stage ReadFixed."));
     inputs
 }
-
 
 thread_local! {
     static CHILD_BOUNDARY: std::cell::Cell<B> = const { std::cell::Cell::new(B::PrivateWorkspaceBootstrap) };
@@ -622,12 +622,67 @@ mod pure_tests {
     }
     #[test]
     fn two_process_stages_share_one_original_deadline() {
-        let start=Instant::now();let deadline=start+WORKFLOW_LIMIT;
-        assert!(before_original_cutoff(deadline,start+Duration::from_secs(899)));
-        assert!(!before_original_cutoff(deadline,start+Duration::from_secs(900)));
-        assert!(!before_original_cutoff(deadline,start+Duration::from_secs(901)));
-        let reader_start=start+Duration::from_secs(899);
-        assert_eq!(deadline.duration_since(reader_start),Duration::from_secs(1));
+        // Script parity uses the actual producer/reader arrays, not a duplicate
+        // production authority or a replacement native approval fixture.
+        let stage_reviews = |inputs: Vec<Input<'static>>| {
+            inputs
+                .into_iter()
+                .filter_map(|input| match input {
+                    Input::ExactReview { detail, .. }
+                        if detail.starts_with("Inspect exact original private V3")
+                            || detail.starts_with("Approve V3 private fixed stage") =>
+                    {
+                        Some(detail)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let inspection = "Inspect exact original private V3 stage metadata.";
+        assert_eq!(
+            stage_reviews(producer_inputs()),
+            vec![
+                inspection,
+                "Approve V3 private fixed stage Prepare.",
+                inspection,
+                "Approve V3 private fixed stage AdmitOriginal.",
+                inspection,
+                "Approve V3 private fixed stage ProveOriginal.",
+                inspection,
+                "Approve V3 private fixed stage FreezeFixed.",
+                inspection,
+                "Approve V3 private fixed stage ReadFixed.",
+            ]
+        );
+        assert_eq!(
+            stage_reviews(reader_inputs()),
+            vec![inspection, "Approve V3 private fixed stage ReadFixed."]
+        );
+        for inputs in [producer_inputs(), reader_inputs()] {
+            assert!(!inputs.into_iter().any(|input| matches!(input, Input::ExactReview { detail, .. }
+                if detail.starts_with("Allow InspectStatus") || detail.starts_with("Allow ProveLocally")
+                    || detail.starts_with("Allow RetainPrivateWitnesses") || detail.starts_with("Observe this exact retained")
+                    || detail.starts_with("Allow this exact original private material for bounded"))));
+        }
+        let start = Instant::now();
+        let deadline = start + WORKFLOW_LIMIT;
+        assert!(before_original_cutoff(
+            deadline,
+            start + Duration::from_secs(899)
+        ));
+        assert!(!before_original_cutoff(
+            deadline,
+            start + Duration::from_secs(900)
+        ));
+        assert!(!before_original_cutoff(
+            deadline,
+            start + Duration::from_secs(901)
+        ));
+        let reader_start = start + Duration::from_secs(899);
+        assert_eq!(
+            deadline.duration_since(reader_start),
+            Duration::from_secs(1)
+        );
     }
     #[test]
     fn fixed_outcome_is_closed_and_has_no_private_values() {

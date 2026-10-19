@@ -24,7 +24,8 @@ pub(crate) use exact_fixed_v2::diagnostics;
 mod operation_v1;
 pub use exact_fixed_v2::{
     OriginalCheckpointOutcomeV2, OriginalProofAttemptV2, PreparedOriginalCheckpointV2,
-    PrivateExactCandidateV2, PrivateFixedStatusV2, PrivateVerifiedFixedV2,
+    PrivateExactCandidateV2, PrivateFixedMaterialReviewV3, PrivateFixedStageReviewV3,
+    PrivateFixedStageV3, PrivateFixedStatusV2, PrivateVerifiedFixedV2,
 };
 
 fn denied() -> ApiError {
@@ -312,6 +313,10 @@ pub enum PrivateWorkspaceActionV1 {
     ProveOriginalOnce,
     FreezeVerifiedFixed,
     ReadVerifiedFixed,
+    /// Current-scope bounded review metadata only; never an effect or artifact read.
+    InspectFixedStageMetadataV3,
+    /// Pure one-shot local construction; never constructor retention or enqueue.
+    PrepareFixedStageV3,
 }
 
 /// Exact privacy scope assembled from real source and destination owners. Values

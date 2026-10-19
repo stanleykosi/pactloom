@@ -438,6 +438,7 @@ impl CurrentNativePrivacy<'_, '_> {
             PrivateWorkspaceActionV1::Reopen
                 | PrivateWorkspaceActionV1::ReadStatus
                 | PrivateWorkspaceActionV1::ReadVerifiedFixed
+                | PrivateWorkspaceActionV1::InspectFixedStageMetadataV3
         ) {
             self.host.require_private_workspace_read_session_v1()?;
         } else {
@@ -2098,4 +2099,437 @@ fn storage_host_error(error: &Error) {
         Error::GenerationArchiveIncomplete => "HostGenerationArchiveIncomplete",
     };
     storage_failure(outcome);
+}
+
+/// Inspection is current source-reading permission only, never an effect grant.
+pub(in crate::host) struct OwnedPrivateWorkspaceInspectionV3<'a, 'host> {
+    owner: &'a PrivateWorkspaceOwnerV1<'host>,
+    approval: HistoricalApproval,
+}
+/// One genuine closed-stage decision. The nominal descriptor is consumed into
+/// this owner; neither an old permission nor a caller-built scope can issue it.
+pub(in crate::host) struct OwnedPrivateWorkspaceStageV3<'a, 'host> {
+    owner: &'a PrivateWorkspaceOwnerV1<'host>,
+    approval: HistoricalApproval,
+    review: wholepact_engine::PrivateFixedStageReviewV3,
+    scans: Option<super::financial::private_durable_fixed_v2::StageScanBindingsV3>,
+}
+fn stage_workspace_action_v3(
+    stage: wholepact_engine::PrivateFixedStageV3,
+    action: PrivateWorkspaceActionV1,
+) -> bool {
+    use wholepact_engine::PrivateFixedStageV3 as S;
+    use PrivateWorkspaceActionV1 as A;
+    matches!(
+        (stage, action),
+        (S::Prepare, A::ObserveExactMaterial | A::PrepareFixedStageV3)
+            | (
+                S::AdmitOriginal,
+                A::ObserveExactMaterial | A::CheckpointExactOriginal
+            )
+            | (S::ProveOriginal, A::ProveOriginalOnce)
+            | (S::FreezeFixed, A::FreezeVerifiedFixed)
+            | (S::ReadFixed, A::ReadVerifiedFixed)
+    )
+}
+fn stage_proof_action_v3(
+    stage: wholepact_engine::PrivateFixedStageV3,
+    action: wholepact_proof_jobs::LocalAction,
+) -> bool {
+    use wholepact_engine::PrivateFixedStageV3 as S;
+    use wholepact_proof_jobs::LocalAction as A;
+    matches!(
+        (stage, action),
+        (S::AdmitOriginal, A::RetainPrivateWitnesses)
+            | (
+                S::ProveOriginal,
+                A::InspectStatus | A::ProveLocally | A::RetainPrivateWitnesses
+            )
+            | (
+                S::FreezeFixed | S::ReadFixed,
+                A::InspectStatus | A::ReadPrivateArtifact
+            )
+    )
+}
+fn stage_actions_description_v3(stage: wholepact_engine::PrivateFixedStageV3) -> &'static str {
+    use wholepact_engine::PrivateFixedStageV3 as S;
+    match stage {
+        S::Prepare => {
+            "Workspace: ObserveExactMaterial, PrepareFixedStageV3. Materials: ReadForExactConstruction for exactly both original materials. Wallet: SynchronizePublicBlocks and SelectPrivateContribution only for the two listed original process-only owners/providers. One unpersisted randomized construction; no CheckpointExactOriginal, witness retention, receipt, enqueue, link, proof or freeze."
+        }
+        S::AdmitOriginal => {
+            "Workspace: ObserveExactMaterial, CheckpointExactOriginal. Materials: ReadForExactConstruction for exactly both originals. Wallet: SynchronizePublicBlocks and SelectPrivateContribution only for the two listed original owners/providers. Proof: RetainPrivateWitnesses for exactly the prepared checkpoint. After genuine fresh observations, consume the same prepared bytes once for receipt, enqueue and original link. No InspectStatus permission for raced-in jobs, no reconstruction or retry."
+        }
+        S::ProveOriginal => {
+            "Workspace: ProveOriginalOnce. Materials: ReadForExactConstruction for exactly both originals. Proof: InspectStatus, ProveLocally and RetainPrivateWitnesses for exactly this checkpoint. Consume the original queued attempt once; before/after computation and result commits require this same current decision. Expiry/cancellation never renews permission or retries the attempt; a post-compute or uncertain commit refusal can leave retained facts requiring recovery. No wallet scan."
+        }
+        S::FreezeFixed => {
+            "Workspace: FreezeVerifiedFixed. Materials: ReadForExactConstruction for exactly both originals. Proof: InspectStatus and ReadPrivateArtifact for exactly this checkpoint. Verify the successful original lineage and persist only its fixed identity. No wallet scan, proof attempt or new checkpoint."
+        }
+        S::ReadFixed => {
+            "Workspace: ReadVerifiedFixed. Materials: ReadForExactConstruction for exactly both originals. Proof: InspectStatus and ReadPrivateArtifact for exactly this checkpoint. Independently verify and read the retained original fixed identity only. No scan, construction, proof attempt, freeze, repair or write."
+        }
+    }
+}
+/// Shared exact-join/currentness gate. A denial has no review fallback.
+fn stage_permission_v3(exact: bool, current: impl FnOnce() -> Result<()>) -> Result<()> {
+    if !exact {
+        return Err(Error::Permission);
+    }
+    current()
+}
+impl<'host> PrivateWorkspaceOwnerV1<'host> {
+    /// Borrows the actual source owner, not the incidental preceding permission.
+    pub(in crate::host) fn stage_coordinator_v3(&self) -> &PrivateDurableCoordinatorV1<'host> {
+        &self.coordinator
+    }
+    pub(in crate::host) fn inspect_fixed_stage_v3(
+        &self,
+    ) -> Result<OwnedPrivateWorkspaceInspectionV3<'_, 'host>> {
+        self.check_originals()?;
+        let approval = self.host.terminal.approve_historical(&format!(
+            "Inspect exact original private V3 stage metadata. Source: {}. Agreement: {}. Destination: {}. Audience: {:?}. Retention: {}. This read-only inspection may validate the original encrypted envelope and retained material consistency only to collect bounded review metadata; no construction/proof use, raw witness/artifact output, scan or effects.",
+            self.source_digest(), self.agreement_id(), self.metadata_destination().display(), self.reviewer_account_ids(), self.retention_policy()))?;
+        let inspection = OwnedPrivateWorkspaceInspectionV3 {
+            owner: self,
+            approval,
+        };
+        inspection.check()?;
+        Ok(inspection)
+    }
+    fn check_stage_descriptor_v3(
+        &self,
+        review: &wholepact_engine::PrivateFixedStageReviewV3,
+    ) -> Result<()> {
+        self.check_current_without_proof_lock_v2()?;
+        if review.stage() == wholepact_engine::PrivateFixedStageV3::ReadFixed {
+            self.host.require_private_workspace_read_session_v1()?;
+        } else {
+            self.host.require_manual_session()?;
+        }
+        let scope = review.workspace_scope();
+        let a = &self.files.original.pending.association;
+        if scope.source_digest() != a.source_digest
+            || scope.principal_id() != a.principal_id
+            || scope.agreement_id() != a.agreement_id
+            || scope.obligation_id() != a.obligation_id
+            || scope.reviewer_account_ids() != a.reviewer_account_ids
+            || scope.protected_destination() != a.database_path
+            || scope.retention_policy() != a.retention_policy
+            || review.marker_digest() != self.files.original.committed.seed.marker_digest
+            || review.native_association_digest() != self.native_association_digest()
+            || review.metadata_origin() != hex::encode(self.metadata_origin())
+            || review.proof_origin() != hex::encode(self.proof_origin())
+            || (review.stage() == wholepact_engine::PrivateFixedStageV3::Prepare)
+                != review.checkpoint_scope().is_none()
+        {
+            return Err(Error::Authentication);
+        }
+        super::financial::private_durable_fixed_v2::check_stage_material_review_v3(
+            self.host, self, review,
+        )
+    }
+    pub(in crate::host) fn approve_fixed_stage_v3<'a>(
+        &'a self,
+        inspection: OwnedPrivateWorkspaceInspectionV3<'a, 'host>,
+        review: wholepact_engine::PrivateFixedStageReviewV3,
+        scans: Option<super::financial::private_durable_fixed_v2::StageScanBindingsV3>,
+        check_scans: impl Fn() -> Result<()>,
+    ) -> Result<OwnedPrivateWorkspaceStageV3<'a, 'host>> {
+        if !std::ptr::eq(self, inspection.owner) {
+            return Err(Error::Authentication);
+        }
+        inspection.check()?;
+        self.check_stage_descriptor_v3(&review)?;
+        let needs_scans = matches!(
+            review.stage(),
+            wholepact_engine::PrivateFixedStageV3::Prepare
+                | wholepact_engine::PrivateFixedStageV3::AdmitOriginal
+        );
+        if needs_scans != scans.is_some() {
+            return Err(Error::Authentication);
+        }
+        if let Some(scans) = &scans {
+            scans.check_review(&review)?;
+        }
+        check_scans()?;
+        let detail = format!(
+            "Approve V3 private fixed stage {:?}.\n{}\nOriginal process-only scan owners: {}\nClosed actions: {}\nThis permits only the closed actions listed for this stage, under one new 120-second native decision. Both original material absolute ceilings remain unchanged. No financial admission, signing, export, submission, regeneration, retry or permission renewal is authorized.",
+            review.stage(),
+            serde_json::to_string_pretty(&review).map_err(|_| Error::Invalid)?,
+            serde_json::to_string_pretty(&scans).map_err(|_| Error::Invalid)?,
+            stage_actions_description_v3(review.stage())
+        );
+        let check_source = || {
+            self.check_originals()?;
+            check_scans()?;
+            self.check_stage_descriptor_v3(&review)
+        };
+        let approval = self.host.terminal.approve_private_fixed_stage_v3(
+            &inspection.approval,
+            &detail,
+            &check_source,
+            &check_source,
+        )?;
+        // The completed inspection is deliberately not checked after the wait.
+        drop(inspection);
+        let stage = OwnedPrivateWorkspaceStageV3 {
+            owner: self,
+            approval,
+            review,
+            scans,
+        };
+        check_scans()?;
+        stage.check()?;
+        Ok(stage)
+    }
+}
+impl OwnedPrivateWorkspaceInspectionV3<'_, '_> {
+    fn check(&self) -> Result<()> {
+        self.approval.check()?;
+        self.owner
+            .host
+            .require_private_workspace_read_session_v1()?;
+        self.owner.check_originals()?;
+        self.approval.check()
+    }
+}
+impl LocalPrivateWorkspaceConsentV1 for OwnedPrivateWorkspaceInspectionV3<'_, '_> {
+    fn permits_workspace(
+        &self,
+        scope: &PrivateWorkspaceScopeV1,
+        action: PrivateWorkspaceActionV1,
+    ) -> bool {
+        action == PrivateWorkspaceActionV1::InspectFixedStageMetadataV3
+            && CurrentNativePrivacy {
+                host: self.owner.host,
+                committed: &self.owner.committed_target,
+                association: &self.owner.files.original.pending.association,
+                approval: &self.approval,
+                action,
+            }
+            .permits_workspace(scope, action)
+            && match self
+                .owner
+                .check_current_without_proof_lock_v2()
+                .and_then(|()| self.approval.check())
+            {
+                Ok(()) => true,
+                Err(error) => {
+                    observe_private_fixed_host_v1(
+                        PrivateDiagnosticOperationV1::OpenOriginal,
+                        PrivateDiagnosticSiteV1::HostWorkspaceCurrent,
+                        &error,
+                    );
+                    storage_host_error(&error);
+                    false
+                }
+            }
+    }
+}
+impl OwnedPrivateWorkspaceStageV3<'_, '_> {
+    pub(in crate::host) fn deadline(&self) -> std::time::Instant {
+        self.approval.deadline()
+    }
+    pub(in crate::host) fn check(&self) -> Result<()> {
+        self.approval.check()?;
+        self.owner.check_originals()?;
+        self.check_callback()
+    }
+    pub(in crate::host) fn check_callback(&self) -> Result<()> {
+        self.approval.check()?;
+        self.owner.check_stage_descriptor_v3(&self.review)?;
+        self.approval.check()
+    }
+    fn permission_at(&self, exact: bool, site: PrivateDiagnosticSiteV1) -> bool {
+        match stage_permission_v3(exact, || self.check_callback()) {
+            Ok(()) => true,
+            Err(error) => {
+                use wholepact_engine::PrivateFixedStageV3 as S;
+                let operation = match self.review.stage() {
+                    S::Prepare | S::AdmitOriginal => PrivateDiagnosticOperationV1::Checkpoint,
+                    S::ProveOriginal => PrivateDiagnosticOperationV1::Proof,
+                    S::FreezeFixed => PrivateDiagnosticOperationV1::Freeze,
+                    S::ReadFixed => PrivateDiagnosticOperationV1::ReadFixed,
+                };
+                observe_private_fixed_host_v1(operation, site, &error);
+                storage_host_error(&error);
+                false
+            }
+        }
+    }
+    pub(in crate::host) fn scan_bindings(
+        &self,
+    ) -> Option<&super::financial::private_durable_fixed_v2::StageScanBindingsV3> {
+        self.scans.as_ref()
+    }
+}
+impl LocalPrivateWorkspaceConsentV1 for OwnedPrivateWorkspaceStageV3<'_, '_> {
+    fn permits_workspace(
+        &self,
+        scope: &PrivateWorkspaceScopeV1,
+        action: PrivateWorkspaceActionV1,
+    ) -> bool {
+        stage_workspace_action_v3(self.review.stage(), action)
+            && CurrentNativePrivacy {
+                host: self.owner.host,
+                committed: &self.owner.committed_target,
+                association: &self.owner.files.original.pending.association,
+                approval: &self.approval,
+                action,
+            }
+            .permits_workspace(scope, action)
+            && self.permission_at(true, PrivateDiagnosticSiteV1::HostWorkspaceCurrent)
+    }
+}
+impl wholepact_engine::durable_construction_v1::LocalDurableMaterialConsentV1
+    for OwnedPrivateWorkspaceStageV3<'_, '_>
+{
+    fn permits(
+        &self,
+        scope: &wholepact_signer::authority_bridge::durable_construction_v1::DurableConstructionScopeV1,
+        digest: &str,
+        action: wholepact_engine::durable_construction_v1::DurableMaterialActionV1,
+    ) -> bool {
+        self.permission_at(
+            matches!(action, wholepact_engine::durable_construction_v1::DurableMaterialActionV1::ReadForExactConstruction)
+                && self.review.materials().iter().any(|material| material.scope() == scope && material.material_digest() == digest),
+            PrivateDiagnosticSiteV1::HostMaterialScope)
+    }
+}
+impl wholepact_proof_jobs::LocalProofConsent for OwnedPrivateWorkspaceStageV3<'_, '_> {
+    fn permits(
+        &self,
+        scope: &wholepact_proof_jobs::CheckpointScope,
+        action: wholepact_proof_jobs::LocalAction,
+    ) -> bool {
+        self.permission_at(
+            stage_proof_action_v3(self.review.stage(), action)
+                && self.review.checkpoint_scope() == Some(scope),
+            PrivateDiagnosticSiteV1::HostProofScope,
+        )
+    }
+}
+
+#[cfg(test)]
+mod closed_stage_v3_tests {
+    use super::*;
+    use wholepact_engine::PrivateFixedStageV3 as S;
+    use wholepact_proof_jobs::LocalAction as P;
+    #[test]
+    fn stage_workspace_matrix_and_legacy_issuers_remain_closed() {
+        use PrivateWorkspaceActionV1 as A;
+        let actions = [
+            A::Create,
+            A::Reopen,
+            A::ReadStatus,
+            A::RetainDiscovery,
+            A::RetainProjection,
+            A::FreezeCandidate,
+            A::PrepareExactCandidate,
+            A::RetainExactMaterial,
+            A::ObserveExactMaterial,
+            A::CheckpointExactOriginal,
+            A::ProveOriginalOnce,
+            A::FreezeVerifiedFixed,
+            A::ReadVerifiedFixed,
+            A::InspectFixedStageMetadataV3,
+            A::PrepareFixedStageV3,
+        ];
+        for (stage, expected) in [
+            (
+                S::Prepare,
+                vec![A::ObserveExactMaterial, A::PrepareFixedStageV3],
+            ),
+            (
+                S::AdmitOriginal,
+                vec![A::ObserveExactMaterial, A::CheckpointExactOriginal],
+            ),
+            (S::ProveOriginal, vec![A::ProveOriginalOnce]),
+            (S::FreezeFixed, vec![A::FreezeVerifiedFixed]),
+            (S::ReadFixed, vec![A::ReadVerifiedFixed]),
+        ] {
+            for action in actions {
+                assert_eq!(
+                    stage_workspace_action_v3(stage, action),
+                    expected.contains(&action)
+                );
+            }
+        }
+        assert!(require_exact_action(A::InspectFixedStageMetadataV3).is_err());
+        assert!(require_exact_action(A::PrepareFixedStageV3).is_err());
+    }
+    #[test]
+    fn stage_proof_matrix_has_no_prepare_or_recovery_authority() {
+        for (stage, expected) in [
+            (S::Prepare, vec![]),
+            (S::AdmitOriginal, vec![P::RetainPrivateWitnesses]),
+            (
+                S::ProveOriginal,
+                vec![P::InspectStatus, P::ProveLocally, P::RetainPrivateWitnesses],
+            ),
+            (
+                S::FreezeFixed,
+                vec![P::InspectStatus, P::ReadPrivateArtifact],
+            ),
+            (S::ReadFixed, vec![P::InspectStatus, P::ReadPrivateArtifact]),
+        ] {
+            for action in [
+                P::InspectStatus,
+                P::ProveLocally,
+                P::RetainPrivateWitnesses,
+                P::ReadPrivateArtifact,
+                P::RecoverInterrupted,
+            ] {
+                assert_eq!(
+                    stage_proof_action_v3(stage, action),
+                    expected.contains(&action)
+                );
+            }
+        }
+    }
+    #[test]
+    fn exact_stage_permission_rechecks_currentness_and_never_retries_refusal() {
+        let calls = std::cell::Cell::new(0);
+        for _ in 0..2 {
+            assert!(
+                stage_permission_v3(true, || {
+                    calls.set(calls.get() + 1);
+                    Ok(())
+                })
+                .is_ok()
+            );
+        }
+        assert_eq!(calls.get(), 2);
+        assert!(
+            stage_permission_v3(false, || {
+                calls.set(99);
+                Ok(())
+            })
+            .is_err()
+        );
+        assert_eq!(calls.get(), 2);
+        assert!(matches!(
+            stage_permission_v3(true, || {
+                calls.set(calls.get() + 1);
+                Err(Error::Permission)
+            }),
+            Err(Error::Permission)
+        ));
+        assert_eq!(calls.get(), 3);
+    }
+    #[test]
+    fn full_stage_disclosure_names_closed_actions_and_uncertain_proof_semantics() {
+        let prepare = stage_actions_description_v3(S::Prepare);
+        assert!(prepare.contains("PrepareFixedStageV3"));
+        assert!(prepare.contains("no CheckpointExactOriginal"));
+        assert!(stage_actions_description_v3(S::AdmitOriginal).contains("No InspectStatus"));
+        assert!(
+            stage_actions_description_v3(S::ProveOriginal).contains("uncertain commit refusal")
+        );
+        assert!(
+            stage_actions_description_v3(S::ReadFixed)
+                .contains("No scan, construction, proof attempt, freeze, repair or write")
+        );
+    }
 }
