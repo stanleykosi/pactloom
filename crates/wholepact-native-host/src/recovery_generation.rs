@@ -100,6 +100,58 @@ fn unseal(secrets: &Secrets, purpose: &[u8], bytes: &[u8]) -> Result<Zeroizing<V
         .map_err(|_| Error::Authentication)
 }
 
+/// Fixed-purpose wrappers only. No caller-selected crypto domain is exposed.
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "manual-admission",
+    target_os = "linux"
+))]
+pub(crate) fn seal_private_workspace_dependency_v1(
+    secrets: &Secrets,
+    pending: bool,
+    bytes: &[u8],
+) -> Result<Vec<u8>> {
+    if bytes.len() > 131_072 {
+        return Err(Error::Invalid);
+    }
+    seal(
+        secrets,
+        if pending {
+            b"durable-private:pending:v1"
+        } else {
+            b"durable-private:commit:v1"
+        },
+        bytes,
+    )
+}
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "manual-admission",
+    target_os = "linux"
+))]
+pub(crate) fn unseal_private_workspace_dependency_v1(
+    secrets: &Secrets,
+    pending: bool,
+    bytes: &[u8],
+) -> Result<Zeroizing<Vec<u8>>> {
+    if bytes.len() > 131_112 {
+        return Err(Error::Invalid);
+    }
+    let plain = unseal(
+        secrets,
+        if pending {
+            b"durable-private:pending:v1"
+        } else {
+            b"durable-private:commit:v1"
+        },
+        bytes,
+    )?;
+    if plain.len() > 131_072 {
+        return Err(Error::Invalid);
+    }
+    Ok(plain)
+}
+
 pub(crate) struct PendingGeneration {
     source: Inventory,
     directory: Directory,
@@ -710,6 +762,8 @@ mod publication {
         directory: &Directory,
         secrets: &Secrets,
     ) -> Result<wholepact_store::Store> {
+        secrets.require_portable_legacy()?;
+        directory.refuse_private_workspace_files()?;
         // Authenticated format dispatch never falls back to ordinary Store
         // initialization. Missing/tampered markers remain a hard error.
         if archive_history::source_plan_version(directory, secrets)? == 2 {
@@ -1034,6 +1088,14 @@ mod publication {
     pub(crate) mod inherited_manual_identity;
     pub(crate) mod layered_metadata;
     mod layered_publication;
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "manual-admission",
+        target_os = "linux"
+    ))]
+    pub(crate) use layered_publication::{
+        open_private_workspace_original_store_v1, open_workspace_publication_source_store_v1,
+    };
     #[cfg(all(feature = "manual-admission", target_os = "linux"))]
     pub(crate) mod manual_target;
     #[cfg(all(test, target_os = "linux"))]
@@ -1041,8 +1103,18 @@ mod publication {
     pub(crate) use history::{CommittedHistory, open_committed_history};
 }
 
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "manual-admission",
+    target_os = "linux"
+))]
+pub(crate) use publication::{
+    open_private_workspace_original_store_v1, open_workspace_publication_source_store_v1,
+};
+
 #[cfg(all(feature = "manual-admission", target_os = "linux"))]
 pub(crate) use publication::manual_target;
+
 #[cfg(all(feature = "manual-admission", target_os = "linux"))]
 pub(crate) mod construction_inspection_target;
 #[cfg(feature = "financial-runtime")]

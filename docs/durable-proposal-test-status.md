@@ -1,8 +1,18 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-19, 04:34 UTC.
+Updated: 2026-10-19, 06:29 UTC.
 
 **The bounded synthetic native two-owner fixed-signing fixture passed. Product qualification remains incomplete: no public testnet settlement, OS-process restart recovery, attended GUI reliability, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
+
+## Original Host private-workspace precursor: local gates passed, native process reopen pending
+
+The first prospective delivery integration audit found the original layered Host uses a recovered-generation Store, while the previous fixed-signing fixture used a separate fresh Engine. The recovered Store's existing material guards remain unchanged. This slice instead completes a purpose-bound original encrypted private workspace with immutable source and first-write marker, retaining the actual primary proof-store owner and exact original seed operations.
+
+A new explicit workspace-only vault-v3 payload anchors the required dependency before publication. V1/v2 behavior is preserved; ordinary opens never auto-upgrade. Exact staged publication/resume checks original financial/workspace file identities, schema and exclusion locks. Missing/replaced dependencies refuse. Portable backup/export/successor paths refuse v3 before output rather than claiming incomplete archive coverage. No dispatcher credential attachment, v2 payment admission, financial signing or dispatch authority is enabled by this precursor.
+
+Closed Host methods use genuine native review, source-selection claims that remain nonbinding until actual material checks, disposable scan caches and original privacy ceilings. The first proof attempt requires a consuming continuation minted only after a confirmed new encrypted queue commit; reopening a queued job cannot mint another. Saved succeeded proof and exact queued/running/succeeded event history can be read and frozen without another attempt. The new CI-only phase will kill/reap the actual producer and reopen the same originals in a distinct reader process; that native result is still pending.
+
+Independent review covered 40 source/test/CI paths. Build01 found module access/alias errors, fixed with narrow visibility/reexport changes. Build02 passed; six component failures came from three invalid test setups (live encrypted sidecars, mismatched declared proving mode, and noncanonical synthetic account aliases). Those fixtures were corrected without changing production checks. Final all-features Host/Engine/ProofJobs build passed (2m23s), all141 exact selected checks passed, including actual Halo2 proof replay and isolated storage kill/reap. Default Engine build passed (1m13s) and two unsupported-build refusals passed. Non-synthetic durable Host build passed (5m41s), Python144 and shell syntax passed. Suite counts overlap; component process death is not the full native qualification.
 
 ## CI22: committed Acquire reply-loss recovery passed; prospective delivery scope remains inert
 

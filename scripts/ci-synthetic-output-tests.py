@@ -42,6 +42,7 @@ class PublicOutputTests(unittest.TestCase):
 
     def test_durable_acquire_reply_loss_is_exact_ignored_and_preserves_every_old_phase(self):
         expected={
+            'durable-private-reopen': ('durable_proposal_v1::private_fixed_v2::private_workspace_actual_process_death_reopens_same_fixed_proof',1080,True),
             'initial': ('initial_joined_v3::actual_three_born_initial_roster_publications_preserve_refusal',300,False),
             'full': ('full_payment_inputs_v1::actual_three_born_full_payment_uses_one_original_synthetic_path',1080,True),
             'durable-owner-reopen': ('durable_proposal_v1::durable_proposal_native_owner_reopen_retains_exact_fixed_proof',1080,True),
@@ -49,7 +50,7 @@ class PublicOutputTests(unittest.TestCase):
             'durable-acquire-reply-loss': ('durable_proposal_v1::durable_proposal_native_acquire_reply_loss_retries_original_session',1080,True),
         }
         self.assertEqual(set(output.TESTS),set(expected))
-        self.assertEqual(len({name for name,_ in output.TESTS.values()}),5)
+        self.assertEqual(len({name for name,_ in output.TESTS.values()}),6)
         self.assertEqual(output.DURABLE_DIAGNOSTIC_PHASES,
                          frozenset(('durable-fixed-signing','durable-acquire-reply-loss')))
         for phase,(suffix,seconds,ignored) in expected.items():
@@ -100,7 +101,7 @@ class PublicOutputTests(unittest.TestCase):
         self.assertLess(shell.index('"$executable" durable-fixed-signing'),shell.index(call))
         self.assertLess(shell.index(call),shell.index('cargo test --locked --release -p wholepact-signer '))
         self.assertIn('original pending-session Acquire reply-loss recovery checks passed;',shell)
-        self.assertIn('no OS-process restart, public-chain settlement, attended GUI, Windows or production activation claimed.',shell)
+        self.assertIn('No public-chain settlement, attended GUI, Windows or production activation claimed.',shell)
         self.assertIn('set -euo pipefail',shell)
         self.assertIn('export CARGO_HOME="$build_root/cargo" CARGO_TARGET_DIR="$build_root/target"',shell)
         self.assertNotIn('--ignored',shell)
@@ -143,14 +144,14 @@ class PublicOutputTests(unittest.TestCase):
         self.assertIn('return Err(durable_flow_error(',expected)
         self.assertNotIn('diagnostic::emit',expected)
 
-    def test_durable_runner_does_not_claim_full_payment_or_process_restart(self):
+    def test_durable_runner_separates_old_owner_baseline_from_new_process_restart(self):
         shell=(ROOT/'scripts/ci-durable-native-linux.sh').read_text()
         workflow=(ROOT/'.github/workflows/durable-native-linux.yml').read_text()
         self.assertIn('refs/heads/qualification/durable-proposal-v1',shell)
         self.assertIn('branches: [qualification/durable-proposal-v1]',workflow)
         self.assertIn('python3 -B scripts/ci-synthetic-output.py "$executable" durable-owner-reopen',shell)
         self.assertNotIn('python3 -B scripts/ci-synthetic-output.py "$executable" full',shell)
-        self.assertIn('no OS-process restart, public-chain settlement',shell)
+        self.assertIn('The old owner/session baseline is not process-restart evidence.',shell)
 
     def test_durable_entry_failure_stages_remain_closed_and_redacted(self):
         self.assertEqual(len(output.DURABLE_ENTRY_BOUNDARIES),14)
@@ -1400,8 +1401,8 @@ class PublicTimingTests(unittest.TestCase):
                 self.assertEqual(len(re.findall(r'#\[test\]\s+fn '+name.rsplit('::',1)[1]+r'\(',source)),1)
         source=(ROOT/'scripts/ci-synthetic-output.py').read_text()
         self.assertIn(' + SIGNER_TIMING_TESTS + SIGNER_DURABLE_LABEL_TESTS + SIGNER_DURABLE_RECEIPT_TESTS:',source)
-        self.assertIn(' + TIMING_HOST_TESTS + (DURABLE_PROVIDER_METADATA_TEST,):',source)
-        self.assertIn('CI_SYNTHETIC_PURE passed=80 ',source)
+        self.assertIn(' + TIMING_HOST_TESTS + (DURABLE_PROVIDER_METADATA_TEST,)',source)
+        self.assertIn('CI_SYNTHETIC_PURE passed={len(selected)} ',source)
         self.assertIn('timing_counter_cases=3',source)
         self.assertIn("if status!=0 or not cleanup or cores!=1 or failures or (phase=='full' and outcome is None):",source)
         self.assertNotIn('eprintln!',signer)
@@ -2692,6 +2693,127 @@ class DurableAcquireReplyLossGateTests(unittest.TestCase):
             self.assertIn('invalid=true details_withheld=true',result)
         # Optional malformed diagnostics cannot substitute for a failed scenario.
         self.assertNotIn('passed=true',fake(malformed,phase=self.phase))
+
+
+class PrivateWorkspaceOutputTests(unittest.TestCase):
+    def record(self):
+        row={key:True for key in output.PRIVATE_WORKSPACE_BOOL_FIELDS}
+        row.update({key:False for key in output.PRIVATE_WORKSPACE_FALSE_FIELDS})
+        row.update(schema=1,phase='fixed_reopen',result='passed',first_failure=None,
+                   producer_exit='sigkill',reader_exit='success',root_cleanup='closed_absent')
+        return row
+
+    def line(self,row=None):
+        return output.PRIVATE_WORKSPACE_PREFIX+json.dumps(self.record() if row is None else row,separators=(',',':'))
+
+    def test_private_workspace_exact_phase_and_unexpanded_clock_bounds(self):
+        name=output.PREFIX+'durable_proposal_v1::private_fixed_v2::private_workspace_actual_process_death_reopens_same_fixed_proof'
+        self.assertEqual(output.phase_selection('durable-private-reopen'),(name,1080,['--exact',name,'--test-threads=1','--ignored']))
+        self.assertNotIn('durable-private-reopen',output.DURABLE_DIAGNOSTIC_PHASES)
+        for phase in ('durable-private-queued','durable-private-reopen-v1','durable-private-reopen ','private-workspace-read-fixed-v1','durable-private-reopen*'):
+            with self.assertRaises(KeyError): output.phase_selection(phase)
+        shell=(ROOT/'scripts/ci-durable-native-linux.sh').read_text()
+        call='TMPDIR="$runtime_root" python3 -B scripts/ci-synthetic-output.py "$executable" durable-private-reopen'
+        self.assertEqual(shell.count(call),1)
+        self.assertLess(shell.index('"$executable" durable-acquire-reply-loss'),shell.index(call))
+        self.assertIn('timeout-minutes: 150',(ROOT/'.github/workflows/durable-native-linux.yml').read_text())
+
+    def test_private_workspace_closed_fields_and_22_diagnostic_boundaries(self):
+        self.assertEqual(len(output.PRIVATE_WORKSPACE_BOUNDARIES),22)
+        self.assertEqual(len(output.PRIVATE_WORKSPACE_FIELDS),20)
+        row=self.record()
+        self.assertEqual(output.public_private_workspace(json.dumps(row)),row)
+        self.assertLess(len(json.dumps(row,separators=(',',':')).encode()),2048)
+        for label in output.PRIVATE_WORKSPACE_BOUNDARIES:
+            self.assertTrue(output.safe_failure(PublicOutputTests().failure(label+':EngineInvalidTransition')))
+            self.assertFalse(output.safe_failure(PublicOutputTests().failure(label+':private-secret')))
+        for key in output.PRIVATE_WORKSPACE_FIELDS:
+            removed=row.copy(); removed.pop(key)
+            with self.assertRaises(ValueError): output.public_private_workspace(json.dumps(removed))
+        for key in ('password','path','hash','candidate_id','job_id','timestamp','pid','errno','counts','extensions'):
+            with self.assertRaises(ValueError): output.public_private_workspace(json.dumps(dict(row,**{key:'private-value'})))
+        duplicate=json.dumps(row)[:-1]+',"schema":1}'
+        with self.assertRaises(ValueError): output.public_private_workspace(duplicate)
+        with self.assertRaises(ValueError): output.public_private_workspace(' '*2049+json.dumps(row))
+
+    def test_private_workspace_rejects_type_confusion_and_stronger_claims(self):
+        row=self.record()
+        for key in output.PRIVATE_WORKSPACE_BOOL_FIELDS:
+            for value in (1,0,'true',None,[],{}):
+                with self.assertRaises(ValueError): output.public_private_workspace(json.dumps(dict(row,**{key:value})))
+        for key in output.PRIVATE_WORKSPACE_FALSE_FIELDS:
+            for value in (True,0,'false',None):
+                with self.assertRaises(ValueError): output.public_private_workspace(json.dumps(dict(row,**{key:value})))
+        for key,value in (('schema',True),('schema',1.0),('phase','queued'),('result','success'),('producer_exit','success'),('reader_exit','sigkill'),('root_cleanup','closed'),('first_failure','/private/path')):
+            with self.assertRaises(ValueError): output.public_private_workspace(json.dumps(dict(row,**{key:value})))
+
+    def test_private_workspace_every_missing_success_condition_fails(self):
+        row=self.record()
+        for key in output.PRIVATE_WORKSPACE_BOOL_FIELDS:
+            with self.assertRaises(ValueError): output.public_private_workspace(json.dumps(dict(row,**{key:False})))
+        for key,value in (('first_failure','PrivateWorkspaceProof'),('producer_exit','other'),('producer_exit','unverified'),('reader_exit','other'),('reader_exit','not_started'),('reader_exit','unverified'),('root_cleanup','retained'),('root_cleanup','unverified')):
+            with self.assertRaises(ValueError): output.public_private_workspace(json.dumps(dict(row,**{key:value})))
+        failed=dict(row,result='failed',first_failure='PrivateWorkspaceProof',reader_exit='not_started',reader_reaped=False,reader_group_absent=False)
+        self.assertEqual(output.public_private_workspace(json.dumps(failed)),failed)
+        with self.assertRaises(ValueError): output.public_private_workspace(json.dumps(dict(row,result='failed')))
+
+    def test_private_workspace_fragmented_bounded_lines_never_forward_private_text(self):
+        line=self.line().encode()
+        for split in range(len(line)+1):
+            parser=output.BoundedLines('exact')
+            self.assertEqual(parser.feed(line[:split]),[])
+            self.assertEqual(parser.feed(line[split:]+b'\n'),[line])
+        self.assertEqual(output.public_line(b'test exact ... '+line,'exact'),('private_workspace',self.record()))
+        self.assertIsNone(output.public_line(b'private text '+line,'exact'))
+        self.assertIsNone(output.public_line(b'SYNTHETIC_PRIVATE_FIXED_DURABLE_V1=1','exact'))
+        self.assertIsNone(output.public_line(b'{"private_control":"secret"}','exact'))
+        for raw in (line[:-1],b'CI_SYNTHETIC_PRIVATE_WORKSPACE '+bytes([255]),b'CI_SYNTHETIC_PRIVATE_WORKSPACE_BAD '+line):
+            with self.assertRaises(ValueError): output.public_line(raw,'exact')
+        parser=output.BoundedLines('exact')
+        framed=parser.feed(b'CI_SYNTHETIC_PRIVATE_WORKSPACE '+b'x'*9000+b'\n'+line+b'\n')
+        self.assertEqual(framed[0],output.PRIVATE_WORKSPACE_INVALID.encode())
+        with self.assertRaises(ValueError): output.public_line(framed[0],'exact')
+        self.assertLessEqual(len(parser.pending),8192)
+
+    def run_fake(self,rows,status=0,phase='durable-private-reopen'):
+        name=output.TESTS[phase][0]
+        core='[JOINED_CORE_POLICY inherited_limit=Zero collector=Pipe process_dumpability=Unchanged crash_copy_absence_verified=false]'
+        payload=('\n'.join([core]+rows)+'\n').encode()
+        stream=mock.Mock(); stream.fileno.return_value=7
+        process=mock.Mock(stdout=stream); process.wait.return_value=status
+        listed=output.subprocess.CompletedProcess([],0,(name+': test\n\n1 test, 0 benchmarks\n').encode(),b'')
+        captured=io.StringIO()
+        with mock.patch.object(output.resource,'getrlimit',return_value=(0,0)), \
+             mock.patch.object(output.subprocess,'run',return_value=listed), \
+             mock.patch.object(output.subprocess,'Popen',return_value=process), \
+             mock.patch.object(output.select,'select',return_value=([stream],[],[])), \
+             mock.patch.object(output.os,'read',side_effect=[payload,b'']), \
+             mock.patch.dict(output.os.environ,{},clear=True), contextlib.redirect_stdout(captured):
+            output.run('/verified/host',phase)
+        return captured.getvalue()
+
+    def test_private_workspace_phase_requires_one_aggregate_and_libtest_success(self):
+        text=self.run_fake([self.line()])
+        self.assertIn('CI_SYNTHETIC_RESULT phase=durable-private-reopen passed=true',text)
+        self.assertEqual(text.count(output.PRIVATE_WORKSPACE_PREFIX),1)
+        with self.assertRaises(RuntimeError): self.run_fake([])
+        with self.assertRaises(RuntimeError): self.run_fake([self.line()],status=101)
+        with self.assertRaises(ValueError): self.run_fake([self.line(),self.line()])
+        with self.assertRaises(ValueError): self.run_fake([self.line()],phase='durable-owner-reopen')
+        cleanup='[JOINED_CLEANUP group_signal=AlreadyAbsentWhileLeaderOwned group_absence=OriginalGroupAbsentObserved direct_child=Reaped root_cleanup=ClosedAndAbsenceVerified exit=Some(0) signal=None core_dumped=false]'
+        with self.assertRaises(ValueError): self.run_fake([cleanup,self.line()])
+        with self.assertRaises(ValueError): self.run_fake([output.MARKER+json.dumps(PublicOutputTests().record()),self.line()])
+
+    def test_private_workspace_pure_catalogue_matches_seven_exact_source_tests(self):
+        base=ROOT/'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3_qualification'
+        source=(base/'durable_proposal_v1/private_fixed_v2.rs').read_text().split('mod pure_tests {',1)[1]
+        names=re.findall(r'#\[test\]\s*fn ([a-z0-9_]+)\(',source)
+        expected=tuple(output.PREFIX+'durable_proposal_v1::private_fixed_v2::pure_tests::'+name for name in names)
+        self.assertEqual(expected,output.PRIVATE_WORKSPACE_PURE_TESTS)
+        self.assertEqual(len(set(expected)),7)
+        combined=(output.PURE_TESTS+output.PRIVATE_WORKSPACE_PURE_TESTS+output.POLICY_ENVELOPE_TESTS+output.PROMPT_RENDERING_TESTS+output.LOWER_ERROR_TESTS+output.DENIAL_TESTS+output.ROLLING_TRANSCRIPT_TESTS+output.AUTHORITY_PROJECTION_TESTS+output.READ_WAVE_TESTS+output.HISTORY_MEASUREMENT_TESTS+output.HISTORY_TRANSCRIPT_TESTS+output.ADMISSION_PROJECTION_TESTS+output.ADMISSION_TRANSCRIPT_TESTS+output.ADMISSION_HOST_TESTS+output.FLOW_PROJECTION_TESTS+output.FLOW_TRANSCRIPT_TESTS+output.FLOW_HOST_TESTS+output.TIMING_HOST_TESTS+(output.DURABLE_PROVIDER_METADATA_TEST,))
+        self.assertEqual(len(combined),87)
+        self.assertEqual(len(set(combined)),87)
 
 
 if __name__=='__main__':

@@ -84,7 +84,7 @@ impl FinancialProfile {
         let secrets = FinancialSecrets::fresh(owner)?;
         let envelope = secrets.seal(password)?;
         let directory = Directory::create(path)?;
-        let result = Self::load(directory, secrets, owner, true, recorded_import)?;
+        let result = Self::load(directory, secrets, owner, true, recorded_import, None)?;
         result.directory.write_new("financial.vault", &envelope)?;
         result.inventory()?;
         Ok(result)
@@ -103,7 +103,14 @@ impl FinancialProfile {
                 return Err(Error::Invalid);
             }
         }
-        Self::load(directory, secrets, owner, false, RecordableImportKind::None)
+        Self::load(
+            directory,
+            secrets,
+            owner,
+            false,
+            RecordableImportKind::None,
+            None,
+        )
     }
     fn load(
         directory: Directory,
@@ -111,17 +118,24 @@ impl FinancialProfile {
         owner: &str,
         create: bool,
         recorded_import: RecordableImportKind,
+        expected: Option<&[wholepact_storage_security::DatabaseFileIdentity; 4]>,
     ) -> Result<Self> {
         // Directory is exclusively locked before any journal owner is created.
         // Each quiescent preflight is over a different, not-yet-opened journal.
         let connection = |index: usize| -> Result<_> {
             let path = directory.path(JOURNALS[index])?;
             let key = secrets.key(index)?;
-            Ok(if create {
+            let connection = if create {
                 create_encrypted(path, &key)?
             } else {
                 open_encrypted(path, &key)?
-            })
+            };
+            if let Some(expected) = expected {
+                if connection.database_identity()? != expected[index] {
+                    return Err(Error::Authentication);
+                }
+            }
+            Ok(connection)
         };
         let wallet_connection = connection(0)?;
         let wallet_identity = wallet_connection.database_identity()?;
@@ -148,7 +162,7 @@ impl FinancialProfile {
         .map_err(|_| Error::Storage)?;
         let proof_connection = connection(1)?;
         let proof_identity = proof_connection.database_identity()?;
-        let proof = ProofJobStore::from_encrypted_connection(proof_connection)
+        let proof = ProofJobStore::from_original_encrypted_connection_v1(proof_connection)
             .map_err(|_| Error::Storage)?;
         let signed_connection = connection(2)?;
         let signed_identity = signed_connection.database_identity()?;
@@ -174,6 +188,80 @@ impl FinancialProfile {
             ],
             directory,
         })
+    }
+    pub(crate) fn original_workspace_proof_v1(
+        &self,
+    ) -> Result<wholepact_proof_jobs::OriginalProofJobSourceV1<'_>> {
+        self.check_current_journals()?;
+        let source = self
+            .proof
+            .original_source_v1()
+            .map_err(|_| Error::Authentication)?;
+        source.check_current().map_err(|_| Error::Authentication)?;
+        if source.origin_commitment() != self.original_databases[1].origin_commitment() {
+            return Err(Error::Authentication);
+        }
+        Ok(source)
+    }
+    pub(crate) fn original_workspace_proof_origin_v1(&self) -> Result<[u8; 32]> {
+        Ok(self.original_workspace_proof_v1()?.origin_commitment())
+    }
+    /// All source-preserving evidence and exact initialized proof schema are
+    /// checked BEFORE any writable factory is reached. Same-inode empty proof
+    /// files are corruption, not permission to initialize a replacement.
+    pub(crate) fn open_private_workspace_original_v1(
+        path: &Path,
+        host: &Directory,
+        secrets: &crate::vault::Secrets,
+        password: &[u8],
+        expected_financial: &str,
+        expected_directory: &str,
+        expected_proof: [u8; 32],
+    ) -> Result<Self> {
+        let read = FinancialReadProfile::open(path, &secrets.profile(), password)?;
+        read.require_private_workspace_original_v1(
+            host,
+            secrets,
+            expected_financial,
+            expected_directory,
+            expected_proof,
+        )?;
+        let FinancialReadProfile {
+            sources,
+            original_owner,
+            original_databases,
+            secrets: financial_secrets,
+            directory,
+        } = read;
+        for source in &sources {
+            source.check_source_unchanged()?;
+        }
+        drop(sources);
+        // Reauthenticate each actual original handle before ownership transfer.
+        for (index, identity) in original_databases.iter().enumerate() {
+            let connection = open_encrypted(
+                directory.path(JOURNALS[index])?,
+                &financial_secrets.key(index)?,
+            )?;
+            if connection.database_identity()? != *identity {
+                return Err(Error::Authentication);
+            }
+        }
+        let result = Self::load(
+            directory,
+            financial_secrets,
+            &original_owner,
+            false,
+            RecordableImportKind::None,
+            Some(&original_databases),
+        )?;
+        if result.original_databases != original_databases
+            || result.manual_original_primary_origin_digest(host, secrets)? != expected_financial
+            || result.original_workspace_proof_origin_v1()? != expected_proof
+        {
+            return Err(Error::Authentication);
+        }
+        Ok(result)
     }
     /// Exact correlation of the actually open primary financial storage. This
     /// does not establish chain freshness, account ownership or financial use.
@@ -348,6 +436,38 @@ impl FinancialReadProfile {
         };
         profile.check_retained_owner(owner)?;
         Ok(profile)
+    }
+    pub(crate) fn require_private_workspace_original_v1(
+        &self,
+        host: &Directory,
+        secrets: &crate::vault::Secrets,
+        expected_financial: &str,
+        expected_directory: &str,
+        expected_proof: [u8; 32],
+    ) -> Result<()> {
+        self.check_retained_owner(&secrets.profile())?;
+        if self.manual_original_primary_origin_digest(host, secrets)? != expected_financial
+            || self.directory.manual_target_identity_digest()? != expected_directory
+            || self.original_databases[1].origin_commitment() != expected_proof
+        {
+            return Err(Error::Authentication);
+        }
+        let proof = wholepact_proof_jobs::ProofStatusSnapshot::open(
+            &self.directory.path("proof.sqlite")?,
+            &self.secrets.key(1)?,
+        )
+        .map_err(|_| Error::Authentication)?;
+        if proof
+            .source_database_identity()
+            .map_err(|_| Error::Authentication)?
+            != self.original_databases[1]
+        {
+            return Err(Error::Authentication);
+        }
+        proof
+            .check_source_unchanged()
+            .map_err(|_| Error::Authentication)?;
+        self.check_retained_owner(&secrets.profile())
     }
     pub(crate) fn check_retained_owner(&self, owner: &str) -> Result<()> {
         for source in &self.sources {
@@ -635,6 +755,86 @@ fn actual_descriptor(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn workspace_original_financial_preflight_denies_copied_and_uninitialized_proof_before_writes()
+    {
+        use std::os::unix::fs::MetadataExt;
+        for mutation in 0..3 {
+            let temporary = tempfile::tempdir().unwrap();
+            let host = Directory::create(&temporary.path().join("host")).unwrap();
+            let secrets = crate::vault::Secrets::fresh()
+                .unwrap()
+                .bind_successor_plan([3; 32])
+                .unwrap();
+            let root = temporary.path().join("financial");
+            let password = b"synthetic-only-storage-password";
+            let profile = FinancialProfile::create(&root, &secrets.profile(), password).unwrap();
+            crate::financial_inventory::register(
+                &host,
+                &secrets,
+                &root,
+                crate::financial_inventory::AttachmentRole::PrimaryFinancial,
+                None,
+            )
+            .unwrap();
+            let financial_origin = profile
+                .manual_original_primary_origin_digest(&host, &secrets)
+                .unwrap();
+            let directory_origin = profile.directory.manual_target_identity_digest().unwrap();
+            let proof_origin = profile.original_workspace_proof_origin_v1().unwrap();
+            let proof_key = profile.secrets.key(1).unwrap();
+            let original_inode = fs_metadata_inode(&root.join("proof.sqlite"));
+            drop(profile);
+            match mutation {
+                1 => {
+                    let old = temporary.path().join("retained-original-proof");
+                    std::fs::rename(root.join("proof.sqlite"), &old).unwrap();
+                    crate::files::write_new(
+                        &root.join("proof.sqlite"),
+                        &std::fs::read(&old).unwrap(),
+                    )
+                    .unwrap();
+                    assert_ne!(
+                        original_inode,
+                        fs_metadata_inode(&root.join("proof.sqlite"))
+                    );
+                }
+                2 => {
+                    let connection = open_encrypted(root.join("proof.sqlite"), &proof_key)
+                        .unwrap()
+                        .into_connection();
+                    connection
+                        .execute_batch("PRAGMA application_id=0; PRAGMA user_version=0;")
+                        .unwrap();
+                    drop(connection);
+                    assert_eq!(
+                        original_inode,
+                        fs_metadata_inode(&root.join("proof.sqlite"))
+                    );
+                }
+                _ => {}
+            }
+            let before = std::fs::read(root.join("proof.sqlite")).unwrap();
+            let opened = FinancialProfile::open_private_workspace_original_v1(
+                &root,
+                &host,
+                &secrets,
+                password,
+                &financial_origin,
+                &directory_origin,
+                proof_origin,
+            );
+            assert_eq!(opened.is_ok(), mutation == 0);
+            drop(opened);
+            if mutation != 0 {
+                assert_eq!(std::fs::read(root.join("proof.sqlite")).unwrap(), before);
+            }
+        }
+        fn fs_metadata_inode(path: &Path) -> (u64, u64) {
+            let metadata = std::fs::metadata(path).unwrap();
+            (metadata.dev(), metadata.ino())
+        }
+    }
     #[test]
     fn separate_profile_reopen_owner_binding_and_missing_journal_fail_closed() {
         let temporary = tempfile::tempdir().unwrap();

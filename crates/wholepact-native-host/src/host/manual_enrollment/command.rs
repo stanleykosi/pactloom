@@ -93,7 +93,7 @@ impl Host {
         }
         self.authority.check_financial_principal(principal)
     }
-    fn read_manual_private<T: DeserializeOwned>(&self, prompt: &str, reason: &str) -> Result<T> {
+    pub(in crate::host) fn read_manual_private<T: DeserializeOwned>(&self, prompt: &str, reason: &str) -> Result<T> {
         let path = self.path(prompt)?;
         let review = self.terminal.approve_historical(&format!(
             "Read this exact private local file into the current non-signing host for {reason}.\nFile: {}\nNo data is sent by this read. The file grants no authority.", path.display()

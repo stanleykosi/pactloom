@@ -101,6 +101,8 @@ impl BundleAuthority for Consent<'_> {
 }
 impl Quiescent<'_> {
     pub(crate) fn snapshot(&self, destination: &Path, password: &[u8]) -> Result<BundleManifest> {
+        self.secrets.require_portable_legacy()?;
+        self.directory.refuse_private_workspace_files()?;
         self.directory.inventory()?;
         // Never advertise a partial archive as whole-profile after financial attachment,
         // including subsequent sessions where those journals are not yet unlocked.

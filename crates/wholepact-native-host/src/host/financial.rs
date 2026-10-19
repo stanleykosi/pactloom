@@ -13,6 +13,8 @@ pub(in crate::host) mod manual_inventory_setup;
 #[cfg(all(feature = "manual-admission", target_os = "linux"))]
 pub(in crate::host) mod manual_roster_inventory_setup_v2;
 mod participant_delivery;
+#[cfg(all(feature = "durable-proposal", target_os = "linux"))]
+pub(in crate::host) mod private_durable_fixed_v2;
 mod proof_delivery;
 mod proof_execution_request;
 mod proof_request;

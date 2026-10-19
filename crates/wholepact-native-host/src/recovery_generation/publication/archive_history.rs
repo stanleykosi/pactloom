@@ -72,6 +72,8 @@ pub(crate) fn capture_metadata(
 /// Read only an anchored version discriminator. A recognized number is not
 /// validation; callers must invoke that version's complete committed reader.
 pub(crate) fn source_plan_version(directory: &Directory, secrets: &Secrets) -> Result<u16> {
+    secrets.require_portable_legacy()?;
+    directory.refuse_private_workspace_files()?;
     let plain = unseal(secrets, b"plan", &directory.read(PLAN, MAX_DOCUMENT)?)?;
     if secrets.generation_plan_digest() != Some(Sha256::digest(&plain).as_slice()) {
         return Err(Error::Authentication);
@@ -93,6 +95,7 @@ fn checked_layered_directory(
     secrets: &Secrets,
 ) -> Result<super::layered_metadata::CheckedLayeredMetadata> {
     directory.check()?;
+    secrets.require_portable_legacy()?;
     check_layered_directory_inventory(directory)?;
     super::layered_metadata::checked_layered_metadata_bytes(
         directory
@@ -139,6 +142,15 @@ pub(crate) fn open_layered_parent(
     VerifiedGenerationCapsule,
 )> {
     let metadata = checked_layered_directory(directory, secrets)?;
+    open_layered_parent_checked_metadata(directory, metadata)
+}
+fn open_layered_parent_checked_metadata(
+    directory: &Directory,
+    metadata: super::layered_metadata::CheckedLayeredMetadata,
+) -> Result<(
+    super::layered_metadata::CheckedLayeredMetadata,
+    VerifiedGenerationCapsule,
+)> {
     let key = wholepact_storage_security::DatabaseKey::from_bytes(
         metadata
             .parent_key
@@ -154,6 +166,66 @@ pub(crate) fn open_layered_parent(
     metadata.plan.verify_parent(&parent)?;
     directory.check()?;
     Ok((metadata, parent))
+}
+
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "manual-admission",
+    target_os = "linux"
+))]
+fn workspace_metadata(
+    directory: &Directory,
+    secrets: &Secrets,
+) -> Result<super::layered_metadata::CheckedLayeredMetadata> {
+    super::layered_metadata::checked_layered_metadata_bytes(
+        directory
+            .path("profile.vault")?
+            .parent()
+            .ok_or(Error::Invalid)?,
+        secrets,
+        &directory.read(PLAN, MAX_DOCUMENT)?,
+        &directory.read(MANIFEST, MAX_DOCUMENT)?,
+        &directory.read(COMMIT, MAX_DOCUMENT)?,
+        &directory.read("generation.keys", MAX_DOCUMENT)?,
+    )
+}
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "manual-admission",
+    target_os = "linux"
+))]
+pub(crate) fn open_layered_parent_for_private_workspace_v1(
+    directory: &Directory,
+    secrets: &Secrets,
+    files: &crate::host::durable_private_workspace_v1::OriginalWorkspaceFilesV1,
+) -> Result<(
+    super::layered_metadata::CheckedLayeredMetadata,
+    VerifiedGenerationCapsule,
+)> {
+    files.check_inventory(directory, secrets)?;
+    let result =
+        open_layered_parent_checked_metadata(directory, workspace_metadata(directory, secrets)?)?;
+    files.check_inventory(directory, secrets)?;
+    Ok(result)
+}
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "manual-admission",
+    target_os = "linux"
+))]
+pub(crate) fn open_layered_parent_for_workspace_publication_v1(
+    directory: &Directory,
+    secrets: &Secrets,
+    files: &crate::host::durable_private_workspace_v1::OriginalWorkspacePublicationV1,
+) -> Result<(
+    super::layered_metadata::CheckedLayeredMetadata,
+    VerifiedGenerationCapsule,
+)> {
+    files.check_inventory(directory, secrets)?;
+    let result =
+        open_layered_parent_checked_metadata(directory, workspace_metadata(directory, secrets)?)?;
+    files.check_inventory(directory, secrets)?;
+    Ok(result)
 }
 
 pub(crate) fn capture_layered_metadata(

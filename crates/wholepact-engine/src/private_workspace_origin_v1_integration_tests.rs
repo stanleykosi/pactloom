@@ -149,16 +149,17 @@ fn generic_internal_commit_refuses_before_writing_marked_state() {
         &json!({}),
     )
     .unwrap();
-    assert!(f
-        .engine
-        .commit(
-            &command,
-            &f.draft.agreement_id,
-            1,
-            envelope,
-            "cancellation_requested"
-        )
-        .is_err());
+    assert!(
+        f.engine
+            .commit(
+                &command,
+                &f.draft.agreement_id,
+                1,
+                envelope,
+                "cancellation_requested"
+            )
+            .is_err()
+    );
     assert!(f.engine.store.find_replay(&command).unwrap().is_none());
     let after = f
         .engine
@@ -175,11 +176,12 @@ fn exact_encrypted_original_reopen_retains_marker_and_blocks_seed_only_backup() 
     let f = fixture();
     let marker = f.result.record.payload["private_workspace_origin_v1"].clone();
     let backup = f.directory.path().join("must-not-export.sqlite");
-    assert!(f
-        .engine
-        .store
-        .backup_agreement_journal(&backup, &DatabaseKey::from_bytes([119; 32]))
-        .is_err());
+    assert!(
+        f.engine
+            .store
+            .backup_agreement_journal(&backup, &DatabaseKey::from_bytes([119; 32]))
+            .is_err()
+    );
     assert!(!backup.exists());
     drop(f.engine);
     let reopened = Engine::from_store(Store::open_encrypted(&f.path, &f.key).unwrap());
@@ -211,17 +213,18 @@ fn malformed_or_null_marker_cannot_become_absent_during_envelope_decode() {
     let command =
         CommandContext::for_request(&f.access.principal_id, "strip-private-marker", &json!({}))
             .unwrap();
-    assert!(f
-        .engine
-        .store
-        .update_agreement(
-            &command,
-            &f.draft.agreement_id,
-            1,
-            stripped,
-            "synthetic_marker_strip"
-        )
-        .is_err());
+    assert!(
+        f.engine
+            .store
+            .update_agreement(
+                &command,
+                &f.draft.agreement_id,
+                1,
+                stripped,
+                "synthetic_marker_strip"
+            )
+            .is_err()
+    );
 }
 
 #[cfg(not(all(
@@ -260,7 +263,83 @@ fn legacy_unmarked_generic_engine_still_reads_writes_and_replays() {
     );
     assert!(engine.get(&access, &draft.agreement_id).is_ok());
     assert!(engine.list(&access).unwrap().len() == 1);
-    assert!(engine
-        .cancel(&access, "legacy-cancel-command-v1", &draft.agreement_id, 1)
-        .is_ok());
+    assert!(
+        engine
+            .cancel(&access, "legacy-cancel-command-v1", &draft.agreement_id, 1)
+            .is_ok()
+    );
+}
+
+#[test]
+fn encrypted_first_write_outcome_distinguishes_actual_fresh_commit_from_exact_replay() {
+    let f = fixture();
+    // Actual Store transaction outcomes, not an absence preflight. This fixture
+    // does not mint a native source or the facade's live proof continuation.
+    assert!(!f.result.replayed);
+    let replay = f
+        .engine
+        .store
+        .create_agreement(
+            &f.command,
+            &f.draft.agreement_id,
+            f.result.record.payload.clone(),
+        )
+        .unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.record, f.result.record);
+    assert_eq!(replay.operation_id, f.result.operation_id);
+    assert_eq!(replay.event_sequence, f.result.event_sequence);
+    let original = f
+        .engine
+        .store
+        .get_operation(&f.result.operation_id)
+        .unwrap()
+        .unwrap();
+    let saved: MutationResult = serde_json::from_value(original.result).unwrap();
+    assert!(!saved.replayed);
+    assert_eq!(saved.record, replay.record);
+    // Later state never turns initialization replay into an overwrite.
+    let mut next = f.result.record.payload.clone();
+    next["view"]["revision"] = json!(2);
+    let command = CommandContext::for_request(
+        &f.access.principal_id,
+        "synthetic-private-next-command",
+        &json!({"step":2}),
+    )
+    .unwrap();
+    let update = f
+        .engine
+        .store
+        .update_agreement(
+            &command,
+            &f.draft.agreement_id,
+            1,
+            next,
+            "synthetic_private_next",
+        )
+        .unwrap();
+    let replay = f
+        .engine
+        .store
+        .create_agreement(
+            &f.command,
+            &f.draft.agreement_id,
+            f.result.record.payload.clone(),
+        )
+        .unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.record.revision, 1);
+    assert_eq!(
+        f.engine
+            .store
+            .get_agreement(&f.draft.agreement_id)
+            .unwrap()
+            .unwrap(),
+        update.record
+    );
+    assert_eq!(f.engine.store.events_after(0, 100).unwrap().len(), 2);
+    assert_private_denial(f.engine.get(&f.access, &f.draft.agreement_id));
+    assert_private_denial(f.engine.operation(&f.access, &update.operation_id));
+    assert_private_denial(f.engine.replay(&f.access, &command));
+    assert_private_denial(f.engine.replay(&f.access, &f.command));
 }

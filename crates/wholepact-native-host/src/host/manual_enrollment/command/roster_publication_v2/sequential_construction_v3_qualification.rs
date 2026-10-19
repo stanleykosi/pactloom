@@ -797,9 +797,20 @@ fn synthetic_foreground_child() {
     process_containment_v1::require_and_report_core_policy()
         .expect("inherited zero core limit and read-only collector classification");
     let stage = std::env::var(CHILD_ENV).expect("bounded synthetic parent stage");
+    #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+    if stage == "private-workspace-read-fixed-v1" {
+        let terminal = crate::terminal::Terminal::open().expect("actual independent reader TTY");
+        durable_proposal_v1::private_fixed_v2::read_fixed_child(terminal).unwrap();
+        return;
+    }
     let _synthetic_tls = synthetic_provider_tls_v1::child_server_config()
         .expect("owned test-process TLS identity, not chain qualification");
     let terminal = crate::terminal::Terminal::open().expect("actual foreground child TTY");
+    #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+    if stage == "private-workspace-produce-fixed-v1" {
+        durable_proposal_v1::private_fixed_v2::produce_fixed_child(terminal).unwrap();
+        return;
+    }
     if stage == "bounded-dispatch-review-v1" {
         let digest = "a".repeat(64);
         let detail = "SYNTHETIC TEMPORARY DISPATCH REVIEW: controller-only; no transaction or financial effect";
@@ -1132,3 +1143,360 @@ fn joined_temporary_socket_names_fit_linux_pathname_budget() {
 #[cfg(feature = "synthetic-born-joined-qualification")]
 #[path = "sequential_construction_v3_qualification/synthetic_born_submission_sink_v1.rs"]
 mod synthetic_born_submission_sink_v1;
+
+
+#[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum PrivateWorkspaceStageV1 { Producer, Reader }
+#[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+impl PrivateWorkspaceStageV1 {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Producer => "private-workspace-produce-fixed-v1",
+            Self::Reader => "private-workspace-read-fixed-v1",
+        }
+    }
+}
+#[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+struct PrivateWorkspaceStageResultV1 {
+    outcome: std::io::Result<()>,
+    process: owned_test_process_group_v1::ProcessCleanupV1,
+    root: Option<tempfile::TempDir>,
+    summary: String,
+    failure_reason: HarnessFailureReason,
+    next: usize,
+    expected: usize,
+}
+
+/// Exactly one stage, sharing the caller's original cutoff and returning the
+/// SAME TempDir only after existing exact process cleanup. No authority owner
+/// exists in this controller. Existing single-child adapter is unchanged.
+#[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+fn private_workspace_stage_v1(
+    root: tempfile::TempDir,
+    tls_material: Option<&synthetic_provider_tls_v1::ChildTlsMaterialV1>,
+    stage: PrivateWorkspaceStageV1,
+    inputs: &[Input<'_>],
+    deadline: Instant,
+    monotonic_cutoff_ns: u64,
+) -> std::io::Result<PrivateWorkspaceStageResultV1> {
+    if (stage == PrivateWorkspaceStageV1::Producer) != tls_material.is_some() {
+        let _ = root.keep();
+        return Err(std::io::Error::other("exact private workspace child role refused"));
+    }
+    let child_temporary_root = owned_test_process_group_v1::PreSpawnTemporaryRootV1::new(root);
+    let mut failure_reason = HarnessFailureReason::Unclassified;
+    let mut transcript = harness_transcript(&mut failure_reason,
+        rolling_transcript_v1::Transcript::new(inputs.iter().filter_map(|input| match input {
+            Input::CapturedPath { marker, .. } => Some(*marker), _ => None,
+        })))?;
+    // This creates a temporary terminal, not an OS trust root or permission
+    // override. The child still passes the actual foreground() implementation.
+    let master_fd = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC) };
+    if master_fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut master = unsafe { File::from_raw_fd(master_fd) };
+    if unsafe { libc::grantpt(master_fd) } != 0 || unsafe { libc::unlockpt(master_fd) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut slave_name = [0i8; 256];
+    if unsafe { libc::ptsname_r(master_fd, slave_name.as_mut_ptr(), slave_name.len()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let slave_name = unsafe { std::ffi::CStr::from_ptr(slave_name.as_ptr()) };
+    use std::os::unix::ffi::OsStrExt;
+    let slave = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(std::ffi::OsStr::from_bytes(slave_name.to_bytes()))?;
+    let prepared_command = (|| -> std::io::Result<Command> {
+        let mut command = Command::new(std::env::current_exe()?);
+        if let Some(material) = tls_material {
+            material.configure_child(&mut command);
+        } else {
+            // The reader has no TLS authority, server config or signer/witness.
+            command.env_remove("SSL_CERT_FILE").env_remove("SSL_CERT_DIR");
+        }
+        command
+            .args([
+                "--exact",
+                CHILD,
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD_ENV, stage.label())
+            .env("WHOLEPACT_TEST_ONLY_PRIVATE_WORKFLOW_CUTOFF_NS",monotonic_cutoff_ns.to_string())
+            .env("TMPDIR", child_temporary_root.path())
+            .env_remove("DISPLAY")
+            .env_remove("WAYLAND_DISPLAY")
+            .stdin(Stdio::from(slave.try_clone()?))
+            .stdout(Stdio::from(slave.try_clone()?))
+            .stderr(Stdio::from(slave));
+        unsafe {
+            command.pre_exec(|| {
+                // Only the new child changes session membership. No parent's TTY,
+                // foreground group or persistent system setting is changed.
+                if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::tcsetpgrp(0, libc::getpgrp()) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        Ok(command)
+    })();
+    let mut command = match prepared_command {
+        Ok(command) => command,
+        Err(error) => {
+            // TLS preparation completed and no main child spawn was attempted.
+            let cleanup = close_owned_temporary_root(child_temporary_root.into_tempdir());
+            return Err(std::io::Error::new(
+                error.kind(),
+                format!("synthetic child command preparation failed; root_cleanup={cleanup:?}"),
+            ));
+        }
+    };
+    if Instant::now() >= deadline {
+        let _ = close_owned_temporary_root(child_temporary_root.into_tempdir());
+        return Err(std::io::Error::other("original two-process cutoff expired before child spawn"));
+    }
+    let spawned = match owned_test_process_group_v1::spawn_with_checked_wait_policy(&mut command) {
+        Ok(child) => child,
+        Err(error) => {
+            // No Child handle is available to demonstrate ownership/reap. Do
+            // not turn an ambiguous launch failure into root-removal evidence.
+            let _ = child_temporary_root.keep();
+            return Err(std::io::Error::new(
+                error.kind(),
+                "synthetic child spawn failed; cleanup unverified; owned root retained",
+            ));
+        }
+    };
+    // Close the parent's Command-owned slave handles before requiring PTY EOF.
+    drop(command);
+    let mut child = owned_test_process_group_v1::OwnedTestProcessGroupV1::from_spawned_session(
+        spawned,
+        child_temporary_root.into_tempdir(),
+    );
+
+    let mut next = 0;
+    let mut marker_seen = false;
+    let mut outcome = (|| -> std::io::Result<()> {
+        loop {
+            if Instant::now() >= deadline {
+                failure_reason = HarnessFailureReason::Deadline;
+                return Err(std::io::Error::new(std::io::ErrorKind::TimedOut,"original two-process deadline expired"));
+            }
+            if let Some(success) = harness_io(&mut failure_reason,
+                HarnessFailureReason::ChildObservation, child.observe_exit())? {
+                if stage == PrivateWorkspaceStageV1::Reader && success && next == inputs.len() {
+                    // Remaining PTY bytes may complete a split UTF-8 scalar.
+                    // Only the bounded post-reap terminal drain finishes text.
+                    return Ok(());
+                }
+                failure_reason = HarnessFailureReason::ChildExit;
+                return Err(std::io::Error::other("private workspace child exited before verified stage completion"));
+            }
+            let mut descriptor = libc::pollfd { fd: master.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+            if unsafe { libc::poll(&mut descriptor, 1, 50) } < 0 {
+                failure_reason = HarnessFailureReason::PollIo;
+                return Err(std::io::Error::last_os_error());
+            }
+            if descriptor.revents & libc::POLLIN == 0 { continue; }
+            let mut chunk = zeroize::Zeroizing::new([0u8; 4096]);
+            let length = harness_io(&mut failure_reason,HarnessFailureReason::ReadIo,master.read(&mut chunk[..]))?;
+            if length == 0 { continue; }
+            harness_transcript(&mut failure_reason, transcript.append(&chunk[..length],child.temporary_root()))?;
+            // Inspect BEFORE consuming any ordinary input. An early marker
+            // cannot be erased by rolling transcript compaction.
+            if let Some(tail) = harness_transcript(&mut failure_reason,transcript.tail())? {
+                let recognized = durable_proposal_v1::private_fixed_v2::death_marker_v1(
+                    tail, stage == PrivateWorkspaceStageV1::Producer, next == inputs.len(), false)?;
+                if recognized {
+                    if Instant::now() >= deadline { return Err(std::io::Error::other("original deadline expired")); }
+                    marker_seen = true;
+                    break;
+                }
+            }
+            let Some(input) = inputs.get(next) else {
+                continue;
+            };
+            let Some(tail) = harness_transcript(&mut failure_reason, transcript.tail())? else {
+                // An incomplete final UTF-8 scalar waits for more bytes under
+                // the unchanged original stage deadline. Invalid bytes refuse.
+                continue;
+            };
+            let expected = input.rendered_expectation();
+            let approve = match input {
+                Input::Text { response, .. } => {
+                    if !tail.contains(expected.as_str()) {
+                        continue;
+                    }
+                    if response.contains(['\n', '\r']) {
+                        failure_reason = HarnessFailureReason::MultilineInput;
+                        return Err(std::io::Error::other("multiline synthetic input denied"));
+                    }
+                    harness_io(
+                        &mut failure_reason,
+                        HarnessFailureReason::WriteIo,
+                        master.write_all(response.as_bytes()),
+                    )?;
+                    harness_io(
+                        &mut failure_reason,
+                        HarnessFailureReason::WriteIo,
+                        master.write_all(b"\n"),
+                    )?;
+                    harness_io(
+                        &mut failure_reason,
+                        HarnessFailureReason::FlushIo,
+                        master.flush(),
+                    )?;
+                    harness_transcript(&mut failure_reason, transcript.consume(None))?;
+                    next += 1;
+                    continue;
+                }
+                Input::CapturedPath { marker, .. } => {
+                    let Some(prompt) = tail.find(expected.as_str()) else {
+                        continue;
+                    };
+                    let path =
+                        harness_transcript(&mut failure_reason, transcript.path(marker, prompt))?;
+                    harness_io(
+                        &mut failure_reason,
+                        HarnessFailureReason::WriteIo,
+                        master.write_all(path.as_bytes()),
+                    )?;
+                    harness_io(
+                        &mut failure_reason,
+                        HarnessFailureReason::WriteIo,
+                        master.write_all(b"\n"),
+                    )?;
+                    harness_io(
+                        &mut failure_reason,
+                        HarnessFailureReason::FlushIo,
+                        master.flush(),
+                    )?;
+                    harness_transcript(&mut failure_reason, transcript.consume(Some(marker)))?;
+                    next += 1;
+                    continue;
+                }
+                Input::ExactReview { approve, .. } => approve,
+            };
+            let Some(detail_start) = tail.find(expected.as_str()) else {
+                continue;
+            };
+            let remaining = &tail[detail_start + expected.len()..];
+            let prefix = "Type APPROVE ";
+            let suffix = " to approve this exact operation, or anything else to reject: ";
+            let Some(start) = remaining.find(prefix) else {
+                continue;
+            };
+            let start = start + prefix.len();
+            let Some(end) = remaining[start..].find(suffix) else {
+                continue;
+            };
+            let challenge = &remaining[start..start + end];
+            if challenge.len() != 16
+                || !challenge
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            {
+                failure_reason = HarnessFailureReason::InvalidChallenge;
+                return Err(std::io::Error::other(
+                    "unexpected native exact-review challenge",
+                ));
+            }
+            if *approve {
+                harness_io(
+                    &mut failure_reason,
+                    HarnessFailureReason::WriteIo,
+                    master.write_all(format!("APPROVE {challenge}\n").as_bytes()),
+                )?;
+            } else {
+                harness_io(
+                    &mut failure_reason,
+                    HarnessFailureReason::WriteIo,
+                    master.write_all(b"REJECT\n"),
+                )?;
+            }
+            harness_io(
+                &mut failure_reason,
+                HarnessFailureReason::FlushIo,
+                master.flush(),
+            )?;
+            harness_transcript(&mut failure_reason, transcript.consume(None))?;
+            next += 1;
+        }
+        Ok(())
+    })();
+    // Producer marker recognition immediately takes the one owned SIGKILL path.
+    // Cleanup grace does not replace or extend the workflow cutoff.
+    let finished = child.finish();
+    let process = finished.process;
+    if process.verified() {
+        // No consume/eviction occurs after the final input. Drain only already
+        // available data, and require terminal EOF/EIO/hangup, not quietness.
+        let drained = private_workspace_terminal_drain_v1(&mut master,&mut transcript,
+            finished.root_for_explicit_close.as_ref().map(|root| root.path()));
+        if outcome.is_ok() {
+            if let Err(error) = drained { failure_reason=HarnessFailureReason::ReadIo; outcome=Err(error); }
+        }
+        if stage == PrivateWorkspaceStageV1::Producer && outcome.is_ok() {
+            let valid = transcript.finish_text().is_ok()
+                && transcript.tail().ok().flatten().is_some_and(|tail|
+                    durable_proposal_v1::private_fixed_v2::death_marker_v1(tail,true,next==inputs.len(),true).unwrap_or(false));
+            if !marker_seen || !valid {
+                failure_reason=HarnessFailureReason::OutcomeRead;
+                outcome=Err(std::io::Error::other("terminal durable marker validation failed"));
+            }
+        }
+    }
+    if stage == PrivateWorkspaceStageV1::Reader && outcome.is_ok()
+        && transcript.tail().ok().flatten().is_none_or(|tail|
+            durable_proposal_v1::private_fixed_v2::death_marker_v1(tail,false,next==inputs.len(),false).is_err()) {
+        failure_reason=HarnessFailureReason::OutcomeRead;
+        outcome=Err(std::io::Error::other("unexpected reader terminal marker"));
+    }
+    if !process.verified() && outcome.is_ok() {
+        failure_reason=HarnessFailureReason::CleanupUnverified;
+        outcome=Err(std::io::Error::other("private workspace process cleanup unverified"));
+    }
+    Ok(PrivateWorkspaceStageResultV1 { outcome, process,
+        root:finished.root_for_explicit_close, summary:transcript.summary(),
+        failure_reason,next,expected:inputs.len() })
+}
+
+#[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+fn private_workspace_terminal_drain_v1(
+    master: &mut File,
+    transcript: &mut rolling_transcript_v1::Transcript<'_>,
+    root: Option<&std::path::Path>,
+) -> std::io::Result<()> {
+    let root=root.ok_or_else(||std::io::Error::other("verified root unavailable"))?;
+    let flags=unsafe { libc::fcntl(master.as_raw_fd(),libc::F_GETFL) };
+    if flags<0 || unsafe { libc::fcntl(master.as_raw_fd(),libc::F_SETFL,flags|libc::O_NONBLOCK) }<0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    for _ in 0..64 {
+        let mut descriptor=libc::pollfd { fd:master.as_raw_fd(),events:libc::POLLIN,revents:0 };
+        let ready=unsafe { libc::poll(&mut descriptor,1,0) };
+        if ready<0 || descriptor.revents & (libc::POLLERR|libc::POLLNVAL)!=0 {
+            return Err(std::io::Error::other("terminal drain observation failed"));
+        }
+        let mut chunk=zeroize::Zeroizing::new([0u8;4096]);
+        match master.read(&mut chunk[..]) {
+            Ok(0) => return transcript.finish_text().map_err(|_|std::io::Error::other("terminal utf8 incomplete")),
+            Ok(length) => transcript.append(&chunk[..length],root).map_err(|_|std::io::Error::other("terminal bounded append failed"))?,
+            Err(error) if error.raw_os_error()==Some(libc::EIO) =>
+                return transcript.finish_text().map_err(|_|std::io::Error::other("terminal utf8 incomplete")),
+            Err(error) if error.kind()==std::io::ErrorKind::WouldBlock && descriptor.revents & libc::POLLHUP!=0 =>
+                return transcript.finish_text().map_err(|_|std::io::Error::other("terminal utf8 incomplete")),
+            Err(_) => return Err(std::io::Error::other("terminal EOF or hangup not established")),
+        }
+    }
+    Err(std::io::Error::other("terminal bounded drain incomplete"))
+}
