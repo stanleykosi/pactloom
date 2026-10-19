@@ -46,6 +46,8 @@ trap finish EXIT
 export CARGO_HOME="$build_root/cargo" CARGO_TARGET_DIR="$build_root/target"
 export WHOLEPACT_SQLCIPHER_PREFIX="$build_root/sqlcipher"
 export CARGO_BUILD_JOBS=3 CARGO_INCREMENTAL=0 WHOLEPACT_BUILD_JOBS=3
+# Source/projection regressions are cheap: fail before toolchain/dependency builds.
+TMPDIR="$runtime_root" python3 -B scripts/ci-synthetic-output-tests.py
 unset RUST_MIN_STACK RUST_BACKTRACE RUST_LOG
 # Official numbered toolchain, not floating stable or the runner's future default.
 timeout --signal=TERM --kill-after=30s 600s rustup toolchain install 1.99.0 --profile minimal --no-self-update
@@ -99,7 +101,6 @@ PY
 sha256sum "$executable"
 # Fail fast on the new native transition, without skipping final regression gates.
 # Scope TMPDIR to each test only; later compiler processes keep their own defaults.
-TMPDIR="$runtime_root" python3 -B scripts/ci-synthetic-output-tests.py
 TMPDIR="$runtime_root" python3 -B scripts/ci-synthetic-output.py "$executable" pure
 TMPDIR="$runtime_root" python3 -B scripts/ci-synthetic-output.py "$executable" storage-bootstrap
 # CI-only loopback scheduling preflight. Never part of the local safe test gate.

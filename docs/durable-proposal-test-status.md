@@ -1,8 +1,18 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-19, 13:13 UTC.
+Updated: 2026-10-19, 13:52 UTC.
 
 **The bounded synthetic native two-owner fixed-signing fixture passed. Product qualification remains incomplete: no public testnet settlement, OS-process restart recovery, attended GUI reliability, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
+
+## CI30: real overlap passed; scanner error exposed an omitted Observe diagnostic route
+
+[Run 39258435169](https://github.com/stanleykosi/pactloom/actions/runs/39258435169), qualifier `e6e1ddffc4519b30f3a8b54c6c58d9612a52e9e7`, passed build (11m46s), Python153, Host97, encrypted bootstrap and the exact real localhost overlap preflight. At13:32:04 UTC the private phase failed during Observe with EngineDurableConstructionUnavailable, inputs85/94, and DIAGNOSTIC_UNAVAILABLE. Reader never started; producer and runtime cleanup verified. Overlap is proven at the bounded TCP helper, not full native lifecycle success.
+
+Source inspection found a deterministic diagnostic omission: Observe had no detailed boundary mapping, so an actual Engine scanner error produced no primary; its actual lower Wallet category was also erased during conversion. This does not establish a concurrency telemetry defect or the underlying scanner cause.
+
+The bounded three-file repair gives each in-flight Observe call its own finite cause collector, covering original prelude, source/material gates, Wallet call and postchecks without altering order, predicates, clocks or original terminal ApiError fields. It attaches only validated cause metadata, never persistence-call evidence, and Host maps Observe to the existing Checkpoint/WalletRosterAcquire diagnostic path while the actual stage remains live. No new public wire fields or authority grants are added. Independent review reconciled all three source hashes. All-features Engine/Host build passed (3m34s), all12 exact focused/compatibility tests passed, and Python153 passed. Non-synthetic compilation runs alongside publication; the native scanner cause remains unproven.
+
+The existing cheap Python regression invocation is moved before toolchain/dependency compilation, after isolated-runner guards and cleanup setup, so configuration errors fail without wasting a full build. This single move was independently reviewed and tested; all remaining runtime gates remain unchanged.
 
 ## CI29: script compatibility assertion stopped before native execution
 
