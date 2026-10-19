@@ -1103,43 +1103,169 @@ fn check_stage_material_ceiling_v3(scope: &DurableConstructionScopeV1, now: u64)
         Error::Permission
     })
 }
-/// Reuses the original actual roster/source/material predicates, without any
-/// historical permission cache. Both absolute ceilings are checked every time.
+/// One synchronous stage callback only. The returned roster is borrowed inside
+/// this frame and never becomes a reusable validation or authority token.
+fn stage_material_batch_v3<T>(
+    audit_original: impl Fn() -> Result<()>,
+    descriptor: impl FnOnce() -> Result<()>,
+    read_original: impl FnOnce() -> Result<T>,
+    compare_pair: impl FnOnce(&T) -> Result<()>,
+    recheck_original: impl FnOnce(&T) -> Result<()>,
+    final_ceilings: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    audit_original()?;
+    descriptor()?;
+    let original = read_original()?;
+    compare_pair(&original)?;
+    recheck_original(&original)?;
+    audit_original()?;
+    final_ceilings()
+}
+
+/// Inert comparison inputs, assembled only from the actual source owner and
+/// retained descriptor. They grant no permission and never leave this call.
+struct StageMaterialBindingV3<'a> {
+    agreement_id: &'a str,
+    principal: &'a str,
+    destination: &'a Path,
+    retention: &'a str,
+    reviewers: &'a [String],
+    proposal: &'a wholepact_core::ProposalInput,
+}
+fn compare_stage_material_identity_v3(
+    binding: &StageMaterialBindingV3<'_>,
+    scope: &DurableConstructionScopeV1,
+    agreement: &AgreementDraft,
+) -> Result<()> {
+    require_operator_principal(agreement, binding.principal)?;
+    let mut reviewers = scope
+        .reviewers
+        .iter()
+        .map(|reviewer| reviewer.account_id().to_owned())
+        .collect::<Vec<_>>();
+    reviewers.sort();
+    let mut expected = binding.reviewers.to_vec();
+    expected.sort();
+    if scope.version != 2
+        || scope.proposal.proposal_id != binding.proposal.proposal_id
+        || scope.proposal.manifest.agreement != *agreement
+        || scope.proposal != *binding.proposal
+        || scope.constructor.principal_id != binding.principal
+        || scope.prover.principal_id != binding.principal
+        || scope.constructor != scope.prover
+        || scope.protected_destination != binding.destination.to_str().ok_or(Error::Invalid)?
+        || scope.retention_policy != binding.retention
+        || reviewers != expected
+        || expected.len() != 2
+        || !expected.contains(&scope.account_id)
+        || scope.purpose
+            != wholepact_wallet::wallet::protected_sync::durable_construction_v1::PURPOSE
+    {
+        return Err(Error::Authentication);
+    }
+    Ok(())
+}
+fn compare_stage_material_member_v3(
+    binding: &StageMaterialBindingV3<'_>,
+    scope: &DurableConstructionScopeV1,
+    members: &[wholepact_store::manual_enrollment::ManualEnrollmentRosterMember],
+) -> Result<()> {
+    let matching = members
+        .iter()
+        .filter(|member| {
+            member.identity.account_id == scope.account_id
+                && member.scope.participant_id == scope.participant_id
+                && member.scope.privacy_domain == scope.privacy_domain
+                && member.scope.agreement_id == binding.agreement_id
+                && member.scope.obligation_id == scope.proposal.manifest.agreement.obligation_id
+                && member.scope.principal_id == binding.principal
+        })
+        .count();
+    if matching != 1 {
+        return Err(Error::Authentication);
+    }
+    Ok(())
+}
+
+/// Stage-only same-call consolidation. The complete ORIGINAL owner audit still
+/// brackets the one current roster snapshot. No effect, await or disclosure
+/// occurs between the two immutable comparisons. Legacy scope_current remains
+/// unchanged for all other callers. Concurrent mutation can change which denial
+/// is seen first, but cannot be adopted as a replacement original source.
 pub(in crate::host) fn check_stage_material_review_v3(
     host: &Host,
     owner: &PrivateWorkspaceOwnerV1<'_>,
     review: &wholepact_engine::PrivateFixedStageReviewV3,
+    descriptor: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
-    let materials = review.materials();
-    if materials.len() != 2 {
-        return Err(Error::Authentication);
-    }
-    let first = materials[0].scope();
-    let current = CurrentMaterialPrivacyV2 {
-        host,
-        owner,
-        candidate_id: Some(&first.proposal.proposal_id),
-        exact_proposal: Some(&first.proposal),
-        allowed: 1,
-        approved: Mutex::new(Vec::new()),
-    };
-    let mut accounts = BTreeSet::new();
-    for material in materials {
-        if !valid_commitment(material.material_digest())
-            || !accounts.insert(&material.scope().account_id)
-        {
-            return Err(Error::Authentication);
-        }
-        check_stage_material_ceiling_v3(material.scope(), wall_seconds()?)?;
-        current.scope_current(material.scope())?;
-    }
-    // Source/roster reads above may take time. Neither original ceiling may
-    // expire while the other member is checked.
-    let now = wall_seconds()?;
-    for material in materials {
-        check_stage_material_ceiling_v3(material.scope(), now)?;
-    }
-    Ok(())
+    stage_material_batch_v3(
+        || owner.check_current_without_proof_lock_v2(),
+        || {
+            descriptor()?;
+            let materials = review.materials();
+            if materials.len() != 2 {
+                return Err(Error::Authentication);
+            }
+            // Do not read newly selected private roster metadata when either
+            // retained material is already outside its original ceiling.
+            let mut accounts = BTreeSet::new();
+            for material in materials {
+                if !valid_commitment(material.material_digest())
+                    || !accounts.insert(&material.scope().account_id)
+                {
+                    return Err(Error::Authentication);
+                }
+                check_stage_material_ceiling_v3(material.scope(), wall_seconds()?)?;
+            }
+            Ok(())
+        },
+        || {
+            host.engine
+                .manual_roster_intent_target(host.access()?, owner.agreement_id())
+                .map_err(observe_engine_current)
+        },
+        |target| {
+            let materials = review.materials();
+            if materials.len() != 2 {
+                return Err(Error::Authentication);
+            }
+            let binding = StageMaterialBindingV3 {
+                agreement_id: owner.agreement_id(),
+                principal: &host.access()?.principal_id,
+                destination: owner.metadata_destination(),
+                retention: owner.retention_policy(),
+                reviewers: owner.reviewer_account_ids(),
+                proposal: &materials[0].scope().proposal,
+            };
+            for material in materials {
+                check_stage_material_ceiling_v3(material.scope(), wall_seconds()?)?;
+                compare_stage_material_identity_v3(&binding, material.scope(), target.agreement())?;
+            }
+            // Static scope/identity denials precede the private member read,
+            // just as in the unchanged single-scope validator.
+            let members = target
+                .members(host.access()?)
+                .map_err(observe_engine_current)?;
+            for material in materials {
+                compare_stage_material_member_v3(&binding, material.scope(), &members)?;
+            }
+            Ok(())
+        },
+        |target| {
+            target
+                .check_current(host.access()?)
+                .map_err(observe_engine_current)
+        },
+        || {
+            // The complete owner/roster audits above may take time. Neither
+            // original absolute ceiling may expire while checking the other.
+            let now = wall_seconds()?;
+            for material in review.materials() {
+                check_stage_material_ceiling_v3(material.scope(), now)?;
+            }
+            Ok(())
+        },
+    )
 }
 #[derive(Clone, Serialize, PartialEq, Eq)]
 struct StageScanBindingV3 {
@@ -6725,5 +6851,1082 @@ mod observation_cause_v1_tests {
         let _ = observe_engine_observation(scan_error());
         assert_eq!(private_fixed_diagnostic_snapshot_v1().unwrap(), first);
         assert!(first.evidence.is_none() && first.worker.is_none());
+    }
+}
+
+#[cfg(test)]
+mod stage_material_batch_component_v3_tests {
+    //! Real encrypted retained-source/roster component tests. Enrollment rows
+    //! below are explicitly synthetic historical metadata, not native approval,
+    //! publication, signing, financial admission, or an actual Host owner.
+    use super::*;
+    use std::{
+        cell::{Cell, RefCell},
+        collections::BTreeMap,
+        os::unix::fs::PermissionsExt,
+    };
+    use wholepact_core::{
+        Amount, ClaimedInput, ClaimedOutput, FundingPolicy, OutputAllocation,
+        ParticipantAllocation, PrivacyMode, ProposalInput, ProposalManifest,
+    };
+    use wholepact_core::manual_enrollment::{
+        BornManualEnrollmentTerms, BornManualScope, BornManualSignerBinding, ManualAccountIdentity,
+        ManualHostGenerationBinding,
+    };
+    use wholepact_engine::{Access, Engine, PrivateWorkspaceInitializationPlanV1};
+    use wholepact_storage_security::bundle::{
+        self, BundleAuthority, BundleError, BundleLease, BundleScope, Coverage, JournalKind,
+        RegisteredJournal, RestoreRequest, RestoreTarget, SnapshotRequest,
+        recovery::VerifiedRecoveryComponent,
+    };
+    use wholepact_store::{
+        Store,
+        manual_enrollment::{
+            ManualContinuationCurrentAudit, ManualContinuationEnrollment,
+            ManualDurableEnrollmentAudit, ManualEnrollmentAdditionalPublicationV3,
+            ManualEnrollmentAudit, ManualEnrollmentRosterMember, ManualRosterAdmissionV2,
+            ManualRosterEnrollmentEvidenceV2, ManualRosterPublicationAttemptV2,
+            ManualRosterPublicationRequestV2,
+        },
+    };
+    use wholepact_wallet::wallet::protected_sync::durable_construction_v1::{
+        ConstructionRecipientV1, ConstructionReviewerV1, PURPOSE,
+    };
+
+    const OWNER: &str = "synthetic-batch-owner";
+    const AGREEMENT: &str = "synthetic-batch-selected";
+    const DESTINATION: &str = "/synthetic/private-component.sqlite";
+    const RETENTION: &str = "Synthetic finite original component retention only.";
+
+    fn hash(c: char) -> String {
+        c.to_string().repeat(64)
+    }
+    fn key(n: u8) -> DatabaseKey {
+        DatabaseKey::from_bytes([n; 32])
+    }
+    fn amount(n: u64) -> Amount {
+        Amount::from_zatoshis(n).unwrap()
+    }
+    fn draft(id: &str) -> AgreementDraft {
+        let mut a: AgreementDraft = serde_json::from_str(include_str!(
+            "../../../../wholepact-core/tests/fixtures/agreement.json"
+        ))
+        .unwrap();
+        a.agreement_id = id.into();
+        a.obligation_id = format!("obligation-{id}");
+        a.organizer_identity = OWNER.into();
+        a.network_profile_id = "ironwood-testnet-nu7-candidate".into();
+        a.privacy_profile.mode = PrivacyMode::DeclaredOperator;
+        a.privacy_profile.proving_operator = Some(OWNER.into());
+        a.recipients[0].amount = amount(300_000);
+        a.funding_policy = FundingPolicy::Exact {
+            target: amount(300_000),
+        };
+        a
+    }
+
+    // Fixture-only archive permission. This does not implement any native or
+    // private-workspace owner/consent trait and is never passed to a Host.
+    struct SyntheticArchiveGate;
+    impl BundleLease for SyntheticArchiveGate {
+        fn check_current(&self) -> std::result::Result<(), BundleError> {
+            Ok(())
+        }
+        fn checkpoint_id(&self) -> &str {
+            "synthetic-batch-component"
+        }
+    }
+    impl BundleAuthority for SyntheticArchiveGate {
+        fn acquire<'a>(
+            &'a self,
+            scope: &BundleScope<'_>,
+        ) -> std::result::Result<Box<dyn BundleLease + 'a>, BundleError> {
+            if scope.principal_id != OWNER || scope.profile_id != "synthetic-profile" {
+                return Err(BundleError::Permission);
+            }
+            Ok(Box::new(SyntheticArchiveGate))
+        }
+    }
+    fn retained_source(store: &Store, dir: &Path) -> VerifiedRecoveryComponent {
+        let adapter = wholepact_store::bundle::CoordinationBundleAdapter::new(store).unwrap();
+        let sources = [RegisteredJournal::new("coordination", &adapter).unwrap()];
+        let archive = dir.join("archive.sqlite");
+        let restored = dir.join("restored.sqlite");
+        bundle::snapshot(SnapshotRequest {
+            principal_id: OWNER,
+            profile_id: "synthetic-profile",
+            coverage: Coverage {
+                present: BTreeMap::from([(
+                    JournalKind::CoordinationAuthority,
+                    vec!["coordination".into()],
+                )]),
+                absent: [
+                    JournalKind::SignerConsentAuthority,
+                    JournalKind::WalletScan,
+                    JournalKind::ProofWitness,
+                    JournalKind::SignedResults,
+                    JournalKind::ExactTransactions,
+                    JournalKind::Submission,
+                    JournalKind::TransportInbox,
+                    JournalKind::TransportOutbox,
+                ]
+                .into_iter()
+                .collect(),
+            },
+            sources: &sources,
+            destination: &archive,
+            key: &key(172),
+            authority: &SyntheticArchiveGate,
+        })
+        .unwrap();
+        bundle::restore(RestoreRequest {
+            principal_id: OWNER,
+            profile_id: "synthetic-profile",
+            archive: &archive,
+            key: &key(172),
+            targets: &[RestoreTarget {
+                component_id: "coordination",
+                template: wholepact_store::bundle::coordination_template(),
+                destination: &restored,
+                key: &key(173),
+            }],
+            authority: &SyntheticArchiveGate,
+        })
+        .unwrap();
+        VerifiedRecoveryComponent::open(
+            bundle::history::HistoryOpenRequest {
+                archive: &archive,
+                archive_key: &key(172),
+                restored_component: &restored,
+                restored_key: &key(173),
+                component_id: "coordination",
+            },
+            wholepact_store::bundle::coordination_template(),
+        )
+        .unwrap()
+    }
+
+    fn synthetic_member(
+        index: usize,
+        target: &wholepact_store::manual_enrollment::ManualStoreTarget<'_>,
+        previous: Option<String>,
+    ) -> ManualEnrollmentAudit {
+        let account = hash(if index == 0 { '1' } else { '2' });
+        let identity = ManualAccountIdentity {
+            account_id: account.clone(),
+            full_viewing_key_digest: hash(if index == 0 { '3' } else { '4' }),
+            network_profile_id: draft(AGREEMENT).network_profile_id,
+            derivation_domain: "dedicated-testnet-legacy-zip32-v1".into(),
+        };
+        let terms = BornManualEnrollmentTerms {
+            version: 1,
+            operation_id: format!("synthetic-batch-enrollment-{index}"),
+            identity,
+            birth_request_digest: hash('3'),
+            birth_commit_digest: hash('4'),
+            native_birth_digest: hash('5'),
+            original_policy_digest: hash('6'),
+            account_use_genesis_digest: hash('7'),
+            original_witness_origin_digest: hash('8'),
+            host: ManualHostGenerationBinding {
+                generation_id: target.generation_id().into(),
+                inventory_digest: target.inventory_digest().into(),
+                generation_plan_digest: hash('c'),
+                financial_journal_origin_digest: hash('d'),
+                store_destination_identity: target.store_destination_identity().into(),
+                profile_id: "synthetic-profile".into(),
+                canonical_root: "/synthetic/profile".into(),
+                destination_identity_digest: hash('e'),
+                inherited_identity_digest: hash('f'),
+                scope_predecessor_digest: previous,
+            },
+            signer: BornManualSignerBinding {
+                enrollment_generation_id: hash('a'),
+                signer_target_digest: hash('b'),
+                original_envelope_digest: hash('c'),
+                owner_certificate_digest: hash('d'),
+                writer_certificate_digest: hash('e'),
+                writer_epoch: 1,
+                native_signer_measurement: hash('f'),
+            },
+            scope: BornManualScope {
+                agreement_id: AGREEMENT.into(),
+                obligation_id: draft(AGREEMENT).obligation_id,
+                participant_id: format!("participant-{index}"),
+                principal_id: OWNER.into(),
+                privacy_domain: format!("synthetic-domain-{index}"),
+                recipient_scope_digests: vec![hash('1')],
+                aggregate_budget_zatoshis: 1_000_000,
+                per_operation_limit_zatoshis: 500_000,
+                maximum_fee_share_zatoshis: 5_000,
+                maximum_transaction_fee_zatoshis: 10_000,
+                maximum_permit_lifetime_ms: 1_000,
+                expires_at_ms: 10_000,
+            },
+            transport_binding_digest: hash('2'),
+            issued_at_ms: 1,
+        };
+        let exact_request_digest = wholepact_core::proposal::canonical_digest(
+            "wholepact:host-manual-enrollment-request:v1",
+            &serde_json::json!({"terms": &terms}),
+        )
+        .unwrap();
+        ManualEnrollmentAudit {
+            version: 1,
+            terms,
+            admission: ManualDurableEnrollmentAudit {
+                exact_request_digest,
+                signer_intent_digest: hash('d'),
+                witness_admission_digest: hash('e'),
+                admitted_at_ms: 2,
+                admission_deadline_ms: 1_000,
+            },
+            enrollment_ref: hash(if index == 0 { '5' } else { '6' }),
+            witness_extension_digest: hash('4'),
+            witness_extension_sequence: 1,
+            witness_extension_predecessor_digest: None,
+            aliases: BTreeSet::from([account]),
+            store_sequence: index as u64 + 1,
+            request_identity_digest: hash(if index == 0 { '7' } else { '8' }),
+            original_provider_enrollment_ref: hash('a'),
+            original_complete_history_digest: hash('6'),
+            original_exclusion_checkpoint_digest: hash('7'),
+            original_native_review_digest: hash('8'),
+        }
+    }
+
+    fn synthetic_additional_member(
+        first: &ManualEnrollmentAudit,
+        target: &wholepact_store::manual_enrollment::ManualStoreTarget<'_>,
+    ) -> ManualEnrollmentAdditionalPublicationV3 {
+        use wholepact_core::manual_roster_v2::{HostRosterAppendBindingV2, HostRosterPredecessorV2};
+        let mut terms = synthetic_member(1, target, Some(first.digest().unwrap())).terms;
+        // A new account is a typed roster addition, not another V1 account-scope
+        // extension. Only the roster request carries the original predecessor.
+        terms.host.scope_predecessor_digest = None;
+        let request = ManualRosterPublicationRequestV2 {
+            version: 2,
+            enrollment: ManualContinuationEnrollment {
+                terms: terms.clone(),
+            },
+            roster: HostRosterAppendBindingV2 {
+                version: 2,
+                generation_id: target.generation_id().into(),
+                store_destination_identity: target.store_destination_identity().into(),
+                roster_sequence: 2,
+                predecessor: HostRosterPredecessorV2::EnrollmentV1 {
+                    audit_digest: first.digest().unwrap(),
+                },
+            },
+            attempt: ManualRosterPublicationAttemptV2::InitialV2 {},
+        };
+        let roster_extension = hash('e');
+        let attempt_digest = wholepact_core::proposal::canonical_digest(
+            "wholepact:manual-roster-enrollment-initial-attempt:v2",
+            &roster_extension,
+        )
+        .unwrap();
+        ManualEnrollmentAdditionalPublicationV3 {
+            version: 3,
+            operation_id: "synthetic-batch-second-publication".into(),
+            request_identity_digest: hash('8'),
+            provider_enrollment_ref: hash('b'),
+            store_sequence: 2,
+            aliases: BTreeSet::from([terms.identity.account_id.clone()]),
+            evidence: ManualRosterEnrollmentEvidenceV2 {
+                version: 2,
+                enrollment_ref: hash('6'),
+                signer_roster_record_digest: hash('9'),
+                witness_roster_extension_digest: roster_extension,
+                witness_extension_digest: hash('8'),
+                witness_extension_sequence: 1,
+                witness_extension_predecessor_digest: None,
+                admission: ManualRosterAdmissionV2 {
+                    version: 2,
+                    exact_request_digest: request.digest().unwrap(),
+                    signer_intent_digest: hash('7'),
+                    witness_admission_digest: hash('6'),
+                    attempt_digest,
+                    attempt_sequence: 1,
+                    admitted_at_ms: 2,
+                    admission_deadline_ms: 1_000,
+                },
+                current: ManualContinuationCurrentAudit {
+                    writer_certificate_digest: terms.signer.writer_certificate_digest.clone(),
+                    writer_epoch: terms.signer.writer_epoch,
+                    writer_session_digest: hash('a'),
+                    writer_session_expires_at_ms: 2_000,
+                    witness_head_sequence: 1,
+                    witness_head_digest: hash('b'),
+                    complete_history_digest: hash('c'),
+                    exclusion_checkpoint_digest: hash('d'),
+                    native_review_digest: hash('f'),
+                },
+                request,
+            },
+        }
+    }
+
+    fn intent(index: usize) -> ParticipationIntent {
+        ParticipationIntent {
+            intent_id: format!("synthetic-batch-intent-{index}"),
+            agreement_id: AGREEMENT.into(),
+            participant_id: format!("participant-{index}"),
+            desired_contribution: amount(150_000),
+            maximum_net_debit: amount(155_000),
+            fee_cap: amount(5_000),
+            conditions: vec![],
+            valid_until: None,
+            status: IntentStatus::Active,
+        }
+    }
+    fn scopes(agreement: &AgreementDraft, accounts: &[String]) -> Vec<DurableConstructionScopeV1> {
+        let participants = accounts
+            .iter()
+            .enumerate()
+            .map(|(i, account)| ParticipantAllocation {
+                participant_id: format!("participant-{i}"),
+                account_id: account.clone(),
+                contribution: amount(150_000),
+                fee_share: amount(5_000),
+                fee_cap: amount(5_000),
+                maximum_net_debit: amount(155_000),
+                charges: vec![],
+            })
+            .collect::<Vec<_>>();
+        let inputs = participants
+            .iter()
+            .enumerate()
+            .map(|(i, p)| ClaimedInput {
+                input_id: format!("synthetic-input-{i}"),
+                participant_id: p.participant_id.clone(),
+                account_id: p.account_id.clone(),
+                amount: amount(200_000),
+                ownership_evidence_ref: None,
+            })
+            .collect();
+        let mut outputs = vec![ClaimedOutput {
+            output_id: "synthetic-recipient-output".into(),
+            address: agreement.recipients[0].address.clone(),
+            amount: amount(300_000),
+            allocation: OutputAllocation::Recipient {
+                recipient_id: agreement.recipients[0].recipient_id.clone(),
+            },
+        }];
+        for (i, p) in participants.iter().enumerate() {
+            outputs.push(ClaimedOutput {
+                output_id: format!("synthetic-return-{i}"),
+                address: format!("usyntheticreturn{i}"),
+                amount: amount(45_000),
+                allocation: OutputAllocation::Return {
+                    participant_id: p.participant_id.clone(),
+                    account_id: p.account_id.clone(),
+                    ownership_evidence_ref: None,
+                },
+            });
+        }
+        let proposal = ProposalInput {
+            proposal_id: "synthetic-batch-candidate".into(),
+            previous_proposal_id: None,
+            manifest: ProposalManifest {
+                agreement: agreement.clone(),
+                participants,
+                inputs,
+                outputs,
+                transaction_fee: amount(10_000),
+                expiry_height: 4_465_070,
+            },
+            artifact_digest: None,
+            effects_commitment: None,
+            created_at: "2026-10-19T00:00:00Z".into(),
+        };
+        wholepact_core::Proposal::validate(proposal.clone()).unwrap();
+        accounts
+            .iter()
+            .enumerate()
+            .map(|(i, account)| {
+                let recipient = ConstructionRecipientV1 {
+                    principal_id: OWNER.into(),
+                    authenticated_local_grant_digest: hash('d'),
+                };
+                let scope = DurableConstructionScopeV1 {
+                    version: 2,
+                    purpose: PURPOSE.into(),
+                    proposal: proposal.clone(),
+                    account_id: account.clone(),
+                    participant_id: format!("participant-{i}"),
+                    privacy_domain: format!("synthetic-domain-{i}"),
+                    constructor: recipient.clone(),
+                    prover: recipient,
+                    reviewers: accounts
+                        .iter()
+                        .cloned()
+                        .map(ConstructionReviewerV1::local_installed_signer)
+                        .collect(),
+                    protected_destination: DESTINATION.into(),
+                    retention_policy: RETENTION.into(),
+                    valid_from_unix_seconds: 100,
+                    valid_until_unix_seconds: 200,
+                    minimum_confirmations: 1,
+                    maximum_scan_blocks: 20,
+                };
+                scope.check_valid_at(150).unwrap();
+                scope
+            })
+            .collect()
+    }
+
+    struct Fixture {
+        engine: Engine,
+        access: Access,
+        agreement: AgreementDraft,
+        reviewers: Vec<String>,
+        scopes: Vec<DurableConstructionScopeV1>,
+        original_digest: String,
+        original_plan: PrivateWorkspaceInitializationPlanV1,
+        _directory: tempfile::TempDir,
+    }
+    impl Fixture {
+        fn new() -> Self {
+            let directory = tempfile::tempdir().unwrap();
+            std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+            let access = Access {
+                principal_id: OWNER.into(),
+                include_owned_agreements: true,
+                ..Access::default()
+            };
+            let original_path = directory.path().join("source.sqlite");
+            let original =
+                Engine::from_store(Store::create_encrypted(&original_path, &key(171)).unwrap());
+            original
+                .create(
+                    &access,
+                    "synthetic-batch-historical",
+                    draft("synthetic-historical"),
+                )
+                .unwrap();
+            drop(original);
+            let original_store = Store::open_encrypted(&original_path, &key(171)).unwrap();
+            let source = retained_source(&original_store, directory.path());
+            drop(original_store);
+            let inventory =
+                wholepact_engine::recovery::inspect_coordination_recovery(&source).unwrap();
+            let generation = bundle::recovery::generation::GenerationBinding::new(
+                &hash('e'),
+                inventory.digest(),
+            )
+            .unwrap();
+            let destination = directory.path().join("successor.sqlite");
+            Store::reconstruct_recovered_generation(&source, &destination, &key(174), &generation)
+                .unwrap();
+            let store = Store::open_recovered_generation(
+                &destination,
+                &key(174),
+                &generation,
+                source.provenance(),
+            )
+            .unwrap();
+            let target = store.manual_store_target().unwrap();
+            let first = synthetic_member(0, &target, None);
+            let second = synthetic_additional_member(&first, &target);
+            first.validate().unwrap();
+            second.validate().unwrap();
+            let second_digest = second.digest().unwrap();
+            drop(target);
+            let engine = Engine::from_store(store);
+            let agreement = draft(AGREEMENT);
+            engine
+                .create(
+                    &access,
+                    "synthetic-batch-selected-create",
+                    agreement.clone(),
+                )
+                .unwrap();
+            drop(engine);
+            // Genuine encrypted generation opener, deliberately synthetic retained
+            // rows. No private Engine access or native-approval constructor.
+            let connection = bundle::recovery::generation::open_recovered_generation(
+                &destination,
+                &key(174),
+                &generation,
+                source.provenance(),
+                wholepact_store::recovery::coordination_successor_template(),
+            )
+            .unwrap();
+            for (kind, digest, payload) in [
+                (
+                    "generation_manual_enrollment_v1",
+                    first.digest().unwrap(),
+                    serde_json::to_string(&first).unwrap(),
+                ),
+                (
+                    "generation_manual_enrollment_additional_publication_v3",
+                    second_digest.clone(),
+                    serde_json::to_string(&second).unwrap(),
+                ),
+            ] {
+                connection.connection().execute(
+                    "INSERT INTO records(aggregate_type,id,revision,payload,created_at_ms,updated_at_ms) VALUES(?1,?2,0,?3,1,1)",
+                    [kind.to_owned(), digest, payload]).unwrap();
+            }
+            drop(connection);
+            let store = Store::open_recovered_generation(
+                &destination,
+                &key(174),
+                &generation,
+                source.provenance(),
+            )
+            .unwrap();
+            assert!(store.recovery_state().unwrap().recovery_required);
+            for account in [hash('1'), hash('2')] {
+                assert!(store.authority_account(&account).unwrap().is_none());
+            }
+            let engine = Engine::from_store(store);
+            for i in 0..2 {
+                let revision = engine.get(&access, AGREEMENT).unwrap().revision;
+                engine
+                    .add_intent(
+                        &access,
+                        &format!("synthetic-batch-add-{i}"),
+                        AGREEMENT,
+                        revision,
+                        intent(i),
+                    )
+                    .unwrap();
+            }
+            engine
+                .select_roster(
+                    &access,
+                    "synthetic-batch-select",
+                    AGREEMENT,
+                    engine.get(&access, AGREEMENT).unwrap().revision,
+                    RosterSelectionRequest {
+                        selected_intent_ids: vec![intent(0).intent_id, intent(1).intent_id],
+                    },
+                )
+                .unwrap();
+            let roster = engine
+                .manual_roster_intent_target(&access, AGREEMENT)
+                .unwrap();
+            assert_eq!(roster.binding().roster_sequence, 3);
+            assert!(matches!(
+                &roster.binding().predecessor,
+                wholepact_core::manual_roster_v2::HostRosterPredecessorV2::AdditionalPublicationV3 { audit_digest }
+                    if audit_digest == &second_digest
+            ));
+            assert_eq!(roster.members(&access).unwrap().len(), 2);
+            roster.check_current(&access).unwrap();
+            drop(roster);
+            let original = engine
+                .original_private_workspace_source_v1(&access, AGREEMENT)
+                .unwrap();
+            let original_digest = original.source_digest().to_owned();
+            let original_plan = original.initialization_plan_v1(&access).unwrap();
+            let reviewers = original.reviewer_account_ids();
+            assert_eq!(reviewers, vec![hash('1'), hash('2')]);
+            drop(original);
+            let scopes = scopes(&agreement, &reviewers);
+            Self {
+                engine,
+                access,
+                agreement,
+                reviewers,
+                scopes,
+                original_digest,
+                original_plan,
+                _directory: directory,
+            }
+        }
+        fn binding(&self) -> StageMaterialBindingV3<'_> {
+            StageMaterialBindingV3 {
+                agreement_id: AGREEMENT,
+                principal: OWNER,
+                destination: Path::new(DESTINATION),
+                retention: RETENTION,
+                reviewers: &self.reviewers,
+                proposal: &self.scopes[0].proposal,
+            }
+        }
+        fn audit_original(&self) -> Result<()> {
+            let original = self
+                .engine
+                .original_private_workspace_source_v1(&self.access, AGREEMENT)
+                .map_err(|_| Error::Authentication)?;
+            // Saved ORIGINAL values are deliberately never refreshed. Merely
+            // proving that some newly acquired source is current is insufficient.
+            original
+                .check_initialization_plan_v1(&self.access, &self.original_plan)
+                .map_err(|_| Error::Authentication)?;
+            if original.source_digest() != self.original_digest {
+                return Err(Error::Authentication);
+            }
+            original
+                .check_current(&self.access)
+                .map_err(|_| Error::Authentication)
+        }
+        fn replace_selected_source(&self) {
+            let old = intent(0);
+            let withdrawn = self
+                .engine
+                .withdraw(
+                    &self.access,
+                    "synthetic-batch-mutate-withdraw",
+                    AGREEMENT,
+                    &old.intent_id,
+                    self.engine.get(&self.access, AGREEMENT).unwrap().revision,
+                )
+                .unwrap();
+            let mut replacement = old;
+            replacement.intent_id = "synthetic-batch-replacement".into();
+            replacement
+                .conditions
+                .push("Distinct selected original intent".into());
+            let added = self
+                .engine
+                .add_intent(
+                    &self.access,
+                    "synthetic-batch-mutate-add",
+                    AGREEMENT,
+                    withdrawn.agreement.revision,
+                    replacement.clone(),
+                )
+                .unwrap();
+            self.engine
+                .select_roster(
+                    &self.access,
+                    "synthetic-batch-mutate-select",
+                    AGREEMENT,
+                    added.agreement.revision,
+                    RosterSelectionRequest {
+                        selected_intent_ids: vec![replacement.intent_id, intent(1).intent_id],
+                    },
+                )
+                .unwrap();
+            let fresh = self
+                .engine
+                .original_private_workspace_source_v1(&self.access, AGREEMENT)
+                .unwrap();
+            fresh.check_current(&self.access).unwrap();
+            assert_ne!(fresh.source_digest(), self.original_digest);
+            assert!(
+                fresh
+                    .check_initialization_plan_v1(&self.access, &self.original_plan)
+                    .is_err()
+            );
+        }
+    }
+
+    // Literal legacy scope_current predicates, without its unavailable native
+    // Host owner. Keep this independent of the new comparison implementation.
+    fn legacy_compare(
+        binding: &StageMaterialBindingV3<'_>,
+        scope: &DurableConstructionScopeV1,
+        agreement: &AgreementDraft,
+        members: &[ManualEnrollmentRosterMember],
+    ) -> Result<()> {
+        require_operator_principal(agreement, binding.principal)?;
+        let mut reviewers = scope
+            .reviewers
+            .iter()
+            .map(|r| r.account_id().to_owned())
+            .collect::<Vec<_>>();
+        reviewers.sort();
+        let mut expected = binding.reviewers.to_vec();
+        expected.sort();
+        if scope.version != 2
+            || scope.proposal.proposal_id != binding.proposal.proposal_id
+            || scope.proposal.manifest.agreement != *agreement
+            || scope.proposal != *binding.proposal
+            || scope.constructor.principal_id != binding.principal
+            || scope.prover.principal_id != binding.principal
+            || scope.constructor != scope.prover
+            || scope.protected_destination != binding.destination.to_str().ok_or(Error::Invalid)?
+            || scope.retention_policy != binding.retention
+            || reviewers != expected
+            || expected.len() != 2
+            || !expected.contains(&scope.account_id)
+            || scope.purpose != PURPOSE
+        {
+            return Err(Error::Authentication);
+        }
+        let matching = members
+            .iter()
+            .filter(|m| {
+                m.identity.account_id == scope.account_id
+                    && m.scope.participant_id == scope.participant_id
+                    && m.scope.privacy_domain == scope.privacy_domain
+                    && m.scope.agreement_id == binding.agreement_id
+                    && m.scope.obligation_id == scope.proposal.manifest.agreement.obligation_id
+                    && m.scope.principal_id == binding.principal
+            })
+            .count();
+        if matching != 1 {
+            return Err(Error::Authentication);
+        }
+        Ok(())
+    }
+    #[derive(Default)]
+    struct Counts {
+        audits: Cell<u32>,
+        targets: Cell<u32>,
+        members: Cell<u32>,
+        final_ceilings: Cell<u32>,
+    }
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum ChangeAt {
+        Never,
+        TargetRecheck,
+        FinalOwner,
+    }
+
+    fn component_run(
+        f: &Fixture,
+        batch: bool,
+        scopes: &[DurableConstructionScopeV1],
+        change: ChangeAt,
+        initial_now: u64,
+        final_now: u64,
+        counts: &Counts,
+    ) -> Result<()> {
+        let audit = || {
+            counts.audits.set(counts.audits.get() + 1);
+            if change == ChangeAt::FinalOwner && counts.audits.get() == if batch { 2 } else { 5 } {
+                f.replace_selected_source();
+            }
+            f.audit_original()
+        };
+        let read = || {
+            counts.targets.set(counts.targets.get() + 1);
+            f.engine
+                .manual_roster_intent_target(&f.access, AGREEMENT)
+                .map_err(|_| Error::Authentication)
+        };
+        let ceilings = || {
+            counts.final_ceilings.set(counts.final_ceilings.get() + 1);
+            for scope in scopes {
+                check_stage_material_ceiling_v3(scope, final_now)?;
+            }
+            Ok(())
+        };
+        let binding = f.binding();
+        if batch {
+            stage_material_batch_v3(
+                audit,
+                || {
+                    for scope in scopes {
+                        check_stage_material_ceiling_v3(scope, initial_now)?;
+                    }
+                    Ok(())
+                },
+                read,
+                |target| {
+                    if scopes.len() != 2 {
+                        return Err(Error::Authentication);
+                    }
+                    let mut accounts = BTreeSet::new();
+                    for scope in scopes {
+                        if !accounts.insert(&scope.account_id) {
+                            return Err(Error::Authentication);
+                        }
+                        check_stage_material_ceiling_v3(scope, initial_now)?;
+                        compare_stage_material_identity_v3(&binding, scope, target.agreement())?;
+                    }
+                    counts.members.set(counts.members.get() + 1);
+                    let members = target
+                        .members(&f.access)
+                        .map_err(|_| Error::Authentication)?;
+                    for scope in scopes {
+                        compare_stage_material_member_v3(&binding, scope, members)?;
+                    }
+                    Ok(())
+                },
+                |target| {
+                    if change == ChangeAt::TargetRecheck {
+                        f.replace_selected_source();
+                    }
+                    target
+                        .check_current(&f.access)
+                        .map_err(|_| Error::Authentication)
+                },
+                ceilings,
+            )
+        } else {
+            audit()?;
+            if scopes.len() != 2 {
+                return Err(Error::Authentication);
+            }
+            let mut accounts = BTreeSet::new();
+            for scope in scopes {
+                if !accounts.insert(&scope.account_id) {
+                    return Err(Error::Authentication);
+                }
+                check_stage_material_ceiling_v3(scope, initial_now)?;
+                audit()?;
+                scope
+                    .check_valid_at(initial_now)
+                    .map_err(|_| Error::Permission)?;
+                let target = read()?;
+                counts.members.set(counts.members.get() + 1);
+                let members = target
+                    .members(&f.access)
+                    .map_err(|_| Error::Authentication)?;
+                legacy_compare(&binding, scope, target.agreement(), members)?;
+                if change == ChangeAt::TargetRecheck {
+                    f.replace_selected_source();
+                }
+                target
+                    .check_current(&f.access)
+                    .map_err(|_| Error::Authentication)?;
+                audit()?;
+            }
+            ceilings()
+        }
+    }
+
+    #[test]
+    fn encrypted_same_source_pair_reduces_outer_audits_five_to_two_and_targets_two_to_one() {
+        let f = Fixture::new();
+        // Only scalar elapsed component time. Setup and Host file/capsule/native,
+        // provider, wallet, proof, and end-to-end cost are deliberately excluded.
+        // No timing threshold or speedup claim is an acceptance condition.
+        let mut legacy_us = Vec::new();
+        let mut batch_us = Vec::new();
+        for _ in 0..3 {
+            for (batch, samples) in [(false, &mut legacy_us), (true, &mut batch_us)] {
+                let counts = Counts::default();
+                let started = std::time::Instant::now();
+                component_run(&f, batch, &f.scopes, ChangeAt::Never, 150, 150, &counts).unwrap();
+                samples.push(u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX));
+                assert_eq!(
+                    (
+                        counts.audits.get(),
+                        counts.targets.get(),
+                        counts.members.get()
+                    ),
+                    if batch { (2, 1, 1) } else { (5, 2, 2) }
+                );
+                assert_eq!(counts.final_ceilings.get(), 1);
+            }
+        }
+        legacy_us.sort_unstable();
+        batch_us.sort_unstable();
+        eprintln!(
+            "synthetic_encrypted_source_roster_component samples=3 legacy_audits=5 batch_audits=2 legacy_targets=2 batch_targets=1 legacy_us_min={} legacy_us_median={} legacy_us_max={} batch_us_min={} batch_us_median={} batch_us_max={} excludes_host_files_capsule_native_provider_wallet_proof=true",
+            legacy_us[0], legacy_us[1], legacy_us[2], batch_us[0], batch_us[1], batch_us[2]
+        );
+        f.audit_original().unwrap();
+    }
+
+    #[test]
+    fn actual_selected_source_mutation_is_denied_at_same_target_and_final_owner_boundaries() {
+        for batch in [false, true] {
+            for change in [ChangeAt::TargetRecheck, ChangeAt::FinalOwner] {
+                let f = Fixture::new();
+                let counts = Counts::default();
+                assert!(matches!(
+                    component_run(&f, batch, &f.scopes, change, 150, 150, &counts),
+                    Err(Error::Authentication)
+                ));
+                assert_eq!(counts.final_ceilings.get(), 0);
+                assert!(f.audit_original().is_err());
+                if change == ChangeAt::TargetRecheck {
+                    assert_eq!(counts.audits.get(), if batch { 1 } else { 2 });
+                    assert_eq!(counts.targets.get(), 1);
+                } else {
+                    assert_eq!(counts.audits.get(), if batch { 2 } else { 5 });
+                    assert_eq!(counts.targets.get(), if batch { 1 } else { 2 });
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn encrypted_retained_members_preserve_every_legacy_material_join_denial() {
+        let f = Fixture::new();
+        let target = f
+            .engine
+            .manual_roster_intent_target(&f.access, AGREEMENT)
+            .unwrap();
+        let members = target.members(&f.access).unwrap();
+        let binding = f.binding();
+        for original in &f.scopes {
+            legacy_compare(&binding, original, &f.agreement, members).unwrap();
+            compare_stage_material_identity_v3(&binding, original, &f.agreement).unwrap();
+            compare_stage_material_member_v3(&binding, original, members).unwrap();
+            for mutation in 0..16 {
+                let mut scope = original.clone();
+                match mutation {
+                    0 => scope.version = 1,
+                    1 => scope.proposal.proposal_id.push('x'),
+                    2 => scope.proposal.manifest.agreement.purpose.push('x'),
+                    3 => scope.proposal.created_at = "2026-10-20T00:00:00Z".into(),
+                    4 => scope.constructor.principal_id.push('x'),
+                    5 => scope.prover.principal_id.push('x'),
+                    6 => scope.prover.authenticated_local_grant_digest = hash('e'),
+                    7 => scope.protected_destination.push('x'),
+                    8 => scope.retention_policy.push('x'),
+                    9 => scope.reviewers.pop().map(|_| ()).unwrap(),
+                    10 => scope.account_id = hash('f'),
+                    11 => scope.participant_id.push('x'),
+                    12 => scope.privacy_domain.push('x'),
+                    13 => scope.purpose.push('x'),
+                    14 => scope.reviewers[1] = scope.reviewers[0].clone(),
+                    _ => {
+                        scope.reviewers[1] =
+                            ConstructionReviewerV1::local_installed_signer(hash('f'))
+                    }
+                }
+                let old = legacy_compare(&binding, &scope, &f.agreement, members);
+                let new = compare_stage_material_identity_v3(&binding, &scope, &f.agreement)
+                    .and_then(|()| compare_stage_material_member_v3(&binding, &scope, members));
+                assert_eq!(
+                    host_category(&old.unwrap_err()),
+                    host_category(&new.unwrap_err()),
+                    "mutation {mutation}"
+                );
+            }
+            for member_mutation in 0..7 {
+                let mut changed = members.to_vec();
+                let index = changed
+                    .iter()
+                    .position(|m| m.identity.account_id == original.account_id)
+                    .unwrap();
+                match member_mutation {
+                    0 => changed[index].identity.account_id = hash('f'),
+                    1 => changed[index].scope.participant_id.push('x'),
+                    2 => changed[index].scope.privacy_domain.push('x'),
+                    3 => changed[index].scope.agreement_id.push('x'),
+                    4 => changed[index].scope.obligation_id.push('x'),
+                    5 => changed[index].scope.principal_id.push('x'),
+                    _ => changed.push(changed[index].clone()),
+                }
+                assert!(legacy_compare(&binding, original, &f.agreement, &changed).is_err());
+                assert!(compare_stage_material_member_v3(&binding, original, &changed).is_err());
+            }
+            for organizer in [false, true] {
+                let mut agreement = f.agreement.clone();
+                if organizer {
+                    agreement.organizer_identity.push('x');
+                } else {
+                    agreement.privacy_profile.proving_operator = Some("different-operator".into());
+                }
+                assert!(matches!(
+                    legacy_compare(&binding, original, &agreement, members),
+                    Err(Error::Permission)
+                ));
+                assert!(matches!(
+                    compare_stage_material_identity_v3(&binding, original, &agreement),
+                    Err(Error::Permission)
+                ));
+            }
+            let restricted = StageMaterialBindingV3 {
+                reviewers: &f.reviewers[..1],
+                ..f.binding()
+            };
+            assert!(legacy_compare(&restricted, original, &f.agreement, members).is_err());
+            assert!(
+                compare_stage_material_identity_v3(&restricted, original, &f.agreement).is_err()
+            );
+        }
+        target.check_current(&f.access).unwrap();
+        f.audit_original().unwrap();
+    }
+
+    #[test]
+    fn preexpired_either_material_denies_batch_before_any_explicit_roster_read() {
+        let f = Fixture::new();
+        for expired_member in 0..2 {
+            let mut scopes = f.scopes.clone();
+            scopes[expired_member].valid_until_unix_seconds = 175;
+            let counts = Counts::default();
+            assert!(matches!(
+                component_run(&f, true, &scopes, ChangeAt::Never, 175, 175, &counts),
+                Err(Error::Permission)
+            ));
+            assert_eq!(
+                (
+                    counts.audits.get(),
+                    counts.targets.get(),
+                    counts.members.get(),
+                    counts.final_ceilings.get()
+                ),
+                (1, 0, 0, 0)
+            );
+        }
+        // Valid scope syntax but a mismatched recipient fails static identity
+        // before the one explicit private roster-members projection is read.
+        let mut scopes = f.scopes.clone();
+        scopes[1].retention_policy.push('x');
+        let counts = Counts::default();
+        assert!(matches!(
+            component_run(&f, true, &scopes, ChangeAt::Never, 150, 150, &counts),
+            Err(Error::Authentication)
+        ));
+        assert_eq!(
+            (
+                counts.audits.get(),
+                counts.targets.get(),
+                counts.members.get(),
+                counts.final_ceilings.get()
+            ),
+            (1, 1, 0, 0)
+        );
+    }
+
+    #[test]
+    fn both_absolute_original_ceilings_are_checked_after_source_reads_without_renewal() {
+        let f = Fixture::new();
+        for expired_member in 0..2 {
+            let mut scopes = f.scopes.clone();
+            scopes[expired_member].valid_until_unix_seconds = 175;
+            let before = serde_json::to_value(&scopes).unwrap();
+            for batch in [false, true] {
+                let counts = Counts::default();
+                assert!(matches!(
+                    component_run(&f, batch, &scopes, ChangeAt::Never, 150, 175, &counts),
+                    Err(Error::Permission)
+                ));
+                assert_eq!(counts.audits.get(), if batch { 2 } else { 5 });
+                assert_eq!(counts.final_ceilings.get(), 1);
+                assert_eq!(serde_json::to_value(&scopes).unwrap(), before);
+            }
+        }
+    }
+
+    #[test]
+    fn stage_batch_preserves_first_denial_and_never_runs_a_later_callback() {
+        for denied_at in 0..7 {
+            let visited = RefCell::new(Vec::new());
+            let audits = Cell::new(0);
+            let step = |index| {
+                visited.borrow_mut().push(index);
+                if index == denied_at {
+                    Err(Error::Permission)
+                } else {
+                    Ok(())
+                }
+            };
+            let result = stage_material_batch_v3(
+                || {
+                    let index = if audits.replace(audits.get() + 1) == 0 {
+                        0
+                    } else {
+                        5
+                    };
+                    step(index)
+                },
+                || step(1),
+                || {
+                    step(2)?;
+                    Ok(())
+                },
+                |_| step(3),
+                |_| step(4),
+                || step(6),
+            );
+            assert!(matches!(result, Err(Error::Permission)));
+            assert_eq!(*visited.borrow(), (0..=denied_at).collect::<Vec<_>>());
+        }
     }
 }
