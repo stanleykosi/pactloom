@@ -3286,3 +3286,241 @@ mod diagnostic_v1_tests {
         // can no longer silently participate in this serialization comparison.
     }
 }
+
+// Cause-only scan observations exercise the same forwarding kernels. These
+// component tests neither construct a native grant nor contact a provider.
+mod observation_cause_v1_tests {
+    use super::*;
+    use diagnostics::{Observation, Operation, Site};
+    use std::cell::{Cell, RefCell};
+    use wholepact_wallet::wallet::protected_sync::{
+        SyncError, durable_construction_v1::DurableConstructionError as E,
+    };
+    const KEY: &str = "private_fixed_observation_cause_v1";
+
+    fn assert_original(mut actual: ApiError, expected: ApiError) {
+        if let Some(details) = actual.details.as_object_mut() {
+            details.remove(KEY);
+        }
+        assert_eq!(actual.code, expected.code);
+        assert_eq!(actual.message, expected.message);
+        assert_eq!(actual.retryable, expected.retryable);
+        assert_eq!(actual.operation_id, expected.operation_id);
+        assert_eq!(actual.safe_actions, expected.safe_actions);
+        assert_eq!(actual.details, expected.details);
+    }
+    fn error() -> ApiError {
+        let mut error = ApiError::new("DISCLOSURE_DENIED", "private original sentinel");
+        error.retryable = true;
+        error.operation_id = Some("original-observation-operation".into());
+        error.safe_actions = vec!["original safe action".into()];
+        error.details = Box::new(json!({"original":"retained"}));
+        error
+    }
+    #[test]
+    fn observation_cause_keeps_owned_results_all_error_fields_and_prelude_sites() {
+        #[derive(Debug)]
+        struct Owned<'a>(&'a Cell<u32>);
+        impl Drop for Owned<'_> {
+            fn drop(&mut self) {
+                self.0.set(self.0.get() + 1);
+            }
+        }
+        let drops = Cell::new(0);
+        let observer = Observation::new(Operation::Checkpoint);
+        let value = observer.finish_cause_only(Ok(Owned(&drops))).unwrap();
+        assert_eq!(drops.get(), 0);
+        drop(value);
+        assert_eq!(drops.get(), 1);
+        for site in [
+            Site::WorkspaceLoad,
+            Site::Candidate,
+            Site::MaterialRoster,
+            Site::GateWorkspace,
+            Site::GateMaterial,
+            Site::WalletRosterAcquire,
+            Site::PostConsent,
+        ] {
+            let observer = Observation::new(Operation::Checkpoint);
+            observer.stage(site);
+            let actual = observer.finish_cause_only::<()>(Err(error())).unwrap_err();
+            let value = &actual.details[KEY];
+            assert_eq!(value["site"], serde_json::to_value(site).unwrap());
+            assert_eq!(value["engine_code"], "DISCLOSURE_DENIED");
+            assert_eq!(value.as_object().unwrap().len(), 6);
+            assert!(value.get("calls").is_none());
+            assert!(value.get("attempt_consumed").is_none());
+            assert!(actual.details.get(diagnostics::KEY).is_none());
+            assert!(!value.to_string().contains("private original"));
+            assert_original(actual, error());
+        }
+    }
+    #[test]
+    fn observation_cause_preserves_actual_wallet_categories_before_original_conversion() {
+        fn cases() -> Vec<(E, &'static str, &'static str)> {
+            vec![
+                (E::Invalid, "DurableConstruction", "Invalid"),
+                (E::Binding, "DurableConstruction", "Binding"),
+                (E::Stale, "DurableConstruction", "Stale"),
+                (E::Storage, "DurableConstruction", "Storage"),
+                (E::Sync(SyncError::AccessDenied), "Sync", "AccessDenied"),
+                (E::Sync(SyncError::Interrupted), "Sync", "Interrupted"),
+                (
+                    E::Sync(SyncError::NoCurrentObservation),
+                    "Sync",
+                    "NoCurrentObservation",
+                ),
+                (
+                    E::Sync(SyncError::Chain(wholepact_chain::ChainError::StaleChain)),
+                    "Chain",
+                    "StaleChain",
+                ),
+                (
+                    E::Sync(SyncError::Chain(
+                        wholepact_chain::ChainError::BackendFailure { grpc_code: 14 },
+                    )),
+                    "Chain",
+                    "BackendFailure",
+                ),
+                (
+                    E::Sync(SyncError::Wallet(
+                        wholepact_wallet::wallet::WalletError::Transport,
+                    )),
+                    "Wallet",
+                    "Transport",
+                ),
+            ]
+        }
+        for ((typed, family, cause), (legacy, _, _)) in cases().into_iter().zip(cases()) {
+            let observer = Observation::new(Operation::Checkpoint);
+            let mapped = observer.construction_result::<()>(Site::WalletRosterAcquire, Err(typed));
+            let actual = observer.finish_cause_only(mapped).unwrap_err();
+            assert_eq!(actual.details[KEY]["family"], family);
+            assert_eq!(actual.details[KEY]["cause"], cause);
+            assert_eq!(actual.details[KEY]["site"], "WalletRosterAcquire");
+            assert_original(actual, ApiError::from(legacy));
+        }
+    }
+    #[test]
+    fn observation_gate_keeps_short_circuit_and_first_error_before_access_denied() {
+        for (deny, permission, expected) in [
+            (1, true, vec!["check"]),
+            (0, false, vec!["check", "permit"]),
+            (2, true, vec!["check", "permit", "check"]),
+            (0, true, vec!["check", "permit", "check"]),
+        ] {
+            let observer = Observation::new(Operation::Checkpoint);
+            let count = Cell::new(0);
+            let order = RefCell::new(Vec::new());
+            let allowed = observation_permission_v1(
+                || {
+                    order.borrow_mut().push("check");
+                    count.set(count.get() + 1);
+                    let result = if count.get() == deny {
+                        Err(ApiError::new("MISSING_EVIDENCE", "original"))
+                    } else {
+                        Ok(())
+                    };
+                    observer.api(Site::GateMaterial, result)
+                },
+                || {
+                    order.borrow_mut().push("permit");
+                    permission
+                },
+            );
+            assert_eq!(*order.borrow(), expected);
+            assert_eq!(allowed, deny == 0 && permission);
+            if !allowed {
+                let mapped = observer.construction_result::<()>(
+                    Site::WalletRosterAcquire,
+                    Err(E::Sync(SyncError::AccessDenied)),
+                );
+                let actual = observer.finish_cause_only(mapped).unwrap_err();
+                assert_eq!(
+                    actual.details[KEY]["cause"],
+                    if deny > 0 {
+                        "MISSING_EVIDENCE"
+                    } else {
+                        "AccessDenied"
+                    }
+                );
+                assert_eq!(
+                    actual.details[KEY]["site"],
+                    if deny > 0 {
+                        "GateMaterial"
+                    } else {
+                        "WalletRosterAcquire"
+                    }
+                );
+                assert_eq!(actual.code, "DURABLE_CONSTRUCTION_UNAVAILABLE");
+            }
+        }
+    }
+    #[test]
+    fn observation_cause_omits_collision_unavailable_and_nonobject_details() {
+        for details in [
+            json!({KEY:{"private":"do not overwrite"}}),
+            json!("opaque"),
+            json!({diagnostics::KEY:{"existing":true}}),
+        ] {
+            let observer = Observation::new(Operation::Checkpoint);
+            let mut expected = error();
+            expected.details = Box::new(details.clone());
+            let mut original = error();
+            original.details = Box::new(details);
+            let actual = observer.finish_cause_only::<()>(Err(original)).unwrap_err();
+            assert_eq!(actual.details, expected.details);
+            assert_eq!(actual.code, expected.code);
+        }
+        let observer = Observation::new(Operation::Checkpoint);
+        observer.record_while_borrowed_for_test(&error());
+        let actual = observer.finish_cause_only::<()>(Err(error())).unwrap_err();
+        assert!(actual.details.get(KEY).is_none());
+        assert_original(actual, error());
+        let observer = Observation::new(Operation::Checkpoint);
+        observer.record(
+            Site::Candidate,
+            diagnostics::Cause {
+                family: "private-label",
+                cause: "private-cause",
+            },
+        );
+        let actual = observer.finish_cause_only::<()>(Err(error())).unwrap_err();
+        assert!(!actual.details[KEY].to_string().contains("private-label"));
+        assert_eq!(actual.details[KEY]["cause"], "Unclassified");
+    }
+    #[test]
+    fn concurrent_observation_collectors_keep_independent_first_causes() {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let started = Cell::new(0u8);
+                let first = async {
+                    let observer = Observation::new(Operation::Checkpoint);
+                    observer.stage(Site::Candidate);
+                    started.set(started.get() | 1);
+                    tokio::task::yield_now().await;
+                    assert_eq!(started.get(), 3);
+                    observer
+                        .finish_cause_only::<()>(Err(ApiError::new("MISSING_EVIDENCE", "first")))
+                        .unwrap_err()
+                };
+                let second = async {
+                    let observer = Observation::new(Operation::Checkpoint);
+                    observer.stage(Site::MaterialRoster);
+                    started.set(started.get() | 2);
+                    tokio::task::yield_now().await;
+                    assert_eq!(started.get(), 3);
+                    observer
+                        .finish_cause_only::<()>(Err(ApiError::new("DISCLOSURE_DENIED", "second")))
+                        .unwrap_err()
+                };
+                let (a, b) = tokio::join!(first, second);
+                assert_eq!(a.details[KEY]["site"], "Candidate");
+                assert_eq!(a.details[KEY]["cause"], "MISSING_EVIDENCE");
+                assert_eq!(b.details[KEY]["site"], "MaterialRoster");
+                assert_eq!(b.details[KEY]["cause"], "DISCLOSURE_DENIED");
+            });
+    }
+}

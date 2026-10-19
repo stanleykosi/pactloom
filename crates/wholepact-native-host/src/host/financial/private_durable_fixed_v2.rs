@@ -1329,22 +1329,37 @@ async fn observe_one_original_wallet_v3(
     captured: &Option<(DurableConstructionScopeV1, BackendIdentity)>,
     stage: &crate::host::durable_private_workspace_v1::OwnedPrivateWorkspaceStageV3<'_, '_>,
 ) -> Result<FreshDurableConstructionObservationV1> {
-    let (scope, backend) = captured.as_ref().ok_or(Error::Invalid)?;
-    wallet.check()?;
-    let sync = wallet.wallet.as_mut().ok_or(Error::Invalid)?;
+    let (scope, backend) = private_host_result_at_v1(
+        PrivateDiagnosticSiteV1::HostCheckpointSlots,
+        captured.as_ref().ok_or(Error::Invalid),
+    )?;
+    private_host_result_at_v1(PrivateDiagnosticSiteV1::SourcePermission, wallet.check())?;
+    let sync = private_host_result_at_v1(
+        PrivateDiagnosticSiteV1::HostCheckpointSlots,
+        wallet.wallet.as_mut().ok_or(Error::Invalid),
+    )?;
     let gate = CurrentScanAccessV3 {
-        cache_directory: cache_directory.as_ref().ok_or(Error::Invalid)?,
+        cache_directory: private_host_result_at_v1(
+            PrivateDiagnosticSiteV1::HostCheckpointSlots,
+            cache_directory.as_ref().ok_or(Error::Invalid),
+        )?,
         stage,
-        directory: wallet.directory.as_ref().ok_or(Error::Invalid)?,
-        origin: wallet.origin.as_ref().ok_or(Error::Invalid)?,
+        directory: private_host_result_at_v1(
+            PrivateDiagnosticSiteV1::HostCheckpointSlots,
+            wallet.directory.as_ref().ok_or(Error::Invalid),
+        )?,
+        origin: private_host_result_at_v1(
+            PrivateDiagnosticSiteV1::HostCheckpointSlots,
+            wallet.origin.as_ref().ok_or(Error::Invalid),
+        )?,
         account: sync.account_uuid(),
         backend,
         scope,
     };
-    stage.check()?;
+    private_host_result_at_v1(PrivateDiagnosticSiteV1::SourcePermission, stage.check())?;
     let fresh = coordinator
         .observe_exact_material_v2(
-            host.access()?,
+            private_host_result_at_v1(PrivateDiagnosticSiteV1::HostCheckpointEntry, host.access())?,
             candidate,
             &scope.account_id,
             sync,
@@ -1354,7 +1369,7 @@ async fn observe_one_original_wallet_v3(
         )
         .await
         .map_err(observe_engine_observation)?;
-    stage.check()?;
+    private_host_result_at_v1(PrivateDiagnosticSiteV1::PostConsent, stage.check())?;
     Ok(fresh)
 }
 
@@ -4305,6 +4320,7 @@ impl PrivateBoundaryV2 {
         use PrivateDiagnosticOperationV1 as O;
         use PrivateDiagnosticSiteV1 as S;
         match self {
+            Self::Observe => Some((O::Checkpoint, S::WalletRosterAcquire)),
             Self::Checkpoint => Some((O::Checkpoint, S::HostCheckpointEntry)),
             Self::Proof => Some((O::Proof, S::HostProofPrecheck)),
             Self::Freeze => Some((O::Freeze, S::HostFreezeReturn)),
@@ -4537,8 +4553,62 @@ fn observe_engine_candidate(error: wholepact_engine::ApiError) -> Error {
 fn observe_engine_intake(error: wholepact_engine::ApiError) -> Error {
     observe_engine(PrivateBoundaryV2::Intake, error)
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PrivateObservationCauseV1 {
+    schema: u8,
+    operation: PrivateDiagnosticOperationV1,
+    site: PrivateDiagnosticSiteV1,
+    engine_code: PrivateDiagnosticEngineCodeV1,
+    family: PrivateDiagnosticFamilyV1,
+    cause: PrivateDiagnosticCauseV1,
+}
+fn original_observation_cause_v1(
+    error: &wholepact_engine::ApiError,
+) -> Option<PrivateDiagnosticPrimaryV1> {
+    let value = error.details.get("private_fixed_observation_cause_v1")?;
+    let cause: PrivateObservationCauseV1 = serde_json::from_value(value.clone()).ok()?;
+    let actual_code: PrivateDiagnosticEngineCodeV1 =
+        serde_json::from_value(serde_json::Value::String(error.code.clone()))
+            .unwrap_or(PrivateDiagnosticEngineCodeV1::Unclassified);
+    if cause.schema != 1
+        || cause.operation != PrivateDiagnosticOperationV1::Checkpoint
+        || cause.engine_code == PrivateDiagnosticEngineCodeV1::NotApplicable
+        || cause.engine_code != actual_code
+        || cause.family == PrivateDiagnosticFamilyV1::Host
+        || !matches!(
+            cause.site,
+            PrivateDiagnosticSiteV1::WorkspaceLoad
+                | PrivateDiagnosticSiteV1::Candidate
+                | PrivateDiagnosticSiteV1::MaterialRoster
+                | PrivateDiagnosticSiteV1::GateWorkspace
+                | PrivateDiagnosticSiteV1::GateMaterial
+                | PrivateDiagnosticSiteV1::WalletRosterAcquire
+                | PrivateDiagnosticSiteV1::PostConsent
+                | PrivateDiagnosticSiteV1::OperationHistory
+        )
+    {
+        return None;
+    }
+    let primary = PrivateDiagnosticPrimaryV1 {
+        operation: cause.operation,
+        site: cause.site,
+        engine_code: cause.engine_code,
+        family: cause.family,
+        cause: cause.cause,
+    };
+    primary.valid().then_some(primary)
+}
 fn observe_engine_observation(error: wholepact_engine::ApiError) -> Error {
-    observe_engine(PrivateBoundaryV2::Observe, error)
+    if let Some(primary) = original_observation_cause_v1(&error) {
+        // Same foreground invocation; never infer checkpoint CALL facts from
+        // a scan result or overwrite a native/source failure already observed.
+        record_private_primary_v1(primary, None);
+        observe_failure(PrivateBoundaryV2::Observe, engine_category(&error));
+        Error::from(error)
+    } else {
+        observe_engine(PrivateBoundaryV2::Observe, error)
+    }
 }
 fn observe_engine_checkpoint(error: wholepact_engine::ApiError) -> Error {
     observe_engine(PrivateBoundaryV2::Checkpoint, error)
@@ -6501,5 +6571,159 @@ mod observation_wave_v3_tests {
             assert_eq!(result.unwrap(), [0, 1]);
             assert_eq!(requested.get(), 3);
         });
+    }
+}
+
+#[cfg(test)]
+mod observation_cause_v1_tests {
+    use super::*;
+    const KEY: &str = "private_fixed_observation_cause_v1";
+    fn scan_error() -> wholepact_engine::ApiError {
+        let mut error = wholepact_engine::ApiError::new(
+            "DURABLE_CONSTRUCTION_UNAVAILABLE",
+            "private scanner message",
+        );
+        error.details = Box::new(serde_json::json!({KEY:{
+            "schema":1,"operation":"Checkpoint","site":"WalletRosterAcquire",
+            "engine_code":"DURABLE_CONSTRUCTION_UNAVAILABLE","family":"Sync","cause":"NoCurrentObservation"
+        }}));
+        error
+    }
+    #[test]
+    fn observe_boundary_and_cause_only_parser_are_closed_and_code_correlated() {
+        // Observe was absent here, causing the real CI30 UNAVAILABLE record.
+        assert_eq!(
+            PrivateBoundaryV2::Observe.diagnostic_v1(),
+            Some((
+                PrivateDiagnosticOperationV1::Checkpoint,
+                PrivateDiagnosticSiteV1::WalletRosterAcquire
+            ))
+        );
+        let primary = original_observation_cause_v1(&scan_error()).unwrap();
+        assert_eq!(primary.family, PrivateDiagnosticFamilyV1::Sync);
+        assert_eq!(
+            primary.cause,
+            PrivateDiagnosticCauseV1::NoCurrentObservation
+        );
+        for (field, value) in [
+            ("schema", serde_json::json!(2)),
+            ("operation", serde_json::json!("Proof")),
+            ("site", serde_json::json!("ReceiptCommit")),
+            ("engine_code", serde_json::json!("DISCLOSURE_DENIED")),
+            ("engine_code", serde_json::json!("NotApplicable")),
+            ("family", serde_json::json!("Host")),
+            ("cause", serde_json::json!("private/unbounded/cause")),
+            ("calls", serde_json::json!({})),
+        ] {
+            let mut error = scan_error();
+            error.details[KEY][field] = value;
+            assert!(original_observation_cause_v1(&error).is_none(), "{field}");
+        }
+        let mut impossible = scan_error();
+        impossible.details[KEY]["family"] = serde_json::json!("Host");
+        impossible.details[KEY]["cause"] = serde_json::json!("Permission");
+        assert!(original_observation_cause_v1(&impossible).is_none());
+        let mut error = scan_error();
+        error.details[KEY] = serde_json::json!("malformed");
+        assert!(original_observation_cause_v1(&error).is_none());
+        let mut error = scan_error();
+        error.code = "INTERNAL_ERROR".into();
+        assert!(original_observation_cause_v1(&error).is_none());
+    }
+    #[test]
+    fn observation_setup_forwarding_preserves_owned_values_and_original_errors() {
+        #[derive(Debug)]
+        struct Owned<'a>(&'a std::cell::Cell<u32>);
+        impl Drop for Owned<'_> {
+            fn drop(&mut self) {
+                self.0.set(self.0.get() + 1);
+            }
+        }
+        let drops = std::cell::Cell::new(0);
+        let owned =
+            private_host_result_at_v1(PrivateDiagnosticSiteV1::SourcePermission, Ok(Owned(&drops)))
+                .unwrap();
+        assert_eq!(drops.get(), 0);
+        drop(owned);
+        assert_eq!(drops.get(), 1);
+        for error in [
+            Error::Invalid,
+            Error::Permission,
+            Error::Authentication,
+            Error::Storage,
+        ] {
+            let expected = host_category(&error);
+            let result: Result<()> =
+                private_host_result_at_v1(PrivateDiagnosticSiteV1::HostCheckpointSlots, Err(error));
+            assert_eq!(host_category(&result.unwrap_err()), expected);
+        }
+    }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    #[test]
+    fn observe_scan_failure_survives_actual_stage_collector_and_wire_roundtrip() {
+        for cause_only in [false, true] {
+            let _scope = begin_private_fixed_diagnostic_scope_v1();
+            let invocation =
+                begin_private_diagnostic_invocation_v1(PrivateDiagnosticOperationV1::Checkpoint);
+            begin_private_stage(PrivateBoundaryV2::Observe);
+            let stage = begin_private_stage_cost_v1(
+                wholepact_engine::PrivateFixedStageV3::Prepare,
+                std::time::Instant::now() + Duration::from_secs(120),
+            );
+            stage.callback(|| Ok(())).unwrap();
+            let error = if cause_only {
+                scan_error()
+            } else {
+                wholepact_engine::ApiError::new("DURABLE_CONSTRUCTION_UNAVAILABLE", "fallback")
+            };
+            let _original = observe_engine_observation(error);
+            let snapshot = private_fixed_diagnostic_snapshot_v1().unwrap();
+            assert_eq!(
+                snapshot.primary.operation,
+                PrivateDiagnosticOperationV1::Checkpoint
+            );
+            assert_eq!(
+                snapshot.primary.site,
+                PrivateDiagnosticSiteV1::WalletRosterAcquire
+            );
+            assert_eq!(
+                snapshot.primary.family,
+                if cause_only {
+                    PrivateDiagnosticFamilyV1::Sync
+                } else {
+                    PrivateDiagnosticFamilyV1::Engine
+                }
+            );
+            assert!(snapshot.evidence.is_none() && snapshot.worker.is_none());
+            let cost = snapshot.stage.as_ref().unwrap();
+            assert_eq!(cost.kind, PrivateStageKindV1::Prepare);
+            assert_eq!(cost.callback_count, 1);
+            let json = snapshot.canonical_json().unwrap();
+            assert!(!json.contains("private scanner"));
+            assert_eq!(PrivateFixedDiagnosticV1::parse(&json).unwrap(), snapshot);
+            drop(stage);
+            drop(invocation);
+            assert_eq!(private_fixed_diagnostic_snapshot_v1().unwrap(), snapshot);
+        }
+    }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    #[test]
+    fn observation_engine_error_does_not_replace_first_native_source_failure() {
+        let _scope = begin_private_fixed_diagnostic_scope_v1();
+        let _invocation =
+            begin_private_diagnostic_invocation_v1(PrivateDiagnosticOperationV1::Checkpoint);
+        let stage = begin_private_stage_cost_v1(
+            wholepact_engine::PrivateFixedStageV3::Prepare,
+            std::time::Instant::now() + Duration::from_secs(120),
+        );
+        let result: Result<()> = stage.observe(
+            PrivateDiagnosticSiteV1::HostWorkspaceNativeCheck,
+            Err(Error::Permission),
+        );
+        assert!(matches!(result, Err(Error::Permission)));
+        let first = private_fixed_diagnostic_snapshot_v1().unwrap();
+        let _ = observe_engine_observation(scan_error());
+        assert_eq!(private_fixed_diagnostic_snapshot_v1().unwrap(), first);
+        assert!(first.evidence.is_none() && first.worker.is_none());
     }
 }

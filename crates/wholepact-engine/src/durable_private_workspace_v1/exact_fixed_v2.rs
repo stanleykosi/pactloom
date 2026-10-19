@@ -1169,41 +1169,56 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
         material: &dyn LocalDurableMaterialConsentV1,
         wallet_access: &impl LocalWalletAccess,
     ) -> Result<FreshDurableConstructionObservationV1> {
-        let envelope = self
-            .operation(
+        // One collector per concrete observation future, never shared between
+        // the two owners. This path can report causes, not persistence facts.
+        let observation = Observation::new(Operation::Checkpoint);
+        let result = async {
+            observation.stage(Site::WorkspaceLoad);
+            let envelope = self
+                .operation_observed(
+                    access,
+                    consent,
+                    PrivateWorkspaceActionV1::ObserveExactMaterial,
+                    Some(&observation),
+                )?
+                .load_observed(&observation)?;
+            observation.stage(Site::Candidate);
+            candidate(&envelope, candidate_id)?;
+            observation.stage(Site::MaterialRoster);
+            let roster = self.engine.durable_roster(&envelope, candidate_id)?;
+            let intake = roster.owners.get(account_id).ok_or_else(damaged)?;
+            let gate = ObservationGate {
+                workspace: self,
                 access,
                 consent,
-                PrivateWorkspaceActionV1::ObserveExactMaterial,
-            )?
-            .load()?;
-        candidate(&envelope, candidate_id)?;
-        let roster = self.engine.durable_roster(&envelope, candidate_id)?;
-        let intake = roster.owners.get(account_id).ok_or_else(damaged)?;
-        let gate = ObservationGate {
-            workspace: self,
-            access,
-            consent,
-            material,
-            intake,
-            wallet: wallet_access,
-        };
-        gate.check()?;
-        let result = wallet
-            .observe_durable_material_v1(
-                &intake.outbox.request().material,
-                &intake.outbox.request().scope,
-                &gate,
-            )
-            .await
-            .map_err(Into::into);
-        match result {
-            Err(error) => Err(error),
-            Ok(fresh) => {
-                gate.check()?;
-                Ok(fresh)
+                material,
+                intake,
+                wallet: wallet_access,
+                observation: &observation,
+            };
+            gate.check()?;
+            observation.stage(Site::WalletRosterAcquire);
+            let result = wallet
+                .observe_durable_material_v1(
+                    &intake.outbox.request().material,
+                    &intake.outbox.request().scope,
+                    &gate,
+                )
+                .await;
+            let result = observation.construction_result(Site::WalletRosterAcquire, result);
+            match result {
+                Err(error) => Err(error),
+                Ok(fresh) => {
+                    observation.stage(Site::PostConsent);
+                    gate.check()?;
+                    Ok(fresh)
+                }
             }
         }
+        .await;
+        observation.finish_cause_only(result)
     }
+
     /// Prepare exactly once, release all initial wallet locks, then obtain the
     /// real exact artifact review. No retained metadata/proof effects occur.
     /// Existing process-only scan/witness caches are not a no-write claim.
@@ -3246,22 +3261,34 @@ struct ObservationGate<'a, 'source, W> {
     material: &'a dyn LocalDurableMaterialConsentV1,
     intake: &'a Intake,
     wallet: &'a W,
+    observation: &'a Observation,
 }
 impl<W> ObservationGate<'_, '_, W> {
     fn check(&self) -> Result<()> {
-        self.workspace.check(
-            self.access,
-            self.consent,
-            PrivateWorkspaceActionV1::ObserveExactMaterial,
+        self.observation.stage(Site::GateWorkspace);
+        self.observation.api(
+            Site::GateWorkspace,
+            self.workspace.check_observed(
+                self.access,
+                self.consent,
+                PrivateWorkspaceActionV1::ObserveExactMaterial,
+                Some(self.observation),
+            ),
         )?;
-        self.workspace.check_intake(
-            self.access,
-            self.intake,
-            self.material,
-            DurableMaterialActionV1::ReadForExactConstruction,
+        self.observation.stage(Site::GateMaterial);
+        self.observation.api(
+            Site::GateMaterial,
+            self.workspace.check_intake_observed(
+                Some(self.observation),
+                self.access,
+                self.intake,
+                self.material,
+                DurableMaterialActionV1::ReadForExactConstruction,
+            ),
         )
     }
 }
+
 impl<W: LocalWalletAccess> LocalWalletAccess for ObservationGate<'_, '_, W> {
     fn permits(
         &self,
@@ -3269,10 +3296,18 @@ impl<W: LocalWalletAccess> LocalWalletAccess for ObservationGate<'_, '_, W> {
         provider: &wholepact_wallet::wallet::protected_sync::BackendIdentity,
         purpose: wholepact_wallet::wallet::protected_sync::WalletAccessPurpose,
     ) -> bool {
-        self.check().is_ok()
-            && self.wallet.permits(account, provider, purpose)
-            && self.check().is_ok()
+        observation_permission_v1(
+            || self.check(),
+            || self.wallet.permits(account, provider, purpose),
+        )
     }
+}
+// Same short-circuit kernel: no observer borrow survives the actual checks.
+fn observation_permission_v1(
+    mut check: impl FnMut() -> Result<()>,
+    permission: impl FnOnce() -> bool,
+) -> bool {
+    check().is_ok() && permission() && check().is_ok()
 }
 struct ArtifactGate<'a, 'source, 'held> {
     workspace: &'a PrivateDurableCoordinatorV1<'source>,
@@ -3677,6 +3712,57 @@ pub(crate) mod diagnostics {
         pub(super) fn record_while_borrowed_for_test(&self, error: &ApiError) {
             let _held = self.first.borrow_mut();
             self.record(Site::FinalGate, engine(error));
+        }
+        pub(super) fn construction_result<T>(
+            &self,
+            site: Site,
+            result: std::result::Result<
+                T,
+                wholepact_wallet::wallet::protected_sync::durable_construction_v1::DurableConstructionError,
+            >,
+        ) -> Result<T> {
+            result.map_err(|error| {
+                self.record(site, construction(&error));
+                ApiError::from(error)
+            })
+        }
+        /// Observation only: these reads do not execute checkpoint effects.
+        /// No CALL or consumed fields may escape from this finish path.
+        pub(super) fn finish_cause_only<T>(&self, result: Result<T>) -> Result<T> {
+            match result {
+                Ok(value) => Ok(value),
+                Err(mut error) => {
+                    const CAUSE_KEY: &str = "private_fixed_observation_cause_v1";
+                    self.record(self.site(), engine(&error));
+                    if !self.available.get()
+                        || error.details.get(CAUSE_KEY).is_some()
+                        || error.details.get(KEY).is_some()
+                        || !error.details.is_object()
+                    {
+                        return Err(error);
+                    }
+                    let Ok(first) = self.first.try_borrow() else {
+                        return Err(error);
+                    };
+                    let Some(first) = *first else {
+                        return Err(error);
+                    };
+                    let value = serde_json::json!({
+                        "schema":1,"operation":self.operation,"site":first.site,
+                        "engine_code":engine_code(&error.code),
+                        "family":first.cause.family,"cause":first.cause.cause
+                    });
+                    if serde_json::to_vec(&value)
+                        .ok()
+                        .is_some_and(|bytes| bytes.len() <= 4096)
+                    {
+                        if let Some(details) = error.details.as_object_mut() {
+                            details.entry(CAUSE_KEY.to_owned()).or_insert(value);
+                        }
+                    }
+                    Err(error)
+                }
+            }
         }
         pub(crate) fn finish<T>(&self, result: Result<T>) -> Result<T> {
             match result {
@@ -4360,7 +4446,7 @@ pub(crate) mod diagnostics {
     pub(crate) fn construction(
         error:&wholepact_wallet::wallet::protected_sync::durable_construction_v1::DurableConstructionError,
     ) -> Cause {
-        use wholepact_wallet::wallet::protected_sync::durable_construction_v1::DurableConstructionError::*;
+                use wholepact_wallet::wallet::protected_sync::durable_construction_v1::DurableConstructionError::*;
         match error {
             Sync(e) => sync(e),
             Invalid => Cause {
