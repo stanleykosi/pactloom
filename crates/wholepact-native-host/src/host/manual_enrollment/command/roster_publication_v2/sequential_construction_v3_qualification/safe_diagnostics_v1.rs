@@ -4467,14 +4467,14 @@ pub(super) use private_fixed_projection::{
     feature = "durable-proposal",
     feature = "synthetic-born-joined-qualification"
 ))]
-pub(super) const PRIVATE_FIXED_DIAGNOSTIC_TEST_JSON: &str = r#"{"evidence":{"attempt_consumed":true,"call_scope":"CurrentInvocation","calls":{"enqueue":"NotApplicable","freeze":"NotApplicable","link":"NotApplicable","outcome":"NotCalled","proof":"ReturnedErrUnknown","receipt":"NotApplicable"}},"primary":{"cause":"Authentication","engine_code":"NotApplicable","family":"Host","operation":"Proof","site":"HostProofForegroundMessage"},"schema":1,"worker":{"engine_failure":{"attempt_consumed":true,"call_scope":"CurrentInvocation","calls":{"enqueue":"NotApplicable","freeze":"NotApplicable","link":"NotApplicable","outcome":"NotCalled","proof":"ReturnedErrUnknown","receipt":"NotApplicable"},"cause":"NoCurrentObservation","engine_code":"DURABLE_CONSTRUCTION_UNAVAILABLE","family":"Sync","operation":"Proof","schema":1,"site":"ProofRun"},"join":"Joined","result":"ReceivedErr"}}"#;
+pub(super) const PRIVATE_FIXED_DIAGNOSTIC_TEST_JSON: &str = r#"{"evidence":{"attempt_consumed":true,"call_scope":"CurrentInvocation","calls":{"enqueue":"NotApplicable","freeze":"NotApplicable","link":"NotApplicable","outcome":"NotCalled","proof":"ReturnedErrUnknown","receipt":"NotApplicable"}},"primary":{"cause":"Authentication","engine_code":"NotApplicable","family":"Host","operation":"Proof","site":"HostProofForegroundMessage"},"schema":1,"stage":null,"worker":{"engine_failure":{"attempt_consumed":true,"call_scope":"CurrentInvocation","calls":{"enqueue":"NotApplicable","freeze":"NotApplicable","link":"NotApplicable","outcome":"NotCalled","proof":"ReturnedErrUnknown","receipt":"NotApplicable"},"cause":"NoCurrentObservation","engine_code":"DURABLE_CONSTRUCTION_UNAVAILABLE","family":"Sync","operation":"Proof","schema":1,"site":"ProofRun"},"join":"Joined","result":"ReceivedErr"}}"#;
 
 #[cfg(all(
     test,
     feature = "durable-proposal",
     feature = "synthetic-born-joined-qualification"
 ))]
-pub(super) const PRIVATE_FIXED_DIAGNOSTIC_MAXIMAL_TEST_JSON: &str = r#"{"evidence":{"attempt_consumed":true,"call_scope":"CurrentInvocation","calls":{"enqueue":"NotApplicable","freeze":"NotApplicable","link":"NotApplicable","outcome":"ReturnedErrUnknown","proof":"ReturnedErrUnknown","receipt":"NotApplicable"}},"primary":{"cause":"RETAINED_INPUT_OBSERVATION_UNAVAILABLE","engine_code":"RETAINED_INPUT_OBSERVATION_UNAVAILABLE","family":"Engine","operation":"Proof","site":"ReaderOriginalFinancialProofSchema"},"schema":1,"worker":{"engine_failure":{"attempt_consumed":true,"call_scope":"CurrentInvocation","calls":{"enqueue":"NotApplicable","freeze":"NotApplicable","link":"NotApplicable","outcome":"ReturnedErrUnknown","proof":"ReturnedErrUnknown","receipt":"NotApplicable"},"cause":"RETAINED_INPUT_OBSERVATION_UNAVAILABLE","engine_code":"RETAINED_INPUT_OBSERVATION_UNAVAILABLE","family":"Engine","operation":"Proof","schema":1,"site":"SnapshotSourceUnchanged"},"join":"Panicked","result":"ReceivedErr"}}"#;
+pub(super) const PRIVATE_FIXED_DIAGNOSTIC_MAXIMAL_TEST_JSON: &str = r#"{"evidence":{"attempt_consumed":true,"call_scope":"CurrentInvocation","calls":{"enqueue":"NotApplicable","freeze":"NotApplicable","link":"NotApplicable","outcome":"ReturnedErrUnknown","proof":"ReturnedErrUnknown","receipt":"NotApplicable"}},"primary":{"cause":"RETAINED_INPUT_OBSERVATION_UNAVAILABLE","engine_code":"RETAINED_INPUT_OBSERVATION_UNAVAILABLE","family":"Engine","operation":"Proof","site":"ReaderOriginalFinancialProofSchema"},"schema":1,"stage":{"callback_count":1000000,"callback_max_us":1080000000,"callback_total_us":1080000000,"elapsed_ms":1080000,"kind":"ProveOriginal"},"worker":{"engine_failure":{"attempt_consumed":true,"call_scope":"CurrentInvocation","calls":{"enqueue":"NotApplicable","freeze":"NotApplicable","link":"NotApplicable","outcome":"ReturnedErrUnknown","proof":"ReturnedErrUnknown","receipt":"NotApplicable"},"cause":"RETAINED_INPUT_OBSERVATION_UNAVAILABLE","engine_code":"RETAINED_INPUT_OBSERVATION_UNAVAILABLE","family":"Engine","operation":"Proof","schema":1,"site":"SnapshotSourceUnchanged"},"join":"Panicked","result":"ReceivedErr"}}"#;
 
 #[cfg(all(
     test,
@@ -4727,6 +4727,32 @@ fn private_fixed_diagnostic_maximal_canonical_and_exact_4096_boundary() {
     let dto = PrivateFixedDiagnosticV1::parse(PRIVATE_FIXED_DIAGNOSTIC_MAXIMAL_TEST_JSON).unwrap();
     let canonical = dto.canonical_json().unwrap();
     assert!(canonical.len() <= 4096);
+    let mut value: serde_json::Value = serde_json::from_str(&canonical).unwrap();
+    assert!(value["stage"].is_object());
+    for (kind, operation) in [
+        ("Prepare", "Checkpoint"),
+        ("AdmitOriginal", "Checkpoint"),
+        ("ProveOriginal", "Proof"),
+        ("FreezeFixed", "Freeze"),
+        ("ReadFixed", "ReadFixed"),
+    ] {
+        value["stage"]["kind"] = serde_json::json!(kind);
+        value["primary"]["operation"] = serde_json::json!(operation);
+        value["worker"] = serde_json::Value::Null;
+        value["evidence"] = serde_json::Value::Null;
+        assert!(private_fixed_test_parse(&value));
+        value["primary"]["operation"] = serde_json::json!("OpenOriginal");
+        assert!(!private_fixed_test_parse(&value));
+    }
+    value = serde_json::from_str(&canonical).unwrap();
+    value["stage"]["callback_count"] = serde_json::json!(0);
+    assert!(!private_fixed_test_parse(&value));
+    value = serde_json::from_str(&canonical).unwrap();
+    value["stage"]["elapsed_ms"] = serde_json::json!(1_080_001);
+    assert!(!private_fixed_test_parse(&value));
+    value = serde_json::from_str(&canonical).unwrap();
+    value.as_object_mut().unwrap().remove("stage");
+    assert!(!private_fixed_test_parse(&value));
     let exact = format!("{}{}", " ".repeat(4096 - canonical.len()), canonical);
     assert_eq!(exact.len(), 4096);
     assert!(PrivateFixedDiagnosticV1::parse(&exact).is_some());

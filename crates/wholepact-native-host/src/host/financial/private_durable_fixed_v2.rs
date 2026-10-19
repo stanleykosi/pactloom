@@ -1873,6 +1873,8 @@ impl<'host> PrivateFixedSessionV2<'host> {
         complete_private_stage(PrivateBoundaryV2::Checkpoint);
         drop(checkpoint_diagnostic);
         begin_private_stage(PrivateBoundaryV2::Proof);
+        let proof_diagnostic =
+            begin_private_diagnostic_invocation_v1(PrivateDiagnosticOperationV1::Proof);
         let inspection = self.owner.inspect_fixed_stage_v3()?;
         let review = attempt
             .inspect_proof_stage_v3(self.host.access()?, &inspection)
@@ -1894,6 +1896,7 @@ impl<'host> PrivateFixedSessionV2<'host> {
         self.revision = proved.revision;
         drop(prove);
         complete_private_stage(PrivateBoundaryV2::Proof);
+        drop(proof_diagnostic);
         begin_private_stage(PrivateBoundaryV2::Freeze);
         let freeze_diagnostic =
             begin_private_diagnostic_invocation_v1(PrivateDiagnosticOperationV1::Freeze);
@@ -2053,8 +2056,6 @@ fn run_original_proof_foreground_v2<'op, 'source>(
     let key = key.to_owned();
     let deadline = workspace.deadline();
     let cancelled = std::sync::Arc::new(AtomicBool::new(false));
-    let _proof_diagnostic =
-        begin_private_diagnostic_invocation_v1(PrivateDiagnosticOperationV1::Proof);
     let result = std::thread::scope(|scope| {
         let (send, receive) = std::sync::mpsc::channel();
         let broker = ForegroundProofBrokerV2 {
@@ -2421,6 +2422,9 @@ pub(crate) enum PrivateDiagnosticSiteV1 {
     HostProofNativeCheck,
     HostProofApproval,
     HostWorkspaceCurrent,
+    HostWorkspaceNativeCheck,
+    HostWorkspaceSessionCheck,
+    HostWorkspaceSourceCheck,
     ReaderProfileDirectory,
     ReaderVaultRead,
     ReaderVaultV3Open,
@@ -2778,6 +2782,55 @@ pub(crate) struct PrivateFixedDiagnosticV1 {
     pub(crate) evidence: Option<PrivateDiagnosticEvidenceV1>,
     #[serde(deserialize_with = "required_private_optional_v1")]
     pub(crate) worker: Option<PrivateDiagnosticWorkerV1>,
+    #[serde(deserialize_with = "required_private_optional_v1")]
+    pub(crate) stage: Option<PrivateStageCostV1>,
+}
+// These are optional measurements, never native permission or effect evidence.
+const PRIVATE_STAGE_MAX_COUNT_V1: u64 = 1_000_000;
+const PRIVATE_STAGE_MAX_US_V1: u64 = 1_080_000_000;
+const PRIVATE_STAGE_MAX_MS_V1: u64 = 1_080_000;
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum PrivateStageKindV1 {
+    Prepare,
+    AdmitOriginal,
+    ProveOriginal,
+    FreezeFixed,
+    ReadFixed,
+}
+impl PrivateStageKindV1 {
+    fn operation(self) -> PrivateDiagnosticOperationV1 {
+        use PrivateDiagnosticOperationV1 as O;
+        match self {
+            Self::Prepare | Self::AdmitOriginal => O::Checkpoint,
+            Self::ProveOriginal => O::Proof,
+            Self::FreezeFixed => O::Freeze,
+            Self::ReadFixed => O::ReadFixed,
+        }
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PrivateStageCostV1 {
+    pub(crate) kind: PrivateStageKindV1,
+    pub(crate) elapsed_ms: u64,
+    pub(crate) callback_count: u64,
+    pub(crate) callback_total_us: u64,
+    pub(crate) callback_max_us: u64,
+}
+impl PrivateStageCostV1 {
+    fn valid(&self, operation: PrivateDiagnosticOperationV1) -> bool {
+        self.kind.operation() == operation
+            && self.elapsed_ms <= PRIVATE_STAGE_MAX_MS_V1
+            && self.callback_count <= PRIVATE_STAGE_MAX_COUNT_V1
+            && self.callback_total_us <= PRIVATE_STAGE_MAX_US_V1
+            && self.callback_max_us <= self.callback_total_us
+            && self
+                .callback_max_us
+                .checked_mul(self.callback_count)
+                .is_some_and(|maximum| self.callback_total_us <= maximum)
+            && (self.callback_count != 0
+                || (self.callback_total_us == 0 && self.callback_max_us == 0))
+    }
 }
 impl PrivateDiagnosticPrimaryV1 {
     fn valid(&self) -> bool {
@@ -3191,6 +3244,10 @@ impl PrivateFixedDiagnosticV1 {
         if self.schema != 1
             || !self.primary.valid()
             || self
+                .stage
+                .as_ref()
+                .is_some_and(|value| !value.valid(self.primary.operation))
+            || self
                 .evidence
                 .as_ref()
                 .is_some_and(|value| !value.valid(self.primary.operation))
@@ -3227,6 +3284,8 @@ struct PrivateDiagnosticLatchV1 {
     operation: Option<PrivateDiagnosticOperationV1>,
     invocation: Option<u64>,
     first_invocation: Option<u64>,
+    stage: Option<PrivateStageStateV1>,
+    first_stage: Option<(u64, Option<u64>)>,
     first: Option<PrivateFixedDiagnosticV1>,
     boundary: Option<(&'static str, &'static str)>,
     worker: Option<PrivateDiagnosticWorkerV1>,
@@ -3264,6 +3323,216 @@ fn with_private_diagnostic_v1<T>(f: impl FnOnce(&mut PrivateDiagnosticLatchV1) -
             invalidate_private_diagnostic_v1();
             None
         }
+    }
+}
+struct PrivateStageStateV1 {
+    token: u64,
+    invocation: u64,
+    start: std::time::Instant,
+    cost: PrivateStageCostV1,
+    callback: Option<u64>,
+    unavailable: bool,
+}
+impl PrivateStageStateV1 {
+    fn snapshot(&self) -> Option<PrivateStageCostV1> {
+        if self.unavailable {
+            return None;
+        }
+        let mut cost = self.cost.clone();
+        cost.elapsed_ms = std::time::Instant::now()
+            .checked_duration_since(self.start)?
+            .as_millis()
+            .try_into()
+            .ok()?;
+        cost.valid(cost.kind.operation()).then_some(cost)
+    }
+}
+/// Inert thread-local correlation only. It owns no source, key or native grant.
+pub(in crate::host) struct PrivateStageObservationV1 {
+    token: Option<u64>,
+    local: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+fn latch_private_stage_v1(state: &mut PrivateDiagnosticLatchV1) {
+    let Some(stage) = state.stage.as_ref() else {
+        return;
+    };
+    let Some(first) = state.first.as_mut() else {
+        return;
+    };
+    if state.invocation == Some(stage.invocation)
+        && state.first_invocation == Some(stage.invocation)
+        && first.primary.operation == stage.cost.kind.operation()
+    {
+        state.first_stage = Some((stage.token, stage.callback));
+        first.stage = if stage.callback.is_none() {
+            stage.snapshot()
+        } else {
+            None
+        };
+    }
+}
+fn private_stage_kind_v1(kind: wholepact_engine::PrivateFixedStageV3) -> PrivateStageKindV1 {
+    use wholepact_engine::PrivateFixedStageV3 as S;
+    match kind {
+        S::Prepare => PrivateStageKindV1::Prepare,
+        S::AdmitOriginal => PrivateStageKindV1::AdmitOriginal,
+        S::ProveOriginal => PrivateStageKindV1::ProveOriginal,
+        S::FreezeFixed => PrivateStageKindV1::FreezeFixed,
+        S::ReadFixed => PrivateStageKindV1::ReadFixed,
+    }
+}
+pub(in crate::host) fn begin_private_stage_cost_v1(
+    kind: wholepact_engine::PrivateFixedStageV3,
+    deadline: std::time::Instant,
+) -> PrivateStageObservationV1 {
+    let mut result = PrivateStageObservationV1 {
+        token: None,
+        local: std::marker::PhantomData,
+    };
+    if !private_diagnostic_active_v1() {
+        return result;
+    }
+    // Every attempted stage reset invalidates the previous inert generation,
+    // even when this allocation or start conversion cannot be observed.
+    let _ = with_private_diagnostic_v1(|state| state.stage = None);
+    let Some(start) = deadline.checked_sub(Duration::from_secs(120)) else {
+        return result;
+    };
+    let token = PRIVATE_DIAGNOSTIC_SEQUENCE_V1
+        .try_with(|value| value.get().checked_add(1).inspect(|next| value.set(*next)))
+        .ok()
+        .flatten();
+    if let Some(token) = token {
+        let _ = with_private_diagnostic_v1(|state| {
+            // Beginning another stage invalidates its predecessor's future updates.
+            state.stage = None;
+            if let Some(invocation) = state.invocation {
+                result.token = Some(token);
+                state.stage = Some(PrivateStageStateV1 {
+                    token,
+                    invocation,
+                    start,
+                    cost: PrivateStageCostV1 {
+                        kind: private_stage_kind_v1(kind),
+                        elapsed_ms: 0,
+                        callback_count: 0,
+                        callback_total_us: 0,
+                        callback_max_us: 0,
+                    },
+                    callback: None,
+                    unavailable: false,
+                });
+            }
+        });
+    }
+    result
+}
+impl Drop for PrivateStageObservationV1 {
+    fn drop(&mut self) {
+        if let Some(token) = self.token {
+            let _ = with_private_diagnostic_v1(|state| {
+                if state
+                    .stage
+                    .as_ref()
+                    .is_some_and(|stage| stage.token == token)
+                {
+                    state.stage = None;
+                }
+            });
+        }
+    }
+}
+impl PrivateStageObservationV1 {
+    fn matches(&self, state: &PrivateDiagnosticLatchV1) -> bool {
+        self.token.is_some()
+            && state.stage.as_ref().is_some_and(|stage| {
+                Some(stage.token) == self.token && state.invocation == Some(stage.invocation)
+            })
+    }
+    /// Return the original owned result; no predicate is evaluated here.
+    pub(in crate::host) fn observe<T>(
+        &self,
+        site: PrivateDiagnosticSiteV1,
+        result: Result<T>,
+    ) -> Result<T> {
+        if let Err(error) = &result {
+            if self.token.is_some()
+                && with_private_diagnostic_v1(|state| self.matches(state)).unwrap_or(false)
+            {
+                observe_private_fixed_host_v1(
+                    PrivateDiagnosticOperationV1::OpenOriginal,
+                    site,
+                    error,
+                );
+            }
+        }
+        result
+    }
+    /// This sum covers only this callback, not Engine or outer source work.
+    pub(in crate::host) fn callback<T>(&self, call: impl FnOnce() -> Result<T>) -> Result<T> {
+        if self.token.is_none() {
+            return call();
+        }
+        let measured = with_private_diagnostic_v1(|state| {
+            if !self.matches(state) {
+                return None;
+            }
+            let stage = state.stage.as_mut()?;
+            if stage.unavailable || stage.callback.is_some() {
+                stage.unavailable = true;
+                return None;
+            }
+            let Some(count) = stage.cost.callback_count.checked_add(1) else {
+                stage.unavailable = true;
+                return None;
+            };
+            if count > PRIVATE_STAGE_MAX_COUNT_V1 {
+                stage.unavailable = true;
+                return None;
+            }
+            stage.cost.callback_count = count;
+            stage.callback = Some(count);
+            Some((count, std::time::Instant::now()))
+        })
+        .flatten();
+        let result = call();
+        if let Some((callback, started)) = measured {
+            let duration = started.elapsed().as_micros().try_into().ok();
+            let _ = with_private_diagnostic_v1(|state| {
+                if !self.matches(state) {
+                    return;
+                }
+                let Some(stage) = state.stage.as_mut() else {
+                    return;
+                };
+                if stage.callback != Some(callback) {
+                    stage.unavailable = true;
+                    return;
+                }
+                stage.callback = None;
+                match duration.and_then(|us: u64| {
+                    stage
+                        .cost
+                        .callback_total_us
+                        .checked_add(us)
+                        .map(|total| (us, total))
+                }) {
+                    Some((us, total)) if total <= PRIVATE_STAGE_MAX_US_V1 => {
+                        stage.cost.callback_total_us = total;
+                        stage.cost.callback_max_us = stage.cost.callback_max_us.max(us);
+                    }
+                    _ => stage.unavailable = true,
+                }
+                // Supplement only the exact first error raised inside this call.
+                if state.first_stage == Some((stage.token, Some(callback))) {
+                    if let Some(first) = &mut state.first {
+                        first.stage = stage.snapshot();
+                    }
+                    state.first_stage = Some((stage.token, None));
+                }
+            });
+        }
+        result
     }
 }
 pub(crate) struct PrivateFixedDiagnosticScopeV1 {
@@ -3394,7 +3663,9 @@ fn record_private_primary_v1(
             primary,
             evidence,
             worker,
+            stage: None,
         });
+        latch_private_stage_v1(state);
     });
 }
 fn host_private_primary_v1(
@@ -3559,7 +3830,9 @@ pub(crate) fn observe_private_fixed_engine_v1(
                     primary,
                     evidence: same_operation.then(|| core.evidence()),
                     worker,
+                    stage: None,
                 });
+                latch_private_stage_v1(state);
             }
         });
     } else {
@@ -3962,6 +4235,17 @@ fn observe_failure(boundary: PrivateBoundaryV2, outcome: &'static str) {
     let _ = (boundary, outcome);
 }
 fn begin_private_stage(boundary: PrivateBoundaryV2) {
+    let action = match boundary {
+        PrivateBoundaryV2::Observe => Some(PrivateWorkspaceActionV1::ObserveExactMaterial),
+        PrivateBoundaryV2::Checkpoint => Some(PrivateWorkspaceActionV1::CheckpointExactOriginal),
+        PrivateBoundaryV2::Proof => Some(PrivateWorkspaceActionV1::ProveOriginalOnce),
+        PrivateBoundaryV2::Freeze => Some(PrivateWorkspaceActionV1::FreezeVerifiedFixed),
+        PrivateBoundaryV2::Read => Some(PrivateWorkspaceActionV1::ReadVerifiedFixed),
+        _ => None,
+    };
+    if let Some(action) = action {
+        crate::host::durable_private_workspace_v1::storage_action_boundary(action);
+    }
     if let Some((operation, _)) = boundary.diagnostic_v1() {
         private_diagnostic_operation_v1(operation);
     }
@@ -4818,6 +5102,7 @@ mod tests {
                 primary: core.primary(),
                 evidence: Some(core.evidence()),
                 worker: None,
+                stage: None,
             }
         }
         #[test]
@@ -4825,7 +5110,7 @@ mod tests {
             let value = wire(&core(O::Checkpoint));
             let json = value.canonical_json().unwrap();
             assert_eq!(PrivateFixedDiagnosticV1::parse(&json), Some(value));
-            for field in ["schema", "primary", "evidence", "worker"] {
+            for field in ["schema", "primary", "evidence", "worker", "stage"] {
                 let mut missing: serde_json::Value = serde_json::from_str(&json).unwrap();
                 missing.as_object_mut().unwrap().remove(field);
                 assert!(
@@ -5248,5 +5533,330 @@ mod stage_review_error_v3_tests {
         assert!(first.worker.is_none());
         let _ = observe_engine_stage_review_v3(PrivateBoundaryV2::Read, error("Binding"));
         assert_eq!(private_fixed_diagnostic_snapshot_v1(), Some(first));
+    }
+}
+
+#[cfg(all(test, feature = "synthetic-born-joined-qualification"))]
+mod stage_cost_observation_tests {
+    use super::*;
+    use wholepact_engine::PrivateFixedStageV3 as S;
+    fn stage(kind: S) -> PrivateStageObservationV1 {
+        // Inert measurement correlation only, never a native approval.
+        begin_private_stage_cost_v1(kind, std::time::Instant::now() + Duration::from_secs(120))
+    }
+    #[test]
+    fn same_owned_callback_result_and_first_failure_complete_once() {
+        let _scope = begin_private_fixed_diagnostic_scope_v1();
+        let _invocation =
+            begin_private_diagnostic_invocation_v1(PrivateDiagnosticOperationV1::Checkpoint);
+        let observation = stage(S::Prepare);
+        struct Owned(std::rc::Rc<std::cell::Cell<u32>>);
+        impl Drop for Owned {
+            fn drop(&mut self) {
+                self.0.set(self.0.get() + 1);
+            }
+        }
+        let dropped = std::rc::Rc::new(std::cell::Cell::new(0));
+        let value = observation.callback(|| Ok(Owned(dropped.clone()))).unwrap();
+        assert_eq!(dropped.get(), 0);
+        drop(value);
+        assert_eq!(dropped.get(), 1);
+        let mut calls = 0;
+        let result: Result<()> = observation.callback(|| {
+            calls += 1;
+            observation.observe(
+                PrivateDiagnosticSiteV1::HostWorkspaceNativeCheck,
+                Err(Error::Permission),
+            )
+        });
+        assert!(matches!(result, Err(Error::Permission)));
+        assert_eq!(calls, 1);
+        let first = private_fixed_diagnostic_snapshot_v1().unwrap();
+        assert_eq!(
+            first.primary.site,
+            PrivateDiagnosticSiteV1::HostWorkspaceNativeCheck
+        );
+        let cost = first.stage.as_ref().unwrap();
+        assert_eq!(cost.callback_count, 2);
+        assert!(cost.callback_max_us <= cost.callback_total_us);
+        let _: Result<()> = observation.callback(|| {
+            observation.observe(
+                PrivateDiagnosticSiteV1::HostWorkspaceSourceCheck,
+                Err(Error::Authentication),
+            )
+        });
+        assert_eq!(private_fixed_diagnostic_snapshot_v1().unwrap(), first);
+    }
+    #[test]
+    fn actual_negative_native_check_and_distinct_session_source_results() {
+        for (site, error) in [
+            (
+                PrivateDiagnosticSiteV1::HostWorkspaceSessionCheck,
+                Error::Permission,
+            ),
+            (
+                PrivateDiagnosticSiteV1::HostWorkspaceSourceCheck,
+                Error::Authentication,
+            ),
+        ] {
+            let _scope = begin_private_fixed_diagnostic_scope_v1();
+            let _invocation =
+                begin_private_diagnostic_invocation_v1(PrivateDiagnosticOperationV1::Checkpoint);
+            let observation = stage(S::Prepare);
+            let result: Result<()> = observation.observe(site, Err(error));
+            assert!(result.is_err());
+            let first = private_fixed_diagnostic_snapshot_v1().unwrap();
+            assert_eq!(first.primary.site, site);
+            assert_eq!(first.stage.unwrap().callback_count, 0);
+        }
+        for expired in [true, false] {
+            let _scope = begin_private_fixed_diagnostic_scope_v1();
+            let _invocation =
+                begin_private_diagnostic_invocation_v1(PrivateDiagnosticOperationV1::Checkpoint);
+            let observation = stage(S::Prepare);
+            let denied = HistoricalApproval::denied_for_test(expired);
+            let result = observation.observe(
+                PrivateDiagnosticSiteV1::HostWorkspaceNativeCheck,
+                denied.check(),
+            );
+            if expired {
+                assert!(matches!(result, Err(Error::Permission)));
+            } else {
+                assert!(matches!(result, Err(Error::Terminal)));
+            }
+            let first = private_fixed_diagnostic_snapshot_v1().unwrap();
+            assert_eq!(
+                first.primary.cause,
+                if expired {
+                    PrivateDiagnosticCauseV1::Permission
+                } else {
+                    PrivateDiagnosticCauseV1::Terminal
+                }
+            );
+        }
+    }
+    #[test]
+    fn replaced_stage_and_replaced_invocation_cannot_supply_evidence() {
+        let _scope = begin_private_fixed_diagnostic_scope_v1();
+        let invocation =
+            begin_private_diagnostic_invocation_v1(PrivateDiagnosticOperationV1::Checkpoint);
+        let old = stage(S::Prepare);
+        let current = stage(S::AdmitOriginal);
+        let _: Result<()> = old.observe(
+            PrivateDiagnosticSiteV1::HostWorkspaceNativeCheck,
+            Err(Error::Permission),
+        );
+        assert!(private_fixed_diagnostic_snapshot_v1().is_none());
+        drop(old);
+        let _: Result<()> = current.observe(
+            PrivateDiagnosticSiteV1::HostWorkspaceSourceCheck,
+            Err(Error::Authentication),
+        );
+        let first = private_fixed_diagnostic_snapshot_v1().unwrap();
+        assert_eq!(
+            first.stage.as_ref().unwrap().kind,
+            PrivateStageKindV1::AdmitOriginal
+        );
+        drop(invocation);
+        let _replacement =
+            begin_private_diagnostic_invocation_v1(PrivateDiagnosticOperationV1::Checkpoint);
+        let _: Result<()> = current.callback(|| {
+            current.observe(
+                PrivateDiagnosticSiteV1::HostWorkspaceNativeCheck,
+                Err(Error::Permission),
+            )
+        });
+        assert_eq!(private_fixed_diagnostic_snapshot_v1().unwrap(), first);
+    }
+    #[test]
+    fn proof_stage_spans_existing_worker_observations_but_not_following_freeze() {
+        let _scope = begin_private_fixed_diagnostic_scope_v1();
+        let proof = begin_private_diagnostic_invocation_v1(PrivateDiagnosticOperationV1::Proof);
+        let observation = stage(S::ProveOriginal);
+        let token = observation.token;
+        // The actual broker observation helpers share the already installed
+        // outer Proof invocation; they do not create a replacement scope.
+        observation.callback(|| Ok(())).unwrap();
+        private_worker_start_v1();
+        let result: std::result::Result<(), wholepact_engine::ApiError> = Ok(());
+        private_worker_received_v1(&result);
+        private_worker_joined_v1(true);
+        assert_eq!(observation.token, token);
+        assert!(with_private_diagnostic_v1(|state| observation.matches(state)).unwrap());
+        let _: Result<()> = observation.callback(|| {
+            observation.observe(
+                PrivateDiagnosticSiteV1::HostWorkspaceNativeCheck,
+                Err(Error::Permission),
+            )
+        });
+        let first = private_fixed_diagnostic_snapshot_v1().unwrap();
+        assert_eq!(first.primary.operation, PrivateDiagnosticOperationV1::Proof);
+        assert_eq!(
+            first.stage.as_ref().unwrap().kind,
+            PrivateStageKindV1::ProveOriginal
+        );
+        assert_eq!(first.stage.as_ref().unwrap().callback_count, 2);
+        drop(proof);
+        let _freeze = begin_private_diagnostic_invocation_v1(PrivateDiagnosticOperationV1::Freeze);
+        let next = stage(S::FreezeFixed);
+        assert!(!with_private_diagnostic_v1(|state| observation.matches(state)).unwrap());
+        let _: Result<()> = next.callback(|| {
+            next.observe(
+                PrivateDiagnosticSiteV1::HostWorkspaceSourceCheck,
+                Err(Error::Authentication),
+            )
+        });
+        assert_eq!(private_fixed_diagnostic_snapshot_v1().unwrap(), first);
+    }
+    #[test]
+    fn unavailable_counts_are_null_and_contention_preserves_result() {
+        {
+            let _scope = begin_private_fixed_diagnostic_scope_v1();
+            let _invocation =
+                begin_private_diagnostic_invocation_v1(PrivateDiagnosticOperationV1::Checkpoint);
+            let observation = stage(S::Prepare);
+            with_private_diagnostic_v1(|state| {
+                state.stage.as_mut().unwrap().cost.callback_count = PRIVATE_STAGE_MAX_COUNT_V1
+            });
+            let _: Result<()> = observation.callback(|| {
+                observation.observe(
+                    PrivateDiagnosticSiteV1::HostWorkspaceNativeCheck,
+                    Err(Error::Permission),
+                )
+            });
+            assert!(
+                private_fixed_diagnostic_snapshot_v1()
+                    .unwrap()
+                    .stage
+                    .is_none()
+            );
+        }
+        {
+            let _scope = begin_private_fixed_diagnostic_scope_v1();
+            let _invocation =
+                begin_private_diagnostic_invocation_v1(PrivateDiagnosticOperationV1::Checkpoint);
+            let observation = stage(S::Prepare);
+            PRIVATE_DIAGNOSTIC_LATCH_V1.with(|cell| {
+                let _held = cell.borrow_mut();
+                let result: Result<()> = observation.callback(|| Err(Error::Authentication));
+                assert!(matches!(result, Err(Error::Authentication)));
+            });
+            assert!(private_fixed_diagnostic_snapshot_v1().is_none());
+        }
+    }
+    #[test]
+    fn panicked_callback_and_failed_stage_allocation_never_reuse_partial_cost() {
+        {
+            let _scope = begin_private_fixed_diagnostic_scope_v1();
+            let _invocation =
+                begin_private_diagnostic_invocation_v1(PrivateDiagnosticOperationV1::Checkpoint);
+            let observation = stage(S::Prepare);
+            let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                observation.callback(|| -> Result<()> {
+                    let _: Result<()> = observation.observe(
+                        PrivateDiagnosticSiteV1::HostWorkspaceNativeCheck,
+                        Err(Error::Permission),
+                    );
+                    panic!("inert diagnostic callback panic");
+                })
+            }));
+            assert!(panic.is_err());
+            assert!(
+                private_fixed_diagnostic_snapshot_v1()
+                    .unwrap()
+                    .stage
+                    .is_none()
+            );
+        }
+        {
+            let _scope = begin_private_fixed_diagnostic_scope_v1();
+            let _invocation =
+                begin_private_diagnostic_invocation_v1(PrivateDiagnosticOperationV1::Checkpoint);
+            let old = stage(S::Prepare);
+            let previous = PRIVATE_DIAGNOSTIC_SEQUENCE_V1.with(|value| value.replace(u64::MAX));
+            let unavailable = stage(S::AdmitOriginal);
+            PRIVATE_DIAGNOSTIC_SEQUENCE_V1.with(|value| value.set(previous));
+            assert!(unavailable.token.is_none());
+            let _: Result<()> = old.observe(
+                PrivateDiagnosticSiteV1::HostWorkspaceNativeCheck,
+                Err(Error::Permission),
+            );
+            assert!(private_fixed_diagnostic_snapshot_v1().is_none());
+            observe_private_fixed_host_v1(
+                PrivateDiagnosticOperationV1::Checkpoint,
+                PrivateDiagnosticSiteV1::HostWorkspaceSourceCheck,
+                &Error::Authentication,
+            );
+            assert!(
+                private_fixed_diagnostic_snapshot_v1()
+                    .unwrap()
+                    .stage
+                    .is_none()
+            );
+        }
+    }
+    #[test]
+    fn absent_observer_forwards_once_and_stage_schema_is_strict() {
+        let observation = PrivateStageObservationV1 {
+            token: None,
+            local: std::marker::PhantomData,
+        };
+        let mut calls = 0;
+        let result = observation.callback(|| {
+            calls += 1;
+            Ok(17)
+        });
+        assert_eq!(result.unwrap(), 17);
+        assert_eq!(calls, 1);
+        for (kind, operation) in [
+            (
+                PrivateStageKindV1::Prepare,
+                PrivateDiagnosticOperationV1::Checkpoint,
+            ),
+            (
+                PrivateStageKindV1::AdmitOriginal,
+                PrivateDiagnosticOperationV1::Checkpoint,
+            ),
+            (
+                PrivateStageKindV1::ProveOriginal,
+                PrivateDiagnosticOperationV1::Proof,
+            ),
+            (
+                PrivateStageKindV1::FreezeFixed,
+                PrivateDiagnosticOperationV1::Freeze,
+            ),
+            (
+                PrivateStageKindV1::ReadFixed,
+                PrivateDiagnosticOperationV1::ReadFixed,
+            ),
+        ] {
+            let cost = PrivateStageCostV1 {
+                kind,
+                elapsed_ms: 0,
+                callback_count: 0,
+                callback_total_us: 0,
+                callback_max_us: 0,
+            };
+            assert!(cost.valid(operation));
+            assert!(!cost.valid(PrivateDiagnosticOperationV1::OpenOriginal));
+            let raw = serde_json::to_string(&cost).unwrap();
+            assert!(
+                serde_json::from_str::<PrivateStageCostV1>(
+                    &raw.replace("\"elapsed_ms\":0", "\"elapsed_ms\":0,\"elapsed_ms\":1")
+                )
+                .is_err()
+            );
+            let mut invalid = cost.clone();
+            invalid.callback_total_us = 1;
+            assert!(!invalid.valid(operation));
+            let mut invalid = cost.clone();
+            invalid.callback_count = 1;
+            invalid.callback_total_us = 2;
+            invalid.callback_max_us = 1;
+            assert!(!invalid.valid(operation));
+            let mut invalid = cost;
+            invalid.elapsed_ms = PRIVATE_STAGE_MAX_MS_V1 + 1;
+            assert!(!invalid.valid(operation));
+        }
     }
 }

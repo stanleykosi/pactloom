@@ -1,8 +1,16 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-19, 11:25 UTC.
+Updated: 2026-10-19, 12:17 UTC.
 
 **The bounded synthetic native two-owner fixed-signing fixture passed. Product qualification remains incomplete: no public testnet settlement, OS-process restart recovery, attended GUI reliability, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
+
+## CI27: original workspace still refuses; exact stage diagnostics and measured Engine component
+
+[Run 39244679333](https://github.com/stanleykosi/pactloom/actions/runs/39244679333), qualifier `5f933b368adcce5286eb6a21573627efba844535`, failed at 11:45:16 UTC after build, Python152, Host97 and bootstrap passed. The targeted private phase failed at 85/94 supplied inputs with HostWorkspaceCurrent/Host/Permission and secondary EngineDurableConstructionUnavailable. Reader never started; producer and root cleanup were verified. The Intake boundary label was stale observation state, not proof of retained Intake permission. No restart or native lifecycle success is claimed.
+
+A six-path observation-only update distinguishes the actual native check, session check and source check without changing their predicates, deadlines, results or order. It records bounded exact-invocation/stage elapsed time and complete callback count/sum/max, or null when unavailable, partial, contended or stale. Boundary attribution is corrected to the actual current phase. Independent source/hash review cleared the exact six paths; this is diagnostic evidence collection, not a functional cure or timer relaxation.
+
+Two exact no-network Engine component tests passed. The real encrypted component executed 38 history walks (3,320,035 microseconds), 32 typed intake validations (263,369 microseconds), and two additional record decodes (64,396 microseconds): 3,647,800 microseconds total. Corruption/currentness refusals and unchanged file/logical state were checked. This excludes full Host/source/native/network work and does not explain the 120-second native failure. Python strict projection passed all153 tests. Host library compilation, all seven new exact pure collector tests and all97 existing pure compatibility tests passed. Non-synthetic compilation runs alongside publication; the next isolated native qualification remains pending.
 
 ## CI26: retained Host approval refused final refresh; complete purpose-specific stage decisions added
 

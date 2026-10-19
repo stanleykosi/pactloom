@@ -12,6 +12,9 @@ pub(crate) use super::financial::private_durable_fixed_v2::{
     private_fixed_diagnostic_snapshot_v1, observe_private_fixed_boundary_v1,
     first_private_fixed_boundary_v1,
 };
+use super::financial::private_durable_fixed_v2::{
+    PrivateStageObservationV1, begin_private_stage_cost_v1,
+};
 
 // Evaluate the original expression once, borrow only its returned error, and
 // return the same owned Result before the original conversion or propagation.
@@ -429,10 +432,35 @@ struct CurrentNativePrivacy<'a, 'host> {
     association: &'a Association,
     approval: &'a HistoricalApproval,
     action: PrivateWorkspaceActionV1,
+    observation: PrivateCurrentObservationV1<'a>,
+}
+enum PrivateCurrentObservationV1<'a> {
+    None,
+    Inspection,
+    Stage(&'a PrivateStageObservationV1),
 }
 impl CurrentNativePrivacy<'_, '_> {
+    fn observed<T>(&self, site: PrivateDiagnosticSiteV1, result: Result<T>) -> Result<T> {
+        match &self.observation {
+            PrivateCurrentObservationV1::None => result,
+            PrivateCurrentObservationV1::Stage(stage) => stage.observe(site, result),
+            PrivateCurrentObservationV1::Inspection => {
+                if let Err(error) = &result {
+                    observe_private_fixed_host_v1(
+                        PrivateDiagnosticOperationV1::OpenOriginal,
+                        site,
+                        error,
+                    );
+                }
+                result
+            }
+        }
+    }
     fn check(&self) -> Result<()> {
-        self.approval.check()?;
+        self.observed(
+            PrivateDiagnosticSiteV1::HostWorkspaceNativeCheck,
+            self.approval.check(),
+        )?;
         if matches!(
             self.action,
             PrivateWorkspaceActionV1::Reopen
@@ -440,31 +468,47 @@ impl CurrentNativePrivacy<'_, '_> {
                 | PrivateWorkspaceActionV1::ReadVerifiedFixed
                 | PrivateWorkspaceActionV1::InspectFixedStageMetadataV3
         ) {
-            self.host.require_private_workspace_read_session_v1()?;
+            self.observed(
+                PrivateDiagnosticSiteV1::HostWorkspaceSessionCheck,
+                self.host.require_private_workspace_read_session_v1(),
+            )?;
         } else {
-            self.host.require_manual_session()?;
+            self.observed(
+                PrivateDiagnosticSiteV1::HostWorkspaceSessionCheck,
+                self.host.require_manual_session(),
+            )?;
         }
-        self.committed.check_current()?;
-        self.committed.coverage().require_complete()?;
-        if self.host.access()?.principal_id != self.association.principal_id
-            || self.committed.profile_id() != self.association.profile_id
-            || self.committed.generation_id() != self.association.generation_id
-            || self.committed.inventory_digest() != self.association.inventory_digest
-            || self.committed.plan_digest() != self.association.generation_plan_digest
-            || self.committed.destination_identity_digest()
-                != self.association.host_directory_identity
-            || self.committed.coverage().digest()? != self.association.parent_coverage_digest
-            || self
-                .host
-                .financial
-                .as_ref()
-                .ok_or(Error::Locked)?
-                .manual_original_primary_origin_digest(&self.host.directory, &self.host.secrets)?
-                != self.association.original_financial_origin_digest
-        {
-            return Err(Error::Authentication);
-        }
-        self.approval.check()
+        let source = (|| {
+            self.committed.check_current()?;
+            self.committed.coverage().require_complete()?;
+            if self.host.access()?.principal_id != self.association.principal_id
+                || self.committed.profile_id() != self.association.profile_id
+                || self.committed.generation_id() != self.association.generation_id
+                || self.committed.inventory_digest() != self.association.inventory_digest
+                || self.committed.plan_digest() != self.association.generation_plan_digest
+                || self.committed.destination_identity_digest()
+                    != self.association.host_directory_identity
+                || self.committed.coverage().digest()? != self.association.parent_coverage_digest
+                || self
+                    .host
+                    .financial
+                    .as_ref()
+                    .ok_or(Error::Locked)?
+                    .manual_original_primary_origin_digest(
+                        &self.host.directory,
+                        &self.host.secrets,
+                    )?
+                    != self.association.original_financial_origin_digest
+            {
+                return Err(Error::Authentication);
+            }
+            Ok(())
+        })();
+        self.observed(PrivateDiagnosticSiteV1::HostWorkspaceSourceCheck, source)?;
+        self.observed(
+            PrivateDiagnosticSiteV1::HostWorkspaceNativeCheck,
+            self.approval.check(),
+        )
     }
 }
 impl LocalPrivateWorkspaceConsentV1 for CurrentNativePrivacy<'_, '_> {
@@ -1069,6 +1113,7 @@ impl Host {
                     association: &pending.association,
                     approval: &approval,
                     action: PrivateWorkspaceActionV1::Create,
+                    observation: PrivateCurrentObservationV1::None,
                 };
                 privacy.check()?;
                 check_workspace_destination(&self, root)?;
@@ -1317,6 +1362,7 @@ impl Host {
             association: &p.association,
             approval: &approval,
             action,
+            observation: PrivateCurrentObservationV1::None,
         };
         reader_result!(
             ReaderSourceFinalCheck,
@@ -1551,6 +1597,7 @@ impl PrivateWorkspaceOwnerV1<'_> {
             association: a,
             approval: &approval,
             action,
+            observation: PrivateCurrentObservationV1::None,
         };
         privacy.check()?;
         let result = effect(&self.coordinator, &privacy)?;
@@ -1923,6 +1970,7 @@ impl LocalPrivateWorkspaceConsentV1 for OwnedPrivateWorkspaceActionV2<'_, '_> {
             association: &self.owner.files.original.pending.association,
             approval: &self.approval,
             action: self.action,
+            observation: PrivateCurrentObservationV1::None,
         };
         if !privacy.permits_workspace(scope, action) {
             return false;
@@ -1984,7 +2032,7 @@ pub(in crate::host) fn first_storage_failure_v1() -> Option<(&'static str, &'sta
         .ok()
         .flatten()
 }
-fn storage_action_boundary(action: PrivateWorkspaceActionV1) {
+pub(in crate::host) fn storage_action_boundary(action: PrivateWorkspaceActionV1) {
     let boundary = match action {
         PrivateWorkspaceActionV1::PrepareExactCandidate => "PrivateWorkspaceCandidate",
         PrivateWorkspaceActionV1::RetainExactMaterial => "PrivateWorkspaceIntake",
@@ -2113,6 +2161,7 @@ pub(in crate::host) struct OwnedPrivateWorkspaceStageV3<'a, 'host> {
     approval: HistoricalApproval,
     review: wholepact_engine::PrivateFixedStageReviewV3,
     scans: Option<super::financial::private_durable_fixed_v2::StageScanBindingsV3>,
+    observation: PrivateStageObservationV1,
 }
 fn stage_workspace_action_v3(
     stage: wholepact_engine::PrivateFixedStageV3,
@@ -2203,9 +2252,17 @@ impl<'host> PrivateWorkspaceOwnerV1<'host> {
     ) -> Result<()> {
         self.check_current_without_proof_lock_v2()?;
         if review.stage() == wholepact_engine::PrivateFixedStageV3::ReadFixed {
-            self.host.require_private_workspace_read_session_v1()?;
+            reader_result!(
+                HostWorkspaceSessionCheck,
+                observe_private_fixed_host_v1,
+                self.host.require_private_workspace_read_session_v1()
+            )?;
         } else {
-            self.host.require_manual_session()?;
+            reader_result!(
+                HostWorkspaceSessionCheck,
+                observe_private_fixed_host_v1,
+                self.host.require_manual_session()
+            )?;
         }
         let scope = review.workspace_scope();
         let a = &self.files.original.pending.association;
@@ -2273,11 +2330,13 @@ impl<'host> PrivateWorkspaceOwnerV1<'host> {
         )?;
         // The completed inspection is deliberately not checked after the wait.
         drop(inspection);
+        let observation = begin_private_stage_cost_v1(review.stage(), approval.deadline());
         let stage = OwnedPrivateWorkspaceStageV3 {
             owner: self,
             approval,
             review,
             scans,
+            observation,
         };
         check_scans()?;
         stage.check()?;
@@ -2307,6 +2366,7 @@ impl LocalPrivateWorkspaceConsentV1 for OwnedPrivateWorkspaceInspectionV3<'_, '_
                 association: &self.owner.files.original.pending.association,
                 approval: &self.approval,
                 action,
+                observation: PrivateCurrentObservationV1::Inspection,
             }
             .permits_workspace(scope, action)
             && match self
@@ -2332,16 +2392,44 @@ impl OwnedPrivateWorkspaceStageV3<'_, '_> {
         self.approval.deadline()
     }
     pub(in crate::host) fn check(&self) -> Result<()> {
-        self.approval.check()?;
-        self.owner.check_originals()?;
+        self.observation.observe(
+            PrivateDiagnosticSiteV1::HostWorkspaceNativeCheck,
+            self.approval.check(),
+        )?;
+        self.observation.observe(
+            PrivateDiagnosticSiteV1::HostWorkspaceSourceCheck,
+            self.owner.check_originals(),
+        )?;
         self.check_callback()
     }
     pub(in crate::host) fn check_callback(&self) -> Result<()> {
-        self.approval.check()?;
-        self.owner.check_stage_descriptor_v3(&self.review)?;
-        self.approval.check()
+        self.observation.callback(|| {
+            self.observation.observe(
+                PrivateDiagnosticSiteV1::HostWorkspaceNativeCheck,
+                self.approval.check(),
+            )?;
+            self.observation.observe(
+                PrivateDiagnosticSiteV1::HostWorkspaceSourceCheck,
+                self.owner.check_stage_descriptor_v3(&self.review),
+            )?;
+            self.observation.observe(
+                PrivateDiagnosticSiteV1::HostWorkspaceNativeCheck,
+                self.approval.check(),
+            )
+        })
+    }
+    fn storage_boundary(&self) {
+        use wholepact_engine::PrivateFixedStageV3 as S;
+        storage_action_boundary(match self.review.stage() {
+            S::Prepare => PrivateWorkspaceActionV1::ObserveExactMaterial,
+            S::AdmitOriginal => PrivateWorkspaceActionV1::CheckpointExactOriginal,
+            S::ProveOriginal => PrivateWorkspaceActionV1::ProveOriginalOnce,
+            S::FreezeFixed => PrivateWorkspaceActionV1::FreezeVerifiedFixed,
+            S::ReadFixed => PrivateWorkspaceActionV1::ReadVerifiedFixed,
+        });
     }
     fn permission_at(&self, exact: bool, site: PrivateDiagnosticSiteV1) -> bool {
+        self.storage_boundary();
         match stage_permission_v3(exact, || self.check_callback()) {
             Ok(()) => true,
             Err(error) => {
@@ -2370,6 +2458,7 @@ impl LocalPrivateWorkspaceConsentV1 for OwnedPrivateWorkspaceStageV3<'_, '_> {
         scope: &PrivateWorkspaceScopeV1,
         action: PrivateWorkspaceActionV1,
     ) -> bool {
+        storage_action_boundary(action);
         stage_workspace_action_v3(self.review.stage(), action)
             && CurrentNativePrivacy {
                 host: self.owner.host,
@@ -2377,6 +2466,7 @@ impl LocalPrivateWorkspaceConsentV1 for OwnedPrivateWorkspaceStageV3<'_, '_> {
                 association: &self.owner.files.original.pending.association,
                 approval: &self.approval,
                 action,
+                observation: PrivateCurrentObservationV1::Stage(&self.observation),
             }
             .permits_workspace(scope, action)
             && self.permission_at(true, PrivateDiagnosticSiteV1::HostWorkspaceCurrent)
