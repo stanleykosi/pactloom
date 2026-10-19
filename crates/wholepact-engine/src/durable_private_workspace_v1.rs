@@ -23,9 +23,11 @@ pub(crate) use exact_fixed_v2::diagnostics;
 #[path = "durable_private_workspace_v1/operation_v1.rs"]
 mod operation_v1;
 pub use exact_fixed_v2::{
-    OriginalCheckpointOutcomeV2, OriginalProofAttemptV2, PreparedOriginalCheckpointV2,
-    PrivateExactCandidateV2, PrivateFixedMaterialReviewV3, PrivateFixedStageReviewV3,
-    PrivateFixedStageV3, PrivateFixedStatusV2, PrivateVerifiedFixedV2,
+    LocalPrivateFixedPermissionBoundaryV3, OriginalCheckpointOutcomeV2, OriginalProofAttemptV2,
+    PreparedOriginalCheckpointV2, PrivateExactCandidateV2, PrivateFixedArtifactCallbackV3,
+    PrivateFixedMaterialReviewV3, PrivateFixedObservationCallbackV3,
+    PrivateFixedPermissionRequestV3, PrivateFixedStageReviewV3, PrivateFixedStageV3,
+    PrivateFixedStatusV2, PrivateVerifiedFixedV2,
 };
 
 fn denied() -> ApiError {
@@ -363,6 +365,11 @@ pub trait LocalPrivateWorkspaceConsentV1 {
         scope: &PrivateWorkspaceScopeV1,
         action: PrivateWorkspaceActionV1,
     ) -> bool;
+    /// Only this operation's current embedding may opt into a synchronous
+    /// compound permission. Retained prepared/attempt owners store no grant.
+    fn fixed_permission_boundary_v3(&self) -> Option<&dyn LocalPrivateFixedPermissionBoundaryV3> {
+        None
+    }
 }
 
 /// The only externally serializable command result. No operation identifier,

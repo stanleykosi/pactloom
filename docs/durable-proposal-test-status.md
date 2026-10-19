@@ -1,8 +1,18 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-19, 14:43 UTC.
+Updated: 2026-10-19, 15:45 UTC.
 
 **The bounded synthetic native two-owner fixed-signing fixture passed. Product qualification remains incomplete: no public testnet settlement, OS-process restart recovery, attended GUI reliability, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
+
+## CI32: observation timeout cleared; repeated permission composition still ages held chain evidence
+
+[Run 39271755561](https://github.com/stanleykosi/pactloom/actions/runs/39271755561), qualifier `0bf64804cf158cf563feeebe0d7903a1be711705`, passed early Python153, build (11m54s), Host97, encrypted bootstrap and real TCP overlap. Observe completed, then at15:02:47 UTC Checkpoint failed at GateHeldPre with Chain/StaleChain. Prepare elapsed72,229ms;145 callbacks consumed56,042,164us total, maximum415,586us. Receipt/enqueue/link were NotCalled, attempt_consumed=false. Reader never started; cleanup verified. The prior callback batch improved the measured source work but did not establish a fresh checkpoint.
+
+The exact graph showed seven full source audits per Wallet permission and up to nine per artifact proof permission, all within synchronous permission evaluation. The reviewed six-path correction adds a closed compound boundary with opaque Engine-derived requests and non-escaping borrowed Host role views. Full original-source validation brackets that one call; every original live native/session/file/material check and Engine/Wallet validator remains. Engine independently requires its actual kernel to run and succeed even if a provider falsely returns true. Legacy None paths remain unchanged. No async work, prompt, proof computation, durable effect or transferable permission is enclosed. Held-wallet freshness is checked again after the exit audit, and original inner errors keep priority.
+
+Structural cached-path counts are Prepare151->77 and Admit215->106, not timing guarantees. The native Prove worker deliberately retains ForegroundProofBrokerV2/defaultNone and its unchanged full checks; no boxed closure crosses threads. Direct OwnedStage Prepare/Admit/Freeze/Read opt in. Native proof latency remains separately unqualified.
+
+Independent review matched all six source files. After an execution transport interruption, the compile-only build was safely resumed with preserved files and no previous compiler process; completed rebuild passed. All16 focused tests,14 compatibility tests and two real local Halo2 tests passed, plus Python153 and Host97. Real encrypted-source component measurements for4/7/9-role compositions were1067491/1597871/1911899us before versus516713/431833/420708us after. These exclude full Host files/capsule/native, Engine gate, Wallet/provider/proof work. Mutation, expiry, omitted-kernel, false-result and post-exit held-staleness refusals passed. Non-synthetic compatibility runs alongside publication; full native recovery/settlement remains pending.
 
 ## CI31: actual chain timeout with measured synchronous source-check cost
 
