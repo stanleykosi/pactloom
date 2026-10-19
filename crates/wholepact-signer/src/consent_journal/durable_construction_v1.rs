@@ -139,8 +139,8 @@ impl SignerConsentJournal {
     }
 }
 fn validate_original_rows(c: &Connection, outbox: &DurableConstructionOutboxV1) -> Result<()> {
-    outbox
-        .validate()
+    let p = outbox
+        .validate_with_proposal()
         .map_err(|_| JournalError::InvalidBinding)?;
     if let Some(link) = outbox.redisclosure() {
         // Bounded one-link join: refuse a chain before recursive validation, so
@@ -156,9 +156,6 @@ fn validate_original_rows(c: &Connection, outbox: &DurableConstructionOutboxV1) 
         storage::read_enrollment(c, &request.enrollment_ref)?.ok_or(JournalError::NotFound)?;
     let manifest =
         storage::read_manifest(c, &request.accepted_manifest_ref)?.ok_or(JournalError::NotFound)?;
-    let p = request
-        .validate()
-        .map_err(|_| JournalError::InvalidBinding)?;
     if enrollment.account_id() != request.scope.account_id
         || enrollment.account_fvk_digest() != request.material.fvk_digest()
         || enrollment.participant_id() != request.scope.participant_id

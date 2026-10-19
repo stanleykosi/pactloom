@@ -35,6 +35,24 @@ pub(super) fn hash(value: &str) -> Result<()> {
     Ok(())
 }
 impl DurableConstructionRequestV1 {
+    // Closed, data-only composition over this exact borrowed request. The
+    // returned proposal and digest confer no current permission or provenance.
+    fn validate_with_material_digest(&self) -> Result<(Proposal, String)> {
+        crate::review::validate_label(&self.operation_id).map_err(|_| BridgeError::Binding)?;
+        hash(&self.enrollment_ref)?;
+        hash(&self.accepted_manifest_ref)?;
+        let validated = self
+            .material
+            .validate_for_with_digest(&self.scope)
+            .map_err(|_| BridgeError::Binding)?;
+        let raw =
+            zeroize::Zeroizing::new(serde_json::to_vec(self).map_err(|_| BridgeError::Binding)?);
+        if raw.len() > 120 * 1024 {
+            return Err(BridgeError::Limit);
+        }
+        Ok(validated)
+    }
+
     pub fn validate(&self) -> Result<Proposal> {
         crate::review::validate_label(&self.operation_id).map_err(|_| BridgeError::Binding)?;
         hash(&self.enrollment_ref)?;
@@ -186,6 +204,12 @@ impl DurableConstructionOutboxV1 {
         &self.recipient_transport
     }
     pub fn validate(&self) -> Result<()> {
+        self.validate_with_proposal().map(|_| ())
+    }
+    /// Historical data consistency only. All checks derive from this exact
+    /// borrowed outbox; the returned proposal is not current authority. The
+    /// journal still independently joins every original and record reference.
+    pub(crate) fn validate_with_proposal(&self) -> Result<Proposal> {
         if let Some(link) = &self.redisclosure {
             crate::review::validate_label(&link.original_operation_id)
                 .map_err(|_| BridgeError::Binding)?;
@@ -212,7 +236,7 @@ impl DurableConstructionOutboxV1 {
             return Err(BridgeError::Binding);
         };
         hash(process_instance)?;
-        let proposal = self.request.validate()?;
+        let (proposal, material_digest) = self.request.validate_with_material_digest()?;
         if *pid == 0
             || *signer_generation == 0
             || transport_identity_id != &self.original_grant_id
@@ -242,13 +266,13 @@ impl DurableConstructionOutboxV1 {
         if encoded.len() > 128 * 1024 - 64 {
             return Err(BridgeError::Limit);
         }
-        if self.request.digest()? != self.request_digest
-            || self
-                .request
-                .material
-                .digest()
-                .map_err(|_| BridgeError::Binding)?
-                != self.material_digest
+        if wholepact_core::proposal::canonical_digest(
+            "wholepact:durable-construction-disclosure-request:v1",
+            &self.request,
+        )
+        .map_err(|_| BridgeError::Binding)?
+            != self.request_digest
+            || material_digest != self.material_digest
             || self
                 .request
                 .scope
@@ -261,7 +285,7 @@ impl DurableConstructionOutboxV1 {
         {
             return Err(BridgeError::Binding);
         }
-        Ok(())
+        Ok(proposal)
     }
     pub(crate) fn compute_reference(&self) -> Result<String> {
         wholepact_core::proposal::canonical_digest(

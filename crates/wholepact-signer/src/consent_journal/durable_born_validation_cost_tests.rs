@@ -408,6 +408,637 @@ impl MaterialFixture {
     }
 }
 
+// Frozen pre-consolidation composition. Keep the independent public request
+// validator/digest and material digest calls, including their original order.
+// This is DATA-ONLY validation of inert DTOs, never a native authority source.
+// Do not replace this reference with validate_with_proposal or a shared helper.
+fn frozen_outbox_hash(value: &str) -> crate::authority_bridge::Result<()> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+    {
+        return Err(crate::authority_bridge::BridgeError::Binding);
+    }
+    Ok(())
+}
+
+fn frozen_outbox_reference(
+    outbox: &DurableConstructionOutboxV1,
+) -> crate::authority_bridge::Result<String> {
+    wholepact_core::proposal::canonical_digest(
+        "wholepact:durable-construction-consent-outbox:v1",
+        &(
+            &outbox.request_digest,
+            &outbox.material_digest,
+            &outbox.native_review_digest,
+            &outbox.native_entry_digest,
+            &outbox.recipient_grant_digest,
+            &outbox.original_channel_digest,
+            &outbox.original_grant_id,
+            &outbox.recipient_transport,
+            &outbox.redisclosure,
+        ),
+    )
+    .map_err(|_| crate::authority_bridge::BridgeError::Binding)
+}
+
+fn frozen_outbox_proposal(
+    outbox: &DurableConstructionOutboxV1,
+) -> crate::authority_bridge::Result<Proposal> {
+    use crate::authority_bridge::BridgeError;
+
+    if let Some(link) = &outbox.redisclosure {
+        crate::review::validate_label(&link.original_operation_id)
+            .map_err(|_| BridgeError::Binding)?;
+        frozen_outbox_hash(&link.original_request_digest)?;
+        frozen_outbox_hash(&link.original_outbox_reference)?;
+        if link.original_operation_id == outbox.request.operation_id {
+            return Err(BridgeError::Binding);
+        }
+    }
+    let TransportIdentityBinding::LocalProcess {
+        transport_identity_id,
+        channel_key_digest,
+        channel_binding_digest,
+        uid: _,
+        pid,
+        process_instance,
+        signer_generation,
+        account_id,
+        agreement_id,
+        participant_id,
+        manifest_digest,
+    } = &outbox.recipient_transport
+    else {
+        return Err(BridgeError::Binding);
+    };
+    frozen_outbox_hash(process_instance)?;
+    let proposal = outbox.request.validate()?;
+    if *pid == 0
+        || *signer_generation == 0
+        || transport_identity_id != &outbox.original_grant_id
+        || channel_key_digest != &outbox.recipient_grant_digest
+        || channel_binding_digest != &outbox.original_channel_digest
+        || account_id != &outbox.request.scope.account_id
+        || agreement_id != &proposal.manifest().agreement.agreement_id
+        || participant_id != &outbox.request.scope.participant_id
+        || manifest_digest != proposal.manifest_digest()
+    {
+        return Err(BridgeError::Binding);
+    }
+    for h in [
+        &outbox.request_digest,
+        &outbox.material_digest,
+        &outbox.native_review_digest,
+        &outbox.native_entry_digest,
+        &outbox.recipient_grant_digest,
+        &outbox.original_channel_digest,
+        &outbox.reference,
+    ] {
+        frozen_outbox_hash(h)?;
+    }
+    frozen_outbox_hash(&outbox.original_grant_id)?;
+    let encoded = Zeroizing::new(serde_json::to_vec(outbox).map_err(|_| BridgeError::Binding)?);
+    if encoded.len() > 128 * 1024 - 64 {
+        return Err(BridgeError::Limit);
+    }
+    if outbox.request.digest()? != outbox.request_digest
+        || outbox
+            .request
+            .material
+            .digest()
+            .map_err(|_| BridgeError::Binding)?
+            != outbox.material_digest
+        || outbox
+            .request
+            .scope
+            .constructor
+            .authenticated_local_grant_digest
+            != outbox.recipient_grant_digest
+        || outbox.request.scope.prover.authenticated_local_grant_digest
+            != outbox.recipient_grant_digest
+        || frozen_outbox_reference(outbox)? != outbox.reference
+    {
+        return Err(BridgeError::Binding);
+    }
+    Ok(proposal)
+}
+
+#[derive(Clone, Copy)]
+enum ExpectedOutboxResult {
+    Valid,
+    Binding,
+    Limit,
+}
+
+fn same_bridge_result_category<T, U>(
+    left: &crate::authority_bridge::Result<T>,
+    right: &crate::authority_bridge::Result<U>,
+) -> bool {
+    match (left, right) {
+        (Ok(_), Ok(_)) => true,
+        (Err(left), Err(right)) => std::mem::discriminant(left) == std::mem::discriminant(right),
+        _ => false,
+    }
+}
+
+fn assert_outbox_composition_results(
+    outbox: &DurableConstructionOutboxV1,
+    frozen: crate::authority_bridge::Result<Proposal>,
+    combined: crate::authority_bridge::Result<Proposal>,
+    expected: ExpectedOutboxResult,
+) {
+    use crate::authority_bridge::BridgeError;
+
+    assert!(
+        same_bridge_result_category(&frozen, &combined),
+        "frozen and combined outbox result categories differed"
+    );
+    assert!(
+        same_bridge_result_category(&frozen, &outbox.validate()),
+        "public outbox result category differed"
+    );
+    assert!(
+        matches!(
+            (&frozen, expected),
+            (Ok(_), ExpectedOutboxResult::Valid)
+                | (Err(BridgeError::Binding), ExpectedOutboxResult::Binding)
+                | (Err(BridgeError::Limit), ExpectedOutboxResult::Limit)
+        ),
+        "frozen outbox result category differed from expected"
+    );
+    if let (Ok(frozen), Ok(combined)) = (frozen, combined) {
+        // Equality covers the complete Proposal, including accounting and both
+        // Proposal digests, without printing any material on assertion failure.
+        assert!(frozen == combined, "validated Proposals differed");
+        assert!(
+            frozen == checked(Proposal::validate(outbox.request.scope.proposal.clone())),
+            "validated Proposal differed from independent proposal validation"
+        );
+        let request_digest = checked(outbox.request.digest());
+        let material_digest = checked(outbox.request.material.digest());
+        assert!(request_digest == outbox.request_digest);
+        assert!(material_digest == outbox.material_digest);
+        assert!(
+            request_digest
+                == checked(wholepact_core::proposal::canonical_digest(
+                    "wholepact:durable-construction-disclosure-request:v1",
+                    &outbox.request,
+                ))
+        );
+        assert!(
+            material_digest
+                == checked(wholepact_core::proposal::canonical_digest(
+                    "wholepact:historical-construction-material:v1",
+                    &outbox.request.material,
+                ))
+        );
+        assert!(outbox.reference == checked(frozen_outbox_reference(outbox)));
+    }
+}
+
+fn assert_outbox_composition(outbox: &DurableConstructionOutboxV1, expected: ExpectedOutboxResult) {
+    assert_outbox_composition_results(
+        outbox,
+        frozen_outbox_proposal(outbox),
+        outbox.validate_with_proposal(),
+        expected,
+    );
+}
+
+fn mutated_outbox_field(
+    original: &DurableConstructionOutboxV1,
+    pointer: &str,
+    replacement: serde_json::Value,
+) -> DurableConstructionOutboxV1 {
+    let mut value = checked(serde_json::to_value(original));
+    *value
+        .pointer_mut(pointer)
+        .expect("synthetic outbox field missing") = replacement;
+    checked(serde_json::from_value(value))
+}
+
+#[test]
+fn encrypted_material_outbox_composition_matches_frozen_original_and_direct_links() {
+    let f = MaterialFixture::new();
+    f.assert_topology();
+    let before = f.logical_commitment();
+    for (ordinal, outbox) in f.rows.iter().enumerate() {
+        let (frozen, frozen_costs) = measure(|| frozen_outbox_proposal(outbox));
+        let (combined, combined_costs) = measure(|| outbox.validate_with_proposal());
+        assert_outbox_composition_results(outbox, frozen, combined, ExpectedOutboxResult::Valid);
+        for costs in [&frozen_costs, &combined_costs] {
+            assert!(costs.calls(Phase::SampleTotal) == 1);
+            assert!(costs.calls(Phase::SnapshotTotal) == 0);
+            assert!(!costs.is_clamped() && !costs.is_incomplete());
+        }
+        // Exactly three paired samples on inert values. No timing threshold,
+        // speedup claim, material, digests, payloads or native qualification.
+        eprintln!(
+            "LOCAL_DURABLE_OUTBOX_COMPOSITION_V1 component_only=true ordinal={} frozen_us={} combined_us={} proposal_and_digests_equal=true",
+            ordinal + 1,
+            frozen_costs.inclusive_us(Phase::SampleTotal),
+            combined_costs.inclusive_us(Phase::SampleTotal),
+        );
+    }
+    f.assert_topology();
+    assert!(
+        before == f.logical_commitment(),
+        "composition changed retained history"
+    );
+}
+
+#[test]
+fn encrypted_material_outbox_composition_matches_frozen_mutations() {
+    let f = MaterialFixture::new();
+    f.assert_topology();
+    let before = f.logical_commitment();
+    // Every case starts from the same real original material, not a previous
+    // corruption. Serde permits inspecting invalid inert DTOs without decoding
+    // them through a validating material API or creating a live wallet owner.
+    for (pointer, replacement) in [
+        ("/request/operation_id", serde_json::json!("")),
+        (
+            "/request/operation_id",
+            serde_json::json!("invalid operation"),
+        ),
+        ("/request/operation_id", serde_json::json!("x".repeat(129))),
+        ("/request/enrollment_ref", serde_json::json!("bad")),
+        (
+            "/request/enrollment_ref",
+            serde_json::json!("AB".repeat(32)),
+        ),
+        (
+            "/request/enrollment_ref",
+            serde_json::json!(hash_label(0xe1)),
+        ),
+        ("/request/accepted_manifest_ref", serde_json::json!("bad")),
+        (
+            "/request/accepted_manifest_ref",
+            serde_json::json!(hash_label(0xe2)),
+        ),
+        ("/request/scope/version", serde_json::json!(0)),
+        ("/request/scope/purpose", serde_json::json!("other-purpose")),
+        (
+            "/request/scope/account_id",
+            serde_json::json!(hash_label(0xe3)),
+        ),
+        (
+            "/request/scope/participant_id",
+            serde_json::json!("other-participant"),
+        ),
+        ("/request/scope/minimum_confirmations", serde_json::json!(0)),
+        (
+            "/request/scope/maximum_scan_blocks",
+            serde_json::json!(1001),
+        ),
+        (
+            "/request/scope/valid_until_unix_seconds",
+            serde_json::json!(1_800_000_000u64),
+        ),
+        (
+            "/request/scope/protected_destination",
+            serde_json::json!("relative/intake.sqlite"),
+        ),
+        ("/request/scope/reviewers", serde_json::json!([])),
+        (
+            "/request/scope/proposal/manifest/expiry_height",
+            serde_json::json!(1),
+        ),
+        (
+            "/request/scope/constructor/authenticated_local_grant_digest",
+            serde_json::json!(hash_label(0xe4)),
+        ),
+        (
+            "/request/scope/prover/authenticated_local_grant_digest",
+            serde_json::json!(hash_label(0xe5)),
+        ),
+        ("/request/material/version", serde_json::json!(2)),
+        (
+            "/request/material/account_id",
+            serde_json::json!(hash_label(0xe6)),
+        ),
+        (
+            "/request/material/fvk_hex",
+            serde_json::json!("00".repeat(96)),
+        ),
+        (
+            "/request/material/fvk_digest",
+            serde_json::json!(hash_label(0xe7)),
+        ),
+        (
+            "/request/material/selected_zatoshis",
+            serde_json::json!(199_999u64),
+        ),
+        (
+            "/request/material/requested_debit_zatoshis",
+            serde_json::json!(105_001u64),
+        ),
+        ("/request/material/birthday_height", serde_json::json!(0)),
+        (
+            "/request/material/source/network",
+            serde_json::json!("main"),
+        ),
+        (
+            "/request/material/source/endpoint",
+            serde_json::json!("http://component.invalid"),
+        ),
+        (
+            "/request/material/source/observed_at",
+            serde_json::json!(1_800_000_060u64),
+        ),
+        (
+            "/request/material/context/anchor_root",
+            serde_json::json!(hash_label(0xe8)),
+        ),
+        (
+            "/request/material/notes/0/value_zatoshis",
+            serde_json::json!(199_999u64),
+        ),
+        (
+            "/request/material/notes/0/nullifier",
+            serde_json::json!(hash_label(0xe9)),
+        ),
+        (
+            "/request/material/notes/0/commitment",
+            serde_json::json!(hash_label(0xea)),
+        ),
+        (
+            "/request/material/notes/0/authentication_path/0",
+            serde_json::json!(hash_label(0xeb)),
+        ),
+        ("/request_digest", serde_json::json!("bad")),
+        ("/request_digest", serde_json::json!(hash_label(0xec))),
+        ("/material_digest", serde_json::json!("bad")),
+        ("/material_digest", serde_json::json!(hash_label(0xed))),
+        ("/native_review_digest", serde_json::json!(hash_label(0xee))),
+        ("/native_entry_digest", serde_json::json!(hash_label(0xef))),
+        (
+            "/recipient_grant_digest",
+            serde_json::json!(hash_label(0xf0)),
+        ),
+        (
+            "/original_channel_digest",
+            serde_json::json!(hash_label(0xf1)),
+        ),
+        ("/original_grant_id", serde_json::json!(hash_label(0xf2))),
+        ("/reference", serde_json::json!("bad")),
+        ("/reference", serde_json::json!(hash_label(0xf3))),
+        (
+            "/recipient_transport/process_instance",
+            serde_json::json!("bad"),
+        ),
+        ("/recipient_transport/pid", serde_json::json!(0)),
+        (
+            "/recipient_transport/signer_generation",
+            serde_json::json!(0),
+        ),
+        (
+            "/recipient_transport/transport_identity_id",
+            serde_json::json!(hash_label(0xf4)),
+        ),
+        (
+            "/recipient_transport/channel_key_digest",
+            serde_json::json!(hash_label(0xf5)),
+        ),
+        (
+            "/recipient_transport/channel_binding_digest",
+            serde_json::json!(hash_label(0xf6)),
+        ),
+        (
+            "/recipient_transport/account_id",
+            serde_json::json!(hash_label(0xf7)),
+        ),
+        (
+            "/recipient_transport/agreement_id",
+            serde_json::json!("other-agreement"),
+        ),
+        (
+            "/recipient_transport/participant_id",
+            serde_json::json!("other-participant"),
+        ),
+        (
+            "/recipient_transport/manifest_digest",
+            serde_json::json!(hash_label(0xf8)),
+        ),
+        (
+            "/recipient_transport",
+            serde_json::json!({
+                "kind": "remote_authenticated_keys",
+                "transport_identity_id": hash_label(0xf9),
+                "sender_key_digest": hash_label(0xfa),
+                "recipient_key_digest": hash_label(0xfb),
+                "channel_binding_digest": hash_label(0xfc),
+            }),
+        ),
+    ] {
+        let changed = mutated_outbox_field(&f.rows[0], pointer, replacement);
+        assert_outbox_composition(&changed, ExpectedOutboxResult::Binding);
+    }
+    for (pointer, replacement) in [
+        (
+            "/redisclosure/original_operation_id",
+            serde_json::json!("invalid original"),
+        ),
+        (
+            "/redisclosure/original_operation_id",
+            serde_json::json!(f.rows[2].request.operation_id),
+        ),
+        (
+            "/redisclosure/original_request_digest",
+            serde_json::json!("bad"),
+        ),
+        (
+            "/redisclosure/original_outbox_reference",
+            serde_json::json!("bad"),
+        ),
+    ] {
+        let changed = mutated_outbox_field(&f.rows[2], pointer, replacement);
+        assert_outbox_composition(&changed, ExpectedOutboxResult::Binding);
+    }
+    f.assert_topology();
+    assert!(
+        before == f.logical_commitment(),
+        "mutation comparison changed retained history"
+    );
+}
+
+// Fill only optional, bounded inert extension strings. This leaves the actual
+// scanned note, arithmetic and material topology unchanged. Raw canonical
+// digests construct test inputs only; neither result is trusted for validation.
+fn outbox_with_request_bytes(
+    original: &DurableConstructionOutboxV1,
+    target: usize,
+) -> DurableConstructionOutboxV1 {
+    let mut outbox = original.clone();
+    outbox.request.scope.proposal.manifest.agreement.extensions = (0..8)
+        .map(|index| Extension {
+            name: format!("synthetic-size-padding-{index}"),
+            required: false,
+            schema_version: 1,
+            value: serde_json::json!(""),
+        })
+        .collect();
+    let initial = Zeroizing::new(checked(serde_json::to_vec(&outbox.request))).len();
+    assert!(target >= initial);
+    let mut remaining = target - initial;
+    for extension in &mut outbox.request.scope.proposal.manifest.agreement.extensions {
+        let count = remaining.min(16_382);
+        extension.value = serde_json::json!("x".repeat(count));
+        remaining -= count;
+    }
+    assert!(
+        remaining == 0,
+        "size fixture exceeded bounded extension capacity"
+    );
+    assert!(Zeroizing::new(checked(serde_json::to_vec(&outbox.request))).len() == target);
+    let proposal = checked(outbox.request.scope.validate());
+    checked(outbox.request.material.validate_for(&outbox.request.scope));
+    let TransportIdentityBinding::LocalProcess {
+        manifest_digest, ..
+    } = &mut outbox.recipient_transport
+    else {
+        panic!("synthetic local transport missing");
+    };
+    *manifest_digest = proposal.manifest_digest().into();
+    outbox.request_digest = checked(wholepact_core::proposal::canonical_digest(
+        "wholepact:durable-construction-disclosure-request:v1",
+        &outbox.request,
+    ));
+    outbox.reference = checked(frozen_outbox_reference(&outbox));
+    outbox
+}
+
+#[test]
+fn encrypted_material_outbox_composition_matches_frozen_size_limits() {
+    let f = MaterialFixture::new();
+    f.assert_topology();
+    let before = f.logical_commitment();
+    for bytes in [120 * 1024 - 1, 120 * 1024, 120 * 1024 + 1] {
+        let changed = outbox_with_request_bytes(&f.rows[0], bytes);
+        assert_outbox_composition(
+            &changed,
+            if bytes <= 120 * 1024 {
+                ExpectedOutboxResult::Valid
+            } else {
+                ExpectedOutboxResult::Limit
+            },
+        );
+    }
+    let oversized = outbox_with_request_bytes(&f.rows[0], 120 * 1024 + 1);
+    // The original process hash precedes request validation, but the PID join
+    // and outbox hash checks follow the request limit. Competing failures must
+    // retain those exact categories, not merely return any refusal.
+    for (pointer, replacement, expected) in [
+        (
+            "/recipient_transport/process_instance",
+            serde_json::json!("bad"),
+            ExpectedOutboxResult::Binding,
+        ),
+        (
+            "/recipient_transport/pid",
+            serde_json::json!(0),
+            ExpectedOutboxResult::Limit,
+        ),
+        (
+            "/request/enrollment_ref",
+            serde_json::json!("bad"),
+            ExpectedOutboxResult::Binding,
+        ),
+        (
+            "/request/material/fvk_digest",
+            serde_json::json!(hash_label(0xfd)),
+            ExpectedOutboxResult::Binding,
+        ),
+        (
+            "/native_review_digest",
+            serde_json::json!("bad"),
+            ExpectedOutboxResult::Limit,
+        ),
+    ] {
+        let changed = mutated_outbox_field(&oversized, pointer, replacement);
+        assert_outbox_composition(&changed, expected);
+    }
+    // With valid bounded transport fields, a <=120 KiB request cannot reach
+    // the larger 128 KiB envelope bound. A malformed hash can make that envelope
+    // oversized, but must still fail its earlier hash check as Binding.
+    let mut oversized_envelope = f.rows[0].clone();
+    oversized_envelope.native_review_digest = "a".repeat(128 * 1024);
+    assert!(
+        Zeroizing::new(checked(serde_json::to_vec(&oversized_envelope))).len() > 128 * 1024 - 64
+    );
+    assert_outbox_composition(&oversized_envelope, ExpectedOutboxResult::Binding);
+    f.assert_topology();
+    assert!(
+        before == f.logical_commitment(),
+        "size comparison changed retained history"
+    );
+}
+
+#[test]
+fn encrypted_material_outbox_composition_matches_frozen_link_reference_substitutions() {
+    let f = MaterialFixture::new();
+    f.assert_valid_baseline();
+    let before = f.logical_commitment();
+    for case in 0..6 {
+        let mut changed = f.rows[2].clone();
+        match case {
+            0 => changed.request.enrollment_ref = f.rows[1].request.enrollment_ref.clone(),
+            1 => {
+                changed.request.accepted_manifest_ref =
+                    f.rows[1].request.accepted_manifest_ref.clone()
+            }
+            _ => {
+                let link = changed
+                    .redisclosure
+                    .as_mut()
+                    .expect("synthetic direct link missing");
+                match case {
+                    2 => link.original_request_digest = hash_label(0xe1),
+                    3 => link.original_outbox_reference = hash_label(0xe2),
+                    4 => link.original_operation_id = "synthetic-missing-original".into(),
+                    5 => {
+                        link.original_operation_id = f.rows[1].request.operation_id.clone();
+                        link.original_request_digest = f.rows[1].request_digest.clone();
+                        link.original_outbox_reference = f.rows[1].reference.clone();
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        }
+        changed.request_digest = checked(changed.request.digest());
+        changed.reference = checked(frozen_outbox_reference(&changed));
+        // The closed composition validates only the actual object, not a
+        // persistent origin. These coherent substitutions remain locally valid
+        // under BOTH paths and MUST still fail their independent journal join.
+        assert_outbox_composition(&changed, ExpectedOutboxResult::Valid);
+        f.replace_outbox(2, &changed);
+        {
+            let connection = checked(f.encrypted.journal.connection.lock());
+            assert_exact_executable_schema(&connection);
+        }
+        f.assert_reader_parity(
+            &f.encrypted.genesis,
+            Err(if case == 4 {
+                JournalError::NotFound
+            } else {
+                JournalError::InvalidBinding
+            }),
+        );
+        f.replace_outbox(2, &f.rows[2]);
+        assert!(
+            before == f.logical_commitment(),
+            "substituted history was not restored"
+        );
+    }
+    f.assert_valid_baseline();
+    assert!(
+        before == f.logical_commitment(),
+        "join comparison changed retained history"
+    );
+}
+
 #[test]
 fn encrypted_material_callback_components_are_measured() {
     let (f, setup) = measure(MaterialFixture::new);

@@ -570,6 +570,20 @@ impl HistoricalConstructionMaterialV1 {
         Ok(())
     }
     pub fn validate_for(&self, scope: &DurableConstructionScopeV1) -> Result<()> {
+        self.validate_for_proposal(scope).map(|_| ())
+    }
+    /// Validate the exact scope and material, then derive their inert proposal
+    /// and canonical material digest. Neither value grants freshness, identity,
+    /// consent, a native decision, or spending authority; nothing is cached.
+    pub fn validate_for_with_digest(
+        &self,
+        scope: &DurableConstructionScopeV1,
+    ) -> Result<(Proposal, String)> {
+        let proposal = self.validate_for_proposal(scope)?;
+        let material_digest = digest("wholepact:historical-construction-material:v1", self)?;
+        Ok((proposal, material_digest))
+    }
+    fn validate_for_proposal(&self, scope: &DurableConstructionScopeV1) -> Result<Proposal> {
         let p = scope.validate()?;
         let c = self.validate()?;
         if self.account_id != scope.account_id
@@ -614,7 +628,7 @@ impl HistoricalConstructionMaterialV1 {
         {
             return Err(DurableConstructionError::Binding);
         }
-        Ok(())
+        Ok(p)
     }
     fn validate(&self) -> Result<wholepact_protocol::construction::OwnedContribution> {
         if self.version != 1

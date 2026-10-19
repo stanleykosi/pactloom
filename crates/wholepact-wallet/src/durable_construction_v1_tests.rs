@@ -383,3 +383,472 @@ fn local_reviewer_audience_is_explicit_and_never_inferred_from_legacy_transport(
     scope.reviewers[0] = serde_json::from_value(legacy).unwrap();
     assert!(scope.validate().is_err()); // No mixed audience or fallback.
 }
+
+type MaterialResult<T> = std::result::Result<T, DurableConstructionError>;
+
+// Frozen pre-consolidation scope/material composition. Keep this independent of
+// validate_for, validate_for_proposal and validate_for_with_digest: it is the
+// differential reference, not an assertion that historical data is authority.
+fn frozen_material_validate_for(
+    material: &HistoricalConstructionMaterialV1,
+    scope: &DurableConstructionScopeV1,
+) -> MaterialResult<Proposal> {
+    let p = scope.validate()?;
+    let c = material.validate()?;
+    if material.account_id != scope.account_id
+        || material.context.tip_height >= p.manifest().expiry_height
+    {
+        return Err(DurableConstructionError::Binding);
+    }
+    let allocation = p
+        .manifest()
+        .participants
+        .iter()
+        .find(|a| a.account_id == material.account_id)
+        .ok_or(DurableConstructionError::Binding)?;
+    let debit = p
+        .accounting()
+        .participant_net_debits
+        .get(&scope.participant_id)
+        .ok_or(DurableConstructionError::Binding)?
+        .as_zatoshis();
+    let inputs = p
+        .manifest()
+        .inputs
+        .iter()
+        .filter(|n| n.account_id == material.account_id)
+        .collect::<Vec<_>>();
+    if inputs.len() != material.notes.len()
+        || debit != material.requested_debit_zatoshis
+        || debit > allocation.maximum_net_debit.as_zatoshis()
+        || material
+            .context
+            .tip_height
+            .checked_sub(material.context.anchor_height)
+            .and_then(|h| h.checked_add(1))
+            .is_none_or(|v| v < scope.minimum_confirmations)
+        || inputs.iter().any(|i| {
+            i.participant_id != scope.participant_id
+                || !material
+                    .notes
+                    .iter()
+                    .any(|n| n.input_id == i.input_id && n.value_zatoshis == i.amount.as_zatoshis())
+        })
+        || c.fvk.scope_for_address(&c.change_address) != Some(Scope::Internal)
+    {
+        return Err(DurableConstructionError::Binding);
+    }
+    Ok(p)
+}
+
+// All new failure messages are fixed strings. In particular, never format the
+// material, serialized mutation, viewing key, witness, proposal or digest.
+fn material_test_value<T, E>(value: std::result::Result<T, E>) -> T {
+    match value {
+        Ok(value) => value,
+        Err(_) => panic!("material differential fixture operation failed"),
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MaterialResultCategory {
+    Valid,
+    Invalid,
+    Binding,
+    Stale,
+    Storage,
+    Sync,
+}
+fn material_result_category<T>(result: &MaterialResult<T>) -> MaterialResultCategory {
+    match result {
+        Ok(_) => MaterialResultCategory::Valid,
+        Err(DurableConstructionError::Invalid) => MaterialResultCategory::Invalid,
+        Err(DurableConstructionError::Binding) => MaterialResultCategory::Binding,
+        Err(DurableConstructionError::Stale) => MaterialResultCategory::Stale,
+        Err(DurableConstructionError::Storage) => MaterialResultCategory::Storage,
+        Err(DurableConstructionError::Sync(_)) => MaterialResultCategory::Sync,
+    }
+}
+fn assert_material_validation_matches_frozen(
+    material: &HistoricalConstructionMaterialV1,
+    scope: &DurableConstructionScopeV1,
+) -> MaterialResultCategory {
+    // The old composition validates scope/material, then calls the unchanged
+    // separately validating public digest. It never calls a consolidated API.
+    let expected = frozen_material_validate_for(material, scope)
+        .and_then(|proposal| material.digest().map(|digest| (proposal, digest)));
+    let actual = material.validate_for_with_digest(scope);
+    let category = material_result_category(&expected);
+    assert!(
+        material_result_category(&actual) == category,
+        "material validation error category changed"
+    );
+    if let (Ok((expected_proposal, expected_digest)), Ok((proposal, digest))) = (expected, actual) {
+        assert!(proposal == expected_proposal, "material proposal changed");
+        assert!(digest == expected_digest, "material digest changed");
+        // Independent canonical oracle uses the old literal domain directly,
+        // not the production helper or the returned digest as an input.
+        let canonical = material_test_value(wholepact_core::proposal::canonical_digest(
+            "wholepact:historical-construction-material:v1",
+            material,
+        ));
+        assert!(digest == canonical, "material canonical domain changed");
+    }
+    category
+}
+
+fn assert_material_validation_category(
+    material: &HistoricalConstructionMaterialV1,
+    scope: &DurableConstructionScopeV1,
+    expected: MaterialResultCategory,
+) {
+    assert!(
+        assert_material_validation_matches_frozen(material, scope) == expected,
+        "material fixture category changed"
+    );
+    assert!(
+        material_result_category(&material.validate_for(scope)) == expected,
+        "legacy material validation contract changed"
+    );
+}
+
+// Enumerate every serialized leaf and array, including all 32 path positions
+// in every note. Each replacement is applied alone to a fresh fixture clone.
+// Nonempty arrays are tested both missing an element and repeating an element;
+// empty arrays are tested with an unexpected member. Object members are visited
+// recursively rather than selecting just a few hand-picked bindings.
+fn material_json_mutations(
+    value: &serde_json::Value,
+    pointer: &str,
+    mutations: &mut Vec<(String, serde_json::Value)>,
+) {
+    use serde_json::Value;
+    match value {
+        Value::Object(object) => {
+            for (key, value) in object {
+                let escaped = key.replace('~', "~0").replace('/', "~1");
+                material_json_mutations(value, &format!("{pointer}/{escaped}"), mutations);
+            }
+        }
+        Value::Array(array) => {
+            if array.is_empty() {
+                mutations.push((pointer.into(), serde_json::json!([null])));
+            } else {
+                let mut missing = array.clone();
+                missing.pop();
+                mutations.push((pointer.into(), Value::Array(missing)));
+                let mut repeated = array.clone();
+                repeated.push(array[0].clone());
+                mutations.push((pointer.into(), Value::Array(repeated)));
+                for (index, value) in array.iter().enumerate() {
+                    material_json_mutations(value, &format!("{pointer}/{index}"), mutations);
+                }
+            }
+        }
+        Value::String(value) => {
+            // Keep Amount strings numeric and keep byte encodings syntactically
+            // valid, so their mutations reach arithmetic and binding checks.
+            let changed = if let Some(number) = (value.len() <= 20)
+                .then(|| value.parse::<u64>().ok())
+                .flatten()
+            {
+                (number ^ 1).to_string()
+            } else if !value.is_empty()
+                && value
+                    .bytes()
+                    .all(|v| v.is_ascii_digit() || (b'a'..=b'f').contains(&v))
+            {
+                let mut changed = value.clone();
+                changed.replace_range(..1, if value.starts_with('0') { "1" } else { "0" });
+                changed
+            } else if value == "declared_operator" {
+                "local_only".into()
+            } else {
+                format!("{value}-changed")
+            };
+            mutations.push((pointer.into(), Value::String(changed)));
+            if !value.is_empty() {
+                mutations.push((pointer.into(), Value::String(String::new())));
+            }
+        }
+        Value::Number(value) => {
+            let number = value
+                .as_u64()
+                .unwrap_or_else(|| panic!("non-integer material fixture"));
+            mutations.push((pointer.into(), Value::from(number ^ 1)));
+        }
+        Value::Bool(value) => mutations.push((pointer.into(), Value::Bool(!value))),
+        Value::Null => mutations.push((pointer.into(), Value::String("changed".into()))),
+    }
+}
+
+#[test]
+fn consolidated_material_validation_matches_every_material_field_and_witness_path() {
+    let (material, scope, _) = fixture();
+    assert_material_validation_category(&material, &scope, MaterialResultCategory::Valid);
+    let original = material_test_value(serde_json::to_value(&material));
+    let mut mutations = Vec::new();
+    material_json_mutations(&original, "", &mut mutations);
+    let mut valid = 0;
+    let mut invalid = 0;
+    let mut binding = 0;
+    let mut path_positions = BTreeSet::new();
+    for (pointer, replacement) in mutations {
+        if pointer.contains("/authentication_path/") {
+            path_positions.insert(pointer.clone());
+        }
+        let mut changed = original.clone();
+        *changed
+            .pointer_mut(&pointer)
+            .unwrap_or_else(|| panic!("material mutation path missing")) = replacement;
+        assert!(changed != original, "material mutation did not change data");
+        // All material leaves are primitive strings/integers. Array shape
+        // mutations remain deserializable, including an empty notes array.
+        let changed: HistoricalConstructionMaterialV1 =
+            material_test_value(serde_json::from_value(changed));
+        match assert_material_validation_matches_frozen(&changed, &scope) {
+            MaterialResultCategory::Valid => {
+                valid += 1;
+                let canonical = material_test_value(wholepact_core::proposal::canonical_digest(
+                    "wholepact:historical-construction-material:v1",
+                    &changed,
+                ));
+                let original_canonical =
+                    material_test_value(wholepact_core::proposal::canonical_digest(
+                        "wholepact:historical-construction-material:v1",
+                        &material,
+                    ));
+                assert!(
+                    canonical != original_canonical,
+                    "material mutation not committed"
+                );
+            }
+            MaterialResultCategory::Invalid => invalid += 1,
+            MaterialResultCategory::Binding => binding += 1,
+            _ => panic!("data-only material validation returned a live-state error"),
+        }
+    }
+    assert!(
+        valid > 0 && invalid > 0 && binding > 0,
+        "material categories not exercised"
+    );
+    assert!(
+        path_positions.len() == material.notes.len() * 32,
+        "material witness path coverage incomplete"
+    );
+}
+
+#[test]
+fn consolidated_material_validation_matches_every_scope_field_and_both_audiences() {
+    let (material, scope, _) = fixture();
+    for local_audience in [false, true] {
+        let mut scope = scope.clone();
+        if local_audience {
+            scope.version = 2;
+            scope.reviewers = scope
+                .reviewers
+                .iter()
+                .map(|reviewer| {
+                    ConstructionReviewerV1::local_installed_signer(reviewer.account_id().into())
+                })
+                .collect();
+        }
+        assert_material_validation_category(&material, &scope, MaterialResultCategory::Valid);
+        let original = material_test_value(serde_json::to_value(&scope));
+        let mut mutations = Vec::new();
+        material_json_mutations(&original, "", &mut mutations);
+        let mut valid = 0;
+        let mut invalid = 0;
+        let mut binding = 0;
+        let mut schema_rejected = 0;
+        for (pointer, replacement) in mutations {
+            let mut changed = original.clone();
+            *changed
+                .pointer_mut(&pointer)
+                .unwrap_or_else(|| panic!("scope mutation path missing")) = replacement;
+            assert!(changed != original, "scope mutation did not change data");
+            // Invalid enum tags and malformed optional/array values cannot
+            // become a typed scope. Keep them in the exhaustive field walk and
+            // check their rejection rather than silently skipping such fields.
+            let changed: DurableConstructionScopeV1 = match serde_json::from_value(changed) {
+                Ok(changed) => changed,
+                Err(_) => {
+                    schema_rejected += 1;
+                    continue;
+                }
+            };
+            match assert_material_validation_matches_frozen(&material, &changed) {
+                // The independent oracle in the comparison also ensures that
+                // scope changes cannot contaminate the material-only digest.
+                MaterialResultCategory::Valid => valid += 1,
+                MaterialResultCategory::Invalid => invalid += 1,
+                MaterialResultCategory::Binding => binding += 1,
+                _ => panic!("data-only scope validation returned a live-state error"),
+            }
+        }
+        assert!(
+            valid > 0 && invalid > 0 && binding > 0 && schema_rejected > 0,
+            "scope categories not exercised"
+        );
+    }
+}
+
+#[test]
+fn consolidated_material_validation_preserves_bounds_and_error_precedence() {
+    let (material, scope, _) = fixture();
+    // These APIs retain their independent validating contracts and byte bounds.
+    let encoded = material_test_value(material.encode());
+    let decoded = material_test_value(HistoricalConstructionMaterialV1::decode(&encoded));
+    assert!(decoded == material, "material roundtrip changed");
+    assert_material_validation_category(&decoded, &scope, MaterialResultCategory::Valid);
+    let mut padded = Zeroizing::new(encoded.to_vec());
+    padded.resize(MAX_MATERIAL_BYTES, b' ');
+    assert!(
+        HistoricalConstructionMaterialV1::decode(&padded).is_ok(),
+        "exact material byte limit changed"
+    );
+    padded.push(b' ');
+    assert!(
+        material_result_category(&HistoricalConstructionMaterialV1::decode(&padded))
+            == MaterialResultCategory::Invalid,
+        "oversized material bytes accepted"
+    );
+    assert!(
+        material_result_category(&HistoricalConstructionMaterialV1::decode(&[]))
+            == MaterialResultCategory::Invalid,
+        "empty material bytes accepted"
+    );
+
+    let mut bad_material = material.clone();
+    bad_material.source.source_id = "x".repeat(MAX_MATERIAL_BYTES + 1);
+    assert_material_validation_category(&bad_material, &scope, MaterialResultCategory::Invalid);
+    assert!(
+        material_result_category(&bad_material.digest()) == MaterialResultCategory::Invalid
+            && material_result_category(&bad_material.encode()) == MaterialResultCategory::Invalid,
+        "standalone material APIs skipped validation"
+    );
+    bad_material = material.clone();
+    bad_material.notes = vec![material.notes[0].clone(); MAX_SELECTED_NOTES + 1];
+    assert_material_validation_category(&bad_material, &scope, MaterialResultCategory::Invalid);
+    bad_material.notes = vec![material.notes[0].clone(); MAX_SELECTED_NOTES];
+    assert_material_validation_category(&bad_material, &scope, MaterialResultCategory::Binding);
+    bad_material.notes.clear();
+    assert_material_validation_category(&bad_material, &scope, MaterialResultCategory::Invalid);
+
+    // Scope validation precedes material mathematics. Mixed failures preserve
+    // the same category instead of accidentally prioritizing material checks.
+    bad_material = material.clone();
+    bad_material.fvk_digest = "00".repeat(32);
+    let mut bad_scope = scope.clone();
+    bad_scope.purpose.clear();
+    assert_material_validation_category(&bad_material, &bad_scope, MaterialResultCategory::Invalid);
+    bad_material.version = 0;
+    bad_scope = scope.clone();
+    bad_scope.reviewers.pop();
+    assert_material_validation_category(&bad_material, &bad_scope, MaterialResultCategory::Binding);
+
+    // Fill otherwise-valid optional extension data up to the existing exact
+    // serialized scope byte limit, then exceed it by just one byte.
+    let mut bounded_scope = scope.clone();
+    bounded_scope.proposal.manifest.agreement.extensions = (0..9)
+        .map(|index| Extension {
+            name: format!("padding-{index}"),
+            required: false,
+            schema_version: 1,
+            value: serde_json::Value::String(String::new()),
+        })
+        .collect();
+    let limit = 128 * 1024;
+    let initial = material_test_value(serde_json::to_vec(&bounded_scope)).len();
+    assert!(initial < limit, "scope size fixture exceeds limit");
+    let mut remaining = limit - initial;
+    for extension in &mut bounded_scope.proposal.manifest.agreement.extensions {
+        let fill = remaining.min(16_382);
+        extension.value = serde_json::Value::String("x".repeat(fill));
+        remaining -= fill;
+    }
+    assert!(remaining == 0, "scope size fixture padding incomplete");
+    assert!(
+        material_test_value(serde_json::to_vec(&bounded_scope)).len() == limit,
+        "scope size fixture is not exact"
+    );
+    assert_material_validation_category(&material, &bounded_scope, MaterialResultCategory::Valid);
+    let last = bounded_scope
+        .proposal
+        .manifest
+        .agreement
+        .extensions
+        .last_mut()
+        .unwrap_or_else(|| panic!("scope size fixture missing extension"));
+    last.value = serde_json::Value::String("x".into());
+    assert!(
+        material_test_value(serde_json::to_vec(&bounded_scope)).len() == limit + 1,
+        "oversized scope fixture is not exact"
+    );
+    assert_material_validation_category(&material, &bounded_scope, MaterialResultCategory::Invalid);
+}
+
+#[test]
+fn consolidated_material_validation_preserves_exact_scope_bindings_after_success() {
+    let (material, scope, owners) = fixture();
+    assert_material_validation_category(&material, &scope, MaterialResultCategory::Valid);
+
+    let mut changed_scope = scope.clone();
+    changed_scope.account_id = owners[1].account_id.clone();
+    changed_scope.participant_id = "participant-1".into();
+    assert_material_validation_category(&material, &changed_scope, MaterialResultCategory::Binding);
+
+    changed_scope = scope.clone();
+    changed_scope.proposal.manifest.expiry_height = material.context.tip_height;
+    assert_material_validation_category(&material, &changed_scope, MaterialResultCategory::Binding);
+
+    changed_scope = scope.clone();
+    changed_scope.minimum_confirmations =
+        material.context.tip_height - material.context.anchor_height + 2;
+    assert_material_validation_category(&material, &changed_scope, MaterialResultCategory::Binding);
+
+    changed_scope = scope.clone();
+    let input = changed_scope
+        .proposal
+        .manifest
+        .inputs
+        .iter_mut()
+        .find(|input| input.account_id == material.account_id)
+        .unwrap_or_else(|| panic!("scope binding fixture missing input"));
+    input.input_id.push_str("-changed");
+    assert_material_validation_category(&material, &changed_scope, MaterialResultCategory::Binding);
+
+    // Reconcile the proposal independently so a wrong claimed input amount
+    // reaches the material join instead of failing proposal arithmetic first.
+    changed_scope = scope.clone();
+    let input = changed_scope
+        .proposal
+        .manifest
+        .inputs
+        .iter_mut()
+        .find(|input| input.account_id == material.account_id)
+        .unwrap_or_else(|| panic!("scope binding fixture missing input"));
+    input.amount = material_test_value(Amount::from_zatoshis(input.amount.as_zatoshis() + 1));
+    let returned = changed_scope
+        .proposal
+        .manifest
+        .outputs
+        .iter_mut()
+        .find(|output| {
+            matches!(
+                &output.allocation,
+                OutputAllocation::Return { account_id, .. } if *account_id == material.account_id
+            )
+        })
+        .unwrap_or_else(|| panic!("scope binding fixture missing return"));
+    returned.amount = material_test_value(Amount::from_zatoshis(returned.amount.as_zatoshis() + 1));
+    assert_material_validation_category(&material, &changed_scope, MaterialResultCategory::Binding);
+
+    let mut changed_material = material.clone();
+    changed_material.requested_debit_zatoshis += 1;
+    assert_material_validation_category(&changed_material, &scope, MaterialResultCategory::Binding);
+    // Restoring the actual data restores the same result; no successful result
+    // from an earlier invocation authorizes a later mutated object.
+    changed_material.requested_debit_zatoshis -= 1;
+    assert_material_validation_category(&changed_material, &scope, MaterialResultCategory::Valid);
+}
