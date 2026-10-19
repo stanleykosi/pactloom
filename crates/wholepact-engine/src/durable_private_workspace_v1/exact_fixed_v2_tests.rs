@@ -403,6 +403,7 @@ mod actual_cryptography {
         chain: ConstructionContext,
         packages: Vec<OwnedContribution>,
         account_ids: Vec<String>,
+        selection: wholepact_wallet::wallet::SelectionContext,
     }
     fn fixture() -> Fixture {
         let (wallets, selection) = synthetic_scanned_contributions().unwrap();
@@ -516,6 +517,7 @@ mod actual_cryptography {
             chain,
             packages,
             account_ids,
+            selection,
         }
     }
 
@@ -546,6 +548,7 @@ mod actual_cryptography {
             chain,
             packages,
             account_ids,
+            ..
         } = fixture();
         let directory = tempfile::tempdir().unwrap();
         std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -762,6 +765,667 @@ mod actual_cryptography {
                 .unwrap(),
             actual
         );
+    }
+    /// Data-only mathematical/history component. Serialized historical labels
+    /// are not native approvals. No authenticated disclosure, source owner,
+    /// fresh observation, proof job or continuation is created by this module.
+    mod immutable_validation {
+        use super::*;
+        use crate::durable_construction_v1::{Intake, MaterialCheckErrorV2, Roster};
+        use std::cell::Cell;
+        use std::path::{Path, PathBuf};
+        use std::time::{Instant, SystemTime, UNIX_EPOCH};
+        use wholepact_signer::authority_bridge::durable_construction_v1::{
+            DurableConstructionOutboxV1, DurableConstructionRequestV1,
+            HistoricalConstructionMaterialV1,
+        };
+        use wholepact_signer::consent_journal::TransportIdentityBinding;
+        use wholepact_wallet::wallet::protected_sync::durable_construction_v1::{
+            ConstructionRecipientV1, ConstructionReviewerV1, DurableConstructionScopeV1, PURPOSE,
+        };
+
+        fn checked<T, E>(result: std::result::Result<T, E>) -> T {
+            match result {
+                Ok(value) => value,
+                Err(_) => panic!("inert mathematical component failed"),
+            }
+        }
+        fn hash(byte: u8) -> String {
+            format!("{byte:02x}").repeat(32)
+        }
+        fn unix_now() -> u64 {
+            checked(SystemTime::now().duration_since(UNIX_EPOCH)).as_secs()
+        }
+        fn material(f: &Fixture, index: usize) -> HistoricalConstructionMaterialV1 {
+            let owner = &f.packages[index];
+            let notes: Vec<_> = owner.notes.iter().map(|n| {
+                let mut fields = n.input_id.split(':');
+                assert!(fields.next() == Some("ironwood"));
+                let mut txid = checked(hex::decode(fields.next().unwrap_or("")));
+                txid.reverse();
+                let output_index = checked(fields.next().unwrap_or("").parse::<u16>());
+                assert!(fields.next().is_none());
+                json!({"input_id":n.input_id,"txid_protocol":hex::encode(txid),"output_index":output_index,
+                    "recipient":hex::encode(n.note.recipient().to_raw_address_bytes()),
+                    "value_zatoshis":n.note.value().inner(),"rho":hex::encode(n.note.rho().to_bytes()),
+                    "rseed":hex::encode(n.note.rseed().as_bytes()),
+                    "nullifier":hex::encode(n.note.nullifier(&owner.fvk).to_bytes()),
+                    "commitment":hex::encode(orchard::note::ExtractedNoteCommitment::from(n.note.commitment()).to_bytes()),
+                    "position":n.witness.position(),
+                    "authentication_path":n.witness.auth_path().iter().map(|p|hex::encode(p.to_bytes())).collect::<Vec<_>>()})
+            }).collect();
+            let c = &f.selection;
+            checked(HistoricalConstructionMaterialV1::decode(&checked(
+                serde_json::to_vec(&json!({
+                    "version":1,"account_id":owner.account_id,"fvk_hex":hex::encode(owner.fvk.to_bytes()),
+                    "fvk_digest":hex::encode(Sha256::digest(owner.fvk.to_bytes())),
+                    "selected_zatoshis":owner.notes.iter().map(|n|n.note.value().inner()).sum::<u64>(),
+                    "requested_debit_zatoshis":f.request.manifest.participants[index].maximum_net_debit.as_zatoshis(),
+                    "change_address":hex::encode(owner.change_address.to_raw_address_bytes()),
+                    "birthday_height":c.anchor_height,
+                    "context":{"tip_height":c.tip_height,"tip_hash_protocol":hex::encode(c.tip_hash_protocol),
+                        "anchor_height":c.anchor_height,"anchor_hash_protocol":hex::encode(c.anchor_hash_protocol),
+                        "anchor_root":hex::encode(c.anchor_root)},
+                    "source":{"source_id":"inert-engine-math-component","endpoint":"https://component.invalid",
+                        "trust_profile":"single_tls_provider_report_not_consensus","network":"test",
+                        "branch_id":"0x77190ad9","lightwalletd_version":"synthetic-component",
+                        "backend_subversion":"synthetic-no-backend","protocol_version":"synthetic-component-v1",
+                        "request_started":1800000000u64,"observed_at":1800000001u64,"valid_until":1800000060u64},
+                    "notes":notes
+                })),
+            )))
+        }
+        fn outbox(
+            proposal: &ProposalInput,
+            material: HistoricalConstructionMaterialV1,
+            index: usize,
+            destination: &Path,
+            valid_from: u64,
+            valid_until: u64,
+        ) -> DurableConstructionOutboxV1 {
+            let grant = hash(0x20 + index as u8);
+            let channel = hash(0x30 + index as u8);
+            let grant_id = hash(0x40 + index as u8);
+            let principal = "synthetic-local-constructor";
+            let scope = DurableConstructionScopeV1 {
+                version: 2,
+                purpose: PURPOSE.into(),
+                proposal: proposal.clone(),
+                account_id: proposal.manifest.participants[index].account_id.clone(),
+                participant_id: proposal.manifest.participants[index].participant_id.clone(),
+                privacy_domain: "inert-private-component".into(),
+                constructor: ConstructionRecipientV1 {
+                    principal_id: principal.into(),
+                    authenticated_local_grant_digest: grant.clone(),
+                },
+                prover: ConstructionRecipientV1 {
+                    principal_id: principal.into(),
+                    authenticated_local_grant_digest: grant.clone(),
+                },
+                reviewers: proposal
+                    .manifest
+                    .participants
+                    .iter()
+                    .map(|p| ConstructionReviewerV1::local_installed_signer(p.account_id.clone()))
+                    .collect(),
+                protected_destination: destination.to_str().unwrap().into(),
+                retention_policy: "temporary inert encrypted component".into(),
+                valid_from_unix_seconds: valid_from,
+                valid_until_unix_seconds: valid_until,
+                minimum_confirmations: 1,
+                maximum_scan_blocks: 100,
+            };
+            let verified = checked(Proposal::validate(proposal.clone()));
+            let transport = TransportIdentityBinding::LocalProcess {
+                transport_identity_id: grant_id.clone(),
+                channel_key_digest: grant.clone(),
+                channel_binding_digest: channel.clone(),
+                uid: 42,
+                pid: 100 + index as u32,
+                process_instance: hash(0x50 + index as u8),
+                signer_generation: 1,
+                account_id: scope.account_id.clone(),
+                agreement_id: proposal.manifest.agreement.agreement_id.clone(),
+                participant_id: scope.participant_id.clone(),
+                manifest_digest: verified.manifest_digest().into(),
+            };
+            let request = DurableConstructionRequestV1 {
+                operation_id: format!("inert-math-operation-{index}"),
+                enrollment_ref: hash(0x60 + index as u8),
+                accepted_manifest_ref: hash(0x70 + index as u8),
+                scope,
+                material,
+            };
+            let request_digest = checked(request.digest());
+            let material_digest = checked(request.material.digest());
+            let review = hash(0x80 + index as u8);
+            let entry = hash(0x90 + index as u8);
+            let reference = checked(wholepact_core::proposal::canonical_digest(
+                "wholepact:durable-construction-consent-outbox:v1",
+                &(
+                    &request_digest,
+                    &material_digest,
+                    &review,
+                    &entry,
+                    &grant,
+                    &channel,
+                    &grant_id,
+                    &transport,
+                    Option::<serde_json::Value>::None,
+                ),
+            ));
+            let value = checked(serde_json::from_value(
+                json!({"request":request,"request_digest":request_digest,
+                "material_digest":material_digest,"native_review_digest":review,"native_entry_digest":entry,
+                "recipient_grant_digest":grant,"original_channel_digest":channel,"original_grant_id":grant_id,
+                "recipient_transport":transport,"reference":reference}),
+            ));
+            let value: DurableConstructionOutboxV1 = value;
+            checked(value.validate());
+            value
+        }
+        struct HistoryFixture {
+            _dir: tempfile::TempDir,
+            path: PathBuf,
+            engine: Engine,
+            envelopes: Vec<Envelope>,
+            intake: Intake,
+        }
+        fn history_fixture() -> HistoryFixture {
+            let f = fixture();
+            let dir = checked(tempfile::tempdir());
+            checked(std::fs::set_permissions(
+                dir.path(),
+                std::fs::Permissions::from_mode(0o700),
+            ));
+            let path = dir.path().join("inert-history.sqlite");
+            let engine = Engine::from_store(checked(wholepact_store::Store::create_encrypted(
+                &path,
+                &DatabaseKey::from_bytes([123; 32]),
+            )));
+            let origin = checked(engine.store.verify_original_encrypted_destination(&path));
+            let access = Access {
+                principal_id: "synthetic-local-constructor".into(),
+                include_owned_agreements: true,
+                ..Access::default()
+            };
+            let seed_engine = checked(Engine::in_memory());
+            checked(seed_engine.create(
+                &access,
+                "inert-component-seed-command",
+                f.agreement.clone(),
+            ));
+            let record =
+                checked(seed_engine.store.get_agreement(&f.agreement.agreement_id)).unwrap();
+            let mut seed = checked(crate::decode_unprojected(&record));
+            seed.terms_editing_origin = false;
+            seed.view.roster_selected = true;
+            seed.view.progress = "preparing_proposal".into();
+            assert!(seed.private_workspace_origin_v1.is_none());
+            let mut candidate = advance(seed.clone());
+            candidate
+                .view
+                .candidates
+                .push(checked(crate::candidates::build_exact_candidate_v2(
+                    f.request.clone(),
+                )));
+            let now = unix_now();
+            let mut roster = Roster::default();
+            let mut envelopes = vec![seed, candidate];
+            for index in 0..2 {
+                let proposal = &envelopes[1].view.candidates[0].proposal;
+                let value = Intake {
+                    schema_version: 1,
+                    principal_id: access.principal_id.clone(),
+                    metadata_origin: hex::encode(origin),
+                    signer_enrollment_reference: hash(0xa0 + index as u8),
+                    signer_process_instance: hash(0xb0 + index as u8),
+                    outbox: outbox(
+                        proposal,
+                        material(&f, index),
+                        index,
+                        &path,
+                        now - 1,
+                        now + 3599,
+                    ),
+                };
+                roster
+                    .owners
+                    .insert(value.outbox.request().scope.account_id.clone(), value);
+                let mut next = advance(envelopes.last().unwrap().clone());
+                next.durable_construction_v1.insert(
+                    next.view.candidates[0].candidate_id.clone(),
+                    checked(serde_json::to_value(&roster)),
+                );
+                envelopes.push(next);
+            }
+            let intake = roster.owners.values().next().unwrap().clone();
+            let mut receipt = advance(envelopes.last().unwrap().clone());
+            receipt
+                .checkpoint_receipts
+                .insert(hash(0xc0), inert_receipt(&receipt.view.candidates[0]));
+            envelopes.push(receipt);
+            for (i, e) in envelopes.iter().enumerate() {
+                checked(operation_v1::validate_shape(e));
+                let command = checked(wholepact_store::CommandContext::for_request(
+                    &access.principal_id,
+                    &format!("inert-history-command-{i}"),
+                    &json!(i),
+                ));
+                if i == 0 {
+                    checked(engine.store.create_agreement(
+                        &command,
+                        &e.view.agreement.agreement_id,
+                        checked(crate::encode(e)),
+                    ));
+                } else {
+                    checked(engine.store.update_agreement(
+                        &command,
+                        &e.view.agreement.agreement_id,
+                        i as u64,
+                        checked(crate::encode(e)),
+                        event(i),
+                    ));
+                }
+            }
+            HistoryFixture {
+                _dir: dir,
+                path,
+                engine,
+                envelopes,
+                intake,
+            }
+        }
+        fn event(i: usize) -> &'static str {
+            match i {
+                1 => "private_exact_candidate_prepared_v2",
+                2 | 3 => "private_exact_material_retained_v2",
+                4 => "private_original_constructor_recorded_v2",
+                _ => panic!("invalid component phase"),
+            }
+        }
+        fn purpose(i: usize) -> EffectV2 {
+            match i {
+                1 => EffectV2::PrepareExactCandidate,
+                2 | 3 => EffectV2::RetainExactMaterial,
+                4 => EffectV2::ConstructorReceipt,
+                _ => panic!("invalid component phase"),
+            }
+        }
+        fn owner_count(e: &Envelope) -> usize {
+            e.durable_construction_v1
+                .values()
+                .map(|v| {
+                    checked(serde_json::from_value::<Roster>(v.clone()))
+                        .owners
+                        .len()
+                })
+                .sum()
+        }
+        // Same pure read composition as the production traversal, deliberately
+        // without native-marker/source checks or claims of coordinator authority.
+        fn walk(f: &HistoryFixture, reuse: bool) -> crate::Result<(serde_json::Value, usize)> {
+            let current = f
+                .engine
+                .store
+                .get_agreement(&f.envelopes[0].view.agreement.agreement_id)
+                .map_err(crate::store_error)?
+                .ok_or_else(damaged)?;
+            let current = decode_private_record(&current)?;
+            operation_v1::validate_shape(&current)?;
+            let mut validations = 2 * owner_count(&current);
+            let mut previous: Option<Envelope> = None;
+            for (i, event) in f
+                .engine
+                .store
+                .events_after(0, 9)
+                .map_err(crate::store_error)?
+                .iter()
+                .enumerate()
+            {
+                let operation = f
+                    .engine
+                    .store
+                    .get_operation(&event.operation_id)
+                    .map_err(crate::store_error)?
+                    .ok_or_else(damaged)?;
+                let saved: wholepact_store::MutationResult =
+                    serde_json::from_value(operation.result).map_err(|_| damaged())?;
+                let envelope = decode_private_record(&saved.record)?;
+                operation_v1::validate_shape(&envelope)?;
+                validations += 2 * owner_count(&envelope);
+                if let Some(before) = &previous {
+                    if reuse {
+                        operation_v1::validate_delta_after_checked_shapes_v2(
+                            before,
+                            &envelope,
+                            purpose(i),
+                        )?;
+                    } else {
+                        operation_v1::validate_delta(before, &envelope, purpose(i))?;
+                        validations += owner_count(before) + owner_count(&envelope);
+                    }
+                }
+                previous = Some(envelope);
+            }
+            let result = crate::encode(previous.as_ref().ok_or_else(damaged)?)?;
+            if result != crate::encode(&current)? {
+                return Err(damaged());
+            }
+            Ok((result, validations))
+        }
+        fn state(f: &HistoryFixture) -> serde_json::Value {
+            let events = checked(f.engine.store.events_after(0, 9));
+            let operations: Vec<_> = events
+                .iter()
+                .map(|e| checked(f.engine.store.get_operation(&e.operation_id)))
+                .collect();
+            json!({"records":checked(f.engine.store.list_records("agreement")),"events":events,"operations":operations})
+        }
+        #[test]
+        fn encrypted_history_shape_reuse_matches_full_kernels_and_reports_cost() {
+            let f = history_fixture();
+            let before = state(&f);
+            let bytes = checked(std::fs::read(&f.path));
+            for sample in 0..3 {
+                let started = Instant::now();
+                let old = checked(walk(&f, false));
+                let old_us = started.elapsed().as_micros();
+                let started = Instant::now();
+                let new = checked(walk(&f, true));
+                let new_us = started.elapsed().as_micros();
+                assert!(old.0 == new.0);
+                // Source-derived call counts, not runtime material instrumentation.
+                assert_eq!((old.1, new.1), (22, 14));
+                eprintln!(
+                    "IMMUTABLE_COMPONENT engine_history sample={sample} baseline_us={old_us} reused_us={new_us} source_baseline_material_calls=22 source_reused_material_calls=14 equal=true"
+                );
+            }
+            assert!(before == state(&f));
+            assert!(bytes == checked(std::fs::read(&f.path)));
+        }
+        fn checked_delta(
+            before: &Envelope,
+            after: &Envelope,
+            effect: EffectV2,
+        ) -> crate::Result<()> {
+            operation_v1::validate_shape(before)?;
+            operation_v1::validate_shape(after)?;
+            operation_v1::validate_delta_after_checked_shapes_v2(before, after, effect)
+        }
+        fn same_result(a: crate::Result<()>, b: crate::Result<()>) {
+            match (a, b) {
+                (Ok(()), Ok(())) => {}
+                (Err(a), Err(b)) => assert!(
+                    a.code == b.code
+                        && a.message == b.message
+                        && a.details == b.details
+                        && a.retryable == b.retryable
+                        && a.operation_id == b.operation_id
+                        && a.safe_actions == b.safe_actions
+                ),
+                _ => panic!("component result mismatch"),
+            }
+        }
+        #[test]
+        fn checked_shape_tail_preserves_mutation_refusal_and_first_error() {
+            let (before, after) = candidate_pair();
+            same_result(
+                operation_v1::validate_delta(&before, &after, EffectV2::PrepareExactCandidate),
+                checked_delta(&before, &after, EffectV2::PrepareExactCandidate),
+            );
+            let mut variants = Vec::new();
+            let mut e = after.clone();
+            e.view.revision += 1;
+            variants.push(e);
+            let mut e = after.clone();
+            e.view.updated_at = "invalid".into();
+            variants.push(e);
+            let mut e = after.clone();
+            e.owner_client_id = "changed".into();
+            variants.push(e);
+            let mut e = after.clone();
+            e.view.cancellation_requested = true;
+            variants.push(e);
+            let mut e = after.clone();
+            e.view.authorization_exposure = "changed".into();
+            variants.push(e);
+            let mut e = after.clone();
+            e.view.candidates.push(e.view.candidates[0].clone());
+            variants.push(e);
+            for e in variants {
+                let old =
+                    operation_v1::validate_delta(&before, &e, EffectV2::PrepareExactCandidate);
+                assert!(old.is_err());
+                same_result(
+                    old,
+                    checked_delta(&before, &e, EffectV2::PrepareExactCandidate),
+                );
+            }
+            let mut wrong_before = before.clone();
+            wrong_before.view.chain_observation = "changed".into();
+            same_result(
+                operation_v1::validate_delta(
+                    &wrong_before,
+                    &after,
+                    EffectV2::PrepareExactCandidate,
+                ),
+                checked_delta(&wrong_before, &after, EffectV2::PrepareExactCandidate),
+            );
+            assert!(checked_delta(&before, &after, EffectV2::ConstructorReceipt).is_err());
+            let encoded = checked(crate::encode(&after));
+            for key in ["unknown_field", "view"] {
+                let mut value = encoded.clone();
+                if key == "view" {
+                    value.as_object_mut().unwrap().remove(key);
+                } else {
+                    value[key] = json!(true);
+                }
+                assert!(serde_json::from_value::<Envelope>(value).is_err());
+            }
+        }
+        fn material_damaged() -> ApiError {
+            ApiError::new(
+                "RECOVERY_REQUIRED",
+                "Original authenticated durable disclosure history is missing or inconsistent; preserve all original journals",
+            )
+        }
+        fn material_denied() -> ApiError {
+            ApiError::new(
+                "DISCLOSURE_DENIED",
+                "Current exact private-material permission, original destination or validity is unavailable",
+            )
+        }
+        // Literal pre-change same-intake composition, retained only as the
+        // comparator. All three original live expressions still run normally.
+        fn baseline_material(
+            engine: &Engine,
+            access: &Access,
+            intake: &Intake,
+            consent: &dyn LocalDurableMaterialConsentV1,
+        ) -> crate::Result<()> {
+            let check = || -> std::result::Result<(), MaterialCheckErrorV2> {
+                intake.outbox.validate().map_err(|_| material_damaged())?;
+                let scope = &intake.outbox.request().scope;
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|v| v.as_secs())
+                    .map_err(|_| material_denied())?;
+                scope.check_valid_at(now)?;
+                if intake.principal_id != access.principal_id
+                    || hex::encode(engine.store.verify_original_encrypted_destination(
+                        Path::new(&scope.protected_destination),
+                    )?) != intake.metadata_origin
+                {
+                    return Err(material_denied().into());
+                }
+                Ok(())
+            };
+            let run = || -> std::result::Result<(), MaterialCheckErrorV2> {
+                check()?;
+                if !consent.permits(
+                    &intake.outbox.request().scope,
+                    intake.outbox.material_digest(),
+                    DurableMaterialActionV1::ReadForExactConstruction,
+                ) {
+                    return Err(material_denied().into());
+                }
+                check()
+            };
+            run().map_err(MaterialCheckErrorV2::into_api)
+        }
+        struct Consent<'a> {
+            calls: Cell<usize>,
+            allow: bool,
+            replace_path: Option<&'a Path>,
+        }
+        impl LocalDurableMaterialConsentV1 for Consent<'_> {
+            fn permits(
+                &self,
+                _: &DurableConstructionScopeV1,
+                _: &str,
+                _: DurableMaterialActionV1,
+            ) -> bool {
+                self.calls.set(self.calls.get() + 1);
+                if let Some(path) = self.replace_path {
+                    checked(std::fs::rename(path, path.with_extension("held")));
+                }
+                self.allow
+            }
+        }
+        fn current_material(
+            engine: &Engine,
+            access: &Access,
+            intake: &Intake,
+            consent: &dyn LocalDurableMaterialConsentV1,
+        ) -> crate::Result<()> {
+            engine
+                .check_durable_material_typed_v2(
+                    access,
+                    intake,
+                    consent,
+                    DurableMaterialActionV1::ReadForExactConstruction,
+                )
+                .map_err(MaterialCheckErrorV2::into_api)
+        }
+        #[test]
+        fn same_intake_live_checks_keep_denial_post_origin_and_first_error() {
+            let f = history_fixture();
+            let access = Access {
+                principal_id: f.intake.principal_id.clone(),
+                ..Access::default()
+            };
+            let before = state(&f);
+            let bytes = checked(std::fs::read(&f.path));
+            // No callback on malformed data, expired scope, wrong principal or
+            // wrong retained origin. In all cases the old first error is kept.
+            let mut variants = vec![f.intake.clone()];
+            let mut wrong = f.intake.clone();
+            wrong.principal_id = "other".into();
+            variants.push(wrong);
+            let mut wrong = f.intake.clone();
+            wrong.metadata_origin = hash(0xee);
+            variants.push(wrong);
+            let mut wrong = f.intake.clone();
+            let mut value = checked(serde_json::to_value(&wrong.outbox));
+            value["reference"] = json!(hash(0xef));
+            wrong.outbox = checked(serde_json::from_value(value));
+            variants.push(wrong);
+            let mut expired = f.intake.clone();
+            let request = expired.outbox.request();
+            let index = f.envelopes[1].view.candidates[0]
+                .proposal
+                .manifest
+                .participants
+                .iter()
+                .position(|p| p.account_id == request.scope.account_id)
+                .unwrap();
+            expired.outbox = outbox(
+                &request.scope.proposal,
+                request.material.clone(),
+                index,
+                &f.path,
+                1,
+                2,
+            );
+            variants.push(expired);
+            for (index, intake) in variants.iter().enumerate() {
+                let old_gate = Consent {
+                    calls: Cell::new(0),
+                    allow: true,
+                    replace_path: None,
+                };
+                let new_gate = Consent {
+                    calls: Cell::new(0),
+                    allow: true,
+                    replace_path: None,
+                };
+                let old = baseline_material(&f.engine, &access, intake, &old_gate);
+                let new = current_material(&f.engine, &access, intake, &new_gate);
+                assert_eq!(
+                    (old_gate.calls.get(), new_gate.calls.get()),
+                    if index == 0 { (1, 1) } else { (0, 0) }
+                );
+                assert_eq!(old.is_ok(), index == 0);
+                same_result(old, new);
+            }
+            for allow in [false, true] {
+                let mut results = Vec::new();
+                for baseline in [true, false] {
+                    let gate = Consent {
+                        calls: Cell::new(0),
+                        allow,
+                        replace_path: Some(&f.path),
+                    };
+                    let result = if baseline {
+                        baseline_material(&f.engine, &access, &f.intake, &gate)
+                    } else {
+                        current_material(&f.engine, &access, &f.intake, &gate)
+                    };
+                    checked(std::fs::rename(f.path.with_extension("held"), &f.path));
+                    assert_eq!(gate.calls.get(), 1);
+                    assert!(result.is_err());
+                    if !allow {
+                        assert!(result.as_ref().err().unwrap().code == "DISCLOSURE_DENIED");
+                    }
+                    // True consent followed by the real moved original file must
+                    // fail the post-origin check, not silently reuse permission.
+                    if allow {
+                        assert!(result.as_ref().err().unwrap().code != "DISCLOSURE_DENIED");
+                    }
+                    results.push(result);
+                }
+                let new = results.pop().unwrap();
+                let old = results.pop().unwrap();
+                same_result(old, new);
+            }
+            for sample in 0..3 {
+                let old_gate = Consent {
+                    calls: Cell::new(0),
+                    allow: true,
+                    replace_path: None,
+                };
+                let new_gate = Consent {
+                    calls: Cell::new(0),
+                    allow: true,
+                    replace_path: None,
+                };
+                let started = Instant::now();
+                let old = baseline_material(&f.engine, &access, &f.intake, &old_gate);
+                let old_us = started.elapsed().as_micros();
+                let started = Instant::now();
+                let new = current_material(&f.engine, &access, &f.intake, &new_gate);
+                let new_us = started.elapsed().as_micros();
+                assert!(old.is_ok() && new.is_ok());
+                same_result(old, new);
+                assert_eq!((old_gate.calls.get(), new_gate.calls.get()), (1, 1));
+                eprintln!(
+                    "IMMUTABLE_COMPONENT engine_intake sample={sample} baseline_us={old_us} reused_us={new_us} source_baseline_material_calls=2 source_reused_material_calls=1 source_live_checks=2 observed_consent_calls=1 equal=true"
+                );
+            }
+            assert!(before == state(&f));
+            assert!(bytes == checked(std::fs::read(&f.path)));
+        }
     }
 }
 

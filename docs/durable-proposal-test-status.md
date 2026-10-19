@@ -1,8 +1,18 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-19, 08:20 UTC.
+Updated: 2026-10-19, 09:32 UTC.
 
 **The bounded synthetic native two-owner fixed-signing fixture passed. Product qualification remains incomplete: no public testnet settlement, OS-process restart recovery, attended GUI reliability, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
+
+## CI24: held observation expired; duplicate immutable validation reduced and failing phase moved first
+
+[Run 39222418879](https://github.com/stanleykosi/pactloom/actions/runs/39222418879), qualifier `3804297e7b2be4045aaf73773c06119a392b9287`, passed build/Python152/Host97/bootstrap/baseline/full signing/Acquire reply loss. Private checkpoint failed at 08:52:24 UTC: Checkpoint/GateHeldPost, Sync/NoCurrentObservation, DISCLOSURE_DENIED. Current-invocation evidence retained receipt ReturnedOkFresh, enqueue ReturnedErrUnknown, link NotCalled, no proof/freeze attempt. Reader never started; producer and root cleanup verified. Source tracing maps this held-observation error to the original 60-second monotonic lifetime, not a dropped generation. Enqueue remains uncertain; a retry/reconstruction is not authorized by this result.
+
+The six-file optimization reuses only immutable mathematical validation already completed in the same call. Wallet borrows its existing decoded contribution while preserving all current wallet SQL, identity, scope, generation, nullifier/tree and clock checks. Engine's private audit tail is reached only after both exact historical envelopes pass original/shape checks, and same-intake math is computed once around the unchanged pre/post live gates. No global cache, added private-data lifetime, deadline change or authority relaxation is introduced.
+
+Focused Wallet/Engine all-features build passed (5m09s) after a test-only JSON argument correction. All7 focused tests and31 additional affected compatibility tests passed. The actual encrypted held-kernel sample reduced material validations17→4 with live checks13→13 unchanged, 217385→102397 microseconds. Three encrypted history samples reduced 202508/195562/185682 to126653/123215/119886 microseconds; intake16610/17405/16838 to8170/8314/9247. Engine22→14 and2→1 counts are source-composition counts, whereas Wallet counts are actual opt-in test instrumentation. These component savings do not prove native window fit or human-paced reliability.
+
+CI now runs the failing private-reopen phase immediately after pure/bootstrap checks, before the already-passing baseline/full-signing/lost-reply phases. All those regressions and final gates still run if the targeted phase passes. Python152 and shell syntax passed; no cleanup/security/budget change. Host integration compilation passed (5m33s). Non-synthetic compatibility is running in parallel with publication/native qualification rather than delaying the first relevant failure; its result and native window fit remain pending.
 
 ## CI23: original workspace reached checkpoint but failed before restart; finite diagnostics added
 

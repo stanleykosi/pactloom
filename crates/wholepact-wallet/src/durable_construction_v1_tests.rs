@@ -1,5 +1,7 @@
-//! Mathematical/data-only component tests. Fresh random never-funded owners and
-//! maintained note scanning; no native decision, intake or fresh source is faked.
+//! Mathematical/data-only and inert held-kernel component tests. Fresh random
+//! never-funded owners and maintained note scanning; no native decision, intake
+//! or real source authority is fabricated. The private Fresh test carrier below
+//! retains opaque synthetic provenance and cannot qualify a durable TLS source.
 use super::*;
 use wholepact_core::*;
 use wholepact_protocol::review::encode_testnet_receiver;
@@ -66,6 +68,10 @@ fn fixture() -> (
     for contribution in &mut contributions {
         contribution.account_id = canonical_durable_account_id(&contribution.fvk);
     }
+    let scope = scope_for_contributions(&contributions);
+    (material(&contributions[0]), scope, contributions)
+}
+fn scope_for_contributions(contributions: &[WalletContribution]) -> DurableConstructionScopeV1 {
     let a = &contributions[0];
     let receiver = encode_testnet_receiver(&a.notes[0].note.recipient());
     let agreement = AgreementDraft {
@@ -183,7 +189,393 @@ fn fixture() -> (
         minimum_confirmations: 1,
         maximum_scan_blocks: 100,
     };
-    (material(a), scope, contributions)
+    scope
+}
+
+// Opt-in, thread-local component instrumentation. Outside a measured test run
+// it is inert; neither this switch nor its counters exist in product builds.
+#[derive(Clone, Copy, Default)]
+struct HeldValidationCounts {
+    material: usize,
+    live: usize,
+}
+struct HeldValidationMeter {
+    legacy: bool,
+    counts: HeldValidationCounts,
+}
+thread_local! {
+    static HELD_VALIDATION_METER: std::cell::RefCell<Option<HeldValidationMeter>> =
+        const { std::cell::RefCell::new(None) };
+}
+pub(super) fn record_material_validation() {
+    HELD_VALIDATION_METER.with(|meter| {
+        if let Some(meter) = meter.borrow_mut().as_mut() {
+            meter.counts.material += 1;
+        }
+    });
+}
+pub(super) fn record_live_verification() {
+    HELD_VALIDATION_METER.with(|meter| {
+        if let Some(meter) = meter.borrow_mut().as_mut() {
+            meter.counts.live += 1;
+        }
+    });
+}
+pub(super) fn legacy_held_validation() -> bool {
+    HELD_VALIDATION_METER.with(|meter| meter.borrow().as_ref().is_some_and(|m| m.legacy))
+}
+fn measure_held_validation<T>(
+    legacy: bool,
+    work: impl FnOnce() -> T,
+) -> (T, HeldValidationCounts, Duration) {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            HELD_VALIDATION_METER.with(|meter| {
+                meter.borrow_mut().take();
+            });
+        }
+    }
+    HELD_VALIDATION_METER.with(|meter| {
+        let mut meter = meter.borrow_mut();
+        assert!(meter.is_none(), "nested held component measurement");
+        *meter = Some(HeldValidationMeter {
+            legacy,
+            counts: HeldValidationCounts::default(),
+        });
+    });
+    let reset = Reset;
+    let started = Instant::now();
+    let result = work();
+    let elapsed = started.elapsed();
+    let counts = HELD_VALIDATION_METER.with(|meter| {
+        meter
+            .borrow_mut()
+            .take()
+            .unwrap_or_else(|| panic!("held component measurement missing"))
+            .counts
+    });
+    drop(reset);
+    (result, counts, elapsed)
+}
+
+// Real encrypted maintained scanner databases, but NO provider observation,
+// native approval, construction admission, financial effect or public issuer.
+// The private Fresh carrier is only inert currentness scaffolding for this
+// component. Its opaque synthetic ChainContext retains synthetic provenance;
+// material()'s historical TLS strings remain inert mathematical claims. They
+// are deliberately incompatible with the source preflight tested below.
+struct HeldComponentFixture {
+    _directory: tempfile::TempDir,
+    wallets: Vec<ProtectedWalletSync>,
+    fresh: Vec<FreshDurableConstructionObservationV1>,
+    competitors: Vec<wholepact_storage_security::EncryptedConnection>,
+    paths: Vec<std::path::PathBuf>,
+}
+fn held_component_fixture() -> HeldComponentFixture {
+    use rand::{Rng, rand_core::UnwrapErr, rngs::SysRng};
+    use std::os::unix::fs::PermissionsExt;
+    use wholepact_storage_security::{DatabaseKey, create_encrypted, open_encrypted};
+    use zcash_primitives::block::BlockHash;
+    let directory = material_test_value(tempfile::tempdir());
+    material_test_value(std::fs::set_permissions(
+        directory.path(),
+        std::fs::Permissions::from_mode(0o700),
+    ));
+    let owners = crate::wallet::SyntheticContributionFixture::generate();
+    let (_, _, _, current, blocks) =
+        crate::wallet::qualification::synthetic_wallet_with_fixture(&owners);
+    let mut wallets = Vec::new();
+    let mut contributions = Vec::new();
+    let mut competitors = Vec::new();
+    let mut paths = Vec::new();
+    for index in 0..2 {
+        let fvk = FullViewingKey::from(owners.owner_spending_key(index));
+        let mut key_bytes = [0; 32];
+        UnwrapErr(SysRng).fill_bytes(&mut key_bytes);
+        let key = DatabaseKey::from_bytes(key_bytes);
+        let path = directory
+            .path()
+            .join(format!("held-component-{index}.sqlite"));
+        let connection = material_test_value(create_encrypted(&path, &key));
+        material_test_value(
+            connection
+                .connection()
+                .pragma_update(None, "journal_mode", "WAL"),
+        );
+        material_test_value(connection.connection().busy_timeout(Duration::ZERO));
+        let mut wallet = material_test_value(DedicatedTestnetWallet::from_encrypted_connection(
+            connection,
+        ));
+        let prior = ChainState::empty((current.tip_height - 1).into(), BlockHash([50; 32]));
+        let account = material_test_value(
+            wallet.import_dedicated_fvk(&fvk, AccountBirthday::from_parts(prior.clone(), None)),
+        );
+        material_test_value(wallet.scan_cached(&blocks, &prior, 1, current.tip_height));
+        contributions.push(material_test_value(wallet.select_contribution(
+            account,
+            &fvk,
+            &canonical_durable_account_id(&fvk),
+            if index == 0 { 105_000 } else { 210_000 },
+            NonZeroU32::MIN,
+            &current,
+            &[],
+        )));
+        // Constructing this synthetic adapter performs no I/O. It is never
+        // contacted, changed to HTTPS or treated as a TLS-qualified source.
+        let source = material_test_value(ChainAdapter::synthetic_loopback_for_qualification(
+            "http://127.0.0.1:1",
+            NetworkPolicy::default(),
+        ));
+        wallets.push(material_test_value(
+            ProtectedWalletSync::from_initialized_wallet(wallet, source, NonZeroU32::MIN),
+        ));
+        let competitor = material_test_value(open_encrypted(&path, &key));
+        material_test_value(competitor.connection().busy_timeout(Duration::ZERO));
+        competitors.push(competitor);
+        paths.push(path);
+    }
+    let clock = material_test_value(now());
+    let started = Instant::now();
+    let observation = material_test_value(
+        wholepact_chain::synthetic_wallet_chain_context_for_qualification(clock),
+    );
+    assert!(observation.source().trust_profile == "synthetic_never_chain_evidence");
+    assert!(!observation.authorizes_signing());
+    let mut scope = scope_for_contributions(&contributions);
+    scope.valid_from_unix_seconds = clock - 1;
+    scope.valid_until_unix_seconds = clock + 600;
+    let fresh = contributions
+        .iter()
+        .zip(&wallets)
+        .enumerate()
+        .map(|(index, (c, sync))| {
+            let mut scope = scope.clone();
+            scope.account_id = c.account_id.clone();
+            scope.participant_id = format!("participant-{index}");
+            FreshDurableConstructionObservationV1 {
+                material: material(c),
+                scope,
+                observation: observation.clone(),
+                current: current.clone(),
+                started,
+                generation: Arc::downgrade(&sync.generation),
+                account: sync.account,
+                attempted: std::cell::Cell::new(false),
+            }
+        })
+        .collect();
+    HeldComponentFixture {
+        _directory: directory,
+        wallets,
+        fresh,
+        competitors,
+        paths,
+    }
+}
+fn component_try_write(connection: &wholepact_storage_security::EncryptedConnection) -> bool {
+    match connection.connection().execute_batch("BEGIN IMMEDIATE;") {
+        Ok(()) => {
+            material_test_value(connection.connection().execute_batch("ROLLBACK;"));
+            true
+        }
+        Err(rusqlite::Error::SqliteFailure(error, _))
+            if error.code == rusqlite::ErrorCode::DatabaseBusy =>
+        {
+            false
+        }
+        Err(_) => panic!("unexpected held component writer error"),
+    }
+}
+fn with_held_component(
+    wallets: &mut [ProtectedWalletSync],
+    fresh: &[FreshDurableConstructionObservationV1],
+    callback: impl FnOnce(&HeldDurableConstructionRosterV1<'_>) -> MaterialResult<()>,
+) -> MaterialResult<()> {
+    let slots = wallets
+        .iter_mut()
+        .zip(fresh)
+        .map(|(sync, fresh)| DurableConstructionWalletSlotV1::new(sync, fresh))
+        .collect::<MaterialResult<Vec<_>>>()?;
+    with_durable_construction_roster_v1(slots, |held, _, _| callback(held))
+}
+
+#[test]
+fn held_component_reuses_owned_with_same_live_checks_and_actual_locks() {
+    let mut observed = Vec::new();
+    for legacy in [true, false] {
+        // Separate fresh original instances: attempted is never cleared or reused.
+        let mut fixture = held_component_fixture();
+        let reached = std::cell::Cell::new(0);
+        let (result, counts, elapsed) = measure_held_validation(legacy, || {
+            with_held_component(&mut fixture.wallets, &fixture.fresh, |held| {
+                held.check_current()?;
+                assert!(fixture.competitors.iter().all(|c| !component_try_write(c)));
+                reached.set(reached.get() + 1);
+                Ok(())
+            })
+        });
+        assert!(
+            result.is_ok(),
+            "held component must accept unchanged maintained rows"
+        );
+        assert!(reached.get() == 1, "held component callback count changed");
+        assert!(counts.live == 13, "held live checks were removed or added");
+        assert!(
+            counts.material == if legacy { 17 } else { 4 },
+            "held material validation count changed"
+        );
+        assert!(fixture.competitors.iter().all(component_try_write));
+        let repeated = with_held_component(&mut fixture.wallets, &fixture.fresh, |_| {
+            panic!("consumed held component reached callback")
+        });
+        assert!(matches!(repeated, Err(DurableConstructionError::Stale)));
+        observed.push((counts, elapsed));
+    }
+    // Finite scalar cost evidence only; elapsed time is never a pass criterion.
+    eprintln!(
+        "held_material_component legacy_validations={} reuse_validations={} legacy_live={} reuse_live={} legacy_us={} reuse_us={}",
+        observed[0].0.material,
+        observed[1].0.material,
+        observed[0].0.live,
+        observed[1].0.live,
+        observed[0].1.as_micros(),
+        observed[1].1.as_micros()
+    );
+}
+
+#[test]
+fn held_component_malformed_source_database_and_currentness_fail_closed() {
+    let mut category_sets = Vec::new();
+    for legacy in [true, false] {
+        let mut categories = Vec::new();
+        for fault in 0..7 {
+            let mut fixture = held_component_fixture();
+            match fault {
+                0 => fixture.fresh[0].material.notes[0].nullifier = "ff".repeat(32),
+                1 => fixture.fresh[0].started = Instant::now() - Duration::from_secs(61),
+                2 => fixture.wallets[0].invalidate_observation(),
+                3 => fixture.fresh[0].current.tip_hash_protocol[0] ^= 1,
+                4 => fixture.fresh[0].material.birthday_height -= 1,
+                5 => fixture.wallets.swap(0, 1),
+                _ => fixture.fresh[0].scope.valid_until_unix_seconds = material_test_value(now()),
+            }
+            let reached = std::cell::Cell::new(false);
+            let (result, _, _) = measure_held_validation(legacy, || {
+                with_held_component(&mut fixture.wallets, &fixture.fresh, |_| {
+                    reached.set(true);
+                    Ok(())
+                })
+            });
+            assert!(
+                result.is_err(),
+                "held component accepted a malformed or stale input"
+            );
+            assert!(!reached.get(), "invalid held component reached callback");
+            assert!(fixture.competitors.iter().all(component_try_write));
+            if fault == 1 {
+                assert!(matches!(
+                    result,
+                    Err(DurableConstructionError::Sync(
+                        SyncError::NoCurrentObservation
+                    ))
+                ));
+            }
+            categories.push(material_result_category(&result));
+        }
+        let fixture = held_component_fixture();
+        let f = &fixture.fresh[0];
+        let owned = material_test_value(f.material.validate());
+        let refused = fixture.wallets[0].validate_durable_material_source_v1(
+            &f.material,
+            &f.scope,
+            &owned.fvk,
+        );
+        assert!(matches!(refused, Err(DurableConstructionError::Binding)));
+        assert!(
+            !f.material.source.matches(&f.observation),
+            "synthetic provenance was relabelled"
+        );
+        assert!(
+            fixture.wallets[0].accepted.is_none(),
+            "component acquired source authority"
+        );
+        let wrong_db = verify_current_notes(&fixture.wallets[1].wallet.db, f);
+        assert!(matches!(wrong_db, Err(DurableConstructionError::Stale)));
+        category_sets.push(categories);
+    }
+    assert!(
+        category_sets[0] == category_sets[1],
+        "held currentness refusal category changed"
+    );
+}
+
+#[test]
+fn held_component_mutated_rows_and_quarantine_match_legacy_refusals() {
+    // Deliberate fixture corruption only; production decisions continue to use
+    // maintained APIs. No stale writer is allowed through the actual held locks.
+    let mutations = [
+        "UPDATE ironwood_received_notes SET value = value + 1",
+        "UPDATE ironwood_received_notes SET commitment_tree_position = commitment_tree_position + 1",
+        "UPDATE blocks SET hash = zeroblob(32)",
+        "UPDATE scan_queue SET priority = 50",
+        "INSERT INTO ironwood_received_note_spends(ironwood_received_note_id, transaction_id) SELECT id, transaction_id FROM ironwood_received_notes",
+        "CREATE TABLE wholepact_bundle_quarantine(recovery_required INTEGER)",
+    ];
+    for sql in mutations {
+        let mut categories = Vec::new();
+        for legacy in [true, false] {
+            let mut fixture = held_component_fixture();
+            material_test_value(fixture.competitors[0].connection().execute_batch(sql));
+            let reached = std::cell::Cell::new(false);
+            let (result, _, _) = measure_held_validation(legacy, || {
+                with_held_component(&mut fixture.wallets, &fixture.fresh, |_| {
+                    reached.set(true);
+                    Ok(())
+                })
+            });
+            assert!(result.is_err(), "mutated maintained rows were accepted");
+            assert!(!reached.get(), "mutated maintained rows reached callback");
+            assert!(fixture.competitors.iter().all(component_try_write));
+            categories.push(material_result_category(&result));
+        }
+        assert!(
+            categories[0] == categories[1],
+            "held mutation refusal category changed"
+        );
+    }
+}
+
+#[test]
+fn held_component_rechecks_identity_inside_callback_and_after_return() {
+    use std::os::unix::fs::PermissionsExt;
+    for legacy in [true, false] {
+        let mut fixture = held_component_fixture();
+        let entered = std::cell::Cell::new(false);
+        let (result, _, _) = measure_held_validation(legacy, || {
+            with_held_component(&mut fixture.wallets, &fixture.fresh, |held| {
+                held.check_current()?;
+                assert!(fixture.competitors.iter().all(|c| !component_try_write(c)));
+                entered.set(true); // Operation-local diagnostic, never a financial effect.
+                material_test_value(std::fs::set_permissions(
+                    &fixture.paths[0],
+                    std::fs::Permissions::from_mode(0o640),
+                ));
+                assert!(matches!(
+                    held.check_current(),
+                    Err(DurableConstructionError::Storage)
+                ));
+                // Returning success cannot suppress the kernel's post-leaf check.
+                Ok(())
+            })
+        });
+        assert!(
+            entered.get(),
+            "held identity mutation never reached boundary"
+        );
+        assert!(matches!(result, Err(DurableConstructionError::Storage)));
+        assert!(fixture.competitors.iter().all(component_try_write));
+    }
 }
 #[test]
 fn exact_private_material_roundtrip_preserves_math_not_authority() {

@@ -631,6 +631,8 @@ impl HistoricalConstructionMaterialV1 {
         Ok(p)
     }
     fn validate(&self) -> Result<wholepact_protocol::construction::OwnedContribution> {
+        #[cfg(all(test, feature = "synthetic-qualification"))]
+        tests::record_material_validation();
         if self.version != 1
             || self.birthday_height == 0
             || self.birthday_height > self.context.anchor_height
@@ -966,8 +968,25 @@ where
         + InputSource<AccountId = AccountUuid, NoteRef = ReceivedNoteId>,
 {
     f.check_current()?;
+    let owned = f.material.validate()?;
+    verify_current_notes_with_owned(db, f, &owned)
+}
+
+// Only reuse the exact immutable material decoded by this stack frame. This
+// helper carries no freshness or authority; both callers check currentness at
+// the original boundary and every maintained database predicate remains here.
+fn verify_current_notes_with_owned<D>(
+    db: &D,
+    f: &FreshDurableConstructionObservationV1,
+    owned: &wholepact_protocol::construction::OwnedContribution,
+) -> Result<()>
+where
+    D: WalletRead<AccountId = AccountUuid>
+        + InputSource<AccountId = AccountUuid, NoteRef = ReceivedNoteId>,
+{
+    #[cfg(all(test, feature = "synthetic-qualification"))]
+    tests::record_live_verification();
     let m = &f.material;
-    let owned = m.validate()?;
     let old = m.context.decode()?;
     if f.current.anchor_height != old.anchor_height
         || f.current.anchor_hash_protocol != old.anchor_hash_protocol
@@ -1277,7 +1296,12 @@ where
             let quarantined: bool = extension.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='wholepact_bundle_quarantine')", [], |r| r.get(0))
                 .map_err(|_| DurableConstructionError::Storage)?;
             if quarantined { return Err(DurableConstructionError::Storage); }
-            verify_current_notes(db, fresh)
+            // Test-only frozen composition measures the former repeated decode
+            // inside this very same held kernel, never a public alternate path.
+            #[cfg(all(test, feature = "synthetic-qualification"))]
+            if tests::legacy_held_validation() { return verify_current_notes(db, fresh); }
+            fresh.check_current()?;
+            verify_current_notes_with_owned(db, fresh, &owned)
         };
         check().map_err(|e| TransactionError(E::from(e)))?;
         let node = CheckNode { prior, check: &check };

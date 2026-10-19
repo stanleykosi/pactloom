@@ -102,12 +102,12 @@ sha256sum "$executable"
 TMPDIR="$runtime_root" python3 -B scripts/ci-synthetic-output-tests.py
 TMPDIR="$runtime_root" python3 -B scripts/ci-synthetic-output.py "$executable" pure
 TMPDIR="$runtime_root" python3 -B scripts/ci-synthetic-output.py "$executable" storage-bootstrap
+# Separate original-workspace producer SIGKILL and fresh-process read-only reopening.
+TMPDIR="$runtime_root" python3 -B scripts/ci-synthetic-output.py "$executable" durable-private-reopen
 TMPDIR="$runtime_root" python3 -B scripts/ci-synthetic-output.py "$executable" durable-owner-reopen
 TMPDIR="$runtime_root" python3 -B scripts/ci-synthetic-output.py "$executable" durable-fixed-signing
 # A separate fresh fixture reuses only this compiled binary, not prior custody.
 TMPDIR="$runtime_root" python3 -B scripts/ci-synthetic-output.py "$executable" durable-acquire-reply-loss
-# Separate original-workspace producer SIGKILL and fresh-process read-only reopening.
-TMPDIR="$runtime_root" python3 -B scripts/ci-synthetic-output.py "$executable" durable-private-reopen
 # The private account/envelope regressions live in the signer lib, not the Host
 # executable. Reuse this exact release target and dependencies; do not run a
 # broad signer suite or any ignored/native tests during this separate build.

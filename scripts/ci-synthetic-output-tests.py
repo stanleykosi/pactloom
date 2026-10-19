@@ -227,6 +227,7 @@ class PublicOutputTests(unittest.TestCase):
         early=['python3 -B scripts/ci-synthetic-output-tests.py',
                'python3 -B scripts/ci-synthetic-output.py "$executable" pure',
                'python3 -B scripts/ci-synthetic-output.py "$executable" storage-bootstrap',
+               'python3 -B scripts/ci-synthetic-output.py "$executable" durable-private-reopen',
                'python3 -B scripts/ci-synthetic-output.py "$executable" durable-owner-reopen',
                'python3 -B scripts/ci-synthetic-output.py "$executable" durable-fixed-signing',
                'python3 -B scripts/ci-synthetic-output.py "$executable" durable-acquire-reply-loss']
@@ -2715,7 +2716,8 @@ class PrivateWorkspaceOutputTests(unittest.TestCase):
         shell=(ROOT/'scripts/ci-durable-native-linux.sh').read_text()
         call='TMPDIR="$runtime_root" python3 -B scripts/ci-synthetic-output.py "$executable" durable-private-reopen'
         self.assertEqual(shell.count(call),1)
-        self.assertLess(shell.index('"$executable" durable-acquire-reply-loss'),shell.index(call))
+        self.assertLess(shell.index('"$executable" storage-bootstrap'),shell.index(call))
+        self.assertLess(shell.index(call),shell.index('"$executable" durable-owner-reopen'))
         self.assertIn('timeout-minutes: 150',(ROOT/'.github/workflows/durable-native-linux.yml').read_text())
 
     def test_private_workspace_closed_fields_and_22_diagnostic_boundaries(self):
