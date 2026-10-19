@@ -803,11 +803,31 @@ impl Engine {
     }
 }
 
+enum FixedVerificationFailureV2 {
+    Engine(ApiError),
+    Protocol(String),
+}
+impl FixedVerificationFailureV2 {
+    fn into_api(self) -> ApiError {
+        match self {
+            Self::Engine(e) => e,
+            Self::Protocol(_) => damaged(),
+        }
+    }
+}
 fn verify_fixed(
     candidate: &crate::CandidateView,
     checkpoint: &VerifiedCheckpoint,
     mappings: &Mappings,
 ) -> Result<VerifiedFixedProposal> {
+    verify_fixed_typed_v2(candidate, checkpoint, mappings)
+        .map_err(FixedVerificationFailureV2::into_api)
+}
+fn verify_fixed_typed_v2(
+    candidate: &crate::CandidateView,
+    checkpoint: &VerifiedCheckpoint,
+    mappings: &Mappings,
+) -> std::result::Result<VerifiedFixedProposal, FixedVerificationFailureV2> {
     let inputs: Vec<_> = mappings
         .inputs
         .iter()
@@ -828,13 +848,15 @@ fn verify_fixed(
     VerifiedFixedProposal::verify(
         checkpoint.private_unsigned_pczt_bytes(),
         checkpoint.pczt_bytes(),
-        &candidate.verified_snapshot()?,
+        &candidate
+            .verified_snapshot()
+            .map_err(FixedVerificationFailureV2::Engine)?,
         checkpoint.policy(),
         &inputs,
         &outputs,
         limits(),
     )
-    .map_err(|_| damaged())
+    .map_err(FixedVerificationFailureV2::Protocol)
 }
 fn put(envelope: &mut Envelope, id: &str, stored: &Stored) -> Result<()> {
     envelope.durable_proposals_v1.insert(
@@ -974,11 +996,40 @@ pub(crate) fn freeze_private_fixed_v2(
     checkpoint: &VerifiedCheckpoint,
     receipt: &crate::candidates::CheckpointReceipt,
 ) -> Result<FixedProposalIdentityV1> {
+    freeze_private_fixed_kernel_v2(envelope, access, checkpoint, receipt, &|_| {})
+}
+#[cfg(all(feature = "manual-admission", target_os = "linux"))]
+pub(crate) fn freeze_private_fixed_observed_v2(
+    observation: &crate::durable_private_workspace_v1::diagnostics::Observation,
+    envelope: &mut Envelope,
+    access: &Access,
+    checkpoint: &VerifiedCheckpoint,
+    receipt: &crate::candidates::CheckpointReceipt,
+) -> Result<FixedProposalIdentityV1> {
+    use crate::durable_private_workspace_v1::diagnostics::{self, Site};
+    freeze_private_fixed_kernel_v2(envelope, access, checkpoint, receipt, &|error| {
+        let cause = match error {
+            FixedVerificationFailureV2::Engine(e) => diagnostics::engine(e),
+            FixedVerificationFailureV2::Protocol(e) => diagnostics::protocol(e),
+        };
+        observation.record(Site::FixedVerify, cause);
+    })
+}
+fn freeze_private_fixed_kernel_v2(
+    envelope: &mut Envelope,
+    access: &Access,
+    checkpoint: &VerifiedCheckpoint,
+    receipt: &crate::candidates::CheckpointReceipt,
+    observe: &dyn Fn(&FixedVerificationFailureV2),
+) -> Result<FixedProposalIdentityV1> {
     let candidate = envelope.view.candidates.first().ok_or_else(damaged)?;
     let mappings: Mappings =
         serde_json::from_value(receipt.action_mappings_v1.clone().ok_or_else(damaged)?)
             .map_err(|_| damaged())?;
-    let fixed = verify_fixed(candidate, checkpoint, &mappings)?;
+    let fixed = verify_fixed_typed_v2(candidate, checkpoint, &mappings).map_err(|error| {
+        observe(&error);
+        error.into_api()
+    })?;
     let identity = fixed.identity().clone();
     let id = candidate.candidate_id.clone();
     if envelope.durable_proposals_v1.contains_key(&id) {
@@ -1003,6 +1054,32 @@ pub(crate) fn read_private_fixed_v2(
     checkpoint: &VerifiedCheckpoint,
     receipt: &crate::candidates::CheckpointReceipt,
 ) -> Result<FixedProposalIdentityV1> {
+    read_private_fixed_kernel_v2(envelope, access, checkpoint, receipt, &|_| {})
+}
+#[cfg(all(feature = "manual-admission", target_os = "linux"))]
+pub(crate) fn read_private_fixed_observed_v2(
+    observation: &crate::durable_private_workspace_v1::diagnostics::Observation,
+    envelope: &Envelope,
+    access: &Access,
+    checkpoint: &VerifiedCheckpoint,
+    receipt: &crate::candidates::CheckpointReceipt,
+) -> Result<FixedProposalIdentityV1> {
+    use crate::durable_private_workspace_v1::diagnostics::{self, Site};
+    read_private_fixed_kernel_v2(envelope, access, checkpoint, receipt, &|error| {
+        let cause = match error {
+            FixedVerificationFailureV2::Engine(e) => diagnostics::engine(e),
+            FixedVerificationFailureV2::Protocol(e) => diagnostics::protocol(e),
+        };
+        observation.record(Site::FixedVerify, cause);
+    })
+}
+fn read_private_fixed_kernel_v2(
+    envelope: &Envelope,
+    access: &Access,
+    checkpoint: &VerifiedCheckpoint,
+    receipt: &crate::candidates::CheckpointReceipt,
+    observe: &dyn Fn(&FixedVerificationFailureV2),
+) -> Result<FixedProposalIdentityV1> {
     let candidate = envelope.view.candidates.first().ok_or_else(damaged)?;
     let stored: Stored = serde_json::from_value(
         envelope
@@ -1024,7 +1101,10 @@ pub(crate) fn read_private_fixed_v2(
     {
         return Err(damaged());
     }
-    let fixed = verify_fixed(candidate, checkpoint, &mappings)?;
+    let fixed = verify_fixed_typed_v2(candidate, checkpoint, &mappings).map_err(|error| {
+        observe(&error);
+        error.into_api()
+    })?;
     if fixed.identity() != &stored.identity {
         return Err(damaged());
     }

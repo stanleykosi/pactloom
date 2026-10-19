@@ -391,3 +391,144 @@ fn ownership_cut_precedes_every_vault_replacement_and_reopen_is_explicit() {
         .unwrap();
     assert!(open.contains("retention_policy, false"));
 }
+
+// These are real encrypted sidecar/metadata fault kernels. They do not enroll a
+// reader, obtain a native receipt, or construct a private coordinator.
+#[cfg(feature = "synthetic-born-joined-qualification")]
+#[test]
+fn private_reader_diagnostic_real_anchor_failure_preserves_origin() {
+    for mutation in 0..8 {
+        let temp = tempfile::tempdir().unwrap();
+        let (directory, secrets) = fixture(&temp.path().join("host"), true, true);
+        assert!(OriginalWorkspaceFilesV1::open_final(&directory, &secrets).is_ok());
+        let pending = directory.path(PENDING).unwrap();
+        let commit = directory.path(COMMIT).unwrap();
+        match mutation {
+            0 => fs::remove_file(&pending).unwrap(),
+            1 => fs::remove_file(&commit).unwrap(),
+            2 => {
+                fs::remove_file(&pending).unwrap();
+                fs::remove_file(&commit).unwrap();
+            }
+            3 | 4 => {
+                let path = if mutation == 3 { &pending } else { &commit };
+                let bytes = fs::read(path).unwrap();
+                fs::rename(path, temp.path().join("retained-original")).unwrap();
+                crate::files::write_new(path, &bytes).unwrap();
+            }
+            5 => fs::hard_link(&pending, temp.path().join("second-link")).unwrap(),
+            6 => fs::set_permissions(&pending, fs::Permissions::from_mode(0o644)).unwrap(),
+            _ => fs::write(&pending, fs::read(&commit).unwrap()).unwrap(),
+        }
+        let before = fingerprint(&directory);
+        let _scope = begin_private_fixed_diagnostic_scope_v1();
+        let result = OriginalWorkspaceFilesV1::open_final(&directory, &secrets);
+        let expected = if matches!(mutation, 5 | 6) {
+            "Invalid"
+        } else {
+            "Authentication"
+        };
+        assert!(matches!(
+            (&result, expected),
+            (Err(Error::Invalid), "Invalid") | (Err(Error::Authentication), "Authentication")
+        ));
+        let first = private_fixed_diagnostic_snapshot_v1().unwrap();
+        let encoded = first.canonical_json().unwrap();
+        let value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(value["primary"]["operation"], "OpenOriginal");
+        assert_eq!(value["primary"]["site"], "ReaderFinalRegistry");
+        assert_eq!(value["primary"]["engine_code"], "NotApplicable");
+        assert_eq!(value["primary"]["family"], "Host");
+        assert_eq!(value["primary"]["cause"], expected);
+        assert!(value["evidence"].is_null());
+        assert!(value["worker"].is_null());
+        let later: Result<()> = reader_result!(
+            ReaderHostReturn,
+            observe_private_fixed_host_v1,
+            Err(Error::Storage)
+        );
+        assert!(matches!(later, Err(Error::Storage)));
+        assert_eq!(private_fixed_diagnostic_snapshot_v1().unwrap(), first);
+        assert_eq!(fingerprint(&directory), before);
+    }
+}
+
+#[cfg(feature = "synthetic-born-joined-qualification")]
+#[test]
+fn private_reader_diagnostic_first_failure_is_shared_with_host() {
+    let temp = tempfile::tempdir().unwrap();
+    let (directory, _secrets) = fixture(&temp.path().join("host"), true, true);
+    let path = temp.path().join("workspace").join(DATABASE);
+    let control = wholepact_storage_security::open_encrypted_read_snapshot(
+        &path,
+        &DatabaseKey::from_bytes([9; 32]),
+    )
+    .unwrap();
+    drop(control);
+    let before = fs::read(&path).unwrap();
+    let original_host = fingerprint(&directory);
+    let _scope = begin_private_fixed_diagnostic_scope_v1();
+    // This is the exact forwarding kernel at the production metadata snapshot
+    // expression, using a genuine encrypted source and an incorrect key.
+    let lower = reader_result!(
+        ReaderMetadataSnapshot,
+        observe_private_fixed_storage_v1,
+        wholepact_storage_security::open_encrypted_read_snapshot(
+            &path,
+            &DatabaseKey::from_bytes([42; 32])
+        )
+    );
+    assert!(matches!(
+        lower,
+        Err(wholepact_storage_security::StorageSecurityError::AuthenticationFailed)
+    ));
+    let first = private_fixed_diagnostic_snapshot_v1().unwrap();
+    let value: serde_json::Value = serde_json::from_str(&first.canonical_json().unwrap()).unwrap();
+    assert_eq!(value["primary"]["site"], "ReaderMetadataSnapshot");
+    assert_eq!(value["primary"]["family"], "StorageSecurity");
+    assert_eq!(value["primary"]["cause"], "AuthenticationFailed");
+    assert_eq!(value["primary"]["engine_code"], "NotApplicable");
+    let mapped = lower.map_err(Error::from);
+    let outer = reader_result!(ReaderSourceOpen, observe_private_fixed_host_v1, mapped);
+    assert!(matches!(outer, Err(Error::Storage)));
+    assert_eq!(private_fixed_diagnostic_snapshot_v1().unwrap(), first);
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_eq!(fingerprint(&directory), original_host);
+}
+
+#[cfg(feature = "synthetic-born-joined-qualification")]
+#[test]
+fn private_reader_diagnostic_v3_and_result_forwarding_are_exact() {
+    let password = b"synthetic-only-storage-password";
+    let legacy = Secrets::fresh().unwrap().seal(password).unwrap();
+    let _scope = begin_private_fixed_diagnostic_scope_v1();
+    let calls = std::cell::Cell::new(0);
+    let result = reader_result!(ReaderVaultV3Open, observe_private_fixed_host_v1, {
+        calls.set(calls.get() + 1);
+        Secrets::open_private_workspace_v3(&legacy, password)
+    });
+    assert!(matches!(result, Err(Error::Invalid)));
+    assert_eq!(calls.get(), 1);
+    let first = private_fixed_diagnostic_snapshot_v1().unwrap();
+    let value: serde_json::Value = serde_json::from_str(&first.canonical_json().unwrap()).unwrap();
+    assert_eq!(value["primary"]["site"], "ReaderVaultV3Open");
+    assert_eq!(value["primary"]["cause"], "Invalid");
+    let canary = String::from("private-reader-payload-canary");
+    let pointer = canary.as_ptr();
+    let returned: Result<()> = reader_result!(ReaderHostReturn, observe_private_fixed_host_v1, {
+        calls.set(calls.get() + 1);
+        Err(Error::Receipt(canary))
+    });
+    match returned {
+        Err(Error::Receipt(value)) => assert_eq!(value.as_ptr(), pointer),
+        _ => panic!("the original error must be returned unchanged"),
+    }
+    assert_eq!(calls.get(), 2);
+    assert_eq!(private_fixed_diagnostic_snapshot_v1().unwrap(), first);
+    assert!(
+        !first
+            .canonical_json()
+            .unwrap()
+            .contains("private-reader-payload-canary")
+    );
+}

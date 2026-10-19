@@ -1159,6 +1159,9 @@ impl PrivateWorkspaceStageV1 {
 }
 #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
 struct PrivateWorkspaceStageResultV1 {
+    private_fixed_diagnostic:
+        Option<crate::host::durable_private_workspace_v1::PrivateFixedDiagnosticV1>,
+    diagnostic_withheld: bool,
     outcome: std::io::Result<()>,
     process: owned_test_process_group_v1::ProcessCleanupV1,
     root: Option<tempfile::TempDir>,
@@ -1166,6 +1169,21 @@ struct PrivateWorkspaceStageResultV1 {
     failure_reason: HarnessFailureReason,
     next: usize,
     expected: usize,
+}
+
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "synthetic-born-joined-qualification"
+))]
+impl PrivateWorkspaceStageResultV1 {
+    fn private_fixed_diagnostic(
+        &self,
+    ) -> Option<&crate::host::durable_private_workspace_v1::PrivateFixedDiagnosticV1> {
+        self.private_fixed_diagnostic.as_ref()
+    }
+    fn diagnostic_withheld(&self) -> bool {
+        self.diagnostic_withheld
+    }
 }
 
 /// Exactly one stage, sharing the caller's original cutoff and returning the
@@ -1465,9 +1483,24 @@ fn private_workspace_stage_v1(
         failure_reason=HarnessFailureReason::CleanupUnverified;
         outcome=Err(std::io::Error::other("private workspace process cleanup unverified"));
     }
-    Ok(PrivateWorkspaceStageResultV1 { outcome, process,
-        root:finished.root_for_explicit_close, summary:transcript.summary(),
-        failure_reason,next,expected:inputs.len() })
+    transcript.finish_private_fixed_diagnostic();
+    let private_fixed_diagnostic = if process.verified() {
+        transcript.private_fixed_diagnostic().cloned()
+    } else {
+        None
+    };
+    let diagnostic_withheld = transcript.diagnostic_withheld();
+    Ok(PrivateWorkspaceStageResultV1 {
+        private_fixed_diagnostic,
+        diagnostic_withheld,
+        outcome,
+        process,
+        root: finished.root_for_explicit_close,
+        summary: transcript.summary(),
+        failure_reason,
+        next,
+        expected: inputs.len(),
+    })
 }
 
 #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]

@@ -643,7 +643,10 @@ impl LocalDurableMaterialConsentV1 for CurrentMaterialPrivacyV2<'_, '_> {
         if action != self.allowed || !valid_commitment(material) {
             return false;
         }
-        if !observed_host_permission(self.scope_current(scope)) {
+        if !observed_private_permission_at_v1(
+            PrivateDiagnosticSiteV1::HostMaterialScope,
+            self.scope_current(scope),
+        ) {
             return false;
         }
         let Ok(mut approved) = self.approved.lock() else {
@@ -655,8 +658,14 @@ impl LocalDurableMaterialConsentV1 for CurrentMaterialPrivacyV2<'_, '_> {
         {
             return original == scope
                 && digest == material
-                && observed_host_permission(approval.check())
-                && observed_host_permission(self.scope_current(scope));
+                && observed_private_permission_at_v1(
+                    PrivateDiagnosticSiteV1::HostMaterialNativeCheck,
+                    approval.check(),
+                )
+                && observed_private_permission_at_v1(
+                    PrivateDiagnosticSiteV1::HostMaterialScope,
+                    self.scope_current(scope),
+                );
         }
         if approved.len() >= 2 {
             return false;
@@ -667,10 +676,14 @@ impl LocalDurableMaterialConsentV1 for CurrentMaterialPrivacyV2<'_, '_> {
         let approval = match self.host.terminal.approve_historical(&format!(
             "Allow this exact original private material for {} in this current native command?\n{detail}\nOriginal material commitment: {material}\nThe original absolute privacy ceiling is not renewed. This is local retention/read only, not participant ownership, financial authority, review export, signing or submission.",
             if action == 0 { "sealed initial durable retention" } else { "bounded original construction/proof/fixed verification" },
-        )) { Ok(approval) => approval, Err(error) => { observe_host_current(&error); return false; } };
-        if !observed_host_permission(self.scope_current(scope))
-            || !observed_host_permission(approval.check())
-        {
+        )) { Ok(approval) => approval, Err(error) => { observe_private_host_current_at_v1(PrivateDiagnosticSiteV1::HostMaterialApproval,&error);observe_host_current(&error); return false; } };
+        if !observed_private_permission_at_v1(
+            PrivateDiagnosticSiteV1::HostMaterialScope,
+            self.scope_current(scope),
+        ) || !observed_private_permission_at_v1(
+            PrivateDiagnosticSiteV1::HostMaterialNativeCheck,
+            approval.check(),
+        ) {
             return false;
         }
         approved.push((scope.clone(), material.into(), approval));
@@ -694,12 +707,16 @@ impl LocalProofConsent for CurrentProofPrivacyV2<'_, '_> {
         if !self.allowed.contains(&action) {
             return false;
         }
-        if !observed_host_permission(self.material.check_complete()) {
+        if !observed_private_permission_at_v1(
+            PrivateDiagnosticSiteV1::HostProofScope,
+            self.material.check_complete(),
+        ) {
             return false;
         }
         let scopes = match self.material.exact_scopes() {
             Ok(scopes) => scopes,
             Err(error) => {
+                observe_private_host_current_at_v1(PrivateDiagnosticSiteV1::HostProofScope, &error);
                 observe_host_current(&error);
                 return false;
             }
@@ -707,6 +724,7 @@ impl LocalProofConsent for CurrentProofPrivacyV2<'_, '_> {
         let access = match self.material.host.access() {
             Ok(access) => access,
             Err(error) => {
+                observe_private_host_current_at_v1(PrivateDiagnosticSiteV1::HostProofScope, &error);
                 observe_host_current(&error);
                 return false;
             }
@@ -740,18 +758,27 @@ impl LocalProofConsent for CurrentProofPrivacyV2<'_, '_> {
             return false;
         }
         if let Some((_, _, native)) = approved.iter().find(|(_, a, _)| *a == action) {
-            return observed_host_permission(native.check())
-                && observed_host_permission(self.material.check_complete());
+            return observed_private_permission_at_v1(
+                PrivateDiagnosticSiteV1::HostProofNativeCheck,
+                native.check(),
+            ) && observed_private_permission_at_v1(
+                PrivateDiagnosticSiteV1::HostProofScope,
+                self.material.check_complete(),
+            );
         }
         let Ok(detail) = serde_json::to_string_pretty(scope) else {
             return false;
         };
         let native = match self.material.host.terminal.approve_historical(&format!(
             "Allow {action:?} for this exact original private workspace checkpoint?\n{detail}\nOnly the actual original primary proof journal is used. A first proof attempt consumes its live continuation; interruption never authorizes restart. No remote export, financial admission, signature or submission is allowed."
-        )) { Ok(native) => native, Err(error) => { observe_host_current(&error); return false; } };
-        if !observed_host_permission(native.check())
-            || !observed_host_permission(self.material.check_complete())
-        {
+        )) { Ok(native) => native, Err(error) => { observe_private_host_current_at_v1(PrivateDiagnosticSiteV1::HostProofApproval,&error);observe_host_current(&error); return false; } };
+        if !observed_private_permission_at_v1(
+            PrivateDiagnosticSiteV1::HostProofNativeCheck,
+            native.check(),
+        ) || !observed_private_permission_at_v1(
+            PrivateDiagnosticSiteV1::HostProofScope,
+            self.material.check_complete(),
+        ) {
             return false;
         }
         approved.push((scope.clone(), action, native));
@@ -1426,11 +1453,26 @@ impl<'host> PrivateFixedSessionV2<'host> {
         drop(observe);
         complete_private_stage(PrivateBoundaryV2::Observe);
         begin_private_stage(PrivateBoundaryV2::Checkpoint);
-        material.check_complete()?;
-        let checkpoint_key = self.original_checkpoint_key()?;
+        let checkpoint_diagnostic =
+            begin_private_diagnostic_invocation_v1(PrivateDiagnosticOperationV1::Checkpoint);
+        private_host_result_at_v1(
+            PrivateDiagnosticSiteV1::HostCheckpointEntry,
+            material.check_complete(),
+        )?;
+        let checkpoint_key = private_host_result_at_v1(
+            PrivateDiagnosticSiteV1::HostCheckpointEntry,
+            self.original_checkpoint_key(),
+        )?;
         let checkpoint_action = self
             .owner
-            .exact_fixed_action_v2(PrivateWorkspaceActionV1::CheckpointExactOriginal)?;
+            .exact_fixed_action_v2(PrivateWorkspaceActionV1::CheckpointExactOriginal)
+            .map_err(|error| {
+                observe_private_host_current_at_v1(
+                    PrivateDiagnosticSiteV1::HostCheckpointAction,
+                    &error,
+                );
+                error
+            })?;
         let [left, right] = &mut self.cache.wallets;
         let checkpoint = checkpoint_action
             .coordinator()
@@ -1458,12 +1500,19 @@ impl<'host> PrivateFixedSessionV2<'host> {
             )
             .map_err(observe_engine_checkpoint)?;
         let revision = checkpoint.status().revision;
-        let attempt = checkpoint
-            .into_attempt()
-            .ok_or(Error::RecoveryFinancialUnsupported)?;
-        checkpoint_action.check()?;
+        let attempt = private_host_result_at_v1(
+            PrivateDiagnosticSiteV1::HostCheckpointContinuation,
+            checkpoint
+                .into_attempt()
+                .ok_or(Error::RecoveryFinancialUnsupported),
+        )?;
+        private_host_result_at_v1(
+            PrivateDiagnosticSiteV1::HostCheckpointPostcheck,
+            checkpoint_action.check(),
+        )?;
         drop(fresh);
         complete_private_stage(PrivateBoundaryV2::Checkpoint);
+        drop(checkpoint_diagnostic);
         begin_private_stage(PrivateBoundaryV2::Proof);
         let prove_action = self
             .owner
@@ -1500,6 +1549,8 @@ impl<'host> PrivateFixedSessionV2<'host> {
         drop(checkpoint_action);
         complete_private_stage(PrivateBoundaryV2::Proof);
         begin_private_stage(PrivateBoundaryV2::Freeze);
+        let freeze_diagnostic =
+            begin_private_diagnostic_invocation_v1(PrivateDiagnosticOperationV1::Freeze);
         let freeze_material = CurrentMaterialPrivacyV2::new(
             self.host,
             &self.owner,
@@ -1531,7 +1582,10 @@ impl<'host> PrivateFixedSessionV2<'host> {
         )?;
         self.revision = frozen.revision;
         complete_private_stage(PrivateBoundaryV2::Freeze);
+        drop(freeze_diagnostic);
         begin_private_stage(PrivateBoundaryV2::Read);
+        let _read_diagnostic =
+            begin_private_diagnostic_invocation_v1(PrivateDiagnosticOperationV1::ReadFixed);
         self.owner.with_exact_fixed_v2(
             PrivateWorkspaceActionV1::ReadVerifiedFixed,
             |coordinator, privacy| {
@@ -1648,11 +1702,17 @@ fn run_original_proof_foreground_v2<'op, 'source>(
     material: &CurrentMaterialPrivacyV2<'_, '_>,
 ) -> Result<wholepact_engine::PrivateWorkspaceStatusV1> {
     use std::sync::atomic::{AtomicBool, Ordering};
-    workspace.check()?;
-    let access = host.access()?.clone();
+    private_host_result_at_v1(
+        PrivateDiagnosticSiteV1::HostProofPrecheck,
+        workspace.check(),
+    )?;
+    let access =
+        private_host_result_at_v1(PrivateDiagnosticSiteV1::HostProofAccess, host.access())?.clone();
     let key = key.to_owned();
     let deadline = workspace.deadline();
     let cancelled = std::sync::Arc::new(AtomicBool::new(false));
+    let _proof_diagnostic =
+        begin_private_diagnostic_invocation_v1(PrivateDiagnosticOperationV1::Proof);
     let result = std::thread::scope(|scope| {
         let (send, receive) = std::sync::mpsc::channel();
         let broker = ForegroundProofBrokerV2 {
@@ -1668,10 +1728,12 @@ fn run_original_proof_foreground_v2<'op, 'source>(
             );
             let _ = send.send(ForegroundProofRequestV2::Finished(result));
         });
+        private_worker_start_v1();
         let mut foreground_error = None;
         let result = loop {
             match receive.recv_timeout(Duration::from_secs(1)) {
                 Ok(ForegroundProofRequestV2::Finished(result)) => {
+                    private_worker_received_v1(&result);
                     break result.map_err(observe_engine_proof);
                 }
                 Ok(request) => {
@@ -1709,35 +1771,62 @@ fn run_original_proof_foreground_v2<'op, 'source>(
                     }
                     if foreground_error.is_none() {
                         if let Err(error) = host.terminal.message("Original local proof work is active; the owned worker will drain. No transaction is being submitted.\n") {
+                            observe_private_host_current_at_v1(PrivateDiagnosticSiteV1::HostProofForegroundMessage,&error);
                             observe_host_current(&error);
                             foreground_error = Some(error);
                             cancelled.store(true, Ordering::Release);
                         }
                     }
                 }
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break Err(Error::Storage),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    private_worker_disconnected_v1();
+                    observe_private_host_current_at_v1(
+                        PrivateDiagnosticSiteV1::HostProofReceive,
+                        &Error::Storage,
+                    );
+                    break Err(Error::Storage);
+                }
             }
         };
         // Join on every success/failure/channel outcome. No detached proof can
         // outlive these exact original source/proof owners or cache teardown.
         let joined = worker.join();
-        if let Some(error) = foreground_error {
-            return Err(error);
-        }
-        match result {
-            Err(error) => Err(error),
-            Ok(status) => match joined {
-                Ok(()) => Ok(status),
-                Err(_) => Err(Error::Storage),
-            },
-        }
+        private_worker_joined_v1(joined.is_ok());
+        select_original_proof_result_v1(foreground_error, result, joined)
     });
     match result {
         Err(error) => Err(error),
         Ok(status) => {
-            workspace.check()?;
+            private_host_result_at_v1(
+                PrivateDiagnosticSiteV1::HostProofFinalCheck,
+                workspace.check(),
+            )?;
             Ok(status)
         }
+    }
+}
+
+// Data-only selection shared with component faults; join already happened.
+fn select_original_proof_result_v1<T>(
+    foreground_error: Option<Error>,
+    result: Result<T>,
+    joined: std::thread::Result<()>,
+) -> Result<T> {
+    if let Some(error) = foreground_error {
+        return Err(error);
+    }
+    match result {
+        Err(error) => Err(error),
+        Ok(status) => match joined {
+            Ok(()) => Ok(status),
+            Err(_) => {
+                observe_private_host_current_at_v1(
+                    PrivateDiagnosticSiteV1::HostProofJoin,
+                    &Error::Storage,
+                );
+                Err(Error::Storage)
+            }
+        },
     }
 }
 
@@ -1834,6 +1923,8 @@ impl Host {
         root: &Path,
     ) -> Result<PrivateVerifiedFixedV2> {
         begin_private_stage(PrivateBoundaryV2::Read);
+        let _read_diagnostic =
+            begin_private_diagnostic_invocation_v1(PrivateDiagnosticOperationV1::ReadFixed);
         let result = self.private_durable_read_fixed_inner_v2(root);
         if let Err(error) = &result {
             observe_host_current(error);
@@ -1843,8 +1934,14 @@ impl Host {
         result
     }
     fn private_durable_read_fixed_inner_v2(&self, root: &Path) -> Result<PrivateVerifiedFixedV2> {
-        self.require_private_workspace_read_session_v1()?;
-        let owner = self.reopen_private_workspace_registered_v1(root)?;
+        private_host_result_at_v1(
+            PrivateDiagnosticSiteV1::HostReadSession,
+            self.require_private_workspace_read_session_v1(),
+        )?;
+        let owner = private_host_result_at_v1(
+            PrivateDiagnosticSiteV1::HostReadOpen,
+            self.reopen_private_workspace_registered_v1(root),
+        )?;
         let material = CurrentMaterialPrivacyV2 {
             host: self,
             owner: &owner,
@@ -1874,6 +1971,1591 @@ impl Host {
     }
 }
 
+// Closed, data-only private diagnostic wire. These values never authorize work.
+const PRIVATE_FIXED_DIAGNOSTIC_MAX_BYTES_V1: usize = 4096;
+#[allow(non_camel_case_types)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum PrivateDiagnosticOperationV1 {
+    Checkpoint,
+    Proof,
+    Freeze,
+    ReadFixed,
+    OpenOriginal,
+}
+#[allow(non_camel_case_types)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum PrivateDiagnosticSiteV1 {
+    WorkspaceLoad,
+    Candidate,
+    MaterialRoster,
+    SlotBindings,
+    WalletRosterAcquire,
+    HeldPrecheck,
+    ConstructorReload,
+    InputRequestDigest,
+    OriginalRequest,
+    OriginalLookup,
+    OriginalLineage,
+    ReplayLookup,
+    Revision,
+    CurrentTerms,
+    ProposalValidation,
+    ProtocolConstruct,
+    ProtocolInspect,
+    RetainConsent,
+    ReceiptPrepare,
+    ReceiptCommit,
+    Enqueue,
+    ReloadAfterEnqueue,
+    LinkPrepare,
+    LinkUpsert,
+    LinkCommit,
+    PostSource,
+    PostConsent,
+    HeldPostcheck,
+    WalletRosterRelease,
+    ContinuationBinding,
+    ProofRun,
+    ProofResultLineage,
+    OutcomePrepare,
+    OutcomeCommit,
+    StatusLookup,
+    LoadVerified,
+    ProofVerifiedState,
+    FixedMappings,
+    FixedVerify,
+    FixedReplayRead,
+    FixedPrepare,
+    FixedCommit,
+    SavedDecode,
+    OutputLineage,
+    OperationHistory,
+    ProofEventHistory,
+    OutputCommitments,
+    RetainedDiscovery,
+    RetainedKey,
+    ReloadAfterRead,
+    EnvelopeCompare,
+    JournalAfterRead,
+    LogicalCompare,
+    FinalGate,
+    FinalProofOrigin,
+    MetadataPreflight,
+    MetadataOpen,
+    SeedAudit,
+    SourcePermission,
+    MetadataOrigin,
+    Marker,
+    ProofOrigin,
+    ExactScope,
+    GateWorkspace,
+    GateMaterial,
+    GateHeldPre,
+    GateHeldPost,
+    GateProofConsent,
+    SnapshotOpen,
+    SnapshotOrigin,
+    SnapshotSchema,
+    SnapshotInventory,
+    SnapshotSourceUnchanged,
+    SeedPlan,
+    SeedBinding,
+    SeedReplay,
+    SeedRecord,
+    SeedOperation,
+    SeedFinal,
+    HostCheckpointEntry,
+    HostCheckpointAction,
+    HostCheckpointSlots,
+    HostCheckpointContinuation,
+    HostCheckpointPostcheck,
+    HostProofPrecheck,
+    HostProofAccess,
+    HostProofForegroundMessage,
+    HostProofReceive,
+    HostProofJoin,
+    HostProofFinalCheck,
+    HostFreezeEntry,
+    HostFreezeAction,
+    HostFreezeReturn,
+    HostReadSession,
+    HostReadOpen,
+    HostReadAction,
+    HostReadReturn,
+    HostMaterialScope,
+    HostMaterialNativeCheck,
+    HostMaterialApproval,
+    HostProofScope,
+    HostProofNativeCheck,
+    HostProofApproval,
+    HostWorkspaceCurrent,
+    ReaderProfileDirectory,
+    ReaderVaultRead,
+    ReaderVaultV3Open,
+    ReaderFinalRegistry,
+    ReaderSourceOpen,
+    ReaderSourceAssociation,
+    ReaderFinancialOpen,
+    ReaderHostRuntime,
+    ReaderEnroll,
+    ReaderSavedPrincipal,
+    ReaderReadSession,
+    ReaderHostReturn,
+    ReaderFinancialSnapshot,
+    ReaderFinancialOriginal,
+    ReaderWorkspaceDirectory,
+    ReaderMetadataSnapshot,
+    ReaderMetadataOrigin,
+    ReaderMetadataInitializedSchema,
+    ReaderSourceStore,
+    ReaderSourceSelection,
+    ReaderSourceSeedPlan,
+    ReaderSourceSeedBinding,
+    ReaderSourceSeedCompare,
+    ReaderSourceCompare,
+    ReaderSourceFinalCheck,
+    ReaderOriginalFinancialProofSchema,
+    ReaderOriginalFinancialHandles,
+    ReaderOriginalFinancialLoad,
+    ReaderOriginalProofSource,
+    ReaderOriginalProofCurrent,
+    ReaderProofSnapshotOpen,
+    ReaderProofSnapshotOrigin,
+    ReaderProofSnapshotUnchanged,
+    ReaderControlRead,
+    ReaderFinancialCompare,
+    ReaderCommitments,
+    ReaderComparisonVerify,
+    ReaderCompletionWrite,
+    ReaderFinalReturn,
+}
+#[allow(non_camel_case_types)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum PrivateDiagnosticFamilyV1 {
+    Engine,
+    DurableConstruction,
+    Sync,
+    Wallet,
+    Chain,
+    Protocol,
+    Store,
+    StorageSecurity,
+    Job,
+    Gate,
+    Host,
+}
+#[allow(non_camel_case_types)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum PrivateDiagnosticCauseV1 {
+    DISCLOSURE_DENIED,
+    DURABLE_CONSTRUCTION_UNAVAILABLE,
+    DURABLE_PROPOSAL_RECOVERY_REQUIRED,
+    DURABLE_PROPOSAL_CONFLICT,
+    DURABLE_PROPOSAL_NOT_FOUND,
+    DURABLE_PROFILE_UNAVAILABLE,
+    MANUAL_CONSTRUCTION_DENIED,
+    RETAINED_INPUT_OBSERVATION_UNAVAILABLE,
+    CANDIDATE_VERIFICATION_FAILED,
+    IDEMPOTENCY_CONFLICT,
+    REVISION_CONFLICT,
+    NOT_FOUND,
+    INVALID_REQUEST,
+    RECOVERY_REQUIRED,
+    LIVE_AUTHORIZATION_EXISTS,
+    RESOURCE_EXHAUSTED,
+    INVALID_TRANSITION,
+    STORAGE_PROTECTION_REQUIRED,
+    STORAGE_UNAVAILABLE,
+    ACCESS_DENIED,
+    INVALID_TERMS,
+    UNSUPPORTED_CAPABILITY,
+    MISSING_EVIDENCE,
+    INVALID_AMOUNT,
+    UNKNOWN_PARTICIPANT,
+    DUPLICATE_IDENTIFIER,
+    CONSERVATION_FAILURE,
+    DEBIT_CAP_EXCEEDED,
+    FEE_CAP_EXCEEDED,
+    UNVERIFIABLE_MATCH,
+    PRIVACY_INCOMPATIBLE,
+    UNSUPPORTED_VERSION,
+    RESOURCE_LIMIT,
+    STALE_CHAIN,
+    OUTSTANDING_EXPOSURE,
+    USER_REJECTED,
+    INTERNAL_ERROR,
+    Unclassified,
+    PERMISSION_DENIED,
+    Invalid,
+    Binding,
+    Stale,
+    Storage,
+    AccessDenied,
+    InvalidRequest,
+    Interrupted,
+    ReconciliationRequired,
+    InvalidResponse,
+    ResourceLimit,
+    NoCurrentObservation,
+    AccountScope,
+    AccountMismatch,
+    IncompleteSync,
+    UnsupportedProfile,
+    ChainMismatch,
+    InsufficientFunds,
+    MissingWitness,
+    InvalidNote,
+    Scan,
+    Transport,
+    InvalidConfiguration,
+    WrongNetwork,
+    UnsupportedProxyConfiguration,
+    WrongBranch,
+    StaleChain,
+    ContradictoryChain,
+    Timeout,
+    TransportUnavailable,
+    ObservationInterrupted,
+    MissingAncestryEvidence,
+    NotObserved,
+    MalformedEvidence,
+    UnsupportedCapability,
+    BackendFailure,
+    ClockUnavailable,
+    IdempotencyConflict,
+    JournalFailure,
+    SubmissionNotAuthorized,
+    SubmissionExpiryMargin,
+    ObligationConflict,
+    SubmissionOutcomeUnrecorded,
+    SubmissionRetentionUncertain,
+    Manifest,
+    Disclosure,
+    Context,
+    Contribution,
+    Input,
+    Output,
+    Fee,
+    BuilderInput,
+    BuilderOutput,
+    Pczt,
+    Finalize,
+    ActionMapping,
+    FixedBudget,
+    FixedOwners,
+    FixedRecipient,
+    FixedPolicy,
+    FixedAccounting,
+    FixedRealInput,
+    FixedCanonicalAccount,
+    FixedDistinctAccounts,
+    FixedUnsignedPredecessor,
+    FixedUnsignedRealInput,
+    FixedProofOnlyTransition,
+    FixedPaddingSignature,
+    StorageSecurity,
+    Database,
+    Encoding,
+    Poisoned,
+    RevisionConflict,
+    NotFound,
+    AlreadyExists,
+    InvalidInput,
+    UnsupportedSchema,
+    RecoveryRequired,
+    WriterEpochMismatch,
+    LiveAuthorizationExists,
+    InputReserved,
+    ResourceExhausted,
+    BudgetExceeded,
+    InvalidTransition,
+    File,
+    UnsupportedPlatform,
+    QuarantinedDatabase,
+    RecoveredGeneration,
+    GenerationArchive,
+    UninitializedDatabase,
+    UnsafePath,
+    MissingDatabase,
+    PlaintextRefused,
+    UnqualifiedRuntime,
+    AuthenticationFailed,
+    Io,
+    SnapshotLimit,
+    SourceChanged,
+    ConsentDenied,
+    VerificationFailed,
+    StateConflict,
+    ExactScopeMismatch,
+    WorkspaceConsentFalse,
+    MaterialConsentFalse,
+    ProofConsentFalse,
+    Platform,
+    Terminal,
+    Permission,
+    Locked,
+    Authentication,
+    Quarantined,
+    Unsupported,
+    Receipt,
+    RecoverySemantic,
+    RecoveryBackupUnsupported,
+    RecoveryFinancialUnsupported,
+    CompleteOriginRecoveryUnavailable,
+    HistoricalExportIncomplete,
+    GenerationArchiveIncomplete,
+}
+#[allow(non_camel_case_types)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum PrivateDiagnosticEngineCodeV1 {
+    DISCLOSURE_DENIED,
+    DURABLE_CONSTRUCTION_UNAVAILABLE,
+    DURABLE_PROPOSAL_RECOVERY_REQUIRED,
+    DURABLE_PROPOSAL_CONFLICT,
+    DURABLE_PROPOSAL_NOT_FOUND,
+    DURABLE_PROFILE_UNAVAILABLE,
+    MANUAL_CONSTRUCTION_DENIED,
+    RETAINED_INPUT_OBSERVATION_UNAVAILABLE,
+    CANDIDATE_VERIFICATION_FAILED,
+    IDEMPOTENCY_CONFLICT,
+    REVISION_CONFLICT,
+    NOT_FOUND,
+    INVALID_REQUEST,
+    RECOVERY_REQUIRED,
+    LIVE_AUTHORIZATION_EXISTS,
+    RESOURCE_EXHAUSTED,
+    INVALID_TRANSITION,
+    STORAGE_PROTECTION_REQUIRED,
+    STORAGE_UNAVAILABLE,
+    ACCESS_DENIED,
+    INVALID_TERMS,
+    UNSUPPORTED_CAPABILITY,
+    MISSING_EVIDENCE,
+    INVALID_AMOUNT,
+    UNKNOWN_PARTICIPANT,
+    DUPLICATE_IDENTIFIER,
+    CONSERVATION_FAILURE,
+    DEBIT_CAP_EXCEEDED,
+    FEE_CAP_EXCEEDED,
+    UNVERIFIABLE_MATCH,
+    PRIVACY_INCOMPATIBLE,
+    UNSUPPORTED_VERSION,
+    RESOURCE_LIMIT,
+    STALE_CHAIN,
+    OUTSTANDING_EXPOSURE,
+    USER_REJECTED,
+    INTERNAL_ERROR,
+    Unclassified,
+    PERMISSION_DENIED,
+    NotApplicable,
+}
+#[allow(non_camel_case_types)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum PrivateDiagnosticCallStateV1 {
+    NotApplicable,
+    NotCalled,
+    ReturnedOk,
+    ReturnedOkFresh,
+    ReturnedOkReplay,
+    ReturnedOkNoContinuation,
+    ReturnedErrUnknown,
+}
+#[allow(non_camel_case_types)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum PrivateDiagnosticWorkerResultV1 {
+    NotStarted,
+    NotReceived,
+    Disconnected,
+    ReceivedOk,
+    ReceivedErr,
+}
+#[allow(non_camel_case_types)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum PrivateDiagnosticWorkerJoinV1 {
+    NotStarted,
+    Joined,
+    Panicked,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum PrivateDiagnosticCallScopeV1 {
+    CurrentInvocation,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PrivateDiagnosticPrimaryV1 {
+    pub(crate) operation: PrivateDiagnosticOperationV1,
+    pub(crate) site: PrivateDiagnosticSiteV1,
+    pub(crate) engine_code: PrivateDiagnosticEngineCodeV1,
+    pub(crate) family: PrivateDiagnosticFamilyV1,
+    pub(crate) cause: PrivateDiagnosticCauseV1,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PrivateDiagnosticCallsV1 {
+    pub(crate) receipt: PrivateDiagnosticCallStateV1,
+    pub(crate) enqueue: PrivateDiagnosticCallStateV1,
+    pub(crate) link: PrivateDiagnosticCallStateV1,
+    pub(crate) proof: PrivateDiagnosticCallStateV1,
+    pub(crate) outcome: PrivateDiagnosticCallStateV1,
+    pub(crate) freeze: PrivateDiagnosticCallStateV1,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PrivateDiagnosticEvidenceV1 {
+    pub(crate) call_scope: PrivateDiagnosticCallScopeV1,
+    pub(crate) attempt_consumed: bool,
+    pub(crate) calls: PrivateDiagnosticCallsV1,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PrivateDiagnosticEngineCoreV1 {
+    pub(crate) schema: u8,
+    pub(crate) operation: PrivateDiagnosticOperationV1,
+    pub(crate) site: PrivateDiagnosticSiteV1,
+    pub(crate) engine_code: PrivateDiagnosticEngineCodeV1,
+    pub(crate) family: PrivateDiagnosticFamilyV1,
+    pub(crate) cause: PrivateDiagnosticCauseV1,
+    pub(crate) calls: PrivateDiagnosticCallsV1,
+    pub(crate) attempt_consumed: bool,
+    pub(crate) call_scope: PrivateDiagnosticCallScopeV1,
+}
+fn required_private_optional_v1<'de, D, T>(
+    deserializer: D,
+) -> std::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PrivateDiagnosticWorkerV1 {
+    pub(crate) result: PrivateDiagnosticWorkerResultV1,
+    pub(crate) join: PrivateDiagnosticWorkerJoinV1,
+    #[serde(deserialize_with = "required_private_optional_v1")]
+    pub(crate) engine_failure: Option<PrivateDiagnosticEngineCoreV1>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PrivateFixedDiagnosticV1 {
+    pub(crate) schema: u8,
+    pub(crate) primary: PrivateDiagnosticPrimaryV1,
+    #[serde(deserialize_with = "required_private_optional_v1")]
+    pub(crate) evidence: Option<PrivateDiagnosticEvidenceV1>,
+    #[serde(deserialize_with = "required_private_optional_v1")]
+    pub(crate) worker: Option<PrivateDiagnosticWorkerV1>,
+}
+impl PrivateDiagnosticPrimaryV1 {
+    fn valid(&self) -> bool {
+        if self.family == PrivateDiagnosticFamilyV1::Engine
+            && self.engine_code == PrivateDiagnosticEngineCodeV1::NotApplicable
+        {
+            return false;
+        }
+        use PrivateDiagnosticCauseV1 as C;
+        use PrivateDiagnosticFamilyV1 as F;
+        match self.family {
+            F::Engine => matches!(
+                self.cause,
+                C::DISCLOSURE_DENIED
+                    | C::DURABLE_CONSTRUCTION_UNAVAILABLE
+                    | C::DURABLE_PROPOSAL_RECOVERY_REQUIRED
+                    | C::DURABLE_PROPOSAL_CONFLICT
+                    | C::DURABLE_PROPOSAL_NOT_FOUND
+                    | C::DURABLE_PROFILE_UNAVAILABLE
+                    | C::MANUAL_CONSTRUCTION_DENIED
+                    | C::RETAINED_INPUT_OBSERVATION_UNAVAILABLE
+                    | C::CANDIDATE_VERIFICATION_FAILED
+                    | C::IDEMPOTENCY_CONFLICT
+                    | C::REVISION_CONFLICT
+                    | C::NOT_FOUND
+                    | C::INVALID_REQUEST
+                    | C::RECOVERY_REQUIRED
+                    | C::LIVE_AUTHORIZATION_EXISTS
+                    | C::RESOURCE_EXHAUSTED
+                    | C::INVALID_TRANSITION
+                    | C::STORAGE_PROTECTION_REQUIRED
+                    | C::STORAGE_UNAVAILABLE
+                    | C::ACCESS_DENIED
+                    | C::INVALID_TERMS
+                    | C::UNSUPPORTED_CAPABILITY
+                    | C::MISSING_EVIDENCE
+                    | C::INVALID_AMOUNT
+                    | C::UNKNOWN_PARTICIPANT
+                    | C::DUPLICATE_IDENTIFIER
+                    | C::CONSERVATION_FAILURE
+                    | C::DEBIT_CAP_EXCEEDED
+                    | C::FEE_CAP_EXCEEDED
+                    | C::UNVERIFIABLE_MATCH
+                    | C::PRIVACY_INCOMPATIBLE
+                    | C::UNSUPPORTED_VERSION
+                    | C::RESOURCE_LIMIT
+                    | C::STALE_CHAIN
+                    | C::OUTSTANDING_EXPOSURE
+                    | C::USER_REJECTED
+                    | C::INTERNAL_ERROR
+                    | C::Unclassified
+                    | C::PERMISSION_DENIED
+            ),
+            F::DurableConstruction => matches!(
+                self.cause,
+                C::Invalid | C::Binding | C::Stale | C::Storage | C::Unclassified
+            ),
+            F::Sync => matches!(
+                self.cause,
+                C::AccessDenied
+                    | C::InvalidRequest
+                    | C::Interrupted
+                    | C::ReconciliationRequired
+                    | C::InvalidResponse
+                    | C::ResourceLimit
+                    | C::NoCurrentObservation
+                    | C::Unclassified
+            ),
+            F::Wallet => matches!(
+                self.cause,
+                C::Storage
+                    | C::AccountScope
+                    | C::AccountMismatch
+                    | C::IncompleteSync
+                    | C::UnsupportedProfile
+                    | C::ChainMismatch
+                    | C::InsufficientFunds
+                    | C::InvalidRequest
+                    | C::MissingWitness
+                    | C::InvalidNote
+                    | C::Scan
+                    | C::Transport
+                    | C::Unclassified
+            ),
+            F::Chain => matches!(
+                self.cause,
+                C::InvalidConfiguration
+                    | C::WrongNetwork
+                    | C::UnsupportedProxyConfiguration
+                    | C::WrongBranch
+                    | C::StaleChain
+                    | C::ContradictoryChain
+                    | C::Timeout
+                    | C::TransportUnavailable
+                    | C::ObservationInterrupted
+                    | C::MissingAncestryEvidence
+                    | C::NotObserved
+                    | C::ResourceLimit
+                    | C::MalformedEvidence
+                    | C::UnsupportedCapability
+                    | C::BackendFailure
+                    | C::ClockUnavailable
+                    | C::IdempotencyConflict
+                    | C::JournalFailure
+                    | C::SubmissionNotAuthorized
+                    | C::SubmissionExpiryMargin
+                    | C::ObligationConflict
+                    | C::SubmissionOutcomeUnrecorded
+                    | C::SubmissionRetentionUncertain
+                    | C::Unclassified
+            ),
+            F::Protocol => matches!(
+                self.cause,
+                C::Manifest
+                    | C::Disclosure
+                    | C::Context
+                    | C::Contribution
+                    | C::Input
+                    | C::Output
+                    | C::Fee
+                    | C::BuilderInput
+                    | C::BuilderOutput
+                    | C::Pczt
+                    | C::Finalize
+                    | C::ActionMapping
+                    | C::FixedBudget
+                    | C::FixedOwners
+                    | C::FixedRecipient
+                    | C::FixedPolicy
+                    | C::FixedAccounting
+                    | C::FixedRealInput
+                    | C::FixedCanonicalAccount
+                    | C::FixedDistinctAccounts
+                    | C::FixedUnsignedPredecessor
+                    | C::FixedUnsignedRealInput
+                    | C::FixedProofOnlyTransition
+                    | C::FixedPaddingSignature
+                    | C::Unclassified
+            ),
+            F::Store => matches!(
+                self.cause,
+                C::StorageSecurity
+                    | C::Database
+                    | C::Encoding
+                    | C::Poisoned
+                    | C::IdempotencyConflict
+                    | C::RevisionConflict
+                    | C::NotFound
+                    | C::AlreadyExists
+                    | C::InvalidInput
+                    | C::UnsupportedSchema
+                    | C::RecoveryRequired
+                    | C::WriterEpochMismatch
+                    | C::LiveAuthorizationExists
+                    | C::InputReserved
+                    | C::ResourceExhausted
+                    | C::BudgetExceeded
+                    | C::InvalidTransition
+                    | C::File
+                    | C::Unclassified
+            ),
+            F::StorageSecurity => matches!(
+                self.cause,
+                C::UnsupportedPlatform
+                    | C::QuarantinedDatabase
+                    | C::RecoveredGeneration
+                    | C::GenerationArchive
+                    | C::UninitializedDatabase
+                    | C::UnsafePath
+                    | C::AlreadyExists
+                    | C::MissingDatabase
+                    | C::PlaintextRefused
+                    | C::UnqualifiedRuntime
+                    | C::AuthenticationFailed
+                    | C::Database
+                    | C::Io
+                    | C::SnapshotLimit
+                    | C::SourceChanged
+                    | C::Unclassified
+            ),
+            F::Job => matches!(
+                self.cause,
+                C::ConsentDenied
+                    | C::NotFound
+                    | C::InvalidRequest
+                    | C::VerificationFailed
+                    | C::IdempotencyConflict
+                    | C::RecoveryRequired
+                    | C::StateConflict
+                    | C::Storage
+                    | C::UnsupportedSchema
+                    | C::ResourceExhausted
+                    | C::Unclassified
+            ),
+            F::Gate => matches!(
+                self.cause,
+                C::ExactScopeMismatch
+                    | C::WorkspaceConsentFalse
+                    | C::MaterialConsentFalse
+                    | C::ProofConsentFalse
+                    | C::Unclassified
+            ),
+            F::Host => matches!(
+                self.cause,
+                C::Platform
+                    | C::Terminal
+                    | C::Permission
+                    | C::Locked
+                    | C::Invalid
+                    | C::Authentication
+                    | C::Storage
+                    | C::Quarantined
+                    | C::Unsupported
+                    | C::Receipt
+                    | C::RecoverySemantic
+                    | C::RecoveryBackupUnsupported
+                    | C::RecoveryFinancialUnsupported
+                    | C::CompleteOriginRecoveryUnavailable
+                    | C::HistoricalExportIncomplete
+                    | C::GenerationArchiveIncomplete
+                    | C::Unclassified
+            ),
+        }
+    }
+}
+impl PrivateDiagnosticEvidenceV1 {
+    fn valid(&self, operation: PrivateDiagnosticOperationV1) -> bool {
+        use PrivateDiagnosticCallStateV1 as C;
+        use PrivateDiagnosticOperationV1 as O;
+        let store = |value| {
+            matches!(
+                value,
+                C::NotCalled | C::ReturnedOkFresh | C::ReturnedOkReplay | C::ReturnedErrUnknown
+            )
+        };
+        let enqueue = |value| {
+            matches!(
+                value,
+                C::NotCalled
+                    | C::ReturnedOkFresh
+                    | C::ReturnedOkNoContinuation
+                    | C::ReturnedErrUnknown
+            )
+        };
+        let proof = |value| matches!(value, C::NotCalled | C::ReturnedOk | C::ReturnedErrUnknown);
+        let c = &self.calls;
+        match operation {
+            O::Checkpoint => {
+                !self.attempt_consumed
+                    && store(c.receipt)
+                    && enqueue(c.enqueue)
+                    && store(c.link)
+                    && c.proof == C::NotApplicable
+                    && c.outcome == C::NotApplicable
+                    && c.freeze == C::NotApplicable
+            }
+            O::Proof => {
+                self.attempt_consumed
+                    && proof(c.proof)
+                    && store(c.outcome)
+                    && c.receipt == C::NotApplicable
+                    && c.enqueue == C::NotApplicable
+                    && c.link == C::NotApplicable
+                    && c.freeze == C::NotApplicable
+            }
+            O::Freeze => {
+                !self.attempt_consumed
+                    && store(c.freeze)
+                    && c.receipt == C::NotApplicable
+                    && c.enqueue == C::NotApplicable
+                    && c.link == C::NotApplicable
+                    && c.proof == C::NotApplicable
+                    && c.outcome == C::NotApplicable
+            }
+            O::ReadFixed | O::OpenOriginal => {
+                !self.attempt_consumed
+                    && [c.receipt, c.enqueue, c.link, c.proof, c.outcome, c.freeze]
+                        .iter()
+                        .all(|value| *value == C::NotApplicable)
+            }
+        }
+    }
+}
+impl PrivateDiagnosticEngineCoreV1 {
+    fn primary(&self) -> PrivateDiagnosticPrimaryV1 {
+        PrivateDiagnosticPrimaryV1 {
+            operation: self.operation,
+            site: self.site,
+            engine_code: self.engine_code,
+            family: self.family,
+            cause: self.cause,
+        }
+    }
+    fn evidence(&self) -> PrivateDiagnosticEvidenceV1 {
+        PrivateDiagnosticEvidenceV1 {
+            call_scope: self.call_scope,
+            attempt_consumed: self.attempt_consumed,
+            calls: self.calls.clone(),
+        }
+    }
+    fn valid(&self) -> bool {
+        self.schema == 1
+            && self.engine_code != PrivateDiagnosticEngineCodeV1::NotApplicable
+            && self.primary().valid()
+            && self.evidence().valid(self.operation)
+            && matches!(
+                self.site,
+                PrivateDiagnosticSiteV1::WorkspaceLoad
+                    | PrivateDiagnosticSiteV1::Candidate
+                    | PrivateDiagnosticSiteV1::MaterialRoster
+                    | PrivateDiagnosticSiteV1::SlotBindings
+                    | PrivateDiagnosticSiteV1::WalletRosterAcquire
+                    | PrivateDiagnosticSiteV1::HeldPrecheck
+                    | PrivateDiagnosticSiteV1::ConstructorReload
+                    | PrivateDiagnosticSiteV1::InputRequestDigest
+                    | PrivateDiagnosticSiteV1::OriginalRequest
+                    | PrivateDiagnosticSiteV1::OriginalLookup
+                    | PrivateDiagnosticSiteV1::OriginalLineage
+                    | PrivateDiagnosticSiteV1::ReplayLookup
+                    | PrivateDiagnosticSiteV1::Revision
+                    | PrivateDiagnosticSiteV1::CurrentTerms
+                    | PrivateDiagnosticSiteV1::ProposalValidation
+                    | PrivateDiagnosticSiteV1::ProtocolConstruct
+                    | PrivateDiagnosticSiteV1::ProtocolInspect
+                    | PrivateDiagnosticSiteV1::RetainConsent
+                    | PrivateDiagnosticSiteV1::ReceiptPrepare
+                    | PrivateDiagnosticSiteV1::ReceiptCommit
+                    | PrivateDiagnosticSiteV1::Enqueue
+                    | PrivateDiagnosticSiteV1::ReloadAfterEnqueue
+                    | PrivateDiagnosticSiteV1::LinkPrepare
+                    | PrivateDiagnosticSiteV1::LinkUpsert
+                    | PrivateDiagnosticSiteV1::LinkCommit
+                    | PrivateDiagnosticSiteV1::PostSource
+                    | PrivateDiagnosticSiteV1::PostConsent
+                    | PrivateDiagnosticSiteV1::HeldPostcheck
+                    | PrivateDiagnosticSiteV1::WalletRosterRelease
+                    | PrivateDiagnosticSiteV1::ContinuationBinding
+                    | PrivateDiagnosticSiteV1::ProofRun
+                    | PrivateDiagnosticSiteV1::ProofResultLineage
+                    | PrivateDiagnosticSiteV1::OutcomePrepare
+                    | PrivateDiagnosticSiteV1::OutcomeCommit
+                    | PrivateDiagnosticSiteV1::StatusLookup
+                    | PrivateDiagnosticSiteV1::LoadVerified
+                    | PrivateDiagnosticSiteV1::ProofVerifiedState
+                    | PrivateDiagnosticSiteV1::FixedMappings
+                    | PrivateDiagnosticSiteV1::FixedVerify
+                    | PrivateDiagnosticSiteV1::FixedReplayRead
+                    | PrivateDiagnosticSiteV1::FixedPrepare
+                    | PrivateDiagnosticSiteV1::FixedCommit
+                    | PrivateDiagnosticSiteV1::SavedDecode
+                    | PrivateDiagnosticSiteV1::OutputLineage
+                    | PrivateDiagnosticSiteV1::OperationHistory
+                    | PrivateDiagnosticSiteV1::ProofEventHistory
+                    | PrivateDiagnosticSiteV1::OutputCommitments
+                    | PrivateDiagnosticSiteV1::RetainedDiscovery
+                    | PrivateDiagnosticSiteV1::RetainedKey
+                    | PrivateDiagnosticSiteV1::ReloadAfterRead
+                    | PrivateDiagnosticSiteV1::EnvelopeCompare
+                    | PrivateDiagnosticSiteV1::JournalAfterRead
+                    | PrivateDiagnosticSiteV1::LogicalCompare
+                    | PrivateDiagnosticSiteV1::FinalGate
+                    | PrivateDiagnosticSiteV1::FinalProofOrigin
+                    | PrivateDiagnosticSiteV1::MetadataPreflight
+                    | PrivateDiagnosticSiteV1::MetadataOpen
+                    | PrivateDiagnosticSiteV1::SeedAudit
+                    | PrivateDiagnosticSiteV1::SourcePermission
+                    | PrivateDiagnosticSiteV1::MetadataOrigin
+                    | PrivateDiagnosticSiteV1::Marker
+                    | PrivateDiagnosticSiteV1::ProofOrigin
+                    | PrivateDiagnosticSiteV1::ExactScope
+                    | PrivateDiagnosticSiteV1::GateWorkspace
+                    | PrivateDiagnosticSiteV1::GateMaterial
+                    | PrivateDiagnosticSiteV1::GateHeldPre
+                    | PrivateDiagnosticSiteV1::GateHeldPost
+                    | PrivateDiagnosticSiteV1::GateProofConsent
+                    | PrivateDiagnosticSiteV1::SnapshotOpen
+                    | PrivateDiagnosticSiteV1::SnapshotOrigin
+                    | PrivateDiagnosticSiteV1::SnapshotSchema
+                    | PrivateDiagnosticSiteV1::SnapshotInventory
+                    | PrivateDiagnosticSiteV1::SnapshotSourceUnchanged
+                    | PrivateDiagnosticSiteV1::SeedPlan
+                    | PrivateDiagnosticSiteV1::SeedBinding
+                    | PrivateDiagnosticSiteV1::SeedReplay
+                    | PrivateDiagnosticSiteV1::SeedRecord
+                    | PrivateDiagnosticSiteV1::SeedOperation
+                    | PrivateDiagnosticSiteV1::SeedFinal
+            )
+    }
+    fn from_error(error: &wholepact_engine::ApiError) -> Option<Self> {
+        let value = error.details.get("private_fixed_diagnostic_v1")?;
+        let core: Self = serde_json::from_value(value.clone()).ok()?;
+        core.valid().then_some(core)
+    }
+}
+impl PrivateFixedDiagnosticV1 {
+    pub(crate) fn parse(text: &str) -> Option<Self> {
+        if text.len() > PRIVATE_FIXED_DIAGNOSTIC_MAX_BYTES_V1 {
+            return None;
+        }
+        let value: Self = serde_json::from_str(text).ok()?;
+        value.valid().then_some(value)
+    }
+    pub(crate) fn canonical_json(&self) -> Option<String> {
+        if !self.valid() {
+            return None;
+        }
+        let value = serde_json::to_string(self).ok()?;
+        (value.len() <= PRIVATE_FIXED_DIAGNOSTIC_MAX_BYTES_V1).then_some(value)
+    }
+    fn valid(&self) -> bool {
+        if self.schema != 1
+            || !self.primary.valid()
+            || self
+                .evidence
+                .as_ref()
+                .is_some_and(|value| !value.valid(self.primary.operation))
+        {
+            return false;
+        }
+        if let Some(worker) = &self.worker {
+            use PrivateDiagnosticWorkerJoinV1 as J;
+            use PrivateDiagnosticWorkerResultV1 as R;
+            if self.primary.operation != PrivateDiagnosticOperationV1::Proof {
+                return false;
+            }
+            if (worker.result == R::NotStarted) != (worker.join == J::NotStarted) {
+                return false;
+            }
+            if worker.engine_failure.is_none() && self.evidence.is_some() {
+                return false;
+            }
+            if let Some(core) = &worker.engine_failure {
+                if worker.result != R::ReceivedErr
+                    || core.operation != PrivateDiagnosticOperationV1::Proof
+                    || !core.valid()
+                    || self.evidence.as_ref() != Some(&core.evidence())
+                {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+}
+#[derive(Default)]
+struct PrivateDiagnosticLatchV1 {
+    operation: Option<PrivateDiagnosticOperationV1>,
+    invocation: Option<u64>,
+    first_invocation: Option<u64>,
+    first: Option<PrivateFixedDiagnosticV1>,
+    boundary: Option<(&'static str, &'static str)>,
+    worker: Option<PrivateDiagnosticWorkerV1>,
+}
+thread_local! {
+    static PRIVATE_DIAGNOSTIC_LATCH_V1:std::cell::RefCell<PrivateDiagnosticLatchV1>=std::cell::RefCell::new(PrivateDiagnosticLatchV1::default());
+    static PRIVATE_DIAGNOSTIC_ACTIVE_V1:std::cell::Cell<bool>=const {std::cell::Cell::new(false)};
+    static PRIVATE_DIAGNOSTIC_UNAVAILABLE_V1:std::cell::Cell<bool>=const {std::cell::Cell::new(false)};
+    static PRIVATE_DIAGNOSTIC_SEQUENCE_V1:std::cell::Cell<u64>=const {std::cell::Cell::new(0)};
+}
+fn invalidate_private_diagnostic_v1() {
+    let _ = PRIVATE_DIAGNOSTIC_UNAVAILABLE_V1.try_with(|value| value.set(true));
+}
+fn private_diagnostic_active_v1() -> bool {
+    PRIVATE_DIAGNOSTIC_ACTIVE_V1
+        .try_with(|value| value.get())
+        .unwrap_or(false)
+        && !PRIVATE_DIAGNOSTIC_UNAVAILABLE_V1
+            .try_with(|value| value.get())
+            .unwrap_or(true)
+}
+fn with_private_diagnostic_v1<T>(f: impl FnOnce(&mut PrivateDiagnosticLatchV1) -> T) -> Option<T> {
+    if !private_diagnostic_active_v1() {
+        return None;
+    }
+    match PRIVATE_DIAGNOSTIC_LATCH_V1.try_with(|slot| match slot.try_borrow_mut() {
+        Ok(mut state) => Some(f(&mut state)),
+        Err(_) => {
+            invalidate_private_diagnostic_v1();
+            None
+        }
+    }) {
+        Ok(value) => value,
+        Err(_) => {
+            invalidate_private_diagnostic_v1();
+            None
+        }
+    }
+}
+pub(crate) struct PrivateFixedDiagnosticScopeV1 {
+    installed: bool,
+    local: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+pub(crate) fn begin_private_fixed_diagnostic_scope_v1() -> PrivateFixedDiagnosticScopeV1 {
+    let mut installed = false;
+    #[cfg(all(test, feature = "synthetic-born-joined-qualification"))]
+    if !PRIVATE_DIAGNOSTIC_ACTIVE_V1
+        .try_with(|value| value.get())
+        .unwrap_or(true)
+    {
+        let _ = PRIVATE_DIAGNOSTIC_LATCH_V1.try_with(|slot| {
+            if let Ok(mut state) = slot.try_borrow_mut() {
+                *state = PrivateDiagnosticLatchV1::default();
+                let _ = PRIVATE_DIAGNOSTIC_UNAVAILABLE_V1.try_with(|value| value.set(false));
+                let _ = PRIVATE_DIAGNOSTIC_ACTIVE_V1.try_with(|value| value.set(true));
+                installed = true;
+            } else {
+                invalidate_private_diagnostic_v1();
+            }
+        });
+    }
+    PrivateFixedDiagnosticScopeV1 {
+        installed,
+        local: std::marker::PhantomData,
+    }
+}
+impl Drop for PrivateFixedDiagnosticScopeV1 {
+    fn drop(&mut self) {
+        if self.installed {
+            // Independent Cells invalidate even if the data RefCell is borrowed.
+            let _ = PRIVATE_DIAGNOSTIC_ACTIVE_V1.try_with(|value| value.set(false));
+            invalidate_private_diagnostic_v1();
+            let _ = PRIVATE_DIAGNOSTIC_LATCH_V1.try_with(|slot| {
+                if let Ok(mut state) = slot.try_borrow_mut() {
+                    *state = PrivateDiagnosticLatchV1::default();
+                }
+            });
+        }
+    }
+}
+struct PrivateDiagnosticInvocationV1 {
+    token: Option<u64>,
+    previous: Option<u64>,
+    operation: Option<PrivateDiagnosticOperationV1>,
+    local: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+fn begin_private_diagnostic_invocation_v1(
+    operation: PrivateDiagnosticOperationV1,
+) -> PrivateDiagnosticInvocationV1 {
+    let mut guard = PrivateDiagnosticInvocationV1 {
+        token: None,
+        previous: None,
+        operation: None,
+        local: std::marker::PhantomData,
+    };
+    if !private_diagnostic_active_v1() {
+        return guard;
+    }
+    let token = PRIVATE_DIAGNOSTIC_SEQUENCE_V1
+        .try_with(|value| value.get().checked_add(1).inspect(|next| value.set(*next)))
+        .ok()
+        .flatten();
+    let Some(token) = token else {
+        invalidate_private_diagnostic_v1();
+        return guard;
+    };
+    let _ = with_private_diagnostic_v1(|state| {
+        guard.previous = state.invocation;
+        guard.operation = state.operation;
+        guard.token = Some(token);
+        state.invocation = Some(token);
+        state.operation = Some(operation);
+    });
+    guard
+}
+impl Drop for PrivateDiagnosticInvocationV1 {
+    fn drop(&mut self) {
+        if let Some(token) = self.token {
+            let _ = with_private_diagnostic_v1(|state| {
+                if state.invocation == Some(token) {
+                    state.invocation = self.previous;
+                    state.operation = self.operation;
+                } else {
+                    invalidate_private_diagnostic_v1();
+                }
+            });
+        }
+    }
+}
+fn private_diagnostic_operation_v1(operation: PrivateDiagnosticOperationV1) {
+    let _ = with_private_diagnostic_v1(|state| state.operation = Some(operation));
+}
+fn private_root_operation_v1(
+    operation: PrivateDiagnosticOperationV1,
+) -> PrivateDiagnosticOperationV1 {
+    if operation == PrivateDiagnosticOperationV1::OpenOriginal {
+        with_private_diagnostic_v1(|state| state.operation)
+            .flatten()
+            .unwrap_or(operation)
+    } else {
+        operation
+    }
+}
+pub(crate) fn private_fixed_diagnostic_snapshot_v1() -> Option<PrivateFixedDiagnosticV1> {
+    with_private_diagnostic_v1(|state| state.first.clone())
+        .flatten()
+        .filter(PrivateFixedDiagnosticV1::valid)
+}
+fn record_private_primary_v1(
+    primary: PrivateDiagnosticPrimaryV1,
+    evidence: Option<PrivateDiagnosticEvidenceV1>,
+) {
+    let _ = with_private_diagnostic_v1(|state| {
+        if state.first.is_some() {
+            return;
+        }
+        let worker = if primary.operation == PrivateDiagnosticOperationV1::Proof {
+            state.worker.clone()
+        } else {
+            None
+        };
+        state.first_invocation = state.invocation;
+        state.first = Some(PrivateFixedDiagnosticV1 {
+            schema: 1,
+            primary,
+            evidence,
+            worker,
+        });
+    });
+}
+fn host_private_primary_v1(
+    operation: PrivateDiagnosticOperationV1,
+    site: PrivateDiagnosticSiteV1,
+    family: PrivateDiagnosticFamilyV1,
+    cause: PrivateDiagnosticCauseV1,
+) {
+    record_private_primary_v1(
+        PrivateDiagnosticPrimaryV1 {
+            operation: private_root_operation_v1(operation),
+            site,
+            engine_code: PrivateDiagnosticEngineCodeV1::NotApplicable,
+            family,
+            cause,
+        },
+        None,
+    );
+}
+pub(crate) fn observe_private_fixed_host_v1(
+    operation: PrivateDiagnosticOperationV1,
+    site: PrivateDiagnosticSiteV1,
+    error: &Error,
+) {
+    use PrivateDiagnosticCauseV1 as C;
+    let cause = match error {
+        Error::Platform => C::Platform,
+        Error::Terminal => C::Terminal,
+        Error::Permission => C::Permission,
+        Error::Locked => C::Locked,
+        Error::Invalid => C::Invalid,
+        Error::Authentication => C::Authentication,
+        Error::Storage => C::Storage,
+        Error::Quarantined => C::Quarantined,
+        Error::Unsupported => C::Unsupported,
+        Error::Receipt(_) => C::Receipt,
+        Error::RecoverySemantic(_) => C::RecoverySemantic,
+        Error::RecoveryBackupUnsupported => C::RecoveryBackupUnsupported,
+        Error::RecoveryFinancialUnsupported => C::RecoveryFinancialUnsupported,
+        Error::CompleteOriginRecoveryUnavailable => C::CompleteOriginRecoveryUnavailable,
+        Error::HistoricalExportIncomplete => C::HistoricalExportIncomplete,
+        Error::GenerationArchiveIncomplete => C::GenerationArchiveIncomplete,
+    };
+    host_private_primary_v1(operation, site, PrivateDiagnosticFamilyV1::Host, cause);
+}
+pub(crate) fn observe_private_fixed_job_v1(
+    operation: PrivateDiagnosticOperationV1,
+    site: PrivateDiagnosticSiteV1,
+    error: &wholepact_proof_jobs::JobError,
+) {
+    use PrivateDiagnosticCauseV1 as C;
+    use wholepact_proof_jobs::JobError as E;
+    let cause = match error {
+        E::ConsentDenied => C::ConsentDenied,
+        E::NotFound => C::NotFound,
+        E::InvalidRequest => C::InvalidRequest,
+        E::VerificationFailed => C::VerificationFailed,
+        E::IdempotencyConflict => C::IdempotencyConflict,
+        E::RecoveryRequired => C::RecoveryRequired,
+        E::StateConflict => C::StateConflict,
+        E::Storage => C::Storage,
+        E::UnsupportedSchema => C::UnsupportedSchema,
+        E::ResourceExhausted => C::ResourceExhausted,
+    };
+    host_private_primary_v1(operation, site, PrivateDiagnosticFamilyV1::Job, cause);
+}
+pub(crate) fn observe_private_fixed_storage_v1(
+    operation: PrivateDiagnosticOperationV1,
+    site: PrivateDiagnosticSiteV1,
+    error: &wholepact_storage_security::StorageSecurityError,
+) {
+    use PrivateDiagnosticCauseV1 as C;
+    use wholepact_storage_security::StorageSecurityError as E;
+    let cause = match error {
+        E::UnsupportedPlatform => C::UnsupportedPlatform,
+        E::QuarantinedDatabase => C::QuarantinedDatabase,
+        E::RecoveredGeneration => C::RecoveredGeneration,
+        E::GenerationArchive => C::GenerationArchive,
+        E::UninitializedDatabase => C::UninitializedDatabase,
+        E::UnsafePath => C::UnsafePath,
+        E::AlreadyExists => C::AlreadyExists,
+        E::MissingDatabase => C::MissingDatabase,
+        E::PlaintextRefused => C::PlaintextRefused,
+        E::UnqualifiedRuntime => C::UnqualifiedRuntime,
+        E::AuthenticationFailed => C::AuthenticationFailed,
+        E::Database => C::Database,
+        E::Io => C::Io,
+        E::SnapshotLimit => C::SnapshotLimit,
+        E::SourceChanged => C::SourceChanged,
+    };
+    host_private_primary_v1(
+        operation,
+        site,
+        PrivateDiagnosticFamilyV1::StorageSecurity,
+        cause,
+    );
+}
+pub(crate) fn observe_private_fixed_store_v1(
+    operation: PrivateDiagnosticOperationV1,
+    site: PrivateDiagnosticSiteV1,
+    error: &wholepact_store::StoreError,
+) {
+    use PrivateDiagnosticCauseV1 as C;
+    use wholepact_store::StoreError as E;
+    if let E::StorageSecurity(inner) = error {
+        observe_private_fixed_storage_v1(operation, site, inner);
+        return;
+    }
+    let cause = match error {
+        E::StorageSecurity(_) => C::StorageSecurity,
+        E::Database(_) => C::Database,
+        E::Encoding(_) => C::Encoding,
+        E::Poisoned => C::Poisoned,
+        E::IdempotencyConflict => C::IdempotencyConflict,
+        E::RevisionConflict => C::RevisionConflict,
+        E::NotFound => C::NotFound,
+        E::AlreadyExists => C::AlreadyExists,
+        E::InvalidInput(_) => C::InvalidInput,
+        E::UnsupportedSchema(_) => C::UnsupportedSchema,
+        E::RecoveryRequired => C::RecoveryRequired,
+        E::WriterEpochMismatch => C::WriterEpochMismatch,
+        E::LiveAuthorizationExists => C::LiveAuthorizationExists,
+        E::InputReserved => C::InputReserved,
+        E::ResourceExhausted => C::ResourceExhausted,
+        E::BudgetExceeded => C::BudgetExceeded,
+        E::InvalidTransition => C::InvalidTransition,
+        E::File(_) => C::File,
+    };
+    host_private_primary_v1(operation, site, PrivateDiagnosticFamilyV1::Store, cause);
+}
+pub(crate) fn observe_private_fixed_engine_v1(
+    operation: PrivateDiagnosticOperationV1,
+    site: PrivateDiagnosticSiteV1,
+    error: &wholepact_engine::ApiError,
+) {
+    let operation = private_root_operation_v1(operation);
+    let core = PrivateDiagnosticEngineCoreV1::from_error(error);
+    if let Some(core) = core {
+        let same_operation = core.operation == operation;
+        let _ = with_private_diagnostic_v1(|state| {
+            let worker = if operation == PrivateDiagnosticOperationV1::Proof {
+                state.worker.clone()
+            } else {
+                None
+            };
+            if let Some(first) = &mut state.first {
+                // Exact current guard, never operation-label equality alone.
+                if same_operation
+                    && state.invocation.is_some()
+                    && state.first_invocation == state.invocation
+                    && first.primary.operation == operation
+                {
+                    first.evidence = Some(core.evidence());
+                    first.worker = worker;
+                }
+            } else {
+                let mut primary = core.primary();
+                primary.operation = operation;
+                state.first_invocation = state.invocation;
+                state.first = Some(PrivateFixedDiagnosticV1 {
+                    schema: 1,
+                    primary,
+                    evidence: same_operation.then(|| core.evidence()),
+                    worker,
+                });
+            }
+        });
+    } else {
+        let code = match error.code.as_str() {
+            "DISCLOSURE_DENIED" => PrivateDiagnosticEngineCodeV1::DISCLOSURE_DENIED,
+            "DURABLE_CONSTRUCTION_UNAVAILABLE" => {
+                PrivateDiagnosticEngineCodeV1::DURABLE_CONSTRUCTION_UNAVAILABLE
+            }
+            "DURABLE_PROPOSAL_RECOVERY_REQUIRED" => {
+                PrivateDiagnosticEngineCodeV1::DURABLE_PROPOSAL_RECOVERY_REQUIRED
+            }
+            "DURABLE_PROPOSAL_CONFLICT" => PrivateDiagnosticEngineCodeV1::DURABLE_PROPOSAL_CONFLICT,
+            "DURABLE_PROPOSAL_NOT_FOUND" => {
+                PrivateDiagnosticEngineCodeV1::DURABLE_PROPOSAL_NOT_FOUND
+            }
+            "DURABLE_PROFILE_UNAVAILABLE" => {
+                PrivateDiagnosticEngineCodeV1::DURABLE_PROFILE_UNAVAILABLE
+            }
+            "MANUAL_CONSTRUCTION_DENIED" => {
+                PrivateDiagnosticEngineCodeV1::MANUAL_CONSTRUCTION_DENIED
+            }
+            "RETAINED_INPUT_OBSERVATION_UNAVAILABLE" => {
+                PrivateDiagnosticEngineCodeV1::RETAINED_INPUT_OBSERVATION_UNAVAILABLE
+            }
+            "CANDIDATE_VERIFICATION_FAILED" => {
+                PrivateDiagnosticEngineCodeV1::CANDIDATE_VERIFICATION_FAILED
+            }
+            "IDEMPOTENCY_CONFLICT" => PrivateDiagnosticEngineCodeV1::IDEMPOTENCY_CONFLICT,
+            "REVISION_CONFLICT" => PrivateDiagnosticEngineCodeV1::REVISION_CONFLICT,
+            "NOT_FOUND" => PrivateDiagnosticEngineCodeV1::NOT_FOUND,
+            "INVALID_REQUEST" => PrivateDiagnosticEngineCodeV1::INVALID_REQUEST,
+            "RECOVERY_REQUIRED" => PrivateDiagnosticEngineCodeV1::RECOVERY_REQUIRED,
+            "LIVE_AUTHORIZATION_EXISTS" => PrivateDiagnosticEngineCodeV1::LIVE_AUTHORIZATION_EXISTS,
+            "RESOURCE_EXHAUSTED" => PrivateDiagnosticEngineCodeV1::RESOURCE_EXHAUSTED,
+            "INVALID_TRANSITION" => PrivateDiagnosticEngineCodeV1::INVALID_TRANSITION,
+            "STORAGE_PROTECTION_REQUIRED" => {
+                PrivateDiagnosticEngineCodeV1::STORAGE_PROTECTION_REQUIRED
+            }
+            "STORAGE_UNAVAILABLE" => PrivateDiagnosticEngineCodeV1::STORAGE_UNAVAILABLE,
+            "ACCESS_DENIED" => PrivateDiagnosticEngineCodeV1::ACCESS_DENIED,
+            "INVALID_TERMS" => PrivateDiagnosticEngineCodeV1::INVALID_TERMS,
+            "UNSUPPORTED_CAPABILITY" => PrivateDiagnosticEngineCodeV1::UNSUPPORTED_CAPABILITY,
+            "MISSING_EVIDENCE" => PrivateDiagnosticEngineCodeV1::MISSING_EVIDENCE,
+            "INVALID_AMOUNT" => PrivateDiagnosticEngineCodeV1::INVALID_AMOUNT,
+            "UNKNOWN_PARTICIPANT" => PrivateDiagnosticEngineCodeV1::UNKNOWN_PARTICIPANT,
+            "DUPLICATE_IDENTIFIER" => PrivateDiagnosticEngineCodeV1::DUPLICATE_IDENTIFIER,
+            "CONSERVATION_FAILURE" => PrivateDiagnosticEngineCodeV1::CONSERVATION_FAILURE,
+            "DEBIT_CAP_EXCEEDED" => PrivateDiagnosticEngineCodeV1::DEBIT_CAP_EXCEEDED,
+            "FEE_CAP_EXCEEDED" => PrivateDiagnosticEngineCodeV1::FEE_CAP_EXCEEDED,
+            "UNVERIFIABLE_MATCH" => PrivateDiagnosticEngineCodeV1::UNVERIFIABLE_MATCH,
+            "PRIVACY_INCOMPATIBLE" => PrivateDiagnosticEngineCodeV1::PRIVACY_INCOMPATIBLE,
+            "UNSUPPORTED_VERSION" => PrivateDiagnosticEngineCodeV1::UNSUPPORTED_VERSION,
+            "RESOURCE_LIMIT" => PrivateDiagnosticEngineCodeV1::RESOURCE_LIMIT,
+            "STALE_CHAIN" => PrivateDiagnosticEngineCodeV1::STALE_CHAIN,
+            "OUTSTANDING_EXPOSURE" => PrivateDiagnosticEngineCodeV1::OUTSTANDING_EXPOSURE,
+            "USER_REJECTED" => PrivateDiagnosticEngineCodeV1::USER_REJECTED,
+            "INTERNAL_ERROR" => PrivateDiagnosticEngineCodeV1::INTERNAL_ERROR,
+            "PERMISSION_DENIED" => PrivateDiagnosticEngineCodeV1::PERMISSION_DENIED,
+            _ => PrivateDiagnosticEngineCodeV1::Unclassified,
+        };
+        let cause = match error.code.as_str() {
+            "DISCLOSURE_DENIED" => PrivateDiagnosticCauseV1::DISCLOSURE_DENIED,
+            "DURABLE_CONSTRUCTION_UNAVAILABLE" => {
+                PrivateDiagnosticCauseV1::DURABLE_CONSTRUCTION_UNAVAILABLE
+            }
+            "DURABLE_PROPOSAL_RECOVERY_REQUIRED" => {
+                PrivateDiagnosticCauseV1::DURABLE_PROPOSAL_RECOVERY_REQUIRED
+            }
+            "DURABLE_PROPOSAL_CONFLICT" => PrivateDiagnosticCauseV1::DURABLE_PROPOSAL_CONFLICT,
+            "DURABLE_PROPOSAL_NOT_FOUND" => PrivateDiagnosticCauseV1::DURABLE_PROPOSAL_NOT_FOUND,
+            "DURABLE_PROFILE_UNAVAILABLE" => PrivateDiagnosticCauseV1::DURABLE_PROFILE_UNAVAILABLE,
+            "MANUAL_CONSTRUCTION_DENIED" => PrivateDiagnosticCauseV1::MANUAL_CONSTRUCTION_DENIED,
+            "RETAINED_INPUT_OBSERVATION_UNAVAILABLE" => {
+                PrivateDiagnosticCauseV1::RETAINED_INPUT_OBSERVATION_UNAVAILABLE
+            }
+            "CANDIDATE_VERIFICATION_FAILED" => {
+                PrivateDiagnosticCauseV1::CANDIDATE_VERIFICATION_FAILED
+            }
+            "IDEMPOTENCY_CONFLICT" => PrivateDiagnosticCauseV1::IDEMPOTENCY_CONFLICT,
+            "REVISION_CONFLICT" => PrivateDiagnosticCauseV1::REVISION_CONFLICT,
+            "NOT_FOUND" => PrivateDiagnosticCauseV1::NOT_FOUND,
+            "INVALID_REQUEST" => PrivateDiagnosticCauseV1::INVALID_REQUEST,
+            "RECOVERY_REQUIRED" => PrivateDiagnosticCauseV1::RECOVERY_REQUIRED,
+            "LIVE_AUTHORIZATION_EXISTS" => PrivateDiagnosticCauseV1::LIVE_AUTHORIZATION_EXISTS,
+            "RESOURCE_EXHAUSTED" => PrivateDiagnosticCauseV1::RESOURCE_EXHAUSTED,
+            "INVALID_TRANSITION" => PrivateDiagnosticCauseV1::INVALID_TRANSITION,
+            "STORAGE_PROTECTION_REQUIRED" => PrivateDiagnosticCauseV1::STORAGE_PROTECTION_REQUIRED,
+            "STORAGE_UNAVAILABLE" => PrivateDiagnosticCauseV1::STORAGE_UNAVAILABLE,
+            "ACCESS_DENIED" => PrivateDiagnosticCauseV1::ACCESS_DENIED,
+            "INVALID_TERMS" => PrivateDiagnosticCauseV1::INVALID_TERMS,
+            "UNSUPPORTED_CAPABILITY" => PrivateDiagnosticCauseV1::UNSUPPORTED_CAPABILITY,
+            "MISSING_EVIDENCE" => PrivateDiagnosticCauseV1::MISSING_EVIDENCE,
+            "INVALID_AMOUNT" => PrivateDiagnosticCauseV1::INVALID_AMOUNT,
+            "UNKNOWN_PARTICIPANT" => PrivateDiagnosticCauseV1::UNKNOWN_PARTICIPANT,
+            "DUPLICATE_IDENTIFIER" => PrivateDiagnosticCauseV1::DUPLICATE_IDENTIFIER,
+            "CONSERVATION_FAILURE" => PrivateDiagnosticCauseV1::CONSERVATION_FAILURE,
+            "DEBIT_CAP_EXCEEDED" => PrivateDiagnosticCauseV1::DEBIT_CAP_EXCEEDED,
+            "FEE_CAP_EXCEEDED" => PrivateDiagnosticCauseV1::FEE_CAP_EXCEEDED,
+            "UNVERIFIABLE_MATCH" => PrivateDiagnosticCauseV1::UNVERIFIABLE_MATCH,
+            "PRIVACY_INCOMPATIBLE" => PrivateDiagnosticCauseV1::PRIVACY_INCOMPATIBLE,
+            "UNSUPPORTED_VERSION" => PrivateDiagnosticCauseV1::UNSUPPORTED_VERSION,
+            "RESOURCE_LIMIT" => PrivateDiagnosticCauseV1::RESOURCE_LIMIT,
+            "STALE_CHAIN" => PrivateDiagnosticCauseV1::STALE_CHAIN,
+            "OUTSTANDING_EXPOSURE" => PrivateDiagnosticCauseV1::OUTSTANDING_EXPOSURE,
+            "USER_REJECTED" => PrivateDiagnosticCauseV1::USER_REJECTED,
+            "INTERNAL_ERROR" => PrivateDiagnosticCauseV1::INTERNAL_ERROR,
+            "PERMISSION_DENIED" => PrivateDiagnosticCauseV1::PERMISSION_DENIED,
+            _ => PrivateDiagnosticCauseV1::Unclassified,
+        };
+        let job = error
+            .details
+            .get("private_original_job_error_v1")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|label| match label {
+                "consent_denied" => Some(PrivateDiagnosticCauseV1::ConsentDenied),
+                "not_found" => Some(PrivateDiagnosticCauseV1::NotFound),
+                "invalid_request" => Some(PrivateDiagnosticCauseV1::InvalidRequest),
+                "verification_failed" => Some(PrivateDiagnosticCauseV1::VerificationFailed),
+                "idempotency_conflict" => Some(PrivateDiagnosticCauseV1::IdempotencyConflict),
+                "recovery_required" => Some(PrivateDiagnosticCauseV1::RecoveryRequired),
+                "state_conflict" => Some(PrivateDiagnosticCauseV1::StateConflict),
+                "storage" => Some(PrivateDiagnosticCauseV1::Storage),
+                "unsupported_schema" => Some(PrivateDiagnosticCauseV1::UnsupportedSchema),
+                "resource_exhausted" => Some(PrivateDiagnosticCauseV1::ResourceExhausted),
+                _ => None,
+            });
+        let (family, cause) = job.map_or((PrivateDiagnosticFamilyV1::Engine, cause), |cause| {
+            (PrivateDiagnosticFamilyV1::Job, cause)
+        });
+        record_private_primary_v1(
+            PrivateDiagnosticPrimaryV1 {
+                operation,
+                site,
+                engine_code: code,
+                family,
+                cause,
+            },
+            None,
+        );
+    }
+}
+fn observe_private_host_current_at_v1(site: PrivateDiagnosticSiteV1, error: &Error) {
+    if let Some(operation) = with_private_diagnostic_v1(|state| state.operation).flatten() {
+        observe_private_fixed_host_v1(operation, site, error);
+    }
+}
+fn private_host_result_at_v1<T>(site: PrivateDiagnosticSiteV1, result: Result<T>) -> Result<T> {
+    if let Err(error) = &result {
+        observe_private_host_current_at_v1(site, error);
+    }
+    result
+}
+fn observed_private_permission_at_v1(site: PrivateDiagnosticSiteV1, result: Result<()>) -> bool {
+    if let Err(error) = &result {
+        observe_private_host_current_at_v1(site, error);
+    }
+    observed_host_permission(result)
+}
+fn private_worker_start_v1() {
+    let _ = with_private_diagnostic_v1(|state| {
+        state.worker = Some(PrivateDiagnosticWorkerV1 {
+            result: PrivateDiagnosticWorkerResultV1::NotReceived,
+            join: PrivateDiagnosticWorkerJoinV1::NotStarted,
+            engine_failure: None,
+        })
+    });
+}
+fn private_worker_received_v1<T>(result: &std::result::Result<T, wholepact_engine::ApiError>) {
+    let _ = with_private_diagnostic_v1(|state| {
+        if let Some(worker) = &mut state.worker {
+            worker.result = if result.is_ok() {
+                PrivateDiagnosticWorkerResultV1::ReceivedOk
+            } else {
+                PrivateDiagnosticWorkerResultV1::ReceivedErr
+            };
+            worker.engine_failure = result
+                .as_ref()
+                .err()
+                .and_then(PrivateDiagnosticEngineCoreV1::from_error)
+                .filter(|core| core.operation == PrivateDiagnosticOperationV1::Proof);
+        }
+    });
+}
+fn private_worker_disconnected_v1() {
+    let _ = with_private_diagnostic_v1(|state| {
+        if let Some(worker) = &mut state.worker {
+            worker.result = PrivateDiagnosticWorkerResultV1::Disconnected;
+        }
+    });
+}
+fn private_worker_joined_v1(joined: bool) {
+    let _ = with_private_diagnostic_v1(|state| {
+        if let Some(worker) = &mut state.worker {
+            worker.join = if joined {
+                PrivateDiagnosticWorkerJoinV1::Joined
+            } else {
+                PrivateDiagnosticWorkerJoinV1::Panicked
+            };
+        }
+        let worker = state.worker.clone();
+        if let Some(first) = &mut state.first {
+            if first.primary.operation == PrivateDiagnosticOperationV1::Proof
+                && state.first_invocation == state.invocation
+            {
+                first.worker = worker;
+            }
+        }
+    });
+}
+pub(crate) fn observe_private_fixed_boundary_v1(boundary: &'static str, outcome: &'static str) {
+    let boundary = match boundary {
+        "PrivateWorkspaceBootstrap" => "PrivateWorkspaceBootstrap",
+        "PrivateSourceSelect" => "PrivateSourceSelect",
+        "PrivateWorkspaceReserve" => "PrivateWorkspaceReserve",
+        "PrivateWorkspaceAnchor" => "PrivateWorkspaceAnchor",
+        "PrivateWorkspacePublish" => "PrivateWorkspacePublish",
+        "PrivateWorkspaceInitialize" => "PrivateWorkspaceInitialize",
+        "PrivateWorkspaceCandidate" => "PrivateWorkspaceCandidate",
+        "PrivateWorkspaceCapture" => "PrivateWorkspaceCapture",
+        "PrivateWorkspaceIntake" => "PrivateWorkspaceIntake",
+        "PrivateWorkspaceObserve" => "PrivateWorkspaceObserve",
+        "PrivateWorkspaceCheckpoint" => "PrivateWorkspaceCheckpoint",
+        "PrivateWorkspaceProof" => "PrivateWorkspaceProof",
+        "PrivateWorkspaceFreeze" => "PrivateWorkspaceFreeze",
+        "PrivateWorkspaceScanCleanup" => "PrivateWorkspaceScanCleanup",
+        "PrivateWorkspaceDurableMarker" => "PrivateWorkspaceDurableMarker",
+        "PrivateWorkspaceProducerKill" => "PrivateWorkspaceProducerKill",
+        "PrivateWorkspaceProducerReap" => "PrivateWorkspaceProducerReap",
+        "PrivateWorkspaceReaderOpen" => "PrivateWorkspaceReaderOpen",
+        "PrivateWorkspaceReadFixed" => "PrivateWorkspaceReadFixed",
+        "PrivateWorkspaceIdentityCompare" => "PrivateWorkspaceIdentityCompare",
+        "PrivateWorkspaceReaderReap" => "PrivateWorkspaceReaderReap",
+        "PrivateWorkspaceRootCleanup" => "PrivateWorkspaceRootCleanup",
+        _ => return,
+    };
+    let outcome = match outcome {
+        "HostPlatform" => "HostPlatform",
+        "HostTerminal" => "HostTerminal",
+        "HostPermission" => "HostPermission",
+        "HostLocked" => "HostLocked",
+        "HostInvalid" => "HostInvalid",
+        "HostAuthentication" => "HostAuthentication",
+        "HostStorage" => "HostStorage",
+        "HostQuarantined" => "HostQuarantined",
+        "HostUnsupported" => "HostUnsupported",
+        "HostReceipt" => "HostReceipt",
+        "HostRecoverySemantic" => "HostRecoverySemantic",
+        "HostRecoveryBackupUnsupported" => "HostRecoveryBackupUnsupported",
+        "HostRecoveryFinancialUnsupported" => "HostRecoveryFinancialUnsupported",
+        "HostCompleteOriginRecoveryUnavailable" => "HostCompleteOriginRecoveryUnavailable",
+        "HostHistoricalExportIncomplete" => "HostHistoricalExportIncomplete",
+        "HostGenerationArchiveIncomplete" => "HostGenerationArchiveIncomplete",
+        "EngineManualConstructionDenied" => "EngineManualConstructionDenied",
+        "EngineRetainedObservationUnavailable" => "EngineRetainedObservationUnavailable",
+        "EngineCandidateVerificationFailed" => "EngineCandidateVerificationFailed",
+        "EngineIdempotencyConflict" => "EngineIdempotencyConflict",
+        "EngineRevisionConflict" => "EngineRevisionConflict",
+        "EngineNotFound" => "EngineNotFound",
+        "EngineInvalidRequest" => "EngineInvalidRequest",
+        "EngineRecoveryRequired" => "EngineRecoveryRequired",
+        "EngineLiveAuthorizationExists" => "EngineLiveAuthorizationExists",
+        "EngineResourceExhausted" => "EngineResourceExhausted",
+        "EngineInvalidTransition" => "EngineInvalidTransition",
+        "EngineStorageProtectionRequired" => "EngineStorageProtectionRequired",
+        "EngineStorageUnavailable" => "EngineStorageUnavailable",
+        "EngineAccessDenied" => "EngineAccessDenied",
+        "EngineUnclassified" => "EngineUnclassified",
+        "EngineDisclosureDenied" => "EngineDisclosureDenied",
+        "EngineDurableConstructionUnavailable" => "EngineDurableConstructionUnavailable",
+        "EngineDurableProposalRecoveryRequired" => "EngineDurableProposalRecoveryRequired",
+        "EngineMissingEvidence" => "EngineMissingEvidence",
+        "EngineInvalidTerms" => "EngineInvalidTerms",
+        "EngineUnsupportedCapability" => "EngineUnsupportedCapability",
+        "EngineDebitCapExceeded" => "EngineDebitCapExceeded",
+        "EnginePermissionDenied" => "EnginePermissionDenied",
+        "EngineInternalError" => "EngineInternalError",
+        "JobConsentDenied" => "JobConsentDenied",
+        "JobNotFound" => "JobNotFound",
+        "JobInvalidRequest" => "JobInvalidRequest",
+        "JobVerificationFailed" => "JobVerificationFailed",
+        "JobIdempotencyConflict" => "JobIdempotencyConflict",
+        "JobRecoveryRequired" => "JobRecoveryRequired",
+        "JobStateConflict" => "JobStateConflict",
+        "JobStorage" => "JobStorage",
+        "JobUnsupportedSchema" => "JobUnsupportedSchema",
+        "JobResourceExhausted" => "JobResourceExhausted",
+        "BridgeBinding" => "BridgeBinding",
+        "BridgeConflict" => "BridgeConflict",
+        "BridgeMissing" => "BridgeMissing",
+        "BridgeUncertain" => "BridgeUncertain",
+        "BridgeLimit" => "BridgeLimit",
+        "BridgePermission" => "BridgePermission",
+        "BridgeRecoveryRequired" => "BridgeRecoveryRequired",
+        "BridgeCompleteOriginRecoveryUnavailable" => "BridgeCompleteOriginRecoveryUnavailable",
+        "BridgeVerification" => "BridgeVerification",
+        "BridgeSignerOriginUnavailable" => "BridgeSignerOriginUnavailable",
+        "BridgeJournal" => "BridgeJournal",
+        "BridgeAuthority" => "BridgeAuthority",
+        "BridgeWallet" => "BridgeWallet",
+        "BridgeIpc" => "BridgeIpc",
+        _ => return,
+    };
+    if outcome.starts_with("Bridge") && boundary != "PrivateWorkspaceCapture" {
+        return;
+    }
+    if (outcome.starts_with("Engine") || outcome.starts_with("Job"))
+        && matches!(
+            boundary,
+            "PrivateWorkspaceScanCleanup"
+                | "PrivateWorkspaceDurableMarker"
+                | "PrivateWorkspaceProducerKill"
+                | "PrivateWorkspaceProducerReap"
+                | "PrivateWorkspaceReaderReap"
+                | "PrivateWorkspaceRootCleanup"
+        )
+    {
+        return;
+    }
+    let _ = with_private_diagnostic_v1(|state| {
+        if state.boundary.is_none() {
+            state.boundary = Some((boundary, outcome));
+        }
+    });
+}
+pub(crate) fn first_private_fixed_boundary_v1() -> Option<(&'static str, &'static str)> {
+    with_private_diagnostic_v1(|state| state.boundary).flatten()
+}
+
 // Product calls evaluate exactly once and preserve the existing error type.
 // The test-only observer records finite source categories before wrapper loss;
 // it never changes arguments, retries, supplies consent or formats private data.
@@ -1891,6 +3573,17 @@ enum PrivateBoundaryV2 {
     Read,
 }
 impl PrivateBoundaryV2 {
+    fn diagnostic_v1(self) -> Option<(PrivateDiagnosticOperationV1, PrivateDiagnosticSiteV1)> {
+        use PrivateDiagnosticOperationV1 as O;
+        use PrivateDiagnosticSiteV1 as S;
+        match self {
+            Self::Checkpoint => Some((O::Checkpoint, S::HostCheckpointEntry)),
+            Self::Proof => Some((O::Proof, S::HostProofPrecheck)),
+            Self::Freeze => Some((O::Freeze, S::HostFreezeReturn)),
+            Self::Read => Some((O::ReadFixed, S::HostReadReturn)),
+            _ => None,
+        }
+    }
     fn label(self) -> &'static str {
         match self {
             Self::Source => "PrivateSourceSelect",
@@ -1916,6 +3609,7 @@ pub(in crate::host) fn first_private_failure_v2() -> Option<(&'static str, &'sta
     PRIVATE_FIRST_FAILURE_V2.with(|first| first.try_borrow().ok().and_then(|first| *first))
 }
 fn observe_failure(boundary: PrivateBoundaryV2, outcome: &'static str) {
+    observe_private_fixed_boundary_v1(boundary.label(), outcome);
     #[cfg(all(test, feature = "synthetic-born-joined-qualification"))]
     PRIVATE_FIRST_FAILURE_V2.with(|first| {
         let Ok(mut first) = first.try_borrow_mut() else {
@@ -1936,6 +3630,9 @@ fn observe_failure(boundary: PrivateBoundaryV2, outcome: &'static str) {
     let _ = (boundary, outcome);
 }
 fn begin_private_stage(boundary: PrivateBoundaryV2) {
+    if let Some((operation, _)) = boundary.diagnostic_v1() {
+        private_diagnostic_operation_v1(operation);
+    }
     #[cfg(all(test, feature = "synthetic-born-joined-qualification"))]
     {
         PRIVATE_CURRENT_BOUNDARY_V2.with(|stage| stage.set(boundary));
@@ -1988,6 +3685,15 @@ fn engine_category(error: &wholepact_engine::ApiError) -> &'static str {
         }
     }
     match error.code.as_str() {
+        "DISCLOSURE_DENIED" => "EngineDisclosureDenied",
+        "DURABLE_CONSTRUCTION_UNAVAILABLE" => "EngineDurableConstructionUnavailable",
+        "DURABLE_PROPOSAL_RECOVERY_REQUIRED" => "EngineDurableProposalRecoveryRequired",
+        "MISSING_EVIDENCE" => "EngineMissingEvidence",
+        "INVALID_TERMS" => "EngineInvalidTerms",
+        "UNSUPPORTED_CAPABILITY" => "EngineUnsupportedCapability",
+        "DEBIT_CAP_EXCEEDED" => "EngineDebitCapExceeded",
+        "PERMISSION_DENIED" => "EnginePermissionDenied",
+        "INTERNAL_ERROR" => "EngineInternalError",
         "MANUAL_CONSTRUCTION_DENIED" => "EngineManualConstructionDenied",
         "RETAINED_INPUT_OBSERVATION_UNAVAILABLE" => "EngineRetainedObservationUnavailable",
         "CANDIDATE_VERIFICATION_FAILED" => "EngineCandidateVerificationFailed",
@@ -2006,12 +3712,21 @@ fn engine_category(error: &wholepact_engine::ApiError) -> &'static str {
     }
 }
 fn observe_engine(boundary: PrivateBoundaryV2, error: wholepact_engine::ApiError) -> Error {
+    if let Some((operation, site)) = boundary.diagnostic_v1() {
+        observe_private_fixed_engine_v1(operation, site, &error);
+    }
     observe_failure(boundary, engine_category(&error));
     Error::from(error)
 }
 fn observe_engine_current(error: wholepact_engine::ApiError) -> Error {
     #[cfg(all(test, feature = "synthetic-born-joined-qualification"))]
-    PRIVATE_CURRENT_BOUNDARY_V2.with(|stage| observe_failure(stage.get(), engine_category(&error)));
+    PRIVATE_CURRENT_BOUNDARY_V2.with(|stage| {
+        let boundary = stage.get();
+        if let Some((operation, site)) = boundary.diagnostic_v1() {
+            observe_private_fixed_engine_v1(operation, site, &error);
+        }
+        observe_failure(boundary, engine_category(&error));
+    });
     Error::from(error)
 }
 fn observe_engine_source(error: wholepact_engine::ApiError) -> Error {
@@ -2090,8 +3805,13 @@ fn observed_host_permission(result: Result<()>) -> bool {
 }
 fn observe_host_current(error: &Error) {
     #[cfg(all(test, feature = "synthetic-born-joined-qualification"))]
-    PRIVATE_CURRENT_BOUNDARY_V2
-        .with(|boundary| observe_failure(boundary.get(), host_category(error)));
+    PRIVATE_CURRENT_BOUNDARY_V2.with(|boundary| {
+        let boundary = boundary.get();
+        if let Some((operation, site)) = boundary.diagnostic_v1() {
+            observe_private_fixed_host_v1(operation, site, error);
+        }
+        observe_failure(boundary, host_category(error));
+    });
     #[cfg(not(all(test, feature = "synthetic-born-joined-qualification")))]
     let _ = error;
 }
@@ -2431,5 +4151,343 @@ mod tests {
         assert_eq!(host_category(&Error::Authentication), "HostAuthentication");
         assert_eq!(host_category(&Error::Permission), "HostPermission");
         assert!(material_action_tag(DurableMaterialActionV1::ExportForLocalNativeReview).is_none());
+    }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    mod private_diagnostics {
+        use super::*;
+        use PrivateDiagnosticCallStateV1 as C;
+        use PrivateDiagnosticOperationV1 as O;
+        use PrivateDiagnosticSiteV1 as S;
+        fn core(operation: O) -> PrivateDiagnosticEngineCoreV1 {
+            let mut calls = PrivateDiagnosticCallsV1 {
+                receipt: C::NotApplicable,
+                enqueue: C::NotApplicable,
+                link: C::NotApplicable,
+                proof: C::NotApplicable,
+                outcome: C::NotApplicable,
+                freeze: C::NotApplicable,
+            };
+            match operation {
+                O::Checkpoint => {
+                    calls.receipt = C::ReturnedOkFresh;
+                    calls.enqueue = C::ReturnedErrUnknown;
+                    calls.link = C::NotCalled;
+                }
+                O::Proof => {
+                    calls.proof = C::ReturnedErrUnknown;
+                    calls.outcome = C::NotCalled;
+                }
+                O::Freeze => calls.freeze = C::ReturnedErrUnknown,
+                O::ReadFixed | O::OpenOriginal => {}
+            }
+            PrivateDiagnosticEngineCoreV1 {
+                schema: 1,
+                operation,
+                site: S::PostConsent,
+                engine_code: PrivateDiagnosticEngineCodeV1::DISCLOSURE_DENIED,
+                family: PrivateDiagnosticFamilyV1::Sync,
+                cause: PrivateDiagnosticCauseV1::NoCurrentObservation,
+                calls,
+                attempt_consumed: operation == O::Proof,
+                call_scope: PrivateDiagnosticCallScopeV1::CurrentInvocation,
+            }
+        }
+        fn error(core: &PrivateDiagnosticEngineCoreV1) -> wholepact_engine::ApiError {
+            let mut error =
+                wholepact_engine::ApiError::new("DISCLOSURE_DENIED", "private-error-canary");
+            error.details = Box::new(serde_json::json!({"private_fixed_diagnostic_v1":core}));
+            error
+        }
+        fn wire(core: &PrivateDiagnosticEngineCoreV1) -> PrivateFixedDiagnosticV1 {
+            PrivateFixedDiagnosticV1 {
+                schema: 1,
+                primary: core.primary(),
+                evidence: Some(core.evidence()),
+                worker: None,
+            }
+        }
+        #[test]
+        fn private_fixed_diagnostic_required_fields_and_finite_pairs() {
+            let value = wire(&core(O::Checkpoint));
+            let json = value.canonical_json().unwrap();
+            assert_eq!(PrivateFixedDiagnosticV1::parse(&json), Some(value));
+            for field in ["schema", "primary", "evidence", "worker"] {
+                let mut missing: serde_json::Value = serde_json::from_str(&json).unwrap();
+                missing.as_object_mut().unwrap().remove(field);
+                assert!(
+                    PrivateFixedDiagnosticV1::parse(&missing.to_string()).is_none(),
+                    "{field}"
+                );
+            }
+            for object in ["primary", "evidence"] {
+                let original: serde_json::Value = serde_json::from_str(&json).unwrap();
+                for field in original[object].as_object().unwrap().keys() {
+                    let mut missing = original.clone();
+                    missing[object].as_object_mut().unwrap().remove(field);
+                    assert!(PrivateFixedDiagnosticV1::parse(&missing.to_string()).is_none());
+                }
+            }
+            let duplicate = json.replacen("\"schema\":1", "\"schema\":1,\"schema\":1", 1);
+            assert!(PrivateFixedDiagnosticV1::parse(&duplicate).is_none());
+            let nested = json.replacen("\"receipt\":", "\"receipt\":\"NotCalled\",\"receipt\":", 1);
+            assert!(PrivateFixedDiagnosticV1::parse(&nested).is_none());
+            let mut invalid = wire(&core(O::Checkpoint));
+            invalid.primary.family = PrivateDiagnosticFamilyV1::Host;
+            assert!(invalid.canonical_json().is_none());
+            invalid = wire(&core(O::Checkpoint));
+            invalid.primary.family = PrivateDiagnosticFamilyV1::Engine;
+            invalid.primary.cause = PrivateDiagnosticCauseV1::DISCLOSURE_DENIED;
+            invalid.primary.engine_code = PrivateDiagnosticEngineCodeV1::NotApplicable;
+            assert!(invalid.canonical_json().is_none());
+        }
+        #[test]
+        fn private_fixed_diagnostic_unknown_and_private_canaries_are_omitted() {
+            let _scope = begin_private_fixed_diagnostic_scope_v1();
+            let original =
+                wholepact_engine::ApiError::new("SECRET/path/pczt/fvk", "SECRET/path/pczt/fvk");
+            observe_private_fixed_engine_v1(O::Checkpoint, S::Candidate, &original);
+            let value = private_fixed_diagnostic_snapshot_v1()
+                .unwrap()
+                .canonical_json()
+                .unwrap();
+            assert!(!value.contains("SECRET"));
+            assert!(value.contains("Unclassified"));
+            assert_eq!(original.code, "SECRET/path/pczt/fvk");
+            assert_eq!(original.message, "SECRET/path/pczt/fvk");
+            assert!(
+                PrivateFixedDiagnosticV1::parse(&value.replacen(
+                    "Unclassified",
+                    "SECRET/path/pczt/fvk",
+                    1
+                ))
+                .is_none()
+            );
+        }
+        #[test]
+        fn private_fixed_diagnostic_first_observed_survives_cleanup() {
+            let _scope = begin_private_fixed_diagnostic_scope_v1();
+            let _call = begin_private_diagnostic_invocation_v1(O::Checkpoint);
+            observe_private_fixed_host_v1(
+                O::Checkpoint,
+                S::HostMaterialApproval,
+                &Error::Permission,
+            );
+            observe_private_fixed_engine_v1(
+                O::Checkpoint,
+                S::Candidate,
+                &error(&core(O::Checkpoint)),
+            );
+            observe_private_fixed_host_v1(
+                O::Checkpoint,
+                S::HostCheckpointPostcheck,
+                &Error::Storage,
+            );
+            let first = private_fixed_diagnostic_snapshot_v1().unwrap();
+            assert_eq!(first.primary.site, S::HostMaterialApproval);
+            assert_eq!(first.primary.cause, PrivateDiagnosticCauseV1::Permission);
+            assert_eq!(first.evidence.unwrap().calls.receipt, C::ReturnedOkFresh);
+        }
+        #[test]
+        fn private_fixed_diagnostic_same_operation_replacement_cannot_fill_evidence() {
+            let _scope = begin_private_fixed_diagnostic_scope_v1();
+            {
+                let _call = begin_private_diagnostic_invocation_v1(O::Checkpoint);
+                observe_private_fixed_host_v1(
+                    O::Checkpoint,
+                    S::HostMaterialApproval,
+                    &Error::Permission,
+                );
+            }
+            {
+                let _replacement = begin_private_diagnostic_invocation_v1(O::Checkpoint);
+                observe_private_fixed_engine_v1(
+                    O::Checkpoint,
+                    S::Candidate,
+                    &error(&core(O::Checkpoint)),
+                );
+            }
+            let first = private_fixed_diagnostic_snapshot_v1().unwrap();
+            assert!(first.evidence.is_none());
+            assert_eq!(first.primary.site, S::HostMaterialApproval);
+        }
+        #[test]
+        fn private_fixed_diagnostic_broker_priority_preserves_received_engine_error() {
+            let _scope = begin_private_fixed_diagnostic_scope_v1();
+            let _call = begin_private_diagnostic_invocation_v1(O::Proof);
+            private_worker_start_v1();
+            let original = Error::Terminal;
+            observe_private_fixed_host_v1(O::Proof, S::HostProofForegroundMessage, &original);
+            let received: std::result::Result<(), wholepact_engine::ApiError> =
+                Err(error(&core(O::Proof)));
+            private_worker_received_v1(&received);
+            observe_private_fixed_engine_v1(O::Proof, S::ProofRun, received.as_ref().unwrap_err());
+            private_worker_joined_v1(true);
+            let first = private_fixed_diagnostic_snapshot_v1().unwrap();
+            assert_eq!(first.primary.cause, PrivateDiagnosticCauseV1::Terminal);
+            assert!(first.worker.unwrap().engine_failure.is_some());
+            assert!(received.is_err());
+            let chosen: Result<()> = select_original_proof_result_v1(
+                Some(original),
+                Err(Error::Permission),
+                Err(Box::new(())),
+            );
+            assert!(matches!(chosen, Err(Error::Terminal)));
+            let chosen: Result<()> = select_original_proof_result_v1(
+                None,
+                Err(Error::Authentication),
+                Err(Box::new(())),
+            );
+            assert!(matches!(chosen, Err(Error::Authentication)));
+        }
+        #[test]
+        fn private_fixed_diagnostic_disconnect_and_panic_do_not_invent_engine_error() {
+            let _scope = begin_private_fixed_diagnostic_scope_v1();
+            let _call = begin_private_diagnostic_invocation_v1(O::Proof);
+            private_worker_start_v1();
+            observe_private_fixed_host_v1(
+                O::Proof,
+                S::HostProofForegroundMessage,
+                &Error::Terminal,
+            );
+            private_worker_disconnected_v1();
+            private_worker_joined_v1(false);
+            let first = private_fixed_diagnostic_snapshot_v1().unwrap();
+            assert!(first.evidence.is_none());
+            let worker = first.worker.unwrap();
+            assert_eq!(worker.result, PrivateDiagnosticWorkerResultV1::Disconnected);
+            assert_eq!(worker.join, PrivateDiagnosticWorkerJoinV1::Panicked);
+            assert!(worker.engine_failure.is_none());
+        }
+        #[test]
+        fn private_fixed_diagnostic_same_result_once_without_clone() {
+            struct Owned(std::rc::Rc<Cell<usize>>);
+            impl Drop for Owned {
+                fn drop(&mut self) {
+                    self.0.set(self.0.get() + 1);
+                }
+            }
+            let _scope = begin_private_fixed_diagnostic_scope_v1();
+            let _call = begin_private_diagnostic_invocation_v1(O::Proof);
+            let dropped = std::rc::Rc::new(Cell::new(0));
+            let calls = Cell::new(0);
+            let original = private_host_result_at_v1(S::HostProofAccess, {
+                calls.set(calls.get() + 1);
+                Ok(Owned(dropped.clone()))
+            })
+            .unwrap();
+            assert_eq!(calls.get(), 1);
+            assert_eq!(dropped.get(), 0);
+            drop(original);
+            assert_eq!(dropped.get(), 1);
+            assert!(private_fixed_diagnostic_snapshot_v1().is_none());
+        }
+        #[test]
+        fn private_fixed_diagnostic_call_relevance_and_nullable_evidence() {
+            for op in [
+                O::Checkpoint,
+                O::Proof,
+                O::Freeze,
+                O::ReadFixed,
+                O::OpenOriginal,
+            ] {
+                assert!(wire(&core(op)).canonical_json().is_some());
+            }
+            let mut value = wire(&core(O::Checkpoint));
+            value.evidence.as_mut().unwrap().calls.receipt = C::ReturnedOk;
+            assert!(value.canonical_json().is_none());
+            let mut value = wire(&core(O::Proof));
+            value.evidence.as_mut().unwrap().attempt_consumed = false;
+            assert!(value.canonical_json().is_none());
+            let mut value = wire(&core(O::Proof));
+            value.worker = Some(PrivateDiagnosticWorkerV1 {
+                result: PrivateDiagnosticWorkerResultV1::ReceivedOk,
+                join: PrivateDiagnosticWorkerJoinV1::Joined,
+                engine_failure: None,
+            });
+            assert!(value.canonical_json().is_none());
+            value.evidence = None;
+            assert!(value.canonical_json().is_some());
+            let raw = value.canonical_json().unwrap();
+            assert!(
+                PrivateFixedDiagnosticV1::parse(&raw.replace(",\"engine_failure\":null", ""))
+                    .is_none()
+            );
+        }
+        #[test]
+        fn private_fixed_diagnostic_maximal_canonical_wrapper_is_bounded() {
+            let mut original = core(O::Proof);
+            original.site = S::SnapshotSourceUnchanged;
+            original.engine_code =
+                PrivateDiagnosticEngineCodeV1::RETAINED_INPUT_OBSERVATION_UNAVAILABLE;
+            original.family = PrivateDiagnosticFamilyV1::Engine;
+            original.cause = PrivateDiagnosticCauseV1::RETAINED_INPUT_OBSERVATION_UNAVAILABLE;
+            original.calls.proof = C::ReturnedErrUnknown;
+            original.calls.outcome = C::ReturnedErrUnknown;
+            let mut value = wire(&original);
+            value.primary.site = S::ReaderOriginalFinancialProofSchema;
+            value.worker = Some(PrivateDiagnosticWorkerV1 {
+                result: PrivateDiagnosticWorkerResultV1::ReceivedErr,
+                join: PrivateDiagnosticWorkerJoinV1::Panicked,
+                engine_failure: Some(original),
+            });
+            let actual = serde_json::to_string(&value).unwrap();
+            assert!(actual.len() <= PRIVATE_FIXED_DIAGNOSTIC_MAX_BYTES_V1);
+            assert_eq!(PrivateFixedDiagnosticV1::parse(&actual), Some(value));
+        }
+        #[test]
+        fn private_fixed_diagnostic_scope_contention_and_drop_are_unavailable() {
+            let scope = begin_private_fixed_diagnostic_scope_v1();
+            PRIVATE_DIAGNOSTIC_LATCH_V1.with(|slot| {
+                let _held = slot.borrow_mut();
+                observe_private_fixed_host_v1(O::ReadFixed, S::HostReadReturn, &Error::Permission);
+            });
+            observe_private_fixed_host_v1(O::ReadFixed, S::HostReadReturn, &Error::Storage);
+            assert!(private_fixed_diagnostic_snapshot_v1().is_none());
+            PRIVATE_DIAGNOSTIC_LATCH_V1.with(|slot| {
+                let _held = slot.borrow_mut();
+                drop(scope);
+            });
+            observe_private_fixed_host_v1(O::ReadFixed, S::HostReadReturn, &Error::Storage);
+            assert!(private_fixed_diagnostic_snapshot_v1().is_none());
+            let _fresh = begin_private_fixed_diagnostic_scope_v1();
+            assert!(private_fixed_diagnostic_snapshot_v1().is_none());
+            observe_private_fixed_host_v1(O::ReadFixed, S::ReaderCompletionWrite, &Error::Storage);
+            assert_eq!(
+                private_fixed_diagnostic_snapshot_v1().unwrap().primary.site,
+                S::ReaderCompletionWrite
+            );
+        }
+        #[test]
+        fn private_fixed_diagnostic_invocation_overflow_is_unavailable() {
+            let _scope = begin_private_fixed_diagnostic_scope_v1();
+            let prior = PRIVATE_DIAGNOSTIC_SEQUENCE_V1.with(|sequence| sequence.replace(u64::MAX));
+            let _call = begin_private_diagnostic_invocation_v1(O::Checkpoint);
+            observe_private_fixed_host_v1(
+                O::Checkpoint,
+                S::HostCheckpointEntry,
+                &Error::Permission,
+            );
+            assert!(private_fixed_diagnostic_snapshot_v1().is_none());
+            PRIVATE_DIAGNOSTIC_SEQUENCE_V1.with(|sequence| sequence.set(prior));
+        }
+        #[test]
+        fn private_fixed_diagnostic_invalid_boundary_pairs_are_never_retained() {
+            let _scope = begin_private_fixed_diagnostic_scope_v1();
+            for (boundary, outcome) in [
+                ("SECRET/path", "HostPermission"),
+                ("PrivateWorkspaceProof", "SECRET/pczt"),
+                ("PrivateWorkspaceRootCleanup", "BridgeBinding"),
+                ("PrivateWorkspaceProof", "Begin"),
+            ] {
+                observe_private_fixed_boundary_v1(boundary, outcome);
+                assert!(first_private_fixed_boundary_v1().is_none());
+            }
+            observe_private_fixed_boundary_v1("PrivateWorkspaceProof", "HostPermission");
+            observe_private_fixed_boundary_v1("PrivateWorkspaceRootCleanup", "HostStorage");
+            assert_eq!(
+                first_private_fixed_boundary_v1(),
+                Some(("PrivateWorkspaceProof", "HostPermission"))
+            );
+        }
     }
 }

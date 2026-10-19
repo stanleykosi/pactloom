@@ -2804,16 +2804,237 @@ class PrivateWorkspaceOutputTests(unittest.TestCase):
         with self.assertRaises(ValueError): self.run_fake([cleanup,self.line()])
         with self.assertRaises(ValueError): self.run_fake([output.MARKER+json.dumps(PublicOutputTests().record()),self.line()])
 
-    def test_private_workspace_pure_catalogue_matches_seven_exact_source_tests(self):
+    def test_private_workspace_pure_catalogue_matches_exact_source_tests(self):
         base=ROOT/'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3_qualification'
         source=(base/'durable_proposal_v1/private_fixed_v2.rs').read_text().split('mod pure_tests {',1)[1]
         names=re.findall(r'#\[test\]\s*fn ([a-z0-9_]+)\(',source)
         expected=tuple(output.PREFIX+'durable_proposal_v1::private_fixed_v2::pure_tests::'+name for name in names)
         self.assertEqual(expected,output.PRIVATE_WORKSPACE_PURE_TESTS)
-        self.assertEqual(len(set(expected)),7)
-        combined=(output.PURE_TESTS+output.PRIVATE_WORKSPACE_PURE_TESTS+output.POLICY_ENVELOPE_TESTS+output.PROMPT_RENDERING_TESTS+output.LOWER_ERROR_TESTS+output.DENIAL_TESTS+output.ROLLING_TRANSCRIPT_TESTS+output.AUTHORITY_PROJECTION_TESTS+output.READ_WAVE_TESTS+output.HISTORY_MEASUREMENT_TESTS+output.HISTORY_TRANSCRIPT_TESTS+output.ADMISSION_PROJECTION_TESTS+output.ADMISSION_TRANSCRIPT_TESTS+output.ADMISSION_HOST_TESTS+output.FLOW_PROJECTION_TESTS+output.FLOW_TRANSCRIPT_TESTS+output.FLOW_HOST_TESTS+output.TIMING_HOST_TESTS+(output.DURABLE_PROVIDER_METADATA_TEST,))
-        self.assertEqual(len(combined),87)
-        self.assertEqual(len(set(combined)),87)
+        self.assertEqual(len(set(expected)),len(names))
+        combined=(output.PURE_TESTS+output.PRIVATE_WORKSPACE_PURE_TESTS+output.PRIVATE_FIXED_PROJECTION_TESTS+output.PRIVATE_FIXED_TRANSCRIPT_TESTS+output.POLICY_ENVELOPE_TESTS+output.PROMPT_RENDERING_TESTS+output.LOWER_ERROR_TESTS+output.DENIAL_TESTS+output.ROLLING_TRANSCRIPT_TESTS+output.AUTHORITY_PROJECTION_TESTS+output.READ_WAVE_TESTS+output.HISTORY_MEASUREMENT_TESTS+output.HISTORY_TRANSCRIPT_TESTS+output.ADMISSION_PROJECTION_TESTS+output.ADMISSION_TRANSCRIPT_TESTS+output.ADMISSION_HOST_TESTS+output.FLOW_PROJECTION_TESTS+output.FLOW_TRANSCRIPT_TESTS+output.FLOW_HOST_TESTS+output.TIMING_HOST_TESTS+(output.DURABLE_PROVIDER_METADATA_TEST,))
+        self.assertEqual(len(set(combined)),len(combined))
+
+
+
+class PrivateFixedDiagnosticOutputTests(unittest.TestCase):
+    FIXTURE = r'''{"evidence":{"attempt_consumed":true,"call_scope":"CurrentInvocation","calls":{"enqueue":"NotApplicable","freeze":"NotApplicable","link":"NotApplicable","outcome":"NotCalled","proof":"ReturnedErrUnknown","receipt":"NotApplicable"}},"primary":{"cause":"Authentication","engine_code":"NotApplicable","family":"Host","operation":"Proof","site":"HostProofForegroundMessage"},"schema":1,"worker":{"engine_failure":{"attempt_consumed":true,"call_scope":"CurrentInvocation","calls":{"enqueue":"NotApplicable","freeze":"NotApplicable","link":"NotApplicable","outcome":"NotCalled","proof":"ReturnedErrUnknown","receipt":"NotApplicable"},"cause":"NoCurrentObservation","engine_code":"DURABLE_CONSTRUCTION_UNAVAILABLE","family":"Sync","operation":"Proof","schema":1,"site":"ProofRun"},"join":"Joined","result":"ReceivedErr"}}'''
+    MAXIMAL = r'''{"evidence":{"attempt_consumed":true,"call_scope":"CurrentInvocation","calls":{"enqueue":"NotApplicable","freeze":"NotApplicable","link":"NotApplicable","outcome":"ReturnedErrUnknown","proof":"ReturnedErrUnknown","receipt":"NotApplicable"}},"primary":{"cause":"RETAINED_INPUT_OBSERVATION_UNAVAILABLE","engine_code":"RETAINED_INPUT_OBSERVATION_UNAVAILABLE","family":"Engine","operation":"Proof","site":"ReaderOriginalFinancialProofSchema"},"schema":1,"worker":{"engine_failure":{"attempt_consumed":true,"call_scope":"CurrentInvocation","calls":{"enqueue":"NotApplicable","freeze":"NotApplicable","link":"NotApplicable","outcome":"ReturnedErrUnknown","proof":"ReturnedErrUnknown","receipt":"NotApplicable"},"cause":"RETAINED_INPUT_OBSERVATION_UNAVAILABLE","engine_code":"RETAINED_INPUT_OBSERVATION_UNAVAILABLE","family":"Engine","operation":"Proof","schema":1,"site":"SnapshotSourceUnchanged"},"join":"Panicked","result":"ReceivedErr"}}'''
+
+    def record(self):
+        return json.loads(self.FIXTURE)
+
+    def line(self, row=None):
+        return output.PRIVATE_FIXED_DIAGNOSTIC_PREFIX+json.dumps(self.record() if row is None else row,separators=(',',':'),sort_keys=True)
+
+    def check(self, row):
+        return output.public_private_fixed_diagnostic(json.dumps(row))
+
+    def objects(self, row):
+        return [row,row['primary'],row['evidence'],row['evidence']['calls'],row['worker'],row['worker']['engine_failure'],row['worker']['engine_failure']['calls']]
+
+    def test_exact_schema_required_fields_types_enums_and_pairing(self):
+        self.assertEqual(self.check(self.record()),self.record())
+        for index, original in enumerate(self.objects(self.record())):
+            for key in original:
+                row=self.record(); del self.objects(row)[index][key]
+                with self.assertRaises(ValueError): self.check(row)
+                row=self.record(); self.objects(row)[index][key]=['PRIVATE_CANARY']
+                with self.assertRaises(ValueError): self.check(row)
+            row=self.record(); self.objects(row)[index]['private_unknown']='PRIVATE_CANARY'
+            with self.assertRaises(ValueError): self.check(row)
+        for family, causes in output.PRIVATE_FIXED_FAMILIES.items():
+            for cause in set().union(*output.PRIVATE_FIXED_FAMILIES.values()):
+                row=self.record(); row['primary'].update(family=family,cause=cause,engine_code='Unclassified' if family=='Engine' else 'NotApplicable')
+                if cause in causes: self.assertEqual(self.check(row),row)
+                else:
+                    with self.assertRaises(ValueError): self.check(row)
+        for operation in output.PRIVATE_FIXED_OPERATIONS:
+            row=self.record(); row['worker']=None; row['primary']['operation']=operation
+            row['evidence']['attempt_consumed']=operation=='Proof'
+            row['evidence']['calls']={slot:'NotCalled' if slot in output.PRIVATE_FIXED_RELEVANCE[operation] else 'NotApplicable' for slot in output.PRIVATE_FIXED_CALL_FIELDS}
+            self.assertEqual(self.check(row),row)
+            for slot in output.PRIVATE_FIXED_CALL_FIELDS:
+                for state in output.PRIVATE_FIXED_CALL_STATES:
+                    changed=json.loads(json.dumps(row)); changed['evidence']['calls'][slot]=state
+                    allowed=output.PRIVATE_FIXED_SLOT_STATES[slot] if slot in output.PRIVATE_FIXED_RELEVANCE[operation] else {'NotApplicable'}
+                    if state in allowed: self.assertEqual(self.check(changed),changed)
+                    else:
+                        with self.assertRaises(ValueError): self.check(changed)
+        row=self.record(); row['primary'].update(family='Engine',cause='Unclassified')
+        with self.assertRaises(ValueError): self.check(row)
+        for schema in (True,False,0,2,1.0,'1',None):
+            row=self.record(); row['schema']=schema
+            with self.assertRaises(ValueError): self.check(row)
+
+    def test_worker_null_receive_join_and_nullable_call_evidence(self):
+        for operation in output.PRIVATE_FIXED_OPERATIONS:
+            row=self.record(); row['primary']['operation']=operation; row['worker']=None; row['evidence']=None
+            self.assertEqual(self.check(row),row)
+        for result in output.PRIVATE_FIXED_WORKER_RESULTS:
+            for join in output.PRIVATE_FIXED_WORKER_JOINS:
+                row=self.record(); row['evidence']=None
+                row['worker']={'result':result,'join':join,'engine_failure':None}
+                if (result=='NotStarted')==(join=='NotStarted'): self.assertEqual(self.check(row),row)
+                else:
+                    with self.assertRaises(ValueError): self.check(row)
+                row['evidence']=self.record()['evidence']; row['worker']['engine_failure']=self.record()['worker']['engine_failure']
+                if result=='ReceivedErr' and join!='NotStarted': self.assertEqual(self.check(row),row)
+                else:
+                    with self.assertRaises(ValueError): self.check(row)
+        for section,key,value in [('primary','operation','Checkpoint'),('evidence','attempt_consumed',False),('evidence','attempt_consumed',1),('worker','engine_failure',None)]:
+            row=self.record(); row[section][key]=value
+            with self.assertRaises(ValueError): self.check(row)
+        for key,value in [('operation','Checkpoint'),('site','HostProofJoin'),('engine_code','NotApplicable'),('attempt_consumed',False),('schema',True),('call_scope','EarlierInvocation')]:
+            row=self.record(); row['worker']['engine_failure'][key]=value
+            with self.assertRaises(ValueError): self.check(row)
+        row=self.record(); row['worker']['engine_failure']['calls']['proof']='ReturnedOk'
+        with self.assertRaises(ValueError): self.check(row)
+
+    def test_maximal_canonical_record_is_bounded(self):
+        row=output.public_private_fixed_diagnostic(self.MAXIMAL)
+        canonical=json.dumps(row,separators=(',',':'),sort_keys=True)
+        self.assertLessEqual(len(canonical.encode()),4096)
+        exact=' '*(4096-len(canonical.encode()))+canonical
+        self.assertEqual(len(exact.encode()),4096)
+        self.assertEqual(output.public_private_fixed_diagnostic(exact),row)
+        with self.assertRaises(ValueError): output.public_private_fixed_diagnostic(exact+' ')
+        raw=(output.PRIVATE_FIXED_DIAGNOSTIC_PREFIX+canonical+'\r'*4097).encode()
+        self.assertEqual(output.public_line(raw,'exact'),('private_fixed_diagnostic_invalid',None))
+
+    def test_unknown_private_duplicate_and_oversized_records_withheld(self):
+        for index, original in enumerate(self.objects(self.record())):
+            for key in original:
+                obj=json.dumps(original,separators=(',',':'),sort_keys=True)
+                duplicate='{'+json.dumps(key)+':'+json.dumps(original[key])+','+obj[1:]
+                row=self.record(); target=self.objects(row)[index]
+                def encode(value):
+                    if value is target: return duplicate
+                    if type(value) is dict: return '{'+','.join(json.dumps(k)+':'+encode(v) for k,v in sorted(value.items()))+'}'
+                    return json.dumps(value,separators=(',',':'))
+                raw=encode(row)
+                with self.assertRaises(ValueError): output.public_private_fixed_diagnostic(raw)
+        for key in output.PRIVATE_FIXED_PRIMARY_FIELDS:
+            row=self.record(); row['primary'][key]='/private/PCZT-FVK-CANARY'
+            self.assertEqual(output.public_line(self.line(row).encode(),'exact'),('private_fixed_diagnostic_invalid',None))
+        row=self.record(); row['primary'].update(family='Sync',cause='Authentication')
+        with self.assertRaises(ValueError): self.check(row)
+        capture=output.PrivateFixedDiagnostics()
+        capture.record('private_fixed_diagnostic',self.record())
+        capture.record('private_fixed_diagnostic_invalid',None)
+        self.assertTrue(capture.invalid)
+        self.assertEqual(capture.value,self.record())
+        for raw in ((output.PRIVATE_FIXED_DIAGNOSTIC_PREFIX+' '*4097+'{}').encode(),output.PRIVATE_FIXED_DIAGNOSTIC_PREFIX.encode()+bytes([255]),output.PRIVATE_FIXED_DIAGNOSTIC_UNAVAILABLE.encode()):
+            self.assertEqual(output.public_line(raw,'exact'),('private_fixed_diagnostic_invalid',None))
+
+    def test_fragmented_crlf_utf8_and_near_prefix_do_not_leak(self):
+        line=self.line().encode()
+        for split in range(len(line)+1):
+            parser=output.BoundedLines('exact')
+            self.assertEqual(parser.feed(line[:split]),[])
+            rows=parser.feed(line[split:]+b'\r\n')
+            self.assertEqual([output.public_line(row,'exact') for row in rows],[('private_fixed_diagnostic',self.record())])
+        for raw in (b'private '+line,b'[ '+line+b' ]',b'CI_SYNTHETIC_PRIVATE_FIXED_DIAGNOSTI '+line):
+            self.assertIsNone(output.public_line(raw,'exact'))
+        self.assertEqual(output.public_line(b'test exact ... '+line,'exact'),('private_fixed_diagnostic',self.record()))
+        self.assertEqual(output.public_line(b'CI_SYNTHETIC_PRIVATE_FIXED_DIAGNOSTIC_BAD '+line,'exact'),('private_fixed_diagnostic_invalid',None))
+        parser=output.BoundedLines('exact')
+        framed=parser.feed(output.PRIVATE_FIXED_DIAGNOSTIC_PREFIX.encode()+b'x'*9000+b'\n'+line+b'\n')
+        self.assertEqual(framed[0],output.PRIVATE_FIXED_DIAGNOSTIC_UNAVAILABLE.encode())
+        self.assertEqual(output.public_line(framed[1],'exact'),('private_fixed_diagnostic',self.record()))
+        self.assertLessEqual(len(parser.pending),8192)
+        parser=output.BoundedLines('exact')
+        self.assertEqual(parser.feed('private é'.encode()[:-1]),[])
+        self.assertIsNone(output.public_line(parser.feed(bytes([0xa9])+b'\n')[0],'exact'))
+
+    def failed_outcome(self):
+        row=PrivateWorkspaceOutputTests().record()
+        row.update(result='failed',first_failure='PrivateWorkspaceProof',producer_exit='other',reader_exit='not_started',reader_reaped=False,reader_group_absent=False)
+        return row
+
+    def run_fake(self, rows, status=101, phase='durable-private-reopen', tail=b''):
+        name=output.TESTS[phase][0]
+        core='[JOINED_CORE_POLICY inherited_limit=Zero collector=Pipe process_dumpability=Unchanged crash_copy_absence_verified=false]'
+        payload=('\n'.join([core]+rows)+'\n').encode()+tail
+        stream=mock.Mock(); stream.fileno.return_value=7
+        process=mock.Mock(stdout=stream); process.wait.return_value=status
+        listed=output.subprocess.CompletedProcess([],0,(name+': test\n\n1 test, 0 benchmarks\n').encode(),b'')
+        captured=io.StringIO(); failed=False
+        with mock.patch.object(output.resource,'getrlimit',return_value=(0,0)), \
+             mock.patch.object(output.subprocess,'run',return_value=listed), \
+             mock.patch.object(output.subprocess,'Popen',return_value=process), \
+             mock.patch.object(output.select,'select',return_value=([stream],[],[])), \
+             mock.patch.object(output.os,'read',side_effect=[payload,b'']), \
+             mock.patch.dict(output.os.environ,{},clear=True), contextlib.redirect_stdout(captured):
+            try: output.run('/verified/host',phase)
+            except RuntimeError: failed=True
+        return failed,captured.getvalue()
+
+    def test_record_does_not_change_phase_success_or_first_failure(self):
+        aggregate=output.PRIVATE_WORKSPACE_PREFIX+json.dumps(self.failed_outcome())
+        for records in ([],[self.line()],[self.line(),self.line()],[output.PRIVATE_FIXED_DIAGNOSTIC_UNAVAILABLE]):
+            failed,text=self.run_fake(records+[aggregate])
+            self.assertTrue(failed)
+            projected=[line for line in text.splitlines() if line.startswith(output.PRIVATE_WORKSPACE_PREFIX)]
+            self.assertEqual(len(projected),1)
+            self.assertEqual(json.loads(projected[0][len(output.PRIVATE_WORKSPACE_PREFIX):]),self.failed_outcome())
+        failed,text=self.run_fake([self.line()])
+        self.assertTrue(failed); self.assertNotIn(output.PRIVATE_FIXED_DIAGNOSTIC_PREFIX,text)
+        for records in ([self.line()],[self.line(),self.line()],[output.PRIVATE_FIXED_DIAGNOSTIC_UNAVAILABLE]):
+            aggregate=PrivateWorkspaceOutputTests().line()
+            failed,text=self.run_fake(records+[aggregate],status=0)
+            self.assertFalse(failed); self.assertNotIn('CI_SYNTHETIC_PRIVATE_FIXED_DIAGNOSTIC',text)
+        failed,text=self.run_fake([aggregate],tail=self.line().encode())
+        self.assertTrue(failed); self.assertNotIn('CI_SYNTHETIC_PRIVATE_FIXED_DIAGNOSTIC',text)
+
+    def test_record_forwarded_only_after_existing_cleanup_outcome(self):
+        row=self.failed_outcome()
+        aggregate=lambda value:output.PRIVATE_WORKSPACE_PREFIX+json.dumps(value)
+        failed,text=self.run_fake([self.line(),aggregate(row)])
+        self.assertTrue(failed)
+        self.assertIn(self.line(),text)
+        for key,value in [('root_cleanup','retained'),('root_cleanup','unverified'),('producer_reaped',False),('producer_group_absent',False),('producer_exit','unverified'),('reader_exit','unverified'),('reader_exit','other')]:
+            changed=dict(row,**{key:value})
+            failed,text=self.run_fake([self.line(),aggregate(changed)])
+            self.assertTrue(failed); self.assertNotIn('CI_SYNTHETIC_PRIVATE_FIXED_DIAGNOSTIC',text)
+        reader=dict(row,reader_exit='other',reader_reaped=True,reader_group_absent=True)
+        failed,text=self.run_fake([self.line(),aggregate(reader)])
+        self.assertTrue(failed); self.assertIn(self.line(),text)
+        failed,text=self.run_fake([self.line(),self.line(),aggregate(row)])
+        self.assertEqual(text.count(output.PRIVATE_FIXED_DIAGNOSTIC_UNAVAILABLE),1)
+        self.assertNotIn(self.line(),text)
+        failed,text=self.run_fake([aggregate(row)],tail=self.line().encode())
+        self.assertIn(output.PRIVATE_FIXED_DIAGNOSTIC_UNAVAILABLE,text)
+        failed,text=self.run_fake([self.line()],phase='durable-owner-reopen')
+        self.assertTrue(failed); self.assertNotIn('CI_SYNTHETIC_PRIVATE_FIXED_DIAGNOSTIC',text)
+
+    def test_rust_python_closed_inventory_and_selector_parity(self):
+        leaf=(ROOT/'crates/wholepact-native-host/src/host/financial/private_durable_fixed_v2.rs').read_text()
+        def variants(name):
+            body=re.search(r'enum '+name+r'\s*\{(.*?)\}',leaf,re.S).group(1)
+            return frozenset(re.findall(r'\b([A-Za-z][A-Za-z0-9_]*)\s*(?:,|$)',body))
+        for name, expected in [('Operation',output.PRIVATE_FIXED_OPERATIONS),('Site',output.PRIVATE_FIXED_SITES),('Family',set(output.PRIVATE_FIXED_FAMILIES)),('Cause',set().union(*output.PRIVATE_FIXED_FAMILIES.values())),('EngineCode',output.PRIVATE_FIXED_ENGINE_CODES),('CallState',output.PRIVATE_FIXED_CALL_STATES),('CallScope',{'CurrentInvocation'}),('WorkerResult',output.PRIVATE_FIXED_WORKER_RESULTS),('WorkerJoin',output.PRIVATE_FIXED_WORKER_JOINS)]:
+            self.assertEqual(variants('PrivateDiagnostic'+name+'V1'),expected)
+        for name, expected in [('PrivateFixedDiagnosticV1',output.PRIVATE_FIXED_FIELDS),('PrivateDiagnosticPrimaryV1',output.PRIVATE_FIXED_PRIMARY_FIELDS),('PrivateDiagnosticEvidenceV1',output.PRIVATE_FIXED_EVIDENCE_FIELDS),('PrivateDiagnosticCallsV1',output.PRIVATE_FIXED_CALL_FIELDS),('PrivateDiagnosticEngineCoreV1',output.PRIVATE_FIXED_ENGINE_FIELDS),('PrivateDiagnosticWorkerV1',output.PRIVATE_FIXED_WORKER_FIELDS)]:
+            body=re.search(r'struct '+name+r'\s*\{(.*?)\n\}',leaf,re.S).group(1)
+            self.assertEqual(set(re.findall(r'pub\(crate\)\s+(\w+)\s*:',body)),expected)
+        families={family:frozenset(re.findall(r'C::(\w+)',causes)) for family,causes in re.findall(r'F::(\w+)\s*=>\s*matches!\(\s*self.cause,\s*(.*?)\)',leaf,re.S)}
+        self.assertEqual(families,output.PRIVATE_FIXED_FAMILIES)
+        engine=leaf.split('impl PrivateDiagnosticEngineCoreV1 {',1)[1].split('fn from_error',1)[0]
+        self.assertEqual(set(re.findall(r'PrivateDiagnosticSiteV1::(\w+)',engine)),output.PRIVATE_FIXED_ENGINE_SITES)
+        base=ROOT/'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3_qualification'
+        safe=(base/'safe_diagnostics_v1.rs').read_text(); rolling=(base/'rolling_transcript_v1.rs').read_text()
+        for source, module, selected in [(safe,'safe_diagnostics_v1::',output.PRIVATE_FIXED_PROJECTION_TESTS),(rolling,'rolling_transcript_v1::tests::',output.PRIVATE_FIXED_TRANSCRIPT_TESTS)]:
+            actual=re.findall(r'#\[test\]\s*(?:#\[[^\]]*\]\s*)*fn (private_fixed_diagnostic_\w+)\(',source)
+            self.assertEqual(tuple(output.PREFIX+module+name for name in actual),selected)
+            self.assertEqual(len(actual),len(set(actual)))
+        fixture=re.search(r'PRIVATE_FIXED_DIAGNOSTIC_TEST_JSON: &str = r#"(.*?)"#;',safe,re.S).group(1)
+        maximal=re.search(r'PRIVATE_FIXED_DIAGNOSTIC_MAXIMAL_TEST_JSON: &str = r#"(.*?)"#;',safe,re.S).group(1)
+        self.assertEqual(json.loads(fixture),self.record())
+        self.assertEqual(json.loads(maximal),json.loads(self.MAXIMAL))
+        # Existing budget, outcome and deadline code remains authoritative.
+        self.assertIn('MAX_BYTES: usize = 262_144',rolling)
+        self.assertEqual(len(output.PRIVATE_WORKSPACE_FIELDS),20)
+        self.assertEqual(output.TESTS['durable-private-reopen'][1],1080)
 
 
 if __name__=='__main__':

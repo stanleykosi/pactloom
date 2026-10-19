@@ -52,6 +52,9 @@ PRIVATE_WORKSPACE_PURE_TESTS = tuple(PREFIX + 'durable_proposal_v1::private_fixe
     'fragmented_utf8_and_marker_use_the_existing_bounded_transcript',
     'early_duplicate_and_partial_death_markers_refuse',
     'final_response_consumption_precedes_terminal_marker_retention',
+    'private_fixed_diagnostic_reader_final_sites_forward_actual_errors',
+    'private_fixed_diagnostic_cleanup_never_replaces_first_observed_failure',
+    'private_fixed_diagnostic_transport_waits_for_existing_cleanup_gate',
 ))
 PRIVATE_WORKSPACE_PREFIX = 'CI_SYNTHETIC_PRIVATE_WORKSPACE '
 PRIVATE_WORKSPACE_INVALID = 'CI_SYNTHETIC_PRIVATE_WORKSPACE_INVALID'
@@ -59,6 +62,64 @@ PRIVATE_WORKSPACE_BOUNDARIES = frozenset('PrivateWorkspaceBootstrap PrivateSourc
 PRIVATE_WORKSPACE_FALSE_FIELDS = frozenset(('authorization_allowed','distribution_allowed','attended_native_acceptance_verified','public_chain_verified'))
 PRIVATE_WORKSPACE_BOOL_FIELDS = frozenset(('producer_reaped','producer_group_absent','reader_reaped','reader_group_absent','fixed_verified','exact_identity_preserved','exact_checkpoint_preserved','exact_idempotency_preserved','reader_no_effects_verified'))
 PRIVATE_WORKSPACE_FIELDS = PRIVATE_WORKSPACE_FALSE_FIELDS | PRIVATE_WORKSPACE_BOOL_FIELDS | frozenset(('schema','phase','result','first_failure','producer_exit','reader_exit','root_cleanup'))
+
+# Independent, closed, bounded optional observation. Never an outcome/permit.
+PRIVATE_FIXED_DIAGNOSTIC_PREFIX = 'CI_SYNTHETIC_PRIVATE_FIXED_DIAGNOSTIC '
+PRIVATE_FIXED_DIAGNOSTIC_UNAVAILABLE = 'CI_SYNTHETIC_PRIVATE_FIXED_DIAGNOSTIC_UNAVAILABLE'
+PRIVATE_FIXED_DIAGNOSTIC_MAX_BYTES = 4096
+PRIVATE_FIXED_FIELDS = frozenset(('schema', 'primary', 'evidence', 'worker'))
+PRIVATE_FIXED_PRIMARY_FIELDS = frozenset(('operation', 'site', 'engine_code', 'family', 'cause'))
+PRIVATE_FIXED_EVIDENCE_FIELDS = frozenset(('call_scope', 'attempt_consumed', 'calls'))
+PRIVATE_FIXED_WORKER_FIELDS = frozenset(('result', 'join', 'engine_failure'))
+PRIVATE_FIXED_ENGINE_FIELDS = frozenset(('schema', 'operation', 'site', 'engine_code', 'family', 'cause', 'calls', 'attempt_consumed', 'call_scope'))
+PRIVATE_FIXED_CALL_FIELDS = frozenset(('receipt', 'enqueue', 'link', 'proof', 'outcome', 'freeze'))
+PRIVATE_FIXED_OPERATIONS = frozenset(('Checkpoint', 'Proof', 'Freeze', 'ReadFixed', 'OpenOriginal'))
+PRIVATE_FIXED_SITES = frozenset(('WorkspaceLoad', 'Candidate', 'MaterialRoster', 'SlotBindings', 'WalletRosterAcquire', 'HeldPrecheck', 'ConstructorReload', 'InputRequestDigest', 'OriginalRequest', 'OriginalLookup', 'OriginalLineage', 'ReplayLookup', 'Revision', 'CurrentTerms', 'ProposalValidation', 'ProtocolConstruct', 'ProtocolInspect', 'RetainConsent', 'ReceiptPrepare', 'ReceiptCommit', 'Enqueue', 'ReloadAfterEnqueue', 'LinkPrepare', 'LinkUpsert', 'LinkCommit', 'PostSource', 'PostConsent', 'HeldPostcheck', 'WalletRosterRelease', 'ContinuationBinding', 'ProofRun', 'ProofResultLineage', 'OutcomePrepare', 'OutcomeCommit', 'StatusLookup', 'LoadVerified', 'ProofVerifiedState', 'FixedMappings', 'FixedVerify', 'FixedReplayRead', 'FixedPrepare', 'FixedCommit', 'SavedDecode', 'OutputLineage', 'OperationHistory', 'ProofEventHistory', 'OutputCommitments', 'RetainedDiscovery', 'RetainedKey', 'ReloadAfterRead', 'EnvelopeCompare', 'JournalAfterRead', 'LogicalCompare', 'FinalGate', 'FinalProofOrigin', 'MetadataPreflight', 'MetadataOpen', 'SeedAudit', 'SourcePermission', 'MetadataOrigin', 'Marker', 'ProofOrigin', 'ExactScope', 'GateWorkspace', 'GateMaterial', 'GateHeldPre', 'GateHeldPost', 'GateProofConsent', 'SnapshotOpen', 'SnapshotOrigin', 'SnapshotSchema', 'SnapshotInventory', 'SnapshotSourceUnchanged', 'SeedPlan', 'SeedBinding', 'SeedReplay', 'SeedRecord', 'SeedOperation', 'SeedFinal', 'HostCheckpointEntry', 'HostCheckpointAction', 'HostCheckpointSlots', 'HostCheckpointContinuation', 'HostCheckpointPostcheck', 'HostProofPrecheck', 'HostProofAccess', 'HostProofForegroundMessage', 'HostProofReceive', 'HostProofJoin', 'HostProofFinalCheck', 'HostFreezeEntry', 'HostFreezeAction', 'HostFreezeReturn', 'HostReadSession', 'HostReadOpen', 'HostReadAction', 'HostReadReturn', 'HostMaterialScope', 'HostMaterialNativeCheck', 'HostMaterialApproval', 'HostProofScope', 'HostProofNativeCheck', 'HostProofApproval', 'HostWorkspaceCurrent', 'ReaderProfileDirectory', 'ReaderVaultRead', 'ReaderVaultV3Open', 'ReaderFinalRegistry', 'ReaderSourceOpen', 'ReaderSourceAssociation', 'ReaderFinancialOpen', 'ReaderHostRuntime', 'ReaderEnroll', 'ReaderSavedPrincipal', 'ReaderReadSession', 'ReaderHostReturn', 'ReaderFinancialSnapshot', 'ReaderFinancialOriginal', 'ReaderWorkspaceDirectory', 'ReaderMetadataSnapshot', 'ReaderMetadataOrigin', 'ReaderMetadataInitializedSchema', 'ReaderSourceStore', 'ReaderSourceSelection', 'ReaderSourceSeedPlan', 'ReaderSourceSeedBinding', 'ReaderSourceSeedCompare', 'ReaderSourceCompare', 'ReaderSourceFinalCheck', 'ReaderOriginalFinancialProofSchema', 'ReaderOriginalFinancialHandles', 'ReaderOriginalFinancialLoad', 'ReaderOriginalProofSource', 'ReaderOriginalProofCurrent', 'ReaderProofSnapshotOpen', 'ReaderProofSnapshotOrigin', 'ReaderProofSnapshotUnchanged', 'ReaderControlRead', 'ReaderFinancialCompare', 'ReaderCommitments', 'ReaderComparisonVerify', 'ReaderCompletionWrite', 'ReaderFinalReturn'))
+PRIVATE_FIXED_ENGINE_SITES = frozenset(('WorkspaceLoad', 'Candidate', 'MaterialRoster', 'SlotBindings', 'WalletRosterAcquire', 'HeldPrecheck', 'ConstructorReload', 'InputRequestDigest', 'OriginalRequest', 'OriginalLookup', 'OriginalLineage', 'ReplayLookup', 'Revision', 'CurrentTerms', 'ProposalValidation', 'ProtocolConstruct', 'ProtocolInspect', 'RetainConsent', 'ReceiptPrepare', 'ReceiptCommit', 'Enqueue', 'ReloadAfterEnqueue', 'LinkPrepare', 'LinkUpsert', 'LinkCommit', 'PostSource', 'PostConsent', 'HeldPostcheck', 'WalletRosterRelease', 'ContinuationBinding', 'ProofRun', 'ProofResultLineage', 'OutcomePrepare', 'OutcomeCommit', 'StatusLookup', 'LoadVerified', 'ProofVerifiedState', 'FixedMappings', 'FixedVerify', 'FixedReplayRead', 'FixedPrepare', 'FixedCommit', 'SavedDecode', 'OutputLineage', 'OperationHistory', 'ProofEventHistory', 'OutputCommitments', 'RetainedDiscovery', 'RetainedKey', 'ReloadAfterRead', 'EnvelopeCompare', 'JournalAfterRead', 'LogicalCompare', 'FinalGate', 'FinalProofOrigin', 'MetadataPreflight', 'MetadataOpen', 'SeedAudit', 'SourcePermission', 'MetadataOrigin', 'Marker', 'ProofOrigin', 'ExactScope', 'GateWorkspace', 'GateMaterial', 'GateHeldPre', 'GateHeldPost', 'GateProofConsent', 'SnapshotOpen', 'SnapshotOrigin', 'SnapshotSchema', 'SnapshotInventory', 'SnapshotSourceUnchanged', 'SeedPlan', 'SeedBinding', 'SeedReplay', 'SeedRecord', 'SeedOperation', 'SeedFinal'))
+PRIVATE_FIXED_ENGINE_CODES = frozenset(('DISCLOSURE_DENIED', 'DURABLE_CONSTRUCTION_UNAVAILABLE', 'DURABLE_PROPOSAL_RECOVERY_REQUIRED', 'DURABLE_PROPOSAL_CONFLICT', 'DURABLE_PROPOSAL_NOT_FOUND', 'DURABLE_PROFILE_UNAVAILABLE', 'MANUAL_CONSTRUCTION_DENIED', 'RETAINED_INPUT_OBSERVATION_UNAVAILABLE', 'CANDIDATE_VERIFICATION_FAILED', 'IDEMPOTENCY_CONFLICT', 'REVISION_CONFLICT', 'NOT_FOUND', 'INVALID_REQUEST', 'RECOVERY_REQUIRED', 'LIVE_AUTHORIZATION_EXISTS', 'RESOURCE_EXHAUSTED', 'INVALID_TRANSITION', 'STORAGE_PROTECTION_REQUIRED', 'STORAGE_UNAVAILABLE', 'ACCESS_DENIED', 'INVALID_TERMS', 'UNSUPPORTED_CAPABILITY', 'MISSING_EVIDENCE', 'INVALID_AMOUNT', 'UNKNOWN_PARTICIPANT', 'DUPLICATE_IDENTIFIER', 'CONSERVATION_FAILURE', 'DEBIT_CAP_EXCEEDED', 'FEE_CAP_EXCEEDED', 'UNVERIFIABLE_MATCH', 'PRIVACY_INCOMPATIBLE', 'UNSUPPORTED_VERSION', 'RESOURCE_LIMIT', 'STALE_CHAIN', 'OUTSTANDING_EXPOSURE', 'USER_REJECTED', 'INTERNAL_ERROR', 'Unclassified', 'PERMISSION_DENIED', 'NotApplicable'))
+PRIVATE_FIXED_CALL_STATES = frozenset(('NotApplicable', 'NotCalled', 'ReturnedOk', 'ReturnedOkFresh', 'ReturnedOkReplay', 'ReturnedOkNoContinuation', 'ReturnedErrUnknown'))
+PRIVATE_FIXED_WORKER_RESULTS = frozenset(('NotStarted', 'NotReceived', 'Disconnected', 'ReceivedOk', 'ReceivedErr'))
+PRIVATE_FIXED_WORKER_JOINS = frozenset(('NotStarted', 'Joined', 'Panicked'))
+PRIVATE_FIXED_FAMILIES = {
+    'Engine': frozenset(('DISCLOSURE_DENIED', 'DURABLE_CONSTRUCTION_UNAVAILABLE', 'DURABLE_PROPOSAL_RECOVERY_REQUIRED', 'DURABLE_PROPOSAL_CONFLICT', 'DURABLE_PROPOSAL_NOT_FOUND', 'DURABLE_PROFILE_UNAVAILABLE', 'MANUAL_CONSTRUCTION_DENIED', 'RETAINED_INPUT_OBSERVATION_UNAVAILABLE', 'CANDIDATE_VERIFICATION_FAILED', 'IDEMPOTENCY_CONFLICT', 'REVISION_CONFLICT', 'NOT_FOUND', 'INVALID_REQUEST', 'RECOVERY_REQUIRED', 'LIVE_AUTHORIZATION_EXISTS', 'RESOURCE_EXHAUSTED', 'INVALID_TRANSITION', 'STORAGE_PROTECTION_REQUIRED', 'STORAGE_UNAVAILABLE', 'ACCESS_DENIED', 'INVALID_TERMS', 'UNSUPPORTED_CAPABILITY', 'MISSING_EVIDENCE', 'INVALID_AMOUNT', 'UNKNOWN_PARTICIPANT', 'DUPLICATE_IDENTIFIER', 'CONSERVATION_FAILURE', 'DEBIT_CAP_EXCEEDED', 'FEE_CAP_EXCEEDED', 'UNVERIFIABLE_MATCH', 'PRIVACY_INCOMPATIBLE', 'UNSUPPORTED_VERSION', 'RESOURCE_LIMIT', 'STALE_CHAIN', 'OUTSTANDING_EXPOSURE', 'USER_REJECTED', 'INTERNAL_ERROR', 'Unclassified', 'PERMISSION_DENIED')),
+    'DurableConstruction': frozenset(('Invalid', 'Binding', 'Stale', 'Storage', 'Unclassified')),
+    'Sync': frozenset(('AccessDenied', 'InvalidRequest', 'Interrupted', 'ReconciliationRequired', 'InvalidResponse', 'ResourceLimit', 'NoCurrentObservation', 'Unclassified')),
+    'Wallet': frozenset(('Storage', 'AccountScope', 'AccountMismatch', 'IncompleteSync', 'UnsupportedProfile', 'ChainMismatch', 'InsufficientFunds', 'InvalidRequest', 'MissingWitness', 'InvalidNote', 'Scan', 'Transport', 'Unclassified')),
+    'Chain': frozenset(('InvalidConfiguration', 'WrongNetwork', 'UnsupportedProxyConfiguration', 'WrongBranch', 'StaleChain', 'ContradictoryChain', 'Timeout', 'TransportUnavailable', 'ObservationInterrupted', 'MissingAncestryEvidence', 'NotObserved', 'ResourceLimit', 'MalformedEvidence', 'UnsupportedCapability', 'BackendFailure', 'ClockUnavailable', 'IdempotencyConflict', 'JournalFailure', 'SubmissionNotAuthorized', 'SubmissionExpiryMargin', 'ObligationConflict', 'SubmissionOutcomeUnrecorded', 'SubmissionRetentionUncertain', 'Unclassified')),
+    'Protocol': frozenset(('Manifest', 'Disclosure', 'Context', 'Contribution', 'Input', 'Output', 'Fee', 'BuilderInput', 'BuilderOutput', 'Pczt', 'Finalize', 'ActionMapping', 'FixedBudget', 'FixedOwners', 'FixedRecipient', 'FixedPolicy', 'FixedAccounting', 'FixedRealInput', 'FixedCanonicalAccount', 'FixedDistinctAccounts', 'FixedUnsignedPredecessor', 'FixedUnsignedRealInput', 'FixedProofOnlyTransition', 'FixedPaddingSignature', 'Unclassified')),
+    'Store': frozenset(('StorageSecurity', 'Database', 'Encoding', 'Poisoned', 'IdempotencyConflict', 'RevisionConflict', 'NotFound', 'AlreadyExists', 'InvalidInput', 'UnsupportedSchema', 'RecoveryRequired', 'WriterEpochMismatch', 'LiveAuthorizationExists', 'InputReserved', 'ResourceExhausted', 'BudgetExceeded', 'InvalidTransition', 'File', 'Unclassified')),
+    'StorageSecurity': frozenset(('UnsupportedPlatform', 'QuarantinedDatabase', 'RecoveredGeneration', 'GenerationArchive', 'UninitializedDatabase', 'UnsafePath', 'AlreadyExists', 'MissingDatabase', 'PlaintextRefused', 'UnqualifiedRuntime', 'AuthenticationFailed', 'Database', 'Io', 'SnapshotLimit', 'SourceChanged', 'Unclassified')),
+    'Job': frozenset(('ConsentDenied', 'NotFound', 'InvalidRequest', 'VerificationFailed', 'IdempotencyConflict', 'RecoveryRequired', 'StateConflict', 'Storage', 'UnsupportedSchema', 'ResourceExhausted', 'Unclassified')),
+    'Gate': frozenset(('ExactScopeMismatch', 'WorkspaceConsentFalse', 'MaterialConsentFalse', 'ProofConsentFalse', 'Unclassified')),
+    'Host': frozenset(('Platform', 'Terminal', 'Permission', 'Locked', 'Invalid', 'Authentication', 'Storage', 'Quarantined', 'Unsupported', 'Receipt', 'RecoverySemantic', 'RecoveryBackupUnsupported', 'RecoveryFinancialUnsupported', 'CompleteOriginRecoveryUnavailable', 'HistoricalExportIncomplete', 'GenerationArchiveIncomplete', 'Unclassified')),
+}
+PRIVATE_FIXED_RELEVANCE = {
+    'Checkpoint': frozenset(('receipt', 'enqueue', 'link')),
+    'Proof': frozenset(('proof', 'outcome')),
+    'Freeze': frozenset(('freeze',)),
+    'ReadFixed': frozenset(()),
+    'OpenOriginal': frozenset(()),
+}
+PRIVATE_FIXED_SLOT_STATES = {
+    'receipt': frozenset(('NotCalled', 'ReturnedOkFresh', 'ReturnedOkReplay', 'ReturnedErrUnknown')),
+    'enqueue': frozenset(('NotCalled', 'ReturnedOkFresh', 'ReturnedOkNoContinuation', 'ReturnedErrUnknown')),
+    'link': frozenset(('NotCalled', 'ReturnedOkFresh', 'ReturnedOkReplay', 'ReturnedErrUnknown')),
+    'proof': frozenset(('NotCalled', 'ReturnedOk', 'ReturnedErrUnknown')),
+    'outcome': frozenset(('NotCalled', 'ReturnedOkFresh', 'ReturnedOkReplay', 'ReturnedErrUnknown')),
+    'freeze': frozenset(('NotCalled', 'ReturnedOkFresh', 'ReturnedOkReplay', 'ReturnedErrUnknown')),
+}
+
+PRIVATE_FIXED_PROJECTION_TESTS = tuple(PREFIX + 'safe_diagnostics_v1::' + name for name in (
+    'private_fixed_diagnostic_strict_public_schema_and_worker_relations',
+    'private_fixed_diagnostic_canonicalizes_only_valid_enum_records',
+    'private_fixed_diagnostic_rejects_duplicate_unknown_private_or_oversized_record',
+    'private_fixed_diagnostic_maximal_canonical_and_exact_4096_boundary',
+))
+PRIVATE_FIXED_TRANSCRIPT_TESTS = tuple(PREFIX + 'rolling_transcript_v1::tests::' + name for name in (
+    'private_fixed_diagnostic_all_fragment_boundaries_survive_consume',
+    'private_fixed_diagnostic_counts_against_original_aggregate_budget',
+    'private_fixed_diagnostic_duplicate_and_partial_records_are_unavailable',
+))
 
 POLICY_ENVELOPE_TESTS = tuple(PREFIX + 'retained_joined_v3::original_policy_export_v2::tests::' + name for name in (
     'producer_shaped_policy_envelope_projects_only_validated_original',
@@ -347,7 +408,7 @@ FAILURE = re.compile(r'\[JOINED_FAILURE exit=(' + OPTION_INT + r') signal=(' + O
 # The no-process self-tests check equality with those original Rust declarations.
 HARNESS_FAILURE_REASONS = frozenset('Unclassified Deadline ChildObservation ChildExit PollIo ReadIo OutputLimit IncompleteUtf8 InvalidUtf8 MultilineInput WriteIo FlushIo MissingPathMarker InvalidPath InvalidChallenge OutcomeRead CleanupUnverified'.split())
 BOUNDARIES = frozenset('ObservationClockRollback ObservationClockWallExpired ObservationClockMonotonicExpired ObservationRetainedClockRead ObservationRetainedClockDenied ObservationAdmittedClockRead ObservationAdmittedClockDenied CompletionObservationDenied CompletionPostReentryCurrent CompletionReadBinding CompletionConstructionTime CompletionCallerBinding CompletionConstructionRequest EngineCheckpointClaim EngineCheckpointPlan EngineCheckpointRetained EngineCheckpointParts EngineCheckpointNative EngineCheckpointHeld EngineCheckpointRestriction EngineCheckpointConstruct EngineCheckpointInspect EngineCheckpointActionLimit EngineCheckpointConsent EngineCheckpointReceipt EngineCheckpointRecord EngineCheckpointEnqueue EngineCheckpointFinish EngineCheckpointContext CheckpointEngine CheckpointWalletUnwind CheckpointFinish CheckpointObservations CheckpointOutput CheckpointBeforeClaim CheckpointClaimMayExist SignerPollCancelled SignerPollDeadline SignerPollTerminal RosterConstructionIntoNamed RosterConstructionNamedOwner RosterConstructionFinalOwner RosterConstructionCheck RosterConstructionReserve RosterConstructionReservedAppend RosterConstructionConsume RosterConstructionConsumedAppend RosterConstructionSend ConstructionClockTerminal ConstructionClockLiveness ConstructionClockWallRollback ConstructionClockWallExpired ConstructionClockMonotonicExpired RosterCompletionClaimCheck RosterCompletionClaimSign RosterCompletionClaimGranted RosterCompletionClaimClaim RosterCompletionClaimClaimed RosterCompletionClaimObserve RosterCompletionClaimHistory RosterCompletionClaimReentered RosterCompletionClaimSend NativeOwnerRevoked NativeOwnerExpired NativeOwnerParent NativeOwnerRetirementParent RosterOwnerEpoch RosterWorkOpenCommonContext RosterWorkPrepareCompletionWitness RosterWorkPrepareReenteredConstruction RosterWorkCommitCompletionPair RosterWorkCommitCompletionWitness RosterWorkCommitCompletionClaim RosterWorkCommitReenteredConstruction RosterCompletionWitnessCheck RosterCompletionWitnessHistory RosterCompletionWitnessHistoryBinding RosterCompletionWitnessTransport CompletionOriginal CompletionPairApproval CompletionPairBegin CompletionPairFinish CompletionReentryRequest CompletionRequestApproval CompletionReentryBegin CompletionReentryFinish CompletionConstructionBegin CompletionConstructionFinish RosterBirthHistoryGate RosterBirthExtension RosterBirthOriginal RosterBirthLinkage ContinuationRetainedSource ContinuationAttemptedSource ContinuationWriterSource ContinuationHistoryReplay ContinuationPairing ContinuationPreparedReview ContinuationSource ContinuationBirthLink ContinuationPreconstruction ContinuationHistoryGate ContinuationHistoryArchive ContinuationRetainedReceipt ContinuationPreviousLoad ContinuationProposalCapacity ContinuationProposalIndex ContinuationAttemptSequence ContinuationProposalValidation ObservedPlanWitnessOrigin WitnessPlanInput WitnessPlanSelect WitnessPlanInputUtf8 WitnessPlanPublicRefusal WitnessPlanQualifiedEntry WitnessPlanLaunch WitnessPlanDrain WitnessPlanPending WitnessPlanApprove WitnessPlanReceipt WitnessPlanReceiptDigest WitnessPlanExpectedParse WitnessPlanDigestMatch WitnessPlanWorkerPrepare WitnessPlanWorkerApprove CandidateRetainCurrent CandidateRetainRequest CandidateRetainBegin CandidateRetainFinish CandidateLeaseOrigin CandidateRequestRemaining InventoryLeaseOrigin InventoryRequestSource InventoryRequestProvenance InventoryRequestBinding InventoryRequestRemaining InventorySourceOwner InventorySourceNative InventorySourceDeadline InventorySourcePeer InventorySourceOwnerBinding InventorySourcePeerBinding InventorySourceRetiredGrant InventorySourceProcess InventorySourceRetained InventorySourceAdmission InventorySourceHistory InventorySourceWitness InventoryWindowWallRollback InventoryWindowWallExpired InventoryWindowMonotonicExpired InventoryNativeBinding InventorySourceRequest InventoryPeerConnection InventoryObservedMissing InventoryObservedLifetimeInvalid InventoryObservedWallRollback InventoryObservedSessionExpired InventoryObservedAgeExpired ScanAccessAccount ScanAccessNativeBefore ScanAccessRequest ScanAccessTarget ScanAccessHostAccess ScanAccessPrincipal ScanAccessEnrollmentPrincipal ScanAccessRequestDigest ScanAccessScopeDigest ScanAccessImport ScanAccessNativeAfter ScanNativeAdmissionDeadline ScanNativeLease ScanNativeRemaining ScanNativePurpose ScanNativeAccount ScanNativeProviderSource ScanNativeProviderEndpoint ScanNativeProviderTrust RosterWorkOpen RosterWorkPrepareIntent RosterWorkPrepareReentry RosterWorkPrepareSignature RosterWorkPrepareExport RosterWorkPrepareWitness RosterWorkPrepareAcquire RosterWorkPrepareActivate RosterWorkPreparePublication RosterWorkPrepareServe RosterWorkPrepareContinuationProposal RosterWorkPrepareContinuationSign RosterWorkPrepareContinuationExport RosterWorkPrepareContinuedReentry RosterWorkPrepareContinuedServe RosterWorkPreparePolicyExport RosterWorkPrepareInventory RosterWorkPrepareCandidateSelection RosterWorkRetryAdmission RosterWorkRetryContinuedAdmission RosterWorkRetryAcquire RosterWorkRetryActivate RosterWorkCommitPair RosterWorkCommitRetain RosterWorkCommitReentry RosterWorkCommitSign RosterWorkCommitExport RosterWorkCommitWitness RosterWorkCommitAcquire RosterWorkCommitActivate RosterWorkCommitAdmit RosterWorkCommitPublish RosterWorkCommitServe RosterWorkCommitContinuationProposal RosterWorkCommitContinuationSign RosterWorkCommitContinuationExport RosterWorkCommitContinuedReentry RosterWorkCommitContinuedAdmit RosterWorkCommitContinuedServe RosterWorkCommitPolicyExport RosterWorkCommitInventory RosterWorkCommitCandidateSelection RosterWorkCommitContributionRetention RosterWorkOther RosterWorkReceiveResult RosterWorkAdoptOutput RosterClearFocus RosterClearOwner RosterClearPeer RosterClearInitialStream RosterClearContinuedStream RosterClearReviewExpired RosterDropLateOutput JoinedPairFinish JoinedRequestBegin JoinedLeaseFinish JoinedInventoryCheck JoinedAuditAppend JoinedInventoryRun InventoryPair InventoryRequest InventoryLease InventoryImport InventoryImportRecord InventoryScan InventorySynchronize InventoryInspect InventoryDisplay InventoryFinish CandidateRun CandidatePair CandidateRequest CandidateLease CandidateExclusions CandidateSelect CandidateDisplay CandidateRetain CandidateAttach FullOriginalPolicy RetainedPredecessor RetainedMaterial RetainedEconomics RetainedInvocation RetainedRuntime RetainedProvider RetainedTls RetainedWitness RetainedPolicyRead RetainedPolicyMatch RetainedSelectionFiles ContinuedPredecessor ContinuedObservation ContinuedOriginal ContinuedWait ContinuedPrepare Bootstrap Session PublicRefusal PaymentReceiver AgreementInput AgreementNative WitnessSetup WitnessOrigin SignerStart BirthExport BirthRead BirthEnroll BirthHistory BirthAcknowledge BirthDistinct SinglePrepare SingleOpen SinglePair SingleSubmit SingleExport SingleWitness SinglePublicationPrepare SingleHistory SinglePublicationOpen SinglePublicationPair SingleFinish SingleClose RosterPrepare RosterOpen RosterPair RosterSubmit RosterExport RosterWitness RosterPublicationPrepare RosterHistory RosterPublicationOpen RosterPublicationPair RosterFinish RosterClose MetadataCheck FinancialRefusal EndInvariant SignerCreate SignerExportBirth SignerAcknowledge SignerOpenSingleIntent SignerPollSingleIntent SignerExportSingle SignerOpenSinglePublication SignerPollSinglePublication SignerCloseSinglePublication SignerOpenRosterIntent SignerPollRosterIntent SignerExportRoster SignerOpenRosterPublication SignerPollRosterPublication SignerCloseRosterPublication SignerOpenContinuationIntent SignerPollContinuationIntent SignerOpenContinuedPublication SignerPollContinuedPublication SignerCloseContinuedPublication SignerExportOriginalFullPlan SignerOpenCommonContextRead SignerPollCommonContextRead SignerParkCommonContextCompletion SignerPeerMetadata SignerNativeEntry SignerEndpoint SignerProvider SignerDeadline SignerSingleController ObservedInputs ObservedRetainedPredecessor ObservedAssemble ObservedCandidateReview ObservedPlanExport ObservedPlanSign ObservedPlanRead ObservedPlanAuthenticate ObservedPlanWitness ObservedContinuation ObservedOwnerSplit ObservedReadPrepare ObservedReadHistory ObservedReadOpen ObservedReadPair ObservedReadFinish ObservedReadPark ObservedBarrier ObservedProviderDrain ConstructedPredecessor ConstructedDisclosure ConstructedWitnessOriginal ConstructedWitnessGrant ConstructedWitnessScope ConstructedPendingFile ConstructedPendingReview ConstructedSignerOpen ConstructedConsume ConstructedSignerPark ConstructedServerSeal ConstructedCheckpoint ConstructedSavedOriginal ConstructedInvariant ConstructedProviderDrain SignerOpenOriginalCompletion SignerPollOriginalCompletion ProvedConstructionDrain ProvedOriginalJob ProvedOriginalCorrelation ProvedHostPublic ProvedWitnessKey ProvedNamedOpen ProvedNamedPair ProvedNamedStatus ProvedNamedRecords ProvedNamedProfile ProvedNativePins ProvedCarrierPrepare ProvedCarrierExport ProvedCarrierRecover ProvedCarrierRetained ProvedCarrierInvariant SignerOpenOriginalNamed SignerPollOriginalNamed SignerRetainOriginalProfile SignerNamedEnrollmentExport SignerNamedInstalledMetadata SignerNamedVerifierArm SignerNamedVerifierStart SignerNamedVerifierPoll SignerNamedAssertionExport SignerNamedOriginalImport SignerNamedOriginalSubmit SignerNamedOriginalSign SignerNamedHostServing FullPaymentPredecessor FullEnrollmentExport FullEnrollmentInstall FullArtifactsInstall FullInstalledMetadata FullVerifierRequest FullAssertion FullOriginalImport FullAdmission FullSignatureReturn FullHistory FullReturnIntake FullMerge FullCurrentDispatch FullRecipientReceipt SingleAccountUnlock SingleRetainedRead SingleAcquireState SingleAttemptedSource SingleAttemptsRead SingleRetainedReopen SinglePreacquire SingleReference SingleAccountId SingleAudit SingleEndpointCreate SingleDirectoryOpen SingleIpcBind SingleEndpointPublish SingleWorkOpen SingleWorkPrepareIntent SingleWorkPrepareSignature SingleWorkPrepareExport SingleWorkPrepareReentry SingleWorkPrepareWitness SingleWorkPrepareAcquire SingleWorkPrepareActivate SingleWorkPreparePublication SingleWorkPrepareServe SingleWorkCommitPair SingleWorkCommitRetain SingleWorkCommitSignature SingleWorkCommitExport SingleWorkCommitReentry SingleWorkCommitWitness SingleWorkCommitAcquire SingleWorkCommitActivate SingleWorkCommitAdmission SingleWorkCommitPublication SingleWorkCommitServe SingleWorkRetryAcquire SingleWorkRetryActivate SingleWorkRetryAdmission SingleWorkOther SingleWorkAdoptOutput'.split())
-OUTCOMES = frozenset('ExactPermission ExactLineage ExactBinding ExactStorage ExactRecoveryRequired ExactStateChanged ExactProfileChanged ExactBudget ExactRoster EngineAccessDenied EngineCandidateVerificationFailed EngineIdempotencyConflict EngineInvalidRequest EngineInvalidTransition EngineLiveAuthorizationExists EngineManualConstructionDenied EngineNotFound EngineRecoveryRequired EngineResourceExhausted EngineRetainedObservationUnavailable EngineRevisionConflict EngineStorageProtectionRequired EngineStorageUnavailable EngineUnclassified JobConsentDenied JobIdempotencyConflict JobInvalidRequest JobNotFound JobRecoveryRequired JobResourceExhausted JobStateConflict JobStorage JobUnsupportedSchema JobVerificationFailed ProtocolActionMapping ProtocolBuilderInput ProtocolBuilderOutput ProtocolContext ProtocolContribution ProtocolDisclosure ProtocolFee ProtocolFinalize ProtocolInput ProtocolManifest ProtocolOutput ProtocolPczt ProtocolUnclassified StoreAlreadyExists StoreBudgetExceeded StoreDatabase StoreEncoding StoreFile StoreIdempotencyConflict StoreInputReserved StoreInvalidInput StoreInvalidTransition StoreLiveAuthorizationExists StoreNotFound StorePoisoned StoreRecoveryRequired StoreResourceExhausted StoreRevisionConflict StoreStorageSecurity StoreUnsupportedSchema StoreWriterEpochMismatch BridgeBinding BridgeConflict BridgeMissing BridgeUncertain BridgeLimit BridgePermission BridgeRecoveryRequired BridgeCompleteOriginRecoveryUnavailable BridgeVerification BridgeSignerOriginUnavailable BridgeJournal BridgeAuthority BridgeWallet BridgeIpc AuthorityInputEmpty AuthorityInputWithinBound AuthorityInputOverBound AuthorityInvalidBinding AuthorityPermission AuthorityStaleHead AuthorityConflict AuthorityInactive AuthorityRecoveryRequired AuthorityExpired AuthorityPolicyDenied AuthorityBudgetExceeded AuthorityInputReserved AuthorityObligationReserved AuthorityLimit AuthorityStorage AuthorityCorruptHistory AuthorityPermanentStopUnavailable AuthorityOfflineHistoryUnsupported AuthorityConstructionHistoryUnsupported AuthorityUnsupportedVersion AuthorityAuthentication AuthorityUncertain AuthorityResolutionUnavailable AuthoritySessionRequired AuthoritySessionPending OriginPermanentStopUnavailable OriginRetirementEvidenceUnavailable OriginSignerOriginUnavailable OriginPeerLifetimeUnavailable OriginAuthentication OriginBinding OriginConflict OriginPermission OriginInvalidData OriginLocked OriginCrypto OriginIpc OriginLimit OriginIoTimedOut OriginIoWouldBlock OriginIoUnexpectedEof OriginIoBrokenPipe OriginIoConnectionReset OriginIoConnectionAborted OriginIoNotConnected OriginIoInterrupted OriginIoPermissionDenied OriginIoOther ImportFreshOwnerRequired ImportBinding ImportIncomplete ImportStorage SyncAccessDenied SyncInvalidRequest SyncInterrupted SyncReconciliationRequired SyncInvalidResponse SyncResourceLimit SyncNoCurrentObservation WalletStorage WalletAccountScope WalletAccountMismatch WalletIncompleteSync WalletUnsupportedProfile WalletChainMismatch WalletInsufficientFunds WalletInvalidRequest WalletMissingWitness WalletInvalidNote WalletScan WalletTransport ChainInvalidConfiguration ChainWrongNetwork ChainUnsupportedProxyConfiguration ChainWrongBranch ChainStaleChain ChainContradictoryChain ChainTimeout ChainTransportUnavailable ChainObservationInterrupted ChainMissingAncestryEvidence ChainNotObserved ChainResourceLimit ChainMalformedEvidence ChainUnsupportedCapability ChainBackendFailure ChainClockUnavailable ChainIdempotencyConflict ChainJournalFailure ChainSubmissionNotAuthorized ChainSubmissionExpiryMargin ChainObligationConflict ChainSubmissionOutcomeUnrecorded ChainSubmissionRetentionUncertain RecoveryAccessDenied RecoveryUnsupportedAccountComponents RecoveryIncompleteScan RecoveryKnownFundsRemain RecoveryAdditionalEvidenceRequired Begin Complete HostPlatform HostTerminal HostPermission HostLocked HostInvalid HostAuthentication HostStorage HostQuarantined HostUnsupported HostReceipt HostRecoverySemantic HostRecoveryBackupUnsupported HostRecoveryFinancialUnsupported HostCompleteOriginRecoveryUnavailable HostHistoricalExportIncomplete HostGenerationArchiveIncomplete SignerUnavailable SignerPeerLifetimeUnavailable SignerIo SignerAuthentication SignerInvalidData SignerCrypto SignerLocked SignerBackupRequired SignerRecoveryRequired SignerAlreadyOpen SignerReviewMismatch SignerVerification SignerUncertain SignerConsentJournal SignerStore WorkerFailure'.split())
+OUTCOMES = frozenset('EngineDisclosureDenied EngineDurableConstructionUnavailable EngineDurableProposalRecoveryRequired EngineMissingEvidence EngineInvalidTerms EngineUnsupportedCapability EngineDebitCapExceeded EnginePermissionDenied EngineInternalError ExactPermission ExactLineage ExactBinding ExactStorage ExactRecoveryRequired ExactStateChanged ExactProfileChanged ExactBudget ExactRoster EngineAccessDenied EngineCandidateVerificationFailed EngineIdempotencyConflict EngineInvalidRequest EngineInvalidTransition EngineLiveAuthorizationExists EngineManualConstructionDenied EngineNotFound EngineRecoveryRequired EngineResourceExhausted EngineRetainedObservationUnavailable EngineRevisionConflict EngineStorageProtectionRequired EngineStorageUnavailable EngineUnclassified JobConsentDenied JobIdempotencyConflict JobInvalidRequest JobNotFound JobRecoveryRequired JobResourceExhausted JobStateConflict JobStorage JobUnsupportedSchema JobVerificationFailed ProtocolActionMapping ProtocolBuilderInput ProtocolBuilderOutput ProtocolContext ProtocolContribution ProtocolDisclosure ProtocolFee ProtocolFinalize ProtocolInput ProtocolManifest ProtocolOutput ProtocolPczt ProtocolUnclassified StoreAlreadyExists StoreBudgetExceeded StoreDatabase StoreEncoding StoreFile StoreIdempotencyConflict StoreInputReserved StoreInvalidInput StoreInvalidTransition StoreLiveAuthorizationExists StoreNotFound StorePoisoned StoreRecoveryRequired StoreResourceExhausted StoreRevisionConflict StoreStorageSecurity StoreUnsupportedSchema StoreWriterEpochMismatch BridgeBinding BridgeConflict BridgeMissing BridgeUncertain BridgeLimit BridgePermission BridgeRecoveryRequired BridgeCompleteOriginRecoveryUnavailable BridgeVerification BridgeSignerOriginUnavailable BridgeJournal BridgeAuthority BridgeWallet BridgeIpc AuthorityInputEmpty AuthorityInputWithinBound AuthorityInputOverBound AuthorityInvalidBinding AuthorityPermission AuthorityStaleHead AuthorityConflict AuthorityInactive AuthorityRecoveryRequired AuthorityExpired AuthorityPolicyDenied AuthorityBudgetExceeded AuthorityInputReserved AuthorityObligationReserved AuthorityLimit AuthorityStorage AuthorityCorruptHistory AuthorityPermanentStopUnavailable AuthorityOfflineHistoryUnsupported AuthorityConstructionHistoryUnsupported AuthorityUnsupportedVersion AuthorityAuthentication AuthorityUncertain AuthorityResolutionUnavailable AuthoritySessionRequired AuthoritySessionPending OriginPermanentStopUnavailable OriginRetirementEvidenceUnavailable OriginSignerOriginUnavailable OriginPeerLifetimeUnavailable OriginAuthentication OriginBinding OriginConflict OriginPermission OriginInvalidData OriginLocked OriginCrypto OriginIpc OriginLimit OriginIoTimedOut OriginIoWouldBlock OriginIoUnexpectedEof OriginIoBrokenPipe OriginIoConnectionReset OriginIoConnectionAborted OriginIoNotConnected OriginIoInterrupted OriginIoPermissionDenied OriginIoOther ImportFreshOwnerRequired ImportBinding ImportIncomplete ImportStorage SyncAccessDenied SyncInvalidRequest SyncInterrupted SyncReconciliationRequired SyncInvalidResponse SyncResourceLimit SyncNoCurrentObservation WalletStorage WalletAccountScope WalletAccountMismatch WalletIncompleteSync WalletUnsupportedProfile WalletChainMismatch WalletInsufficientFunds WalletInvalidRequest WalletMissingWitness WalletInvalidNote WalletScan WalletTransport ChainInvalidConfiguration ChainWrongNetwork ChainUnsupportedProxyConfiguration ChainWrongBranch ChainStaleChain ChainContradictoryChain ChainTimeout ChainTransportUnavailable ChainObservationInterrupted ChainMissingAncestryEvidence ChainNotObserved ChainResourceLimit ChainMalformedEvidence ChainUnsupportedCapability ChainBackendFailure ChainClockUnavailable ChainIdempotencyConflict ChainJournalFailure ChainSubmissionNotAuthorized ChainSubmissionExpiryMargin ChainObligationConflict ChainSubmissionOutcomeUnrecorded ChainSubmissionRetentionUncertain RecoveryAccessDenied RecoveryUnsupportedAccountComponents RecoveryIncompleteScan RecoveryKnownFundsRemain RecoveryAdditionalEvidenceRequired Begin Complete HostPlatform HostTerminal HostPermission HostLocked HostInvalid HostAuthentication HostStorage HostQuarantined HostUnsupported HostReceipt HostRecoverySemantic HostRecoveryBackupUnsupported HostRecoveryFinancialUnsupported HostCompleteOriginRecoveryUnavailable HostHistoricalExportIncomplete HostGenerationArchiveIncomplete SignerUnavailable SignerPeerLifetimeUnavailable SignerIo SignerAuthentication SignerInvalidData SignerCrypto SignerLocked SignerBackupRequired SignerRecoveryRequired SignerAlreadyOpen SignerReviewMismatch SignerVerification SignerUncertain SignerConsentJournal SignerStore WorkerFailure'.split())
 IO_KINDS = frozenset('NotFound PermissionDenied AlreadyExists InvalidInput InvalidData AddrInUse AddrNotAvailable WouldBlock TimedOut Interrupted Unsupported Other'.split())
 DURABLE_ENTRY_BOUNDARIES = frozenset('DurableEntryNativeOwnerCheck DurableEntryVaultOpen DurableEntryRetainedEnrollment DurableEntryOriginalCommit DurableEntryJournalOpen DurableEntrySourceCheck DurableEntryRuntimeActivation DurableEntryWorkerResult DurableEntryEndpointCreate DurableEntryEndpointBind DurableEntryEndpointPublish DurableEntryPostEndpointSourceCheck DurableEntryFixturePreflight DurableEntryFixturePostActivation'.split())
 DURABLE_HOST_BOUNDARIES = frozenset('DurableHostOpen DurableHostPairStatus DurableHostPairObserved DurableHostAccept DurableHostInitialDisclosure DurableHostInitialObserved DurableHostRecipient DurableHostCaptureSetup DurableHostCapture DurableHostCaptureObserved DurableHostCaptureCommitted DurableHostIntake DurableHostClose DurableHostObserve DurableHostCheckpoint DurableHostProof DurableHostFreeze DurableHostReload DurableHostRedisclosure DurableHostReviewReady DurableHostReviewExport DurableHostReviewImported DurableHostProviderStop'.split())
@@ -910,6 +971,93 @@ def public_private_workspace(text):
         raise ValueError('private workspace missing first failure')
     return row
 
+def private_fixed_object(value, fields):
+    if type(value) is not dict or set(value) != fields: raise ValueError('private fixed fields')
+    return value
+
+
+def private_fixed_label(value, labels):
+    if type(value) is not str or value not in labels: raise ValueError('private fixed label')
+
+
+def private_fixed_primary(row, engine=False):
+    private_fixed_label(row['operation'], PRIVATE_FIXED_OPERATIONS)
+    private_fixed_label(row['site'], PRIVATE_FIXED_ENGINE_SITES if engine else PRIVATE_FIXED_SITES)
+    private_fixed_label(row['engine_code'], PRIVATE_FIXED_ENGINE_CODES)
+    private_fixed_label(row['family'], PRIVATE_FIXED_FAMILIES)
+    private_fixed_label(row['cause'], PRIVATE_FIXED_FAMILIES[row['family']])
+    if (engine or row['family']=='Engine') and row['engine_code']=='NotApplicable': raise ValueError('private fixed engine code')
+
+
+def private_fixed_evidence(row, operation):
+    if row['call_scope']!='CurrentInvocation' or type(row['call_scope']) is not str:
+        raise ValueError('private fixed scope')
+    if type(row['attempt_consumed']) is not bool or row['attempt_consumed'] != (operation=='Proof'):
+        raise ValueError('private fixed attempt')
+    calls=private_fixed_object(row['calls'],PRIVATE_FIXED_CALL_FIELDS)
+    for slot, value in calls.items():
+        private_fixed_label(value,PRIVATE_FIXED_SLOT_STATES[slot] if slot in PRIVATE_FIXED_RELEVANCE[operation] else ('NotApplicable',))
+
+
+def public_private_fixed_diagnostic(text):
+    row=history_json(text,PRIVATE_FIXED_DIAGNOSTIC_MAX_BYTES)
+    private_fixed_object(row,PRIVATE_FIXED_FIELDS)
+    if type(row['schema']) is not int or row['schema']!=1: raise ValueError('private fixed schema')
+    primary=private_fixed_object(row['primary'],PRIVATE_FIXED_PRIMARY_FIELDS)
+    private_fixed_primary(primary)
+    evidence=row['evidence']
+    if evidence is not None:
+        private_fixed_object(evidence,PRIVATE_FIXED_EVIDENCE_FIELDS)
+        private_fixed_evidence(evidence,primary['operation'])
+    worker=row['worker']
+    if worker is not None:
+        if primary['operation']!='Proof': raise ValueError('private fixed worker operation')
+        private_fixed_object(worker,PRIVATE_FIXED_WORKER_FIELDS)
+        private_fixed_label(worker['result'],PRIVATE_FIXED_WORKER_RESULTS)
+        private_fixed_label(worker['join'],PRIVATE_FIXED_WORKER_JOINS)
+        if (worker['result']=='NotStarted') != (worker['join']=='NotStarted'):
+            raise ValueError('private fixed worker join')
+        failure=worker['engine_failure']
+        if failure is None and evidence is not None: raise ValueError('private fixed unavailable worker evidence')
+        if failure is not None:
+            if worker['result']!='ReceivedErr': raise ValueError('private fixed worker result')
+            private_fixed_object(failure,PRIVATE_FIXED_ENGINE_FIELDS)
+            if type(failure['schema']) is not int or failure['schema']!=1 or failure['operation']!='Proof':
+                raise ValueError('private fixed worker schema')
+            private_fixed_primary(failure,engine=True)
+            private_fixed_evidence(failure,'Proof')
+            if evidence is None or any(failure[key]!=evidence[key] for key in PRIVATE_FIXED_EVIDENCE_FIELDS):
+                raise ValueError('private fixed worker evidence')
+    return row
+
+
+class PrivateFixedDiagnostics:
+    def __init__(self):
+        self.value=None
+        self.seen=False
+        self.invalid=False
+
+    def record(self, kind, value):
+        if self.seen or kind!='private_fixed_diagnostic': self.invalid=True
+        elif not self.invalid: self.value=value
+        self.seen=True
+
+    def emit(self, phase, outcome):
+        # An optional record is never process/cleanup/success evidence. Both
+        # started children must have independently verified reap and absence.
+        if (phase!='durable-private-reopen' or outcome is None or outcome['result']!='failed'
+            or outcome['root_cleanup']!='closed_absent'
+            or not outcome['producer_reaped'] or not outcome['producer_group_absent']
+            or outcome['producer_exit']=='unverified'
+            or (outcome['reader_exit']!='not_started' and
+                (outcome['reader_exit']=='unverified' or not outcome['reader_reaped'] or not outcome['reader_group_absent']))):
+            return
+        if self.invalid:
+            print(PRIVATE_FIXED_DIAGNOSTIC_UNAVAILABLE,flush=True)
+        elif self.value is not None:
+            print(PRIVATE_FIXED_DIAGNOSTIC_PREFIX+json.dumps(self.value,separators=(',',':'),sort_keys=True),flush=True)
+
+
 def exact_listing(text, name):
     # Actual rustc 1.99 libtest output. A known optional trailing newline is the
     # only variation; zero/multiple tests and arbitrary extra output are refused.
@@ -953,14 +1101,17 @@ def lifecycle_candidate(raw, name=None):
 
 def public_line(raw, name):
     if len(raw)>8192:
+        if diagnostic_candidate(raw,b'CI_SYNTHETIC_PRIVATE_FIXED_DIAGNOSTIC',name): return ('private_fixed_diagnostic_invalid',None)
         if diagnostic_candidate(raw,b'CI_SYNTHETIC_PRIVATE_WORKSPACE',name): raise ValueError('oversized private workspace line')
         if flow_candidate(raw,name): return ('durable_flow_invalid',None)
         return ('durable_lifecycle_invalid',None) if lifecycle_candidate(raw,name) else None
     try:
-        line=raw.decode('utf8','strict').rstrip('\r')
+        decoded=raw.decode('utf8','strict')
+        line=decoded.rstrip('\r')
     except UnicodeError:
         prefix=('test '+name+' ... ').encode('utf8')
         candidate=raw[len(prefix):] if raw.startswith(prefix) else raw
+        if candidate.startswith(b'CI_SYNTHETIC_PRIVATE_FIXED_DIAGNOSTIC'): return ('private_fixed_diagnostic_invalid',None)
         if candidate.startswith(b'CI_SYNTHETIC_PRIVATE_WORKSPACE'): raise ValueError('private workspace utf8')
         if flow_candidate(candidate): return ('durable_flow_invalid',None)
         if lifecycle_candidate(candidate): return ('durable_lifecycle_invalid',None)
@@ -974,6 +1125,15 @@ def public_line(raw, name):
     # or an entire standalone closed marker line is eligible for projection.
     prefix='test '+name+' ... '
     if line.startswith(prefix): line=line[len(prefix):]
+    if line.startswith('CI_SYNTHETIC_PRIVATE_FIXED_DIAGNOSTIC'):
+        # One CR belongs to CRLF framing; any others remain bounded JSON whitespace.
+        line=decoded[:-1] if decoded.endswith('\r') else decoded
+        if line.startswith(prefix): line=line[len(prefix):]
+        try:
+            if not line.startswith(PRIVATE_FIXED_DIAGNOSTIC_PREFIX): raise ValueError('private fixed framing')
+            return ('private_fixed_diagnostic',public_private_fixed_diagnostic(line[len(PRIVATE_FIXED_DIAGNOSTIC_PREFIX):]))
+        except (ValueError,TypeError,KeyError,OverflowError,RecursionError):
+            return ('private_fixed_diagnostic_invalid',None)
     if line.startswith('CI_SYNTHETIC_PRIVATE_WORKSPACE') and not line.startswith(PRIVATE_WORKSPACE_PREFIX): raise ValueError('private workspace framing')
     if line.startswith(PRIVATE_WORKSPACE_PREFIX):
         return ('private_workspace',public_private_workspace(line[len(PRIVATE_WORKSPACE_PREFIX):]))
@@ -1044,6 +1204,7 @@ class BoundedLines:
                     # never the oversized line, reaches the optional Flow slot.
                     head=bytes(self.pending[:8192])+part[:8192-len(self.pending)]
                     if diagnostic_candidate(head,b'CI_SYNTHETIC_PRIVATE_WORKSPACE',self.name): lines.append(PRIVATE_WORKSPACE_INVALID.encode('ascii'))
+                    if diagnostic_candidate(head,b'CI_SYNTHETIC_PRIVATE_FIXED_DIAGNOSTIC',self.name): lines.append(PRIVATE_FIXED_DIAGNOSTIC_UNAVAILABLE.encode('ascii'))
                     if flow_candidate(head,self.name): lines.append(FLOW_INVALID.encode('ascii'))
                     if lifecycle_candidate(head,self.name): lines.append(LIFECYCLE_INVALID.encode('ascii'))
                     self.pending.clear()
@@ -1062,13 +1223,13 @@ DURABLE_PROVIDER_METADATA_TEST = PREFIX + 'synthetic_born_provider_v1::durable_m
 
 def run_pure(executable):
     assert resource.getrlimit(resource.RLIMIT_CORE)[0] == 0
-    selected = PURE_TESTS + PRIVATE_WORKSPACE_PURE_TESTS + POLICY_ENVELOPE_TESTS + PROMPT_RENDERING_TESTS + LOWER_ERROR_TESTS + DENIAL_TESTS + ROLLING_TRANSCRIPT_TESTS + AUTHORITY_PROJECTION_TESTS + READ_WAVE_TESTS + HISTORY_MEASUREMENT_TESTS + HISTORY_TRANSCRIPT_TESTS + ADMISSION_PROJECTION_TESTS + ADMISSION_TRANSCRIPT_TESTS + ADMISSION_HOST_TESTS + FLOW_PROJECTION_TESTS + FLOW_TRANSCRIPT_TESTS + FLOW_HOST_TESTS + TIMING_HOST_TESTS + (DURABLE_PROVIDER_METADATA_TEST,)
+    selected = PURE_TESTS + PRIVATE_WORKSPACE_PURE_TESTS + PRIVATE_FIXED_PROJECTION_TESTS + PRIVATE_FIXED_TRANSCRIPT_TESTS + POLICY_ENVELOPE_TESTS + PROMPT_RENDERING_TESTS + LOWER_ERROR_TESTS + DENIAL_TESTS + ROLLING_TRANSCRIPT_TESTS + AUTHORITY_PROJECTION_TESTS + READ_WAVE_TESTS + HISTORY_MEASUREMENT_TESTS + HISTORY_TRANSCRIPT_TESTS + ADMISSION_PROJECTION_TESTS + ADMISSION_TRANSCRIPT_TESTS + ADMISSION_HOST_TESTS + FLOW_PROJECTION_TESTS + FLOW_TRANSCRIPT_TESTS + FLOW_HOST_TESTS + TIMING_HOST_TESTS + (DURABLE_PROVIDER_METADATA_TEST,)
     for name in selected:
         flags=['--exact',name,'--test-threads=1']
         listed=subprocess.run([executable,*flags,'--list'],capture_output=True,timeout=30,check=True)
         if not exact_listing(listed.stdout.decode(),name) or listed.stderr:
             raise ValueError('exact pure test not uniquely registered')
-        # These 87 fixed source-reviewed cases use only modeled process state,
+        # These explicitly inventoried source-reviewed cases use only modeled process state,
         # inert files, historical policy DTOs, fixed prompts, closed error kinds or
         # bounded private parsing state or data-only scanned-note mathematics. They create
         # no native/IPC/network/payment owners.
@@ -1237,6 +1398,7 @@ def run(executable, phase):
     assert process.stdout is not None
     framing=BoundedLines(name); total=0; cleanup=False; cleanup_observed=False; cleanups=0; cores=0; failures=0; outcome=None; status=None; timing=None; timing_count=0; timing_invalid=False
     private_workspace=None
+    private_fixed_diagnostics=PrivateFixedDiagnostics()
     history_measurements=HistoryMeasurements()
     admission_diagnostics=AdmissionDiagnostics()
     durable_flow=DurableFlowDiagnostics()
@@ -1260,6 +1422,8 @@ def run(executable, phase):
                     cores+=1
                     if cores>1: raise ValueError('duplicate core policy')
                     print(value,flush=True)
+                elif kind in ('private_fixed_diagnostic','private_fixed_diagnostic_invalid'):
+                    if phase=='durable-private-reopen': private_fixed_diagnostics.record(kind,value)
                 elif kind=='private_workspace':
                     if phase!='durable-private-reopen' or private_workspace is not None: raise ValueError('unexpected duplicate private workspace outcome')
                     private_workspace=value
@@ -1291,6 +1455,7 @@ def run(executable, phase):
                 elif kind=='outcome':
                     if phase!='full' or outcome is not None: raise ValueError('unexpected duplicate public outcome')
                     outcome=value
+        if diagnostic_candidate(bytes(framing.pending),b'CI_SYNTHETIC_PRIVATE_FIXED_DIAGNOSTIC',name): private_fixed_diagnostics.record('private_fixed_diagnostic_invalid',None)
         if diagnostic_candidate(bytes(framing.pending),b'CI_SYNTHETIC_PRIVATE_WORKSPACE',name): raise ValueError('incomplete private workspace line')
         status=process.wait(timeout=10)
     finally:
@@ -1317,6 +1482,7 @@ def run(executable, phase):
         else:
             print(TIMING_PREFIX+json.dumps(timing,separators=(',',':'),sort_keys=True)+']',flush=True)
     if phase=='durable-private-reopen':
+        private_fixed_diagnostics.emit(phase,private_workspace)
         if private_workspace is not None:
             print(PRIVATE_WORKSPACE_PREFIX+json.dumps(private_workspace,separators=(',',':'),sort_keys=True),flush=True)
         if status!=0 or cores!=1 or failures or private_workspace is None or private_workspace['result']!='passed':

@@ -665,6 +665,16 @@ mod actual_cryptography {
                 .get("original_request_v2")
                 .is_none()
         );
+        let mut observed_envelope = stale.clone();
+        let observation = Observation::new(Operation::Freeze);
+        let observed_fixed = crate::durable_proposals_v1::freeze_private_fixed_observed_v2(
+            &observation,
+            &mut observed_envelope,
+            &access,
+            &checkpoint,
+            &receipt,
+        )
+        .unwrap();
         let fixed = crate::durable_proposals_v1::freeze_private_fixed_v2(
             &mut stale,
             &access,
@@ -672,6 +682,14 @@ mod actual_cryptography {
             &receipt,
         )
         .unwrap();
+        assert_eq!(
+            serde_json::to_value(&observed_fixed).unwrap(),
+            serde_json::to_value(&fixed).unwrap()
+        );
+        assert_eq!(
+            crate::encode(&observed_envelope).unwrap(),
+            crate::encode(&stale).unwrap()
+        );
         assert_eq!(stale.view.candidates[0].proof_jobs[0].state, "queued");
         assert_eq!(
             crate::durable_proposals_v1::read_private_fixed_v2(
@@ -701,6 +719,35 @@ mod actual_cryptography {
         );
         let mut wrong = receipt;
         wrong.action_mappings_v1 = Some(json!({"inputs":[],"outputs":[]}));
+        let mut altered_metadata = stale.clone();
+        altered_metadata
+            .durable_proposals_v1
+            .get_mut(&c.candidate_id)
+            .unwrap()["mappings"] = wrong.action_mappings_v1.clone().unwrap();
+        let legacy_error = crate::durable_proposals_v1::read_private_fixed_v2(
+            &altered_metadata,
+            &access,
+            &checkpoint,
+            &wrong,
+        )
+        .unwrap_err();
+        let observation = Observation::new(Operation::ReadFixed);
+        let actual_error = observation
+            .finish(crate::durable_proposals_v1::read_private_fixed_observed_v2(
+                &observation,
+                &altered_metadata,
+                &access,
+                &checkpoint,
+                &wrong,
+            ))
+            .unwrap_err();
+        assert_eq!(actual_error.code, legacy_error.code);
+        assert_eq!(actual_error.message, legacy_error.message);
+        assert_eq!(
+            actual_error.details["private_fixed_diagnostic_v1"]["family"],
+            "Protocol"
+        );
+
         assert!(
             crate::durable_proposals_v1::read_private_fixed_v2(
                 &stale,
@@ -929,5 +976,446 @@ fn original_job_diagnostics_keep_only_the_exact_finite_category() {
             error.details.as_ref(),
             &json!({"private_original_job_error_v1":category})
         );
+    }
+}
+
+/// Faults run the production observation kernels, not a fabricated native issuer
+/// or completed proof row. The crypto component above remains separately gated.
+mod diagnostic_v1_tests {
+    use super::*;
+    use diagnostics::{Call, CallState, Observation, Operation, Site};
+    use std::cell::{Cell, RefCell};
+    const KEY: &str = "private_fixed_diagnostic_v1";
+
+    fn failure(observation: &Observation) -> ApiError {
+        observation
+            .finish::<()>(Err(ApiError::new("DISCLOSURE_DENIED", "local sentinel")))
+            .unwrap_err()
+    }
+    fn core(error: &ApiError) -> &serde_json::Value {
+        &error.details[KEY]
+    }
+
+    #[test]
+    fn observed_owned_results_and_error_fields_are_not_replaced() {
+        struct Owned<'a>(&'a Cell<u32>);
+        impl Drop for Owned<'_> {
+            fn drop(&mut self) {
+                self.0.set(self.0.get() + 1);
+            }
+        }
+        let drops = Cell::new(0);
+        let observation = Observation::new(Operation::Checkpoint);
+        let owned = observation
+            .finish(observation.api(Site::Candidate, Ok(Owned(&drops))))
+            .unwrap();
+        assert_eq!(drops.get(), 0);
+        drop(owned);
+        assert_eq!(drops.get(), 1);
+        let mut original = ApiError::new(
+            "INVALID_REQUEST",
+            "private message remains only in original error",
+        );
+        original.retryable = true;
+        original.operation_id = Some("original-operation".into());
+        original.safe_actions = vec!["original action".into()];
+        original.details = Box::new(json!({"existing":"value"}));
+        let error = observation.finish::<()>(Err(original)).unwrap_err();
+        assert_eq!(error.code, "INVALID_REQUEST");
+        assert!(error.retryable);
+        assert_eq!(error.operation_id.as_deref(), Some("original-operation"));
+        assert_eq!(error.safe_actions, vec!["original action"]);
+        assert_eq!(error.details["existing"], "value");
+        assert!(!core(&error).to_string().contains("private message"));
+    }
+
+    #[test]
+    fn observed_gate_preserves_every_short_circuit_and_first_actual_error() {
+        for (exact, denied_at, permission, expected) in [
+            (false, 0, true, vec![]),
+            (true, 1, true, vec!["check"]),
+            (true, 0, false, vec!["check", "permission"]),
+            (true, 2, true, vec!["check", "permission", "check"]),
+            (true, 0, true, vec!["check", "permission", "check"]),
+        ] {
+            let mut outcomes = Vec::new();
+            for observed in [false, true] {
+                let observation = Observation::new(Operation::Checkpoint);
+                let order = RefCell::new(Vec::new());
+                let calls = Cell::new(0);
+                let allowed = diagnostics::gate_chain(
+                    observed.then_some(&observation),
+                    exact,
+                    || {
+                        order.borrow_mut().push("check");
+                        calls.set(calls.get() + 1);
+                        if calls.get() == denied_at {
+                            let error = ApiError::new("MISSING_EVIDENCE", "not exported");
+                            if observed {
+                                observation.record(Site::GateMaterial, diagnostics::engine(&error));
+                            }
+                            Err(error)
+                        } else {
+                            Ok(())
+                        }
+                    },
+                    || {
+                        order.borrow_mut().push("permission");
+                        permission
+                    },
+                );
+                assert_eq!(*order.borrow(), expected);
+                outcomes.push(allowed);
+                if observed && !allowed {
+                    let error = failure(&observation);
+                    if denied_at > 0 {
+                        assert_eq!(core(&error)["site"], "GateMaterial");
+                        assert_eq!(core(&error)["cause"], "MISSING_EVIDENCE");
+                        assert_eq!(core(&error)["engine_code"], "DISCLOSURE_DENIED");
+                    }
+                }
+            }
+            assert_eq!(outcomes[0], outcomes[1]);
+        }
+    }
+
+    #[test]
+    fn actual_wallet_roster_failure_keeps_generic_e_lower_cause_and_legacy_error() {
+        let callback = Cell::new(0);
+        let legacy: crate::Result<()> =
+            with_durable_construction_roster_v1(Vec::new(), |_, _, _| {
+                callback.set(callback.get() + 1);
+                Ok(())
+            });
+        let observed: std::result::Result<(), diagnostics::RosterError> =
+            with_durable_construction_roster_v1(Vec::new(), |_, _, _| {
+                callback.set(callback.get() + 1);
+                Ok(())
+            });
+        let observation = Observation::new(Operation::Checkpoint);
+        let mapped = observed.map_err(|e| e.into_api(&observation, Site::WalletRosterAcquire));
+        let error = observation.finish(mapped).unwrap_err();
+        let old = legacy.unwrap_err();
+        assert_eq!(callback.get(), 0);
+        assert_eq!(error.code, old.code);
+        assert_eq!(error.message, old.message);
+        assert_eq!(error.retryable, old.retryable);
+        assert_eq!(error.safe_actions, old.safe_actions);
+        assert_eq!(core(&error)["family"], "DurableConstruction");
+        assert_eq!(core(&error)["cause"], "Binding");
+        assert_eq!(core(&error)["calls"]["receipt"], "NotCalled");
+    }
+
+    #[test]
+    fn finite_lower_families_do_not_export_payloads_or_guess_job_storage() {
+        use wholepact_wallet::wallet::protected_sync::{
+            SyncError, durable_construction_v1::DurableConstructionError,
+        };
+        let cases = [
+            diagnostics::construction(&DurableConstructionError::Sync(
+                SyncError::NoCurrentObservation,
+            )),
+            diagnostics::construction(&DurableConstructionError::Sync(SyncError::Wallet(
+                wholepact_wallet::wallet::WalletError::AccountMismatch,
+            ))),
+            diagnostics::construction(&DurableConstructionError::Sync(SyncError::Chain(
+                wholepact_chain::ChainError::BackendFailure { grpc_code: 123456 },
+            ))),
+            diagnostics::store(&wholepact_store::StoreError::InvalidInput(
+                "private path sentinel",
+            )),
+            diagnostics::store(&wholepact_store::StoreError::StorageSecurity(
+                wholepact_storage_security::StorageSecurityError::SourceChanged,
+            )),
+            diagnostics::job(&wholepact_proof_jobs::JobError::Storage),
+            diagnostics::protocol("Accepted manifest accounting is invalid"),
+            diagnostics::protocol("private arbitrary protocol sentinel"),
+        ];
+        let expected = [
+            ("Sync", "NoCurrentObservation"),
+            ("Wallet", "AccountMismatch"),
+            ("Chain", "BackendFailure"),
+            ("Store", "InvalidInput"),
+            ("StorageSecurity", "SourceChanged"),
+            ("Job", "Storage"),
+            ("Protocol", "Manifest"),
+            ("Protocol", "Unclassified"),
+        ];
+        for (cause, (family, label)) in cases.into_iter().zip(expected) {
+            let observation = Observation::new(Operation::Checkpoint);
+            observation.record(Site::ProtocolConstruct, cause);
+            let error = failure(&observation);
+            let value = core(&error);
+            assert_eq!(value["family"], family);
+            assert_eq!(value["cause"], label);
+            assert!(!value.to_string().contains("sentinel"));
+            assert!(!value.to_string().contains("123456"));
+        }
+        let observation = Observation::new(Operation::ReadFixed);
+        observation.record(
+            Site::FixedVerify,
+            diagnostics::Cause {
+                family: "private-family",
+                cause: "private-cause",
+            },
+        );
+        let error = failure(&observation);
+        assert_eq!(core(&error)["family"], "Engine");
+        assert_eq!(core(&error)["cause"], "Unclassified");
+    }
+
+    #[test]
+    fn actual_protocol_parse_failure_is_classified_without_second_evaluation() {
+        let actual = wholepact_protocol::inspect_candidate(b"not a PCZT");
+        let observation = Observation::new(Operation::Checkpoint);
+        let mapped = actual.map_err(|error| {
+            observation.record(Site::ProtocolInspect, diagnostics::protocol(&error));
+            damaged()
+        });
+        let error = observation.finish(mapped).err().unwrap();
+        assert_eq!(core(&error)["site"], "ProtocolInspect");
+        assert_eq!(core(&error)["family"], "Protocol");
+        assert!(!core(&error).to_string().contains("not a PCZT"));
+    }
+
+    #[test]
+    fn real_store_fresh_replay_and_error_returns_survive_later_error() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = dir.path().join("observed.sqlite");
+        let key = DatabaseKey::from_bytes([121; 32]);
+        let store = wholepact_store::Store::create_encrypted(&path, &key).unwrap();
+        let create = wholepact_store::CommandContext::for_request(
+            "owner",
+            "create-observed-command",
+            &json!({"n":0}),
+        )
+        .unwrap();
+        let initial = store
+            .create_agreement(&create, "observed", json!({"n":0}))
+            .unwrap();
+        let update = wholepact_store::CommandContext::for_request(
+            "owner",
+            "update-observed-command",
+            &json!({"n":1}),
+        )
+        .unwrap();
+        for expected in ["ReturnedOkFresh", "ReturnedOkReplay"] {
+            let observation = Observation::new(Operation::Checkpoint);
+            let result = store.update_agreement(
+                &update,
+                "observed",
+                initial.record.revision,
+                json!({"n":1}),
+                "observed.changed",
+            );
+            observation.store_call(Site::ReceiptCommit, Call::Receipt, &result);
+            let returned = result.unwrap();
+            assert_eq!(returned.replayed, expected == "ReturnedOkReplay");
+            // Same observation after a later postcheck Err cannot downgrade a known returned commit.
+            observation.call(Call::Receipt, CallState::ReturnedErrUnknown);
+            let error = failure(&observation);
+            assert_eq!(core(&error)["calls"]["receipt"], expected);
+        }
+        let wrong = wholepact_store::CommandContext::for_request(
+            "owner",
+            "wrong-revision-command",
+            &json!({"n":2}),
+        )
+        .unwrap();
+        let observation = Observation::new(Operation::Checkpoint);
+        let result =
+            store.update_agreement(&wrong, "observed", 999, json!({"n":2}), "observed.changed");
+        observation.store_call(Site::ReceiptCommit, Call::Receipt, &result);
+        assert!(matches!(
+            result,
+            Err(wholepact_store::StoreError::RevisionConflict)
+        ));
+        let error = failure(&observation);
+        assert_eq!(core(&error)["calls"]["receipt"], "ReturnedErrUnknown");
+        assert_eq!(core(&error)["family"], "Store");
+        assert_eq!(core(&error)["cause"], "RevisionConflict");
+    }
+
+    #[test]
+    fn complete_call_slots_are_operation_local_and_proof_requires_consumption() {
+        for (operation, related) in [
+            (Operation::Checkpoint, vec!["receipt", "enqueue", "link"]),
+            (Operation::Proof, vec!["proof", "outcome"]),
+            (Operation::Freeze, vec!["freeze"]),
+            (Operation::ReadFixed, vec![]),
+            (Operation::OpenOriginal, vec![]),
+        ] {
+            let observation = Observation::new(operation);
+            if operation == Operation::Proof {
+                observation.consumed();
+            }
+            let error = failure(&observation);
+            let value = core(&error);
+            assert_eq!(value["call_scope"], "CurrentInvocation");
+            assert_eq!(value["attempt_consumed"], operation == Operation::Proof);
+            assert_eq!(value.as_object().unwrap().len(), 9);
+            assert_eq!(value["calls"].as_object().unwrap().len(), 6);
+            for slot in ["receipt", "enqueue", "link", "proof", "outcome", "freeze"] {
+                assert_eq!(
+                    value["calls"][slot],
+                    if related.contains(&slot) {
+                        "NotCalled"
+                    } else {
+                        "NotApplicable"
+                    }
+                );
+            }
+            assert!(serde_json::to_vec(value).unwrap().len() <= 4096);
+        }
+        let omitted = Observation::new(Operation::Proof);
+        assert!(failure(&omitted).details.get(KEY).is_none());
+        let enqueue = Observation::new(Operation::Checkpoint);
+        enqueue.call(Call::Enqueue, CallState::ReturnedOkNoContinuation);
+        assert_eq!(
+            core(&failure(&enqueue))["calls"]["enqueue"],
+            "ReturnedOkNoContinuation"
+        );
+        let invalid = Observation::new(Operation::Checkpoint);
+        invalid.call(Call::Receipt, CallState::ReturnedOk);
+        assert!(failure(&invalid).details.get(KEY).is_none());
+    }
+
+    #[test]
+    fn collision_nonobject_and_borrow_contention_omit_without_changing_errors() {
+        for details in [
+            json!({KEY:{"preexisting":"do not replace"}}),
+            json!(["arbitrary private details"]),
+            json!(null),
+        ] {
+            let observation = Observation::new(Operation::Checkpoint);
+            let mut error = ApiError::new("INVALID_REQUEST", "original");
+            error.details = Box::new(details.clone());
+            let returned = observation.finish::<()>(Err(error)).unwrap_err();
+            assert_eq!(*returned.details, details);
+        }
+        let observation = Observation::new(Operation::Checkpoint);
+        let error = ApiError::new("INVALID_REQUEST", "original");
+        observation.record_while_borrowed_for_test(&error);
+        let returned = observation.finish::<()>(Err(error)).unwrap_err();
+        assert_eq!(returned.code, "INVALID_REQUEST");
+        assert!(returned.details.get(KEY).is_none());
+    }
+
+    #[test]
+    fn commit_metadata_merge_preserves_first_cause_and_arbitrary_existing_details() {
+        let mut error = ApiError::new("RECOVERY_REQUIRED", "original");
+        error.details = Box::new(
+            json!({"private_original_job_error_v1":"Storage",KEY:{"reserved":"first"},"metadata_commit_status":"earlier","other":[1,2]}),
+        );
+        let original = error.details.clone();
+        super::super::super::operation_v1::merge_error_details_v2(
+            &mut error,
+            &json!({"metadata_commit_status":"committed","new_fact":true,KEY:{"reserved":"later"}}),
+        );
+        for (key, value) in original.as_object().unwrap() {
+            assert_eq!(&error.details[key], value);
+        }
+        assert_eq!(error.details["new_fact"], true);
+        error.details = Box::new(json!("not an object"));
+        super::super::super::operation_v1::merge_error_details_v2(
+            &mut error,
+            &json!({"fact":true}),
+        );
+        assert_eq!(*error.details, json!("not an object"));
+    }
+
+    #[test]
+    fn actual_read_only_preflight_faults_preserve_source_and_original_error() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let key = DatabaseKey::from_bytes([122; 32]);
+        let path = dir.path().join("metadata.sqlite");
+        let store = wholepact_store::Store::create_encrypted(&path, &key).unwrap();
+        let origin = store.verify_original_encrypted_destination(&path).unwrap();
+        drop(store);
+        for (file, expected, site) in [(&path, [7; 32], "SnapshotOrigin")] {
+            let bytes = std::fs::read(file).unwrap();
+            let legacy = preflight_original_metadata(file, &key, expected).unwrap_err();
+            let observed = PreparedPrivateDurableCoordinatorV1::check_initialized_original_v1(
+                file, &key, expected,
+            )
+            .unwrap_err();
+            assert_eq!(observed.code, legacy.code);
+            assert_eq!(observed.message, legacy.message);
+            assert_eq!(core(&observed)["site"], site);
+            assert_eq!(std::fs::read(file).unwrap(), bytes);
+        }
+        let empty = dir.path().join("empty.sqlite");
+        let connection = wholepact_storage_security::create_encrypted(&empty, &key).unwrap();
+        let empty_origin = connection.database_identity().unwrap().origin_commitment();
+        drop(connection);
+        let bytes = std::fs::read(&empty).unwrap();
+        let legacy = preflight_original_metadata(&empty, &key, empty_origin).unwrap_err();
+        let error = PreparedPrivateDurableCoordinatorV1::check_initialized_original_v1(
+            &empty,
+            &key,
+            empty_origin,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, legacy.code);
+        assert_eq!(error.message, legacy.message);
+        // The snapshot factory rejects an uninitialized file before the Engine
+        // can inspect its schema. Preserve that actual first typed failure.
+        assert_eq!(core(&error)["site"], "SnapshotOpen");
+        assert_eq!(core(&error)["family"], "StorageSecurity");
+        assert_eq!(core(&error)["cause"], "UninitializedDatabase");
+        assert_eq!(std::fs::read(&empty).unwrap(), bytes);
+
+        // A distinct initialized encrypted journal reaches the schema check.
+        // Mutate only this local negative fixture; never open it through Store
+        // again, which could exercise a migration rather than a read preflight.
+        let wrong_schema = dir.path().join("wrong-schema.sqlite");
+        let store = wholepact_store::Store::create_encrypted(&wrong_schema, &key).unwrap();
+        let wrong_schema_origin = store
+            .verify_original_encrypted_destination(&wrong_schema)
+            .unwrap();
+        drop(store);
+        let connection = wholepact_storage_security::open_encrypted(&wrong_schema, &key).unwrap();
+        connection
+            .connection()
+            .pragma_update(None, "user_version", 4)
+            .unwrap();
+        drop(connection);
+        let bytes = std::fs::read(&wrong_schema).unwrap();
+        let legacy =
+            preflight_original_metadata(&wrong_schema, &key, wrong_schema_origin).unwrap_err();
+        let error = PreparedPrivateDurableCoordinatorV1::check_initialized_original_v1(
+            &wrong_schema,
+            &key,
+            wrong_schema_origin,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, legacy.code);
+        assert_eq!(error.message, legacy.message);
+        assert_eq!(core(&error)["site"], "SnapshotSchema");
+        assert_eq!(core(&error)["family"], "Engine");
+        assert_eq!(core(&error)["cause"], legacy.code);
+        assert_eq!(std::fs::read(&wrong_schema).unwrap(), bytes);
+        PreparedPrivateDurableCoordinatorV1::check_initialized_original_v1(&path, &key, origin)
+            .unwrap();
+    }
+
+    #[test]
+    fn typed_original_receipt_comparison_preserves_exact_real_value() {
+        let (_, envelope) = candidate_pair();
+        let original = inert_receipt(&envelope.view.candidates[0]);
+        assert!(same_original_receipt_v2(&original, &original).unwrap());
+        let mut different = original.clone();
+        different.prepared_revision += 1;
+        assert!(!same_original_receipt_v2(&different, &original).unwrap());
+        let mut different = original.clone();
+        different.coordination_request_digest = "f".repeat(64);
+        assert!(!same_original_receipt_v2(&different, &original).unwrap());
+        let mut different = original.clone();
+        different.action_mappings_v1 = None;
+        assert!(!same_original_receipt_v2(&different, &original).unwrap());
+        // The production helper takes CheckpointReceipt references; a stage's ()
+        // can no longer silently participate in this serialization comparison.
     }
 }

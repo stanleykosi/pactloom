@@ -11,6 +11,28 @@ use wholepact_protocol::authorization::retention::{
 use wholepact_storage_security::{create_encrypted, open_encrypted_quiescent as open_encrypted};
 use wholepact_wallet::wallet::DedicatedTestnetWallet;
 
+// The bridge exists only in the already qualified original-workspace build.
+// Other financial configurations retain exactly their original Result path.
+macro_rules! reader_result {
+    ($site:ident, $observe:ident, $result:expr) => {{
+        let result = $result;
+        #[cfg(all(
+            feature = "durable-proposal",
+            feature = "manual-admission",
+            target_os = "linux"
+        ))]
+        if let Err(error) = &result {
+            use crate::host::durable_private_workspace_v1 as diagnostic;
+            diagnostic::$observe(
+                diagnostic::PrivateDiagnosticOperationV1::OpenOriginal,
+                diagnostic::PrivateDiagnosticSiteV1::$site,
+                error,
+            );
+        }
+        result
+    }};
+}
+
 pub(crate) const JOURNALS: [&str; 4] = [
     "wallet.sqlite",
     "proof.sqlite",
@@ -192,14 +214,29 @@ impl FinancialProfile {
     pub(crate) fn original_workspace_proof_v1(
         &self,
     ) -> Result<wholepact_proof_jobs::OriginalProofJobSourceV1<'_>> {
-        self.check_current_journals()?;
-        let source = self
-            .proof
-            .original_source_v1()
-            .map_err(|_| Error::Authentication)?;
-        source.check_current().map_err(|_| Error::Authentication)?;
+        reader_result!(
+            ReaderOriginalProofSource,
+            observe_private_fixed_host_v1,
+            self.check_current_journals()
+        )?;
+        let source = reader_result!(
+            ReaderOriginalProofSource,
+            observe_private_fixed_job_v1,
+            self.proof.original_source_v1()
+        )
+        .map_err(|_| Error::Authentication)?;
+        reader_result!(
+            ReaderOriginalProofCurrent,
+            observe_private_fixed_job_v1,
+            source.check_current()
+        )
+        .map_err(|_| Error::Authentication)?;
         if source.origin_commitment() != self.original_databases[1].origin_commitment() {
-            return Err(Error::Authentication);
+            return reader_result!(
+                ReaderOriginalProofCurrent,
+                observe_private_fixed_host_v1,
+                Err(Error::Authentication)
+            );
         }
         Ok(source)
     }
@@ -218,13 +255,21 @@ impl FinancialProfile {
         expected_directory: &str,
         expected_proof: [u8; 32],
     ) -> Result<Self> {
-        let read = FinancialReadProfile::open(path, &secrets.profile(), password)?;
-        read.require_private_workspace_original_v1(
-            host,
-            secrets,
-            expected_financial,
-            expected_directory,
-            expected_proof,
+        let read = reader_result!(
+            ReaderFinancialSnapshot,
+            observe_private_fixed_host_v1,
+            FinancialReadProfile::open(path, &secrets.profile(), password)
+        )?;
+        reader_result!(
+            ReaderFinancialOriginal,
+            observe_private_fixed_host_v1,
+            read.require_private_workspace_original_v1(
+                host,
+                secrets,
+                expected_financial,
+                expected_directory,
+                expected_proof,
+            )
         )?;
         let FinancialReadProfile {
             sources,
@@ -234,32 +279,57 @@ impl FinancialProfile {
             directory,
         } = read;
         for source in &sources {
-            source.check_source_unchanged()?;
+            reader_result!(
+                ReaderOriginalFinancialHandles,
+                observe_private_fixed_storage_v1,
+                source.check_source_unchanged()
+            )?;
         }
         drop(sources);
         // Reauthenticate each actual original handle before ownership transfer.
         for (index, identity) in original_databases.iter().enumerate() {
-            let connection = open_encrypted(
-                directory.path(JOURNALS[index])?,
-                &financial_secrets.key(index)?,
+            let connection = reader_result!(
+                ReaderOriginalFinancialHandles,
+                observe_private_fixed_storage_v1,
+                open_encrypted(
+                    directory.path(JOURNALS[index])?,
+                    &financial_secrets.key(index)?,
+                )
             )?;
-            if connection.database_identity()? != *identity {
-                return Err(Error::Authentication);
+            if reader_result!(
+                ReaderOriginalFinancialHandles,
+                observe_private_fixed_storage_v1,
+                connection.database_identity()
+            )? != *identity
+            {
+                return reader_result!(
+                    ReaderOriginalFinancialHandles,
+                    observe_private_fixed_host_v1,
+                    Err(Error::Authentication)
+                );
             }
         }
-        let result = Self::load(
-            directory,
-            financial_secrets,
-            &original_owner,
-            false,
-            RecordableImportKind::None,
-            Some(&original_databases),
+        let result = reader_result!(
+            ReaderOriginalFinancialLoad,
+            observe_private_fixed_host_v1,
+            Self::load(
+                directory,
+                financial_secrets,
+                &original_owner,
+                false,
+                RecordableImportKind::None,
+                Some(&original_databases),
+            )
         )?;
         if result.original_databases != original_databases
             || result.manual_original_primary_origin_digest(host, secrets)? != expected_financial
             || result.original_workspace_proof_origin_v1()? != expected_proof
         {
-            return Err(Error::Authentication);
+            return reader_result!(
+                ReaderOriginalFinancialLoad,
+                observe_private_fixed_host_v1,
+                Err(Error::Authentication)
+            );
         }
         Ok(result)
     }
@@ -406,14 +476,23 @@ impl FinancialReadProfile {
         let sources = (0..4)
             .map(|index| {
                 Ok(if index == 0 {
-                    wholepact_wallet::bundle::open_wallet_scan_read_snapshot(
-                        &directory.path(JOURNALS[index])?,
-                        &secrets.key(index)?,
+                    reader_result!(
+                        ReaderFinancialSnapshot,
+                        observe_private_fixed_host_v1,
+                        wholepact_wallet::bundle::open_wallet_scan_read_snapshot(
+                            &directory.path(JOURNALS[index])?,
+                            &secrets.key(index)?,
+                        )
+                        .map_err(Error::from)
                     )?
                 } else {
-                    wholepact_storage_security::open_encrypted_read_snapshot(
-                        directory.path(JOURNALS[index])?,
-                        &secrets.key(index)?,
+                    reader_result!(
+                        ReaderFinancialSnapshot,
+                        observe_private_fixed_storage_v1,
+                        wholepact_storage_security::open_encrypted_read_snapshot(
+                            directory.path(JOURNALS[index])?,
+                            &secrets.key(index)?,
+                        )
                     )?
                 })
             })
@@ -423,7 +502,13 @@ impl FinancialReadProfile {
         let sources: [wholepact_storage_security::EncryptedReadSnapshot; 4] = sources;
         let original_databases = sources
             .iter()
-            .map(|source| Ok(source.source_database_identity()?))
+            .map(|source| {
+                Ok(reader_result!(
+                    ReaderFinancialSnapshot,
+                    observe_private_fixed_storage_v1,
+                    source.source_database_identity()
+                )?)
+            })
             .collect::<Result<Vec<_>>>()?
             .try_into()
             .map_err(|_| Error::Invalid)?;
@@ -445,33 +530,63 @@ impl FinancialReadProfile {
         expected_directory: &str,
         expected_proof: [u8; 32],
     ) -> Result<()> {
-        self.check_retained_owner(&secrets.profile())?;
+        reader_result!(
+            ReaderFinancialOriginal,
+            observe_private_fixed_host_v1,
+            self.check_retained_owner(&secrets.profile())
+        )?;
         if self.manual_original_primary_origin_digest(host, secrets)? != expected_financial
             || self.directory.manual_target_identity_digest()? != expected_directory
             || self.original_databases[1].origin_commitment() != expected_proof
         {
-            return Err(Error::Authentication);
+            return reader_result!(
+                ReaderFinancialOriginal,
+                observe_private_fixed_host_v1,
+                Err(Error::Authentication)
+            );
         }
-        let proof = wholepact_proof_jobs::ProofStatusSnapshot::open(
-            &self.directory.path("proof.sqlite")?,
-            &self.secrets.key(1)?,
+        let proof = reader_result!(
+            ReaderOriginalFinancialProofSchema,
+            observe_private_fixed_job_v1,
+            wholepact_proof_jobs::ProofStatusSnapshot::open(
+                &self.directory.path("proof.sqlite")?,
+                &self.secrets.key(1)?,
+            )
         )
         .map_err(|_| Error::Authentication)?;
-        if proof
-            .source_database_identity()
-            .map_err(|_| Error::Authentication)?
+        if reader_result!(
+            ReaderProofSnapshotOrigin,
+            observe_private_fixed_job_v1,
+            proof.source_database_identity()
+        )
+        .map_err(|_| Error::Authentication)?
             != self.original_databases[1]
         {
-            return Err(Error::Authentication);
+            return reader_result!(
+                ReaderProofSnapshotOrigin,
+                observe_private_fixed_host_v1,
+                Err(Error::Authentication)
+            );
         }
-        proof
-            .check_source_unchanged()
-            .map_err(|_| Error::Authentication)?;
-        self.check_retained_owner(&secrets.profile())
+        reader_result!(
+            ReaderProofSnapshotUnchanged,
+            observe_private_fixed_job_v1,
+            proof.check_source_unchanged()
+        )
+        .map_err(|_| Error::Authentication)?;
+        reader_result!(
+            ReaderFinancialOriginal,
+            observe_private_fixed_host_v1,
+            self.check_retained_owner(&secrets.profile())
+        )
     }
     pub(crate) fn check_retained_owner(&self, owner: &str) -> Result<()> {
         for source in &self.sources {
-            source.check_source_unchanged()?;
+            reader_result!(
+                ReaderOriginalFinancialHandles,
+                observe_private_fixed_storage_v1,
+                source.check_source_unchanged()
+            )?;
         }
         check_retained(
             &self.directory,
@@ -814,7 +929,16 @@ mod tests {
                 }
                 _ => {}
             }
-            let before = std::fs::read(root.join("proof.sqlite")).unwrap();
+            let before = JOURNALS.map(|name| std::fs::read(root.join(name)).unwrap());
+            #[cfg(all(
+                feature = "durable-proposal",
+                feature = "manual-admission",
+                target_os = "linux",
+                feature = "synthetic-born-joined-qualification"
+            ))]
+            let _scope =
+                crate::host::durable_private_workspace_v1::begin_private_fixed_diagnostic_scope_v1(
+                );
             let opened = FinancialProfile::open_private_workspace_original_v1(
                 &root,
                 &host,
@@ -825,15 +949,136 @@ mod tests {
                 proof_origin,
             );
             assert_eq!(opened.is_ok(), mutation == 0);
+            #[cfg(all(
+                feature = "durable-proposal",
+                feature = "manual-admission",
+                target_os = "linux",
+                feature = "synthetic-born-joined-qualification"
+            ))]
+            {
+                use crate::host::durable_private_workspace_v1::private_fixed_diagnostic_snapshot_v1;
+                if mutation == 0 {
+                    assert!(private_fixed_diagnostic_snapshot_v1().is_none());
+                } else {
+                    assert!(matches!(opened, Err(Error::Authentication)));
+                    let first = private_fixed_diagnostic_snapshot_v1().unwrap();
+                    let value: serde_json::Value =
+                        serde_json::from_str(&first.canonical_json().unwrap()).unwrap();
+                    assert_eq!(value["primary"]["operation"], "OpenOriginal");
+                    assert_eq!(value["primary"]["engine_code"], "NotApplicable");
+                    if mutation == 1 {
+                        assert_eq!(value["primary"]["site"], "ReaderFinancialOriginal");
+                        assert_eq!(value["primary"]["family"], "Host");
+                        assert_eq!(value["primary"]["cause"], "Authentication");
+                    } else {
+                        assert_eq!(
+                            value["primary"]["site"],
+                            "ReaderOriginalFinancialProofSchema"
+                        );
+                        assert_eq!(value["primary"]["family"], "Job");
+                        assert_eq!(value["primary"]["cause"], "UnsupportedSchema");
+                    }
+                    assert!(value["evidence"].is_null());
+                    assert!(value["worker"].is_null());
+                }
+            }
             drop(opened);
             if mutation != 0 {
-                assert_eq!(std::fs::read(root.join("proof.sqlite")).unwrap(), before);
+                assert_eq!(
+                    JOURNALS.map(|name| std::fs::read(root.join(name)).unwrap()),
+                    before
+                );
             }
         }
         fn fs_metadata_inode(path: &Path) -> (u64, u64) {
             let metadata = std::fs::metadata(path).unwrap();
             (metadata.dev(), metadata.ino())
         }
+    }
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "manual-admission",
+        target_os = "linux",
+        feature = "synthetic-born-joined-qualification"
+    ))]
+    #[test]
+    fn private_reader_diagnostic_job_storage_remains_opaque_before_mapping() {
+        use crate::host::durable_private_workspace_v1::{
+            begin_private_fixed_diagnostic_scope_v1, private_fixed_diagnostic_snapshot_v1,
+        };
+        for (error, cause) in [
+            (wholepact_proof_jobs::JobError::Storage, "Storage"),
+            (
+                wholepact_proof_jobs::JobError::UnsupportedSchema,
+                "UnsupportedSchema",
+            ),
+        ] {
+            let _scope = begin_private_fixed_diagnostic_scope_v1();
+            let calls = std::cell::Cell::new(0);
+            let result: Result<()> = reader_result!(
+                ReaderOriginalFinancialProofSchema,
+                observe_private_fixed_job_v1,
+                {
+                    calls.set(calls.get() + 1);
+                    std::result::Result::<(), _>::Err(error)
+                }
+            )
+            .map_err(|_| Error::Authentication);
+            assert!(matches!(result, Err(Error::Authentication)));
+            assert_eq!(calls.get(), 1);
+            let first = private_fixed_diagnostic_snapshot_v1().unwrap();
+            let value: serde_json::Value =
+                serde_json::from_str(&first.canonical_json().unwrap()).unwrap();
+            assert_eq!(value["primary"]["family"], "Job");
+            assert_eq!(value["primary"]["cause"], cause);
+            assert_eq!(value["primary"]["engine_code"], "NotApplicable");
+            let final_result =
+                reader_result!(ReaderFinancialOpen, observe_private_fixed_host_v1, result);
+            assert!(matches!(final_result, Err(Error::Authentication)));
+            assert_eq!(private_fixed_diagnostic_snapshot_v1().unwrap(), first);
+        }
+        // A real encrypted proof snapshot already erases its incorrect-key
+        // reason to JobStorage. Keep exactly that available category here.
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("financial");
+        let profile = FinancialProfile::create(
+            &root,
+            "native-synthetic-owner",
+            b"synthetic-only-storage-password",
+        )
+        .unwrap();
+        let proof_key = profile.secrets.key(1).unwrap();
+        drop(profile);
+        let directory = Directory::open(&root).unwrap();
+        let path = directory.path("proof.sqlite").unwrap();
+        let control = wholepact_proof_jobs::ProofStatusSnapshot::open(&path, &proof_key).unwrap();
+        drop(control);
+        let before = std::fs::read(&path).unwrap();
+        let _scope = begin_private_fixed_diagnostic_scope_v1();
+        let actual = reader_result!(
+            ReaderOriginalFinancialProofSchema,
+            observe_private_fixed_job_v1,
+            wholepact_proof_jobs::ProofStatusSnapshot::open(
+                &path,
+                &wholepact_storage_security::DatabaseKey::from_bytes([42; 32])
+            )
+        );
+        assert!(matches!(
+            &actual,
+            Err(wholepact_proof_jobs::JobError::Storage)
+        ));
+        let actual = actual.map_err(|_| Error::Authentication);
+        assert!(matches!(actual, Err(Error::Authentication)));
+        let first = private_fixed_diagnostic_snapshot_v1().unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&first.canonical_json().unwrap()).unwrap();
+        assert_eq!(
+            value["primary"]["site"],
+            "ReaderOriginalFinancialProofSchema"
+        );
+        assert_eq!(value["primary"]["family"], "Job");
+        assert_eq!(value["primary"]["cause"], "Storage");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
     #[test]
     fn separate_profile_reopen_owner_binding_and_missing_journal_fail_closed() {

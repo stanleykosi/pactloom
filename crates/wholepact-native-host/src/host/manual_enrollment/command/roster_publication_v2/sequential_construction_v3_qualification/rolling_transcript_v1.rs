@@ -42,6 +42,11 @@ pub(super) struct Transcript<'a> {
     durable_flow: super::safe_diagnostics_v1::DurableFlowCapture,
     #[cfg(feature = "synthetic-born-joined-qualification")]
     durable_lifecycle: super::safe_diagnostics_v1::DurableLifecycleCapture,
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "synthetic-born-joined-qualification"
+    ))]
+    private_fixed_diagnostic: super::safe_diagnostics_v1::PrivateFixedDiagnosticCapture,
 }
 
 impl<'a> Transcript<'a> {
@@ -81,6 +86,11 @@ impl<'a> Transcript<'a> {
             durable_flow: Default::default(),
             #[cfg(feature = "synthetic-born-joined-qualification")]
             durable_lifecycle: Default::default(),
+            #[cfg(all(
+                feature = "durable-proposal",
+                feature = "synthetic-born-joined-qualification"
+            ))]
+            private_fixed_diagnostic: Default::default(),
         })
     }
 
@@ -91,6 +101,7 @@ impl<'a> Transcript<'a> {
             + self.admission_diagnostic_retained_bytes()
             + self.durable_flow_retained_bytes()
             + self.durable_lifecycle_retained_bytes()
+            + self.private_fixed_diagnostic_retained_bytes()
             + self
                 .paths
                 .values()
@@ -147,6 +158,53 @@ impl<'a> Transcript<'a> {
         #[cfg(not(feature = "synthetic-born-joined-qualification"))]
         { 0 }
     }
+    fn private_fixed_diagnostic_retained_bytes(&self) -> usize {
+        #[cfg(all(
+            feature = "durable-proposal",
+            feature = "synthetic-born-joined-qualification"
+        ))]
+        {
+            self.private_fixed_diagnostic.retained_bytes()
+        }
+        #[cfg(not(all(
+            feature = "durable-proposal",
+            feature = "synthetic-born-joined-qualification"
+        )))]
+        {
+            0
+        }
+    }
+    fn discard_private_fixed_diagnostic_for_budget(&mut self) {
+        #[cfg(all(
+            feature = "durable-proposal",
+            feature = "synthetic-born-joined-qualification"
+        ))]
+        self.private_fixed_diagnostic.discard_for_budget();
+    }
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "synthetic-born-joined-qualification"
+    ))]
+    pub(super) fn finish_private_fixed_diagnostic(&mut self) {
+        self.private_fixed_diagnostic
+            .finish(&self.bytes[self.line_start..]);
+    }
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "synthetic-born-joined-qualification"
+    ))]
+    pub(super) fn private_fixed_diagnostic(
+        &self,
+    ) -> Option<&crate::host::durable_private_workspace_v1::PrivateFixedDiagnosticV1> {
+        self.private_fixed_diagnostic.value()
+    }
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "synthetic-born-joined-qualification"
+    ))]
+    pub(super) fn diagnostic_withheld(&self) -> bool {
+        self.private_fixed_diagnostic.withheld()
+    }
     #[cfg(feature = "synthetic-born-joined-qualification")]
     pub(super) fn durable_lifecycle_lines(&self) -> Vec<&str> {
         self.durable_lifecycle.public_lines(&self.durable_flow)
@@ -182,6 +240,9 @@ impl<'a> Transcript<'a> {
         // Optional retained copies yield to the original transcript budget.
         // Their original raw PTY bytes still count normally; no raw limit is
         // bypassed, and truly over-budget original text still fails below.
+        if chunk.len() > MAX_BYTES.saturating_sub(self.retained_bytes()) {
+            self.discard_private_fixed_diagnostic_for_budget();
+        }
         #[cfg(feature = "synthetic-born-joined-qualification")]
         if chunk.len() > MAX_BYTES.saturating_sub(self.retained_bytes()) {
             self.history_measurements.discard_for_budget();
@@ -223,6 +284,14 @@ impl<'a> Transcript<'a> {
                     retained = retained - removed - count.saturating_sub(1)
                         + entry.len()
                         + new_count.saturating_sub(1);
+                    if retained > MAX_BYTES {
+                        retained -= self.private_fixed_diagnostic_retained_bytes();
+                        #[cfg(all(
+                            feature = "durable-proposal",
+                            feature = "synthetic-born-joined-qualification"
+                        ))]
+                        self.private_fixed_diagnostic.discard_for_budget();
+                    }
                     #[cfg(feature = "synthetic-born-joined-qualification")]
                     if retained > MAX_BYTES {
                         retained -= self.history_measurements.retained_bytes()
@@ -246,6 +315,11 @@ impl<'a> Transcript<'a> {
             // Complete lines are UTF-8 because append already refused invalid
             // bytes, and an incomplete scalar cannot contain the newline.
             let line = std::str::from_utf8(line).map_err(|_| Failure::InvalidUtf8)?;
+            #[cfg(all(
+                feature = "durable-proposal",
+                feature = "synthetic-born-joined-qualification"
+            ))]
+            let private_fixed_line = line.strip_suffix('\r').unwrap_or(line);
             let line = line.trim_end_matches('\r');
             #[cfg(feature = "synthetic-born-joined-qualification")]
             {
@@ -266,6 +340,17 @@ impl<'a> Transcript<'a> {
                     .capture_line(line, MAX_BYTES.saturating_sub(retained));
                 retained = retained - previous + self.durable_lifecycle.retained_bytes();
             }
+            #[cfg(all(
+                feature = "durable-proposal",
+                feature = "synthetic-born-joined-qualification"
+            ))]
+            {
+                let previous = self.private_fixed_diagnostic.retained_bytes();
+                self.private_fixed_diagnostic
+                    .capture_line(private_fixed_line, MAX_BYTES.saturating_sub(retained));
+                retained = retained - previous + self.private_fixed_diagnostic.retained_bytes();
+            }
+            let mut private_fixed_retained = self.private_fixed_diagnostic_retained_bytes();
             for (marker, path) in &mut self.paths {
                 // Preserve the original exact substring lookup, even when a
                 // prior terminal prompt has not supplied a line break. Only
@@ -283,6 +368,15 @@ impl<'a> Transcript<'a> {
                         return Err(Failure::InvalidPath);
                     }
                     retained = retained - path.as_ref().map_or(0, |p| p.value.len()) + value.len();
+                    if retained > MAX_BYTES {
+                        retained -= private_fixed_retained;
+                        #[cfg(all(
+                            feature = "durable-proposal",
+                            feature = "synthetic-born-joined-qualification"
+                        ))]
+                        self.private_fixed_diagnostic.discard_for_budget();
+                        private_fixed_retained = 0;
+                    }
                     #[cfg(feature = "synthetic-born-joined-qualification")]
                     if retained > MAX_BYTES {
                         retained -= self.history_measurements.retained_bytes()
@@ -1009,4 +1103,135 @@ mod tests {
         }
     }
 
+    #[test]
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "synthetic-born-joined-qualification"
+    ))]
+    fn private_fixed_diagnostic_all_fragment_boundaries_survive_consume() {
+        let root = Path::new("/tmp/owned");
+        let line = format!(
+            "CI_SYNTHETIC_PRIVATE_FIXED_DIAGNOSTIC {}\r\n",
+            super::super::safe_diagnostics_v1::PRIVATE_FIXED_DIAGNOSTIC_TEST_JSON
+        );
+        for split in 0..line.len() {
+            let mut transcript = Transcript::new([]).unwrap();
+            transcript.append(&line.as_bytes()[..split], root).unwrap();
+            assert!(transcript.private_fixed_diagnostic().is_none());
+            transcript.consume(None).unwrap();
+            transcript.append(&line.as_bytes()[split..], root).unwrap();
+            transcript.consume(None).unwrap();
+            transcript.finish_private_fixed_diagnostic();
+            assert!(transcript.private_fixed_diagnostic().is_some());
+            assert!(transcript.bytes.is_empty());
+            assert_eq!(
+                transcript.retained_bytes(),
+                transcript.timing_retained_bytes()
+                    + transcript.private_fixed_diagnostic_retained_bytes()
+            );
+        }
+        let mut transcript = Transcript::new([]).unwrap();
+        transcript
+            .append("private é".as_bytes().split_last().unwrap().1, root)
+            .unwrap();
+        transcript.append(&[0xa9, b'\n'], root).unwrap();
+        transcript.append(line.as_bytes(), root).unwrap();
+        assert!(transcript.private_fixed_diagnostic().is_some());
+    }
+    #[test]
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "synthetic-born-joined-qualification"
+    ))]
+    fn private_fixed_diagnostic_counts_against_original_aggregate_budget() {
+        let root = Path::new("/tmp/owned");
+        // Exercise all three pre-existing pressure sites: raw append, closed
+        // diagnostic history and exact retained path metadata.
+        for metadata in [
+            None,
+            Some("[JOINED_DIAGNOSTIC Bootstrap Begin]\n"),
+            Some("SYNTHETIC_JOINED_DRAFT_PATH=/tmp/owned/exact\n"),
+        ] {
+            let mut measured = Transcript::new([MARKER]).unwrap();
+            let mut original = Transcript::new([MARKER]).unwrap();
+            let history = format!(
+                "[HISTORY_MEASUREMENT_V1 {}]\n",
+                super::super::safe_diagnostics_v1::HISTORY_MEASUREMENT_TEST_JSON
+            );
+            measured.append(history.as_bytes(), root).unwrap();
+            measured.consume(None).unwrap();
+            original.append(history.as_bytes(), root).unwrap();
+            original.consume(None).unwrap();
+            let line = format!(
+                "CI_SYNTHETIC_PRIVATE_FIXED_DIAGNOSTIC {}\n",
+                super::super::safe_diagnostics_v1::PRIVATE_FIXED_DIAGNOSTIC_TEST_JSON
+            );
+            measured.append(line.as_bytes(), root).unwrap();
+            measured.consume(None).unwrap();
+            let captured = measured.private_fixed_diagnostic_retained_bytes();
+            assert!(captured > 0);
+            let chunk = if let Some(metadata) = metadata {
+                let filler = MAX_BYTES - original.retained_bytes() - captured - metadata.len() - 1;
+                let mut chunk = vec![b'x'; filler];
+                chunk.push(b'\n');
+                chunk.extend_from_slice(metadata.as_bytes());
+                chunk
+            } else {
+                vec![b'x'; MAX_BYTES - original.retained_bytes()]
+            };
+            original.append(&chunk, root).unwrap();
+            measured.append(&chunk, root).unwrap();
+            assert_eq!(measured.private_fixed_diagnostic_retained_bytes(), 0);
+            assert!(measured.diagnostic_withheld());
+            assert!(measured.history_measurement_retained_bytes() > 0);
+            assert_eq!(measured.retained_bytes(), original.retained_bytes());
+            assert_eq!(measured.summary(), original.summary());
+            if metadata.is_none() {
+                let freed = original.history_measurement_retained_bytes();
+                original.append(&vec![b'x'; freed], root).unwrap();
+                measured.append(&vec![b'x'; freed], root).unwrap();
+                assert_eq!(original.append(b"x", root), Err(Failure::OutputLimit));
+                assert_eq!(measured.append(b"x", root), Err(Failure::OutputLimit));
+            }
+        }
+    }
+    #[test]
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "synthetic-born-joined-qualification"
+    ))]
+    fn private_fixed_diagnostic_duplicate_and_partial_records_are_unavailable() {
+        let root = Path::new("/tmp/owned");
+        let line = format!(
+            "CI_SYNTHETIC_PRIVATE_FIXED_DIAGNOSTIC {}\n",
+            super::super::safe_diagnostics_v1::PRIVATE_FIXED_DIAGNOSTIC_TEST_JSON
+        );
+        for second in [
+            line.as_bytes(),
+            b"CI_SYNTHETIC_PRIVATE_FIXED_DIAGNOSTIC_UNAVAILABLE\n",
+            b"CI_SYNTHETIC_PRIVATE_FIXED_DIAGNOSTIC {private",
+        ] {
+            let mut transcript = Transcript::new([]).unwrap();
+            transcript.append(line.as_bytes(), root).unwrap();
+            transcript.consume(None).unwrap();
+            let captured = transcript.private_fixed_diagnostic_retained_bytes();
+            transcript.append(second, root).unwrap();
+            transcript.finish_private_fixed_diagnostic();
+            assert!(
+                transcript.private_fixed_diagnostic().is_none() && transcript.diagnostic_withheld()
+            );
+            assert_eq!(
+                transcript.private_fixed_diagnostic_retained_bytes(),
+                captured
+            );
+        }
+        let mut transcript = Transcript::new([]).unwrap();
+        transcript
+            .append(format!("private review {line}").as_bytes(), root)
+            .unwrap();
+        transcript.finish_private_fixed_diagnostic();
+        assert!(
+            transcript.private_fixed_diagnostic().is_none() && !transcript.diagnostic_withheld()
+        );
+    }
 }

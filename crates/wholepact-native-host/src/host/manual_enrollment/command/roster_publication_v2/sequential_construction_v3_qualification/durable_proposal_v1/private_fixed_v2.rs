@@ -4,6 +4,8 @@
 use super::*;
 use super::safe_diagnostics_v1::{self as diagnostic, Boundary as B, Outcome};
 use std::io;
+use crate::host::financial::private_durable_fixed_v2 as private_diagnostic;
+use private_diagnostic::{PrivateDiagnosticOperationV1 as DiagnosticOperation,PrivateDiagnosticSiteV1 as DiagnosticSite};
 #[path = "private_fixed_v2/control_v1.rs"]
 mod control_v1;
 use control_v1::{PublicOutcomeV1, ReadyControlV1, ReaderCompletionV1};
@@ -73,6 +75,7 @@ fn first_private_failure(summary:&str,fallback:&'static str)->&'static str {
     }
     fallback
 }
+fn private_fixed_detail_allowed(process_verified:bool,root_cleanup:&str)->bool {process_verified && root_cleanup=="closed_absent"}
 fn private_failure_report(stage:&PrivateWorkspaceStageResultV1)->String {
     format!("[JOINED_FAILURE exit={:?} signal={:?} core_dumped={} inputs={}/{} reason={:?} static_boundaries={}]",
         stage.process.status.as_ref().and_then(|status|status.code()),
@@ -95,6 +98,9 @@ fn run_two_processes_v1()->io::Result<()> {
     let mut root=Some(tempfile::Builder::new().prefix(CHILD_TEMPORARY_PREFIX)
         .permissions(std::fs::Permissions::from_mode(0o700)).tempdir()?);
     let mut first_report=None;
+    let mut first_detail=None;
+    let mut detail_withheld=false;
+    let mut detail_process_verified=false;
     let workflow=(||->io::Result<()> {
         owned_test_process_group_v1::require_default_child_wait_policy().map_err(|error| {
             public.fail("PrivateWorkspaceBootstrap");
@@ -120,6 +126,9 @@ fn run_two_processes_v1()->io::Result<()> {
         if producer.outcome.is_err() {
             public.fail(first_private_failure(&producer.summary,if producer.failure_reason==HarnessFailureReason::CleanupUnverified {"PrivateWorkspaceProducerReap"} else {"PrivateWorkspaceDurableMarker"}));
             first_report=Some(private_failure_report(&producer));
+            first_detail=producer.private_fixed_diagnostic().cloned();
+            detail_withheld=producer.diagnostic_withheld() || first_detail.is_none();
+            detail_process_verified=producer.process.verified();
             return Err(io::Error::other("producer fixed workflow failed"));
         }
         if !producer_cleanup_verified(&producer.process) {
@@ -148,6 +157,9 @@ fn run_two_processes_v1()->io::Result<()> {
         if reader.outcome.is_err() {
             public.fail(first_private_failure(&reader.summary,if reader.failure_reason==HarnessFailureReason::CleanupUnverified {"PrivateWorkspaceReaderReap"} else {"PrivateWorkspaceReadFixed"}));
             first_report=Some(private_failure_report(&reader));
+            first_detail=reader.private_fixed_diagnostic().cloned();
+            detail_withheld=reader.diagnostic_withheld() || first_detail.is_none();
+            detail_process_verified=reader.process.verified();
             return Err(io::Error::other("independent reader workflow failed"));
         }
         if !reader.process.verified() || public.reader_exit!="success" {
@@ -179,6 +191,10 @@ fn run_two_processes_v1()->io::Result<()> {
     if workflow.is_err() && public.first_failure.is_none() { public.fail("PrivateWorkspaceBootstrap"); }
     if workflow.is_ok() && public.verified_success() { public.result="passed".into(); }
     else if public.first_failure.is_none() { public.fail("PrivateWorkspaceIdentityCompare"); }
+    if private_fixed_detail_allowed(detail_process_verified,&public.root_cleanup) {
+        if detail_withheld {diagnostic::emit_private_fixed_diagnostic_unavailable();}
+        else if let Some(detail)=&first_detail {diagnostic::emit_private_fixed_diagnostic(detail);}
+    }
     if let Some(report)=first_report { eprintln!("{report}"); }
     eprintln!("{}{}",control_v1::PUBLIC_PREFIX,public.public_json()?);
     if public.result=="passed" { Ok(()) } else { Err(io::Error::other("original private workspace qualification failed")) }
@@ -311,6 +327,8 @@ thread_local! {
     static CHILD_FIRST_FAILURE: std::cell::Cell<Option<(B,Outcome)>> = const { std::cell::Cell::new(None) };
 }
 fn observe_failure(boundary:B,outcome:Outcome) {
+    let (boundary_label,outcome_label)=diagnostic::private_observation_labels(boundary,outcome);
+    private_diagnostic::observe_private_fixed_boundary_v1(boundary_label,outcome_label);
     CHILD_FIRST_FAILURE.with(|first|if first.get().is_none() { first.set(Some((boundary,outcome))); });
     diagnostic::emit(boundary,outcome);
 }
@@ -318,14 +336,31 @@ fn at<T>(boundary:B,operation:impl FnOnce()->Result<T>)->Result<T> {
     CHILD_BOUNDARY.with(|current|current.set(boundary));
     let result=diagnostic::host(boundary,operation);
     if let Err(error)=&result {
+        let (boundary_label,outcome_label)=diagnostic::private_observation_labels(boundary,diagnostic::host_error(error));
+        private_diagnostic::observe_private_fixed_boundary_v1(boundary_label,outcome_label);
+        if let Some((operation,site))=diagnostic_boundary_site(boundary) {private_diagnostic::observe_private_fixed_host_v1(operation,site,error);}
         CHILD_FIRST_FAILURE.with(|first|if first.get().is_none() { first.set(Some((boundary,diagnostic::host_error(error)))); });
     }
     result
 }
+fn diagnostic_boundary_site(boundary:B)->Option<(DiagnosticOperation,DiagnosticSite)> {
+    match boundary {
+        B::PrivateWorkspaceCheckpoint=>Some((DiagnosticOperation::Checkpoint,DiagnosticSite::HostCheckpointEntry)),
+        B::PrivateWorkspaceProof=>Some((DiagnosticOperation::Proof,DiagnosticSite::HostProofPrecheck)),
+        B::PrivateWorkspaceFreeze=>Some((DiagnosticOperation::Freeze,DiagnosticSite::HostFreezeReturn)),
+        B::PrivateWorkspaceReaderOpen=>Some((DiagnosticOperation::OpenOriginal,DiagnosticSite::ReaderHostReturn)),
+        B::PrivateWorkspaceReadFixed=>Some((DiagnosticOperation::ReadFixed,DiagnosticSite::HostReadReturn)),
+        B::PrivateWorkspaceIdentityCompare=>Some((DiagnosticOperation::ReadFixed,DiagnosticSite::ReaderCommitments)),
+        _=>None,
+    }
+}
+fn diagnostic_result_at<T>(operation:DiagnosticOperation,site:DiagnosticSite,result:Result<T>)->Result<T> {
+    if let Err(error)=&result {private_diagnostic::observe_private_fixed_host_v1(operation,site,error);}
+    result
+}
 fn child_result(result:Result<()>)->Result<()> {
     if let Err(error)=&result {
-        let observed=crate::host::financial::private_durable_fixed_v2::first_private_failure_v2()
-            .or_else(crate::host::durable_private_workspace_v1::first_storage_failure_v1);
+        let observed=private_diagnostic::first_private_fixed_boundary_v1();
         if !observed.is_some_and(|(boundary,outcome)|diagnostic::emit_private_observation(boundary,outcome)) {
             if let Some((boundary,outcome))=CHILD_FIRST_FAILURE.with(|first|first.get()) {
                 diagnostic::emit(boundary,outcome);
@@ -333,13 +368,17 @@ fn child_result(result:Result<()>)->Result<()> {
                 CHILD_BOUNDARY.with(|current|diagnostic::emit(current.get(),diagnostic::host_error(error)));
             }
         }
+        if let Some(detail)=private_diagnostic::private_fixed_diagnostic_snapshot_v1() {diagnostic::emit_private_fixed_diagnostic(&detail);}
+        else {diagnostic::emit_private_fixed_diagnostic_unavailable();}
     }
     result
 }
 pub(in crate::host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification) fn produce_fixed_child(terminal:crate::terminal::Terminal)->Result<()> {
+    let _diagnostic_scope=private_diagnostic::begin_private_fixed_diagnostic_scope_v1();
     child_result(produce_fixed_inner(terminal))
 }
 pub(in crate::host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification) fn read_fixed_child(terminal:crate::terminal::Terminal)->Result<()> {
+    let _diagnostic_scope=private_diagnostic::begin_private_fixed_diagnostic_scope_v1();
     child_result(read_fixed_inner(terminal))
 }
 
@@ -520,10 +559,12 @@ fn produce_fixed_inner(terminal:crate::terminal::Terminal)->Result<()> {
 
 fn read_fixed_inner(terminal:crate::terminal::Terminal)->Result<()> {
     let scenario=scenario_root()?;
-    let ready=ReadyControlV1::read_original(&scenario)?;
+    let ready=diagnostic_result_at(DiagnosticOperation::OpenOriginal,DiagnosticSite::ReaderControlRead,ReadyControlV1::read_original(&scenario).map_err(Error::from))?;
     terminal.message(&format!("SYNTHETIC_PRIVATE_NEW_SESSION_PATH={}\n",scenario.join("private-reader-session.token").display()))?;
     let host=at(B::PrivateWorkspaceReaderOpen,||Host::open_private_workspace_registered_v1(terminal,&ready.profile,&ready.workspace,false))?;
-    if host.financial.as_ref().ok_or(Error::Locked)?.current_directory()?!=ready.financial { return Err(Error::Authentication); }
+    diagnostic_result_at(DiagnosticOperation::ReadFixed,DiagnosticSite::ReaderFinancialCompare,(|| {
+        if host.financial.as_ref().ok_or(Error::Locked)?.current_directory()?!=ready.financial {return Err(Error::Authentication);}Ok(())
+    })())?;
     // The production reader discovers only the original saved fixed lineage.
     // It performs no initialize, capture, scan, constructor, enqueue or proof.
     let fixed=at(B::PrivateWorkspaceReadFixed,||host.private_durable_read_fixed_v2(&ready.workspace))?;
@@ -535,8 +576,9 @@ fn read_fixed_inner(terminal:crate::terminal::Terminal)->Result<()> {
         reader_no_effects_verified:actual.logical_state_digest==ready.expected.logical_state_digest
             && actual.operation_history_digest==ready.expected.operation_history_digest
             && actual.proof_event_history_digest==ready.expected.proof_event_history_digest };
-    if !result.verified() { return Err(Error::Authentication); }
-    result.write_once(&scenario)?;
+    diagnostic_result_at(DiagnosticOperation::ReadFixed,DiagnosticSite::ReaderComparisonVerify,
+        if !result.verified() {Err(Error::Authentication)} else {Ok(())})?;
+    diagnostic_result_at(DiagnosticOperation::ReadFixed,DiagnosticSite::ReaderCompletionWrite,result.write_once(&scenario).map_err(Error::from))?;
     // Normal reader exit releases its independently authenticated original locks.
     drop(fixed);drop(host);Ok(())
 }
@@ -653,4 +695,28 @@ mod pure_tests {
         transcript.append(format!("{DEATH_MARKER}\n").as_bytes(),root).unwrap();
         assert!(death_marker_v1(transcript.tail().unwrap().unwrap(),true,true,true).is_err());
     }
+    #[test]
+    fn private_fixed_diagnostic_reader_final_sites_forward_actual_errors() {
+        let _scope=private_diagnostic::begin_private_fixed_diagnostic_scope_v1();
+        let result:Result<()>=diagnostic_result_at(DiagnosticOperation::ReadFixed,DiagnosticSite::ReaderCompletionWrite,Err(io::Error::other("PRIVATE completion path").into()));
+        assert!(matches!(result,Err(Error::Storage)));
+        let value=private_diagnostic::private_fixed_diagnostic_snapshot_v1().unwrap();
+        assert_eq!(value.primary.site,DiagnosticSite::ReaderCompletionWrite);
+        assert!(!value.canonical_json().unwrap().contains("PRIVATE"));
+    }
+    #[test]
+    fn private_fixed_diagnostic_cleanup_never_replaces_first_observed_failure() {
+        let _scope=private_diagnostic::begin_private_fixed_diagnostic_scope_v1();
+        let first:Result<()>=diagnostic_result_at(DiagnosticOperation::ReadFixed,DiagnosticSite::ReaderComparisonVerify,Err(Error::Authentication));
+        let cleanup:Result<()>=diagnostic_result_at(DiagnosticOperation::ReadFixed,DiagnosticSite::ReaderFinalReturn,Err(Error::Storage));
+        assert!(matches!(first,Err(Error::Authentication)));assert!(matches!(cleanup,Err(Error::Storage)));
+        assert_eq!(private_diagnostic::private_fixed_diagnostic_snapshot_v1().unwrap().primary.site,DiagnosticSite::ReaderComparisonVerify);
+    }
+    #[test]
+    fn private_fixed_diagnostic_transport_waits_for_existing_cleanup_gate() {
+        for process in [false,true] {for root in ["retained","unverified","closed_absent"] {
+            assert_eq!(private_fixed_detail_allowed(process,root),process && root=="closed_absent");
+        }}
+    }
+
 }
