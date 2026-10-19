@@ -6,26 +6,26 @@ use crate::authority_bridge::{
     BridgeError,
     durable_delivery_admission_ipc_v2::*,
     durable_review_ipc_v1::{
-        self as wire, DurableReviewDeliveryRequestV1, DurableReviewPayloadV1,
-        DurableReviewDeliveryReceiptV1, DeliveryCommandV1, DeliveryResponseV1,
+        self as wire, DeliveryCommandV1, DeliveryResponseV1, DurableReviewDeliveryReceiptV1,
+        DurableReviewDeliveryRequestV1, DurableReviewPayloadV1,
     },
 };
-use crate::native_ui::{durable_proposal_v1::VerifiedDurableEconomicsV1, NativeDecision};
 use crate::consent_journal::{
     PreparedDurableDeliveryAdmissionIntentV2, RetainedDurableDeliveryAdmissionIntentV2,
 };
-use wholepact_authority::{
-    durable_delivery_scope_v2::*,
-    durable_payment_v1::{DurablePaymentAdmissionTermsV1, DurableFixedCandidateBindingV1},
-    OwnerControl, OwnerControlRequest, ReconciledAuthorityHistory,
-};
-use wholepact_wallet::wallet::protected_sync::durable_construction_v1::DurableConstructionScopeV1;
+use crate::native_ui::{NativeDecision, durable_proposal_v1::VerifiedDurableEconomicsV1};
+use sha2::{Digest, Sha256};
 use std::{
     os::unix::net::UnixStream,
     sync::mpsc,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
-use sha2::{Digest, Sha256};
+use wholepact_authority::{
+    OwnerControl, OwnerControlRequest, ReconciledAuthorityHistory,
+    durable_delivery_scope_v2::*,
+    durable_payment_v1::{DurableFixedCandidateBindingV1, DurablePaymentAdmissionTermsV1},
+};
+use wholepact_wallet::wallet::protected_sync::durable_construction_v1::DurableConstructionScopeV1;
 fn bridge_error(_: impl std::fmt::Display) -> BridgeError {
     BridgeError::Permission
 }
@@ -799,15 +799,76 @@ struct DeliveryJobV2 {
     epoch: u64,
     attempt: u64,
 }
-struct ImportJobV2 {
-    receive: mpsc::Receiver<authority_bridge::Result<ImportedDeliveryReviewV2>>,
+// A diagnostic read may observe a successful completion, but cannot adopt it.
+// Keep that exact owned value in the original job until ordinary polling applies
+// its original epoch, attempt, pairing and imported-source gates.
+struct ImportJobV2<
+    T = ImportedDeliveryReviewV2,
+    E = BridgeError,
+    R = DurableReviewDeliveryRequestV1,
+> {
+    receive: mpsc::Receiver<std::result::Result<T, E>>,
+    pending_result: Option<std::result::Result<T, E>>,
     epoch: u64,
     attempt: u64,
+    request: R,
+}
+impl<T, E, R> ImportJobV2<T, E, R> {
+    fn try_take_result(
+        &mut self,
+    ) -> std::result::Result<std::result::Result<T, E>, mpsc::TryRecvError> {
+        match self.pending_result.take() {
+            Some(result) => Ok(result),
+            None => self.receive.try_recv(),
+        }
+    }
+}
+#[cfg(any(test, feature = "synthetic-born-joined-qualification"))]
+impl<T, E, R: PartialEq> ImportJobV2<T, E, R> {
+    fn take_failure_for(
+        &mut self,
+        epoch: u64,
+        attempt: u64,
+        request: &R,
+        current_attempt: u64,
+    ) -> Option<E> {
+        if self.epoch != epoch
+            || self.attempt != attempt
+            || &self.request != request
+            || current_attempt != attempt
+        {
+            return None;
+        }
+        match self.try_take_result() {
+            Ok(Err(error)) => Some(error),
+            Ok(Ok(imported)) => {
+                self.pending_result = Some(Ok(imported));
+                None
+            }
+            // Neither an empty channel nor a disconnected worker supplies an
+            // actual worker error. Leave ordinary polling to handle disconnect.
+            Err(_) => None,
+        }
+    }
+}
+#[cfg(feature = "synthetic-born-joined-qualification")]
+struct ImportCorrelationV2 {
+    epoch: u64,
+    attempt: u64,
+    request: DurableReviewDeliveryRequestV1,
+}
+#[cfg(feature = "synthetic-born-joined-qualification")]
+impl ImportCorrelationV2 {
+    fn matches(&self, epoch: u64, attempt: u64, request: &DurableReviewDeliveryRequestV1) -> bool {
+        self.epoch == epoch && self.attempt == attempt && &self.request == request
+    }
 }
 #[derive(Default)]
 pub(super) struct DurableDeliveryRuntimeV2 {
     pub(super) imported: Option<Arc<ImportedDeliveryReviewV2>>,
     import: Option<ImportJobV2>,
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    import_terminal: Option<ImportCorrelationV2>,
     job: Option<DeliveryJobV2>,
     next_attempt: u64,
     awaiting_audit: Option<Arc<PendingAuditV2>>,
@@ -818,6 +879,10 @@ impl DurableDeliveryRuntimeV2 {
     pub(super) fn clear(&mut self) {
         self.imported = None;
         self.import = None;
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        {
+            self.import_terminal = None;
+        }
         self.job = None;
         self.awaiting_audit = None;
     }
@@ -828,7 +893,150 @@ impl DurableDeliveryRuntimeV2 {
         self.next_attempt = self.next_attempt.checked_add(1).ok_or(Error::Unavailable)?;
         self.failure = None;
         self.status = None;
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        {
+            self.import_terminal = None;
+        }
         Ok(self.next_attempt)
+    }
+}
+// Correlation observations only: none of these methods creates an import,
+// adopts a successful result, or supplies current source authority.
+#[cfg(feature = "synthetic-born-joined-qualification")]
+impl DurableDeliveryRuntimeV2 {
+    pub(super) fn qualification_import_attempt_v2(
+        &self,
+        epoch: u64,
+        request: &DurableReviewDeliveryRequestV1,
+    ) -> Result<(u64, u64, bool)> {
+        if self.job.is_some()
+            || self.awaiting_audit.is_some()
+            || self.status.is_some()
+            || self.failure.is_some()
+            || self.imported.is_some()
+            || self.import_terminal.is_some()
+        {
+            return Err(Error::ReviewMismatch);
+        }
+        if let Some(job) = &self.import {
+            if job.epoch != epoch || &job.request != request || job.attempt != self.next_attempt {
+                return Err(Error::ReviewMismatch);
+            }
+            return Ok((
+                job.attempt.checked_sub(1).ok_or(Error::ReviewMismatch)?,
+                job.attempt,
+                true,
+            ));
+        }
+        Ok((
+            self.next_attempt,
+            self.next_attempt.checked_add(1).ok_or(Error::Unavailable)?,
+            false,
+        ))
+    }
+    pub(super) fn qualification_import_current_v2(
+        &self,
+        epoch: u64,
+        predecessor: u64,
+        expected: u64,
+        request: &DurableReviewDeliveryRequestV1,
+        job_seen: &mut bool,
+    ) -> Result<bool> {
+        if predecessor.checked_add(1) != Some(expected)
+            || self.job.is_some()
+            || self.awaiting_audit.is_some()
+            || self.status.is_some()
+            || self.failure.is_some()
+        {
+            return Err(Error::ReviewMismatch);
+        }
+        if let Some(job) = &self.import {
+            if self.next_attempt != expected
+                || job.attempt != expected
+                || job.epoch != epoch
+                || &job.request != request
+                || self.imported.is_some()
+                || self.import_terminal.is_some()
+            {
+                return Err(Error::ReviewMismatch);
+            }
+            *job_seen = true;
+            return Ok(false);
+        }
+        if let Some(imported) = &self.imported {
+            if self.next_attempt != expected
+                || &imported.request != request
+                || !self
+                    .import_terminal
+                    .as_ref()
+                    .is_some_and(|actual| actual.matches(epoch, expected, request))
+            {
+                return Err(Error::ReviewMismatch);
+            }
+            *job_seen = true;
+            return Ok(true);
+        }
+        if *job_seen || self.next_attempt != predecessor || self.import_terminal.is_some() {
+            return Err(Error::ReviewMismatch);
+        }
+        Ok(false)
+    }
+    pub(super) fn qualification_import_failure_attempt_v2(
+        &self,
+        epoch: u64,
+        request: &DurableReviewDeliveryRequestV1,
+    ) -> Option<u64> {
+        if let Some(job) = &self.import {
+            return (job.epoch == epoch
+                && job.attempt == self.next_attempt
+                && &job.request == request)
+                .then_some(job.attempt);
+        }
+        self.import_terminal
+            .as_ref()
+            .filter(|actual| actual.matches(epoch, self.next_attempt, request))
+            .map(|actual| actual.attempt)
+    }
+    pub(super) fn qualification_take_import_failure_v2(
+        &mut self,
+        epoch: u64,
+        expected: u64,
+        request: &DurableReviewDeliveryRequestV1,
+    ) -> Option<DurableDeliveryFailureV2> {
+        if self.next_attempt != expected {
+            return None;
+        }
+        if let Some(job) = self.import.as_mut() {
+            let error = job.take_failure_for(epoch, expected, request, self.next_attempt)?;
+            let job = self.import.take().expect("matched import job");
+            self.import_terminal = Some(ImportCorrelationV2 {
+                epoch: job.epoch,
+                attempt: job.attempt,
+                request: job.request,
+            });
+            return Some(DurableDeliveryFailureV2 {
+                attempt: expected,
+                stage: DurableDeliveryStageV2::Import,
+                error: Error::Verification,
+                import_error: Some(error),
+                transport: None,
+            });
+        }
+        if !self
+            .import_terminal
+            .as_ref()
+            .is_some_and(|actual| actual.matches(epoch, expected, request))
+            || !self.failure.as_ref().is_some_and(|failure| {
+                failure.attempt == expected
+                    && matches!(
+                        failure.stage,
+                        DurableDeliveryStageV2::Import | DurableDeliveryStageV2::Source
+                    )
+            })
+        {
+            return None;
+        }
+        self.failure.take()
     }
 }
 fn send_response(
@@ -1011,6 +1219,7 @@ impl NativeRuntime {
         let session = open.session.clone().ok_or(Error::Locked)?;
         let attempt = open.durable_delivery.attempt()?;
         let (send, receive) = mpsc::channel();
+        let accepted_request = request.clone();
         let worker = std::thread::spawn(move || {
             let result = receive_delivery(
                 stream,
@@ -1027,8 +1236,10 @@ impl NativeRuntime {
         open.durable_delivery.imported = None;
         open.durable_delivery.import = Some(ImportJobV2 {
             receive,
+            pending_result: None,
             epoch,
             attempt,
+            request: accepted_request,
         });
         Ok(())
     }
@@ -1414,11 +1625,19 @@ impl NativeRuntime {
         let Some(open) = self.open.as_mut() else {
             return;
         };
-        if let Some(job) = open.durable_delivery.import.as_ref() {
-            match job.receive.try_recv() {
+        if let Some(job) = open.durable_delivery.import.as_mut() {
+            match job.try_take_result() {
                 Err(mpsc::TryRecvError::Empty) => {}
                 result => {
                     let job = open.durable_delivery.import.take().expect("checked job");
+                    #[cfg(feature = "synthetic-born-joined-qualification")]
+                    {
+                        open.durable_delivery.import_terminal = Some(ImportCorrelationV2 {
+                            epoch: job.epoch,
+                            attempt: job.attempt,
+                            request: job.request,
+                        });
+                    }
                     match result {
                         Ok(Ok(imported))
                             if job.epoch == epoch
@@ -1791,5 +2010,349 @@ mod continuation_source_contract_tests {
             )
         );
         assert!(!audit.contains("awaiting_audit.take()"));
+    }
+}
+
+#[cfg(all(test, feature = "synthetic-born-joined-qualification"))]
+mod pending_import_completion_tests {
+    use super::*;
+
+    // Owned, deliberately non-Clone data exercises the exact production job
+    // kernel without constructing native/source/import authority.
+    #[derive(Debug)]
+    struct Owned(Box<u64>);
+
+    fn inert_job() -> (
+        mpsc::Sender<std::result::Result<Owned, Owned>>,
+        ImportJobV2<Owned, Owned, &'static str>,
+    ) {
+        let (send, receive) = mpsc::channel();
+        (
+            send,
+            ImportJobV2 {
+                receive,
+                pending_result: None,
+                epoch: 17,
+                attempt: 8,
+                request: "exact-request",
+            },
+        )
+    }
+
+    fn request() -> DurableReviewDeliveryRequestV1 {
+        DurableReviewDeliveryRequestV1 {
+            operation_id: "inert-import".into(),
+            enrollment_ref: "01".repeat(32),
+            accepted_manifest_ref: "02".repeat(32),
+            own_disclosure:
+                crate::authority_bridge::durable_construction_v1::DurableConstructionHistoryRequestV1 {
+                    operation_id: "inert-disclosure".into(),
+                    expected_request_digest: "03".repeat(32),
+                },
+            current_disclosure: None,
+            proposal_binding: "04".repeat(32),
+        }
+    }
+
+    fn runtime_job(
+        request: DurableReviewDeliveryRequestV1,
+    ) -> (
+        mpsc::Sender<authority_bridge::Result<ImportedDeliveryReviewV2>>,
+        DurableDeliveryRuntimeV2,
+    ) {
+        let (send, receive) = mpsc::channel();
+        let mut runtime = DurableDeliveryRuntimeV2::default();
+        runtime.next_attempt = 8;
+        runtime.import = Some(ImportJobV2 {
+            receive,
+            pending_result: None,
+            epoch: 17,
+            attempt: 8,
+            request,
+        });
+        (send, runtime)
+    }
+
+    #[test]
+    fn queued_nonclone_error_is_exact_owned_and_consumed_once() {
+        let (send, mut job) = inert_job();
+        let error = Owned(Box::new(71));
+        let original = &*error.0 as *const u64;
+        send.send(Err(error)).unwrap();
+        let observed = job.take_failure_for(17, 8, &"exact-request", 8).unwrap();
+        assert_eq!(&*observed.0 as *const u64, original);
+        assert_eq!(*observed.0, 71);
+        assert!(job.take_failure_for(17, 8, &"exact-request", 8).is_none());
+        assert!(matches!(
+            job.try_take_result(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn queued_nonclone_success_stays_owned_until_ordinary_take() {
+        let (send, mut job) = inert_job();
+        let imported = Owned(Box::new(72));
+        let original = &*imported.0 as *const u64;
+        send.send(Ok(imported)).unwrap();
+        for _ in 0..3 {
+            assert!(job.take_failure_for(17, 8, &"exact-request", 8).is_none());
+            let buffered = job.pending_result.as_ref().unwrap().as_ref().unwrap();
+            assert_eq!(&*buffered.0 as *const u64, original);
+        }
+        assert!(job.take_failure_for(17, 8, &"other-request", 8).is_none());
+        let buffered = job.pending_result.as_ref().unwrap().as_ref().unwrap();
+        assert_eq!(&*buffered.0 as *const u64, original);
+        // The diagnostic has no adoption closure or source authority. Only the
+        // ordinary once-only read can release its retained successful value.
+        let imported = job.try_take_result().unwrap().unwrap();
+        assert_eq!(&*imported.0 as *const u64, original);
+        assert_eq!(*imported.0, 72);
+        assert!(job.pending_result.is_none());
+        assert!(matches!(
+            job.try_take_result(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn wrong_epoch_attempt_request_or_current_attempt_leaves_queue_untouched() {
+        let (send, mut job) = inert_job();
+        let error = Owned(Box::new(73));
+        let original = &*error.0 as *const u64;
+        send.send(Err(error)).unwrap();
+        for (epoch, attempt, request, current) in [
+            (18, 8, "exact-request", 8),
+            (17, 9, "exact-request", 8),
+            (17, 8, "other-request", 8),
+            (17, 8, "exact-request", 9),
+        ] {
+            assert!(
+                job.take_failure_for(epoch, attempt, &request, current)
+                    .is_none()
+            );
+            assert!(job.pending_result.is_none());
+        }
+        let observed = job.try_take_result().unwrap().unwrap_err();
+        assert_eq!(&*observed.0 as *const u64, original);
+    }
+
+    #[test]
+    fn empty_or_disconnected_worker_never_fabricates_failure() {
+        let (send, mut job) = inert_job();
+        assert!(job.take_failure_for(17, 8, &"exact-request", 8).is_none());
+        assert!(matches!(
+            job.try_take_result(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        drop(send);
+        assert!(job.take_failure_for(17, 8, &"exact-request", 8).is_none());
+        assert!(matches!(
+            job.try_take_result(),
+            Err(mpsc::TryRecvError::Disconnected)
+        ));
+    }
+
+    #[test]
+    fn predecessor_is_pending_only_before_exact_job_has_been_seen() {
+        let request = request();
+        let mut runtime = DurableDeliveryRuntimeV2::default();
+        runtime.next_attempt = 7;
+        assert_eq!(
+            runtime
+                .qualification_import_attempt_v2(17, &request)
+                .unwrap(),
+            (7, 8, false)
+        );
+        let mut seen = false;
+        assert!(
+            !runtime
+                .qualification_import_current_v2(17, 7, 8, &request, &mut seen)
+                .unwrap()
+        );
+        assert!(!seen);
+        let (_send, mut runtime) = runtime_job(request.clone());
+        assert_eq!(
+            runtime
+                .qualification_import_attempt_v2(17, &request)
+                .unwrap(),
+            (7, 8, true)
+        );
+        assert!(
+            !runtime
+                .qualification_import_current_v2(17, 7, 8, &request, &mut seen)
+                .unwrap()
+        );
+        assert!(seen);
+        runtime.clear();
+        assert!(
+            runtime
+                .qualification_import_current_v2(17, 7, 8, &request, &mut seen)
+                .is_err()
+        );
+        // Even an inert attempt rollback cannot turn a seen-then-vanished job
+        // back into the initial IPC-not-yet-started state.
+        runtime.next_attempt = 7;
+        assert!(
+            runtime
+                .qualification_import_current_v2(17, 7, 8, &request, &mut seen)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn runtime_correlation_refuses_replaced_job_before_diagnostic_read() {
+        let request = request();
+        let (send, mut runtime) = runtime_job(request.clone());
+        send.send(Err(BridgeError::Ipc)).ok().unwrap();
+        assert_eq!(
+            runtime.qualification_import_failure_attempt_v2(17, &request),
+            Some(8)
+        );
+        assert_eq!(
+            DurableDeliveryRuntimeV2::default()
+                .qualification_import_failure_attempt_v2(17, &request),
+            None
+        );
+        let mut wrong_request = request.clone();
+        wrong_request.operation_id = "other-import".into();
+        for (epoch, expected, request) in [
+            (18, 8, &request),
+            (17, 9, &request),
+            (17, 8, &wrong_request),
+        ] {
+            assert!(
+                runtime
+                    .qualification_take_import_failure_v2(epoch, expected, request)
+                    .is_none()
+            );
+            let mut seen = true;
+            assert!(
+                runtime
+                    .qualification_import_current_v2(
+                        epoch,
+                        expected - 1,
+                        expected,
+                        request,
+                        &mut seen
+                    )
+                    .is_err()
+            );
+        }
+        assert!(
+            runtime
+                .qualification_import_attempt_v2(18, &request)
+                .is_err()
+        );
+        assert_eq!(
+            runtime.qualification_import_failure_attempt_v2(18, &request),
+            None
+        );
+        assert_eq!(
+            runtime.qualification_import_failure_attempt_v2(17, &wrong_request),
+            None
+        );
+        assert!(
+            runtime
+                .qualification_import_attempt_v2(17, &wrong_request)
+                .is_err()
+        );
+        let failure = runtime
+            .qualification_take_import_failure_v2(17, 8, &request)
+            .unwrap();
+        assert_eq!(failure.attempt(), 8);
+        assert!(failure.stage() == DurableDeliveryStageV2::Import);
+        assert!(matches!(
+            failure.into_import_error(),
+            Some(BridgeError::Ipc)
+        ));
+        assert!(runtime.import.is_none());
+        assert!(runtime.imported.is_none());
+        assert!(
+            runtime
+                .qualification_take_import_failure_v2(17, 8, &request)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn ordinary_terminal_failure_remains_exact_and_correlation_is_invalidated() {
+        let request = request();
+        let mut runtime = DurableDeliveryRuntimeV2::default();
+        runtime.next_attempt = 8;
+        runtime.import_terminal = Some(ImportCorrelationV2 {
+            epoch: 17,
+            attempt: 8,
+            request: request.clone(),
+        });
+        assert_eq!(
+            runtime.qualification_import_failure_attempt_v2(17, &request),
+            Some(8)
+        );
+        runtime.failure = Some(DurableDeliveryFailureV2 {
+            attempt: 8,
+            stage: DurableDeliveryStageV2::Source,
+            error: Error::Locked,
+            import_error: None,
+            transport: None,
+        });
+        assert!(
+            runtime
+                .qualification_take_import_failure_v2(18, 8, &request)
+                .is_none()
+        );
+        assert!(runtime.failure.is_some());
+        let failure = runtime
+            .qualification_take_import_failure_v2(17, 8, &request)
+            .unwrap();
+        assert!(matches!(failure.into_error(), Error::Locked));
+        assert!(
+            runtime
+                .qualification_take_import_failure_v2(17, 8, &request)
+                .is_none()
+        );
+        runtime.clear();
+        assert!(runtime.import_terminal.is_none());
+        runtime.import_terminal = Some(ImportCorrelationV2 {
+            epoch: 17,
+            attempt: 8,
+            request,
+        });
+        assert_eq!(runtime.attempt().unwrap(), 9);
+        assert!(runtime.import_terminal.is_none());
+    }
+
+    #[test]
+    fn ordinary_import_adoption_keeps_original_current_and_epoch_attempt_gates() {
+        // Static production integration evidence only. These inert job tests do
+        // not construct a native source or claim native expiry/timing coverage.
+        let source = include_str!("durable_delivery_admission_v2.rs");
+        let poll = source
+            .split("pub(super) fn poll_durable_delivery_v2(&mut self, epoch: u64)")
+            .nth(1)
+            .unwrap()
+            .split("pub(super) fn durable_delivery_ui_v2")
+            .next()
+            .unwrap();
+        assert!(poll.contains("match job.try_take_result()"));
+        assert!(poll.contains("if job.epoch == epoch"));
+        assert!(poll.contains("&& open.durable_delivery.next_attempt == job.attempt"));
+        assert!(poll.contains("open.check_pairing().and_then(|_| imported.check_current())"));
+        assert!(
+            poll.contains("Ok(Err(error)) if open.durable_delivery.next_attempt == job.attempt")
+        );
+        let drain = source
+            .split("pub(super) fn qualification_take_import_failure_v2(")
+            .nth(1)
+            .unwrap()
+            .split("fn send_response(")
+            .next()
+            .unwrap();
+        assert!(!drain.contains("check_current("));
+        assert!(!drain.contains("check_pairing("));
+        assert!(!drain.contains("self.imported ="));
+        assert!(!drain.contains("thread::spawn"));
+        assert!(!drain.contains("Instant::now"));
+        assert!(!drain.contains("receive_delivery("));
     }
 }

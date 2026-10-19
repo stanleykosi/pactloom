@@ -3153,6 +3153,123 @@ pub(in crate::native_ui) struct DurableDeliveryNativeFixtureV2 {
     owner_setup: Zeroizing<String>,
 }
 pub use super::durable_delivery_admission_v2::{DurableDeliveryFailureV2, DurableDeliveryStageV2};
+
+// Inert correlations held only by the exclusive borrowed wait. None is an
+// authority token, a reusable currentness result or an import selector.
+struct DeliveryImportWaitBindingV2 {
+    entry: String,
+    source_markers: [usize; 4],
+    pairing: TransportIdentityBinding,
+    deadline: Instant,
+    predecessor: u64,
+    attempt: u64,
+    job_seen: bool,
+}
+impl DeliveryImportWaitBindingV2 {
+    fn same_entry(
+        &self,
+        entry: &str,
+        source_markers: [usize; 4],
+        pairing: &TransportIdentityBinding,
+        deadline: Instant,
+    ) -> bool {
+        self.entry == entry
+            && self.source_markers == source_markers
+            && &self.pairing == pairing
+            && self.deadline == deadline
+    }
+}
+fn delivery_import_exact_v2(
+    actual_request: &DurableReviewDeliveryRequestV1,
+    actual_identity: &FixedProposalIdentityV1,
+    request: &DurableReviewDeliveryRequestV1,
+    identity: &FixedProposalIdentityV1,
+) -> bool {
+    actual_request == request && actual_identity == identity
+}
+
+/// One actual v2 import, fixed to the original entry and one expected attempt.
+/// Exclusive borrowing prevents replacing its request, source or identity.
+pub(in crate::native_ui) struct DurableDeliveryImportWaitV2<'a> {
+    fixture: &'a mut DurableDeliveryNativeFixtureV2,
+    request: &'a DurableReviewDeliveryRequestV1,
+    identity: &'a FixedProposalIdentityV1,
+    binding: DeliveryImportWaitBindingV2,
+    state: witness_wait_v1::PollState,
+    failure: Option<DurableDeliveryFailureV2>,
+}
+impl DurableDeliveryImportWaitV2<'_> {
+    pub(in crate::native_ui) fn deadline(&self) -> Instant {
+        self.binding.deadline
+    }
+    fn capture_failure(&mut self) -> bool {
+        if self.failure.is_none() {
+            self.failure = self.fixture.runtime.open.as_mut().and_then(|open| {
+                open.durable_delivery.qualification_take_import_failure_v2(
+                    EPOCH,
+                    self.binding.attempt,
+                    self.request,
+                )
+            });
+        }
+        self.failure.is_some()
+    }
+    fn refuse_terminal(&mut self) {
+        // Consume the same kernel on a diagnostic-only error exit. No source
+        // check, result adoption, IPC event or successful validation runs here.
+        let _: Result<bool> = self.state.poll(
+            &mut (),
+            || Error::ReviewMismatch,
+            |_| Err(Error::ReviewMismatch),
+            |_| unreachable!("a refused wait cannot poll"),
+            |_| unreachable!("a refused wait cannot validate success"),
+        );
+    }
+    pub(in crate::native_ui) fn take_failure(&mut self) -> Option<DurableDeliveryFailureV2> {
+        if self.capture_failure() {
+            self.refuse_terminal();
+        }
+        self.failure.take()
+    }
+    pub(in crate::native_ui) fn poll(&mut self) -> Result<bool> {
+        // The queued owned Err belongs to this exact job. Taking it before
+        // liveness cannot adopt Ok or extend any native/client deadline.
+        if self.capture_failure() {
+            self.refuse_terminal();
+            return Err(Error::ReviewMismatch);
+        }
+        let mut pending = (&mut *self.fixture, &mut self.binding);
+        let request = self.request;
+        let identity = self.identity;
+        let original = self.state.poll(
+            &mut pending,
+            || Error::ReviewMismatch,
+            |(fixture, binding)| {
+                fixture
+                    .check_pending_import_wait_v2(binding, request, identity)
+                    .map(|_| ())
+            },
+            |(fixture, binding)| {
+                fixture.runtime.poll(EPOCH);
+                fixture.check_import_wait_context_v2(binding, request, identity)
+            },
+            |(fixture, binding)| {
+                // Success still requires the actual full encrypted source and
+                // retained journal audit, followed by exact current result data.
+                fixture.check()?;
+                if !fixture.check_pending_import_wait_v2(binding, request, identity)? {
+                    return Err(Error::ReviewMismatch);
+                }
+                Ok(())
+            },
+        );
+        if self.capture_failure() {
+            self.refuse_terminal();
+            return Err(Error::ReviewMismatch);
+        }
+        original
+    }
+}
 impl DurableDeliveryNativeFixtureV2 {
     pub(in crate::native_ui) fn open(
         original: AcknowledgedBornFixture,
@@ -3410,6 +3527,180 @@ impl DurableDeliveryNativeFixtureV2 {
             return Err(Error::ReviewMismatch);
         }
         self.check()
+    }
+    pub(in crate::native_ui) fn drain_import_failure_before_wait(
+        &mut self,
+        request: &DurableReviewDeliveryRequestV1,
+    ) -> Option<DurableDeliveryFailureV2> {
+        let open = self.runtime.open.as_mut()?;
+        let source = open.durable_delivery_entry.as_ref()?;
+        // Existing entry/source identity only. An expired or canceled source
+        // must not hide its already queued owned error behind a live precheck.
+        if open.authority.binding().entry_digest() != self.entry
+            || open.authority.binding() != source.native_binding()
+            || source.original_root() != self.root
+            || !Arc::ptr_eq(source.vault(), &open.vault)
+            || !Arc::ptr_eq(source.journal(), &open.journal)
+        {
+            return None;
+        }
+        // Only an actual exact job or its retained terminal correlation may
+        // supply this attempt. No next-attempt guess or import selection.
+        let attempt = open
+            .durable_delivery
+            .qualification_import_failure_attempt_v2(EPOCH, request)?;
+        open.durable_delivery
+            .qualification_take_import_failure_v2(EPOCH, attempt, request)
+    }
+    pub(in crate::native_ui) fn begin_import_wait<'a>(
+        &'a mut self,
+        request: &'a DurableReviewDeliveryRequestV1,
+        identity: &'a FixedProposalIdentityV1,
+    ) -> Result<DurableDeliveryImportWaitV2<'a>> {
+        let (state, mut binding) = witness_wait_v1::begin(self, |fixture| {
+            // The actual encrypted source and complete retained journal are
+            // checked once at entry, not memoized as later import authority.
+            fixture.check()?;
+            request.validate().map_err(|_| Error::ReviewMismatch)?;
+            let open = fixture.runtime.open.as_ref().ok_or(Error::Locked)?;
+            let source = open
+                .durable_delivery_entry
+                .as_ref()
+                .ok_or(Error::Unavailable)?;
+            let pairing = open.pairing.as_ref().ok_or(Error::Authentication)?;
+            let (predecessor, attempt, job_seen) = open
+                .durable_delivery
+                .qualification_import_attempt_v2(EPOCH, request)?;
+            Ok::<_, Error>(DeliveryImportWaitBindingV2 {
+                entry: fixture.entry.clone(),
+                source_markers: [
+                    Arc::as_ptr(source) as usize,
+                    Arc::as_ptr(source.native_owner()) as usize,
+                    Arc::as_ptr(&open.vault) as usize,
+                    Arc::as_ptr(&open.journal) as usize,
+                ],
+                pairing: pairing.binding().clone(),
+                deadline: open.authority.binding().bounded_deadline()?,
+                predecessor,
+                attempt,
+                job_seen,
+            })
+        })?;
+        self.check_pending_import_wait_v2(&mut binding, request, identity)?;
+        Ok(DurableDeliveryImportWaitV2 {
+            fixture: self,
+            request,
+            identity,
+            binding,
+            state,
+            failure: None,
+        })
+    }
+    // Pending-only liveness. The entry/final checks and unchanged production
+    // receive/adoption paths retain their full original-source journal audits.
+    fn check_pending_import_wait_v2(
+        &self,
+        binding: &mut DeliveryImportWaitBindingV2,
+        request: &DurableReviewDeliveryRequestV1,
+        identity: &FixedProposalIdentityV1,
+    ) -> Result<bool> {
+        let open = self.runtime.open.as_ref().ok_or(Error::Locked)?;
+        let source = open
+            .durable_delivery_entry
+            .as_ref()
+            .ok_or(Error::Unavailable)?;
+        source.native_owner().check_current()?;
+        open.authority.check_current()?;
+        open.pairing
+            .as_ref()
+            .ok_or(Error::Authentication)?
+            .check_current()?;
+        self.check_import_wait_context_v2(binding, request, identity)
+    }
+    fn check_import_wait_context_v2(
+        &self,
+        binding: &mut DeliveryImportWaitBindingV2,
+        request: &DurableReviewDeliveryRequestV1,
+        identity: &FixedProposalIdentityV1,
+    ) -> Result<bool> {
+        let open = self.runtime.open.as_ref().ok_or(Error::Locked)?;
+        let source = open
+            .durable_delivery_entry
+            .as_ref()
+            .ok_or(Error::Unavailable)?;
+        let pairing = open.pairing.as_ref().ok_or(Error::Authentication)?;
+        let markers = [
+            Arc::as_ptr(source) as usize,
+            Arc::as_ptr(source.native_owner()) as usize,
+            Arc::as_ptr(&open.vault) as usize,
+            Arc::as_ptr(&open.journal) as usize,
+        ];
+        if !binding.same_entry(
+            &self.entry,
+            markers,
+            pairing.binding(),
+            open.authority.binding().bounded_deadline()?,
+        ) || source.original_root() != self.root
+            || open.vault.account_id()? != self.scope.account_id
+            || source.account().account_id()? != self.scope.account_id
+            || !Arc::ptr_eq(source.vault(), &open.vault)
+            || !Arc::ptr_eq(source.journal(), &open.journal)
+            || open.authority.binding().entry_digest() != self.entry
+            || open.authority.binding() != source.native_binding()
+            || pairing.peer.scope != self.scope
+            || pairing.native_origin() != &source.native_binding()
+            || request.proposal_binding != identity.proposal_binding
+            || identity.proposal_digest != self.proposal.proposal_digest()
+            || identity.manifest_digest != self.proposal.manifest_digest()
+            || open
+                .enrollment
+                .as_ref()
+                .is_none_or(|e| e.reference() != request.enrollment_ref)
+            || open
+                .manifest
+                .as_ref()
+                .is_none_or(|m| m.reference() != request.accepted_manifest_ref)
+            || open.supports_ordinary_routes()
+            || open.durable_born_entry.is_some()
+            || open.writer_receipt.is_some()
+            || open.writer_reconciled
+            || open.writer_retry.is_some()
+            || open.activation_retry.is_some()
+            || open.wallet.is_some()
+            || open.wallet_job.is_some()
+            || open.witness.is_some()
+            || open.witness_job.is_some()
+            || open.durable_review.is_some()
+            || open.durable_import_job.is_some()
+            || open.durable_wallet_job.is_some()
+            || !open.revocations.is_empty()
+            || self.runtime.pending.is_some()
+            || self.runtime.signing_job.is_some()
+        {
+            return Err(Error::ReviewMismatch);
+        }
+        let done = open.durable_delivery.qualification_import_current_v2(
+            EPOCH,
+            binding.predecessor,
+            binding.attempt,
+            request,
+            &mut binding.job_seen,
+        )?;
+        match &open.durable_delivery.imported {
+            Some(imported)
+                if done
+                    && delivery_import_exact_v2(
+                        &imported.request,
+                        imported.fixed.verified().identity(),
+                        request,
+                        identity,
+                    ) =>
+            {
+                Ok(true)
+            }
+            None if !done => Ok(false),
+            _ => Err(Error::ReviewMismatch),
+        }
     }
     pub(in crate::native_ui) fn poll_exact_redisclosure(
         &mut self,
@@ -3765,5 +4056,393 @@ impl DurableNativeEntryFailureV1 {
             stage: DurableNativeEntryStageV1::FixturePostActivation,
             error: Error::ReviewMismatch,
         }
+    }
+}
+
+#[cfg(test)]
+mod delivery_import_wait_v2_tests {
+    use super::*;
+
+    // Inert counters and non-Clone owned errors exercise the exact production
+    // wait kernel. They never stand in for a native/source authority fixture.
+    #[derive(Debug)]
+    struct Refusal(Box<u8>);
+    #[derive(Default)]
+    struct Counts {
+        entry: usize,
+        live: [usize; 4],
+        polls: usize,
+        exit: usize,
+    }
+
+    #[test]
+    fn v2_pending_wait_counts_one_full_entry_and_exit_for_many_pending_polls() {
+        let mut counts = Counts::default();
+        let (mut wait, ()) = witness_wait_v1::begin(&mut counts, |counts| {
+            counts.entry += 1;
+            Ok::<_, Refusal>(())
+        })
+        .unwrap();
+        for poll in 0..129 {
+            let done = wait
+                .poll(
+                    &mut counts,
+                    || panic!("not terminal yet"),
+                    |counts| {
+                        for gate in &mut counts.live {
+                            *gate += 1;
+                        }
+                        Ok::<_, Refusal>(())
+                    },
+                    |counts| {
+                        counts.polls += 1;
+                        Ok(poll == 128)
+                    },
+                    |counts| {
+                        counts.exit += 1;
+                        Ok(())
+                    },
+                )
+                .unwrap();
+            assert_eq!(done, poll == 128);
+            assert_eq!(counts.entry, 1);
+            assert_eq!(counts.exit, usize::from(done));
+        }
+        assert_eq!(counts.live, [129; 4]);
+        assert_eq!(counts.polls, 129);
+        assert_eq!(counts.entry + counts.exit, 2);
+        assert!(
+            wait.poll(
+                &mut counts,
+                || Refusal(Box::new(1)),
+                |_| panic!("terminal wait cannot check again"),
+                |_| panic!("terminal wait cannot poll again"),
+                |_| panic!("terminal wait cannot repeat success"),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn v2_pending_wait_owned_entry_refusal_cannot_construct_wait() {
+        let mut counts = Counts::default();
+        let refusal = Refusal(Box::new(2));
+        let original = &*refusal.0 as *const u8;
+        let result = witness_wait_v1::begin(&mut counts, |counts| {
+            counts.entry += 1;
+            Err::<(), _>(refusal)
+        });
+        let Err(returned) = result else {
+            panic!("entry must refuse")
+        };
+        assert!(std::ptr::eq(&*returned.0, original));
+        assert_eq!(counts.entry, 1);
+        assert_eq!(counts.live, [0; 4]);
+        assert_eq!(counts.polls, 0);
+        assert_eq!(counts.exit, 0);
+    }
+
+    #[test]
+    fn v2_pending_wait_each_live_refusal_shortcircuits_and_is_terminal() {
+        for refused_gate in 0..4 {
+            let mut counts = Counts::default();
+            let (mut wait, ()) = witness_wait_v1::begin(&mut counts, |counts| {
+                counts.entry += 1;
+                Ok::<_, Refusal>(())
+            })
+            .unwrap();
+            let refusal = Refusal(Box::new(3));
+            let original = &*refusal.0 as *const u8;
+            let result = wait.poll(
+                &mut counts,
+                || panic!("first refusal"),
+                |counts| {
+                    for (index, gate) in counts.live.iter_mut().enumerate() {
+                        *gate += 1;
+                        if index == refused_gate {
+                            return Err(refusal);
+                        }
+                    }
+                    unreachable!("one gate always refuses")
+                },
+                |_| panic!("liveness refusal must prevent polling"),
+                |_| panic!("liveness refusal must prevent final audit"),
+            );
+            let Err(returned) = result else {
+                panic!("live refusal must return")
+            };
+            assert!(std::ptr::eq(&*returned.0, original));
+            for (index, count) in counts.live.iter().enumerate() {
+                assert_eq!(*count, usize::from(index <= refused_gate));
+            }
+            assert_eq!(counts.polls, 0);
+            assert_eq!(counts.exit, 0);
+            assert!(
+                wait.poll(
+                    &mut counts,
+                    || Refusal(Box::new(4)),
+                    |_| panic!("refused wait cannot become current again"),
+                    |_| panic!("refused wait cannot start another import"),
+                    |_| panic!("refused wait cannot succeed"),
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn v2_pending_wait_final_mutation_returns_owned_error_and_never_recovers() {
+        let mut journal_current = true;
+        let (mut wait, ()) = witness_wait_v1::begin(&mut journal_current, |current| {
+            assert!(*current);
+            Ok::<_, Refusal>(())
+        })
+        .unwrap();
+        assert!(
+            !wait
+                .poll(
+                    &mut journal_current,
+                    || panic!("not repeated"),
+                    |_| Ok::<_, Refusal>(()),
+                    |_| Ok(false),
+                    |_| panic!("pending import must not run final audit"),
+                )
+                .unwrap()
+        );
+        // This models ordering only. The unchanged encrypted snapshot tests
+        // separately exercise real malformed retained rows and original intent.
+        journal_current = false;
+        let refusal = Refusal(Box::new(5));
+        let original = &*refusal.0 as *const u8;
+        let result = wait.poll(
+            &mut journal_current,
+            || panic!("first terminal result"),
+            |_| Ok(()),
+            |_| Ok(true),
+            |current| {
+                assert!(!*current);
+                Err(refusal)
+            },
+        );
+        let Err(returned) = result else {
+            panic!("final audit must refuse")
+        };
+        assert!(std::ptr::eq(&*returned.0, original));
+        journal_current = true;
+        assert!(
+            wait.poll(
+                &mut journal_current,
+                || Refusal(Box::new(6)),
+                |_| panic!("restoration cannot revive terminal wait"),
+                |_| panic!("restoration cannot retry completed import"),
+                |_| panic!("restoration cannot return cached success"),
+            )
+            .is_err()
+        );
+    }
+
+    fn inert_request() -> DurableReviewDeliveryRequestV1 {
+        DurableReviewDeliveryRequestV1 {
+            operation_id: "inert-import".into(),
+            enrollment_ref: "11".repeat(32),
+            accepted_manifest_ref: "22".repeat(32),
+            own_disclosure: DurableConstructionHistoryRequestV1 {
+                operation_id: "inert-history".into(),
+                expected_request_digest: "33".repeat(32),
+            },
+            current_disclosure: None,
+            proposal_binding: "44".repeat(32),
+        }
+    }
+    fn inert_identity() -> FixedProposalIdentityV1 {
+        FixedProposalIdentityV1 {
+            schema_version: 1,
+            network_profile_id: "inert-network".into(),
+            agreement_id: "inert-agreement".into(),
+            obligation_id: "inert-obligation".into(),
+            proposal_id: "inert-proposal".into(),
+            revision: 1,
+            expiry_height: 1,
+            proposal_digest: "55".repeat(32),
+            manifest_digest: "66".repeat(32),
+            unsigned_artifact_digest: "77".repeat(32),
+            proved_artifact_digest: "88".repeat(32),
+            effects_commitment: "99".repeat(32),
+            policy_digest: "aa".repeat(32),
+            review_binding: "bb".repeat(32),
+            action_mapping_digest: "cc".repeat(32),
+            anchor: "dd".repeat(32),
+            proposal_binding: "44".repeat(32),
+        }
+    }
+
+    #[test]
+    fn v2_pending_wait_exact_result_rejects_every_request_and_identity_dimension() {
+        let request = inert_request();
+        let identity = inert_identity();
+        assert!(delivery_import_exact_v2(
+            &request, &identity, &request, &identity
+        ));
+        for mode in 0..7 {
+            let mut changed = request.clone();
+            match mode {
+                0 => changed.operation_id.push('x'),
+                1 => changed.enrollment_ref.push('x'),
+                2 => changed.accepted_manifest_ref.push('x'),
+                3 => changed.own_disclosure.operation_id.push('x'),
+                4 => changed.own_disclosure.expected_request_digest.push('x'),
+                5 => changed.current_disclosure = Some(changed.own_disclosure.clone()),
+                _ => changed.proposal_binding.push('x'),
+            }
+            assert!(!delivery_import_exact_v2(
+                &changed, &identity, &request, &identity
+            ));
+        }
+        let encoded = serde_json::to_value(&identity).unwrap();
+        for field in encoded.as_object().unwrap().keys() {
+            let mut changed = encoded.clone();
+            let value = changed.get_mut(field).unwrap();
+            *value = if let Some(text) = value.as_str() {
+                serde_json::Value::String(format!("{text}x"))
+            } else {
+                serde_json::Value::from(value.as_u64().unwrap() + 1)
+            };
+            let changed: FixedProposalIdentityV1 = serde_json::from_value(changed).unwrap();
+            assert!(
+                !delivery_import_exact_v2(&request, &changed, &request, &identity),
+                "{field}"
+            );
+        }
+    }
+
+    #[test]
+    fn v2_pending_wait_entry_source_pair_and_original_deadline_cannot_change() {
+        let pairing = TransportIdentityBinding::LocalProcess {
+            transport_identity_id: "inert-grant".into(),
+            channel_key_digest: "11".repeat(32),
+            channel_binding_digest: "22".repeat(32),
+            uid: 0,
+            pid: 0,
+            process_instance: "inert-process".into(),
+            signer_generation: 1,
+            account_id: "inert-account".into(),
+            agreement_id: "inert-agreement".into(),
+            participant_id: "inert-participant".into(),
+            manifest_digest: "33".repeat(32),
+        };
+        let deadline = Instant::now();
+        let binding = DeliveryImportWaitBindingV2 {
+            entry: "inert-entry".into(),
+            source_markers: [1, 2, 3, 4],
+            pairing: pairing.clone(),
+            deadline,
+            predecessor: 0,
+            attempt: 1,
+            job_seen: false,
+        };
+        assert!(binding.same_entry("inert-entry", [1, 2, 3, 4], &pairing, deadline));
+        for mode in 0..7 {
+            let mut entry = "inert-entry";
+            let mut markers = [1, 2, 3, 4];
+            let mut pair = pairing.clone();
+            let mut current_deadline = deadline;
+            match mode {
+                0 => entry = "another-entry",
+                1..=4 => markers[mode - 1] += 1,
+                5 => {
+                    let TransportIdentityBinding::LocalProcess {
+                        signer_generation, ..
+                    } = &mut pair
+                    else {
+                        unreachable!()
+                    };
+                    *signer_generation += 1;
+                }
+                _ => current_deadline += Duration::from_nanos(1),
+            }
+            assert!(!binding.same_entry(entry, markers, &pair, current_deadline));
+        }
+    }
+
+    #[test]
+    fn v2_pending_wait_source_wiring_keeps_real_audits_liveness_and_adoption() {
+        let source = include_str!("durable_proposal_v1.rs");
+        let production = source
+            .split("#[cfg(test)]\nmod delivery_import_wait_v2_tests")
+            .next()
+            .unwrap();
+        let wait = production
+            .split("impl DurableDeliveryImportWaitV2<'_> {")
+            .nth(1)
+            .unwrap()
+            .split("impl DurableDeliveryNativeFixtureV2 {")
+            .next()
+            .unwrap();
+        assert!(wait.contains("self.state.poll("));
+        assert!(wait.contains("fixture.runtime.poll(EPOCH)"));
+        assert!(wait.contains("fixture.check()?;"));
+        assert!(!wait.contains("poll_data_only("));
+        assert!(!wait.contains("poll_exact_import("));
+        let live = production
+            .split("fn check_pending_import_wait_v2(")
+            .nth(1)
+            .unwrap()
+            .split("fn check_import_wait_context_v2(")
+            .next()
+            .unwrap();
+        assert!(live.contains("source.native_owner().check_current()?"));
+        assert!(live.contains("open.authority.check_current()?"));
+        assert!(live.contains(".check_current()?"));
+        assert!(!live.contains("source.check_current()"));
+        let context = production
+            .split("fn check_import_wait_context_v2(")
+            .nth(1)
+            .unwrap()
+            .split("pub(in crate::native_ui) fn poll_exact_redisclosure(")
+            .next()
+            .unwrap();
+        for required in [
+            "open.vault.account_id()?",
+            "source.account().account_id()?",
+            "Arc::ptr_eq(source.vault(), &open.vault)",
+            "Arc::ptr_eq(source.journal(), &open.journal)",
+            "pairing.native_origin()",
+            "pairing.peer.scope",
+            "bounded_deadline()?",
+            "qualification_import_current_v2(",
+            "binding.predecessor",
+            "binding.attempt",
+            "&mut binding.job_seen",
+            "delivery_import_exact_v2(",
+            "open.writer_receipt.is_some()",
+            "self.runtime.signing_job.is_some()",
+        ] {
+            assert!(context.contains(required), "{required}");
+        }
+        let fixture = production
+            .split("impl DurableDeliveryNativeFixtureV2 {")
+            .nth(1)
+            .unwrap();
+        let full = fixture
+            .split("fn check(&self)")
+            .nth(1)
+            .unwrap()
+            .split("pub(in crate::native_ui) fn endpoint")
+            .next()
+            .unwrap();
+        assert!(full.contains("source.check_current()?"));
+        let begin = production
+            .split("pub(in crate::native_ui) fn begin_import_wait<'a>(")
+            .nth(1)
+            .unwrap()
+            .split("fn check_pending_import_wait_v2(")
+            .next()
+            .unwrap();
+        assert!(begin.contains("witness_wait_v1::begin(self"));
+        assert!(begin.contains("fixture.check()?"));
+        let runtime = include_str!("../runtime/durable_delivery_admission_v2.rs");
+        assert!(runtime.contains("open.check_pairing().and_then(|_| imported.check_current())"));
+        assert!(runtime.contains("source.check_current()"));
+        assert!(runtime.contains("check_current_under_preconstruction_lease"));
     }
 }

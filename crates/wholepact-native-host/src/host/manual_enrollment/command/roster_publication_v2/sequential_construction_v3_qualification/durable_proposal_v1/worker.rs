@@ -30,12 +30,12 @@ use wholepact_signer::authority_bridge::{
     preconstruction_ipc::PreconstructionRequest,
 };
 use wholepact_signer::native_ui::synthetic_born_joined_qualification::{
-    DurableAdmissionCallFailureV1, DurableAdmissionCallbackStageV1,
+    DurableAcquireReplyLossV1, DurableAdmissionCallFailureV1, DurableAdmissionCallbackStageV1,
     DurableAdmissionDispatchFailureV1, DurableAdmissionDispatchStageV1,
     DurableAdmissionHistoryFailureV1, DurableAdmissionPreparationFailureV1,
-    DurableAdmissionPreparationStageV1, DurableNativeEntryFailureV1, DurableNativeEntryStageV1,
-    DurableNativeRecordsV1, DurableAcquireReplyLossV1, DurableFlowFailureV1, DurableFlowResultV1,
-    EphemeralAcknowledgedBornV1, EphemeralDurableNativeV1, EphemeralDurableDeliveryNativeV2,
+    DurableAdmissionPreparationStageV1, DurableFlowFailureV1, DurableFlowResultV1,
+    DurableNativeEntryFailureV1, DurableNativeEntryStageV1, DurableNativeRecordsV1,
+    EphemeralAcknowledgedBornV1, EphemeralDurableDeliveryNativeV2, EphemeralDurableNativeV1,
     EphemeralExportedBirthV1, EphemeralFirstAnchorIntentV1, EphemeralFirstAnchorPublicationV1,
     EphemeralOriginalRosterIntentV1, EphemeralPendingBornV1, EphemeralRosterPublicationV1,
     OriginalBirthSetupV1,
@@ -762,6 +762,31 @@ fn poll_until(
     }
 }
 
+// Data-only terminal failure observation precedes the same pending-stop checks.
+// A queued success is not returned by take_failure and still traverses the
+// borrowed wait's original live and full successful-exit gates.
+fn delivery_import_poll_step<S, E>(
+    state: &mut S,
+    mut take_failure: impl FnMut(&mut S) -> Option<E>,
+    live: impl FnOnce() -> std::result::Result<(), E>,
+    poll: impl FnOnce(&mut S) -> std::result::Result<bool, E>,
+) -> std::result::Result<bool, E> {
+    if let Some(error) = take_failure(state) {
+        return Err(error);
+    }
+    live()?;
+    let result = poll(state);
+    if let Some(error) = take_failure(state) {
+        return Err(error);
+    }
+    result
+}
+
+enum DeliveryImportPollError {
+    Stop(&'static str),
+    Signer(wholepact_signer::Error),
+}
+
 fn command_index(command: &JoinedSignerCommandV1) -> usize {
     use JoinedSignerCommandV1 as C;
     match command {
@@ -981,7 +1006,10 @@ fn execute(
                 cancelled,
                 || {
                     entry.poll_exact_redisclosure(&request).map_err(|error| {
-                        diagnostic::emit_delivery_observation(B::DeliveryRedisclosure, diagnostic::signer_error(&error));
+                        diagnostic::emit_delivery_observation(
+                            B::DeliveryRedisclosure,
+                            diagnostic::signer_error(&error),
+                        );
                         error
                     })
                 },
@@ -1008,20 +1036,54 @@ fn execute(
             (State::Delivery(entry), R::Done { index })
         }
         (C::PollDeliveryImport(_, request, identity), State::Delivery(mut entry)) => {
-            poll_until(
-                entry
-                    .deadline()
-                    .map_err(|error| signer_error(error, "delivery import deadline"))?,
-                cancelled,
-                || {
-                    let result = entry.poll_exact_import(&request, &identity);
-                    if let Some(failure) = entry.take_failure() {
-                        return Err(delivery_failure_error(failure));
+            if let Some(failure) = entry.drain_import_failure_before_wait(&request) {
+                return Err(signer_error(
+                    delivery_failure_error(failure),
+                    "exact delivery native source import",
+                ));
+            }
+            {
+                let mut wait = entry
+                    .begin_import_wait(&request, &identity)
+                    .map_err(|error| signer_error(error, "delivery import wait entry"))?;
+                let deadline = wait.deadline();
+                loop {
+                    let complete = delivery_import_poll_step(
+                        &mut wait,
+                        |wait| {
+                            wait.take_failure().map(|failure| {
+                                DeliveryImportPollError::Signer(delivery_failure_error(failure))
+                            })
+                        },
+                        || {
+                            if cancelled.load(Ordering::Acquire) {
+                                diagnostic::emit(B::SignerPollCancelled, Outcome::Begin);
+                                return Err(DeliveryImportPollError::Stop(
+                                    "signer worker cancelled while polling",
+                                ));
+                            }
+                            if Instant::now() >= deadline {
+                                diagnostic::emit(B::SignerPollDeadline, Outcome::Begin);
+                                return Err(DeliveryImportPollError::Stop(
+                                    "actual signer entry deadline elapsed",
+                                ));
+                            }
+                            Ok(())
+                        },
+                        |wait| wait.poll().map_err(DeliveryImportPollError::Signer),
+                    )
+                    .map_err(|error| match error {
+                        DeliveryImportPollError::Stop(message) => message,
+                        DeliveryImportPollError::Signer(error) => {
+                            signer_error(error, "exact delivery native source import")
+                        }
+                    })?;
+                    if complete {
+                        break;
                     }
-                    result
-                },
-                "exact delivery native source import",
-            )?;
+                    thread::sleep(Duration::from_millis(2));
+                }
+            }
             (State::Delivery(entry), R::Done { index })
         }
         (C::PollDeliveryAdmission(_, request), State::Delivery(mut entry)) => {
@@ -1748,5 +1810,131 @@ mod admission_diagnostic_tests {
             assert!(checked_authority_boundary(stage, false).is_none());
             assert!(checked_authority_boundary(stage, true).is_none());
         }
+    }
+}
+
+#[cfg(test)]
+mod delivery_import_wait_tests {
+    use super::delivery_import_poll_step;
+    use std::cell::RefCell;
+
+    #[derive(Debug)]
+    struct OwnedFailure(Box<u8>);
+
+    #[test]
+    fn delivery_import_worker_uses_exact_wait_without_repeated_full_audits() {
+        // Source integration only, not native entry issuance or timing proof.
+        let source = include_str!("worker.rs")
+            .split("#[cfg(test)]\nmod delivery_import_wait_tests")
+            .next()
+            .unwrap();
+        let start = source
+            .find("(C::PollDeliveryImport(_, request, identity)")
+            .unwrap();
+        let end = source[start..]
+            .find("(C::PollDeliveryAdmission(_, request)")
+            .unwrap()
+            + start;
+        let body = &source[start..end];
+        let drain = body
+            .find("drain_import_failure_before_wait(&request)")
+            .unwrap();
+        let begin = body
+            .find(".begin_import_wait(&request, &identity)")
+            .unwrap();
+        let live = body.find("cancelled.load(Ordering::Acquire)").unwrap();
+        let poll = body
+            .find("wait.poll().map_err(DeliveryImportPollError::Signer)")
+            .unwrap();
+        assert!(drain < begin && begin < live && live < poll);
+        assert!(body.contains("Instant::now() >= deadline"));
+        assert!(body.contains("thread::sleep(Duration::from_millis(2))"));
+        assert!(!body.contains("poll_data_only"));
+        assert!(!body.contains("poll_exact_import"));
+        assert!(!body.contains(".take_failure()") || body.contains("wait.take_failure()"));
+    }
+
+    #[test]
+    fn completed_import_error_precedes_cancellation_without_polling_or_adoption() {
+        let original = OwnedFailure(Box::new(17));
+        let address = &*original.0 as *const u8;
+        let mut state = Some(original);
+        let result = delivery_import_poll_step(
+            &mut state,
+            |state| state.take(),
+            || panic!("completed error must be retained before stop/currentness checks"),
+            |_| panic!("diagnostic drain must never poll or adopt success"),
+        );
+        assert_eq!(&*result.unwrap_err().0 as *const u8, address);
+        assert!(state.is_none());
+    }
+
+    #[test]
+    fn pending_import_stop_refusal_never_calls_poll_or_returns_success() {
+        for reason in [23, 29] {
+            let original = OwnedFailure(Box::new(reason));
+            let address = &*original.0 as *const u8;
+            let mut probes = 0;
+            let result = delivery_import_poll_step(
+                &mut probes,
+                |probes| {
+                    *probes += 1;
+                    None
+                },
+                || Err(original),
+                |_| panic!("cancelled or expired pending wait cannot poll success"),
+            );
+            assert_eq!(&*result.unwrap_err().0 as *const u8, address);
+            assert_eq!(probes, 1);
+        }
+    }
+
+    #[test]
+    fn pending_import_step_preserves_pending_success_and_actual_terminal_errors() {
+        for completed in [false, true] {
+            let events = RefCell::new(Vec::new());
+            let mut state = ();
+            let result: Result<bool, OwnedFailure> = delivery_import_poll_step(
+                &mut state,
+                |_| {
+                    events.borrow_mut().push("drain");
+                    None
+                },
+                || {
+                    events.borrow_mut().push("live");
+                    Ok(())
+                },
+                |_| {
+                    events.borrow_mut().push("poll");
+                    Ok(completed)
+                },
+            );
+            assert_eq!(result.unwrap(), completed);
+            assert_eq!(*events.borrow(), ["drain", "live", "poll", "drain"]);
+        }
+        let original = OwnedFailure(Box::new(31));
+        let address = &*original.0 as *const u8;
+        let mut no_failure = ();
+        let returned =
+            delivery_import_poll_step(&mut no_failure, |_| None, || Ok(()), |_| Err(original))
+                .unwrap_err();
+        assert_eq!(&*returned.0 as *const u8, address);
+
+        // The same actual worker Err observed by the poll is kept, rather than
+        // replacing it with a later wrapper error or inventing a success.
+        let original = OwnedFailure(Box::new(37));
+        let address = &*original.0 as *const u8;
+        let mut state = (false, Some(original));
+        let returned = delivery_import_poll_step(
+            &mut state,
+            |state| if state.0 { state.1.take() } else { None },
+            || Ok(()),
+            |state| {
+                state.0 = true;
+                Err(OwnedFailure(Box::new(41)))
+            },
+        )
+        .unwrap_err();
+        assert_eq!(&*returned.0 as *const u8, address);
     }
 }
