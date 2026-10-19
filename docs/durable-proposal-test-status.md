@@ -1,8 +1,18 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-19, 13:52 UTC.
+Updated: 2026-10-19, 14:43 UTC.
 
 **The bounded synthetic native two-owner fixed-signing fixture passed. Product qualification remains incomplete: no public testnet settlement, OS-process restart recovery, attended GUI reliability, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
+
+## CI31: actual chain timeout with measured synchronous source-check cost
+
+[Run 39264108721](https://github.com/stanleykosi/pactloom/actions/runs/39264108721), qualifier `4ecfa56f4b800f7ac9c15c5db7c0a55df03e3643`, passed early Python153, build (12m25s), Host97, encrypted bootstrap and real TCP overlap. At14:12:42 UTC Observe failed with Chain/Timeout at WalletRosterAcquire, DURABLE_CONSTRUCTION_UNAVAILABLE. Prepare elapsed38,460ms; 35 callbacks consumed33,077,197 microseconds total (maximum969,176). Persistence and worker evidence were null. Reader never started; producer/runtime cleanup verified. This failure was not native120-second expiry.
+
+The synthetic provider and clients share the current-thread runtime. Source tracing gives one issuance callback plus17 synchronous callbacks per wallet before the initial RPC can progress, matching the measured35. The second preamble can starve an already-pending10-second RPC; this is a source/count inference about the failed RPC, not a separately traced provider-latency measurement. No network or native timeout is widened.
+
+The bounded two-Host-file change reduces duplicate work inside one synchronous stage callback: five complete original-source audits become two, and two current roster target/member reads become one. Both original ceilings and static scope joins precede new roster reads; actual retained target and original owner are revalidated on exit, followed by both ceilings and the final native check. Legacy individual-scope validation remains unchanged. No cross-call or cross-wait authority/currentness cache is introduced.
+
+Independent source/hash review cleared the two paths. The first component fixture correctly failed recovery validation because its synthetic predecessor type was invalid; a reviewed test-only correction supplied the maintained AdditionalPublicationV3 shape without changing production checks. Rebuild passed (2m22s). All12 exact focused/compatibility tests passed. Three real encrypted-source component samples yielded legacy min/median/max542328/574615/587672us versus batch226219/246195/247403us, approximately57.2% lower median. Actual valid-but-changed source, binding and expiry refusals remained enforced. These measurements exclude full Host file/capsule/native/provider/wallet/proof cost and do not establish native fit. Non-synthetic compatibility and isolated native qualification remain pending at publication.
 
 ## CI30: real overlap passed; scanner error exposed an omitted Observe diagnostic route
 

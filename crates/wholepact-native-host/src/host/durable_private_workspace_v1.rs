@@ -2250,40 +2250,44 @@ impl<'host> PrivateWorkspaceOwnerV1<'host> {
         &self,
         review: &wholepact_engine::PrivateFixedStageReviewV3,
     ) -> Result<()> {
-        self.check_current_without_proof_lock_v2()?;
-        if review.stage() == wholepact_engine::PrivateFixedStageV3::ReadFixed {
-            reader_result!(
-                HostWorkspaceSessionCheck,
-                observe_private_fixed_host_v1,
-                self.host.require_private_workspace_read_session_v1()
-            )?;
-        } else {
-            reader_result!(
-                HostWorkspaceSessionCheck,
-                observe_private_fixed_host_v1,
-                self.host.require_manual_session()
-            )?;
-        }
-        let scope = review.workspace_scope();
-        let a = &self.files.original.pending.association;
-        if scope.source_digest() != a.source_digest
-            || scope.principal_id() != a.principal_id
-            || scope.agreement_id() != a.agreement_id
-            || scope.obligation_id() != a.obligation_id
-            || scope.reviewer_account_ids() != a.reviewer_account_ids
-            || scope.protected_destination() != a.database_path
-            || scope.retention_policy() != a.retention_policy
-            || review.marker_digest() != self.files.original.committed.seed.marker_digest
-            || review.native_association_digest() != self.native_association_digest()
-            || review.metadata_origin() != hex::encode(self.metadata_origin())
-            || review.proof_origin() != hex::encode(self.proof_origin())
-            || (review.stage() == wholepact_engine::PrivateFixedStageV3::Prepare)
-                != review.checkpoint_scope().is_none()
-        {
-            return Err(Error::Authentication);
-        }
         super::financial::private_durable_fixed_v2::check_stage_material_review_v3(
-            self.host, self, review,
+            self.host,
+            self,
+            review,
+            || {
+                if review.stage() == wholepact_engine::PrivateFixedStageV3::ReadFixed {
+                    reader_result!(
+                        HostWorkspaceSessionCheck,
+                        observe_private_fixed_host_v1,
+                        self.host.require_private_workspace_read_session_v1()
+                    )?;
+                } else {
+                    reader_result!(
+                        HostWorkspaceSessionCheck,
+                        observe_private_fixed_host_v1,
+                        self.host.require_manual_session()
+                    )?;
+                }
+                let scope = review.workspace_scope();
+                let a = &self.files.original.pending.association;
+                if scope.source_digest() != a.source_digest
+                    || scope.principal_id() != a.principal_id
+                    || scope.agreement_id() != a.agreement_id
+                    || scope.obligation_id() != a.obligation_id
+                    || scope.reviewer_account_ids() != a.reviewer_account_ids
+                    || scope.protected_destination() != a.database_path
+                    || scope.retention_policy() != a.retention_policy
+                    || review.marker_digest() != self.files.original.committed.seed.marker_digest
+                    || review.native_association_digest() != self.native_association_digest()
+                    || review.metadata_origin() != hex::encode(self.metadata_origin())
+                    || review.proof_origin() != hex::encode(self.proof_origin())
+                    || (review.stage() == wholepact_engine::PrivateFixedStageV3::Prepare)
+                        != review.checkpoint_scope().is_none()
+                {
+                    return Err(Error::Authentication);
+                }
+                Ok(())
+            },
         )
     }
     pub(in crate::host) fn approve_fixed_stage_v3<'a>(
