@@ -384,6 +384,7 @@ fn original_attempt_and_result_ownership_are_consuming_not_cloneable() {
     impl<T: ?Sized> AmbiguousIfClone<()> for T {}
     impl<T: ?Sized + Clone> AmbiguousIfClone<u8> for T {}
     let _ = <OriginalProofAttemptV2<'static, 'static> as AmbiguousIfClone<_>>::marker;
+    let _ = <PreparedOriginalCheckpointV2<'static, 'static> as AmbiguousIfClone<_>>::marker;
     let _ = <OriginalCheckpointOutcomeV2<'static, 'static> as AmbiguousIfClone<_>>::marker;
     fn consume(
         result: crate::Result<OriginalCheckpointOutcomeV2<'static, 'static>>,
@@ -772,6 +773,589 @@ mod actual_cryptography {
             actual
         );
     }
+    /// Shared review and actual proof-journal components only. Inert metadata
+    /// never fabricates an authenticated native source, grant or coordinator.
+    mod stage_reviews_v3 {
+        use super::*;
+        use std::cell::Cell;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use wholepact_wallet::wallet::protected_sync::durable_construction_v1::{
+            ConstructionRecipientV1, ConstructionReviewerV1, PURPOSE,
+        };
+        fn checked<T, E>(result: std::result::Result<T, E>) -> T {
+            match result {
+                Ok(v) => v,
+                Err(_) => panic!("stage review component failed"),
+            }
+        }
+        fn materials(c: &CandidateView) -> Vec<PrivateFixedMaterialReviewV3> {
+            let now = checked(stage_now_v3());
+            c.proposal
+                .manifest
+                .participants
+                .iter()
+                .enumerate()
+                .map(|(i, p)| PrivateFixedMaterialReviewV3 {
+                    material_digest: format!("{:02x}", i + 1).repeat(32),
+                    scope: DurableConstructionScopeV1 {
+                        version: 2,
+                        purpose: PURPOSE.into(),
+                        proposal: c.proposal.clone(),
+                        account_id: p.account_id.clone(),
+                        participant_id: p.participant_id.clone(),
+                        privacy_domain: "inert-stage-component".into(),
+                        constructor: ConstructionRecipientV1 {
+                            principal_id: "synthetic-local-constructor".into(),
+                            authenticated_local_grant_digest: "ab".repeat(32),
+                        },
+                        prover: ConstructionRecipientV1 {
+                            principal_id: "synthetic-local-constructor".into(),
+                            authenticated_local_grant_digest: "ab".repeat(32),
+                        },
+                        reviewers: c
+                            .proposal
+                            .manifest
+                            .participants
+                            .iter()
+                            .map(|p| {
+                                ConstructionReviewerV1::local_installed_signer(p.account_id.clone())
+                            })
+                            .collect(),
+                        protected_destination: "/inert-stage-component/metadata.sqlite".into(),
+                        retention_policy: "temporary stage component ciphertext".into(),
+                        valid_from_unix_seconds: now - 1,
+                        valid_until_unix_seconds: now + 300,
+                        minimum_confirmations: 1,
+                        maximum_scan_blocks: 100,
+                    },
+                })
+                .collect()
+        }
+        fn constructed() -> (
+            CandidateView,
+            ConstructedCheckpointV2,
+            crate::candidates::CheckpointReceipt,
+            Vec<PrivateFixedMaterialReviewV3>,
+        ) {
+            let f = fixture();
+            let c = checked(crate::candidates::build_exact_candidate_v2(f.request));
+            let materials = materials(&c);
+            checked(check_stage_material_ceilings_v3(&materials));
+            let access = Access {
+                principal_id: "synthetic-local-constructor".into(),
+                include_owned_agreements: true,
+                ..Access::default()
+            };
+            let declarations: Vec<_> = f
+                .account_ids
+                .iter()
+                .map(|account| DisclosureAcknowledgement {
+                    account_id: account.clone(),
+                    manifest_digest: checked(hex::decode(&c.manifest_digest)).try_into().unwrap(),
+                    operator: access.principal_id.clone(),
+                    reviewer_account_ids: f.account_ids.clone(),
+                    purpose: materials[0].scope.purpose.clone(),
+                    retention_policy: materials[0].scope.retention_policy.clone(),
+                    scope: DisclosureScope::DedicatedAccountFvkAndSelectedNotesAndOutputs,
+                })
+                .collect();
+            let input = checked(crate::candidates::private_request_digest(
+                f.chain,
+                &f.packages,
+                &declarations,
+            ));
+            let key = "stage-review-component-original-key";
+            let limits = ProvingLimits { maximum_actions: 8 };
+            let command = checked(crate::context(
+                &access,
+                key,
+                "private_checkpoint_exact_original_v2",
+                &c.candidate_id,
+                Some(4),
+                &json!({"local_input_digest":input,"maximum_actions":8}),
+            ));
+            let observation = Observation::new(Operation::Checkpoint);
+            let built = checked(construct_exact_artifact_v2(
+                &access,
+                &c.candidate_id,
+                &c,
+                &command,
+                crate::candidates::LocalConstruction {
+                    context: f.chain,
+                    contributions: f.packages,
+                    declarations: &declarations,
+                },
+                limits,
+                &observation,
+            ));
+            let receipt = checked(prepare_constructor_receipt_v2(
+                &access,
+                key,
+                &c.candidate_id,
+                4,
+                input,
+                &c,
+                &command,
+                &built.built,
+                &built.scope,
+                limits,
+                &observation,
+            ));
+            (c, built, receipt, materials)
+        }
+        fn review(
+            c: &CandidateView,
+            materials: Vec<PrivateFixedMaterialReviewV3>,
+            scope: Option<CheckpointScope>,
+        ) -> PrivateFixedStageReviewV3 {
+            PrivateFixedStageReviewV3 {
+                version: 3,
+                purpose: "original-private-fixed-stage-review-v3",
+                stage: if scope.is_some() {
+                    PrivateFixedStageV3::AdmitOriginal
+                } else {
+                    PrivateFixedStageV3::Prepare
+                },
+                workspace_scope: PrivateWorkspaceScopeV1 {
+                    source_digest: "11".repeat(32),
+                    principal_id: "synthetic-local-constructor".into(),
+                    agreement_id: c.proposal.manifest.agreement.agreement_id.clone(),
+                    obligation_id: c.proposal.manifest.agreement.obligation_id.clone(),
+                    reviewer_account_ids: c
+                        .proposal
+                        .manifest
+                        .participants
+                        .iter()
+                        .map(|p| p.account_id.clone())
+                        .collect(),
+                    protected_destination: "/inert-stage-component/metadata.sqlite".into(),
+                    retention_policy: "temporary stage component ciphertext".into(),
+                },
+                marker_digest: "22".repeat(32),
+                native_association_digest: "33".repeat(32),
+                metadata_origin: "44".repeat(32),
+                proof_origin: "55".repeat(32),
+                revision: 4,
+                materials,
+                checkpoint_scope: scope,
+            }
+        }
+        #[test]
+        fn current_scope_descriptor_refuses_either_expired_material_and_overflow() {
+            let c = checked(crate::candidates::build_exact_candidate_v2(
+                fixture().request,
+            ));
+            let mut data = materials(&c);
+            checked(check_stage_material_ceilings_v3(&data));
+            for index in 0..2 {
+                let old = data[index].scope.clone();
+                let now = checked(stage_now_v3());
+                data[index].scope.valid_from_unix_seconds = now - 300;
+                data[index].scope.valid_until_unix_seconds = now;
+                let error = check_stage_material_ceilings_v3(&data).unwrap_err();
+                assert_eq!(
+                    error.details["private_fixed_stage_cause_v3"],
+                    json!({"family":"DurableConstruction","cause":"Stale"})
+                );
+                data[index].scope = old;
+            }
+            checked(check_stage_material_ceilings_v3(&data));
+            let mut descriptor = review(&c, data, None);
+            checked(bounded_stage_review_v3(&descriptor));
+            let encoded = checked(serde_json::to_value(&descriptor));
+            let keys = encoded
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                keys,
+                [
+                    "version",
+                    "purpose",
+                    "stage",
+                    "workspace_scope",
+                    "marker_digest",
+                    "native_association_digest",
+                    "metadata_origin",
+                    "proof_origin",
+                    "revision",
+                    "materials",
+                    "checkpoint_scope"
+                ]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+            );
+            for entry in encoded["materials"].as_array().unwrap() {
+                assert_eq!(
+                    entry
+                        .as_object()
+                        .unwrap()
+                        .keys()
+                        .cloned()
+                        .collect::<BTreeSet<_>>(),
+                    ["scope".into(), "material_digest".into()]
+                        .into_iter()
+                        .collect()
+                );
+            }
+            descriptor.stage = PrivateFixedStageV3::ProveOriginal;
+            assert!(bounded_stage_review_v3(&descriptor).is_err());
+            descriptor.stage = PrivateFixedStageV3::Prepare;
+            descriptor.workspace_scope.retention_policy = "x".repeat(MAX_STAGE_REVIEW_BYTES_V3);
+            assert!(bounded_stage_review_v3(&descriptor).is_err());
+            assert!(matches!(
+                PrepareModeV3::StagePreparation.action(),
+                PrivateWorkspaceActionV1::PrepareFixedStageV3
+            ));
+            assert!(matches!(
+                PrepareModeV3::LegacyCheckpoint.action(),
+                PrivateWorkspaceActionV1::CheckpointExactOriginal
+            ));
+        }
+        #[test]
+        fn actual_constructor_scope_projection_rejects_changed_receipt_and_never_exposes_artifact()
+        {
+            ORIGINAL_CONSTRUCTOR_CALLS_V2.with(|n| n.set(0));
+            let (c, built, receipt, materials) = constructed();
+            let projected = checked(retained_review_scope_v3(&c, &receipt, &materials));
+            assert!(projected == built.scope);
+            for field in [
+                "scope_digest",
+                "principal_id",
+                "candidate_id",
+                "manifest_digest",
+                "coordination_request_digest",
+                "artifact_digest",
+                "review_binding",
+                "effects_commitment",
+            ] {
+                let mut value = checked(serde_json::to_value(&receipt));
+                value[field] = json!("00".repeat(32));
+                let changed: crate::candidates::CheckpointReceipt =
+                    checked(serde_json::from_value(value));
+                assert!(retained_review_scope_v3(&c, &changed, &materials).is_err());
+            }
+            let mut descriptor = review(&c, materials, Some(projected));
+            checked(bounded_stage_review_v3(&descriptor));
+            assert!(descriptor.checkpoint_scope() == Some(&built.scope));
+            assert!(descriptor.materials().len() == 2);
+            descriptor.stage = PrivateFixedStageV3::Prepare;
+            assert!(bounded_stage_review_v3(&descriptor).is_err());
+            ORIGINAL_CONSTRUCTOR_CALLS_V2.with(|n| assert_eq!(n.get(), 1));
+        }
+        #[test]
+        fn metadata_review_gate_allows_only_exact_status_and_checks_current_twice() {
+            let c = checked(crate::candidates::build_exact_candidate_v2(
+                fixture().request,
+            ));
+            let scope = CheckpointScope {
+                principal_id: "synthetic-local-constructor".into(),
+                candidate_id: c.candidate_id,
+                manifest_digest: c.manifest_digest,
+                artifact_digest: "11".repeat(32),
+                effects_commitment: "22".repeat(32),
+                coordination_request_digest: "33".repeat(32),
+                review_binding: "44".repeat(32),
+                account_ids: vec![],
+                local_operator: "synthetic-local-constructor".into(),
+                purpose: "inert metadata gate".into(),
+                retention_policy: "inert".into(),
+            };
+            let calls = Cell::new(0);
+            for action in [
+                LocalAction::RetainPrivateWitnesses,
+                LocalAction::ProveLocally,
+                LocalAction::ReadPrivateArtifact,
+            ] {
+                assert!(!metadata_review_permission_v3(
+                    &scope,
+                    &scope,
+                    action,
+                    || {
+                        calls.set(calls.get() + 1);
+                        Ok(())
+                    }
+                ));
+            }
+            assert_eq!(calls.get(), 0);
+            let mut wrong = scope.clone();
+            wrong.artifact_digest = "55".repeat(32);
+            assert!(!metadata_review_permission_v3(
+                &wrong,
+                &scope,
+                LocalAction::InspectStatus,
+                || {
+                    calls.set(calls.get() + 1);
+                    Ok(())
+                }
+            ));
+            assert_eq!(calls.get(), 0);
+            assert!(metadata_review_permission_v3(
+                &scope,
+                &scope,
+                LocalAction::InspectStatus,
+                || {
+                    calls.set(calls.get() + 1);
+                    Ok(())
+                }
+            ));
+            assert_eq!(calls.get(), 2);
+            calls.set(0);
+            assert!(!metadata_review_permission_v3(
+                &scope,
+                &scope,
+                LocalAction::InspectStatus,
+                || {
+                    calls.set(calls.get() + 1);
+                    Err(denied())
+                }
+            ));
+            assert_eq!(calls.get(), 1);
+            calls.set(0);
+            assert!(!metadata_review_permission_v3(
+                &scope,
+                &scope,
+                LocalAction::InspectStatus,
+                || {
+                    calls.set(calls.get() + 1);
+                    if calls.get() == 1 {
+                        Ok(())
+                    } else {
+                        Err(denied())
+                    }
+                }
+            ));
+            assert_eq!(calls.get(), 2);
+        }
+        #[test]
+        fn stage_scope_error_keeps_owned_error_fields_and_omits_unknown_or_collision() {
+            use wholepact_wallet::wallet::protected_sync::durable_construction_v1::DurableConstructionError;
+            let original = ApiError::from(DurableConstructionError::Stale);
+            let mut input = ApiError::from(DurableConstructionError::Stale);
+            input.details = Box::new(json!({"existing":"kept"}));
+            let actual = preserve_stage_scope_cause_v3(
+                input,
+                diagnostics::construction(&DurableConstructionError::Stale),
+            );
+            assert_eq!(actual.code, original.code);
+            assert_eq!(actual.message, original.message);
+            assert_eq!(actual.retryable, original.retryable);
+            assert_eq!(actual.safe_actions, original.safe_actions);
+            assert_eq!(actual.operation_id, original.operation_id);
+            assert_eq!(actual.details["existing"], "kept");
+            assert_eq!(
+                actual.details["private_fixed_stage_cause_v3"],
+                json!({"family":"DurableConstruction","cause":"Stale"})
+            );
+            assert!(actual.details.get("private_fixed_diagnostic_v1").is_none());
+            let mut collision = denied();
+            collision.details =
+                Box::new(json!({"private_fixed_stage_cause_v3":{"existing":"opaque"}}));
+            let saved = collision.details.clone();
+            let collision = preserve_stage_scope_cause_v3(
+                collision,
+                diagnostics::construction(&DurableConstructionError::Stale),
+            );
+            assert_eq!(collision.details, saved);
+            for cause in [
+                diagnostics::Cause {
+                    family: "DurableConstruction",
+                    cause: "Unknown",
+                },
+                diagnostics::Cause {
+                    family: "unknown",
+                    cause: "Stale",
+                },
+            ] {
+                let input = denied();
+                let saved = input.details.clone();
+                assert_eq!(preserve_stage_scope_cause_v3(input, cause).details, saved);
+            }
+            let mut nonobject = denied();
+            nonobject.details = Box::new(json!("opaque"));
+            assert_eq!(
+                *preserve_stage_scope_cause_v3(
+                    nonobject,
+                    diagnostics::construction(&DurableConstructionError::Stale)
+                )
+                .details,
+                json!("opaque")
+            );
+        }
+        #[test]
+        fn metadata_bool_failure_preserves_first_cause_only_on_same_terminal_error() {
+            fn failure(cause: &'static str) -> ApiError {
+                preserve_stage_scope_cause_v3(
+                    denied(),
+                    diagnostics::Cause {
+                        family: "DurableConstruction",
+                        cause,
+                    },
+                )
+            }
+            let collector = StageInspectionFailureV3::default();
+            let original: crate::Result<()> = Err(failure("Stale"));
+            collector.observe(&original);
+            collector.observe(&Err::<(), _>(failure("Binding")));
+            let terminal = job_error(wholepact_proof_jobs::JobError::ConsentDenied);
+            let code = terminal.code.clone();
+            let message = terminal.message.clone();
+            let details = terminal.details.clone();
+            let retryable = terminal.retryable;
+            let operation_id = terminal.operation_id.clone();
+            let actions = terminal.safe_actions.clone();
+            let result: crate::Result<()> = collector.finish(Err(terminal));
+            let actual = result.unwrap_err();
+            assert_eq!(actual.code, code);
+            assert_eq!(actual.message, message);
+            assert_eq!(actual.retryable, retryable);
+            assert_eq!(actual.operation_id, operation_id);
+            assert_eq!(actual.safe_actions, actions);
+            assert_eq!(
+                actual.details["private_original_job_error_v1"],
+                details["private_original_job_error_v1"]
+            );
+            assert_eq!(
+                actual.details["private_fixed_stage_cause_v3"]["cause"],
+                "Stale"
+            );
+            assert!(actual.details.get("private_fixed_diagnostic_v1").is_none());
+            assert_eq!(collector.finish(Ok(Box::new(7))).unwrap(), Box::new(7));
+            let clean = StageInspectionFailureV3::default();
+            let untouched: crate::Result<()> = clean.finish(Err(denied()));
+            assert!(
+                untouched
+                    .unwrap_err()
+                    .details
+                    .get("private_fixed_stage_cause_v3")
+                    .is_none()
+            );
+            for detail in [
+                json!({"family":"DurableConstruction","cause":"Stale","extra":true}),
+                json!({"family":"unknown","cause":"Stale"}),
+                json!("malformed"),
+            ] {
+                let first = StageInspectionFailureV3::default();
+                let mut error = denied();
+                error.details = Box::new(json!({"private_fixed_stage_cause_v3":detail}));
+                first.observe(&Err::<(), _>(error));
+                first.observe(&original);
+                let result: crate::Result<()> = first.finish(Err(denied()));
+                assert!(
+                    result
+                        .unwrap_err()
+                        .details
+                        .get("private_fixed_stage_cause_v3")
+                        .is_none()
+                );
+            }
+        }
+        struct ExactScope(CheckpointScope);
+        impl LocalProofConsent for ExactScope {
+            fn permits(&self, scope: &CheckpointScope, _: LocalAction) -> bool {
+                scope == &self.0
+            }
+        }
+        struct DenyAfterComputation {
+            scope: CheckpointScope,
+            prove: AtomicUsize,
+            retain: AtomicUsize,
+        }
+        impl LocalProofConsent for DenyAfterComputation {
+            fn permits(&self, scope: &CheckpointScope, action: LocalAction) -> bool {
+                if scope != &self.scope {
+                    return false;
+                }
+                match action {
+                    LocalAction::ProveLocally => self.prove.fetch_add(1, Ordering::SeqCst) == 0,
+                    LocalAction::RetainPrivateWitnesses => {
+                        self.retain.fetch_add(1, Ordering::SeqCst);
+                        true
+                    }
+                    _ => false,
+                }
+            }
+        }
+        /// ACTUAL Halo2 computation and real original-qualified encrypted journal.
+        /// This is a proof-job component, not a fabricated native/source facade.
+        #[test]
+        fn actual_halo2_postcompute_denial_is_uncertain_and_cannot_restart_original_attempt() {
+            let (_, built, _, _) = constructed();
+            let dir = checked(tempfile::tempdir());
+            checked(std::fs::set_permissions(
+                dir.path(),
+                std::fs::Permissions::from_mode(0o700),
+            ));
+            let jobs = checked(
+                wholepact_proof_jobs::ProofJobStore::from_original_encrypted_connection_v1(
+                    checked(wholepact_storage_security::create_encrypted(
+                        dir.path().join("proof.sqlite"),
+                        &DatabaseKey::from_bytes([137; 32]),
+                    )),
+                ),
+            );
+            let source = checked(jobs.original_source_v1());
+            let allow = ExactScope(built.scope.clone());
+            let key = "postcompute-denial-original-command";
+            let limits = ProvingLimits { maximum_actions: 8 };
+            let outcome = checked(source.enqueue_original_once_v1(
+                &built.scope,
+                key,
+                &built.built.pczt_bytes,
+                &built.built.review_policy,
+                limits,
+                &allow,
+            ));
+            let (queued, attempt) = outcome.into_parts();
+            assert!(queued.state == wholepact_proof_jobs::JobState::Queued && queued.attempt == 0);
+            let deny = DenyAfterComputation {
+                scope: built.scope.clone(),
+                prove: AtomicUsize::new(0),
+                retain: AtomicUsize::new(0),
+            };
+            let result = attempt.unwrap().run_original_queued_v1(&deny);
+            assert!(matches!(
+                result,
+                Err(wholepact_proof_jobs::JobError::ConsentDenied)
+            ));
+            // The second Prove callback is after the real prove_reviewed call.
+            // Short-circuit denial suppresses the second Retain callback.
+            assert_eq!(deny.prove.load(Ordering::SeqCst), 2);
+            assert_eq!(deny.retain.load(Ordering::SeqCst), 1);
+            let actual = checked(source.status(&built.scope.principal_id, &queued.job_id, &allow));
+            assert!(
+                actual.state == wholepact_proof_jobs::JobState::Uncertain && actual.attempt == 1
+            );
+            assert!(!actual.proof_verified && actual.result_digest.is_none());
+            assert!(matches!(
+                source.load_verified(&built.scope.principal_id, &queued.job_id, &allow),
+                Err(wholepact_proof_jobs::JobError::StateConflict)
+            ));
+            let replay = checked(source.enqueue_original_once_v1(
+                &built.scope,
+                key,
+                &built.built.pczt_bytes,
+                &built.built.review_policy,
+                limits,
+                &allow,
+            ));
+            let (replayed, fresh) = replay.into_parts();
+            assert_eq!(replayed, actual);
+            assert!(fresh.is_none());
+            assert!(matches!(
+                jobs.run_original_queued(&built.scope.principal_id, &queued.job_id, &allow),
+                Err(wholepact_proof_jobs::JobError::StateConflict)
+            ));
+            assert_eq!(
+                checked(source.status(&built.scope.principal_id, &queued.job_id, &allow)),
+                actual
+            );
+        }
+    }
+
     /// Same-kernel lifecycle components, not a fabricated original source or
     /// native approval. One actual randomized unsigned artifact is reused.
     mod prepared_lifecycle {

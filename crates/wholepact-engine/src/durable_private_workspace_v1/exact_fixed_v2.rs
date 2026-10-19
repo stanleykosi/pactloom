@@ -18,10 +18,95 @@ use wholepact_protocol::construction::{DisclosureAcknowledgement, DisclosureScop
 use wholepact_protocol::proving::ProvingLimits;
 use wholepact_signer::authority_bridge::durable_construction_v1::AuthenticatedDurableConstructionDisclosureV1;
 use wholepact_wallet::wallet::protected_sync::durable_construction_v1::{
-    DurableConstructionWalletSlotV1, FreshDurableConstructionObservationV1,
-    HeldDurableConstructionRosterV1, with_durable_construction_roster_v1,
+    DurableConstructionScopeV1, DurableConstructionWalletSlotV1,
+    FreshDurableConstructionObservationV1, HeldDurableConstructionRosterV1,
+    with_durable_construction_roster_v1,
 };
 use wholepact_wallet::wallet::protected_sync::{LocalWalletAccess, ProtectedWalletSync};
+
+/// Closed review purpose. Values select a data projection, never authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum PrivateFixedStageV3 {
+    Prepare,
+    AdmitOriginal,
+    ProveOriginal,
+    FreezeFixed,
+    ReadFixed,
+}
+/// Original metadata only. No private material bytes or construction authority.
+#[derive(Serialize)]
+pub struct PrivateFixedMaterialReviewV3 {
+    scope: DurableConstructionScopeV1,
+    material_digest: String,
+}
+impl PrivateFixedMaterialReviewV3 {
+    pub fn scope(&self) -> &DurableConstructionScopeV1 {
+        &self.scope
+    }
+    pub fn material_digest(&self) -> &str {
+        &self.material_digest
+    }
+}
+/// Source-authenticated, current-scope review data. A native issuer must still
+/// obtain a genuine new stage decision and recheck every original restriction.
+/// There is no public constructor, Deserialize, permission or artifact getter.
+#[derive(Serialize)]
+pub struct PrivateFixedStageReviewV3 {
+    version: u16,
+    purpose: &'static str,
+    stage: PrivateFixedStageV3,
+    workspace_scope: PrivateWorkspaceScopeV1,
+    marker_digest: String,
+    native_association_digest: String,
+    metadata_origin: String,
+    proof_origin: String,
+    revision: u64,
+    materials: Vec<PrivateFixedMaterialReviewV3>,
+    checkpoint_scope: Option<CheckpointScope>,
+}
+impl PrivateFixedStageReviewV3 {
+    pub fn stage(&self) -> PrivateFixedStageV3 {
+        self.stage
+    }
+    pub fn workspace_scope(&self) -> &PrivateWorkspaceScopeV1 {
+        &self.workspace_scope
+    }
+    pub fn marker_digest(&self) -> &str {
+        &self.marker_digest
+    }
+    pub fn native_association_digest(&self) -> &str {
+        &self.native_association_digest
+    }
+    pub fn metadata_origin(&self) -> &str {
+        &self.metadata_origin
+    }
+    pub fn proof_origin(&self) -> &str {
+        &self.proof_origin
+    }
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+    pub fn materials(&self) -> &[PrivateFixedMaterialReviewV3] {
+        &self.materials
+    }
+    pub fn checkpoint_scope(&self) -> Option<&CheckpointScope> {
+        self.checkpoint_scope.as_ref()
+    }
+}
+const MAX_STAGE_REVIEW_BYTES_V3: usize = 64 * 1024;
+#[derive(Clone, Copy)]
+enum PrepareModeV3 {
+    LegacyCheckpoint,
+    StagePreparation,
+}
+impl PrepareModeV3 {
+    fn action(self) -> PrivateWorkspaceActionV1 {
+        match self {
+            Self::LegacyCheckpoint => PrivateWorkspaceActionV1::CheckpointExactOriginal,
+            Self::StagePreparation => PrivateWorkspaceActionV1::PrepareFixedStageV3,
+        }
+    }
+}
 
 /// Exact data-only candidate for the two native disclosure reviews. No Engine,
 /// agreement view, existing material, operation or private proof escapes.
@@ -97,8 +182,11 @@ pub struct OriginalProofAttemptV2<'op, 'source> {
     constructor: FreshConstructorReceiptCommitV2<'op, 'source>,
     enqueue: FreshOriginalEnqueueV1<'source>,
     linked_revision: u64,
+    // Inert exact original scope, not consent and never another continuation.
+    review_scope: CheckpointScope,
 }
-/// Memory-only original randomized artifact after exact native review. This is
+/// Memory-only original randomized artifact. Its originating API determines
+/// whether review has occurred; admission always requires current exact consent. This is
 /// not a receipt, proof attempt or permission. No Clone/serde/raw-data getters.
 /// It borrows only its original coordinator, never a wallet or observation.
 pub struct PreparedOriginalCheckpointV2<'op, 'source> {
@@ -142,6 +230,535 @@ impl<'op, 'source> OriginalCheckpointOutcomeV2<'op, 'source> {
         self.attempt
     }
 }
+impl<'source> PrivateDurableCoordinatorV1<'source> {
+    /// Collect only bounded original metadata under explicit current inspection.
+    /// No artifact is read, constructor run, retained effect or token issued.
+    pub fn inspect_prepare_stage_v3(
+        &self,
+        access: &Access,
+        inspection: &dyn LocalPrivateWorkspaceConsentV1,
+    ) -> Result<PrivateFixedStageReviewV3> {
+        let before = self.inspection_envelope_v3(access, inspection)?;
+        let id = sole_candidate_id_v3(&before)?;
+        let c = candidate(&before, id)?;
+        if !before.checkpoint_receipts.is_empty()
+            || !before.durable_proposals_v1.is_empty()
+            || !c.proof_jobs.is_empty()
+        {
+            return Err(damaged());
+        }
+        crate::candidates::check_current_terms(&before.view, &c.proposal.manifest)?;
+        let materials = self.stage_materials_v3(access, &before, id)?;
+        self.finish_stage_review_v3(
+            access,
+            inspection,
+            &before,
+            PrivateFixedStageV3::Prepare,
+            materials,
+            None,
+        )
+    }
+    pub fn inspect_freeze_stage_v3(
+        &self,
+        access: &Access,
+        inspection: &dyn LocalPrivateWorkspaceConsentV1,
+    ) -> Result<PrivateFixedStageReviewV3> {
+        self.inspect_retained_stage_v3(access, inspection, PrivateFixedStageV3::FreezeFixed)
+    }
+    pub fn inspect_saved_read_stage_v3(
+        &self,
+        access: &Access,
+        inspection: &dyn LocalPrivateWorkspaceConsentV1,
+    ) -> Result<PrivateFixedStageReviewV3> {
+        self.inspect_retained_stage_v3(access, inspection, PrivateFixedStageV3::ReadFixed)
+    }
+    fn inspection_envelope_v3(
+        &self,
+        access: &Access,
+        inspection: &dyn LocalPrivateWorkspaceConsentV1,
+    ) -> Result<Envelope> {
+        self.operation(
+            access,
+            inspection,
+            PrivateWorkspaceActionV1::InspectFixedStageMetadataV3,
+        )?
+        .load()
+    }
+    fn stage_materials_v3(
+        &self,
+        access: &Access,
+        before: &Envelope,
+        id: &str,
+    ) -> Result<Vec<PrivateFixedMaterialReviewV3>> {
+        let c = candidate(before, id)?;
+        let roster = self.engine.durable_roster(before, id)?;
+        if roster.owners.len() != 2 {
+            return Err(damaged());
+        }
+        let expected: BTreeSet<_> = self.source.reviewer_account_ids().into_iter().collect();
+        let mut accounts = BTreeSet::new();
+        let mut materials = Vec::with_capacity(2);
+        for (account, intake) in &roster.owners {
+            intake.outbox.validate().map_err(|_| damaged())?;
+            let scope = &intake.outbox.request().scope;
+            let reviewers: BTreeSet<_> = scope
+                .reviewers
+                .iter()
+                .map(|r| r.account_id().to_string())
+                .collect();
+            if account != &scope.account_id
+                || !accounts.insert(account.clone())
+                || intake.principal_id != access.principal_id
+                || intake.metadata_origin != hex::encode(self.origin)
+                || scope.constructor.principal_id != access.principal_id
+                || scope.prover.principal_id != access.principal_id
+                || scope.constructor != scope.prover
+                || scope.proposal != c.proposal
+                || Path::new(&scope.protected_destination) != self.scope.protected_destination()
+                || scope.retention_policy != self.scope.retention_policy
+                || reviewers != expected
+            {
+                return Err(denied());
+            }
+            materials.push(PrivateFixedMaterialReviewV3 {
+                scope: scope.clone(),
+                material_digest: intake.outbox.material_digest().into(),
+            });
+        }
+        if accounts != expected {
+            return Err(denied());
+        }
+        check_stage_material_ceilings_v3(&materials)?;
+        Ok(materials)
+    }
+    fn inspect_retained_stage_v3(
+        &self,
+        access: &Access,
+        inspection: &dyn LocalPrivateWorkspaceConsentV1,
+        stage: PrivateFixedStageV3,
+    ) -> Result<PrivateFixedStageReviewV3> {
+        if !matches!(
+            stage,
+            PrivateFixedStageV3::FreezeFixed | PrivateFixedStageV3::ReadFixed
+        ) {
+            return Err(denied());
+        }
+        let before = self.inspection_envelope_v3(access, inspection)?;
+        let id = sole_candidate_id_v3(&before)?;
+        if before.checkpoint_receipts.len() != 1
+            || (stage == PrivateFixedStageV3::ReadFixed
+                && (before.durable_proposals_v1.len() != 1
+                    || !before.durable_proposals_v1.contains_key(id)))
+        {
+            return Err(damaged());
+        }
+        let materials = self.stage_materials_v3(access, &before, id)?;
+        let receipt = before
+            .checkpoint_receipts
+            .values()
+            .next()
+            .ok_or_else(damaged)?;
+        let original = receipt.original_request_v2.as_ref().ok_or_else(damaged)?;
+        let key = &original.command.idempotency_key;
+        validate_original_request_v2(receipt, access, key)?;
+        let scope = retained_review_scope_v3(candidate(&before, id)?, receipt, &materials)?;
+        let gate = MetadataInspectionGateV3 {
+            workspace: self,
+            access,
+            inspection,
+            scope: &scope,
+            materials: &materials,
+            failure: StageInspectionFailureV3::default(),
+        };
+        let saved = gate
+            .failure
+            .finish(
+                self.proof
+                    .status_for_key(
+                        &access.principal_id,
+                        key,
+                        &receipt.coordination_request_digest,
+                        &gate,
+                    )
+                    .map_err(job_error),
+            )?
+            .ok_or_else(damaged)?;
+        self.validate_original_lineage(&before, access, key, &saved, None)?;
+        if saved.state != wholepact_proof_jobs::JobState::Succeeded
+            || saved.attempt != 1
+            || !saved.proof_verified
+        {
+            return Err(damaged());
+        }
+        // The state flag is not proof verification; the later effect/read must
+        // independently load_verified under its new exact native stage grant.
+        self.finish_stage_review_v3(access, inspection, &before, stage, materials, Some(scope))
+    }
+    fn finish_stage_review_v3(
+        &self,
+        access: &Access,
+        inspection: &dyn LocalPrivateWorkspaceConsentV1,
+        before: &Envelope,
+        stage: PrivateFixedStageV3,
+        materials: Vec<PrivateFixedMaterialReviewV3>,
+        checkpoint_scope: Option<CheckpointScope>,
+    ) -> Result<PrivateFixedStageReviewV3> {
+        if materials.len() != 2
+            || (stage == PrivateFixedStageV3::Prepare) != checkpoint_scope.is_none()
+        {
+            return Err(damaged());
+        }
+        check_stage_material_ceilings_v3(&materials)?;
+        let after = self.inspection_envelope_v3(access, inspection)?;
+        if crate::encode(before)? != crate::encode(&after)? {
+            return Err(damaged());
+        }
+        let review = PrivateFixedStageReviewV3 {
+            version: 3,
+            purpose: "original-private-fixed-stage-review-v3",
+            stage,
+            workspace_scope: self.scope.clone(),
+            marker_digest: self.origin_marker_digest()?,
+            native_association_digest: self.marker.native_association_digest.clone(),
+            metadata_origin: hex::encode(self.origin),
+            proof_origin: hex::encode(self.proof_origin),
+            revision: before.view.revision,
+            materials,
+            checkpoint_scope,
+        };
+        bounded_stage_review_v3(&review)?;
+        self.check(
+            access,
+            inspection,
+            PrivateWorkspaceActionV1::InspectFixedStageMetadataV3,
+        )?;
+        check_stage_material_ceilings_v3(&review.materials)?;
+        Ok(review)
+    }
+}
+impl PreparedOriginalCheckpointV2<'_, '_> {
+    pub fn inspect_admission_stage_v3(
+        &self,
+        access: &Access,
+        inspection: &dyn LocalPrivateWorkspaceConsentV1,
+    ) -> Result<PrivateFixedStageReviewV3> {
+        let workspace = self.workspace;
+        let before = workspace.inspection_envelope_v3(access, inspection)?;
+        if crate::encode(&before)? != crate::encode(&self.ready.before)? {
+            return Err(damaged());
+        }
+        let materials = workspace.stage_materials_v3(access, &before, &self.ready.candidate_id)?;
+        validate_original_request_v2(&self.ready.receipt, access, &self.ready.original_key)?;
+        let scope = retained_review_scope_v3(
+            candidate(&before, &self.ready.candidate_id)?,
+            &self.ready.receipt,
+            &materials,
+        )?;
+        if scope != self.ready.scope
+            || scope.artifact_digest != hex::encode(Sha256::digest(&self.ready.built.pczt_bytes))
+        {
+            return Err(damaged());
+        }
+        let gate = MetadataInspectionGateV3 {
+            workspace,
+            access,
+            inspection,
+            scope: &scope,
+            materials: &materials,
+            failure: StageInspectionFailureV3::default(),
+        };
+        let observation = Observation::new(Operation::Checkpoint);
+        gate.failure.finish(require_fresh_original_checkpoint_v2(
+            &before,
+            &self.ready.candidate_id,
+            self.ready.revision,
+            workspace.proof.status_for_key(
+                &access.principal_id,
+                &self.ready.original_key,
+                &self.ready.command.request_digest,
+                &gate,
+            ),
+            &observation,
+        ))?;
+        workspace.finish_stage_review_v3(
+            access,
+            inspection,
+            &before,
+            PrivateFixedStageV3::AdmitOriginal,
+            materials,
+            Some(scope),
+        )
+    }
+}
+impl OriginalProofAttemptV2<'_, '_> {
+    /// Borrow only for exact metadata review. This cannot duplicate, run or
+    /// replace the live consuming continuation.
+    pub fn inspect_proof_stage_v3(
+        &self,
+        access: &Access,
+        inspection: &dyn LocalPrivateWorkspaceConsentV1,
+    ) -> Result<PrivateFixedStageReviewV3> {
+        let workspace = self.constructor.workspace;
+        if !self.enqueue.matches_source(&workspace.proof) {
+            return Err(denied());
+        }
+        let before = workspace.inspection_envelope_v3(access, inspection)?;
+        crate::candidates::check_revision(&before, self.linked_revision)?;
+        let materials = workspace.stage_materials_v3(
+            access,
+            &before,
+            &self.constructor.receipt.candidate_id,
+        )?;
+        let scope = retained_review_scope_v3(
+            candidate(&before, &self.constructor.receipt.candidate_id)?,
+            &self.constructor.receipt,
+            &materials,
+        )?;
+        if scope != self.review_scope {
+            return Err(damaged());
+        }
+        let gate = MetadataInspectionGateV3 {
+            workspace,
+            access,
+            inspection,
+            scope: &scope,
+            materials: &materials,
+            failure: StageInspectionFailureV3::default(),
+        };
+        let saved = gate
+            .failure
+            .finish(
+                workspace
+                    .proof
+                    .status_for_key(
+                        &access.principal_id,
+                        &self.constructor.original_key,
+                        &self.constructor.command.request_digest,
+                        &gate,
+                    )
+                    .map_err(job_error),
+            )?
+            .ok_or_else(damaged)?;
+        let receipt = workspace.validate_original_lineage(
+            &before,
+            access,
+            &self.constructor.original_key,
+            &saved,
+            None,
+        )?;
+        if !same_original_receipt_v2(receipt, &self.constructor.receipt)?
+            || receipt_key(access, &self.constructor.original_key)? != self.constructor.receipt_key
+            || &saved != self.enqueue.summary()
+            || saved.state != wholepact_proof_jobs::JobState::Queued
+            || saved.attempt != 0
+        {
+            return Err(damaged());
+        }
+        workspace.finish_stage_review_v3(
+            access,
+            inspection,
+            &before,
+            PrivateFixedStageV3::ProveOriginal,
+            materials,
+            Some(scope),
+        )
+    }
+}
+fn sole_candidate_id_v3(before: &Envelope) -> Result<&str> {
+    if before.view.candidates.len() != 1 {
+        return Err(damaged());
+    }
+    Ok(&before.view.candidates[0].candidate_id)
+}
+fn stage_now_v3() -> Result<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .map_err(|_| damaged())
+}
+fn check_stage_material_ceilings_v3(materials: &[PrivateFixedMaterialReviewV3]) -> Result<()> {
+    if materials.len() != 2 {
+        return Err(damaged());
+    }
+    for material in materials {
+        material
+            .scope
+            .check_valid_at(stage_now_v3()?)
+            .map_err(|error| {
+                let cause = diagnostics::construction(&error);
+                preserve_stage_scope_cause_v3(ApiError::from(error), cause)
+            })?;
+    }
+    Ok(())
+}
+// This optional finite cause is not a complete operation diagnostic. Metadata
+// inspection has no proof consumption or persistence CALL facts to invent.
+fn preserve_stage_scope_cause_v3(mut error: ApiError, cause: diagnostics::Cause) -> ApiError {
+    if !matches!(
+        (cause.family, cause.cause),
+        ("DurableConstruction", "Invalid" | "Binding" | "Stale")
+    ) {
+        return error;
+    }
+    if let Some(details) = error.details.as_object_mut() {
+        details
+            .entry("private_fixed_stage_cause_v3".to_owned())
+            .or_insert_with(|| json!({"family":cause.family,"cause":cause.cause}));
+    }
+    error
+}
+fn bounded_stage_review_v3(review: &PrivateFixedStageReviewV3) -> Result<()> {
+    if review.version != 3
+        || review.purpose != "original-private-fixed-stage-review-v3"
+        || review.materials.len() != 2
+        || (review.stage == PrivateFixedStageV3::Prepare) != review.checkpoint_scope.is_none()
+    {
+        return Err(damaged());
+    }
+    if serde_json::to_vec(review).map_err(|_| damaged())?.len() > MAX_STAGE_REVIEW_BYTES_V3 {
+        return Err(denied());
+    }
+    Ok(())
+}
+fn retained_review_scope_v3(
+    c: &CandidateView,
+    receipt: &crate::candidates::CheckpointReceipt,
+    materials: &[PrivateFixedMaterialReviewV3],
+) -> Result<CheckpointScope> {
+    if materials.len() != 2 {
+        return Err(damaged());
+    }
+    let first = &materials[0].scope;
+    if materials.iter().any(|m| {
+        m.scope.purpose != first.purpose || m.scope.retention_policy != first.retention_policy
+    }) || receipt.candidate_id != c.candidate_id
+        || receipt.manifest_digest != c.manifest_digest
+    {
+        return Err(damaged());
+    }
+    let scope = CheckpointScope {
+        principal_id: receipt.principal_id.clone(),
+        candidate_id: receipt.candidate_id.clone(),
+        manifest_digest: receipt.manifest_digest.clone(),
+        artifact_digest: receipt.artifact_digest.clone(),
+        effects_commitment: receipt.effects_commitment.clone(),
+        coordination_request_digest: receipt.coordination_request_digest.clone(),
+        review_binding: receipt.review_binding.clone(),
+        account_ids: c
+            .proposal
+            .manifest
+            .participants
+            .iter()
+            .map(|p| p.account_id.clone())
+            .collect(),
+        local_operator: c
+            .proposal
+            .manifest
+            .agreement
+            .privacy_profile
+            .proving_operator
+            .clone()
+            .ok_or_else(denied)?,
+        purpose: first.purpose.clone(),
+        retention_policy: first.retention_policy.clone(),
+    };
+    if hex::encode(Sha256::digest(
+        serde_json::to_vec(&scope).map_err(|_| damaged())?,
+    )) != receipt.scope_digest
+    {
+        return Err(damaged());
+    }
+    Ok(scope)
+}
+// Diagnostic data only, local to one actual status lookup. No lock or borrow
+// guard survives a callback, and no collected value changes permission.
+#[derive(Default)]
+struct StageInspectionFailureV3(std::cell::Cell<(bool, Option<diagnostics::Cause>)>);
+impl StageInspectionFailureV3 {
+    fn observe<T>(&self, result: &Result<T>) {
+        if self.0.get().0 {
+            return;
+        }
+        let Err(error) = result else {
+            return;
+        };
+        let cause = error
+            .details
+            .get("private_fixed_stage_cause_v3")
+            .and_then(serde_json::Value::as_object)
+            .filter(|object| object.len() == 2)
+            .and_then(|object| {
+                match (
+                    object.get("family")?.as_str()?,
+                    object.get("cause")?.as_str()?,
+                ) {
+                    ("DurableConstruction", "Invalid") => Some(diagnostics::Cause {
+                        family: "DurableConstruction",
+                        cause: "Invalid",
+                    }),
+                    ("DurableConstruction", "Binding") => Some(diagnostics::Cause {
+                        family: "DurableConstruction",
+                        cause: "Binding",
+                    }),
+                    ("DurableConstruction", "Stale") => Some(diagnostics::Cause {
+                        family: "DurableConstruction",
+                        cause: "Stale",
+                    }),
+                    _ => None,
+                }
+            });
+        self.0.set((true, cause));
+    }
+    fn finish<T>(&self, result: Result<T>) -> Result<T> {
+        match result {
+            Err(error) => Err(match self.0.get().1 {
+                Some(cause) => preserve_stage_scope_cause_v3(error, cause),
+                None => error,
+            }),
+            Ok(value) => Ok(value),
+        }
+    }
+}
+struct MetadataInspectionGateV3<'a, 'source> {
+    workspace: &'a PrivateDurableCoordinatorV1<'source>,
+    access: &'a Access,
+    inspection: &'a dyn LocalPrivateWorkspaceConsentV1,
+    scope: &'a CheckpointScope,
+    materials: &'a [PrivateFixedMaterialReviewV3],
+    failure: StageInspectionFailureV3,
+}
+impl MetadataInspectionGateV3<'_, '_> {
+    fn check(&self) -> Result<()> {
+        check_stage_material_ceilings_v3(self.materials)?;
+        self.workspace.check_without_proof_lock(
+            self.access,
+            self.inspection,
+            PrivateWorkspaceActionV1::InspectFixedStageMetadataV3,
+        )?;
+        check_stage_material_ceilings_v3(self.materials)
+    }
+}
+impl LocalProofConsent for MetadataInspectionGateV3<'_, '_> {
+    fn permits(&self, scope: &CheckpointScope, action: LocalAction) -> bool {
+        metadata_review_permission_v3(scope, self.scope, action, || {
+            let result = self.check();
+            self.failure.observe(&result);
+            result
+        })
+    }
+}
+fn metadata_review_permission_v3(
+    actual: &CheckpointScope,
+    expected: &CheckpointScope,
+    action: LocalAction,
+    mut current: impl FnMut() -> Result<()>,
+) -> bool {
+    action == LocalAction::InspectStatus
+        && actual == expected
+        && current().is_ok()
+        && current().is_ok()
+}
+
 fn status(result: &wholepact_store::MutationResult) -> PrivateWorkspaceStatusV1 {
     PrivateWorkspaceStatusV1 {
         revision: result.record.revision,
@@ -618,6 +1235,56 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
         );
         observation.finish(result)
     }
+    /// New stage-only pure constructor. Its separate workspace purpose cannot
+    /// authorize the legacy retained checkpoint path. No native dialog here.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_checkpoint_for_stage_v3<'op>(
+        &'op self,
+        access: &Access,
+        key: &str,
+        candidate_id: &str,
+        revision: u64,
+        slots: Vec<DurableConstructionWalletSlotV1<'_>>,
+        limits: ProvingLimits,
+        consent: &dyn LocalPrivateWorkspaceConsentV1,
+        proof: &dyn LocalProofConsent,
+        material: &dyn LocalDurableMaterialConsentV1,
+    ) -> Result<PreparedOriginalCheckpointV2<'op, 'source>> {
+        let observation = Observation::new(Operation::Checkpoint);
+        let result = (|| {
+            let (_, prepared) = self.prepare_unreviewed_original_v3(
+                access,
+                key,
+                candidate_id,
+                revision,
+                slots,
+                limits,
+                consent,
+                proof,
+                material,
+                PrepareModeV3::StagePreparation,
+                &observation,
+            )?;
+            // All held callbacks/postchecks have returned. End this stage under
+            // its own current source and permission before any later review.
+            self.check_observed(
+                access,
+                consent,
+                PrivateWorkspaceActionV1::PrepareFixedStageV3,
+                Some(&observation),
+            )?;
+            self.finish_preparation_v3(
+                access,
+                key,
+                candidate_id,
+                revision,
+                prepared,
+                limits,
+                &observation,
+            )
+        })();
+        observation.finish(result)
+    }
     #[allow(clippy::too_many_arguments)]
     fn prepare_original_observed_v2<'op>(
         &'op self,
@@ -632,66 +1299,19 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
         material: &dyn LocalDurableMaterialConsentV1,
         observation: &Observation,
     ) -> Result<PreparedOriginalCheckpointV2<'op, 'source>> {
-        if !(1..=wholepact_protocol::proving::MAX_PROVING_ACTIONS).contains(&limits.maximum_actions)
-        {
-            return Err(denied());
-        }
-        observation.stage(Site::WorkspaceLoad);
-        let envelope = self
-            .operation_observed(
-                access,
-                consent,
-                PrivateWorkspaceActionV1::CheckpointExactOriginal,
-                Some(observation),
-            )?
-            .load_observed(observation)?;
-        observation.stage(Site::Candidate);
-        let c = candidate(&envelope, candidate_id)?;
-        observation.stage(Site::MaterialRoster);
-        let roster =
-            self.checked_roster_observed(observation, access, &envelope, candidate_id, material)?;
-        let declarations = checkpoint_declarations_v2(c, &roster, &slots, observation)?;
-        observation.stage(Site::WalletRosterAcquire);
-        let callback_returned = std::cell::Cell::new(false);
-        let prepared = with_durable_construction_roster_v1(
+        let (roster, prepared) = self.prepare_unreviewed_original_v3(
+            access,
+            key,
+            candidate_id,
+            revision,
             slots,
-            |held, contributions, context| -> std::result::Result<_, diagnostics::RosterError> {
-                let result = (|| -> Result<_> {
-                    let gate = ArtifactGate {workspace:self, access, consent, material, proof,
-                        roster:&roster, action:PrivateWorkspaceActionV1::CheckpointExactOriginal,
-                        held:Some(held), observation:Some(observation)};
-                    observation.stage(Site::HeldPrecheck);
-                    gate.check()?;
-                    observation.stage(Site::ConstructorReload);
-                    let before = self.operation_observed(access, consent,
-                        PrivateWorkspaceActionV1::CheckpointExactOriginal, Some(observation))?
-                        .load_observed(observation)?;
-                    observation.stage(Site::Candidate);
-                    let candidate = candidate(&before, candidate_id)?.clone();
-                    observation.stage(Site::InputRequestDigest);
-                    let input_digest = crate::candidates::private_request_digest(context, &contributions, &declarations)?;
-                    observation.stage(Site::OriginalRequest);
-                    let command = crate::context(access, key, "private_checkpoint_exact_original_v2",
-                        candidate_id, Some(revision),
-                        &json!({"local_input_digest":input_digest,"maximum_actions":limits.maximum_actions}))?;
-                    let receipt_key = receipt_key(access, key)?;
-                    observation.stage(Site::OriginalLookup);
-                    require_fresh_original_checkpoint_v2(&before, candidate_id, revision,
-                        self.proof.status_for_key(&access.principal_id, key, &command.request_digest, &gate), observation)?;
-                    let constructed = construct_exact_artifact_v2(access, candidate_id, &candidate, &command,
-                        crate::candidates::LocalConstruction {context,contributions,declarations:&declarations},
-                        limits, observation)?;
-                    observation.stage(Site::HeldPostcheck);
-                    gate.check()?;
-                    Ok(UnreviewedOriginalCheckpointV2 {before,candidate,command,input_digest,receipt_key,constructed})
-                })();
-                if let Err(error)=&result { observation.record(observation.site(), diagnostics::engine(error)); }
-                callback_returned.set(true);
-                result.map_err(diagnostics::RosterError::from)
-            },
-        ).map_err(|error| error.into_api(observation, if callback_returned.get() {
-            Site::WalletRosterRelease
-        } else { Site::WalletRosterAcquire }))?;
+            limits,
+            consent,
+            proof,
+            material,
+            PrepareModeV3::LegacyCheckpoint,
+            observation,
+        )?;
         // The entire held kernel, including its postchecks, has returned. The
         // real human review below owns no wallet lock and renews no capability.
         let gate = ArtifactGate {
@@ -720,6 +1340,99 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
         self.proof
             .check_current()
             .map_err(|error| observation.job_error(error))?;
+        self.finish_preparation_v3(
+            access,
+            key,
+            candidate_id,
+            revision,
+            prepared,
+            limits,
+            observation,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_unreviewed_original_v3(
+        &self,
+        access: &Access,
+        key: &str,
+        candidate_id: &str,
+        revision: u64,
+        slots: Vec<DurableConstructionWalletSlotV1<'_>>,
+        limits: ProvingLimits,
+        consent: &dyn LocalPrivateWorkspaceConsentV1,
+        proof: &dyn LocalProofConsent,
+        material: &dyn LocalDurableMaterialConsentV1,
+        mode: PrepareModeV3,
+        observation: &Observation,
+    ) -> Result<(Roster, UnreviewedOriginalCheckpointV2)> {
+        if !(1..=wholepact_protocol::proving::MAX_PROVING_ACTIONS).contains(&limits.maximum_actions)
+        {
+            return Err(denied());
+        }
+        observation.stage(Site::WorkspaceLoad);
+        let envelope = self
+            .operation_observed(access, consent, mode.action(), Some(observation))?
+            .load_observed(observation)?;
+        observation.stage(Site::Candidate);
+        let c = candidate(&envelope, candidate_id)?;
+        observation.stage(Site::MaterialRoster);
+        let roster =
+            self.checked_roster_observed(observation, access, &envelope, candidate_id, material)?;
+        let declarations = checkpoint_declarations_v2(c, &roster, &slots, observation)?;
+        observation.stage(Site::WalletRosterAcquire);
+        let callback_returned = std::cell::Cell::new(false);
+        let prepared = with_durable_construction_roster_v1(
+            slots,
+            |held, contributions, context| -> std::result::Result<_, diagnostics::RosterError> {
+                let result = (|| -> Result<_> {
+                    let gate = ArtifactGate {workspace:self, access, consent, material, proof,
+                        roster:&roster, action:mode.action(),
+                        held:Some(held), observation:Some(observation)};
+                    observation.stage(Site::HeldPrecheck);
+                    gate.check()?;
+                    observation.stage(Site::ConstructorReload);
+                    let before = self.operation_observed(access, consent,
+                        mode.action(), Some(observation))?
+                        .load_observed(observation)?;
+                    observation.stage(Site::Candidate);
+                    let candidate = candidate(&before, candidate_id)?.clone();
+                    observation.stage(Site::InputRequestDigest);
+                    let input_digest = crate::candidates::private_request_digest(context, &contributions, &declarations)?;
+                    observation.stage(Site::OriginalRequest);
+                    let command = crate::context(access, key, "private_checkpoint_exact_original_v2",
+                        candidate_id, Some(revision),
+                        &json!({"local_input_digest":input_digest,"maximum_actions":limits.maximum_actions}))?;
+                    let receipt_key = receipt_key(access, key)?;
+                    observation.stage(Site::OriginalLookup);
+                    require_fresh_original_checkpoint_v2(&before, candidate_id, revision,
+                        self.proof.status_for_key(&access.principal_id, key, &command.request_digest, &gate), observation)?;
+                    let constructed = construct_exact_artifact_v2(access, candidate_id, &candidate, &command,
+                        crate::candidates::LocalConstruction {context,contributions,declarations:&declarations},
+                        limits, observation)?;
+                    observation.stage(Site::HeldPostcheck);
+                    gate.check()?;
+                    Ok(UnreviewedOriginalCheckpointV2 {before,candidate,command,input_digest,receipt_key,constructed})
+                })();
+                if let Err(error)=&result { observation.record(observation.site(), diagnostics::engine(error)); }
+                callback_returned.set(true);
+                result.map_err(diagnostics::RosterError::from)
+            },
+        ).map_err(|error| error.into_api(observation, if callback_returned.get() {
+            Site::WalletRosterRelease
+        } else { Site::WalletRosterAcquire }))?;
+        Ok((roster, prepared))
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn finish_preparation_v3<'op>(
+        &'op self,
+        access: &Access,
+        key: &str,
+        candidate_id: &str,
+        revision: u64,
+        prepared: UnreviewedOriginalCheckpointV2,
+        limits: ProvingLimits,
+        observation: &Observation,
+    ) -> Result<PreparedOriginalCheckpointV2<'op, 'source>> {
         let UnreviewedOriginalCheckpointV2 {
             before,
             candidate,
@@ -1276,6 +1989,7 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
                     constructor,
                     enqueue,
                     linked_revision: linked.record.revision,
+                    review_scope: scope.clone(),
                 })
             }
             _ => None,
@@ -1419,6 +2133,7 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
             constructor,
             enqueue,
             linked_revision,
+            review_scope: _,
         } = attempt;
         observation.consumed();
         observation.stage(Site::ContinuationBinding);

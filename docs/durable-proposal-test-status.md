@@ -1,8 +1,18 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-19, 10:22 UTC.
+Updated: 2026-10-19, 11:25 UTC.
 
 **The bounded synthetic native two-owner fixed-signing fixture passed. Product qualification remains incomplete: no public testnet settlement, OS-process restart recovery, attended GUI reliability, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
+
+## CI26: retained Host approval refused final refresh; complete purpose-specific stage decisions added
+
+[Run 39237114306](https://github.com/stanleykosi/pactloom/actions/runs/39237114306), qualifier `1677a9207dd78f2538fa00ca8b21306f461b78b0`, passed build/Python152/Host97/bootstrap. Private checkpoint failed at10:41:55 UTC during final observation: HostWorkspaceCurrent/Host/Permission; secondary observation error was EngineDurableConstructionUnavailable. Evidence and worker were null, reader never started, cleanup verified. This category includes expiry and foreground/session denial, so expiry is a source-supported explanation, not a proven public subtype. Later regression phases were not run after this targeted failure.
+
+The complete source graph revealed overlapping independently timed approvals across Observe, checkpoint, proof, freeze and read. The eight-file correction introduces closed V3 Prepare, AdmitOriginal, ProveOriginal, FreezeFixed and ReadFixed decisions. Each exact review derives from actual source/prepared/retained owners, completes before prompt-free work, and mints one new purpose-specific stage owner. Prior stage grants are dropped; no expired cached grant is renewed. Explicit current-scope metadata inspection precedes review, including reopened Read, and cannot issue financial or private artifact authority.
+
+A new same-TTY terminal issuer admits exact checked disclosure under lock. Inspection checks surround expensive pre-display source validation. Immediately after an affirmative response, it captures the unchanged120-second stage deadline, then rechecks actual foreground/session/source/revocation/material predicates within that budget before returning authority. Old terminal factories remain unchanged. Original material ceilings,60-second genuine chain observations, exact artifact/request/source identities and post-proof uncertainty checks remain. No Wallet/ProofJobs/journal/financial policy or generic deadline change is made.
+
+Independent source/hash review cleared all8 paths. All-features Engine/Host build passed (3m12s). All31 exact focused/targeted tests passed:22 new tests, including a real Halo2 post-compute denial that records Uncertain without a second attempt, plus9 compatibility cases including a positive proof and actual qualifier input ordering. Non-synthetic compatibility runs alongside publication/native qualification. Actual native lifecycle success and full original-process reopen remain pending; v2 delivery/admission work remains held.
 
 ## CI25: fail-fast exposed the remaining lifecycle boundary; exact preparation split from admission
 

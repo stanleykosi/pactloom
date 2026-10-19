@@ -57,9 +57,10 @@ pub(crate) mod durable_private_workspace_v1;
 pub use durable_private_workspace_v1::{
     LocalPrivateWorkspaceConsentV1, OriginalCheckpointOutcomeV2, OriginalProofAttemptV2,
     PreparedPrivateDurableCoordinatorV1, PrivateDurableCoordinatorV1,
-    PrivateDurableWorkspaceSourceV1, PrivateExactCandidateV2, PrivateFixedStatusV2,
-    PrivateVerifiedFixedV2, PrivateWorkspaceActionV1, PrivateWorkspaceInitializationPlanV1,
-    PrivateWorkspaceScopeV1, PrivateWorkspaceSeedBindingV1, PrivateWorkspaceStatusV1,
+    PrivateDurableWorkspaceSourceV1, PrivateExactCandidateV2, PrivateFixedMaterialReviewV3,
+    PrivateFixedStageReviewV3, PrivateFixedStageV3, PrivateFixedStatusV2, PrivateVerifiedFixedV2,
+    PrivateWorkspaceActionV1, PrivateWorkspaceInitializationPlanV1, PrivateWorkspaceScopeV1,
+    PrivateWorkspaceSeedBindingV1, PrivateWorkspaceStatusV1,
 };
 #[cfg(feature = "durable-proposal")]
 pub mod durable_proposals_v1;
