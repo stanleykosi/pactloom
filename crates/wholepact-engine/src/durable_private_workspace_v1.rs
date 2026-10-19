@@ -23,8 +23,8 @@ pub(crate) use exact_fixed_v2::diagnostics;
 #[path = "durable_private_workspace_v1/operation_v1.rs"]
 mod operation_v1;
 pub use exact_fixed_v2::{
-    OriginalCheckpointOutcomeV2, OriginalProofAttemptV2, PrivateExactCandidateV2,
-    PrivateFixedStatusV2, PrivateVerifiedFixedV2,
+    OriginalCheckpointOutcomeV2, OriginalProofAttemptV2, PreparedOriginalCheckpointV2,
+    PrivateExactCandidateV2, PrivateFixedStatusV2, PrivateVerifiedFixedV2,
 };
 
 fn denied() -> ApiError {

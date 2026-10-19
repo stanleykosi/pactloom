@@ -3,6 +3,12 @@
 use super::*;
 use std::os::unix::fs::PermissionsExt;
 use wholepact_core::*;
+std::thread_local! {
+    static ORIGINAL_CONSTRUCTOR_CALLS_V2: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+pub(super) fn record_original_constructor_v2() {
+    ORIGINAL_CONSTRUCTOR_CALLS_V2.with(|count| count.set(count.get() + 1));
+}
 fn amount(n: u64) -> Amount {
     Amount::from_zatoshis(n).unwrap()
 }
@@ -765,6 +771,408 @@ mod actual_cryptography {
                 .unwrap(),
             actual
         );
+    }
+    /// Same-kernel lifecycle components, not a fabricated original source or
+    /// native approval. One actual randomized unsigned artifact is reused.
+    mod prepared_lifecycle {
+        use super::*;
+        use wholepact_protocol::construction::SpendableNote;
+        fn checked<T, E>(value: std::result::Result<T, E>) -> T {
+            match value {
+                Ok(value) => value,
+                Err(_) => panic!("prepared lifecycle component failed"),
+            }
+        }
+        fn copies(values: &[OwnedContribution]) -> Vec<OwnedContribution> {
+            values
+                .iter()
+                .map(|v| OwnedContribution {
+                    account_id: v.account_id.clone(),
+                    fvk: v.fvk.clone(),
+                    change_address: v.change_address,
+                    notes: v
+                        .notes
+                        .iter()
+                        .map(|n| SpendableNote {
+                            input_id: n.input_id.clone(),
+                            note: n.note.clone(),
+                            witness: n.witness.clone(),
+                        })
+                        .collect(),
+                })
+                .collect()
+        }
+        #[test]
+        fn prepared_context_accepts_advance_but_not_rewind_anchor_or_expiry_change() {
+            let original = ConstructionContext {
+                anchor: [1; 32],
+                anchor_height: 4_465_040,
+                anchor_block_hash: [2; 32],
+                target_height: 4_465_041,
+            };
+            checked(validate_prepared_context_v2(original, original, 4_465_070));
+            let mut advanced = original;
+            advanced.target_height += 2;
+            checked(validate_prepared_context_v2(original, advanced, 4_465_070));
+            for current in [
+                ConstructionContext {
+                    target_height: original.target_height - 1,
+                    ..original
+                },
+                ConstructionContext {
+                    target_height: 4_465_071,
+                    ..original
+                },
+                ConstructionContext {
+                    anchor: [3; 32],
+                    ..original
+                },
+                ConstructionContext {
+                    anchor_height: original.anchor_height + 1,
+                    ..original
+                },
+                ConstructionContext {
+                    anchor_block_hash: [4; 32],
+                    ..original
+                },
+            ] {
+                assert!(validate_prepared_context_v2(original, current, 4_465_070).is_err());
+            }
+            // NU7 and real current note/ancestry eligibility are established by
+            // the unchanged Wallet held kernel, not by this inert context DTO.
+        }
+        #[test]
+        fn original_artifact_moves_once_across_advancing_join_and_fresh_only_recheck() {
+            ORIGINAL_CONSTRUCTOR_CALLS_V2.with(|count| count.set(0));
+            let f = fixture();
+            let dir = checked(tempfile::tempdir());
+            checked(std::fs::set_permissions(
+                dir.path(),
+                std::fs::Permissions::from_mode(0o700),
+            ));
+            let metadata = dir.path().join("metadata.sqlite");
+            let proof_path = dir.path().join("proof.sqlite");
+            let engine = Engine::from_store(checked(wholepact_store::Store::create_encrypted(
+                &metadata,
+                &DatabaseKey::from_bytes([126; 32]),
+            )));
+            let proof_key = DatabaseKey::from_bytes([127; 32]);
+            let jobs = checked(
+                wholepact_proof_jobs::ProofJobStore::from_encrypted_connection(checked(
+                    wholepact_storage_security::create_encrypted(&proof_path, &proof_key),
+                )),
+            );
+            let access = Access {
+                principal_id: "synthetic-component-owner".into(),
+                include_owned_agreements: true,
+                ..Access::default()
+            };
+            checked(engine.create(
+                &access,
+                "prepared-component-create-command",
+                f.agreement.clone(),
+            ));
+            for (i, p) in f.request.manifest.participants.iter().enumerate() {
+                checked(engine.add_intent(
+                    &access,
+                    &format!("prepared-component-intent-{i}"),
+                    &f.agreement.agreement_id,
+                    i as u64 + 1,
+                    ParticipationIntent {
+                        intent_id: format!("prepared-intent-{i}"),
+                        agreement_id: f.agreement.agreement_id.clone(),
+                        participant_id: p.participant_id.clone(),
+                        desired_contribution: p.contribution,
+                        maximum_net_debit: p.maximum_net_debit,
+                        fee_cap: p.fee_cap,
+                        conditions: vec![],
+                        valid_until: None,
+                        status: IntentStatus::Active,
+                    },
+                ));
+            }
+            let candidate = checked(engine.create_candidate(
+                &access,
+                "prepared-component-candidate-command",
+                &f.agreement.agreement_id,
+                3,
+                f.request,
+            ));
+            let c = candidate.agreement.candidates[0].clone();
+            let before = checked(engine.load(&access, &f.agreement.agreement_id));
+            assert!(before.private_workspace_origin_v1.is_none());
+            let revision = before.view.revision;
+            let declarations: Vec<_> = f
+                .account_ids
+                .iter()
+                .map(|account| DisclosureAcknowledgement {
+                    account_id: account.clone(),
+                    manifest_digest: checked(hex::decode(&c.manifest_digest)).try_into().unwrap(),
+                    operator: "synthetic-local-constructor".into(),
+                    reviewer_account_ids: f.account_ids.clone(),
+                    purpose: "actual synthetic proof component".into(),
+                    retention_policy: "temporary component ciphertext".into(),
+                    scope: DisclosureScope::DedicatedAccountFvkAndSelectedNotesAndOutputs,
+                })
+                .collect();
+            let key = "prepared-component-checkpoint-command";
+            let limits = ProvingLimits { maximum_actions: 8 };
+            let input_digest = checked(crate::candidates::private_request_digest(
+                f.chain,
+                &f.packages,
+                &declarations,
+            ));
+            let command = checked(crate::context(
+                &access,
+                key,
+                "private_checkpoint_exact_original_v2",
+                &c.candidate_id,
+                Some(revision),
+                &json!({"local_input_digest":input_digest,"maximum_actions":limits.maximum_actions}),
+            ));
+            let privacy = ExactProofPrivacy {
+                principal: access.principal_id.clone(),
+                candidate: c.candidate_id.clone(),
+                manifest: c.manifest_digest.clone(),
+                accounts: f.account_ids.clone(),
+            };
+            let observation = Observation::new(Operation::Checkpoint);
+            let records = checked(engine.store.list_records("agreement"));
+            let events = checked(engine.store.events_after(0, 64));
+            let metadata_bytes = checked(std::fs::read(&metadata));
+            let proof_bytes = checked(std::fs::read(&proof_path));
+            checked(require_fresh_original_checkpoint_v2(
+                &before,
+                &c.candidate_id,
+                revision,
+                jobs.status_for_key(&access.principal_id, key, &command.request_digest, &privacy),
+                &observation,
+            ));
+            let constructed = checked(construct_exact_artifact_v2(
+                &access,
+                &c.candidate_id,
+                &c,
+                &command,
+                crate::candidates::LocalConstruction {
+                    context: f.chain,
+                    contributions: copies(&f.packages),
+                    declarations: &declarations,
+                },
+                limits,
+                &observation,
+            ));
+            let ConstructedCheckpointV2 { built, scope } = constructed;
+            let receipt = checked(prepare_constructor_receipt_v2(
+                &access,
+                key,
+                &c.candidate_id,
+                revision,
+                input_digest,
+                &c,
+                &command,
+                &built,
+                &scope,
+                limits,
+                &observation,
+            ));
+            let mut ready = ReadyOriginalCheckpointV2 {
+                before: before.clone(),
+                original_key: key.into(),
+                candidate_id: c.candidate_id.clone(),
+                revision,
+                command,
+                receipt_key: checked(receipt_key(&access, key)),
+                receipt,
+                built,
+                scope,
+                limits,
+            };
+            let original_pointer = ready.built.pczt_bytes.as_ptr();
+            let original_bytes = ready.built.pczt_bytes.clone();
+            let original_scope = checked(serde_json::to_value(&ready.scope));
+            let original_receipt = checked(serde_json::to_value(&ready.receipt));
+            let original_request = checked(serde_json::to_value(&ready.command));
+            let original_policy_allocations = (
+                ready.built.review_policy.participants.as_ptr(),
+                ready.built.review_policy.inputs.as_ptr(),
+                ready.built.review_policy.outputs.as_ptr(),
+            );
+            let original_review = checked(serde_json::to_value(checked(
+                wholepact_protocol::review::verify_review(
+                    &ready.built.pczt_bytes,
+                    &ready.built.review_policy,
+                ),
+            )));
+            let mut advanced = f.chain;
+            advanced.target_height += 1;
+            checked(validate_prepared_join_v2(
+                &ready,
+                &before,
+                advanced,
+                &f.packages,
+                &declarations,
+            ));
+            assert!(
+                checked(crate::candidates::private_request_digest(
+                    advanced,
+                    &f.packages,
+                    &declarations
+                )) != ready
+                    .receipt
+                    .original_request_v2
+                    .as_ref()
+                    .unwrap()
+                    .local_input_digest
+            );
+            let mut changed = before.clone();
+            changed.view.revision += 1;
+            assert!(
+                validate_prepared_join_v2(&ready, &changed, advanced, &f.packages, &declarations)
+                    .is_err()
+            );
+            let mut changed_inputs = copies(&f.packages);
+            changed_inputs[0].notes[0].input_id.push('x');
+            assert!(
+                validate_prepared_join_v2(
+                    &ready,
+                    &before,
+                    advanced,
+                    &changed_inputs,
+                    &declarations
+                )
+                .is_err()
+            );
+            let old_scope = ready.scope.clone();
+            ready.scope.retention_policy.push('x');
+            assert!(
+                validate_prepared_join_v2(&ready, &before, advanced, &f.packages, &declarations)
+                    .is_err()
+            );
+            ready.scope = old_scope;
+            let old_digest = ready.command.request_digest.clone();
+            ready.command.request_digest = "0".repeat(64);
+            assert!(
+                validate_prepared_join_v2(&ready, &before, advanced, &f.packages, &declarations)
+                    .is_err()
+            );
+            ready.command.request_digest = old_digest;
+            let ready = checked(consume_prepared_join_v2(
+                ready,
+                &before,
+                advanced,
+                &f.packages,
+                &declarations,
+            ));
+            assert!(
+                ready.built.pczt_bytes.as_ptr() == original_pointer
+                    && ready.built.pczt_bytes == original_bytes
+            );
+            assert!(checked(serde_json::to_value(&ready.scope)) == original_scope);
+            assert!(checked(serde_json::to_value(&ready.receipt)) == original_receipt);
+            assert!(checked(serde_json::to_value(&ready.command)) == original_request);
+            assert!(
+                original_policy_allocations
+                    == (
+                        ready.built.review_policy.participants.as_ptr(),
+                        ready.built.review_policy.inputs.as_ptr(),
+                        ready.built.review_policy.outputs.as_ptr(),
+                    )
+            );
+            assert!(
+                checked(serde_json::to_value(checked(
+                    wholepact_protocol::review::verify_review(
+                        &ready.built.pczt_bytes,
+                        &ready.built.review_policy
+                    ),
+                ))) == original_review
+            );
+            ORIGINAL_CONSTRUCTOR_CALLS_V2.with(|count| assert_eq!(count.get(), 1));
+            assert!(
+                records == checked(engine.store.list_records("agreement"))
+                    && events == checked(engine.store.events_after(0, 64))
+            );
+            assert!(
+                metadata_bytes == checked(std::fs::read(&metadata))
+                    && proof_bytes == checked(std::fs::read(&proof_path))
+            );
+            // A REAL queued row is now created solely for the refusal control.
+            // No completed proof, native source owner or continuation is fabricated.
+            checked(jobs.enqueue(
+                &ready.scope,
+                key,
+                &ready.built.pczt_bytes,
+                &ready.built.review_policy,
+                limits,
+                &privacy,
+            ));
+            let actual = jobs.status_for_key(
+                &access.principal_id,
+                key,
+                &ready.command.request_digest,
+                &privacy,
+            );
+            assert!(actual.as_ref().is_ok_and(|s| s.is_some()));
+            assert!(
+                require_fresh_original_checkpoint_v2(
+                    &before,
+                    &c.candidate_id,
+                    revision,
+                    actual,
+                    &observation
+                )
+                .is_err()
+            );
+            let actual_error =
+                jobs.status_for_key(&access.principal_id, key, &"0".repeat(64), &privacy);
+            assert!(matches!(
+                actual_error,
+                Err(wholepact_proof_jobs::JobError::IdempotencyConflict)
+            ));
+            let error = require_fresh_original_checkpoint_v2(
+                &before,
+                &c.candidate_id,
+                revision,
+                actual_error,
+                &observation,
+            )
+            .err()
+            .unwrap();
+            assert_eq!(error.code, "IDEMPOTENCY_CONFLICT");
+            let mut partial = before.clone();
+            partial
+                .checkpoint_receipts
+                .insert(ready.receipt_key.clone(), ready.receipt.clone());
+            assert!(
+                require_fresh_original_checkpoint_v2(
+                    &partial,
+                    &c.candidate_id,
+                    revision,
+                    Ok(None),
+                    &observation
+                )
+                .is_err()
+            );
+            assert!(
+                require_fresh_original_checkpoint_v2(
+                    &before,
+                    &c.candidate_id,
+                    revision + 1,
+                    Ok(None),
+                    &observation
+                )
+                .is_err()
+            );
+            // Failure also consumes this memory-only Ready value. It cannot be
+            // reused or converted to OriginalProofAttemptV2 from either Result.
+            let failed =
+                consume_prepared_join_v2(ready, &changed, advanced, &f.packages, &declarations);
+            assert!(failed.is_err());
+            ORIGINAL_CONSTRUCTOR_CALLS_V2.with(|count| assert_eq!(count.get(), 1));
+            assert!(
+                records == checked(engine.store.list_records("agreement"))
+                    && events == checked(engine.store.events_after(0, 64))
+            );
+        }
     }
     /// Data-only mathematical/history component. Serialized historical labels
     /// are not native approvals. No authenticated disclosure, source owner,

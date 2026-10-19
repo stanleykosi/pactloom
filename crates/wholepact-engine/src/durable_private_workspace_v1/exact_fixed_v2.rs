@@ -98,6 +98,38 @@ pub struct OriginalProofAttemptV2<'op, 'source> {
     enqueue: FreshOriginalEnqueueV1<'source>,
     linked_revision: u64,
 }
+/// Memory-only original randomized artifact after exact native review. This is
+/// not a receipt, proof attempt or permission. No Clone/serde/raw-data getters.
+/// It borrows only its original coordinator, never a wallet or observation.
+pub struct PreparedOriginalCheckpointV2<'op, 'source> {
+    workspace: &'op PrivateDurableCoordinatorV1<'source>,
+    ready: ReadyOriginalCheckpointV2,
+}
+impl<'op, 'source> PreparedOriginalCheckpointV2<'op, 'source> {
+    /// Consume before any fallible admission check. A failure cannot be retried
+    /// with this owner and never authorizes randomized reconstruction.
+    pub fn admit_original_v2(
+        self,
+        access: &Access,
+        slots: Vec<DurableConstructionWalletSlotV1<'_>>,
+        consent: &dyn LocalPrivateWorkspaceConsentV1,
+        proof: &dyn LocalProofConsent,
+        material: &dyn LocalDurableMaterialConsentV1,
+    ) -> Result<OriginalCheckpointOutcomeV2<'op, 'source>> {
+        let PreparedOriginalCheckpointV2 { workspace, ready } = self;
+        let observation = Observation::new(Operation::Checkpoint);
+        let result = workspace.admit_ready_original_v2(
+            access,
+            ready,
+            slots,
+            consent,
+            proof,
+            material,
+            &observation,
+        );
+        observation.finish(result)
+    }
+}
 pub struct OriginalCheckpointOutcomeV2<'op, 'source> {
     status: PrivateWorkspaceStatusV1,
     attempt: Option<OriginalProofAttemptV2<'op, 'source>>,
@@ -555,6 +587,294 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
             }
         }
     }
+    /// Prepare exactly once, release all initial wallet locks, then obtain the
+    /// real exact artifact review. No retained metadata/proof effects occur.
+    /// Existing process-only scan/witness caches are not a no-write claim.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_checkpoint_exact_original_v2<'op>(
+        &'op self,
+        access: &Access,
+        key: &str,
+        candidate_id: &str,
+        revision: u64,
+        slots: Vec<DurableConstructionWalletSlotV1<'_>>,
+        limits: ProvingLimits,
+        consent: &dyn LocalPrivateWorkspaceConsentV1,
+        proof: &dyn LocalProofConsent,
+        material: &dyn LocalDurableMaterialConsentV1,
+    ) -> Result<PreparedOriginalCheckpointV2<'op, 'source>> {
+        let observation = Observation::new(Operation::Checkpoint);
+        let result = self.prepare_original_observed_v2(
+            access,
+            key,
+            candidate_id,
+            revision,
+            slots,
+            limits,
+            consent,
+            proof,
+            material,
+            &observation,
+        );
+        observation.finish(result)
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_original_observed_v2<'op>(
+        &'op self,
+        access: &Access,
+        key: &str,
+        candidate_id: &str,
+        revision: u64,
+        slots: Vec<DurableConstructionWalletSlotV1<'_>>,
+        limits: ProvingLimits,
+        consent: &dyn LocalPrivateWorkspaceConsentV1,
+        proof: &dyn LocalProofConsent,
+        material: &dyn LocalDurableMaterialConsentV1,
+        observation: &Observation,
+    ) -> Result<PreparedOriginalCheckpointV2<'op, 'source>> {
+        if !(1..=wholepact_protocol::proving::MAX_PROVING_ACTIONS).contains(&limits.maximum_actions)
+        {
+            return Err(denied());
+        }
+        observation.stage(Site::WorkspaceLoad);
+        let envelope = self
+            .operation_observed(
+                access,
+                consent,
+                PrivateWorkspaceActionV1::CheckpointExactOriginal,
+                Some(observation),
+            )?
+            .load_observed(observation)?;
+        observation.stage(Site::Candidate);
+        let c = candidate(&envelope, candidate_id)?;
+        observation.stage(Site::MaterialRoster);
+        let roster =
+            self.checked_roster_observed(observation, access, &envelope, candidate_id, material)?;
+        let declarations = checkpoint_declarations_v2(c, &roster, &slots, observation)?;
+        observation.stage(Site::WalletRosterAcquire);
+        let callback_returned = std::cell::Cell::new(false);
+        let prepared = with_durable_construction_roster_v1(
+            slots,
+            |held, contributions, context| -> std::result::Result<_, diagnostics::RosterError> {
+                let result = (|| -> Result<_> {
+                    let gate = ArtifactGate {workspace:self, access, consent, material, proof,
+                        roster:&roster, action:PrivateWorkspaceActionV1::CheckpointExactOriginal,
+                        held:Some(held), observation:Some(observation)};
+                    observation.stage(Site::HeldPrecheck);
+                    gate.check()?;
+                    observation.stage(Site::ConstructorReload);
+                    let before = self.operation_observed(access, consent,
+                        PrivateWorkspaceActionV1::CheckpointExactOriginal, Some(observation))?
+                        .load_observed(observation)?;
+                    observation.stage(Site::Candidate);
+                    let candidate = candidate(&before, candidate_id)?.clone();
+                    observation.stage(Site::InputRequestDigest);
+                    let input_digest = crate::candidates::private_request_digest(context, &contributions, &declarations)?;
+                    observation.stage(Site::OriginalRequest);
+                    let command = crate::context(access, key, "private_checkpoint_exact_original_v2",
+                        candidate_id, Some(revision),
+                        &json!({"local_input_digest":input_digest,"maximum_actions":limits.maximum_actions}))?;
+                    let receipt_key = receipt_key(access, key)?;
+                    observation.stage(Site::OriginalLookup);
+                    require_fresh_original_checkpoint_v2(&before, candidate_id, revision,
+                        self.proof.status_for_key(&access.principal_id, key, &command.request_digest, &gate), observation)?;
+                    let constructed = construct_exact_artifact_v2(access, candidate_id, &candidate, &command,
+                        crate::candidates::LocalConstruction {context,contributions,declarations:&declarations},
+                        limits, observation)?;
+                    observation.stage(Site::HeldPostcheck);
+                    gate.check()?;
+                    Ok(UnreviewedOriginalCheckpointV2 {before,candidate,command,input_digest,receipt_key,constructed})
+                })();
+                if let Err(error)=&result { observation.record(observation.site(), diagnostics::engine(error)); }
+                callback_returned.set(true);
+                result.map_err(diagnostics::RosterError::from)
+            },
+        ).map_err(|error| error.into_api(observation, if callback_returned.get() {
+            Site::WalletRosterRelease
+        } else { Site::WalletRosterAcquire }))?;
+        // The entire held kernel, including its postchecks, has returned. The
+        // real human review below owns no wallet lock and renews no capability.
+        let gate = ArtifactGate {
+            workspace: self,
+            access,
+            consent,
+            material,
+            proof,
+            roster: &roster,
+            action: PrivateWorkspaceActionV1::CheckpointExactOriginal,
+            held: None,
+            observation: Some(observation),
+        };
+        observation.stage(Site::PostSource);
+        self.proof
+            .check_current()
+            .map_err(|error| observation.job_error(error))?;
+        observation.stage(Site::RetainConsent);
+        if !gate.permits(
+            &prepared.constructed.scope,
+            LocalAction::RetainPrivateWitnesses,
+        ) {
+            return Err(denied());
+        }
+        observation.stage(Site::PostSource);
+        self.proof
+            .check_current()
+            .map_err(|error| observation.job_error(error))?;
+        let UnreviewedOriginalCheckpointV2 {
+            before,
+            candidate,
+            command,
+            input_digest,
+            receipt_key,
+            constructed,
+        } = prepared;
+        let ConstructedCheckpointV2 { built, scope } = constructed;
+        let receipt = prepare_constructor_receipt_v2(
+            access,
+            key,
+            candidate_id,
+            revision,
+            input_digest,
+            &candidate,
+            &command,
+            &built,
+            &scope,
+            limits,
+            observation,
+        )?;
+        Ok(PreparedOriginalCheckpointV2 {
+            workspace: self,
+            ready: ReadyOriginalCheckpointV2 {
+                before,
+                original_key: key.into(),
+                candidate_id: candidate_id.into(),
+                revision,
+                command,
+                receipt_key,
+                receipt,
+                built,
+                scope,
+                limits,
+            },
+        })
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn admit_ready_original_v2<'op>(
+        &'op self,
+        access: &Access,
+        ready: ReadyOriginalCheckpointV2,
+        slots: Vec<DurableConstructionWalletSlotV1<'_>>,
+        consent: &dyn LocalPrivateWorkspaceConsentV1,
+        proof: &dyn LocalProofConsent,
+        material: &dyn LocalDurableMaterialConsentV1,
+        observation: &Observation,
+    ) -> Result<OriginalCheckpointOutcomeV2<'op, 'source>> {
+        observation.stage(Site::WorkspaceLoad);
+        let envelope = self
+            .operation_observed(
+                access,
+                consent,
+                PrivateWorkspaceActionV1::CheckpointExactOriginal,
+                Some(observation),
+            )?
+            .load_observed(observation)?;
+        observation.stage(Site::Candidate);
+        let c = candidate(&envelope, &ready.candidate_id)?;
+        observation.stage(Site::MaterialRoster);
+        let roster = self.checked_roster_observed(
+            observation,
+            access,
+            &envelope,
+            &ready.candidate_id,
+            material,
+        )?;
+        let declarations = checkpoint_declarations_v2(c, &roster, &slots, observation)?;
+        observation.stage(Site::WalletRosterAcquire);
+        let callback_returned = std::cell::Cell::new(false);
+        let result = with_durable_construction_roster_v1(
+            slots,
+            |held, contributions, current| -> std::result::Result<_, diagnostics::RosterError> {
+                let result = (|| -> Result<_> {
+                    let gate = ArtifactGate {
+                        workspace: self,
+                        access,
+                        consent,
+                        material,
+                        proof,
+                        roster: &roster,
+                        action: PrivateWorkspaceActionV1::CheckpointExactOriginal,
+                        held: Some(held),
+                        observation: Some(observation),
+                    };
+                    observation.stage(Site::HeldPrecheck);
+                    gate.check()?;
+                    observation.stage(Site::ConstructorReload);
+                    let before = self
+                        .operation_observed(
+                            access,
+                            consent,
+                            PrivateWorkspaceActionV1::CheckpointExactOriginal,
+                            Some(observation),
+                        )?
+                        .load_observed(observation)?;
+                    observation.stage(Site::OriginalLookup);
+                    require_fresh_original_checkpoint_v2(
+                        &before,
+                        &ready.candidate_id,
+                        ready.revision,
+                        self.proof.status_for_key(
+                            &access.principal_id,
+                            &ready.original_key,
+                            &ready.command.request_digest,
+                            &gate,
+                        ),
+                        observation,
+                    )?;
+                    observation.stage(Site::OriginalRequest);
+                    let ready = consume_prepared_join_v2(
+                        ready,
+                        &before,
+                        current,
+                        &contributions,
+                        &declarations,
+                    )?;
+                    validate_original_request_v2(&ready.receipt, access, &ready.original_key)?;
+                    observation.stage(Site::RetainConsent);
+                    if !gate.permits(&ready.scope, LocalAction::RetainPrivateWitnesses) {
+                        return Err(denied());
+                    }
+                    // No constructor on this path. The exact reviewed bytes and
+                    // request move once into the original retained-effect tail.
+                    let outcome = self.persist_original_checkpoint_v2(
+                        access,
+                        ready,
+                        consent,
+                        &gate,
+                        observation,
+                    )?;
+                    observation.stage(Site::HeldPostcheck);
+                    gate.check()
+                        .map_err(|error| checkpoint_committed_error(error, &outcome.status))?;
+                    Ok(outcome)
+                })();
+                if let Err(error) = &result {
+                    observation.record(observation.site(), diagnostics::engine(error));
+                }
+                callback_returned.set(true);
+                result.map_err(diagnostics::RosterError::from)
+            },
+        );
+        result.map_err(|error| {
+            error.into_api(
+                observation,
+                if callback_returned.get() {
+                    Site::WalletRosterRelease
+                } else {
+                    Site::WalletRosterAcquire
+                },
+            )
+        })
+    }
     #[allow(clippy::too_many_arguments)]
     pub fn checkpoint_exact_original_v2<'op>(
         &'op self,
@@ -614,57 +934,7 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
         observation.stage(Site::MaterialRoster);
         let roster =
             self.checked_roster_observed(observation, access, &envelope, candidate_id, material)?;
-        observation.stage(Site::SlotBindings);
-        if slots.len() != 2 {
-            return Err(denied());
-        }
-        let mut expected = BTreeSet::new();
-        let mut declarations = Vec::new();
-        for intake in roster.owners.values() {
-            let scope = &intake.outbox.request().scope;
-            expected.insert((
-                intake.outbox.material_digest().to_owned(),
-                scope.digest().map_err(|e| {
-                    observation.record(Site::SlotBindings, diagnostics::construction(&e));
-                    ApiError::from(e)
-                })?,
-            ));
-            declarations.push(DisclosureAcknowledgement {
-                account_id: scope.account_id.clone(),
-                manifest_digest: hex::decode(&c.manifest_digest)
-                    .map_err(|_| damaged())?
-                    .try_into()
-                    .map_err(|_| damaged())?,
-                operator: scope.prover.principal_id.clone(),
-                reviewer_account_ids: scope
-                    .reviewers
-                    .iter()
-                    .map(|r| r.account_id().to_string())
-                    .collect(),
-                purpose: scope.purpose.clone(),
-                retention_policy: scope.retention_policy.clone(),
-                scope: DisclosureScope::DedicatedAccountFvkAndSelectedNotesAndOutputs,
-            });
-        }
-        observation.stage(Site::SlotBindings);
-        let actual: BTreeSet<_> = slots
-            .iter()
-            .map(|s| {
-                Ok((
-                    s.material_digest().map_err(|e| {
-                        observation.record(Site::SlotBindings, diagnostics::construction(&e));
-                        ApiError::from(e)
-                    })?,
-                    s.scope_digest().map_err(|e| {
-                        observation.record(Site::SlotBindings, diagnostics::construction(&e));
-                        ApiError::from(e)
-                    })?,
-                ))
-            })
-            .collect::<Result<_>>()?;
-        if actual.len() != 2 || actual != expected {
-            return Err(damaged());
-        }
+        let declarations = checkpoint_declarations_v2(c, &roster, &slots, observation)?;
         observation.stage(Site::WalletRosterAcquire);
         let callback_returned = std::cell::Cell::new(false);
         let result = with_durable_construction_roster_v1(
@@ -836,98 +1106,74 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
         crate::candidates::check_revision(&before, revision)?;
         observation.stage(Site::CurrentTerms);
         crate::candidates::check_current_terms(&before.view, &c.proposal.manifest)?;
-        observation.stage(Site::RetainConsent);
-        let first = construction.declarations.first().ok_or_else(denied)?;
-        if construction.declarations.len() != 2
-            || construction
-                .declarations
-                .iter()
-                .any(|d| d.purpose != first.purpose || d.retention_policy != first.retention_policy)
-        {
-            return Err(denied());
-        }
-        observation.stage(Site::ProposalValidation);
-        let proposal = c.verified_snapshot()?;
-        observation.stage(Site::ProtocolConstruct);
-        let built = wholepact_protocol::construction::construct_proposal(
-            &proposal,
-            construction.context,
-            construction.contributions,
-            construction.declarations,
-        )
-        .map_err(|error| {
-            observation.record(Site::ProtocolConstruct, diagnostics::protocol(&error));
-            ApiError::new(
-                "CANDIDATE_VERIFICATION_FAILED",
-                "Exact original local construction failed before private retention",
-            )
-        })?;
-        observation.stage(Site::ProtocolInspect);
-        if wholepact_protocol::inspect_candidate(&built.pczt_bytes)
-            .map_err(|error| {
-                observation.record(Site::ProtocolInspect, diagnostics::protocol(&error));
-                damaged()
-            })?
-            .actions
-            > limits.maximum_actions
-        {
-            return Err(denied());
-        }
-        observation.stage(Site::OriginalRequest);
-        let scope = CheckpointScope {
-            principal_id: access.principal_id.clone(),
-            candidate_id: candidate_id.into(),
-            manifest_digest: c.manifest_digest.clone(),
-            artifact_digest: hex::encode(Sha256::digest(&built.pczt_bytes)),
-            effects_commitment: built.economic_review.shielded_sighash().into(),
-            coordination_request_digest: command.request_digest.clone(),
-            review_binding: built.economic_review.review_binding().into(),
-            account_ids: proposal
-                .manifest()
-                .participants
-                .iter()
-                .map(|p| p.account_id.clone())
-                .collect(),
-            local_operator: proposal
-                .manifest()
-                .agreement
-                .privacy_profile
-                .proving_operator
-                .clone()
-                .ok_or_else(denied)?,
-            purpose: first.purpose.clone(),
-            retention_policy: first.retention_policy.clone(),
-        };
+        let ConstructedCheckpointV2 { built, scope } = construct_exact_artifact_v2(
+            access,
+            candidate_id,
+            &c,
+            &command,
+            construction,
+            limits,
+            observation,
+        )?;
         observation.stage(Site::RetainConsent);
         if !proof.permits(&scope, LocalAction::RetainPrivateWitnesses) {
             return Err(denied());
         }
-        observation.stage(Site::ReceiptPrepare);
-        let prepared_revision = revision.checked_add(1).ok_or_else(damaged)?;
-        let receipt = crate::candidates::CheckpointReceipt {
-            original_request_v2: Some(crate::candidates::OriginalCheckpointRequestV2 {
-                command: command.clone(),
-                expected_revision: revision,
-                local_input_digest: input_digest,
-                maximum_actions: limits.maximum_actions,
-            }),
-            action_mappings_v1: Some(json!({
-            "inputs":built.input_actions.iter().map(|m|json!({"input_id":m.input_id,"account_id":m.account_id,"action_index":m.action_index})).collect::<Vec<_>>(),
-            "outputs":built.output_actions.iter().map(|m|json!({"output_id":m.output_id,"action_index":m.action_index})).collect::<Vec<_>>() })),
-            job_id: wholepact_proof_jobs::job_id_for_key(&access.principal_id, key)
-                .map_err(|error| observation.job_error(error))?,
-            scope_digest: hex::encode(Sha256::digest(
-                serde_json::to_vec(&scope).map_err(|_| damaged())?,
-            )),
-            principal_id: access.principal_id.clone(),
-            candidate_id: candidate_id.into(),
-            manifest_digest: c.manifest_digest.clone(),
-            coordination_request_digest: command.request_digest.clone(),
-            artifact_digest: scope.artifact_digest.clone(),
-            review_binding: scope.review_binding.clone(),
-            effects_commitment: scope.effects_commitment.clone(),
-            prepared_revision,
-        };
+        let receipt = prepare_constructor_receipt_v2(
+            access,
+            key,
+            candidate_id,
+            revision,
+            input_digest,
+            &c,
+            &command,
+            &built,
+            &scope,
+            limits,
+            observation,
+        )?;
+        self.persist_original_checkpoint_v2(
+            access,
+            ReadyOriginalCheckpointV2 {
+                before,
+                original_key: key.into(),
+                candidate_id: candidate_id.into(),
+                revision,
+                command,
+                receipt_key,
+                receipt,
+                built,
+                scope,
+                limits,
+            },
+            consent,
+            proof,
+            observation,
+        )
+    }
+    fn persist_original_checkpoint_v2<'op>(
+        &'op self,
+        access: &Access,
+        ready: ReadyOriginalCheckpointV2,
+        consent: &dyn LocalPrivateWorkspaceConsentV1,
+        proof: &dyn LocalProofConsent,
+        observation: &Observation,
+    ) -> Result<OriginalCheckpointOutcomeV2<'op, 'source>> {
+        let ReadyOriginalCheckpointV2 {
+            before,
+            original_key,
+            candidate_id,
+            revision,
+            command,
+            receipt_key,
+            receipt,
+            built,
+            scope,
+            limits,
+        } = ready;
+        let key = original_key.as_str();
+        let candidate_id = candidate_id.as_str();
+        let prepared_revision = receipt.prepared_revision;
         observation.stage(Site::ReceiptPrepare);
         let prepare_command = crate::context(
             access,
@@ -1977,6 +2223,306 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
         }
         commit_digest("wholepact:private-exact-operation-history:v2", &history)
     }
+}
+struct UnreviewedOriginalCheckpointV2 {
+    before: Envelope,
+    candidate: CandidateView,
+    command: wholepact_store::CommandContext,
+    input_digest: String,
+    receipt_key: String,
+    constructed: ConstructedCheckpointV2,
+}
+fn require_fresh_original_checkpoint_v2(
+    before: &Envelope,
+    candidate_id: &str,
+    revision: u64,
+    actual_lookup: std::result::Result<Option<JobSummary>, wholepact_proof_jobs::JobError>,
+    observation: &Observation,
+) -> Result<()> {
+    // An error or an existing row is never converted into absence. This helper
+    // cannot link/replay an existing job, construct bytes, write or mint owners.
+    let existing = actual_lookup.map_err(|error| observation.job_error(error))?;
+    observation.stage(Site::OriginalLineage);
+    let c = candidate(before, candidate_id)?;
+    if existing.is_some()
+        || !before.checkpoint_receipts.is_empty()
+        || !c.proof_jobs.is_empty()
+        || !before.durable_proposals_v1.is_empty()
+    {
+        return Err(damaged());
+    }
+    observation.stage(Site::Revision);
+    crate::candidates::check_revision(before, revision)?;
+    observation.stage(Site::CurrentTerms);
+    crate::candidates::check_current_terms(&before.view, &c.proposal.manifest)
+}
+fn validate_prepared_context_v2(
+    original: wholepact_protocol::construction::ConstructionContext,
+    current: wholepact_protocol::construction::ConstructionContext,
+    expiry_height: u32,
+) -> Result<()> {
+    // Current target eligibility/NU7 and exact note/ancestry/spendability are
+    // independently checked by the held Wallet kernel. Only the target may
+    // advance here: the original randomized artifact and request stay fixed.
+    if current.anchor != original.anchor
+        || current.anchor_height != original.anchor_height
+        || current.anchor_block_hash != original.anchor_block_hash
+        || current.target_height < original.target_height
+        || current.target_height > expiry_height
+    {
+        return Err(denied());
+    }
+    Ok(())
+}
+fn consume_prepared_join_v2(
+    ready: ReadyOriginalCheckpointV2,
+    before: &Envelope,
+    current: wholepact_protocol::construction::ConstructionContext,
+    contributions: &[wholepact_protocol::construction::OwnedContribution],
+    declarations: &[DisclosureAcknowledgement],
+) -> Result<ReadyOriginalCheckpointV2> {
+    validate_prepared_join_v2(&ready, before, current, contributions, declarations)?;
+    Ok(ready)
+}
+fn validate_prepared_join_v2(
+    ready: &ReadyOriginalCheckpointV2,
+    before: &Envelope,
+    current: wholepact_protocol::construction::ConstructionContext,
+    contributions: &[wholepact_protocol::construction::OwnedContribution],
+    declarations: &[DisclosureAcknowledgement],
+) -> Result<()> {
+    if crate::encode(before)? != crate::encode(&ready.before)? {
+        return Err(damaged());
+    }
+    let c = candidate(before, &ready.candidate_id)?;
+    validate_prepared_context_v2(
+        ready.built.context,
+        current,
+        c.proposal.manifest.expiry_height,
+    )?;
+    let request = ready
+        .receipt
+        .original_request_v2
+        .as_ref()
+        .ok_or_else(damaged)?;
+    // Deliberately bind the immutable ORIGINAL target, not the newer current
+    // scan target. No new transaction or replacement request is constructed.
+    let actual = crate::candidates::private_request_digest(
+        ready.built.context,
+        contributions,
+        declarations,
+    )?;
+    if ready.receipt.scope_digest
+        != hex::encode(Sha256::digest(
+            serde_json::to_vec(&ready.scope).map_err(|_| damaged())?,
+        ))
+        || ready.scope.artifact_digest != hex::encode(Sha256::digest(&ready.built.pczt_bytes))
+        || ready.scope.candidate_id != ready.candidate_id
+        || ready.scope.manifest_digest != c.manifest_digest
+        || ready.scope.coordination_request_digest != ready.command.request_digest
+        || actual != request.local_input_digest
+        || request.command.principal_id != ready.command.principal_id
+        || request.command.idempotency_key != ready.command.idempotency_key
+        || request.command.request_digest != ready.command.request_digest
+        || request.expected_revision != ready.revision
+        || request.maximum_actions != ready.limits.maximum_actions
+    {
+        return Err(damaged());
+    }
+    Ok(())
+}
+fn checkpoint_declarations_v2(
+    c: &CandidateView,
+    roster: &Roster,
+    slots: &[DurableConstructionWalletSlotV1<'_>],
+    observation: &Observation,
+) -> Result<Vec<DisclosureAcknowledgement>> {
+    observation.stage(Site::SlotBindings);
+    if slots.len() != 2 {
+        return Err(denied());
+    }
+    let mut expected = BTreeSet::new();
+    let mut declarations = Vec::new();
+    for intake in roster.owners.values() {
+        let scope = &intake.outbox.request().scope;
+        expected.insert((
+            intake.outbox.material_digest().to_owned(),
+            scope.digest().map_err(|e| {
+                observation.record(Site::SlotBindings, diagnostics::construction(&e));
+                ApiError::from(e)
+            })?,
+        ));
+        declarations.push(DisclosureAcknowledgement {
+            account_id: scope.account_id.clone(),
+            manifest_digest: hex::decode(&c.manifest_digest)
+                .map_err(|_| damaged())?
+                .try_into()
+                .map_err(|_| damaged())?,
+            operator: scope.prover.principal_id.clone(),
+            reviewer_account_ids: scope
+                .reviewers
+                .iter()
+                .map(|r| r.account_id().to_string())
+                .collect(),
+            purpose: scope.purpose.clone(),
+            retention_policy: scope.retention_policy.clone(),
+            scope: DisclosureScope::DedicatedAccountFvkAndSelectedNotesAndOutputs,
+        });
+    }
+    observation.stage(Site::SlotBindings);
+    let actual: BTreeSet<_> = slots
+        .iter()
+        .map(|s| {
+            Ok((
+                s.material_digest().map_err(|e| {
+                    observation.record(Site::SlotBindings, diagnostics::construction(&e));
+                    ApiError::from(e)
+                })?,
+                s.scope_digest().map_err(|e| {
+                    observation.record(Site::SlotBindings, diagnostics::construction(&e));
+                    ApiError::from(e)
+                })?,
+            ))
+        })
+        .collect::<Result<_>>()?;
+    if actual.len() != 2 || actual != expected {
+        return Err(damaged());
+    }
+    Ok(declarations)
+}
+struct ConstructedCheckpointV2 {
+    built: wholepact_protocol::construction::ConstructedProposal,
+    scope: CheckpointScope,
+}
+struct ReadyOriginalCheckpointV2 {
+    before: Envelope,
+    original_key: String,
+    candidate_id: String,
+    revision: u64,
+    command: wholepact_store::CommandContext,
+    receipt_key: String,
+    receipt: crate::candidates::CheckpointReceipt,
+    built: wholepact_protocol::construction::ConstructedProposal,
+    scope: CheckpointScope,
+    limits: ProvingLimits,
+}
+#[allow(clippy::too_many_arguments)]
+fn construct_exact_artifact_v2(
+    access: &Access,
+    candidate_id: &str,
+    c: &CandidateView,
+    command: &wholepact_store::CommandContext,
+    construction: crate::candidates::LocalConstruction<'_>,
+    limits: ProvingLimits,
+    observation: &Observation,
+) -> Result<ConstructedCheckpointV2> {
+    observation.stage(Site::RetainConsent);
+    let first = construction.declarations.first().ok_or_else(denied)?;
+    if construction.declarations.len() != 2
+        || construction
+            .declarations
+            .iter()
+            .any(|d| d.purpose != first.purpose || d.retention_policy != first.retention_policy)
+    {
+        return Err(denied());
+    }
+    observation.stage(Site::ProposalValidation);
+    let proposal = c.verified_snapshot()?;
+    observation.stage(Site::ProtocolConstruct);
+    #[cfg(test)]
+    tests::record_original_constructor_v2();
+    let built = wholepact_protocol::construction::construct_proposal(
+        &proposal,
+        construction.context,
+        construction.contributions,
+        construction.declarations,
+    )
+    .map_err(|error| {
+        observation.record(Site::ProtocolConstruct, diagnostics::protocol(&error));
+        ApiError::new(
+            "CANDIDATE_VERIFICATION_FAILED",
+            "Exact original local construction failed before private retention",
+        )
+    })?;
+    observation.stage(Site::ProtocolInspect);
+    if wholepact_protocol::inspect_candidate(&built.pczt_bytes)
+        .map_err(|error| {
+            observation.record(Site::ProtocolInspect, diagnostics::protocol(&error));
+            damaged()
+        })?
+        .actions
+        > limits.maximum_actions
+    {
+        return Err(denied());
+    }
+    observation.stage(Site::OriginalRequest);
+    let scope = CheckpointScope {
+        principal_id: access.principal_id.clone(),
+        candidate_id: candidate_id.into(),
+        manifest_digest: c.manifest_digest.clone(),
+        artifact_digest: hex::encode(Sha256::digest(&built.pczt_bytes)),
+        effects_commitment: built.economic_review.shielded_sighash().into(),
+        coordination_request_digest: command.request_digest.clone(),
+        review_binding: built.economic_review.review_binding().into(),
+        account_ids: proposal
+            .manifest()
+            .participants
+            .iter()
+            .map(|p| p.account_id.clone())
+            .collect(),
+        local_operator: proposal
+            .manifest()
+            .agreement
+            .privacy_profile
+            .proving_operator
+            .clone()
+            .ok_or_else(denied)?,
+        purpose: first.purpose.clone(),
+        retention_policy: first.retention_policy.clone(),
+    };
+    Ok(ConstructedCheckpointV2 { built, scope })
+}
+#[allow(clippy::too_many_arguments)]
+fn prepare_constructor_receipt_v2(
+    access: &Access,
+    key: &str,
+    candidate_id: &str,
+    revision: u64,
+    input_digest: String,
+    c: &CandidateView,
+    command: &wholepact_store::CommandContext,
+    built: &wholepact_protocol::construction::ConstructedProposal,
+    scope: &CheckpointScope,
+    limits: ProvingLimits,
+    observation: &Observation,
+) -> Result<crate::candidates::CheckpointReceipt> {
+    observation.stage(Site::ReceiptPrepare);
+    let prepared_revision = revision.checked_add(1).ok_or_else(damaged)?;
+    let receipt = crate::candidates::CheckpointReceipt {
+        original_request_v2: Some(crate::candidates::OriginalCheckpointRequestV2 {
+            command: command.clone(),
+            expected_revision: revision,
+            local_input_digest: input_digest,
+            maximum_actions: limits.maximum_actions,
+        }),
+        action_mappings_v1: Some(json!({
+            "inputs":built.input_actions.iter().map(|m|json!({"input_id":m.input_id,"account_id":m.account_id,"action_index":m.action_index})).collect::<Vec<_>>(),
+            "outputs":built.output_actions.iter().map(|m|json!({"output_id":m.output_id,"action_index":m.action_index})).collect::<Vec<_>>() })),
+        job_id: wholepact_proof_jobs::job_id_for_key(&access.principal_id, key)
+            .map_err(|error| observation.job_error(error))?,
+        scope_digest: hex::encode(Sha256::digest(
+            serde_json::to_vec(&scope).map_err(|_| damaged())?,
+        )),
+        principal_id: access.principal_id.clone(),
+        candidate_id: candidate_id.into(),
+        manifest_digest: c.manifest_digest.clone(),
+        coordination_request_digest: command.request_digest.clone(),
+        artifact_digest: scope.artifact_digest.clone(),
+        review_binding: scope.review_binding.clone(),
+        effects_commitment: scope.effects_commitment.clone(),
+        prepared_revision,
+    };
+    Ok(receipt)
 }
 struct ObservationGate<'a, 'source, W> {
     workspace: &'a PrivateDurableCoordinatorV1<'source>,

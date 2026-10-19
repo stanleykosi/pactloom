@@ -1,8 +1,18 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-19, 09:32 UTC.
+Updated: 2026-10-19, 10:22 UTC.
 
 **The bounded synthetic native two-owner fixed-signing fixture passed. Product qualification remains incomplete: no public testnet settlement, OS-process restart recovery, attended GUI reliability, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
+
+## CI25: fail-fast exposed the remaining lifecycle boundary; exact preparation split from admission
+
+[Run 39231461187](https://github.com/stanleykosi/pactloom/actions/runs/39231461187), qualifier `420e3676bdaa4023a4a89356c64ab411fb020725`, passed build/Python152/Host97/bootstrap, then the targeted private phase failed first at09:55:09 UTC. Checkpoint/GateHeldPost reported Chain/StaleChain and DISCLOSURE_DENIED, with receipt/enqueue/link NotCalled in this invocation and no consumed proof attempt. Reader never started; cleanup verified. Later native regressions were not run because the targeted gate failed. The reordered test surfaced this failure in roughly18 minutes rather than spending another10–12 minutes on prior passing phases.
+
+The performance improvement did not remove the structural issue: a fresh wallet observation still spanned construction and genuine privacy review. The four-file lifecycle correction separates preparation from admission. It constructs the exact randomized artifact without constructor/proof persistence, releases held wallet locks, completes exact native reviews, obtains genuine new observations through the same retained scanner/source owners using cached-only nonprompting adapters, then consumes the same prepared artifact before the first receipt/enqueue/link. Ephemeral scan/witness-cache writes are not represented as no effects.
+
+Admission rechecks the original journal/revision/request and refuses intervening or uncertain attempts. It retains identical bytes, original context/target and request; ordinary tip advance is allowed only with identical anchor tuple and fresh target not earlier, while unchanged Wallet rules enforce Nu7, expiry, ancestry and exact input/nullifier eligibility. No old capability is renewed, no artifact is reconstructed, and no new dialog occurs inside final wallet locks. Native/material deadlines remain unchanged.
+
+Independent source/hash review cleared all4 paths. All-features Engine/Host build passed (3m22s), and all8 focused tests passed, including real unsigned construction/immutable move and cached-only refusal/positive control. All43 additional affected compatibility tests passed. Non-synthetic gates run in parallel with publication and the fast-first native run; no native lifecycle success is yet claimed.
 
 ## CI24: held observation expired; duplicate immutable validation reduced and failing phase moved first
 
