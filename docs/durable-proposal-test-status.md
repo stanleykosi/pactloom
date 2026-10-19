@@ -1,8 +1,18 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-19, 03:28 UTC.
+Updated: 2026-10-19, 04:34 UTC.
 
 **The bounded synthetic native two-owner fixed-signing fixture passed. Product qualification remains incomplete: no public testnet settlement, OS-process restart recovery, attended GUI reliability, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
+
+## CI22: committed Acquire reply-loss recovery passed; prospective delivery scope remains inert
+
+[Run 39195077385](https://github.com/stanleykosi/pactloom/actions/runs/39195077385), qualifier `3b6c5a032d20008db691d7e2d81bb38b44ddebfe`, passed all listed gates at 04:11:07 UTC. Native baseline passed at 03:48:10, two-owner fixed signing passed again at 03:55:56, and the distinct actual committed Acquire response-loss phase passed at 04:00:09, all with verified cleanup. Python137, Host80, bootstrap, final Signer41, endpoint1/two cycles, renderer6 and replay3 also passed.
+
+The new recovery phase proves actual selected response-socket loss after one real financial Acquire commit, genuine exact retry with the same retained client/key/approved request/history/deadline, identical original receipt/timestamps, unchanged original prefix and exactly one additional Acquire/session-key row, with no activation/reservation. This is a live-process pending-session recovery result, not recovery after process or key loss.
+
+The simplest prospective submission direction is explicit signing-time delivery consent, not a second mandatory owner round. Existing v1 approvals lack dispatcher/provider/finite-delivery scope and remain ineligible. New consent must bind the fixed proved artifact and original authorization/result lineage; randomized final extraction means it cannot claim a future final-byte digest was already reviewed. One verified retained output must later be pinned before any send, with fresh Host/witness/all-input checks and Unknown-before-network ordering.
+
+The first three-file delivery-v2 slice is inert data only: strict canonical parsing, digests, independent historical-claim comparisons and original absolute ceilings. It has no native, policy, storage, transport or dispatch consumer and issues no permission. Default Authority build passed (53.87s), all-features build passed (1m10s), and all23 exact pure tests passed in each configuration. Review corrected Serde's permissive internally tagged unit variant with a same-wire empty-struct variant. Native approval, durable dispatcher identity, authenticated witness execution, retained lineage, restart and public-chain settlement remain unfinished. This data-only checkpoint is published on the implementation branch; the last full native qualification remains checkpoint42.
 
 ## Committed Acquire reply-loss qualification added; native result pending
 
