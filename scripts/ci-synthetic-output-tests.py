@@ -2324,7 +2324,7 @@ class PublicDurableFlowTests(unittest.TestCase):
             self.assertEqual(body.count('#[serde(deserialize_with = "required_history_nullable")]'),len(re.findall(r'^\s+[a-z_]+: Option<',body,re.M)))
 
 class PublicDurableLifecycleTests(unittest.TestCase):
-    maximal='{"version":1,"operation":"WriterReconcile","fixture_result":"ReturnedErr","owner_budget_us":120000000,"points":{"native_open_complete":{"age_us":100000000,"remaining_us":20000000},"pair_complete":{"age_us":100000000,"remaining_us":20000000},"witness_setup_complete":{"age_us":100000000,"remaining_us":20000000},"accept_complete":{"age_us":100000000,"remaining_us":20000000},"redisclosure_complete":{"age_us":100000000,"remaining_us":20000000},"import_complete":{"age_us":100000000,"remaining_us":20000000},"historical_lookup_complete":{"age_us":100000000,"remaining_us":20000000},"acquire_prepare_launch":{"age_us":100000000,"remaining_us":20000000},"acquire_prepare_complete":{"age_us":100000000,"remaining_us":20000000},"acquire_native_approval":{"age_us":100000000,"remaining_us":20000000},"acquire_worker_launch":{"age_us":100000000,"remaining_us":20000000},"fixture_failure":{"age_us":100000000,"remaining_us":20000000},"after_drain":{"age_us":100000000,"remaining_us":20000000}},"pending_wait":{"full_precheck":{"calls":1000000,"total_us":600000000,"max_us":600000000},"full_postcheck":{"calls":1000000,"total_us":600000000,"max_us":600000000},"liveness":{"calls":1000000,"total_us":600000000,"max_us":600000000},"poll":{"calls":1000000,"total_us":600000000,"max_us":600000000}},"worker_purpose":"ActivationPrepare","worker_started_to_client_entry_us":600000000,"worker_started_to_client_return_us":600000000,"clamped":false,"incomplete":false}'
+    maximal='{"version":1,"operation":"WriterReconcile","fixture_result":"ReturnedErr","owner_budget_us":120000000,"points":{"native_open_complete":{"age_us":100000000,"remaining_us":20000000},"pair_complete":{"age_us":100000000,"remaining_us":20000000},"witness_setup_complete":{"age_us":100000000,"remaining_us":20000000},"accept_complete":{"age_us":100000000,"remaining_us":20000000},"redisclosure_complete":{"age_us":100000000,"remaining_us":20000000},"import_complete":{"age_us":100000000,"remaining_us":20000000},"historical_lookup_complete":{"age_us":100000000,"remaining_us":20000000},"acquire_prepare_launch":{"age_us":100000000,"remaining_us":20000000},"acquire_prepare_complete":{"age_us":100000000,"remaining_us":20000000},"acquire_native_approval":{"age_us":100000000,"remaining_us":20000000},"acquire_worker_launch":{"age_us":100000000,"remaining_us":20000000},"writer_reconcile_complete":{"age_us":100000000,"remaining_us":20000000},"post_reconcile_accept_complete":{"age_us":100000000,"remaining_us":20000000},"viewing_setup_complete":{"age_us":100000000,"remaining_us":20000000},"post_reconcile_redisclosure_native_complete":{"age_us":100000000,"remaining_us":20000000},"financial_import_poll_start":{"age_us":100000000,"remaining_us":20000000},"financial_import_complete":{"age_us":100000000,"remaining_us":20000000},"initial_sign_complete":{"age_us":100000000,"remaining_us":20000000},"fixture_failure":{"age_us":100000000,"remaining_us":20000000},"after_drain":{"age_us":100000000,"remaining_us":20000000}},"pending_wait":{"full_precheck":{"calls":1000000,"total_us":600000000,"max_us":600000000},"full_postcheck":{"calls":1000000,"total_us":600000000,"max_us":600000000},"liveness":{"calls":1000000,"total_us":600000000,"max_us":600000000},"poll":{"calls":1000000,"total_us":600000000,"max_us":600000000}},"worker_purpose":"ActivationPrepare","worker_started_to_client_entry_us":600000000,"worker_started_to_client_return_us":600000000,"clamped":false,"incomplete":false}'
     base=PublicDurableFlowTests.base
     objects=PublicDurableFlowTests.objects
     at=PublicDurableFlowTests.at
@@ -2334,8 +2334,8 @@ class PublicDurableLifecycleTests(unittest.TestCase):
 
     def test_maximal_canonical_parity_caps_and_pairing(self):
         row=self.valid(self.record())
-        self.assertEqual(len(self.maximal.encode()),1450)
-        self.assertEqual(hashlib.sha256(self.maximal.encode()).hexdigest(),'bc9da3afb31e95e9f28bb9df25cc205f1387cfb44b564ba22030f267714dff87')
+        self.assertEqual(len(self.maximal.encode()),1979)
+        self.assertEqual(hashlib.sha256(self.maximal.encode()).hexdigest(),'69414cc5082857eb6773c0dff55718d92fe01f4352092b661cf45bdf34f0be2a')
         self.assertEqual(json.dumps(row,separators=(',',':')),self.maximal)
         source=(self.base/'safe_diagnostics_v1.rs').read_text()
         golden=re.search(r'const DURABLE_LIFECYCLE_MAXIMAL_TEST_JSON: &str = r#"([^\n]+)"#;',source).group(1)
@@ -2359,6 +2359,33 @@ class PublicDurableLifecycleTests(unittest.TestCase):
             saved=io.StringIO()
             with contextlib.redirect_stdout(saved): capture.emit(flow)
             self.assertEqual(saved.getvalue(),output.LIFECYCLE_INVALID+'\n')
+
+        # Later sealed failure snapshots keep earlier owner points, not writer
+        # worker timings or an invented drain/receive/result observation.
+        for operation,purpose in (('FinancialImport','Import'),('InitialSign','Sign'),('RetainedRetry',None),('ResultService','ResultService')):
+            row=self.record(); row.update(operation=operation,worker_purpose=purpose,
+                worker_started_to_client_entry_us=None,worker_started_to_client_return_us=None)
+            row['points']['after_drain']=None
+            source_flow=PublicDurableFlowTests().record()
+            source_flow.update(operation=operation,after_drain=None,lower_call_measurement=None)
+            source_flow['completion']=dict(purpose=purpose,result='NotObserved',receive='Pending' if purpose else 'Missing',presentation='NotObserved')
+            original=json.loads(json.dumps(source_flow))
+            flow=output.DurableFlowDiagnostics(); flow.record('durable_flow',source_flow)
+            capture=output.DurableLifecycleDiagnostics(); capture.record('durable_lifecycle',row)
+            saved=io.StringIO()
+            with contextlib.redirect_stdout(saved): capture.emit(flow)
+            self.assertEqual(saved.getvalue(),self.line(row)+'\n')
+            self.assertEqual(source_flow,original)
+            self.assertIsNotNone(row['points']['native_open_complete'])
+            self.assertIsNotNone(row['points']['writer_reconcile_complete'])
+            self.assertEqual(self.valid(row),row)
+            for key in ('worker_started_to_client_entry_us','worker_started_to_client_return_us'):
+                changed=json.loads(json.dumps(row)); changed[key]=0
+                with self.assertRaises(ValueError): self.valid(changed)
+            changed=json.loads(json.dumps(row)); changed['points']['after_drain']=dict(age_us=120000000,remaining_us=0)
+            with self.assertRaises(ValueError): self.valid(changed)
+            source_flow['after_drain']=PublicDurableFlowTests().record()['after_drain']
+            self.assertFalse(output.lifecycle_matches_flow(row,source_flow))
 
     def test_every_scope_nullable_and_duplicate_rules(self):
         original=self.record(); text=self.maximal
@@ -2406,9 +2433,25 @@ class PublicDurableLifecycleTests(unittest.TestCase):
         for purpose in (None,'Import','Sign','ResultService','private'):
             row=self.record(); row['worker_purpose']=purpose
             with self.assertRaises(ValueError): self.valid(row)
-        for key,value in (('operation','InitialSign'),('owner_budget_us',120000001),('version',True),('fixture_result','ReturnedOk')):
+        for key,value in (('operation','Unknown'),('owner_budget_us',120000001),('version',True),('fixture_result','ReturnedOk')):
             row=self.record(); row[key]=value
             with self.assertRaises(ValueError): self.valid(row)
+
+        expected={
+            'WriterReconcile': {'AcquirePrepare','Acquire','ActivationPrepare','Activate','ReconcilePrepare','Reconcile'},
+            'FinancialImport': {'Import'}, 'InitialSign': {'WalletReview','Sign'},
+            'RetainedRetry': set(), 'ResultService': {'ResultService'},
+        }
+        self.assertEqual(set(expected),output.FLOW_OPERATION)
+        self.assertEqual(len(output.LIFECYCLE_POINT_FIELDS),20)
+        for operation,allowed in expected.items():
+            for purpose in (None,*output.FLOW_JOB_PURPOSE):
+                row=self.record(); row.update(operation=operation,worker_purpose=purpose,
+                    worker_started_to_client_entry_us=None,worker_started_to_client_return_us=None)
+                row['points']['after_drain']=None
+                if purpose is None or purpose in allowed: self.assertEqual(self.valid(row),row)
+                else:
+                    with self.assertRaises(ValueError): self.valid(row)
 
     def test_split_oversize_duplicate_and_optional_failure_handling(self):
         raw=self.line().encode(); row=self.record()

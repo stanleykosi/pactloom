@@ -1045,12 +1045,13 @@ fn execute(
             // binds this inert token; polling never resets or creates a job.
             let token = entry.arm_financial_import_diagnostics(&request, &identity);
             let result = (|| {
+                let mut wait = entry
+                    .begin_financial_import_wait_diagnosed(&token, &request, &identity)
+                    .map_err(|e| signer_error(e, "financial import deadline"))?;
                 poll_until(
-                    entry
-                        .financial_import_deadline_diagnosed(&token)
-                        .map_err(|e| signer_error(e, "financial import deadline"))?,
+                    wait.deadline(),
                     cancelled,
-                    || entry.poll_financial_import_diagnosed(&token, &request, &identity),
+                    || wait.poll(),
                     "exact fixed import with separately reconciled current writer",
                 )
             })();
@@ -1122,14 +1123,17 @@ fn execute(
             (State::Durable(entry), R::Done { index })
         }
         (C::PollDisclosure(_), State::Durable(mut entry)) => {
-            poll_until(
-                entry
-                    .deadline()
-                    .map_err(|e| signer_error(e, "disclosure deadline"))?,
-                cancelled,
-                || entry.poll_exact_disclosure(),
-                "exact privacy disclosure",
-            )?;
+            {
+                let mut wait = entry
+                    .begin_disclosure_wait()
+                    .map_err(|e| signer_error(e, "disclosure deadline"))?;
+                poll_until(
+                    wait.deadline(),
+                    cancelled,
+                    || wait.poll(),
+                    "exact privacy disclosure",
+                )?;
+            }
             (State::Durable(entry), R::Done { index })
         }
         (C::CaptureCommitted(_), State::Durable(entry)) => {

@@ -1353,3 +1353,317 @@ fn encrypted_material_wait_exit_refuses_worker_queued_recovery() {
 fn encrypted_material_wait_exit_refuses_worker_queued_corruption() {
     encrypted_material_wait_component(QueuedWaitChange::OutboxColumn);
 }
+
+// These tests use the SAME private incremental kernel as the borrowed facade
+// waiters. Their liveness and approval callbacks remain inert component data,
+// not fabricated native/peer permission or qualification of those real owners.
+#[derive(Clone, Copy)]
+enum IncrementalWaitRoute {
+    FinancialImport,
+    Disclosure,
+}
+
+#[derive(Clone, Copy)]
+enum IncrementalWaitFinish {
+    Complete,
+    DropPending,
+}
+
+struct EncryptedIncrementalWaitState<'scope, 'fixture> {
+    wait: EncryptedWaitState<'scope, 'fixture>,
+    preapprovals: usize,
+    inert_actions: usize,
+}
+
+fn encrypted_material_incremental_wait_component(
+    change: QueuedWaitChange,
+    route: IncrementalWaitRoute,
+    finish: IncrementalWaitFinish,
+) {
+    use std::sync::mpsc;
+
+    let f = MaterialFixture::new();
+    f.assert_topology();
+    let original = f.logical_commitment();
+    let dropping_pending = matches!(finish, IncrementalWaitFinish::DropPending);
+    assert!(!dropping_pending || matches!(change, QueuedWaitChange::Unchanged));
+    DURABLE_BORN_SNAPSHOT_VALIDATIONS_V1.with(|count| count.set(0));
+    std::thread::scope(|scope| {
+        let (start_tx, start_rx) = mpsc::channel();
+        let (held_tx, held_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let fixture = &f;
+        let worker = scope.spawn(move || {
+            if start_rx.recv().is_err() {
+                return None;
+            }
+            let mut connection = checked(fixture.encrypted.journal.connection.lock());
+            let before = checked(writer_history::complete_journal_commitment(&connection));
+            if held_tx.send(()).is_err() {
+                return None;
+            }
+            let explicitly_released = release_rx.recv_timeout(WAIT_CLEANUP_TIMEOUT).is_ok();
+            if explicitly_released {
+                change.apply(&mut connection, fixture);
+            }
+            let after = checked(writer_history::complete_journal_commitment(&connection));
+            drop(connection);
+            Some(WaitHolderObservation {
+                explicitly_released,
+                before,
+                after,
+            })
+        });
+        let mut state = EncryptedIncrementalWaitState {
+            wait: EncryptedWaitState {
+                fixture: &f,
+                start: Some(start_tx),
+                held: held_rx,
+                release: WaitHolderRelease(Some(release_tx)),
+                worker: Some(worker),
+                observation: None,
+                entries: 0,
+                live_checks: 0,
+                polls: 0,
+                sleeps: 0,
+                exits: 0,
+            },
+            preapprovals: 0,
+            inert_actions: 0,
+        };
+        let (result, costs) = measure(|| {
+            let (mut pending, ()) = checked(witness_wait_v1::begin(&mut state, |state| {
+                state.wait.entries += 1;
+                state.wait.fixture.encrypted.check()?;
+                checked(
+                    state
+                        .wait
+                        .start
+                        .as_ref()
+                        .expect("incremental holder start channel missing")
+                        .send(()),
+                );
+                checked(state.wait.held.recv_timeout(WAIT_CLEANUP_TIMEOUT));
+                Ok::<(), JournalError>(())
+            }));
+            let bounded_polls = if dropping_pending {
+                WAIT_PENDING_POLLS - 1
+            } else {
+                WAIT_PENDING_POLLS
+            };
+            let mut last = Ok(false);
+            for ordinal in 1..=bounded_polls {
+                last = pending.poll(
+                    &mut state,
+                    || JournalError::Permission,
+                    |state| {
+                        state.wait.assert_pending_contention();
+                        state.wait.live_checks += 1;
+                        Ok(())
+                    },
+                    |state| {
+                        state.wait.assert_pending_contention();
+                        state.wait.polls += 1;
+                        assert!(state.wait.live_checks == state.wait.polls);
+                        if state.wait.polls < WAIT_PENDING_POLLS {
+                            return Ok(false);
+                        }
+                        assert!(state.wait.polls == WAIT_PENDING_POLLS);
+                        state.wait.finish_worker();
+                        match route {
+                            IncrementalWaitRoute::FinancialImport => Ok(true),
+                            IncrementalWaitRoute::Disclosure => witness_wait_v1::before_approval(
+                                state,
+                                |state| {
+                                    state.preapprovals += 1;
+                                    state.wait.fixture.encrypted.check()
+                                },
+                                |state| {
+                                    // Data-only action marker. No native
+                                    // approval/session/receipt is constructed.
+                                    state.inert_actions += 1;
+                                    Ok(true)
+                                },
+                            ),
+                        }
+                    },
+                    |state| {
+                        assert!(state.wait.worker.is_none());
+                        assert!(state
+                            .wait
+                            .observation
+                            .as_ref()
+                            .is_some_and(|o| o.explicitly_released));
+                        state.wait.exits += 1;
+                        state.wait.fixture.encrypted.check()
+                    },
+                );
+                if ordinal < WAIT_PENDING_POLLS {
+                    assert!(matches!(last, Ok(false)));
+                    state.wait.assert_pending_contention();
+                    assert!(state.wait.exits == 0 && state.preapprovals == 0);
+                    assert!(state.inert_actions == 0);
+                }
+            }
+            if dropping_pending {
+                // Dropping an unfinished wait does not manufacture a final
+                // validation or turn previous pending results into success.
+                drop(pending);
+            } else {
+                // A success OR first refusal makes the actual same kernel
+                // terminal. Repeating cannot return cached success, repeat
+                // an action or reacquire even one historical snapshot.
+                let repeated = pending.poll(
+                    &mut state,
+                    || JournalError::Permission,
+                    |_| panic!("terminal wait repeated its liveness callback"),
+                    |_| panic!("terminal wait repeated its poll callback"),
+                    |_| panic!("terminal wait repeated its full exit callback"),
+                );
+                assert!(matches!(repeated, Err(JournalError::Permission)));
+            }
+            last
+        });
+        // Explicit cleanup also covers pending-drop. On panic/early error the
+        // contained state's Drop releases both channels before scoped join.
+        state.wait.finish_worker();
+        let disclosure = matches!(route, IncrementalWaitRoute::Disclosure);
+        let unchanged = matches!(change, QueuedWaitChange::Unchanged);
+        let expected_scans = if dropping_pending {
+            1
+        } else if disclosure && unchanged {
+            3
+        } else {
+            2
+        };
+        let expected_polls = if dropping_pending {
+            WAIT_PENDING_POLLS - 1
+        } else {
+            WAIT_PENDING_POLLS
+        };
+        assert!(state.wait.entries == 1);
+        assert!(state.wait.live_checks == expected_polls && state.wait.polls == expected_polls);
+        assert!(state.wait.sleeps == 0);
+        assert!(state.wait.exits == usize::from(!dropping_pending && (!disclosure || unchanged)));
+        assert!(state.preapprovals == usize::from(!dropping_pending && disclosure));
+        assert!(state.inert_actions == usize::from(!dropping_pending && disclosure && unchanged));
+        DURABLE_BORN_SNAPSHOT_VALIDATIONS_V1.with(|count| assert!(count.get() == expected_scans));
+        assert!(costs.calls(Phase::SnapshotTotal) == expected_scans);
+        assert!(costs.calls(Phase::SchemaTotal) == expected_scans);
+        assert!(costs.calls(Phase::DurableMaterialRows) == expected_scans);
+        assert!(!costs.is_clamped() && !costs.is_incomplete());
+        let observed = state
+            .wait
+            .observation
+            .take()
+            .expect("incremental holder observation missing");
+        assert!(observed.explicitly_released);
+        assert!(original == observed.before);
+        assert!(
+            observed.after == f.logical_commitment(),
+            "incremental checker changed retained rows"
+        );
+        match change {
+            QueuedWaitChange::Unchanged => {
+                assert!(matches!(result, Ok(done) if done != dropping_pending));
+                assert!(
+                    original == observed.after,
+                    "incremental wait changed history"
+                );
+            }
+            QueuedWaitChange::Recovery => {
+                assert!(matches!(result, Err(JournalError::RecoveryRequired)));
+                assert!(
+                    original != observed.after,
+                    "incremental queued recovery was not recorded"
+                );
+                f.change_rows(&[], false, |connection| {
+                    checked(
+                        connection.execute("UPDATE signer_account SET recovery_required=0", []),
+                    );
+                });
+            }
+            QueuedWaitChange::OutboxColumn => {
+                assert!(matches!(result, Err(JournalError::InvalidBinding)));
+                assert!(
+                    original != observed.after,
+                    "incremental queued corruption was not recorded"
+                );
+                f.replace_outbox(2, &f.rows[2]);
+            }
+        }
+    });
+    f.assert_topology();
+    assert!(
+        original == f.logical_commitment(),
+        "incremental wait lost original 1+2 material history"
+    );
+}
+
+#[test]
+fn encrypted_material_incremental_import_progresses_under_real_journal_contention() {
+    encrypted_material_incremental_wait_component(
+        QueuedWaitChange::Unchanged,
+        IncrementalWaitRoute::FinancialImport,
+        IncrementalWaitFinish::Complete,
+    );
+}
+
+#[test]
+fn encrypted_material_incremental_import_exit_refuses_queued_recovery() {
+    encrypted_material_incremental_wait_component(
+        QueuedWaitChange::Recovery,
+        IncrementalWaitRoute::FinancialImport,
+        IncrementalWaitFinish::Complete,
+    );
+}
+
+#[test]
+fn encrypted_material_incremental_import_exit_refuses_queued_corruption() {
+    encrypted_material_incremental_wait_component(
+        QueuedWaitChange::OutboxColumn,
+        IncrementalWaitRoute::FinancialImport,
+        IncrementalWaitFinish::Complete,
+    );
+}
+
+#[test]
+fn encrypted_material_incremental_disclosure_keeps_full_preapproval_and_exit_gates() {
+    encrypted_material_incremental_wait_component(
+        QueuedWaitChange::Unchanged,
+        IncrementalWaitRoute::Disclosure,
+        IncrementalWaitFinish::Complete,
+    );
+}
+
+#[test]
+fn encrypted_material_incremental_disclosure_preapproval_refuses_queued_recovery() {
+    encrypted_material_incremental_wait_component(
+        QueuedWaitChange::Recovery,
+        IncrementalWaitRoute::Disclosure,
+        IncrementalWaitFinish::Complete,
+    );
+}
+
+#[test]
+fn encrypted_material_incremental_disclosure_preapproval_refuses_queued_corruption() {
+    encrypted_material_incremental_wait_component(
+        QueuedWaitChange::OutboxColumn,
+        IncrementalWaitRoute::Disclosure,
+        IncrementalWaitFinish::Complete,
+    );
+}
+
+#[test]
+fn encrypted_material_incremental_drop_pending_has_no_successful_exit() {
+    for route in [
+        IncrementalWaitRoute::FinancialImport,
+        IncrementalWaitRoute::Disclosure,
+    ] {
+        encrypted_material_incremental_wait_component(
+            QueuedWaitChange::Unchanged,
+            route,
+            IncrementalWaitFinish::DropPending,
+        );
+    }
+}

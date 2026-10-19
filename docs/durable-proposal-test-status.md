@@ -1,8 +1,16 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-18, 23:28 UTC.
+Updated: 2026-10-19, 00:12 UTC.
 
 **Incomplete implementation. No full native financial signing, public testnet settlement, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
+
+## CI18: writer lifecycle passed; fresh financial import expired
+
+[Run 39176813171](https://github.com/stanleykosi/pactloom/actions/runs/39176813171), qualifier `59cfdb0b7ace97e5f91147d5ba1a7dd24472c2d6`, passed build/Python130/Host80/bootstrap/baseline/cleanup. WriterReconcile completed actual SessionAcquired, ActivationCommitted and ReconciliationCommitted, drained original revocations and verified old refs/import invalidation and unchanged original writer/owner identities. Fresh acceptance, viewing setup and redisclosure then completed; owner expiry during ReviewExport/FinancialImport stopped signing. Pending snapshots do not establish absence of effects. No post-Acquire reentry or session replacement is permitted by this result.
+
+The next nine-file synthetic-only slice removes repeated full fixture scans from paired FinancialImport and disclosure waiters, internal wallet review and revocation drain. Opaque exclusive borrowed waiters capture the original deadline and identity; full entry/successful-exit checks, actual native/peer liveness, disclosure preapproval and production launch/receive/worker gates remain unchanged. Signing wait, synchronous retry, cleanup, pre-pair and ResultService are excluded. No runtime, Engine, transport or financial journal authority behavior changes. Same-owner failure-only lifecycle evidence adds distinct post-reconciliation milestones within the existing 2048-byte limit; unknown worker effects remain unknown.
+
+All-features Host+Signer build passed (6m31s); 21 new signer test registrations (16 distinct behaviors, shared wait kernel included twice), Host80 and Python130 passed. Non-synthetic durable Signer lib-test build also passed without recompilation of changed synthetic-only code. Encrypted contention/mutation tests exercise exact shared wait kernels and preserve logical commitment; they are not native signing proof. Full native signing/retry and testnet settlement remain pending.
 
 ## CI17: fresh admission reentry passed; pending Acquire expiry and fixture contention
 
