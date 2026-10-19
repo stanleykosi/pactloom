@@ -104,7 +104,23 @@ class PublicOutputTests(unittest.TestCase):
         self.assertIn('No public-chain settlement, attended GUI, Windows or production activation claimed.',shell)
         self.assertIn('set -euo pipefail',shell)
         self.assertIn('export CARGO_HOME="$build_root/cargo" CARGO_TARGET_DIR="$build_root/target"',shell)
-        self.assertNotIn('--ignored',shell)
+        # Only the separately bounded, exact CI loopback preflight may run an
+        # ignored test. Native phases and signer regressions remain unchanged.
+        prefix, wave_and_rest = shell.split("<<'PY_WAVE'\n", 1)
+        wave, suffix = wave_and_rest.split('\nPY_WAVE\n', 1)
+        self.assertNotIn('--ignored', prefix + suffix)
+        self.assertEqual(shell.count("<<'PY_WAVE'"), 1)
+        self.assertIn("name = 'host::financial::private_durable_fixed_v2::observation_wave_v3_tests::observation_wave_actual_localhost_requests_overlap_before_responses'", wave)
+        self.assertEqual(wave.count('subprocess.run('), 2)
+        self.assertIn("[sys.argv[1], name, '--ignored', '--exact', '--list'], capture_output=True, text=True, timeout=15", wave)
+        self.assertIn("[sys.argv[1], name, '--ignored', '--exact', '--test-threads=1'], capture_output=True, text=True, timeout=30", wave)
+        self.assertEqual(wave.count('--ignored'), 2)
+        self.assertIn("== [name + ': test']", wave)
+        self.assertIn("result.returncode == 0 and 'test result: ok. 1 passed; 0 failed;' in result.stdout", wave)
+        self.assertNotIn('print(result', wave)
+        self.assertNotIn('print(listed', wave)
+        self.assertIn('sys.exit(1)', wave)
+        self.assertLess(shell.index("<<'PY_WAVE'"), shell.index('"$executable" durable-private-reopen'))
         self.assertIn('timeout-minutes: 150',(ROOT/'.github/workflows/durable-native-linux.yml').read_text())
 
     def test_durable_acquire_reply_loss_producer_requires_retry_receipt_joined_audit_and_no_signing(self):
