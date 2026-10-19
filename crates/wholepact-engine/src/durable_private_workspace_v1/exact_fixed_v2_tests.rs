@@ -1924,6 +1924,9 @@ mod actual_cryptography {
             intake: Intake,
         }
         fn history_fixture() -> HistoryFixture {
+            history_fixture_with_receipt(true)
+        }
+        fn history_fixture_with_receipt(include_receipt: bool) -> HistoryFixture {
             let f = fixture();
             let dir = checked(tempfile::tempdir());
             checked(std::fs::set_permissions(
@@ -1992,11 +1995,13 @@ mod actual_cryptography {
                 envelopes.push(next);
             }
             let intake = roster.owners.values().next().unwrap().clone();
-            let mut receipt = advance(envelopes.last().unwrap().clone());
-            receipt
-                .checkpoint_receipts
-                .insert(hash(0xc0), inert_receipt(&receipt.view.candidates[0]));
-            envelopes.push(receipt);
+            if include_receipt {
+                let mut receipt = advance(envelopes.last().unwrap().clone());
+                receipt
+                    .checkpoint_receipts
+                    .insert(hash(0xc0), inert_receipt(&receipt.view.candidates[0]));
+                envelopes.push(receipt);
+            }
             for (i, e) in envelopes.iter().enumerate() {
                 checked(operation_v1::validate_shape(e));
                 let command = checked(wholepact_store::CommandContext::for_request(
@@ -2135,6 +2140,212 @@ mod actual_cryptography {
             }
             assert!(before == state(&f));
             assert!(bytes == checked(std::fs::read(&f.path)));
+        }
+        // This schedules the source-derived same-tip scan composition. It is
+        // NOT a scanner, native stage, or authenticated coordinator invocation.
+        // The actual timed calls are the encrypted read/history composition
+        // above and the unchanged typed material kernel below. Host source,
+        // registry, native approval, networking and Wallet work are excluded.
+        #[derive(Default)]
+        struct ComponentCost {
+            calls: usize,
+            total_us: u128,
+            max_us: u128,
+        }
+        impl ComponentCost {
+            fn measure<T>(&mut self, call: impl FnOnce() -> crate::Result<T>) -> crate::Result<T> {
+                let started = Instant::now();
+                let result = call();
+                let elapsed = started.elapsed().as_micros();
+                self.calls += 1;
+                self.total_us = self.total_us.saturating_add(elapsed);
+                self.max_us = self.max_us.max(elapsed);
+                result
+            }
+            fn report(&self, name: &str) {
+                const CAP_US: u128 = 1_080_000_000;
+                eprintln!(
+                    "PREPARE_SCAN_COMPONENT component={name} executed_calls={} total_us={} max_us={} clamped={}",
+                    self.calls,
+                    self.total_us.min(CAP_US),
+                    self.max_us.min(CAP_US),
+                    self.total_us > CAP_US || self.max_us > CAP_US,
+                );
+            }
+        }
+        #[derive(Default)]
+        struct ScanComponentCost {
+            history: ComponentCost,
+            intake: ComponentCost,
+            load_decode: ComponentCost,
+        }
+        fn component_load(f: &HistoryFixture) -> crate::Result<Envelope> {
+            let record = f
+                .engine
+                .store
+                .get_agreement(&f.envelopes[0].view.agreement.agreement_id)
+                .map_err(crate::store_error)?
+                .ok_or_else(damaged)?;
+            let envelope = decode_private_record(&record)?;
+            operation_v1::validate_shape(&envelope)?;
+            Ok(envelope)
+        }
+        fn component_gate(
+            f: &HistoryFixture,
+            access: &Access,
+            intake: &Intake,
+            consent: &dyn LocalDurableMaterialConsentV1,
+            cost: &mut ScanComponentCost,
+        ) -> crate::Result<()> {
+            cost.history.measure(|| walk(f, true))?;
+            cost.intake
+                .measure(|| current_material(&f.engine, access, intake, consent))
+        }
+        #[test]
+        fn encrypted_prepare_same_tip_scan_composition_reports_real_kernel_cost() {
+            // Actual Prepare has seed, candidate and two intakes, no receipt.
+            let f = history_fixture_with_receipt(false);
+            assert_eq!(f.envelopes.len(), 4);
+            assert!(f.envelopes.last().unwrap().checkpoint_receipts.is_empty());
+            let before = state(&f);
+            let bytes = checked(std::fs::read(&f.path));
+            let access = Access {
+                principal_id: f.intake.principal_id.clone(),
+                ..Access::default()
+            };
+            // Inert component consent, not a native approval/source issuer.
+            let consent = Consent {
+                calls: Cell::new(0),
+                allow: true,
+                replace_path: None,
+            };
+            let mut cost = ScanComponentCost::default();
+            for owner in 0..2 {
+                // operation(): check; load(): check, decode, check.
+                checked(cost.history.measure(|| walk(&f, true)));
+                checked(cost.history.measure(|| walk(&f, true)));
+                let envelope = checked(cost.load_decode.measure(|| component_load(&f)));
+                checked(cost.history.measure(|| walk(&f, true)));
+                let id = &envelope.view.candidates[0].candidate_id;
+                checked(candidate(&envelope, id));
+                let roster = checked(f.engine.durable_roster(&envelope, id));
+                assert_eq!(roster.owners.len(), 2);
+                let intake = roster.owners.values().nth(owner).unwrap();
+                // ObservationGate before Wallet, then seven successful scanner
+                // permission calls, each with the same gate before and after.
+                checked(component_gate(&f, &access, intake, &consent, &mut cost));
+                for _ in 0..7 {
+                    checked(component_gate(&f, &access, intake, &consent, &mut cost));
+                    // Actual Host scan callback is intentionally not simulated.
+                    checked(component_gate(&f, &access, intake, &consent, &mut cost));
+                }
+                checked(component_gate(&f, &access, intake, &consent, &mut cost));
+            }
+            assert_eq!(
+                (
+                    cost.history.calls,
+                    cost.intake.calls,
+                    cost.load_decode.calls
+                ),
+                (38, 32, 2)
+            );
+            assert_eq!(consent.calls.get(), 32);
+            cost.history.report("encrypted_history");
+            cost.intake.report("typed_intake");
+            cost.load_decode.report("extra_load_decode");
+            let measured_total_us = cost
+                .history
+                .total_us
+                .saturating_add(cost.intake.total_us)
+                .saturating_add(cost.load_decode.total_us);
+            eprintln!(
+                "PREPARE_SCAN_COMPONENT measured_kernel_total_us={} clamped={}",
+                measured_total_us.min(1_080_000_000),
+                measured_total_us > 1_080_000_000
+            );
+            eprintln!(
+                "PREPARE_SCAN_COMPONENT source_wallets=2 source_same_tip_permissions_per_wallet=7 source_history_per_wallet=19 source_intake_per_wallet=16 source_extra_decode_per_wallet=1 source_stage_callbacks=122 source_outer_stage_checks=4 full_host_measured=false native_authority=false"
+            );
+            assert!(before == state(&f));
+            assert!(bytes == checked(std::fs::read(&f.path)));
+        }
+        #[test]
+        fn prepare_scan_component_preserves_corruption_and_currentness_refusals() {
+            let f = history_fixture_with_receipt(false);
+            let before = state(&f);
+            let bytes = checked(std::fs::read(&f.path));
+            let access = Access {
+                principal_id: f.intake.principal_id.clone(),
+                ..Access::default()
+            };
+            let mut corrupt = checked(
+                f.engine
+                    .store
+                    .get_agreement(&f.envelopes[0].view.agreement.agreement_id),
+            )
+            .unwrap();
+            let candidate_id = &f.envelopes[1].view.candidates[0].candidate_id;
+            let mut roster: Roster = checked(serde_json::from_value(
+                corrupt.payload["durable_construction_v1"][candidate_id].clone(),
+            ));
+            let intake = roster.owners.values_mut().next().unwrap();
+            let mut outbox = checked(serde_json::to_value(&intake.outbox));
+            outbox["reference"] = json!(hash(0xee));
+            intake.outbox = checked(serde_json::from_value(outbox));
+            corrupt.payload["durable_construction_v1"][candidate_id] =
+                checked(serde_json::to_value(roster));
+            let strict = decode_private_record(&corrupt).map(|_| ());
+            assert!(strict.is_err());
+            same_result(strict, crate::decode_unprojected(&corrupt).map(|_| ()));
+            // Compare the existing full live-check composition with the actual
+            // typed kernel; no permission callback may run on stale input.
+            let request = f.intake.outbox.request();
+            let index = request
+                .scope
+                .proposal
+                .manifest
+                .participants
+                .iter()
+                .position(|p| p.account_id == request.scope.account_id)
+                .unwrap();
+            let mut expired = f.intake.clone();
+            expired.outbox = outbox_for_expired_component(&f, index);
+            let mut wrong_origin = f.intake.clone();
+            wrong_origin.metadata_origin = hash(0xef);
+            for intake in [expired, wrong_origin] {
+                let a = Consent {
+                    calls: Cell::new(0),
+                    allow: true,
+                    replace_path: None,
+                };
+                let b = Consent {
+                    calls: Cell::new(0),
+                    allow: true,
+                    replace_path: None,
+                };
+                let original = baseline_material(&f.engine, &access, &intake, &a);
+                let actual = current_material(&f.engine, &access, &intake, &b);
+                assert!(actual.is_err());
+                same_result(original, actual);
+                assert_eq!((a.calls.get(), b.calls.get()), (0, 0));
+            }
+            assert!(before == state(&f));
+            assert!(bytes == checked(std::fs::read(&f.path)));
+        }
+        fn outbox_for_expired_component(
+            f: &HistoryFixture,
+            index: usize,
+        ) -> DurableConstructionOutboxV1 {
+            let request = f.intake.outbox.request();
+            let now = unix_now();
+            outbox(
+                &request.scope.proposal,
+                request.material.clone(),
+                index,
+                &f.path,
+                now - 100,
+                now - 1,
+            )
         }
         fn checked_delta(
             before: &Envelope,

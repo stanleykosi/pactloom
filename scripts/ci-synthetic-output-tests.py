@@ -2819,8 +2819,8 @@ class PrivateWorkspaceOutputTests(unittest.TestCase):
 
 
 class PrivateFixedDiagnosticOutputTests(unittest.TestCase):
-    FIXTURE = r'''{"evidence":{"attempt_consumed":true,"call_scope":"CurrentInvocation","calls":{"enqueue":"NotApplicable","freeze":"NotApplicable","link":"NotApplicable","outcome":"NotCalled","proof":"ReturnedErrUnknown","receipt":"NotApplicable"}},"primary":{"cause":"Authentication","engine_code":"NotApplicable","family":"Host","operation":"Proof","site":"HostProofForegroundMessage"},"schema":1,"worker":{"engine_failure":{"attempt_consumed":true,"call_scope":"CurrentInvocation","calls":{"enqueue":"NotApplicable","freeze":"NotApplicable","link":"NotApplicable","outcome":"NotCalled","proof":"ReturnedErrUnknown","receipt":"NotApplicable"},"cause":"NoCurrentObservation","engine_code":"DURABLE_CONSTRUCTION_UNAVAILABLE","family":"Sync","operation":"Proof","schema":1,"site":"ProofRun"},"join":"Joined","result":"ReceivedErr"}}'''
-    MAXIMAL = r'''{"evidence":{"attempt_consumed":true,"call_scope":"CurrentInvocation","calls":{"enqueue":"NotApplicable","freeze":"NotApplicable","link":"NotApplicable","outcome":"ReturnedErrUnknown","proof":"ReturnedErrUnknown","receipt":"NotApplicable"}},"primary":{"cause":"RETAINED_INPUT_OBSERVATION_UNAVAILABLE","engine_code":"RETAINED_INPUT_OBSERVATION_UNAVAILABLE","family":"Engine","operation":"Proof","site":"ReaderOriginalFinancialProofSchema"},"schema":1,"worker":{"engine_failure":{"attempt_consumed":true,"call_scope":"CurrentInvocation","calls":{"enqueue":"NotApplicable","freeze":"NotApplicable","link":"NotApplicable","outcome":"ReturnedErrUnknown","proof":"ReturnedErrUnknown","receipt":"NotApplicable"},"cause":"RETAINED_INPUT_OBSERVATION_UNAVAILABLE","engine_code":"RETAINED_INPUT_OBSERVATION_UNAVAILABLE","family":"Engine","operation":"Proof","schema":1,"site":"SnapshotSourceUnchanged"},"join":"Panicked","result":"ReceivedErr"}}'''
+    FIXTURE = r'''{"evidence":{"attempt_consumed":true,"call_scope":"CurrentInvocation","calls":{"enqueue":"NotApplicable","freeze":"NotApplicable","link":"NotApplicable","outcome":"NotCalled","proof":"ReturnedErrUnknown","receipt":"NotApplicable"}},"primary":{"cause":"Authentication","engine_code":"NotApplicable","family":"Host","operation":"Proof","site":"HostProofForegroundMessage"},"schema":1,"stage":null,"worker":{"engine_failure":{"attempt_consumed":true,"call_scope":"CurrentInvocation","calls":{"enqueue":"NotApplicable","freeze":"NotApplicable","link":"NotApplicable","outcome":"NotCalled","proof":"ReturnedErrUnknown","receipt":"NotApplicable"},"cause":"NoCurrentObservation","engine_code":"DURABLE_CONSTRUCTION_UNAVAILABLE","family":"Sync","operation":"Proof","schema":1,"site":"ProofRun"},"join":"Joined","result":"ReceivedErr"}}'''
+    MAXIMAL = r'''{"evidence":{"attempt_consumed":true,"call_scope":"CurrentInvocation","calls":{"enqueue":"NotApplicable","freeze":"NotApplicable","link":"NotApplicable","outcome":"ReturnedErrUnknown","proof":"ReturnedErrUnknown","receipt":"NotApplicable"}},"primary":{"cause":"RETAINED_INPUT_OBSERVATION_UNAVAILABLE","engine_code":"RETAINED_INPUT_OBSERVATION_UNAVAILABLE","family":"Engine","operation":"Proof","site":"ReaderOriginalFinancialProofSchema"},"schema":1,"stage":{"callback_count":1000000,"callback_max_us":1080000000,"callback_total_us":1080000000,"elapsed_ms":1080000,"kind":"ProveOriginal"},"worker":{"engine_failure":{"attempt_consumed":true,"call_scope":"CurrentInvocation","calls":{"enqueue":"NotApplicable","freeze":"NotApplicable","link":"NotApplicable","outcome":"ReturnedErrUnknown","proof":"ReturnedErrUnknown","receipt":"NotApplicable"},"cause":"RETAINED_INPUT_OBSERVATION_UNAVAILABLE","engine_code":"RETAINED_INPUT_OBSERVATION_UNAVAILABLE","family":"Engine","operation":"Proof","schema":1,"site":"SnapshotSourceUnchanged"},"join":"Panicked","result":"ReceivedErr"}}'''
 
     def record(self):
         return json.loads(self.FIXTURE)
@@ -2891,6 +2891,32 @@ class PrivateFixedDiagnosticOutputTests(unittest.TestCase):
             with self.assertRaises(ValueError): self.check(row)
         row=self.record(); row['worker']['engine_failure']['calls']['proof']='ReturnedOk'
         with self.assertRaises(ValueError): self.check(row)
+
+    def test_stage_cost_exact_pairing_bounds_and_required_null(self):
+        for kind,operation in output.PRIVATE_FIXED_STAGE_OPERATIONS.items():
+            row=self.record(); row['primary']['operation']=operation; row['worker']=None; row['evidence']=None
+            row['stage']={'kind':kind,'elapsed_ms':120001,'callback_count':1,'callback_total_us':7,'callback_max_us':7}
+            self.assertEqual(self.check(row),row)
+            row['primary']['operation']='OpenOriginal'
+            with self.assertRaises(ValueError): self.check(row)
+        row=json.loads(self.MAXIMAL)
+        for key,bad in [('elapsed_ms',1080001),('callback_count',1000001),('callback_total_us',1080000001),('callback_max_us',1080000001),('kind','private-canary')]:
+            changed=json.loads(self.MAXIMAL);changed['stage'][key]=bad
+            with self.assertRaises(ValueError): self.check(changed)
+        for key in output.PRIVATE_FIXED_STAGE_FIELDS:
+            changed=json.loads(self.MAXIMAL);del changed['stage'][key]
+            with self.assertRaises(ValueError): self.check(changed)
+            changed=json.loads(self.MAXIMAL);changed['stage'][key]=True
+            with self.assertRaises(ValueError): self.check(changed)
+        changed=self.record();del changed['stage']
+        with self.assertRaises(ValueError): self.check(changed)
+        for stage in [{'kind':'ProveOriginal','elapsed_ms':0,'callback_count':1,'callback_total_us':2,'callback_max_us':1}, {'kind':'ProveOriginal','elapsed_ms':0,'callback_count':0,'callback_total_us':1,'callback_max_us':1}, {'kind':'ProveOriginal','elapsed_ms':0,'callback_count':1,'callback_total_us':1,'callback_max_us':2}]:
+            changed=self.record();changed['stage']=stage
+            with self.assertRaises(ValueError): self.check(changed)
+        raw=self.MAXIMAL.replace('"elapsed_ms":1080000','"elapsed_ms":1080000,"elapsed_ms":1')
+        with self.assertRaises(ValueError): output.public_private_fixed_diagnostic(raw)
+        raw=self.MAXIMAL.replace('"kind":"ProveOriginal"','"kind":"ProveOriginal","private":"canary"')
+        with self.assertRaises(ValueError): output.public_private_fixed_diagnostic(raw)
 
     def test_maximal_canonical_record_is_bounded(self):
         row=output.public_private_fixed_diagnostic(self.MAXIMAL)
@@ -3016,7 +3042,8 @@ class PrivateFixedDiagnosticOutputTests(unittest.TestCase):
             return frozenset(re.findall(r'\b([A-Za-z][A-Za-z0-9_]*)\s*(?:,|$)',body))
         for name, expected in [('Operation',output.PRIVATE_FIXED_OPERATIONS),('Site',output.PRIVATE_FIXED_SITES),('Family',set(output.PRIVATE_FIXED_FAMILIES)),('Cause',set().union(*output.PRIVATE_FIXED_FAMILIES.values())),('EngineCode',output.PRIVATE_FIXED_ENGINE_CODES),('CallState',output.PRIVATE_FIXED_CALL_STATES),('CallScope',{'CurrentInvocation'}),('WorkerResult',output.PRIVATE_FIXED_WORKER_RESULTS),('WorkerJoin',output.PRIVATE_FIXED_WORKER_JOINS)]:
             self.assertEqual(variants('PrivateDiagnostic'+name+'V1'),expected)
-        for name, expected in [('PrivateFixedDiagnosticV1',output.PRIVATE_FIXED_FIELDS),('PrivateDiagnosticPrimaryV1',output.PRIVATE_FIXED_PRIMARY_FIELDS),('PrivateDiagnosticEvidenceV1',output.PRIVATE_FIXED_EVIDENCE_FIELDS),('PrivateDiagnosticCallsV1',output.PRIVATE_FIXED_CALL_FIELDS),('PrivateDiagnosticEngineCoreV1',output.PRIVATE_FIXED_ENGINE_FIELDS),('PrivateDiagnosticWorkerV1',output.PRIVATE_FIXED_WORKER_FIELDS)]:
+        self.assertEqual(variants('PrivateStageKindV1'),set(output.PRIVATE_FIXED_STAGE_OPERATIONS))
+        for name, expected in [('PrivateFixedDiagnosticV1',output.PRIVATE_FIXED_FIELDS),('PrivateDiagnosticPrimaryV1',output.PRIVATE_FIXED_PRIMARY_FIELDS),('PrivateDiagnosticEvidenceV1',output.PRIVATE_FIXED_EVIDENCE_FIELDS),('PrivateDiagnosticCallsV1',output.PRIVATE_FIXED_CALL_FIELDS),('PrivateDiagnosticEngineCoreV1',output.PRIVATE_FIXED_ENGINE_FIELDS),('PrivateDiagnosticWorkerV1',output.PRIVATE_FIXED_WORKER_FIELDS),('PrivateStageCostV1',output.PRIVATE_FIXED_STAGE_FIELDS)]:
             body=re.search(r'struct '+name+r'\s*\{(.*?)\n\}',leaf,re.S).group(1)
             self.assertEqual(set(re.findall(r'pub\(crate\)\s+(\w+)\s*:',body)),expected)
         families={family:frozenset(re.findall(r'C::(\w+)',causes)) for family,causes in re.findall(r'F::(\w+)\s*=>\s*matches!\(\s*self.cause,\s*(.*?)\)',leaf,re.S)}
