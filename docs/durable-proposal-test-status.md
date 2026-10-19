@@ -1,8 +1,16 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-19, 01:10 UTC.
+Updated: 2026-10-19, 02:09 UTC.
 
 **Incomplete implementation. No full native financial signing, public testnet settlement, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
+
+## CI20: fresh import passed, owner expired before signing; public verifier parameters reused
+
+[Run 39184238012](https://github.com/stanleykosi/pactloom/actions/runs/39184238012), qualifier `36110e905646429b1f3e7d76624f2ef906ada52c`, passed build/Python130/Host80/bootstrap/baseline/cleanup. Admission, acquisition, activation, reconciliation and fresh financial import completed. InitialSign then expired with WalletReview received/accepted but no signing release/reservation/key-use/result call observed. Lifecycle improved: first import31.505s, historical lookup41.986s, acquisition worker52.725s, reconciliation86.336s, financial import115.304s, expiry120.098s. The cycle is still unqualified and too close to its bound for any broad reliability claim.
+
+A local component measurement found each fixed PostNu6_3 public verifying-key construction took3.091/3.021s. The two-file optimization retains only those public immutable parameters in a private process-local OnceLock. Every original review, proof-presence, instance and actual proof.verify check still executes. No supplied proof acceptance, private data, authority or deadline is cached; no prewarm operation or lifetime change is added.
+
+All-features Protocol+Host+Signer build passed (7m17s) after a test-only Result alias correction. Send/Sync and concurrent one-initialization tests passed2; an actual deterministic proof-only ignored test passed, comparing shared/fresh parameter verification, repeated real verifier calls and corrupted proof/anchor/instance refusals without signing/native authority. The construction binding/resource rejection integration test passed1, Host80 and Python130 passed, and non-synthetic proving-library build passed (7.29s). Native window fit and attended/variable-history reliability remain unproven.
 
 ## CI19: owner budget exhausted at activation approval; same-call validation reduced
 

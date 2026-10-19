@@ -791,6 +791,216 @@ mod synthetic {
     }
 
     #[test]
+    #[ignore = "CPU-intensive deterministic proof-only public-parameter equivalence; run explicitly"]
+    fn real_proof_public_verifying_parameter_reuse_preserves_exact_verification() {
+        use crate::proving::{
+            ProvedCandidate, actual_proof_verification_count_for_test,
+            verify_proof_with_public_parameters_for_test,
+            verify_proved_candidate_with_fresh_public_parameters_for_test,
+        };
+
+        fn observed_verification<T>(
+            operation: impl FnOnce() -> std::result::Result<T, String>,
+        ) -> std::result::Result<T, String> {
+            let before = actual_proof_verification_count_for_test();
+            let result = operation();
+            assert_eq!(
+                actual_proof_verification_count_for_test(),
+                before + 1,
+                "Every call must reach actual proof.verify, including repeated refusals"
+            );
+            result
+        }
+
+        fn assert_same_verified_candidate(
+            expected_bytes: &[u8],
+            expected_review: &Value,
+            expected_proof_bytes: usize,
+            cached: &ProvedCandidate,
+            fresh: &ProvedCandidate,
+        ) {
+            for candidate in [cached, fresh] {
+                assert!(
+                    candidate.pczt_bytes.as_slice() == expected_bytes,
+                    "Verification must retain the exact proved artifact bytes"
+                );
+                assert!(
+                    serde_json::to_value(&candidate.economic_review).unwrap() == *expected_review,
+                    "Verification must preserve every economic review field"
+                );
+                assert_eq!(candidate.proof_bytes, expected_proof_bytes);
+                assert!(candidate.proof_verified);
+                assert!(!candidate.chain_validated);
+                assert!(!candidate.distribution_allowed);
+                assert!(!candidate.authorization_allowed);
+                assert!(!candidate.encrypted_checkpoint_created);
+            }
+        }
+
+        // Reuse only the existing fixed public TEST-key fixture. This separate
+        // proof-only qualification never adds real-owner spend authorizations.
+        let fixture = fixture();
+        let limits = ProvingLimits { maximum_actions: 8 };
+        let review = verify_review(&fixture.unsigned, &fixture.policy).unwrap();
+        let expected_review = serde_json::to_value(&review).unwrap();
+        let key =
+            orchard::circuit::ProvingKey::build(orchard::circuit::OrchardCircuitVersion::PostNu6_3);
+        let proved = Prover::new(parse_candidate(&fixture.unsigned).unwrap())
+            .create_ironwood_proof(StdRng::from_seed([0xd3; 32]), &key)
+            .unwrap()
+            .finish();
+        let proved = encode(proved).unwrap();
+        assert!(
+            encode(parse_candidate(&proved).unwrap()).unwrap() == proved,
+            "The proved artifact must round-trip canonically without changes"
+        );
+        require_exact_proof_addition(
+            &fixture.unsigned,
+            &parse_candidate(&fixture.unsigned).unwrap(),
+            &parse_candidate(&proved).unwrap(),
+            &fixture.policy,
+        )
+        .unwrap();
+
+        let original = wire(&proved);
+        let proof_bytes = original["ironwood"]["zkproof"].as_array().unwrap().len();
+        assert_eq!(
+            proof_bytes,
+            orchard::Proof::expected_proof_size(
+                original["ironwood"]["actions"].as_array().unwrap().len()
+            )
+        );
+        let mut malformed = original.clone();
+        let proof = malformed["ironwood"]["zkproof"].as_array_mut().unwrap();
+        assert!(!proof.is_empty());
+        proof[0] = json!(proof[0].as_u64().unwrap() as u8 ^ 1);
+        let malformed = bytes(malformed);
+        assert!(
+            malformed != proved,
+            "The corrupted proof must change the artifact"
+        );
+        assert_eq!(malformed.len(), proved.len());
+        assert!(
+            serde_json::to_value(verify_review(&malformed, &fixture.policy).unwrap()).unwrap()
+                == expected_review,
+            "Proof corruption must preserve the complete economic review"
+        );
+
+        // Interleave identical valid and identical invalid artifacts. Count the
+        // real verifier boundary on every call, not only cache initialization.
+        for _ in 0..2 {
+            let cached = observed_verification(|| {
+                verify_proved_candidate(&proved, &fixture.policy, review.review_binding(), limits)
+            })
+            .unwrap();
+            let fresh = observed_verification(|| {
+                verify_proved_candidate_with_fresh_public_parameters_for_test(
+                    &proved,
+                    &fixture.policy,
+                    review.review_binding(),
+                    limits,
+                )
+            })
+            .unwrap();
+            assert_same_verified_candidate(&proved, &expected_review, proof_bytes, &cached, &fresh);
+
+            let cached_error = observed_verification(|| {
+                verify_proved_candidate(
+                    &malformed,
+                    &fixture.policy,
+                    review.review_binding(),
+                    limits,
+                )
+            })
+            .err()
+            .expect("A canonical-size corrupted proof must be refused");
+            let fresh_error = observed_verification(|| {
+                verify_proved_candidate_with_fresh_public_parameters_for_test(
+                    &malformed,
+                    &fixture.policy,
+                    review.review_binding(),
+                    limits,
+                )
+            })
+            .err()
+            .expect("The fresh-key reference must refuse the same corrupted proof");
+            assert_eq!(cached_error, fresh_error);
+            assert_eq!(cached_error, "Ironwood proof verification failed");
+        }
+
+        let mut changed_anchor = original.clone();
+        let alternate_anchor = json!(orchard::Anchor::empty_tree().to_bytes());
+        assert!(
+            changed_anchor["ironwood"]["anchor"] != alternate_anchor,
+            "The alternate anchor must differ from the proved anchor"
+        );
+        changed_anchor["ironwood"]["anchor"] = alternate_anchor;
+
+        // Use an already valid, distinct commitment encoding rather than an
+        // invalid field encoding that could be rejected before proof.verify.
+        let mut changed_instance = original.clone();
+        let first_cmx = original["ironwood"]["actions"][0]["output"]["cmx"].clone();
+        let second_cmx = original["ironwood"]["actions"][1]["output"]["cmx"].clone();
+        assert!(
+            first_cmx != second_cmx,
+            "The swapped commitments must be distinct"
+        );
+        changed_instance["ironwood"]["actions"][0]["output"]["cmx"] = second_cmx;
+        changed_instance["ironwood"]["actions"][1]["output"]["cmx"] = first_cmx;
+
+        for changed in [changed_anchor, changed_instance] {
+            assert!(
+                changed["ironwood"]["zkproof"] == original["ironwood"]["zkproof"],
+                "Public-instance mutation must preserve the original proof"
+            );
+            let changed = bytes(changed);
+            assert!(
+                changed != proved,
+                "The public-instance mutation must change the artifact"
+            );
+            assert!(
+                encode(parse_candidate(&changed).unwrap()).unwrap() == changed,
+                "The changed artifact must retain valid canonical encodings"
+            );
+
+            // Production must retain its economic/review refusal. That refusal
+            // alone is not evidence of cryptographic proof rejection below.
+            let before = actual_proof_verification_count_for_test();
+            let cached_error =
+                verify_proved_candidate(&changed, &fixture.policy, review.review_binding(), limits)
+                    .err()
+                    .expect("Changed reviewed fields must fail the production review");
+            let fresh_error = verify_proved_candidate_with_fresh_public_parameters_for_test(
+                &changed,
+                &fixture.policy,
+                review.review_binding(),
+                limits,
+            )
+            .err()
+            .expect("The fresh-key reference must preserve the review refusal");
+            assert_eq!(cached_error, fresh_error);
+            assert_eq!(actual_proof_verification_count_for_test(), before);
+
+            // The cfg(test)-only seam reaches the unchanged proof-verifier body
+            // with valid encodings but the original proof's wrong public inputs.
+            let cached = observed_verification(|| {
+                verify_proof_with_public_parameters_for_test(
+                    parse_candidate(&changed).unwrap(),
+                    false,
+                )
+            });
+            let fresh = observed_verification(|| {
+                verify_proof_with_public_parameters_for_test(
+                    parse_candidate(&changed).unwrap(),
+                    true,
+                )
+            });
+            assert_eq!(cached, fresh);
+            assert_eq!(cached, Err("Ironwood proof verification failed".into()));
+        }
+    }
+
+    #[test]
     #[ignore = "CPU-intensive real synthetic proof qualification; run explicitly"]
     fn real_proof_and_independent_detached_owners_preserve_exact_fixed_artifact() {
         let fixture = fixture_with_inputs(&[(0, 100_000), (0, 100_000), (1, 300_000)]);
