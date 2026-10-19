@@ -1,8 +1,18 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-19, 19:32 UTC.
+Updated: 2026-10-19, 20:34 UTC.
 
 **CI33 passed the bounded synthetic original-private-workspace completed-fixed SIGKILL/fresh-process read-only reopen path and all listed regressions. Product qualification remains incomplete: no public testnet settlement, restarted acquired financial session, attended GUI reliability, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
+
+## CI35: first-owner export commit denied before this invocation's Store update
+
+[Run 39313369287](https://github.com/stanleykosi/pactloom/actions/runs/39313369287), qualifier `adcaae6f616aa32113bb4d57f0faafdd2b0c3b04`, source `b1754b9c0ca247b9d62590356e59173bcea0506a`, passed its release build (8m30s), pure97, encrypted bootstrap and observation preflight. At 20:00:46 UTC its first observed pair was DeliveryExportCommit / EngineDisclosureDenied, with producer inputs111/117. This is the first owner's export approval. Producer exit was other, reaped and group absent; reader never started; root cleanup was closed/absent and runtime removal verified. Admission and full fixed/history claims remain unverified. Later regression phases did not run. Checkpoint57 local non-synthetic build and nine exact compatible controls passed; the original eleven-item scratch inventory wrongly included two synthetic-only controls, which were excluded after compiled-catalogue verification and had already passed the all-feature30 inventory.
+
+Source tracing localizes the plain Engine error before this invocation's Store update, because update and later errors are wrapped as DISCLOSURE_UNKNOWN. This is not proof of global nonexposure, prior history, rollback or a specific failed predicate. Recipient currentness errors and lower Engine errors converted through proof-role booleans remained indistinguishable. No deterministic scope mismatch or actual expiry was established.
+
+The next seven-path change is observation-only: a same-invocation first-cause collector preserves the actual lower Result before conversion; a shared recipient kernel identifies a failed original deadline comparison versus stream, IO, framing or response failure without adding clock reads or repeating checks. Exact false predicates remain PredicateDenied, not fabricated typed errors. A strict finite additive error sidecar preserves original fields; pre-existing reserved-key collisions suppress projection. Host emits only validated closed categories. Public schema3, its26 fields and cleanup requirements remain unchanged. Original checks, owned Results, clocks, authority, effects and DISCLOSURE_UNKNOWN wrapping remain intact.
+
+The all-feature Engine/Signer/Host release build (8m21s), all29 exact focused controls, ten exact compatibility controls and Python162 pass. Non-synthetic compilation and24 exact compatible controls remain pending at preparation. Actual native export/admission/restart is not yet established and no functional or timeout fix is claimed.
 
 ## CI34: delivery export refused; finer finite observations under qualification
 

@@ -2,23 +2,317 @@
 //! conversion back to the precursor, generic Engine, raw Store or private bytes.
 //! The immutable fixed prefix and the append-only export history are distinct.
 use super::*;
-use crate::Envelope;
 use crate::durable_construction_v1::{
-    DurableMaterialActionV1, LocalDurableMaterialConsentV1, original_roster_v2,
+    original_roster_v2,
     review_export_v1::{
         self, DurableReviewExportScopeV1, ExportExposure, ExportIntent,
         LocalDurableReviewExportConsentV1, MAX_EXPORT_INTENTS,
     },
+    DurableMaterialActionV1, LocalDurableMaterialConsentV1,
 };
+use crate::Envelope;
 use wholepact_proof_jobs::{CheckpointScope, LocalAction, LocalProofConsent, VerifiedCheckpoint};
 use wholepact_protocol::durable_proposal_v1::FixedProposalIdentityV1;
 use wholepact_signer::authority_bridge::{
-    BridgeError,
     durable_review_ipc_v1::{
         DurableReviewOutputActionV1, DurableReviewPayloadV1, PreparedDurableReviewDeliveryV1,
     },
+    BridgeError,
 };
 use wholepact_store::{CommandContext, MutationResult};
+
+const EXPORT_CAUSE_KEY: &str = "private_durable_delivery_cause_v2";
+const EXPORT_CAUSE_COLLISION_KEY: &str = "private_durable_delivery_cause_collision_v2";
+
+// These labels are inert diagnostic vocabulary, not authority or caller input.
+macro_rules! cause_labels {
+    ($name:ident { $($variant:ident),+ $(,)? }) => {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        enum $name { $($variant),+ }
+        impl $name {
+            #[cfg(test)]
+            const ALL: &'static [Self] = &[$(Self::$variant),+];
+            fn label(self) -> &'static str {
+                match self { $(Self::$variant => stringify!($variant)),+ }
+            }
+            fn from_label(label: &str) -> Option<Self> {
+                match label { $(stringify!($variant) => Some(Self::$variant)),+, _ => None }
+            }
+        }
+    };
+}
+cause_labels! { ExportCauseSite {
+    ExportProofCurrent, ExportProofOrigin, ExportSourceBefore, ExportSourceAfter,
+    ExportMetadataOrigin, ExportMarker, ExportHistory, ExportMaterialCeilings,
+    ExportIntake, ExportVerifiedProof, ExportRoster, ExportPayload,
+    ExportOutputActions, ExportRecipientBinding, ExportSources,
+    ExportCheckpointScope, ExportProofPermission, ExportPermission,
+    ExportReplayScope, ExportCommand, ExportReplayLookup, ExportDelta, ExportEntry,
+    RecipientMutex, RecipientDeadline, RecipientOrigin, RecipientObserverClone,
+    RecipientWriteSerialize, RecipientWriteLimit, RecipientWriteDeadline,
+    RecipientWriteTimeout, RecipientWriteIo, RecipientWriteEmpty, RecipientFrame,
+    RecipientResponseDecode, RecipientResponseDigest, RecipientResponse,
+} }
+cause_labels! { ExportCauseOutcome {
+    PredicateDenied, EngineDisclosureUnknown, EngineDisclosureDenied,
+    EngineRecoveryRequired, EngineIdempotencyConflict, EngineRevisionConflict,
+    EngineDurableProposalConflict, EngineDurableConstructionUnavailable,
+    EngineDurableProfileUnavailable, EngineResourceExhausted, EngineUnclassified,
+    BridgeBinding, BridgeConflict, BridgeMissing, BridgeUncertain, BridgeLimit,
+    BridgePermission, BridgeRecoveryRequired, BridgeCompleteOriginRecoveryUnavailable,
+    BridgeVerification, BridgeSignerOriginUnavailable, BridgeJournal, BridgeAuthority,
+    BridgeWallet, BridgeIpc, OriginPermanentStopUnavailable,
+    OriginRetirementEvidenceUnavailable, OriginSignerOriginUnavailable,
+    OriginPeerLifetimeUnavailable, OriginAuthentication, OriginBinding,
+    OriginConflict, OriginPermission, OriginInvalidData, OriginLocked, OriginCrypto,
+    OriginIpc, OriginLimit, OriginIoTimedOut, OriginIoWouldBlock,
+    OriginIoUnexpectedEof, OriginIoBrokenPipe, OriginIoConnectionReset,
+    OriginIoConnectionAborted, OriginIoNotConnected, OriginIoInterrupted,
+    OriginIoPermissionDenied, OriginIoOther,
+} }
+impl ExportCauseOutcome {
+    fn engine(error: &ApiError) -> Self {
+        match error.code.as_str() {
+            "DISCLOSURE_UNKNOWN" => Self::EngineDisclosureUnknown,
+            "DISCLOSURE_DENIED" => Self::EngineDisclosureDenied,
+            "RECOVERY_REQUIRED" | "DURABLE_PROPOSAL_RECOVERY_REQUIRED" => {
+                Self::EngineRecoveryRequired
+            }
+            "IDEMPOTENCY_CONFLICT" => Self::EngineIdempotencyConflict,
+            "REVISION_CONFLICT" => Self::EngineRevisionConflict,
+            "DURABLE_PROPOSAL_CONFLICT" => Self::EngineDurableProposalConflict,
+            "DURABLE_CONSTRUCTION_UNAVAILABLE" => Self::EngineDurableConstructionUnavailable,
+            "DURABLE_PROFILE_UNAVAILABLE" => Self::EngineDurableProfileUnavailable,
+            "RESOURCE_EXHAUSTED" => Self::EngineResourceExhausted,
+            _ => Self::EngineUnclassified,
+        }
+    }
+    fn is_bridge(self) -> bool {
+        matches!(
+            self,
+            Self::BridgeBinding
+                | Self::BridgeConflict
+                | Self::BridgeMissing
+                | Self::BridgeUncertain
+                | Self::BridgeLimit
+                | Self::BridgePermission
+                | Self::BridgeRecoveryRequired
+                | Self::BridgeCompleteOriginRecoveryUnavailable
+                | Self::BridgeVerification
+                | Self::BridgeSignerOriginUnavailable
+                | Self::BridgeJournal
+                | Self::BridgeAuthority
+                | Self::BridgeWallet
+                | Self::BridgeIpc
+        )
+    }
+    fn is_origin_io(self) -> bool {
+        matches!(
+            self,
+            Self::OriginIoTimedOut
+                | Self::OriginIoWouldBlock
+                | Self::OriginIoUnexpectedEof
+                | Self::OriginIoBrokenPipe
+                | Self::OriginIoConnectionReset
+                | Self::OriginIoConnectionAborted
+                | Self::OriginIoNotConnected
+                | Self::OriginIoInterrupted
+                | Self::OriginIoPermissionDenied
+                | Self::OriginIoOther
+        )
+    }
+    fn is_origin(self) -> bool {
+        self.is_origin_io()
+            || matches!(
+                self,
+                Self::OriginPermanentStopUnavailable
+                    | Self::OriginRetirementEvidenceUnavailable
+                    | Self::OriginSignerOriginUnavailable
+                    | Self::OriginPeerLifetimeUnavailable
+                    | Self::OriginAuthentication
+                    | Self::OriginBinding
+                    | Self::OriginConflict
+                    | Self::OriginPermission
+                    | Self::OriginInvalidData
+                    | Self::OriginLocked
+                    | Self::OriginCrypto
+                    | Self::OriginIpc
+                    | Self::OriginLimit
+            )
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FirstExportCause {
+    Vacant,
+    // Failure was observed but its evidence was unavailable. A later wrapper
+    // must not impersonate that first failure.
+    Unavailable,
+    Seen(ExportCauseSite, ExportCauseOutcome),
+}
+struct ExportCause {
+    first: std::cell::Cell<FirstExportCause>,
+    active: std::cell::Cell<bool>,
+}
+impl ExportCause {
+    fn new() -> Self {
+        Self {
+            first: std::cell::Cell::new(FirstExportCause::Vacant),
+            active: std::cell::Cell::new(true),
+        }
+    }
+    fn record(&self, cause: FirstExportCause) {
+        if self.active.get() && self.first.get() == FirstExportCause::Vacant {
+            self.first.set(cause);
+        }
+    }
+    fn freeze(&self) {
+        self.active.set(false);
+    }
+    fn attach<T>(&self, result: Result<T>) -> Result<T> {
+        result.map_err(|mut error| {
+            let Some(details) = error.details.as_object_mut() else {
+                return error;
+            };
+            // An inherited valid-looking sidecar is not evidence from this
+            // invocation. Preserve it exactly and add only a deny marker. The
+            // Host rejects ANY marker presence, including pre-existing values.
+            // This precedes the Vacant/Unavailable/frozen paths deliberately.
+            if details.contains_key(EXPORT_CAUSE_KEY) {
+                details
+                    .entry(EXPORT_CAUSE_COLLISION_KEY)
+                    .or_insert(serde_json::Value::Bool(true));
+                return error;
+            }
+            if details.contains_key(EXPORT_CAUSE_COLLISION_KEY) {
+                return error;
+            }
+            if let FirstExportCause::Seen(site, outcome) = self.first.get() {
+                details.insert(
+                    EXPORT_CAUSE_KEY.into(),
+                    serde_json::json!({
+                        "version": 1, "site": site.label(), "outcome": outcome.label(),
+                    }),
+                );
+            }
+            error
+        })
+    }
+}
+type ExportObservation<'a> = Option<&'a ExportCause>;
+
+// Consume and return the same owned result. In particular, observe failures
+// before ProofGate's existing conversion to bool can erase their actual cause.
+fn export_result<T>(
+    cause: ExportObservation<'_>,
+    site: ExportCauseSite,
+    result: Result<T>,
+) -> Result<T> {
+    if let (Some(cause), Err(error)) = (cause, &result) {
+        cause.record(FirstExportCause::Seen(
+            site,
+            ExportCauseOutcome::engine(error),
+        ));
+    }
+    result
+}
+fn export_predicate(cause: ExportObservation<'_>, site: ExportCauseSite, permitted: bool) -> bool {
+    if !permitted {
+        if let Some(cause) = cause {
+            cause.record(FirstExportCause::Seen(
+                site,
+                ExportCauseOutcome::PredicateDenied,
+            ));
+        }
+    }
+    permitted
+}
+fn export_predicate_error<T>(
+    cause: ExportObservation<'_>,
+    site: ExportCauseSite,
+    error: ApiError,
+) -> Result<T> {
+    export_predicate(cause, site, false);
+    Err(error)
+}
+fn recipient_cause(site: &str, outcome: &str) -> Option<FirstExportCause> {
+    use ExportCauseOutcome as O;
+    use ExportCauseSite as S;
+    let site = S::from_label(site)?;
+    let outcome = O::from_label(outcome)?;
+    let valid = match site {
+        S::RecipientMutex | S::RecipientWriteEmpty => outcome == O::BridgeIpc,
+        S::RecipientDeadline | S::RecipientWriteDeadline | S::RecipientResponse => {
+            outcome == O::BridgePermission
+        }
+        S::RecipientOrigin => outcome.is_bridge(),
+        S::RecipientObserverClone | S::RecipientWriteTimeout | S::RecipientWriteIo => {
+            outcome.is_origin_io()
+        }
+        S::RecipientWriteSerialize | S::RecipientResponseDecode | S::RecipientResponseDigest => {
+            outcome == O::BridgeBinding
+        }
+        S::RecipientWriteLimit => outcome == O::BridgeLimit,
+        S::RecipientFrame => outcome.is_origin(),
+        _ => false,
+    };
+    valid.then_some(FirstExportCause::Seen(site, outcome))
+}
+fn recipient_result<T>(
+    cause: &ExportCause,
+    result: std::result::Result<T, BridgeError>,
+    diagnostic: Option<FirstExportCause>,
+) -> std::result::Result<T, BridgeError> {
+    if result.is_err() {
+        cause.record(diagnostic.unwrap_or(FirstExportCause::Unavailable));
+    }
+    result
+}
+fn check_recipient(
+    recipient: &PreparedDurableReviewDeliveryV1<'_>,
+    cause: ExportObservation<'_>,
+) -> Result<()> {
+    let result = if let Some(cause) = cause.filter(|cause| cause.active.get()) {
+        let (result, diagnostic) = recipient.check_current_observed_v2();
+        recipient_result(
+            cause,
+            result,
+            diagnostic.and_then(|d| recipient_cause(d.site_label(), d.outcome_label())),
+        )
+    } else {
+        recipient.check_current()
+    };
+    result.map_err(|_| denied())
+}
+
+fn proof_permission(
+    cause: ExportObservation<'_>,
+    mut check: impl FnMut() -> Result<()>,
+    permits: impl FnOnce() -> bool,
+) -> bool {
+    export_result(cause, ExportCauseSite::ExportProofPermission, check()).is_ok()
+        && export_predicate(cause, ExportCauseSite::ExportProofPermission, permits())
+        && export_result(cause, ExportCauseSite::ExportProofPermission, check()).is_ok()
+}
+fn delivery_permission(
+    cause: ExportObservation<'_>,
+    proof: impl FnOnce() -> bool,
+    export: impl FnOnce() -> bool,
+) -> bool {
+    export_predicate(cause, ExportCauseSite::ExportProofPermission, proof())
+        && export_predicate(cause, ExportCauseSite::ExportPermission, export())
+}
+fn replay_scope_matches(
+    cause: ExportObservation<'_>,
+    retained: &DurableReviewExportScopeV1,
+    expected: &DurableReviewExportScopeV1,
+) -> bool {
+    export_predicate(
+        cause,
+        ExportCauseSite::ExportReplayScope,
+        retained == expected,
+    )
+}
 
 const PREFIX_EVENTS: usize = 8;
 const EXPORT_EVENT: &str = "private_durable_admission_review_disclosed_v2";
@@ -263,6 +557,7 @@ impl<'source> PrivateDurableAdmissionCoordinatorV2<'source> {
             proof,
             material,
             action: DurableMaterialActionV1::ReadForExactConstruction,
+            cause: None,
         };
         gate.check()?;
         let (checkpoint, key, identity) = self.verified(&history, access, &gate)?;
@@ -310,6 +605,7 @@ impl<'source> PrivateDurableAdmissionCoordinatorV2<'source> {
             proof,
             material,
             action: DurableMaterialActionV1::ExportForLocalNativeReview,
+            cause: None,
         };
         let (_, scope) = self.payload(access, recipient, &history, &gate)?;
         gate.check()?;
@@ -334,8 +630,30 @@ impl<'source> PrivateDurableAdmissionCoordinatorV2<'source> {
         material: &dyn LocalDurableMaterialConsentV1,
         export: &dyn LocalDurableReviewExportConsentV1,
     ) -> Result<PrivateDurableAdmissionDeliveryV2> {
-        recipient.check_current().map_err(|_| denied())?;
-        let (before, history) = self.check(access, consent)?;
+        let cause = ExportCause::new();
+        let result = export_result(
+            Some(&cause),
+            ExportCauseSite::ExportEntry,
+            self.deliver_observed(access, recipient, consent, proof, material, export, &cause),
+        );
+        cause.attach(result)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn deliver_observed(
+        &self,
+        access: &Access,
+        recipient: PreparedDurableReviewDeliveryV1<'_>,
+        consent: &dyn LocalPrivateDurableAdmissionConsentV2,
+        proof: &dyn LocalProofConsent,
+        material: &dyn LocalDurableMaterialConsentV1,
+        export: &dyn LocalDurableReviewExportConsentV1,
+        observation: &ExportCause,
+    ) -> Result<PrivateDurableAdmissionDeliveryV2> {
+        use ExportCauseSite as S;
+        let cause = Some(observation);
+        check_recipient(&recipient, cause)?;
+        let (before, history) = self.check_observed(access, consent, cause)?;
         let gate = ProofGate {
             owner: self,
             access,
@@ -343,6 +661,7 @@ impl<'source> PrivateDurableAdmissionCoordinatorV2<'source> {
             proof,
             material,
             action: DurableMaterialActionV1::ExportForLocalNativeReview,
+            cause,
         };
         let (payload, scope) = self.payload(access, &recipient, &history, &gate)?;
         let delivery_gate = DeliveryGate {
@@ -351,8 +670,8 @@ impl<'source> PrivateDurableAdmissionCoordinatorV2<'source> {
             export,
         };
         delivery_gate.check(false)?;
-        recipient.check_current().map_err(|_| denied())?;
-        let mut roster = original_roster_v2(&before)?;
+        check_recipient(&recipient, cause)?;
+        let mut roster = export_result(cause, S::ExportRoster, original_roster_v2(&before))?;
         let prior_revision = history
             .export_revisions
             .get(&scope.recipient.request.operation_id)
@@ -360,39 +679,53 @@ impl<'source> PrivateDurableAdmissionCoordinatorV2<'source> {
         let revision = prior_revision
             .map(|n| n - 1)
             .unwrap_or(before.view.revision);
-        let command = export_command(access, revision, &scope)?;
+        let command = export_result(
+            cause,
+            S::ExportCommand,
+            export_command(access, revision, &scope),
+        )?;
         let saved = if let Some(saved_revision) = prior_revision {
-            let retained = roster
-                .review_exports
-                .get(&scope.recipient.request.operation_id)
-                .ok_or_else(damaged)?;
-            if retained.scope != scope {
+            let retained = export_result(
+                cause,
+                S::ExportReplayScope,
+                roster
+                    .review_exports
+                    .get(&scope.recipient.request.operation_id)
+                    .ok_or_else(damaged),
+            )?;
+            if !replay_scope_matches(cause, &retained.scope, &scope) {
                 return Err(denied());
             }
-            let saved = self
-                .original
-                .engine
-                .store
-                .find_replay(&command)
-                .map_err(crate::store_error)?
-                .ok_or_else(damaged)?;
+            let saved = export_result(
+                cause,
+                S::ExportReplayLookup,
+                self.original
+                    .engine
+                    .store
+                    .find_replay(&command)
+                    .map_err(crate::store_error)
+                    .and_then(|saved| saved.ok_or_else(damaged)),
+            )?;
             if saved.record.revision != saved_revision {
-                return Err(damaged());
+                return export_predicate_error(cause, S::ExportReplayLookup, damaged());
             }
             saved
         } else {
             if roster.review_exports.len() >= MAX_EXPORT_INTENTS {
-                return Err(capacity());
+                return export_predicate_error(cause, S::ExportRoster, capacity());
             }
-            if self
-                .original
-                .engine
-                .store
-                .find_replay(&command)
-                .map_err(crate::store_error)?
-                .is_some()
+            if export_result(
+                cause,
+                S::ExportReplayLookup,
+                self.original
+                    .engine
+                    .store
+                    .find_replay(&command)
+                    .map_err(crate::store_error),
+            )?
+            .is_some()
             {
-                return Err(damaged());
+                return export_predicate_error(cause, S::ExportReplayLookup, damaged());
             }
             roster.review_exports.insert(
                 scope.recipient.request.operation_id.clone(),
@@ -404,13 +737,23 @@ impl<'source> PrivateDurableAdmissionCoordinatorV2<'source> {
             let mut after = before.clone();
             after.durable_construction_v1.insert(
                 scope.proposal.proposal_id.clone(),
-                serde_json::to_value(&roster).map_err(|_| damaged())?,
+                export_result(
+                    cause,
+                    S::ExportDelta,
+                    serde_json::to_value(&roster).map_err(|_| damaged()),
+                )?,
             );
-            after.view.revision = revision.checked_add(1).ok_or_else(damaged)?;
+            after.view.revision = export_result(
+                cause,
+                S::ExportDelta,
+                revision.checked_add(1).ok_or_else(damaged),
+            )?;
             after.view.updated_at = crate::now();
-            validate_export_delta(&before, &after)?;
+            validate_export_delta_observed(&before, &after, cause)?;
             delivery_gate.check(false)?;
-            recipient.check_current().map_err(|_| denied())?;
+            check_recipient(&recipient, cause)?;
+            let encoded = export_result(cause, S::ExportDelta, crate::encode(&after))?;
+            observation.freeze();
             // No private transport before this original Store transaction.
             self.original
                 .engine
@@ -419,11 +762,14 @@ impl<'source> PrivateDurableAdmissionCoordinatorV2<'source> {
                     &command,
                     self.original.source.agreement_id(),
                     revision,
-                    crate::encode(&after)?,
+                    encoded,
                     EXPORT_EVENT,
                 )
                 .map_err(|error| disclosure_unknown(crate::store_error(error)))?
         };
+        // From this existing boundary onward the original UNKNOWN wrapper is
+        // authoritative. No post-update observation can claim a pre-Store cause.
+        observation.freeze();
         // Reload and authenticate the actual saved operation on fresh AND replay
         // paths; a successful mutation return alone is never send permission.
         let result = (|| {
@@ -463,34 +809,53 @@ impl<'source> PrivateDurableAdmissionCoordinatorV2<'source> {
         access: &Access,
         gate: &ProofGate<'_, '_>,
     ) -> Result<(VerifiedCheckpoint, String, FixedProposalIdentityV1)> {
-        let candidate = history.prefix.view.candidates.first().ok_or_else(damaged)?;
-        let receipt = history
-            .prefix
-            .checkpoint_receipts
-            .values()
-            .next()
-            .ok_or_else(damaged)?;
-        let key = receipt
-            .original_request_v2
-            .as_ref()
-            .ok_or_else(damaged)?
-            .command
-            .idempotency_key
-            .clone();
-        let observation = Observation::new(Operation::ReadFixed);
-        let checkpoint = self.original.load_original_verified(
-            &history.prefix,
-            access,
-            &candidate.candidate_id,
-            &key,
-            gate,
-            &observation,
+        use ExportCauseSite as S;
+        let cause = gate.cause;
+        let candidate = export_result(
+            cause,
+            S::ExportVerifiedProof,
+            history.prefix.view.candidates.first().ok_or_else(damaged),
         )?;
-        let identity = crate::durable_proposals_v1::read_private_fixed_v2(
-            &history.prefix,
-            access,
-            &checkpoint,
-            receipt,
+        let receipt = export_result(
+            cause,
+            S::ExportVerifiedProof,
+            history
+                .prefix
+                .checkpoint_receipts
+                .values()
+                .next()
+                .ok_or_else(damaged),
+        )?;
+        let key = export_result(
+            cause,
+            S::ExportVerifiedProof,
+            receipt.original_request_v2.as_ref().ok_or_else(damaged),
+        )?
+        .command
+        .idempotency_key
+        .clone();
+        let observation = Observation::new(Operation::ReadFixed);
+        let checkpoint = export_result(
+            cause,
+            S::ExportVerifiedProof,
+            self.original.load_original_verified(
+                &history.prefix,
+                access,
+                &candidate.candidate_id,
+                &key,
+                gate,
+                &observation,
+            ),
+        )?;
+        let identity = export_result(
+            cause,
+            S::ExportVerifiedProof,
+            crate::durable_proposals_v1::read_private_fixed_v2(
+                &history.prefix,
+                access,
+                &checkpoint,
+                receipt,
+            ),
         )?;
         gate.check()?;
         Ok((checkpoint, key, identity))
@@ -502,21 +867,31 @@ impl<'source> PrivateDurableAdmissionCoordinatorV2<'source> {
         history: &History,
         gate: &ProofGate<'_, '_>,
     ) -> Result<(DurableReviewPayloadV1, DurableReviewExportScopeV1)> {
+        use ExportCauseSite as S;
+        let cause = gate.cause;
         gate.check()?;
-        recipient.check_current().map_err(|_| denied())?;
+        check_recipient(recipient, cause)?;
         let (checkpoint, _, identity) = self.verified(history, access, gate)?;
-        let roster = original_roster_v2(&history.prefix)?;
-        let receipt = history
-            .prefix
-            .checkpoint_receipts
-            .values()
-            .next()
-            .ok_or_else(damaged)?;
-        let mappings = crate::durable_proposals_v1::original_review_output_actions_v2(
-            &history.prefix,
-            access,
-            &checkpoint,
-            receipt,
+        let roster = export_result(cause, S::ExportRoster, original_roster_v2(&history.prefix))?;
+        let receipt = export_result(
+            cause,
+            S::ExportOutputActions,
+            history
+                .prefix
+                .checkpoint_receipts
+                .values()
+                .next()
+                .ok_or_else(damaged),
+        )?;
+        let mappings = export_result(
+            cause,
+            S::ExportOutputActions,
+            crate::durable_proposals_v1::original_review_output_actions_v2(
+                &history.prefix,
+                access,
+                &checkpoint,
+                receipt,
+            ),
         )?;
         let payload = DurableReviewPayloadV1 {
             version: 1,
@@ -531,20 +906,40 @@ impl<'source> PrivateDurableAdmissionCoordinatorV2<'source> {
                 })
                 .collect(),
         };
-        let encoded = payload.encode().map_err(|_| damaged())?;
+        let encoded = export_result(
+            cause,
+            S::ExportPayload,
+            payload.encode().map_err(|_| damaged()),
+        )?;
         let scope = DurableReviewExportScopeV1 {
             schema_version: 1,
             principal_id: access.principal_id.clone(),
             proposal: identity,
             recipient: recipient.descriptor().clone(),
-            sources: review_export_v1::sources(&roster)?,
-            payload_digest: payload.digest().map_err(|_| damaged())?,
-            payload_length: encoded.len().try_into().map_err(|_| damaged())?,
+            sources: export_result(cause, S::ExportSources, review_export_v1::sources(&roster))?,
+            payload_digest: export_result(
+                cause,
+                S::ExportPayload,
+                payload.digest().map_err(|_| damaged()),
+            )?,
+            payload_length: export_result(
+                cause,
+                S::ExportPayload,
+                encoded.len().try_into().map_err(|_| damaged()),
+            )?,
         };
         drop(encoded);
-        review_export_v1::validate_recipient(&roster, &history.prefix.view.candidates[0], &scope)?;
+        export_result(
+            cause,
+            S::ExportRecipientBinding,
+            review_export_v1::validate_recipient(
+                &roster,
+                &history.prefix.view.candidates[0],
+                &scope,
+            ),
+        )?;
         gate.check()?;
-        recipient.check_current().map_err(|_| denied())?;
+        check_recipient(recipient, cause)?;
         Ok((payload, scope))
     }
 
@@ -553,18 +948,35 @@ impl<'source> PrivateDurableAdmissionCoordinatorV2<'source> {
         access: &Access,
         consent: &dyn LocalPrivateDurableAdmissionConsentV2,
     ) -> Result<(Envelope, History)> {
-        self.original
-            .proof
-            .check_current()
-            .map_err(original_job_error_v2)?;
+        self.check_observed(access, consent, None)
+    }
+    fn check_observed(
+        &self,
+        access: &Access,
+        consent: &dyn LocalPrivateDurableAdmissionConsentV2,
+        cause: ExportObservation<'_>,
+    ) -> Result<(Envelope, History)> {
+        use ExportCauseSite as S;
+        export_result(
+            cause,
+            S::ExportProofCurrent,
+            self.original
+                .proof
+                .check_current()
+                .map_err(original_job_error_v2),
+        )?;
         if self.original.proof.origin_commitment() != self.original.proof_origin {
-            return Err(damaged());
+            return export_predicate_error(cause, S::ExportProofOrigin, damaged());
         }
-        let result = self.check_without_proof_lock(access, consent)?;
-        self.original
-            .proof
-            .check_current()
-            .map_err(original_job_error_v2)?;
+        let result = self.check_without_proof_lock(access, consent, cause)?;
+        export_result(
+            cause,
+            S::ExportProofCurrent,
+            self.original
+                .proof
+                .check_current()
+                .map_err(original_job_error_v2),
+        )?;
         Ok(result)
     }
     // Proof permission callbacks execute with its mutex held. This path checks
@@ -573,42 +985,63 @@ impl<'source> PrivateDurableAdmissionCoordinatorV2<'source> {
         &self,
         access: &Access,
         consent: &dyn LocalPrivateDurableAdmissionConsentV2,
+        cause: ExportObservation<'_>,
     ) -> Result<(Envelope, History)> {
+        use ExportCauseSite as S;
         let o = &self.original;
-        check_source(&o.source, access, &o.scope, consent)?;
-        if o.engine
-            .store
-            .verify_original_encrypted_destination(o.scope.protected_destination())
-            .map_err(crate::store_error)?
-            != o.origin
+        check_source_observed(&o.source, access, &o.scope, consent, cause)?;
+        if export_result(
+            cause,
+            S::ExportMetadataOrigin,
+            o.engine
+                .store
+                .verify_original_encrypted_destination(o.scope.protected_destination())
+                .map_err(crate::store_error),
+        )? != o.origin
         {
-            return Err(damaged());
+            return export_predicate_error(cause, S::ExportMetadataOrigin, damaged());
         }
-        let marker = crate::private_workspace_origin_v1::from_source(
-            &o.source,
-            access,
-            &o.scope,
-            &o.marker.native_association_digest,
-            o.origin,
+        let marker = export_result(
+            cause,
+            S::ExportMarker,
+            crate::private_workspace_origin_v1::from_source(
+                &o.source,
+                access,
+                &o.scope,
+                &o.marker.native_association_digest,
+                o.origin,
+            ),
         )?;
         if marker != o.marker {
-            return Err(damaged());
+            return export_predicate_error(cause, S::ExportMarker, damaged());
         }
-        let record = o
-            .engine
-            .store
-            .get_agreement(o.source.agreement_id())
-            .map_err(crate::store_error)?
-            .ok_or_else(damaged)?;
-        let current = decode_private_record(&record)?;
-        let history = self.audit(access, &current)?;
+        let record = export_result(
+            cause,
+            S::ExportHistory,
+            o.engine
+                .store
+                .get_agreement(o.source.agreement_id())
+                .map_err(crate::store_error)
+                .and_then(|record| record.ok_or_else(damaged)),
+        )?;
+        let current = export_result(cause, S::ExportHistory, decode_private_record(&record))?;
+        let history = export_result(cause, S::ExportHistory, self.audit(access, &current, cause))?;
         // Always enforce BOTH original immutable material ceilings, including
         // during opening and inspection; historical availability is separate.
-        o.stage_materials_v3(access, &current, &current.view.candidates[0].candidate_id)?;
-        check_source(&o.source, access, &o.scope, consent)?;
+        export_result(
+            cause,
+            S::ExportMaterialCeilings,
+            o.stage_materials_v3(access, &current, &current.view.candidates[0].candidate_id),
+        )?;
+        check_source_observed(&o.source, access, &o.scope, consent, cause)?;
         Ok((current, history))
     }
-    fn audit(&self, access: &Access, current: &Envelope) -> Result<History> {
+    fn audit(
+        &self,
+        access: &Access,
+        current: &Envelope,
+        cause: ExportObservation<'_>,
+    ) -> Result<History> {
         let o = &self.original;
         let events = o
             .engine
@@ -619,7 +1052,7 @@ impl<'source> PrivateDurableAdmissionCoordinatorV2<'source> {
             || events.len() > PREFIX_EVENTS + MAX_EXPORT_INTENTS
             || events.len() as u64 != current.view.revision
         {
-            return Err(damaged());
+            return export_predicate_error(cause, ExportCauseSite::ExportHistory, damaged());
         }
         let mut previous: Option<Envelope> = None;
         let mut history = Vec::with_capacity(events.len());
@@ -639,7 +1072,7 @@ impl<'source> PrivateDurableAdmissionCoordinatorV2<'source> {
                         EXPORT_EVENT
                     }
             {
-                return Err(damaged());
+                return export_predicate_error(cause, ExportCauseSite::ExportHistory, damaged());
             }
             let operation = o
                 .engine
@@ -660,7 +1093,7 @@ impl<'source> PrivateDurableAdmissionCoordinatorV2<'source> {
                 || saved.record.id != event.aggregate_id
                 || saved.replayed
             {
-                return Err(damaged());
+                return export_predicate_error(cause, ExportCauseSite::ExportHistory, damaged());
             }
             let envelope = decode_private_record(&saved.record)?;
             if i < PREFIX_EVENTS {
@@ -673,7 +1106,13 @@ impl<'source> PrivateDurableAdmissionCoordinatorV2<'source> {
                         5 => operation_v1::EffectV2::MetadataLink,
                         6 => operation_v1::EffectV2::RecordOriginalProofOutcome,
                         7 => operation_v1::EffectV2::FreezeVerifiedFixed,
-                        _ => return Err(damaged()),
+                        _ => {
+                            return export_predicate_error(
+                                cause,
+                                ExportCauseSite::ExportHistory,
+                                damaged(),
+                            )
+                        }
                     };
                     operation_v1::validate_delta_after_checked_shapes_v2(
                         before, &envelope, purpose,
@@ -683,19 +1122,24 @@ impl<'source> PrivateDurableAdmissionCoordinatorV2<'source> {
                     || !envelope.checkpoint_receipts.is_empty()
                     || !envelope.durable_proposals_v1.is_empty()
                 {
-                    return Err(damaged());
+                    return export_predicate_error(
+                        cause,
+                        ExportCauseSite::ExportHistory,
+                        damaged(),
+                    );
                 }
                 let command = self
                     .prefix_commands
                     .get(&event.operation_id)
                     .ok_or_else(damaged)?;
-                validate_prefix_command(
+                validate_prefix_command_observed(
                     i,
                     access,
                     &self.seed_command,
                     command,
                     previous.as_ref(),
                     &envelope,
+                    cause,
                 )?;
                 let replay = o
                     .engine
@@ -707,16 +1151,20 @@ impl<'source> PrivateDurableAdmissionCoordinatorV2<'source> {
                     || replay.operation_id != saved.operation_id
                     || replay.event_sequence != saved.event_sequence
                 {
-                    return Err(damaged());
+                    return export_predicate_error(
+                        cause,
+                        ExportCauseSite::ExportHistory,
+                        damaged(),
+                    );
                 }
                 if i + 1 == PREFIX_EVENTS {
-                    require_completed_prefix(&envelope)?;
+                    require_completed_prefix_observed(&envelope, cause)?;
                     prefix = Some(envelope.clone());
                 }
             } else {
                 o.require_original_identity_v2(&envelope)?;
                 let before = previous.as_ref().ok_or_else(damaged)?;
-                let scope = validate_export_delta(before, &envelope)?;
+                let scope = validate_export_delta_observed(before, &envelope, cause)?;
                 if scope.principal_id != access.principal_id
                     || export_revisions
                         .insert(
@@ -725,9 +1173,17 @@ impl<'source> PrivateDurableAdmissionCoordinatorV2<'source> {
                         )
                         .is_some()
                 {
-                    return Err(damaged());
+                    return export_predicate_error(
+                        cause,
+                        ExportCauseSite::ExportHistory,
+                        damaged(),
+                    );
                 }
-                let command = export_command(access, before.view.revision, &scope)?;
+                let command = export_result(
+                    cause,
+                    ExportCauseSite::ExportCommand,
+                    export_command(access, before.view.revision, &scope),
+                )?;
                 let replay = o
                     .engine
                     .store
@@ -738,14 +1194,18 @@ impl<'source> PrivateDurableAdmissionCoordinatorV2<'source> {
                     || replay.operation_id != saved.operation_id
                     || replay.event_sequence != saved.event_sequence
                 {
-                    return Err(damaged());
+                    return export_predicate_error(
+                        cause,
+                        ExportCauseSite::ExportHistory,
+                        damaged(),
+                    );
                 }
             }
             history.push((event, operation));
             previous = Some(envelope);
         }
         if crate::encode(previous.as_ref().ok_or_else(damaged)?)? != crate::encode(current)? {
-            return Err(damaged());
+            return export_predicate_error(cause, ExportCauseSite::ExportHistory, damaged());
         }
         let prefix_digest = digest(
             "wholepact:private-exact-operation-history:v2",
@@ -767,18 +1227,32 @@ fn check_source(
     scope: &PrivateWorkspaceScopeV1,
     consent: &dyn LocalPrivateDurableAdmissionConsentV2,
 ) -> Result<()> {
-    source.check_current(access)?;
-    if !consent.permits_source(scope) {
+    check_source_observed(source, access, scope, consent, None)
+}
+fn check_source_observed(
+    source: &PrivateDurableWorkspaceSourceV1<'_>,
+    access: &Access,
+    scope: &PrivateWorkspaceScopeV1,
+    consent: &dyn LocalPrivateDurableAdmissionConsentV2,
+    cause: ExportObservation<'_>,
+) -> Result<()> {
+    use ExportCauseSite as S;
+    export_result(cause, S::ExportSourceBefore, source.check_current(access))?;
+    if !export_predicate(cause, S::ExportSourceBefore, consent.permits_source(scope)) {
         return Err(denied());
     }
-    source.check_current(access)
+    export_result(cause, S::ExportSourceAfter, source.check_current(access))
 }
 fn digest<T: Serialize + ?Sized>(domain: &str, value: &T) -> Result<String> {
     // Serialize the borrowed slice as its canonical array; the original domain
     // remains exactly the precursor domain for the immutable eight-event prefix.
     wholepact_core::proposal::canonical_digest(domain, &value).map_err(Into::into)
 }
+#[cfg(all(test, feature = "synthetic-qualification"))]
 fn require_completed_prefix(e: &Envelope) -> Result<()> {
+    require_completed_prefix_observed(e, None)
+}
+fn require_completed_prefix_observed(e: &Envelope, cause: ExportObservation<'_>) -> Result<()> {
     operation_v1::validate_shape(e)?;
     if e.view.revision != PREFIX_EVENTS as u64
         || e.view.progress != "awaiting_authorization"
@@ -786,7 +1260,7 @@ fn require_completed_prefix(e: &Envelope) -> Result<()> {
         || e.checkpoint_receipts.len() != 1
         || e.durable_proposals_v1.len() != 1
     {
-        return Err(damaged());
+        return export_predicate_error(cause, ExportCauseSite::ExportHistory, damaged());
     }
     let roster = original_roster_v2(e)?;
     let c = &e.view.candidates[0];
@@ -798,7 +1272,7 @@ fn require_completed_prefix(e: &Envelope) -> Result<()> {
         || !c.proof_jobs[0].proof_verified
         || c.proof_jobs[0].result_digest.is_none()
     {
-        return Err(damaged());
+        return export_predicate_error(cause, ExportCauseSite::ExportHistory, damaged());
     }
     Ok(())
 }
@@ -827,9 +1301,28 @@ fn export_command(
 /// Compare the entire typed envelope, admitting only one exact export-map
 /// insertion and the maintained revision/time increment. No historical field is
 /// removed or replaced to simulate a precursor. Existing exports stay exact.
+#[cfg(all(test, feature = "synthetic-qualification"))]
 fn validate_export_delta(
     before: &Envelope,
     after: &Envelope,
+) -> Result<DurableReviewExportScopeV1> {
+    validate_export_delta_observed(before, after, None)
+}
+fn validate_export_delta_observed(
+    before: &Envelope,
+    after: &Envelope,
+    cause: ExportObservation<'_>,
+) -> Result<DurableReviewExportScopeV1> {
+    export_result(
+        cause,
+        ExportCauseSite::ExportDelta,
+        validate_export_delta_kernel(before, after, cause),
+    )
+}
+fn validate_export_delta_kernel(
+    before: &Envelope,
+    after: &Envelope,
+    cause: ExportObservation<'_>,
 ) -> Result<DurableReviewExportScopeV1> {
     for e in [before, after] {
         operation_v1::validate_common_shape(e)?;
@@ -843,20 +1336,20 @@ fn validate_export_delta(
         )
         .is_err()
     {
-        return Err(damaged());
+        return export_predicate_error(cause, ExportCauseSite::ExportDelta, damaged());
     }
     let old = original_roster_v2(before)?;
     let new = original_roster_v2(after)?;
     if new.owners.len() != 2 {
-        return Err(damaged());
+        return export_predicate_error(cause, ExportCauseSite::ExportDelta, damaged());
     }
-    let (id, intent) = added_export(&old.review_exports, &new.review_exports)?;
+    let (id, intent) = added_export_observed(&old.review_exports, &new.review_exports, cause)?;
     let mut allowed_roster = old.clone();
     allowed_roster.review_exports.insert(id, intent.clone());
     if serde_json::to_value(&allowed_roster).map_err(|_| damaged())?
         != serde_json::to_value(&new).map_err(|_| damaged())?
     {
-        return Err(damaged());
+        return export_predicate_error(cause, ExportCauseSite::ExportDelta, damaged());
     }
     let mut permitted = before.clone();
     permitted.view.revision = after.view.revision;
@@ -866,24 +1359,32 @@ fn validate_export_delta(
         serde_json::to_value(&allowed_roster).map_err(|_| damaged())?,
     );
     if crate::encode(&permitted)? != crate::encode(after)? {
-        return Err(damaged());
+        return export_predicate_error(cause, ExportCauseSite::ExportDelta, damaged());
     }
     Ok(intent.scope.clone())
 }
 
+#[cfg(test)]
 fn added_export(
     old: &BTreeMap<String, ExportIntent>,
     new: &BTreeMap<String, ExportIntent>,
 ) -> Result<(String, ExportIntent)> {
+    added_export_observed(old, new, None)
+}
+fn added_export_observed(
+    old: &BTreeMap<String, ExportIntent>,
+    new: &BTreeMap<String, ExportIntent>,
+    cause: ExportObservation<'_>,
+) -> Result<(String, ExportIntent)> {
     if new.len() != old.len() + 1 || new.len() > MAX_EXPORT_INTENTS {
-        return Err(damaged());
+        return export_predicate_error(cause, ExportCauseSite::ExportDelta, damaged());
     }
     let added = new
         .iter()
         .filter(|(key, _)| !old.contains_key(*key))
         .collect::<Vec<_>>();
     if added.len() != 1 {
-        return Err(damaged());
+        return export_predicate_error(cause, ExportCauseSite::ExportDelta, damaged());
     }
     let (id, intent) = added[0];
     let mut expected = old.clone();
@@ -892,7 +1393,7 @@ fn added_export(
         != serde_json::to_value(new).map_err(|_| damaged())?
         || id != &intent.scope.recipient.request.operation_id
     {
-        return Err(damaged());
+        return export_predicate_error(cause, ExportCauseSite::ExportDelta, damaged());
     }
     Ok((id.clone(), intent.clone()))
 }
@@ -903,25 +1404,38 @@ struct ProofGate<'a, 'source> {
     proof: &'a dyn LocalProofConsent,
     material: &'a dyn LocalDurableMaterialConsentV1,
     action: DurableMaterialActionV1,
+    cause: ExportObservation<'a>,
 }
 impl ProofGate<'_, '_> {
     fn check(&self) -> Result<()> {
-        let (current, _) = self
-            .owner
-            .check_without_proof_lock(self.access, self.consent)?;
-        for intake in original_roster_v2(&current)?.owners.values() {
+        use ExportCauseSite as S;
+        let (current, _) =
             self.owner
-                .original
-                .check_intake(self.access, intake, self.material, self.action)?;
+                .check_without_proof_lock(self.access, self.consent, self.cause)?;
+        for intake in export_result(self.cause, S::ExportRoster, original_roster_v2(&current))?
+            .owners
+            .values()
+        {
+            export_result(
+                self.cause,
+                S::ExportIntake,
+                self.owner
+                    .original
+                    .check_intake(self.access, intake, self.material, self.action),
+            )?;
         }
         self.owner
-            .check_without_proof_lock(self.access, self.consent)?;
+            .check_without_proof_lock(self.access, self.consent, self.cause)?;
         Ok(())
     }
 }
 impl LocalProofConsent for ProofGate<'_, '_> {
     fn permits(&self, scope: &CheckpointScope, action: LocalAction) -> bool {
-        self.check().is_ok() && self.proof.permits(scope, action) && self.check().is_ok()
+        proof_permission(
+            self.cause,
+            || self.check(),
+            || self.proof.permits(scope, action),
+        )
     }
 }
 struct DeliveryGate<'a, 'source> {
@@ -931,15 +1445,23 @@ struct DeliveryGate<'a, 'source> {
 }
 impl DeliveryGate<'_, '_> {
     fn check(&self, require_committed: bool) -> Result<()> {
+        use ExportCauseSite as S;
+        let cause = self.proof.cause;
         self.proof.check()?;
-        let (current, _) = self
-            .proof
-            .owner
-            .check(self.proof.access, self.proof.consent)?;
-        let roster = original_roster_v2(&current)?;
-        review_export_v1::validate_recipient(&roster, &current.view.candidates[0], self.scope)?;
-        if review_export_v1::sources(&roster)? != self.scope.sources {
-            return Err(damaged());
+        let (current, _) =
+            self.proof
+                .owner
+                .check_observed(self.proof.access, self.proof.consent, cause)?;
+        let roster = export_result(cause, S::ExportRoster, original_roster_v2(&current))?;
+        export_result(
+            cause,
+            S::ExportRecipientBinding,
+            review_export_v1::validate_recipient(&roster, &current.view.candidates[0], self.scope),
+        )?;
+        if export_result(cause, S::ExportSources, review_export_v1::sources(&roster))?
+            != self.scope.sources
+        {
+            return export_predicate_error(cause, S::ExportSources, damaged());
         }
         if require_committed
             && roster
@@ -947,27 +1469,42 @@ impl DeliveryGate<'_, '_> {
                 .get(&self.scope.recipient.request.operation_id)
                 .is_none_or(|i| i.scope != *self.scope)
         {
-            return Err(damaged());
+            return export_predicate_error(cause, S::ExportReplayScope, damaged());
         }
-        let materials = self.proof.owner.original.stage_materials_v3(
-            self.proof.access,
-            &current,
-            &current.view.candidates[0].candidate_id,
+        let materials = export_result(
+            cause,
+            S::ExportMaterialCeilings,
+            self.proof.owner.original.stage_materials_v3(
+                self.proof.access,
+                &current,
+                &current.view.candidates[0].candidate_id,
+            ),
         )?;
-        let checkpoint_scope = exact_fixed_v2::retained_review_scope_v3(
-            &current.view.candidates[0],
-            current
-                .checkpoint_receipts
-                .values()
-                .next()
-                .ok_or_else(damaged)?,
-            &materials,
+        let checkpoint_scope = export_result(
+            cause,
+            S::ExportCheckpointScope,
+            exact_fixed_v2::retained_review_scope_v3(
+                &current.view.candidates[0],
+                export_result(
+                    cause,
+                    S::ExportCheckpointScope,
+                    current
+                        .checkpoint_receipts
+                        .values()
+                        .next()
+                        .ok_or_else(damaged),
+                )?,
+                &materials,
+            ),
         )?;
-        if !self
-            .proof
-            .permits(&checkpoint_scope, LocalAction::ReadPrivateArtifact)
-            || !self.export.permits(self.scope)
-        {
+        if !delivery_permission(
+            cause,
+            || {
+                self.proof
+                    .permits(&checkpoint_scope, LocalAction::ReadPrivateArtifact)
+            },
+            || self.export.permits(self.scope),
+        ) {
             return Err(denied());
         }
         self.proof.check()
@@ -1056,6 +1593,7 @@ fn original_commands(
     snapshot.check_source_unchanged().map_err(|_| damaged())?;
     Ok(commands)
 }
+#[cfg(all(test, feature = "synthetic-qualification"))]
 fn validate_prefix_command(
     index: usize,
     access: &Access,
@@ -1063,6 +1601,17 @@ fn validate_prefix_command(
     command: &CommandContext,
     before: Option<&Envelope>,
     after: &Envelope,
+) -> Result<()> {
+    validate_prefix_command_observed(index, access, seed, command, before, after, None)
+}
+fn validate_prefix_command_observed(
+    index: usize,
+    access: &Access,
+    seed: &CommandContext,
+    command: &CommandContext,
+    before: Option<&Envelope>,
+    after: &Envelope,
+    cause: ExportObservation<'_>,
 ) -> Result<()> {
     let key = &command.idempotency_key;
     let expected = if index == 0 {
@@ -1098,7 +1647,11 @@ fn validate_prefix_command(
                     .filter(|(account, _)| !old.owners.contains_key(*account))
                     .collect::<Vec<_>>();
                 if added.len() != 1 {
-                    return Err(damaged());
+                    return export_predicate_error(
+                        cause,
+                        ExportCauseSite::ExportHistory,
+                        damaged(),
+                    );
                 }
                 let intake = added[0].1;
                 crate::context(
@@ -1130,7 +1683,11 @@ fn validate_prefix_command(
                         exact_fixed_v2::receipt_key(access, &original.command.idempotency_key)?
                     )
                 {
-                    return Err(damaged());
+                    return export_predicate_error(
+                        cause,
+                        ExportCauseSite::ExportHistory,
+                        damaged(),
+                    );
                 }
                 crate::context(
                     access,
@@ -1183,14 +1740,14 @@ fn validate_prefix_command(
                     ),
                 )?
             }
-            _ => return Err(damaged()),
+            _ => return export_predicate_error(cause, ExportCauseSite::ExportHistory, damaged()),
         }
     };
     if command.principal_id != access.principal_id
         || serde_json::to_value(command).map_err(|_| damaged())?
             != serde_json::to_value(expected).map_err(|_| damaged())?
     {
-        return Err(damaged());
+        return export_predicate_error(cause, ExportCauseSite::ExportHistory, damaged());
     }
     Ok(())
 }
@@ -1267,6 +1824,465 @@ mod tests {
             scope: scope(operation),
             exposure: ExportExposure::DisclosedOrUnknown,
         }
+    }
+    fn cause_pair(cause: &ExportCause) -> Option<(&'static str, &'static str)> {
+        match cause.first.get() {
+            FirstExportCause::Seen(site, outcome) => Some((site.label(), outcome.label())),
+            _ => None,
+        }
+    }
+    #[test]
+    fn admission_export_observation_forwards_owned_result_and_success_without_clone() {
+        #[derive(Debug)]
+        struct NotClone(Box<u8>);
+        let cause = ExportCause::new();
+        let value = NotClone(Box::new(7));
+        let pointer = &*value.0 as *const u8;
+        let returned =
+            export_result(Some(&cause), ExportCauseSite::ExportPayload, Ok(value)).unwrap();
+        assert_eq!(&*returned.0 as *const u8, pointer);
+        assert_eq!(cause.first.get(), FirstExportCause::Vacant);
+
+        let mut error = ApiError::new("RECOVERY_REQUIRED", "original lower cause");
+        error.retryable = true;
+        error.operation_id = Some("inert-operation".into());
+        error.safe_actions = vec!["preserve original evidence".into()];
+        error.details = Box::new(serde_json::json!({"retained": [1, 2, 3]}));
+        let expected = serde_json::to_value(&error).unwrap();
+        let message_pointer = error.message.as_ptr();
+        let details_pointer = &*error.details as *const serde_json::Value;
+        let returned = export_result::<()>(Some(&cause), ExportCauseSite::ExportIntake, Err(error))
+            .unwrap_err();
+        assert_eq!(serde_json::to_value(&returned).unwrap(), expected);
+        assert_eq!(returned.message.as_ptr(), message_pointer);
+        assert_eq!(
+            &*returned.details as *const serde_json::Value,
+            details_pointer
+        );
+        assert_eq!(
+            cause_pair(&cause),
+            Some(("ExportIntake", "EngineRecoveryRequired"))
+        );
+    }
+    #[test]
+    fn admission_export_first_cause_survives_bool_and_higher_denied_conversion() {
+        let cause = ExportCause::new();
+        let permitted = proof_permission(
+            Some(&cause),
+            || {
+                export_result(
+                    Some(&cause),
+                    ExportCauseSite::ExportMaterialCeilings,
+                    Err(ApiError::new("not-a-public-code", "private lower detail")),
+                )
+            },
+            || panic!("the original first failure must short circuit permission"),
+        );
+        assert!(!permitted);
+        assert!(!export_predicate(
+            Some(&cause),
+            ExportCauseSite::ExportProofPermission,
+            permitted
+        ));
+        let terminal = cause
+            .attach(export_result::<()>(
+                Some(&cause),
+                ExportCauseSite::ExportEntry,
+                Err(denied()),
+            ))
+            .unwrap_err();
+        assert_eq!(terminal.code, "DISCLOSURE_DENIED");
+        assert_eq!(
+            terminal.details[EXPORT_CAUSE_KEY],
+            serde_json::json!({
+                "version": 1, "site": "ExportMaterialCeilings", "outcome": "EngineUnclassified",
+            })
+        );
+        assert!(!serde_json::to_string(&terminal.details)
+            .unwrap()
+            .contains("private lower detail"));
+        assert!(!serde_json::to_string(&terminal.details)
+            .unwrap()
+            .contains("not-a-public-code"));
+    }
+    #[test]
+    fn admission_export_proof_permission_preserves_every_short_circuit_and_none_path() {
+        for observed in [false, true] {
+            for (failed_check, allowed, expected_calls, expected_decisions, expected) in [
+                (Some(1), true, 1, 0, false),
+                (None, false, 1, 1, false),
+                (Some(2), true, 2, 1, false),
+                (None, true, 2, 1, true),
+            ] {
+                let cause = ExportCause::new();
+                let observation = observed.then_some(&cause);
+                let calls = std::cell::Cell::new(0);
+                let decisions = std::cell::Cell::new(0);
+                let trace = std::cell::RefCell::new(Vec::new());
+                let actual = proof_permission(
+                    observation,
+                    || {
+                        calls.set(calls.get() + 1);
+                        trace.borrow_mut().push("check");
+                        if failed_check == Some(calls.get()) {
+                            Err(damaged())
+                        } else {
+                            Ok(())
+                        }
+                    },
+                    || {
+                        decisions.set(decisions.get() + 1);
+                        trace.borrow_mut().push("permission");
+                        allowed
+                    },
+                );
+                assert_eq!(actual, expected);
+                assert_eq!(calls.get(), expected_calls);
+                assert_eq!(decisions.get(), expected_decisions);
+                let expected_trace = if expected_decisions == 0 {
+                    vec!["check"]
+                } else if expected_calls == 1 {
+                    vec!["check", "permission"]
+                } else {
+                    vec!["check", "permission", "check"]
+                };
+                assert_eq!(*trace.borrow(), expected_trace);
+                if !observed || expected {
+                    assert_eq!(cause.first.get(), FirstExportCause::Vacant);
+                } else {
+                    assert_eq!(
+                        cause_pair(&cause),
+                        Some((
+                            "ExportProofPermission",
+                            if failed_check.is_some() {
+                                "EngineRecoveryRequired"
+                            } else {
+                                "PredicateDenied"
+                            }
+                        ))
+                    );
+                }
+            }
+        }
+    }
+    #[test]
+    fn admission_export_delivery_permission_preserves_boolean_precedence() {
+        for observed in [false, true] {
+            for (proof, export) in [(false, false), (false, true), (true, false), (true, true)] {
+                let cause = ExportCause::new();
+                let calls = std::cell::RefCell::new(Vec::new());
+                let actual = delivery_permission(
+                    observed.then_some(&cause),
+                    || {
+                        calls.borrow_mut().push("proof");
+                        proof
+                    },
+                    || {
+                        calls.borrow_mut().push("export");
+                        export
+                    },
+                );
+                assert_eq!(actual, proof && export);
+                assert_eq!(
+                    *calls.borrow(),
+                    if proof {
+                        vec!["proof", "export"]
+                    } else {
+                        vec!["proof"]
+                    }
+                );
+                if observed && !actual {
+                    assert_eq!(
+                        cause_pair(&cause),
+                        Some((
+                            if proof {
+                                "ExportPermission"
+                            } else {
+                                "ExportProofPermission"
+                            },
+                            "PredicateDenied"
+                        ))
+                    );
+                } else {
+                    assert_eq!(cause.first.get(), FirstExportCause::Vacant);
+                }
+            }
+        }
+    }
+    #[test]
+    fn admission_export_recipient_missing_or_invalid_evidence_blocks_later_cause() {
+        for diagnostic in [
+            None,
+            recipient_cause("RecipientDeadline", "OriginAuthentication"),
+            recipient_cause("ExportProofCurrent", "BridgePermission"),
+            recipient_cause("private-account", "BridgePermission"),
+        ] {
+            let cause = ExportCause::new();
+            let actual = recipient_result::<()>(&cause, Err(BridgeError::Permission), diagnostic);
+            assert!(matches!(actual, Err(BridgeError::Permission)));
+            let terminal = cause
+                .attach(export_result::<()>(
+                    Some(&cause),
+                    ExportCauseSite::ExportEntry,
+                    Err(denied()),
+                ))
+                .unwrap_err();
+            assert_eq!(cause.first.get(), FirstExportCause::Unavailable);
+            assert!(terminal.details.get(EXPORT_CAUSE_KEY).is_none());
+        }
+        let cause = ExportCause::new();
+        let result = recipient_result(
+            &cause,
+            Ok(Box::new(7)),
+            recipient_cause("RecipientDeadline", "BridgePermission"),
+        );
+        assert_eq!(*result.unwrap(), 7);
+        assert_eq!(cause.first.get(), FirstExportCause::Vacant);
+    }
+    #[test]
+    fn admission_export_recipient_inventory_is_closed_and_stage_specific() {
+        assert_eq!(ExportCauseSite::ALL.len(), 37);
+        assert_eq!(ExportCauseOutcome::ALL.len(), 48);
+        for site in ExportCauseSite::ALL {
+            assert_eq!(ExportCauseSite::from_label(site.label()), Some(*site));
+        }
+        for outcome in ExportCauseOutcome::ALL {
+            assert_eq!(
+                ExportCauseOutcome::from_label(outcome.label()),
+                Some(*outcome)
+            );
+        }
+        for (site, outcome) in [
+            ("RecipientMutex", "BridgeIpc"),
+            ("RecipientDeadline", "BridgePermission"),
+            ("RecipientOrigin", "BridgeSignerOriginUnavailable"),
+            ("RecipientObserverClone", "OriginIoOther"),
+            ("RecipientWriteSerialize", "BridgeBinding"),
+            ("RecipientWriteLimit", "BridgeLimit"),
+            ("RecipientWriteDeadline", "BridgePermission"),
+            ("RecipientWriteTimeout", "OriginIoTimedOut"),
+            ("RecipientWriteIo", "OriginIoBrokenPipe"),
+            ("RecipientWriteEmpty", "BridgeIpc"),
+            ("RecipientFrame", "OriginAuthentication"),
+            ("RecipientResponseDecode", "BridgeBinding"),
+            ("RecipientResponseDigest", "BridgeBinding"),
+            ("RecipientResponse", "BridgePermission"),
+        ] {
+            assert!(recipient_cause(site, outcome).is_some());
+            assert!(recipient_cause(site, "EngineDisclosureDenied").is_none());
+            assert!(recipient_cause(site, "PredicateDenied").is_none());
+            assert!(recipient_cause(site, "OriginSecretPrivateData").is_none());
+        }
+        assert!(recipient_cause("RecipientFrame", "BridgePermission").is_none());
+        assert!(recipient_cause("RecipientDeadline", "OriginAuthentication").is_none());
+        assert!(recipient_cause("RecipientUnknown", "BridgePermission").is_none());
+    }
+    #[test]
+    fn admission_export_sidecar_is_additive_terminal_only_and_collision_safe() {
+        let cause = ExportCause::new();
+        export_predicate(Some(&cause), ExportCauseSite::ExportPermission, false);
+        let mut error = ApiError::new("DISCLOSURE_DENIED", "keep original message");
+        error.retryable = true;
+        error.operation_id = Some("original-operation".into());
+        error.safe_actions = vec!["original-action".into()];
+        error.details = Box::new(serde_json::json!({"original": {"nested": [1, 2]}}));
+        let expected = serde_json::to_value(&error).unwrap();
+        let message_pointer = error.message.as_ptr();
+        let details_pointer = &*error.details as *const serde_json::Value;
+        let mut returned = cause.attach::<()>(Err(error)).unwrap_err();
+        assert_eq!(returned.message.as_ptr(), message_pointer);
+        assert_eq!(
+            &*returned.details as *const serde_json::Value,
+            details_pointer
+        );
+        assert_eq!(
+            returned
+                .details
+                .as_object_mut()
+                .unwrap()
+                .remove(EXPORT_CAUSE_KEY)
+                .unwrap(),
+            serde_json::json!({
+                "version": 1, "site": "ExportPermission", "outcome": "PredicateDenied",
+            })
+        );
+        assert_eq!(serde_json::to_value(&returned).unwrap(), expected);
+        assert_eq!(cause.attach(Ok(17)).unwrap(), 17);
+
+        for details in [
+            serde_json::Value::Null,
+            serde_json::json!([]),
+            serde_json::json!("original"),
+        ] {
+            let mut error = denied();
+            error.details = Box::new(details);
+            let expected = serde_json::to_value(&error).unwrap();
+            let actual = cause.attach::<()>(Err(error)).unwrap_err();
+            assert_eq!(serde_json::to_value(actual).unwrap(), expected);
+        }
+    }
+    #[test]
+    fn admission_export_collisions_are_marked_before_vacant_unavailable_or_frozen() {
+        for state in [
+            FirstExportCause::Vacant,
+            FirstExportCause::Unavailable,
+            FirstExportCause::Seen(
+                ExportCauseSite::ExportPermission,
+                ExportCauseOutcome::PredicateDenied,
+            ),
+        ] {
+            for frozen in [false, true] {
+                for collision in [
+                    serde_json::Value::Null,
+                    serde_json::json!({
+                        "version":1,"site":"RecipientDeadline","outcome":"BridgePermission"
+                    }),
+                ] {
+                    let cause = ExportCause::new();
+                    cause.first.set(state);
+                    if frozen {
+                        cause.freeze();
+                    }
+                    let mut error = denied();
+                    error.details = Box::new(
+                        serde_json::json!({EXPORT_CAUSE_KEY: collision, "original": true}),
+                    );
+                    let expected = serde_json::to_value(&error).unwrap();
+                    let mut actual = cause.attach::<()>(Err(error)).unwrap_err();
+                    assert_eq!(
+                        actual
+                            .details
+                            .as_object_mut()
+                            .unwrap()
+                            .remove(EXPORT_CAUSE_COLLISION_KEY),
+                        Some(serde_json::Value::Bool(true))
+                    );
+                    assert_eq!(serde_json::to_value(actual).unwrap(), expected);
+                }
+                for marker in [
+                    serde_json::Value::Null,
+                    serde_json::json!(false),
+                    serde_json::json!(1),
+                    serde_json::json!("pre-existing"),
+                    serde_json::json!([]),
+                    serde_json::json!({"old":true}),
+                ] {
+                    for has_cause in [false, true] {
+                        let cause = ExportCause::new();
+                        cause.first.set(state);
+                        if frozen {
+                            cause.freeze();
+                        }
+                        let mut error = denied();
+                        error.details = Box::new(
+                            serde_json::json!({EXPORT_CAUSE_COLLISION_KEY: marker, "original": true}),
+                        );
+                        if has_cause {
+                            error.details.as_object_mut().unwrap().insert(EXPORT_CAUSE_KEY.into(), serde_json::json!({
+                                "version":1,"site":"RecipientDeadline","outcome":"BridgePermission"
+                            }));
+                        }
+                        let expected = serde_json::to_value(&error).unwrap();
+                        let actual = cause.attach::<()>(Err(error)).unwrap_err();
+                        assert_eq!(serde_json::to_value(actual).unwrap(), expected);
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn admission_export_frozen_vacant_preserves_unknown_and_cannot_claim_entry() {
+        let cause = ExportCause::new();
+        cause.freeze();
+        let mut original = denied();
+        original.operation_id = Some("retained-operation".into());
+        original.safe_actions = vec!["preserve".into()];
+        original.details = Box::new(serde_json::json!({"original_detail": true}));
+        let unknown = disclosure_unknown(original);
+        let expected = serde_json::to_value(&unknown).unwrap();
+        let actual = cause
+            .attach(export_result::<()>(
+                Some(&cause),
+                ExportCauseSite::ExportEntry,
+                Err(unknown),
+            ))
+            .unwrap_err();
+        assert_eq!(serde_json::to_value(&actual).unwrap(), expected);
+        assert_eq!(cause.first.get(), FirstExportCause::Vacant);
+        assert_eq!(actual.details["original_code"], "DISCLOSURE_DENIED");
+        assert_eq!(actual.details["disclosure_state"], "disclosed_or_unknown");
+        assert!(actual.details.get(EXPORT_CAUSE_KEY).is_none());
+
+        let prior = ExportCause::new();
+        export_predicate(Some(&prior), ExportCauseSite::ExportPermission, false);
+        prior.freeze();
+        let unknown = disclosure_unknown(denied());
+        let expected = serde_json::to_value(&unknown).unwrap();
+        let mut actual = prior.attach::<()>(Err(unknown)).unwrap_err();
+        actual
+            .details
+            .as_object_mut()
+            .unwrap()
+            .remove(EXPORT_CAUSE_KEY);
+        assert_eq!(serde_json::to_value(actual).unwrap(), expected);
+    }
+    #[test]
+    fn admission_export_collectors_are_invocation_local_and_success_is_silent() {
+        let first = ExportCause::new();
+        let second = ExportCause::new();
+        assert!(export_predicate(
+            Some(&first),
+            ExportCauseSite::ExportPermission,
+            true
+        ));
+        assert_eq!(first.first.get(), FirstExportCause::Vacant);
+        assert!(!export_predicate(
+            Some(&first),
+            ExportCauseSite::ExportPermission,
+            false
+        ));
+        let terminal = second.attach::<()>(Err(denied())).unwrap_err();
+        assert!(terminal.details.get(EXPORT_CAUSE_KEY).is_none());
+        assert_eq!(second.first.get(), FirstExportCause::Vacant);
+    }
+    #[test]
+    fn admission_export_actual_replay_scope_and_suffix_predicates_remain_exact() {
+        let original = scope("inert-review");
+        let mut changed = original.clone();
+        changed.recipient.local_channel_digest = "cd".repeat(32);
+        for observation in [false, true] {
+            let cause = ExportCause::new();
+            assert!(replay_scope_matches(
+                observation.then_some(&cause),
+                &original,
+                &original
+            ));
+            assert!(!replay_scope_matches(
+                observation.then_some(&cause),
+                &changed,
+                &original
+            ));
+            if observation {
+                assert_eq!(
+                    cause_pair(&cause),
+                    Some(("ExportReplayScope", "PredicateDenied"))
+                );
+            } else {
+                assert_eq!(cause.first.get(), FirstExportCause::Vacant);
+            }
+        }
+        let cause = ExportCause::new();
+        let mut exports = BTreeMap::new();
+        exports.insert("wrong-key".into(), intent("different-operation"));
+        let expected = added_export(&BTreeMap::new(), &exports).err().unwrap();
+        let actual = added_export_observed(&BTreeMap::new(), &exports, Some(&cause))
+            .err()
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(actual).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+        assert_eq!(cause_pair(&cause), Some(("ExportDelta", "PredicateDenied")));
     }
     #[test]
     fn admission_owner_is_nominal_nonclone_and_nonserializable() {
@@ -1394,12 +2410,10 @@ mod tests {
         let encoded = serde_json::to_string(&intent("review")).unwrap();
         assert!(encoded.contains("disclosed_or_unknown"));
         for substitute in ["not_shared", "cancelled", "recalled", "acknowledged"] {
-            assert!(
-                serde_json::from_str::<ExportIntent>(
-                    &encoded.replace("disclosed_or_unknown", substitute)
-                )
-                .is_err()
-            );
+            assert!(serde_json::from_str::<ExportIntent>(
+                &encoded.replace("disclosed_or_unknown", substitute)
+            )
+            .is_err());
         }
         let mut value = serde_json::to_value(intent("review")).unwrap();
         value["extra"] = true.into();
@@ -1440,8 +2454,8 @@ mod request_history_tests {
     use super::*;
     use crate::durable_construction_v1::{Intake, Roster};
     use crate::{
-        CandidateRequest,
         candidates::{CheckpointReceipt, OriginalCheckpointRequestV2},
+        CandidateRequest,
     };
     use serde_json::json;
     use sha2::{Digest, Sha256};
@@ -2022,49 +3036,43 @@ mod request_history_tests {
             let before = i.checked_sub(1).map(|n| &f.envelopes[n]);
             let mut changed = command.clone();
             changed.request_digest = hash(0xdd);
-            assert!(
-                validate_prefix_command(
-                    i,
-                    &f.access,
-                    &f.commands[0],
-                    &changed,
-                    before,
-                    &f.envelopes[i]
-                )
-                .is_err()
-            );
+            assert!(validate_prefix_command(
+                i,
+                &f.access,
+                &f.commands[0],
+                &changed,
+                before,
+                &f.envelopes[i]
+            )
+            .is_err());
             if i > 0 {
                 let mut prior = before.unwrap().clone();
                 prior.view.revision += 1;
                 if i != 5 {
-                    assert!(
-                        validate_prefix_command(
-                            i,
-                            &f.access,
-                            &f.commands[0],
-                            command,
-                            Some(&prior),
-                            &f.envelopes[i]
-                        )
-                        .is_err()
-                    );
+                    assert!(validate_prefix_command(
+                        i,
+                        &f.access,
+                        &f.commands[0],
+                        command,
+                        Some(&prior),
+                        &f.envelopes[i]
+                    )
+                    .is_err());
                 }
             }
         }
         for i in [0, 4, 5] {
             let mut command = f.commands[i].clone();
             command.idempotency_key.push('x');
-            assert!(
-                validate_prefix_command(
-                    i,
-                    &f.access,
-                    &f.commands[0],
-                    &command,
-                    i.checked_sub(1).map(|n| &f.envelopes[n]),
-                    &f.envelopes[i]
-                )
-                .is_err()
-            );
+            assert!(validate_prefix_command(
+                i,
+                &f.access,
+                &f.commands[0],
+                &command,
+                i.checked_sub(1).map(|n| &f.envelopes[n]),
+                &f.envelopes[i]
+            )
+            .is_err());
         }
         let mut mapping = f.envelopes[4].clone();
         mapping
@@ -2074,30 +3082,26 @@ mod request_history_tests {
             .unwrap()
             .action_mappings_v1 =
             Some(json!({"inputs":[],"outputs":[{"output_id":"changed","action_index":0}]}));
-        assert!(
-            validate_prefix_command(
-                4,
-                &f.access,
-                &f.commands[0],
-                &f.commands[4],
-                Some(&f.envelopes[3]),
-                &mapping
-            )
-            .is_err()
-        );
+        assert!(validate_prefix_command(
+            4,
+            &f.access,
+            &f.commands[0],
+            &f.commands[4],
+            Some(&f.envelopes[3]),
+            &mapping
+        )
+        .is_err());
         let mut summary = f.envelopes[7].clone();
         summary.view.candidates[0].proof_jobs[0].result_digest = Some(hash(0xee));
-        assert!(
-            validate_prefix_command(
-                7,
-                &f.access,
-                &f.commands[0],
-                &f.commands[7],
-                Some(&f.envelopes[6]),
-                &summary
-            )
-            .is_err()
-        );
+        assert!(validate_prefix_command(
+            7,
+            &f.access,
+            &f.commands[0],
+            &f.commands[7],
+            Some(&f.envelopes[6]),
+            &summary
+        )
+        .is_err());
         assert!(original_commands(&f.path, &f.key, [0; 32]).is_err());
     }
     #[test]

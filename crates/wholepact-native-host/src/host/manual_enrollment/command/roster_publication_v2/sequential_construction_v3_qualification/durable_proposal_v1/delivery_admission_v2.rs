@@ -1,8 +1,8 @@
 //! A single actual fixed-source preparation, two native prospective admissions,
 //! and controlled process death followed by a separate same-original reader.
 //! Restart records are bounded inert selectors, never reconstructed authority.
-use super::*;
 use super::safe_diagnostics_v1::{self as diagnostic, Boundary as B, Outcome};
+use super::*;
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{File, OpenOptions},
@@ -13,20 +13,20 @@ use std::{
     },
     path::{Component, Path, PathBuf},
     sync::{
-        Arc,
         atomic::{AtomicBool, Ordering},
+        Arc,
     },
 };
 use wholepact_signer::authority_bridge::{
-    ipc::OriginalHistoryClient,
-    durable_delivery_admission_ipc_v2::{
-        DurableDeliveryAdmissionStatusV2, DurableDeliveryHistoryRequestV2,
-    },
-    durable_review_ipc_v1::DurableReviewDeliveryRequestV1,
     durable_construction_v1::{
         DurableConstructionHistoryRequestV1, DurableConstructionRedisclosureRequestV1,
         DurableConstructionRedisclosureSourceV1, DurableConstructionScopeV1,
     },
+    durable_delivery_admission_ipc_v2::{
+        DurableDeliveryAdmissionStatusV2, DurableDeliveryHistoryRequestV2,
+    },
+    durable_review_ipc_v1::DurableReviewDeliveryRequestV1,
+    ipc::OriginalHistoryClient,
 };
 use worker::{JoinedSignerCommandV1 as C, JoinedSignerReplyV1 as R};
 
@@ -298,14 +298,24 @@ impl PublicOutcomeV3 {
                 self.first_failure.is_none() || !diagnostic::delivery_failure_outcome_label(outcome)
             })
             || !matches!(
-                (self.failed_child_inputs_completed, self.failed_child_inputs_expected),
+                (
+                    self.failed_child_inputs_completed,
+                    self.failed_child_inputs_expected
+                ),
                 (None, None) | (Some(0..=512), Some(1..=512))
             )
-            || self.failed_child_inputs_completed.zip(self.failed_child_inputs_expected)
-                .is_some_and(|(completed, expected)| completed > expected || self.first_failure.is_none())
-            || ((self.result == "passed" || self.root_cleanup != "closed_absent"
-                    || !self.producer_reaped || !self.producer_group_absent)
-                && (self.first_outcome.is_some() || self.failed_child_inputs_completed.is_some()
+            || self
+                .failed_child_inputs_completed
+                .zip(self.failed_child_inputs_expected)
+                .is_some_and(|(completed, expected)| {
+                    completed > expected || self.first_failure.is_none()
+                })
+            || ((self.result == "passed"
+                || self.root_cleanup != "closed_absent"
+                || !self.producer_reaped
+                || !self.producer_group_absent)
+                && (self.first_outcome.is_some()
+                    || self.failed_child_inputs_completed.is_some()
                     || self.failed_child_inputs_expected.is_some()))
             || !["sigkill", "other", "unverified"].contains(&self.producer_exit.as_str())
             || !["success", "other", "not_started", "unverified"]
@@ -830,10 +840,59 @@ fn observe_delivery(
     site: crate::host::financial::durable_delivery_admission_v2::DeliveryObservationSiteV2,
     outcome: crate::host::financial::durable_delivery_admission_v2::DeliveryObservationOutcomeV2,
 ) {
+    let (boundary, outcome) = delivery_observation_pair(site, outcome);
+    diagnostic::emit_delivery_observation(boundary, outcome);
+}
+fn delivery_observation_pair(
+    site: crate::host::financial::durable_delivery_admission_v2::DeliveryObservationSiteV2,
+    outcome: crate::host::financial::durable_delivery_admission_v2::DeliveryObservationOutcomeV2,
+) -> (B, Outcome) {
     use crate::host::financial::durable_delivery_admission_v2::{
-        DeliveryObservationSiteV2 as S, DeliveryObservationOutcomeV2 as O,
+        DeliveryObservationOutcomeV2 as O, DeliveryObservationSiteV2 as S,
     };
     let boundary = match site {
+        S::ExportProofCurrent => B::DeliveryExportProofCurrent,
+        S::ExportProofOrigin => B::DeliveryExportProofOrigin,
+        S::ExportSourceBefore => B::DeliveryExportSourceBefore,
+        S::ExportSourceAfter => B::DeliveryExportSourceAfter,
+        S::ExportMetadataOrigin => B::DeliveryExportMetadataOrigin,
+        S::ExportMarker => B::DeliveryExportMarker,
+        S::ExportHistory => B::DeliveryExportHistory,
+        S::ExportMaterialCeilings => B::DeliveryExportMaterialCeilings,
+        S::ExportIntake => B::DeliveryExportIntake,
+        S::ExportVerifiedProof => B::DeliveryExportVerifiedProof,
+        S::ExportRoster => B::DeliveryExportRoster,
+        S::ExportPayload => B::DeliveryExportPayload,
+        S::ExportOutputActions => B::DeliveryExportOutputActions,
+        S::ExportRecipientBinding => B::DeliveryExportRecipientBinding,
+        S::ExportSources => B::DeliveryExportSources,
+        S::ExportCheckpointScope => B::DeliveryExportCheckpointScope,
+        S::ExportProofPermission => B::DeliveryExportProofPermission,
+        S::ExportPermission => B::DeliveryExportPermission,
+        S::ExportReplayScope => B::DeliveryExportReplayScope,
+        S::ExportCommand => B::DeliveryExportCommand,
+        S::ExportReplayLookup => B::DeliveryExportReplayLookup,
+        S::ExportDelta => B::DeliveryExportDelta,
+        S::ExportEntry => B::DeliveryExportEntry,
+        S::RecipientMutex => B::DeliveryRecipientMutex,
+        S::RecipientDeadline => B::DeliveryRecipientDeadline,
+        S::RecipientOrigin => B::DeliveryRecipientOrigin,
+        S::RecipientObserverClone => B::DeliveryRecipientObserverClone,
+        S::RecipientWriteSerialize => B::DeliveryRecipientWriteSerialize,
+        S::RecipientWriteLimit => B::DeliveryRecipientWriteLimit,
+        S::RecipientWriteDeadline => B::DeliveryRecipientWriteDeadline,
+        S::RecipientWriteTimeout => B::DeliveryRecipientWriteTimeout,
+        S::RecipientWriteIo => B::DeliveryRecipientWriteIo,
+        S::RecipientWriteEmpty => B::DeliveryRecipientWriteEmpty,
+        S::RecipientFrame => B::DeliveryRecipientFrame,
+        S::RecipientResponseDecode => B::DeliveryRecipientResponseDecode,
+        S::RecipientResponseDigest => B::DeliveryRecipientResponseDigest,
+        S::RecipientResponse => B::DeliveryRecipientResponse,
+        S::SourceScopePredicate => B::DeliverySourceScopePredicate,
+        S::ProofRolePredicate => B::DeliveryProofRolePredicate,
+        S::MaterialActionPredicate => B::DeliveryMaterialActionPredicate,
+        S::MaterialScopePredicate => B::DeliveryMaterialScopePredicate,
+        S::ExportScopePredicate => B::DeliveryExportScopePredicate,
         S::FixedRead => B::DeliveryHistoricalRead,
         S::SourceOpen => B::DeliverySourceOpen,
         S::SourceInspection => B::DeliverySourceInspection,
@@ -847,6 +906,30 @@ fn observe_delivery(
         S::SourceCheck => B::DeliverySourceCheck,
     };
     let outcome = match outcome {
+        O::PredicateDenied => Outcome::PredicateDenied,
+        O::OriginPermanentStopUnavailable => Outcome::OriginPermanentStopUnavailable,
+        O::OriginRetirementEvidenceUnavailable => Outcome::OriginRetirementEvidenceUnavailable,
+        O::OriginSignerOriginUnavailable => Outcome::OriginSignerOriginUnavailable,
+        O::OriginPeerLifetimeUnavailable => Outcome::OriginPeerLifetimeUnavailable,
+        O::OriginAuthentication => Outcome::OriginAuthentication,
+        O::OriginBinding => Outcome::OriginBinding,
+        O::OriginConflict => Outcome::OriginConflict,
+        O::OriginPermission => Outcome::OriginPermission,
+        O::OriginInvalidData => Outcome::OriginInvalidData,
+        O::OriginLocked => Outcome::OriginLocked,
+        O::OriginCrypto => Outcome::OriginCrypto,
+        O::OriginIpc => Outcome::OriginIpc,
+        O::OriginLimit => Outcome::OriginLimit,
+        O::OriginIoTimedOut => Outcome::OriginIoTimedOut,
+        O::OriginIoWouldBlock => Outcome::OriginIoWouldBlock,
+        O::OriginIoUnexpectedEof => Outcome::OriginIoUnexpectedEof,
+        O::OriginIoBrokenPipe => Outcome::OriginIoBrokenPipe,
+        O::OriginIoConnectionReset => Outcome::OriginIoConnectionReset,
+        O::OriginIoConnectionAborted => Outcome::OriginIoConnectionAborted,
+        O::OriginIoNotConnected => Outcome::OriginIoNotConnected,
+        O::OriginIoInterrupted => Outcome::OriginIoInterrupted,
+        O::OriginIoPermissionDenied => Outcome::OriginIoPermissionDenied,
+        O::OriginIoOther => Outcome::OriginIoOther,
         O::ReturnedOk => Outcome::Complete,
         O::EngineDisclosureUnknown => Outcome::EngineDisclosureUnknown,
         O::EngineDisclosureDenied => Outcome::EngineDisclosureDenied,
@@ -868,7 +951,9 @@ fn observe_delivery(
         O::BridgeLimit => Outcome::BridgeLimit,
         O::BridgePermission => Outcome::BridgePermission,
         O::BridgeRecoveryRequired => Outcome::BridgeRecoveryRequired,
-        O::BridgeCompleteOriginRecoveryUnavailable => Outcome::BridgeCompleteOriginRecoveryUnavailable,
+        O::BridgeCompleteOriginRecoveryUnavailable => {
+            Outcome::BridgeCompleteOriginRecoveryUnavailable
+        }
         O::BridgeVerification => Outcome::BridgeVerification,
         O::BridgeSignerOriginUnavailable => Outcome::BridgeSignerOriginUnavailable,
         O::BridgeJournal => Outcome::BridgeJournal,
@@ -890,7 +975,7 @@ fn observe_delivery(
         O::HostGenerationArchiveIncomplete => Outcome::HostGenerationArchiveIncomplete,
         O::HostUnclassified => Outcome::WorkerFailure,
     };
-    diagnostic::emit_delivery_observation(boundary, outcome);
+    (boundary, outcome)
 }
 
 fn pair_owner(
@@ -1640,16 +1725,19 @@ mod tests {
         ] {
             assert!(!value.as_object().unwrap().contains_key(forbidden));
         }
-        assert!(
-            serde_json::from_str::<PublicOutcomeV3>(
-                &(json.trim_end_matches('}').to_owned() + ",\"schema\":3}")
-            )
-            .is_err()
-        );
+        assert!(serde_json::from_str::<PublicOutcomeV3>(
+            &(json.trim_end_matches('}').to_owned() + ",\"schema\":3}")
+        )
+        .is_err());
         row.first_failure = Some("unbounded-private-error".into());
         assert!(row.public_json().is_err());
     }
-    fn failed_child(marker: &[u8], completed: usize, expected: usize, verified: bool) -> PrivateWorkspaceStageResultV1 {
+    fn failed_child(
+        marker: &[u8],
+        completed: usize,
+        expected: usize,
+        verified: bool,
+    ) -> PrivateWorkspaceStageResultV1 {
         use std::os::unix::process::ExitStatusExt;
         let mut transcript = rolling_transcript_v1::Transcript::new([]).unwrap();
         transcript.enable_delivery_first_failure();
@@ -1661,7 +1749,8 @@ mod tests {
             outcome: Err(invalid()),
             process: owned_test_process_group_v1::ProcessCleanupV1 {
                 group_signal: owned_test_process_group_v1::GroupSignalV1::SentWhileLeaderOwned,
-                group_absence: owned_test_process_group_v1::GroupAbsenceV1::OriginalGroupAbsentObserved,
+                group_absence:
+                    owned_test_process_group_v1::GroupAbsenceV1::OriginalGroupAbsentObserved,
                 direct_child: if verified {
                     owned_test_process_group_v1::DirectChildV1::Reaped
                 } else {
@@ -1677,14 +1766,113 @@ mod tests {
         }
     }
     #[test]
+    fn delivery_export_lower_pair_mapping_preserves_predicates_and_actual_categories() {
+        use crate::host::financial::durable_delivery_admission_v2::{
+            DeliveryObservationOutcomeV2 as O, DeliveryObservationSiteV2 as S,
+        };
+        for (site, outcome, boundary, expected) in [
+            (
+                S::RecipientDeadline,
+                O::BridgePermission,
+                B::DeliveryRecipientDeadline,
+                Outcome::BridgePermission,
+            ),
+            (
+                S::RecipientWriteDeadline,
+                O::BridgePermission,
+                B::DeliveryRecipientWriteDeadline,
+                Outcome::BridgePermission,
+            ),
+            (
+                S::RecipientFrame,
+                O::OriginAuthentication,
+                B::DeliveryRecipientFrame,
+                Outcome::OriginAuthentication,
+            ),
+            (
+                S::RecipientWriteIo,
+                O::OriginIoBrokenPipe,
+                B::DeliveryRecipientWriteIo,
+                Outcome::OriginIoBrokenPipe,
+            ),
+            (
+                S::ExportIntake,
+                O::EngineDisclosureDenied,
+                B::DeliveryExportIntake,
+                Outcome::EngineDisclosureDenied,
+            ),
+            (
+                S::ExportHistory,
+                O::EngineRecoveryRequired,
+                B::DeliveryExportHistory,
+                Outcome::EngineRecoveryRequired,
+            ),
+            (
+                S::ExportProofPermission,
+                O::PredicateDenied,
+                B::DeliveryExportProofPermission,
+                Outcome::PredicateDenied,
+            ),
+            (
+                S::MaterialScopePredicate,
+                O::PredicateDenied,
+                B::DeliveryMaterialScopePredicate,
+                Outcome::PredicateDenied,
+            ),
+            (
+                S::ExportScopePredicate,
+                O::PredicateDenied,
+                B::DeliveryExportScopePredicate,
+                Outcome::PredicateDenied,
+            ),
+        ] {
+            let actual = delivery_observation_pair(site, outcome);
+            assert!(std::mem::discriminant(&actual.0) == std::mem::discriminant(&boundary));
+            assert!(std::mem::discriminant(&actual.1) == std::mem::discriminant(&expected));
+        }
+    }
+    #[test]
+    fn delivery_export_lower_failure_survives_real_capture_and_public_serialization() {
+        for (boundary, outcome) in [
+            ("DeliveryRecipientDeadline", "BridgePermission"),
+            ("DeliveryRecipientFrame", "OriginAuthentication"),
+            ("DeliveryExportIntake", "EngineDisclosureDenied"),
+            ("DeliveryExportScopePredicate", "PredicateDenied"),
+        ] {
+            let marker = format!("[JOINED_DIAGNOSTIC {boundary} {outcome}]\n[JOINED_DIAGNOSTIC DeliveryExportCommit EngineDisclosureDenied]\n");
+            let child = failed_child(marker.as_bytes(), 111, 117, true);
+            let mut row = PublicOutcomeV3::pending();
+            row.producer_reaped = true;
+            row.producer_group_absent = true;
+            row.fail_child(&child, "DeliverySourceExport");
+            assert!(row.first_outcome.is_none());
+            row.root_cleanup = "closed_absent".into();
+            row.disclose_child_observation_after_cleanup();
+            let json = row.public_json().unwrap();
+            let decoded: PublicOutcomeV3 = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded.first_failure.as_deref(), Some(boundary));
+            assert_eq!(decoded.first_outcome.as_deref(), Some(outcome));
+            assert_eq!(decoded.failed_child_inputs_completed, Some(111));
+            assert_eq!(decoded.failed_child_inputs_expected, Some(117));
+            assert_eq!(decoded.schema, 3);
+            assert!(!decoded.authorization_allowed && !decoded.distribution_allowed);
+            assert!(!decoded.reader_no_effects_verified);
+            assert!(json.len() <= 2048);
+        }
+    }
+    #[test]
     fn delivery_observation_uses_same_first_failed_child_and_real_progress() {
         let producer = failed_child(
             b"[JOINED_DIAGNOSTIC DeliveryExportCommit EngineDisclosureUnknown]\n",
-            17, 61, true,
+            17,
+            61,
+            true,
         );
         let reader = failed_child(
             b"[JOINED_DIAGNOSTIC DeliveryHistoricalRead HostPermission]\n",
-            2, 3, true,
+            2,
+            3,
+            true,
         );
         let mut row = PublicOutcomeV3::pending();
         row.producer_reaped = true;
@@ -1695,7 +1883,10 @@ mod tests {
         row.root_cleanup = "closed_absent".into();
         row.disclose_child_observation_after_cleanup();
         assert_eq!(row.first_failure.as_deref(), Some("DeliveryExportCommit"));
-        assert_eq!(row.first_outcome.as_deref(), Some("EngineDisclosureUnknown"));
+        assert_eq!(
+            row.first_outcome.as_deref(),
+            Some("EngineDisclosureUnknown")
+        );
         assert_eq!(row.failed_child_inputs_completed, Some(17));
         assert_eq!(row.failed_child_inputs_expected, Some(61));
         assert!(row.public_json().is_ok());
@@ -1717,7 +1908,9 @@ mod tests {
             for verified in [false, true] {
                 let child = failed_child(
                     b"[JOINED_DIAGNOSTIC DeliverySourcePlan HostInvalid]\n",
-                    11, 61, verified,
+                    11,
+                    61,
+                    verified,
                 );
                 let mut row = PublicOutcomeV3::pending();
                 row.producer_reaped = verified;
@@ -1726,17 +1919,29 @@ mod tests {
                 row.root_cleanup = cleanup.into();
                 row.disclose_child_observation_after_cleanup();
                 let visible = verified && cleanup == "closed_absent";
-                assert_eq!(row.first_outcome.as_deref(), visible.then_some("HostInvalid"));
+                assert_eq!(
+                    row.first_outcome.as_deref(),
+                    visible.then_some("HostInvalid")
+                );
                 assert_eq!(row.failed_child_inputs_completed, visible.then_some(11));
                 assert_eq!(row.failed_child_inputs_expected, visible.then_some(61));
-                assert_eq!(row.first_failure.as_deref(), Some(if visible { "DeliverySourcePlan" } else { "DeliveryDurableMarker" }));
+                assert_eq!(
+                    row.first_failure.as_deref(),
+                    Some(if visible {
+                        "DeliverySourcePlan"
+                    } else {
+                        "DeliveryDurableMarker"
+                    })
+                );
                 assert!(row.public_json().is_ok());
             }
         }
         // A missing/lost latch never consults the last-64 summary for an outcome.
         let mut child = failed_child(
             b"[JOINED_DIAGNOSTIC DeliverySourceExport HostReceipt]\n",
-            11, 61, true,
+            11,
+            61,
+            true,
         );
         child.delivery_first_failure = None;
         let mut row = PublicOutcomeV3::pending();
@@ -1759,7 +1964,11 @@ mod tests {
         row.producer_group_absent = true;
         let value: serde_json::Value = serde_json::from_str(&row.public_json().unwrap()).unwrap();
         assert_eq!(value["schema"], 3);
-        for key in ["first_outcome", "failed_child_inputs_completed", "failed_child_inputs_expected"] {
+        for key in [
+            "first_outcome",
+            "failed_child_inputs_completed",
+            "failed_child_inputs_expected",
+        ] {
             assert!(value.get(key).unwrap().is_null());
             let mut missing = value.clone();
             missing.as_object_mut().unwrap().remove(key);
@@ -1774,8 +1983,12 @@ mod tests {
         row.failed_child_inputs_expected = Some(1);
         assert!(row.public_json().is_ok());
         for (completed, expected) in [
-            (Some(1), None), (None, Some(1)), (Some(0), Some(0)),
-            (Some(2), Some(1)), (Some(1), Some(513)), (Some(513), Some(513)),
+            (Some(1), None),
+            (None, Some(1)),
+            (Some(0), Some(0)),
+            (Some(2), Some(1)),
+            (Some(1), Some(513)),
+            (Some(513), Some(513)),
         ] {
             row.failed_child_inputs_completed = completed;
             row.failed_child_inputs_expected = expected;

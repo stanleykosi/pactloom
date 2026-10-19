@@ -52,6 +52,48 @@ pub(in crate::host) enum DeliveryObservationSiteV2 {
     NativeCheck,
     SourceCheck,
     FixedRead,
+    SourceScopePredicate,
+    ProofRolePredicate,
+    MaterialActionPredicate,
+    MaterialScopePredicate,
+    ExportScopePredicate,
+    ExportProofCurrent,
+    ExportProofOrigin,
+    ExportSourceBefore,
+    ExportSourceAfter,
+    ExportMetadataOrigin,
+    ExportMarker,
+    ExportHistory,
+    ExportMaterialCeilings,
+    ExportIntake,
+    ExportVerifiedProof,
+    ExportRoster,
+    ExportPayload,
+    ExportOutputActions,
+    ExportRecipientBinding,
+    ExportSources,
+    ExportCheckpointScope,
+    ExportProofPermission,
+    ExportPermission,
+    ExportReplayScope,
+    ExportCommand,
+    ExportReplayLookup,
+    ExportDelta,
+    ExportEntry,
+    RecipientMutex,
+    RecipientDeadline,
+    RecipientOrigin,
+    RecipientObserverClone,
+    RecipientWriteSerialize,
+    RecipientWriteLimit,
+    RecipientWriteDeadline,
+    RecipientWriteTimeout,
+    RecipientWriteIo,
+    RecipientWriteEmpty,
+    RecipientFrame,
+    RecipientResponseDecode,
+    RecipientResponseDigest,
+    RecipientResponse,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::host) enum DeliveryObservationOutcomeV2 {
@@ -97,6 +139,30 @@ pub(in crate::host) enum DeliveryObservationOutcomeV2 {
     HostHistoricalExportIncomplete,
     HostGenerationArchiveIncomplete,
     HostUnclassified,
+    PredicateDenied,
+    OriginPermanentStopUnavailable,
+    OriginRetirementEvidenceUnavailable,
+    OriginSignerOriginUnavailable,
+    OriginPeerLifetimeUnavailable,
+    OriginAuthentication,
+    OriginBinding,
+    OriginConflict,
+    OriginPermission,
+    OriginInvalidData,
+    OriginLocked,
+    OriginCrypto,
+    OriginIpc,
+    OriginLimit,
+    OriginIoTimedOut,
+    OriginIoWouldBlock,
+    OriginIoUnexpectedEof,
+    OriginIoBrokenPipe,
+    OriginIoConnectionReset,
+    OriginIoConnectionAborted,
+    OriginIoNotConnected,
+    OriginIoInterrupted,
+    OriginIoPermissionDenied,
+    OriginIoOther,
 }
 #[cfg(all(test, feature = "synthetic-born-joined-qualification"))]
 thread_local! { static DELIVERY_OBSERVER_V2: std::cell::Cell<Option<fn(DeliveryObservationSiteV2,DeliveryObservationOutcomeV2)>> = const { std::cell::Cell::new(None) }; }
@@ -156,7 +222,144 @@ fn engine_result<T>(
     site: DeliveryObservationSiteV2,
     result: wholepact_engine::Result<T>,
 ) -> Result<T> {
-    observed_result(site, result, engine_outcome).map_err(Error::from)
+    observed_engine_result(site, result).map_err(Error::from)
+}
+fn observed_engine_result<T>(
+    site: DeliveryObservationSiteV2,
+    result: wholepact_engine::Result<T>,
+) -> wholepact_engine::Result<T> {
+    if site == DeliveryObservationSiteV2::ExportCommit {
+        if let Err(error) = &result {
+            if let Some((cause_site, cause_outcome)) = export_engine_cause(error) {
+                observe_delivery(cause_site, cause_outcome);
+            }
+        }
+    }
+    observed_result(site, result, engine_outcome)
+}
+const EXPORT_CAUSE_KEY: &str = "private_durable_delivery_cause_v2";
+const EXPORT_CAUSE_COLLISION_KEY: &str = "private_durable_delivery_cause_collision_v2";
+
+// These tables turn only exact known labels into local enums. No input string,
+// error code, message or other metadata is retained by an observation.
+macro_rules! export_cause_labels {
+    ($parse:ident, $inventory:ident, $kind:ident { $($variant:ident),+ $(,)? }) => {
+        fn $parse(value: &str) -> Option<$kind> {
+            match value {
+                $(stringify!($variant) => Some($kind::$variant),)+
+                _ => None,
+            }
+        }
+        #[cfg(test)]
+        const $inventory: &[(&str, $kind)] = &[
+            $((stringify!($variant), $kind::$variant),)+
+        ];
+    };
+}
+export_cause_labels! { parse_export_cause_site, EXPORT_CAUSE_SITES, DeliveryObservationSiteV2 {
+    ExportProofCurrent, ExportProofOrigin, ExportSourceBefore, ExportSourceAfter,
+    ExportMetadataOrigin, ExportMarker, ExportHistory, ExportMaterialCeilings,
+    ExportIntake, ExportVerifiedProof, ExportRoster, ExportPayload,
+    ExportOutputActions, ExportRecipientBinding, ExportSources,
+    ExportCheckpointScope, ExportProofPermission, ExportPermission,
+    ExportReplayScope, ExportCommand, ExportReplayLookup, ExportDelta, ExportEntry,
+    RecipientMutex, RecipientDeadline, RecipientOrigin, RecipientObserverClone,
+    RecipientWriteSerialize, RecipientWriteLimit, RecipientWriteDeadline,
+    RecipientWriteTimeout, RecipientWriteIo, RecipientWriteEmpty, RecipientFrame,
+    RecipientResponseDecode, RecipientResponseDigest, RecipientResponse,
+} }
+export_cause_labels! { parse_export_cause_outcome, EXPORT_CAUSE_OUTCOMES, DeliveryObservationOutcomeV2 {
+    EngineDisclosureUnknown, EngineDisclosureDenied, EngineRecoveryRequired,
+    EngineIdempotencyConflict, EngineRevisionConflict, EngineDurableProposalConflict,
+    EngineDurableConstructionUnavailable, EngineDurableProfileUnavailable,
+    EngineResourceExhausted, EngineUnclassified, PredicateDenied,
+    BridgeBinding, BridgeConflict, BridgeMissing, BridgeUncertain, BridgeLimit,
+    BridgePermission, BridgeRecoveryRequired, BridgeCompleteOriginRecoveryUnavailable,
+    BridgeVerification, BridgeSignerOriginUnavailable, BridgeJournal, BridgeAuthority,
+    BridgeWallet, BridgeIpc,
+    OriginPermanentStopUnavailable, OriginRetirementEvidenceUnavailable,
+    OriginSignerOriginUnavailable, OriginPeerLifetimeUnavailable, OriginAuthentication,
+    OriginBinding, OriginConflict, OriginPermission, OriginInvalidData, OriginLocked,
+    OriginCrypto, OriginIpc, OriginLimit, OriginIoTimedOut, OriginIoWouldBlock,
+    OriginIoUnexpectedEof, OriginIoBrokenPipe, OriginIoConnectionReset,
+    OriginIoConnectionAborted, OriginIoNotConnected, OriginIoInterrupted,
+    OriginIoPermissionDenied, OriginIoOther,
+} }
+fn export_cause_pair_is_valid(
+    site: DeliveryObservationSiteV2,
+    outcome: DeliveryObservationOutcomeV2,
+) -> bool {
+    use DeliveryObservationOutcomeV2 as O;
+    use DeliveryObservationSiteV2 as S;
+    let engine = matches!(outcome,
+        O::EngineDisclosureUnknown | O::EngineDisclosureDenied | O::EngineRecoveryRequired
+            | O::EngineIdempotencyConflict | O::EngineRevisionConflict
+            | O::EngineDurableProposalConflict | O::EngineDurableConstructionUnavailable
+            | O::EngineDurableProfileUnavailable | O::EngineResourceExhausted
+            | O::EngineUnclassified
+    );
+    let bridge = matches!(outcome,
+        O::BridgeBinding | O::BridgeConflict | O::BridgeMissing | O::BridgeUncertain
+            | O::BridgeLimit | O::BridgePermission | O::BridgeRecoveryRequired
+            | O::BridgeCompleteOriginRecoveryUnavailable | O::BridgeVerification
+            | O::BridgeSignerOriginUnavailable | O::BridgeJournal | O::BridgeAuthority
+            | O::BridgeWallet | O::BridgeIpc
+    );
+    let origin_io = matches!(outcome,
+        O::OriginIoTimedOut | O::OriginIoWouldBlock | O::OriginIoUnexpectedEof
+            | O::OriginIoBrokenPipe | O::OriginIoConnectionReset | O::OriginIoConnectionAborted
+            | O::OriginIoNotConnected | O::OriginIoInterrupted | O::OriginIoPermissionDenied
+            | O::OriginIoOther
+    );
+    let origin = origin_io || matches!(outcome,
+        O::OriginPermanentStopUnavailable | O::OriginRetirementEvidenceUnavailable
+            | O::OriginSignerOriginUnavailable | O::OriginPeerLifetimeUnavailable
+            | O::OriginAuthentication | O::OriginBinding | O::OriginConflict
+            | O::OriginPermission | O::OriginInvalidData | O::OriginLocked | O::OriginCrypto
+            | O::OriginIpc | O::OriginLimit
+    );
+    match site {
+        S::ExportProofOrigin | S::ExportPermission => outcome == O::PredicateDenied,
+        S::ExportSourceBefore | S::ExportMetadataOrigin | S::ExportMarker | S::ExportHistory
+        | S::ExportRoster | S::ExportSources | S::ExportProofPermission | S::ExportReplayScope
+        | S::ExportReplayLookup | S::ExportDelta => engine || outcome == O::PredicateDenied,
+        S::ExportProofCurrent | S::ExportSourceAfter | S::ExportMaterialCeilings
+        | S::ExportIntake | S::ExportVerifiedProof | S::ExportPayload | S::ExportOutputActions
+        | S::ExportRecipientBinding | S::ExportCheckpointScope | S::ExportCommand
+        | S::ExportEntry => engine,
+        S::RecipientMutex | S::RecipientWriteEmpty => outcome == O::BridgeIpc,
+        S::RecipientDeadline | S::RecipientWriteDeadline | S::RecipientResponse => {
+            outcome == O::BridgePermission
+        }
+        S::RecipientOrigin => bridge,
+        S::RecipientObserverClone | S::RecipientWriteTimeout | S::RecipientWriteIo => origin_io,
+        S::RecipientWriteSerialize | S::RecipientResponseDecode | S::RecipientResponseDigest => {
+            outcome == O::BridgeBinding
+        }
+        S::RecipientWriteLimit => outcome == O::BridgeLimit,
+        S::RecipientFrame => origin,
+        _ => false,
+    }
+}
+/// Trust only the exact closed sidecar of this invocation's terminal Engine
+/// export error. Other detail fields are untouched and never projected.
+fn export_engine_cause(
+    error: &wholepact_engine::ApiError,
+) -> Option<(DeliveryObservationSiteV2, DeliveryObservationOutcomeV2)> {
+    let details = error.details.as_object()?;
+    // The Engine marks a pre-existing reserved key before considering its
+    // current collector. Marker presence always denies projection, even when
+    // its value is false, malformed or itself pre-existing. It grants nothing.
+    if details.contains_key(EXPORT_CAUSE_COLLISION_KEY) {
+        return None;
+    }
+    let detail = details.get(EXPORT_CAUSE_KEY)?.as_object()?;
+    if detail.len() != 3 || detail.get("version")?.as_u64()? != 1 {
+        return None;
+    }
+    let site = parse_export_cause_site(detail.get("site")?.as_str()?)?;
+    let outcome = parse_export_cause_outcome(detail.get("outcome")?.as_str()?)?;
+    export_cause_pair_is_valid(site, outcome).then_some((site, outcome))
 }
 fn bridge_outcome(
     error: &wholepact_signer::authority_bridge::BridgeError,
@@ -222,6 +425,27 @@ fn export_check_result<T>(
     } else {
         result
     }
+}
+/// Observe the original boolean at its existing short-circuit position. No
+/// permission, lookup, native approval or source check is rerun here.
+fn export_predicate(
+    exporting: bool,
+    site: DeliveryObservationSiteV2,
+    allowed: bool,
+) -> bool {
+    if exporting && !allowed {
+        observe_delivery(site, DeliveryObservationOutcomeV2::PredicateDenied);
+    }
+    allowed
+}
+/// A failed serialization is still the original typed source error, not a
+/// fabricated predicate denial. Only an actual Ok(false) is a false predicate.
+fn export_source_scope_result(exporting: bool, result: Result<bool>) -> Result<bool> {
+    let result = export_check_result(exporting, DeliveryObservationSiteV2::SourceCheck, result);
+    if let Ok(allowed) = &result {
+        export_predicate(exporting, DeliveryObservationSiteV2::SourceScopePredicate, *allowed);
+    }
+    result
 }
 fn post_export_result(result: Result<()>) -> Result<()> {
     host_result(DeliveryObservationSiteV2::ExportPostcheck, result)
@@ -376,9 +600,8 @@ impl InspectionReadV2<'_, '_> {
 }
 impl LocalPrivateDurableAdmissionConsentV2 for InspectionReadV2<'_, '_> {
     fn permits_source(&self, s: &PrivateWorkspaceScopeV1) -> bool {
-        export_check_result(
+        export_source_scope_result(
             self.export_preview,
-            DeliveryObservationSiteV2::SourceCheck,
             same(s, self.inspection.workspace_scope()),
         )
         .unwrap_or(false)
@@ -387,7 +610,11 @@ impl LocalPrivateDurableAdmissionConsentV2 for InspectionReadV2<'_, '_> {
 }
 impl LocalProofConsent for InspectionReadV2<'_, '_> {
     fn permits(&self, s: &CheckpointScope, a: LocalAction) -> bool {
-        proof_matches(self.inspection, s, a) && self.check().is_ok()
+        export_predicate(
+            self.export_preview,
+            DeliveryObservationSiteV2::ProofRolePredicate,
+            proof_matches(self.inspection, s, a),
+        ) && self.check().is_ok()
     }
 }
 impl LocalDurableMaterialConsentV1 for InspectionReadV2<'_, '_> {
@@ -397,7 +624,15 @@ impl LocalDurableMaterialConsentV1 for InspectionReadV2<'_, '_> {
         } else {
             matches!(a, DurableMaterialActionV1::ReadForExactConstruction)
         };
-        allowed && material_matches(self.inspection, s, d) && self.check().is_ok()
+        export_predicate(
+            self.export_preview,
+            DeliveryObservationSiteV2::MaterialActionPredicate,
+            allowed,
+        ) && export_predicate(
+            self.export_preview,
+            DeliveryObservationSiteV2::MaterialScopePredicate,
+            material_matches(self.inspection, s, d),
+        ) && self.check().is_ok()
     }
 }
 /// Privately constructed only after real same-TTY exact review. No caller
@@ -436,9 +671,8 @@ impl OwnedDeliveryConsentV2<'_, '_> {
 }
 impl LocalPrivateDurableAdmissionConsentV2 for OwnedDeliveryConsentV2<'_, '_> {
     fn permits_source(&self, s: &PrivateWorkspaceScopeV1) -> bool {
-        export_check_result(
+        export_source_scope_result(
             self.export.is_some(),
-            DeliveryObservationSiteV2::SourceCheck,
             same(s, self.inspection.workspace_scope()),
         )
         .unwrap_or(false)
@@ -447,7 +681,11 @@ impl LocalPrivateDurableAdmissionConsentV2 for OwnedDeliveryConsentV2<'_, '_> {
 }
 impl LocalProofConsent for OwnedDeliveryConsentV2<'_, '_> {
     fn permits(&self, s: &CheckpointScope, a: LocalAction) -> bool {
-        proof_matches(self.inspection, s, a) && self.check().is_ok()
+        export_predicate(
+            self.export.is_some(),
+            DeliveryObservationSiteV2::ProofRolePredicate,
+            proof_matches(self.inspection, s, a),
+        ) && self.check().is_ok()
     }
 }
 impl LocalDurableMaterialConsentV1 for OwnedDeliveryConsentV2<'_, '_> {
@@ -457,14 +695,25 @@ impl LocalDurableMaterialConsentV1 for OwnedDeliveryConsentV2<'_, '_> {
         } else {
             DurableMaterialActionV1::ReadForExactConstruction
         };
-        std::mem::discriminant(&a) == std::mem::discriminant(&expected)
-            && material_matches(self.inspection, s, d)
+        export_predicate(
+            self.export.is_some(),
+            DeliveryObservationSiteV2::MaterialActionPredicate,
+            std::mem::discriminant(&a) == std::mem::discriminant(&expected),
+        ) && export_predicate(
+            self.export.is_some(),
+            DeliveryObservationSiteV2::MaterialScopePredicate,
+            material_matches(self.inspection, s, d),
+        )
             && self.check().is_ok()
     }
 }
 impl LocalDurableReviewExportConsentV1 for OwnedDeliveryConsentV2<'_, '_> {
     fn permits(&self, s: &DurableReviewExportScopeV1) -> bool {
-        self.export.is_some_and(|exact| exact == s) && self.check().is_ok()
+        export_predicate(
+            self.export.is_some(),
+            DeliveryObservationSiteV2::ExportScopePredicate,
+            self.export.is_some_and(|exact| exact == s),
+        ) && self.check().is_ok()
     }
 }
 fn source_plan(
@@ -844,6 +1093,291 @@ pub(in crate::host) fn read_original_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    thread_local! {
+        static EXPORT_SEEN: std::cell::RefCell<Vec<(DeliveryObservationSiteV2, DeliveryObservationOutcomeV2)>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    fn record_export(site: DeliveryObservationSiteV2, outcome: DeliveryObservationOutcomeV2) {
+        EXPORT_SEEN.with(|seen| seen.borrow_mut().push((site, outcome)));
+    }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    fn take_export_seen() -> Vec<(DeliveryObservationSiteV2, DeliveryObservationOutcomeV2)> {
+        EXPORT_SEEN.with(|seen| std::mem::take(&mut *seen.borrow_mut()))
+    }
+    fn cause_error(site: &str, outcome: &str) -> wholepact_engine::ApiError {
+        let mut error = wholepact_engine::ApiError::new("DISCLOSURE_DENIED", "private error");
+        error.details = Box::new(serde_json::json!({
+            "private_durable_delivery_cause_v2": {
+                "version": 1,
+                "site": site,
+                "outcome": outcome,
+            },
+            "private": "unchanged",
+        }));
+        error
+    }
+    #[test]
+    fn export_sidecar_complete_inventory_has_exact_source_stage_category_parity() {
+        use std::collections::BTreeSet;
+        let engine = [
+            "EngineDisclosureUnknown", "EngineDisclosureDenied", "EngineRecoveryRequired",
+            "EngineIdempotencyConflict", "EngineRevisionConflict", "EngineDurableProposalConflict",
+            "EngineDurableConstructionUnavailable", "EngineDurableProfileUnavailable",
+            "EngineResourceExhausted", "EngineUnclassified",
+        ];
+        let engine_or_predicate: Vec<_> = engine.iter().copied().chain(["PredicateDenied"]).collect();
+        let bridge = [
+            "BridgeBinding", "BridgeConflict", "BridgeMissing", "BridgeUncertain", "BridgeLimit",
+            "BridgePermission", "BridgeRecoveryRequired", "BridgeCompleteOriginRecoveryUnavailable",
+            "BridgeVerification", "BridgeSignerOriginUnavailable", "BridgeJournal", "BridgeAuthority",
+            "BridgeWallet", "BridgeIpc",
+        ];
+        let origin_io = [
+            "OriginIoTimedOut", "OriginIoWouldBlock", "OriginIoUnexpectedEof", "OriginIoBrokenPipe",
+            "OriginIoConnectionReset", "OriginIoConnectionAborted", "OriginIoNotConnected",
+            "OriginIoInterrupted", "OriginIoPermissionDenied", "OriginIoOther",
+        ];
+        let origin: Vec<_> = [
+            "OriginPermanentStopUnavailable", "OriginRetirementEvidenceUnavailable",
+            "OriginSignerOriginUnavailable", "OriginPeerLifetimeUnavailable", "OriginAuthentication",
+            "OriginBinding", "OriginConflict", "OriginPermission", "OriginInvalidData", "OriginLocked",
+            "OriginCrypto", "OriginIpc", "OriginLimit",
+        ].into_iter().chain(origin_io).collect();
+        // Independent contract inventory, not the production validator's result.
+        let groups: &[(&[&str], &[&str])] = &[
+            (&["ExportProofOrigin", "ExportPermission"], &["PredicateDenied"]),
+            (&["ExportSourceBefore", "ExportMetadataOrigin", "ExportMarker", "ExportHistory",
+                "ExportRoster", "ExportSources", "ExportProofPermission", "ExportReplayScope",
+                "ExportReplayLookup", "ExportDelta"], &engine_or_predicate),
+            (&["ExportProofCurrent", "ExportSourceAfter", "ExportMaterialCeilings", "ExportIntake",
+                "ExportVerifiedProof", "ExportPayload", "ExportOutputActions", "ExportRecipientBinding",
+                "ExportCheckpointScope", "ExportCommand", "ExportEntry"], &engine),
+            (&["RecipientMutex", "RecipientWriteEmpty"], &["BridgeIpc"]),
+            (&["RecipientDeadline", "RecipientWriteDeadline", "RecipientResponse"], &["BridgePermission"]),
+            (&["RecipientOrigin"], &bridge),
+            (&["RecipientObserverClone", "RecipientWriteTimeout", "RecipientWriteIo"], &origin_io),
+            (&["RecipientWriteSerialize", "RecipientResponseDecode", "RecipientResponseDigest"], &["BridgeBinding"]),
+            (&["RecipientWriteLimit"], &["BridgeLimit"]),
+            (&["RecipientFrame"], &origin),
+        ];
+        let expected: BTreeSet<_> = groups.iter().flat_map(|(sites, outcomes)| {
+            sites.iter().flat_map(move |site| outcomes.iter().map(move |outcome| (*site, *outcome)))
+        }).collect();
+        assert_eq!(expected.len(), 298);
+        let sites: BTreeSet<_> = EXPORT_CAUSE_SITES.iter().map(|(label, _)| *label).collect();
+        let outcomes: BTreeSet<_> = EXPORT_CAUSE_OUTCOMES.iter().map(|(label, _)| *label).collect();
+        assert_eq!(EXPORT_CAUSE_SITES.len(), 37);
+        assert_eq!(EXPORT_CAUSE_OUTCOMES.len(), 48);
+        assert_eq!(sites.len(), 37);
+        assert_eq!(outcomes.len(), 48);
+        assert_eq!(expected.iter().map(|(site, _)| *site).collect::<BTreeSet<_>>(), sites);
+        assert_eq!(expected.iter().map(|(_, outcome)| *outcome).collect::<BTreeSet<_>>(), outcomes);
+        for (site_label, site) in EXPORT_CAUSE_SITES {
+            assert_eq!(parse_export_cause_site(site_label), Some(*site));
+            for (outcome_label, outcome) in EXPORT_CAUSE_OUTCOMES {
+                assert_eq!(parse_export_cause_outcome(outcome_label), Some(*outcome));
+                let expected = expected.contains(&(*site_label, *outcome_label))
+                    .then_some((*site, *outcome));
+                assert_eq!(export_engine_cause(&cause_error(site_label, outcome_label)), expected);
+            }
+        }
+        for unknown in ["", "private/path", "recipientdeadline", "DeliveryRecipientDeadline", "RecipientDeadline ", "ReturnedOk", "HostPermission"] {
+            assert_eq!(parse_export_cause_site(unknown), None);
+            assert_eq!(parse_export_cause_outcome(unknown), None);
+        }
+    }
+    #[test]
+    fn strict_export_sidecar_rejects_malformed_unknown_and_wrong_source_categories() {
+        use serde_json::json;
+        assert_eq!(
+            export_engine_cause(&cause_error("RecipientDeadline", "BridgePermission")),
+            Some((DeliveryObservationSiteV2::RecipientDeadline, DeliveryObservationOutcomeV2::BridgePermission)),
+        );
+        for detail in [
+            json!(null), json!(false), json!([]), json!("private"), json!(1),
+            json!({}), json!({"version": 1}),
+            json!({"version": 1, "site": "RecipientDeadline"}),
+            json!({"version": 1, "outcome": "BridgePermission"}),
+            json!({"site": "RecipientDeadline", "outcome": "BridgePermission"}),
+            json!({"version": 1, "site": "RecipientDeadline", "outcome": "BridgePermission", "extra": null}),
+            json!({"version": 1, "site": "RecipientDeadline", "outcome": "BridgePermission", "source": "Engine"}),
+            json!({"version": 1, "site": "RecipientDeadline", "outcome": "BridgePermission", "committed": false}),
+        ] {
+            let mut error = cause_error("RecipientDeadline", "BridgePermission");
+            error.details[EXPORT_CAUSE_KEY] = detail;
+            assert_eq!(export_engine_cause(&error), None);
+        }
+        for version in [json!(0), json!(2), json!(-1), json!(1.0), json!("1"), json!(null), json!(true)] {
+            let mut error = cause_error("RecipientDeadline", "BridgePermission");
+            error.details[EXPORT_CAUSE_KEY]["version"] = version;
+            assert_eq!(export_engine_cause(&error), None);
+        }
+        for field in ["site", "outcome"] {
+            for invalid in [json!(null), json!(1), json!(true), json!([]), json!({}), json!(""), json!("private unknown")] {
+                let mut error = cause_error("RecipientDeadline", "BridgePermission");
+                error.details[EXPORT_CAUSE_KEY][field] = invalid;
+                assert_eq!(export_engine_cause(&error), None);
+            }
+        }
+        for (site, outcome) in [
+            ("RecipientDeadline", "EngineDisclosureDenied"),
+            ("RecipientDeadline", "PredicateDenied"),
+            ("RecipientDeadline", "OriginIoTimedOut"),
+            ("RecipientFrame", "BridgePermission"),
+            ("RecipientWriteTimeout", "OriginAuthentication"),
+            ("RecipientMutex", "BridgeBinding"),
+            ("RecipientOrigin", "OriginAuthentication"),
+            ("ExportProofCurrent", "BridgePermission"),
+            ("ExportProofCurrent", "PredicateDenied"),
+            ("ExportProofOrigin", "EngineDisclosureDenied"),
+            ("ExportEntry", "OriginIoTimedOut"),
+            ("SourceScopePredicate", "PredicateDenied"),
+            ("NativeCheck", "HostPermission"),
+            ("ExportCommit", "ReturnedOk"),
+            ("ExportProofCurrent", "HostPermission"),
+            ("ExportProofCurrent", "DISCLOSURE_DENIED"),
+            ("private source path", "EngineDisclosureDenied"),
+        ] {
+            assert_eq!(export_engine_cause(&cause_error(site, outcome)), None);
+        }
+        for details in [json!(null), json!([]), json!("private"), json!(false), json!({"other": {"version": 1, "site": "RecipientDeadline", "outcome": "BridgePermission"}})] {
+            let mut error = cause_error("RecipientDeadline", "BridgePermission");
+            error.details = Box::new(details);
+            assert_eq!(export_engine_cause(&error), None);
+        }
+        for collision in [json!(null), json!(false), json!(true), json!(0), json!(1), json!(1.5), json!("private"), json!([]), json!({}), json!({"version": 1})] {
+            let mut error = cause_error("RecipientDeadline", "BridgePermission");
+            error.details[EXPORT_CAUSE_COLLISION_KEY] = collision;
+            let original = serde_json::to_vec(&error).unwrap();
+            assert_eq!(export_engine_cause(&error), None);
+            assert_eq!(serde_json::to_vec(&error).unwrap(), original);
+        }
+    }
+    #[test]
+    fn export_cause_projection_preserves_owned_engine_error_and_non_clone_success() {
+        struct OwnedOnly(Box<u8>);
+        let success = OwnedOnly(Box::new(3));
+        let address = (&*success.0) as *const u8;
+        let returned = observed_engine_result(DeliveryObservationSiteV2::ExportCommit, Ok(success)).unwrap();
+        assert_eq!((&*returned.0) as *const u8, address);
+        let mut error = cause_error("RecipientDeadline", "BridgePermission");
+        error.code = "DISCLOSURE_UNKNOWN".into();
+        error.retryable = true;
+        error.operation_id = Some("private operation".into());
+        error.safe_actions = vec!["private action".into()];
+        error.details["original_code"] = serde_json::json!("DISCLOSURE_DENIED");
+        error.details["disclosure_state"] = serde_json::json!("DisclosedOrUnknown");
+        let expected = serde_json::to_vec(&error).unwrap();
+        let details_address = (&*error.details) as *const serde_json::Value;
+        let message_address = error.message.as_ptr();
+        let returned = observed_engine_result::<()>(DeliveryObservationSiteV2::ExportCommit, Err(error)).unwrap_err();
+        assert_eq!((&*returned.details) as *const serde_json::Value, details_address);
+        assert_eq!(returned.message.as_ptr(), message_address);
+        assert_eq!(serde_json::to_vec(&returned).unwrap(), expected);
+        assert!(matches!(Err::<(), _>(returned).map_err(Error::from), Err(Error::Permission)));
+    }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    #[test]
+    fn export_cause_precedes_aggregate_and_other_sources_cannot_impersonate_it() {
+        use DeliveryObservationOutcomeV2 as O;
+        use DeliveryObservationSiteV2 as S;
+        take_export_seen();
+        with_delivery_observer_v2(record_export, || {
+            assert!(engine_result::<()>(S::ExportCommit, Err(cause_error("RecipientFrame", "OriginAuthentication"))).is_err());
+            assert_eq!(take_export_seen(), vec![(S::RecipientFrame, O::OriginAuthentication), (S::ExportCommit, O::EngineDisclosureDenied)]);
+            for site in [S::SourceOpen, S::SourceInspection, S::ExportPreview, S::ExportApproval, S::ExportPostcheck, S::FixedRead] {
+                assert!(engine_result::<()>(site, Err(cause_error("RecipientDeadline", "BridgePermission"))).is_err());
+                assert_eq!(take_export_seen(), vec![(site, O::EngineDisclosureDenied)]);
+            }
+            assert!(engine_result::<()>(S::ExportCommit, Err(cause_error("RecipientFrame", "BridgePermission"))).is_err());
+            assert_eq!(take_export_seen(), vec![(S::ExportCommit, O::EngineDisclosureDenied)]);
+            let mut collision = cause_error("RecipientDeadline", "BridgePermission");
+            collision.details[EXPORT_CAUSE_COLLISION_KEY] = serde_json::json!(false);
+            assert!(engine_result::<()>(S::ExportCommit, Err(collision)).is_err());
+            assert_eq!(take_export_seen(), vec![(S::ExportCommit, O::EngineDisclosureDenied)]);
+            assert!(host_result::<()>(S::ExportCommit, Err(Error::Receipt("private_durable_delivery_cause_v2 RecipientDeadline BridgePermission".into()))).is_err());
+            assert_eq!(take_export_seen(), vec![(S::ExportCommit, O::HostReceipt)]);
+            assert!(bridge_result::<()>(S::ExportCommit, Err(wholepact_signer::authority_bridge::BridgeError::Permission)).is_err());
+            assert_eq!(take_export_seen(), vec![(S::ExportCommit, O::BridgePermission)]);
+            assert!(observed_engine_result(S::ExportCommit, Ok(())).is_ok());
+            assert!(take_export_seen().is_empty());
+        });
+    }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    #[test]
+    fn export_predicates_are_once_only_short_circuit_and_readonly_silent() {
+        use std::cell::Cell;
+        use DeliveryObservationOutcomeV2 as O;
+        use DeliveryObservationSiteV2 as S;
+        take_export_seen();
+        with_delivery_observer_v2(record_export, || {
+            for exporting in [false, true] {
+                for site in [S::SourceScopePredicate, S::ProofRolePredicate, S::MaterialActionPredicate, S::MaterialScopePredicate, S::ExportScopePredicate] {
+                    for allowed in [false, true] {
+                        let predicates = Cell::new(0);
+                        let following = Cell::new(0);
+                        let result = export_predicate(exporting, site, {
+                            predicates.set(predicates.get() + 1);
+                            allowed
+                        }) && {
+                            following.set(following.get() + 1);
+                            true
+                        };
+                        assert_eq!(result, allowed);
+                        assert_eq!(predicates.get(), 1);
+                        assert_eq!(following.get(), if allowed { 1 } else { 0 });
+                        assert_eq!(take_export_seen(), if exporting && !allowed { vec![(site, O::PredicateDenied)] } else { vec![] });
+                    }
+                }
+            }
+            for (members, expected, visits) in [([false, true], true, 2), ([false, false], false, 2), ([true, false], true, 1)] {
+                let checked = Cell::new(0);
+                assert_eq!(export_predicate(true, S::MaterialScopePredicate, members.into_iter().any(|member| {
+                    checked.set(checked.get() + 1);
+                    member
+                })), expected);
+                assert_eq!(checked.get(), visits);
+                assert_eq!(take_export_seen(), if expected { vec![] } else { vec![(S::MaterialScopePredicate, O::PredicateDenied)] });
+            }
+            let lookups = Cell::new(0);
+            let checks = Cell::new(0);
+            assert!(!(export_predicate(true, S::MaterialActionPredicate, false)
+                && export_predicate(true, S::MaterialScopePredicate, {
+                    lookups.set(lookups.get() + 1);
+                    true
+                }) && {
+                    checks.set(checks.get() + 1);
+                    true
+                }));
+            assert_eq!(lookups.get(), 0);
+            assert_eq!(checks.get(), 0);
+            assert_eq!(take_export_seen(), vec![(S::MaterialActionPredicate, O::PredicateDenied)]);
+        });
+    }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    #[test]
+    fn source_scope_false_never_fabricates_or_overrides_typed_failure() {
+        use DeliveryObservationOutcomeV2 as O;
+        use DeliveryObservationSiteV2 as S;
+        take_export_seen();
+        with_delivery_observer_v2(record_export, || {
+            for exporting in [false, true] {
+                for allowed in [false, true] {
+                    assert_eq!(export_source_scope_result(exporting, Ok(allowed)).unwrap(), allowed);
+                    assert_eq!(take_export_seen(), if exporting && !allowed { vec![(S::SourceScopePredicate, O::PredicateDenied)] } else { vec![] });
+                }
+                let payload = String::from("private serialization error");
+                let address = payload.as_ptr();
+                match export_source_scope_result(exporting, Err(Error::Receipt(payload))) {
+                    Err(Error::Receipt(returned)) => assert_eq!(returned.as_ptr(), address),
+                    _ => panic!("original error replaced"),
+                }
+                assert_eq!(take_export_seen(), if exporting { vec![(S::SourceCheck, O::HostReceipt)] } else { vec![] });
+            }
+        });
+    }
     fn choices() -> DeliveryChoicesV2 {
         DeliveryChoicesV2 {
             submission_operation_id: "original-delivery-operation".into(),
@@ -887,7 +1421,7 @@ mod tests {
     #[test]
     fn source_bound_issuers_do_not_accept_arbitrary_approval_or_compound() {
         let source = include_str!("durable_delivery_admission_v2.rs");
-        let production = source.split("#[cfg(test)]").next().unwrap();
+        let production = source.split("\n#[cfg(test)]\nmod tests {").next().unwrap();
         assert!(!production.contains("fn fixed_permission_boundary_v3"));
         assert!(!production.contains("pub fn new("));
         assert!(production.contains("recipient.check_current()"));
