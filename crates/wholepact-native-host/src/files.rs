@@ -147,6 +147,38 @@ impl Directory {
         File::open(&self.root)?.sync_all()?;
         Ok(())
     }
+    /// Fail closed even for malformed/partial workspace names, in every build.
+    pub(crate) fn refuse_private_workspace_files(&self) -> Result<()> {
+        self.check()?;
+        for entry in fs::read_dir(&self.root)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_str().ok_or(Error::Invalid)?;
+            if private_workspace_name(name) {
+                return Err(Error::Invalid);
+            }
+        }
+        Ok(())
+    }
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "manual-admission",
+        target_os = "linux"
+    ))]
+    pub(crate) fn private_workspace_candidates(&self) -> Result<Vec<String>> {
+        self.check()?;
+        fs::read_dir(&self.root)?
+            .map(|entry| {
+                let entry = entry?;
+                entry.file_name().into_string().map_err(|_| Error::Invalid)
+            })
+            .filter_map(|name| match name {
+                Ok(name) if private_workspace_name(&name) => Some(Ok(name)),
+                Ok(_) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .collect()
+    }
     pub(crate) fn inventory(&self) -> Result<()> {
         self.inventory_of(
             &crate::vault::JOURNALS,
@@ -180,6 +212,187 @@ impl Directory {
         Ok(())
     }
 }
+pub(crate) const PRIVATE_PENDING: &str = "durable-private.pending-v1";
+pub(crate) const PRIVATE_COMMIT: &str = "durable-private.commit-v1";
+pub(crate) fn private_workspace_name(name: &str) -> bool {
+    name == PRIVATE_PENDING
+        || name == PRIVATE_COMMIT
+        || name.starts_with("staging-durable-private-")
+}
+
+/// A bounded retained descriptor, never an origin reconstructed from a path.
+/// Its final role remains fixed across the only permitted no-replace rename.
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "manual-admission",
+    target_os = "linux"
+))]
+pub(crate) struct PrivateWorkspaceFileV1 {
+    file: File,
+    name: String,
+    final_name: &'static str,
+    directory_identity: String,
+    dev: u64,
+    ino: u64,
+    len: u64,
+    ciphertext_digest: String,
+}
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "manual-admission",
+    target_os = "linux"
+))]
+impl PrivateWorkspaceFileV1 {
+    pub(crate) fn open(
+        directory: &Directory,
+        name: &str,
+        final_name: &'static str,
+        max: usize,
+    ) -> Result<Self> {
+        let prefix = match final_name {
+            PRIVATE_PENDING => "staging-durable-private-pending-v1-",
+            PRIVATE_COMMIT => "staging-durable-private-commit-v1-",
+            _ => return Err(Error::Invalid),
+        };
+        if name != final_name {
+            let suffix = name.strip_prefix(prefix).ok_or(Error::Invalid)?;
+            if suffix.len() != 32
+                || !suffix
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            {
+                return Err(Error::Invalid);
+            }
+        }
+        let file = open_read(&directory.path(name)?)?;
+        validate_file(&file, max as u64)?;
+        let metadata = file.metadata()?;
+        let bytes = read_private(&directory.path(name)?, max)?;
+        use sha2::{Digest, Sha256};
+        let result = Self {
+            file,
+            name: name.into(),
+            final_name,
+            directory_identity: directory.manual_target_identity_digest()?,
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+            len: metadata.len(),
+            ciphertext_digest: hex::encode(Sha256::digest(&bytes)),
+        };
+        result.check(directory, max)?;
+        Ok(result)
+    }
+    pub(crate) fn stage(
+        directory: &Directory,
+        final_name: &'static str,
+        bytes: &[u8],
+        max: usize,
+    ) -> Result<Self> {
+        if bytes.len() > max {
+            return Err(Error::Invalid);
+        }
+        let role = match final_name {
+            PRIVATE_PENDING => "pending",
+            PRIVATE_COMMIT => "commit",
+            _ => return Err(Error::Invalid),
+        };
+        let name = format!(
+            "staging-durable-private-{role}-v1-{}",
+            hex::encode(crate::random::<16>()?)
+        );
+        directory.write_new(&name, bytes)?;
+        Self::open(directory, &name, final_name, max)
+    }
+    pub(crate) fn check(&self, directory: &Directory, max: usize) -> Result<()> {
+        use sha2::{Digest, Sha256};
+        directory.check()?;
+        validate_file(&self.file, max as u64)?;
+        let held = self.file.metadata()?;
+        let path = fs::symlink_metadata(directory.path(&self.name)?)?;
+        if directory.manual_target_identity_digest()? != self.directory_identity
+            || held.dev() != self.dev
+            || held.ino() != self.ino
+            || held.len() != self.len
+            || path.dev() != self.dev
+            || path.ino() != self.ino
+            || path.len() != self.len
+            || !path.is_file()
+            || path.nlink() != 1
+            || path.mode() & 0o077 != 0
+            || path.uid() != unsafe { libc::geteuid() }
+        {
+            return Err(Error::Authentication);
+        }
+        let mut bytes = Vec::new();
+        use std::os::unix::fs::FileExt;
+        bytes.resize(self.len as usize, 0);
+        self.file.read_exact_at(&mut bytes, 0)?;
+        if hex::encode(Sha256::digest(&bytes)) != self.ciphertext_digest {
+            return Err(Error::Authentication);
+        }
+        Ok(())
+    }
+    pub(crate) fn bytes(&self, directory: &Directory, max: usize) -> Result<Vec<u8>> {
+        self.check(directory, max)?;
+        use std::os::unix::fs::FileExt;
+        let mut bytes = vec![0; self.len as usize];
+        self.file.read_exact_at(&mut bytes, 0)?;
+        self.check(directory, max)?;
+        Ok(bytes)
+    }
+    pub(crate) fn origin(&self) -> Result<String> {
+        wholepact_core::proposal::canonical_digest(
+            "wholepact:native-private-workspace-file-origin:v1",
+            &(
+                &self.directory_identity,
+                self.final_name,
+                self.dev,
+                self.ino,
+                self.len,
+            ),
+        )
+        .map_err(|_| Error::Authentication)
+    }
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+    pub(crate) fn is_final(&self) -> bool {
+        self.name == self.final_name
+    }
+    pub(crate) fn ciphertext_digest(&self) -> &str {
+        &self.ciphertext_digest
+    }
+    pub(crate) fn publish(&mut self, directory: &Directory, max: usize) -> Result<()> {
+        self.check(directory, max)?;
+        if self.is_final() {
+            return Ok(());
+        }
+        use std::os::unix::ffi::OsStrExt;
+        let source = std::ffi::CString::new(directory.path(&self.name)?.as_os_str().as_bytes())
+            .map_err(|_| Error::Invalid)?;
+        let destination =
+            std::ffi::CString::new(directory.path(self.final_name)?.as_os_str().as_bytes())
+                .map_err(|_| Error::Invalid)?;
+        // SAFETY: both C strings are valid, absolute, validated owned paths.
+        // RENAME_NOREPLACE preserves the retained inode and never overwrites.
+        if unsafe {
+            libc::renameat2(
+                libc::AT_FDCWD,
+                source.as_ptr(),
+                libc::AT_FDCWD,
+                destination.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        } != 0
+        {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        self.name = self.final_name.into();
+        File::open(&directory.root)?.sync_all()?;
+        self.check(directory, max)
+    }
+}
+
 pub(crate) fn validate_absolute(p: &Path) -> Result<()> {
     if !p.is_absolute()
         || p.file_name().is_none()

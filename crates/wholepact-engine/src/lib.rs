@@ -4,10 +4,10 @@
 //! computation never grants human approval, disclosure, signing, or submission.
 #![forbid(unsafe_code)]
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeSet, path::Path, sync::Arc};
-use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 use wholepact_core::{AgreementDraft, CoreError, IntentStatus, ParticipationIntent};
 use wholepact_store::{CommandContext, MutationResult, Store, StoredEvent, StoredRecord};
@@ -49,6 +49,18 @@ pub(crate) mod durable_input_projections_v1;
     target_os = "linux"
 ))]
 pub(crate) mod durable_private_workspace_v1;
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "manual-admission",
+    target_os = "linux"
+))]
+pub use durable_private_workspace_v1::{
+    LocalPrivateWorkspaceConsentV1, OriginalCheckpointOutcomeV2, OriginalProofAttemptV2,
+    PreparedPrivateDurableCoordinatorV1, PrivateDurableCoordinatorV1,
+    PrivateDurableWorkspaceSourceV1, PrivateExactCandidateV2, PrivateFixedStatusV2,
+    PrivateVerifiedFixedV2, PrivateWorkspaceActionV1, PrivateWorkspaceInitializationPlanV1,
+    PrivateWorkspaceScopeV1, PrivateWorkspaceSeedBindingV1, PrivateWorkspaceStatusV1,
+};
 #[cfg(feature = "durable-proposal")]
 pub mod durable_proposals_v1;
 pub mod financial_preflight;
@@ -947,8 +959,15 @@ fn decode_unprojected(record: &StoredRecord) -> Result<Envelope> {
                 "Private workspace origin does not match its record",
             ));
         }
-        #[cfg(not(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux")))]
-        return Err(ApiError::new("RECOVERY_REQUIRED", "Private workspace history requires its compatible protected owner; preserve the original journal"));
+        #[cfg(not(all(
+            feature = "durable-proposal",
+            feature = "manual-admission",
+            target_os = "linux"
+        )))]
+        return Err(ApiError::new(
+            "RECOVERY_REQUIRED",
+            "Private workspace history requires its compatible protected owner; preserve the original journal",
+        ));
     }
     if envelope.durable_proposals_v1.len() > MAX_PROPOSALS
         || envelope.durable_construction_v1.len() > 4

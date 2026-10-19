@@ -23,15 +23,60 @@ impl<'directory> ManualCommittedTarget<'directory> {
         directory: &'directory Directory,
         secrets: &'directory Secrets,
     ) -> Result<Self> {
-        directory.check()?;
+        secrets.require_portable_legacy()?;
+        directory.refuse_private_workspace_files()?;
         if source_plan_version(directory, secrets)? != 2 {
-            // A standalone/v1 source cannot pretend it supplied the complete
-            // sealed capsule owner required by this first bounded composition.
             return Err(Error::RecoveryFinancialUnsupported);
         }
         let current_commit = unseal(secrets, b"commit", &directory.read(COMMIT, MAX_DOCUMENT)?)?;
         require_current_financial_family(complete_origins::metadata_version(&current_commit)?)?;
         let (metadata, capsule) = open_layered_parent(directory, secrets)?;
+        Self::from_checked_parent(directory, secrets, metadata, capsule)
+    }
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "manual-admission",
+        target_os = "linux"
+    ))]
+    pub(crate) fn open_private_workspace_original(
+        directory: &'directory Directory,
+        secrets: &'directory Secrets,
+        files: &crate::host::durable_private_workspace_v1::OriginalWorkspaceFilesV1,
+    ) -> Result<Self> {
+        let (metadata, capsule) =
+            super::archive_history::open_layered_parent_for_private_workspace_v1(
+                directory, secrets, files,
+            )?;
+        Self::from_checked_parent(directory, secrets, metadata, capsule)
+    }
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "manual-admission",
+        target_os = "linux"
+    ))]
+    pub(crate) fn open_workspace_publication_source_v1(
+        directory: &'directory Directory,
+        secrets: &'directory Secrets,
+        files: &crate::host::durable_private_workspace_v1::OriginalWorkspacePublicationV1,
+    ) -> Result<Self> {
+        let (metadata, capsule) =
+            super::archive_history::open_layered_parent_for_workspace_publication_v1(
+                directory, secrets, files,
+            )?;
+        Self::from_checked_parent(directory, secrets, metadata, capsule)
+    }
+    fn from_checked_parent(
+        directory: &'directory Directory,
+        secrets: &'directory Secrets,
+        metadata: super::layered_metadata::CheckedLayeredMetadata,
+        capsule: VerifiedGenerationCapsule,
+    ) -> Result<Self> {
+        directory.check()?;
+        if metadata.plan.version != 2 {
+            return Err(Error::RecoveryFinancialUnsupported);
+        }
+        let current_commit = unseal(secrets, b"commit", &directory.read(COMMIT, MAX_DOCUMENT)?)?;
+        require_current_financial_family(complete_origins::metadata_version(&current_commit)?)?;
         let coverage = capsule.inherited_manual_identity_coverage()?;
         coverage.require_financial_history_supported()?;
         let actual_root = directory.path("profile.vault")?;

@@ -242,6 +242,7 @@ impl ArchiveAuthority for Consent<'_> {
 
 pub(crate) fn backup(terminal: Terminal, profile: &Path, destination: &Path) -> Result<()> {
     let directory = Directory::open(profile)?;
+    directory.refuse_private_workspace_files()?;
     directory.external_destination(destination)?;
     let read=terminal.approve_historical(&format!("Authenticate every inherited and current private host-owned journal for complete encrypted generation backup at {}. Viewing/scan data, witnesses, signatures, transactions, transport/observation history and NON-signing storage/transport recovery keys are included. Registered current financial directories require separate private-data approval. Nothing is sent, signed or submitted; no financial or clone freshness is established.",destination.display()))?;
     let password = terminal.secret("Restricted successor storage passphrase: ")?;

@@ -57,6 +57,12 @@ mod born_offline_checkpoint_carrier_v1;
 mod born_offline_return_validation_v1;
 #[cfg(all(feature = "manual-admission", target_os = "linux"))]
 mod born_offline_return_owner_v1;
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "manual-admission",
+    target_os = "linux"
+))]
+pub(crate) mod durable_private_workspace_v1;
 #[cfg(feature = "financial-runtime")]
 mod financial;
 #[cfg(test)]
@@ -116,6 +122,54 @@ struct Args {
 }
 #[derive(Subcommand)]
 enum Command {
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "manual-admission",
+        target_os = "linux"
+    ))]
+    DurablePrivateCreateV1 {
+        #[arg(long)]
+        profile: PathBuf,
+        #[arg(long)]
+        workspace: PathBuf,
+    },
+
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "manual-admission",
+        target_os = "linux"
+    ))]
+    DurablePrivateInitializeV1 {
+        #[arg(long)]
+        profile: PathBuf,
+        #[arg(long)]
+        workspace: PathBuf,
+    },
+
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "manual-admission",
+        target_os = "linux"
+    ))]
+    DurablePrivateFixV1 {
+        #[arg(long)]
+        profile: PathBuf,
+        #[arg(long)]
+        workspace: PathBuf,
+    },
+
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "manual-admission",
+        target_os = "linux"
+    ))]
+    DurablePrivateReadFixedV1 {
+        #[arg(long)]
+        profile: PathBuf,
+        #[arg(long)]
+        workspace: PathBuf,
+    },
+
     /// Back up a closed restricted successor, preserving its complete ancestor graph.
     #[cfg(feature = "financial-runtime")]
     GenerationBackup {
@@ -346,6 +400,46 @@ pub fn run() -> Result<()> {
 }
 fn dispatch(terminal: Terminal, command: Command) -> Result<()> {
     match command {
+        #[cfg(all(
+            feature = "durable-proposal",
+            feature = "manual-admission",
+            target_os = "linux"
+        ))]
+        Command::DurablePrivateCreateV1 { profile, workspace } => {
+            durable_private_workspace_v1::create_command_v1(terminal, &profile, &workspace)
+        }
+        #[cfg(all(
+            feature = "durable-proposal",
+            feature = "manual-admission",
+            target_os = "linux"
+        ))]
+        Command::DurablePrivateInitializeV1 { profile, workspace } => {
+            let host =
+                Host::open_private_workspace_registered_v1(terminal, &profile, &workspace, true)?;
+            drop(host);
+            Ok(())
+        }
+        #[cfg(all(
+            feature = "durable-proposal",
+            feature = "manual-admission",
+            target_os = "linux"
+        ))]
+        Command::DurablePrivateFixV1 { profile, workspace } => {
+            let host =
+                Host::open_private_workspace_registered_v1(terminal, &profile, &workspace, false)?;
+            host.private_durable_fix_v1_command(&workspace)
+        }
+        #[cfg(all(
+            feature = "durable-proposal",
+            feature = "manual-admission",
+            target_os = "linux"
+        ))]
+        Command::DurablePrivateReadFixedV1 { profile, workspace } => {
+            let host =
+                Host::open_private_workspace_registered_v1(terminal, &profile, &workspace, false)?;
+            host.private_durable_read_fixed_v1_command(&workspace)
+        }
+
         #[cfg(feature = "financial-runtime")]
         Command::GenerationBackup {
             profile,
@@ -546,12 +640,20 @@ struct Host {
     >,
     #[cfg(feature = "financial-runtime")]
     resolution_source: Option<Arc<crate::authority::positive_settlement::EnrolledResolutionSource>>,
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "manual-admission",
+        target_os = "linux"
+    ))]
+    workspace_files: Option<durable_private_workspace_v1::OriginalWorkspaceFilesV1>,
     // Rust drops fields in declaration order. Keep the exclusive profile lock
     // until every SQLite owner and possible final checkpoint above has dropped.
     directory: Directory,
 }
 impl Host {
     fn open(directory: Directory, secrets: Secrets, terminal: Terminal) -> Result<Self> {
+        secrets.require_portable_legacy()?;
+        directory.refuse_private_workspace_files()?;
         // The exclusive Directory lock is already owned; no Host/runtime exists
         // yet. Quiescent open preflights cannot race our own journal writers.
         // The vault itself distinguishes successors, even if external markers
@@ -572,6 +674,35 @@ impl Host {
                 &secrets.key(0)?,
             )?)?
         };
+        Self::open_runtime_from_store(directory, secrets, terminal, store)
+    }
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "manual-admission",
+        target_os = "linux"
+    ))]
+    fn open_private_workspace_original(
+        directory: Directory,
+        secrets: Secrets,
+        terminal: Terminal,
+        files: durable_private_workspace_v1::OriginalWorkspaceFilesV1,
+        financial: crate::financial_profile::FinancialProfile,
+    ) -> Result<Self> {
+        files.check_inventory(&directory, &secrets)?;
+        let store = crate::recovery_generation::open_private_workspace_original_store_v1(
+            &directory, &secrets, &files,
+        )?;
+        let mut host = Self::open_runtime_from_store(directory, secrets, terminal, store)?;
+        host.workspace_files = Some(files);
+        host.financial = Some(financial);
+        Ok(host)
+    }
+    fn open_runtime_from_store(
+        directory: Directory,
+        secrets: Secrets,
+        terminal: Terminal,
+        store: Store,
+    ) -> Result<Self> {
         let engine = Engine::from_store(store);
         let inbox = SqliteReplayLedger::from_encrypted_connection(open_encrypted(
             directory.path(JOURNALS[1])?,
@@ -634,12 +765,20 @@ impl Host {
             signer_review_clients: std::collections::BTreeMap::new(),
             #[cfg(feature = "financial-runtime")]
             resolution_source: None,
+            #[cfg(all(
+                feature = "durable-proposal",
+                feature = "manual-admission",
+                target_os = "linux"
+            ))]
+            workspace_files: None,
         })
     }
     fn access(&self) -> Result<&Access> {
         self.access.as_ref().ok_or(Error::Permission)
     }
     fn shell(&mut self) -> Result<()> {
+        self.secrets.require_portable_legacy()?;
+        self.directory.refuse_private_workspace_files()?;
         self.terminal.message("Unlocked NON-signing native host. No app grants, peers or observers are active.\nCommands: status, enroll, public-key, create, agreement, pin, grant-peer, intake, recover, recover-export, prepare-invitation, preview, invitation, import, seal, export, records, receipt-preview, receipt-preview-read, receipt-stage, receipt-write, receipt-status, observe, serve, backup, revoke, lock.\nEach sensitive selection and consent stays on this controlling terminal.\n")?;
         #[cfg(feature = "financial-runtime")]
         self.terminal.message("Financial commands: native-account-inspection-request, native-account-inspection-status, resolution-source, record-resolve, financial-init, financial-open, financial-close, candidate-prepare, candidate-read, candidate-review, candidate-construct, native-construction-request, native-proof-reconcile-request, native-proof-execute-request, native-artifact-handoff-request, native-settlement-request, native-settlement-inspect, native-dispatch-request, native-dispatch-status, native-reconciliation-request, native-reconciliation-status, native-proof-reconcile-original, native-construction-original-status, proof-status, proof-review, proof-reconcile, proof-recover, proof-run, proof-send-for-review, automatic-authorize, signature-export, transaction-export, portable-import, portable-receipt-export, signature-retain, signature-reconcile, transaction-checkpoint, transaction-dispatch, record-retain. Construction requests separate signer-native disclosure for each account; saved proof commands require an original engine-created checkpoint. Original signatures must be produced by the independently installed signer; exact dispatch requires all live signer admissions.\n")?;
@@ -659,6 +798,8 @@ impl Host {
                 return Ok(());
             }
             let outcome=match command.as_str(){
+                #[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
+                "durable-private-source-select-v1" => self.private_durable_source_select_v1_command(),
                 #[cfg(all(feature = "manual-admission", target_os = "linux"))]
                 "born-offline-checkpoint-export-v1" => self.born_offline_checkpoint_export_v1_command(),
                 #[cfg(all(feature = "manual-admission", target_os = "linux"))]
@@ -1183,6 +1324,8 @@ impl Host {
         self.terminal.message("Foreground service and observer stopped; all runtime jobs drained. Native commands and backup are available.\n")
     }
     fn backup(&mut self) -> Result<()> {
+        self.secrets.require_portable_legacy()?;
+        self.directory.refuse_private_workspace_files()?;
         if self.secrets.generation_plan_digest().is_some() {
             return Err(Error::RecoveryBackupUnsupported);
         }

@@ -274,6 +274,7 @@ impl Engine {
         // private commit. A caller-supplied manifest digest is not provenance.
         let prepared_revision = revision.checked_add(1).ok_or_else(internal)?;
         let receipt = candidates::CheckpointReceipt {
+            original_request_v2: None,
             action_mappings_v1: Some(json!({
                 "inputs": built.input_actions.iter().map(|m| json!({"input_id": m.input_id, "account_id": m.account_id, "action_index": m.action_index})).collect::<Vec<_>>(),
                 "outputs": built.output_actions.iter().map(|m| json!({"output_id": m.output_id, "action_index": m.action_index})).collect::<Vec<_>>(),
@@ -507,7 +508,7 @@ impl Engine {
     }
 }
 
-fn validate_provenance<'a>(
+pub(crate) fn validate_provenance<'a>(
     envelope: &'a Envelope,
     access: &Access,
     summary: &JobSummary,
@@ -521,7 +522,7 @@ fn validate_provenance<'a>(
         .ok_or_else(|| ApiError::new("MISSING_EVIDENCE", "This job has no matching engine-origin exact constructor receipt; a supplied manifest digest cannot establish provenance"))
 }
 
-fn upsert_link(envelope: &mut Envelope, summary: &JobSummary) -> Result<()> {
+pub(crate) fn upsert_link(envelope: &mut Envelope, summary: &JobSummary) -> Result<()> {
     let candidate = envelope
         .view
         .candidates
@@ -554,7 +555,7 @@ fn upsert_link(envelope: &mut Envelope, summary: &JobSummary) -> Result<()> {
     }
     Ok(())
 }
-fn validate_summary(candidate: &CandidateView, summary: &JobSummary) -> Result<()> {
+pub(crate) fn validate_summary(candidate: &CandidateView, summary: &JobSummary) -> Result<()> {
     if summary.candidate_id != candidate.candidate_id
         || summary.manifest_digest != candidate.manifest_digest
         || !summary.encrypted_checkpoint_created
@@ -569,7 +570,7 @@ fn validate_summary(candidate: &CandidateView, summary: &JobSummary) -> Result<(
     }
     Ok(())
 }
-fn public_summary(s: &JobSummary) -> CandidateProofJob {
+pub(crate) fn public_summary(s: &JobSummary) -> CandidateProofJob {
     CandidateProofJob {
         job_id: s.job_id.clone(),
         scope_digest: s.scope_digest.clone(),
@@ -594,14 +595,14 @@ fn public_summary(s: &JobSummary) -> CandidateProofJob {
         observation_source: "independent_encrypted_local_proof_journal".into(),
     }
 }
-fn checkpoint_exists(mut error: ApiError, summary: &JobSummary) -> ApiError {
+pub(crate) fn checkpoint_exists(mut error: ApiError, summary: &JobSummary) -> ApiError {
     error.details = Box::new(
         json!({"proof_job_id":summary.job_id,"encrypted_checkpoint_created":true,"coordination_link_committed":false,"journals_are_atomic_together":false}),
     );
     error.safe_actions = vec!["Inspect the original encrypted checkpoint before retrying".into(), "Retry the exact original command; if its coordination revision changed, reconcile the existing job with the current revision".into()];
     error
 }
-fn job_error(error: JobError) -> ApiError {
+pub(crate) fn job_error(error: JobError) -> ApiError {
     let (code, message) = match error {
         JobError::ConsentDenied => (
             "DISCLOSURE_DENIED",

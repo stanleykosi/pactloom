@@ -464,3 +464,176 @@ pub(super) fn inputs() -> Vec<Input<'static>> {
     }
     inputs
 }
+
+/// Original workspace prefix owns its Host in a move-safe slot for the mandatory vault cut.
+pub(super) struct PrivateWorkspaceInitialV1 {
+    pub(super) signers: JoinedSignerWorkerV1,
+    pub(super) witness: EphemeralNativeWitnessV1,
+    pub(super) host: Option<Host>,
+    pub(super) born: [PublicJoinedBornV1; 3],
+    pub(super) roster_intents: [HostManualRosterEnrollmentIntentV2; 2],
+    pub(super) roster_requests: [HostManualRosterPublicationRequestV2; 2],
+    /// Exact private exports remain owned by the same live signer worker.
+    pub(super) roster_signed_extension_files: [std::path::PathBuf; 2],
+    pub(super) roster_original_policy_files: [std::path::PathBuf; 2],
+    pub(super) payment_receiver: String,
+    pub(super) expiry_ms: u64,
+    pub(super) temporary: tempfile::TempDir,
+}
+// Unlike the legacy fixture, this workspace-only owner permits moving the
+// actual signer/witness out for explicit verified shutdown before process death.
+// Host remains in its move-safe slot through the mandatory consuming vault cut.
+
+pub(super) fn prepare_private_workspace_v1(terminal: crate::terminal::Terminal) -> Result<PrivateWorkspaceInitialV1> {
+    let (temporary, host) = diagnostic::host(B::PrivateWorkspaceBootstrap, || {
+        crate::host::born_test_host_v1::create(terminal)
+    })?;
+    diagnostic::host(B::Session, || host.require_manual_session())?;
+    mark(B::PaymentReceiver);
+    let payment_receiver =
+        wholepact_wallet::wallet::synthetic_born_receiver_blocks_v1::synthetic_payment_receiver_v1(
+        );
+    let now_ms: u64 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| Error::Invalid)?
+        .as_millis()
+        .try_into()
+        .map_err(|_| Error::Invalid)?;
+    let expiry_ms = now_ms.checked_add(3_600_000).ok_or(Error::Invalid)?;
+    diagnostic::host(B::AgreementInput, || {
+        create_private_workspace_agreement_v1(&host, temporary.path(), &payment_receiver)
+    })?;
+    mark(B::WitnessSetup);
+    let mut witness = EphemeralNativeWitnessV1::new().map_err(|_| stage("witness native setup"))?;
+    mark(B::WitnessOrigin);
+    let origin = witness
+        .origin()
+        .map_err(|_| stage("original witness pins"))?;
+    mark(B::SignerStart);
+    let signers =
+        JoinedSignerWorkerV1::spawn(origin, payment_receiver.clone(), expiry_ms).map_err(stage)?;
+    let mut born = Vec::with_capacity(3);
+    for index in 0..3 {
+        mark(B::BirthExport);
+        signers.send(Command::ExportBirth(index)).map_err(stage)?;
+        let (account_id, birth_digest, exported_file) = match signers.receive().map_err(stage)? {
+            Reply::BirthExport {
+                index: actual,
+                account_id,
+                birth_digest,
+                exported_file,
+            } if actual == index => (account_id, birth_digest, exported_file),
+            _ => return Err(Error::Authentication),
+        };
+        mark(B::BirthRead);
+        let bytes = zeroize::Zeroizing::new(crate::files::read_private(&exported_file, 131_072)?);
+        mark(B::BirthEnroll);
+        witness
+            .enroll_signed_birth(&account_id, &bytes)
+            .map_err(|_| stage("actual witness birth review"))?;
+        mark(B::BirthHistory);
+        let server = witness
+            .serve_original_history()
+            .map_err(|_| stage("original birth TLS server"))?;
+        mark(B::BirthAcknowledge);
+        signers.send(Command::Acknowledge(index)).map_err(stage)?;
+        let acknowledged = match signers.receive().map_err(stage)? {
+            Reply::Acknowledged(owner)
+                if owner.index == index
+                    && owner.account_id == account_id
+                    && owner.birth_digest == birth_digest =>
+            {
+                owner
+            }
+            _ => return Err(Error::Authentication),
+        };
+        drop(server);
+        born.push(acknowledged);
+    }
+    mark(B::BirthDistinct);
+    let born: [PublicJoinedBornV1; 3] = born.try_into().map_err(|_| Error::Invalid)?;
+    if born
+        .iter()
+        .enumerate()
+        .any(|(i, a)| born[..i].iter().any(|b| a.account_id == b.account_id))
+    {
+        return Err(Error::Authentication);
+    }
+    publish_single_anchor(&host, &mut witness, &signers, &born[0], expiry_ms)?;
+    let mut intents = Vec::with_capacity(2);
+    let mut requests = Vec::with_capacity(2);
+    let mut signed_extensions = Vec::with_capacity(2);
+    let mut original_policies = Vec::with_capacity(2);
+    for owner in &born[1..] {
+        let (intent, request, signed_extension, original_policy) =
+            publish_roster_member(&host, &mut witness, &signers, owner, expiry_ms)?;
+        intents.push(intent);
+        requests.push(request);
+        signed_extensions.push(signed_extension);
+        original_policies.push(original_policy);
+    }
+    // Read back the actual immutable Store roster through the genuine Engine
+    // metadata owner. Success of a signer UI alone is not Host publication.
+    mark(B::MetadataCheck);
+    {
+        let target = host
+            .engine
+            .manual_roster_intent_target(host.access()?, AGREEMENT)?;
+        let members = target.members(host.access()?)?;
+        if members.len() != 3
+            || target.binding().roster_sequence != 4
+            || born.iter().any(|owner| {
+                !members.iter().any(|member| {
+                    member.identity.account_id == owner.account_id
+                        && member.identity.full_viewing_key_digest == owner.full_viewing_key_digest
+                        && member.scope.participant_id == owner.participant_id
+                        && member.scope.privacy_domain == owner.privacy_domain
+                })
+            })
+        {
+            return Err(Error::Authentication);
+        }
+        target.check_current(host.access()?)?;
+    }
+    // First publication is audit-only. It must not silently activate a generic
+    // financial gate or create spendable/candidate inputs.
+    mark(B::FinancialRefusal);
+    if host.require_financial_generation_admission().is_ok() {
+        return Err(Error::Authentication);
+    }
+    Ok(PrivateWorkspaceInitialV1 {
+        signers,
+        witness,
+        host: Some(host),
+        born,
+        roster_intents: intents.try_into().map_err(|_| Error::Invalid)?,
+        roster_requests: requests.try_into().map_err(|_| Error::Invalid)?,
+        roster_signed_extension_files: signed_extensions.try_into().map_err(|_| Error::Invalid)?,
+        roster_original_policy_files: original_policies.try_into().map_err(|_| Error::Invalid)?,
+        payment_receiver,
+        expiry_ms,
+        temporary,
+    })
+}
+
+fn create_private_workspace_agreement_v1(host: &Host, root: &std::path::Path, receiver: &str) -> Result<()> {
+    let principal = host.access()?.principal_id.clone();
+    let draft = serde_json::json!({
+        "schema_version": 1, "agreement_id": AGREEMENT, "obligation_id": OBLIGATION,
+        "revision": 1, "purpose": "Synthetic temporary joined controller qualification. No network funds.",
+        "organizer_identity": principal,
+        "network_profile_id": wholepact_protocol::construction::PROFILE_ID,
+        "recipients": [{"recipient_id":RECIPIENT_ID, "address":receiver,
+            "amount":"300000", "memo":null,
+            "instruction_provenance":RECIPIENT_PROVENANCE}],
+        "funding_policy":{"kind":"exact", "target":"300000"},
+        "fee_policy":{"kind":"pro_rata"},
+        "privacy_profile":{"mode":"declared_operator", "proving_operator":principal, "dedicated_accounts_required":true},
+        "coordination_deadline":null, "confirmation_policy":{"required_confirmations":10}, "extensions":[]
+    });
+    let path = root.join("synthetic-private-workspace-agreement.json");
+    crate::files::write_new(&path, &serde_json::to_vec(&draft)?)?;
+    host.terminal
+        .message(&format!("SYNTHETIC_JOINED_DRAFT_PATH={}\n", path.display()))?;
+    diagnostic::host(B::AgreementNative, || host.create())
+}

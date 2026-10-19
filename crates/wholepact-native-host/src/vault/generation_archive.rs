@@ -137,6 +137,7 @@ impl QuarantinedGenerationRecovery {
 /// These buffers are written only into independently encrypted capsule objects.
 /// There is deliberately no Serialize, Debug, ordinary vault or grant conversion.
 pub(crate) fn source_material(source: &Secrets) -> Result<Zeroizing<Vec<u8>>> {
+    source.require_portable_legacy()?;
     if source.generation_plan_digest().is_none() {
         return Err(Error::Invalid);
     }

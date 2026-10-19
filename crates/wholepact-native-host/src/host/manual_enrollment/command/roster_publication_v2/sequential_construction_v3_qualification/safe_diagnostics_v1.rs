@@ -14,6 +14,7 @@ macro_rules! labels {
     };
 }
 labels! { Boundary {
+    PrivateWorkspaceBootstrap, PrivateSourceSelect, PrivateWorkspaceReserve, PrivateWorkspaceAnchor, PrivateWorkspacePublish, PrivateWorkspaceInitialize, PrivateWorkspaceCandidate, PrivateWorkspaceCapture, PrivateWorkspaceIntake, PrivateWorkspaceObserve, PrivateWorkspaceCheckpoint, PrivateWorkspaceProof, PrivateWorkspaceFreeze, PrivateWorkspaceScanCleanup, PrivateWorkspaceDurableMarker, PrivateWorkspaceProducerKill, PrivateWorkspaceProducerReap, PrivateWorkspaceReaderOpen, PrivateWorkspaceReadFixed, PrivateWorkspaceIdentityCompare, PrivateWorkspaceReaderReap, PrivateWorkspaceRootCleanup,
     SignerAdmissionCallCallerDeadline, SignerAdmissionCallExchangeDeadline, SignerAdmissionCallSourceCallback, SignerAdmissionCallBounds,
     SignerAdmissionCallRequestValidation, SignerAdmissionCallBinding, SignerAdmissionCallConnect, SignerAdmissionCallHandshake, SignerAdmissionCallPeerBinding, SignerAdmissionCallRequestBuild, SignerAdmissionCallRequestWrite, SignerAdmissionCallResponseRead, SignerAdmissionCallResponse, SignerAdmissionCallSnapshotValidation, SignerAdmissionCallCommittedHeadValidation, SignerAdmissionCallFinalValidation, SignerAdmissionDispatchFixtureState, SignerAdmissionDispatchReviewCorrelation, SignerAdmissionDispatchNativeApproval, SignerAdmissionDispatchIntentRetention, SignerAdmissionDispatchSubmitCustody, SignerAdmissionDispatchSubmitIntent, SignerAdmissionDispatchSubmitInterval, SignerAdmissionDispatchSubmitWorkspace, SignerAdmissionDispatchAuthorityCall, SignerAdmissionDispatchWorkerCompletion, SignerAdmissionDispatchCommittedCorrelation, SignerAdmissionCallbackWorkspaceCurrent, SignerAdmissionCallbackCustody, SignerAdmissionCallbackRequestValidation, SignerAdmissionCallIoTimeout, SignerAdmissionCallIoClosed, SignerAdmissionCallIoRefused, SignerAdmissionCallIoOther, SignerAdmissionCallCallbackError,
     SignerAdmissionHistoryCallerDeadline, SignerAdmissionHistoryExchangeDeadline, SignerAdmissionHistorySourceCallback, SignerAdmissionHistorySnapshotConnect, SignerAdmissionHistorySnapshotHandshake, SignerAdmissionHistorySnapshotPeerBinding, SignerAdmissionHistorySnapshotRequestBuild, SignerAdmissionHistorySnapshotRequestWrite, SignerAdmissionHistorySnapshotResponseRead, SignerAdmissionHistorySnapshotResponse, SignerAdmissionHistorySnapshotValidation, SignerAdmissionHistoryPageConnect, SignerAdmissionHistoryPageHandshake, SignerAdmissionHistoryPagePeerBinding, SignerAdmissionHistoryPageRequestBuild, SignerAdmissionHistoryPageRequestWrite, SignerAdmissionHistoryPageResponseRead, SignerAdmissionHistoryPageResponse, SignerAdmissionHistoryPageValidation, SignerAdmissionHistoryEventReplay, SignerAdmissionHistoryFinalValidation, SignerAdmissionHistoryBounds, SignerAdmissionHistoryIoTimeout, SignerAdmissionHistoryIoClosed, SignerAdmissionHistoryIoRefused, SignerAdmissionHistoryIoOther, SignerAdmissionHistoryCallbackError,
@@ -56,6 +57,23 @@ pub(super) fn emit(boundary: Boundary, outcome: Outcome) {
         boundary.label(),
         outcome.label()
     );
+}
+
+
+/// Reparse a product leaf's finite observer; no arbitrary label can escape.
+#[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+pub(super) fn emit_private_observation(boundary: &str, outcome: &str) -> bool {
+    let (Some(boundary), Some(outcome)) = (Boundary::parse(boundary), Outcome::parse(outcome)) else { return false; };
+    if !matches!(boundary, Boundary::PrivateWorkspaceBootstrap | Boundary::PrivateSourceSelect
+        | Boundary::PrivateWorkspaceReserve | Boundary::PrivateWorkspaceAnchor | Boundary::PrivateWorkspacePublish
+        | Boundary::PrivateWorkspaceInitialize | Boundary::PrivateWorkspaceCandidate | Boundary::PrivateWorkspaceCapture
+        | Boundary::PrivateWorkspaceIntake | Boundary::PrivateWorkspaceObserve | Boundary::PrivateWorkspaceCheckpoint
+        | Boundary::PrivateWorkspaceProof | Boundary::PrivateWorkspaceFreeze | Boundary::PrivateWorkspaceScanCleanup
+        | Boundary::PrivateWorkspaceDurableMarker | Boundary::PrivateWorkspaceProducerKill | Boundary::PrivateWorkspaceProducerReap
+        | Boundary::PrivateWorkspaceReaderOpen | Boundary::PrivateWorkspaceReadFixed | Boundary::PrivateWorkspaceIdentityCompare
+        | Boundary::PrivateWorkspaceReaderReap | Boundary::PrivateWorkspaceRootCleanup) { return false; }
+    if matches!(outcome, Outcome::Begin | Outcome::Complete) { return false; }
+    emit(boundary, outcome); true
 }
 
 #[cfg(feature = "synthetic-born-joined-qualification")]
@@ -1654,7 +1672,7 @@ pub(super) fn host<T>(boundary: Boundary, operation: impl FnOnce() -> Result<T>)
     );
     result
 }
-fn host_error(error: &Error) -> Outcome {
+pub(super) fn host_error(error: &Error) -> Outcome {
     match error {
         Error::Platform => Outcome::HostPlatform,
         Error::Terminal => Outcome::HostTerminal,

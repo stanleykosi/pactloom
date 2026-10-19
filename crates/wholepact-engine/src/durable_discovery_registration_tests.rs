@@ -85,7 +85,7 @@ fn unsupported_build_refuses_nonempty_recognized_history_before_projection() {
 }
 
 #[test]
-fn compiler_registration_keeps_private_factories_and_native_activation_inaccessible() {
+fn compiler_registration_exposes_only_nominal_original_workspace_and_hides_discovery_issuers() {
     // These structural assertions supplement actual Rust visibility. They are
     // not a runtime ownership/foreground-consent or native IPC qualification.
     let engine = include_str!("lib.rs");
@@ -99,6 +99,32 @@ fn compiler_registration_keeps_private_factories_and_native_activation_inaccessi
     let facade = include_str!("durable_private_workspace_v1.rs");
     assert!(facade.contains("pub(crate) fn private_durable_workspace_source_v1"));
     assert!(!facade.contains("pub fn private_durable_workspace_source_v1"));
+    // The newly released facade is purpose-specific, not an unchanged inactive
+    // factory fence. Public names below deliberately admit actual source owners.
+    assert!(facade.contains("pub fn original_private_workspace_source_v1"));
+    assert!(engine.contains("pub use durable_private_workspace_v1::{"));
+    for nominal in [
+        "PrivateDurableWorkspaceSourceV1",
+        "PreparedPrivateDurableCoordinatorV1",
+        "PrivateDurableCoordinatorV1",
+        "OriginalProofAttemptV2",
+        "PrivateVerifiedFixedV2",
+    ] {
+        assert!(engine.contains(nominal));
+    }
+    for raw in [
+        "pub fn engine(",
+        "pub fn store(",
+        "pub fn into_inner(",
+        "pub fn create_new(",
+    ] {
+        assert!(!facade.contains(raw));
+    }
+    let exact = include_str!("durable_private_workspace_v1/exact_fixed_v2.rs");
+    assert!(exact.contains("pub fn read_only_original_fixed_v2"));
+    assert!(exact.contains("pub fn prove_original_once_v2"));
+    assert!(!exact.contains("pub fn jobs("));
+    assert!(!exact.contains("pub fn pczt_bytes("));
     let origin = include_str!("../../wholepact-signer-origin/src/lib.rs");
     let client = include_str!("../../wholepact-signer-origin/src/client.rs");
     assert!(origin.contains("pub use client::AuthenticatedDurableInputProjectionV1;"));

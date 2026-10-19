@@ -80,6 +80,10 @@ pub struct CandidateProofJob {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CheckpointReceipt {
+    /// Only the closed original-source precursor writes this immutable request.
+    /// Legacy constructors omit it and cannot become a private continuation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_request_v2: Option<OriginalCheckpointRequestV2>,
     /// Exact constructor-produced action mapping; absent on historical receipts.
     /// A missing mapping cannot be invented to upgrade an old artifact.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -94,6 +98,15 @@ pub(crate) struct CheckpointReceipt {
     pub review_binding: String,
     pub effects_commitment: String,
     pub prepared_revision: u64,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct OriginalCheckpointRequestV2 {
+    pub command: wholepact_store::CommandContext,
+    pub expected_revision: u64,
+    pub local_input_digest: String,
+    pub maximum_actions: usize,
 }
 
 /// Structural validation of two deliberately distinct retained identities.
@@ -205,28 +218,10 @@ impl Engine {
                 "Candidate must name the latest prior candidate, or null for the first candidate",
             ));
         }
-        let proposal = Proposal::validate(ProposalInput {
-            proposal_id: Uuid::new_v4().to_string(),
-            previous_proposal_id: request.previous_candidate_id,
-            manifest: request.manifest,
-            artifact_digest: None,
-            effects_commitment: None,
-            // Core portable timestamps intentionally use whole seconds.
-            created_at: OffsetDateTime::now_utc()
-                .replace_nanosecond(0)
-                .map_err(|_| internal())?
-                .format(&Rfc3339)
-                .map_err(|_| internal())?,
-        })?;
-        envelope.view.candidates.push(CandidateView {
-            candidate_id: proposal.input().proposal_id.clone(),
-            proposal: proposal.input().clone(),
-            manifest_digest: proposal.manifest_digest().into(),
-            proposal_digest: proposal.proposal_digest().into(),
-            accounting: serde_json::to_value(proposal.accounting()).map_err(|_| internal())?,
-            reviews: vec![],
-            proof_jobs: vec![],
-        });
+        envelope
+            .view
+            .candidates
+            .push(build_exact_candidate_v2(request)?);
         envelope.view.progress = "preparing_proposal".into();
         self.commit(
             &command,
@@ -716,4 +711,30 @@ pub(crate) fn private_request_digest(
         match d.scope { wholepact_protocol::construction::DisclosureScope::DedicatedAccountFvkAndSelectedNotesAndOutputs => hash.update([1]) }
     }
     Ok(hex::encode(hash.finalize()))
+}
+
+/// Shared maintained candidate construction, with no metadata owner or bypass.
+pub(crate) fn build_exact_candidate_v2(request: CandidateRequest) -> Result<CandidateView> {
+    let proposal = Proposal::validate(ProposalInput {
+        proposal_id: Uuid::new_v4().to_string(),
+        previous_proposal_id: request.previous_candidate_id,
+        manifest: request.manifest,
+        artifact_digest: None,
+        effects_commitment: None,
+        // Core portable timestamps intentionally use whole seconds.
+        created_at: OffsetDateTime::now_utc()
+            .replace_nanosecond(0)
+            .map_err(|_| internal())?
+            .format(&Rfc3339)
+            .map_err(|_| internal())?,
+    })?;
+    Ok(CandidateView {
+        candidate_id: proposal.input().proposal_id.clone(),
+        proposal: proposal.input().clone(),
+        manifest_digest: proposal.manifest_digest().into(),
+        proposal_digest: proposal.proposal_digest().into(),
+        accounting: serde_json::to_value(proposal.accounting()).map_err(|_| internal())?,
+        reviews: vec![],
+        proof_jobs: vec![],
+    })
 }

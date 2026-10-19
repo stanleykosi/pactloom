@@ -1,8 +1,28 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-19, 03:28 UTC.
+Updated: 2026-10-19, 06:29 UTC.
 
 **The bounded synthetic native two-owner fixed-signing fixture passed. Product qualification remains incomplete: no public testnet settlement, OS-process restart recovery, attended GUI reliability, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
+
+## Original Host private-workspace precursor: local gates passed, native process reopen pending
+
+The first prospective delivery integration audit found the original layered Host uses a recovered-generation Store, while the previous fixed-signing fixture used a separate fresh Engine. The recovered Store's existing material guards remain unchanged. This slice instead completes a purpose-bound original encrypted private workspace with immutable source and first-write marker, retaining the actual primary proof-store owner and exact original seed operations.
+
+A new explicit workspace-only vault-v3 payload anchors the required dependency before publication. V1/v2 behavior is preserved; ordinary opens never auto-upgrade. Exact staged publication/resume checks original financial/workspace file identities, schema and exclusion locks. Missing/replaced dependencies refuse. Portable backup/export/successor paths refuse v3 before output rather than claiming incomplete archive coverage. No dispatcher credential attachment, v2 payment admission, financial signing or dispatch authority is enabled by this precursor.
+
+Closed Host methods use genuine native review, source-selection claims that remain nonbinding until actual material checks, disposable scan caches and original privacy ceilings. The first proof attempt requires a consuming continuation minted only after a confirmed new encrypted queue commit; reopening a queued job cannot mint another. Saved succeeded proof and exact queued/running/succeeded event history can be read and frozen without another attempt. The new CI-only phase will kill/reap the actual producer and reopen the same originals in a distinct reader process; that native result is still pending.
+
+Independent review covered 40 source/test/CI paths. Build01 found module access/alias errors, fixed with narrow visibility/reexport changes. Build02 passed; six component failures came from three invalid test setups (live encrypted sidecars, mismatched declared proving mode, and noncanonical synthetic account aliases). Those fixtures were corrected without changing production checks. Final all-features Host/Engine/ProofJobs build passed (2m23s), all141 exact selected checks passed, including actual Halo2 proof replay and isolated storage kill/reap. Default Engine build passed (1m13s) and two unsupported-build refusals passed. Non-synthetic durable Host build passed (5m41s), Python144 and shell syntax passed. Suite counts overlap; component process death is not the full native qualification.
+
+## CI22: committed Acquire reply-loss recovery passed; prospective delivery scope remains inert
+
+[Run 39195077385](https://github.com/stanleykosi/pactloom/actions/runs/39195077385), qualifier `3b6c5a032d20008db691d7e2d81bb38b44ddebfe`, passed all listed gates at 04:11:07 UTC. Native baseline passed at 03:48:10, two-owner fixed signing passed again at 03:55:56, and the distinct actual committed Acquire response-loss phase passed at 04:00:09, all with verified cleanup. Python137, Host80, bootstrap, final Signer41, endpoint1/two cycles, renderer6 and replay3 also passed.
+
+The new recovery phase proves actual selected response-socket loss after one real financial Acquire commit, genuine exact retry with the same retained client/key/approved request/history/deadline, identical original receipt/timestamps, unchanged original prefix and exactly one additional Acquire/session-key row, with no activation/reservation. This is a live-process pending-session recovery result, not recovery after process or key loss.
+
+The simplest prospective submission direction is explicit signing-time delivery consent, not a second mandatory owner round. Existing v1 approvals lack dispatcher/provider/finite-delivery scope and remain ineligible. New consent must bind the fixed proved artifact and original authorization/result lineage; randomized final extraction means it cannot claim a future final-byte digest was already reviewed. One verified retained output must later be pinned before any send, with fresh Host/witness/all-input checks and Unknown-before-network ordering.
+
+The first three-file delivery-v2 slice is inert data only: strict canonical parsing, digests, independent historical-claim comparisons and original absolute ceilings. It has no native, policy, storage, transport or dispatch consumer and issues no permission. Default Authority build passed (53.87s), all-features build passed (1m10s), and all23 exact pure tests passed in each configuration. Review corrected Serde's permissive internally tagged unit variant with a same-wire empty-struct variant. Native approval, durable dispatcher identity, authenticated witness execution, retained lineage, restart and public-chain settlement remain unfinished. This data-only checkpoint is published on the implementation branch; the last full native qualification remains checkpoint42.
 
 ## Committed Acquire reply-loss qualification added; native result pending
 

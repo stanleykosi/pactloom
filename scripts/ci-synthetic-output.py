@@ -16,6 +16,7 @@ import time
 
 PREFIX = 'host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification::'
 TESTS = {
+    'durable-private-reopen': (PREFIX + 'durable_proposal_v1::private_fixed_v2::private_workspace_actual_process_death_reopens_same_fixed_proof', 1080),
     'durable-acquire-reply-loss': (PREFIX + 'durable_proposal_v1::durable_proposal_native_acquire_reply_loss_retries_original_session', 1080),
     'durable-fixed-signing': (PREFIX + 'durable_proposal_v1::durable_proposal_native_fixed_signing_retains_exact_results', 1080),
     'durable-owner-reopen': (PREFIX + 'durable_proposal_v1::durable_proposal_native_owner_reopen_retains_exact_fixed_proof', 1080),
@@ -43,6 +44,22 @@ PURE_TESTS = tuple(PREFIX + suffix for suffix in (
     'public_outcome_v1::tests::public_outcome_sidecar_is_single_create_exact_bounded_and_private',
     'public_outcome_v1::tests::public_outcome_sidecar_denies_symlink_multilink_partial_and_oversize',
 ))
+PRIVATE_WORKSPACE_PURE_TESTS = tuple(PREFIX + 'durable_proposal_v1::private_fixed_v2::pure_tests::' + name for name in (
+    'death_marker_cannot_replace_verified_sigkill_reap_and_group_absence',
+    'reader_never_starts_after_unverified_producer_cleanup',
+    'two_process_stages_share_one_original_deadline',
+    'fixed_outcome_is_closed_and_has_no_private_values',
+    'fragmented_utf8_and_marker_use_the_existing_bounded_transcript',
+    'early_duplicate_and_partial_death_markers_refuse',
+    'final_response_consumption_precedes_terminal_marker_retention',
+))
+PRIVATE_WORKSPACE_PREFIX = 'CI_SYNTHETIC_PRIVATE_WORKSPACE '
+PRIVATE_WORKSPACE_INVALID = 'CI_SYNTHETIC_PRIVATE_WORKSPACE_INVALID'
+PRIVATE_WORKSPACE_BOUNDARIES = frozenset('PrivateWorkspaceBootstrap PrivateSourceSelect PrivateWorkspaceReserve PrivateWorkspaceAnchor PrivateWorkspacePublish PrivateWorkspaceInitialize PrivateWorkspaceCandidate PrivateWorkspaceCapture PrivateWorkspaceIntake PrivateWorkspaceObserve PrivateWorkspaceCheckpoint PrivateWorkspaceProof PrivateWorkspaceFreeze PrivateWorkspaceScanCleanup PrivateWorkspaceDurableMarker PrivateWorkspaceProducerKill PrivateWorkspaceProducerReap PrivateWorkspaceReaderOpen PrivateWorkspaceReadFixed PrivateWorkspaceIdentityCompare PrivateWorkspaceReaderReap PrivateWorkspaceRootCleanup'.split())
+PRIVATE_WORKSPACE_FALSE_FIELDS = frozenset(('authorization_allowed','distribution_allowed','attended_native_acceptance_verified','public_chain_verified'))
+PRIVATE_WORKSPACE_BOOL_FIELDS = frozenset(('producer_reaped','producer_group_absent','reader_reaped','reader_group_absent','fixed_verified','exact_identity_preserved','exact_checkpoint_preserved','exact_idempotency_preserved','reader_no_effects_verified'))
+PRIVATE_WORKSPACE_FIELDS = PRIVATE_WORKSPACE_FALSE_FIELDS | PRIVATE_WORKSPACE_BOOL_FIELDS | frozenset(('schema','phase','result','first_failure','producer_exit','reader_exit','root_cleanup'))
+
 POLICY_ENVELOPE_TESTS = tuple(PREFIX + 'retained_joined_v3::original_policy_export_v2::tests::' + name for name in (
     'producer_shaped_policy_envelope_projects_only_validated_original',
     'policy_envelope_rejects_individually_valid_substituted_originals',
@@ -338,7 +355,7 @@ DURABLE_FINANCIAL_BOUNDARIES = frozenset('DurableHostWitnessSetup DurableHostWri
 SIGNER_ADMISSION_BOUNDARIES = frozenset('SignerAdmissionFixtureState SignerAdmissionSource SignerAdmissionHistory SignerAdmissionRetainedIntent SignerAdmissionTerms SignerAdmissionRequestBuilder SignerAdmissionExactRequest SignerAdmissionLiveInterval SignerAdmissionLocalIntent SignerAdmissionIntentDisplay SignerAdmissionReviewCustody SignerAdmissionReviewDisplay SignerAdmissionNativeStage SignerAdmissionWorkerCompletion'.split())
 SIGNER_HISTORY_BOUNDARIES = frozenset('SignerAdmissionHistoryCallerDeadline SignerAdmissionHistoryExchangeDeadline SignerAdmissionHistorySourceCallback SignerAdmissionHistorySnapshotConnect SignerAdmissionHistorySnapshotHandshake SignerAdmissionHistorySnapshotPeerBinding SignerAdmissionHistorySnapshotRequestBuild SignerAdmissionHistorySnapshotRequestWrite SignerAdmissionHistorySnapshotResponseRead SignerAdmissionHistorySnapshotResponse SignerAdmissionHistorySnapshotValidation SignerAdmissionHistoryPageConnect SignerAdmissionHistoryPageHandshake SignerAdmissionHistoryPagePeerBinding SignerAdmissionHistoryPageRequestBuild SignerAdmissionHistoryPageRequestWrite SignerAdmissionHistoryPageResponseRead SignerAdmissionHistoryPageResponse SignerAdmissionHistoryPageValidation SignerAdmissionHistoryEventReplay SignerAdmissionHistoryFinalValidation SignerAdmissionHistoryBounds SignerAdmissionHistoryIoTimeout SignerAdmissionHistoryIoClosed SignerAdmissionHistoryIoRefused SignerAdmissionHistoryIoOther SignerAdmissionHistoryCallbackError'.split())
 SIGNER_DISPATCH_BOUNDARIES = frozenset(['SignerAdmissionCallRequestValidation', 'SignerAdmissionCallBinding', 'SignerAdmissionCallConnect', 'SignerAdmissionCallHandshake', 'SignerAdmissionCallPeerBinding', 'SignerAdmissionCallRequestBuild', 'SignerAdmissionCallRequestWrite', 'SignerAdmissionCallResponseRead', 'SignerAdmissionCallResponse', 'SignerAdmissionCallSnapshotValidation', 'SignerAdmissionCallCommittedHeadValidation', 'SignerAdmissionCallFinalValidation', 'SignerAdmissionDispatchFixtureState', 'SignerAdmissionDispatchReviewCorrelation', 'SignerAdmissionDispatchNativeApproval', 'SignerAdmissionDispatchIntentRetention', 'SignerAdmissionDispatchSubmitCustody', 'SignerAdmissionDispatchSubmitIntent', 'SignerAdmissionDispatchSubmitInterval', 'SignerAdmissionDispatchSubmitWorkspace', 'SignerAdmissionDispatchAuthorityCall', 'SignerAdmissionDispatchWorkerCompletion', 'SignerAdmissionDispatchCommittedCorrelation', 'SignerAdmissionCallbackWorkspaceCurrent', 'SignerAdmissionCallbackCustody', 'SignerAdmissionCallbackRequestValidation', 'SignerAdmissionCallIoTimeout', 'SignerAdmissionCallIoClosed', 'SignerAdmissionCallIoRefused', 'SignerAdmissionCallIoOther', 'SignerAdmissionCallCallbackError', 'SignerAdmissionCallCallerDeadline', 'SignerAdmissionCallExchangeDeadline', 'SignerAdmissionCallSourceCallback', 'SignerAdmissionCallBounds'])
-BOUNDARIES = BOUNDARIES | SIGNER_DISPATCH_BOUNDARIES | DURABLE_ENTRY_BOUNDARIES | DURABLE_HOST_BOUNDARIES | DURABLE_FINANCIAL_BOUNDARIES | SIGNER_ADMISSION_BOUNDARIES | SIGNER_HISTORY_BOUNDARIES
+BOUNDARIES = BOUNDARIES | PRIVATE_WORKSPACE_BOUNDARIES | SIGNER_DISPATCH_BOUNDARIES | DURABLE_ENTRY_BOUNDARIES | DURABLE_HOST_BOUNDARIES | DURABLE_FINANCIAL_BOUNDARIES | SIGNER_ADMISSION_BOUNDARIES | SIGNER_HISTORY_BOUNDARIES
 FALSE_FIELDS = {'public_network_settlement_verified','public_network_inclusion_verified','independent_consensus_verified','attended_native_acceptance_verified','clears_authorization_exposure','permits_replacement'}
 INT_FIELDS = {'schema','consensus_branch_id','expiry_height','submission_attempt','recipient_decrypted_zatoshis','recipient_owned_note_count','fabricated_inclusion_height','fabricated_tip_height','required_confirmations'}
 STRING_FIELDS = {'evidence_kind','transaction_id','transaction_bytes_sha256','network','submission_outcome'}
@@ -871,6 +888,28 @@ def public_outcome(text):
     if row['evidence_kind']!='synthetic_full_payment_v1' or row['network']!='testnet' or row['submission_outcome']!='synthetic_acknowledged': raise ValueError('unexpected result kind')
     return row
 
+def public_private_workspace(text):
+    if len(text.encode('utf8')) > 2048: raise ValueError('oversized private workspace result')
+    row=json.loads(text,object_pairs_hook=distinct_object)
+    if type(row) is not dict or set(row)!=PRIVATE_WORKSPACE_FIELDS: raise ValueError('private workspace fields')
+    if type(row['schema']) is not int or row['schema']!=1: raise ValueError('private workspace schema')
+    if type(row['phase']) is not str or row['phase']!='fixed_reopen': raise ValueError('private workspace phase')
+    if type(row['result']) is not str or row['result'] not in ('passed','failed'): raise ValueError('private workspace result')
+    if row['first_failure'] is not None and (type(row['first_failure']) is not str or row['first_failure'] not in PRIVATE_WORKSPACE_BOUNDARIES): raise ValueError('private workspace boundary')
+    for key,values in (('producer_exit',('sigkill','other','unverified')),('reader_exit',('success','other','not_started','unverified')),('root_cleanup',('closed_absent','retained','unverified'))):
+        if type(row[key]) is not str or row[key] not in values: raise ValueError('private workspace closed status')
+    if any(type(row[key]) is not bool for key in PRIVATE_WORKSPACE_BOOL_FIELDS): raise ValueError('private workspace boolean')
+    if any(row[key] is not False for key in PRIVATE_WORKSPACE_FALSE_FIELDS): raise ValueError('private workspace stronger claim')
+    if row['reader_exit']=='not_started' and (row['reader_reaped'] or row['reader_group_absent']): raise ValueError('unstarted reader cleanup claim')
+    if row['result']=='passed':
+        if (row['first_failure'] is not None or row['producer_exit']!='sigkill'
+            or row['reader_exit']!='success' or row['root_cleanup']!='closed_absent'
+            or not all(row[key] for key in PRIVATE_WORKSPACE_BOOL_FIELDS)):
+            raise ValueError('private workspace false success')
+    elif row['first_failure'] is None:
+        raise ValueError('private workspace missing first failure')
+    return row
+
 def exact_listing(text, name):
     # Actual rustc 1.99 libtest output. A known optional trailing newline is the
     # only variation; zero/multiple tests and arbitrary extra output are refused.
@@ -914,6 +953,7 @@ def lifecycle_candidate(raw, name=None):
 
 def public_line(raw, name):
     if len(raw)>8192:
+        if diagnostic_candidate(raw,b'CI_SYNTHETIC_PRIVATE_WORKSPACE',name): raise ValueError('oversized private workspace line')
         if flow_candidate(raw,name): return ('durable_flow_invalid',None)
         return ('durable_lifecycle_invalid',None) if lifecycle_candidate(raw,name) else None
     try:
@@ -921,6 +961,7 @@ def public_line(raw, name):
     except UnicodeError:
         prefix=('test '+name+' ... ').encode('utf8')
         candidate=raw[len(prefix):] if raw.startswith(prefix) else raw
+        if candidate.startswith(b'CI_SYNTHETIC_PRIVATE_WORKSPACE'): raise ValueError('private workspace utf8')
         if flow_candidate(candidate): return ('durable_flow_invalid',None)
         if lifecycle_candidate(candidate): return ('durable_lifecycle_invalid',None)
         if candidate.startswith(TIMING_PREFIX.encode('ascii')):
@@ -933,6 +974,9 @@ def public_line(raw, name):
     # or an entire standalone closed marker line is eligible for projection.
     prefix='test '+name+' ... '
     if line.startswith(prefix): line=line[len(prefix):]
+    if line.startswith('CI_SYNTHETIC_PRIVATE_WORKSPACE') and not line.startswith(PRIVATE_WORKSPACE_PREFIX): raise ValueError('private workspace framing')
+    if line.startswith(PRIVATE_WORKSPACE_PREFIX):
+        return ('private_workspace',public_private_workspace(line[len(PRIVATE_WORKSPACE_PREFIX):]))
     if CORE.fullmatch(line): return ('core',line)
     cleanup=CLEANUP.fullmatch(line)
     if cleanup and option_i32(cleanup[5]) and option_i32(cleanup[6]): return ('cleanup',line)
@@ -999,6 +1043,7 @@ class BoundedLines:
                     # Preserve the raw cap. Only a fixed invalid notification,
                     # never the oversized line, reaches the optional Flow slot.
                     head=bytes(self.pending[:8192])+part[:8192-len(self.pending)]
+                    if diagnostic_candidate(head,b'CI_SYNTHETIC_PRIVATE_WORKSPACE',self.name): lines.append(PRIVATE_WORKSPACE_INVALID.encode('ascii'))
                     if flow_candidate(head,self.name): lines.append(FLOW_INVALID.encode('ascii'))
                     if lifecycle_candidate(head,self.name): lines.append(LIFECYCLE_INVALID.encode('ascii'))
                     self.pending.clear()
@@ -1017,12 +1062,13 @@ DURABLE_PROVIDER_METADATA_TEST = PREFIX + 'synthetic_born_provider_v1::durable_m
 
 def run_pure(executable):
     assert resource.getrlimit(resource.RLIMIT_CORE)[0] == 0
-    for name in PURE_TESTS + POLICY_ENVELOPE_TESTS + PROMPT_RENDERING_TESTS + LOWER_ERROR_TESTS + DENIAL_TESTS + ROLLING_TRANSCRIPT_TESTS + AUTHORITY_PROJECTION_TESTS + READ_WAVE_TESTS + HISTORY_MEASUREMENT_TESTS + HISTORY_TRANSCRIPT_TESTS + ADMISSION_PROJECTION_TESTS + ADMISSION_TRANSCRIPT_TESTS + ADMISSION_HOST_TESTS + FLOW_PROJECTION_TESTS + FLOW_TRANSCRIPT_TESTS + FLOW_HOST_TESTS + TIMING_HOST_TESTS + (DURABLE_PROVIDER_METADATA_TEST,):
+    selected = PURE_TESTS + PRIVATE_WORKSPACE_PURE_TESTS + POLICY_ENVELOPE_TESTS + PROMPT_RENDERING_TESTS + LOWER_ERROR_TESTS + DENIAL_TESTS + ROLLING_TRANSCRIPT_TESTS + AUTHORITY_PROJECTION_TESTS + READ_WAVE_TESTS + HISTORY_MEASUREMENT_TESTS + HISTORY_TRANSCRIPT_TESTS + ADMISSION_PROJECTION_TESTS + ADMISSION_TRANSCRIPT_TESTS + ADMISSION_HOST_TESTS + FLOW_PROJECTION_TESTS + FLOW_TRANSCRIPT_TESTS + FLOW_HOST_TESTS + TIMING_HOST_TESTS + (DURABLE_PROVIDER_METADATA_TEST,)
+    for name in selected:
         flags=['--exact',name,'--test-threads=1']
         listed=subprocess.run([executable,*flags,'--list'],capture_output=True,timeout=30,check=True)
         if not exact_listing(listed.stdout.decode(),name) or listed.stderr:
             raise ValueError('exact pure test not uniquely registered')
-        # These 80 fixed source-reviewed cases use only modeled process state,
+        # These 87 fixed source-reviewed cases use only modeled process state,
         # inert files, historical policy DTOs, fixed prompts, closed error kinds or
         # bounded private parsing state or data-only scanned-note mathematics. They create
         # no native/IPC/network/payment owners.
@@ -1030,7 +1076,7 @@ def run_pure(executable):
         if result.returncode!=0 or len(result.stdout)>1024*1024:
             print('CI_SYNTHETIC_PURE failed_test='+name,flush=True)
             raise RuntimeError('exact pure test failed; raw output withheld')
-    print('CI_SYNTHETIC_PURE passed=80 raw_output_discarded=true',flush=True)
+    print(f'CI_SYNTHETIC_PURE passed={len(selected)} raw_output_discarded=true',flush=True)
 
 def run_signer_validation(executable):
     assert resource.getrlimit(resource.RLIMIT_CORE)[0] == 0
@@ -1179,7 +1225,7 @@ def run_storage_bootstrap(executable):
 
 def phase_selection(phase):
     name, seconds = TESTS[phase]
-    flags = ['--exact', name, '--test-threads=1'] + (['--ignored'] if phase in ('full','durable-owner-reopen','durable-fixed-signing','durable-acquire-reply-loss') else [])
+    flags = ['--exact', name, '--test-threads=1'] + (['--ignored'] if phase in ('full','durable-owner-reopen','durable-fixed-signing','durable-acquire-reply-loss','durable-private-reopen') else [])
     return name, seconds, flags
 
 def run(executable, phase):
@@ -1190,6 +1236,7 @@ def run(executable, phase):
     started=time.monotonic(); process=subprocess.Popen([executable,*flags,'--nocapture'],stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
     assert process.stdout is not None
     framing=BoundedLines(name); total=0; cleanup=False; cleanup_observed=False; cleanups=0; cores=0; failures=0; outcome=None; status=None; timing=None; timing_count=0; timing_invalid=False
+    private_workspace=None
     history_measurements=HistoryMeasurements()
     admission_diagnostics=AdmissionDiagnostics()
     durable_flow=DurableFlowDiagnostics()
@@ -1213,7 +1260,11 @@ def run(executable, phase):
                     cores+=1
                     if cores>1: raise ValueError('duplicate core policy')
                     print(value,flush=True)
+                elif kind=='private_workspace':
+                    if phase!='durable-private-reopen' or private_workspace is not None: raise ValueError('unexpected duplicate private workspace outcome')
+                    private_workspace=value
                 elif kind=='cleanup':
+                    if phase=='durable-private-reopen': raise ValueError('single-child cleanup cannot establish private workspace reopen')
                     cleanups+=1
                     if cleanups>1: raise ValueError('duplicate cleanup result')
                     fields=CLEANUP.fullmatch(value)
@@ -1240,6 +1291,7 @@ def run(executable, phase):
                 elif kind=='outcome':
                     if phase!='full' or outcome is not None: raise ValueError('unexpected duplicate public outcome')
                     outcome=value
+        if diagnostic_candidate(bytes(framing.pending),b'CI_SYNTHETIC_PRIVATE_WORKSPACE',name): raise ValueError('incomplete private workspace line')
         status=process.wait(timeout=10)
     finally:
         if status is None:
@@ -1264,6 +1316,13 @@ def run(executable, phase):
             print('CI_SYNTHETIC_TIMING missing=true details_withheld=true',flush=True)
         else:
             print(TIMING_PREFIX+json.dumps(timing,separators=(',',':'),sort_keys=True)+']',flush=True)
+    if phase=='durable-private-reopen':
+        if private_workspace is not None:
+            print(PRIVATE_WORKSPACE_PREFIX+json.dumps(private_workspace,separators=(',',':'),sort_keys=True),flush=True)
+        if status!=0 or cores!=1 or failures or private_workspace is None or private_workspace['result']!='passed':
+            raise RuntimeError('private workspace process-death qualification failed')
+        print('CI_SYNTHETIC_RESULT phase=durable-private-reopen passed=true cleanup_verified=true',flush=True)
+        return
     if status!=0 or not cleanup or cores!=1 or failures or (phase=='full' and outcome is None):
         raise RuntimeError('synthetic phase failed or required cleanup/outcome evidence missing')
     if outcome is not None:

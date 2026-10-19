@@ -18,7 +18,7 @@ use wholepact_protocol::{
     proving::{MAX_PROVING_ACTIONS, ProvingLimits, prove_reviewed, verify_proved_candidate},
     review::{ReviewPolicy, verify_review},
 };
-use wholepact_storage_security::EncryptedConnection;
+use wholepact_storage_security::{DatabaseFileIdentity, EncryptedConnection};
 use zeroize::Zeroizing;
 
 const APPLICATION_ID: i64 = 0x5750504a;
@@ -171,6 +171,236 @@ impl VerifiedCheckpoint {
 
 pub struct ProofJobStore {
     connection: Mutex<Connection>,
+    // Populated only by the purpose-specific authenticated factory. Legacy
+    // stores do not acquire an original-workspace identity merely by opening.
+    original_database: Option<DatabaseFileIdentity>,
+}
+
+/// Borrow of one actual authenticated proof store, never a permission token.
+/// The embedding retains the original profile/directory exclusion owner and
+/// independently joins this origin to its immutable workspace association.
+/// No raw store, key, connection, or token-free proof runner is exposed.
+pub struct OriginalProofJobSourceV1<'a> {
+    store: &'a ProofJobStore,
+    origin: &'a DatabaseFileIdentity,
+}
+
+/// Actual enqueue outcome. An identical retained row is data-only replay and
+/// never yields another live first-attempt continuation.
+pub struct OriginalEnqueueOutcomeV1<'a> {
+    summary: JobSummary,
+    fresh: Option<FreshOriginalEnqueueV1<'a>>,
+}
+impl<'a> OriginalEnqueueOutcomeV1<'a> {
+    pub fn into_parts(self) -> (JobSummary, Option<FreshOriginalEnqueueV1<'a>>) {
+        (self.summary, self.fresh)
+    }
+}
+
+/// Non-Clone, non-serializable process continuity from one confirmed original
+/// INSERT + Queued event + commit. It is not native permission: the embedding
+/// must also own its newly committed constructor receipt and current consent.
+/// Drop, ambiguous commit, replay and reopen cannot recreate this value.
+pub struct FreshOriginalEnqueueV1<'a> {
+    source: OriginalProofJobSourceV1<'a>,
+    scope: CheckpointScope,
+    request_digest: String,
+    summary: JobSummary,
+}
+impl FreshOriginalEnqueueV1<'_> {
+    pub fn summary(&self) -> &JobSummary {
+        &self.summary
+    }
+    pub fn matches_source(&self, source: &OriginalProofJobSourceV1<'_>) -> bool {
+        std::ptr::eq(self.source.store, source.store) && self.source.origin == source.origin
+    }
+    /// Consume continuity BEFORE admission. The original atomic Queued/attempt0
+    /// gate and every current consent check still execute on the exact row.
+    pub fn run_original_queued_v1(self, consent: &dyn LocalProofConsent) -> Result<JobSummary> {
+        self.source.check_current()?;
+        self.source.store.run_mode_checked(
+            &self.scope.principal_id,
+            &self.summary.job_id,
+            consent,
+            true,
+            Some((&self.source, &self.scope, &self.request_digest)),
+        )
+    }
+}
+
+impl<'a> OriginalProofJobSourceV1<'a> {
+    pub fn origin_commitment(&self) -> [u8; 32] {
+        self.origin.origin_commitment()
+    }
+    pub fn check_current(&self) -> Result<()> {
+        let connection = self
+            .store
+            .connection
+            .try_lock()
+            .map_err(|error| match error {
+                std::sync::TryLockError::WouldBlock => JobError::ResourceExhausted,
+                std::sync::TryLockError::Poisoned(_) => JobError::Storage,
+            })?;
+        check_original_connection(Some(self.origin), &connection)
+    }
+    pub fn status_for_key(
+        &self,
+        principal: &str,
+        idempotency_key: &str,
+        coordination_request_digest: &str,
+        consent: &dyn LocalProofConsent,
+    ) -> Result<Option<JobSummary>> {
+        self.check_current()?;
+        self.store.status_for_key_checked(
+            principal,
+            idempotency_key,
+            coordination_request_digest,
+            consent,
+            Some(self.origin),
+        )
+    }
+    pub fn status(
+        &self,
+        principal: &str,
+        job_id: &str,
+        consent: &dyn LocalProofConsent,
+    ) -> Result<JobSummary> {
+        self.check_current()?;
+        self.store
+            .status_checked(principal, job_id, consent, Some(self.origin))
+    }
+    pub fn load_verified(
+        &self,
+        principal: &str,
+        job_id: &str,
+        consent: &dyn LocalProofConsent,
+    ) -> Result<VerifiedCheckpoint> {
+        self.check_current()?;
+        self.store
+            .load_verified_checked(principal, job_id, consent, Some(self.origin))
+    }
+    /// Commitment to the exact immutable event history of this ONE original
+    /// completed attempt. This is not proof verification or a whole-journal
+    /// audit: the caller must also load_verified and join its retained lineage.
+    pub fn original_attempt_history_digest_v1(
+        &self,
+        principal: &str,
+        job_id: &str,
+        consent: &dyn LocalProofConsent,
+    ) -> Result<String> {
+        self.check_current()?;
+        let mut connection = self
+            .store
+            .connection
+            .lock()
+            .map_err(|_| JobError::Storage)?;
+        check_original_connection(Some(self.origin), &connection)?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .map_err(db)?;
+        let retained = record(&tx, principal, job_id)?.ok_or(JobError::NotFound)?;
+        gate(consent, &retained.scope, LocalAction::InspectStatus)?;
+        let events = {
+            let mut statement = tx.prepare(
+                "SELECT sequence,CASE WHEN typeof(state)='text' AND length(state)<=16 THEN state ELSE NULL END,attempt FROM proof_events WHERE job_id=?1 ORDER BY sequence LIMIT 4",
+            ).map_err(db)?;
+            let rows = statement
+                .query_map([job_id], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, u32>(2)?,
+                    ))
+                })
+                .map_err(db)?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(db)?
+        };
+        let digest = original_event_history_digest_v1(&retained, &events)?;
+        gate(consent, &retained.scope, LocalAction::InspectStatus)?;
+        check_original_connection(Some(self.origin), &tx)?;
+        // Read-only snapshot: no status repair, new event, or proof admission.
+        drop(tx);
+        check_original_connection(Some(self.origin), &connection)?;
+        Ok(digest)
+    }
+
+    pub fn enqueue_original_once_v1(
+        &self,
+        scope: &CheckpointScope,
+        idempotency_key: &str,
+        pczt: &[u8],
+        policy: &ReviewPolicy,
+        limits: ProvingLimits,
+        consent: &dyn LocalProofConsent,
+    ) -> Result<OriginalEnqueueOutcomeV1<'a>> {
+        self.check_current()?;
+        let (summary, created, request_digest) = self.store.enqueue_with_mode_checked(
+            EnqueueInput {
+                scope,
+                idempotency_key,
+                pczt,
+                policy,
+                limits,
+            },
+            consent,
+            EnqueueMode::FailFast,
+            Some(self.origin),
+        )?;
+        let fresh = created.then(|| FreshOriginalEnqueueV1 {
+            source: OriginalProofJobSourceV1 {
+                store: self.store,
+                origin: self.origin,
+            },
+            scope: scope.clone(),
+            request_digest,
+            summary: summary.clone(),
+        });
+        Ok(OriginalEnqueueOutcomeV1 { summary, fresh })
+    }
+}
+
+fn original_event_history_digest_v1(
+    retained: &Record,
+    events: &[(i64, String, u32)],
+) -> Result<String> {
+    if retained.summary.state != JobState::Succeeded
+        || retained.summary.attempt != 1
+        || events.len() != 3
+        || events
+            .iter()
+            .zip([("queued", 0), ("running", 1), ("succeeded", 1)])
+            .any(|((sequence, state, attempt), (expected, number))| {
+                *sequence <= 0 || state != expected || *attempt != number
+            })
+        || events.windows(2).any(|pair| pair[0].0 >= pair[1].0)
+    {
+        return Err(JobError::StateConflict);
+    }
+    let body = serde_json::to_vec(&(
+        &retained.scope,
+        &retained.request_digest,
+        &retained.summary,
+        events,
+    ))
+    .map_err(|_| JobError::Storage)?;
+    let mut hash = Sha256::new();
+    hash.update(b"wholepact:original-proof-selected-attempt-history:v1\0");
+    hash.update((body.len() as u64).to_le_bytes());
+    hash.update(body);
+    Ok(hex::encode(hash.finalize()))
+}
+
+fn check_original_connection(
+    origin: Option<&DatabaseFileIdentity>,
+    connection: &Connection,
+) -> Result<()> {
+    if let Some(origin) = origin {
+        origin
+            .check_current(connection)
+            .map_err(|_| JobError::Storage)?;
+    }
+    Ok(())
 }
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::time::Duration;
@@ -296,7 +526,36 @@ impl ProofJobStore {
         }
         Ok(Self {
             connection: Mutex::new(connection),
+            original_database: None,
         })
+    }
+
+    /// Purpose-specific source factory. Capture the authenticated live origin
+    /// before consuming the connection; the legacy schema/init behavior is
+    /// unchanged. Original reopen must separately preflight its initialized
+    /// schema and compare this origin with the retained association.
+    pub fn from_original_encrypted_connection_v1(encrypted: EncryptedConnection) -> Result<Self> {
+        let origin = encrypted
+            .database_identity()
+            .map_err(|_| JobError::Storage)?;
+        let mut store = Self::from_encrypted_connection(encrypted)?;
+        origin
+            .check_current(store.connection.get_mut().map_err(|_| JobError::Storage)?)
+            .map_err(|_| JobError::Storage)?;
+        store.original_database = Some(origin);
+        Ok(store)
+    }
+
+    pub fn original_source_v1(&self) -> Result<OriginalProofJobSourceV1<'_>> {
+        let source = OriginalProofJobSourceV1 {
+            store: self,
+            origin: self
+                .original_database
+                .as_ref()
+                .ok_or(JobError::InvalidRequest)?,
+        };
+        source.check_current()?;
+        Ok(source)
     }
 
     /// Commits the immutable unproved candidate, private policy and job intent in
@@ -354,6 +613,16 @@ impl ProofJobStore {
         consent: &dyn LocalProofConsent,
         mode: EnqueueMode,
     ) -> Result<JobSummary> {
+        self.enqueue_with_mode_checked(input, consent, mode, None)
+            .map(|(summary, _, _)| summary)
+    }
+    fn enqueue_with_mode_checked(
+        &self,
+        input: EnqueueInput<'_>,
+        consent: &dyn LocalProofConsent,
+        mode: EnqueueMode,
+        origin: Option<&DatabaseFileIdentity>,
+    ) -> Result<(JobSummary, bool, String)> {
         let EnqueueInput {
             scope,
             idempotency_key,
@@ -387,7 +656,8 @@ impl ProofJobStore {
                 std::sync::TryLockError::Poisoned(_) => JobError::Storage,
             })?,
         };
-        mode.with_connection(&mut connection, |connection| {
+        check_original_connection(origin, &connection)?;
+        let outcome = mode.with_connection(&mut connection, |connection| {
         let tx = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(db)?;
@@ -400,7 +670,8 @@ impl ProofJobStore {
                 &existing.scope,
                 LocalAction::RetainPrivateWitnesses,
             )?;
-            return Ok(existing.summary);
+            check_original_connection(origin, &tx)?;
+            return Ok((existing.summary, false, request_digest));
         }
         if tx
             .query_row("SELECT count(*) FROM proof_jobs", [], |r| {
@@ -413,6 +684,7 @@ impl ProofJobStore {
         }
         validate_input(pczt, policy, scope, limits)?;
         gate(consent, scope, LocalAction::RetainPrivateWitnesses)?;
+        check_original_connection(origin, &tx)?;
         tx.execute("INSERT INTO proof_jobs(job_id,principal_id,idem_key,request_digest,scope,input_digest,input,policy,maximum_actions,state) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,'queued')",
             params![job_id, scope.principal_id, idempotency_key, request_digest, scope_bytes, input_digest, pczt, encoded.as_slice(), limits.maximum_actions as u32]).map_err(db)?;
         event(&tx, &job_id, JobState::Queued, 0)?;
@@ -420,9 +692,12 @@ impl ProofJobStore {
             .ok_or(JobError::Storage)?
             .summary;
         gate(consent, scope, LocalAction::RetainPrivateWitnesses)?;
+        check_original_connection(origin, &tx)?;
         tx.commit().map_err(db)?;
-        Ok(summary)
-        })
+        Ok((summary, true, request_digest))
+        })?;
+        check_original_connection(origin, &connection)?;
+        Ok(outcome)
     }
 
     /// Recover a stable job identity before randomized construction. This is
@@ -436,6 +711,22 @@ impl ProofJobStore {
         expected_coordination_request_digest: &str,
         consent: &dyn LocalProofConsent,
     ) -> Result<Option<JobSummary>> {
+        self.status_for_key_checked(
+            principal,
+            idempotency_key,
+            expected_coordination_request_digest,
+            consent,
+            None,
+        )
+    }
+    fn status_for_key_checked(
+        &self,
+        principal: &str,
+        idempotency_key: &str,
+        expected_coordination_request_digest: &str,
+        consent: &dyn LocalProofConsent,
+        origin: Option<&DatabaseFileIdentity>,
+    ) -> Result<Option<JobSummary>> {
         if !hash_text(expected_coordination_request_digest)
             || !bounded(principal, 128)
             || !(16..=128).contains(&idempotency_key.len())
@@ -445,13 +736,16 @@ impl ProofJobStore {
         }
         let job_id = job_id_for_key(principal, idempotency_key)?;
         let connection = self.connection.lock().map_err(|_| JobError::Storage)?;
+        check_original_connection(origin, &connection)?;
         let Some(r) = record(&connection, principal, &job_id)? else {
+            check_original_connection(origin, &connection)?;
             return Ok(None);
         };
         gate(consent, &r.scope, LocalAction::InspectStatus)?;
         if r.scope.coordination_request_digest != expected_coordination_request_digest {
             return Err(JobError::IdempotencyConflict);
         }
+        check_original_connection(origin, &connection)?;
         Ok(Some(r.summary))
     }
 
@@ -461,9 +755,20 @@ impl ProofJobStore {
         job_id: &str,
         consent: &dyn LocalProofConsent,
     ) -> Result<JobSummary> {
+        self.status_checked(principal, job_id, consent, None)
+    }
+    fn status_checked(
+        &self,
+        principal: &str,
+        job_id: &str,
+        consent: &dyn LocalProofConsent,
+        origin: Option<&DatabaseFileIdentity>,
+    ) -> Result<JobSummary> {
         let connection = self.connection.lock().map_err(|_| JobError::Storage)?;
+        check_original_connection(origin, &connection)?;
         let r = record(&connection, principal, job_id)?.ok_or(JobError::NotFound)?;
         gate(consent, &r.scope, LocalAction::InspectStatus)?;
+        check_original_connection(origin, &connection)?;
         Ok(r.summary)
     }
 
@@ -535,12 +840,29 @@ impl ProofJobStore {
         consent: &dyn LocalProofConsent,
         original_queued_only: bool,
     ) -> Result<JobSummary> {
+        self.run_mode_checked(principal, job_id, consent, original_queued_only, None)
+    }
+    fn run_mode_checked(
+        &self,
+        principal: &str,
+        job_id: &str,
+        consent: &dyn LocalProofConsent,
+        original_queued_only: bool,
+        original: Option<(&OriginalProofJobSourceV1<'_>, &CheckpointScope, &str)>,
+    ) -> Result<JobSummary> {
+        let origin = original.map(|(source, _, _)| source.origin);
         let private = {
             let mut connection = self.connection.lock().map_err(|_| JobError::Storage)?;
+            check_original_connection(origin, &connection)?;
             let tx = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(db)?;
             let r = record(&tx, principal, job_id)?.ok_or(JobError::NotFound)?;
+            if let Some((_, scope, request_digest)) = original {
+                if &r.scope != scope || r.request_digest != request_digest {
+                    return Err(JobError::IdempotencyConflict);
+                }
+            }
             gate(consent, &r.scope, LocalAction::ProveLocally)?;
             gate(consent, &r.scope, LocalAction::RetainPrivateWitnesses)?;
             if original_queued_only
@@ -581,13 +903,16 @@ impl ProofJobStore {
                 .attempt
                 .checked_add(1)
                 .ok_or(JobError::ResourceExhausted)?;
+            check_original_connection(origin, &tx)?;
             tx.execute(
                 "UPDATE proof_jobs SET state='running',attempt=?2 WHERE job_id=?1",
                 params![job_id, next],
             )
             .map_err(db)?;
             event(&tx, job_id, JobState::Running, next)?;
+            check_original_connection(origin, &tx)?;
             tx.commit().map_err(db)?;
+            check_original_connection(origin, &connection)?;
             p.record.summary.state = JobState::Running;
             p.record.summary.attempt = next;
             p
@@ -611,10 +936,16 @@ impl ProofJobStore {
             Ok::<_, JobError>(Zeroizing::new(proved.pczt_bytes))
         })();
         let mut connection = self.connection.lock().map_err(|_| JobError::Storage)?;
+        check_original_connection(origin, &connection)?;
         let tx = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(db)?;
         let current = record(&tx, principal, job_id)?.ok_or(JobError::NotFound)?;
+        if let Some((_, scope, request_digest)) = original {
+            if &current.scope != scope || current.request_digest != request_digest {
+                return Err(JobError::IdempotencyConflict);
+            }
+        }
         if current.summary.state != JobState::Running || current.summary.attempt != attempt {
             return Err(JobError::StateConflict);
         }
@@ -629,9 +960,11 @@ impl ProofJobStore {
             )
             .map_err(db)?;
             event(&tx, job_id, JobState::Uncertain, attempt)?;
+            check_original_connection(origin, &tx)?;
             tx.commit().map_err(db)?;
             return Err(JobError::ConsentDenied);
         }
+        check_original_connection(origin, &tx)?;
         match result {
             Ok(bytes) => {
                 if bytes.len() > MAX_ARTIFACT_BYTES {
@@ -647,6 +980,7 @@ impl ProofJobStore {
                 )
                 .map_err(db)?;
                 event(&tx, job_id, JobState::Failed, attempt)?;
+                check_original_connection(origin, &tx)?;
                 tx.commit().map_err(db)?;
                 return Err(JobError::VerificationFailed);
             }
@@ -654,7 +988,9 @@ impl ProofJobStore {
         let summary = record(&tx, principal, job_id)?
             .ok_or(JobError::Storage)?
             .summary;
+        check_original_connection(origin, &tx)?;
         tx.commit().map_err(db)?;
+        check_original_connection(origin, &connection)?;
         Ok(summary)
     }
 
@@ -666,12 +1002,23 @@ impl ProofJobStore {
         job_id: &str,
         consent: &dyn LocalProofConsent,
     ) -> Result<VerifiedCheckpoint> {
+        self.load_verified_checked(principal, job_id, consent, None)
+    }
+    fn load_verified_checked(
+        &self,
+        principal: &str,
+        job_id: &str,
+        consent: &dyn LocalProofConsent,
+        origin: Option<&DatabaseFileIdentity>,
+    ) -> Result<VerifiedCheckpoint> {
         let connection = self.connection.lock().map_err(|_| JobError::Storage)?;
+        check_original_connection(origin, &connection)?;
         let r = record(&connection, principal, job_id)?.ok_or(JobError::NotFound)?;
         gate(consent, &r.scope, LocalAction::ReadPrivateArtifact)?;
         let mut p = private_record(&connection, principal, job_id)?;
         verify_saved(&p)?;
         gate(consent, &p.record.scope, LocalAction::ReadPrivateArtifact)?;
+        check_original_connection(origin, &connection)?;
         Ok(VerifiedCheckpoint {
             original_bytes: p.input,
             bytes: p.result.take().ok_or(JobError::Storage)?,
@@ -916,6 +1263,8 @@ fn verify_saved(p: &PrivateRecord) -> Result<()> {
 
 #[cfg(all(test, target_os = "linux"))]
 mod original_queued_tests;
+#[cfg(all(test, target_os = "linux"))]
+mod original_source_v1_tests;
 #[cfg(all(test, target_os = "linux"))]
 mod tests;
 

@@ -26,6 +26,9 @@ mod admission;
 pub(crate) mod durable_payment_owner_v1;
 mod durable_payment_policy_v1;
 pub mod durable_payment_v1;
+pub mod durable_delivery_scope_v2;
+#[cfg(test)]
+mod durable_delivery_scope_v2_tests;
 #[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
 pub use transport::open_born_durable_payment_v1_for_server;
 mod automation;

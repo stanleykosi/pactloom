@@ -22,12 +22,12 @@ use wholepact_signer::authority_bridge::durable_construction_v1::{
     DurableConstructionScopeV1,
 };
 use wholepact_wallet::wallet::protected_sync::{
-    durable_construction_v1::{
-        with_durable_construction_roster_v1, DurableConstructionError,
-        DurableConstructionWalletSlotV1, FreshDurableConstructionObservationV1,
-        HeldDurableConstructionRosterV1,
-    },
     LocalWalletAccess, ProtectedWalletSync,
+    durable_construction_v1::{
+        DurableConstructionError, DurableConstructionWalletSlotV1,
+        FreshDurableConstructionObservationV1, HeldDurableConstructionRosterV1,
+        with_durable_construction_roster_v1,
+    },
 };
 
 #[derive(Clone, Copy)]
@@ -48,20 +48,20 @@ pub trait LocalDurableMaterialConsentV1 {
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Intake {
-    schema_version: u16,
-    principal_id: String,
-    metadata_origin: String,
-    signer_enrollment_reference: String,
-    signer_process_instance: String,
-    outbox: DurableConstructionOutboxV1,
+pub(crate) struct Intake {
+    pub(crate) schema_version: u16,
+    pub(crate) principal_id: String,
+    pub(crate) metadata_origin: String,
+    pub(crate) signer_enrollment_reference: String,
+    pub(crate) signer_process_instance: String,
+    pub(crate) outbox: DurableConstructionOutboxV1,
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Roster {
-    owners: BTreeMap<String, Intake>,
+pub(crate) struct Roster {
+    pub(crate) owners: BTreeMap<String, Intake>,
     #[serde(default)]
-    review_exports: BTreeMap<String, review_export_v1::ExportIntent>,
+    pub(crate) review_exports: BTreeMap<String, review_export_v1::ExportIntent>,
 }
 fn damaged() -> ApiError {
     ApiError::new(
@@ -378,14 +378,14 @@ impl Engine {
             result
         })
     }
-    fn durable_roster(&self, envelope: &Envelope, candidate: &str) -> Result<Roster> {
+    pub(crate) fn durable_roster(&self, envelope: &Envelope, candidate: &str) -> Result<Roster> {
         envelope
             .durable_construction_v1
             .get(candidate)
             .map(|v| serde_json::from_value(v.clone()).map_err(|_| damaged()))
             .unwrap_or_else(|| Ok(Roster::default()))
     }
-    fn check_durable_material(
+    pub(crate) fn check_durable_material(
         &self,
         access: &Access,
         intake: &Intake,
@@ -488,4 +488,54 @@ impl<W: LocalWalletAccess> LocalWalletAccess for MaterialWalletGate<'_, W> {
     ) -> bool {
         self.current() && self.wallet.permits(account, provider, purpose) && self.current()
     }
+}
+
+/// Restricted precursor shape: no native review exports or third owner.
+pub(crate) fn validate_private_roster_v2(envelope: &Envelope) -> Result<()> {
+    validate_stored(envelope)?;
+    for value in envelope.durable_construction_v1.values() {
+        let roster: Roster = serde_json::from_value(value.clone()).map_err(|_| damaged())?;
+        if !roster.review_exports.is_empty() {
+            return Err(damaged());
+        }
+    }
+    Ok(())
+}
+pub(crate) fn validate_private_intake_delta_v2(before: &Envelope, after: &Envelope) -> Result<()> {
+    let id = &before
+        .view
+        .candidates
+        .first()
+        .ok_or_else(damaged)?
+        .candidate_id;
+    let old: Roster = before
+        .durable_construction_v1
+        .get(id)
+        .map(|v| serde_json::from_value(v.clone()))
+        .transpose()
+        .map_err(|_| damaged())?
+        .unwrap_or_default();
+    let new: Roster = serde_json::from_value(
+        after
+            .durable_construction_v1
+            .get(id)
+            .ok_or_else(damaged)?
+            .clone(),
+    )
+    .map_err(|_| damaged())?;
+    if new.owners.len() != old.owners.len() + 1
+        || new.owners.len() > 2
+        || !new.review_exports.is_empty()
+    {
+        return Err(damaged());
+    }
+    for (account, intake) in old.owners {
+        let retained = new.owners.get(&account).ok_or_else(damaged)?;
+        if serde_json::to_value(retained).map_err(|_| damaged())?
+            != serde_json::to_value(intake).map_err(|_| damaged())?
+        {
+            return Err(damaged());
+        }
+    }
+    Ok(())
 }

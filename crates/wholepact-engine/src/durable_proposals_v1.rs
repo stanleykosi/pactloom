@@ -12,12 +12,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use wholepact_proof_jobs::{CheckpointScope, LocalAction, LocalProofConsent, VerifiedCheckpoint};
 use wholepact_protocol::{
     authorization::retention::{
-        durable_intake_v1::{retained_source_set_digest_v1, RetainedIntakeRefV1},
-        transaction::{
-            submission_handoff::{LocalSubmissionDispatch, LocalSubmissionHandoff},
-            LocalTransactionCheckpoint, TransactionCheckpointSummary,
-        },
         RetentionError, SignedCandidateContext, SignedRetentionConsent, SignedRetentionScope,
+        durable_intake_v1::{RetainedIntakeRefV1, retained_source_set_digest_v1},
+        transaction::{
+            LocalTransactionCheckpoint, TransactionCheckpointSummary,
+            submission_handoff::{LocalSubmissionDispatch, LocalSubmissionHandoff},
+        },
     },
     construction::{InputActionMapping, OutputActionMapping},
     durable_proposal_v1::{FixedProposalIdentityV1, VerifiedFixedProposal},
@@ -954,4 +954,79 @@ fn submission_error(id: &str) -> ApiError {
     e.operation_id = Some(id.into());
     e.safe_actions = vec!["Reconcile the same retained transaction and operation; never reconstruct a replacement payment".into()];
     e
+}
+
+/// Exact nonauthorizing fixed-only precursor shape.
+pub(crate) fn validate_private_fixed_v2(envelope: &Envelope) -> Result<()> {
+    validate_stored(envelope)?;
+    for value in envelope.durable_proposals_v1.values() {
+        let stored: Stored = serde_json::from_value(value.clone()).map_err(|_| damaged())?;
+        if !stored.intakes.is_empty() || stored.union.is_some() {
+            return Err(damaged());
+        }
+    }
+    Ok(())
+}
+/// Shared verifier and serializer, never exported as a raw verified artifact.
+pub(crate) fn freeze_private_fixed_v2(
+    envelope: &mut Envelope,
+    access: &Access,
+    checkpoint: &VerifiedCheckpoint,
+    receipt: &crate::candidates::CheckpointReceipt,
+) -> Result<FixedProposalIdentityV1> {
+    let candidate = envelope.view.candidates.first().ok_or_else(damaged)?;
+    let mappings: Mappings =
+        serde_json::from_value(receipt.action_mappings_v1.clone().ok_or_else(damaged)?)
+            .map_err(|_| damaged())?;
+    let fixed = verify_fixed(candidate, checkpoint, &mappings)?;
+    let identity = fixed.identity().clone();
+    let id = candidate.candidate_id.clone();
+    if envelope.durable_proposals_v1.contains_key(&id) {
+        return Err(conflict());
+    }
+    let stored = Stored {
+        schema_version: 1,
+        principal_id: access.principal_id.clone(),
+        proof_job_id: checkpoint.summary().job_id.clone(),
+        identity: identity.clone(),
+        mappings,
+        intakes: BTreeMap::new(),
+        union: None,
+    };
+    put(envelope, &id, &stored)?;
+    envelope.view.progress = "awaiting_authorization".into();
+    Ok(identity)
+}
+pub(crate) fn read_private_fixed_v2(
+    envelope: &Envelope,
+    access: &Access,
+    checkpoint: &VerifiedCheckpoint,
+    receipt: &crate::candidates::CheckpointReceipt,
+) -> Result<FixedProposalIdentityV1> {
+    let candidate = envelope.view.candidates.first().ok_or_else(damaged)?;
+    let stored: Stored = serde_json::from_value(
+        envelope
+            .durable_proposals_v1
+            .get(&candidate.candidate_id)
+            .ok_or_else(damaged)?
+            .clone(),
+    )
+    .map_err(|_| damaged())?;
+    let mappings: Mappings =
+        serde_json::from_value(receipt.action_mappings_v1.clone().ok_or_else(damaged)?)
+            .map_err(|_| damaged())?;
+    if stored.principal_id != access.principal_id
+        || stored.proof_job_id != checkpoint.summary().job_id
+        || !stored.intakes.is_empty()
+        || stored.union.is_some()
+        || serde_json::to_value(&stored.mappings).map_err(|_| damaged())?
+            != serde_json::to_value(&mappings).map_err(|_| damaged())?
+    {
+        return Err(damaged());
+    }
+    let fixed = verify_fixed(candidate, checkpoint, &mappings)?;
+    if fixed.identity() != &stored.identity {
+        return Err(damaged());
+    }
+    Ok(stored.identity)
 }

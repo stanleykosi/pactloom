@@ -247,9 +247,118 @@ pub(super) fn open_layered_checked(
     commit_bytes: &[u8],
     unpublished: bool,
 ) -> Result<wholepact_store::Store> {
+    secrets.require_portable_legacy()?;
+    directory.refuse_private_workspace_files()?;
+    open_layered_checked_inner(
+        directory,
+        secrets,
+        commit_bytes,
+        unpublished,
+        WorkspaceInventory::Legacy,
+    )
+}
+// Only nominal authenticated own-file proofs can select the private originals.
+enum WorkspaceInventory<'a> {
+    Legacy,
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "manual-admission",
+        target_os = "linux"
+    ))]
+    Original(&'a crate::host::durable_private_workspace_v1::OriginalWorkspaceFilesV1),
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "manual-admission",
+        target_os = "linux"
+    ))]
+    Publication(&'a crate::host::durable_private_workspace_v1::OriginalWorkspacePublicationV1),
+    // Retain the lifetime in unsupported configurations without a usable variant.
+    #[cfg(not(all(
+        feature = "durable-proposal",
+        feature = "manual-admission",
+        target_os = "linux"
+    )))]
+    _Unavailable(std::marker::PhantomData<&'a ()>),
+}
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "manual-admission",
+    target_os = "linux"
+))]
+pub(crate) fn open_private_workspace_original_store_v1(
+    directory: &Directory,
+    secrets: &Secrets,
+    files: &crate::host::durable_private_workspace_v1::OriginalWorkspaceFilesV1,
+) -> Result<wholepact_store::Store> {
+    open_layered_checked_inner(
+        directory,
+        secrets,
+        &directory.read(COMMIT, MAX_DOCUMENT)?,
+        false,
+        WorkspaceInventory::Original(files),
+    )
+}
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "manual-admission",
+    target_os = "linux"
+))]
+pub(crate) fn open_workspace_publication_source_store_v1(
+    directory: &Directory,
+    secrets: &Secrets,
+    files: &crate::host::durable_private_workspace_v1::OriginalWorkspacePublicationV1,
+) -> Result<wholepact_store::Store> {
+    open_layered_checked_inner(
+        directory,
+        secrets,
+        &directory.read(COMMIT, MAX_DOCUMENT)?,
+        false,
+        WorkspaceInventory::Publication(files),
+    )
+}
+fn open_layered_checked_inner(
+    directory: &Directory,
+    secrets: &Secrets,
+    commit_bytes: &[u8],
+    unpublished: bool,
+    inventory: WorkspaceInventory<'_>,
+) -> Result<wholepact_store::Store> {
     let commit_plain = unseal(secrets, b"commit", commit_bytes)?;
-    if !unpublished && matches!(complete_origins::metadata_version(&commit_plain)?, 3..=5) {
-        return Err(Error::RecoveryFinancialUnsupported);
+    let version = complete_origins::metadata_version(&commit_plain)?;
+    match &inventory {
+        WorkspaceInventory::Legacy => {
+            if !unpublished && matches!(version, 3..=5) {
+                return Err(Error::RecoveryFinancialUnsupported);
+            }
+        }
+        #[cfg(all(
+            feature = "durable-proposal",
+            feature = "manual-admission",
+            target_os = "linux"
+        ))]
+        WorkspaceInventory::Original(files) => {
+            if !matches!(version, 1 | 2 | 4) {
+                return Err(Error::RecoveryFinancialUnsupported);
+            }
+            files.check_inventory(directory, secrets)?;
+        }
+        #[cfg(all(
+            feature = "durable-proposal",
+            feature = "manual-admission",
+            target_os = "linux"
+        ))]
+        WorkspaceInventory::Publication(files) => {
+            if !matches!(version, 1 | 2 | 4) {
+                return Err(Error::RecoveryFinancialUnsupported);
+            }
+            files.check_inventory(directory, secrets)?;
+        }
+        #[cfg(not(all(
+            feature = "durable-proposal",
+            feature = "manual-admission",
+            target_os = "linux"
+        )))]
+        WorkspaceInventory::_Unavailable(_) => return Err(Error::Unsupported),
     }
     let path = directory.path("profile.vault")?;
     let metadata = layered_metadata::checked_layered_metadata_bytes(
@@ -260,6 +369,7 @@ pub(super) fn open_layered_checked(
         commit_bytes,
         &directory.read("generation.keys", MAX_DOCUMENT)?,
     )?;
+    if matches!(inventory, WorkspaceInventory::Legacy) {
     directory.inventory_of(
         &[
             "coordination.sqlite",
@@ -279,6 +389,7 @@ pub(super) fn open_layered_checked(
             "financial.inventory",
         ],
     )?;
+    }
     let parent_key = DatabaseKey::from_bytes(
         metadata
             .parent_key

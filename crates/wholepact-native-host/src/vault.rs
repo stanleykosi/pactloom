@@ -47,15 +47,15 @@ impl Secrets {
         Ok(self)
     }
     pub(crate) fn generation_plan_digest(&self) -> Option<&[u8]> {
-        (self.bytes[0] == 2).then(|| &self.bytes[LENGTH..LENGTH + 32])
+        matches!(self.bytes[0], 2 | 3).then(|| &self.bytes[LENGTH..LENGTH + 32])
     }
     #[cfg(feature = "financial-runtime")]
     pub(crate) fn generation_seal_key(&self) -> Result<Zeroizing<[u8; 32]>> {
-        if self.bytes[0] != 2 {
+        if !matches!(self.bytes[0], 2 | 3) {
             return Err(Error::Invalid);
         }
         Ok(Zeroizing::new(
-            self.bytes[LENGTH + 32..]
+            self.bytes[LENGTH + 32..LENGTH + 64]
                 .try_into()
                 .map_err(|_| Error::Invalid)?,
         ))
@@ -64,6 +64,34 @@ impl Secrets {
         if !(bytes.first() == Some(&1) && bytes.len() == LENGTH)
             && !(bytes.first() == Some(&2) && bytes.len() == LENGTH + 64)
         {
+            return Err(Error::Invalid);
+        }
+        Ok(Self { bytes })
+    }
+    /// Workspace-only v3 is a mandatory, immutable dependency anchor. This
+    /// consuming transition preserves every original v2 byte except version.
+    #[cfg(feature = "financial-runtime")]
+    pub(crate) fn bind_private_workspace_v3(mut self, anchor: [u8; 32]) -> Result<Self> {
+        if self.bytes[0] != 2 || self.bytes.len() != LENGTH + 64 {
+            return Err(Error::Invalid);
+        }
+        self.bytes[0] = 3;
+        self.bytes.extend_from_slice(&anchor);
+        Ok(self)
+    }
+    pub(crate) fn private_workspace_anchor(&self) -> Option<&[u8]> {
+        (self.bytes[0] == 3).then(|| &self.bytes[LENGTH + 64..LENGTH + 96])
+    }
+    pub(crate) fn require_portable_legacy(&self) -> Result<()> {
+        if self.private_workspace_anchor().is_some() {
+            return Err(Error::Invalid);
+        }
+        Ok(())
+    }
+    #[cfg(feature = "financial-runtime")]
+    pub(crate) fn open_private_workspace_v3(bytes: &[u8], password: &[u8]) -> Result<Self> {
+        let bytes = open(MAGIC, password, bytes)?;
+        if bytes.first() != Some(&3) || bytes.len() != LENGTH + 96 {
             return Err(Error::Invalid);
         }
         Ok(Self { bytes })
@@ -100,6 +128,7 @@ impl Secrets {
         Self::from_bytes(open(MAGIC, password, bytes)?)
     }
     pub(crate) fn recovery(&self, password: &[u8], archive_key: &[u8; 32]) -> Result<Vec<u8>> {
+        self.require_portable_legacy()?;
         let mut payload = Zeroizing::new(Vec::with_capacity(LENGTH + 32));
         payload.extend_from_slice(archive_key);
         payload.extend_from_slice(&self.bytes);
@@ -217,6 +246,56 @@ impl FinancialSecrets {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "financial-runtime")]
+    #[test]
+    fn private_workspace_v3_preserves_exact_legacy_slots_and_refuses_portable_decoders() {
+        let mut v1 = vec![0u8; 177];
+        v1[0] = 1;
+        for (index, byte) in v1.iter_mut().enumerate().skip(1) {
+            *byte = index as u8;
+        }
+        let legacy = Secrets::from_bytes(Zeroizing::new(v1.clone())).unwrap();
+        assert_eq!(legacy.bytes.as_slice(), v1);
+        let mut v2 = v1;
+        v2[0] = 2;
+        v2.extend_from_slice(&[11; 32]);
+        v2.extend_from_slice(&[12; 32]);
+        assert_eq!(v2.len(), 241);
+        let old = Secrets::from_bytes(Zeroizing::new(v2.clone())).unwrap();
+        let upgraded = old.bind_private_workspace_v3([13; 32]).unwrap();
+        assert_eq!(upgraded.bytes.len(), 273);
+        assert_eq!(upgraded.bytes[0], 3);
+        assert_eq!(&upgraded.bytes[1..241], &v2[1..]);
+        assert_eq!(upgraded.generation_plan_digest(), Some([11; 32].as_slice()));
+        assert_eq!(*upgraded.generation_seal_key().unwrap(), [12; 32]);
+        assert_eq!(
+            upgraded.private_workspace_anchor(),
+            Some([13; 32].as_slice())
+        );
+        assert!(Secrets::from_bytes(Zeroizing::new(upgraded.bytes.to_vec())).is_err());
+        assert!(
+            upgraded
+                .recovery(b"component-test-password", &[14; 32])
+                .is_err()
+        );
+        assert!(generation_archive::source_material(&upgraded).is_err());
+        let password = b"component-test-password";
+        let ciphertext = upgraded.seal(password).unwrap();
+        assert!(Secrets::open(&ciphertext, password).is_err());
+        let reopened = Secrets::open_private_workspace_v3(&ciphertext, password).unwrap();
+        assert!(reopened.same_recovery_material(&upgraded));
+        assert!(reopened.bind_private_workspace_v3([15; 32]).is_err());
+        let old = Secrets::from_bytes(Zeroizing::new(v2)).unwrap();
+        assert!(
+            Secrets::open_private_workspace_v3(&old.seal(password).unwrap(), password).is_err()
+        );
+        assert!(
+            Secrets::fresh()
+                .unwrap()
+                .bind_private_workspace_v3([13; 32])
+                .is_err()
+        );
+    }
     #[test]
     fn successor_vault_keeps_generation_anchor_in_authenticated_payload() {
         let original = Secrets::fresh().unwrap();
