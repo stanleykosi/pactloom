@@ -1,8 +1,18 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-19, 12:17 UTC.
+Updated: 2026-10-19, 12:54 UTC.
 
 **The bounded synthetic native two-owner fixed-signing fixture passed. Product qualification remains incomplete: no public testnet settlement, OS-process restart recovery, attended GUI reliability, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
+
+## CI28: observation completed; checkpoint entry erased a lower wallet result
+
+[Run 39251298687](https://github.com/stanleykosi/pactloom/actions/runs/39251298687), qualifier `957bb4c51fbd2d8786ee8b8fbec89601b82f29d8`, passed build (9m02s), Python153, Host97 and encrypted bootstrap. At12:33:43 UTC it failed after Observe Complete and Checkpoint Begin with HostCheckpointEntry/Host/Permission; stage, evidence and worker were null. Inputs85/94; reader never started; producer and runtime cleanup verified. Earlier checkpoint49 local gates also passed Engine2, Host7, pure97 and six non-synthetic compatibility cases.
+
+Source tracing found that both pre-Engine WalletSlot constructors erased their actual typed wallet error to Permission. Recording happened only after the original stage/invocation dropped, explaining the absent correlated stage. Slot checks enforce original observation freshness and exact account/generation identity; the previous public error does not prove which one failed. Host access is another possible early Permission source.
+
+Both Prepare and Admit previously observed the two wallets sequentially, consuming the first observation's unchanged earliest-request lifetime while the second completed. The bounded two-file correction uses one same-thread joined wave over the same disjoint wallet borrows, same scopes/providers and same stage checks. Both results drain before deterministic owner-order release; no partial result reaches construction. Existing scan/cache effects remain ephemeral. No retry, refreshed observation, replacement clock, budget increase or authority expansion is introduced. Synchronous audits can still serialize, so overlap is not a guarantee of native deadline fit.
+
+Actual slot and access failures are now observed in place before stage drop while preserving the original terminal Permission conversion. An ignored real localhost overlap preflight is routed only through isolated CI, with exact one-test verification and bounded, non-raw output. Local tests use only in-memory rendezvous components and real encrypted slot refusal components. Independent source review cleared the two implementation/test paths and the exact CI route. All-features Host/Wallet library build passed (5m59s), and all14 focused/compatibility tests passed with exactly one selected test each. Non-synthetic compilation runs alongside publication. The real TCP preflight and native completion remain unverified until isolated CI.
 
 ## CI27: original workspace still refuses; exact stage diagnostics and measured Engine component
 

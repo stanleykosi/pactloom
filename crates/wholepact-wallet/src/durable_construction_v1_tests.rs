@@ -1244,3 +1244,52 @@ fn consolidated_material_validation_preserves_exact_scope_bindings_after_success
     changed_material.requested_debit_zatoshis -= 1;
     assert_material_validation_category(&changed_material, &scope, MaterialResultCategory::Valid);
 }
+
+#[test]
+fn actual_slot_constructor_preserves_freshness_generation_and_account_refusals() {
+    // Real encrypted wallets, explicitly inert synthetic Fresh facts. No
+    // provider contact, native grant or durable-source promotion occurs.
+    for fault in 0..5 {
+        let mut fixture = held_component_fixture();
+        match fault {
+            0 => {}
+            1 => fixture.fresh[0].started = Instant::now() - Duration::from_secs(61),
+            2 => fixture.wallets.swap(0, 1),
+            3 => fixture.wallets[0].invalidate_observation(),
+            _ => fixture.fresh[0].scope.valid_until_unix_seconds = material_test_value(now()),
+        }
+        assert!(!fixture.fresh[0].observation.authorizes_signing());
+        assert!(
+            fixture
+                .wallets
+                .iter()
+                .all(|wallet| wallet.accepted.is_none())
+        );
+        let result =
+            DurableConstructionWalletSlotV1::new(&mut fixture.wallets[0], &fixture.fresh[0]);
+        match (fault, result) {
+            (0, Ok(slot)) => {
+                assert!(!slot.fresh.attempted.get());
+                drop(slot);
+            }
+            (1, Err(DurableConstructionError::Sync(SyncError::NoCurrentObservation))) => {}
+            (2, Err(DurableConstructionError::Binding)) => {}
+            (3 | 4, Err(DurableConstructionError::Stale)) => {}
+            _ => panic!("actual slot constructor changed its refusal category"),
+        }
+        assert!(!fixture.fresh[0].attempted.get());
+        assert!(fixture.competitors.iter().all(component_try_write));
+    }
+    // The positive slot above did not authenticate the synthetic source.
+    let fixture = held_component_fixture();
+    let fresh = &fixture.fresh[0];
+    let owned = material_test_value(fresh.material.validate());
+    assert!(matches!(
+        fixture.wallets[0].validate_durable_material_source_v1(
+            &fresh.material,
+            &fresh.scope,
+            &owned.fvk
+        ),
+        Err(DurableConstructionError::Binding)
+    ));
+}

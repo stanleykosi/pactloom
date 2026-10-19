@@ -102,6 +102,22 @@ sha256sum "$executable"
 TMPDIR="$runtime_root" python3 -B scripts/ci-synthetic-output-tests.py
 TMPDIR="$runtime_root" python3 -B scripts/ci-synthetic-output.py "$executable" pure
 TMPDIR="$runtime_root" python3 -B scripts/ci-synthetic-output.py "$executable" storage-bootstrap
+# CI-only loopback scheduling preflight. Never part of the local safe test gate.
+# Exact ignored selector only; no raw test output or arbitrary exception text.
+TMPDIR="$runtime_root" python3 -B - "$executable" <<'PY_WAVE'
+import subprocess, sys
+name = 'host::financial::private_durable_fixed_v2::observation_wave_v3_tests::observation_wave_actual_localhost_requests_overlap_before_responses'
+try:
+    listed = subprocess.run([sys.argv[1], name, '--ignored', '--exact', '--list'], capture_output=True, text=True, timeout=15)
+    assert listed.returncode == 0
+    assert [line for line in listed.stdout.splitlines() if line.endswith(': test')] == [name + ': test']
+    result = subprocess.run([sys.argv[1], name, '--ignored', '--exact', '--test-threads=1'], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0 and 'test result: ok. 1 passed; 0 failed;' in result.stdout
+except Exception:
+    print('CI_OBSERVATION_WAVE passed=false details_withheld=true', flush=True)
+    sys.exit(1)
+print('CI_OBSERVATION_WAVE passed=true native_authority=false', flush=True)
+PY_WAVE
 # Separate original-workspace producer SIGKILL and fresh-process read-only reopening.
 TMPDIR="$runtime_root" python3 -B scripts/ci-synthetic-output.py "$executable" durable-private-reopen
 TMPDIR="$runtime_root" python3 -B scripts/ci-synthetic-output.py "$executable" durable-owner-reopen
