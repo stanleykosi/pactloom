@@ -41,42 +41,7 @@ const OWNER_FILES: [&[u8]; 2] = [
 const PUBLIC_PREFIX: &str = "CI_SYNTHETIC_DURABLE_DELIVERY ";
 const DEATH_MARKER: &str = "SYNTHETIC_DURABLE_DELIVERY_ADMITTED_V2=1";
 const WORKFLOW_LIMIT: Duration = Duration::from_secs(900);
-const BOUNDARIES: &[&str] = &[
-    "PrivateWorkspaceBootstrap",
-    "PrivateSourceSelect",
-    "PrivateWorkspaceReserve",
-    "PrivateWorkspaceAnchor",
-    "PrivateWorkspacePublish",
-    "PrivateWorkspaceInitialize",
-    "PrivateWorkspaceCandidate",
-    "PrivateWorkspaceCapture",
-    "PrivateWorkspaceIntake",
-    "PrivateWorkspaceObserve",
-    "PrivateWorkspaceCheckpoint",
-    "PrivateWorkspaceProof",
-    "PrivateWorkspaceFreeze",
-    "PrivateWorkspaceScanCleanup",
-    "PrivateWorkspaceDurableMarker",
-    "PrivateWorkspaceProducerKill",
-    "PrivateWorkspaceProducerReap",
-    "PrivateWorkspaceReaderOpen",
-    "PrivateWorkspaceReadFixed",
-    "PrivateWorkspaceIdentityCompare",
-    "PrivateWorkspaceReaderReap",
-    "PrivateWorkspaceRootCleanup",
-    "DeliveryCredentialRegistration",
-    "DeliverySourceExport",
-    "DeliveryOriginalReopen",
-    "DeliveryUnsupportedAudit",
-    "DeliveryNativeAdmission",
-    "DeliveryHistoricalRead",
-    "DeliveryIdentityCompare",
-    "DeliveryDurableMarker",
-    "DeliveryProducerKill",
-    "DeliveryProducerReap",
-    "DeliveryReaderReap",
-    "DeliveryRootCleanup",
-];
+const BOUNDARIES: &[&str] = diagnostic::DELIVERY_BOUNDARIES;
 fn invalid() -> io::Error {
     io::Error::other("closed original delivery qualification record refused")
 }
@@ -180,13 +145,37 @@ impl ReaderCompletionV2 {
         write_record(root, READER_FILE, self)
     }
 }
+// Deserializing these Option fields must distinguish explicit null from a
+// missing schema3 key. No raw child text or selector is retained here.
+fn required_nullable<'de, D, T>(deserializer: D) -> std::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
+struct FailedChildObservation {
+    pair: Option<diagnostic::DeliveryFailure>,
+    completed: usize,
+    expected: usize,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct PublicOutcomeV2 {
+struct PublicOutcomeV3 {
     schema: u8,
     phase: String,
     result: String,
     first_failure: Option<String>,
+    #[serde(deserialize_with = "required_nullable")]
+    first_outcome: Option<String>,
+    #[serde(deserialize_with = "required_nullable")]
+    failed_child_inputs_completed: Option<usize>,
+    #[serde(deserialize_with = "required_nullable")]
+    failed_child_inputs_expected: Option<usize>,
+    #[serde(skip)]
+    pending_child_observation: Option<FailedChildObservation>,
     producer_exit: String,
     producer_reaped: bool,
     producer_group_absent: bool,
@@ -207,13 +196,17 @@ struct PublicOutcomeV2 {
     distribution_allowed: bool,
     public_chain_verified: bool,
 }
-impl PublicOutcomeV2 {
+impl PublicOutcomeV3 {
     fn pending() -> Self {
         Self {
-            schema: 2,
+            schema: 3,
             phase: "durable_delivery_admission".into(),
             result: "failed".into(),
             first_failure: None,
+            first_outcome: None,
+            failed_child_inputs_completed: None,
+            failed_child_inputs_expected: None,
+            pending_child_observation: None,
             producer_exit: "unverified".into(),
             producer_reaped: false,
             producer_group_absent: false,
@@ -241,8 +234,38 @@ impl PublicOutcomeV2 {
         }
         self.result = "failed".into();
     }
+    fn fail_child(&mut self, child: &PrivateWorkspaceStageResultV1, fallback: &'static str) {
+        if self.first_failure.is_none() {
+            self.fail(fallback);
+            if child.process.verified() {
+                self.pending_child_observation = Some(FailedChildObservation {
+                    pair: child.delivery_first_failure,
+                    completed: child.next,
+                    expected: child.expected,
+                });
+            }
+        }
+    }
+    fn disclose_child_observation_after_cleanup(&mut self) {
+        let pending = self.pending_child_observation.take();
+        if self.root_cleanup != "closed_absent" {
+            return;
+        }
+        if let Some(observed) = pending {
+            if let Some(pair) = observed.pair {
+                let (boundary, outcome) = pair.labels();
+                self.first_failure = Some(boundary.into());
+                self.first_outcome = Some(outcome.into());
+            }
+            self.failed_child_inputs_completed = Some(observed.completed);
+            self.failed_child_inputs_expected = Some(observed.expected);
+        }
+    }
     fn verified(&self) -> bool {
         self.first_failure.is_none()
+            && self.first_outcome.is_none()
+            && self.failed_child_inputs_completed.is_none()
+            && self.failed_child_inputs_expected.is_none()
             && self.producer_exit == "sigkill"
             && self.producer_reaped
             && self.producer_group_absent
@@ -264,13 +287,26 @@ impl PublicOutcomeV2 {
             && !self.public_chain_verified
     }
     fn public_json(&self) -> io::Result<String> {
-        if self.schema != 2
+        if self.schema != 3
             || self.phase != "durable_delivery_admission"
             || !["passed", "failed"].contains(&self.result.as_str())
             || self
                 .first_failure
                 .as_ref()
                 .is_some_and(|name| !BOUNDARIES.contains(&name.as_str()))
+            || self.first_outcome.as_ref().is_some_and(|outcome| {
+                self.first_failure.is_none() || !diagnostic::delivery_failure_outcome_label(outcome)
+            })
+            || !matches!(
+                (self.failed_child_inputs_completed, self.failed_child_inputs_expected),
+                (None, None) | (Some(0..=512), Some(1..=512))
+            )
+            || self.failed_child_inputs_completed.zip(self.failed_child_inputs_expected)
+                .is_some_and(|(completed, expected)| completed > expected || self.first_failure.is_none())
+            || ((self.result == "passed" || self.root_cleanup != "closed_absent"
+                    || !self.producer_reaped || !self.producer_group_absent)
+                && (self.first_outcome.is_some() || self.failed_child_inputs_completed.is_some()
+                    || self.failed_child_inputs_expected.is_some()))
             || !["sigkill", "other", "unverified"].contains(&self.producer_exit.as_str())
             || !["success", "other", "not_started", "unverified"]
                 .contains(&self.reader_exit.as_str())
@@ -349,19 +385,6 @@ fn monotonic_now_ns() -> io::Result<u64> {
         .and_then(|seconds| seconds.checked_add(nanos))
         .ok_or_else(invalid)
 }
-fn first_failure(summary: &str, fallback: &'static str) -> &'static str {
-    for entry in summary.split(',') {
-        let mut parts = entry.split(':');
-        if let (Some(boundary), Some(outcome)) = (parts.next(), parts.next()) {
-            if outcome != "Begin" && outcome != "Complete" {
-                if let Some(name) = BOUNDARIES.iter().find(|name| **name == boundary) {
-                    return name;
-                }
-            }
-        }
-    }
-    fallback
-}
 fn committed_count(root: &Path) -> io::Result<&'static str> {
     let mut committed = Vec::new();
     for name in OWNER_FILES {
@@ -406,7 +429,7 @@ fn run_two_processes_v2() -> io::Result<()> {
                 .map_err(|_| invalid())?,
         )
         .ok_or_else(invalid)?;
-    let mut public = PublicOutcomeV2::pending();
+    let mut public = PublicOutcomeV3::pending();
     let mut root = Some(
         tempfile::Builder::new()
             .prefix(CHILD_TEMPORARY_PREFIX)
@@ -470,7 +493,7 @@ fn run_two_processes_v2() -> io::Result<()> {
             }
         }
         if producer.outcome.is_err() {
-            public.fail(first_failure(&producer.summary, "DeliveryDurableMarker"));
+            public.fail_child(&producer, "DeliveryDurableMarker");
             return Err(invalid());
         }
         if !producer.process.verified()
@@ -478,7 +501,7 @@ fn run_two_processes_v2() -> io::Result<()> {
                 != owned_test_process_group_v1::GroupSignalV1::SentWhileLeaderOwned
             || public.producer_exit != "sigkill"
         {
-            public.fail("DeliveryProducerReap");
+            public.fail_child(&producer, "DeliveryProducerReap");
             return Err(invalid());
         }
         diagnostic::emit(B::DeliveryProducerKill, Outcome::Complete);
@@ -524,14 +547,14 @@ fn run_two_processes_v2() -> io::Result<()> {
         .into();
         root = reader.root.take();
         if reader.outcome.is_err() {
-            public.fail(first_failure(&reader.summary, "DeliveryHistoricalRead"));
+            public.fail_child(&reader, "DeliveryHistoricalRead");
             return Err(invalid());
         }
         if !reader.process.verified()
             || public.reader_exit != "success"
             || Instant::now() >= deadline
         {
-            public.fail("DeliveryReaderReap");
+            public.fail_child(&reader, "DeliveryReaderReap");
             return Err(invalid());
         }
         let checked =
@@ -567,6 +590,7 @@ fn run_two_processes_v2() -> io::Result<()> {
     } else {
         diagnostic::emit(B::DeliveryRootCleanup, Outcome::Complete);
     }
+    public.disclose_child_observation_after_cleanup();
     if workflow.is_err() && public.first_failure.is_none() {
         public.fail("DeliveryNativeAdmission");
     }
@@ -811,9 +835,16 @@ fn observe_delivery(
     };
     let boundary = match site {
         S::FixedRead => B::DeliveryHistoricalRead,
-        S::SourceInspection | S::ExportPreview | S::ExportCommit | S::ExportPostcheck => {
-            B::DeliverySourceExport
-        }
+        S::SourceOpen => B::DeliverySourceOpen,
+        S::SourceInspection => B::DeliverySourceInspection,
+        S::SourcePlan => B::DeliverySourcePlan,
+        S::RecipientPrepare => B::DeliveryRecipientPrepare,
+        S::ExportPreview => B::DeliveryExportPreview,
+        S::ExportApproval => B::DeliveryExportApproval,
+        S::ExportCommit => B::DeliveryExportCommit,
+        S::ExportPostcheck => B::DeliveryExportPostcheck,
+        S::NativeCheck => B::DeliveryNativeCheck,
+        S::SourceCheck => B::DeliverySourceCheck,
     };
     let outcome = match outcome {
         O::ReturnedOk => Outcome::Complete,
@@ -830,9 +861,36 @@ fn observe_delivery(
         O::HostPermission => Outcome::HostPermission,
         O::HostTerminal => Outcome::HostTerminal,
         O::HostAuthentication => Outcome::HostAuthentication,
+        O::BridgeBinding => Outcome::BridgeBinding,
+        O::BridgeConflict => Outcome::BridgeConflict,
+        O::BridgeMissing => Outcome::BridgeMissing,
+        O::BridgeUncertain => Outcome::BridgeUncertain,
+        O::BridgeLimit => Outcome::BridgeLimit,
+        O::BridgePermission => Outcome::BridgePermission,
+        O::BridgeRecoveryRequired => Outcome::BridgeRecoveryRequired,
+        O::BridgeCompleteOriginRecoveryUnavailable => Outcome::BridgeCompleteOriginRecoveryUnavailable,
+        O::BridgeVerification => Outcome::BridgeVerification,
+        O::BridgeSignerOriginUnavailable => Outcome::BridgeSignerOriginUnavailable,
+        O::BridgeJournal => Outcome::BridgeJournal,
+        O::BridgeAuthority => Outcome::BridgeAuthority,
+        O::BridgeWallet => Outcome::BridgeWallet,
+        O::BridgeIpc => Outcome::BridgeIpc,
+        O::HostPlatform => Outcome::HostPlatform,
+        O::HostLocked => Outcome::HostLocked,
+        O::HostInvalid => Outcome::HostInvalid,
+        O::HostStorage => Outcome::HostStorage,
+        O::HostQuarantined => Outcome::HostQuarantined,
+        O::HostUnsupported => Outcome::HostUnsupported,
+        O::HostReceipt => Outcome::HostReceipt,
+        O::HostRecoverySemantic => Outcome::HostRecoverySemantic,
+        O::HostRecoveryBackupUnsupported => Outcome::HostRecoveryBackupUnsupported,
+        O::HostRecoveryFinancialUnsupported => Outcome::HostRecoveryFinancialUnsupported,
+        O::HostCompleteOriginRecoveryUnavailable => Outcome::HostCompleteOriginRecoveryUnavailable,
+        O::HostHistoricalExportIncomplete => Outcome::HostHistoricalExportIncomplete,
+        O::HostGenerationArchiveIncomplete => Outcome::HostGenerationArchiveIncomplete,
         O::HostUnclassified => Outcome::WorkerFailure,
     };
-    diagnostic::emit(boundary, outcome);
+    diagnostic::emit_delivery_observation(boundary, outcome);
 }
 
 fn pair_owner(
@@ -1047,10 +1105,10 @@ pub(super) fn continue_completed_original(
                         stop.clone(),
                     ))
                     .map_err(worker_error)?;
-                let received = at(B::DeliverySourceExport, || {
+                let received = at(B::DeliveryRedisclosure, || {
                     client
                         .redisclose_durable_construction_v1(&redisclosure_request)
-                        .map_err(|error| bridge_error_at(B::DeliverySourceExport, error))
+                        .map_err(|error| bridge_error_at(B::DeliveryRedisclosure, error))
                 });
                 stop.store(true, Ordering::Release);
                 let stopped = done(&original.signers, index);
@@ -1510,8 +1568,8 @@ fn dedicated_dispatcher_credentials(
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn passed() -> PublicOutcomeV2 {
-        let mut r = PublicOutcomeV2::pending();
+    fn passed() -> PublicOutcomeV3 {
+        let mut r = PublicOutcomeV3::pending();
         r.result = "passed".into();
         r.producer_exit = "sigkill".into();
         r.producer_reaped = true;
@@ -1537,24 +1595,24 @@ mod tests {
         assert!(row.verified());
         assert!(row.public_json().unwrap().len() < 2048);
         for mutate in [
-            |r: &mut PublicOutcomeV2| r.producer_exit = "other".into(),
-            |r: &mut PublicOutcomeV2| r.producer_reaped = false,
-            |r: &mut PublicOutcomeV2| r.producer_group_absent = false,
-            |r: &mut PublicOutcomeV2| r.reader_reaped = false,
-            |r: &mut PublicOutcomeV2| r.reader_group_absent = false,
-            |r: &mut PublicOutcomeV2| r.root_cleanup = "retained".into(),
-            |r: &mut PublicOutcomeV2| r.admission_count = "1_of_2".into(),
-            |r: &mut PublicOutcomeV2| r.fixed_verified = false,
-            |r: &mut PublicOutcomeV2| r.exact_fixed_prefix_preserved = false,
-            |r: &mut PublicOutcomeV2| r.exact_export_history_preserved = false,
-            |r: &mut PublicOutcomeV2| r.exact_original_scopes_preserved = false,
-            |r: &mut PublicOutcomeV2| r.exact_original_intents_preserved = false,
-            |r: &mut PublicOutcomeV2| r.authenticated_histories_verified = false,
-            |r: &mut PublicOutcomeV2| r.unsupported_actions_denied = false,
-            |r: &mut PublicOutcomeV2| r.reader_no_effects_verified = false,
-            |r: &mut PublicOutcomeV2| r.authorization_allowed = true,
-            |r: &mut PublicOutcomeV2| r.distribution_allowed = true,
-            |r: &mut PublicOutcomeV2| r.public_chain_verified = true,
+            |r: &mut PublicOutcomeV3| r.producer_exit = "other".into(),
+            |r: &mut PublicOutcomeV3| r.producer_reaped = false,
+            |r: &mut PublicOutcomeV3| r.producer_group_absent = false,
+            |r: &mut PublicOutcomeV3| r.reader_reaped = false,
+            |r: &mut PublicOutcomeV3| r.reader_group_absent = false,
+            |r: &mut PublicOutcomeV3| r.root_cleanup = "retained".into(),
+            |r: &mut PublicOutcomeV3| r.admission_count = "1_of_2".into(),
+            |r: &mut PublicOutcomeV3| r.fixed_verified = false,
+            |r: &mut PublicOutcomeV3| r.exact_fixed_prefix_preserved = false,
+            |r: &mut PublicOutcomeV3| r.exact_export_history_preserved = false,
+            |r: &mut PublicOutcomeV3| r.exact_original_scopes_preserved = false,
+            |r: &mut PublicOutcomeV3| r.exact_original_intents_preserved = false,
+            |r: &mut PublicOutcomeV3| r.authenticated_histories_verified = false,
+            |r: &mut PublicOutcomeV3| r.unsupported_actions_denied = false,
+            |r: &mut PublicOutcomeV3| r.reader_no_effects_verified = false,
+            |r: &mut PublicOutcomeV3| r.authorization_allowed = true,
+            |r: &mut PublicOutcomeV3| r.distribution_allowed = true,
+            |r: &mut PublicOutcomeV3| r.public_chain_verified = true,
         ] {
             let mut row = passed();
             mutate(&mut row);
@@ -1564,13 +1622,13 @@ mod tests {
     }
     #[test]
     fn delivery_result_is_typed_finite_and_first_failure_preserving() {
-        let mut row = PublicOutcomeV2::pending();
+        let mut row = PublicOutcomeV3::pending();
         row.fail("DeliverySourceExport");
         row.fail("DeliveryRootCleanup");
         assert_eq!(row.first_failure.as_deref(), Some("DeliverySourceExport"));
         let json = row.public_json().unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(value.as_object().unwrap().len(), 23);
+        assert_eq!(value.as_object().unwrap().len(), 26);
         for forbidden in [
             "path",
             "hash",
@@ -1583,13 +1641,163 @@ mod tests {
             assert!(!value.as_object().unwrap().contains_key(forbidden));
         }
         assert!(
-            serde_json::from_str::<PublicOutcomeV2>(
-                &(json.trim_end_matches('}').to_owned() + ",\"schema\":2}")
+            serde_json::from_str::<PublicOutcomeV3>(
+                &(json.trim_end_matches('}').to_owned() + ",\"schema\":3}")
             )
             .is_err()
         );
         row.first_failure = Some("unbounded-private-error".into());
         assert!(row.public_json().is_err());
+    }
+    fn failed_child(marker: &[u8], completed: usize, expected: usize, verified: bool) -> PrivateWorkspaceStageResultV1 {
+        use std::os::unix::process::ExitStatusExt;
+        let mut transcript = rolling_transcript_v1::Transcript::new([]).unwrap();
+        transcript.enable_delivery_first_failure();
+        transcript.append(marker, Path::new("/tmp/owned")).unwrap();
+        PrivateWorkspaceStageResultV1 {
+            delivery_first_failure: transcript.delivery_first_failure(),
+            private_fixed_diagnostic: None,
+            diagnostic_withheld: false,
+            outcome: Err(invalid()),
+            process: owned_test_process_group_v1::ProcessCleanupV1 {
+                group_signal: owned_test_process_group_v1::GroupSignalV1::SentWhileLeaderOwned,
+                group_absence: owned_test_process_group_v1::GroupAbsenceV1::OriginalGroupAbsentObserved,
+                direct_child: if verified {
+                    owned_test_process_group_v1::DirectChildV1::Reaped
+                } else {
+                    owned_test_process_group_v1::DirectChildV1::Unverified
+                },
+                status: Some(std::process::ExitStatus::from_raw(1 << 8)),
+            },
+            root: None,
+            summary: transcript.summary(),
+            failure_reason: HarnessFailureReason::ChildExit,
+            next: completed,
+            expected,
+        }
+    }
+    #[test]
+    fn delivery_observation_uses_same_first_failed_child_and_real_progress() {
+        let producer = failed_child(
+            b"[JOINED_DIAGNOSTIC DeliveryExportCommit EngineDisclosureUnknown]\n",
+            17, 61, true,
+        );
+        let reader = failed_child(
+            b"[JOINED_DIAGNOSTIC DeliveryHistoricalRead HostPermission]\n",
+            2, 3, true,
+        );
+        let mut row = PublicOutcomeV3::pending();
+        row.producer_reaped = true;
+        row.producer_group_absent = true;
+        row.fail_child(&producer, "DeliveryDurableMarker");
+        row.fail_child(&reader, "DeliveryHistoricalRead");
+        assert!(row.first_outcome.is_none());
+        row.root_cleanup = "closed_absent".into();
+        row.disclose_child_observation_after_cleanup();
+        assert_eq!(row.first_failure.as_deref(), Some("DeliveryExportCommit"));
+        assert_eq!(row.first_outcome.as_deref(), Some("EngineDisclosureUnknown"));
+        assert_eq!(row.failed_child_inputs_completed, Some(17));
+        assert_eq!(row.failed_child_inputs_expected, Some(61));
+        assert!(row.public_json().is_ok());
+        // Neither the outcome nor input progress says whether exposure occurred.
+        assert!(!row.reader_no_effects_verified);
+        let mut reader_row = PublicOutcomeV3::pending();
+        reader_row.producer_reaped = true;
+        reader_row.producer_group_absent = true;
+        reader_row.fail_child(&reader, "DeliveryHistoricalRead");
+        reader_row.root_cleanup = "closed_absent".into();
+        reader_row.disclose_child_observation_after_cleanup();
+        assert_eq!(reader_row.first_outcome.as_deref(), Some("HostPermission"));
+        assert_eq!(reader_row.failed_child_inputs_completed, Some(2));
+        assert_eq!(reader_row.failed_child_inputs_expected, Some(3));
+    }
+    #[test]
+    fn delivery_observation_withholds_unclean_or_unverified_child_details() {
+        for cleanup in ["retained", "unverified", "closed_absent"] {
+            for verified in [false, true] {
+                let child = failed_child(
+                    b"[JOINED_DIAGNOSTIC DeliverySourcePlan HostInvalid]\n",
+                    11, 61, verified,
+                );
+                let mut row = PublicOutcomeV3::pending();
+                row.producer_reaped = verified;
+                row.producer_group_absent = verified;
+                row.fail_child(&child, "DeliveryDurableMarker");
+                row.root_cleanup = cleanup.into();
+                row.disclose_child_observation_after_cleanup();
+                let visible = verified && cleanup == "closed_absent";
+                assert_eq!(row.first_outcome.as_deref(), visible.then_some("HostInvalid"));
+                assert_eq!(row.failed_child_inputs_completed, visible.then_some(11));
+                assert_eq!(row.failed_child_inputs_expected, visible.then_some(61));
+                assert_eq!(row.first_failure.as_deref(), Some(if visible { "DeliverySourcePlan" } else { "DeliveryDurableMarker" }));
+                assert!(row.public_json().is_ok());
+            }
+        }
+        // A missing/lost latch never consults the last-64 summary for an outcome.
+        let mut child = failed_child(
+            b"[JOINED_DIAGNOSTIC DeliverySourceExport HostReceipt]\n",
+            11, 61, true,
+        );
+        child.delivery_first_failure = None;
+        let mut row = PublicOutcomeV3::pending();
+        row.producer_reaped = true;
+        row.producer_group_absent = true;
+        row.fail_child(&child, "DeliveryDurableMarker");
+        row.root_cleanup = "closed_absent".into();
+        row.disclose_child_observation_after_cleanup();
+        assert_eq!(row.first_failure.as_deref(), Some("DeliveryDurableMarker"));
+        assert!(row.first_outcome.is_none());
+        assert_eq!(row.failed_child_inputs_completed, Some(11));
+        assert_eq!(row.failed_child_inputs_expected, Some(61));
+    }
+    #[test]
+    fn delivery_schema3_requires_nullable_keys_and_bounded_typed_details() {
+        let mut row = PublicOutcomeV3::pending();
+        row.fail("DeliverySourcePlan");
+        row.root_cleanup = "closed_absent".into();
+        row.producer_reaped = true;
+        row.producer_group_absent = true;
+        let value: serde_json::Value = serde_json::from_str(&row.public_json().unwrap()).unwrap();
+        assert_eq!(value["schema"], 3);
+        for key in ["first_outcome", "failed_child_inputs_completed", "failed_child_inputs_expected"] {
+            assert!(value.get(key).unwrap().is_null());
+            let mut missing = value.clone();
+            missing.as_object_mut().unwrap().remove(key);
+            assert!(serde_json::from_value::<PublicOutcomeV3>(missing).is_err());
+        }
+        for outcome in ["Begin", "Complete", "private-value", "HostInvalid extra"] {
+            row.first_outcome = Some(outcome.into());
+            assert!(row.public_json().is_err());
+        }
+        row.first_outcome = Some("HostInvalid".into());
+        row.failed_child_inputs_completed = Some(0);
+        row.failed_child_inputs_expected = Some(1);
+        assert!(row.public_json().is_ok());
+        for (completed, expected) in [
+            (Some(1), None), (None, Some(1)), (Some(0), Some(0)),
+            (Some(2), Some(1)), (Some(1), Some(513)), (Some(513), Some(513)),
+        ] {
+            row.failed_child_inputs_completed = completed;
+            row.failed_child_inputs_expected = expected;
+            assert!(row.public_json().is_err());
+        }
+        row.failed_child_inputs_completed = Some(1);
+        row.failed_child_inputs_expected = Some(2);
+        row.producer_reaped = false;
+        assert!(row.public_json().is_err());
+        row.producer_reaped = true;
+        row.producer_group_absent = false;
+        assert!(row.public_json().is_err());
+        row.producer_group_absent = true;
+        row.first_failure = None;
+        assert!(row.public_json().is_err());
+        let mut success = passed();
+        success.first_outcome = Some("HostInvalid".into());
+        assert!(success.public_json().is_err());
+        success.first_outcome = None;
+        success.failed_child_inputs_completed = Some(1);
+        success.failed_child_inputs_expected = Some(2);
+        assert!(success.public_json().is_err());
     }
     #[test]
     fn delivery_marker_is_complete_single_role_exact_and_not_precursor() {

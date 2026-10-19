@@ -41,10 +41,16 @@ use wholepact_signer::ipc::PairScope;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::host) enum DeliveryObservationSiteV2 {
+    SourceOpen,
     SourceInspection,
+    SourcePlan,
+    RecipientPrepare,
     ExportPreview,
+    ExportApproval,
     ExportCommit,
     ExportPostcheck,
+    NativeCheck,
+    SourceCheck,
     FixedRead,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,9 +66,36 @@ pub(in crate::host) enum DeliveryObservationOutcomeV2 {
     EngineDurableProfileUnavailable,
     EngineResourceExhausted,
     EngineUnclassified,
-    HostPermission,
+    BridgeBinding,
+    BridgeConflict,
+    BridgeMissing,
+    BridgeUncertain,
+    BridgeLimit,
+    BridgePermission,
+    BridgeRecoveryRequired,
+    BridgeCompleteOriginRecoveryUnavailable,
+    BridgeVerification,
+    BridgeSignerOriginUnavailable,
+    BridgeJournal,
+    BridgeAuthority,
+    BridgeWallet,
+    BridgeIpc,
+    HostPlatform,
     HostTerminal,
+    HostPermission,
+    HostLocked,
+    HostInvalid,
     HostAuthentication,
+    HostStorage,
+    HostQuarantined,
+    HostUnsupported,
+    HostReceipt,
+    HostRecoverySemantic,
+    HostRecoveryBackupUnsupported,
+    HostRecoveryFinancialUnsupported,
+    HostCompleteOriginRecoveryUnavailable,
+    HostHistoricalExportIncomplete,
+    HostGenerationArchiveIncomplete,
     HostUnclassified,
 }
 #[cfg(all(test, feature = "synthetic-born-joined-qualification"))]
@@ -107,29 +140,91 @@ fn engine_outcome(error: &wholepact_engine::ApiError) -> DeliveryObservationOutc
         _ => O::EngineUnclassified,
     }
 }
+/// Observe only the borrowed error of the result already returned by the
+/// existing operation. This kernel does not run, clone or replace that operation.
+fn observed_result<T, E>(
+    site: DeliveryObservationSiteV2,
+    result: std::result::Result<T, E>,
+    outcome: impl FnOnce(&E) -> DeliveryObservationOutcomeV2,
+) -> std::result::Result<T, E> {
+    if let Err(error) = &result {
+        observe_delivery(site, outcome(error));
+    }
+    result
+}
 fn engine_result<T>(
     site: DeliveryObservationSiteV2,
     result: wholepact_engine::Result<T>,
 ) -> Result<T> {
-    if let Err(error) = &result {
-        observe_delivery(site, engine_outcome(error));
+    observed_result(site, result, engine_outcome).map_err(Error::from)
+}
+fn bridge_outcome(
+    error: &wholepact_signer::authority_bridge::BridgeError,
+) -> DeliveryObservationOutcomeV2 {
+    use wholepact_signer::authority_bridge::BridgeError as E;
+    use DeliveryObservationOutcomeV2 as O;
+    match error {
+        E::Binding => O::BridgeBinding,
+        E::Conflict => O::BridgeConflict,
+        E::Missing => O::BridgeMissing,
+        E::Uncertain => O::BridgeUncertain,
+        E::Limit => O::BridgeLimit,
+        E::Permission => O::BridgePermission,
+        E::RecoveryRequired => O::BridgeRecoveryRequired,
+        E::CompleteOriginRecoveryUnavailable => O::BridgeCompleteOriginRecoveryUnavailable,
+        E::Verification => O::BridgeVerification,
+        E::SignerOriginUnavailable => O::BridgeSignerOriginUnavailable,
+        E::Journal(_) => O::BridgeJournal,
+        E::Authority(_) => O::BridgeAuthority,
+        E::Wallet(_) => O::BridgeWallet,
+        E::Ipc => O::BridgeIpc,
     }
-    result.map_err(Error::from)
+}
+fn bridge_result<T>(
+    site: DeliveryObservationSiteV2,
+    result: wholepact_signer::authority_bridge::Result<T>,
+) -> wholepact_signer::authority_bridge::Result<T> {
+    observed_result(site, result, bridge_outcome)
+}
+fn host_outcome(error: &Error) -> DeliveryObservationOutcomeV2 {
+    use DeliveryObservationOutcomeV2 as O;
+    match error {
+        Error::Platform => O::HostPlatform,
+        Error::Terminal => O::HostTerminal,
+        Error::Permission => O::HostPermission,
+        Error::Locked => O::HostLocked,
+        Error::Invalid => O::HostInvalid,
+        Error::Authentication => O::HostAuthentication,
+        Error::Storage => O::HostStorage,
+        Error::Quarantined => O::HostQuarantined,
+        Error::Unsupported => O::HostUnsupported,
+        Error::Receipt(_) => O::HostReceipt,
+        Error::RecoverySemantic(_) => O::HostRecoverySemantic,
+        Error::RecoveryBackupUnsupported => O::HostRecoveryBackupUnsupported,
+        Error::RecoveryFinancialUnsupported => O::HostRecoveryFinancialUnsupported,
+        Error::CompleteOriginRecoveryUnavailable => O::HostCompleteOriginRecoveryUnavailable,
+        Error::HistoricalExportIncomplete => O::HostHistoricalExportIncomplete,
+        Error::GenerationArchiveIncomplete => O::HostGenerationArchiveIncomplete,
+    }
+}
+fn host_result<T>(site: DeliveryObservationSiteV2, result: Result<T>) -> Result<T> {
+    observed_result(site, result, host_outcome)
+}
+/// Shared read adapters observe an export check only when their existing role
+/// is export. Historical reads retain their original behavior and attribution.
+fn export_check_result<T>(
+    exporting: bool,
+    site: DeliveryObservationSiteV2,
+    result: Result<T>,
+) -> Result<T> {
+    if exporting {
+        host_result(site, result)
+    } else {
+        result
+    }
 }
 fn post_export_result(result: Result<()>) -> Result<()> {
-    if let Err(error) = &result {
-        use DeliveryObservationOutcomeV2 as O;
-        observe_delivery(
-            DeliveryObservationSiteV2::ExportPostcheck,
-            match error {
-                Error::Permission => O::HostPermission,
-                Error::Terminal => O::HostTerminal,
-                Error::Authentication => O::HostAuthentication,
-                _ => O::HostUnclassified,
-            },
-        );
-    }
-    result
+    host_result(DeliveryObservationSiteV2::ExportPostcheck, result)
 }
 
 /// Explicit future delivery choices only. Original identities, lineage, account
@@ -257,16 +352,37 @@ struct InspectionReadV2<'a, 'host> {
 impl InspectionReadV2<'_, '_> {
     fn check(&self) -> Result<()> {
         if self.export_preview {
-            self.host.require_manual_session()?;
+            host_result(
+                DeliveryObservationSiteV2::NativeCheck,
+                self.host.require_manual_session(),
+            )?;
         }
-        self.owner.inspection_approval().check()?;
-        current_source(self.host, self.owner, self.inspection)?;
-        self.owner.inspection_approval().check()
+        export_check_result(
+            self.export_preview,
+            DeliveryObservationSiteV2::NativeCheck,
+            self.owner.inspection_approval().check(),
+        )?;
+        export_check_result(
+            self.export_preview,
+            DeliveryObservationSiteV2::SourceCheck,
+            current_source(self.host, self.owner, self.inspection),
+        )?;
+        export_check_result(
+            self.export_preview,
+            DeliveryObservationSiteV2::NativeCheck,
+            self.owner.inspection_approval().check(),
+        )
     }
 }
 impl LocalPrivateDurableAdmissionConsentV2 for InspectionReadV2<'_, '_> {
     fn permits_source(&self, s: &PrivateWorkspaceScopeV1) -> bool {
-        same(s, self.inspection.workspace_scope()).unwrap_or(false) && self.check().is_ok()
+        export_check_result(
+            self.export_preview,
+            DeliveryObservationSiteV2::SourceCheck,
+            same(s, self.inspection.workspace_scope()),
+        )
+        .unwrap_or(false)
+            && self.check().is_ok()
     }
 }
 impl LocalProofConsent for InspectionReadV2<'_, '_> {
@@ -296,16 +412,37 @@ struct OwnedDeliveryConsentV2<'a, 'host> {
 impl OwnedDeliveryConsentV2<'_, '_> {
     fn check(&self) -> Result<()> {
         if self.export.is_some() {
-            self.host.require_manual_session()?;
+            host_result(
+                DeliveryObservationSiteV2::NativeCheck,
+                self.host.require_manual_session(),
+            )?;
         }
-        self.approval.check()?;
-        current_source(self.host, self.owner, self.inspection)?;
-        self.approval.check()
+        export_check_result(
+            self.export.is_some(),
+            DeliveryObservationSiteV2::NativeCheck,
+            self.approval.check(),
+        )?;
+        export_check_result(
+            self.export.is_some(),
+            DeliveryObservationSiteV2::SourceCheck,
+            current_source(self.host, self.owner, self.inspection),
+        )?;
+        export_check_result(
+            self.export.is_some(),
+            DeliveryObservationSiteV2::NativeCheck,
+            self.approval.check(),
+        )
     }
 }
 impl LocalPrivateDurableAdmissionConsentV2 for OwnedDeliveryConsentV2<'_, '_> {
     fn permits_source(&self, s: &PrivateWorkspaceScopeV1) -> bool {
-        same(s, self.inspection.workspace_scope()).unwrap_or(false) && self.check().is_ok()
+        export_check_result(
+            self.export.is_some(),
+            DeliveryObservationSiteV2::SourceCheck,
+            same(s, self.inspection.workspace_scope()),
+        )
+        .unwrap_or(false)
+            && self.check().is_ok()
     }
 }
 impl LocalProofConsent for OwnedDeliveryConsentV2<'_, '_> {
@@ -426,21 +563,36 @@ impl Host {
         request: DurableReviewDeliveryRequestV1,
         choices: &DeliveryChoicesV2,
     ) -> Result<OriginalDeliveryExportV2> {
-        self.require_manual_session()?;
-        let owner = self.original_delivery_admission_owner_v2(root)?;
+        host_result(
+            DeliveryObservationSiteV2::SourceOpen,
+            self.require_manual_session(),
+        )?;
+        let owner = host_result(
+            DeliveryObservationSiteV2::SourceOpen,
+            self.original_delivery_admission_owner_v2(root),
+        )?;
         let inspection = engine_result(
             DeliveryObservationSiteV2::SourceInspection,
-            owner
-                .coordinator()
-                .inspect_original_for_admission_v2(self.access()?, &owner),
+            owner.coordinator().inspect_original_for_admission_v2(
+                host_result(DeliveryObservationSiteV2::SourceInspection, self.access())?,
+                &owner,
+            ),
         )?;
-        let plan = source_plan(&owner, &inspection, choices)?;
+        let plan = host_result(
+            DeliveryObservationSiteV2::SourcePlan,
+            source_plan(&owner, &inspection, choices),
+        )?;
         // Validate the actual source-derived plan before preparing a recipient
         // or recording exposure. This pure grammar check is not admission.
-        plan.validate_origins().map_err(|_| Error::Invalid)?;
-        let recipient = client
-            .prepare_durable_review_delivery_v1(&request)
-            .map_err(|_| Error::Permission)?;
+        host_result(
+            DeliveryObservationSiteV2::SourcePlan,
+            plan.validate_origins().map_err(|_| Error::Invalid),
+        )?;
+        let recipient = bridge_result(
+            DeliveryObservationSiteV2::RecipientPrepare,
+            client.prepare_durable_review_delivery_v1(&request),
+        )
+        .map_err(|_| Error::Permission)?;
         let read = InspectionReadV2 {
             host: self,
             owner: &owner,
@@ -450,36 +602,62 @@ impl Host {
         let export_scope = engine_result(
             DeliveryObservationSiteV2::ExportPreview,
             owner.coordinator().review_original_delivery_v2(
-                self.access()?,
+                host_result(DeliveryObservationSiteV2::ExportPreview, self.access())?,
                 &recipient,
                 &read,
                 &read,
                 &read,
             ),
         )?;
-        read.check()?;
+        host_result(DeliveryObservationSiteV2::ExportPreview, read.check())?;
         if export_scope.proposal != *inspection.fixed_identity()
             || export_scope.recipient.request != request
         {
-            return Err(Error::Authentication);
+            return host_result(
+                DeliveryObservationSiteV2::ExportPreview,
+                Err(Error::Authentication),
+            );
         }
         let detail = format!(
             "Approve exact original delivery export and prospective admission request.\n{}\n{}\n{}\nDisclose the full retained private candidate, viewing keys, notes and witnesses to ONLY this actual installed reviewer. Retain DisclosedOrUnknown before any byte; failure cannot undo disclosure. Prospective policy names the original dispatcher and provider, one verified retained extraction and same-byte explicit retries, bounded by the original absolute ceilings. Provider receives the entire final transaction and connection metadata; each witness receives final commitments, backend linkage and account/reservation linkage. This operation does not sign, submit, enroll a live dispatcher or authorize any v2 financial execution.",
-            serde_json::to_string(&inspection)?,
-            serde_json::to_string(&export_scope)?,
-            serde_json::to_string(&plan)?
+            host_result(
+                DeliveryObservationSiteV2::ExportApproval,
+                serde_json::to_string(&inspection).map_err(Error::from),
+            )?,
+            host_result(
+                DeliveryObservationSiteV2::ExportApproval,
+                serde_json::to_string(&export_scope).map_err(Error::from),
+            )?,
+            host_result(
+                DeliveryObservationSiteV2::ExportApproval,
+                serde_json::to_string(&plan).map_err(Error::from),
+            )?
         );
-        let approval = self.terminal.approve_durable_delivery_v2(
-            owner.inspection_approval(),
-            &detail,
-            || {
-                read.check()?;
-                recipient.check_current().map_err(|_| Error::Permission)
-            },
-            || {
-                current_source(self, &owner, &inspection)?;
-                recipient.check_current().map_err(|_| Error::Permission)
-            },
+        let approval = host_result(
+            DeliveryObservationSiteV2::ExportApproval,
+            self.terminal.approve_durable_delivery_v2(
+                owner.inspection_approval(),
+                &detail,
+                || {
+                    read.check()?;
+                    bridge_result(
+                        DeliveryObservationSiteV2::ExportApproval,
+                        recipient.check_current(),
+                    )
+                    .map_err(|_| Error::Permission)
+                },
+                || {
+                    host_result(
+                        DeliveryObservationSiteV2::SourceCheck,
+                        current_source(self, &owner, &inspection),
+                    )?;
+                    bridge_result(
+                        DeliveryObservationSiteV2::ExportApproval,
+                        recipient.check_current(),
+                    )
+                    .map_err(|_| Error::Permission)
+                },
+            ),
         )?;
         drop(read);
         let consent = OwnedDeliveryConsentV2 {
@@ -489,11 +667,11 @@ impl Host {
             approval,
             export: Some(&export_scope),
         };
-        consent.check()?;
+        host_result(DeliveryObservationSiteV2::ExportCommit, consent.check())?;
         let retention = engine_result(
             DeliveryObservationSiteV2::ExportCommit,
             owner.coordinator().deliver_original_for_admission_v2(
-                self.access()?,
+                host_result(DeliveryObservationSiteV2::ExportCommit, self.access())?,
                 recipient,
                 &consent,
                 &consent,
@@ -755,6 +933,289 @@ mod tests {
             engine_result::<()>(DeliveryObservationSiteV2::ExportCommit, Err(error)),
             Err(Error::Permission)
         ));
+    }
+    #[test]
+    fn observed_result_keeps_non_clone_success_and_failure_once_only() {
+        use std::cell::Cell;
+        struct OwnedOnly(Box<u8>);
+        let operations = Cell::new(0);
+        let classifications = Cell::new(0);
+        let success = OwnedOnly(Box::new(7));
+        let success_address = (&*success.0) as *const u8;
+        let operation = || {
+            operations.set(operations.get() + 1);
+            Ok::<_, OwnedOnly>(success)
+        };
+        let returned = observed_result(
+            DeliveryObservationSiteV2::SourceOpen,
+            operation(),
+            |_| {
+                classifications.set(classifications.get() + 1);
+                DeliveryObservationOutcomeV2::HostUnclassified
+            },
+        );
+        match returned {
+            Ok(owned) => {
+                assert_eq!((&*owned.0) as *const u8, success_address);
+                assert_eq!(*owned.0, 7);
+            }
+            Err(_) => panic!("success changed"),
+        }
+        assert_eq!(operations.get(), 1);
+        assert_eq!(classifications.get(), 0);
+
+        let failure = OwnedOnly(Box::new(9));
+        let failure_address = (&*failure.0) as *const u8;
+        let classifier_capture = OwnedOnly(Box::new(11));
+        let operation = || {
+            operations.set(operations.get() + 1);
+            Err::<OwnedOnly, _>(failure)
+        };
+        let returned = observed_result(
+            DeliveryObservationSiteV2::SourcePlan,
+            operation(),
+            |error| {
+                classifications.set(classifications.get() + 1);
+                assert_eq!((&*error.0) as *const u8, failure_address);
+                drop(classifier_capture);
+                DeliveryObservationOutcomeV2::HostUnclassified
+            },
+        );
+        match returned {
+            Err(owned) => {
+                assert_eq!((&*owned.0) as *const u8, failure_address);
+                assert_eq!(*owned.0, 9);
+            }
+            Ok(_) => panic!("failure changed"),
+        }
+        assert_eq!(operations.get(), 2);
+        assert_eq!(classifications.get(), 1);
+    }
+    #[test]
+    fn finite_bridge_mapping_preserves_original_error_variants() {
+        use wholepact_signer::authority_bridge::BridgeError as E;
+        use DeliveryObservationOutcomeV2 as O;
+        for (error, expected) in [
+            (E::Binding, O::BridgeBinding),
+            (E::Conflict, O::BridgeConflict),
+            (E::Missing, O::BridgeMissing),
+            (E::Uncertain, O::BridgeUncertain),
+            (E::Limit, O::BridgeLimit),
+            (E::Permission, O::BridgePermission),
+            (E::RecoveryRequired, O::BridgeRecoveryRequired),
+            (
+                E::CompleteOriginRecoveryUnavailable,
+                O::BridgeCompleteOriginRecoveryUnavailable,
+            ),
+            (E::Verification, O::BridgeVerification),
+            (E::SignerOriginUnavailable, O::BridgeSignerOriginUnavailable),
+            (
+                E::Journal(wholepact_signer::consent_journal::JournalError::Expired),
+                O::BridgeJournal,
+            ),
+            (
+                E::Authority(wholepact_authority::AuthorityError::InvalidBinding),
+                O::BridgeAuthority,
+            ),
+            (
+                E::Wallet(
+                    wholepact_wallet::wallet::protected_sync::key_use::WalletKeyUseError::Permission,
+                ),
+                O::BridgeWallet,
+            ),
+            (E::Ipc, O::BridgeIpc),
+        ] {
+            assert_eq!(bridge_outcome(&error), expected);
+            let discriminant = std::mem::discriminant(&error);
+            let returned = bridge_result::<()>(
+                DeliveryObservationSiteV2::RecipientPrepare,
+                Err(error),
+            )
+            .unwrap_err();
+            assert_eq!(std::mem::discriminant(&returned), discriminant);
+            assert_eq!(bridge_outcome(&returned), expected);
+            assert!(matches!(
+                Err::<(), _>(returned).map_err(|_| Error::Permission),
+                Err(Error::Permission)
+            ));
+        }
+    }
+    #[test]
+    fn finite_host_mapping_preserves_original_private_payload() {
+        use DeliveryObservationOutcomeV2 as O;
+        for (error, expected) in [
+            (Error::Platform, O::HostPlatform),
+            (Error::Terminal, O::HostTerminal),
+            (Error::Permission, O::HostPermission),
+            (Error::Locked, O::HostLocked),
+            (Error::Invalid, O::HostInvalid),
+            (Error::Authentication, O::HostAuthentication),
+            (Error::Storage, O::HostStorage),
+            (Error::Quarantined, O::HostQuarantined),
+            (Error::Unsupported, O::HostUnsupported),
+            (Error::Receipt("private receipt".into()), O::HostReceipt),
+            (
+                Error::RecoverySemantic("private recovery".into()),
+                O::HostRecoverySemantic,
+            ),
+            (Error::RecoveryBackupUnsupported, O::HostRecoveryBackupUnsupported),
+            (
+                Error::RecoveryFinancialUnsupported,
+                O::HostRecoveryFinancialUnsupported,
+            ),
+            (
+                Error::CompleteOriginRecoveryUnavailable,
+                O::HostCompleteOriginRecoveryUnavailable,
+            ),
+            (Error::HistoricalExportIncomplete, O::HostHistoricalExportIncomplete),
+            (Error::GenerationArchiveIncomplete, O::HostGenerationArchiveIncomplete),
+        ] {
+            assert_eq!(host_outcome(&error), expected);
+            let discriminant = std::mem::discriminant(&error);
+            let returned = host_result::<()>(DeliveryObservationSiteV2::SourcePlan, Err(error))
+                .unwrap_err();
+            assert_eq!(std::mem::discriminant(&returned), discriminant);
+        }
+        let private = String::from("private source payload must not be emitted");
+        let address = private.as_ptr();
+        let returned = host_result::<()>(
+            DeliveryObservationSiteV2::SourceOpen,
+            Err(Error::Receipt(private)),
+        );
+        match returned {
+            Err(Error::Receipt(payload)) => {
+                assert_eq!(payload.as_ptr(), address);
+                assert_eq!(host_outcome(&Error::Receipt(payload)), O::HostReceipt);
+            }
+            _ => panic!("host error payload changed"),
+        }
+    }
+    #[test]
+    fn finite_engine_mapping_covers_only_closed_error_codes() {
+        use DeliveryObservationOutcomeV2 as O;
+        for (code, expected) in [
+            ("DISCLOSURE_UNKNOWN", O::EngineDisclosureUnknown),
+            ("DISCLOSURE_DENIED", O::EngineDisclosureDenied),
+            ("RECOVERY_REQUIRED", O::EngineRecoveryRequired),
+            ("DURABLE_PROPOSAL_RECOVERY_REQUIRED", O::EngineRecoveryRequired),
+            ("IDEMPOTENCY_CONFLICT", O::EngineIdempotencyConflict),
+            ("REVISION_CONFLICT", O::EngineRevisionConflict),
+            ("DURABLE_PROPOSAL_CONFLICT", O::EngineDurableProposalConflict),
+            (
+                "DURABLE_CONSTRUCTION_UNAVAILABLE",
+                O::EngineDurableConstructionUnavailable,
+            ),
+            ("DURABLE_PROFILE_UNAVAILABLE", O::EngineDurableProfileUnavailable),
+            ("RESOURCE_EXHAUSTED", O::EngineResourceExhausted),
+            ("not-a-public-code", O::EngineUnclassified),
+        ] {
+            let error = wholepact_engine::ApiError::new(code, "private details");
+            assert_eq!(engine_outcome(&error), expected);
+            assert!(matches!(
+                engine_result::<()>(DeliveryObservationSiteV2::ExportPreview, Err(error)),
+                Err(Error::Permission)
+            ));
+        }
+    }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    #[test]
+    fn export_checks_preserve_short_circuit_and_leave_readonly_unobserved() {
+        use std::cell::{Cell, RefCell};
+        thread_local! {
+            static SEEN: RefCell<Vec<(DeliveryObservationSiteV2, DeliveryObservationOutcomeV2)>> =
+                const { RefCell::new(Vec::new()) };
+        }
+        fn record(site: DeliveryObservationSiteV2, outcome: DeliveryObservationOutcomeV2) {
+            SEEN.with(|seen| seen.borrow_mut().push((site, outcome)));
+        }
+        SEEN.with(|seen| seen.borrow_mut().clear());
+        with_delivery_observer_v2(record, || {
+            let checks = Cell::new(0);
+            let matches_scope = false;
+            let permitted = matches_scope
+                && export_check_result(
+                    true,
+                    DeliveryObservationSiteV2::SourceCheck,
+                    {
+                        checks.set(checks.get() + 1);
+                        Err::<(), _>(Error::Authentication)
+                    },
+                )
+                .is_ok();
+            assert!(!permitted);
+            assert_eq!(checks.get(), 0);
+            assert!(SEEN.with(|seen| seen.borrow().is_empty()));
+            assert!(!export_check_result(
+                false,
+                DeliveryObservationSiteV2::NativeCheck,
+                Err::<(), _>(Error::Terminal),
+            )
+            .is_ok());
+            assert!(!export_check_result(
+                true,
+                DeliveryObservationSiteV2::SourceCheck,
+                Ok(false),
+            )
+            .unwrap_or(false));
+            assert!(SEEN.with(|seen| seen.borrow().is_empty()));
+            assert!(!export_check_result(
+                true,
+                DeliveryObservationSiteV2::NativeCheck,
+                {
+                    checks.set(checks.get() + 1);
+                    Err::<(), _>(Error::Terminal)
+                },
+            )
+            .is_ok());
+            assert_eq!(checks.get(), 1);
+        });
+        SEEN.with(|seen| {
+            assert_eq!(
+                &*seen.borrow(),
+                &[(
+                    DeliveryObservationSiteV2::NativeCheck,
+                    DeliveryObservationOutcomeV2::HostTerminal,
+                )],
+            );
+        });
+    }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    #[test]
+    fn bridge_cause_is_observed_before_unchanged_host_permission_mapping() {
+        thread_local! {
+            static SEEN: std::cell::RefCell<Vec<(DeliveryObservationSiteV2, DeliveryObservationOutcomeV2)>> =
+                const { std::cell::RefCell::new(Vec::new()) };
+        }
+        fn record(site: DeliveryObservationSiteV2, outcome: DeliveryObservationOutcomeV2) {
+            SEEN.with(|seen| seen.borrow_mut().push((site, outcome)));
+        }
+        SEEN.with(|seen| seen.borrow_mut().clear());
+        with_delivery_observer_v2(record, || {
+            let result = host_result(
+                DeliveryObservationSiteV2::ExportApproval,
+                bridge_result::<()>(
+                    DeliveryObservationSiteV2::ExportApproval,
+                    Err(wholepact_signer::authority_bridge::BridgeError::Binding),
+                )
+                .map_err(|_| Error::Permission),
+            );
+            assert!(matches!(result, Err(Error::Permission)));
+        });
+        SEEN.with(|seen| {
+            assert_eq!(
+                &*seen.borrow(),
+                &[
+                    (
+                        DeliveryObservationSiteV2::ExportApproval,
+                        DeliveryObservationOutcomeV2::BridgeBinding,
+                    ),
+                    (
+                        DeliveryObservationSiteV2::ExportApproval,
+                        DeliveryObservationOutcomeV2::HostPermission,
+                    ),
+                ],
+            );
+        });
     }
     #[cfg(feature = "synthetic-born-joined-qualification")]
     #[test]

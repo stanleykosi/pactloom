@@ -447,40 +447,56 @@ impl ApprovedDurableConstructionV1 {
         session: &SignerConsentSession,
         check: Option<&dyn Fn(&PreconstructionRecordLease<'_>) -> authority_bridge::Result<()>>,
     ) -> authority_bridge::Result<()> {
-        let lease = journal.acquire_preconstruction_records(
-            &self.prepared.request.enrollment_ref,
-            &self.prepared.request.accepted_manifest_ref,
-            session,
-        )?;
-        lease.require_native_origin(&self.prepared.source)?;
-        lease.require_current_durable_disclosure_receipts_v1()?;
-        validate_original(&self.prepared.request, &lease)?;
-        check_original_source(&lease, check)?;
-        // Commit is fenced against lock. Export holds that fence only across
-        // each bounded syscall, never across the entire possibly slow delivery.
-        let outbox = {
-            let _publication = self
-                .prepared
-                .source
-                .publication_lease()
-                .map_err(|_| BridgeError::Permission)?;
-            check_original_source(&lease, check)?;
-            journal.record_durable_construction_v1(&self, &lease)?
-        };
-        self.check_current()?;
-        lease.require_current_durable_disclosure_receipts_v1()?;
-        check_original_source(&lease, check)?;
-        let deadline =
-            (self.prepared.started + Duration::from_secs(120)).min(self.prepared.peer.deadline());
-        let p = &mut self.prepared;
-        write_bounded(&mut p.stream, outbox, deadline, &p.source, &p.peer, || {
-            check_original_source(&lease, check)?;
+        // Keep the owned stream alive until the exact V2 terminal error has
+        // been observed. This closure borrows self; it does not move ownership,
+        // change checks, or extend the original service deadline.
+        let original = (|| {
+            let lease = journal.acquire_preconstruction_records(
+                &self.prepared.request.enrollment_ref,
+                &self.prepared.request.accepted_manifest_ref,
+                session,
+            )?;
+            lease.require_native_origin(&self.prepared.source)?;
             lease.require_current_durable_disclosure_receipts_v1()?;
-            p.request
-                .scope
-                .check_valid_at(now().map_err(|_| BridgeError::Permission)?)
-                .map_err(|_| BridgeError::Permission)
-        })
+            validate_original(&self.prepared.request, &lease)?;
+            check_original_source(&lease, check)?;
+            // Commit is fenced against lock. Export holds that fence only across
+            // each bounded syscall, never across the entire possibly slow delivery.
+            let outbox = {
+                let _publication = self
+                    .prepared
+                    .source
+                    .publication_lease()
+                    .map_err(|_| BridgeError::Permission)?;
+                check_original_source(&lease, check)?;
+                journal.record_durable_construction_v1(&self, &lease)?
+            };
+            self.check_current()?;
+            lease.require_current_durable_disclosure_receipts_v1()?;
+            check_original_source(&lease, check)?;
+            let deadline =
+                (self.prepared.started + Duration::from_secs(120)).min(self.prepared.peer.deadline());
+            let p = &mut self.prepared;
+            write_bounded(&mut p.stream, outbox, deadline, &p.source, &p.peer, || {
+                check_original_source(&lease, check)?;
+                lease.require_current_durable_disclosure_receipts_v1()?;
+                p.request
+                    .scope
+                    .check_valid_at(now().map_err(|_| BridgeError::Permission)?)
+                    .map_err(|_| BridgeError::Permission)
+            })
+        })();
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        let original = if check.is_some() {
+            super::runtime::delivery_diagnostics_v2::bridge_result(
+                super::runtime::delivery_diagnostics_v2::Stage::DeliveryRedisclosureServe,
+                original,
+            )
+        } else {
+            // The legacy None path remains silent and returns its same Result.
+            original
+        };
+        original
     }
 }
 pub(super) fn serve_durable_construction_history_v1(
@@ -539,6 +555,30 @@ fn check_original_source<T>(
 mod checked_serve_tests {
     use super::*;
     use std::cell::RefCell;
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    #[test]
+    fn v2_terminal_observation_precedes_owned_stream_drop_source_contract() {
+        // Static source-order evidence only, not actual native or socket
+        // qualification. The separate Result tests exercise the shared kernel.
+        let source = include_str!("durable_construction_v1.rs");
+        let serve = source
+            .split("    fn serve_checked(")
+            .nth(1)
+            .unwrap()
+            .split("\npub(super) fn serve_durable_construction_history_v1(")
+            .next()
+            .unwrap();
+        let borrowed_body = serve.find("let original = (|| {").unwrap();
+        let body_result = serve.find("})();").unwrap();
+        let observe = serve.find("delivery_diagnostics_v2::bridge_result(").unwrap();
+        let unchanged_return = serve.rfind("\n        original\n").unwrap();
+        assert!(borrowed_body < body_result && body_result < observe);
+        assert!(observe < unchanged_return);
+        assert!(serve.contains("mut self,"));
+        assert!(serve.contains("if check.is_some()"));
+        assert!(!serve.contains("move ||"));
+        assert!(!serve.contains("drop(self)"));
+    }
     #[test]
     fn legacy_checked_serve_none_and_noop_preserve_exact_borrow() {
         let source = ("original stream and lease", Instant::now());
