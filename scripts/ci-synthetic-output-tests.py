@@ -3170,6 +3170,73 @@ class DurableDeliveryOutputTests(unittest.TestCase):
             output.public_durable_delivery(json.dumps(row)[:-1]+',"first_outcome":"HostPermission"}')
         with self.assertRaises(ValueError):
             output.public_durable_delivery(json.dumps(dict(row,schema=2)))
+    def test_export_predicates_and_recipient_lower_sites_are_closed_without_schema_growth(self):
+        sites=(
+            'ExportProofCurrent',
+            'ExportProofOrigin',
+            'ExportSourceBefore',
+            'ExportSourceAfter',
+            'ExportMetadataOrigin',
+            'ExportMarker',
+            'ExportHistory',
+            'ExportMaterialCeilings',
+            'ExportIntake',
+            'ExportVerifiedProof',
+            'ExportRoster',
+            'ExportPayload',
+            'ExportOutputActions',
+            'ExportRecipientBinding',
+            'ExportSources',
+            'ExportCheckpointScope',
+            'ExportProofPermission',
+            'ExportPermission',
+            'ExportReplayScope',
+            'ExportCommand',
+            'ExportReplayLookup',
+            'ExportDelta',
+            'ExportEntry',
+            'RecipientMutex',
+            'RecipientDeadline',
+            'RecipientOrigin',
+            'RecipientObserverClone',
+            'RecipientWriteSerialize',
+            'RecipientWriteLimit',
+            'RecipientWriteDeadline',
+            'RecipientWriteTimeout',
+            'RecipientWriteIo',
+            'RecipientWriteEmpty',
+            'RecipientFrame',
+            'RecipientResponseDecode',
+            'RecipientResponseDigest',
+            'RecipientResponse',
+            'SourceScopePredicate',
+            'ProofRolePredicate',
+            'MaterialActionPredicate',
+            'MaterialScopePredicate',
+            'ExportScopePredicate',
+        )
+        self.assertEqual(len(sites),42)
+        self.assertEqual(len(set(sites)),42)
+        source=(ROOT/'crates/wholepact-native-host/src/host/financial/durable_delivery_admission_v2.rs').read_text()
+        body=re.search(r'enum DeliveryObservationSiteV2\s*\{(.*?)\n\}',source,re.S).group(1)
+        actual={name.strip() for name in body.split(',') if name.strip()}
+        original={'SourceOpen','SourceInspection','SourcePlan','RecipientPrepare','ExportPreview','ExportApproval','ExportCommit','ExportPostcheck','NativeCheck','SourceCheck','FixedRead'}
+        self.assertEqual(actual,original|set(sites))
+        for site in sites:
+            boundary='Delivery'+site
+            self.assertIn(boundary,output.DURABLE_DELIVERY_BOUNDARIES)
+            outcome='PredicateDenied' if site.endswith('Predicate') else ('BridgePermission' if site.startswith('Recipient') else 'EngineDisclosureDenied')
+            row=dict(self.record(),result='failed',first_failure=boundary,first_outcome=outcome,
+                     failed_child_inputs_completed=111,failed_child_inputs_expected=117,
+                     admission_count='unverified')
+            self.assertEqual(output.public_durable_delivery(json.dumps(row)),row)
+            self.assertEqual(row['schema'],3)
+            self.assertEqual(len(row),26)
+            self.assertFalse(row['authorization_allowed'])
+        row=dict(self.record(),result='failed',first_failure='DeliveryRecipientFrame',first_outcome='OriginAuthentication')
+        self.assertEqual(output.public_durable_delivery(json.dumps(row)),row)
+        for bad in (dict(row,first_failure='DeliveryRecipientPrivatePath'),dict(row,first_outcome='private peer message'),dict(row,elapsed_ms=120001)):
+            with self.assertRaises(ValueError):output.public_durable_delivery(json.dumps(bad))
     def test_export_unknown_is_observed_without_claiming_rollback_or_success(self):
         row=dict(self.record(),result='failed',first_failure='DeliveryExportCommit',
                  first_outcome='EngineDisclosureUnknown',admission_count='unverified')
