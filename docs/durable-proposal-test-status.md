@@ -1,8 +1,14 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-19, 12:54 UTC.
+Updated: 2026-10-19, 13:13 UTC.
 
 **The bounded synthetic native two-owner fixed-signing fixture passed. Product qualification remains incomplete: no public testnet settlement, OS-process restart recovery, attended GUI reliability, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
+
+## CI29: script compatibility assertion stopped before native execution
+
+[Run 39255831352](https://github.com/stanleykosi/pactloom/actions/runs/39255831352), qualifier `585ff9fa2c7a1238d03ecf16f830833e6d803fb1`, compiled successfully but stopped at13:09:48 UTC in the Python suite. An older assertion prohibited `--ignored` anywhere in the shell, conflicting with the newly explicit exact loopback preflight. The native payment and TCP tests did not run. Root omitted the local Python rerun after modifying the shell; this was a test-configuration oversight, not a result about the two-wallet lifecycle change.
+
+The compatibility assertion now permits only the unique PY_WAVE block with its exact static test name, two fixed subprocess calls, unchanged15/30-second timeouts, exact listing and one-pass result checks, no captured-output printing, and execution before private-reopen. Ignored selectors remain forbidden outside this block. All153 Python tests were rerun locally. No Rust implementation or safety deadline changed. Checkpoint50 non-synthetic Host build and four exact compatible wave tests also passed.
 
 ## CI28: observation completed; checkpoint entry erased a lower wallet result
 
