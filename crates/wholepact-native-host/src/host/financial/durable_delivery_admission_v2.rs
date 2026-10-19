@@ -571,6 +571,7 @@ struct InspectionReadV2<'a, 'host> {
     host: &'a Host,
     owner: &'a OriginalDeliveryAdmissionOwnerV2<'host>,
     inspection: &'a PrivateDurableAdmissionInspectionV2,
+    approval: &'a HistoricalApproval,
     export_preview: bool,
 }
 impl InspectionReadV2<'_, '_> {
@@ -584,7 +585,7 @@ impl InspectionReadV2<'_, '_> {
         export_check_result(
             self.export_preview,
             DeliveryObservationSiteV2::NativeCheck,
-            self.owner.inspection_approval().check(),
+            self.approval.check(),
         )?;
         export_check_result(
             self.export_preview,
@@ -594,7 +595,7 @@ impl InspectionReadV2<'_, '_> {
         export_check_result(
             self.export_preview,
             DeliveryObservationSiteV2::NativeCheck,
-            self.owner.inspection_approval().check(),
+            self.approval.check(),
         )
     }
 }
@@ -619,11 +620,8 @@ impl LocalProofConsent for InspectionReadV2<'_, '_> {
 }
 impl LocalDurableMaterialConsentV1 for InspectionReadV2<'_, '_> {
     fn permits(&self, s: &DurableConstructionScopeV1, d: &str, a: DurableMaterialActionV1) -> bool {
-        let allowed = if self.export_preview {
-            matches!(a, DurableMaterialActionV1::ExportForLocalNativeReview)
-        } else {
-            matches!(a, DurableMaterialActionV1::ReadForExactConstruction)
-        };
+        // Inspection and exact local preparation never grant export authority.
+        let allowed = matches!(a, DurableMaterialActionV1::ReadForExactConstruction);
         export_predicate(
             self.export_preview,
             DeliveryObservationSiteV2::MaterialActionPredicate,
@@ -802,16 +800,59 @@ fn source_plan(
         attempt_rule: DurableDeliveryAttemptRuleV2::ExplicitImmediateHostDecision,
     })
 }
+/// Bound the same escaped text and fixed-width challenge that the maintained
+/// terminal renders. This rejects oversized metadata; it cannot issue approval.
+fn bound_original_delivery_review_v2(detail: &str) -> Result<()> {
+    const PROMPT: &str = "\nType APPROVE 0000000000000000 to approve this exact operation, or anything else to reject: ";
+    let maximum = wholepact_storage_security::bundle::recovery::evidence::history::MAX_HISTORICAL_METADATA_BYTES;
+    let rendered = detail.chars().try_fold(0usize, |length, c| {
+        length.checked_add(if c == '\n' || c == ' ' || c.is_ascii_graphic() {
+            1
+        } else {
+            c.escape_default().count()
+        })
+    });
+    if detail.len() > maximum
+        || rendered
+            .and_then(|length| length.checked_add(PROMPT.len()))
+            .is_none_or(|length| length > maximum)
+    {
+        return Err(Error::Invalid);
+    }
+    Ok(())
+}
+/// Ordering only. The caller must use the genuine terminal issuer; this kernel
+/// cannot create authority or extend either original material ceiling.
+fn source_checked_approval_v2<T>(
+    mut source: impl FnMut() -> Result<()>,
+    issue: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    source()?;
+    let approval = issue()?;
+    source()?;
+    Ok(approval)
+}
+/// The owned local result is complete before the one-shot recipient opener is
+/// called. Both values remain opaque to this ordering-only kernel.
+fn prepare_before_recipient_v2<P, R>(
+    prepare: impl FnOnce() -> Result<P>,
+    open_recipient: impl FnOnce() -> Result<R>,
+) -> Result<(P, R)> {
+    let prepared = prepare()?;
+    let recipient = open_recipient()?;
+    Ok((prepared, recipient))
+}
 impl Host {
-    /// The actual paired recipient is prepared ONCE before the exact native
-    /// review. Its original clock is not refreshed by this Host approval.
+    /// Lexically own the actual original source and immutable prepared bytes,
+    /// then open the recipient exactly once. A qualifier must create a genuinely
+    /// new native entry in that continuation. An already-paired CLI caller does
+    /// not gain a new native lifetime by adapting to this helper.
     pub(in crate::host) fn private_original_delivery_export_v2(
         &self,
         root: &Path,
-        client: &OriginalHistoryClient,
-        request: DurableReviewDeliveryRequestV1,
         choices: &DeliveryChoicesV2,
-    ) -> Result<OriginalDeliveryExportV2> {
+        open_recipient: impl FnOnce() -> Result<(OriginalHistoryClient, DurableReviewDeliveryRequestV1)>,
+    ) -> Result<(OriginalHistoryClient, OriginalDeliveryExportV2)> {
         host_result(
             DeliveryObservationSiteV2::SourceOpen,
             self.require_manual_session(),
@@ -831,33 +872,103 @@ impl Host {
             DeliveryObservationSiteV2::SourcePlan,
             source_plan(&owner, &inspection, choices),
         )?;
-        // Validate the actual source-derived plan before preparing a recipient
-        // or recording exposure. This pure grammar check is not admission.
+        // This exact source-derived plan is inert, never disclosure admission.
         host_result(
             DeliveryObservationSiteV2::SourcePlan,
             plan.validate_origins().map_err(|_| Error::Invalid),
         )?;
+        let (prepared, (client, request)) = prepare_before_recipient_v2(
+            || {
+                // Fixed purpose text only: protected exact metadata is rendered
+                // later under the checked final disclosure approval.
+                let detail = "Approve LOCAL exact-byte preparation for original delivery.\nRead and fully verify only the selected retained original proof and both original materials, then encode and retain the exact private review bytes in LOCAL memory under their ORIGINAL absolute ceilings. No recipient disclosure, export, signing, submission, admission or other financial effect is authorized.";
+                host_result(
+                    DeliveryObservationSiteV2::ExportPreview,
+                    bound_original_delivery_review_v2(&detail),
+                )?;
+                let approval = source_checked_approval_v2(
+                    || {
+                        host_result(
+                            DeliveryObservationSiteV2::SourceCheck,
+                            current_source(self, &owner, &inspection),
+                        )
+                    },
+                    || {
+                        host_result(
+                            DeliveryObservationSiteV2::ExportPreview,
+                            self.terminal.approve_historical(&detail),
+                        )
+                    },
+                )?;
+                let read = InspectionReadV2 {
+                    host: self,
+                    owner: &owner,
+                    inspection: &inspection,
+                    approval: &approval,
+                    export_preview: true,
+                };
+                host_result(DeliveryObservationSiteV2::ExportPreview, read.check())?;
+                let prepared = engine_result(
+                    DeliveryObservationSiteV2::ExportPreview,
+                    owner.coordinator().prepare_original_delivery_v2(
+                        host_result(DeliveryObservationSiteV2::ExportPreview, self.access())?,
+                        &read,
+                        &read,
+                        &read,
+                    ),
+                )?;
+                host_result(DeliveryObservationSiteV2::ExportPreview, read.check())?;
+                // Neither this read adapter nor its approval escapes preparation.
+                Ok(prepared)
+            },
+            open_recipient,
+        )?;
+        // This is an unconditional new decision after actual recipient setup,
+        // not renewal or fallback to either earlier approval. Source currentness
+        // independently checks both original material ceilings before and after.
+        let detail = "Inspect fresh original delivery metadata for the actual new recipient.\nInspect the selected original source, fixed proof, both original material scopes and bounded exact prepared review metadata to bind ONLY this actual paired recipient. Read and verify under the ORIGINAL absolute ceilings. No private payload disclosure, export, financial admission, signing or submission is authorized.";
+        host_result(
+            DeliveryObservationSiteV2::SourceInspection,
+            bound_original_delivery_review_v2(&detail),
+        )?;
+        let final_inspection = source_checked_approval_v2(
+            || {
+                host_result(
+                    DeliveryObservationSiteV2::SourceCheck,
+                    current_source(self, &owner, &inspection),
+                )
+            },
+            || {
+                host_result(
+                    DeliveryObservationSiteV2::SourceInspection,
+                    self.terminal.approve_historical(&detail),
+                )
+            },
+        )?;
+        let read = InspectionReadV2 {
+            host: self,
+            owner: &owner,
+            inspection: &inspection,
+            approval: &final_inspection,
+            export_preview: true,
+        };
+        host_result(DeliveryObservationSiteV2::SourceInspection, read.check())?;
         let recipient = bridge_result(
             DeliveryObservationSiteV2::RecipientPrepare,
             client.prepare_durable_review_delivery_v1(&request),
         )
         .map_err(|_| Error::Permission)?;
-        let read = InspectionReadV2 {
-            host: self,
-            owner: &owner,
-            inspection: &inspection,
-            export_preview: true,
-        };
-        let export_scope = engine_result(
+        let bound = engine_result(
             DeliveryObservationSiteV2::ExportPreview,
-            owner.coordinator().review_original_delivery_v2(
+            prepared.bind_current_v2(
                 host_result(DeliveryObservationSiteV2::ExportPreview, self.access())?,
-                &recipient,
+                recipient,
                 &read,
                 &read,
                 &read,
             ),
         )?;
+        let export_scope = bound.scope().clone();
         host_result(DeliveryObservationSiteV2::ExportPreview, read.check())?;
         if export_scope.proposal != *inspection.fixed_identity()
             || export_scope.recipient.request != request
@@ -885,13 +996,13 @@ impl Host {
         let approval = host_result(
             DeliveryObservationSiteV2::ExportApproval,
             self.terminal.approve_durable_delivery_v2(
-                owner.inspection_approval(),
+                &final_inspection,
                 &detail,
                 || {
                     read.check()?;
                     bridge_result(
                         DeliveryObservationSiteV2::ExportApproval,
-                        recipient.check_current(),
+                        bound.check_current_v2(),
                     )
                     .map_err(|_| Error::Permission)
                 },
@@ -902,7 +1013,7 @@ impl Host {
                     )?;
                     bridge_result(
                         DeliveryObservationSiteV2::ExportApproval,
-                        recipient.check_current(),
+                        bound.check_current_v2(),
                     )
                     .map_err(|_| Error::Permission)
                 },
@@ -919,9 +1030,8 @@ impl Host {
         host_result(DeliveryObservationSiteV2::ExportCommit, consent.check())?;
         let retention = engine_result(
             DeliveryObservationSiteV2::ExportCommit,
-            owner.coordinator().deliver_original_for_admission_v2(
+            bound.deliver_v2(
                 host_result(DeliveryObservationSiteV2::ExportCommit, self.access())?,
-                recipient,
                 &consent,
                 &consent,
                 &consent,
@@ -933,15 +1043,18 @@ impl Host {
             DeliveryObservationOutcomeV2::ReturnedOk,
         );
         post_export_result(consent.check())?;
-        Ok(OriginalDeliveryExportV2 {
-            request: DurableDeliveryAdmissionRequestV2 {
-                version: 2,
-                import_request: request,
-                delivery: plan,
+        Ok((
+            client,
+            OriginalDeliveryExportV2 {
+                request: DurableDeliveryAdmissionRequestV2 {
+                    version: 2,
+                    import_request: request,
+                    delivery: plan,
+                },
+                export_scope,
+                retention,
             },
-            export_scope,
-            retention,
-        })
+        ))
     }
     pub(in crate::host) fn private_original_delivery_status_v2(
         &self,
@@ -1068,12 +1181,12 @@ pub(in crate::host) fn admit_original(
         pair,
     )
     .map_err(|_| Error::Permission)?;
-    let exported = host.private_original_delivery_export_v2(
-        workspace,
-        &client,
-        request.request,
-        &request.choices,
-    )?;
+    // This route pairs an already-open native entry; unlike the qualifier's
+    // opener it makes no claim to move or refresh that original native lifetime.
+    let (client, exported) =
+        host.private_original_delivery_export_v2(workspace, &request.choices, || {
+            Ok((client, request.request))
+        })?;
     let status = client
         .request_durable_delivery_admission_v2(&exported.request)
         .map_err(|_| Error::Permission)?;
@@ -1424,8 +1537,8 @@ mod tests {
         let production = source.split("\n#[cfg(test)]\nmod tests {").next().unwrap();
         assert!(!production.contains("fn fixed_permission_boundary_v3"));
         assert!(!production.contains("pub fn new("));
-        assert!(production.contains("recipient.check_current()"));
-        assert!(production.contains("deliver_original_for_admission_v2"));
+        assert!(production.contains("bound.check_current_v2()"));
+        assert!(production.contains("bound.deliver_v2("));
         assert!(production.contains("source.original_host_generation_binding()"));
         let export = production
             .split("fn private_original_delivery_export_v2(")
@@ -1437,8 +1550,199 @@ mod tests {
         );
         assert!(
             export.find("plan.validate_origins()").unwrap()
-                < export.find("deliver_original_for_admission_v2").unwrap()
+                < export.find("prepare_original_delivery_v2").unwrap()
         );
+        let final_phase = export
+            .split("// This is an unconditional new decision")
+            .nth(1)
+            .unwrap()
+            .split("pub(in crate::host) fn private_original_delivery_status_v2")
+            .next()
+            .unwrap();
+        let prepare_phase = export
+            .split("// This is an unconditional new decision")
+            .next()
+            .unwrap();
+        assert!(!prepare_phase.contains("owner.inspection_approval()"));
+        assert!(!prepare_phase.contains("let detail = format!("));
+        let fresh_issuance = final_phase
+            .split("let read = InspectionReadV2")
+            .next()
+            .unwrap();
+        assert!(!fresh_issuance.contains("let detail = format!("));
+        assert!(!final_phase.contains("owner.inspection_approval()"));
+        assert!(final_phase.contains("approval: &final_inspection"));
+        assert!(final_phase.contains("approve_historical(&detail)"));
+        assert!(final_phase.contains("&final_inspection,"));
+        assert!(final_phase.contains("prepared.bind_current_v2("));
+        assert!(final_phase.contains("bound.deliver_v2("));
+        let read = production
+            .split("struct InspectionReadV2")
+            .nth(1)
+            .unwrap()
+            .split("struct OwnedDeliveryConsentV2")
+            .next()
+            .unwrap();
+        assert!(read.contains("approval: &'a HistoricalApproval"));
+        assert!(read.contains("self.approval.check()"));
+        assert!(read.contains("DurableMaterialActionV1::ReadForExactConstruction"));
+        assert!(!read.contains("owner.inspection_approval()"));
+        assert!(!read.contains("DurableMaterialActionV1::ExportForLocalNativeReview"));
+        assert!(!read.contains("impl LocalDurableReviewExportConsentV1"));
+    }
+    #[test]
+    fn prepared_delivery_local_preparation_precedes_one_shot_recipient() {
+        use std::cell::RefCell;
+        // Inert, non-Clone values only: no native approval is manufactured.
+        struct LocalBytes(Box<[u8]>);
+        struct CurrentPeer(Box<u8>);
+        let events = RefCell::new(Vec::new());
+        let original = LocalBytes(vec![3, 7, 11].into_boxed_slice());
+        let allocation = original.0.as_ptr();
+        let (prepared, peer) = prepare_before_recipient_v2(
+            || {
+                events.borrow_mut().push("prepare");
+                Ok(original)
+            },
+            || {
+                events.borrow_mut().push("open");
+                Ok(CurrentPeer(Box::new(13)))
+            },
+        )
+        .unwrap();
+        assert_eq!(*events.borrow(), ["prepare", "open"]);
+        assert_eq!(prepared.0.as_ptr(), allocation);
+        assert_eq!(&*prepared.0, &[3, 7, 11]);
+        assert_eq!(*peer.0, 13);
+    }
+    #[test]
+    fn prepared_delivery_denial_never_opens_recipient_and_drops_local_custody() {
+        use std::cell::{Cell, RefCell};
+        let opened = Cell::new(false);
+        let result = prepare_before_recipient_v2(
+            || Err::<(), _>(Error::Permission),
+            || {
+                opened.set(true);
+                Ok(())
+            },
+        );
+        assert!(matches!(result, Err(Error::Permission)));
+        assert!(!opened.get());
+
+        struct LocalBytes<'a>(&'a RefCell<Vec<&'static str>>);
+        impl Drop for LocalBytes<'_> {
+            fn drop(&mut self) {
+                self.0.borrow_mut().push("drop");
+            }
+        }
+        let events = RefCell::new(Vec::new());
+        let result = prepare_before_recipient_v2(
+            || {
+                events.borrow_mut().push("prepare");
+                Ok(LocalBytes(&events))
+            },
+            || {
+                events.borrow_mut().push("open-denied");
+                Err::<(), _>(Error::Authentication)
+            },
+        );
+        assert!(matches!(result, Err(Error::Authentication)));
+        assert_eq!(*events.borrow(), ["prepare", "open-denied", "drop"]);
+    }
+    #[test]
+    fn prepared_delivery_issuance_checks_source_before_and_after_exactly_once() {
+        use std::cell::RefCell;
+        let events = RefCell::new(Vec::new());
+        // This is an inert return value, not an approval or authority factory.
+        struct InertReview(Box<u8>);
+        let review = source_checked_approval_v2(
+            || {
+                events.borrow_mut().push("source-and-both-ceilings");
+                Ok(())
+            },
+            || {
+                events.borrow_mut().push("genuine-issuer-call");
+                Ok(InertReview(Box::new(17)))
+            },
+        )
+        .unwrap();
+        assert_eq!(*review.0, 17);
+        assert_eq!(
+            *events.borrow(),
+            [
+                "source-and-both-ceilings",
+                "genuine-issuer-call",
+                "source-and-both-ceilings"
+            ]
+        );
+    }
+    #[test]
+    fn prepared_delivery_issuance_denial_short_circuits_every_later_phase() {
+        use std::cell::{Cell, RefCell};
+        for deny in 0..3 {
+            let calls = Cell::new(0);
+            let events = RefCell::new(Vec::new());
+            let result = prepare_before_recipient_v2(
+                || {
+                    source_checked_approval_v2(
+                        || {
+                            let position = calls.get();
+                            calls.set(position + 1);
+                            events.borrow_mut().push(if position == 0 {
+                                "before"
+                            } else {
+                                "after"
+                            });
+                            if deny == position * 2 {
+                                Err(Error::Permission)
+                            } else {
+                                Ok(())
+                            }
+                        },
+                        || {
+                            events.borrow_mut().push("issue");
+                            if deny == 1 {
+                                Err(Error::Authentication)
+                            } else {
+                                Ok(())
+                            }
+                        },
+                    )?;
+                    events.borrow_mut().push("prepare-bytes");
+                    Ok(())
+                },
+                || {
+                    events.borrow_mut().push("open-recipient");
+                    Ok(())
+                },
+            );
+            assert!(result.is_err());
+            let expected: &[&str] = match deny {
+                0 => &["before"],
+                1 => &["before", "issue"],
+                _ => &["before", "issue", "after"],
+            };
+            assert_eq!(&*events.borrow(), expected);
+        }
+    }
+    #[test]
+    fn prepared_delivery_inspection_review_bounds_real_escaped_framing() {
+        let maximum = wholepact_storage_security::bundle::recovery::evidence::history::MAX_HISTORICAL_METADATA_BYTES;
+        let challenge = "\nType APPROVE 0000000000000000 to approve this exact operation, or anything else to reject: ";
+        let exact = "x".repeat(maximum - challenge.len());
+        assert!(bound_original_delivery_review_v2(&exact).is_ok());
+        assert!(matches!(
+            bound_original_delivery_review_v2(&(exact + "x")),
+            Err(Error::Invalid)
+        ));
+        let escaped = "é".repeat(maximum / 4);
+        assert!(escaped.len() < maximum);
+        assert!(crate::terminal::render_synthetic_expected_prompt(&escaped).len() > maximum);
+        assert!(matches!(
+            bound_original_delivery_review_v2(&escaped),
+            Err(Error::Invalid)
+        ));
+        assert!(bound_original_delivery_review_v2("Bounded source\nLocal only.").is_ok());
     }
     #[test]
     fn finite_engine_observation_never_formats_private_details() {

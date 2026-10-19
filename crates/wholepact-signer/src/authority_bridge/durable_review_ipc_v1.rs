@@ -126,6 +126,29 @@ impl DurableReviewPayloadV1 {
     pub fn digest(&self) -> Result<String> {
         Ok(hex::encode(Sha256::digest(self.encode()?.as_slice())))
     }
+    /// Consumes the typed payload after its original validation and one encode.
+    /// This is local private custody only, never recipient or export permission.
+    pub fn into_prepared_v2(self) -> Result<PreparedDurableReviewPayloadV2> {
+        let raw = self.encode()?;
+        let digest = hex::encode(Sha256::digest(raw.as_slice()));
+        Ok(PreparedDurableReviewPayloadV2 { raw, digest })
+    }
+}
+
+/// One original validated encoding, held in zeroizing private memory. No raw
+/// constructor/getter, cloning, serialization or diagnostic rendering is exposed.
+/// Only an actual delivery attempt can consume these bytes for transport.
+pub struct PreparedDurableReviewPayloadV2 {
+    raw: Zeroizing<Vec<u8>>,
+    digest: String,
+}
+impl PreparedDurableReviewPayloadV2 {
+    pub fn payload_digest(&self) -> &str {
+        &self.digest
+    }
+    pub fn payload_bytes(&self) -> u64 {
+        self.raw.len() as u64
+    }
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -490,75 +513,131 @@ impl PreparedDurableReviewDeliveryV1<'_> {
     ) -> Result<DurableReviewDeliveryReceiptV1> {
         let raw = payload.encode()?;
         let digest = hex::encode(Sha256::digest(raw.as_slice()));
-        check()?;
-        self.check_current()?;
-        let mut stream = self.stream.lock().map_err(|_| BridgeError::Ipc)?;
-        let observer = stream.try_clone().map_err(|_| BridgeError::Ipc)?;
-        let current = || {
-            check()?;
-            self.check_stream(&observer)
-        };
-        bounded_write(
-            &mut stream,
-            &DeliveryCommandV1::Begin {
-                payload_digest: digest.clone(),
-                payload_bytes: raw.len() as u64,
+        self.deliver_encoded_v2(PreparedDurableReviewPayloadV2 { raw, digest }, check)
+    }
+    /// Consumes the original encoding without validating or encoding it again.
+    /// The same commit-before-byte requirement as `deliver` remains mandatory.
+    pub fn deliver_prepared_v2(
+        self,
+        payload: PreparedDurableReviewPayloadV2,
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<DurableReviewDeliveryReceiptV1> {
+        self.deliver_encoded_v2(payload, check)
+    }
+    fn deliver_encoded_v2(
+        self,
+        payload: PreparedDurableReviewPayloadV2,
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<DurableReviewDeliveryReceiptV1> {
+        delivery_preflight_v2(
+            check,
+            || self.check_current(),
+            || {
+                let mut stream = self.stream.lock().map_err(|_| BridgeError::Ipc)?;
+                let observer = stream.try_clone().map_err(|_| BridgeError::Ipc)?;
+                let current = || {
+                    check()?;
+                    self.check_stream(&observer)
+                };
+                let mut transport = StreamDeliveryTransportV2 {
+                    stream: &mut stream,
+                    client: self.client,
+                    deadline: self.deadline,
+                    check: &current,
+                };
+                delivery_transport_kernel_v2(&payload, &mut transport, || {
+                    self.recipient.request.digest()
+                })
             },
-            self.deadline,
-            &current,
-        )?;
-        expect_received(&stream, self.client, 0, self.deadline, &current)?;
-        for (index, bytes) in raw.chunks(CHUNK_BYTES).enumerate() {
-            let offset = index * CHUNK_BYTES;
-            bounded_write(
-                &mut stream,
-                &DeliveryCommandV1::Chunk {
-                    offset: offset as u64,
-                    data_hex: hex::encode(bytes),
-                },
-                self.deadline,
-                &current,
-            )?;
-            current()?;
-            expect_received(
-                &stream,
-                self.client,
-                (offset + bytes.len()) as u64,
-                self.deadline,
-                &current,
-            )?;
-        }
-        bounded_write(
-            &mut stream,
-            &DeliveryCommandV1::Finish,
-            self.deadline,
-            &current,
-        )?;
-        let frame = wholepact_signer_origin::framing::read_frame_capped_checked_until(
-            &stream,
+        )
+    }
+}
+// These adapters are private and accept no public authority substitute. Their
+// live implementation delegates to the exact original checks and IO operations.
+// Inert tests exercise the same ordering without a socket or native recipient.
+fn delivery_preflight_v2<T>(
+    check: impl FnOnce() -> Result<()>,
+    recipient_current: impl FnOnce() -> Result<()>,
+    transport: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    check()?;
+    recipient_current()?;
+    transport()
+}
+trait DeliveryTransportV2 {
+    fn write(&mut self, command: &DeliveryCommandV1) -> Result<()>;
+    fn write_chunk(&mut self, offset: u64, bytes: &[u8]) -> Result<()> {
+        self.write(&DeliveryCommandV1::Chunk {
+            offset,
+            data_hex: hex::encode(bytes),
+        })
+    }
+    fn check(&self) -> Result<()>;
+    fn expect_received(&self, length: u64) -> Result<()>;
+    fn read_frame(&self) -> Result<Zeroizing<Vec<u8>>>;
+}
+struct StreamDeliveryTransportV2<'a> {
+    stream: &'a mut UnixStream,
+    client: &'a OriginalHistoryClient,
+    deadline: Instant,
+    check: &'a dyn Fn() -> Result<()>,
+}
+impl DeliveryTransportV2 for StreamDeliveryTransportV2<'_> {
+    fn write(&mut self, command: &DeliveryCommandV1) -> Result<()> {
+        bounded_write(self.stream, command, self.deadline, self.check)
+    }
+    fn check(&self) -> Result<()> {
+        (self.check)()
+    }
+    fn expect_received(&self, length: u64) -> Result<()> {
+        expect_received(self.stream, self.client, length, self.deadline, self.check)
+    }
+    fn read_frame(&self) -> Result<Zeroizing<Vec<u8>>> {
+        wholepact_signer_origin::framing::read_frame_capped_checked_until(
+            self.stream,
             self.client.peer(),
             128 * 1024,
             self.deadline,
-            || current().map_err(|_| wholepact_signer_origin::Error::Permission),
+            || (self.check)().map_err(|_| wholepact_signer_origin::Error::Permission),
         )
-        .map_err(|_| BridgeError::Ipc)?;
-        current()?;
-        let DeliveryResponseV1::Imported { receipt } =
-            serde_json::from_slice(&frame).map_err(|_| BridgeError::Binding)?
-        else {
-            return Err(BridgeError::Permission);
-        };
-        if receipt.version != 1
-            || receipt.recipient_request_digest != self.recipient.request.digest()?
-            || receipt.payload_digest != digest
-            || receipt.payload_bytes != raw.len() as u64
-            || receipt.state != "imported_for_review"
-        {
-            return Err(BridgeError::Binding);
-        }
-        Ok(receipt)
+        .map_err(|_| BridgeError::Ipc)
     }
 }
+fn delivery_transport_kernel_v2(
+    payload: &PreparedDurableReviewPayloadV2,
+    transport: &mut impl DeliveryTransportV2,
+    recipient_request_digest: impl FnOnce() -> Result<String>,
+) -> Result<DurableReviewDeliveryReceiptV1> {
+    transport.write(&DeliveryCommandV1::Begin {
+        payload_digest: payload.digest.clone(),
+        payload_bytes: payload.raw.len() as u64,
+    })?;
+    transport.expect_received(0)?;
+    for (index, bytes) in payload.raw.chunks(CHUNK_BYTES).enumerate() {
+        let offset = index * CHUNK_BYTES;
+        transport.write_chunk(offset as u64, bytes)?;
+        transport.check()?;
+        transport.expect_received((offset + bytes.len()) as u64)?;
+    }
+    transport.write(&DeliveryCommandV1::Finish)?;
+    let frame = transport.read_frame()?;
+    transport.check()?;
+    let DeliveryResponseV1::Imported { receipt } =
+        serde_json::from_slice(&frame).map_err(|_| BridgeError::Binding)?
+    else {
+        return Err(BridgeError::Permission);
+    };
+    if receipt.version != 1
+        || receipt.recipient_request_digest != recipient_request_digest()?
+        || receipt.payload_digest != payload.digest
+        || receipt.payload_bytes != payload.raw.len() as u64
+        || receipt.state != "imported_for_review"
+    {
+        return Err(BridgeError::Binding);
+    }
+    Ok(receipt)
+}
+
 // Deferred expressions make the actual short-circuit kernel testable without
 // constructing a recipient or opening a socket. Only private callers can supply
 // these expressions; production supplies the original checks above exactly once.
@@ -1279,5 +1358,378 @@ mod current_diagnostics_v2_tests {
             labels(&first),
             Some(("RecipientOrigin", "BridgeVerification"))
         );
+    }
+}
+
+#[cfg(test)]
+mod prepared_payload_v2_tests {
+    use super::*;
+    use std::{cell::RefCell, rc::Rc};
+
+    // Inert byte/ordering evidence only, not successful typed validation, a
+    // native authorization, a real authenticated stream, or timing-fit proof.
+    type Trace = Rc<RefCell<Vec<&'static str>>>;
+    fn step(trace: &Trace, fail_at: Option<usize>, label: &'static str) -> Result<()> {
+        let mut trace = trace.borrow_mut();
+        trace.push(label);
+        if fail_at == Some(trace.len()) {
+            Err(BridgeError::Conflict)
+        } else {
+            Ok(())
+        }
+    }
+    struct InertTransport {
+        trace: Trace,
+        fail_at: Option<usize>,
+        original_pointer: *const u8,
+        transmitted: Vec<u8>,
+        acknowledged: RefCell<Vec<u64>>,
+        begin: Option<(String, u64)>,
+        frame: Zeroizing<Vec<u8>>,
+    }
+    impl DeliveryTransportV2 for InertTransport {
+        fn write(&mut self, command: &DeliveryCommandV1) -> Result<()> {
+            match command {
+                DeliveryCommandV1::Begin {
+                    payload_digest,
+                    payload_bytes,
+                } => {
+                    step(&self.trace, self.fail_at, "begin")?;
+                    self.begin = Some((payload_digest.clone(), *payload_bytes));
+                }
+                DeliveryCommandV1::Chunk { offset, data_hex } => {
+                    step(&self.trace, self.fail_at, "chunk")?;
+                    assert_eq!(*offset as usize, self.transmitted.len());
+                    self.transmitted.extend(hex::decode(data_hex).unwrap());
+                }
+                DeliveryCommandV1::Finish => step(&self.trace, self.fail_at, "finish")?,
+                DeliveryCommandV1::CheckCurrent => panic!("preflight is a separate original call"),
+            }
+            Ok(())
+        }
+        fn write_chunk(&mut self, offset: u64, bytes: &[u8]) -> Result<()> {
+            // Pointer comparison, not dereferencing, proves each chunk borrows
+            // the exact original allocation after moving the opaque owner.
+            assert_eq!(
+                bytes.as_ptr(),
+                self.original_pointer.wrapping_add(offset as usize)
+            );
+            self.write(&DeliveryCommandV1::Chunk {
+                offset,
+                data_hex: hex::encode(bytes),
+            })
+        }
+        fn check(&self) -> Result<()> {
+            step(&self.trace, self.fail_at, "check")
+        }
+        fn expect_received(&self, length: u64) -> Result<()> {
+            step(&self.trace, self.fail_at, "ack")?;
+            self.acknowledged.borrow_mut().push(length);
+            Ok(())
+        }
+        fn read_frame(&self) -> Result<Zeroizing<Vec<u8>>> {
+            step(&self.trace, self.fail_at, "frame")?;
+            Ok(Zeroizing::new(self.frame.to_vec()))
+        }
+    }
+    fn receipt(payload: &PreparedDurableReviewPayloadV2) -> DurableReviewDeliveryReceiptV1 {
+        DurableReviewDeliveryReceiptV1 {
+            version: 1,
+            recipient_request_digest: "inert-request-digest".into(),
+            payload_digest: payload.payload_digest().into(),
+            payload_bytes: payload.payload_bytes(),
+            state: "imported_for_review".into(),
+        }
+    }
+    fn inert_transport(
+        payload: &PreparedDurableReviewPayloadV2,
+        receipt: DurableReviewDeliveryReceiptV1,
+    ) -> InertTransport {
+        InertTransport {
+            trace: Trace::default(),
+            fail_at: None,
+            original_pointer: payload.raw.as_ptr(),
+            transmitted: Vec::new(),
+            acknowledged: RefCell::new(Vec::new()),
+            begin: None,
+            frame: Zeroizing::new(
+                serde_json::to_vec(&DeliveryResponseV1::Imported { receipt }).unwrap(),
+            ),
+        }
+    }
+
+    #[test]
+    fn prepared_owner_surface_is_consuming_and_has_no_clone_debug_or_serialization() {
+        trait AmbiguousIfClone<A> {
+            fn check() {}
+        }
+        impl<T: ?Sized> AmbiguousIfClone<()> for T {}
+        impl<T: ?Sized + Clone> AmbiguousIfClone<u8> for T {}
+        let _ = <PreparedDurableReviewPayloadV2 as AmbiguousIfClone<_>>::check;
+        trait AmbiguousIfDebug<A> {
+            fn check() {}
+        }
+        impl<T: ?Sized> AmbiguousIfDebug<()> for T {}
+        impl<T: ?Sized + std::fmt::Debug> AmbiguousIfDebug<u8> for T {}
+        let _ = <PreparedDurableReviewPayloadV2 as AmbiguousIfDebug<_>>::check;
+        trait AmbiguousIfSerialize<A> {
+            fn check() {}
+        }
+        impl<T: ?Sized> AmbiguousIfSerialize<()> for T {}
+        impl<T: ?Sized + Serialize> AmbiguousIfSerialize<u8> for T {}
+        let _ = <PreparedDurableReviewPayloadV2 as AmbiguousIfSerialize<_>>::check;
+        trait AmbiguousIfDeserialize<A> {
+            fn check() {}
+        }
+        impl<T: ?Sized> AmbiguousIfDeserialize<()> for T {}
+        impl<T: ?Sized + serde::de::DeserializeOwned> AmbiguousIfDeserialize<u8> for T {}
+        let _ = <PreparedDurableReviewPayloadV2 as AmbiguousIfDeserialize<_>>::check;
+
+        let _: fn(DurableReviewPayloadV1) -> Result<PreparedDurableReviewPayloadV2> =
+            DurableReviewPayloadV1::into_prepared_v2;
+        let _: fn(&PreparedDurableReviewPayloadV2) -> &str =
+            PreparedDurableReviewPayloadV2::payload_digest;
+        let _: fn(&PreparedDurableReviewPayloadV2) -> u64 =
+            PreparedDurableReviewPayloadV2::payload_bytes;
+        fn consuming_delivery<'a>() {
+            let _: fn(
+                PreparedDurableReviewDeliveryV1<'a>,
+                PreparedDurableReviewPayloadV2,
+                &dyn Fn() -> Result<()>,
+            ) -> Result<DurableReviewDeliveryReceiptV1> =
+                PreparedDurableReviewDeliveryV1::deliver_prepared_v2;
+        }
+        consuming_delivery();
+    }
+
+    #[test]
+    fn production_source_encodes_once_and_both_routes_use_original_transport_kernel() {
+        // Source assertions distinguish the one actual typed encoding from the
+        // inert allocation fixtures below; they do not claim positive native IO.
+        let source = include_str!("durable_review_ipc_v1.rs");
+        let source = source.split("#[cfg(test)]").next().unwrap();
+        let prepare = source
+            .split("pub fn into_prepared_v2(")
+            .nth(1)
+            .unwrap()
+            .split("/// One original validated encoding")
+            .next()
+            .unwrap();
+        assert_eq!(prepare.matches("self.encode()?").count(), 1);
+        assert_eq!(prepare.matches("Sha256::digest(raw.as_slice())").count(), 1);
+        assert!(prepare.contains("PreparedDurableReviewPayloadV2 { raw, digest }"));
+        let legacy = source
+            .split("pub fn deliver(")
+            .nth(1)
+            .unwrap()
+            .split("pub fn deliver_prepared_v2(")
+            .next()
+            .unwrap();
+        let encode = legacy.find("payload.encode()?").unwrap();
+        let digest = legacy.find("Sha256::digest(raw.as_slice())").unwrap();
+        let transport = legacy.find("self.deliver_encoded_v2(").unwrap();
+        assert!(encode < digest && digest < transport);
+        assert_eq!(legacy.matches("payload.encode()?").count(), 1);
+        let prepared_delivery = source
+            .split("pub fn deliver_prepared_v2(")
+            .nth(1)
+            .unwrap()
+            .split("// Deferred expressions")
+            .next()
+            .unwrap();
+        assert!(!prepared_delivery.contains(".encode()"));
+        assert!(!prepared_delivery.contains("Sha256::digest"));
+        assert!(prepared_delivery.contains("self.deliver_encoded_v2(payload, check)"));
+        assert!(prepared_delivery.contains("delivery_transport_kernel_v2(&payload"));
+        assert!(source.contains("bounded_write_kernel_v2(stream, value, deadline, check, None)"));
+        let owner_impl = source
+            .split("impl PreparedDurableReviewPayloadV2 {")
+            .nth(1)
+            .unwrap()
+            .split("#[derive(")
+            .next()
+            .unwrap();
+        assert_eq!(owner_impl.matches("pub fn ").count(), 2);
+        assert!(!owner_impl.contains("Vec<u8>"));
+        assert!(!owner_impl.contains("&[u8]"));
+    }
+
+    #[test]
+    fn typed_payload_validation_failure_never_reaches_transport() {
+        let payload = DurableReviewPayloadV1 {
+            version: 1,
+            unsigned_pczt_hex: "00".into(),
+            proved_pczt_hex: "00".into(),
+            contributions: Vec::new(),
+            output_actions: vec![DurableReviewOutputActionV1 {
+                output_id: "inert-output".into(),
+                action_index: 0,
+            }],
+        };
+        let result = payload.into_prepared_v2().and_then(|_| -> Result<()> {
+            panic!("invalid typed payload must never reach any transport")
+        });
+        assert!(matches!(result, Err(BridgeError::Binding)));
+    }
+
+    #[test]
+    fn preflight_checks_once_in_original_order_and_failure_opens_no_transport() {
+        for fail_at in [Some(1), Some(2), None] {
+            let trace = Trace::default();
+            let result = delivery_preflight_v2(
+                || step(&trace, fail_at, "consent"),
+                || step(&trace, fail_at, "recipient_current"),
+                || step(&trace, fail_at, "transport"),
+            );
+            let expected = ["consent", "recipient_current", "transport"];
+            assert_eq!(*trace.borrow(), expected[..fail_at.unwrap_or(3)]);
+            assert_eq!(result.is_err(), fail_at.is_some());
+            if fail_at.is_some() {
+                assert!(matches!(result, Err(BridgeError::Conflict)));
+            }
+        }
+    }
+
+    #[test]
+    fn inert_prepared_transport_keeps_exact_original_allocation_digest_length_and_bytes() {
+        let raw = Zeroizing::new(
+            (0..CHUNK_BYTES * 2 + 17)
+                .map(|index| (index % 251) as u8)
+                .collect::<Vec<_>>(),
+        );
+        let original_pointer = raw.as_ptr();
+        let expected = raw.to_vec();
+        let digest = hex::encode(Sha256::digest(raw.as_slice()));
+        // Private inert construction for an allocation test only. Production
+        // has no byte constructor and only creates this after typed encode().
+        let payload = PreparedDurableReviewPayloadV2 { raw, digest };
+        assert_eq!(payload.raw.as_ptr(), original_pointer);
+        assert_eq!(payload.payload_bytes(), expected.len() as u64);
+        assert_eq!(
+            payload.payload_digest(),
+            hex::encode(Sha256::digest(&expected))
+        );
+        let mut transport = inert_transport(&payload, receipt(&payload));
+        let trace = transport.trace.clone();
+        let original_payload = payload;
+        let result = delivery_preflight_v2(
+            || step(&trace, None, "consent"),
+            || step(&trace, None, "recipient_current"),
+            || {
+                delivery_transport_kernel_v2(&original_payload, &mut transport, || {
+                    step(&trace, None, "request_digest")?;
+                    Ok("inert-request-digest".into())
+                })
+            },
+        );
+        assert!(result.is_ok());
+        assert_eq!(original_payload.raw.as_ptr(), original_pointer);
+        assert_eq!(transport.transmitted, expected);
+        assert_eq!(
+            transport.begin,
+            Some((
+                original_payload.payload_digest().into(),
+                original_payload.payload_bytes()
+            ))
+        );
+        assert_eq!(
+            *transport.acknowledged.borrow(),
+            [
+                0,
+                CHUNK_BYTES as u64,
+                (CHUNK_BYTES * 2) as u64,
+                expected.len() as u64
+            ]
+        );
+        assert_eq!(
+            *trace.borrow(),
+            [
+                "consent",
+                "recipient_current",
+                "begin",
+                "ack",
+                "chunk",
+                "check",
+                "ack",
+                "chunk",
+                "check",
+                "ack",
+                "chunk",
+                "check",
+                "ack",
+                "finish",
+                "frame",
+                "check",
+                "request_digest"
+            ]
+        );
+    }
+
+    #[test]
+    fn inert_transport_failures_keep_legacy_short_circuit_order() {
+        let expected = [
+            "begin",
+            "ack",
+            "chunk",
+            "check",
+            "ack",
+            "finish",
+            "frame",
+            "check",
+            "request_digest",
+        ];
+        for fail_at in 1..=expected.len() {
+            let raw = Zeroizing::new(vec![0x51; 7]);
+            let digest = hex::encode(Sha256::digest(raw.as_slice()));
+            let payload = PreparedDurableReviewPayloadV2 { raw, digest };
+            let mut transport = inert_transport(&payload, receipt(&payload));
+            transport.fail_at = Some(fail_at);
+            let trace = transport.trace.clone();
+            let result = delivery_transport_kernel_v2(&payload, &mut transport, || {
+                step(&trace, Some(fail_at), "request_digest")?;
+                Ok("inert-request-digest".into())
+            });
+            assert!(matches!(result, Err(BridgeError::Conflict)));
+            assert_eq!(*trace.borrow(), expected[..fail_at]);
+        }
+    }
+
+    #[test]
+    fn inert_receipt_validation_preserves_strict_fields_and_digest_short_circuit() {
+        for mutation in 0..8 {
+            let raw = Zeroizing::new(vec![0x51; 7]);
+            let digest = hex::encode(Sha256::digest(raw.as_slice()));
+            let payload = PreparedDurableReviewPayloadV2 { raw, digest };
+            let mut receipt = receipt(&payload);
+            match mutation {
+                0 => receipt.version = 2,
+                1 => receipt.recipient_request_digest.push('x'),
+                2 => receipt.payload_digest.push('x'),
+                3 => receipt.payload_bytes += 1,
+                4 => receipt.state.push('x'),
+                _ => {}
+            }
+            let mut transport = inert_transport(&payload, receipt);
+            if mutation == 5 {
+                transport.frame = Zeroizing::new(b"not-json".to_vec());
+            } else if mutation == 6 {
+                transport.frame =
+                    Zeroizing::new(serde_json::to_vec(&DeliveryResponseV1::Denied).unwrap());
+            }
+            let digest_calls = Cell::new(0);
+            let result = delivery_transport_kernel_v2(&payload, &mut transport, || {
+                digest_calls.set(digest_calls.get() + 1);
+                Ok("inert-request-digest".into())
+            });
+            assert_eq!(
+                digest_calls.get(),
+                usize::from(matches!(mutation, 1..=4 | 7))
+            );
+            match mutation {
+                6 => assert!(matches!(result, Err(BridgeError::Permission))),
+                7 => assert!(result.is_ok()),
+                _ => assert!(matches!(result, Err(BridgeError::Binding))),
+            }
+        }
     }
 }

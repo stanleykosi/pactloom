@@ -3237,6 +3237,109 @@ class DurableDeliveryOutputTests(unittest.TestCase):
         self.assertEqual(output.public_durable_delivery(json.dumps(row)),row)
         for bad in (dict(row,first_failure='DeliveryRecipientPrivatePath'),dict(row,first_outcome='private peer message'),dict(row,elapsed_ms=120001)):
             with self.assertRaises(ValueError):output.public_durable_delivery(json.dumps(bad))
+    def test_receiver_stage_inventory_and_finite_outcomes_are_exact(self):
+        stages=(
+            'DeliveryReceiveNativeDeadline',
+            'DeliveryReceiveRequest',
+            'DeliveryReceiveSource',
+            'DeliveryReceiveOriginalHistory',
+            'DeliveryReceiveOriginalBinding',
+            'DeliveryReceiveCurrentHistory',
+            'DeliveryReceiveRedisclosureBinding',
+            'DeliveryReceiveRecipientBinding',
+            'DeliveryReceiveViewingKey',
+            'DeliveryReceiveMaterialOwner',
+            'DeliveryReceiveLease',
+            'DeliveryReceiveNativeOrigin',
+            'DeliveryReceiveSourceUnderLease',
+            'DeliveryReceiveReceipts',
+            'DeliveryReceiveProposal',
+            'DeliveryReceiveAccount',
+            'DeliveryReceiveAccountBinding',
+            'DeliveryReceiveReviewerScope',
+            'DeliveryReceiveDeadline',
+            'DeliveryReceiveOriginalSource',
+            'DeliveryReceivePeer',
+            'DeliveryReceiveMaterialClock',
+            'DeliveryReceiveMaterialScope',
+            'DeliveryReceiveRequestDigest',
+            'DeliveryReceiveReadyWrite',
+            'DeliveryReceiveFrame',
+            'DeliveryReceiveCommandParse',
+            'DeliveryReceiveCommandBinding',
+            'DeliveryReceivePayloadLimit',
+            'DeliveryReceiveChunkDecode',
+            'DeliveryReceiveCurrentWrite',
+            'DeliveryReceiveReceivingWrite',
+            'DeliveryReceivePayloadBinding',
+            'DeliveryReceivePayloadParse',
+            'DeliveryReceivePayloadCanonical',
+            'DeliveryReceiveContributionBinding',
+            'DeliveryReceiveUnsignedDecode',
+            'DeliveryReceiveProvedDecode',
+            'DeliveryReceiveEconomics',
+            'DeliveryReceiveFinalBinding',
+            'DeliveryReceiveFinalSource',
+            'DeliveryReceiveFinalPeer',
+            'DeliveryReceiveFinalDeadline',
+            'DeliveryReceiveFinalMaterialClock',
+            'DeliveryReceiveFinalMaterialScope',
+            'DeliveryReceiveImportedWrite',
+            'DeliveryReceiveTerminal',
+        )
+        additions=(
+            'JournalExpired',
+            'JournalPermission',
+            'JournalOther',
+            'ConstructionInvalid',
+            'ConstructionBinding',
+            'ConstructionStale',
+            'ConstructionStorage',
+            'ConstructionSync',
+        )
+        source=(ROOT/'crates/wholepact-signer/src/native_ui/runtime/durable_delivery_admission_v2.rs').read_text()
+        receiver=source.split('mod receiver_diagnostics_v2 {',1)[1]
+        def labels(name):
+            body=re.search(r'labels!\s*\{\s*'+name+r'\s*\{(.*?)\}\s*\}',receiver,re.S).group(1)
+            values=re.findall(r'\b([A-Za-z][A-Za-z0-9_]*)\s*,',body)
+            self.assertEqual(len(values),len(set(values)))
+            return values
+        self.assertEqual(labels('Stage'),list(stages))
+        self.assertEqual(len(stages),47)
+        self.assertEqual(set(stages),{name for name in output.DURABLE_DELIVERY_BOUNDARIES if name.startswith('DeliveryReceive')})
+        self.assertEqual(set(stages),{name for name in output.BOUNDARIES if name.startswith('DeliveryReceive')})
+        outcomes=labels('Outcome')
+        self.assertEqual(len(additions),8)
+        self.assertEqual(set(additions),{name for name in outcomes if name.startswith(('Journal','Construction'))})
+        self.assertTrue(set(outcomes)<=output.OUTCOMES)
+        for stage in stages:
+            row=dict(self.record(),result='failed',first_failure=stage,first_outcome='WorkerFailure',admission_count='unverified')
+            self.assertEqual(output.public_durable_delivery(json.dumps(row)),row)
+        # This establishes closed wire vocabulary, not per-site runtime causes.
+        for outcome in additions:
+            row=dict(self.record(),result='failed',first_failure='DeliveryReceiveTerminal',first_outcome=outcome,admission_count='unverified')
+            self.assertEqual(output.public_durable_delivery(json.dumps(row)),row)
+
+    def test_receiver_failure_projection_preserves_limits_and_no_effect_inference(self):
+        for stage,outcome in (('DeliveryReceiveDeadline','PredicateDenied'),
+                              ('DeliveryReceiveReceipts','JournalExpired'),
+                              ('DeliveryReceiveMaterialScope','ConstructionStale'),
+                              ('DeliveryReceiveFrame','OriginAuthentication'),
+                              ('DeliveryReceiveSource','SignerLocked')):
+            row=dict(self.record(),result='failed',first_failure=stage,first_outcome=outcome,
+                     failed_child_inputs_completed=113,failed_child_inputs_expected=121,
+                     admission_count='unverified',reader_exit='not_started',reader_reaped=False,
+                     reader_group_absent=False,reader_no_effects_verified=False)
+            self.assertEqual(output.public_durable_delivery(json.dumps(row)),row)
+            self.assertEqual(row['schema'],3)
+            self.assertEqual(len(row),26)
+            self.assertLess(len(self.line(row).encode()),2048)
+            self.assertFalse(row['authorization_allowed'])
+            self.assertNotIn('no_effects',row)
+            for changed in (dict(row,first_failure='DeliveryReceivePrivatePath'),
+                            dict(row,first_outcome='private source error'),dict(row,elapsed_ms=120001),
+                            dict(row,root_cleanup='retained'),dict(row,producer_reaped=False)):
+                with self.assertRaises(ValueError):output.public_durable_delivery(json.dumps(changed))
     def test_export_unknown_is_observed_without_claiming_rollback_or_success(self):
         row=dict(self.record(),result='failed',first_failure='DeliveryExportCommit',
                  first_outcome='EngineDisclosureUnknown',admission_count='unverified')

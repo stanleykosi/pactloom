@@ -1,8 +1,20 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-19, 22:56 UTC.
+Updated: 2026-10-19, 23:51 UTC.
 
 **CI33 passed the bounded synthetic original-private-workspace completed-fixed SIGKILL/fresh-process read-only reopen path and all listed regressions. Product qualification remains incomplete: no public testnet settlement, restarted acquired financial session, attended GUI reliability, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
+
+## CI37: closed recipient persists; prepare exact payload before fresh native entry
+
+[Run 39339038477](https://github.com/stanleykosi/pactloom/actions/runs/39339038477), qualifier `e3f523afcb106fc941fa65a86bddddf2aa7ffdd3`, source `687e980c1ef1004044a4a9565c79632c7de925f5`, passed build (9m46s), pure97, encrypted bootstrap and observation preflight. At 23:21:40 UTC it again reported DeliveryRecipientWriteIo / OriginIoBrokenPipe, inputs111/117, reader not started. Producer reaping/group absence, closed/absent root cleanup and empty runtime removal were verified. The pending-wait correction was not sufficient to clear this failure. Its local non-synthetic build also passed before this run; the19 targeted tests were not rerun unchanged.
+
+The eight-path correction moves actual immutable payload preparation before each genuinely new Signer entry. Opaque non-Clone owners retain one validated zeroizing encoded allocation. After real recipient setup, an unconditional new source-bound metadata-inspection approval and the existing export consent authorize the exact final operation. Before Store, commit reloads the actual verified proof/history and compares original source, fixed identity, scope, output actions, material ceilings and prepared bytes. Only that same retained payload allocation is sent. Per-owner preparation prevents the first export append from silently staling a second owner's history snapshot.
+
+Preparation is local reading/custody, not permission to disclose. The completed preparation grant is not renewed or carried as final authority. All native/recipient/material clocks and exposure-before-send/Unknown behavior remain unchanged. The qualifier opens the fresh recipient after preparation; an already-paired legacy CLI does not gain that earlier-entry ordering. Final human review still shares the independent Signer120-second ceiling, so this is not a guarantee of human-paced timing fit.
+
+An operation-local receiver observer also captures the same original lower error before callback conversion and emits its finite first cause while the original stream remains owned. It does not change returned Results, IO, checks or clocks. Closed receiver categories extend the existing schema3 vocabulary only; no raw errors, private values or new result fields are exposed. First observed is not a global causal-order guarantee.
+
+The all-feature Engine/Signer/Host release build (7m54s), all32 exact new/affected Rust checks and11 affected Python delivery-projection checks pass. Non-synthetic compilation and21 exact compatible checks remain pending at preparation. Unchanged test evidence is reused. Actual export/admission/restart remains unproven until the next isolated native run; the exact server-closing predicate in CI37 is still not established.
 
 ## CI36: recipient currentness write reaches a closed pipe; targeted pending-wait correction
 
