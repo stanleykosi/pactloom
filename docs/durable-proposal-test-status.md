@@ -1,8 +1,18 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-19, 18:32 UTC.
+Updated: 2026-10-19, 19:32 UTC.
 
 **CI33 passed the bounded synthetic original-private-workspace completed-fixed SIGKILL/fresh-process read-only reopen path and all listed regressions. Product qualification remains incomplete: no public testnet settlement, restarted acquired financial session, attended GUI reliability, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
+
+## CI34: delivery export refused; finer finite observations under qualification
+
+[Run 39304763153](https://github.com/stanleykosi/pactloom/actions/runs/39304763153), qualifier `c4dc885b1d4a0d47959690a9a4fdd7faee2494a9`, implementation `7874b7295a67b1515074ecfba00b02b466b55041`, passed its release build (9m49s), pure97, encrypted bootstrap and observation preflight. At 19:03:09 UTC the new native phase failed at aggregate DeliverySourceExport. Admission count and all completion/history facts were unverified; producer exit was other, reaped and group absent, reader not started. Root cleanup was closed/absent and the runtime container was removed empty. Later regression phases did not run. Local checkpoint56 non-synthetic compilation and all60 exact compatible tests also passed before this run.
+
+That aggregate covers redisclosure, recipient preparation, original-source inspection, preview, approval, export commit and postcheck. The parent dropped the finite error category; two Signer Result paths were discarded before eventual transport fallout. No specific binding defect, exhausted clock, absence of private exposure or successful rollback is established. The approximately eight-minute phase includes its completed-fixed precursor and is not evidence of an approval timeout.
+
+The reviewed eleven-path correction is observation-only. It preserves actual returned Results, checks, short-circuit ordering, deadlines and effects while distinguishing finite failure sites. Checked V2 serve records its error before dropping its still-owned stream. A bounded B1-only per-child latch retains one first-observed strict finite failure across the existing 64-entry summary eviction; budget loss permanently withholds that optional evidence and never substitutes a later error. Existing capture budgets and summary behavior are unchanged. Public schema3 adds a nullable finite outcome and verified child input counts, only after verified cleanup. A fallback boundary has a null outcome. First observed PTY failure is not guaranteed causal root cause across threads. No raw transcript, private identifiers or arbitrary error strings are exposed.
+
+Python161 passes after preserving the original22 transcript selectors and separately validating the new8 latch tests. The all-feature Host/Signer release library build and all30 exact focused/compatibility observation tests pass. The non-synthetic build and its11 exact tests remain pending at this checkpoint's preparation. Full B1 admission/death/reopen remains unproven; no financial permission or deadline is relaxed to make a test pass.
 
 ## Delivery admission B1: source and component gates pass; native qualification pending
 

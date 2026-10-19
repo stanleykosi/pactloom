@@ -626,7 +626,20 @@ class PublicOutputTests(unittest.TestCase):
     def test_rolling_preflight_preserves_ten_original_plus_twelve_optional_cases(self):
         base=ROOT/'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2'
         source=(base/'sequential_construction_v3_qualification/rolling_transcript_v1.rs').read_text()
-        names=re.findall(r'#\[test\]\s+(?:#\[cfg\(feature = "synthetic-born-joined-qualification"\)\]\s+)?fn (\w+)\(',source)
+        original,delivery=source.split('mod delivery_first_failure_tests {')
+        names=re.findall(r'#\[test\]\s+(?:#\[cfg\(feature = "synthetic-born-joined-qualification"\)\]\s+)?fn (\w+)\(',original)
+        delivery_names=re.findall(r'#\[test\]\s+fn (\w+)\(',delivery)
+        self.assertEqual(tuple(delivery_names),(
+            'delivery_first_failure_survives_more_than_64_later_diagnostics',
+            'delivery_first_failure_requires_complete_exact_finite_marker',
+            'delivery_first_failure_is_opt_in_and_isolated_per_child',
+            'delivery_first_failure_yields_to_chunk_budget_and_never_recaptures',
+            'delivery_first_failure_yields_to_summary_and_path_metadata_budget',
+            'delivery_first_failure_yields_before_existing_optional_capture_budget',
+            'delivery_first_failure_yields_before_position_budget_refusals',
+            'delivery_first_failure_insufficient_capture_budget_is_sticky',
+        ))
+        self.assertEqual(len(delivery_names),len(set(delivery_names)))
         all_expected=tuple(output.PREFIX+'rolling_transcript_v1::tests::'+name for name in names)
         self.assertEqual(len(all_expected),22)
         self.assertEqual(set(all_expected),set(output.ROLLING_TRANSCRIPT_TESTS+output.HISTORY_TRANSCRIPT_TESTS+output.ADMISSION_TRANSCRIPT_TESTS+output.FLOW_TRANSCRIPT_TESTS))
@@ -3088,7 +3101,8 @@ class DurableDeliveryOutputTests(unittest.TestCase):
     def record(self):
         row={key:True for key in output.DURABLE_DELIVERY_BOOL_FIELDS}
         row.update({key:False for key in output.DURABLE_DELIVERY_FALSE_FIELDS})
-        row.update(schema=2,phase='durable_delivery_admission',result='passed',first_failure=None,
+        row.update(schema=3,phase='durable_delivery_admission',result='passed',first_failure=None,
+                   first_outcome=None,failed_child_inputs_completed=None,failed_child_inputs_expected=None,
                    producer_exit='sigkill',reader_exit='success',root_cleanup='closed_absent',admission_count='2_of_2')
         return row
     def line(self,row=None):
@@ -3106,11 +3120,16 @@ class DurableDeliveryOutputTests(unittest.TestCase):
     def test_rust_python_result_inventory_and_selector_are_exact(self):
         base=ROOT/'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3_qualification'
         source=(base/'durable_proposal_v1/delivery_admission_v2.rs').read_text()
-        fields=re.search(r'struct PublicOutcomeV2\s*\{(.*?)\n\}',source,re.S).group(1)
+        fields=re.search(r'struct PublicOutcomeV3\s*\{(.*?)\n\}',source,re.S).group(1)
+        skipped=re.findall(r'#\[serde\(skip\)\]\s*(\w+): ([^,]+),',fields)
+        self.assertEqual(skipped,[('pending_child_observation','Option<FailedChildObservation>')])
+        fields=re.sub(r'#\[serde\(skip\)\]\s*\w+: [^,]+,','',fields)
         actual=dict(re.findall(r'^\s+(\w+): ([^,]+),$',fields,re.M))
         self.assertEqual(set(actual),output.DURABLE_DELIVERY_FIELDS)
         self.assertEqual({key for key,ty in actual.items() if ty=='bool'},output.DURABLE_DELIVERY_BOOL_FIELDS|output.DURABLE_DELIVERY_FALSE_FIELDS)
-        boundaries=re.search(r'const BOUNDARIES: &\[&str\] = &\[(.*?)\];',source,re.S).group(1)
+        self.assertIn('const BOUNDARIES: &[&str] = diagnostic::DELIVERY_BOUNDARIES;',source)
+        safe=(base/'safe_diagnostics_v1.rs').read_text()
+        boundaries=re.search(r'const DELIVERY_BOUNDARIES: &\[&str\] = &\[(.*?)\];',safe,re.S).group(1)
         self.assertEqual(set(re.findall(r'"(\w+)"',boundaries)),output.DURABLE_DELIVERY_BOUNDARIES)
         self.assertIn('const PUBLIC_PREFIX: &str = "'+output.DURABLE_DELIVERY_PREFIX+'";',source)
         selector=output.TESTS['durable-delivery-admission'][0].rsplit('::',1)[1]
@@ -3132,6 +3151,32 @@ class DurableDeliveryOutputTests(unittest.TestCase):
             with self.assertRaises(ValueError):output.public_durable_delivery(json.dumps(dict(row,**{key:True})))
         for bad in (json.dumps(row)[:-1]+',"schema":2}',json.dumps(dict(row,private_key='secret')),' '*2049+json.dumps(row)):
             with self.assertRaises(ValueError):output.public_durable_delivery(bad)
+    def test_first_observed_outcome_and_input_progress_are_closed_and_cleanup_gated(self):
+        row=dict(self.record(),result='failed',first_failure='DeliveryRedisclosureServe',
+                 first_outcome='BridgePermission',failed_child_inputs_completed=108,
+                 failed_child_inputs_expected=117)
+        self.assertEqual(output.public_durable_delivery(json.dumps(row)),row)
+        for value in ('private secret','Begin','Complete','',1,{},['BridgePermission']):
+            with self.assertRaises(ValueError):
+                output.public_durable_delivery(json.dumps(dict(row,first_outcome=value)))
+        for completed,expected in ((True,117),(1,False),(-1,117),(118,117),(1,513),(0,0),(None,117),(108,None),('108',117)):
+            with self.assertRaises(ValueError):
+                output.public_durable_delivery(json.dumps(dict(row,failed_child_inputs_completed=completed,failed_child_inputs_expected=expected)))
+        for changed in (dict(row,root_cleanup='retained'),dict(row,root_cleanup='unverified'),dict(row,result='passed'),dict(row,first_failure=None),dict(row,producer_reaped=False),dict(row,producer_group_absent=False)):
+            with self.assertRaises(ValueError):output.public_durable_delivery(json.dumps(changed))
+        fallback=dict(row,first_outcome=None,failed_child_inputs_completed=None,failed_child_inputs_expected=None)
+        self.assertEqual(output.public_durable_delivery(json.dumps(fallback)),fallback)
+        with self.assertRaises(ValueError):
+            output.public_durable_delivery(json.dumps(row)[:-1]+',"first_outcome":"HostPermission"}')
+        with self.assertRaises(ValueError):
+            output.public_durable_delivery(json.dumps(dict(row,schema=2)))
+    def test_export_unknown_is_observed_without_claiming_rollback_or_success(self):
+        row=dict(self.record(),result='failed',first_failure='DeliveryExportCommit',
+                 first_outcome='EngineDisclosureUnknown',admission_count='unverified')
+        self.assertEqual(output.public_durable_delivery(json.dumps(row)),row)
+        self.assertFalse(row['authorization_allowed'])
+        self.assertNotIn('no_effects',row)
+        self.assertLess(len(self.line(row).encode('utf8')),2048)
     def test_every_success_fact_is_required_and_partial_commit_is_not_success(self):
         row=self.record()
         for key in output.DURABLE_DELIVERY_BOOL_FIELDS:

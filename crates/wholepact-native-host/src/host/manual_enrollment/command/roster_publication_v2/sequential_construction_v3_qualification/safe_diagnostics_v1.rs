@@ -14,7 +14,7 @@ macro_rules! labels {
     };
 }
 labels! { Boundary {
-    DeliveryCredentialRegistration, DeliverySourceExport, DeliveryOriginalReopen, DeliveryUnsupportedAudit, DeliveryNativeAdmission, DeliveryHistoricalRead, DeliveryIdentityCompare, DeliveryDurableMarker, DeliveryProducerKill, DeliveryProducerReap, DeliveryReaderReap, DeliveryRootCleanup,
+    DeliveryCredentialRegistration, DeliveryRedisclosure, DeliveryRedisclosurePrepare, DeliveryRedisclosureApprove, DeliveryRedisclosureServe, DeliveryArtifactImportStart, DeliveryArtifactImport, DeliverySourceOpen, DeliverySourceInspection, DeliverySourcePlan, DeliveryRecipientPrepare, DeliveryExportPreview, DeliveryExportApproval, DeliveryExportCommit, DeliveryExportPostcheck, DeliveryNativeCheck, DeliverySourceCheck, DeliverySourceExport, DeliveryOriginalReopen, DeliveryUnsupportedAudit, DeliveryNativeAdmission, DeliveryHistoricalRead, DeliveryIdentityCompare, DeliveryDurableMarker, DeliveryProducerKill, DeliveryProducerReap, DeliveryReaderReap, DeliveryRootCleanup,
     PrivateWorkspaceBootstrap, PrivateSourceSelect, PrivateWorkspaceReserve, PrivateWorkspaceAnchor, PrivateWorkspacePublish, PrivateWorkspaceInitialize, PrivateWorkspaceCandidate, PrivateWorkspaceCapture, PrivateWorkspaceIntake, PrivateWorkspaceObserve, PrivateWorkspaceCheckpoint, PrivateWorkspaceProof, PrivateWorkspaceFreeze, PrivateWorkspaceScanCleanup, PrivateWorkspaceDurableMarker, PrivateWorkspaceProducerKill, PrivateWorkspaceProducerReap, PrivateWorkspaceReaderOpen, PrivateWorkspaceReadFixed, PrivateWorkspaceIdentityCompare, PrivateWorkspaceReaderReap, PrivateWorkspaceRootCleanup,
     SignerAdmissionCallCallerDeadline, SignerAdmissionCallExchangeDeadline, SignerAdmissionCallSourceCallback, SignerAdmissionCallBounds,
     SignerAdmissionCallRequestValidation, SignerAdmissionCallBinding, SignerAdmissionCallConnect, SignerAdmissionCallHandshake, SignerAdmissionCallPeerBinding, SignerAdmissionCallRequestBuild, SignerAdmissionCallRequestWrite, SignerAdmissionCallResponseRead, SignerAdmissionCallResponse, SignerAdmissionCallSnapshotValidation, SignerAdmissionCallCommittedHeadValidation, SignerAdmissionCallFinalValidation, SignerAdmissionDispatchFixtureState, SignerAdmissionDispatchReviewCorrelation, SignerAdmissionDispatchNativeApproval, SignerAdmissionDispatchIntentRetention, SignerAdmissionDispatchSubmitCustody, SignerAdmissionDispatchSubmitIntent, SignerAdmissionDispatchSubmitInterval, SignerAdmissionDispatchSubmitWorkspace, SignerAdmissionDispatchAuthorityCall, SignerAdmissionDispatchWorkerCompletion, SignerAdmissionDispatchCommittedCorrelation, SignerAdmissionCallbackWorkspaceCurrent, SignerAdmissionCallbackCustody, SignerAdmissionCallbackRequestValidation, SignerAdmissionCallIoTimeout, SignerAdmissionCallIoClosed, SignerAdmissionCallIoRefused, SignerAdmissionCallIoOther, SignerAdmissionCallCallbackError,
@@ -68,6 +68,19 @@ pub(super) fn emit(boundary: Boundary, outcome: Outcome) {
         "\n[JOINED_DIAGNOSTIC {} {}]",
         boundary.label(),
         outcome.label()
+    );
+}
+
+// Delivery-only optional output must never replace an existing owned Result
+// with a formatting panic when stderr is closed or otherwise unavailable.
+#[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+pub(super) fn emit_delivery_observation(boundary: Boundary, outcome: Outcome) {
+    use std::io::Write;
+    let _ = writeln!(
+        std::io::stderr().lock(),
+        "\n[JOINED_DIAGNOSTIC {} {}]",
+        boundary.label(),
+        outcome.label(),
     );
 }
 
@@ -539,6 +552,22 @@ pub(super) struct HistoryMeasurementCapture {
 
 #[cfg(feature = "synthetic-born-joined-qualification")]
 impl HistoryMeasurementCapture {
+    #[cfg(feature = "durable-proposal")]
+    pub(super) fn additional_bytes_for_line(&self, line: &str) -> Option<usize> {
+        let server = if line.starts_with("[HISTORY_SERVER_MEASUREMENT_V1 ") {
+            true
+        } else if line.starts_with("[HISTORY_MEASUREMENT_V1 ") {
+            false
+        } else {
+            return None;
+        };
+        if if server { self.server_invalid } else { self.client_invalid } {
+            return None;
+        }
+        let record = parse_history_record(line, server)?;
+        self.records[record.slot()].is_none().then_some(record.line().len())
+    }
+
     pub(super) fn retained_bytes(&self) -> usize {
         self.records
             .iter()
@@ -1436,6 +1465,15 @@ pub(super) struct AdmissionDiagnosticCapture {
 }
 #[cfg(feature = "synthetic-born-joined-qualification")]
 impl AdmissionDiagnosticCapture {
+    #[cfg(feature = "durable-proposal")]
+    pub(super) fn additional_bytes_for_line(&self, line: &str) -> Option<usize> {
+        let slot = (0..3).find(|&slot| line.starts_with(ADMISSION_PREFIXES[slot]))?;
+        if self.invalid[slot] || self.records[slot].is_some() {
+            return None;
+        }
+        Some(parse_admission_record(line, slot)?.line.len())
+    }
+
     pub(super) fn retained_bytes(&self) -> usize {
         self.records
             .iter()
@@ -1785,6 +1823,138 @@ pub(super) fn authority_error(error: &wholepact_authority::AuthorityError) -> Ou
         E::ResolutionUnavailable => Outcome::AuthorityResolutionUnavailable,
         E::SessionRequired => Outcome::AuthoritySessionRequired,
         E::SessionPending => Outcome::AuthoritySessionPending,
+    }
+}
+
+// B1's public inventory excludes unrelated qualification diagnostics. These
+// finite labels are observation only, never evidence of absence of effects.
+#[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+pub(super) const DELIVERY_BOUNDARIES: &[&str] = &[
+    "PrivateWorkspaceBootstrap",
+    "PrivateSourceSelect",
+    "PrivateWorkspaceReserve",
+    "PrivateWorkspaceAnchor",
+    "PrivateWorkspacePublish",
+    "PrivateWorkspaceInitialize",
+    "PrivateWorkspaceCandidate",
+    "PrivateWorkspaceCapture",
+    "PrivateWorkspaceIntake",
+    "PrivateWorkspaceObserve",
+    "PrivateWorkspaceCheckpoint",
+    "PrivateWorkspaceProof",
+    "PrivateWorkspaceFreeze",
+    "PrivateWorkspaceScanCleanup",
+    "PrivateWorkspaceDurableMarker",
+    "PrivateWorkspaceProducerKill",
+    "PrivateWorkspaceProducerReap",
+    "PrivateWorkspaceReaderOpen",
+    "PrivateWorkspaceReadFixed",
+    "PrivateWorkspaceIdentityCompare",
+    "PrivateWorkspaceReaderReap",
+    "PrivateWorkspaceRootCleanup",
+    "DeliveryCredentialRegistration",
+    "DeliveryRedisclosure",
+    "DeliveryRedisclosurePrepare",
+    "DeliveryRedisclosureApprove",
+    "DeliveryRedisclosureServe",
+    "DeliveryArtifactImportStart",
+    "DeliveryArtifactImport",
+    "DeliverySourceOpen",
+    "DeliverySourceInspection",
+    "DeliverySourcePlan",
+    "DeliveryRecipientPrepare",
+    "DeliveryExportPreview",
+    "DeliveryExportApproval",
+    "DeliveryExportCommit",
+    "DeliveryExportPostcheck",
+    "DeliveryNativeCheck",
+    "DeliverySourceCheck",
+    "DeliverySourceExport",
+    "DeliveryOriginalReopen",
+    "DeliveryUnsupportedAudit",
+    "DeliveryNativeAdmission",
+    "DeliveryHistoricalRead",
+    "DeliveryIdentityCompare",
+    "DeliveryDurableMarker",
+    "DeliveryProducerKill",
+    "DeliveryProducerReap",
+    "DeliveryReaderReap",
+    "DeliveryRootCleanup",
+];
+
+#[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+#[derive(Clone, Copy)]
+pub(super) struct DeliveryFailure {
+    boundary: Boundary,
+    outcome: Outcome,
+}
+#[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+impl DeliveryFailure {
+    // The caller supplies one complete physical line, with its LF removed.
+    // Accept exactly one optional terminal CR, not fuzzy marker extraction.
+    fn from_complete_line(line: &[u8]) -> Option<Self> {
+        let line = std::str::from_utf8(line).ok()?;
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let inner = line.strip_prefix("[JOINED_DIAGNOSTIC ")?.strip_suffix(']')?;
+        let (boundary, outcome) = inner.split_once(' ')?;
+        let boundary = Boundary::parse(boundary)?;
+        let outcome = Outcome::parse(outcome)?;
+        if !DELIVERY_BOUNDARIES.contains(&boundary.label())
+            || matches!(outcome, Outcome::Begin | Outcome::Complete)
+        {
+            return None;
+        }
+        Some(Self { boundary, outcome })
+    }
+    pub(super) fn labels(self) -> (&'static str, &'static str) {
+        (self.boundary.label(), self.outcome.label())
+    }
+    fn retained_bytes(self) -> usize {
+        // Charge the complete serialized boundary:outcome pair, including ':';
+        // storage itself holds only closed enums, never the raw marker.
+        self.boundary.label().len() + 1 + self.outcome.label().len()
+    }
+}
+#[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+pub(super) fn delivery_failure_outcome_label(value: &str) -> bool {
+    Outcome::parse(value).is_some_and(|outcome| !matches!(outcome, Outcome::Begin | Outcome::Complete))
+}
+
+// First in this PTY's observed byte-stream order, not cross-thread causality.
+// Once optional retention is lost, a later failure cannot become the first.
+#[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+#[derive(Default)]
+pub(super) enum DeliveryFailureCapture {
+    #[default]
+    Vacant,
+    Captured(DeliveryFailure),
+    Unavailable,
+}
+#[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+impl DeliveryFailureCapture {
+    pub(super) fn capture_complete_line(&mut self, line: &[u8], available: usize) {
+        if !matches!(self, Self::Vacant) {
+            return;
+        }
+        if let Some(pair) = DeliveryFailure::from_complete_line(line) {
+            *self = if pair.retained_bytes() <= available {
+                Self::Captured(pair)
+            } else {
+                Self::Unavailable
+            };
+        }
+    }
+    pub(super) fn retained_bytes(&self) -> usize {
+        self.value().map_or(0, DeliveryFailure::retained_bytes)
+    }
+    pub(super) fn value(&self) -> Option<DeliveryFailure> {
+        match self {
+            Self::Captured(pair) => Some(*pair),
+            Self::Vacant | Self::Unavailable => None,
+        }
+    }
+    pub(super) fn discard_for_budget(&mut self) {
+        *self = Self::Unavailable;
     }
 }
 
@@ -3395,6 +3565,16 @@ mod durable_flow_projection {
         invalid: bool,
     }
     impl DurableFlowCapture {
+        #[cfg(feature = "durable-proposal")]
+        pub(crate) fn additional_bytes_for_line(&self, line: &str) -> Option<usize> {
+            if self.invalid || self.record.is_some() {
+                return None;
+            }
+            let payload = line.strip_prefix(PRIVATE_PREFIX)?.strip_suffix(']')?;
+            let value = parse_payload(payload)?;
+            Some(PUBLIC_PREFIX.len() + canonical_payload(&value)?.len())
+        }
+
         pub(crate) fn retained_bytes(&self) -> usize {
             self.record.as_ref().map_or(0, String::len)
         }
@@ -3641,6 +3821,16 @@ mod durable_flow_projection {
         invalid: bool,
     }
     impl DurableLifecycleCapture {
+        #[cfg(feature = "durable-proposal")]
+        pub(crate) fn additional_bytes_for_line(&self, line: &str) -> Option<usize> {
+            if self.invalid || self.record.is_some() {
+                return None;
+            }
+            let payload = line.strip_prefix(LIFECYCLE_PRIVATE_PREFIX)?.strip_suffix(']')?;
+            let value = lifecycle_parse(payload)?;
+            Some(LIFECYCLE_PUBLIC_PREFIX.len() + lifecycle_canonical(&value)?.len())
+        }
+
         pub(crate) fn retained_bytes(&self) -> usize {
             self.record.as_ref().map_or(0, String::len)
         }
@@ -4604,6 +4794,14 @@ mod private_fixed_projection {
         invalid: bool,
     }
     impl PrivateFixedDiagnosticCapture {
+        pub(crate) fn additional_bytes_for_line(&self, line: &str) -> Option<usize> {
+            if self.seen {
+                return None;
+            }
+            let value = PrivateFixedDiagnosticV1::parse(line.strip_prefix(PREFIX)?)?;
+            Some(value.canonical_json()?.len())
+        }
+
         pub(crate) fn retained_bytes(&self) -> usize {
             self.retained
         }

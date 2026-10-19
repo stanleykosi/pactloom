@@ -1225,6 +1225,7 @@ impl PrivateWorkspaceStageV1 {
     feature = "synthetic-born-joined-qualification"
 ))]
 struct PrivateWorkspaceStageResultV1 {
+    delivery_first_failure: Option<safe_diagnostics_v1::DeliveryFailure>,
     private_fixed_diagnostic:
         Option<crate::host::durable_private_workspace_v1::PrivateFixedDiagnosticV1>,
     diagnostic_withheld: bool,
@@ -1282,6 +1283,9 @@ fn private_workspace_stage_v1(
             _ => None,
         })),
     )?;
+    if matches!(stage, PrivateWorkspaceStageV1::DeliveryProducer | PrivateWorkspaceStageV1::DeliveryReader) {
+        transcript.enable_delivery_first_failure();
+    }
     // This creates a temporary terminal, not an OS trust root or permission
     // override. The child still passes the actual foreground() implementation.
     let master_fd = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC) };
@@ -1616,7 +1620,15 @@ fn private_workspace_stage_v1(
         None
     };
     let diagnostic_withheld = transcript.diagnostic_withheld();
+    // The observation and input progress remain in this same child result.
+    // Never forward a captured pair without exact process cleanup evidence.
+    let delivery_first_failure = if process.verified() {
+        transcript.delivery_first_failure()
+    } else {
+        None
+    };
     Ok(PrivateWorkspaceStageResultV1 {
+        delivery_first_failure,
         private_fixed_diagnostic,
         diagnostic_withheld,
         outcome,

@@ -964,6 +964,8 @@ impl NativeRuntime {
         let session = open.session.clone().ok_or(Error::Locked)?;
         let journal = open.journal.clone();
         let worker = std::thread::spawn(move || {
+            // The checked serve observes its same terminal Result before its
+            // owned stream drops. Do not emit a duplicate after this return.
             let _ = approved.serve_with_original_source_check_v2(&journal, &session, |lease| {
                 source
                     .check_current_under_preconstruction_lease(lease)

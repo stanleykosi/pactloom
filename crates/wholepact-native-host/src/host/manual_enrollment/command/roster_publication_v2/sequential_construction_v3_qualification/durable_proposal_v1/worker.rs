@@ -825,7 +825,7 @@ fn delivery_failure_error(
     use wholepact_signer::native_ui::synthetic_born_joined_qualification::DurableDeliveryStageV2 as S;
     let (_attempt, stage, error, import, transport) = failure.into_parts();
     let boundary = match stage {
-        S::Import => B::DeliverySourceExport,
+        S::Import => B::DeliveryArtifactImport,
         S::OriginalEvidence => B::DeliveryCredentialRegistration,
         S::History | S::Audit => B::DeliveryHistoricalRead,
         _ => B::DeliveryNativeAdmission,
@@ -850,7 +850,7 @@ fn delivery_failure_error(
             E::Wallet(_) => Outcome::BridgeWallet,
             E::Ipc => Outcome::BridgeIpc,
         };
-        diagnostic::emit(boundary, outcome);
+        diagnostic::emit_delivery_observation(boundary, outcome);
     }
     if let Some(transport) = transport {
         let admission = matches!(stage, S::OwnerSend);
@@ -859,12 +859,12 @@ fn delivery_failure_error(
         } else {
             diagnostic::emit_history_measurement(transport.measurement());
         }
-        diagnostic::emit(
+        diagnostic::emit_delivery_observation(
             checked_authority_boundary(transport.stage(), admission).unwrap_or(boundary),
             diagnostic::authority_error(&transport.error()),
         );
     }
-    diagnostic::emit(boundary, diagnostic::signer_error(&error));
+    diagnostic::emit_delivery_observation(boundary, diagnostic::signer_error(&error));
     error
 }
 
@@ -981,7 +981,7 @@ fn execute(
                 cancelled,
                 || {
                     entry.poll_exact_redisclosure(&request).map_err(|error| {
-                        diagnostic::emit(B::DeliverySourceExport, diagnostic::signer_error(&error));
+                        diagnostic::emit_delivery_observation(B::DeliveryRedisclosure, diagnostic::signer_error(&error));
                         error
                     })
                 },

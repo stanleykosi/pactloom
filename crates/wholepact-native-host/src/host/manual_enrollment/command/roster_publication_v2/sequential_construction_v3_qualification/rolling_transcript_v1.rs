@@ -32,6 +32,8 @@ pub(super) struct Transcript<'a> {
     line_start: usize,
     paths: BTreeMap<&'a str, Option<CapturedPath>>,
     diagnostics: VecDeque<String>,
+    #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+    delivery_first_failure: Option<super::safe_diagnostics_v1::DeliveryFailureCapture>,
     #[cfg(feature = "synthetic-born-joined-qualification")]
     timing: crate::host::synthetic_roster_timing_v1::Capture,
     #[cfg(feature = "synthetic-born-joined-qualification")]
@@ -76,6 +78,8 @@ impl<'a> Transcript<'a> {
             line_start: 0,
             paths,
             diagnostics: VecDeque::new(),
+            #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+            delivery_first_failure: None,
             #[cfg(feature = "synthetic-born-joined-qualification")]
             timing: Default::default(),
             #[cfg(feature = "synthetic-born-joined-qualification")]
@@ -96,6 +100,7 @@ impl<'a> Transcript<'a> {
 
     fn retained_bytes(&self) -> usize {
         self.bytes.len()
+            + self.delivery_first_failure_retained_bytes()
             + self.timing_retained_bytes()
             + self.history_measurement_retained_bytes()
             + self.admission_diagnostic_retained_bytes()
@@ -110,6 +115,22 @@ impl<'a> Transcript<'a> {
                 .sum::<usize>()
             + self.diagnostics.iter().map(String::len).sum::<usize>()
             + self.diagnostics.len().saturating_sub(1)
+    }
+
+    // Disabled for every older adapter. Only the B1 delivery child stages opt in.
+    #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+    pub(super) fn enable_delivery_first_failure(&mut self) {
+        self.delivery_first_failure.get_or_insert_with(Default::default);
+    }
+    #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+    pub(super) fn delivery_first_failure(&self) -> Option<super::safe_diagnostics_v1::DeliveryFailure> {
+        self.delivery_first_failure.as_ref().and_then(|capture| capture.value())
+    }
+    fn delivery_first_failure_retained_bytes(&self) -> usize {
+        #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+        { self.delivery_first_failure.as_ref().map_or(0, |capture| capture.retained_bytes()) }
+        #[cfg(not(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification")))]
+        { 0 }
     }
 
     fn timing_retained_bytes(&self) -> usize {
@@ -240,6 +261,12 @@ impl<'a> Transcript<'a> {
         // Optional retained copies yield to the original transcript budget.
         // Their original raw PTY bytes still count normally; no raw limit is
         // bypassed, and truly over-budget original text still fails below.
+        #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+        if chunk.len() > MAX_BYTES.saturating_sub(self.retained_bytes()) {
+            if let Some(capture) = &mut self.delivery_first_failure {
+                capture.discard_for_budget();
+            }
+        }
         if chunk.len() > MAX_BYTES.saturating_sub(self.retained_bytes()) {
             self.discard_private_fixed_diagnostic_for_budget();
         }
@@ -284,6 +311,13 @@ impl<'a> Transcript<'a> {
                     retained = retained - removed - count.saturating_sub(1)
                         + entry.len()
                         + new_count.saturating_sub(1);
+                    #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+                    if retained > MAX_BYTES {
+                        if let Some(capture) = &mut self.delivery_first_failure {
+                            retained -= capture.retained_bytes();
+                            capture.discard_for_budget();
+                        }
+                    }
                     if retained > MAX_BYTES {
                         retained -= self.private_fixed_diagnostic_retained_bytes();
                         #[cfg(all(
@@ -321,6 +355,23 @@ impl<'a> Transcript<'a> {
             ))]
             let private_fixed_line = line.strip_suffix('\r').unwrap_or(line);
             let line = line.trim_end_matches('\r');
+            #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+            if let Some(capture) = &mut self.delivery_first_failure {
+                if capture.retained_bytes() > 0 {
+                    // Existing optional diagnostic copies have priority over
+                    // this new slot too. Preflight only finite valid records;
+                    // never let the slot change their original budget result.
+                    let required = self.history_measurements.additional_bytes_for_line(line)
+                        .or_else(|| self.admission_diagnostics.additional_bytes_for_line(line))
+                        .or_else(|| self.durable_flow.additional_bytes_for_line(line))
+                        .or_else(|| self.durable_lifecycle.additional_bytes_for_line(line))
+                        .or_else(|| self.private_fixed_diagnostic.additional_bytes_for_line(private_fixed_line));
+                    if required.is_some_and(|bytes| bytes > MAX_BYTES.saturating_sub(retained)) {
+                        retained -= capture.retained_bytes();
+                        capture.discard_for_budget();
+                    }
+                }
+            }
             #[cfg(feature = "synthetic-born-joined-qualification")]
             {
                 let previous = self.history_measurements.retained_bytes();
@@ -368,6 +419,13 @@ impl<'a> Transcript<'a> {
                         return Err(Failure::InvalidPath);
                     }
                     retained = retained - path.as_ref().map_or(0, |p| p.value.len()) + value.len();
+                    #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+                    if retained > MAX_BYTES {
+                        if let Some(capture) = &mut self.delivery_first_failure {
+                            retained -= capture.retained_bytes();
+                            capture.discard_for_budget();
+                        }
+                    }
                     if retained > MAX_BYTES {
                         retained -= private_fixed_retained;
                         #[cfg(all(
@@ -391,8 +449,13 @@ impl<'a> Transcript<'a> {
                     if retained > MAX_BYTES {
                         return Err(Failure::OutputLimit);
                     }
-                    let absolute_end =
-                        self.base.checked_add(end + 1).ok_or(Failure::OutputLimit)?;
+                    let Some(absolute_end) = self.base.checked_add(end + 1) else {
+                        #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+                        if let Some(capture) = &mut self.delivery_first_failure {
+                            capture.discard_for_budget();
+                        }
+                        return Err(Failure::OutputLimit);
+                    };
                     // Drop erases the replaced exact path before allocating its
                     // successor. Never retain another owner's stale path copy.
                     *path = None;
@@ -401,6 +464,12 @@ impl<'a> Transcript<'a> {
                         end: absolute_end,
                     });
                 }
+            }
+            #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+            if let Some(capture) = &mut self.delivery_first_failure {
+                let previous = capture.retained_bytes();
+                capture.capture_complete_line(&self.bytes[self.line_start..end], MAX_BYTES.saturating_sub(retained));
+                retained = retained - previous + capture.retained_bytes();
             }
             self.line_start = end + 1;
         }
@@ -429,12 +498,15 @@ impl<'a> Transcript<'a> {
 
     /// The latest complete exact marker must precede this matched prompt, not
     /// merely occur later in the same read. A used marker cannot be reused.
-    pub(super) fn path(&self, marker: &str, prompt_in_tail: usize) -> Result<&str, Failure> {
-        let prompt = self
-            .base
-            .checked_add(self.consumed)
-            .and_then(|position| position.checked_add(prompt_in_tail))
-            .ok_or(Failure::OutputLimit)?;
+    pub(super) fn path(&mut self, marker: &str, prompt_in_tail: usize) -> Result<&str, Failure> {
+        let Some(prompt) = self.base.checked_add(self.consumed)
+            .and_then(|position| position.checked_add(prompt_in_tail)) else {
+            #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+            if let Some(capture) = &mut self.delivery_first_failure {
+                capture.discard_for_budget();
+            }
+            return Err(Failure::OutputLimit);
+        };
         let path = self
             .paths
             .get(marker)
@@ -456,7 +528,13 @@ impl<'a> Transcript<'a> {
             *self.paths.get_mut(marker).ok_or(Failure::MissingPath)? = None;
         }
         let cut = self.line_start;
-        let base = self.base.checked_add(cut).ok_or(Failure::OutputLimit)?;
+        let Some(base) = self.base.checked_add(cut) else {
+            #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+            if let Some(capture) = &mut self.delivery_first_failure {
+                capture.discard_for_budget();
+            }
+            return Err(Failure::OutputLimit);
+        };
         let length = self.bytes.len() - cut;
         erase_consumed_prefix(&mut self.bytes, cut);
         self.bytes.truncate(length);
@@ -1233,5 +1311,201 @@ mod tests {
         assert!(
             transcript.private_fixed_diagnostic().is_none() && !transcript.diagnostic_withheld()
         );
+    }
+}
+
+#[cfg(all(test, feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+mod delivery_first_failure_tests {
+    use super::*;
+    const FIRST: &[u8] = b"[JOINED_DIAGNOSTIC DeliveryExportCommit EngineDisclosureUnknown]\n";
+    const LATER: &[u8] = b"[JOINED_DIAGNOSTIC DeliveryArtifactImport BridgeBinding]\n";
+    const MARKER: &str = "SYNTHETIC_JOINED_DRAFT_PATH=";
+    fn delivery(markers: impl IntoIterator<Item = &'static str>) -> Transcript<'static> {
+        let mut transcript = Transcript::new(markers).unwrap();
+        transcript.enable_delivery_first_failure();
+        transcript
+    }
+    fn labels(transcript: &Transcript<'_>) -> Option<(&'static str, &'static str)> {
+        transcript.delivery_first_failure().map(|pair| pair.labels())
+    }
+    #[test]
+    fn delivery_first_failure_survives_more_than_64_later_diagnostics() {
+        let root = Path::new("/tmp/owned");
+        let mut transcript = delivery([]);
+        transcript.append(FIRST, root).unwrap();
+        transcript.consume(None).unwrap();
+        let pair_bytes = "DeliveryExportCommit:EngineDisclosureUnknown".len();
+        assert_eq!(transcript.delivery_first_failure_retained_bytes(), pair_bytes);
+        assert_eq!(transcript.retained_bytes(), pair_bytes + transcript.summary().len() + transcript.timing_retained_bytes());
+        for _ in 0..80 {
+            transcript.append(LATER, root).unwrap();
+            transcript.consume(None).unwrap();
+        }
+        assert_eq!(transcript.summary().split(',').count(), MAX_DIAGNOSTICS);
+        assert!(!transcript.summary().contains("DeliveryExportCommit"));
+        assert_eq!(labels(&transcript), Some(("DeliveryExportCommit", "EngineDisclosureUnknown")));
+    }
+    #[test]
+    fn delivery_first_failure_requires_complete_exact_finite_marker() {
+        let root = Path::new("/tmp/owned");
+        let mut transcript = delivery([]);
+        for invalid in [
+            "[JOINED_DIAGNOSTIC DeliverySourceOpen Begin]\n",
+            "[JOINED_DIAGNOSTIC DeliveryExportCommit Complete]\n",
+            "[JOINED_DIAGNOSTIC Bootstrap HostInvalid]\n",
+            "[JOINED_IO DeliveryExportCommit Other 1]\n",
+            "prefix [JOINED_DIAGNOSTIC DeliveryExportCommit HostInvalid]\n",
+            "[JOINED_DIAGNOSTIC DeliveryExportCommit HostInvalid] suffix\n",
+            "[JOINED_DIAGNOSTIC DeliveryExportCommit HostInvalid extra]\n",
+            "[JOINED_DIAGNOSTIC DeliveryExportCommit unknown-private]\n",
+            "[JOINED_DIAGNOSTIC unknown-private HostInvalid]\n",
+            "[JOINED_DIAGNOSTIC DeliveryExportCommit HostInvalid]\r\r\n",
+            "[JOINED_DIAGNOSTIC DeliveryExportCommit HostInvalid][JOINED_DIAGNOSTIC DeliverySourceOpen HostInvalid]\n",
+        ] {
+            transcript.append(invalid.as_bytes(), root).unwrap();
+            assert!(labels(&transcript).is_none());
+            transcript.consume(None).unwrap();
+        }
+        transcript.append(&FIRST[..FIRST.len() - 1], root).unwrap();
+        assert!(labels(&transcript).is_none());
+        transcript.append(b"\r\n", root).unwrap();
+        assert_eq!(labels(&transcript), Some(("DeliveryExportCommit", "EngineDisclosureUnknown")));
+        transcript.append(LATER, root).unwrap();
+        assert_eq!(labels(&transcript), Some(("DeliveryExportCommit", "EngineDisclosureUnknown")));
+    }
+    #[test]
+    fn delivery_first_failure_is_opt_in_and_isolated_per_child() {
+        let root = Path::new("/tmp/owned");
+        let mut old_adapter = Transcript::new([]).unwrap();
+        let mut producer = delivery([]);
+        let mut reader = delivery([]);
+        old_adapter.append(FIRST, root).unwrap();
+        producer.append(FIRST, root).unwrap();
+        assert!(labels(&old_adapter).is_none());
+        assert!(labels(&reader).is_none());
+        reader.append(LATER, root).unwrap();
+        assert_eq!(labels(&producer), Some(("DeliveryExportCommit", "EngineDisclosureUnknown")));
+        assert_eq!(labels(&reader), Some(("DeliveryArtifactImport", "BridgeBinding")));
+        assert_eq!(old_adapter.summary(), producer.summary());
+        assert_eq!(producer.retained_bytes() - old_adapter.retained_bytes(), producer.delivery_first_failure_retained_bytes());
+    }
+    #[test]
+    fn delivery_first_failure_yields_to_chunk_budget_and_never_recaptures() {
+        let root = Path::new("/tmp/owned");
+        for initially_captured in [false, true] {
+            let mut transcript = delivery([]);
+            let mut original = Transcript::new([]).unwrap();
+            if initially_captured {
+                transcript.append(FIRST, root).unwrap();
+                original.append(FIRST, root).unwrap();
+                transcript.consume(None).unwrap();
+                original.consume(None).unwrap();
+            }
+            let mut fill = vec![b'x'; MAX_BYTES - original.retained_bytes()];
+            *fill.last_mut().unwrap() = b'\n';
+            transcript.append(&fill, root).unwrap();
+            original.append(&fill, root).unwrap();
+            assert_eq!(transcript.retained_bytes(), original.retained_bytes());
+            assert_eq!(transcript.append(b"x", root), Err(Failure::OutputLimit));
+            assert_eq!(original.append(b"x", root), Err(Failure::OutputLimit));
+            transcript.consume(None).unwrap();
+            transcript.enable_delivery_first_failure(); // Cannot reset Unavailable.
+            transcript.append(LATER, root).unwrap();
+            assert!(labels(&transcript).is_none());
+            assert_eq!(transcript.delivery_first_failure_retained_bytes(), 0);
+            assert!(matches!(transcript.delivery_first_failure, Some(super::super::safe_diagnostics_v1::DeliveryFailureCapture::Unavailable)));
+        }
+    }
+    #[test]
+    fn delivery_first_failure_yields_to_summary_and_path_metadata_budget() {
+        let root = Path::new("/tmp/owned");
+        for metadata in [
+            "[JOINED_DIAGNOSTIC Bootstrap Begin]\n",
+            "SYNTHETIC_JOINED_DRAFT_PATH=/tmp/owned/exact\n",
+        ] {
+            let mut transcript = delivery([MARKER]);
+            let mut original = Transcript::new([MARKER]).unwrap();
+            transcript.append(FIRST, root).unwrap();
+            original.append(FIRST, root).unwrap();
+            transcript.consume(None).unwrap();
+            original.consume(None).unwrap();
+            let mut chunk = vec![b'x'; MAX_BYTES - transcript.retained_bytes() - metadata.len() - 1];
+            chunk.push(b'\n');
+            chunk.extend_from_slice(metadata.as_bytes());
+            transcript.append(&chunk, root).unwrap();
+            original.append(&chunk, root).unwrap();
+            assert!(labels(&transcript).is_none());
+            assert_eq!(transcript.retained_bytes(), original.retained_bytes());
+            assert_eq!(transcript.summary(), original.summary());
+            transcript.consume(None).unwrap();
+            transcript.append(LATER, root).unwrap();
+            assert!(labels(&transcript).is_none());
+        }
+    }
+    #[test]
+    fn delivery_first_failure_yields_before_existing_optional_capture_budget() {
+        use super::super::safe_diagnostics_v1 as diagnostics;
+        let root = Path::new("/tmp/owned");
+        for record in [
+            format!("[HISTORY_MEASUREMENT_V1 {}]", diagnostics::HISTORY_MEASUREMENT_TEST_JSON),
+            format!("[ADMISSION_MEASUREMENT_V1 {}]", diagnostics::ADMISSION_MEASUREMENT_TEST_JSON),
+            format!("[DURABLE_FLOW_V1 {}]", diagnostics::DURABLE_FLOW_MAXIMAL_TEST_JSON),
+            format!("[DURABLE_LIFECYCLE_V1 {}]", diagnostics::DURABLE_LIFECYCLE_MAXIMAL_TEST_JSON),
+            format!("CI_SYNTHETIC_PRIVATE_FIXED_DIAGNOSTIC {}", diagnostics::PRIVATE_FIXED_DIAGNOSTIC_TEST_JSON),
+        ] {
+            let mut transcript = delivery([]);
+            let mut original = Transcript::new([]).unwrap();
+            transcript.append(FIRST, root).unwrap();
+            original.append(FIRST, root).unwrap();
+            transcript.consume(None).unwrap();
+            original.consume(None).unwrap();
+            let required = transcript.history_measurements.additional_bytes_for_line(&record)
+                .or_else(|| transcript.admission_diagnostics.additional_bytes_for_line(&record))
+                .or_else(|| transcript.durable_flow.additional_bytes_for_line(&record))
+                .or_else(|| transcript.durable_lifecycle.additional_bytes_for_line(&record))
+                .or_else(|| transcript.private_fixed_diagnostic.additional_bytes_for_line(&record))
+                .unwrap();
+            // Raw line plus old capture fit exactly without the optional pair.
+            let filler = MAX_BYTES - original.retained_bytes() - required - record.len() - 2;
+            let mut chunk = vec![b'x'; filler];
+            chunk.push(b'\n');
+            chunk.extend_from_slice(record.as_bytes());
+            chunk.push(b'\n');
+            original.append(&chunk, root).unwrap();
+            transcript.append(&chunk, root).unwrap();
+            assert!(labels(&transcript).is_none());
+            assert_eq!(transcript.retained_bytes(), original.retained_bytes());
+            assert_eq!(transcript.history_measurement_lines(), original.history_measurement_lines());
+            assert_eq!(transcript.admission_diagnostic_lines(), original.admission_diagnostic_lines());
+            assert_eq!(transcript.durable_flow_lines(), original.durable_flow_lines());
+            assert_eq!(transcript.durable_lifecycle_lines(), original.durable_lifecycle_lines());
+            assert_eq!(transcript.private_fixed_diagnostic_retained_bytes(), original.private_fixed_diagnostic_retained_bytes());
+            assert_eq!(transcript.diagnostic_withheld(), original.diagnostic_withheld());
+        }
+    }
+    #[test]
+    fn delivery_first_failure_yields_before_position_budget_refusals() {
+        let root = Path::new("/tmp/owned");
+        for operation in 0..3 {
+            let mut transcript = delivery([MARKER]);
+            transcript.append(FIRST, root).unwrap();
+            transcript.base = usize::MAX;
+            let refused = match operation {
+                0 => transcript.append(b"SYNTHETIC_JOINED_DRAFT_PATH=/tmp/owned/exact\n", root),
+                1 => transcript.consume(None),
+                _ => transcript.path(MARKER, 1).map(|_| ()),
+            };
+            assert_eq!(refused, Err(Failure::OutputLimit));
+            assert!(labels(&transcript).is_none());
+        }
+    }
+    #[test]
+    fn delivery_first_failure_insufficient_capture_budget_is_sticky() {
+        use super::super::safe_diagnostics_v1::DeliveryFailureCapture;
+        let mut capture = DeliveryFailureCapture::default();
+        capture.capture_complete_line(&FIRST[..FIRST.len() - 1], 0);
+        assert!(matches!(capture, DeliveryFailureCapture::Unavailable));
+        capture.capture_complete_line(&LATER[..LATER.len() - 1], MAX_BYTES);
+        assert!(capture.value().is_none());
     }
 }

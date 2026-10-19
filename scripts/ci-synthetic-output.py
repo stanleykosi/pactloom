@@ -66,10 +66,10 @@ PRIVATE_WORKSPACE_FIELDS = PRIVATE_WORKSPACE_FALSE_FIELDS | PRIVATE_WORKSPACE_BO
 
 DURABLE_DELIVERY_PREFIX = 'CI_SYNTHETIC_DURABLE_DELIVERY '
 DURABLE_DELIVERY_INVALID = 'CI_SYNTHETIC_DURABLE_DELIVERY_INVALID'
-DURABLE_DELIVERY_BOUNDARIES = PRIVATE_WORKSPACE_BOUNDARIES | frozenset('DeliveryCredentialRegistration DeliverySourceExport DeliveryOriginalReopen DeliveryUnsupportedAudit DeliveryNativeAdmission DeliveryHistoricalRead DeliveryIdentityCompare DeliveryDurableMarker DeliveryProducerKill DeliveryProducerReap DeliveryReaderReap DeliveryRootCleanup'.split())
+DURABLE_DELIVERY_BOUNDARIES = PRIVATE_WORKSPACE_BOUNDARIES | frozenset('DeliveryCredentialRegistration DeliverySourceExport DeliveryRedisclosure DeliveryRedisclosurePrepare DeliveryRedisclosureApprove DeliveryRedisclosureServe DeliveryArtifactImportStart DeliveryArtifactImport DeliverySourceOpen DeliverySourceInspection DeliverySourcePlan DeliveryRecipientPrepare DeliveryExportPreview DeliveryExportApproval DeliveryExportCommit DeliveryExportPostcheck DeliveryNativeCheck DeliverySourceCheck DeliveryOriginalReopen DeliveryUnsupportedAudit DeliveryNativeAdmission DeliveryHistoricalRead DeliveryIdentityCompare DeliveryDurableMarker DeliveryProducerKill DeliveryProducerReap DeliveryReaderReap DeliveryRootCleanup'.split())
 DURABLE_DELIVERY_FALSE_FIELDS = frozenset(('authorization_allowed','distribution_allowed','public_chain_verified'))
 DURABLE_DELIVERY_BOOL_FIELDS = frozenset(('producer_reaped','producer_group_absent','reader_reaped','reader_group_absent','fixed_verified','exact_fixed_prefix_preserved','exact_export_history_preserved','exact_original_scopes_preserved','exact_original_intents_preserved','authenticated_histories_verified','unsupported_actions_denied','reader_no_effects_verified'))
-DURABLE_DELIVERY_FIELDS = DURABLE_DELIVERY_FALSE_FIELDS | DURABLE_DELIVERY_BOOL_FIELDS | frozenset(('schema','phase','result','first_failure','producer_exit','reader_exit','root_cleanup','admission_count'))
+DURABLE_DELIVERY_FIELDS = DURABLE_DELIVERY_FALSE_FIELDS | DURABLE_DELIVERY_BOOL_FIELDS | frozenset(('schema','phase','result','first_failure','first_outcome','failed_child_inputs_completed','failed_child_inputs_expected','producer_exit','reader_exit','root_cleanup','admission_count'))
 
 # Independent, closed, bounded optional observation. Never an outcome/permit.
 PRIVATE_FIXED_DIAGNOSTIC_PREFIX = 'CI_SYNTHETIC_PRIVATE_FIXED_DIAGNOSTIC '
@@ -985,10 +985,20 @@ def public_durable_delivery(text):
     if len(text.encode('utf8')) > 2048: raise ValueError('oversized durable delivery result')
     row=json.loads(text,object_pairs_hook=distinct_object)
     if type(row) is not dict or set(row)!=DURABLE_DELIVERY_FIELDS: raise ValueError('durable delivery fields')
-    if type(row['schema']) is not int or row['schema']!=2: raise ValueError('durable delivery schema')
+    if type(row['schema']) is not int or row['schema']!=3: raise ValueError('durable delivery schema')
     if type(row['phase']) is not str or row['phase']!='durable_delivery_admission': raise ValueError('durable delivery phase')
     if type(row['result']) is not str or row['result'] not in ('passed','failed'): raise ValueError('durable delivery result')
     if row['first_failure'] is not None and (type(row['first_failure']) is not str or row['first_failure'] not in DURABLE_DELIVERY_BOUNDARIES): raise ValueError('durable delivery boundary')
+    observed=row['first_outcome']
+    completed=row['failed_child_inputs_completed']
+    expected=row['failed_child_inputs_expected']
+    if observed is not None and (type(observed) is not str or observed not in OUTCOMES or observed in ('Begin','Complete') or row['first_failure'] is None):
+        raise ValueError('durable delivery finite observed failure')
+    if (completed is None)!=(expected is None): raise ValueError('durable delivery partial input progress')
+    if completed is not None and (type(completed) is not int or type(expected) is not int or not 0<=completed<=expected<=512 or expected==0 or row['first_failure'] is None):
+        raise ValueError('durable delivery input progress')
+    if (row['result']=='passed' or row['root_cleanup']!='closed_absent' or row['producer_reaped'] is not True or row['producer_group_absent'] is not True) and any(value is not None for value in (observed,completed,expected)):
+        raise ValueError('durable delivery optional observation gate')
     for key,values in (('producer_exit',('sigkill','other','unverified')),('reader_exit',('success','other','not_started','unverified')),('root_cleanup',('closed_absent','retained','unverified')),('admission_count',('unverified','0_of_2','1_of_2','2_of_2'))):
         if type(row[key]) is not str or row[key] not in values: raise ValueError('durable delivery closed status')
     if any(type(row[key]) is not bool for key in DURABLE_DELIVERY_BOOL_FIELDS): raise ValueError('durable delivery boolean')

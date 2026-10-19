@@ -42,6 +42,295 @@ macro_rules! durable_flow_call_v1 {
 ))]
 use crate::authority_bridge::durable_flow_diagnostics_v1 as flow_diag_v1;
 
+// Observe only the existing returned error, before its original discard/return.
+// Without the synthetic feature this evaluates the original expression once
+// and performs no diagnostic classification, IO, state change or extra check.
+macro_rules! durable_delivery_observe_v2 {
+    ($stage:ident, $original:expr) => {{
+        let original = $original;
+        #[cfg(all(
+            feature = "synthetic-born-joined-qualification",
+            feature = "durable-proposal"
+        ))]
+        let original = delivery_diagnostics_v2::signer_result(
+            delivery_diagnostics_v2::Stage::$stage,
+            original,
+        );
+        original
+    }};
+}
+
+#[cfg(all(
+    feature = "synthetic-born-joined-qualification",
+    feature = "durable-proposal"
+))]
+pub(super) mod delivery_diagnostics_v2 {
+    use crate::{Error, authority_bridge::BridgeError};
+    use std::io::Write;
+
+    macro_rules! labels {
+        ($name:ident { $($variant:ident),+ $(,)? }) => {
+            #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+            pub(in crate::native_ui) enum $name { $($variant),+ }
+            impl $name {
+                fn label(self) -> &'static str {
+                    match self { $(Self::$variant => stringify!($variant)),+ }
+                }
+            }
+        };
+    }
+    labels! { Stage {
+        DeliveryRedisclosurePrepare,
+        DeliveryRedisclosureApprove,
+        DeliveryRedisclosureServe,
+        DeliveryArtifactImportStart,
+    } }
+    labels! { Outcome {
+        SignerUnavailable, SignerPeerLifetimeUnavailable, SignerIo,
+        SignerAuthentication, SignerInvalidData, SignerCrypto, SignerLocked,
+        SignerBackupRequired, SignerRecoveryRequired, SignerAlreadyOpen,
+        SignerReviewMismatch, SignerVerification, SignerUncertain,
+        SignerConsentJournal, SignerStore,
+        BridgeBinding, BridgeConflict, BridgeMissing, BridgeUncertain,
+        BridgeLimit, BridgePermission, BridgeRecoveryRequired,
+        BridgeCompleteOriginRecoveryUnavailable, BridgeVerification,
+        BridgeSignerOriginUnavailable, BridgeJournal, BridgeAuthority,
+        BridgeWallet, BridgeIpc, WorkerFailure,
+    } }
+    fn signer_error(error: &Error) -> Outcome {
+        match error {
+            Error::Unavailable => Outcome::SignerUnavailable,
+            Error::PeerLifetimeUnavailable => Outcome::SignerPeerLifetimeUnavailable,
+            Error::Io(_) => Outcome::SignerIo,
+            Error::Authentication => Outcome::SignerAuthentication,
+            Error::InvalidData => Outcome::SignerInvalidData,
+            Error::Crypto => Outcome::SignerCrypto,
+            Error::Locked => Outcome::SignerLocked,
+            Error::BackupRequired => Outcome::SignerBackupRequired,
+            Error::RecoveryRequired => Outcome::SignerRecoveryRequired,
+            Error::AlreadyOpen => Outcome::SignerAlreadyOpen,
+            Error::ReviewMismatch => Outcome::SignerReviewMismatch,
+            Error::Verification => Outcome::SignerVerification,
+            Error::Uncertain => Outcome::SignerUncertain,
+            Error::ConsentJournal(_) => Outcome::SignerConsentJournal,
+            Error::Store(_) => Outcome::SignerStore,
+        }
+    }
+    fn bridge_error(error: &BridgeError) -> Outcome {
+        match error {
+            BridgeError::Binding => Outcome::BridgeBinding,
+            BridgeError::Conflict => Outcome::BridgeConflict,
+            BridgeError::Missing => Outcome::BridgeMissing,
+            BridgeError::Uncertain => Outcome::BridgeUncertain,
+            BridgeError::Limit => Outcome::BridgeLimit,
+            BridgeError::Permission => Outcome::BridgePermission,
+            BridgeError::RecoveryRequired => Outcome::BridgeRecoveryRequired,
+            BridgeError::CompleteOriginRecoveryUnavailable => {
+                Outcome::BridgeCompleteOriginRecoveryUnavailable
+            }
+            BridgeError::Verification => Outcome::BridgeVerification,
+            BridgeError::SignerOriginUnavailable => Outcome::BridgeSignerOriginUnavailable,
+            BridgeError::Journal(_) => Outcome::BridgeJournal,
+            BridgeError::Authority(_) => Outcome::BridgeAuthority,
+            BridgeError::Wallet(_) => Outcome::BridgeWallet,
+            BridgeError::Ipc => Outcome::BridgeIpc,
+        }
+    }
+    fn emit(stage: Stage, outcome: Outcome) {
+        // Diagnostics must not turn a failed stderr write into a runtime panic.
+        // Only closed enum labels reach this sink, never error/value payloads.
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "\n[JOINED_DIAGNOSTIC {} {}]",
+            stage.label(),
+            outcome.label(),
+        );
+    }
+    fn observe_result<T, E>(
+        stage: Stage,
+        original: std::result::Result<T, E>,
+        classify: impl FnOnce(&E) -> Option<Outcome>,
+        emit: impl FnOnce(Stage, Outcome),
+    ) -> std::result::Result<T, E> {
+        if let Err(error) = &original {
+            emit(stage, classify(error).unwrap_or(Outcome::WorkerFailure));
+        }
+        original
+    }
+    pub(in crate::native_ui) fn signer_result<T>(
+        stage: Stage,
+        original: crate::Result<T>,
+    ) -> crate::Result<T> {
+        observe_result(stage, original, |error| Some(signer_error(error)), emit)
+    }
+    pub(in crate::native_ui) fn bridge_result<T>(
+        stage: Stage,
+        original: crate::authority_bridge::Result<T>,
+    ) -> crate::authority_bridge::Result<T> {
+        observe_result(stage, original, |error| Some(bridge_error(error)), emit)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::{cell::RefCell, rc::Rc};
+
+        #[test]
+        fn delivery_signer_error_mapping_is_closed_and_payload_free() {
+            let cases = [
+                (Error::Unavailable, Outcome::SignerUnavailable),
+                (Error::PeerLifetimeUnavailable, Outcome::SignerPeerLifetimeUnavailable),
+                (Error::Io(std::io::Error::other("private payload")), Outcome::SignerIo),
+                (Error::Authentication, Outcome::SignerAuthentication),
+                (Error::InvalidData, Outcome::SignerInvalidData),
+                (Error::Crypto, Outcome::SignerCrypto),
+                (Error::Locked, Outcome::SignerLocked),
+                (Error::BackupRequired, Outcome::SignerBackupRequired),
+                (Error::RecoveryRequired, Outcome::SignerRecoveryRequired),
+                (Error::AlreadyOpen, Outcome::SignerAlreadyOpen),
+                (Error::ReviewMismatch, Outcome::SignerReviewMismatch),
+                (Error::Verification, Outcome::SignerVerification),
+                (Error::Uncertain, Outcome::SignerUncertain),
+                (Error::ConsentJournal(crate::consent_journal::JournalError::Database), Outcome::SignerConsentJournal),
+                (Error::Store(wholepact_store::StoreError::InvalidInput("private payload")), Outcome::SignerStore),
+            ];
+            for (error, expected) in cases {
+                let original = Err::<Box<u8>, _>(error);
+                let identity = std::mem::discriminant(original.as_ref().unwrap_err());
+                let returned = observe_result(
+                    Stage::DeliveryRedisclosurePrepare,
+                    original,
+                    |error| Some(signer_error(error)),
+                    |stage, outcome| {
+                        assert_eq!(stage, Stage::DeliveryRedisclosurePrepare);
+                        assert_eq!(outcome, expected);
+                        assert!(!outcome.label().contains("private"));
+                    },
+                );
+                assert_eq!(std::mem::discriminant(returned.as_ref().unwrap_err()), identity);
+            }
+        }
+
+        #[test]
+        fn delivery_bridge_error_mapping_is_closed_and_payload_free() {
+            let cases = [
+                (BridgeError::Binding, Outcome::BridgeBinding),
+                (BridgeError::Conflict, Outcome::BridgeConflict),
+                (BridgeError::Missing, Outcome::BridgeMissing),
+                (BridgeError::Uncertain, Outcome::BridgeUncertain),
+                (BridgeError::Limit, Outcome::BridgeLimit),
+                (BridgeError::Permission, Outcome::BridgePermission),
+                (BridgeError::RecoveryRequired, Outcome::BridgeRecoveryRequired),
+                (BridgeError::CompleteOriginRecoveryUnavailable, Outcome::BridgeCompleteOriginRecoveryUnavailable),
+                (BridgeError::Verification, Outcome::BridgeVerification),
+                (BridgeError::SignerOriginUnavailable, Outcome::BridgeSignerOriginUnavailable),
+                (BridgeError::Journal(crate::consent_journal::JournalError::Database), Outcome::BridgeJournal),
+                (BridgeError::Authority(wholepact_authority::AuthorityError::Permission), Outcome::BridgeAuthority),
+                (BridgeError::Wallet(wholepact_wallet::wallet::protected_sync::key_use::WalletKeyUseError::Permission), Outcome::BridgeWallet),
+                (BridgeError::Ipc, Outcome::BridgeIpc),
+            ];
+            for (error, expected) in cases {
+                let original = Err::<Box<u8>, _>(error);
+                let identity = std::mem::discriminant(original.as_ref().unwrap_err());
+                let returned = observe_result(
+                    Stage::DeliveryRedisclosureServe,
+                    original,
+                    |error| Some(bridge_error(error)),
+                    |stage, outcome| {
+                        assert_eq!(stage, Stage::DeliveryRedisclosureServe);
+                        assert_eq!(outcome, expected);
+                    },
+                );
+                assert_eq!(std::mem::discriminant(returned.as_ref().unwrap_err()), identity);
+            }
+        }
+
+        struct NonClone {
+            value: Box<u8>,
+            events: Rc<RefCell<Vec<&'static str>>>,
+        }
+        impl Drop for NonClone {
+            fn drop(&mut self) {
+                self.events.borrow_mut().push("drop");
+            }
+        }
+        #[test]
+        fn delivery_observation_preserves_owned_value_and_skips_success_sink() {
+            let events = Rc::new(RefCell::new(Vec::new()));
+            let value = NonClone { value: Box::new(7), events: events.clone() };
+            let identity = &*value.value as *const u8;
+            let returned = observe_result(
+                Stage::DeliveryArtifactImportStart,
+                Ok::<_, NonClone>(value),
+                |_| panic!("successful value must not be classified"),
+                |_, _| panic!("successful value must not be emitted"),
+            );
+            assert!(events.borrow().is_empty());
+            assert_eq!(&*returned.as_ref().ok().unwrap().value as *const u8, identity);
+            drop(returned);
+            assert_eq!(&*events.borrow(), &["drop"]);
+        }
+        #[test]
+        fn delivery_unknown_error_is_borrowed_emitted_before_drop_and_returned_unchanged() {
+            let events = Rc::new(RefCell::new(Vec::new()));
+            let error = NonClone { value: Box::new(9), events: events.clone() };
+            let identity = &*error.value as *const u8;
+            let returned = observe_result(
+                Stage::DeliveryRedisclosureApprove,
+                Err::<NonClone, _>(error),
+                |borrowed| {
+                    assert_eq!(&*borrowed.value as *const u8, identity);
+                    events.borrow_mut().push("classify");
+                    None
+                },
+                |stage, outcome| {
+                    assert_eq!(stage, Stage::DeliveryRedisclosureApprove);
+                    assert_eq!(outcome.label(), "WorkerFailure");
+                    events.borrow_mut().push("emit");
+                },
+            );
+            assert_eq!(&*events.borrow(), &["classify", "emit"]);
+            assert_eq!(&*returned.as_ref().err().unwrap().value as *const u8, identity);
+            drop(returned);
+            assert_eq!(&*events.borrow(), &["classify", "emit", "drop"]);
+        }
+    }
+}
+
+
+#[cfg(all(test, not(feature = "synthetic-born-joined-qualification")))]
+mod delivery_diagnostics_disabled_tests {
+    #[test]
+    fn delivery_observation_is_identity_without_synthetic_feature() {
+        struct NonClone(Box<u8>);
+        let calls = std::cell::Cell::new(0);
+        let success = NonClone(Box::new(7));
+        let success_identity = &*success.0 as *const u8;
+        // This nonexistent stage is deliberately never resolved outside the
+        // synthetic cfg. Only the original expression and Result remain.
+        let returned: std::result::Result<_, NonClone> = durable_delivery_observe_v2!(
+            NoDiagnosticStageExists,
+            {
+                calls.set(calls.get() + 1);
+                Ok(success)
+            }
+        );
+        assert_eq!(calls.get(), 1);
+        assert_eq!(&*returned.as_ref().ok().unwrap().0 as *const u8, success_identity);
+        let error = NonClone(Box::new(9));
+        let error_identity = &*error.0 as *const u8;
+        let returned: std::result::Result<(), _> = durable_delivery_observe_v2!(
+            NoDiagnosticStageExists,
+            {
+                calls.set(calls.get() + 1);
+                Err(error)
+            }
+        );
+        assert_eq!(calls.get(), 2);
+        assert_eq!(&*returned.as_ref().err().unwrap().0 as *const u8, error_identity);
+    }
+}
+
 #[cfg(feature = "pending-birth-owner-signing")]
 #[path = "qualification/born_consumed_named_entry_v1.rs"]
 mod born_consumed_named_entry_v1;
@@ -2207,8 +2496,11 @@ impl NativeRuntime {
                 } => {
                     #[cfg(feature = "pending-birth-owner-signing")]
                     if open.durable_delivery_entry.is_some() {
-                        let _ = self.prepare_durable_delivery_redisclosure_v2(
-                            stream, peer, *request, epoch,
+                        let _ = durable_delivery_observe_v2!(
+                            DeliveryRedisclosurePrepare,
+                            self.prepare_durable_delivery_redisclosure_v2(
+                                stream, peer, *request, epoch,
+                            )
                         );
                         return;
                     }
@@ -2266,8 +2558,10 @@ impl NativeRuntime {
                         .as_ref()
                         .is_some_and(|o| o.durable_delivery_entry.is_some())
                     {
-                        let _ =
-                            self.start_durable_delivery_import_v2(stream, peer, *request, epoch);
+                        let _ = durable_delivery_observe_v2!(
+                            DeliveryArtifactImportStart,
+                            self.start_durable_delivery_import_v2(stream, peer, *request, epoch)
+                        );
                     } else {
                         let _ = self.start_durable_import_v1(stream, peer, *request, epoch);
                     }
@@ -4477,7 +4771,23 @@ impl NativeRuntime {
                     .map(|observer| (observer, value.flow_native_stage_v1())),
                 _ => None,
             });
+        #[cfg(all(
+            feature = "synthetic-born-joined-qualification",
+            feature = "durable-proposal"
+        ))]
+        let delivery_redisclosure = self.pending.as_ref().is_some_and(|pending| {
+            matches!(&pending.operation, Operation::DurableDeliveryRedisclosureV2(_))
+        });
         let result = self.approve_inner(focused, epoch);
+        #[cfg(all(
+            feature = "synthetic-born-joined-qualification",
+            feature = "durable-proposal"
+        ))]
+        let result = if delivery_redisclosure {
+            durable_delivery_observe_v2!(DeliveryRedisclosureApprove, result)
+        } else {
+            result
+        };
         durable_flow_observe_v1!(
             observation.as_ref().map(|(observer, _)| observer),
             observation
