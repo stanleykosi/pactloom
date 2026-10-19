@@ -7,6 +7,7 @@ use crate::durable_construction_v1::{
 };
 use crate::proof_jobs::{upsert_link, validate_provenance, validate_summary};
 use crate::{CandidateRequest, CandidateView, Envelope};
+use diagnostics::{Call, CallState, Observation, Operation, Site};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use wholepact_proof_jobs::{
@@ -422,6 +423,16 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
         material: &dyn LocalDurableMaterialConsentV1,
         action: DurableMaterialActionV1,
     ) -> Result<()> {
+        self.check_intake_observed(None, access, intake, material, action)
+    }
+    fn check_intake_observed(
+        &self,
+        observation: Option<&Observation>,
+        access: &Access,
+        intake: &Intake,
+        material: &dyn LocalDurableMaterialConsentV1,
+        action: DurableMaterialActionV1,
+    ) -> Result<()> {
         let scope = &intake.outbox.request().scope;
         let reviewers: BTreeSet<_> = scope
             .reviewers
@@ -441,10 +452,42 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
             return Err(denied());
         }
         self.engine
-            .check_durable_material(access, intake, material, action)
+            .check_durable_material_typed_v2(access, intake, material, action)
+            .map_err(|error| {
+                if let Some(o) = observation {
+                    use crate::durable_construction_v1::MaterialCheckErrorV2::*;
+                    let cause = match &error {
+                        Engine(e) => diagnostics::engine(e),
+                        Wallet(e) => diagnostics::construction(e),
+                        Store(e) => diagnostics::store(e),
+                    };
+                    o.record(Site::GateMaterial, cause);
+                }
+                error.into_api()
+            })
     }
     fn checked_roster(
         &self,
+        access: &Access,
+        envelope: &Envelope,
+        candidate_id: &str,
+        material: &dyn LocalDurableMaterialConsentV1,
+    ) -> Result<Roster> {
+        self.checked_roster_inner(None, access, envelope, candidate_id, material)
+    }
+    fn checked_roster_observed(
+        &self,
+        observation: &Observation,
+        access: &Access,
+        envelope: &Envelope,
+        candidate_id: &str,
+        material: &dyn LocalDurableMaterialConsentV1,
+    ) -> Result<Roster> {
+        self.checked_roster_inner(Some(observation), access, envelope, candidate_id, material)
+    }
+    fn checked_roster_inner(
+        &self,
+        observation: Option<&Observation>,
         access: &Access,
         envelope: &Envelope,
         candidate_id: &str,
@@ -456,7 +499,8 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
             return Err(denied());
         }
         for intake in roster.owners.values() {
-            self.check_intake(
+            self.check_intake_observed(
+                observation,
                 access,
                 intake,
                 material,
@@ -524,19 +568,53 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
         proof: &dyn LocalProofConsent,
         material: &dyn LocalDurableMaterialConsentV1,
     ) -> Result<OriginalCheckpointOutcomeV2<'op, 'source>> {
+        let observation = Observation::new(Operation::Checkpoint);
+        let result = self.checkpoint_exact_original_v2_observed(
+            access,
+            key,
+            candidate_id,
+            revision,
+            slots,
+            limits,
+            consent,
+            proof,
+            material,
+            &observation,
+        );
+        observation.finish(result)
+    }
+    fn checkpoint_exact_original_v2_observed<'op>(
+        &'op self,
+        access: &Access,
+        key: &str,
+        candidate_id: &str,
+        revision: u64,
+        slots: Vec<DurableConstructionWalletSlotV1<'_>>,
+        limits: ProvingLimits,
+        consent: &dyn LocalPrivateWorkspaceConsentV1,
+        proof: &dyn LocalProofConsent,
+        material: &dyn LocalDurableMaterialConsentV1,
+        observation: &Observation,
+    ) -> Result<OriginalCheckpointOutcomeV2<'op, 'source>> {
         if !(1..=wholepact_protocol::proving::MAX_PROVING_ACTIONS).contains(&limits.maximum_actions)
         {
             return Err(denied());
         }
+        observation.stage(Site::WorkspaceLoad);
         let envelope = self
-            .operation(
+            .operation_observed(
                 access,
                 consent,
                 PrivateWorkspaceActionV1::CheckpointExactOriginal,
+                Some(observation),
             )?
-            .load()?;
+            .load_observed(observation)?;
+        observation.stage(Site::Candidate);
         let c = candidate(&envelope, candidate_id)?;
-        let roster = self.checked_roster(access, &envelope, candidate_id, material)?;
+        observation.stage(Site::MaterialRoster);
+        let roster =
+            self.checked_roster_observed(observation, access, &envelope, candidate_id, material)?;
+        observation.stage(Site::SlotBindings);
         if slots.len() != 2 {
             return Err(denied());
         }
@@ -544,7 +622,13 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
         let mut declarations = Vec::new();
         for intake in roster.owners.values() {
             let scope = &intake.outbox.request().scope;
-            expected.insert((intake.outbox.material_digest().to_owned(), scope.digest()?));
+            expected.insert((
+                intake.outbox.material_digest().to_owned(),
+                scope.digest().map_err(|e| {
+                    observation.record(Site::SlotBindings, diagnostics::construction(&e));
+                    ApiError::from(e)
+                })?,
+            ));
             declarations.push(DisclosureAcknowledgement {
                 account_id: scope.account_id.clone(),
                 manifest_digest: hex::decode(&c.manifest_digest)
@@ -562,47 +646,86 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
                 scope: DisclosureScope::DedicatedAccountFvkAndSelectedNotesAndOutputs,
             });
         }
+        observation.stage(Site::SlotBindings);
         let actual: BTreeSet<_> = slots
             .iter()
-            .map(|s| Ok((s.material_digest()?, s.scope_digest()?)))
+            .map(|s| {
+                Ok((
+                    s.material_digest().map_err(|e| {
+                        observation.record(Site::SlotBindings, diagnostics::construction(&e));
+                        ApiError::from(e)
+                    })?,
+                    s.scope_digest().map_err(|e| {
+                        observation.record(Site::SlotBindings, diagnostics::construction(&e));
+                        ApiError::from(e)
+                    })?,
+                ))
+            })
             .collect::<Result<_>>()?;
         if actual.len() != 2 || actual != expected {
             return Err(damaged());
         }
-        with_durable_construction_roster_v1(slots, |held, contributions, context| {
-            let gate = ArtifactGate {
-                workspace: self,
-                access,
-                consent,
-                material,
-                proof,
-                roster: &roster,
-                action: PrivateWorkspaceActionV1::CheckpointExactOriginal,
-                held: Some(held),
-            };
-            gate.check()?;
-            let outcome = self.construct_checkpoint(
-                access,
-                key,
-                candidate_id,
-                revision,
-                crate::candidates::LocalConstruction {
-                    context,
-                    contributions,
-                    declarations: &declarations,
-                },
-                limits,
-                consent,
-                &gate,
-            );
-            match outcome {
-                Err(error) => Err(error),
-                Ok(outcome) => {
-                    gate.check()
-                        .map_err(|error| checkpoint_committed_error(error, &outcome.status))?;
-                    Ok(outcome)
+        observation.stage(Site::WalletRosterAcquire);
+        let callback_returned = std::cell::Cell::new(false);
+        let result = with_durable_construction_roster_v1(
+            slots,
+            |held, contributions, context| -> std::result::Result<_, diagnostics::RosterError> {
+                let result = (|| -> Result<_> {
+                    let gate = ArtifactGate {
+                        workspace: self,
+                        access,
+                        consent,
+                        material,
+                        proof,
+                        roster: &roster,
+                        action: PrivateWorkspaceActionV1::CheckpointExactOriginal,
+                        held: Some(held),
+                        observation: Some(observation),
+                    };
+                    observation.stage(Site::HeldPrecheck);
+                    gate.check()?;
+                    let outcome = self.construct_checkpoint(
+                        access,
+                        key,
+                        candidate_id,
+                        revision,
+                        crate::candidates::LocalConstruction {
+                            context,
+                            contributions,
+                            declarations: &declarations,
+                        },
+                        limits,
+                        consent,
+                        &gate,
+                        observation,
+                    );
+                    match outcome {
+                        Err(error) => Err(error),
+                        Ok(outcome) => {
+                            observation.stage(Site::HeldPostcheck);
+                            gate.check().map_err(|error| {
+                                checkpoint_committed_error(error, &outcome.status)
+                            })?;
+                            Ok(outcome)
+                        }
+                    }
+                })();
+                if let Err(error) = &result {
+                    observation.record(observation.site(), diagnostics::engine(error));
                 }
-            }
+                callback_returned.set(true);
+                result.map_err(diagnostics::RosterError::from)
+            },
+        );
+        result.map_err(|error| {
+            error.into_api(
+                observation,
+                if callback_returned.get() {
+                    Site::WalletRosterRelease
+                } else {
+                    Site::WalletRosterAcquire
+                },
+            )
         })
     }
     #[allow(clippy::too_many_arguments)]
@@ -616,20 +739,26 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
         limits: ProvingLimits,
         consent: &dyn LocalPrivateWorkspaceConsentV1,
         proof: &dyn LocalProofConsent,
+        observation: &Observation,
     ) -> Result<OriginalCheckpointOutcomeV2<'op, 'source>> {
+        observation.stage(Site::ConstructorReload);
         let before = self
-            .operation(
+            .operation_observed(
                 access,
                 consent,
                 PrivateWorkspaceActionV1::CheckpointExactOriginal,
+                Some(observation),
             )?
-            .load()?;
+            .load_observed(observation)?;
+        observation.stage(Site::Candidate);
         let c = candidate(&before, candidate_id)?.clone();
+        observation.stage(Site::InputRequestDigest);
         let input_digest = crate::candidates::private_request_digest(
             construction.context,
             &construction.contributions,
             construction.declarations,
         )?;
+        observation.stage(Site::OriginalRequest);
         let command = crate::context(
             access,
             key,
@@ -638,51 +767,62 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
             Some(revision),
             &json!({"local_input_digest":input_digest,"maximum_actions":limits.maximum_actions}),
         )?;
+        observation.stage(Site::OriginalRequest);
         let receipt_key = receipt_key(access, key)?;
         // Exact request lookup precedes ALL randomized construction. Permission
         // and storage errors never mean absence or authorize reconstruction.
+        observation.stage(Site::OriginalLookup);
         let existing = self
             .proof
             .status_for_key(&access.principal_id, key, &command.request_digest, proof)
-            .map_err(job_error)?;
+            .map_err(|error| observation.job_error(error))?;
         if let Some(saved) = existing {
+            observation.stage(Site::OriginalLineage);
             let receipt = self
-                .validate_original_lineage(&before, access, key, &saved)?
+                .validate_original_lineage(&before, access, key, &saved, Some(observation))?
                 .clone();
             if receipt.coordination_request_digest != command.request_digest
                 || receipt.prepared_revision != revision.checked_add(1).ok_or_else(damaged)?
             {
                 return Err(damaged());
             }
-            let effect = PrivateWorkspaceEffectV2::new(
+            observation.stage(Site::LinkPrepare);
+            let effect = PrivateWorkspaceEffectV2::new_observed(
                 self,
                 access,
                 consent,
                 EffectV2::MetadataLink,
                 command,
                 receipt.prepared_revision,
+                observation,
             )?;
-            if let Some(replayed) = effect.replay()? {
-                self.validate_original_lineage(&before, access, key, &saved)?;
+            observation.stage(Site::ReplayLookup);
+            if let Some(replayed) = effect.replay_observed(observation)? {
+                self.validate_original_lineage(&before, access, key, &saved, Some(observation))?;
                 return Ok(OriginalCheckpointOutcomeV2 {
                     status: status(&replayed),
                     attempt: None,
                 });
             }
+            observation.stage(Site::Revision);
             crate::candidates::check_revision(&before, receipt.prepared_revision)?;
+            observation.stage(Site::OriginalLineage);
             if !c.proof_jobs.is_empty() {
                 return Err(damaged());
             }
+            observation.stage(Site::LinkUpsert);
             let mut after = before.clone();
             upsert_link(&mut after, &saved)?;
+            observation.stage(Site::LinkCommit);
             let linked = effect
-                .commit(&before, after)
+                .commit_observed(&before, after, observation)
                 .map_err(|e| original_checkpoint_error(e, &saved))?;
             return Ok(OriginalCheckpointOutcomeV2 {
                 status: status(&linked),
                 attempt: None,
             });
         }
+        observation.stage(Site::OriginalLineage);
         if !before.checkpoint_receipts.is_empty()
             || !c.proof_jobs.is_empty()
             || !before.durable_proposals_v1.is_empty()
@@ -692,8 +832,11 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
                 "Original constructor history exists without its exact private checkpoint; preserve both journals and do not reconstruct",
             ));
         }
+        observation.stage(Site::Revision);
         crate::candidates::check_revision(&before, revision)?;
+        observation.stage(Site::CurrentTerms);
         crate::candidates::check_current_terms(&before.view, &c.proposal.manifest)?;
+        observation.stage(Site::RetainConsent);
         let first = construction.declarations.first().ok_or_else(denied)?;
         if construction.declarations.len() != 2
             || construction
@@ -703,26 +846,34 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
         {
             return Err(denied());
         }
+        observation.stage(Site::ProposalValidation);
         let proposal = c.verified_snapshot()?;
+        observation.stage(Site::ProtocolConstruct);
         let built = wholepact_protocol::construction::construct_proposal(
             &proposal,
             construction.context,
             construction.contributions,
             construction.declarations,
         )
-        .map_err(|_| {
+        .map_err(|error| {
+            observation.record(Site::ProtocolConstruct, diagnostics::protocol(&error));
             ApiError::new(
                 "CANDIDATE_VERIFICATION_FAILED",
                 "Exact original local construction failed before private retention",
             )
         })?;
+        observation.stage(Site::ProtocolInspect);
         if wholepact_protocol::inspect_candidate(&built.pczt_bytes)
-            .map_err(|_| damaged())?
+            .map_err(|error| {
+                observation.record(Site::ProtocolInspect, diagnostics::protocol(&error));
+                damaged()
+            })?
             .actions
             > limits.maximum_actions
         {
             return Err(denied());
         }
+        observation.stage(Site::OriginalRequest);
         let scope = CheckpointScope {
             principal_id: access.principal_id.clone(),
             candidate_id: candidate_id.into(),
@@ -747,9 +898,11 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
             purpose: first.purpose.clone(),
             retention_policy: first.retention_policy.clone(),
         };
+        observation.stage(Site::RetainConsent);
         if !proof.permits(&scope, LocalAction::RetainPrivateWitnesses) {
             return Err(denied());
         }
+        observation.stage(Site::ReceiptPrepare);
         let prepared_revision = revision.checked_add(1).ok_or_else(damaged)?;
         let receipt = crate::candidates::CheckpointReceipt {
             original_request_v2: Some(crate::candidates::OriginalCheckpointRequestV2 {
@@ -762,7 +915,7 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
             "inputs":built.input_actions.iter().map(|m|json!({"input_id":m.input_id,"account_id":m.account_id,"action_index":m.action_index})).collect::<Vec<_>>(),
             "outputs":built.output_actions.iter().map(|m|json!({"output_id":m.output_id,"action_index":m.action_index})).collect::<Vec<_>>() })),
             job_id: wholepact_proof_jobs::job_id_for_key(&access.principal_id, key)
-                .map_err(job_error)?,
+                .map_err(|error| observation.job_error(error))?,
             scope_digest: hex::encode(Sha256::digest(
                 serde_json::to_vec(&scope).map_err(|_| damaged())?,
             )),
@@ -775,6 +928,7 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
             effects_commitment: scope.effects_commitment.clone(),
             prepared_revision,
         };
+        observation.stage(Site::ReceiptPrepare);
         let prepare_command = crate::context(
             access,
             &format!("prepare-{receipt_key}"),
@@ -783,19 +937,23 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
             Some(revision),
             &receipt,
         )?;
-        let prepare = PrivateWorkspaceEffectV2::new(
+        observation.stage(Site::ReceiptPrepare);
+        let prepare = PrivateWorkspaceEffectV2::new_observed(
             self,
             access,
             consent,
             EffectV2::ConstructorReceipt,
             prepare_command,
             revision,
+            observation,
         )?;
+        observation.stage(Site::LinkUpsert);
         let mut after = before.clone();
         after
             .checkpoint_receipts
             .insert(receipt_key.clone(), receipt.clone());
-        let committed = prepare.commit(&before, after)?;
+        observation.stage(Site::ReceiptCommit);
+        let committed = prepare.commit_observed(&before, after, observation)?;
         // This actual successful transaction Result is the ONLY minting point.
         // Even an exact Store replay cannot issue a live continuation.
         if committed.replayed {
@@ -808,43 +966,64 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
             original_key: key.into(),
             command: command.clone(),
         };
+        observation.stage(Site::Enqueue);
         let enqueue=self.proof.enqueue_original_once_v1(&scope,key,&built.pczt_bytes,&built.review_policy,limits,proof).map_err(|error| {
-            let mut error=job_error(error);
+            observation.call(Call::Enqueue, CallState::ReturnedErrUnknown);
+            let mut error=observation.job_error(error);
             let category=error.details.get("private_original_job_error_v1").cloned();
             error.details=Box::new(json!({"constructor_receipt_created":true,"prepared_revision":prepared_revision,"coordination_request_digest":command.request_digest,
                 "encrypted_checkpoint_status":"not_confirmed","journals_are_atomic_together":false,"private_original_job_error_v1":category})); error
         })?;
         let (saved, fresh) = enqueue.into_parts();
+        observation.call(
+            Call::Enqueue,
+            if fresh.is_some() {
+                CallState::ReturnedOkFresh
+            } else {
+                CallState::ReturnedOkNoContinuation
+            },
+        );
+        observation.stage(Site::ReloadAfterEnqueue);
         let linked_before = self
-            .operation(
+            .operation_observed(
                 access,
                 consent,
                 PrivateWorkspaceActionV1::CheckpointExactOriginal,
+                Some(observation),
             )?
-            .load()?;
-        self.validate_original_lineage(&linked_before, access, key, &saved)?;
-        let link = PrivateWorkspaceEffectV2::new(
+            .load_observed(observation)?;
+        observation.stage(Site::OriginalLineage);
+        self.validate_original_lineage(&linked_before, access, key, &saved, Some(observation))?;
+        observation.stage(Site::LinkPrepare);
+        let link = PrivateWorkspaceEffectV2::new_observed(
             self,
             access,
             consent,
             EffectV2::MetadataLink,
             command,
             prepared_revision,
+            observation,
         )?;
+        observation.stage(Site::LinkUpsert);
         let mut linked_after = linked_before.clone();
         upsert_link(&mut linked_after, &saved)?;
+        observation.stage(Site::LinkCommit);
         let linked = link
-            .commit(&linked_before, linked_after)
+            .commit_observed(&linked_before, linked_after, observation)
             .map_err(|e| original_checkpoint_error(e, &saved))?;
-        self.check(
+        observation.stage(Site::PostSource);
+        self.check_observed(
             access,
             consent,
             PrivateWorkspaceActionV1::CheckpointExactOriginal,
+            Some(observation),
         )
         .map_err(|error| checkpoint_committed_error(error, &status(&linked)))?;
+        observation.stage(Site::RetainConsent);
         if !proof.permits(&scope, LocalAction::RetainPrivateWitnesses) {
             return Err(checkpoint_committed_error(denied(), &status(&linked)));
         }
+        observation.stage(Site::PostConsent);
         let attempt = match fresh {
             Some(enqueue) if !linked.replayed && enqueue.matches_source(&self.proof) => {
                 Some(OriginalProofAttemptV2 {
@@ -868,7 +1047,11 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
         access: &Access,
         key: &str,
         summary: &JobSummary,
+        observation: Option<&Observation>,
     ) -> Result<&'e crate::candidates::CheckpointReceipt> {
+        if let Some(o) = observation {
+            o.stage(Site::OriginalLineage);
+        }
         let c = candidate(envelope, &summary.candidate_id)?;
         validate_summary(c, summary)?;
         let receipt = validate_provenance(envelope, access, summary)?;
@@ -882,8 +1065,9 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
             != serde_json::to_value(receipt).map_err(|_| damaged())?
             || receipt.action_mappings_v1.is_none()
             || receipt.job_id
-                != wholepact_proof_jobs::job_id_for_key(&access.principal_id, key)
-                    .map_err(job_error)?
+                != wholepact_proof_jobs::job_id_for_key(&access.principal_id, key).map_err(
+                    |error| diagnostics::job_error(observation, Site::OriginalLineage, error),
+                )?
         {
             return Err(damaged());
         }
@@ -899,11 +1083,14 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
             Some(previous),
             receipt,
         )?;
+        if let Some(o) = observation {
+            o.stage(Site::OriginalLineage);
+        }
         let saved = self
             .engine
             .store
             .find_replay(&prepare)
-            .map_err(crate::store_error)?
+            .map_err(|error| diagnostics::store_error(observation, Site::OriginalLineage, error))?
             .ok_or_else(damaged)?;
         let original = decode_private_record(&saved.record)?;
         self.require_original_envelope(&original)?;
@@ -923,11 +1110,14 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
         {
             return Err(damaged());
         }
+        if let Some(o) = observation {
+            o.stage(Site::OriginalLineage);
+        }
         let operation = self
             .engine
             .store
             .get_operation(&saved.operation_id)
-            .map_err(crate::store_error)?
+            .map_err(|error| diagnostics::store_error(observation, Site::OriginalLineage, error))?
             .ok_or_else(damaged)?;
         let result: wholepact_store::MutationResult =
             serde_json::from_value(operation.result).map_err(|_| damaged())?;
@@ -953,6 +1143,30 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
         proof: &dyn LocalProofConsent,
         material: &dyn LocalDurableMaterialConsentV1,
     ) -> Result<PrivateWorkspaceStatusV1> {
+        let observation = Observation::new(Operation::Proof);
+        let result = self.prove_original_once_v2_observed(
+            attempt,
+            access,
+            key,
+            revision,
+            consent,
+            proof,
+            material,
+            &observation,
+        );
+        observation.finish(result)
+    }
+    fn prove_original_once_v2_observed(
+        &self,
+        attempt: OriginalProofAttemptV2<'_, 'source>,
+        access: &Access,
+        key: &str,
+        revision: u64,
+        consent: &dyn LocalPrivateWorkspaceConsentV1,
+        proof: &dyn LocalProofConsent,
+        material: &dyn LocalDurableMaterialConsentV1,
+        observation: &Observation,
+    ) -> Result<PrivateWorkspaceStatusV1> {
         // Consume the entire continuation BEFORE all fallible checks. Every
         // return, denial, panic or failed proof drops the only live correlation.
         let OriginalProofAttemptV2 {
@@ -960,17 +1174,31 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
             enqueue,
             linked_revision,
         } = attempt;
+        observation.consumed();
+        observation.stage(Site::ContinuationBinding);
         if !std::ptr::eq(self, constructor.workspace)
             || !enqueue.matches_source(&self.proof)
             || revision != linked_revision
         {
             return Err(denied());
         }
+        observation.stage(Site::WorkspaceLoad);
         let before = self
-            .operation(access, consent, PrivateWorkspaceActionV1::ProveOriginalOnce)?
-            .load()?;
-        let roster =
-            self.checked_roster(access, &before, &constructor.receipt.candidate_id, material)?;
+            .operation_observed(
+                access,
+                consent,
+                PrivateWorkspaceActionV1::ProveOriginalOnce,
+                Some(observation),
+            )?
+            .load_observed(observation)?;
+        observation.stage(Site::MaterialRoster);
+        let roster = self.checked_roster_observed(
+            observation,
+            access,
+            &before,
+            &constructor.receipt.candidate_id,
+            material,
+        )?;
         let gate = ArtifactGate {
             workspace: self,
             access,
@@ -980,8 +1208,11 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
             roster: &roster,
             action: PrivateWorkspaceActionV1::ProveOriginalOnce,
             held: None,
+            observation: Some(observation),
         };
+        observation.stage(Site::HeldPrecheck);
         gate.check()?;
+        observation.stage(Site::OriginalLookup);
         let saved = self
             .proof
             .status_for_key(
@@ -990,18 +1221,25 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
                 &constructor.command.request_digest,
                 &gate,
             )
-            .map_err(job_error)?
+            .map_err(|error| observation.job_error(error))?
             .ok_or_else(damaged)?;
-        let receipt =
-            self.validate_original_lineage(&before, access, &constructor.original_key, &saved)?;
+        observation.stage(Site::OriginalLineage);
+        let receipt = self.validate_original_lineage(
+            &before,
+            access,
+            &constructor.original_key,
+            &saved,
+            Some(observation),
+        )?;
         if receipt_key(access, &constructor.original_key)? != constructor.receipt_key
-            || serde_json::to_value(receipt).map_err(|_| damaged())?
-                != serde_json::to_value(&constructor.receipt).map_err(|_| damaged())?
+            || !same_original_receipt_v2(receipt, &constructor.receipt)?
             || enqueue.summary() != &saved
         {
             return Err(damaged());
         }
+        observation.stage(Site::Revision);
         crate::candidates::check_revision(&before, revision)?;
+        observation.stage(Site::OriginalRequest);
         let command = crate::context(
             access,
             key,
@@ -1010,20 +1248,25 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
             Some(revision),
             &(&saved.job_id, &constructor.command.request_digest),
         )?;
-        let effect = PrivateWorkspaceEffectV2::new(
+        observation.stage(Site::OutcomePrepare);
+        let effect = PrivateWorkspaceEffectV2::new_observed(
             self,
             access,
             consent,
             EffectV2::RecordOriginalProofOutcome,
             command,
             revision,
+            observation,
         )?;
         // There can be no lawful replay for a live newly minted continuation.
-        if effect.replay()?.is_some() {
+        observation.stage(Site::ReplayLookup);
+        if effect.replay_observed(observation)?.is_some() {
             return Err(damaged());
         }
+        observation.stage(Site::ProofRun);
         let summary = enqueue.run_original_queued_v1(&gate).map_err(|error| {
-            let mut error = job_error(error);
+            observation.call(Call::Proof, CallState::ReturnedErrUnknown);
+            let mut error = observation.job_error(error);
             error.retryable = false;
             if let Some(details) = error.details.as_object_mut() {
                 details.insert("original_proof_attempt_consumed".into(), json!(true));
@@ -1031,13 +1274,25 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
             }
             error
         })?;
+        observation.call(Call::Proof, CallState::ReturnedOk);
+        observation.stage(Site::HeldPrecheck);
         gate.check()?;
-        self.validate_original_lineage(&before, access, &constructor.original_key, &summary)?;
+        observation.stage(Site::ProofResultLineage);
+        self.validate_original_lineage(
+            &before,
+            access,
+            &constructor.original_key,
+            &summary,
+            Some(observation),
+        )?;
+        observation.stage(Site::LinkUpsert);
         let mut after = before.clone();
         upsert_link(&mut after, &summary)?;
+        observation.stage(Site::OutcomeCommit);
         let result = effect
-            .commit(&before, after)
+            .commit_observed(&before, after, observation)
             .map_err(|e| original_checkpoint_error(e, &summary))?;
+        observation.stage(Site::HeldPrecheck);
         gate.check()?;
         Ok(status(&result))
     }
@@ -1048,7 +1303,9 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
         candidate_id: &str,
         original_key: &str,
         proof: &dyn LocalProofConsent,
+        observation: &Observation,
     ) -> Result<VerifiedCheckpoint> {
+        observation.stage(Site::OriginalLineage);
         let receipt = envelope
             .checkpoint_receipts
             .get(&receipt_key(access, original_key)?)
@@ -1056,6 +1313,7 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
         if receipt.candidate_id != candidate_id {
             return Err(damaged());
         }
+        observation.stage(Site::StatusLookup);
         let summary = self
             .proof
             .status_for_key(
@@ -1064,14 +1322,30 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
                 &receipt.coordination_request_digest,
                 proof,
             )
-            .map_err(job_error)?
+            .map_err(|error| observation.job_error(error))?
             .ok_or_else(damaged)?;
-        self.validate_original_lineage(envelope, access, original_key, &summary)?;
+        observation.stage(Site::OriginalLineage);
+        self.validate_original_lineage(
+            envelope,
+            access,
+            original_key,
+            &summary,
+            Some(observation),
+        )?;
+        observation.stage(Site::LoadVerified);
         let checkpoint = self
             .proof
             .load_verified(&access.principal_id, &summary.job_id, proof)
-            .map_err(job_error)?;
-        self.validate_original_lineage(envelope, access, original_key, checkpoint.summary())?;
+            .map_err(|error| observation.job_error(error))?;
+        observation.stage(Site::OriginalLineage);
+        self.validate_original_lineage(
+            envelope,
+            access,
+            original_key,
+            checkpoint.summary(),
+            Some(observation),
+        )?;
+        observation.stage(Site::ProofVerifiedState);
         if checkpoint.summary() != &summary
             || summary.state != wholepact_proof_jobs::JobState::Succeeded
             || summary.attempt != 1
@@ -1093,14 +1367,44 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
         proof: &dyn LocalProofConsent,
         material: &dyn LocalDurableMaterialConsentV1,
     ) -> Result<PrivateVerifiedFixedV2> {
+        let observation = Observation::new(Operation::Freeze);
+        let result = self.freeze_verified_fixed_v2_observed(
+            access,
+            key,
+            candidate_id,
+            original_checkpoint_key,
+            revision,
+            consent,
+            proof,
+            material,
+            &observation,
+        );
+        observation.finish(result)
+    }
+    fn freeze_verified_fixed_v2_observed(
+        &self,
+        access: &Access,
+        key: &str,
+        candidate_id: &str,
+        original_checkpoint_key: &str,
+        revision: u64,
+        consent: &dyn LocalPrivateWorkspaceConsentV1,
+        proof: &dyn LocalProofConsent,
+        material: &dyn LocalDurableMaterialConsentV1,
+        observation: &Observation,
+    ) -> Result<PrivateVerifiedFixedV2> {
+        observation.stage(Site::WorkspaceLoad);
         let before = self
-            .operation(
+            .operation_observed(
                 access,
                 consent,
                 PrivateWorkspaceActionV1::FreezeVerifiedFixed,
+                Some(observation),
             )?
-            .load()?;
-        let roster = self.checked_roster(access, &before, candidate_id, material)?;
+            .load_observed(observation)?;
+        observation.stage(Site::MaterialRoster);
+        let roster =
+            self.checked_roster_observed(observation, access, &before, candidate_id, material)?;
         let gate = ArtifactGate {
             workspace: self,
             access,
@@ -1110,23 +1414,30 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
             roster: &roster,
             action: PrivateWorkspaceActionV1::FreezeVerifiedFixed,
             held: None,
+            observation: Some(observation),
         };
+        observation.stage(Site::FinalGate);
         gate.check()?;
+        observation.stage(Site::LoadVerified);
         let checkpoint = self.load_original_verified(
             &before,
             access,
             candidate_id,
             original_checkpoint_key,
             &gate,
+            observation,
         )?;
+        observation.stage(Site::OriginalLineage);
         let receipt = self
             .validate_original_lineage(
                 &before,
                 access,
                 original_checkpoint_key,
                 checkpoint.summary(),
+                Some(observation),
             )?
             .clone();
+        observation.stage(Site::OriginalRequest);
         let command = crate::context(
             access,
             key,
@@ -1139,21 +1450,27 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
                 checkpoint.summary(),
             ),
         )?;
-        let effect = PrivateWorkspaceEffectV2::new(
+        observation.stage(Site::FixedPrepare);
+        let effect = PrivateWorkspaceEffectV2::new_observed(
             self,
             access,
             consent,
             EffectV2::FreezeVerifiedFixed,
             command,
             revision,
+            observation,
         )?;
-        if effect.replay()?.is_some() {
-            let identity = crate::durable_proposals_v1::read_private_fixed_v2(
+        observation.stage(Site::ReplayLookup);
+        if effect.replay_observed(observation)?.is_some() {
+            observation.stage(Site::FixedReplayRead);
+            let identity = crate::durable_proposals_v1::read_private_fixed_observed_v2(
+                observation,
                 &before,
                 access,
                 &checkpoint,
                 &receipt,
             )?;
+            observation.stage(Site::OutputCommitments);
             let output = self.verified_output(
                 &before,
                 access,
@@ -1161,32 +1478,46 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
                 &checkpoint,
                 &identity,
                 &gate,
+                observation,
             )?;
+            observation.stage(Site::FinalGate);
             gate.check()?;
-            self.check(
+            observation.stage(Site::PostSource);
+            self.check_observed(
                 access,
                 consent,
                 PrivateWorkspaceActionV1::FreezeVerifiedFixed,
+                Some(observation),
             )?;
             return Ok(output);
         }
+        observation.stage(Site::Revision);
         crate::candidates::check_revision(&before, revision)?;
         let mut after = before.clone();
-        let identity = crate::durable_proposals_v1::freeze_private_fixed_v2(
+        observation.stage(Site::FixedVerify);
+        let identity = crate::durable_proposals_v1::freeze_private_fixed_observed_v2(
+            observation,
             &mut after,
             access,
             &checkpoint,
             &receipt,
         )?;
+        observation.stage(Site::FinalGate);
         gate.check()?;
-        let result = effect.commit(&before, after)?;
+        observation.stage(Site::FixedCommit);
+        let result = effect.commit_observed(&before, after, observation)?;
+        observation.stage(Site::FinalGate);
         gate.check()?;
-        self.check(
+        observation.stage(Site::PostSource);
+        self.check_observed(
             access,
             consent,
             PrivateWorkspaceActionV1::FreezeVerifiedFixed,
+            Some(observation),
         )?;
+        observation.stage(Site::SavedDecode);
         let saved = decode_private_record(&result.record)?;
+        observation.stage(Site::OutputCommitments);
         let output = self.verified_output(
             &saved,
             access,
@@ -1194,12 +1525,16 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
             &checkpoint,
             &identity,
             &gate,
+            observation,
         )?;
+        observation.stage(Site::FinalGate);
         gate.check()?;
-        self.check(
+        observation.stage(Site::PostSource);
+        self.check_observed(
             access,
             consent,
             PrivateWorkspaceActionV1::FreezeVerifiedFixed,
+            Some(observation),
         )?;
         Ok(output)
     }
@@ -1213,10 +1548,40 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
         proof: &dyn LocalProofConsent,
         material: &dyn LocalDurableMaterialConsentV1,
     ) -> Result<PrivateVerifiedFixedV2> {
+        let observation = Observation::new(Operation::ReadFixed);
+        let result = self.read_verified_fixed_v2_observed(
+            access,
+            candidate_id,
+            original_checkpoint_key,
+            consent,
+            proof,
+            material,
+            &observation,
+        );
+        observation.finish(result)
+    }
+    fn read_verified_fixed_v2_observed(
+        &self,
+        access: &Access,
+        candidate_id: &str,
+        original_checkpoint_key: &str,
+        consent: &dyn LocalPrivateWorkspaceConsentV1,
+        proof: &dyn LocalProofConsent,
+        material: &dyn LocalDurableMaterialConsentV1,
+        observation: &Observation,
+    ) -> Result<PrivateVerifiedFixedV2> {
+        observation.stage(Site::WorkspaceLoad);
         let envelope = self
-            .operation(access, consent, PrivateWorkspaceActionV1::ReadVerifiedFixed)?
-            .load()?;
-        let roster = self.checked_roster(access, &envelope, candidate_id, material)?;
+            .operation_observed(
+                access,
+                consent,
+                PrivateWorkspaceActionV1::ReadVerifiedFixed,
+                Some(observation),
+            )?
+            .load_observed(observation)?;
+        observation.stage(Site::MaterialRoster);
+        let roster =
+            self.checked_roster_observed(observation, access, &envelope, candidate_id, material)?;
         let gate = ArtifactGate {
             workspace: self,
             access,
@@ -1226,27 +1591,36 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
             roster: &roster,
             action: PrivateWorkspaceActionV1::ReadVerifiedFixed,
             held: None,
+            observation: Some(observation),
         };
+        observation.stage(Site::FinalGate);
         gate.check()?;
+        observation.stage(Site::LoadVerified);
         let checkpoint = self.load_original_verified(
             &envelope,
             access,
             candidate_id,
             original_checkpoint_key,
             &gate,
+            observation,
         )?;
+        observation.stage(Site::OriginalLineage);
         let receipt = self.validate_original_lineage(
             &envelope,
             access,
             original_checkpoint_key,
             checkpoint.summary(),
+            Some(observation),
         )?;
-        let identity = crate::durable_proposals_v1::read_private_fixed_v2(
+        observation.stage(Site::FixedVerify);
+        let identity = crate::durable_proposals_v1::read_private_fixed_observed_v2(
+            observation,
             &envelope,
             access,
             &checkpoint,
             receipt,
         )?;
+        observation.stage(Site::OutputCommitments);
         let output = self.verified_output(
             &envelope,
             access,
@@ -1254,9 +1628,17 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
             &checkpoint,
             &identity,
             &gate,
+            observation,
         )?;
+        observation.stage(Site::FinalGate);
         gate.check()?;
-        self.check(access, consent, PrivateWorkspaceActionV1::ReadVerifiedFixed)?;
+        observation.stage(Site::PostSource);
+        self.check_observed(
+            access,
+            consent,
+            PrivateWorkspaceActionV1::ReadVerifiedFixed,
+            Some(observation),
+        )?;
         Ok(output)
     }
     pub fn fixed_status_v2(
@@ -1304,7 +1686,7 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
                 authorization_allowed: false,
             });
         };
-        self.validate_original_lineage(&envelope, access, original_checkpoint_key, &summary)?;
+        self.validate_original_lineage(&envelope, access, original_checkpoint_key, &summary, None)?;
         self.check(access, consent, PrivateWorkspaceActionV1::ReadStatus)?;
         Ok(PrivateFixedStatusV2 {
             revision: envelope.view.revision,
@@ -1328,32 +1710,76 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
         proof: &dyn LocalProofConsent,
         material: &dyn LocalDurableMaterialConsentV1,
     ) -> Result<PrivateVerifiedFixedV2> {
+        let observation = Observation::new(Operation::ReadFixed);
+        let result = self.read_only_original_fixed_v2_observed(
+            access,
+            consent,
+            proof,
+            material,
+            &observation,
+        );
+        observation.finish(result)
+    }
+    fn read_only_original_fixed_v2_observed(
+        &self,
+        access: &Access,
+        consent: &dyn LocalPrivateWorkspaceConsentV1,
+        proof: &dyn LocalProofConsent,
+        material: &dyn LocalDurableMaterialConsentV1,
+        observation: &Observation,
+    ) -> Result<PrivateVerifiedFixedV2> {
+        observation.stage(Site::WorkspaceLoad);
         let before = self
-            .operation(access, consent, PrivateWorkspaceActionV1::ReadVerifiedFixed)?
-            .load()?;
+            .operation_observed(
+                access,
+                consent,
+                PrivateWorkspaceActionV1::ReadVerifiedFixed,
+                Some(observation),
+            )?
+            .load_observed(observation)?;
+        observation.stage(Site::RetainedDiscovery);
         if before.view.candidates.len() != 1
             || before.durable_proposals_v1.len() != 1
             || before.checkpoint_receipts.len() != 1
         {
             return Err(damaged());
         }
+        observation.stage(Site::RetainedDiscovery);
         let candidate_id = before.view.candidates[0].candidate_id.clone();
         let receipt = before
             .checkpoint_receipts
             .values()
             .next()
             .ok_or_else(damaged)?;
+        observation.stage(Site::RetainedKey);
         let original = receipt.original_request_v2.as_ref().ok_or_else(damaged)?;
         let key = original.command.idempotency_key.clone();
-        let output =
-            self.read_verified_fixed_v2(access, &candidate_id, &key, consent, proof, material)?;
+        observation.stage(Site::LoadVerified);
+        let output = self.read_verified_fixed_v2_observed(
+            access,
+            &candidate_id,
+            &key,
+            consent,
+            proof,
+            material,
+            observation,
+        )?;
+        observation.stage(Site::ReloadAfterRead);
         let after = self
-            .operation(access, consent, PrivateWorkspaceActionV1::ReadVerifiedFixed)?
-            .load()?;
+            .operation_observed(
+                access,
+                consent,
+                PrivateWorkspaceActionV1::ReadVerifiedFixed,
+                Some(observation),
+            )?
+            .load_observed(observation)?;
+        observation.stage(Site::EnvelopeCompare);
         if crate::encode(&before)? != crate::encode(&after)? {
             return Err(damaged());
         }
-        let roster = self.checked_roster(access, &after, &candidate_id, material)?;
+        observation.stage(Site::MaterialRoster);
+        let roster =
+            self.checked_roster_observed(observation, access, &after, &candidate_id, material)?;
         let gate = ArtifactGate {
             workspace: self,
             access,
@@ -1363,7 +1789,9 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
             roster: &roster,
             action: PrivateWorkspaceActionV1::ReadVerifiedFixed,
             held: None,
+            observation: Some(observation),
         };
+        observation.stage(Site::JournalAfterRead);
         let actual = self
             .proof
             .status_for_key(
@@ -1372,14 +1800,18 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
                 &receipt.coordination_request_digest,
                 &gate,
             )
-            .map_err(job_error)?
+            .map_err(|error| observation.job_error(error))?
             .ok_or_else(damaged)?;
-        self.validate_original_lineage(&after, access, &key, &actual)?;
-        let history = self.audit_exact_history(&after)?;
+        observation.stage(Site::OriginalLineage);
+        self.validate_original_lineage(&after, access, &key, &actual, Some(observation))?;
+        observation.stage(Site::OperationHistory);
+        let history = self.audit_exact_history_observed(&after, Some(observation))?;
+        observation.stage(Site::ProofEventHistory);
         let proof_history = self
             .proof
             .original_attempt_history_digest_v1(&access.principal_id, &actual.job_id, &gate)
-            .map_err(job_error)?;
+            .map_err(|error| observation.job_error(error))?;
+        observation.stage(Site::LogicalCompare);
         if output.proof_event_history_digest != proof_history
             || output.logical_state_digest
                 != commit_digest(
@@ -1389,8 +1821,12 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
         {
             return Err(damaged());
         }
+        observation.stage(Site::FinalGate);
         gate.check()?;
-        self.proof.check_current().map_err(job_error)?;
+        observation.stage(Site::FinalProofOrigin);
+        self.proof
+            .check_current()
+            .map_err(|error| observation.job_error(error))?;
         Ok(output)
     }
     fn verified_output(
@@ -1401,14 +1837,20 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
         checkpoint: &VerifiedCheckpoint,
         identity: &wholepact_protocol::durable_proposal_v1::FixedProposalIdentityV1,
         proof: &dyn LocalProofConsent,
+        observation: &Observation,
     ) -> Result<PrivateVerifiedFixedV2> {
         let summary = checkpoint.summary();
-        let receipt = self.validate_original_lineage(envelope, access, key, summary)?;
-        let history = self.audit_exact_history(envelope)?;
+        observation.stage(Site::OutputLineage);
+        let receipt =
+            self.validate_original_lineage(envelope, access, key, summary, Some(observation))?;
+        observation.stage(Site::OperationHistory);
+        let history = self.audit_exact_history_observed(envelope, Some(observation))?;
+        observation.stage(Site::ProofEventHistory);
         let proof_history = self
             .proof
             .original_attempt_history_digest_v1(&access.principal_id, &summary.job_id, proof)
-            .map_err(job_error)?;
+            .map_err(|error| observation.job_error(error))?;
+        observation.stage(Site::OutputCommitments);
         Ok(PrivateVerifiedFixedV2 {
             revision: envelope.view.revision,
             source_digest: self.source.source_digest().into(),
@@ -1459,11 +1901,16 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
     /// Audit every saved exact effect and its original result. This also rejects
     /// changed historical markers and unknown future effects during replay/open.
     pub(super) fn audit_exact_history(&self, current: &Envelope) -> Result<String> {
-        let events = self
-            .engine
-            .store
-            .events_after(0, 9)
-            .map_err(crate::store_error)?;
+        self.audit_exact_history_observed(current, None)
+    }
+    pub(super) fn audit_exact_history_observed(
+        &self,
+        current: &Envelope,
+        observation: Option<&Observation>,
+    ) -> Result<String> {
+        let events = self.engine.store.events_after(0, 9).map_err(|error| {
+            diagnostics::store_error(observation, Site::OperationHistory, error)
+        })?;
         if events.is_empty() || events.len() > 8 || events.len() as u64 != current.view.revision {
             return Err(damaged());
         }
@@ -1481,7 +1928,9 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
                 .engine
                 .store
                 .get_operation(&event.operation_id)
-                .map_err(crate::store_error)?
+                .map_err(|error| {
+                    diagnostics::store_error(observation, Site::OperationHistory, error)
+                })?
                 .ok_or_else(damaged)?;
             let saved: wholepact_store::MutationResult =
                 serde_json::from_value(operation.result.clone()).map_err(|_| damaged())?;
@@ -1570,17 +2019,35 @@ struct ArtifactGate<'a, 'source, 'held> {
     roster: &'a Roster,
     action: PrivateWorkspaceActionV1,
     held: Option<&'a HeldDurableConstructionRosterV1<'held>>,
+    observation: Option<&'a Observation>,
 }
 impl ArtifactGate<'_, '_, '_> {
     fn check(&self) -> Result<()> {
         if let Some(held) = self.held {
-            held.check_current()?;
+            held.check_current().map_err(|error| {
+                if let Some(o) = self.observation {
+                    o.record(Site::GateHeldPre, diagnostics::construction(&error));
+                }
+                ApiError::from(error)
+            })?;
         }
         // The proof mutex may already be held: deliberately no source.check_current here.
         self.workspace
-            .check_without_proof_lock(self.access, self.consent, self.action)?;
+            .check_without_proof_lock_observed(
+                self.access,
+                self.consent,
+                self.action,
+                self.observation,
+            )
+            .map_err(|error| {
+                if let Some(o) = self.observation {
+                    o.record(Site::GateWorkspace, diagnostics::engine(&error));
+                }
+                error
+            })?;
         for intake in self.roster.owners.values() {
-            self.workspace.check_intake(
+            self.workspace.check_intake_observed(
+                self.observation,
                 self.access,
                 intake,
                 self.material,
@@ -1588,7 +2055,12 @@ impl ArtifactGate<'_, '_, '_> {
             )?;
         }
         if let Some(held) = self.held {
-            held.check_current()?;
+            held.check_current().map_err(|error| {
+                if let Some(o) = self.observation {
+                    o.record(Site::GateHeldPost, diagnostics::construction(&error));
+                }
+                ApiError::from(error)
+            })?;
         }
         Ok(())
     }
@@ -1609,9 +2081,23 @@ impl LocalProofConsent for ArtifactGate<'_, '_, '_> {
                     .reviewer_account_ids()
                     .into_iter()
                     .collect();
-        exact && self.check().is_ok() && self.proof.permits(scope, action) && self.check().is_ok()
+        diagnostics::gate_chain(
+            self.observation,
+            exact,
+            || self.check(),
+            || self.proof.permits(scope, action),
+        )
     }
 }
+// Typed arguments retain the actual lineage receipt, never a stage return value.
+fn same_original_receipt_v2(
+    actual: &crate::candidates::CheckpointReceipt,
+    expected: &crate::candidates::CheckpointReceipt,
+) -> Result<bool> {
+    Ok(serde_json::to_value(actual).map_err(|_| damaged())?
+        == serde_json::to_value(expected).map_err(|_| damaged())?)
+}
+
 #[cfg(test)]
 #[path = "exact_fixed_v2_tests.rs"]
 mod tests;
@@ -1643,4 +2129,1133 @@ fn original_checkpoint_error(mut error: ApiError, summary: &JobSummary) -> ApiEr
     }
     error.safe_actions=vec!["Inspect the exact saved original journals; no new randomness or proof attempt is authorized".into()];
     error
+}
+
+/// Inert, operation-local error observations. Never consulted by policy or effects.
+pub(crate) mod diagnostics {
+    use crate::{ApiError, Result};
+    use serde::Serialize;
+    use std::cell::{Cell, RefCell};
+    pub(crate) const KEY: &str = "private_fixed_diagnostic_v1";
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+    pub(crate) enum Operation {
+        Checkpoint,
+        Proof,
+        Freeze,
+        ReadFixed,
+        OpenOriginal,
+    }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+    pub(crate) enum Site {
+        WorkspaceLoad,
+        Candidate,
+        MaterialRoster,
+        SlotBindings,
+        WalletRosterAcquire,
+        HeldPrecheck,
+        ConstructorReload,
+        InputRequestDigest,
+        OriginalRequest,
+        OriginalLookup,
+        OriginalLineage,
+        ReplayLookup,
+        Revision,
+        CurrentTerms,
+        ProposalValidation,
+        ProtocolConstruct,
+        ProtocolInspect,
+        RetainConsent,
+        ReceiptPrepare,
+        ReceiptCommit,
+        Enqueue,
+        ReloadAfterEnqueue,
+        LinkPrepare,
+        LinkUpsert,
+        LinkCommit,
+        PostSource,
+        PostConsent,
+        HeldPostcheck,
+        WalletRosterRelease,
+        ContinuationBinding,
+        ProofRun,
+        ProofResultLineage,
+        OutcomePrepare,
+        OutcomeCommit,
+        StatusLookup,
+        LoadVerified,
+        ProofVerifiedState,
+        FixedMappings,
+        FixedVerify,
+        FixedReplayRead,
+        FixedPrepare,
+        FixedCommit,
+        SavedDecode,
+        OutputLineage,
+        OperationHistory,
+        ProofEventHistory,
+        OutputCommitments,
+        RetainedDiscovery,
+        RetainedKey,
+        ReloadAfterRead,
+        EnvelopeCompare,
+        JournalAfterRead,
+        LogicalCompare,
+        FinalGate,
+        FinalProofOrigin,
+        MetadataPreflight,
+        MetadataOpen,
+        SeedAudit,
+        SourcePermission,
+        MetadataOrigin,
+        Marker,
+        ProofOrigin,
+        ExactScope,
+        GateWorkspace,
+        GateMaterial,
+        GateHeldPre,
+        GateHeldPost,
+        GateProofConsent,
+        SnapshotOpen,
+        SnapshotOrigin,
+        SnapshotSchema,
+        SnapshotInventory,
+        SnapshotSourceUnchanged,
+        SeedPlan,
+        SeedBinding,
+        SeedReplay,
+        SeedRecord,
+        SeedOperation,
+        SeedFinal,
+    }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+    pub(crate) enum CallState {
+        NotApplicable,
+        NotCalled,
+        ReturnedOk,
+        ReturnedOkFresh,
+        ReturnedOkReplay,
+        ReturnedOkNoContinuation,
+        ReturnedErrUnknown,
+    }
+    #[derive(Clone, Copy)]
+    pub(crate) enum Call {
+        Receipt,
+        Enqueue,
+        Link,
+        Proof,
+        Outcome,
+        Freeze,
+    }
+    #[derive(Clone, Copy, Serialize)]
+    struct Calls {
+        receipt: CallState,
+        enqueue: CallState,
+        link: CallState,
+        proof: CallState,
+        outcome: CallState,
+        freeze: CallState,
+    }
+    #[derive(Clone, Copy)]
+    pub(crate) struct Cause {
+        pub(crate) family: &'static str,
+        pub(crate) cause: &'static str,
+    }
+    #[derive(Clone, Copy)]
+    struct Failure {
+        site: Site,
+        cause: Cause,
+    }
+    pub(crate) struct Observation {
+        operation: Operation,
+        first: RefCell<Option<Failure>>,
+        calls: RefCell<Calls>,
+        available: Cell<bool>,
+        consumed: Cell<bool>,
+        current: Cell<Site>,
+    }
+    impl Observation {
+        pub(crate) fn new(operation: Operation) -> Self {
+            use CallState::*;
+            let mut calls = Calls {
+                receipt: NotApplicable,
+                enqueue: NotApplicable,
+                link: NotApplicable,
+                proof: NotApplicable,
+                outcome: NotApplicable,
+                freeze: NotApplicable,
+            };
+            match operation {
+                Operation::Checkpoint => {
+                    calls.receipt = NotCalled;
+                    calls.enqueue = NotCalled;
+                    calls.link = NotCalled;
+                }
+                Operation::Proof => {
+                    calls.proof = NotCalled;
+                    calls.outcome = NotCalled;
+                }
+                Operation::Freeze => calls.freeze = NotCalled,
+                Operation::ReadFixed | Operation::OpenOriginal => {}
+            }
+            Self {
+                operation,
+                first: RefCell::new(None),
+                calls: RefCell::new(calls),
+                available: Cell::new(true),
+                consumed: Cell::new(false),
+                current: Cell::new(Site::WorkspaceLoad),
+            }
+        }
+        pub(crate) fn stage(&self, site: Site) {
+            self.current.set(site);
+        }
+        pub(crate) fn site(&self) -> Site {
+            self.current.get()
+        }
+        pub(crate) fn job_error(&self, error: wholepact_proof_jobs::JobError) -> ApiError {
+            self.record(self.site(), job(&error));
+            super::job_error(error)
+        }
+        pub(crate) fn consumed(&self) {
+            self.consumed.set(true);
+        }
+        pub(crate) fn record(&self, site: Site, cause: Cause) {
+            let cause = finite_cause(cause);
+            match self.first.try_borrow_mut() {
+                Ok(mut first) => {
+                    if first.is_none() {
+                        *first = Some(Failure { site, cause });
+                    }
+                }
+                Err(_) => self.available.set(false),
+            }
+        }
+        pub(crate) fn api<T>(&self, site: Site, result: Result<T>) -> Result<T> {
+            if let Err(error) = &result {
+                self.record(site, engine(error));
+            }
+            result
+        }
+        pub(crate) fn error(&self, site: Site, error: ApiError) -> ApiError {
+            self.record(site, engine(&error));
+            error
+        }
+        pub(crate) fn gate(&self, site: Site, cause: &'static str) {
+            self.record(
+                site,
+                Cause {
+                    family: "Gate",
+                    cause,
+                },
+            );
+        }
+        pub(crate) fn call(&self, call: Call, state: CallState) {
+            let valid = match call {
+                Call::Receipt | Call::Link | Call::Outcome | Call::Freeze => matches!(
+                    state,
+                    CallState::ReturnedOkFresh
+                        | CallState::ReturnedOkReplay
+                        | CallState::ReturnedErrUnknown
+                ),
+                Call::Enqueue => matches!(
+                    state,
+                    CallState::ReturnedOkFresh
+                        | CallState::ReturnedOkNoContinuation
+                        | CallState::ReturnedErrUnknown
+                ),
+                Call::Proof => {
+                    matches!(state, CallState::ReturnedOk | CallState::ReturnedErrUnknown)
+                }
+            };
+            if !valid {
+                self.available.set(false);
+                return;
+            }
+            match self.calls.try_borrow_mut() {
+                Ok(mut calls) => {
+                    let slot = match call {
+                        Call::Receipt => &mut calls.receipt,
+                        Call::Enqueue => &mut calls.enqueue,
+                        Call::Link => &mut calls.link,
+                        Call::Proof => &mut calls.proof,
+                        Call::Outcome => &mut calls.outcome,
+                        Call::Freeze => &mut calls.freeze,
+                    };
+                    if *slot == CallState::NotCalled {
+                        *slot = state;
+                    }
+                }
+                Err(_) => self.available.set(false),
+            }
+        }
+        pub(crate) fn store_call(
+            &self,
+            site: Site,
+            call: Call,
+            result: &wholepact_store::Result<wholepact_store::MutationResult>,
+        ) {
+            match result {
+                Ok(saved) => self.call(
+                    call,
+                    if saved.replayed {
+                        CallState::ReturnedOkReplay
+                    } else {
+                        CallState::ReturnedOkFresh
+                    },
+                ),
+                Err(error) => {
+                    self.call(call, CallState::ReturnedErrUnknown);
+                    self.record(site, store(error));
+                }
+            }
+        }
+        #[cfg(test)]
+        pub(super) fn record_while_borrowed_for_test(&self, error: &ApiError) {
+            let _held = self.first.borrow_mut();
+            self.record(Site::FinalGate, engine(error));
+        }
+        pub(crate) fn finish<T>(&self, result: Result<T>) -> Result<T> {
+            match result {
+                Ok(value) => Ok(value),
+                Err(mut error) => {
+                    self.record(self.site(), engine(&error));
+                    if !self.available.get()
+                        || error.details.get(KEY).is_some()
+                        || !error.details.is_object()
+                    {
+                        return Err(error);
+                    }
+                    let (Ok(first), Ok(calls)) = (self.first.try_borrow(), self.calls.try_borrow())
+                    else {
+                        return Err(error);
+                    };
+                    let Some(first) = *first else {
+                        return Err(error);
+                    };
+                    if (self.operation == Operation::Proof) != self.consumed.get() {
+                        return Err(error);
+                    }
+                    let value = serde_json::json!({"schema":1,"operation":self.operation,"site":first.site,"engine_code":engine_code(&error.code),"family":first.cause.family,"cause":first.cause.cause,"calls":*calls,"attempt_consumed":self.consumed.get(),"call_scope":"CurrentInvocation"});
+                    if serde_json::to_vec(&value)
+                        .ok()
+                        .is_some_and(|bytes| bytes.len() <= 4096)
+                    {
+                        if let Some(details) = error.details.as_object_mut() {
+                            details.entry(KEY.to_owned()).or_insert(value);
+                        }
+                    }
+                    Err(error)
+                }
+            }
+        }
+    }
+    /// Same short-circuit kernel for observed and unobserved permission gates.
+    pub(crate) fn gate_chain(
+        observation: Option<&Observation>,
+        exact: bool,
+        mut check: impl FnMut() -> Result<()>,
+        permission: impl FnOnce() -> bool,
+    ) -> bool {
+        if !exact {
+            if let Some(o) = observation {
+                o.gate(Site::ExactScope, "ExactScopeMismatch");
+            }
+            return false;
+        }
+        let before = check();
+        if let Err(error) = &before {
+            if let Some(o) = observation {
+                o.record(Site::GateHeldPre, engine(error));
+            }
+        }
+        if before.is_err() {
+            return false;
+        }
+        if !permission() {
+            if let Some(o) = observation {
+                o.gate(Site::GateProofConsent, "ProofConsentFalse");
+            }
+            return false;
+        }
+        let after = check();
+        if let Err(error) = &after {
+            if let Some(o) = observation {
+                o.record(Site::GateHeldPost, engine(error));
+            }
+        }
+        after.is_ok()
+    }
+    // A closed vocabulary even if an internal caller accidentally supplies an unknown static label.
+    fn finite_cause(value: Cause) -> Cause {
+        match (value.family, value.cause) {
+            (
+                "Engine",
+                "DISCLOSURE_DENIED"
+                | "DURABLE_CONSTRUCTION_UNAVAILABLE"
+                | "DURABLE_PROPOSAL_RECOVERY_REQUIRED"
+                | "DURABLE_PROPOSAL_CONFLICT"
+                | "DURABLE_PROPOSAL_NOT_FOUND"
+                | "DURABLE_PROFILE_UNAVAILABLE"
+                | "MANUAL_CONSTRUCTION_DENIED"
+                | "RETAINED_INPUT_OBSERVATION_UNAVAILABLE"
+                | "CANDIDATE_VERIFICATION_FAILED"
+                | "IDEMPOTENCY_CONFLICT"
+                | "REVISION_CONFLICT"
+                | "NOT_FOUND"
+                | "INVALID_REQUEST"
+                | "RECOVERY_REQUIRED"
+                | "LIVE_AUTHORIZATION_EXISTS"
+                | "RESOURCE_EXHAUSTED"
+                | "INVALID_TRANSITION"
+                | "STORAGE_PROTECTION_REQUIRED"
+                | "STORAGE_UNAVAILABLE"
+                | "ACCESS_DENIED"
+                | "INVALID_TERMS"
+                | "UNSUPPORTED_CAPABILITY"
+                | "MISSING_EVIDENCE"
+                | "INVALID_AMOUNT"
+                | "UNKNOWN_PARTICIPANT"
+                | "DUPLICATE_IDENTIFIER"
+                | "CONSERVATION_FAILURE"
+                | "DEBIT_CAP_EXCEEDED"
+                | "FEE_CAP_EXCEEDED"
+                | "UNVERIFIABLE_MATCH"
+                | "PRIVACY_INCOMPATIBLE"
+                | "UNSUPPORTED_VERSION"
+                | "RESOURCE_LIMIT"
+                | "STALE_CHAIN"
+                | "OUTSTANDING_EXPOSURE"
+                | "USER_REJECTED"
+                | "INTERNAL_ERROR"
+                | "Unclassified"
+                | "PERMISSION_DENIED",
+            ) => value,
+            (
+                "DurableConstruction",
+                "Invalid" | "Binding" | "Stale" | "Storage" | "Unclassified",
+            ) => value,
+            (
+                "Sync",
+                "AccessDenied"
+                | "InvalidRequest"
+                | "Interrupted"
+                | "ReconciliationRequired"
+                | "InvalidResponse"
+                | "ResourceLimit"
+                | "NoCurrentObservation"
+                | "Unclassified",
+            ) => value,
+            (
+                "Wallet",
+                "Storage" | "AccountScope" | "AccountMismatch" | "IncompleteSync"
+                | "UnsupportedProfile" | "ChainMismatch" | "InsufficientFunds" | "InvalidRequest"
+                | "MissingWitness" | "InvalidNote" | "Scan" | "Transport" | "Unclassified",
+            ) => value,
+            (
+                "Chain",
+                "InvalidConfiguration"
+                | "WrongNetwork"
+                | "UnsupportedProxyConfiguration"
+                | "WrongBranch"
+                | "StaleChain"
+                | "ContradictoryChain"
+                | "Timeout"
+                | "TransportUnavailable"
+                | "ObservationInterrupted"
+                | "MissingAncestryEvidence"
+                | "NotObserved"
+                | "ResourceLimit"
+                | "MalformedEvidence"
+                | "UnsupportedCapability"
+                | "BackendFailure"
+                | "ClockUnavailable"
+                | "IdempotencyConflict"
+                | "JournalFailure"
+                | "SubmissionNotAuthorized"
+                | "SubmissionExpiryMargin"
+                | "ObligationConflict"
+                | "SubmissionOutcomeUnrecorded"
+                | "SubmissionRetentionUncertain"
+                | "Unclassified",
+            ) => value,
+            (
+                "Protocol",
+                "Manifest"
+                | "Disclosure"
+                | "Context"
+                | "Contribution"
+                | "Input"
+                | "Output"
+                | "Fee"
+                | "BuilderInput"
+                | "BuilderOutput"
+                | "Pczt"
+                | "Finalize"
+                | "ActionMapping"
+                | "FixedBudget"
+                | "FixedOwners"
+                | "FixedRecipient"
+                | "FixedPolicy"
+                | "FixedAccounting"
+                | "FixedRealInput"
+                | "FixedCanonicalAccount"
+                | "FixedDistinctAccounts"
+                | "FixedUnsignedPredecessor"
+                | "FixedUnsignedRealInput"
+                | "FixedProofOnlyTransition"
+                | "FixedPaddingSignature"
+                | "Unclassified",
+            ) => value,
+            (
+                "Store",
+                "StorageSecurity"
+                | "Database"
+                | "Encoding"
+                | "Poisoned"
+                | "IdempotencyConflict"
+                | "RevisionConflict"
+                | "NotFound"
+                | "AlreadyExists"
+                | "InvalidInput"
+                | "UnsupportedSchema"
+                | "RecoveryRequired"
+                | "WriterEpochMismatch"
+                | "LiveAuthorizationExists"
+                | "InputReserved"
+                | "ResourceExhausted"
+                | "BudgetExceeded"
+                | "InvalidTransition"
+                | "File"
+                | "Unclassified",
+            ) => value,
+            (
+                "StorageSecurity",
+                "UnsupportedPlatform"
+                | "QuarantinedDatabase"
+                | "RecoveredGeneration"
+                | "GenerationArchive"
+                | "UninitializedDatabase"
+                | "UnsafePath"
+                | "AlreadyExists"
+                | "MissingDatabase"
+                | "PlaintextRefused"
+                | "UnqualifiedRuntime"
+                | "AuthenticationFailed"
+                | "Database"
+                | "Io"
+                | "SnapshotLimit"
+                | "SourceChanged"
+                | "Unclassified",
+            ) => value,
+            (
+                "Job",
+                "ConsentDenied"
+                | "NotFound"
+                | "InvalidRequest"
+                | "VerificationFailed"
+                | "IdempotencyConflict"
+                | "RecoveryRequired"
+                | "StateConflict"
+                | "Storage"
+                | "UnsupportedSchema"
+                | "ResourceExhausted"
+                | "Unclassified",
+            ) => value,
+            (
+                "Gate",
+                "ExactScopeMismatch"
+                | "WorkspaceConsentFalse"
+                | "MaterialConsentFalse"
+                | "ProofConsentFalse"
+                | "Unclassified",
+            ) => value,
+            _ => Cause {
+                family: "Engine",
+                cause: "Unclassified",
+            },
+        }
+    }
+    pub(crate) fn engine(error: &ApiError) -> Cause {
+        Cause {
+            family: "Engine",
+            cause: engine_code(&error.code),
+        }
+    }
+    pub(crate) fn engine_code(code: &str) -> &'static str {
+        match code {
+            "DISCLOSURE_DENIED" => "DISCLOSURE_DENIED",
+            "DURABLE_CONSTRUCTION_UNAVAILABLE" => "DURABLE_CONSTRUCTION_UNAVAILABLE",
+            "DURABLE_PROPOSAL_RECOVERY_REQUIRED" => "DURABLE_PROPOSAL_RECOVERY_REQUIRED",
+            "DURABLE_PROPOSAL_CONFLICT" => "DURABLE_PROPOSAL_CONFLICT",
+            "DURABLE_PROPOSAL_NOT_FOUND" => "DURABLE_PROPOSAL_NOT_FOUND",
+            "DURABLE_PROFILE_UNAVAILABLE" => "DURABLE_PROFILE_UNAVAILABLE",
+            "MANUAL_CONSTRUCTION_DENIED" => "MANUAL_CONSTRUCTION_DENIED",
+            "RETAINED_INPUT_OBSERVATION_UNAVAILABLE" => "RETAINED_INPUT_OBSERVATION_UNAVAILABLE",
+            "CANDIDATE_VERIFICATION_FAILED" => "CANDIDATE_VERIFICATION_FAILED",
+            "IDEMPOTENCY_CONFLICT" => "IDEMPOTENCY_CONFLICT",
+            "REVISION_CONFLICT" => "REVISION_CONFLICT",
+            "NOT_FOUND" => "NOT_FOUND",
+            "INVALID_REQUEST" => "INVALID_REQUEST",
+            "RECOVERY_REQUIRED" => "RECOVERY_REQUIRED",
+            "LIVE_AUTHORIZATION_EXISTS" => "LIVE_AUTHORIZATION_EXISTS",
+            "RESOURCE_EXHAUSTED" => "RESOURCE_EXHAUSTED",
+            "INVALID_TRANSITION" => "INVALID_TRANSITION",
+            "STORAGE_PROTECTION_REQUIRED" => "STORAGE_PROTECTION_REQUIRED",
+            "STORAGE_UNAVAILABLE" => "STORAGE_UNAVAILABLE",
+            "ACCESS_DENIED" => "ACCESS_DENIED",
+            "INVALID_TERMS" => "INVALID_TERMS",
+            "UNSUPPORTED_CAPABILITY" => "UNSUPPORTED_CAPABILITY",
+            "MISSING_EVIDENCE" => "MISSING_EVIDENCE",
+            "INVALID_AMOUNT" => "INVALID_AMOUNT",
+            "UNKNOWN_PARTICIPANT" => "UNKNOWN_PARTICIPANT",
+            "DUPLICATE_IDENTIFIER" => "DUPLICATE_IDENTIFIER",
+            "CONSERVATION_FAILURE" => "CONSERVATION_FAILURE",
+            "DEBIT_CAP_EXCEEDED" => "DEBIT_CAP_EXCEEDED",
+            "FEE_CAP_EXCEEDED" => "FEE_CAP_EXCEEDED",
+            "UNVERIFIABLE_MATCH" => "UNVERIFIABLE_MATCH",
+            "PRIVACY_INCOMPATIBLE" => "PRIVACY_INCOMPATIBLE",
+            "UNSUPPORTED_VERSION" => "UNSUPPORTED_VERSION",
+            "RESOURCE_LIMIT" => "RESOURCE_LIMIT",
+            "STALE_CHAIN" => "STALE_CHAIN",
+            "OUTSTANDING_EXPOSURE" => "OUTSTANDING_EXPOSURE",
+            "USER_REJECTED" => "USER_REJECTED",
+            "INTERNAL_ERROR" => "INTERNAL_ERROR",
+            "PERMISSION_DENIED" => "PERMISSION_DENIED",
+            _ => "Unclassified",
+        }
+    }
+    pub(crate) fn security(error: &wholepact_storage_security::StorageSecurityError) -> Cause {
+        use wholepact_storage_security::StorageSecurityError::*;
+        match error {
+            UnsupportedPlatform => Cause {
+                family: "StorageSecurity",
+                cause: "UnsupportedPlatform",
+            },
+            QuarantinedDatabase => Cause {
+                family: "StorageSecurity",
+                cause: "QuarantinedDatabase",
+            },
+            RecoveredGeneration => Cause {
+                family: "StorageSecurity",
+                cause: "RecoveredGeneration",
+            },
+            GenerationArchive => Cause {
+                family: "StorageSecurity",
+                cause: "GenerationArchive",
+            },
+            UninitializedDatabase => Cause {
+                family: "StorageSecurity",
+                cause: "UninitializedDatabase",
+            },
+            UnsafePath => Cause {
+                family: "StorageSecurity",
+                cause: "UnsafePath",
+            },
+            AlreadyExists => Cause {
+                family: "StorageSecurity",
+                cause: "AlreadyExists",
+            },
+            MissingDatabase => Cause {
+                family: "StorageSecurity",
+                cause: "MissingDatabase",
+            },
+            PlaintextRefused => Cause {
+                family: "StorageSecurity",
+                cause: "PlaintextRefused",
+            },
+            UnqualifiedRuntime => Cause {
+                family: "StorageSecurity",
+                cause: "UnqualifiedRuntime",
+            },
+            AuthenticationFailed => Cause {
+                family: "StorageSecurity",
+                cause: "AuthenticationFailed",
+            },
+            Database => Cause {
+                family: "StorageSecurity",
+                cause: "Database",
+            },
+            Io => Cause {
+                family: "StorageSecurity",
+                cause: "Io",
+            },
+            SnapshotLimit => Cause {
+                family: "StorageSecurity",
+                cause: "SnapshotLimit",
+            },
+            SourceChanged => Cause {
+                family: "StorageSecurity",
+                cause: "SourceChanged",
+            },
+        }
+    }
+    pub(crate) fn store(error: &wholepact_store::StoreError) -> Cause {
+        use wholepact_store::StoreError::*;
+        match error {
+            StorageSecurity(error) => security(error),
+            Database(_) => Cause {
+                family: "Store",
+                cause: "Database",
+            },
+            Encoding(_) => Cause {
+                family: "Store",
+                cause: "Encoding",
+            },
+            Poisoned => Cause {
+                family: "Store",
+                cause: "Poisoned",
+            },
+            IdempotencyConflict => Cause {
+                family: "Store",
+                cause: "IdempotencyConflict",
+            },
+            RevisionConflict => Cause {
+                family: "Store",
+                cause: "RevisionConflict",
+            },
+            NotFound => Cause {
+                family: "Store",
+                cause: "NotFound",
+            },
+            AlreadyExists => Cause {
+                family: "Store",
+                cause: "AlreadyExists",
+            },
+            InvalidInput(_) => Cause {
+                family: "Store",
+                cause: "InvalidInput",
+            },
+            UnsupportedSchema(_) => Cause {
+                family: "Store",
+                cause: "UnsupportedSchema",
+            },
+            RecoveryRequired => Cause {
+                family: "Store",
+                cause: "RecoveryRequired",
+            },
+            WriterEpochMismatch => Cause {
+                family: "Store",
+                cause: "WriterEpochMismatch",
+            },
+            LiveAuthorizationExists => Cause {
+                family: "Store",
+                cause: "LiveAuthorizationExists",
+            },
+            InputReserved => Cause {
+                family: "Store",
+                cause: "InputReserved",
+            },
+            ResourceExhausted => Cause {
+                family: "Store",
+                cause: "ResourceExhausted",
+            },
+            BudgetExceeded => Cause {
+                family: "Store",
+                cause: "BudgetExceeded",
+            },
+            InvalidTransition => Cause {
+                family: "Store",
+                cause: "InvalidTransition",
+            },
+            File(_) => Cause {
+                family: "Store",
+                cause: "File",
+            },
+        }
+    }
+    pub(crate) fn job(error: &wholepact_proof_jobs::JobError) -> Cause {
+        use wholepact_proof_jobs::JobError::*;
+        match error {
+            ConsentDenied => Cause {
+                family: "Job",
+                cause: "ConsentDenied",
+            },
+            NotFound => Cause {
+                family: "Job",
+                cause: "NotFound",
+            },
+            InvalidRequest => Cause {
+                family: "Job",
+                cause: "InvalidRequest",
+            },
+            VerificationFailed => Cause {
+                family: "Job",
+                cause: "VerificationFailed",
+            },
+            IdempotencyConflict => Cause {
+                family: "Job",
+                cause: "IdempotencyConflict",
+            },
+            RecoveryRequired => Cause {
+                family: "Job",
+                cause: "RecoveryRequired",
+            },
+            StateConflict => Cause {
+                family: "Job",
+                cause: "StateConflict",
+            },
+            Storage => Cause {
+                family: "Job",
+                cause: "Storage",
+            },
+            UnsupportedSchema => Cause {
+                family: "Job",
+                cause: "UnsupportedSchema",
+            },
+            ResourceExhausted => Cause {
+                family: "Job",
+                cause: "ResourceExhausted",
+            },
+        }
+    }
+    pub(crate) fn wallet(error: &wholepact_wallet::wallet::WalletError) -> Cause {
+        use wholepact_wallet::wallet::WalletError::*;
+        match error {
+            Storage => Cause {
+                family: "Wallet",
+                cause: "Storage",
+            },
+            AccountScope => Cause {
+                family: "Wallet",
+                cause: "AccountScope",
+            },
+            AccountMismatch => Cause {
+                family: "Wallet",
+                cause: "AccountMismatch",
+            },
+            IncompleteSync => Cause {
+                family: "Wallet",
+                cause: "IncompleteSync",
+            },
+            UnsupportedProfile => Cause {
+                family: "Wallet",
+                cause: "UnsupportedProfile",
+            },
+            ChainMismatch => Cause {
+                family: "Wallet",
+                cause: "ChainMismatch",
+            },
+            InsufficientFunds => Cause {
+                family: "Wallet",
+                cause: "InsufficientFunds",
+            },
+            InvalidRequest => Cause {
+                family: "Wallet",
+                cause: "InvalidRequest",
+            },
+            MissingWitness => Cause {
+                family: "Wallet",
+                cause: "MissingWitness",
+            },
+            InvalidNote => Cause {
+                family: "Wallet",
+                cause: "InvalidNote",
+            },
+            Scan => Cause {
+                family: "Wallet",
+                cause: "Scan",
+            },
+            Transport => Cause {
+                family: "Wallet",
+                cause: "Transport",
+            },
+        }
+    }
+    pub(crate) fn chain(error: &wholepact_chain::ChainError) -> Cause {
+        use wholepact_chain::ChainError::*;
+        match error {
+            InvalidConfiguration => Cause {
+                family: "Chain",
+                cause: "InvalidConfiguration",
+            },
+            WrongNetwork => Cause {
+                family: "Chain",
+                cause: "WrongNetwork",
+            },
+            UnsupportedProxyConfiguration => Cause {
+                family: "Chain",
+                cause: "UnsupportedProxyConfiguration",
+            },
+            WrongBranch => Cause {
+                family: "Chain",
+                cause: "WrongBranch",
+            },
+            StaleChain => Cause {
+                family: "Chain",
+                cause: "StaleChain",
+            },
+            ContradictoryChain => Cause {
+                family: "Chain",
+                cause: "ContradictoryChain",
+            },
+            Timeout => Cause {
+                family: "Chain",
+                cause: "Timeout",
+            },
+            TransportUnavailable => Cause {
+                family: "Chain",
+                cause: "TransportUnavailable",
+            },
+            ObservationInterrupted => Cause {
+                family: "Chain",
+                cause: "ObservationInterrupted",
+            },
+            MissingAncestryEvidence => Cause {
+                family: "Chain",
+                cause: "MissingAncestryEvidence",
+            },
+            NotObserved => Cause {
+                family: "Chain",
+                cause: "NotObserved",
+            },
+            ResourceLimit => Cause {
+                family: "Chain",
+                cause: "ResourceLimit",
+            },
+            MalformedEvidence => Cause {
+                family: "Chain",
+                cause: "MalformedEvidence",
+            },
+            UnsupportedCapability => Cause {
+                family: "Chain",
+                cause: "UnsupportedCapability",
+            },
+            BackendFailure { .. } => Cause {
+                family: "Chain",
+                cause: "BackendFailure",
+            },
+            ClockUnavailable => Cause {
+                family: "Chain",
+                cause: "ClockUnavailable",
+            },
+            IdempotencyConflict => Cause {
+                family: "Chain",
+                cause: "IdempotencyConflict",
+            },
+            JournalFailure => Cause {
+                family: "Chain",
+                cause: "JournalFailure",
+            },
+            SubmissionNotAuthorized => Cause {
+                family: "Chain",
+                cause: "SubmissionNotAuthorized",
+            },
+            SubmissionExpiryMargin => Cause {
+                family: "Chain",
+                cause: "SubmissionExpiryMargin",
+            },
+            ObligationConflict => Cause {
+                family: "Chain",
+                cause: "ObligationConflict",
+            },
+            SubmissionOutcomeUnrecorded => Cause {
+                family: "Chain",
+                cause: "SubmissionOutcomeUnrecorded",
+            },
+            SubmissionRetentionUncertain => Cause {
+                family: "Chain",
+                cause: "SubmissionRetentionUncertain",
+            },
+        }
+    }
+    pub(crate) fn sync(error: &wholepact_wallet::wallet::protected_sync::SyncError) -> Cause {
+        use wholepact_wallet::wallet::protected_sync::SyncError::*;
+        match error {
+            Wallet(e) => wallet(e),
+            Chain(e) => chain(e),
+            AccessDenied => Cause {
+                family: "Sync",
+                cause: "AccessDenied",
+            },
+            InvalidRequest => Cause {
+                family: "Sync",
+                cause: "InvalidRequest",
+            },
+            Interrupted => Cause {
+                family: "Sync",
+                cause: "Interrupted",
+            },
+            ReconciliationRequired => Cause {
+                family: "Sync",
+                cause: "ReconciliationRequired",
+            },
+            InvalidResponse => Cause {
+                family: "Sync",
+                cause: "InvalidResponse",
+            },
+            ResourceLimit => Cause {
+                family: "Sync",
+                cause: "ResourceLimit",
+            },
+            NoCurrentObservation => Cause {
+                family: "Sync",
+                cause: "NoCurrentObservation",
+            },
+        }
+    }
+    pub(crate) fn construction(
+        error:&wholepact_wallet::wallet::protected_sync::durable_construction_v1::DurableConstructionError,
+    ) -> Cause {
+        use wholepact_wallet::wallet::protected_sync::durable_construction_v1::DurableConstructionError::*;
+        match error {
+            Sync(e) => sync(e),
+            Invalid => Cause {
+                family: "DurableConstruction",
+                cause: "Invalid",
+            },
+            Binding => Cause {
+                family: "DurableConstruction",
+                cause: "Binding",
+            },
+            Stale => Cause {
+                family: "DurableConstruction",
+                cause: "Stale",
+            },
+            Storage => Cause {
+                family: "DurableConstruction",
+                cause: "Storage",
+            },
+        }
+    }
+    pub(crate) fn protocol(error: &str) -> Cause {
+        Cause {
+            family: "Protocol",
+            cause: match error {
+                "Accepted manifest accounting is invalid" => "Manifest",
+                "Unsupported construction network profile" => "Manifest",
+                "Construction does not qualify manifest extensions or conditional matching" => {
+                    "Manifest"
+                }
+                "Construction does not qualify service charges" => "Manifest",
+                "Construction supports at most 64 real inputs/outputs" => "Manifest",
+                "Broad-witness construction requires declared operator and dedicated accounts" => {
+                    "Manifest"
+                }
+                "Declared construction/proving operator missing" => "Disclosure",
+                "Manifest digest encoding" => "Disclosure",
+                "Manifest digest length" => "Disclosure",
+                "Every account must have a disclosure declaration" => "Disclosure",
+                "Broad-review disclosure requires the exact complete participant reviewer roster" => {
+                    "Disclosure"
+                }
+                "Disclosure declaration is missing, duplicated or differs from accepted scope" => {
+                    "Disclosure"
+                }
+                "Invalid anchor context" => "Context",
+                "Expiry must cover target height and be a block-height expiry" => "Context",
+                "Target and expiry must remain within the qualified testnet NU7 branch" => {
+                    "Context"
+                }
+                "Invalid Ironwood anchor" => "Context",
+                "Exactly one contribution package is required per participant" => "Contribution",
+                "Total selected note count exceeds 64" => "Contribution",
+                "Contribution lacks an exact disclosure declaration" => "Contribution",
+                "Contribution note count outside 1..=64" => "Contribution",
+                "Change address is not internal-scope account property" => "Contribution",
+                "Same FVK cannot occupy multiple participant accounts" => "Contribution",
+                "Duplicate account contribution" => "Contribution",
+                "Accepted participant contribution missing" => "Contribution",
+                "Every selected note must be value-bearing Ironwood V3" => "Input",
+                "Selected note is not owned by declared FVK" => "Input",
+                "Selected note witness differs from common anchor" => "Input",
+                "Duplicate real note/nullifier" => "Input",
+                "Duplicate selected input ID" => "Input",
+                "Selected notes do not exactly cover accepted inputs" => "Input",
+                "Input account package missing" => "Input",
+                "Accepted input does not identify a selected note" => "Input",
+                "Actual selected input amount differs from accepted manifest" => "Input",
+                "Input participant missing" => "Input",
+                "Accepted recipient missing" => "Output",
+                "Invalid recipient memo" => "Output",
+                "Return account missing" => "Output",
+                "Accepted return receiver differs from account internal change" => "Output",
+                "Return participant missing" => "Output",
+                "Unqualified service charge" => "Output",
+                "Output amount range" => "Output",
+                "Unable to calculate exact ZIP317 fee" => "Fee",
+                "Accepted fee differs from ZIP317 fee for actual padded transaction shape; revise terms explicitly" => {
+                    "Fee"
+                }
+                "Upstream rejected a selected Ironwood input" => "BuilderInput",
+                "Upstream rejected an Ironwood output" => "BuilderOutput",
+                "Upstream PCZT construction failed" => "Pczt",
+                "Unsupported PCZT parts" => "Pczt",
+                "PCZT v2 serialization unsupported" => "Pczt",
+                "Upstream IO finalization failed" => "Finalize",
+                "Missing randomized input action mapping" => "ActionMapping",
+                "Missing randomized output action mapping" => "ActionMapping",
+                "Durable proving action budget must be in 1..=8" => "FixedBudget",
+                "Durable proposal exceeds explicit proving action budget" => "FixedBudget",
+                "Durable fixed proposal requires exactly two owners" => "FixedOwners",
+                "Durable fixed proposal requires exactly one recipient" => "FixedRecipient",
+                "Durable policy allocation limit exceeded" => "FixedPolicy",
+                "Durable manifest accounting is invalid" => "FixedAccounting",
+                "Each durable owner must have a selected real input" => "FixedRealInput",
+                "Durable input action is outside the artifact" => "FixedRealInput",
+                "Durable account ID is not canonical for its actual viewing key" => {
+                    "FixedCanonicalAccount"
+                }
+                "Durable accounts must have distinct account IDs and viewing keys" => {
+                    "FixedDistinctAccounts"
+                }
+                "Durable PCZT parse failed" => "Pczt",
+                "Durable PCZT canonical encoding failed" => "Pczt",
+                "Durable predecessor must be unproved and successor must contain a proof" => {
+                    "FixedUnsignedPredecessor"
+                }
+                "Durable proposal real inputs must be unsigned before proof acceptance" => {
+                    "FixedUnsignedRealInput"
+                }
+                "Durable proved artifact differs from its exact unsigned predecessor" => {
+                    "FixedProofOnlyTransition"
+                }
+                "Padding signature verifier initialization failed" => "FixedPaddingSignature",
+                "Fixed proposal is missing a retained padding signature" => "FixedPaddingSignature",
+                "Fixed proposal retained padding signature is invalid" => "FixedPaddingSignature",
+                "Action mappings differ from the exact fixed proposal" => "ActionMapping",
+                _ => "Unclassified",
+            },
+        }
+    }
+    pub(crate) fn store_error(
+        observation: Option<&Observation>,
+        site: Site,
+        error: wholepact_store::StoreError,
+    ) -> ApiError {
+        if let Some(o) = observation {
+            o.record(site, store(&error));
+        }
+        crate::store_error(error)
+    }
+    pub(crate) fn job_error(
+        observation: Option<&Observation>,
+        site: Site,
+        error: wholepact_proof_jobs::JobError,
+    ) -> ApiError {
+        if let Some(observation) = observation {
+            observation.record(site, job(&error));
+        }
+        super::job_error(error)
+    }
+    pub(crate) enum RosterError {
+        Engine(ApiError), Wallet(wholepact_wallet::wallet::protected_sync::durable_construction_v1::DurableConstructionError) }
+    impl From<ApiError> for RosterError {
+        fn from(e: ApiError) -> Self {
+            Self::Engine(e)
+        }
+    }
+    impl From<wholepact_wallet::wallet::protected_sync::durable_construction_v1::DurableConstructionError> for RosterError {
+    fn from(e:wholepact_wallet::wallet::protected_sync::durable_construction_v1::DurableConstructionError)->Self{Self::Wallet(e)}
+}
+    impl RosterError {
+        pub(crate) fn into_api(self, o: &Observation, site: Site) -> ApiError {
+            match self {
+                Self::Engine(e) => o.error(site, e),
+                Self::Wallet(e) => {
+                    o.record(site, construction(&e));
+                    e.into()
+                }
+            }
+        }
+    }
 }

@@ -43,13 +43,24 @@ labels! { Boundary {
 } }
 labels! { Outcome {
     ExactPermission, ExactLineage, ExactBinding, ExactStorage, ExactRecoveryRequired, ExactStateChanged, ExactProfileChanged, ExactBudget, ExactRoster,
-    EngineAccessDenied, EngineCandidateVerificationFailed, EngineIdempotencyConflict, EngineInvalidRequest, EngineInvalidTransition, EngineLiveAuthorizationExists, EngineManualConstructionDenied, EngineNotFound, EngineRecoveryRequired, EngineResourceExhausted, EngineRetainedObservationUnavailable, EngineRevisionConflict, EngineStorageProtectionRequired, EngineStorageUnavailable, EngineUnclassified, JobConsentDenied, JobIdempotencyConflict, JobInvalidRequest, JobNotFound, JobRecoveryRequired, JobResourceExhausted, JobStateConflict, JobStorage, JobUnsupportedSchema, JobVerificationFailed, ProtocolActionMapping, ProtocolBuilderInput, ProtocolBuilderOutput, ProtocolContext, ProtocolContribution, ProtocolDisclosure, ProtocolFee, ProtocolFinalize, ProtocolInput, ProtocolManifest, ProtocolOutput, ProtocolPczt, ProtocolUnclassified, StoreAlreadyExists, StoreBudgetExceeded, StoreDatabase, StoreEncoding, StoreFile, StoreIdempotencyConflict, StoreInputReserved, StoreInvalidInput, StoreInvalidTransition, StoreLiveAuthorizationExists, StoreNotFound, StorePoisoned, StoreRecoveryRequired, StoreResourceExhausted, StoreRevisionConflict, StoreStorageSecurity, StoreUnsupportedSchema, StoreWriterEpochMismatch,
+    EngineDisclosureDenied, EngineDurableConstructionUnavailable, EngineDurableProposalRecoveryRequired, EngineMissingEvidence, EngineInvalidTerms, EngineUnsupportedCapability, EngineDebitCapExceeded, EnginePermissionDenied, EngineInternalError, EngineAccessDenied, EngineCandidateVerificationFailed, EngineIdempotencyConflict, EngineInvalidRequest, EngineInvalidTransition, EngineLiveAuthorizationExists, EngineManualConstructionDenied, EngineNotFound, EngineRecoveryRequired, EngineResourceExhausted, EngineRetainedObservationUnavailable, EngineRevisionConflict, EngineStorageProtectionRequired, EngineStorageUnavailable, EngineUnclassified, JobConsentDenied, JobIdempotencyConflict, JobInvalidRequest, JobNotFound, JobRecoveryRequired, JobResourceExhausted, JobStateConflict, JobStorage, JobUnsupportedSchema, JobVerificationFailed, ProtocolActionMapping, ProtocolBuilderInput, ProtocolBuilderOutput, ProtocolContext, ProtocolContribution, ProtocolDisclosure, ProtocolFee, ProtocolFinalize, ProtocolInput, ProtocolManifest, ProtocolOutput, ProtocolPczt, ProtocolUnclassified, StoreAlreadyExists, StoreBudgetExceeded, StoreDatabase, StoreEncoding, StoreFile, StoreIdempotencyConflict, StoreInputReserved, StoreInvalidInput, StoreInvalidTransition, StoreLiveAuthorizationExists, StoreNotFound, StorePoisoned, StoreRecoveryRequired, StoreResourceExhausted, StoreRevisionConflict, StoreStorageSecurity, StoreUnsupportedSchema, StoreWriterEpochMismatch,
     BridgeBinding, BridgeConflict, BridgeMissing, BridgeUncertain, BridgeLimit, BridgePermission, BridgeRecoveryRequired, BridgeCompleteOriginRecoveryUnavailable, BridgeVerification, BridgeSignerOriginUnavailable, BridgeJournal, BridgeAuthority, BridgeWallet, BridgeIpc,
     AuthorityInputEmpty, AuthorityInputWithinBound, AuthorityInputOverBound, AuthorityInvalidBinding, AuthorityPermission, AuthorityStaleHead, AuthorityConflict, AuthorityInactive, AuthorityRecoveryRequired, AuthorityExpired, AuthorityPolicyDenied, AuthorityBudgetExceeded, AuthorityInputReserved, AuthorityObligationReserved, AuthorityLimit, AuthorityStorage, AuthorityCorruptHistory, AuthorityPermanentStopUnavailable, AuthorityOfflineHistoryUnsupported, AuthorityConstructionHistoryUnsupported, AuthorityUnsupportedVersion, AuthorityAuthentication, AuthorityUncertain, AuthorityResolutionUnavailable, AuthoritySessionRequired, AuthoritySessionPending,
     OriginPermanentStopUnavailable, OriginRetirementEvidenceUnavailable, OriginSignerOriginUnavailable, OriginPeerLifetimeUnavailable, OriginAuthentication, OriginBinding, OriginConflict, OriginPermission, OriginInvalidData, OriginLocked, OriginCrypto, OriginIpc, OriginLimit, OriginIoTimedOut, OriginIoWouldBlock, OriginIoUnexpectedEof, OriginIoBrokenPipe, OriginIoConnectionReset, OriginIoConnectionAborted, OriginIoNotConnected, OriginIoInterrupted, OriginIoPermissionDenied, OriginIoOther,
     ImportFreshOwnerRequired, ImportBinding, ImportIncomplete, ImportStorage, SyncAccessDenied, SyncInvalidRequest, SyncInterrupted, SyncReconciliationRequired, SyncInvalidResponse, SyncResourceLimit, SyncNoCurrentObservation, WalletStorage, WalletAccountScope, WalletAccountMismatch, WalletIncompleteSync, WalletUnsupportedProfile, WalletChainMismatch, WalletInsufficientFunds, WalletInvalidRequest, WalletMissingWitness, WalletInvalidNote, WalletScan, WalletTransport, ChainInvalidConfiguration, ChainWrongNetwork, ChainUnsupportedProxyConfiguration, ChainWrongBranch, ChainStaleChain, ChainContradictoryChain, ChainTimeout, ChainTransportUnavailable, ChainObservationInterrupted, ChainMissingAncestryEvidence, ChainNotObserved, ChainResourceLimit, ChainMalformedEvidence, ChainUnsupportedCapability, ChainBackendFailure, ChainClockUnavailable, ChainIdempotencyConflict, ChainJournalFailure, ChainSubmissionNotAuthorized, ChainSubmissionExpiryMargin, ChainObligationConflict, ChainSubmissionOutcomeUnrecorded, ChainSubmissionRetentionUncertain, RecoveryAccessDenied, RecoveryUnsupportedAccountComponents, RecoveryIncompleteScan, RecoveryKnownFundsRemain, RecoveryAdditionalEvidenceRequired,
     Begin, Complete, HostPlatform, HostTerminal, HostPermission, HostLocked, HostInvalid, HostAuthentication, HostStorage, HostQuarantined, HostUnsupported, HostReceipt, HostRecoverySemantic, HostRecoveryBackupUnsupported, HostRecoveryFinancialUnsupported, HostCompleteOriginRecoveryUnavailable, HostHistoricalExportIncomplete, HostGenerationArchiveIncomplete, SignerUnavailable, SignerPeerLifetimeUnavailable, SignerIo, SignerAuthentication, SignerInvalidData, SignerCrypto, SignerLocked, SignerBackupRequired, SignerRecoveryRequired, SignerAlreadyOpen, SignerReviewMismatch, SignerVerification, SignerUncertain, SignerConsentJournal, SignerStore, WorkerFailure
 } }
+
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "synthetic-born-joined-qualification"
+))]
+pub(super) fn private_observation_labels(
+    boundary: Boundary,
+    outcome: Outcome,
+) -> (&'static str, &'static str) {
+    (boundary.label(), outcome.label())
+}
 
 pub(super) fn emit(boundary: Boundary, outcome: Outcome) {
     eprintln!(
@@ -4356,3 +4367,369 @@ mod durable_flow_projection {
 pub(super) use durable_flow_projection::{DURABLE_FLOW_MAXIMAL_TEST_JSON, DURABLE_LIFECYCLE_MAXIMAL_TEST_JSON};
 #[cfg(feature = "synthetic-born-joined-qualification")]
 pub(super) use durable_flow_projection::{DurableFlowCapture, DurableLifecycleCapture, emit_durable_flow};
+
+// Optional, data-only transport. The Host leaf owns the single strict typed
+// parser; neither this adapter nor a transcript ever forwards raw JSON.
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "synthetic-born-joined-qualification"
+))]
+mod private_fixed_projection {
+    use crate::host::durable_private_workspace_v1::PrivateFixedDiagnosticV1;
+    pub(super) const PREFIX: &str = "CI_SYNTHETIC_PRIVATE_FIXED_DIAGNOSTIC ";
+    pub(super) const UNAVAILABLE: &str = "CI_SYNTHETIC_PRIVATE_FIXED_DIAGNOSTIC_UNAVAILABLE";
+
+    #[derive(Default)]
+    pub(crate) struct PrivateFixedDiagnosticCapture {
+        value: Option<PrivateFixedDiagnosticV1>,
+        retained: usize,
+        seen: bool,
+        invalid: bool,
+    }
+    impl PrivateFixedDiagnosticCapture {
+        pub(crate) fn retained_bytes(&self) -> usize {
+            self.retained
+        }
+        pub(crate) fn capture_line(&mut self, line: &str, available: usize) {
+            if !line.starts_with("CI_SYNTHETIC_PRIVATE_FIXED_DIAGNOSTIC") {
+                return;
+            }
+            if self.seen {
+                self.invalid = true;
+                return;
+            }
+            self.seen = true;
+            let Some(value) = line
+                .strip_prefix(PREFIX)
+                .and_then(PrivateFixedDiagnosticV1::parse)
+            else {
+                self.invalid = true;
+                return;
+            };
+            let Some(json) = value.canonical_json() else {
+                self.invalid = true;
+                return;
+            };
+            if json.len() > available {
+                self.invalid = true;
+                return;
+            }
+            self.retained = json.len();
+            self.value = Some(value);
+        }
+        pub(crate) fn finish(&mut self, partial: &[u8]) {
+            if partial.starts_with(b"CI_SYNTHETIC_PRIVATE_FIXED_DIAGNOSTIC") {
+                self.seen = true;
+                self.invalid = true;
+            }
+        }
+        pub(crate) fn discard_for_budget(&mut self) {
+            if self.seen {
+                self.invalid = true;
+            }
+            self.value = None;
+            self.retained = 0;
+        }
+        pub(crate) fn value(&self) -> Option<&PrivateFixedDiagnosticV1> {
+            if self.invalid {
+                None
+            } else {
+                self.value.as_ref()
+            }
+        }
+        pub(crate) fn withheld(&self) -> bool {
+            self.seen && self.invalid
+        }
+    }
+    pub(crate) fn emit_private_fixed_diagnostic(value: &PrivateFixedDiagnosticV1) {
+        use std::io::Write;
+        if let Some(json) = value.canonical_json() {
+            let _ = writeln!(std::io::stderr().lock(), "{PREFIX}{json}");
+        } else {
+            emit_private_fixed_diagnostic_unavailable();
+        }
+    }
+    pub(crate) fn emit_private_fixed_diagnostic_unavailable() {
+        use std::io::Write;
+        let _ = writeln!(std::io::stderr().lock(), "{UNAVAILABLE}");
+    }
+}
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "synthetic-born-joined-qualification"
+))]
+pub(super) use private_fixed_projection::{
+    PrivateFixedDiagnosticCapture, emit_private_fixed_diagnostic,
+    emit_private_fixed_diagnostic_unavailable,
+};
+#[cfg(all(
+    test,
+    feature = "durable-proposal",
+    feature = "synthetic-born-joined-qualification"
+))]
+pub(super) const PRIVATE_FIXED_DIAGNOSTIC_TEST_JSON: &str = r#"{"evidence":{"attempt_consumed":true,"call_scope":"CurrentInvocation","calls":{"enqueue":"NotApplicable","freeze":"NotApplicable","link":"NotApplicable","outcome":"NotCalled","proof":"ReturnedErrUnknown","receipt":"NotApplicable"}},"primary":{"cause":"Authentication","engine_code":"NotApplicable","family":"Host","operation":"Proof","site":"HostProofForegroundMessage"},"schema":1,"worker":{"engine_failure":{"attempt_consumed":true,"call_scope":"CurrentInvocation","calls":{"enqueue":"NotApplicable","freeze":"NotApplicable","link":"NotApplicable","outcome":"NotCalled","proof":"ReturnedErrUnknown","receipt":"NotApplicable"},"cause":"NoCurrentObservation","engine_code":"DURABLE_CONSTRUCTION_UNAVAILABLE","family":"Sync","operation":"Proof","schema":1,"site":"ProofRun"},"join":"Joined","result":"ReceivedErr"}}"#;
+
+#[cfg(all(
+    test,
+    feature = "durable-proposal",
+    feature = "synthetic-born-joined-qualification"
+))]
+pub(super) const PRIVATE_FIXED_DIAGNOSTIC_MAXIMAL_TEST_JSON: &str = r#"{"evidence":{"attempt_consumed":true,"call_scope":"CurrentInvocation","calls":{"enqueue":"NotApplicable","freeze":"NotApplicable","link":"NotApplicable","outcome":"ReturnedErrUnknown","proof":"ReturnedErrUnknown","receipt":"NotApplicable"}},"primary":{"cause":"RETAINED_INPUT_OBSERVATION_UNAVAILABLE","engine_code":"RETAINED_INPUT_OBSERVATION_UNAVAILABLE","family":"Engine","operation":"Proof","site":"ReaderOriginalFinancialProofSchema"},"schema":1,"worker":{"engine_failure":{"attempt_consumed":true,"call_scope":"CurrentInvocation","calls":{"enqueue":"NotApplicable","freeze":"NotApplicable","link":"NotApplicable","outcome":"ReturnedErrUnknown","proof":"ReturnedErrUnknown","receipt":"NotApplicable"},"cause":"RETAINED_INPUT_OBSERVATION_UNAVAILABLE","engine_code":"RETAINED_INPUT_OBSERVATION_UNAVAILABLE","family":"Engine","operation":"Proof","schema":1,"site":"SnapshotSourceUnchanged"},"join":"Panicked","result":"ReceivedErr"}}"#;
+
+#[cfg(all(
+    test,
+    feature = "durable-proposal",
+    feature = "synthetic-born-joined-qualification"
+))]
+fn private_fixed_test_parse(value: &serde_json::Value) -> bool {
+    crate::host::durable_private_workspace_v1::PrivateFixedDiagnosticV1::parse(&value.to_string())
+        .is_some()
+}
+#[test]
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "synthetic-born-joined-qualification"
+))]
+fn private_fixed_diagnostic_strict_public_schema_and_worker_relations() {
+    use serde_json::{json, Value};
+    let original: Value = serde_json::from_str(PRIVATE_FIXED_DIAGNOSTIC_TEST_JSON).unwrap();
+    assert!(private_fixed_test_parse(&original));
+    for path in [
+        "",
+        "/primary",
+        "/evidence",
+        "/evidence/calls",
+        "/worker",
+        "/worker/engine_failure",
+        "/worker/engine_failure/calls",
+    ] {
+        for key in original.pointer(path).unwrap().as_object().unwrap().keys() {
+            let mut value = original.clone();
+            value
+                .pointer_mut(path)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .remove(key);
+            assert!(!private_fixed_test_parse(&value), "missing {path}/{key}");
+            let mut value = original.clone();
+            value.pointer_mut(path).unwrap()[key] = json!(["PRIVATE_CANARY"]);
+            assert!(!private_fixed_test_parse(&value), "type {path}/{key}");
+        }
+        let mut value = original.clone();
+        value.pointer_mut(path).unwrap()["private_unknown"] = json!("PRIVATE_CANARY");
+        assert!(!private_fixed_test_parse(&value));
+    }
+    for result in [
+        "NotStarted",
+        "NotReceived",
+        "Disconnected",
+        "ReceivedOk",
+        "ReceivedErr",
+    ] {
+        for join in ["NotStarted", "Joined", "Panicked"] {
+            let mut value = original.clone();
+            value["evidence"] = Value::Null;
+            value["worker"] = json!({"result":result,"join":join,"engine_failure":null});
+            assert_eq!(
+                private_fixed_test_parse(&value),
+                (result == "NotStarted") == (join == "NotStarted")
+            );
+            value["evidence"] = original["evidence"].clone();
+            value["worker"]["engine_failure"] = original["worker"]["engine_failure"].clone();
+            assert_eq!(
+                private_fixed_test_parse(&value),
+                result == "ReceivedErr" && join != "NotStarted"
+            );
+        }
+    }
+    for (path, replacement) in [
+        ("/schema", json!(true)),
+        ("/evidence/attempt_consumed", json!(1)),
+        ("/evidence/attempt_consumed", json!(false)),
+        ("/worker/engine_failure/operation", json!("Checkpoint")),
+        ("/worker/engine_failure/site", json!("HostProofJoin")),
+        ("/worker/engine_failure/engine_code", json!("NotApplicable")),
+        ("/worker/engine_failure/attempt_consumed", json!(false)),
+        ("/worker/engine_failure/calls/proof", json!("ReturnedOk")),
+    ] {
+        let mut value = original.clone();
+        *value.pointer_mut(path).unwrap() = replacement;
+        assert!(!private_fixed_test_parse(&value));
+    }
+    let mut value = original.clone();
+    value["worker"]["engine_failure"] = Value::Null;
+    assert!(!private_fixed_test_parse(&value));
+}
+#[test]
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "synthetic-born-joined-qualification"
+))]
+fn private_fixed_diagnostic_canonicalizes_only_valid_enum_records() {
+    use serde_json::{json, Value};
+    use crate::host::durable_private_workspace_v1::PrivateFixedDiagnosticV1;
+    let original: Value = serde_json::from_str(PRIVATE_FIXED_DIAGNOSTIC_TEST_JSON).unwrap();
+    let states = [
+        "NotApplicable",
+        "NotCalled",
+        "ReturnedOk",
+        "ReturnedOkFresh",
+        "ReturnedOkReplay",
+        "ReturnedOkNoContinuation",
+        "ReturnedErrUnknown",
+    ];
+    let slots = ["receipt", "enqueue", "link", "proof", "outcome", "freeze"];
+    for operation in ["Checkpoint", "Proof", "Freeze", "ReadFixed", "OpenOriginal"] {
+        let mut base = original.clone();
+        base["worker"] = Value::Null;
+        base["primary"]["operation"] = json!(operation);
+        base["evidence"]["attempt_consumed"] = json!(operation == "Proof");
+        for slot in slots {
+            let relevant = match operation {
+                "Checkpoint" => matches!(slot, "receipt" | "enqueue" | "link"),
+                "Proof" => matches!(slot, "proof" | "outcome"),
+                "Freeze" => slot == "freeze",
+                _ => false,
+            };
+            base["evidence"]["calls"][slot] = json!(if relevant {
+                "NotCalled"
+            } else {
+                "NotApplicable"
+            });
+        }
+        assert!(private_fixed_test_parse(&base));
+        for slot in slots {
+            for state in states {
+                let mut value = base.clone();
+                value["evidence"]["calls"][slot] = json!(state);
+                let relevant = base["evidence"]["calls"][slot] == "NotCalled";
+                let expected = if !relevant {
+                    state == "NotApplicable"
+                } else {
+                    match slot {
+                        "proof" => {
+                            matches!(state, "NotCalled" | "ReturnedOk" | "ReturnedErrUnknown")
+                        }
+                        "enqueue" => matches!(
+                            state,
+                            "NotCalled"
+                                | "ReturnedOkFresh"
+                                | "ReturnedOkNoContinuation"
+                                | "ReturnedErrUnknown"
+                        ),
+                        _ => matches!(
+                            state,
+                            "NotCalled"
+                                | "ReturnedOkFresh"
+                                | "ReturnedOkReplay"
+                                | "ReturnedErrUnknown"
+                        ),
+                    }
+                };
+                assert_eq!(
+                    private_fixed_test_parse(&value),
+                    expected,
+                    "{operation}/{slot}/{state}"
+                );
+                if expected {
+                    let dto = PrivateFixedDiagnosticV1::parse(&value.to_string()).unwrap();
+                    let canonical = dto.canonical_json().unwrap();
+                    assert_eq!(serde_json::from_str::<Value>(&canonical).unwrap(), value);
+                    assert_eq!(
+                        PrivateFixedDiagnosticV1::parse(&canonical)
+                            .unwrap()
+                            .canonical_json()
+                            .unwrap(),
+                        canonical
+                    );
+                }
+            }
+        }
+        base["evidence"] = Value::Null;
+        assert!(private_fixed_test_parse(&base));
+    }
+}
+#[test]
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "synthetic-born-joined-qualification"
+))]
+fn private_fixed_diagnostic_rejects_duplicate_unknown_private_or_oversized_record() {
+    use crate::host::durable_private_workspace_v1::PrivateFixedDiagnosticV1;
+    use serde_json::{json, Value};
+    let original: Value = serde_json::from_str(PRIVATE_FIXED_DIAGNOSTIC_TEST_JSON).unwrap();
+    for path in [
+        "",
+        "/primary",
+        "/evidence",
+        "/evidence/calls",
+        "/worker",
+        "/worker/engine_failure",
+        "/worker/engine_failure/calls",
+    ] {
+        let object = original.pointer(path).unwrap();
+        let (key, value) = object.as_object().unwrap().iter().next().unwrap();
+        let json = object.to_string();
+        let duplicate = format!(
+            "{{{}:{},{}",
+            serde_json::to_string(key).unwrap(),
+            value,
+            &json[1..]
+        );
+        let mut selected = original.clone();
+        *selected.pointer_mut(path).unwrap() = json!("PRIVATE_DUPLICATE_SENTINEL");
+        let raw = selected
+            .to_string()
+            .replace("\"PRIVATE_DUPLICATE_SENTINEL\"", &duplicate);
+        assert!(PrivateFixedDiagnosticV1::parse(&raw).is_none());
+    }
+    for path in [
+        "/primary/operation",
+        "/primary/site",
+        "/primary/engine_code",
+        "/primary/family",
+        "/primary/cause",
+        "/evidence/call_scope",
+        "/worker/result",
+        "/worker/join",
+    ] {
+        let mut value = original.clone();
+        *value.pointer_mut(path).unwrap() = json!("/private/PCZT-FVK-CANARY");
+        assert!(!private_fixed_test_parse(&value));
+    }
+    let mut value = original.clone();
+    value["primary"]["family"] = json!("Sync");
+    assert!(!private_fixed_test_parse(&value));
+    let mut capture = PrivateFixedDiagnosticCapture::default();
+    capture.capture_line(
+        &format!(
+            "CI_SYNTHETIC_PRIVATE_FIXED_DIAGNOSTIC {}",
+            PRIVATE_FIXED_DIAGNOSTIC_TEST_JSON
+        ),
+        4096,
+    );
+    let retained = capture.retained_bytes();
+    capture.capture_line(
+        "CI_SYNTHETIC_PRIVATE_FIXED_DIAGNOSTIC {private rejected bytes}",
+        4096,
+    );
+    assert!(capture.value().is_none() && capture.withheld());
+    assert_eq!(capture.retained_bytes(), retained); // first typed observation is not replaced.
+}
+#[test]
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "synthetic-born-joined-qualification"
+))]
+fn private_fixed_diagnostic_maximal_canonical_and_exact_4096_boundary() {
+    use crate::host::durable_private_workspace_v1::PrivateFixedDiagnosticV1;
+    let dto = PrivateFixedDiagnosticV1::parse(PRIVATE_FIXED_DIAGNOSTIC_MAXIMAL_TEST_JSON).unwrap();
+    let canonical = dto.canonical_json().unwrap();
+    assert!(canonical.len() <= 4096);
+    let exact = format!("{}{}", " ".repeat(4096 - canonical.len()), canonical);
+    assert_eq!(exact.len(), 4096);
+    assert!(PrivateFixedDiagnosticV1::parse(&exact).is_some());
+    assert!(PrivateFixedDiagnosticV1::parse(&(exact + " ")).is_none());
+    assert!(PrivateFixedDiagnosticV1::parse(PRIVATE_FIXED_DIAGNOSTIC_TEST_JSON).is_some());
+}

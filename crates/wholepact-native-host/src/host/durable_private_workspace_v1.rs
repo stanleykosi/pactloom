@@ -1,6 +1,33 @@
 //! Exclusive original workspace storage. Mandatory v3 anchor and retained
 //! own-file proofs are separate from current native permission and financial authority.
 use super::Host;
+// Data-only bridge for the existing original-reader paths. No source owner or
+// permission is exposed through this diagnostic surface.
+#[allow(unused_imports)]
+pub(crate) use super::financial::private_durable_fixed_v2::{
+    PrivateDiagnosticOperationV1, PrivateDiagnosticSiteV1, PrivateFixedDiagnosticV1,
+    PrivateFixedDiagnosticScopeV1, begin_private_fixed_diagnostic_scope_v1,
+    observe_private_fixed_host_v1, observe_private_fixed_job_v1, observe_private_fixed_storage_v1,
+    observe_private_fixed_store_v1, observe_private_fixed_engine_v1,
+    private_fixed_diagnostic_snapshot_v1, observe_private_fixed_boundary_v1,
+    first_private_fixed_boundary_v1,
+};
+
+// Evaluate the original expression once, borrow only its returned error, and
+// return the same owned Result before the original conversion or propagation.
+macro_rules! reader_result {
+    ($site:ident, $observe:ident, $result:expr) => {{
+        let result = $result;
+        if let Err(error) = &result {
+            $observe(
+                PrivateDiagnosticOperationV1::OpenOriginal,
+                PrivateDiagnosticSiteV1::$site,
+                error,
+            );
+        }
+        result
+    }};
+}
 use crate::{
     Error, Result,
     files::{Directory, PrivateWorkspaceFileV1},
@@ -350,11 +377,17 @@ impl OriginalWorkspacePublicationV1 {
 }
 impl OriginalWorkspaceFilesV1 {
     pub(crate) fn open_final(directory: &Directory, secrets: &Secrets) -> Result<Self> {
-        let original = OriginalWorkspacePublicationV1::inspect(directory, secrets)?;
-        if !original.pending_file.is_final() || !original.commit_file.is_final() {
-            return Err(Error::Authentication);
-        }
-        Ok(Self { original })
+        reader_result!(
+            ReaderFinalRegistry,
+            observe_private_fixed_host_v1,
+            (|| {
+                let original = OriginalWorkspacePublicationV1::inspect(directory, secrets)?;
+                if !original.pending_file.is_final() || !original.commit_file.is_final() {
+                    return Err(Error::Authentication);
+                }
+                Ok(Self { original })
+            })()
+        )
     }
     pub(crate) fn check_inventory(&self, directory: &Directory, secrets: &Secrets) -> Result<()> {
         if !self.original.pending_file.is_final() || !self.original.commit_file.is_final() {
@@ -453,6 +486,27 @@ impl LocalPrivateWorkspaceConsentV1 for CurrentNativePrivacy<'_, '_> {
         match self.check() {
             Ok(()) => true,
             Err(error) => {
+                let operation = match action {
+                    PrivateWorkspaceActionV1::CheckpointExactOriginal => {
+                        PrivateDiagnosticOperationV1::Checkpoint
+                    }
+                    PrivateWorkspaceActionV1::ProveOriginalOnce => {
+                        PrivateDiagnosticOperationV1::Proof
+                    }
+                    PrivateWorkspaceActionV1::FreezeVerifiedFixed => {
+                        PrivateDiagnosticOperationV1::Freeze
+                    }
+                    PrivateWorkspaceActionV1::ReadVerifiedFixed
+                    | PrivateWorkspaceActionV1::ReadStatus => {
+                        PrivateDiagnosticOperationV1::ReadFixed
+                    }
+                    _ => PrivateDiagnosticOperationV1::OpenOriginal,
+                };
+                observe_private_fixed_host_v1(
+                    operation,
+                    PrivateDiagnosticSiteV1::HostWorkspaceCurrent,
+                    &error,
+                );
                 storage_host_error(&error);
                 false
             }
@@ -507,9 +561,12 @@ fn association(
     retention_policy: &str,
 ) -> Result<Association> {
     host.require_private_workspace_read_session_v1()?;
-    source
-        .check_current(host.access()?)
-        .map_err(storage_engine_error)?;
+    reader_result!(
+        ReaderSourceFinalCheck,
+        observe_private_fixed_engine_v1,
+        source.check_current(host.access()?)
+    )
+    .map_err(storage_engine_error)?;
     committed.check_current()?;
     committed.coverage().require_complete()?;
     crate::files::validate_absolute(root)?;
@@ -571,20 +628,36 @@ impl<'a> PrivateWorkspacePublicationSourceV1<'a> {
         financial_password: &[u8],
         approval: &'a HistoricalApproval,
     ) -> Result<Self> {
-        approval.check()?;
-        files.check_inventory(directory, secrets)?;
-        let pending = &files.pending;
-        let financial = crate::financial_profile::FinancialReadProfile::open(
-            &pending.proof.financial_root,
-            &secrets.profile(),
-            financial_password,
+        reader_result!(
+            ReaderSourceOpen,
+            observe_private_fixed_host_v1,
+            approval.check()
         )?;
-        financial.require_private_workspace_original_v1(
-            directory,
-            secrets,
-            &pending.association.original_financial_origin_digest,
-            &pending.proof.financial_directory_identity,
-            pending.proof.original_proof_origin,
+        reader_result!(
+            ReaderFinalRegistry,
+            observe_private_fixed_host_v1,
+            files.check_inventory(directory, secrets)
+        )?;
+        let pending = &files.pending;
+        let financial = reader_result!(
+            ReaderFinancialSnapshot,
+            observe_private_fixed_host_v1,
+            crate::financial_profile::FinancialReadProfile::open(
+                &pending.proof.financial_root,
+                &secrets.profile(),
+                financial_password,
+            )
+        )?;
+        reader_result!(
+            ReaderFinancialOriginal,
+            observe_private_fixed_host_v1,
+            financial.require_private_workspace_original_v1(
+                directory,
+                secrets,
+                &pending.association.original_financial_origin_digest,
+                &pending.proof.financial_directory_identity,
+                pending.proof.original_proof_origin,
+            )
         )?;
         require_external_workspace_root(directory, &pending.association.workspace_root)?;
         require_external_workspace_root(&financial.directory, &pending.association.workspace_root)?;
@@ -592,37 +665,78 @@ impl<'a> PrivateWorkspacePublicationSourceV1<'a> {
             &crate::financial_inventory::read_current(directory, secrets)?,
             &financial.current_directory()?,
         )?;
-        let workspace = Directory::open(&pending.association.workspace_root)?;
-        workspace.inventory_of(&[DATABASE], &["profile.lock"])?;
-        if workspace.manual_target_identity_digest()?
-            != files.committed.workspace_directory_identity
-        {
-            return Err(Error::Authentication);
-        }
-        let metadata = wholepact_storage_security::open_encrypted_read_snapshot(
-            &pending.association.database_path,
-            &DatabaseKey::from_bytes(pending.database_key),
+        let workspace = reader_result!(
+            ReaderWorkspaceDirectory,
+            observe_private_fixed_host_v1,
+            Directory::open(&pending.association.workspace_root)
         )?;
-        if metadata.source_database_identity()?.origin_commitment()
+        reader_result!(
+            ReaderWorkspaceDirectory,
+            observe_private_fixed_host_v1,
+            workspace.inventory_of(&[DATABASE], &["profile.lock"])
+        )?;
+        if reader_result!(
+            ReaderWorkspaceDirectory,
+            observe_private_fixed_host_v1,
+            workspace.manual_target_identity_digest()
+        )? != files.committed.workspace_directory_identity
+        {
+            return reader_result!(
+                ReaderWorkspaceDirectory,
+                observe_private_fixed_host_v1,
+                Err(Error::Authentication)
+            );
+        }
+        let metadata = reader_result!(
+            ReaderMetadataSnapshot,
+            observe_private_fixed_storage_v1,
+            wholepact_storage_security::open_encrypted_read_snapshot(
+                &pending.association.database_path,
+                &DatabaseKey::from_bytes(pending.database_key),
+            )
+        )?;
+        if reader_result!(
+            ReaderMetadataOrigin,
+            observe_private_fixed_storage_v1,
+            metadata.source_database_identity()
+        )?
+        .origin_commitment()
             != files.committed.original_database_origin
         {
-            return Err(Error::Authentication);
+            return reader_result!(
+                ReaderMetadataOrigin,
+                observe_private_fixed_host_v1,
+                Err(Error::Authentication)
+            );
         }
-        PreparedPrivateDurableCoordinatorV1::check_initialized_original_v1(
-            &pending.association.database_path,
-            &DatabaseKey::from_bytes(pending.database_key),
-            files.committed.original_database_origin,
+        reader_result!(
+            ReaderMetadataInitializedSchema,
+            observe_private_fixed_engine_v1,
+            PreparedPrivateDurableCoordinatorV1::check_initialized_original_v1(
+                &pending.association.database_path,
+                &DatabaseKey::from_bytes(pending.database_key),
+                files.committed.original_database_origin,
+            )
         )
         .map_err(storage_engine_error)?;
-        let target =
-            ManualCommittedTarget::open_workspace_publication_source_v1(directory, secrets, files)?;
-        target.coverage().require_complete()?;
+        let target = reader_result!(
+            ReaderSourceStore,
+            observe_private_fixed_host_v1,
+            ManualCommittedTarget::open_workspace_publication_source_v1(directory, secrets, files)
+        )?;
+        reader_result!(
+            ReaderSourceStore,
+            observe_private_fixed_host_v1,
+            target.coverage().require_complete()
+        )?;
         drop(target);
-        let engine = Engine::from_store(
+        let engine = Engine::from_store(reader_result!(
+            ReaderSourceStore,
+            observe_private_fixed_host_v1,
             crate::recovery_generation::open_workspace_publication_source_store_v1(
                 directory, secrets, files,
-            )?,
-        );
+            )
+        )?);
         // This bounded access projection is used only for the separately approved
         // source read. It is never enrolled into a Host or issued as authority.
         let access = Access {
@@ -645,7 +759,11 @@ impl<'a> PrivateWorkspacePublicationSourceV1<'a> {
             approval,
             workspace,
         };
-        result.require_exact_association()?;
+        reader_result!(
+            ReaderSourceAssociation,
+            observe_private_fixed_host_v1,
+            result.require_exact_association()
+        )?;
         Ok(result)
     }
     fn into_exclusions(self) -> Result<PrivateWorkspacePublicationExclusionsV1> {
@@ -669,25 +787,49 @@ impl<'a> PrivateWorkspacePublicationSourceV1<'a> {
         })
     }
     fn require_exact_association(&self) -> Result<()> {
-        self.approval.check()?;
-        self.files.check_inventory(self.directory, self.secrets)?;
+        reader_result!(
+            ReaderSourceAssociation,
+            observe_private_fixed_host_v1,
+            self.approval.check()
+        )?;
+        reader_result!(
+            ReaderFinalRegistry,
+            observe_private_fixed_host_v1,
+            self.files.check_inventory(self.directory, self.secrets)
+        )?;
         let p = &self.files.pending;
         let a = &p.association;
-        let target = ManualCommittedTarget::open_workspace_publication_source_v1(
-            self.directory,
-            self.secrets,
-            self.files,
+        let target = reader_result!(
+            ReaderSourceStore,
+            observe_private_fixed_host_v1,
+            ManualCommittedTarget::open_workspace_publication_source_v1(
+                self.directory,
+                self.secrets,
+                self.files,
+            )
         )?;
-        target.coverage().require_complete()?;
-        let source = self
-            .engine
-            .original_private_workspace_source_v1(&self.access, &a.agreement_id)
-            .map_err(storage_engine_error)?;
-        source
-            .check_initialization_plan_v1(&self.access, &p.initialization_plan)
-            .map_err(storage_engine_error)?;
-        let seed = source
-            .seed_binding_original_v1(
+        reader_result!(
+            ReaderSourceStore,
+            observe_private_fixed_host_v1,
+            target.coverage().require_complete()
+        )?;
+        let source = reader_result!(
+            ReaderSourceSelection,
+            observe_private_fixed_engine_v1,
+            self.engine
+                .original_private_workspace_source_v1(&self.access, &a.agreement_id)
+        )
+        .map_err(storage_engine_error)?;
+        reader_result!(
+            ReaderSourceSeedPlan,
+            observe_private_fixed_engine_v1,
+            source.check_initialization_plan_v1(&self.access, &p.initialization_plan)
+        )
+        .map_err(storage_engine_error)?;
+        let seed = reader_result!(
+            ReaderSourceSeedBinding,
+            observe_private_fixed_engine_v1,
+            source.seed_binding_original_v1(
                 &self.access,
                 &a.database_path,
                 &a.retention_policy,
@@ -695,9 +837,22 @@ impl<'a> PrivateWorkspacePublicationSourceV1<'a> {
                 self.files.committed.original_database_origin,
                 &p.initialization_plan,
             )
-            .map_err(storage_engine_error)?;
-        if serde_json::to_value(&seed)? != serde_json::to_value(&self.files.committed.seed)? {
-            return Err(Error::Authentication);
+        )
+        .map_err(storage_engine_error)?;
+        if reader_result!(
+            ReaderSourceSeedCompare,
+            observe_private_fixed_host_v1,
+            serde_json::to_value(&seed).map_err(Error::from)
+        )? != reader_result!(
+            ReaderSourceSeedCompare,
+            observe_private_fixed_host_v1,
+            serde_json::to_value(&self.files.committed.seed).map_err(Error::from)
+        )? {
+            return reader_result!(
+                ReaderSourceSeedCompare,
+                observe_private_fixed_host_v1,
+                Err(Error::Authentication)
+            );
         }
         if source.source_digest() != a.source_digest
             || source.principal_id() != a.principal_id
@@ -712,32 +867,67 @@ impl<'a> PrivateWorkspacePublicationSourceV1<'a> {
             || target.generation_id() != a.generation_id
             || target.inventory_digest() != a.inventory_digest
             || target.destination_identity_digest() != a.host_directory_identity
-            || target.coverage().digest()? != a.parent_coverage_digest
-            || self.workspace.manual_target_identity_digest()?
-                != self.files.committed.workspace_directory_identity
-            || self
-                .metadata
-                .source_database_identity()?
-                .origin_commitment()
+            || reader_result!(
+                ReaderSourceCompare,
+                observe_private_fixed_host_v1,
+                target.coverage().digest()
+            )? != a.parent_coverage_digest
+            || reader_result!(
+                ReaderSourceCompare,
+                observe_private_fixed_host_v1,
+                self.workspace.manual_target_identity_digest()
+            )? != self.files.committed.workspace_directory_identity
+            || reader_result!(
+                ReaderMetadataOrigin,
+                observe_private_fixed_storage_v1,
+                self.metadata.source_database_identity()
+            )?
+            .origin_commitment()
                 != self.files.committed.original_database_origin
         {
-            return Err(Error::Authentication);
+            return reader_result!(
+                ReaderSourceCompare,
+                observe_private_fixed_host_v1,
+                Err(Error::Authentication)
+            );
         }
-        self.financial.require_private_workspace_original_v1(
-            self.directory,
-            self.secrets,
-            &a.original_financial_origin_digest,
-            &p.proof.financial_directory_identity,
-            p.proof.original_proof_origin,
+        reader_result!(
+            ReaderFinancialOriginal,
+            observe_private_fixed_host_v1,
+            self.financial.require_private_workspace_original_v1(
+                self.directory,
+                self.secrets,
+                &a.original_financial_origin_digest,
+                &p.proof.financial_directory_identity,
+                p.proof.original_proof_origin,
+            )
         )?;
-        self.metadata.check_source_unchanged()?;
-        self.workspace
-            .inventory_of(&[DATABASE], &["profile.lock"])?;
-        source
-            .check_current(&self.access)
-            .map_err(storage_engine_error)?;
-        target.check_current()?;
-        self.approval.check()
+        reader_result!(
+            ReaderSourceFinalCheck,
+            observe_private_fixed_storage_v1,
+            self.metadata.check_source_unchanged()
+        )?;
+        reader_result!(
+            ReaderSourceFinalCheck,
+            observe_private_fixed_host_v1,
+            self.workspace.inventory_of(&[DATABASE], &["profile.lock"])
+        )?;
+        reader_result!(
+            ReaderSourceFinalCheck,
+            observe_private_fixed_engine_v1,
+            source.check_current(&self.access)
+        )
+        .map_err(storage_engine_error)?;
+        reader_result!(
+            ReaderSourceFinalCheck,
+            observe_private_fixed_host_v1,
+            target.check_current()
+        )?;
+        reader_result!(
+            ReaderSourceFinalCheck,
+            observe_private_fixed_host_v1,
+            self.approval.check()
+        )
     }
 }
 
@@ -813,13 +1003,19 @@ impl Host {
             None => ManualCommittedTarget::open(&self.directory, &self.secrets)?,
         };
         committed.coverage().require_complete()?;
-        let source = self
-            .engine
-            .original_private_workspace_source_v1(self.access()?, agreement_id)
-            .map_err(storage_engine_error)?;
-        source
-            .check_current(self.access()?)
-            .map_err(storage_engine_error)?;
+        let source = reader_result!(
+            ReaderSourceSelection,
+            observe_private_fixed_engine_v1,
+            self.engine
+                .original_private_workspace_source_v1(self.access()?, agreement_id)
+        )
+        .map_err(storage_engine_error)?;
+        reader_result!(
+            ReaderSourceFinalCheck,
+            observe_private_fixed_engine_v1,
+            source.check_current(self.access()?)
+        )
+        .map_err(storage_engine_error)?;
         committed.check_current()?;
         review.check()?;
         Ok((committed, source, review))
@@ -1036,30 +1232,75 @@ impl Host {
         retention_policy: &str,
         initialize: bool,
     ) -> Result<PrivateWorkspaceOwnerV1<'host>> {
-        let files = self.workspace_files.as_ref().ok_or(Error::Authentication)?;
-        files.check_inventory(&self.directory, &self.secrets)?;
+        let files = reader_result!(
+            ReaderFinalRegistry,
+            observe_private_fixed_host_v1,
+            self.workspace_files.as_ref().ok_or(Error::Authentication)
+        )?;
+        reader_result!(
+            ReaderFinalRegistry,
+            observe_private_fixed_host_v1,
+            files.check_inventory(&self.directory, &self.secrets)
+        )?;
         let p = &files.original.pending;
         let c = &files.original.committed;
-        let (committed_target, source, review) =
-            self.private_workspace_source_owners_v1(agreement_id)?;
-        let current = association(
-            self,
-            &committed_target,
-            &source,
-            p.association.dependency_id.clone(),
-            root,
-            retention_policy,
+        let (committed_target, source, review) = reader_result!(
+            ReaderSourceSelection,
+            observe_private_fixed_host_v1,
+            self.private_workspace_source_owners_v1(agreement_id)
         )?;
-        if current != p.association || OriginalProofDescriptorV1::from_host(self)? != p.proof {
-            return Err(Error::Authentication);
+        let current = reader_result!(
+            ReaderSourceAssociation,
+            observe_private_fixed_host_v1,
+            association(
+                self,
+                &committed_target,
+                &source,
+                p.association.dependency_id.clone(),
+                root,
+                retention_policy,
+            )
+        )?;
+        if current != p.association
+            || reader_result!(
+                ReaderSourceAssociation,
+                observe_private_fixed_host_v1,
+                OriginalProofDescriptorV1::from_host(self)
+            )? != p.proof
+        {
+            return reader_result!(
+                ReaderSourceAssociation,
+                observe_private_fixed_host_v1,
+                Err(Error::Authentication)
+            );
         }
-        source
-            .check_initialization_plan_v1(self.access()?, &p.initialization_plan)
-            .map_err(storage_engine_error)?;
-        let directory = Directory::open(root)?;
-        directory.inventory_of(&[DATABASE], &["profile.lock"])?;
-        if directory.manual_target_identity_digest()? != c.workspace_directory_identity {
-            return Err(Error::Authentication);
+        reader_result!(
+            ReaderSourceSeedPlan,
+            observe_private_fixed_engine_v1,
+            source.check_initialization_plan_v1(self.access()?, &p.initialization_plan)
+        )
+        .map_err(storage_engine_error)?;
+        let directory = reader_result!(
+            ReaderWorkspaceDirectory,
+            observe_private_fixed_host_v1,
+            Directory::open(root)
+        )?;
+        reader_result!(
+            ReaderWorkspaceDirectory,
+            observe_private_fixed_host_v1,
+            directory.inventory_of(&[DATABASE], &["profile.lock"])
+        )?;
+        if reader_result!(
+            ReaderWorkspaceDirectory,
+            observe_private_fixed_host_v1,
+            directory.manual_target_identity_digest()
+        )? != c.workspace_directory_identity
+        {
+            return reader_result!(
+                ReaderWorkspaceDirectory,
+                observe_private_fixed_host_v1,
+                Err(Error::Authentication)
+            );
         }
         let approval = self.terminal.approve_historical_reviewed(&review, if initialize {
             "Initialize ONCE the exact previously anchored private seed, original operation/idempotency/timestamps and marker. Exact committed replay returns the original result only; no material, constructor, proof or authority is resumed."
@@ -1076,7 +1317,11 @@ impl Host {
             approval: &approval,
             action,
         };
-        privacy.check()?;
+        reader_result!(
+            ReaderSourceFinalCheck,
+            observe_private_fixed_host_v1,
+            privacy.check()
+        )?;
         let proof = self
             .financial
             .as_ref()
@@ -1115,31 +1360,50 @@ impl Host {
                 )
                 .map_err(storage_engine_error)?
         } else {
-            PrivateDurableCoordinatorV1::open_original(
-                source,
-                self.access()?,
-                &p.association.database_path,
-                &key,
-                c.original_database_origin,
-                retention_policy,
-                &c.association_digest,
-                proof,
-                p.proof.original_proof_origin,
-                &p.initialization_plan,
-                &c.seed,
-                &privacy,
+            reader_result!(
+                ReaderSourceOpen,
+                observe_private_fixed_engine_v1,
+                PrivateDurableCoordinatorV1::open_original(
+                    source,
+                    self.access()?,
+                    &p.association.database_path,
+                    &key,
+                    c.original_database_origin,
+                    retention_policy,
+                    &c.association_digest,
+                    proof,
+                    p.proof.original_proof_origin,
+                    &p.initialization_plan,
+                    &c.seed,
+                    &privacy,
+                )
             )
             .map_err(storage_engine_error)?
         };
-        if coordinator
-            .origin_marker_digest()
-            .map_err(storage_engine_error)?
+        if reader_result!(
+            ReaderSourceSeedCompare,
+            observe_private_fixed_engine_v1,
+            coordinator.origin_marker_digest()
+        )
+        .map_err(storage_engine_error)?
             != c.seed.marker_digest
         {
-            return Err(Error::Authentication);
+            return reader_result!(
+                ReaderSourceSeedCompare,
+                observe_private_fixed_host_v1,
+                Err(Error::Authentication)
+            );
         }
-        privacy.check()?;
-        files.check_inventory(&self.directory, &self.secrets)?;
+        reader_result!(
+            ReaderSourceFinalCheck,
+            observe_private_fixed_host_v1,
+            privacy.check()
+        )?;
+        reader_result!(
+            ReaderFinalRegistry,
+            observe_private_fixed_host_v1,
+            files.check_inventory(&self.directory, &self.secrets)
+        )?;
         Ok(PrivateWorkspaceOwnerV1 {
             coordinator,
             committed_target,
@@ -1177,24 +1441,47 @@ impl Host {
 impl PrivateWorkspaceOwnerV1<'_> {
     fn check_originals(&self) -> Result<()> {
         self.check_current_without_proof_lock_v2()?;
-        self.host
-            .financial
-            .as_ref()
-            .ok_or(Error::Locked)?
-            .original_workspace_proof_v1()?
-            .check_current()
-            .map_err(|_| Error::Authentication)
+        reader_result!(
+            ReaderOriginalProofCurrent,
+            observe_private_fixed_job_v1,
+            self.host
+                .financial
+                .as_ref()
+                .ok_or(Error::Locked)?
+                .original_workspace_proof_v1()?
+                .check_current()
+        )
+        .map_err(|_| Error::Authentication)
     }
     pub(in crate::host) fn check_current_without_proof_lock_v2(&self) -> Result<()> {
-        self.host.require_private_workspace_read_session_v1()?;
-        self.files
-            .check_inventory(&self.host.directory, &self.host.secrets)?;
-        self.committed_target.check_current()?;
+        reader_result!(
+            ReaderReadSession,
+            observe_private_fixed_host_v1,
+            self.host.require_private_workspace_read_session_v1()
+        )?;
+        reader_result!(
+            ReaderFinalRegistry,
+            observe_private_fixed_host_v1,
+            self.files
+                .check_inventory(&self.host.directory, &self.host.secrets)
+        )?;
+        reader_result!(
+            ReaderSourceFinalCheck,
+            observe_private_fixed_host_v1,
+            self.committed_target.check_current()
+        )?;
         let p = &self.files.original.pending;
         let c = &self.files.original.committed;
-        self.directory
-            .inventory_of(&[DATABASE], &["profile.lock"])?;
-        if self.directory.manual_target_identity_digest()? != c.workspace_directory_identity
+        reader_result!(
+            ReaderWorkspaceDirectory,
+            observe_private_fixed_host_v1,
+            self.directory.inventory_of(&[DATABASE], &["profile.lock"])
+        )?;
+        if reader_result!(
+            ReaderWorkspaceDirectory,
+            observe_private_fixed_host_v1,
+            self.directory.manual_target_identity_digest()
+        )? != c.workspace_directory_identity
             || self
                 .host
                 .financial
@@ -1203,22 +1490,40 @@ impl PrivateWorkspaceOwnerV1<'_> {
                 .manual_original_primary_origin_digest(&self.host.directory, &self.host.secrets)?
                 != p.association.original_financial_origin_digest
         {
-            return Err(Error::Authentication);
+            return reader_result!(
+                ReaderSourceCompare,
+                observe_private_fixed_host_v1,
+                Err(Error::Authentication)
+            );
         }
-        let source = self
-            .host
-            .engine
-            .original_private_workspace_source_v1(self.host.access()?, &p.association.agreement_id)
-            .map_err(storage_engine_error)?;
-        source
-            .check_initialization_plan_v1(self.host.access()?, &p.initialization_plan)
-            .map_err(storage_engine_error)?;
+        let source = reader_result!(
+            ReaderSourceSelection,
+            observe_private_fixed_engine_v1,
+            self.host.engine.original_private_workspace_source_v1(
+                self.host.access()?,
+                &p.association.agreement_id
+            )
+        )
+        .map_err(storage_engine_error)?;
+        reader_result!(
+            ReaderSourceSeedPlan,
+            observe_private_fixed_engine_v1,
+            source.check_initialization_plan_v1(self.host.access()?, &p.initialization_plan)
+        )
+        .map_err(storage_engine_error)?;
         if source.source_digest() != p.association.source_digest {
-            return Err(Error::Authentication);
+            return reader_result!(
+                ReaderSourceCompare,
+                observe_private_fixed_host_v1,
+                Err(Error::Authentication)
+            );
         }
-        source
-            .check_current(self.host.access()?)
-            .map_err(storage_engine_error)?;
+        reader_result!(
+            ReaderSourceFinalCheck,
+            observe_private_fixed_engine_v1,
+            source.check_current(self.host.access()?)
+        )
+        .map_err(storage_engine_error)?;
         Ok(())
     }
     /// Closure-scoped access to the purpose-limited facade, never its Engine,
@@ -1410,30 +1715,64 @@ impl Host {
                 storage_begin("PrivateWorkspaceInitialize");
             }
             // No publication evidence is accepted as final runtime evidence.
-            let directory = Directory::open(profile)?;
-            let secrets = Secrets::open_private_workspace_v3(
-                &directory.read("profile.vault", 1024)?,
-                password.as_bytes(),
+            let directory = reader_result!(
+                ReaderProfileDirectory,
+                observe_private_fixed_host_v1,
+                Directory::open(profile)
             )?;
-            let files = OriginalWorkspaceFilesV1::open_final(&directory, &secrets)?;
+            let secrets = reader_result!(
+                ReaderVaultV3Open,
+                observe_private_fixed_host_v1,
+                Secrets::open_private_workspace_v3(
+                    &reader_result!(
+                        ReaderVaultRead,
+                        observe_private_fixed_host_v1,
+                        directory.read("profile.vault", 1024)
+                    )?,
+                    password.as_bytes(),
+                )
+            )?;
+            let files = reader_result!(
+                ReaderFinalRegistry,
+                observe_private_fixed_host_v1,
+                OriginalWorkspaceFilesV1::open_final(&directory, &secrets)
+            )?;
             if files.original.pending.association.workspace_root != root {
-                return Err(Error::Authentication);
+                return reader_result!(
+                    ReaderSourceAssociation,
+                    observe_private_fixed_host_v1,
+                    Err(Error::Authentication)
+                );
             }
             let approval = terminal.approve_historical(&format!(
             "Authenticate and read the exact final original workspace, complete original source and all four original primary journals before opening any runtime. Workspace: {}. This grants no financial authority.", root.display()))?;
             {
-                let source = PrivateWorkspacePublicationSourceV1::open(
-                    &directory,
-                    &secrets,
-                    &files.original,
-                    financial_password.as_bytes(),
-                    &approval,
+                let source = reader_result!(
+                    ReaderSourceOpen,
+                    observe_private_fixed_host_v1,
+                    PrivateWorkspacePublicationSourceV1::open(
+                        &directory,
+                        &secrets,
+                        &files.original,
+                        financial_password.as_bytes(),
+                        &approval,
+                    )
                 )?;
-                source.require_exact_association()?;
+                reader_result!(
+                    ReaderSourceAssociation,
+                    observe_private_fixed_host_v1,
+                    source.require_exact_association()
+                )?;
             }
-            approval.check()?;
+            reader_result!(
+                ReaderSourceFinalCheck,
+                observe_private_fixed_host_v1,
+                approval.check()
+            )?;
             let p = &files.original.pending;
-            let financial =
+            let financial = reader_result!(
+                ReaderFinancialOpen,
+                observe_private_fixed_host_v1,
                 crate::financial_profile::FinancialProfile::open_private_workspace_original_v1(
                     &p.proof.financial_root,
                     &directory,
@@ -1442,23 +1781,44 @@ impl Host {
                     &p.association.original_financial_origin_digest,
                     &p.proof.financial_directory_identity,
                     p.proof.original_proof_origin,
-                )?;
-            let mut host = Self::open_private_workspace_original(
-                directory, secrets, terminal, files, financial,
+                )
             )?;
-            host.enroll()?;
-            let saved_principal = &host
-                .workspace_files
-                .as_ref()
-                .ok_or(Error::Authentication)?
-                .original
-                .pending
-                .association
-                .principal_id;
-            if host.access()?.principal_id != *saved_principal {
-                return Err(Error::Permission);
+            let mut host = reader_result!(
+                ReaderHostRuntime,
+                observe_private_fixed_host_v1,
+                Self::open_private_workspace_original(
+                    directory, secrets, terminal, files, financial,
+                )
+            )?;
+            reader_result!(ReaderEnroll, observe_private_fixed_host_v1, host.enroll())?;
+            let saved_principal = &reader_result!(
+                ReaderSavedPrincipal,
+                observe_private_fixed_host_v1,
+                host.workspace_files.as_ref().ok_or(Error::Authentication)
+            )?
+            .original
+            .pending
+            .association
+            .principal_id;
+            if reader_result!(
+                ReaderSavedPrincipal,
+                observe_private_fixed_host_v1,
+                host.access()
+            )?
+            .principal_id
+                != *saved_principal
+            {
+                return reader_result!(
+                    ReaderSavedPrincipal,
+                    observe_private_fixed_host_v1,
+                    Err(Error::Permission)
+                );
             }
-            host.require_private_workspace_read_session_v1()?;
+            reader_result!(
+                ReaderReadSession,
+                observe_private_fixed_host_v1,
+                host.require_private_workspace_read_session_v1()
+            )?;
             if initialize {
                 host.initialize_private_workspace_saved_v1(root)?;
             } else {
@@ -1467,6 +1827,13 @@ impl Host {
             Ok(host)
         })();
         if let Err(error) = &result {
+            if !initialize {
+                observe_private_fixed_host_v1(
+                    PrivateDiagnosticOperationV1::OpenOriginal,
+                    PrivateDiagnosticSiteV1::ReaderHostReturn,
+                    error,
+                );
+            }
             storage_host_error(error);
         }
         result
@@ -1668,6 +2035,7 @@ fn storage_failure(outcome: &'static str) {
                 if failure.is_none() {
                     if let Ok(boundary) = STORAGE_BOUNDARY_V1.try_with(|current| current.get()) {
                         *failure = Some((boundary, outcome));
+                        observe_private_fixed_boundary_v1(boundary, outcome);
                         let _ = writeln!(
                             std::io::stderr().lock(),
                             "\n[JOINED_DIAGNOSTIC {boundary} {outcome}]"
@@ -1682,6 +2050,15 @@ fn storage_failure(outcome: &'static str) {
 }
 fn storage_engine_error(error: wholepact_engine::ApiError) -> Error {
     let outcome = match error.code.as_str() {
+        "DISCLOSURE_DENIED" => "EngineDisclosureDenied",
+        "DURABLE_CONSTRUCTION_UNAVAILABLE" => "EngineDurableConstructionUnavailable",
+        "DURABLE_PROPOSAL_RECOVERY_REQUIRED" => "EngineDurableProposalRecoveryRequired",
+        "MISSING_EVIDENCE" => "EngineMissingEvidence",
+        "INVALID_TERMS" => "EngineInvalidTerms",
+        "UNSUPPORTED_CAPABILITY" => "EngineUnsupportedCapability",
+        "DEBIT_CAP_EXCEEDED" => "EngineDebitCapExceeded",
+        "PERMISSION_DENIED" => "EnginePermissionDenied",
+        "INTERNAL_ERROR" => "EngineInternalError",
         "MANUAL_CONSTRUCTION_DENIED" => "EngineManualConstructionDenied",
         "RETAINED_INPUT_OBSERVATION_UNAVAILABLE" => "EngineRetainedObservationUnavailable",
         "CANDIDATE_VERIFICATION_FAILED" => "EngineCandidateVerificationFailed",

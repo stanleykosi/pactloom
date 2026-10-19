@@ -18,6 +18,8 @@ use wholepact_store::manual_enrollment::ManualEnrollmentRosterMember;
 use wholepact_store::private_workspace_origin_v1::PrivateWorkspaceOriginV1;
 
 mod exact_fixed_v2;
+use diagnostics::{Observation, Operation, Site};
+pub(crate) use exact_fixed_v2::diagnostics;
 #[path = "durable_private_workspace_v1/operation_v1.rs"]
 mod operation_v1;
 pub use exact_fixed_v2::{
@@ -399,6 +401,40 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
         binding: &PrivateWorkspaceSeedBindingV1,
         consent: &dyn LocalPrivateWorkspaceConsentV1,
     ) -> Result<Self> {
+        let observation = Observation::new(Operation::OpenOriginal);
+        let result = Self::open_original_observed(
+            source,
+            access,
+            destination,
+            key,
+            expected_origin,
+            retention_policy,
+            native_association_digest,
+            proof,
+            expected_proof_origin,
+            plan,
+            binding,
+            consent,
+            &observation,
+        );
+        observation.finish(result)
+    }
+    fn open_original_observed(
+        source: PrivateDurableWorkspaceSourceV1<'source>,
+        access: &Access,
+        destination: &Path,
+        key: &DatabaseKey,
+        expected_origin: [u8; 32],
+        retention_policy: &str,
+        native_association_digest: &str,
+        proof: wholepact_proof_jobs::OriginalProofJobSourceV1<'source>,
+        expected_proof_origin: [u8; 32],
+        plan: &PrivateWorkspaceInitializationPlanV1,
+        binding: &PrivateWorkspaceSeedBindingV1,
+        consent: &dyn LocalPrivateWorkspaceConsentV1,
+        observation: &Observation,
+    ) -> Result<Self> {
+        observation.stage(Site::SourcePermission);
         crate::private_workspace_origin_v1::validate_association_digest(native_association_digest)?;
         let scope = scope(&source, destination, retention_policy)?;
         check_source_permission(
@@ -408,16 +444,22 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
             consent,
             PrivateWorkspaceActionV1::Reopen,
         )?;
-        preflight_original_metadata(destination, key, expected_origin)?;
-        let store =
-            wholepact_store::Store::open_encrypted(destination, key).map_err(crate::store_error)?;
+        preflight_original_metadata_observed(destination, key, expected_origin, Some(observation))?;
+        observation.stage(Site::MetadataOpen);
+        let store = wholepact_store::Store::open_encrypted(destination, key).map_err(|error| {
+            diagnostics::store_error(Some(observation), observation.site(), error)
+        })?;
+        observation.stage(Site::MetadataOrigin);
         if store
             .verify_original_encrypted_destination(destination)
-            .map_err(crate::store_error)?
+            .map_err(|error| {
+                diagnostics::store_error(Some(observation), observation.site(), error)
+            })?
             != expected_origin
         {
             return Err(damaged());
         }
+        observation.stage(Site::Marker);
         let marker = crate::private_workspace_origin_v1::from_source(
             &source,
             access,
@@ -425,7 +467,10 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
             native_association_digest,
             expected_origin,
         )?;
-        proof.check_current().map_err(original_job_error_v2)?;
+        observation.stage(Site::ProofOrigin);
+        proof
+            .check_current()
+            .map_err(|error| observation.job_error(error))?;
         if proof.origin_commitment() != expected_proof_origin {
             return Err(damaged());
         }
@@ -438,8 +483,14 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
             proof,
             proof_origin: expected_proof_origin,
         };
-        result.audit_original_seed_v1(access, plan, binding)?;
-        result.check(access, consent, PrivateWorkspaceActionV1::Reopen)?;
+        result.audit_original_seed_observed_v1(access, plan, binding, Some(observation))?;
+        observation.stage(Site::SeedFinal);
+        result.check_observed(
+            access,
+            consent,
+            PrivateWorkspaceActionV1::Reopen,
+            Some(observation),
+        )?;
         Ok(result)
     }
     /// Correlation needed by the exact native commit, never raw database access.
@@ -457,12 +508,31 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
         consent: &dyn LocalPrivateWorkspaceConsentV1,
         action: PrivateWorkspaceActionV1,
     ) -> Result<()> {
-        self.proof.check_current().map_err(original_job_error_v2)?;
+        self.check_observed(access, consent, action, None)
+    }
+    fn check_observed(
+        &self,
+        access: &Access,
+        consent: &dyn LocalPrivateWorkspaceConsentV1,
+        action: PrivateWorkspaceActionV1,
+        observation: Option<&Observation>,
+    ) -> Result<()> {
+        self.proof.check_current().map_err(|error| {
+            if let Some(o) = observation {
+                o.record(o.site(), diagnostics::job(&error));
+            }
+            original_job_error_v2(error)
+        })?;
         if self.proof.origin_commitment() != self.proof_origin {
             return Err(damaged());
         }
-        self.check_without_proof_lock(access, consent, action)?;
-        self.proof.check_current().map_err(original_job_error_v2)
+        self.check_without_proof_lock_observed(access, consent, action, observation)?;
+        self.proof.check_current().map_err(|error| {
+            if let Some(o) = observation {
+                o.record(o.site(), diagnostics::job(&error));
+            }
+            original_job_error_v2(error)
+        })
     }
     // Used only from proof consent callbacks while its journal mutex is held.
     // Never call the proof owner from here or reacquire that mutex.
@@ -472,12 +542,27 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
         consent: &dyn LocalPrivateWorkspaceConsentV1,
         action: PrivateWorkspaceActionV1,
     ) -> Result<()> {
+        self.check_without_proof_lock_observed(access, consent, action, None)
+    }
+    fn check_without_proof_lock_observed(
+        &self,
+        access: &Access,
+        consent: &dyn LocalPrivateWorkspaceConsentV1,
+        action: PrivateWorkspaceActionV1,
+        observation: Option<&Observation>,
+    ) -> Result<()> {
         check_source_permission(&self.source, access, &self.scope, consent, action)?;
         if self
             .engine
             .store
             .verify_original_encrypted_destination(&self.scope.protected_destination)
-            .map_err(crate::store_error)?
+            .map_err(|error| {
+                diagnostics::store_error(
+                    observation,
+                    observation.map_or(Site::WorkspaceLoad, Observation::site),
+                    error,
+                )
+            })?
             != self.origin
         {
             return Err(damaged());
@@ -496,11 +581,17 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
             .engine
             .store
             .get_agreement(self.source.agreement_id())
-            .map_err(crate::store_error)?
+            .map_err(|error| {
+                diagnostics::store_error(
+                    observation,
+                    observation.map_or(Site::WorkspaceLoad, Observation::site),
+                    error,
+                )
+            })?
             .ok_or_else(damaged)?;
         let envelope = decode_private_record(&record)?;
         self.require_original_envelope(&envelope)?;
-        self.audit_exact_history(&envelope)?;
+        self.audit_exact_history_observed(&envelope, observation)?;
         check_source_permission(&self.source, access, &self.scope, consent, action)
     }
     fn require_original_envelope(&self, envelope: &crate::Envelope) -> Result<()> {
@@ -545,7 +636,16 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
         consent: &'op dyn LocalPrivateWorkspaceConsentV1,
         action: PrivateWorkspaceActionV1,
     ) -> Result<operation_v1::PrivateWorkspaceOperationV1<'op, 'source>> {
-        self.check(access, consent, action)?;
+        self.operation_observed(access, consent, action, None)
+    }
+    fn operation_observed<'op>(
+        &'op self,
+        access: &'op Access,
+        consent: &'op dyn LocalPrivateWorkspaceConsentV1,
+        action: PrivateWorkspaceActionV1,
+        observation: Option<&Observation>,
+    ) -> Result<operation_v1::PrivateWorkspaceOperationV1<'op, 'source>> {
+        self.check_observed(access, consent, action, observation)?;
         Ok(operation_v1::PrivateWorkspaceOperationV1::new(
             self, access, consent, action,
         ))
@@ -754,7 +854,10 @@ impl PreparedPrivateDurableCoordinatorV1 {
         key: &DatabaseKey,
         expected: [u8; 32],
     ) -> Result<()> {
-        preflight_original_metadata(destination, key, expected)
+        let observation = Observation::new(Operation::OpenOriginal);
+        let result =
+            preflight_original_metadata_observed(destination, key, expected, Some(&observation));
+        observation.finish(result)
     }
     pub fn prepare_empty_new(
         source: &PrivateDurableWorkspaceSourceV1<'_>,
@@ -932,23 +1035,62 @@ fn preflight_original_metadata(
     key: &DatabaseKey,
     expected: [u8; 32],
 ) -> Result<()> {
+    preflight_original_metadata_observed(destination, key, expected, None)
+}
+fn preflight_original_metadata_observed(
+    destination: &Path,
+    key: &DatabaseKey,
+    expected: [u8; 32],
+    observation: Option<&Observation>,
+) -> Result<()> {
+    if let Some(o) = observation {
+        o.stage(Site::SnapshotOpen);
+    }
     let snapshot = wholepact_storage_security::open_encrypted_read_snapshot(destination, key)
-        .map_err(|_| damaged())?;
+        .map_err(|error| {
+            if let Some(o) = observation {
+                o.record(o.site(), diagnostics::security(&error));
+            }
+            damaged()
+        })?;
+    if let Some(o) = observation {
+        o.stage(Site::SnapshotOrigin);
+    }
     if snapshot
         .source_database_identity()
-        .map_err(|_| damaged())?
+        .map_err(|error| {
+            if let Some(o) = observation {
+                o.record(o.site(), diagnostics::security(&error));
+            }
+            damaged()
+        })?
         .origin_commitment()
         != expected
     {
         return Err(damaged());
     }
+    if let Some(o) = observation {
+        o.stage(Site::SnapshotSchema);
+    }
     let connection = snapshot.connection();
     let app: i64 = connection
         .pragma_query_value(None, "application_id", |r| r.get(0))
-        .map_err(|_| damaged())?;
+        .map_err(|_| {
+            let error = damaged();
+            if let Some(o) = observation {
+                o.record(o.site(), diagnostics::engine(&error));
+            }
+            error
+        })?;
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |r| r.get(0))
-        .map_err(|_| damaged())?;
+        .map_err(|_| {
+            let error = damaged();
+            if let Some(o) = observation {
+                o.record(o.site(), diagnostics::engine(&error));
+            }
+            error
+        })?;
     if app != 0 || version != 5 {
         return Err(damaged());
     }
@@ -964,13 +1106,31 @@ fn preflight_original_metadata(
     .collect();
     let mut statement = connection
         .prepare("SELECT sql FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' ORDER BY name")
-        .map_err(|_| damaged())?;
+        .map_err(|_| {
+            let error = damaged();
+            if let Some(o) = observation {
+                o.record(o.site(), diagnostics::engine(&error));
+            }
+            error
+        })?;
     let rows = statement
         .query_map([], |row| row.get::<_, String>(0))
-        .map_err(|_| damaged())?;
+        .map_err(|_| {
+            let error = damaged();
+            if let Some(o) = observation {
+                o.record(o.site(), diagnostics::engine(&error));
+            }
+            error
+        })?;
     let mut actual = BTreeSet::new();
     for row in rows {
-        if !actual.insert(row.map_err(|_| damaged())?) {
+        if !actual.insert(row.map_err(|_| {
+            let error = damaged();
+            if let Some(o) = observation {
+                o.record(o.site(), diagnostics::engine(&error));
+            }
+            error
+        })?) {
             return Err(damaged());
         }
     }
@@ -979,34 +1139,67 @@ fn preflight_original_metadata(
     }
     // Exact source-preserving inventory check: only the bounded agreement and
     // its minimal operation/idempotency/event rows may be present.
-    let forbidden:i64=connection.query_row("SELECT (SELECT count(*) FROM authority_accounts)+(SELECT count(*) FROM authority_exposures)+(SELECT count(*) FROM authority_reservations)+(SELECT count(*) FROM authority_events)+(SELECT count(*) FROM effect_intents)",[],|row|row.get(0)).map_err(|_|damaged())?;
-    let recovery:i64=connection.query_row("SELECT count(*) FROM store_recovery WHERE singleton=1 AND recovery_required=0 AND restored_at_ms IS NULL AND source_snapshot_digest IS NULL",[],|row|row.get(0)).map_err(|_|damaged())?;
+    if let Some(o) = observation {
+        o.stage(Site::SnapshotInventory);
+    }
+    let forbidden:i64=connection.query_row("SELECT (SELECT count(*) FROM authority_accounts)+(SELECT count(*) FROM authority_exposures)+(SELECT count(*) FROM authority_reservations)+(SELECT count(*) FROM authority_events)+(SELECT count(*) FROM effect_intents)",[],|row|row.get(0)).map_err(|error|{if let Some(o)=observation{o.record(o.site(),diagnostics::Cause{family:"Store",cause:"Database"});}let _=error;damaged()})?;
+    let recovery:i64=connection.query_row("SELECT count(*) FROM store_recovery WHERE singleton=1 AND recovery_required=0 AND restored_at_ms IS NULL AND source_snapshot_digest IS NULL",[],|row|row.get(0)).map_err(|error|{if let Some(o)=observation{o.record(o.site(),diagnostics::Cause{family:"Store",cause:"Database"});}let _=error;damaged()})?;
     let records: i64 = connection
         .query_row("SELECT count(*) FROM records", [], |row| row.get(0))
-        .map_err(|_| damaged())?;
+        .map_err(|_| {
+            let error = damaged();
+            if let Some(o) = observation {
+                o.record(o.site(), diagnostics::engine(&error));
+            }
+            error
+        })?;
     let foreign: i64 = connection
         .query_row(
             "SELECT count(*) FROM records WHERE aggregate_type!='agreement'",
             [],
             |row| row.get(0),
         )
-        .map_err(|_| damaged())?;
+        .map_err(|_| {
+            let error = damaged();
+            if let Some(o) = observation {
+                o.record(o.site(), diagnostics::engine(&error));
+            }
+            error
+        })?;
     let revision: i64 = connection
         .query_row("SELECT coalesce(sum(revision),0) FROM records", [], |row| {
             row.get(0)
         })
-        .map_err(|_| damaged())?;
-    let counts:(i64,i64,i64)=connection.query_row("SELECT (SELECT count(*) FROM operations),(SELECT count(*) FROM idempotency),(SELECT count(*) FROM events)",[],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).map_err(|_|damaged())?;
+        .map_err(|_| {
+            let error = damaged();
+            if let Some(o) = observation {
+                o.record(o.site(), diagnostics::engine(&error));
+            }
+            error
+        })?;
+    let counts:(i64,i64,i64)=connection.query_row("SELECT (SELECT count(*) FROM operations),(SELECT count(*) FROM idempotency),(SELECT count(*) FROM events)",[],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).map_err(|error|{if let Some(o)=observation{o.record(o.site(),diagnostics::Cause{family:"Store",cause:"Database"});}let _=error;damaged()})?;
     let sequences: i64 = connection
         .query_row("SELECT count(*) FROM sqlite_sequence", [], |row| row.get(0))
-        .map_err(|_| damaged())?;
+        .map_err(|_| {
+            let error = damaged();
+            if let Some(o) = observation {
+                o.record(o.site(), diagnostics::engine(&error));
+            }
+            error
+        })?;
     let invalid_sequences: i64 = connection
         .query_row(
             "SELECT count(*) FROM sqlite_sequence WHERE name!='events' OR seq!=?1",
             [revision],
             |row| row.get(0),
         )
-        .map_err(|_| damaged())?;
+        .map_err(|_| {
+            let error = damaged();
+            if let Some(o) = observation {
+                o.record(o.site(), diagnostics::engine(&error));
+            }
+            error
+        })?;
     if sequences != records || invalid_sequences != 0 {
         return Err(damaged());
     }
@@ -1019,7 +1212,15 @@ fn preflight_original_metadata(
     {
         return Err(damaged());
     }
-    snapshot.check_source_unchanged().map_err(|_| damaged())
+    if let Some(o) = observation {
+        o.stage(Site::SnapshotSourceUnchanged);
+    }
+    snapshot.check_source_unchanged().map_err(|error| {
+        if let Some(o) = observation {
+            o.record(o.site(), diagnostics::security(&error));
+        }
+        damaged()
+    })
 }
 
 /// The generic decoder normalizes public revision/exposure summaries. A private
@@ -1046,6 +1247,18 @@ impl PrivateDurableCoordinatorV1<'_> {
         plan: &PrivateWorkspaceInitializationPlanV1,
         binding: &PrivateWorkspaceSeedBindingV1,
     ) -> Result<()> {
+        self.audit_original_seed_observed_v1(access, plan, binding, None)
+    }
+    fn audit_original_seed_observed_v1(
+        &self,
+        access: &Access,
+        plan: &PrivateWorkspaceInitializationPlanV1,
+        binding: &PrivateWorkspaceSeedBindingV1,
+        observation: Option<&Observation>,
+    ) -> Result<()> {
+        if let Some(o) = observation {
+            o.stage(Site::SeedPlan);
+        }
         self.source.check_initialization_plan_v1(access, plan)?;
         let seed = seed_envelope(&self.source, plan, Some(&self.marker))?;
         let command = wholepact_store::CommandContext::for_request(
@@ -1059,7 +1272,16 @@ impl PrivateDurableCoordinatorV1<'_> {
                 plan
             )),
         )
-        .map_err(crate::store_error)?;
+        .map_err(|error| {
+            diagnostics::store_error(
+                observation,
+                observation.map_or(Site::WorkspaceLoad, Observation::site),
+                error,
+            )
+        })?;
+        if let Some(o) = observation {
+            o.stage(Site::SeedBinding);
+        }
         let expected = PrivateWorkspaceSeedBindingV1 {
             marker: self.marker.clone(),
             marker_digest: self.origin_marker_digest()?,
@@ -1073,22 +1295,43 @@ impl PrivateDurableCoordinatorV1<'_> {
         {
             return Err(damaged());
         }
+        if let Some(o) = observation {
+            o.stage(Site::SeedReplay);
+        }
         let saved = self
             .engine
             .store
             .find_replay(&expected.command)
-            .map_err(crate::store_error)?
+            .map_err(|error| {
+                diagnostics::store_error(
+                    observation,
+                    observation.map_or(Site::WorkspaceLoad, Observation::site),
+                    error,
+                )
+            })?
             .ok_or_else(damaged)?;
+        if let Some(o) = observation {
+            o.stage(Site::SeedRecord);
+        }
         if saved.record.revision != 1
             || crate::encode(&decode_private_record(&saved.record)?)? != crate::encode(&seed)?
         {
             return Err(damaged());
         }
+        if let Some(o) = observation {
+            o.stage(Site::SeedOperation);
+        }
         let operation = self
             .engine
             .store
             .get_operation(&saved.operation_id)
-            .map_err(crate::store_error)?
+            .map_err(|error| {
+                diagnostics::store_error(
+                    observation,
+                    observation.map_or(Site::WorkspaceLoad, Observation::site),
+                    error,
+                )
+            })?
             .ok_or_else(damaged)?;
         let result: wholepact_store::MutationResult =
             serde_json::from_value(operation.result).map_err(|_| damaged())?;

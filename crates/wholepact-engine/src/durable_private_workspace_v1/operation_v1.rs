@@ -1,4 +1,5 @@
 //! Nominal reads and purpose-bound effects. A read owner cannot mutate or replay.
+use super::diagnostics::{Call, Observation, Site};
 use super::*;
 use crate::{Envelope, StoredRecord};
 use wholepact_store::{CommandContext, MutationResult};
@@ -24,18 +25,30 @@ impl<'op, 'source> PrivateWorkspaceOperationV1<'op, 'source> {
         }
     }
     pub(super) fn load(&self) -> Result<Envelope> {
+        self.load_inner(None)
+    }
+    pub(super) fn load_observed(&self, observation: &Observation) -> Result<Envelope> {
+        self.load_inner(Some(observation))
+    }
+    fn load_inner(&self, observation: Option<&Observation>) -> Result<Envelope> {
         self.workspace
-            .check(self.access, self.consent, self.action)?;
+            .check_observed(self.access, self.consent, self.action, observation)?;
         let record = self
             .workspace
             .engine
             .store
             .get_agreement(self.workspace.source.agreement_id())
-            .map_err(crate::store_error)?
+            .map_err(|error| {
+                diagnostics::store_error(
+                    observation,
+                    observation.map_or(Site::WorkspaceLoad, Observation::site),
+                    error,
+                )
+            })?
             .ok_or_else(damaged)?;
         let envelope = decode(self.workspace, &record)?;
         self.workspace
-            .check(self.access, self.consent, self.action)?;
+            .check_observed(self.access, self.consent, self.action, observation)?;
         Ok(envelope)
     }
 }
@@ -97,7 +110,37 @@ impl<'op, 'source> PrivateWorkspaceEffectV2<'op, 'source> {
         command: CommandContext,
         revision: u64,
     ) -> Result<Self> {
-        workspace.check(access, consent, purpose.action())?;
+        Self::new_inner(workspace, access, consent, purpose, command, revision, None)
+    }
+    pub(super) fn new_observed(
+        workspace: &'op PrivateDurableCoordinatorV1<'source>,
+        access: &'op Access,
+        consent: &'op dyn LocalPrivateWorkspaceConsentV1,
+        purpose: EffectV2,
+        command: CommandContext,
+        revision: u64,
+        observation: &Observation,
+    ) -> Result<Self> {
+        Self::new_inner(
+            workspace,
+            access,
+            consent,
+            purpose,
+            command,
+            revision,
+            Some(observation),
+        )
+    }
+    fn new_inner(
+        workspace: &'op PrivateDurableCoordinatorV1<'source>,
+        access: &'op Access,
+        consent: &'op dyn LocalPrivateWorkspaceConsentV1,
+        purpose: EffectV2,
+        command: CommandContext,
+        revision: u64,
+        observation: Option<&Observation>,
+    ) -> Result<Self> {
+        workspace.check_observed(access, consent, purpose.action(), observation)?;
         if command.principal_id != access.principal_id {
             return Err(denied());
         }
@@ -111,14 +154,27 @@ impl<'op, 'source> PrivateWorkspaceEffectV2<'op, 'source> {
         })
     }
     pub(super) fn replay(&self) -> Result<Option<MutationResult>> {
-        self.workspace
-            .check(self.access, self.consent, self.purpose.action())?;
+        self.replay_inner(None)
+    }
+    pub(super) fn replay_observed(
+        &self,
+        observation: &Observation,
+    ) -> Result<Option<MutationResult>> {
+        self.replay_inner(Some(observation))
+    }
+    fn replay_inner(&self, observation: Option<&Observation>) -> Result<Option<MutationResult>> {
+        self.workspace.check_observed(
+            self.access,
+            self.consent,
+            self.purpose.action(),
+            observation,
+        )?;
         let result = self
             .workspace
             .engine
             .store
             .find_replay(&self.command)
-            .map_err(crate::store_error)?;
+            .map_err(|error| diagnostics::store_error(observation, Site::ReplayLookup, error))?;
         if let Some(saved) = &result {
             let envelope = decode(self.workspace, &saved.record)?;
             if envelope.view.revision != self.revision.checked_add(1).ok_or_else(damaged)? {
@@ -129,7 +185,7 @@ impl<'op, 'source> PrivateWorkspaceEffectV2<'op, 'source> {
                 .engine
                 .store
                 .get_operation(&saved.operation_id)
-                .map_err(crate::store_error)?
+                .map_err(|error| diagnostics::store_error(observation, Site::ReplayLookup, error))?
                 .ok_or_else(damaged)?;
             let original: MutationResult =
                 serde_json::from_value(operation.result).map_err(|_| damaged())?;
@@ -143,31 +199,63 @@ impl<'op, 'source> PrivateWorkspaceEffectV2<'op, 'source> {
                 return Err(damaged());
             }
         }
-        self.workspace
-            .check(self.access, self.consent, self.purpose.action())?;
+        self.workspace.check_observed(
+            self.access,
+            self.consent,
+            self.purpose.action(),
+            observation,
+        )?;
         Ok(result)
     }
-    pub(super) fn commit(&self, before: &Envelope, mut after: Envelope) -> Result<MutationResult> {
-        self.workspace
-            .check(self.access, self.consent, self.purpose.action())?;
+    pub(super) fn commit(&self, before: &Envelope, after: Envelope) -> Result<MutationResult> {
+        self.commit_inner(before, after, None)
+    }
+    pub(super) fn commit_observed(
+        &self,
+        before: &Envelope,
+        after: Envelope,
+        observation: &Observation,
+    ) -> Result<MutationResult> {
+        self.commit_inner(before, after, Some(observation))
+    }
+    fn commit_inner(
+        &self,
+        before: &Envelope,
+        mut after: Envelope,
+        observation: Option<&Observation>,
+    ) -> Result<MutationResult> {
+        self.workspace.check_observed(
+            self.access,
+            self.consent,
+            self.purpose.action(),
+            observation,
+        )?;
         crate::candidates::check_revision(before, self.revision)?;
         // Exactly one revision/time update. Caller cannot select either value.
         after.view.revision = self.revision.checked_add(1).ok_or_else(damaged)?;
         after.view.updated_at = crate::now();
         validate_delta(before, &after, self.purpose)?;
         self.workspace.require_original_envelope(&after)?;
-        let saved = self
-            .workspace
-            .engine
-            .store
-            .update_agreement(
-                &self.command,
-                self.workspace.source.agreement_id(),
-                self.revision,
-                crate::encode(&after)?,
-                self.purpose.event(),
-            )
-            .map_err(|error| self.commit_error(crate::store_error(error), None))?;
+        let saved = self.workspace.engine.store.update_agreement(
+            &self.command,
+            self.workspace.source.agreement_id(),
+            self.revision,
+            crate::encode(&after)?,
+            self.purpose.event(),
+        );
+        if let Some(observation) = observation {
+            let call = match self.purpose {
+                EffectV2::ConstructorReceipt => Some((Site::ReceiptCommit, Call::Receipt)),
+                EffectV2::MetadataLink => Some((Site::LinkCommit, Call::Link)),
+                EffectV2::RecordOriginalProofOutcome => Some((Site::OutcomeCommit, Call::Outcome)),
+                EffectV2::FreezeVerifiedFixed => Some((Site::FixedCommit, Call::Freeze)),
+                _ => None,
+            };
+            if let Some((site, call)) = call {
+                observation.store_call(site, call, &saved);
+            }
+        }
+        let saved = saved.map_err(|error| self.commit_error(crate::store_error(error), None))?;
         // Store is independently original-destination fenced, including inside
         // its transaction. Callbacks are outside Store's mutex.
         let saved_envelope = decode(self.workspace, &saved.record)
@@ -176,17 +264,21 @@ impl<'op, 'source> PrivateWorkspaceEffectV2<'op, 'source> {
             return Err(self.commit_error(damaged(), Some(&saved)));
         }
         self.workspace
-            .check(self.access, self.consent, self.purpose.action())
+            .check_observed(
+                self.access,
+                self.consent,
+                self.purpose.action(),
+                observation,
+            )
             .map_err(|error| self.commit_error(error, Some(&saved)))?;
         Ok(saved)
     }
     fn commit_error(&self, mut error: ApiError, saved: Option<&MutationResult>) -> ApiError {
         error.retryable = false;
-        error.details = Box::new(
-            serde_json::json!({"private_metadata_effect_v2":self.purpose.event(),
+        let facts = serde_json::json!({"private_metadata_effect_v2":self.purpose.event(),
             "metadata_commit_status":if saved.is_some(){"committed"}else{"not_confirmed"},
-            "saved_revision":saved.map(|s|s.record.revision),"journals_are_atomic_together":false}),
-        );
+            "saved_revision":saved.map(|s|s.record.revision),"journals_are_atomic_together":false});
+        merge_error_details_v2(&mut error, &facts);
         error.safe_actions=vec!["Inspect the same original request and journals; do not reconstruct or create a new proof attempt".into()];
         error
     }
@@ -331,4 +423,13 @@ pub(super) fn validate_delta(before: &Envelope, after: &Envelope, purpose: Effec
         return Err(damaged());
     }
     Ok(())
+}
+
+/// Add observations without erasing the original cause or caller metadata.
+pub(super) fn merge_error_details_v2(error: &mut ApiError, facts: &serde_json::Value) {
+    if let (Some(details), Some(facts)) = (error.details.as_object_mut(), facts.as_object()) {
+        for (key, value) in facts {
+            details.entry(key.clone()).or_insert_with(|| value.clone());
+        }
+    }
 }

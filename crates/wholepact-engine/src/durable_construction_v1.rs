@@ -130,6 +130,36 @@ pub(crate) fn validate_stored(envelope: &Envelope) -> Result<()> {
     }
     Ok(())
 }
+/// Typed private shared-kernel failures; no caller gains a new permission.
+pub(crate) enum MaterialCheckErrorV2 {
+    Engine(ApiError),
+    Wallet(DurableConstructionError),
+    Store(wholepact_store::StoreError),
+}
+impl From<ApiError> for MaterialCheckErrorV2 {
+    fn from(e: ApiError) -> Self {
+        Self::Engine(e)
+    }
+}
+impl From<DurableConstructionError> for MaterialCheckErrorV2 {
+    fn from(e: DurableConstructionError) -> Self {
+        Self::Wallet(e)
+    }
+}
+impl From<wholepact_store::StoreError> for MaterialCheckErrorV2 {
+    fn from(e: wholepact_store::StoreError) -> Self {
+        Self::Store(e)
+    }
+}
+impl MaterialCheckErrorV2 {
+    pub(crate) fn into_api(self) -> ApiError {
+        match self {
+            Self::Engine(e) => e,
+            Self::Wallet(e) => e.into(),
+            Self::Store(e) => crate::store_error(e),
+        }
+    }
+}
 impl Engine {
     /// Admission consumes a sealed observation of actual authenticated native
     /// IPC. No overload accepts a serialized outbox, material or approval flag.
@@ -392,20 +422,26 @@ impl Engine {
         consent: &dyn LocalDurableMaterialConsentV1,
         action: DurableMaterialActionV1,
     ) -> Result<()> {
-        let check = || -> Result<()> {
+        self.check_durable_material_typed_v2(access, intake, consent, action)
+            .map_err(MaterialCheckErrorV2::into_api)
+    }
+    pub(crate) fn check_durable_material_typed_v2(
+        &self,
+        access: &Access,
+        intake: &Intake,
+        consent: &dyn LocalDurableMaterialConsentV1,
+        action: DurableMaterialActionV1,
+    ) -> std::result::Result<(), MaterialCheckErrorV2> {
+        let check = || -> std::result::Result<(), MaterialCheckErrorV2> {
             intake.outbox.validate().map_err(|_| damaged())?;
             let scope = &intake.outbox.request().scope;
             scope.check_valid_at(now()?)?;
             if intake.principal_id != access.principal_id
-                || hex::encode(
-                    self.store
-                        .verify_original_encrypted_destination(Path::new(
-                            &scope.protected_destination,
-                        ))
-                        .map_err(crate::store_error)?,
-                ) != intake.metadata_origin
+                || hex::encode(self.store.verify_original_encrypted_destination(Path::new(
+                    &scope.protected_destination,
+                ))?) != intake.metadata_origin
             {
-                return Err(denied());
+                return Err(denied().into());
             }
             Ok(())
         };
@@ -415,7 +451,7 @@ impl Engine {
             intake.outbox.material_digest(),
             action,
         ) {
-            return Err(denied());
+            return Err(denied().into());
         }
         check()
     }

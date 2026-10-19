@@ -1,8 +1,16 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-19, 06:29 UTC.
+Updated: 2026-10-19, 08:20 UTC.
 
 **The bounded synthetic native two-owner fixed-signing fixture passed. Product qualification remains incomplete: no public testnet settlement, OS-process restart recovery, attended GUI reliability, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
+
+## CI23: original workspace reached checkpoint but failed before restart; finite diagnostics added
+
+[Run 39210571173](https://github.com/stanleykosi/pactloom/actions/runs/39210571173), qualifier `4f6978b39d3468654d836fd0183a1fb419b3cdc4`, passed build, Python144, Host87, bootstrap, baseline, two-owner signing and committed Acquire reply-loss checks. The new private-workspace phase failed at 07:04:02 UTC with PrivateWorkspaceCheckpoint/EngineUnclassified, inputs90/103. Both contribution captures/intakes and observation completed. Source correlation proves the retention-review prompt response was written after actual proposal construction; it does not prove subsequent acceptance, receipt/enqueue/link success or absence of durable effects. Producer exited101 and was reaped with group absence and root cleanup verified. Reader never started, so native process-reopen remains unproven.
+
+The next16-path update is observation-only. It preserves actual finite wallet/proof/storage/Engine causes before lossy conversion, first-observed cause separately from worker result, and exact current-invocation receipt/enqueue/link/proof/outcome/freeze call returns. Reader pre-runtime stages and strict bounded optional records are covered; unavailable evidence remains null. Calls are not repeated to observe them; checks, Result priority, budgets, clocks, cleanup and authority remain unchanged. No functional cause or repair is claimed yet.
+
+Independent review caught and corrected draft observer insertion defects before build. All-features Host/Engine build passed (3m06s); a Python helper-selection regex and two Engine fixture setups were corrected without production changes. Final build passed (57.13s), all126 selected Rust checks passed (Host114, Engine11 and one actual Halo2 component), Python152 passed, non-synthetic Host/Engine build passed (5m46s), and all11 non-synthetic Engine diagnostic tests passed. Native rerun is pending. The proposed v2 admission/dispatcher work remains held until the original workspace path is qualified.
 
 ## Original Host private-workspace precursor: local gates passed, native process reopen pending
 
