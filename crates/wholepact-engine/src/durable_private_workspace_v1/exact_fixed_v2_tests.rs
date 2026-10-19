@@ -3,6 +3,523 @@
 use super::*;
 use std::os::unix::fs::PermissionsExt;
 use wholepact_core::*;
+
+/// Inert controls exercise the SAME production dispatch/result kernels. They
+/// are not native issuers, current source owners, maintained wallets or grants.
+mod compound_permission_v3_tests {
+    use super::*;
+    use std::cell::{Cell, RefCell};
+    use wholepact_wallet::wallet::protected_sync::durable_construction_v1::{
+        ConstructionRecipientV1, ConstructionReviewerV1,
+    };
+
+    struct Inert;
+    impl LocalPrivateWorkspaceConsentV1 for Inert {
+        fn permits_workspace(
+            &self,
+            _: &PrivateWorkspaceScopeV1,
+            _: PrivateWorkspaceActionV1,
+        ) -> bool {
+            true
+        }
+    }
+    impl LocalDurableMaterialConsentV1 for Inert {
+        fn permits(
+            &self,
+            _: &DurableConstructionScopeV1,
+            _: &str,
+            _: DurableMaterialActionV1,
+        ) -> bool {
+            true
+        }
+    }
+    impl LocalWalletAccess for Inert {
+        fn permits(&self, _: AccountUuid, _: &BackendIdentity, _: WalletAccessPurpose) -> bool {
+            true
+        }
+    }
+    impl LocalProofConsent for Inert {
+        fn permits(&self, _: &CheckpointScope, _: LocalAction) -> bool {
+            true
+        }
+    }
+    struct Provider {
+        omit: bool,
+        entry: bool,
+        exit: bool,
+        lie: bool,
+        calls: Cell<usize>,
+        order: RefCell<Vec<&'static str>>,
+    }
+    impl Provider {
+        fn new() -> Self {
+            Self {
+                omit: false,
+                entry: true,
+                exit: true,
+                lie: false,
+                calls: Cell::new(0),
+                order: RefCell::new(vec![]),
+            }
+        }
+        fn run(&self, body: impl FnOnce() -> bool) -> bool {
+            self.order.borrow_mut().push("entry");
+            if !self.entry {
+                return false;
+            }
+            if self.omit {
+                return true;
+            }
+            self.calls.set(self.calls.get() + 1);
+            self.order.borrow_mut().push("body");
+            let result = body();
+            self.order.borrow_mut().push("exit");
+            (result || self.lie) && self.exit
+        }
+    }
+    impl LocalPrivateFixedPermissionBoundaryV3 for Provider {
+        fn with_observation<'call>(
+            &self,
+            _: &PrivateFixedPermissionRequestV3<'_>,
+            run: PrivateFixedObservationCallbackV3<'call>,
+        ) -> bool {
+            self.run(|| run(&Inert, &Inert, &Inert))
+        }
+        fn with_artifact<'call>(
+            &self,
+            _: &PrivateFixedPermissionRequestV3<'_>,
+            run: PrivateFixedArtifactCallbackV3<'call>,
+        ) -> bool {
+            self.run(|| run(&Inert, &Inert, &Inert))
+        }
+    }
+    fn fixture() -> (PrivateWorkspaceScopeV1, [DurableConstructionScopeV1; 2]) {
+        let candidate = crate::candidates::build_exact_candidate_v2(super::request()).unwrap();
+        let workspace = PrivateWorkspaceScopeV1 {
+            source_digest: "inert-source".into(),
+            principal_id: "inert-operator".into(),
+            agreement_id: candidate.proposal.manifest.agreement.agreement_id.clone(),
+            obligation_id: candidate.proposal.manifest.agreement.obligation_id.clone(),
+            reviewer_account_ids: vec!["account-a".into(), "account-b".into()],
+            protected_destination: "/inert-boundary/metadata.sqlite".into(),
+            retention_policy: "inert".into(),
+        };
+        let materials = std::array::from_fn(|i| {
+            let participant = &candidate.proposal.manifest.participants[i];
+            DurableConstructionScopeV1 {
+                version: 2,
+                purpose: "inert-permission-component".into(),
+                proposal: candidate.proposal.clone(),
+                account_id: participant.account_id.clone(),
+                participant_id: participant.participant_id.clone(),
+                privacy_domain: "inert".into(),
+                constructor: ConstructionRecipientV1 {
+                    principal_id: "inert-operator".into(),
+                    authenticated_local_grant_digest: "ab".repeat(32),
+                },
+                prover: ConstructionRecipientV1 {
+                    principal_id: "inert-operator".into(),
+                    authenticated_local_grant_digest: "ab".repeat(32),
+                },
+                reviewers: vec![
+                    ConstructionReviewerV1::local_installed_signer("account-a".into()),
+                    ConstructionReviewerV1::local_installed_signer("account-b".into()),
+                ],
+                protected_destination: "/inert-boundary/metadata.sqlite".into(),
+                retention_policy: "inert".into(),
+                valid_from_unix_seconds: 1,
+                valid_until_unix_seconds: 2,
+                minimum_confirmations: 1,
+                maximum_scan_blocks: 1,
+            }
+        });
+        (workspace, materials)
+    }
+    fn request<'a>(
+        workspace: &'a PrivateWorkspaceScopeV1,
+        materials: &'a [DurableConstructionScopeV1; 2],
+    ) -> PrivateFixedPermissionRequestV3<'a> {
+        PrivateFixedPermissionRequestV3 {
+            workspace,
+            action: PrivateWorkspaceActionV1::PrepareFixedStageV3,
+            materials: [(&materials[0], "digest-a"), (&materials[1], "digest-b")],
+            kind: PrivateFixedPermissionKindV3::ArtifactCheck,
+        }
+    }
+    #[test]
+    fn actual_dispatch_refuses_omission_inner_false_and_exit_denial() {
+        let (workspace, materials) = fixture();
+        let request = request(&workspace, &materials);
+        for which in 0..4 {
+            let mut provider = Provider::new();
+            match which {
+                0 => provider.omit = true,
+                1 => provider.lie = true,
+                2 => provider.exit = false,
+                _ => provider.entry = false,
+            }
+            let expected_calls = usize::from(which == 1 || which == 2);
+            assert!(!compound_observation_permission_v3(
+                &provider,
+                &request,
+                |_, _, _| which != 1
+            ));
+            assert_eq!(provider.calls.get(), expected_calls);
+            provider.calls.set(0);
+            assert!(!compound_artifact_permission_v3(
+                &provider,
+                &request,
+                |_, _, _| which != 1
+            ));
+            assert_eq!(provider.calls.get(), expected_calls);
+            provider.calls.set(0);
+            assert!(
+                compound_artifact_check_v3(&provider, &request, |_, _, _| {
+                    if which == 1 {
+                        Err(ApiError::new("ORIGINAL_KERNEL_ERROR", "preserve me"))
+                    } else {
+                        Ok(())
+                    }
+                })
+                .is_err()
+            );
+            assert_eq!(provider.calls.get(), expected_calls);
+        }
+    }
+    #[test]
+    fn owned_kernel_error_survives_denied_exit() {
+        let (workspace, materials) = fixture();
+        let request = request(&workspace, &materials);
+        let mut provider = Provider::new();
+        provider.exit = false;
+        let actual = compound_artifact_check_v3(&provider, &request, |_, _, _| {
+            Err(ApiError::new("ORIGINAL_KERNEL_ERROR", "original details"))
+        })
+        .unwrap_err();
+        assert_eq!(actual.code, "ORIGINAL_KERNEL_ERROR");
+        assert_eq!(*provider.order.borrow(), ["entry", "body", "exit"]);
+    }
+    #[test]
+    fn held_orchestration_rechecks_after_exit_and_preserves_first_error() {
+        struct ExitProvider<'a> {
+            current: &'a Cell<bool>,
+            order: &'a RefCell<Vec<&'static str>>,
+            expire: bool,
+        }
+        impl LocalPrivateFixedPermissionBoundaryV3 for ExitProvider<'_> {
+            fn with_artifact<'call>(
+                &self,
+                _: &PrivateFixedPermissionRequestV3<'_>,
+                run: PrivateFixedArtifactCallbackV3<'call>,
+            ) -> bool {
+                self.order.borrow_mut().push("entry");
+                assert!(self.current.get());
+                let result = run(&Inert, &Inert, &Inert);
+                self.order.borrow_mut().push("exit");
+                if self.expire {
+                    self.current.set(false);
+                }
+                result
+            }
+        }
+        let (workspace, materials) = fixture();
+        let request = request(&workspace, &materials);
+        // Inert freshness controls, not a manufactured Held/native owner.
+        for mode in 0..4 {
+            let current = Cell::new(mode != 0);
+            let order = RefCell::new(vec![]);
+            let provider = ExitProvider {
+                current: &current,
+                order: &order,
+                expire: mode == 1 || mode == 2,
+            };
+            let actual = compound_held_result_v3(
+                |site| {
+                    order
+                        .borrow_mut()
+                        .push(if matches!(site, Site::GateHeldPre) {
+                            "held-pre"
+                        } else {
+                            "held-post"
+                        });
+                    if current.get() {
+                        Ok(())
+                    } else {
+                        Err(ApiError::new("HELD_STALE", "inert freshness"))
+                    }
+                },
+                || {
+                    compound_artifact_check_v3(&provider, &request, |_, _, _| {
+                        order.borrow_mut().push("raw-pre");
+                        assert!(current.get());
+                        order.borrow_mut().push("raw-post");
+                        assert!(current.get());
+                        if mode == 2 {
+                            Err(ApiError::new("ORIGINAL_KERNEL_ERROR", "first owned error"))
+                        } else {
+                            Ok(())
+                        }
+                    })
+                },
+            );
+            match mode {
+                0 => {
+                    assert_eq!(actual.unwrap_err().code, "HELD_STALE");
+                    assert_eq!(*order.borrow(), ["held-pre"]);
+                }
+                1 => {
+                    assert_eq!(actual.unwrap_err().code, "HELD_STALE");
+                    assert_eq!(
+                        *order.borrow(),
+                        [
+                            "held-pre",
+                            "entry",
+                            "raw-pre",
+                            "raw-post",
+                            "exit",
+                            "held-post"
+                        ]
+                    );
+                }
+                2 => {
+                    assert_eq!(actual.unwrap_err().code, "ORIGINAL_KERNEL_ERROR");
+                    assert_eq!(
+                        *order.borrow(),
+                        ["held-pre", "entry", "raw-pre", "raw-post", "exit"]
+                    );
+                }
+                _ => {
+                    assert!(actual.is_ok());
+                    assert_eq!(
+                        *order.borrow(),
+                        [
+                            "held-pre",
+                            "entry",
+                            "raw-pre",
+                            "raw-post",
+                            "exit",
+                            "held-post"
+                        ]
+                    );
+                }
+            }
+        }
+    }
+    #[test]
+    fn stable_dispatch_runs_once_and_current_consent_default_is_none() {
+        let (workspace, materials) = fixture();
+        let request = request(&workspace, &materials);
+        let provider = Provider::new();
+        let boundary: &dyn LocalPrivateFixedPermissionBoundaryV3 = &provider;
+        assert!(Inert.fixed_permission_boundary_v3().is_none());
+        assert!(
+            compound_artifact_check_v3(boundary, &request, |w, m, _| {
+                assert!(w.fixed_permission_boundary_v3().is_none());
+                assert!(
+                    w.permits_workspace(&workspace, PrivateWorkspaceActionV1::PrepareFixedStageV3)
+                );
+                assert!(m.permits(
+                    &materials[0],
+                    "digest-a",
+                    DurableMaterialActionV1::ReadForExactConstruction
+                ));
+                Ok(())
+            })
+            .is_ok()
+        );
+        assert_eq!(provider.calls.get(), 1);
+        assert_eq!(*provider.order.borrow(), ["entry", "body", "exit"]);
+    }
+    #[test]
+    fn unsupported_provider_roles_never_invoke_the_kernel() {
+        struct Unsupported;
+        impl LocalPrivateFixedPermissionBoundaryV3 for Unsupported {}
+        let (workspace, materials) = fixture();
+        let request = request(&workspace, &materials);
+        assert!(!compound_observation_permission_v3(
+            &Unsupported,
+            &request,
+            |_, _, _| { panic!("unsupported observation must not run") }
+        ));
+        assert!(!compound_artifact_permission_v3(
+            &Unsupported,
+            &request,
+            |_, _, _| { panic!("unsupported artifact must not run") }
+        ));
+    }
+    #[test]
+    fn compound_dispatch_preserves_original_permission_kernel_call_counts() {
+        let (workspace, materials) = fixture();
+        let request = request(&workspace, &materials);
+        for compound in [false, true] {
+            let raw = Cell::new(0);
+            let permission = Cell::new(0);
+            let provider = Provider::new();
+            let kernel = || {
+                observation_permission_v1(
+                    || {
+                        raw.set(raw.get() + 1);
+                        Ok(())
+                    },
+                    || {
+                        permission.set(permission.get() + 1);
+                        true
+                    },
+                )
+            };
+            let allowed = if compound {
+                compound_observation_permission_v3(&provider, &request, |_, _, _| kernel())
+            } else {
+                kernel()
+            };
+            assert!(allowed);
+            assert_eq!((raw.get(), permission.get()), (2, 1));
+            assert_eq!(provider.calls.get(), usize::from(compound));
+            raw.set(0);
+            permission.set(0);
+            let provider = Provider::new();
+            let kernel = || {
+                diagnostics::gate_chain(
+                    None,
+                    true,
+                    || {
+                        raw.set(raw.get() + 1);
+                        Ok(())
+                    },
+                    || {
+                        permission.set(permission.get() + 1);
+                        true
+                    },
+                )
+            };
+            let allowed = if compound {
+                compound_artifact_permission_v3(&provider, &request, |_, _, _| kernel())
+            } else {
+                kernel()
+            };
+            assert!(allowed);
+            assert_eq!((raw.get(), permission.get()), (2, 1));
+            assert_eq!(provider.calls.get(), usize::from(compound));
+        }
+    }
+    #[test]
+    fn closed_request_preserves_pair_selected_wallet_and_exact_proof() {
+        let (workspace, materials) = fixture();
+        let backend = BackendIdentity {
+            source_id: "inert".into(),
+            endpoint: "https://component.invalid".into(),
+            trust_profile: "inert",
+        };
+        let account = AccountUuid::from_uuid(uuid::Uuid::nil());
+        let mut value = request(&workspace, &materials);
+        assert!(value.is_artifact_check());
+        assert_eq!(value.materials().len(), 2);
+        assert_eq!(value.materials()[0].1, "digest-a");
+        assert!(value.proof_permission().is_none());
+        value.action = PrivateWorkspaceActionV1::ObserveExactMaterial;
+        value.kind = PrivateFixedPermissionKindV3::Observation {
+            scope: &materials[1],
+            digest: "digest-b",
+            account,
+            provider: &backend,
+            purpose: WalletAccessPurpose::SynchronizePublicBlocks,
+        };
+        let (scope, digest, actual, provider, purpose) = value.observation_input().unwrap();
+        assert!(value.is_observation());
+        assert!(!value.is_artifact_check());
+        assert!(scope == &materials[1]);
+        assert_eq!(digest, "digest-b");
+        assert_eq!(actual, account);
+        assert_eq!(provider, &backend);
+        assert!(matches!(
+            purpose,
+            WalletAccessPurpose::SynchronizePublicBlocks
+        ));
+        let proof = CheckpointScope {
+            principal_id: "inert".into(),
+            candidate_id: "inert".into(),
+            manifest_digest: "11".repeat(32),
+            artifact_digest: "22".repeat(32),
+            effects_commitment: "33".repeat(32),
+            coordination_request_digest: "44".repeat(32),
+            review_binding: "55".repeat(32),
+            account_ids: vec!["account-a".into(), "account-b".into()],
+            local_operator: "inert".into(),
+            purpose: "inert".into(),
+            retention_policy: "inert".into(),
+        };
+        value.kind = PrivateFixedPermissionKindV3::ArtifactPermission {
+            scope: &proof,
+            action: LocalAction::RetainPrivateWitnesses,
+        };
+        assert!(value.is_artifact_permission());
+        assert!(value.observation_input().is_none());
+        assert!(value.proof_permission() == Some((&proof, LocalAction::RetainPrivateWitnesses)));
+    }
+    #[test]
+    fn raw_none_dispatch_and_final_held_source_boundaries_remain_closed() {
+        let source = include_str!("exact_fixed_v2.rs");
+        let artifact = source
+            .split("impl ArtifactGate<'_, '_, '_> {")
+            .nth(1)
+            .unwrap()
+            .split("// Typed arguments retain")
+            .next()
+            .unwrap();
+        assert_eq!(
+            artifact
+                .matches("self.consent.fixed_permission_boundary_v3()")
+                .count(),
+            2
+        );
+        let permission = artifact
+            .split("impl LocalProofConsent for ArtifactGate")
+            .nth(1)
+            .unwrap();
+        let none = permission
+            .split("let Some(boundary)")
+            .nth(1)
+            .unwrap()
+            .split("if !exact")
+            .next()
+            .unwrap();
+        assert!(none.contains("self.check_raw(self.consent, self.material)"));
+        assert!(!none.contains("self.check()"));
+        assert_eq!(artifact.matches("compound_held_result_v3(").count(), 2);
+        assert_eq!(
+            artifact.matches("|site| self.check_held_at(site)").count(),
+            2
+        );
+        assert!(artifact.contains("o.record(Site::GateHeldPre"));
+        assert!(artifact.contains("o.record(Site::GateHeldPost"));
+        // All eight Engine sites can dispatch. This is not a claim that every
+        // native path opts in: Prove's real foreground broker remains None.
+        assert_eq!(source.matches("let gate = ArtifactGate {").count(), 8);
+        for name in [
+            "PreparedOriginalCheckpointV2",
+            "ReadyOriginalCheckpointV2",
+            "OriginalProofAttemptV2",
+        ] {
+            let body = source
+                .split(&format!("struct {name}"))
+                .nth(1)
+                .unwrap()
+                .split("\n}")
+                .next()
+                .unwrap();
+            assert!(!body.contains("boundary"));
+        }
+        let observation = source
+            .split("struct ObservationGate")
+            .nth(1)
+            .unwrap()
+            .split("struct ArtifactGate")
+            .next()
+            .unwrap();
+        assert!(!observation.contains(".await"));
+        assert!(!artifact.contains(".await"));
+    }
+}
 std::thread_local! {
     static ORIGINAL_CONSTRUCTOR_CALLS_V2: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }

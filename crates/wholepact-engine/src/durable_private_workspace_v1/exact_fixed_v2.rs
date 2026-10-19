@@ -17,12 +17,245 @@ use wholepact_proof_jobs::{
 use wholepact_protocol::construction::{DisclosureAcknowledgement, DisclosureScope};
 use wholepact_protocol::proving::ProvingLimits;
 use wholepact_signer::authority_bridge::durable_construction_v1::AuthenticatedDurableConstructionDisclosureV1;
+use wholepact_wallet::wallet::AccountUuid;
 use wholepact_wallet::wallet::protected_sync::durable_construction_v1::{
     DurableConstructionScopeV1, DurableConstructionWalletSlotV1,
     FreshDurableConstructionObservationV1, HeldDurableConstructionRosterV1,
     with_durable_construction_roster_v1,
 };
-use wholepact_wallet::wallet::protected_sync::{LocalWalletAccess, ProtectedWalletSync};
+use wholepact_wallet::wallet::protected_sync::{
+    BackendIdentity, LocalWalletAccess, ProtectedWalletSync, WalletAccessPurpose,
+};
+
+/// One synchronous Engine-owned permission invocation. No future, grant or
+/// owner may be returned from the higher-ranked callback.
+pub type PrivateFixedObservationCallbackV3<'call> = Box<
+    dyn for<'g> FnOnce(
+            &'g dyn LocalPrivateWorkspaceConsentV1,
+            &'g dyn LocalDurableMaterialConsentV1,
+            &'g dyn LocalWalletAccess,
+        ) -> bool
+        + 'call,
+>;
+pub type PrivateFixedArtifactCallbackV3<'call> = Box<
+    dyn for<'g> FnOnce(
+            &'g dyn LocalPrivateWorkspaceConsentV1,
+            &'g dyn LocalDurableMaterialConsentV1,
+            &'g dyn LocalProofConsent,
+        ) -> bool
+        + 'call,
+>;
+/// Trusted embedding boundary, never inferred from retained metadata. A
+/// concrete provider must audit the original stage before and after the body.
+/// Unsupported roles deny without running it; the Engine independently keeps
+/// the actual kernel result, so an omitted or false body cannot be approved.
+pub trait LocalPrivateFixedPermissionBoundaryV3 {
+    fn with_observation<'call>(
+        &self,
+        _request: &PrivateFixedPermissionRequestV3<'_>,
+        _run: PrivateFixedObservationCallbackV3<'call>,
+    ) -> bool {
+        false
+    }
+    fn with_artifact<'call>(
+        &self,
+        _request: &PrivateFixedPermissionRequestV3<'_>,
+        _run: PrivateFixedArtifactCallbackV3<'call>,
+    ) -> bool {
+        false
+    }
+}
+enum PrivateFixedPermissionKindV3<'a> {
+    Observation {
+        scope: &'a DurableConstructionScopeV1,
+        digest: &'a str,
+        account: AccountUuid,
+        provider: &'a BackendIdentity,
+        purpose: WalletAccessPurpose,
+    },
+    ArtifactCheck,
+    ArtifactPermission {
+        scope: &'a CheckpointScope,
+        action: LocalAction,
+    },
+}
+/// Exact closed comparison data only. Constructors and the kind are private;
+/// this object neither contains authority nor permits arbitrary callbacks.
+pub struct PrivateFixedPermissionRequestV3<'a> {
+    workspace: &'a PrivateWorkspaceScopeV1,
+    action: PrivateWorkspaceActionV1,
+    materials: [(&'a DurableConstructionScopeV1, &'a str); 2],
+    kind: PrivateFixedPermissionKindV3<'a>,
+}
+impl<'a> PrivateFixedPermissionRequestV3<'a> {
+    fn new(
+        workspace: &'a PrivateWorkspaceScopeV1,
+        action: PrivateWorkspaceActionV1,
+        roster: &'a Roster,
+        kind: PrivateFixedPermissionKindV3<'a>,
+    ) -> Result<Self> {
+        let mut values = roster.owners.values();
+        let first = values.next().ok_or_else(denied)?;
+        let second = values.next().ok_or_else(denied)?;
+        if values.next().is_some()
+            || first.outbox.request().scope.account_id == second.outbox.request().scope.account_id
+        {
+            return Err(denied());
+        }
+        Ok(Self {
+            workspace,
+            action,
+            materials: [
+                (
+                    &first.outbox.request().scope,
+                    first.outbox.material_digest(),
+                ),
+                (
+                    &second.outbox.request().scope,
+                    second.outbox.material_digest(),
+                ),
+            ],
+            kind,
+        })
+    }
+    pub fn workspace_scope(&self) -> &PrivateWorkspaceScopeV1 {
+        self.workspace
+    }
+    pub fn workspace_action(&self) -> PrivateWorkspaceActionV1 {
+        self.action
+    }
+    pub fn materials(&self) -> &[(&'a DurableConstructionScopeV1, &'a str)] {
+        &self.materials
+    }
+    pub fn material_action(&self) -> DurableMaterialActionV1 {
+        DurableMaterialActionV1::ReadForExactConstruction
+    }
+    pub fn observation_input(
+        &self,
+    ) -> Option<(
+        &DurableConstructionScopeV1,
+        &str,
+        AccountUuid,
+        &BackendIdentity,
+        WalletAccessPurpose,
+    )> {
+        match &self.kind {
+            PrivateFixedPermissionKindV3::Observation {
+                scope,
+                digest,
+                account,
+                provider,
+                purpose,
+            } => Some((scope, digest, *account, provider, *purpose)),
+            _ => None,
+        }
+    }
+    pub fn proof_permission(&self) -> Option<(&CheckpointScope, LocalAction)> {
+        match &self.kind {
+            PrivateFixedPermissionKindV3::ArtifactPermission { scope, action } => {
+                Some((scope, *action))
+            }
+            _ => None,
+        }
+    }
+    pub fn is_observation(&self) -> bool {
+        matches!(self.kind, PrivateFixedPermissionKindV3::Observation { .. })
+    }
+    pub fn is_artifact_check(&self) -> bool {
+        matches!(self.kind, PrivateFixedPermissionKindV3::ArtifactCheck)
+    }
+    pub fn is_artifact_permission(&self) -> bool {
+        matches!(
+            self.kind,
+            PrivateFixedPermissionKindV3::ArtifactPermission { .. }
+        )
+    }
+}
+
+// Preserve the actual owned Engine error, even when the provider also denies
+// at exit. The Option is a single-call completion/result slot, not permission.
+fn compound_kernel_result_v3<T>(provider: bool, actual: Option<Result<T>>) -> Result<T> {
+    match actual {
+        Some(Err(error)) => Err(error),
+        Some(Ok(value)) if provider => Ok(value),
+        _ => Err(denied()),
+    }
+}
+fn compound_permission_result_v3(provider: bool, actual: Option<bool>) -> bool {
+    provider && actual == Some(true)
+}
+// The held owner brackets the entire provider invocation, including its exit
+// audit. An owned inner error remains first; a successful body is not enough.
+fn compound_held_result_v3<T>(
+    held: impl Fn(Site) -> Result<()>,
+    body: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    held(Site::GateHeldPre)?;
+    let result = body()?;
+    held(Site::GateHeldPost)?;
+    Ok(result)
+}
+fn compound_observation_permission_v3(
+    boundary: &dyn LocalPrivateFixedPermissionBoundaryV3,
+    request: &PrivateFixedPermissionRequestV3<'_>,
+    kernel: impl for<'g> FnOnce(
+        &'g dyn LocalPrivateWorkspaceConsentV1,
+        &'g dyn LocalDurableMaterialConsentV1,
+        &'g dyn LocalWalletAccess,
+    ) -> bool,
+) -> bool {
+    let mut actual = None;
+    let permitted = boundary.with_observation(
+        request,
+        Box::new(|consent, material, wallet| {
+            let result = kernel(consent, material, wallet);
+            actual = Some(result);
+            result
+        }),
+    );
+    compound_permission_result_v3(permitted, actual)
+}
+fn compound_artifact_check_v3(
+    boundary: &dyn LocalPrivateFixedPermissionBoundaryV3,
+    request: &PrivateFixedPermissionRequestV3<'_>,
+    kernel: impl for<'g> FnOnce(
+        &'g dyn LocalPrivateWorkspaceConsentV1,
+        &'g dyn LocalDurableMaterialConsentV1,
+        &'g dyn LocalProofConsent,
+    ) -> Result<()>,
+) -> Result<()> {
+    let mut actual = None;
+    let permitted = boundary.with_artifact(
+        request,
+        Box::new(|consent, material, proof| {
+            let result = kernel(consent, material, proof);
+            let allowed = result.is_ok();
+            actual = Some(result);
+            allowed
+        }),
+    );
+    compound_kernel_result_v3(permitted, actual)
+}
+fn compound_artifact_permission_v3(
+    boundary: &dyn LocalPrivateFixedPermissionBoundaryV3,
+    request: &PrivateFixedPermissionRequestV3<'_>,
+    kernel: impl for<'g> FnOnce(
+        &'g dyn LocalPrivateWorkspaceConsentV1,
+        &'g dyn LocalDurableMaterialConsentV1,
+        &'g dyn LocalProofConsent,
+    ) -> bool,
+) -> bool {
+    let mut actual = None;
+    let permitted = boundary.with_artifact(
+        request,
+        Box::new(|consent, material, proof| {
+            let result = kernel(consent, material, proof);
+            actual = Some(result);
+            result
+        }),
+    );
+    compound_permission_result_v3(permitted, actual)
+}
 
 /// Closed review purpose. Values select a data projection, never authority.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -1169,6 +1402,56 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
         material: &dyn LocalDurableMaterialConsentV1,
         wallet_access: &impl LocalWalletAccess,
     ) -> Result<FreshDurableConstructionObservationV1> {
+        self.observe_exact_material_inner_v3(
+            access,
+            candidate_id,
+            account_id,
+            wallet,
+            consent,
+            material,
+            wallet_access,
+            None,
+        )
+        .await
+    }
+    /// The fresh actual scan owner supplies the boundary for this observation
+    /// only. No boundary is retained in the returned scanner facts.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn observe_exact_material_compound_v3(
+        &self,
+        access: &Access,
+        candidate_id: &str,
+        account_id: &str,
+        wallet: &mut ProtectedWalletSync,
+        consent: &dyn LocalPrivateWorkspaceConsentV1,
+        material: &dyn LocalDurableMaterialConsentV1,
+        wallet_access: &impl LocalWalletAccess,
+        boundary: &dyn LocalPrivateFixedPermissionBoundaryV3,
+    ) -> Result<FreshDurableConstructionObservationV1> {
+        self.observe_exact_material_inner_v3(
+            access,
+            candidate_id,
+            account_id,
+            wallet,
+            consent,
+            material,
+            wallet_access,
+            Some(boundary),
+        )
+        .await
+    }
+    #[allow(clippy::too_many_arguments)]
+    async fn observe_exact_material_inner_v3(
+        &self,
+        access: &Access,
+        candidate_id: &str,
+        account_id: &str,
+        wallet: &mut ProtectedWalletSync,
+        consent: &dyn LocalPrivateWorkspaceConsentV1,
+        material: &dyn LocalDurableMaterialConsentV1,
+        wallet_access: &impl LocalWalletAccess,
+        boundary: Option<&dyn LocalPrivateFixedPermissionBoundaryV3>,
+    ) -> Result<FreshDurableConstructionObservationV1> {
         // One collector per concrete observation future, never shared between
         // the two owners. This path can report causes, not persistence facts.
         let observation = Observation::new(Operation::Checkpoint);
@@ -1193,7 +1476,9 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
                 consent,
                 material,
                 intake,
+                roster: &roster,
                 wallet: wallet_access,
+                boundary,
                 observation: &observation,
             };
             gate.check()?;
@@ -3260,17 +3545,26 @@ struct ObservationGate<'a, 'source, W> {
     consent: &'a dyn LocalPrivateWorkspaceConsentV1,
     material: &'a dyn LocalDurableMaterialConsentV1,
     intake: &'a Intake,
+    roster: &'a Roster,
     wallet: &'a W,
+    boundary: Option<&'a dyn LocalPrivateFixedPermissionBoundaryV3>,
     observation: &'a Observation,
 }
 impl<W> ObservationGate<'_, '_, W> {
     fn check(&self) -> Result<()> {
+        self.check_with(self.consent, self.material)
+    }
+    fn check_with(
+        &self,
+        consent: &dyn LocalPrivateWorkspaceConsentV1,
+        material: &dyn LocalDurableMaterialConsentV1,
+    ) -> Result<()> {
         self.observation.stage(Site::GateWorkspace);
         self.observation.api(
             Site::GateWorkspace,
             self.workspace.check_observed(
                 self.access,
-                self.consent,
+                consent,
                 PrivateWorkspaceActionV1::ObserveExactMaterial,
                 Some(self.observation),
             ),
@@ -3282,7 +3576,7 @@ impl<W> ObservationGate<'_, '_, W> {
                 Some(self.observation),
                 self.access,
                 self.intake,
-                self.material,
+                material,
                 DurableMaterialActionV1::ReadForExactConstruction,
             ),
         )
@@ -3296,10 +3590,32 @@ impl<W: LocalWalletAccess> LocalWalletAccess for ObservationGate<'_, '_, W> {
         provider: &wholepact_wallet::wallet::protected_sync::BackendIdentity,
         purpose: wholepact_wallet::wallet::protected_sync::WalletAccessPurpose,
     ) -> bool {
-        observation_permission_v1(
-            || self.check(),
-            || self.wallet.permits(account, provider, purpose),
-        )
+        let Some(boundary) = self.boundary else {
+            return observation_permission_v1(
+                || self.check(),
+                || self.wallet.permits(account, provider, purpose),
+            );
+        };
+        let Ok(request) = PrivateFixedPermissionRequestV3::new(
+            &self.workspace.scope,
+            PrivateWorkspaceActionV1::ObserveExactMaterial,
+            self.roster,
+            PrivateFixedPermissionKindV3::Observation {
+                scope: &self.intake.outbox.request().scope,
+                digest: self.intake.outbox.material_digest(),
+                account,
+                provider,
+                purpose,
+            },
+        ) else {
+            return false;
+        };
+        compound_observation_permission_v3(boundary, &request, |consent, material, wallet| {
+            observation_permission_v1(
+                || self.check_with(consent, material),
+                || wallet.permits(account, provider, purpose),
+            )
+        })
     }
 }
 // Same short-circuit kernel: no observer borrow survives the actual checks.
@@ -3322,6 +3638,43 @@ struct ArtifactGate<'a, 'source, 'held> {
 }
 impl ArtifactGate<'_, '_, '_> {
     fn check(&self) -> Result<()> {
+        let Some(boundary) = self.consent.fixed_permission_boundary_v3() else {
+            return self.check_raw(self.consent, self.material);
+        };
+        // Held freshness brackets the COMPLETE compound, not merely the body.
+        compound_held_result_v3(
+            |site| self.check_held_at(site),
+            || {
+                let request = PrivateFixedPermissionRequestV3::new(
+                    &self.workspace.scope,
+                    self.action,
+                    self.roster,
+                    PrivateFixedPermissionKindV3::ArtifactCheck,
+                )?;
+                compound_artifact_check_v3(boundary, &request, |consent, material, _proof| {
+                    self.check_raw(consent, material)
+                })
+            },
+        )
+    }
+    fn check_held_at(&self, site: Site) -> Result<()> {
+        if let Some(held) = self.held {
+            held.check_current().map_err(|error| {
+                if let Some(o) = self.observation {
+                    o.record(site, diagnostics::construction(&error));
+                }
+                ApiError::from(error)
+            })?;
+        }
+        Ok(())
+    }
+    // Original raw validators, including both old held checks. Never dispatch
+    // another compound while this is called inside a permission callback.
+    fn check_raw(
+        &self,
+        consent: &dyn LocalPrivateWorkspaceConsentV1,
+        material: &dyn LocalDurableMaterialConsentV1,
+    ) -> Result<()> {
         if let Some(held) = self.held {
             held.check_current().map_err(|error| {
                 if let Some(o) = self.observation {
@@ -3332,12 +3685,7 @@ impl ArtifactGate<'_, '_, '_> {
         }
         // The proof mutex may already be held: deliberately no source.check_current here.
         self.workspace
-            .check_without_proof_lock_observed(
-                self.access,
-                self.consent,
-                self.action,
-                self.observation,
-            )
+            .check_without_proof_lock_observed(self.access, consent, self.action, self.observation)
             .map_err(|error| {
                 if let Some(o) = self.observation {
                     o.record(Site::GateWorkspace, diagnostics::engine(&error));
@@ -3349,7 +3697,7 @@ impl ArtifactGate<'_, '_, '_> {
                 self.observation,
                 self.access,
                 intake,
-                self.material,
+                material,
                 DurableMaterialActionV1::ReadForExactConstruction,
             )?;
         }
@@ -3380,12 +3728,50 @@ impl LocalProofConsent for ArtifactGate<'_, '_, '_> {
                     .reviewer_account_ids()
                     .into_iter()
                     .collect();
-        diagnostics::gate_chain(
-            self.observation,
-            exact,
-            || self.check(),
-            || self.proof.permits(scope, action),
+        let Some(boundary) = self.consent.fixed_permission_boundary_v3() else {
+            return diagnostics::gate_chain(
+                self.observation,
+                exact,
+                || self.check_raw(self.consent, self.material),
+                || self.proof.permits(scope, action),
+            );
+        };
+        if !exact {
+            return diagnostics::gate_chain(
+                self.observation,
+                false,
+                || self.check_raw(self.consent, self.material),
+                || false,
+            );
+        }
+        compound_held_result_v3(
+            |site| self.check_held_at(site),
+            || {
+                let request = PrivateFixedPermissionRequestV3::new(
+                    &self.workspace.scope,
+                    self.action,
+                    self.roster,
+                    PrivateFixedPermissionKindV3::ArtifactPermission { scope, action },
+                )?;
+                if compound_artifact_permission_v3(
+                    boundary,
+                    &request,
+                    |consent, material, proof| {
+                        diagnostics::gate_chain(
+                            self.observation,
+                            exact,
+                            || self.check_raw(consent, material),
+                            || proof.permits(scope, action),
+                        )
+                    },
+                ) {
+                    Ok(())
+                } else {
+                    Err(denied())
+                }
+            },
         )
+        .is_ok()
     }
 }
 // Typed arguments retain the actual lineage receipt, never a stage return value.

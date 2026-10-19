@@ -1500,7 +1500,9 @@ impl PrivateWorkspaceOwnerV1<'_> {
         )
         .map_err(|_| Error::Authentication)
     }
-    pub(in crate::host) fn check_current_without_proof_lock_v2(&self) -> Result<()> {
+    // Live owner/file predicates, usable only by the closure-local stage view.
+    // The complete original interpretation still brackets every compound call.
+    fn check_compound_live_source_v3(&self) -> Result<()> {
         reader_result!(
             ReaderReadSession,
             observe_private_fixed_host_v1,
@@ -1543,6 +1545,11 @@ impl PrivateWorkspaceOwnerV1<'_> {
                 Err(Error::Authentication)
             );
         }
+        Ok(())
+    }
+    pub(in crate::host) fn check_current_without_proof_lock_v2(&self) -> Result<()> {
+        self.check_compound_live_source_v3()?;
+        let p = &self.files.original.pending;
         let source = reader_result!(
             ReaderSourceSelection,
             observe_private_fixed_engine_v1,
@@ -2457,6 +2464,11 @@ impl OwnedPrivateWorkspaceStageV3<'_, '_> {
     }
 }
 impl LocalPrivateWorkspaceConsentV1 for OwnedPrivateWorkspaceStageV3<'_, '_> {
+    fn fixed_permission_boundary_v3(
+        &self,
+    ) -> Option<&dyn wholepact_engine::LocalPrivateFixedPermissionBoundaryV3> {
+        Some(self)
+    }
     fn permits_workspace(
         &self,
         scope: &PrivateWorkspaceScopeV1,
@@ -2502,6 +2514,261 @@ impl wholepact_proof_jobs::LocalProofConsent for OwnedPrivateWorkspaceStageV3<'_
                 && self.review.checkpoint_scope() == Some(scope),
             PrivateDiagnosticSiteV1::HostProofScope,
         )
+    }
+}
+
+/// One synchronous interpretation interval. There is no cached permission and
+/// no future, effect or private output in this kernel. Even a denied body is
+/// followed by the exit audit; the Engine retains its own first owned error.
+pub(in crate::host) fn compound_stage_permission_v3(
+    exact: bool,
+    mut audit: impl FnMut() -> Result<()>,
+    body: impl FnOnce() -> bool,
+) -> Result<bool> {
+    if !exact {
+        return Err(Error::Permission);
+    }
+    audit()?;
+    let permitted = body();
+    audit()?;
+    Ok(permitted)
+}
+fn same_workspace_scope_v3(a: &PrivateWorkspaceScopeV1, b: &PrivateWorkspaceScopeV1) -> bool {
+    a.source_digest() == b.source_digest()
+        && a.principal_id() == b.principal_id()
+        && a.agreement_id() == b.agreement_id()
+        && a.obligation_id() == b.obligation_id()
+        && a.reviewer_account_ids() == b.reviewer_account_ids()
+        && a.protected_destination() == b.protected_destination()
+        && a.retention_policy() == b.retention_policy()
+}
+impl OwnedPrivateWorkspaceStageV3<'_, '_> {
+    fn compound_request_matches_v3(
+        &self,
+        request: &wholepact_engine::PrivateFixedPermissionRequestV3<'_>,
+    ) -> bool {
+        let materials = request.materials();
+        same_workspace_scope_v3(request.workspace_scope(), self.review.workspace_scope())
+            && stage_workspace_action_v3(self.review.stage(), request.workspace_action())
+            && materials.len() == 2
+            && self.review.materials().len() == 2
+            && materials[0].0.account_id != materials[1].0.account_id
+            && materials.iter().all(|(scope, digest)| {
+                self.review.materials().iter().filter(|retained| {
+                    retained.scope() == *scope && retained.material_digest() == *digest
+                }).count() == 1
+            })
+            && matches!(request.material_action(),
+                wholepact_engine::durable_construction_v1::DurableMaterialActionV1::ReadForExactConstruction)
+            && if request.is_observation() {
+                request.workspace_action() == PrivateWorkspaceActionV1::ObserveExactMaterial
+                    && request.proof_permission().is_none()
+                    && request.observation_input().is_some_and(|(scope, digest, _, _, _)| {
+                        materials.iter().filter(|(s, d)| *s == scope && *d == digest).count() == 1
+                    })
+            } else if request.is_artifact_check() {
+                request.observation_input().is_none() && request.proof_permission().is_none()
+            } else if request.is_artifact_permission() {
+                request.observation_input().is_none()
+                    && request.proof_permission().is_some_and(|(scope, action)| {
+                        self.review.checkpoint_scope() == Some(scope)
+                            && stage_proof_action_v3(self.review.stage(), action)
+                    })
+            } else {
+                false
+            }
+    }
+    fn observe_compound_result_v3(&self, result: Result<bool>) -> bool {
+        self.storage_boundary();
+        match result {
+            Ok(value) => value,
+            Err(error) => {
+                storage_host_error(&error);
+                // The same stage latch keeps an earlier typed/native cause.
+                let _ = self
+                    .observation
+                    .observe::<()>(PrivateDiagnosticSiteV1::HostWorkspaceCurrent, Err(error));
+                false
+            }
+        }
+    }
+    pub(in crate::host) fn with_original_scan_permission_v3<'call>(
+        &self,
+        request: &wholepact_engine::PrivateFixedPermissionRequestV3<'_>,
+        scan: super::financial::private_durable_fixed_v2::OriginalScanPermissionViewV3<
+            '_,
+            '_,
+            '_,
+            '_,
+        >,
+        run: wholepact_engine::PrivateFixedObservationCallbackV3<'call>,
+    ) -> bool {
+        self.storage_boundary();
+        let exact = request.is_observation()
+            && self.compound_request_matches_v3(request)
+            && scan.matches_request(self, request);
+        let result = compound_stage_permission_v3(
+            exact,
+            || self.check_callback(),
+            || {
+                let view = ScopedPrivateStagePermissionV3 {
+                    stage: self,
+                    request,
+                    scan: Some(&scan),
+                };
+                run(&view, &view, &view)
+            },
+        );
+        self.observe_compound_result_v3(result)
+    }
+}
+impl wholepact_engine::LocalPrivateFixedPermissionBoundaryV3
+    for OwnedPrivateWorkspaceStageV3<'_, '_>
+{
+    fn with_artifact<'call>(
+        &self,
+        request: &wholepact_engine::PrivateFixedPermissionRequestV3<'_>,
+        run: wholepact_engine::PrivateFixedArtifactCallbackV3<'call>,
+    ) -> bool {
+        self.storage_boundary();
+        let exact = !request.is_observation() && self.compound_request_matches_v3(request);
+        let result = compound_stage_permission_v3(
+            exact,
+            || self.check_callback(),
+            || {
+                let view = ScopedPrivateStagePermissionV3 {
+                    stage: self,
+                    request,
+                    scan: None,
+                };
+                run(&view, &view, &view)
+            },
+        );
+        self.observe_compound_result_v3(result)
+    }
+}
+/// This view exists only between the current stage's full entry/exit audits.
+/// It exposes no cheap-check accessor, Clone, serialization or grant token.
+/// Its workspace getter inherits None, so inner gates cannot recursively opt in.
+struct ScopedPrivateStagePermissionV3<'a, 'owner, 'host> {
+    stage: &'a OwnedPrivateWorkspaceStageV3<'owner, 'host>,
+    request: &'a wholepact_engine::PrivateFixedPermissionRequestV3<'a>,
+    scan: Option<&'a dyn wholepact_wallet::wallet::protected_sync::LocalWalletAccess>,
+}
+impl ScopedPrivateStagePermissionV3<'_, '_, '_> {
+    fn check_live(&self) -> Result<()> {
+        self.stage.observation.observe(
+            PrivateDiagnosticSiteV1::HostWorkspaceNativeCheck,
+            self.stage.approval.check(),
+        )?;
+        let session =
+            if self.stage.review.stage() == wholepact_engine::PrivateFixedStageV3::ReadFixed {
+                self.stage
+                    .owner
+                    .host
+                    .require_private_workspace_read_session_v1()
+            } else {
+                self.stage.owner.host.require_manual_session()
+            };
+        self.stage
+            .observation
+            .observe(PrivateDiagnosticSiteV1::HostWorkspaceSessionCheck, session)?;
+        self.stage.observation.observe(
+            PrivateDiagnosticSiteV1::HostWorkspaceSourceCheck,
+            self.stage.owner.check_compound_live_source_v3(),
+        )?;
+        self.stage.observation.observe(
+            PrivateDiagnosticSiteV1::HostMaterialScope,
+            super::financial::private_durable_fixed_v2::check_stage_material_ceilings_v3(
+                &self.stage.review,
+            ),
+        )?;
+        self.stage.observation.observe(
+            PrivateDiagnosticSiteV1::HostWorkspaceNativeCheck,
+            self.stage.approval.check(),
+        )
+    }
+    fn permission(&self, exact: bool) -> bool {
+        self.stage.observe_compound_result_v3(
+            stage_permission_v3(exact, || self.check_live()).map(|()| true),
+        )
+    }
+}
+impl LocalPrivateWorkspaceConsentV1 for ScopedPrivateStagePermissionV3<'_, '_, '_> {
+    fn permits_workspace(
+        &self,
+        scope: &PrivateWorkspaceScopeV1,
+        action: PrivateWorkspaceActionV1,
+    ) -> bool {
+        action == self.request.workspace_action()
+            && same_workspace_scope_v3(scope, self.request.workspace_scope())
+            && CurrentNativePrivacy {
+                host: self.stage.owner.host,
+                committed: &self.stage.owner.committed_target,
+                association: &self.stage.owner.files.original.pending.association,
+                approval: &self.stage.approval,
+                action,
+                observation: PrivateCurrentObservationV1::Stage(&self.stage.observation),
+            }
+            .permits_workspace(scope, action)
+            && self.permission(true)
+    }
+}
+impl wholepact_engine::durable_construction_v1::LocalDurableMaterialConsentV1
+    for ScopedPrivateStagePermissionV3<'_, '_, '_>
+{
+    fn permits(
+        &self,
+        scope: &wholepact_signer::authority_bridge::durable_construction_v1::DurableConstructionScopeV1,
+        digest: &str,
+        action: wholepact_engine::durable_construction_v1::DurableMaterialActionV1,
+    ) -> bool {
+        self.permission(matches!(action,
+            wholepact_engine::durable_construction_v1::DurableMaterialActionV1::ReadForExactConstruction)
+            && if self.request.is_observation() {
+                self.request.observation_input().is_some_and(|(s, d, _, _, _)| s == scope && d == digest)
+            } else {
+                self.request.materials().iter().any(|(s, d)| *s == scope && *d == digest)
+            })
+    }
+}
+impl wholepact_proof_jobs::LocalProofConsent for ScopedPrivateStagePermissionV3<'_, '_, '_> {
+    fn permits(
+        &self,
+        scope: &wholepact_proof_jobs::CheckpointScope,
+        action: wholepact_proof_jobs::LocalAction,
+    ) -> bool {
+        self.permission(
+            self.request.is_artifact_permission()
+                && self
+                    .request
+                    .proof_permission()
+                    .is_some_and(|(s, a)| s == scope && a == action),
+        )
+    }
+}
+impl wholepact_wallet::wallet::protected_sync::LocalWalletAccess
+    for ScopedPrivateStagePermissionV3<'_, '_, '_>
+{
+    fn permits(
+        &self,
+        account: wholepact_wallet::wallet::AccountUuid,
+        backend: &wholepact_wallet::wallet::protected_sync::BackendIdentity,
+        purpose: wholepact_wallet::wallet::protected_sync::WalletAccessPurpose,
+    ) -> bool {
+        self.request.is_observation()
+            && self
+                .request
+                .observation_input()
+                .is_some_and(|(_, _, a, b, p)| a == account && b == backend && matches!((p, purpose),
+                    (wholepact_wallet::wallet::protected_sync::WalletAccessPurpose::SynchronizePublicBlocks,
+                     wholepact_wallet::wallet::protected_sync::WalletAccessPurpose::SynchronizePublicBlocks)
+                    | (wholepact_wallet::wallet::protected_sync::WalletAccessPurpose::SelectPrivateContribution,
+                       wholepact_wallet::wallet::protected_sync::WalletAccessPurpose::SelectPrivateContribution)))
+            && self
+                .scan
+                .is_some_and(|scan| scan.permits(account, backend, purpose))
+            && self.permission(true)
     }
 }
 
@@ -2611,6 +2878,131 @@ mod closed_stage_v3_tests {
             Err(Error::Permission)
         ));
         assert_eq!(calls.get(), 3);
+    }
+    #[test]
+    fn compound_permission_keeps_live_roles_and_two_complete_audits() {
+        use std::cell::Cell;
+        for roles in [4, 7, 9] {
+            let audits = Cell::new(0);
+            let live = Cell::new(0);
+            assert!(
+                compound_stage_permission_v3(
+                    true,
+                    || {
+                        audits.set(audits.get() + 1);
+                        Ok(())
+                    },
+                    || {
+                        for _ in 0..roles {
+                            if stage_permission_v3(true, || {
+                                live.set(live.get() + 1);
+                                Ok(())
+                            })
+                            .is_err()
+                            {
+                                return false;
+                            }
+                        }
+                        true
+                    }
+                )
+                .unwrap()
+            );
+            assert_eq!(audits.get(), 2);
+            assert_eq!(live.get(), roles);
+        }
+    }
+    #[test]
+    fn compound_denials_short_circuit_without_fallback_or_second_body() {
+        use std::cell::Cell;
+        for failure in 0..4 {
+            let audits = Cell::new(0);
+            let bodies = Cell::new(0);
+            let result = compound_stage_permission_v3(
+                failure != 0,
+                || {
+                    audits.set(audits.get() + 1);
+                    if (failure == 1 && audits.get() == 1) || (failure == 3 && audits.get() == 2) {
+                        Err(Error::Authentication)
+                    } else {
+                        Ok(())
+                    }
+                },
+                || {
+                    bodies.set(bodies.get() + 1);
+                    failure != 2
+                },
+            );
+            match failure {
+                0 => {
+                    assert!(matches!(result, Err(Error::Permission)));
+                    assert_eq!((audits.get(), bodies.get()), (0, 0));
+                }
+                1 => {
+                    assert!(matches!(result, Err(Error::Authentication)));
+                    assert_eq!((audits.get(), bodies.get()), (1, 0));
+                }
+                2 => {
+                    assert!(matches!(result, Ok(false)));
+                    assert_eq!((audits.get(), bodies.get()), (2, 1));
+                }
+                3 => {
+                    assert!(matches!(result, Err(Error::Authentication)));
+                    assert_eq!((audits.get(), bodies.get()), (2, 1));
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+    #[test]
+    fn compound_every_live_role_denies_currentness_loss_and_audits_exit() {
+        use std::cell::Cell;
+        for roles in [4, 7, 9] {
+            for denied_at in 0..roles {
+                let audits = Cell::new(0);
+                let live = Cell::new(0);
+                let result = compound_stage_permission_v3(
+                    true,
+                    || {
+                        audits.set(audits.get() + 1);
+                        Ok(())
+                    },
+                    || {
+                        (0..roles).all(|index| {
+                            stage_permission_v3(true, || {
+                                live.set(live.get() + 1);
+                                if index == denied_at {
+                                    Err(Error::Permission)
+                                } else {
+                                    Ok(())
+                                }
+                            })
+                            .is_ok()
+                        })
+                    },
+                );
+                assert!(matches!(result, Ok(false)));
+                assert_eq!(audits.get(), 2);
+                assert_eq!(live.get(), denied_at + 1);
+            }
+        }
+    }
+    #[test]
+    fn compound_panic_cannot_be_reported_as_completed_permission() {
+        use std::cell::Cell;
+        let audits = Cell::new(0);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            compound_stage_permission_v3(
+                true,
+                || {
+                    audits.set(audits.get() + 1);
+                    Ok(())
+                },
+                || panic!("inert component callback panic"),
+            )
+        }));
+        assert!(result.is_err());
+        assert_eq!(audits.get(), 1);
     }
     #[test]
     fn full_stage_disclosure_names_closed_actions_and_uncertain_proof_semantics() {

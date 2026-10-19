@@ -1103,6 +1103,16 @@ fn check_stage_material_ceiling_v3(scope: &DurableConstructionScopeV1, now: u64)
         Error::Permission
     })
 }
+/// Pure deadline checks on the retained nominal review, never renewed scope.
+pub(in crate::host) fn check_stage_material_ceilings_v3(
+    review: &wholepact_engine::PrivateFixedStageReviewV3,
+) -> Result<()> {
+    let now = wall_seconds()?;
+    for material in review.materials() {
+        check_stage_material_ceiling_v3(material.scope(), now)?;
+    }
+    Ok(())
+}
 /// One synchronous stage callback only. The returned roster is borrowed inside
 /// this frame and never becomes a reusable validation or authority token.
 fn stage_material_batch_v3<T>(
@@ -1414,8 +1424,8 @@ struct CurrentScanAccessV3<'a, 'owner, 'host> {
     backend: &'a BackendIdentity,
     scope: &'a DurableConstructionScopeV1,
 }
-impl LocalWalletAccess for CurrentScanAccessV3<'_, '_, '_> {
-    fn permits(
+impl CurrentScanAccessV3<'_, '_, '_> {
+    fn permits_original_scan(
         &self,
         account: AccountUuid,
         backend: &BackendIdentity,
@@ -1432,7 +1442,66 @@ impl LocalWalletAccess for CurrentScanAccessV3<'_, '_, '_> {
                 .stage
                 .scan_bindings()
                 .is_some_and(|bindings| observed_host_permission(bindings.matches_actual(self)))
+    }
+}
+impl LocalWalletAccess for CurrentScanAccessV3<'_, '_, '_> {
+    fn permits(
+        &self,
+        account: AccountUuid,
+        backend: &BackendIdentity,
+        purpose: WalletAccessPurpose,
+    ) -> bool {
+        self.permits_original_scan(account, backend, purpose)
             && observed_host_permission(self.stage.check_callback())
+    }
+}
+/// Nominal original scan-owner borrow. Only this module can construct it; it
+/// does not itself grant stage permission and cannot escape the compound call.
+pub(in crate::host) struct OriginalScanPermissionViewV3<'a, 'b, 'owner, 'host> {
+    scan: &'a CurrentScanAccessV3<'b, 'owner, 'host>,
+}
+impl OriginalScanPermissionViewV3<'_, '_, '_, '_> {
+    pub(in crate::host) fn matches_request(
+        &self,
+        stage: &crate::host::durable_private_workspace_v1::OwnedPrivateWorkspaceStageV3<'_, '_>,
+        request: &wholepact_engine::PrivateFixedPermissionRequestV3<'_>,
+    ) -> bool {
+        std::ptr::eq(self.scan.stage, stage)
+            && request.observation_input().is_some_and(
+                |(scope, _digest, account, backend, purpose)| {
+                    scope == self.scan.scope
+                        && account == self.scan.account
+                        && backend == self.scan.backend
+                        && matches!(
+                            purpose,
+                            WalletAccessPurpose::SynchronizePublicBlocks
+                                | WalletAccessPurpose::SelectPrivateContribution
+                        )
+                },
+            )
+    }
+}
+impl LocalWalletAccess for OriginalScanPermissionViewV3<'_, '_, '_, '_> {
+    fn permits(
+        &self,
+        account: AccountUuid,
+        backend: &BackendIdentity,
+        purpose: WalletAccessPurpose,
+    ) -> bool {
+        self.scan.permits_original_scan(account, backend, purpose)
+    }
+}
+impl wholepact_engine::LocalPrivateFixedPermissionBoundaryV3 for CurrentScanAccessV3<'_, '_, '_> {
+    fn with_observation<'call>(
+        &self,
+        request: &wholepact_engine::PrivateFixedPermissionRequestV3<'_>,
+        run: wholepact_engine::PrivateFixedObservationCallbackV3<'call>,
+    ) -> bool {
+        self.stage.with_original_scan_permission_v3(
+            request,
+            OriginalScanPermissionViewV3 { scan: self },
+            run,
+        )
     }
 }
 
@@ -1484,13 +1553,14 @@ async fn observe_one_original_wallet_v3(
     };
     private_host_result_at_v1(PrivateDiagnosticSiteV1::SourcePermission, stage.check())?;
     let fresh = coordinator
-        .observe_exact_material_v2(
+        .observe_exact_material_compound_v3(
             private_host_result_at_v1(PrivateDiagnosticSiteV1::HostCheckpointEntry, host.access())?,
             candidate,
             &scope.account_id,
             sync,
             stage,
             stage,
+            &gate,
             &gate,
         )
         .await
@@ -5316,6 +5386,19 @@ mod tests {
         assert_eq!(engine.get(&access, "component-source").unwrap().revision, 2);
     }
     #[test]
+    fn proof_broker_keeps_full_legacy_permission_without_cross_thread_compound() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let broker = ForegroundProofBrokerV2 {
+            sender,
+            original_deadline: std::time::Instant::now() + Duration::from_secs(1),
+            cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        let consent: &dyn LocalPrivateWorkspaceConsentV1 = &broker;
+        assert!(consent.fixed_permission_boundary_v3().is_none());
+        assert!(consent.fixed_permission_boundary_v3().is_none());
+        assert!(receiver.try_recv().is_err());
+    }
+    #[test]
     fn proof_broker_denial_deadline_and_disconnect_cannot_return_cached_permission() {
         let (sender, receiver) = std::sync::mpsc::channel();
         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -7684,6 +7767,123 @@ mod stage_material_batch_component_v3_tests {
         }
     }
 
+    #[test]
+    fn encrypted_compound_permission_measures_identical_source_without_native_authority() {
+        use crate::host::durable_private_workspace_v1::compound_stage_permission_v3;
+        let f = Fixture::new();
+        for roles in [4u32, 7, 9] {
+            let mut durations = [0u64; 2];
+            for (index, compound) in [false, true].into_iter().enumerate() {
+                let audits = Cell::new(0u32);
+                let live = Cell::new(0u32);
+                let audit = || {
+                    audits.set(audits.get() + 1);
+                    component_run(
+                        &f,
+                        true,
+                        &f.scopes,
+                        ChangeAt::Never,
+                        150,
+                        150,
+                        &Counts::default(),
+                    )
+                };
+                let role = || -> Result<()> {
+                    live.set(live.get() + 1);
+                    for scope in &f.scopes {
+                        check_stage_material_ceiling_v3(scope, 150)?;
+                    }
+                    Ok(())
+                };
+                let started = std::time::Instant::now();
+                if compound {
+                    assert!(
+                        compound_stage_permission_v3(true, audit, || (0..roles)
+                            .all(|_| role().is_ok()))
+                        .unwrap()
+                    );
+                } else {
+                    for _ in 0..roles {
+                        audit().unwrap();
+                        role().unwrap();
+                    }
+                }
+                durations[index] = u64::try_from(started.elapsed().as_micros()).unwrap();
+                assert_eq!(audits.get(), if compound { 2 } else { roles });
+                assert_eq!(live.get(), roles);
+            }
+            eprintln!(
+                "synthetic_encrypted_compound_component roles={roles} legacy_audits={roles} compound_audits=2 legacy_us={} compound_us={} excludes_host_files_capsule_native_engine_gate_wallet_provider_proof=true",
+                durations[0], durations[1]
+            );
+        }
+        // Real encrypted source/roster work with inert historical fixture rows,
+        // never a native stage owner, current TLS source or financial grant.
+        f.audit_original().unwrap();
+    }
+    #[test]
+    fn encrypted_compound_exit_refuses_changed_original_selected_source() {
+        use crate::host::durable_private_workspace_v1::compound_stage_permission_v3;
+        let f = Fixture::new();
+        let audits = Cell::new(0u32);
+        let bodies = Cell::new(0u32);
+        let result = compound_stage_permission_v3(
+            true,
+            || {
+                audits.set(audits.get() + 1);
+                component_run(
+                    &f,
+                    true,
+                    &f.scopes,
+                    ChangeAt::Never,
+                    150,
+                    150,
+                    &Counts::default(),
+                )
+            },
+            || {
+                bodies.set(bodies.get() + 1);
+                f.replace_selected_source();
+                true
+            },
+        );
+        assert!(matches!(result, Err(Error::Authentication)));
+        assert_eq!((audits.get(), bodies.get()), (2, 1));
+        assert!(f.audit_original().is_err());
+    }
+    #[test]
+    fn encrypted_compound_exit_refuses_either_original_material_expiring() {
+        use crate::host::durable_private_workspace_v1::compound_stage_permission_v3;
+        for expired in 0..2 {
+            let f = Fixture::new();
+            let mut scopes = f.scopes.clone();
+            scopes[1 - expired].valid_until_unix_seconds = 300;
+            let now = Cell::new(150u64);
+            let audits = Cell::new(0u32);
+            let result = compound_stage_permission_v3(
+                true,
+                || {
+                    audits.set(audits.get() + 1);
+                    component_run(
+                        &f,
+                        true,
+                        &scopes,
+                        ChangeAt::Never,
+                        now.get(),
+                        now.get(),
+                        &Counts::default(),
+                    )
+                },
+                || {
+                    now.set(201);
+                    true
+                },
+            );
+            assert!(matches!(result, Err(Error::Permission)));
+            assert_eq!(audits.get(), 2);
+            assert_eq!(scopes[expired].valid_until_unix_seconds, 200);
+        }
+    }
     #[test]
     fn encrypted_same_source_pair_reduces_outer_audits_five_to_two_and_targets_two_to_one() {
         let f = Fixture::new();
