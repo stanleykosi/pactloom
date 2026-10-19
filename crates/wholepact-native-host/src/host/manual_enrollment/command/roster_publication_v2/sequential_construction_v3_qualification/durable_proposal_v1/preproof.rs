@@ -224,26 +224,50 @@ impl LocalDurableReviewExportConsentV1 for ExactExport {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FollowOnV1 {
+    Baseline,
+    FixedSigning,
+    AcquireReplyLoss,
+}
+
+type FollowOnExerciseV1 = for<'a> fn(super::fixed_signing::FixedSigningInputsV1<'a>) -> Result<()>;
+
+impl FollowOnV1 {
+    fn exercise(self) -> Option<FollowOnExerciseV1> {
+        match self {
+            Self::Baseline => None,
+            Self::FixedSigning => Some(super::fixed_signing::exercise),
+            Self::AcquireReplyLoss => Some(super::fixed_signing::exercise_acquire_reply_loss),
+        }
+    }
+}
+
 pub(super) fn exercise(original: initial::DurableInitialV1) -> Result<()> {
-    exercise_inner(original, false)
+    exercise_inner(original, FollowOnV1::Baseline)
 }
 
 /// Separate compiled path; the ordinary baseline never enters financial work.
 pub(super) fn exercise_with_fixed_signing(original: initial::DurableInitialV1) -> Result<()> {
-    exercise_inner(original, true)
+    exercise_inner(original, FollowOnV1::FixedSigning)
 }
 
-fn exercise_inner(original: initial::DurableInitialV1, fixed_signing: bool) -> Result<()> {
+/// Distinct original-session reply-loss path after the same genuine prefix.
+pub(super) fn exercise_with_acquire_reply_loss(original: initial::DurableInitialV1) -> Result<()> {
+    exercise_inner(original, FollowOnV1::AcquireReplyLoss)
+}
+
+fn exercise_inner(original: initial::DurableInitialV1, follow_on: FollowOnV1) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
         .build()
         .map_err(fail)?;
-    runtime.block_on(exercise_async(original, fixed_signing))
+    runtime.block_on(exercise_async(original, follow_on))
 }
 async fn exercise_async(
     mut original: initial::DurableInitialV1,
-    fixed_signing: bool,
+    follow_on: FollowOnV1,
 ) -> Result<()> {
     use wholepact_wallet::wallet::synthetic_born_receiver_blocks_v1::{
         SyntheticBornChainSpecV1, SyntheticBornReceiverBlocksV1,
@@ -908,11 +932,11 @@ async fn exercise_async(
         trace.complete();
     }
     drop(reloaded);
-    if fixed_signing {
+    if let Some(exercise) = follow_on.exercise() {
         // The same real provider, witness, original account custodians and
         // protected Engine/proof journals remain alive. No serialized receipt
         // reconstructs authority, and the immutable proof is never rebuilt.
-        super::fixed_signing::exercise(super::fixed_signing::FixedSigningInputsV1 {
+        exercise(super::fixed_signing::FixedSigningInputsV1 {
             original: &mut original,
             engine: &engine,
             jobs: &jobs,
@@ -940,4 +964,25 @@ async fn exercise_async(
     trace.complete();
     drop(original); // Revokes/joins worker and original witness before TempDir.
     Ok(())
+}
+
+#[cfg(test)]
+mod follow_on_tests {
+    use super::*;
+
+    #[test]
+    fn pure_follow_on_selects_exactly_one_distinct_continuation() {
+        assert!(FollowOnV1::Baseline.exercise().is_none());
+        let fixed: FollowOnExerciseV1 = super::super::fixed_signing::exercise;
+        let loss: FollowOnExerciseV1 = super::super::fixed_signing::exercise_acquire_reply_loss;
+        assert!(std::ptr::fn_addr_eq(
+            FollowOnV1::FixedSigning.exercise().unwrap(),
+            fixed
+        ));
+        assert!(std::ptr::fn_addr_eq(
+            FollowOnV1::AcquireReplyLoss.exercise().unwrap(),
+            loss
+        ));
+        assert!(!std::ptr::fn_addr_eq(fixed, loss));
+    }
 }

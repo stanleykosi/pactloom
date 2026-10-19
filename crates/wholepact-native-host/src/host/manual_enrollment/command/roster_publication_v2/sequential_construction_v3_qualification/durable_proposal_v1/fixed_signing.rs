@@ -596,6 +596,14 @@ fn receive_exact_result(
     .map_err(invalid)
 }
 
+#[path = "fixed_signing/acquire_reply_loss.rs"]
+mod acquire_reply_loss;
+
+/// Distinct qualification; the existing complete fixed-signing path is unchanged.
+pub(super) fn exercise_acquire_reply_loss(input: FixedSigningInputsV1<'_>) -> Result<()> {
+    acquire_reply_loss::exercise(input)
+}
+
 pub(super) fn exercise(input: FixedSigningInputsV1<'_>) -> Result<()> {
     let mut trace = HostTrace::new();
     trace.begin(B::MetadataCheck);

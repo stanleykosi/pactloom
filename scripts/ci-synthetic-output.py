@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bounded, public-only output for two fixed synthetic test selections.
+"""Bounded, public-only output for exact fixed synthetic test selections.
 
 Unknown runtime text is discarded, never written to a log. Outer timeout cannot
 establish descendant cleanup; the Rust owner is the actual cleanup producer.
@@ -16,11 +16,13 @@ import time
 
 PREFIX = 'host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification::'
 TESTS = {
+    'durable-acquire-reply-loss': (PREFIX + 'durable_proposal_v1::durable_proposal_native_acquire_reply_loss_retries_original_session', 1080),
     'durable-fixed-signing': (PREFIX + 'durable_proposal_v1::durable_proposal_native_fixed_signing_retains_exact_results', 1080),
     'durable-owner-reopen': (PREFIX + 'durable_proposal_v1::durable_proposal_native_owner_reopen_retains_exact_fixed_proof', 1080),
     'initial': (PREFIX + 'initial_joined_v3::actual_three_born_initial_roster_publications_preserve_refusal', 300),
     'full': (PREFIX + 'full_payment_inputs_v1::actual_three_born_full_payment_uses_one_original_synthetic_path', 1080),
 }
+DURABLE_DIAGNOSTIC_PHASES = frozenset(('durable-fixed-signing','durable-acquire-reply-loss'))
 PURE_TESTS = tuple(PREFIX + suffix for suffix in (
     'owned_test_process_group_v1::pure_tests::pure_cleanup_orders_one_signal_before_reap_then_only_observation',
     'owned_test_process_group_v1::pure_tests::pure_cleanup_never_observes_or_resignals_after_failed_or_expired_reap',
@@ -1177,7 +1179,7 @@ def run_storage_bootstrap(executable):
 
 def phase_selection(phase):
     name, seconds = TESTS[phase]
-    flags = ['--exact', name, '--test-threads=1'] + (['--ignored'] if phase in ('full','durable-owner-reopen','durable-fixed-signing') else [])
+    flags = ['--exact', name, '--test-threads=1'] + (['--ignored'] if phase in ('full','durable-owner-reopen','durable-fixed-signing','durable-acquire-reply-loss') else [])
     return name, seconds, flags
 
 def run(executable, phase):
@@ -1228,13 +1230,13 @@ def run(executable, phase):
                     else: timing=value
                 elif kind in ('history_measurement','history_measurement_invalid',
                               'history_server_measurement','history_server_measurement_invalid'):
-                    if phase=='durable-fixed-signing': history_measurements.record(kind,value)
+                    if phase in DURABLE_DIAGNOSTIC_PHASES: history_measurements.record(kind,value)
                 elif kind in ADMISSION_KINDS or kind in tuple(name+'_invalid' for name in ADMISSION_KINDS):
-                    if phase=='durable-fixed-signing': admission_diagnostics.record(kind,value)
+                    if phase in DURABLE_DIAGNOSTIC_PHASES: admission_diagnostics.record(kind,value)
                 elif kind in ('durable_flow','durable_flow_invalid'):
-                    if phase=='durable-fixed-signing': durable_flow.record(kind,value)
+                    if phase in DURABLE_DIAGNOSTIC_PHASES: durable_flow.record(kind,value)
                 elif kind in ('durable_lifecycle','durable_lifecycle_invalid'):
-                    if phase=='durable-fixed-signing': durable_lifecycle.record(kind,value)
+                    if phase in DURABLE_DIAGNOSTIC_PHASES: durable_lifecycle.record(kind,value)
                 elif kind=='outcome':
                     if phase!='full' or outcome is not None: raise ValueError('unexpected duplicate public outcome')
                     outcome=value
@@ -1250,7 +1252,7 @@ def run(executable, phase):
     # Measurement is optional and emitted only after the independently observed
     # process/root cleanup. Failure exit statuses still retain bounded timing;
     # malformed/missing/duplicate timing never changes the original result gate.
-    if phase=='durable-fixed-signing' and cleanup_observed:
+    if phase in DURABLE_DIAGNOSTIC_PHASES and cleanup_observed:
         history_measurements.emit()
         admission_diagnostics.emit()
         durable_flow.emit()

@@ -26,6 +26,42 @@ fn require_exact_retained_request(
     Ok(())
 }
 
+// Only this nominal fixture leaf can construct an arm. Its data selects one
+// actual Verified admission, never a general transport fault configuration.
+pub(crate) struct DurableAcquireReplyLossArmV1 {
+    admission: OwnerControlRequest,
+}
+impl DurableAcquireReplyLossArmV1 {
+    pub(crate) fn admission(&self) -> &OwnerControlRequest {
+        &self.admission
+    }
+}
+
+/// Inert, non-Clone, consume-once qualification evidence. It holds no socket,
+/// journal, installation, source, client, exporter, key or native lease, and it
+/// cannot approve, wait for, retry, rearm, or renew any operation.
+pub struct EphemeralDurableAcquireReplyLossObservationV1 {
+    observation: crate::transport::DurableAcquireReplyLossObservationV1,
+    original_server_handle_counter: Arc<AtomicUsize>,
+}
+
+/// Bounded facts from the final joined, reopened actual-journal audit. These
+/// facts are historical test output, never pending or active session authority.
+pub struct EphemeralDurableAcquireReplyLossReportV1 {
+    pub original_acquire_committed: bool,
+    pub selected_response_transport_lost: bool,
+    pub retry_same_original: bool,
+    pub event_delta: u64,
+    pub financial_acquire_delta: u64,
+    pub session_key_delta: u64,
+    pub prefix_unchanged: bool,
+    pub no_new_activation_or_reservation: bool,
+    /// This authority server/handler drain. The Host separately joins its
+    /// original signer/client before invoking this final audit.
+    pub stopped_and_drained: bool,
+    pub qualification: &'static str,
+}
+
 impl EphemeralNativeWitnessV1 {
     /// The caller first drops its informational server, after the signer has
     /// finished preparing this actual request from the imported fixed source.
@@ -229,6 +265,90 @@ impl EphemeralNativeWitnessV1 {
         &mut self,
         admission_operation_id: &str,
     ) -> Result<EphemeralHistoryServerV1> {
+        let server = self.open_exact_committed_durable_payment_server(admission_operation_id)?;
+        let serving = self.serve_exact_server(server)?;
+        self.durable_payment = FixturePhaseV1::Idle;
+        Ok(serving)
+    }
+
+    /// Distinct synthetic qualification entry. Ordinary committed serving above
+    /// remains unarmed. Only this exact newly opened scope receives the arm.
+    pub fn serve_committed_durable_payment_losing_acquire_reply_v1(
+        &mut self,
+        admission_operation_id: &str,
+    ) -> Result<(
+        EphemeralHistoryServerV1,
+        EphemeralDurableAcquireReplyLossObservationV1,
+    )> {
+        let FixturePhaseV1::Verified(request) = &self.durable_payment else {
+            return Err(AuthorityError::Permission);
+        };
+        let arm = DurableAcquireReplyLossArmV1 {
+            admission: request.clone(),
+        };
+        let mut server =
+            self.open_exact_committed_durable_payment_server(admission_operation_id)?;
+        let observation = server.attach_durable_acquire_reply_loss_v1(arm)?;
+        let serving = self.serve_exact_server(server)?;
+        self.durable_payment = FixturePhaseV1::Idle;
+        Ok((
+            serving,
+            EphemeralDurableAcquireReplyLossObservationV1 {
+                observation,
+                // The existing inert counter identifies this fixture without
+                // retaining its listener, installation or operational owner.
+                // Retaining the allocation also prevents pointer-reuse/ABA.
+                original_server_handle_counter: self.listener.server_handles.clone(),
+            },
+        ))
+    }
+
+    /// The caller first stops/joins its signer owner and drops its real serving
+    /// handle. This consumes only inert observations, then audits the SAME
+    /// original namespace. The retry receipt is comparison data, not authority.
+    pub fn audit_committed_durable_payment_reply_loss_v1(
+        &mut self,
+        observation: EphemeralDurableAcquireReplyLossObservationV1,
+        retry: &crate::WriterSessionReceipt,
+    ) -> Result<EphemeralDurableAcquireReplyLossReportV1> {
+        if self.listener.server_handles.load(Ordering::Acquire) != 0
+            || !self.window.can_select()
+            || !matches!(&self.durable_payment, FixturePhaseV1::Idle)
+            || !Arc::ptr_eq(
+                &observation.original_server_handle_counter,
+                &self.listener.server_handles,
+            )
+        {
+            return Err(AuthorityError::Permission);
+        }
+        let account_id = observation.observation.account_id()?;
+        if account_id != self.window.input.expected_account_id {
+            return Err(AuthorityError::Authentication);
+        }
+        let journal =
+            crate::witness_locator::open_born_history(self.original_namespace_input(&account_id)?)?;
+        observation.observation.audit(&journal, retry)?;
+        Ok(EphemeralDurableAcquireReplyLossReportV1 {
+            original_acquire_committed: true,
+            selected_response_transport_lost: true,
+            retry_same_original: true,
+            event_delta: 1,
+            financial_acquire_delta: 1,
+            session_key_delta: 1,
+            prefix_unchanged: true,
+            no_new_activation_or_reservation: true,
+            stopped_and_drained: true,
+            qualification: "original-pending-session-after-committed-acquire-reply-loss-v1",
+        })
+    }
+
+    // Shared only by the two nominal fixture entries. The production namespace
+    // opener, original endpoint, checks, finite serving lifetime and Drop stay
+    // unchanged; this helper does not accept a generic fault flag or selector.
+    fn open_exact_committed_durable_payment_server(
+        &mut self,
+        admission_operation_id: &str,
+    ) -> Result<AuthorityServer> {
         let FixturePhaseV1::Verified(request) = &self.durable_payment else {
             return Err(AuthorityError::Permission);
         };
@@ -256,9 +376,7 @@ impl EphemeralNativeWitnessV1 {
             &actual_listen.to_string(),
         )?;
         self.listener.bound = Some(listener);
-        let serving = self.serve_exact_server(server)?;
-        self.durable_payment = FixturePhaseV1::Idle;
-        Ok(serving)
+        Ok(server)
     }
 }
 
