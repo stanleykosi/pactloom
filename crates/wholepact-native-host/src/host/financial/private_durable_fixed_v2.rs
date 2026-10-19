@@ -496,7 +496,10 @@ use wholepact_wallet::wallet::{
     AccountUuid,
     protected_sync::{
         BackendIdentity, LocalWalletAccess, ProtectedWalletSync, WalletAccessPurpose,
-        durable_construction_v1::DurableConstructionWalletSlotV1,
+        durable_construction_v1::{
+            DurableConstructionWalletSlotV1, FreshDurableConstructionObservationV1,
+            DurableConstructionError,
+        },
     },
 };
 
@@ -1307,6 +1310,140 @@ impl LocalWalletAccess for CurrentScanAccessV3<'_, '_, '_> {
     }
 }
 
+/// Same-thread, single-pass two-owner wave. Both admitted scans are drained
+/// before ordered results escape, including failure. No retry or clock reset.
+async fn same_thread_two_wallet_wave_v3<T, E>(
+    first: impl std::future::Future<Output = std::result::Result<T, E>>,
+    second: impl std::future::Future<Output = std::result::Result<T, E>>,
+) -> std::result::Result<[T; 2], E> {
+    let (first, second) = tokio::join!(first, second);
+    Ok([first?, second?])
+}
+
+async fn observe_one_original_wallet_v3(
+    host: &Host,
+    coordinator: &PrivateDurableCoordinatorV1<'_>,
+    candidate: &str,
+    cache_directory: &Option<Directory>,
+    wallet: &mut ScanWalletOwnerV2,
+    captured: &Option<(DurableConstructionScopeV1, BackendIdentity)>,
+    stage: &crate::host::durable_private_workspace_v1::OwnedPrivateWorkspaceStageV3<'_, '_>,
+) -> Result<FreshDurableConstructionObservationV1> {
+    let (scope, backend) = captured.as_ref().ok_or(Error::Invalid)?;
+    wallet.check()?;
+    let sync = wallet.wallet.as_mut().ok_or(Error::Invalid)?;
+    let gate = CurrentScanAccessV3 {
+        cache_directory: cache_directory.as_ref().ok_or(Error::Invalid)?,
+        stage,
+        directory: wallet.directory.as_ref().ok_or(Error::Invalid)?,
+        origin: wallet.origin.as_ref().ok_or(Error::Invalid)?,
+        account: sync.account_uuid(),
+        backend,
+        scope,
+    };
+    stage.check()?;
+    let fresh = coordinator
+        .observe_exact_material_v2(
+            host.access()?,
+            candidate,
+            &scope.account_id,
+            sync,
+            stage,
+            stage,
+            &gate,
+        )
+        .await
+        .map_err(observe_engine_observation)?;
+    stage.check()?;
+    Ok(fresh)
+}
+
+fn original_slot_cause_v3(
+    error: &DurableConstructionError,
+) -> (PrivateDiagnosticFamilyV1, PrivateDiagnosticCauseV1) {
+    use PrivateDiagnosticCauseV1 as C;
+    use PrivateDiagnosticFamilyV1 as F;
+    use wholepact_wallet::wallet::protected_sync::SyncError as S;
+    use wholepact_wallet::wallet::WalletError as W;
+    use wholepact_chain::ChainError as H;
+    match error {
+        DurableConstructionError::Invalid => (F::DurableConstruction, C::Invalid),
+        DurableConstructionError::Binding => (F::DurableConstruction, C::Binding),
+        DurableConstructionError::Stale => (F::DurableConstruction, C::Stale),
+        DurableConstructionError::Storage => (F::DurableConstruction, C::Storage),
+        DurableConstructionError::Sync(sync) => match sync {
+            S::AccessDenied => (F::Sync, C::AccessDenied),
+            S::InvalidRequest => (F::Sync, C::InvalidRequest),
+            S::Interrupted => (F::Sync, C::Interrupted),
+            S::ReconciliationRequired => (F::Sync, C::ReconciliationRequired),
+            S::InvalidResponse => (F::Sync, C::InvalidResponse),
+            S::ResourceLimit => (F::Sync, C::ResourceLimit),
+            S::NoCurrentObservation => (F::Sync, C::NoCurrentObservation),
+            S::Wallet(wallet) => (
+                F::Wallet,
+                match wallet {
+                    W::Storage => C::Storage,
+                    W::AccountScope => C::AccountScope,
+                    W::AccountMismatch => C::AccountMismatch,
+                    W::IncompleteSync => C::IncompleteSync,
+                    W::UnsupportedProfile => C::UnsupportedProfile,
+                    W::ChainMismatch => C::ChainMismatch,
+                    W::InsufficientFunds => C::InsufficientFunds,
+                    W::InvalidRequest => C::InvalidRequest,
+                    W::MissingWitness => C::MissingWitness,
+                    W::InvalidNote => C::InvalidNote,
+                    W::Scan => C::Scan,
+                    W::Transport => C::Transport,
+                },
+            ),
+            S::Chain(chain) => (
+                F::Chain,
+                match chain {
+                    H::InvalidConfiguration => C::InvalidConfiguration,
+                    H::WrongNetwork => C::WrongNetwork,
+                    H::UnsupportedProxyConfiguration => C::UnsupportedProxyConfiguration,
+                    H::WrongBranch => C::WrongBranch,
+                    H::StaleChain => C::StaleChain,
+                    H::ContradictoryChain => C::ContradictoryChain,
+                    H::Timeout => C::Timeout,
+                    H::TransportUnavailable => C::TransportUnavailable,
+                    H::ObservationInterrupted => C::ObservationInterrupted,
+                    H::MissingAncestryEvidence => C::MissingAncestryEvidence,
+                    H::NotObserved => C::NotObserved,
+                    H::ResourceLimit => C::ResourceLimit,
+                    H::MalformedEvidence => C::MalformedEvidence,
+                    H::UnsupportedCapability => C::UnsupportedCapability,
+                    H::BackendFailure { .. } => C::BackendFailure,
+                    H::ClockUnavailable => C::ClockUnavailable,
+                    H::IdempotencyConflict => C::IdempotencyConflict,
+                    H::JournalFailure => C::JournalFailure,
+                    H::SubmissionNotAuthorized => C::SubmissionNotAuthorized,
+                    H::SubmissionExpiryMargin => C::SubmissionExpiryMargin,
+                    H::ObligationConflict => C::ObligationConflict,
+                    H::SubmissionOutcomeUnrecorded => C::SubmissionOutcomeUnrecorded,
+                    H::SubmissionRetentionUncertain => C::SubmissionRetentionUncertain,
+                },
+            ),
+        },
+    }
+}
+fn observe_original_slot_result_v3<T>(
+    result: std::result::Result<T, DurableConstructionError>,
+) -> Result<T> {
+    if let Err(error) = &result {
+        let (family, cause) = original_slot_cause_v3(error);
+        host_private_primary_v1(
+            PrivateDiagnosticOperationV1::Checkpoint,
+            PrivateDiagnosticSiteV1::SlotBindings,
+            family,
+            cause,
+        );
+    }
+    // Keep the original terminal mapping. The actual lower error is observed
+    // before it is erased, while the exact live stage/invocation still exists.
+    result.map_err(|_| Error::Permission)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(in crate::host) enum PrivateCaptureStageV2 {
     BeforeInitial,
@@ -1722,59 +1859,52 @@ impl<'host> PrivateFixedSessionV2<'host> {
             )?),
             || self.cache.check(),
         )?;
-        let mut fresh = Vec::new();
-        for index in 0..2 {
-            let (scope, backend) = self.captured[index].as_ref().ok_or(Error::Invalid)?;
-            let wallet = &mut self.cache.wallets[index];
-            wallet.check()?;
-            let sync = wallet.wallet.as_mut().ok_or(Error::Invalid)?;
-            let gate = CurrentScanAccessV3 {
-                cache_directory: self.cache.directory.as_ref().ok_or(Error::Invalid)?,
-                stage: &prepare,
-                directory: wallet.directory.as_ref().ok_or(Error::Invalid)?,
-                origin: wallet.origin.as_ref().ok_or(Error::Invalid)?,
-                account: sync.account_uuid(),
-                backend,
-                scope,
-            };
-            prepare.check()?;
-            fresh.push(
-                coordinator
-                    .observe_exact_material_v2(
-                        self.host.access()?,
-                        self.candidate.candidate_id(),
-                        &scope.account_id,
-                        sync,
-                        &prepare,
-                        &prepare,
-                        &gate,
-                    )
-                    .await
-                    .map_err(observe_engine_observation)?,
-            );
-            prepare.check()?;
-        }
+        let fresh = {
+            let [left, right] = &mut self.cache.wallets;
+            same_thread_two_wallet_wave_v3(
+                observe_one_original_wallet_v3(
+                    self.host,
+                    coordinator,
+                    self.candidate.candidate_id(),
+                    &self.cache.directory,
+                    left,
+                    &self.captured[0],
+                    &prepare,
+                ),
+                observe_one_original_wallet_v3(
+                    self.host,
+                    coordinator,
+                    self.candidate.candidate_id(),
+                    &self.cache.directory,
+                    right,
+                    &self.captured[1],
+                    &prepare,
+                ),
+            )
+            .await?
+        };
         complete_private_stage(PrivateBoundaryV2::Observe);
         begin_private_stage(PrivateBoundaryV2::Checkpoint);
         let prepared = {
             let [left, right] = &mut self.cache.wallets;
             coordinator
                 .prepare_checkpoint_for_stage_v3(
-                    self.host.access()?,
+                    private_host_result_at_v1(
+                        PrivateDiagnosticSiteV1::HostCheckpointEntry,
+                        self.host.access(),
+                    )?,
                     &checkpoint_key,
                     self.candidate.candidate_id(),
                     self.revision,
                     vec![
-                        DurableConstructionWalletSlotV1::new(
+                        observe_original_slot_result_v3(DurableConstructionWalletSlotV1::new(
                             left.wallet.as_mut().ok_or(Error::Invalid)?,
                             &fresh[0],
-                        )
-                        .map_err(|_| Error::Permission)?,
-                        DurableConstructionWalletSlotV1::new(
+                        ))?,
+                        observe_original_slot_result_v3(DurableConstructionWalletSlotV1::new(
                             right.wallet.as_mut().ok_or(Error::Invalid)?,
                             &fresh[1],
-                        )
-                        .map_err(|_| Error::Permission)?,
+                        ))?,
                     ],
                     wholepact_protocol::proving::ProvingLimits { maximum_actions: 8 },
                     &prepare,
@@ -1802,54 +1932,47 @@ impl<'host> PrivateFixedSessionV2<'host> {
             || self.cache.check(),
         )?;
         // Every dialog is complete before this single genuine final scan pass.
-        let mut fresh = Vec::new();
-        for index in 0..2 {
-            let (scope, backend) = self.captured[index].as_ref().ok_or(Error::Invalid)?;
-            let wallet = &mut self.cache.wallets[index];
-            wallet.check()?;
-            let sync = wallet.wallet.as_mut().ok_or(Error::Invalid)?;
-            let gate = CurrentScanAccessV3 {
-                cache_directory: self.cache.directory.as_ref().ok_or(Error::Invalid)?,
-                stage: &admit,
-                directory: wallet.directory.as_ref().ok_or(Error::Invalid)?,
-                origin: wallet.origin.as_ref().ok_or(Error::Invalid)?,
-                account: sync.account_uuid(),
-                backend,
-                scope,
-            };
-            admit.check()?;
-            fresh.push(
-                coordinator
-                    .observe_exact_material_v2(
-                        self.host.access()?,
-                        self.candidate.candidate_id(),
-                        &scope.account_id,
-                        sync,
-                        &admit,
-                        &admit,
-                        &gate,
-                    )
-                    .await
-                    .map_err(observe_engine_observation)?,
-            );
-            admit.check()?;
-        }
+        let fresh = {
+            let [left, right] = &mut self.cache.wallets;
+            same_thread_two_wallet_wave_v3(
+                observe_one_original_wallet_v3(
+                    self.host,
+                    coordinator,
+                    self.candidate.candidate_id(),
+                    &self.cache.directory,
+                    left,
+                    &self.captured[0],
+                    &admit,
+                ),
+                observe_one_original_wallet_v3(
+                    self.host,
+                    coordinator,
+                    self.candidate.candidate_id(),
+                    &self.cache.directory,
+                    right,
+                    &self.captured[1],
+                    &admit,
+                ),
+            )
+            .await?
+        };
         let checkpoint = {
             let [left, right] = &mut self.cache.wallets;
             prepared
                 .admit_original_v2(
-                    self.host.access()?,
+                    private_host_result_at_v1(
+                        PrivateDiagnosticSiteV1::HostCheckpointEntry,
+                        self.host.access(),
+                    )?,
                     vec![
-                        DurableConstructionWalletSlotV1::new(
+                        observe_original_slot_result_v3(DurableConstructionWalletSlotV1::new(
                             left.wallet.as_mut().ok_or(Error::Invalid)?,
                             &fresh[0],
-                        )
-                        .map_err(|_| Error::Permission)?,
-                        DurableConstructionWalletSlotV1::new(
+                        ))?,
+                        observe_original_slot_result_v3(DurableConstructionWalletSlotV1::new(
                             right.wallet.as_mut().ok_or(Error::Invalid)?,
                             &fresh[1],
-                        )
-                        .map_err(|_| Error::Permission)?,
+                        ))?,
                     ],
                     &admit,
                     &admit,
@@ -5858,5 +5981,525 @@ mod stage_cost_observation_tests {
             invalid.elapsed_ms = PRIVATE_STAGE_MAX_MS_V1 + 1;
             assert!(!invalid.valid(operation));
         }
+    }
+}
+
+#[cfg(test)]
+mod observation_wave_v3_tests {
+    use super::*;
+    use std::{cell::Cell, rc::Rc};
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+    struct Owned {
+        index: usize,
+        dropped: Rc<Cell<usize>>,
+    }
+    impl Drop for Owned {
+        fn drop(&mut self) {
+            self.dropped.set(self.dropped.get() + 1);
+        }
+    }
+
+    #[test]
+    fn observation_wave_suspends_both_original_futures_before_either_completes() {
+        runtime().block_on(async {
+            let started = Rc::new(Cell::new(0u8));
+            let completed = Rc::new(Cell::new(0));
+            let dropped = Rc::new(Cell::new(0));
+            let (left_tx, left_rx) = tokio::sync::oneshot::channel();
+            let (right_tx, right_rx) = tokio::sync::oneshot::channel();
+            let first = async {
+                started.set(started.get() | 1);
+                left_tx.send(()).unwrap();
+                right_rx.await.unwrap();
+                assert_eq!(started.get(), 3);
+                completed.set(completed.get() + 1);
+                Ok::<_, ()>(Owned {
+                    index: 0,
+                    dropped: dropped.clone(),
+                })
+            };
+            let second = async {
+                started.set(started.get() | 2);
+                right_tx.send(()).unwrap();
+                left_rx.await.unwrap();
+                assert_eq!(started.get(), 3);
+                completed.set(completed.get() + 1);
+                Ok::<_, ()>(Owned {
+                    index: 1,
+                    dropped: dropped.clone(),
+                })
+            };
+            // Test liveness only, never a production scan/native deadline.
+            let result = tokio::time::timeout(
+                Duration::from_secs(2),
+                same_thread_two_wallet_wave_v3(first, second),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(completed.get(), 2);
+            assert_eq!([result[0].index, result[1].index], [0, 1]);
+            assert_eq!(dropped.get(), 0);
+            drop(result);
+            assert_eq!(dropped.get(), 2);
+        });
+    }
+
+    #[test]
+    fn observation_wave_drains_both_and_keeps_first_owner_error_without_retry() {
+        runtime().block_on(async {
+            for fail_second in [false, true] {
+                let calls = Rc::new(Cell::new(0));
+                let finished = Rc::new(Cell::new(0));
+                let drops = Rc::new(Cell::new(0));
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                let first = async {
+                    calls.set(calls.get() + 1);
+                    rx.await.unwrap();
+                    finished.set(finished.get() + 1);
+                    Err::<Owned, _>(Owned {
+                        index: 0,
+                        dropped: drops.clone(),
+                    })
+                };
+                let second = async {
+                    calls.set(calls.get() + 1);
+                    finished.set(finished.get() + 1);
+                    tx.send(()).unwrap();
+                    let value = Owned {
+                        index: 1,
+                        dropped: drops.clone(),
+                    };
+                    if fail_second { Err(value) } else { Ok(value) }
+                };
+                let result = same_thread_two_wallet_wave_v3(first, second).await;
+                let error = match result {
+                    Err(error) => error,
+                    Ok(_) => panic!("failed wave escaped"),
+                };
+                assert_eq!(error.index, 0);
+                assert_eq!(calls.get(), 2);
+                assert_eq!(finished.get(), 2);
+                assert_eq!(drops.get(), 1);
+                drop(error);
+                assert_eq!(drops.get(), 2);
+            }
+        });
+    }
+
+    #[test]
+    fn observation_wave_drop_cancels_both_pending_futures_without_output_or_retry() {
+        struct Pending {
+            polled: Rc<Cell<usize>>,
+            dropped: Rc<Cell<usize>>,
+        }
+        impl std::future::Future for Pending {
+            type Output = std::result::Result<(), ()>;
+            fn poll(
+                self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<Self::Output> {
+                self.polled.set(self.polled.get() + 1);
+                std::task::Poll::Pending
+            }
+        }
+        impl Drop for Pending {
+            fn drop(&mut self) {
+                self.dropped.set(self.dropped.get() + 1);
+            }
+        }
+        struct Wake;
+        impl std::task::Wake for Wake {
+            fn wake(self: std::sync::Arc<Self>) {}
+        }
+        let polled = Rc::new(Cell::new(0));
+        let dropped = Rc::new(Cell::new(0));
+        let mut wave = Box::pin(same_thread_two_wallet_wave_v3(
+            Pending {
+                polled: polled.clone(),
+                dropped: dropped.clone(),
+            },
+            Pending {
+                polled: polled.clone(),
+                dropped: dropped.clone(),
+            },
+        ));
+        let waker = std::task::Waker::from(std::sync::Arc::new(Wake));
+        let mut context = std::task::Context::from_waker(&waker);
+        assert!(std::future::Future::poll(wave.as_mut(), &mut context).is_pending());
+        assert_eq!(polled.get(), 2);
+        drop(wave);
+        assert_eq!(dropped.get(), 2);
+        assert_eq!(polled.get(), 2);
+    }
+
+    #[test]
+    fn original_slot_mapping_preserves_owned_success_and_closed_lower_error_categories() {
+        use wholepact_wallet::wallet::protected_sync::SyncError as S;
+        use wholepact_chain::ChainError as H;
+        use PrivateDiagnosticFamilyV1 as F;
+        use PrivateDiagnosticCauseV1 as C;
+        let dropped = Rc::new(Cell::new(0));
+        let value = observe_original_slot_result_v3(Ok(Owned {
+            index: 7,
+            dropped: dropped.clone(),
+        }))
+        .unwrap();
+        assert_eq!(value.index, 7);
+        assert_eq!(dropped.get(), 0);
+        drop(value);
+        assert_eq!(dropped.get(), 1);
+        for (error, family, cause) in [
+            (
+                DurableConstructionError::Invalid,
+                F::DurableConstruction,
+                C::Invalid,
+            ),
+            (
+                DurableConstructionError::Binding,
+                F::DurableConstruction,
+                C::Binding,
+            ),
+            (
+                DurableConstructionError::Stale,
+                F::DurableConstruction,
+                C::Stale,
+            ),
+            (
+                DurableConstructionError::Storage,
+                F::DurableConstruction,
+                C::Storage,
+            ),
+            (
+                DurableConstructionError::Sync(S::AccessDenied),
+                F::Sync,
+                C::AccessDenied,
+            ),
+            (
+                DurableConstructionError::Sync(S::InvalidRequest),
+                F::Sync,
+                C::InvalidRequest,
+            ),
+            (
+                DurableConstructionError::Sync(S::Interrupted),
+                F::Sync,
+                C::Interrupted,
+            ),
+            (
+                DurableConstructionError::Sync(S::ReconciliationRequired),
+                F::Sync,
+                C::ReconciliationRequired,
+            ),
+            (
+                DurableConstructionError::Sync(S::InvalidResponse),
+                F::Sync,
+                C::InvalidResponse,
+            ),
+            (
+                DurableConstructionError::Sync(S::ResourceLimit),
+                F::Sync,
+                C::ResourceLimit,
+            ),
+            (
+                DurableConstructionError::Sync(S::NoCurrentObservation),
+                F::Sync,
+                C::NoCurrentObservation,
+            ),
+            (
+                DurableConstructionError::Sync(S::Chain(H::InvalidConfiguration)),
+                F::Chain,
+                C::InvalidConfiguration,
+            ),
+            (
+                DurableConstructionError::Sync(S::Chain(H::WrongNetwork)),
+                F::Chain,
+                C::WrongNetwork,
+            ),
+            (
+                DurableConstructionError::Sync(S::Chain(H::UnsupportedProxyConfiguration)),
+                F::Chain,
+                C::UnsupportedProxyConfiguration,
+            ),
+            (
+                DurableConstructionError::Sync(S::Chain(H::WrongBranch)),
+                F::Chain,
+                C::WrongBranch,
+            ),
+            (
+                DurableConstructionError::Sync(S::Chain(H::StaleChain)),
+                F::Chain,
+                C::StaleChain,
+            ),
+            (
+                DurableConstructionError::Sync(S::Chain(H::ContradictoryChain)),
+                F::Chain,
+                C::ContradictoryChain,
+            ),
+            (
+                DurableConstructionError::Sync(S::Chain(H::Timeout)),
+                F::Chain,
+                C::Timeout,
+            ),
+            (
+                DurableConstructionError::Sync(S::Chain(H::TransportUnavailable)),
+                F::Chain,
+                C::TransportUnavailable,
+            ),
+            (
+                DurableConstructionError::Sync(S::Chain(H::ObservationInterrupted)),
+                F::Chain,
+                C::ObservationInterrupted,
+            ),
+            (
+                DurableConstructionError::Sync(S::Chain(H::MissingAncestryEvidence)),
+                F::Chain,
+                C::MissingAncestryEvidence,
+            ),
+            (
+                DurableConstructionError::Sync(S::Chain(H::NotObserved)),
+                F::Chain,
+                C::NotObserved,
+            ),
+            (
+                DurableConstructionError::Sync(S::Chain(H::ResourceLimit)),
+                F::Chain,
+                C::ResourceLimit,
+            ),
+            (
+                DurableConstructionError::Sync(S::Chain(H::MalformedEvidence)),
+                F::Chain,
+                C::MalformedEvidence,
+            ),
+            (
+                DurableConstructionError::Sync(S::Chain(H::UnsupportedCapability)),
+                F::Chain,
+                C::UnsupportedCapability,
+            ),
+            (
+                DurableConstructionError::Sync(S::Chain(H::BackendFailure {
+                    grpc_code: i32::MAX,
+                })),
+                F::Chain,
+                C::BackendFailure,
+            ),
+            (
+                DurableConstructionError::Sync(S::Chain(H::ClockUnavailable)),
+                F::Chain,
+                C::ClockUnavailable,
+            ),
+            (
+                DurableConstructionError::Sync(S::Chain(H::IdempotencyConflict)),
+                F::Chain,
+                C::IdempotencyConflict,
+            ),
+            (
+                DurableConstructionError::Sync(S::Chain(H::JournalFailure)),
+                F::Chain,
+                C::JournalFailure,
+            ),
+            (
+                DurableConstructionError::Sync(S::Chain(H::SubmissionNotAuthorized)),
+                F::Chain,
+                C::SubmissionNotAuthorized,
+            ),
+            (
+                DurableConstructionError::Sync(S::Chain(H::SubmissionExpiryMargin)),
+                F::Chain,
+                C::SubmissionExpiryMargin,
+            ),
+            (
+                DurableConstructionError::Sync(S::Chain(H::ObligationConflict)),
+                F::Chain,
+                C::ObligationConflict,
+            ),
+            (
+                DurableConstructionError::Sync(S::Chain(H::SubmissionOutcomeUnrecorded)),
+                F::Chain,
+                C::SubmissionOutcomeUnrecorded,
+            ),
+            (
+                DurableConstructionError::Sync(S::Chain(H::SubmissionRetentionUncertain)),
+                F::Chain,
+                C::SubmissionRetentionUncertain,
+            ),
+            (
+                DurableConstructionError::Sync(S::Wallet(
+                    wholepact_wallet::wallet::WalletError::Storage,
+                )),
+                F::Wallet,
+                C::Storage,
+            ),
+            (
+                DurableConstructionError::Sync(S::Wallet(
+                    wholepact_wallet::wallet::WalletError::AccountScope,
+                )),
+                F::Wallet,
+                C::AccountScope,
+            ),
+            (
+                DurableConstructionError::Sync(S::Wallet(
+                    wholepact_wallet::wallet::WalletError::AccountMismatch,
+                )),
+                F::Wallet,
+                C::AccountMismatch,
+            ),
+            (
+                DurableConstructionError::Sync(S::Wallet(
+                    wholepact_wallet::wallet::WalletError::IncompleteSync,
+                )),
+                F::Wallet,
+                C::IncompleteSync,
+            ),
+            (
+                DurableConstructionError::Sync(S::Wallet(
+                    wholepact_wallet::wallet::WalletError::UnsupportedProfile,
+                )),
+                F::Wallet,
+                C::UnsupportedProfile,
+            ),
+            (
+                DurableConstructionError::Sync(S::Wallet(
+                    wholepact_wallet::wallet::WalletError::ChainMismatch,
+                )),
+                F::Wallet,
+                C::ChainMismatch,
+            ),
+            (
+                DurableConstructionError::Sync(S::Wallet(
+                    wholepact_wallet::wallet::WalletError::InsufficientFunds,
+                )),
+                F::Wallet,
+                C::InsufficientFunds,
+            ),
+            (
+                DurableConstructionError::Sync(S::Wallet(
+                    wholepact_wallet::wallet::WalletError::InvalidRequest,
+                )),
+                F::Wallet,
+                C::InvalidRequest,
+            ),
+            (
+                DurableConstructionError::Sync(S::Wallet(
+                    wholepact_wallet::wallet::WalletError::MissingWitness,
+                )),
+                F::Wallet,
+                C::MissingWitness,
+            ),
+            (
+                DurableConstructionError::Sync(S::Wallet(
+                    wholepact_wallet::wallet::WalletError::InvalidNote,
+                )),
+                F::Wallet,
+                C::InvalidNote,
+            ),
+            (
+                DurableConstructionError::Sync(S::Wallet(
+                    wholepact_wallet::wallet::WalletError::Scan,
+                )),
+                F::Wallet,
+                C::Scan,
+            ),
+            (
+                DurableConstructionError::Sync(S::Wallet(
+                    wholepact_wallet::wallet::WalletError::Transport,
+                )),
+                F::Wallet,
+                C::Transport,
+            ),
+        ] {
+            assert_eq!(original_slot_cause_v3(&error), (family, cause));
+            let result: Result<()> = observe_original_slot_result_v3(Err(error));
+            assert!(matches!(result, Err(Error::Permission)));
+        }
+    }
+
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    #[test]
+    fn original_slot_failure_is_observed_before_stage_drop_without_engine_call_facts() {
+        use wholepact_engine::PrivateFixedStageV3 as S;
+        use wholepact_wallet::wallet::protected_sync::SyncError;
+        for kind in [S::Prepare, S::AdmitOriginal] {
+            let _scope = begin_private_fixed_diagnostic_scope_v1();
+            let invocation =
+                begin_private_diagnostic_invocation_v1(PrivateDiagnosticOperationV1::Checkpoint);
+            let stage = begin_private_stage_cost_v1(
+                kind,
+                std::time::Instant::now() + Duration::from_secs(120),
+            );
+            stage.callback(|| Ok(())).unwrap();
+            let result: Result<()> = observe_original_slot_result_v3(Err(
+                DurableConstructionError::Sync(SyncError::NoCurrentObservation),
+            ));
+            assert!(matches!(result, Err(Error::Permission)));
+            let first = private_fixed_diagnostic_snapshot_v1().unwrap();
+            assert_eq!(first.primary.site, PrivateDiagnosticSiteV1::SlotBindings);
+            assert_eq!(first.primary.family, PrivateDiagnosticFamilyV1::Sync);
+            assert_eq!(
+                first.primary.cause,
+                PrivateDiagnosticCauseV1::NoCurrentObservation
+            );
+            assert_eq!(
+                first.primary.engine_code,
+                PrivateDiagnosticEngineCodeV1::NotApplicable
+            );
+            assert!(first.evidence.is_none() && first.worker.is_none());
+            assert_eq!(
+                first.stage.as_ref().unwrap().kind,
+                private_stage_kind_v1(kind)
+            );
+            assert_eq!(first.stage.as_ref().unwrap().callback_count, 1);
+            drop(stage);
+            drop(invocation);
+            observe_private_fixed_host_v1(
+                PrivateDiagnosticOperationV1::Checkpoint,
+                PrivateDiagnosticSiteV1::HostCheckpointEntry,
+                &Error::Permission,
+            );
+            assert_eq!(private_fixed_diagnostic_snapshot_v1().unwrap(), first);
+        }
+    }
+
+    #[test]
+    #[ignore = "isolated CI only: real localhost TCP, forbidden in local safe gates"]
+    fn observation_wave_actual_localhost_requests_overlap_before_responses() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        runtime().block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let requested = Rc::new(Cell::new(0u8));
+            let serve = async {
+                let (mut first, _) = listener.accept().await.unwrap();
+                let a = first.read_u8().await.unwrap();
+                requested.set(requested.get() | (1 << a));
+                let (mut second, _) = listener.accept().await.unwrap();
+                let b = second.read_u8().await.unwrap();
+                requested.set(requested.get() | (1 << b));
+                assert_eq!(requested.get(), 3);
+                first.write_u8(a).await.unwrap();
+                second.write_u8(b).await.unwrap();
+            };
+            let request = |index: u8| async move {
+                let mut stream = tokio::net::TcpStream::connect(address).await?;
+                stream.write_u8(index).await?;
+                let result = stream.read_u8().await?;
+                Ok::<_, std::io::Error>(result)
+            };
+            let ((), result) = tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::join!(
+                    serve,
+                    same_thread_two_wallet_wave_v3(request(0), request(1))
+                )
+            })
+            .await
+            .unwrap();
+            assert_eq!(result.unwrap(), [0, 1]);
+            assert_eq!(requested.get(), 3);
+        });
     }
 }
