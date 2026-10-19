@@ -47,6 +47,630 @@ fn now_ms() -> Result<u64> {
 fn canonical<T: serde::Serialize>(domain: &str, value: &T) -> Result<String> {
     wholepact_core::proposal::canonical_digest(domain, value).map_err(|_| Error::InvalidData)
 }
+// Every expression is evaluated once, before its original error conversion.
+// The feature-disabled path performs no diagnostic classification or mutation.
+macro_rules! receive_result_v2 {
+    ($collector:expr, $stage:ident, $kind:ident, $original:expr) => {{
+        let original = $original;
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        let original = receiver_diagnostics_v2::$kind(
+            $collector,
+            receiver_diagnostics_v2::Stage::$stage,
+            original,
+        );
+        original
+    }};
+}
+macro_rules! receive_denied_v2 {
+    ($collector:expr, $stage:ident, $denied:expr) => {{
+        let denied = $denied;
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        let denied = receiver_diagnostics_v2::denied(
+            $collector,
+            receiver_diagnostics_v2::Stage::$stage,
+            denied,
+        );
+        denied
+    }};
+}
+
+#[cfg(feature = "synthetic-born-joined-qualification")]
+mod receiver_diagnostics_v2 {
+    use super::{BridgeError, Error};
+    use crate::consent_journal::JournalError;
+    use std::{cell::Cell, io::Write};
+    use wholepact_wallet::wallet::protected_sync::durable_construction_v1::DurableConstructionError;
+
+    macro_rules! labels {
+        ($name:ident { $($variant:ident),+ $(,)? }) => {
+            #[allow(dead_code)]
+            #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+            pub(super) enum $name { $($variant),+ }
+            impl $name {
+                fn label(self) -> &'static str {
+                    match self { $(Self::$variant => stringify!($variant)),+ }
+                }
+            }
+        };
+    }
+    labels! { Stage {
+        DeliveryReceiveNativeDeadline,
+        DeliveryReceiveRequest,
+        DeliveryReceiveSource,
+        DeliveryReceiveOriginalHistory,
+        DeliveryReceiveOriginalBinding,
+        DeliveryReceiveCurrentHistory,
+        DeliveryReceiveRedisclosureBinding,
+        DeliveryReceiveRecipientBinding,
+        DeliveryReceiveViewingKey,
+        DeliveryReceiveMaterialOwner,
+        DeliveryReceiveLease,
+        DeliveryReceiveNativeOrigin,
+        DeliveryReceiveSourceUnderLease,
+        DeliveryReceiveReceipts,
+        DeliveryReceiveProposal,
+        DeliveryReceiveAccount,
+        DeliveryReceiveAccountBinding,
+        DeliveryReceiveReviewerScope,
+        DeliveryReceiveDeadline,
+        DeliveryReceiveOriginalSource,
+        DeliveryReceivePeer,
+        DeliveryReceiveMaterialClock,
+        DeliveryReceiveMaterialScope,
+        DeliveryReceiveRequestDigest,
+        DeliveryReceiveReadyWrite,
+        DeliveryReceiveFrame,
+        DeliveryReceiveCommandParse,
+        DeliveryReceiveCommandBinding,
+        DeliveryReceivePayloadLimit,
+        DeliveryReceiveChunkDecode,
+        DeliveryReceiveCurrentWrite,
+        DeliveryReceiveReceivingWrite,
+        DeliveryReceivePayloadBinding,
+        DeliveryReceivePayloadParse,
+        DeliveryReceivePayloadCanonical,
+        DeliveryReceiveContributionBinding,
+        DeliveryReceiveUnsignedDecode,
+        DeliveryReceiveProvedDecode,
+        DeliveryReceiveEconomics,
+        DeliveryReceiveFinalBinding,
+        DeliveryReceiveFinalSource,
+        DeliveryReceiveFinalPeer,
+        DeliveryReceiveFinalDeadline,
+        DeliveryReceiveFinalMaterialClock,
+        DeliveryReceiveFinalMaterialScope,
+        DeliveryReceiveImportedWrite,
+        DeliveryReceiveTerminal,
+    } }
+    labels! { Outcome {
+        SignerUnavailable,
+        SignerPeerLifetimeUnavailable,
+        SignerIo,
+        SignerAuthentication,
+        SignerInvalidData,
+        SignerCrypto,
+        SignerLocked,
+        SignerBackupRequired,
+        SignerRecoveryRequired,
+        SignerAlreadyOpen,
+        SignerReviewMismatch,
+        SignerVerification,
+        SignerUncertain,
+        SignerConsentJournal,
+        SignerStore,
+        BridgeBinding,
+        BridgeConflict,
+        BridgeMissing,
+        BridgeUncertain,
+        BridgeLimit,
+        BridgePermission,
+        BridgeRecoveryRequired,
+        BridgeCompleteOriginRecoveryUnavailable,
+        BridgeVerification,
+        BridgeSignerOriginUnavailable,
+        BridgeJournal,
+        BridgeAuthority,
+        BridgeWallet,
+        BridgeIpc,
+        WorkerFailure,
+        PredicateDenied,
+        OriginPermanentStopUnavailable,
+        OriginRetirementEvidenceUnavailable,
+        OriginSignerOriginUnavailable,
+        OriginPeerLifetimeUnavailable,
+        OriginAuthentication,
+        OriginBinding,
+        OriginConflict,
+        OriginPermission,
+        OriginInvalidData,
+        OriginLocked,
+        OriginCrypto,
+        OriginIpc,
+        OriginLimit,
+        OriginIoTimedOut,
+        OriginIoWouldBlock,
+        OriginIoUnexpectedEof,
+        OriginIoBrokenPipe,
+        OriginIoConnectionReset,
+        OriginIoConnectionAborted,
+        OriginIoNotConnected,
+        OriginIoInterrupted,
+        OriginIoPermissionDenied,
+        OriginIoOther,
+        JournalExpired,
+        JournalPermission,
+        JournalOther,
+        ConstructionInvalid,
+        ConstructionBinding,
+        ConstructionStale,
+        ConstructionStorage,
+        ConstructionSync,
+    } }
+
+    // A lower error that has no safe classifier still closes the first-cause
+    // slot. Its enclosing Permission/Ipc conversion cannot replace it.
+    #[derive(Clone, Copy, Default)]
+    enum FirstCause {
+        #[default]
+        Vacant,
+        SeenUnknown(Stage),
+        SeenFinite(Stage, Outcome),
+    }
+    #[derive(Default)]
+    pub(super) struct Collector(Cell<FirstCause>);
+    impl Collector {
+        fn record(&self, stage: Stage, outcome: Option<Outcome>) {
+            if matches!(self.0.get(), FirstCause::Vacant) {
+                self.0.set(match outcome {
+                    Some(outcome) => FirstCause::SeenFinite(stage, outcome),
+                    None => FirstCause::SeenUnknown(stage),
+                });
+            }
+        }
+        fn terminal_labels(&self, error: &BridgeError) -> (Stage, Outcome) {
+            match self.0.get() {
+                FirstCause::Vacant => (Stage::DeliveryReceiveTerminal, bridge_outcome(error)),
+                FirstCause::SeenUnknown(stage) => (stage, Outcome::WorkerFailure),
+                FirstCause::SeenFinite(stage, outcome) => (stage, outcome),
+            }
+        }
+        pub(super) fn emit_terminal(&self, error: &BridgeError) {
+            self.emit_terminal_to(error, &mut std::io::stderr().lock());
+        }
+        fn emit_terminal_to(&self, error: &BridgeError, writer: &mut impl Write) {
+            let (stage, outcome) = self.terminal_labels(error);
+            // Closed labels only. A diagnostic write failure cannot replace
+            // the original failure or panic before the held stream is dropped.
+            let _ = writeln!(
+                writer,
+                "\n[JOINED_DIAGNOSTIC {} {}]",
+                stage.label(),
+                outcome.label()
+            );
+        }
+    }
+
+    fn observe<T, E>(
+        collector: Option<&Collector>,
+        stage: Stage,
+        original: std::result::Result<T, E>,
+        classify: impl FnOnce(&E) -> Option<Outcome>,
+    ) -> std::result::Result<T, E> {
+        if let (Some(collector), Err(error)) = (collector, &original) {
+            collector.record(stage, classify(error));
+        }
+        original
+    }
+    pub(super) fn denied(collector: Option<&Collector>, stage: Stage, denied: bool) -> bool {
+        if denied {
+            if let Some(collector) = collector {
+                collector.record(stage, Some(Outcome::PredicateDenied));
+            }
+        }
+        denied
+    }
+    pub(super) fn unknown<T, E>(
+        collector: Option<&Collector>,
+        stage: Stage,
+        original: std::result::Result<T, E>,
+    ) -> std::result::Result<T, E> {
+        observe(collector, stage, original, |_| None)
+    }
+    macro_rules! typed_result {
+        ($name:ident, $error:ty, $classify:ident) => {
+            pub(super) fn $name<T>(
+                collector: Option<&Collector>,
+                stage: Stage,
+                original: std::result::Result<T, $error>,
+            ) -> std::result::Result<T, $error> {
+                observe(collector, stage, original, |error| Some($classify(error)))
+            }
+        };
+    }
+    typed_result!(signer, Error, signer_outcome);
+    typed_result!(bridge, BridgeError, bridge_outcome);
+    typed_result!(journal, JournalError, journal_outcome);
+    typed_result!(construction, DurableConstructionError, construction_outcome);
+    typed_result!(origin, wholepact_signer_origin::Error, origin_outcome);
+    fn journal_outcome(error: &JournalError) -> Outcome {
+        match error {
+            JournalError::Expired => Outcome::JournalExpired,
+            JournalError::Permission => Outcome::JournalPermission,
+            _ => Outcome::JournalOther,
+        }
+    }
+    fn construction_outcome(error: &DurableConstructionError) -> Outcome {
+        match error {
+            DurableConstructionError::Invalid => Outcome::ConstructionInvalid,
+            DurableConstructionError::Binding => Outcome::ConstructionBinding,
+            DurableConstructionError::Stale => Outcome::ConstructionStale,
+            DurableConstructionError::Storage => Outcome::ConstructionStorage,
+            DurableConstructionError::Sync(_) => Outcome::ConstructionSync,
+        }
+    }
+    fn signer_outcome(error: &Error) -> Outcome {
+        match error {
+            Error::Unavailable => Outcome::SignerUnavailable,
+            Error::PeerLifetimeUnavailable => Outcome::SignerPeerLifetimeUnavailable,
+            Error::Io(_) => Outcome::SignerIo,
+            Error::Authentication => Outcome::SignerAuthentication,
+            Error::InvalidData => Outcome::SignerInvalidData,
+            Error::Crypto => Outcome::SignerCrypto,
+            Error::Locked => Outcome::SignerLocked,
+            Error::BackupRequired => Outcome::SignerBackupRequired,
+            Error::RecoveryRequired => Outcome::SignerRecoveryRequired,
+            Error::AlreadyOpen => Outcome::SignerAlreadyOpen,
+            Error::ReviewMismatch => Outcome::SignerReviewMismatch,
+            Error::Verification => Outcome::SignerVerification,
+            Error::Uncertain => Outcome::SignerUncertain,
+            Error::ConsentJournal(error) => journal_outcome(error),
+            Error::Store(_) => Outcome::SignerStore,
+        }
+    }
+    fn bridge_outcome(error: &BridgeError) -> Outcome {
+        use Outcome as O;
+        match error {
+            BridgeError::Binding => O::BridgeBinding,
+            BridgeError::Conflict => O::BridgeConflict,
+            BridgeError::Missing => O::BridgeMissing,
+            BridgeError::Uncertain => O::BridgeUncertain,
+            BridgeError::Limit => O::BridgeLimit,
+            BridgeError::Permission => O::BridgePermission,
+            BridgeError::RecoveryRequired => O::BridgeRecoveryRequired,
+            BridgeError::CompleteOriginRecoveryUnavailable => {
+                O::BridgeCompleteOriginRecoveryUnavailable
+            }
+            BridgeError::Verification => O::BridgeVerification,
+            BridgeError::SignerOriginUnavailable => O::BridgeSignerOriginUnavailable,
+            BridgeError::Journal(error) => journal_outcome(error),
+            BridgeError::Authority(_) => O::BridgeAuthority,
+            #[cfg(feature = "authority-signing")]
+            BridgeError::Wallet(_) => O::BridgeWallet,
+            BridgeError::Ipc => O::BridgeIpc,
+        }
+    }
+    fn io_outcome(error: &std::io::Error) -> Outcome {
+        use Outcome as O;
+        use std::io::ErrorKind as E;
+        match error.kind() {
+            E::TimedOut => O::OriginIoTimedOut,
+            E::WouldBlock => O::OriginIoWouldBlock,
+            E::UnexpectedEof => O::OriginIoUnexpectedEof,
+            E::BrokenPipe => O::OriginIoBrokenPipe,
+            E::ConnectionReset => O::OriginIoConnectionReset,
+            E::ConnectionAborted => O::OriginIoConnectionAborted,
+            E::NotConnected => O::OriginIoNotConnected,
+            E::Interrupted => O::OriginIoInterrupted,
+            E::PermissionDenied => O::OriginIoPermissionDenied,
+            _ => O::OriginIoOther,
+        }
+    }
+    fn origin_outcome(error: &wholepact_signer_origin::Error) -> Outcome {
+        use Outcome as O;
+        use wholepact_signer_origin::Error as E;
+        match error {
+            E::PermanentStopUnavailable => O::OriginPermanentStopUnavailable,
+            E::RetirementEvidenceUnavailable => O::OriginRetirementEvidenceUnavailable,
+            E::SignerOriginUnavailable => O::OriginSignerOriginUnavailable,
+            E::PeerLifetimeUnavailable => O::OriginPeerLifetimeUnavailable,
+            E::Authentication => O::OriginAuthentication,
+            E::Binding => O::OriginBinding,
+            E::Conflict => O::OriginConflict,
+            E::Permission => O::OriginPermission,
+            E::InvalidData => O::OriginInvalidData,
+            E::Locked => O::OriginLocked,
+            E::Crypto => O::OriginCrypto,
+            E::Ipc => O::OriginIpc,
+            E::Limit => O::OriginLimit,
+            E::Io(error) => io_outcome(error),
+        }
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::super::{borrowed_receive_terminal_v2, bridge_error};
+        use super::*;
+
+        #[test]
+        fn callback_lower_cause_survives_permission_and_frame_conversion() {
+            let collector = Collector::default();
+            let check = || -> crate::authority_bridge::Result<()> {
+                signer(
+                    Some(&collector),
+                    Stage::DeliveryReceiveOriginalSource,
+                    Err::<(), _>(Error::Locked),
+                )
+                .map_err(bridge_error)?;
+                Ok(())
+            };
+            // Same actual callback conversions as the receive kernel. No
+            // source, native grant, process, socket or clock is fabricated.
+            let result = origin(
+                Some(&collector),
+                Stage::DeliveryReceiveFrame,
+                check().map_err(|_| wholepact_signer_origin::Error::Permission),
+            )
+            .map_err(|_| BridgeError::Ipc);
+            assert!(matches!(result, Err(BridgeError::Ipc)));
+            assert_eq!(
+                collector.terminal_labels(result.as_ref().unwrap_err()),
+                (Stage::DeliveryReceiveOriginalSource, Outcome::SignerLocked,)
+            );
+        }
+
+        #[test]
+        fn unknown_first_cause_blocks_later_finite_replacement() {
+            let collector = Collector::default();
+            let private = Box::new(String::from("private parse detail"));
+            let identity = &*private as *const String;
+            let original = unknown(
+                Some(&collector),
+                Stage::DeliveryReceiveCommandParse,
+                Err::<(), _>(private),
+            );
+            assert_eq!(&**original.as_ref().unwrap_err() as *const String, identity);
+            let result = bridge(
+                Some(&collector),
+                Stage::DeliveryReceiveFrame,
+                original.map_err(|_| BridgeError::Ipc),
+            );
+            let labels = collector.terminal_labels(result.as_ref().unwrap_err());
+            assert_eq!(
+                labels,
+                (Stage::DeliveryReceiveCommandParse, Outcome::WorkerFailure)
+            );
+            let mut output = Vec::new();
+            collector.emit_terminal_to(result.as_ref().unwrap_err(), &mut output);
+            assert_eq!(
+                String::from_utf8(output).unwrap(),
+                "\n[JOINED_DIAGNOSTIC DeliveryReceiveCommandParse WorkerFailure]\n"
+            );
+        }
+
+        #[test]
+        fn explicit_deadline_is_distinct_from_source_peer_receipt_and_material() {
+            let deadline = Collector::default();
+            assert!(!denied(
+                Some(&deadline),
+                Stage::DeliveryReceiveDeadline,
+                false
+            ));
+            assert!(matches!(deadline.0.get(), FirstCause::Vacant));
+            assert!(denied(
+                Some(&deadline),
+                Stage::DeliveryReceiveDeadline,
+                true
+            ));
+            assert_eq!(
+                deadline.terminal_labels(&BridgeError::Permission),
+                (Stage::DeliveryReceiveDeadline, Outcome::PredicateDenied,)
+            );
+            for (stage, error, expected) in [
+                (
+                    Stage::DeliveryReceiveOriginalSource,
+                    Error::Locked,
+                    Outcome::SignerLocked,
+                ),
+                (
+                    Stage::DeliveryReceivePeer,
+                    Error::Authentication,
+                    Outcome::SignerAuthentication,
+                ),
+            ] {
+                let collector = Collector::default();
+                let result =
+                    signer(Some(&collector), stage, Err::<(), _>(error)).map_err(bridge_error);
+                assert_eq!(
+                    collector.terminal_labels(result.as_ref().unwrap_err()),
+                    (stage, expected)
+                );
+            }
+            let receipt = Collector::default();
+            let result = journal(
+                Some(&receipt),
+                Stage::DeliveryReceiveReceipts,
+                Err::<(), _>(JournalError::Expired),
+            )
+            .map_err(BridgeError::from);
+            assert_eq!(
+                receipt.terminal_labels(result.as_ref().unwrap_err()),
+                (Stage::DeliveryReceiveReceipts, Outcome::JournalExpired,)
+            );
+            let material = Collector::default();
+            let result = construction(
+                Some(&material),
+                Stage::DeliveryReceiveMaterialScope,
+                Err::<(), _>(DurableConstructionError::Stale),
+            )
+            .map_err(bridge_error);
+            assert_eq!(
+                material.terminal_labels(result.as_ref().unwrap_err()),
+                (
+                    Stage::DeliveryReceiveMaterialScope,
+                    Outcome::ConstructionStale,
+                )
+            );
+        }
+
+        #[test]
+        fn bare_frame_authentication_remains_ambiguous_and_operations_are_isolated() {
+            let first = Collector::default();
+            let result = origin(
+                Some(&first),
+                Stage::DeliveryReceiveFrame,
+                Err::<(), _>(wholepact_signer_origin::Error::Authentication),
+            )
+            .map_err(|_| BridgeError::Ipc);
+            assert_eq!(
+                first.terminal_labels(result.as_ref().unwrap_err()),
+                (Stage::DeliveryReceiveFrame, Outcome::OriginAuthentication,)
+            );
+            let second = Collector::default();
+            assert!(matches!(second.0.get(), FirstCause::Vacant));
+            assert_eq!(
+                second.terminal_labels(&BridgeError::Binding),
+                (Stage::DeliveryReceiveTerminal, Outcome::BridgeBinding,)
+            );
+            assert_eq!(
+                first.terminal_labels(&BridgeError::Binding),
+                (Stage::DeliveryReceiveFrame, Outcome::OriginAuthentication,)
+            );
+        }
+
+        #[test]
+        fn typed_journal_and_material_categories_survive_original_wrappers() {
+            for (error, expected) in [
+                (JournalError::Expired, Outcome::JournalExpired),
+                (JournalError::Permission, Outcome::JournalPermission),
+                (JournalError::Database, Outcome::JournalOther),
+            ] {
+                assert_eq!(journal_outcome(&error), expected);
+                assert_eq!(bridge_outcome(&BridgeError::Journal(error)), expected);
+            }
+            assert_eq!(
+                signer_outcome(&Error::ConsentJournal(JournalError::Expired)),
+                Outcome::JournalExpired
+            );
+            for (error, expected) in [
+                (
+                    DurableConstructionError::Invalid,
+                    Outcome::ConstructionInvalid,
+                ),
+                (
+                    DurableConstructionError::Binding,
+                    Outcome::ConstructionBinding,
+                ),
+                (DurableConstructionError::Stale, Outcome::ConstructionStale),
+                (
+                    DurableConstructionError::Storage,
+                    Outcome::ConstructionStorage,
+                ),
+                (
+                    DurableConstructionError::Sync(
+                        wholepact_wallet::wallet::protected_sync::SyncError::NoCurrentObservation,
+                    ),
+                    Outcome::ConstructionSync,
+                ),
+            ] {
+                assert_eq!(construction_outcome(&error), expected);
+            }
+        }
+
+        #[test]
+        fn source_check_short_circuits_once_before_later_receipt_observation() {
+            let collector = Collector::default();
+            let calls = Cell::new(0);
+            let result = (|| -> crate::authority_bridge::Result<()> {
+                signer(Some(&collector), Stage::DeliveryReceiveOriginalSource, {
+                    calls.set(calls.get() + 1);
+                    Err::<(), _>(Error::Locked)
+                })
+                .map_err(bridge_error)?;
+                calls.set(calls.get() + 100);
+                journal(
+                    Some(&collector),
+                    Stage::DeliveryReceiveReceipts,
+                    Err::<(), _>(JournalError::Expired),
+                )?;
+                Ok(())
+            })();
+            assert_eq!(calls.get(), 1);
+            assert_eq!(
+                collector.terminal_labels(result.as_ref().unwrap_err()),
+                (Stage::DeliveryReceiveOriginalSource, Outcome::SignerLocked,)
+            );
+        }
+
+        #[test]
+        fn absent_collector_and_success_do_not_classify_or_emit() {
+            let value = Box::new(71_u64);
+            let identity = &*value as *const u64;
+            let result = observe(
+                None,
+                Stage::DeliveryReceiveFrame,
+                Err::<(), _>(value),
+                |_| panic!("absent collector must not classify"),
+            );
+            assert_eq!(&**result.as_ref().unwrap_err() as *const u64, identity);
+            let collector = Collector::default();
+            let mut resource = ();
+            let mut output = Vec::new();
+            let result = borrowed_receive_terminal_v2(
+                &mut resource,
+                |_| {
+                    observe(
+                        Some(&collector),
+                        Stage::DeliveryReceiveFrame,
+                        Ok::<_, BridgeError>(Box::new(72_u64)),
+                        |_| panic!("success must not classify"),
+                    )
+                },
+                |error| collector.emit_terminal_to(error, &mut output),
+            );
+            assert_eq!(**result.as_ref().unwrap(), 72);
+            assert!(output.is_empty());
+            assert!(matches!(collector.0.get(), FirstCause::Vacant));
+        }
+
+        #[test]
+        fn ignored_sink_write_error_does_not_replace_owned_terminal_error() {
+            struct FailingWriter;
+            impl std::io::Write for FailingWriter {
+                fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                    Err(std::io::Error::other("private stderr failure"))
+                }
+                fn flush(&mut self) -> std::io::Result<()> {
+                    Ok(())
+                }
+            }
+            let collector = Collector::default();
+            let mut resource = ();
+            let result = borrowed_receive_terminal_v2(
+                &mut resource,
+                |_| Err::<(), _>(BridgeError::Journal(JournalError::Expired)),
+                |error| collector.emit_terminal_to(error, &mut FailingWriter),
+            );
+            assert!(matches!(
+                result,
+                Err(BridgeError::Journal(JournalError::Expired))
+            ));
+        }
+    }
+}
+
+// The actual owned stream stays in the caller. The body may only borrow it;
+// the terminal sink sees the same owned error before the caller drops it.
+fn borrowed_receive_terminal_v2<R, T, E>(
+    resource: &mut R,
+    body: impl FnOnce(&mut R) -> std::result::Result<T, E>,
+    terminal: impl FnOnce(&E),
+) -> std::result::Result<T, E> {
+    let original = body(resource);
+    if let Err(error) = &original {
+        terminal(error);
+    }
+    original
+}
+
 pub(super) struct ImportedDeliveryReviewV2 {
     pub(super) fixed: Arc<VerifiedDurableEconomicsV1>,
     pub(super) request: DurableReviewDeliveryRequestV1,
@@ -57,19 +681,64 @@ pub(super) struct ImportedDeliveryReviewV2 {
 }
 impl ImportedDeliveryReviewV2 {
     fn check_data_current(&self) -> Result<()> {
-        self.source.check_original_source_current()?;
-        self.peer.check_current()?;
-        if self.peer.native_origin != self.source.native_binding()
-            || Instant::now() >= self.deadline()?
-            || self.scopes.len() != 2
-        {
+        self.check_data_current_observed_v2(
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            None,
+        )
+    }
+    fn check_data_current_observed_v2(
+        &self,
+        #[cfg(feature = "synthetic-born-joined-qualification")] collector: Option<
+            &receiver_diagnostics_v2::Collector,
+        >,
+    ) -> Result<()> {
+        receive_result_v2!(
+            collector,
+            DeliveryReceiveFinalSource,
+            signer,
+            self.source.check_original_source_current()
+        )?;
+        receive_result_v2!(
+            collector,
+            DeliveryReceiveFinalPeer,
+            signer,
+            self.peer.check_current()
+        )?;
+        if receive_denied_v2!(
+            collector,
+            DeliveryReceiveFinalBinding,
+            self.peer.native_origin != self.source.native_binding()
+                || receive_denied_v2!(
+                    collector,
+                    DeliveryReceiveFinalDeadline,
+                    Instant::now()
+                        >= receive_result_v2!(
+                            collector,
+                            DeliveryReceiveFinalDeadline,
+                            signer,
+                            self.deadline()
+                        )?
+                )
+                || self.scopes.len() != 2
+        ) {
             return Err(Error::ReviewMismatch);
         }
         for scope in &self.scopes {
-            scope
-                .check_valid_at(now().map_err(|_| Error::ReviewMismatch)?)
-                .map_err(|_| Error::ReviewMismatch)?;
-            if scope.proposal != *self.fixed.proposal().input() {
+            receive_result_v2!(
+                collector,
+                DeliveryReceiveFinalMaterialScope,
+                construction,
+                scope.check_valid_at(
+                    receive_result_v2!(collector, DeliveryReceiveFinalMaterialClock, bridge, now())
+                        .map_err(|_| Error::ReviewMismatch)?
+                )
+            )
+            .map_err(|_| Error::ReviewMismatch)?;
+            if receive_denied_v2!(
+                collector,
+                DeliveryReceiveFinalBinding,
+                scope.proposal != *self.fixed.proposal().input()
+            ) {
                 return Err(Error::ReviewMismatch);
             }
         }
@@ -112,108 +781,269 @@ fn receive_delivery(
         &flow_diag_v1::DurableFlowObserverV1,
     >,
 ) -> authority_bridge::Result<ImportedDeliveryReviewV2> {
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    let collector = receiver_diagnostics_v2::Collector::default();
+    borrowed_receive_terminal_v2(
+        &mut stream,
+        |stream| {
+            receive_delivery_borrowed_v2(
+                stream,
+                peer,
+                request,
+                source,
+                session,
+                #[cfg(feature = "synthetic-born-joined-qualification")]
+                observer,
+                #[cfg(feature = "synthetic-born-joined-qualification")]
+                Some(&collector),
+            )
+        },
+        |_error| {
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            collector.emit_terminal(_error);
+        },
+    )
+}
+
+fn receive_delivery_borrowed_v2(
+    stream: &mut UnixStream,
+    peer: AuthenticatedPeer,
+    request: DurableReviewDeliveryRequestV1,
+    source: Arc<FreshDurableDeliveryEntryV2>,
+    session: Arc<SignerConsentSession>,
+    #[cfg(feature = "synthetic-born-joined-qualification")] observer: Option<
+        &flow_diag_v1::DurableFlowObserverV1,
+    >,
+    #[cfg(feature = "synthetic-born-joined-qualification")] collector: Option<
+        &receiver_diagnostics_v2::Collector,
+    >,
+) -> authority_bridge::Result<ImportedDeliveryReviewV2> {
     let deadline = (Instant::now() + Duration::from_secs(120))
         .min(peer.deadline())
         .min(
-            source
-                .native_binding()
-                .bounded_deadline()
-                .map_err(bridge_error)?,
+            receive_result_v2!(
+                collector,
+                DeliveryReceiveNativeDeadline,
+                signer,
+                source.native_binding().bounded_deadline()
+            )
+            .map_err(bridge_error)?,
         );
-    request.validate()?;
-    durable_flow_observe_v1!(
-        observer,
-        flow_diag_v1::DurableFlowStageV1::ImportSource,
-        source.check_current()
+    receive_result_v2!(
+        collector,
+        DeliveryReceiveRequest,
+        bridge,
+        request.validate()
+    )?;
+    receive_result_v2!(
+        collector,
+        DeliveryReceiveSource,
+        signer,
+        durable_flow_observe_v1!(
+            observer,
+            flow_diag_v1::DurableFlowStageV1::ImportSource,
+            source.check_current()
+        )
     )
     .map_err(bridge_error)?;
     let journal = source.journal();
-    let original = journal.durable_construction_history_v1(&request.own_disclosure, &session)?;
-    if original.redisclosure().is_some() {
+    let original = receive_result_v2!(
+        collector,
+        DeliveryReceiveOriginalHistory,
+        journal,
+        journal.durable_construction_history_v1(&request.own_disclosure, &session)
+    )?;
+    if receive_denied_v2!(
+        collector,
+        DeliveryReceiveOriginalBinding,
+        original.redisclosure().is_some()
+    ) {
         return Err(BridgeError::Binding);
     }
     let current = if let Some(current) = &request.current_disclosure {
-        let renewed = journal.durable_construction_history_v1(current, &session)?;
-        renewed.validate_redisclosure_of(&original)?;
+        let renewed = receive_result_v2!(
+            collector,
+            DeliveryReceiveCurrentHistory,
+            journal,
+            journal.durable_construction_history_v1(current, &session)
+        )?;
+        receive_result_v2!(
+            collector,
+            DeliveryReceiveRedisclosureBinding,
+            bridge,
+            renewed.validate_redisclosure_of(&original)
+        )?;
         renewed
     } else {
         original.clone()
     };
-    if !authority_bridge::ipc::exact_local_recipient(current.recipient_transport(), &peer)
-        || !peer.scope.history_read
-        || !peer.scope.preconstruction_export
-        || peer.native_origin != source.native_binding()
-    {
+    if receive_denied_v2!(
+        collector,
+        DeliveryReceiveRecipientBinding,
+        !authority_bridge::ipc::exact_local_recipient(current.recipient_transport(), &peer)
+            || !peer.scope.history_read
+            || !peer.scope.preconstruction_export
+            || peer.native_origin != source.native_binding()
+    ) {
         return Err(BridgeError::Permission);
     }
-    original
-        .request()
-        .material
-        .verify_owner(&source.account().fvk().map_err(bridge_error)?)
-        .map_err(bridge_error)?;
-    let lease = journal.acquire_preconstruction_records(
-        &request.enrollment_ref,
-        &request.accepted_manifest_ref,
-        &session,
+    receive_result_v2!(
+        collector,
+        DeliveryReceiveMaterialOwner,
+        construction,
+        original.request().material.verify_owner(
+            &receive_result_v2!(
+                collector,
+                DeliveryReceiveViewingKey,
+                signer,
+                source.account().fvk()
+            )
+            .map_err(bridge_error)?
+        )
+    )
+    .map_err(bridge_error)?;
+    let lease = receive_result_v2!(
+        collector,
+        DeliveryReceiveLease,
+        journal,
+        journal.acquire_preconstruction_records(
+            &request.enrollment_ref,
+            &request.accepted_manifest_ref,
+            &session,
+        )
     )?;
-    lease.require_native_origin(&source.native_binding())?;
-    source
-        .check_current_under_preconstruction_lease(&lease)
-        .map_err(bridge_error)?;
-    lease.require_current_durable_disclosure_receipts_v1()?;
-    let proposal = Proposal::validate(lease.manifest().proposal_input().clone())
-        .map_err(|_| BridgeError::Binding)?;
-    let account_id = source.account().account_id().map_err(bridge_error)?;
+    receive_result_v2!(
+        collector,
+        DeliveryReceiveNativeOrigin,
+        journal,
+        lease.require_native_origin(&source.native_binding())
+    )?;
+    receive_result_v2!(
+        collector,
+        DeliveryReceiveSourceUnderLease,
+        signer,
+        source.check_current_under_preconstruction_lease(&lease)
+    )
+    .map_err(bridge_error)?;
+    receive_result_v2!(
+        collector,
+        DeliveryReceiveReceipts,
+        journal,
+        lease.require_current_durable_disclosure_receipts_v1()
+    )?;
+    let proposal = receive_result_v2!(
+        collector,
+        DeliveryReceiveProposal,
+        unknown,
+        Proposal::validate(lease.manifest().proposal_input().clone())
+    )
+    .map_err(|_| BridgeError::Binding)?;
+    let account_id = receive_result_v2!(
+        collector,
+        DeliveryReceiveAccount,
+        signer,
+        source.account().account_id()
+    )
+    .map_err(bridge_error)?;
     let original_scope = &original.request().scope;
     let born_scope = &source.record().account_record.terms.scope;
-    if lease.enrollment().account_id() != account_id
-        || lease.enrollment().participant_id() != peer.scope.participant_id
-        || lease.enrollment().agreement_id() != peer.scope.agreement_id
-        || lease.manifest().manifest_digest() != peer.scope.manifest_digest
-        || original_scope.proposal != *proposal.input()
-        || original_scope.account_id != account_id
-        || proposal.manifest().agreement.agreement_id != born_scope.agreement_id
-        || proposal.manifest().agreement.obligation_id != born_scope.obligation_id
-        || !original_scope
-            .permits_local_reviewer_account(&account_id)
+    if receive_denied_v2!(
+        collector,
+        DeliveryReceiveAccountBinding,
+        lease.enrollment().account_id() != account_id
+            || lease.enrollment().participant_id() != peer.scope.participant_id
+            || lease.enrollment().agreement_id() != peer.scope.agreement_id
+            || lease.manifest().manifest_digest() != peer.scope.manifest_digest
+            || original_scope.proposal != *proposal.input()
+            || original_scope.account_id != account_id
+            || proposal.manifest().agreement.agreement_id != born_scope.agreement_id
+            || proposal.manifest().agreement.obligation_id != born_scope.obligation_id
+            || !receive_result_v2!(
+                collector,
+                DeliveryReceiveReviewerScope,
+                construction,
+                original_scope.permits_local_reviewer_account(&account_id)
+            )
             .map_err(bridge_error)?
-    {
+    ) {
         return Err(BridgeError::Binding);
     }
     let check = || -> authority_bridge::Result<()> {
-        if Instant::now() >= deadline {
+        if receive_denied_v2!(
+            collector,
+            DeliveryReceiveDeadline,
+            Instant::now() >= deadline
+        ) {
             return Err(BridgeError::Permission);
         }
-        source
-            .check_original_source_current()
-            .map_err(bridge_error)?;
-        durable_flow_observe_v1!(
-            observer,
-            flow_diag_v1::DurableFlowStageV1::ImportSource,
-            peer.check_current()
+        receive_result_v2!(
+            collector,
+            DeliveryReceiveOriginalSource,
+            signer,
+            source.check_original_source_current()
         )
         .map_err(bridge_error)?;
-        lease.require_native_origin(&source.native_binding())?;
-        lease.require_current_durable_disclosure_receipts_v1()?;
-        original_scope
-            .check_valid_at(now()?)
-            .map_err(bridge_error)?;
+        receive_result_v2!(
+            collector,
+            DeliveryReceivePeer,
+            signer,
+            durable_flow_observe_v1!(
+                observer,
+                flow_diag_v1::DurableFlowStageV1::ImportSource,
+                peer.check_current()
+            )
+        )
+        .map_err(bridge_error)?;
+        receive_result_v2!(
+            collector,
+            DeliveryReceiveNativeOrigin,
+            journal,
+            lease.require_native_origin(&source.native_binding())
+        )?;
+        receive_result_v2!(
+            collector,
+            DeliveryReceiveReceipts,
+            journal,
+            lease.require_current_durable_disclosure_receipts_v1()
+        )?;
+        receive_result_v2!(
+            collector,
+            DeliveryReceiveMaterialScope,
+            construction,
+            original_scope.check_valid_at(receive_result_v2!(
+                collector,
+                DeliveryReceiveMaterialClock,
+                bridge,
+                now()
+            )?)
+        )
+        .map_err(bridge_error)?;
         Ok(())
     };
-    let request_digest = request.digest()?;
-    wire::bounded_write(
-        &mut stream,
-        &DeliveryResponseV1::Ready {
-            request_digest: request_digest.clone(),
-            account_id: account_id.clone(),
-            participant_id: peer.scope.participant_id.clone(),
-            agreement_id: peer.scope.agreement_id.clone(),
-            manifest_digest: peer.scope.manifest_digest.clone(),
-            local_grant_id: peer.grant_id.clone(),
-            local_channel_digest: peer.channel_digest.clone(),
-        },
-        deadline,
-        &check,
+    let request_digest = receive_result_v2!(
+        collector,
+        DeliveryReceiveRequestDigest,
+        bridge,
+        request.digest()
+    )?;
+    receive_result_v2!(
+        collector,
+        DeliveryReceiveReadyWrite,
+        bridge,
+        wire::bounded_write(
+            stream,
+            &DeliveryResponseV1::Ready {
+                request_digest: request_digest.clone(),
+                account_id: account_id.clone(),
+                participant_id: peer.scope.participant_id.clone(),
+                agreement_id: peer.scope.agreement_id.clone(),
+                manifest_digest: peer.scope.manifest_digest.clone(),
+                local_grant_id: peer.grant_id.clone(),
+                local_channel_digest: peer.channel_digest.clone(),
+            },
+            deadline,
+            &check,
+        )
     )?;
     let mut bytes = Zeroizing::new(Vec::new());
     let mut expected: Option<(String, usize)> = None;
@@ -222,135 +1052,264 @@ fn receive_delivery(
         // Waiting for the engine's independently verified export intent is not
         // a new permission window. Preserve the original absolute deadline and
         // partial frame while polling actual revocation/scope every 100 ms.
-        let frame = wholepact_signer_origin::framing::read_frame_capped_checked_until(
-            &stream,
-            &peer.peer,
-            128 * 1024,
-            deadline,
-            || check().map_err(|_| wholepact_signer_origin::Error::Permission),
+        let frame = receive_result_v2!(
+            collector,
+            DeliveryReceiveFrame,
+            origin,
+            wholepact_signer_origin::framing::read_frame_capped_checked_until(
+                stream,
+                &peer.peer,
+                128 * 1024,
+                deadline,
+                || check().map_err(|_| wholepact_signer_origin::Error::Permission),
+            )
         )
         .map_err(|_| BridgeError::Ipc)?;
         check()?;
-        let command: DeliveryCommandV1 =
-            wholepact_core::parse_typed_json(&frame).map_err(|_| BridgeError::Binding)?;
+        let command: DeliveryCommandV1 = receive_result_v2!(
+            collector,
+            DeliveryReceiveCommandParse,
+            unknown,
+            wholepact_core::parse_typed_json(&frame)
+        )
+        .map_err(|_| BridgeError::Binding)?;
         match &command {
             DeliveryCommandV1::CheckCurrent if expected.is_none() => {
-                wire::bounded_write(
-                    &mut stream,
-                    &DeliveryResponseV1::Current {
-                        request_digest: request_digest.clone(),
-                    },
-                    deadline,
-                    &check,
+                receive_result_v2!(
+                    collector,
+                    DeliveryReceiveCurrentWrite,
+                    bridge,
+                    wire::bounded_write(
+                        stream,
+                        &DeliveryResponseV1::Current {
+                            request_digest: request_digest.clone(),
+                        },
+                        deadline,
+                        &check,
+                    )
                 )?;
             }
             DeliveryCommandV1::Begin {
                 payload_digest,
                 payload_bytes,
             } if expected.is_none() => {
-                if payload_digest.len() != 64
-                    || !payload_digest
-                        .bytes()
-                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-                {
+                if receive_denied_v2!(
+                    collector,
+                    DeliveryReceiveCommandBinding,
+                    payload_digest.len() != 64
+                        || !payload_digest
+                            .bytes()
+                            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                ) {
                     return Err(BridgeError::Binding);
                 }
-                let size = usize::try_from(*payload_bytes).map_err(|_| BridgeError::Limit)?;
-                if size == 0 || size > wire::MAX_PAYLOAD {
+                let size = receive_result_v2!(
+                    collector,
+                    DeliveryReceivePayloadLimit,
+                    unknown,
+                    usize::try_from(*payload_bytes)
+                )
+                .map_err(|_| BridgeError::Limit)?;
+                if receive_denied_v2!(
+                    collector,
+                    DeliveryReceivePayloadLimit,
+                    size == 0 || size > wire::MAX_PAYLOAD
+                ) {
                     return Err(BridgeError::Limit);
                 }
                 bytes.reserve(size);
                 expected = Some((payload_digest.clone(), size));
-                wire::bounded_write(
-                    &mut stream,
-                    &DeliveryResponseV1::Receiving { received_bytes: 0 },
-                    deadline,
-                    &check,
+                receive_result_v2!(
+                    collector,
+                    DeliveryReceiveReceivingWrite,
+                    bridge,
+                    wire::bounded_write(
+                        stream,
+                        &DeliveryResponseV1::Receiving { received_bytes: 0 },
+                        deadline,
+                        &check,
+                    )
                 )?;
             }
             DeliveryCommandV1::Chunk { offset, data_hex } => {
-                let (_, size) = expected.as_ref().ok_or(BridgeError::Binding)?;
-                if *offset != bytes.len() as u64
-                    || data_hex.is_empty()
-                    || data_hex.len() > wire::CHUNK_BYTES * 2
-                    || data_hex.len() % 2 != 0
-                    || !data_hex
-                        .bytes()
-                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-                {
+                let (_, size) = receive_result_v2!(
+                    collector,
+                    DeliveryReceiveCommandBinding,
+                    bridge,
+                    expected.as_ref().ok_or(BridgeError::Binding)
+                )?;
+                if receive_denied_v2!(
+                    collector,
+                    DeliveryReceiveCommandBinding,
+                    *offset != bytes.len() as u64
+                        || data_hex.is_empty()
+                        || data_hex.len() > wire::CHUNK_BYTES * 2
+                        || data_hex.len() % 2 != 0
+                        || !data_hex
+                            .bytes()
+                            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                ) {
                     return Err(BridgeError::Binding);
                 }
-                let chunk =
-                    Zeroizing::new(hex::decode(data_hex).map_err(|_| BridgeError::Binding)?);
-                if bytes
-                    .len()
-                    .checked_add(chunk.len())
-                    .is_none_or(|n| n > *size)
-                {
+                let chunk = Zeroizing::new(
+                    receive_result_v2!(
+                        collector,
+                        DeliveryReceiveChunkDecode,
+                        unknown,
+                        hex::decode(data_hex)
+                    )
+                    .map_err(|_| BridgeError::Binding)?,
+                );
+                if receive_denied_v2!(
+                    collector,
+                    DeliveryReceivePayloadLimit,
+                    bytes
+                        .len()
+                        .checked_add(chunk.len())
+                        .is_none_or(|n| n > *size)
+                ) {
                     return Err(BridgeError::Limit);
                 }
                 bytes.extend_from_slice(&chunk);
-                wire::bounded_write(
-                    &mut stream,
-                    &DeliveryResponseV1::Receiving {
-                        received_bytes: bytes.len() as u64,
-                    },
-                    deadline,
-                    &check,
+                receive_result_v2!(
+                    collector,
+                    DeliveryReceiveReceivingWrite,
+                    bridge,
+                    wire::bounded_write(
+                        stream,
+                        &DeliveryResponseV1::Receiving {
+                            received_bytes: bytes.len() as u64,
+                        },
+                        deadline,
+                        &check,
+                    )
                 )?;
             }
             DeliveryCommandV1::Finish => break,
-            _ => return Err(BridgeError::Binding),
+            _ => {
+                return receive_result_v2!(
+                    collector,
+                    DeliveryReceiveCommandBinding,
+                    bridge,
+                    Err(BridgeError::Binding)
+                );
+            }
         }
     }
-    let (digest, size) = expected.ok_or(BridgeError::Binding)?;
-    if bytes.len() != size || hex::encode(Sha256::digest(bytes.as_slice())) != digest {
+    let (digest, size) = receive_result_v2!(
+        collector,
+        DeliveryReceivePayloadBinding,
+        bridge,
+        expected.ok_or(BridgeError::Binding)
+    )?;
+    if receive_denied_v2!(
+        collector,
+        DeliveryReceivePayloadBinding,
+        bytes.len() != size || hex::encode(Sha256::digest(bytes.as_slice())) != digest
+    ) {
         return Err(BridgeError::Binding);
     }
-    let payload: DurableReviewPayloadV1 =
+    let payload: DurableReviewPayloadV1 = receive_result_v2!(
+        collector,
+        DeliveryReceivePayloadParse,
+        unknown,
         wholepact_core::strict_json::parse_typed_json_with_byte_limit(&bytes, wire::MAX_PAYLOAD)
-            .map_err(|_| BridgeError::Binding)?;
-    if payload.encode()?.as_slice() != bytes.as_slice() {
+    )
+    .map_err(|_| BridgeError::Binding)?;
+    if receive_denied_v2!(
+        collector,
+        DeliveryReceivePayloadCanonical,
+        receive_result_v2!(
+            collector,
+            DeliveryReceivePayloadCanonical,
+            bridge,
+            payload.encode()
+        )?
+        .as_slice()
+            != bytes.as_slice()
+    ) {
         return Err(BridgeError::Binding);
     }
-    let own = payload
-        .contributions
-        .iter()
-        .find(|c| c.request().scope.account_id == account_id)
-        .ok_or(BridgeError::Binding)?;
-    if own != &original {
+    let own = receive_result_v2!(
+        collector,
+        DeliveryReceiveContributionBinding,
+        bridge,
+        payload
+            .contributions
+            .iter()
+            .find(|c| c.request().scope.account_id == account_id)
+            .ok_or(BridgeError::Binding)
+    )?;
+    if receive_denied_v2!(
+        collector,
+        DeliveryReceiveContributionBinding,
+        own != &original
+    ) {
         return Err(BridgeError::Binding);
     }
     for contribution in &payload.contributions {
-        contribution
-            .request()
-            .scope
-            .check_valid_at(now()?)
-            .map_err(bridge_error)?;
+        receive_result_v2!(
+            collector,
+            DeliveryReceiveMaterialScope,
+            construction,
+            contribution
+                .request()
+                .scope
+                .check_valid_at(receive_result_v2!(
+                    collector,
+                    DeliveryReceiveMaterialClock,
+                    bridge,
+                    now()
+                )?)
+        )
+        .map_err(bridge_error)?;
     }
-    let unsigned =
-        Zeroizing::new(hex::decode(&payload.unsigned_pczt_hex).map_err(|_| BridgeError::Binding)?);
-    let proved =
-        Zeroizing::new(hex::decode(&payload.proved_pczt_hex).map_err(|_| BridgeError::Binding)?);
+    let unsigned = Zeroizing::new(
+        receive_result_v2!(
+            collector,
+            DeliveryReceiveUnsignedDecode,
+            unknown,
+            hex::decode(&payload.unsigned_pczt_hex)
+        )
+        .map_err(|_| BridgeError::Binding)?,
+    );
+    let proved = Zeroizing::new(
+        receive_result_v2!(
+            collector,
+            DeliveryReceiveProvedDecode,
+            unknown,
+            hex::decode(&payload.proved_pczt_hex)
+        )
+        .map_err(|_| BridgeError::Binding)?,
+    );
     check()?;
-    let fixed = VerifiedDurableEconomicsV1::verify(
-        &proposal,
-        &unsigned,
-        &proved,
-        &payload.contributions,
-        &account_id,
-        payload
-            .output_actions
-            .iter()
-            .map(|m| wholepact_protocol::construction::OutputActionMapping {
-                output_id: m.output_id.clone(),
-                action_index: m.action_index,
-            })
-            .collect(),
-        wholepact_protocol::proving::ProvingLimits { maximum_actions: 8 },
+    let fixed = receive_result_v2!(
+        collector,
+        DeliveryReceiveEconomics,
+        signer,
+        VerifiedDurableEconomicsV1::verify(
+            &proposal,
+            &unsigned,
+            &proved,
+            &payload.contributions,
+            &account_id,
+            payload
+                .output_actions
+                .iter()
+                .map(|m| wholepact_protocol::construction::OutputActionMapping {
+                    output_id: m.output_id.clone(),
+                    action_index: m.action_index,
+                })
+                .collect(),
+            wholepact_protocol::proving::ProvingLimits { maximum_actions: 8 },
+        )
     )
     .map_err(|_| BridgeError::Binding)?;
-    if fixed.verified().identity().proposal_binding != request.proposal_binding {
+    if receive_denied_v2!(
+        collector,
+        DeliveryReceiveFinalBinding,
+        fixed.verified().identity().proposal_binding != request.proposal_binding
+    ) {
         return Err(BridgeError::Binding);
     }
     check()?;
@@ -366,20 +1325,30 @@ fn receive_delivery(
             .map(|c| c.request().scope.clone())
             .collect(),
     };
-    imported.check_data_current().map_err(bridge_error)?;
-    wire::bounded_write(
-        &mut stream,
-        &DeliveryResponseV1::Imported {
-            receipt: DurableReviewDeliveryReceiptV1 {
-                version: 1,
-                recipient_request_digest: request_digest,
-                payload_digest: digest,
-                payload_bytes: size as u64,
-                state: "imported_for_review".into(),
+    imported
+        .check_data_current_observed_v2(
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            collector,
+        )
+        .map_err(bridge_error)?;
+    receive_result_v2!(
+        collector,
+        DeliveryReceiveImportedWrite,
+        bridge,
+        wire::bounded_write(
+            stream,
+            &DeliveryResponseV1::Imported {
+                receipt: DurableReviewDeliveryReceiptV1 {
+                    version: 1,
+                    recipient_request_digest: request_digest,
+                    payload_digest: digest,
+                    payload_bytes: size as u64,
+                    state: "imported_for_review".into(),
+                },
             },
-        },
-        deadline,
-        &check,
+            deadline,
+            &check,
+        )
     )?;
     drop(lease);
     Ok(imported)
@@ -2354,5 +3323,107 @@ mod pending_import_completion_tests {
         assert!(!drain.contains("thread::spawn"));
         assert!(!drain.contains("Instant::now"));
         assert!(!drain.contains("receive_delivery("));
+    }
+}
+
+#[cfg(test)]
+mod receiver_terminal_tests {
+    use super::*;
+    use std::{cell::RefCell, rc::Rc};
+
+    struct BorrowedResource(Rc<RefCell<Vec<&'static str>>>);
+    impl Drop for BorrowedResource {
+        fn drop(&mut self) {
+            self.0.borrow_mut().push("resource-drop");
+        }
+    }
+    struct NonCloneError {
+        value: Box<u64>,
+        events: Rc<RefCell<Vec<&'static str>>>,
+    }
+    impl Drop for NonCloneError {
+        fn drop(&mut self) {
+            self.events.borrow_mut().push("error-drop");
+        }
+    }
+
+    #[test]
+    fn borrowed_body_observes_same_nonclone_error_before_resource_drop() {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let original = NonCloneError {
+            value: Box::new(73),
+            events: events.clone(),
+        };
+        let identity = &*original.value as *const u64;
+        let returned = {
+            let mut resource = BorrowedResource(events.clone());
+            let result = borrowed_receive_terminal_v2(
+                &mut resource,
+                |resource| {
+                    resource.0.borrow_mut().push("body");
+                    Err::<(), _>(original)
+                },
+                |error| {
+                    assert_eq!(&*error.value as *const u64, identity);
+                    events.borrow_mut().push("terminal");
+                    assert_eq!(&*events.borrow(), &["body", "terminal"]);
+                },
+            );
+            assert_eq!(&*events.borrow(), &["body", "terminal"]);
+            result
+        };
+        assert_eq!(
+            &*returned.as_ref().err().unwrap().value as *const u64,
+            identity
+        );
+        assert_eq!(&*events.borrow(), &["body", "terminal", "resource-drop"]);
+        drop(returned);
+        assert_eq!(
+            &*events.borrow(),
+            &["body", "terminal", "resource-drop", "error-drop"]
+        );
+    }
+
+    #[test]
+    fn borrowed_success_never_observes_and_retains_original_allocation() {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let value = Box::new(74_u64);
+        let identity = &*value as *const u64;
+        let returned = {
+            let mut resource = BorrowedResource(events.clone());
+            borrowed_receive_terminal_v2(
+                &mut resource,
+                |resource| {
+                    resource.0.borrow_mut().push("body");
+                    Ok::<_, NonCloneError>(value)
+                },
+                |_| panic!("success must not invoke terminal observer"),
+            )
+        };
+        assert_eq!(&**returned.as_ref().ok().unwrap() as *const u64, identity);
+        assert_eq!(&*events.borrow(), &["body", "resource-drop"]);
+    }
+
+    #[test]
+    fn observation_macros_preserve_no_collector_and_feature_disabled_parity() {
+        // The same macro expansion is compiled with and without synthetic
+        // diagnostics. Neither path evaluates an expression more than once.
+        let calls = std::cell::Cell::new(0);
+        let value = Box::new(75_u64);
+        let identity = &*value as *const u64;
+        let result = receive_result_v2!(None, DeliveryReceiveFrame, unknown, {
+            calls.set(calls.get() + 1);
+            Err::<(), _>(value)
+        });
+        assert_eq!(calls.get(), 1);
+        assert_eq!(&**result.as_ref().unwrap_err() as *const u64, identity);
+        assert!(receive_denied_v2!(None, DeliveryReceiveDeadline, {
+            calls.set(calls.get() + 1);
+            true || {
+                calls.set(100);
+                false
+            }
+        }));
+        assert_eq!(calls.get(), 2);
     }
 }

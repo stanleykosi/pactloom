@@ -14,6 +14,7 @@ macro_rules! labels {
     };
 }
 labels! { Boundary {
+    DeliveryReceiveNativeDeadline, DeliveryReceiveRequest, DeliveryReceiveSource, DeliveryReceiveOriginalHistory, DeliveryReceiveOriginalBinding, DeliveryReceiveCurrentHistory, DeliveryReceiveRedisclosureBinding, DeliveryReceiveRecipientBinding, DeliveryReceiveViewingKey, DeliveryReceiveMaterialOwner, DeliveryReceiveLease, DeliveryReceiveNativeOrigin, DeliveryReceiveSourceUnderLease, DeliveryReceiveReceipts, DeliveryReceiveProposal, DeliveryReceiveAccount, DeliveryReceiveAccountBinding, DeliveryReceiveReviewerScope, DeliveryReceiveDeadline, DeliveryReceiveOriginalSource, DeliveryReceivePeer, DeliveryReceiveMaterialClock, DeliveryReceiveMaterialScope, DeliveryReceiveRequestDigest, DeliveryReceiveReadyWrite, DeliveryReceiveFrame, DeliveryReceiveCommandParse, DeliveryReceiveCommandBinding, DeliveryReceivePayloadLimit, DeliveryReceiveChunkDecode, DeliveryReceiveCurrentWrite, DeliveryReceiveReceivingWrite, DeliveryReceivePayloadBinding, DeliveryReceivePayloadParse, DeliveryReceivePayloadCanonical, DeliveryReceiveContributionBinding, DeliveryReceiveUnsignedDecode, DeliveryReceiveProvedDecode, DeliveryReceiveEconomics, DeliveryReceiveFinalBinding, DeliveryReceiveFinalSource, DeliveryReceiveFinalPeer, DeliveryReceiveFinalDeadline, DeliveryReceiveFinalMaterialClock, DeliveryReceiveFinalMaterialScope, DeliveryReceiveImportedWrite, DeliveryReceiveTerminal,
     DeliveryExportProofCurrent, DeliveryExportProofOrigin, DeliveryExportSourceBefore, DeliveryExportSourceAfter, DeliveryExportMetadataOrigin, DeliveryExportMarker, DeliveryExportHistory, DeliveryExportMaterialCeilings, DeliveryExportIntake, DeliveryExportVerifiedProof, DeliveryExportRoster, DeliveryExportPayload, DeliveryExportOutputActions, DeliveryExportRecipientBinding, DeliveryExportSources, DeliveryExportCheckpointScope, DeliveryExportProofPermission, DeliveryExportPermission, DeliveryExportReplayScope, DeliveryExportCommand, DeliveryExportReplayLookup, DeliveryExportDelta, DeliveryExportEntry, DeliveryRecipientMutex, DeliveryRecipientDeadline, DeliveryRecipientOrigin, DeliveryRecipientObserverClone, DeliveryRecipientWriteSerialize, DeliveryRecipientWriteLimit, DeliveryRecipientWriteDeadline, DeliveryRecipientWriteTimeout, DeliveryRecipientWriteIo, DeliveryRecipientWriteEmpty, DeliveryRecipientFrame, DeliveryRecipientResponseDecode, DeliveryRecipientResponseDigest, DeliveryRecipientResponse, DeliverySourceScopePredicate, DeliveryProofRolePredicate, DeliveryMaterialActionPredicate, DeliveryMaterialScopePredicate, DeliveryExportScopePredicate,
     DeliveryCredentialRegistration, DeliveryRedisclosure, DeliveryRedisclosurePrepare, DeliveryRedisclosureApprove, DeliveryRedisclosureServe, DeliveryArtifactImportStart, DeliveryArtifactImport, DeliverySourceOpen, DeliverySourceInspection, DeliverySourcePlan, DeliveryRecipientPrepare, DeliveryExportPreview, DeliveryExportApproval, DeliveryExportCommit, DeliveryExportPostcheck, DeliveryNativeCheck, DeliverySourceCheck, DeliverySourceExport, DeliveryOriginalReopen, DeliveryUnsupportedAudit, DeliveryNativeAdmission, DeliveryHistoricalRead, DeliveryIdentityCompare, DeliveryDurableMarker, DeliveryProducerKill, DeliveryProducerReap, DeliveryReaderReap, DeliveryRootCleanup,
     PrivateWorkspaceBootstrap, PrivateSourceSelect, PrivateWorkspaceReserve, PrivateWorkspaceAnchor, PrivateWorkspacePublish, PrivateWorkspaceInitialize, PrivateWorkspaceCandidate, PrivateWorkspaceCapture, PrivateWorkspaceIntake, PrivateWorkspaceObserve, PrivateWorkspaceCheckpoint, PrivateWorkspaceProof, PrivateWorkspaceFreeze, PrivateWorkspaceScanCleanup, PrivateWorkspaceDurableMarker, PrivateWorkspaceProducerKill, PrivateWorkspaceProducerReap, PrivateWorkspaceReaderOpen, PrivateWorkspaceReadFixed, PrivateWorkspaceIdentityCompare, PrivateWorkspaceReaderReap, PrivateWorkspaceRootCleanup,
@@ -44,6 +45,7 @@ labels! { Boundary {
     FullOriginalPolicy, RetainedPredecessor, RetainedMaterial, RetainedEconomics, RetainedInvocation, RetainedRuntime, RetainedProvider, RetainedTls, RetainedWitness, RetainedPolicyRead, RetainedPolicyMatch, RetainedSelectionFiles, ContinuedPredecessor, ContinuedObservation, ContinuedOriginal, ContinuedWait, ContinuedPrepare, Bootstrap, Session, PublicRefusal, PaymentReceiver, AgreementInput, AgreementNative, WitnessSetup, WitnessOrigin, SignerStart, BirthExport, BirthRead, BirthEnroll, BirthHistory, BirthAcknowledge, BirthDistinct, SinglePrepare, SingleOpen, SinglePair, SingleSubmit, SingleExport, SingleWitness, SinglePublicationPrepare, SingleHistory, SinglePublicationOpen, SinglePublicationPair, SingleFinish, SingleClose, RosterPrepare, RosterOpen, RosterPair, RosterSubmit, RosterExport, RosterWitness, RosterPublicationPrepare, RosterHistory, RosterPublicationOpen, RosterPublicationPair, RosterFinish, RosterClose, MetadataCheck, FinancialRefusal, EndInvariant, SignerCreate, SignerExportBirth, SignerAcknowledge, SignerOpenSingleIntent, SignerPollSingleIntent, SignerExportSingle, SignerOpenSinglePublication, SignerPollSinglePublication, SignerCloseSinglePublication, SignerOpenRosterIntent, SignerPollRosterIntent, SignerExportRoster, SignerOpenRosterPublication, SignerPollRosterPublication, SignerCloseRosterPublication, SignerOpenContinuationIntent, SignerPollContinuationIntent, SignerOpenContinuedPublication, SignerPollContinuedPublication, SignerCloseContinuedPublication, SignerExportOriginalFullPlan, SignerOpenCommonContextRead, SignerPollCommonContextRead, SignerParkCommonContextCompletion, SignerPeerMetadata, SignerNativeEntry, SignerEndpoint, SignerProvider, SignerDeadline, SignerSingleController, ObservedInputs, ObservedRetainedPredecessor, ObservedAssemble, ObservedCandidateReview, ObservedPlanExport, ObservedPlanSign, ObservedPlanRead, ObservedPlanAuthenticate, ObservedPlanWitness, ObservedContinuation, ObservedOwnerSplit, ObservedReadPrepare, ObservedReadHistory, ObservedReadOpen, ObservedReadPair, ObservedReadFinish, ObservedReadPark, ObservedBarrier, ObservedProviderDrain, ConstructedPredecessor, ConstructedDisclosure, ConstructedWitnessOriginal, ConstructedWitnessGrant, ConstructedWitnessScope, ConstructedPendingFile, ConstructedPendingReview, ConstructedSignerOpen, ConstructedConsume, ConstructedSignerPark, ConstructedServerSeal, ConstructedCheckpoint, ConstructedSavedOriginal, ConstructedInvariant, ConstructedProviderDrain, SignerOpenOriginalCompletion, SignerPollOriginalCompletion, ProvedConstructionDrain, ProvedOriginalJob, ProvedOriginalCorrelation, ProvedHostPublic, ProvedWitnessKey, ProvedNamedOpen, ProvedNamedPair, ProvedNamedStatus, ProvedNamedRecords, ProvedNamedProfile, ProvedNativePins, ProvedCarrierPrepare, ProvedCarrierExport, ProvedCarrierRecover, ProvedCarrierRetained, ProvedCarrierInvariant, SignerOpenOriginalNamed, SignerPollOriginalNamed, SignerRetainOriginalProfile, SignerNamedEnrollmentExport, SignerNamedInstalledMetadata, SignerNamedVerifierArm, SignerNamedVerifierStart, SignerNamedVerifierPoll, SignerNamedAssertionExport, SignerNamedOriginalImport, SignerNamedOriginalSubmit, SignerNamedOriginalSign, SignerNamedHostServing, FullPaymentPredecessor, FullEnrollmentExport, FullEnrollmentInstall, FullArtifactsInstall, FullInstalledMetadata, FullVerifierRequest, FullAssertion, FullOriginalImport, FullAdmission, FullSignatureReturn, FullHistory, FullReturnIntake, FullMerge, FullCurrentDispatch, FullRecipientReceipt, SingleAccountUnlock, SingleRetainedRead, SingleAcquireState, SingleAttemptedSource, SingleAttemptsRead, SingleRetainedReopen, SinglePreacquire, SingleReference, SingleAccountId, SingleAudit, SingleEndpointCreate, SingleDirectoryOpen, SingleIpcBind, SingleEndpointPublish, SingleWorkOpen, SingleWorkPrepareIntent, SingleWorkPrepareSignature, SingleWorkPrepareExport, SingleWorkPrepareReentry, SingleWorkPrepareWitness, SingleWorkPrepareAcquire, SingleWorkPrepareActivate, SingleWorkPreparePublication, SingleWorkPrepareServe, SingleWorkCommitPair, SingleWorkCommitRetain, SingleWorkCommitSignature, SingleWorkCommitExport, SingleWorkCommitReentry, SingleWorkCommitWitness, SingleWorkCommitAcquire, SingleWorkCommitActivate, SingleWorkCommitAdmission, SingleWorkCommitPublication, SingleWorkCommitServe, SingleWorkRetryAcquire, SingleWorkRetryActivate, SingleWorkRetryAdmission, SingleWorkOther, SingleWorkAdoptOutput
 } }
 labels! { Outcome {
+    JournalExpired, JournalPermission, JournalOther, ConstructionInvalid, ConstructionBinding, ConstructionStale, ConstructionStorage, ConstructionSync,
     PredicateDenied,
     ExactPermission, ExactLineage, ExactBinding, ExactStorage, ExactRecoveryRequired, ExactStateChanged, ExactProfileChanged, ExactBudget, ExactRoster,
     EngineDurableProposalConflict, EngineDurableProfileUnavailable, EngineDisclosureUnknown, EngineDisclosureDenied, EngineDurableConstructionUnavailable, EngineDurableProposalRecoveryRequired, EngineMissingEvidence, EngineInvalidTerms, EngineUnsupportedCapability, EngineDebitCapExceeded, EnginePermissionDenied, EngineInternalError, EngineAccessDenied, EngineCandidateVerificationFailed, EngineIdempotencyConflict, EngineInvalidRequest, EngineInvalidTransition, EngineLiveAuthorizationExists, EngineManualConstructionDenied, EngineNotFound, EngineRecoveryRequired, EngineResourceExhausted, EngineRetainedObservationUnavailable, EngineRevisionConflict, EngineStorageProtectionRequired, EngineStorageUnavailable, EngineUnclassified, JobConsentDenied, JobIdempotencyConflict, JobInvalidRequest, JobNotFound, JobRecoveryRequired, JobResourceExhausted, JobStateConflict, JobStorage, JobUnsupportedSchema, JobVerificationFailed, ProtocolActionMapping, ProtocolBuilderInput, ProtocolBuilderOutput, ProtocolContext, ProtocolContribution, ProtocolDisclosure, ProtocolFee, ProtocolFinalize, ProtocolInput, ProtocolManifest, ProtocolOutput, ProtocolPczt, ProtocolUnclassified, StoreAlreadyExists, StoreBudgetExceeded, StoreDatabase, StoreEncoding, StoreFile, StoreIdempotencyConflict, StoreInputReserved, StoreInvalidInput, StoreInvalidTransition, StoreLiveAuthorizationExists, StoreNotFound, StorePoisoned, StoreRecoveryRequired, StoreResourceExhausted, StoreRevisionConflict, StoreStorageSecurity, StoreUnsupportedSchema, StoreWriterEpochMismatch,
@@ -1700,10 +1702,12 @@ fn history_measurement_capture_is_canonical_bounded_and_sticky() {
     assert!(capture.public_lines()[0].contains("invalid=true"));
     capture.discard_for_budget();
     assert_eq!(capture.retained_bytes(), 0);
-    assert!(capture
-        .public_lines()
-        .iter()
-        .all(|line| line.contains("invalid=true")));
+    assert!(
+        capture
+            .public_lines()
+            .iter()
+            .all(|line| line.contains("invalid=true"))
+    );
     let mut capture = HistoryMeasurementCapture::default();
     capture.capture_line(&line, 1);
     capture.capture_line(&line, 8192);
@@ -1735,14 +1739,18 @@ fn history_measurement_parser_preserves_unavailable_and_exhausted() {
     }
     value["incomplete"] = serde_json::json!(true);
     let record = parse_history_record(&format!("[HISTORY_MEASUREMENT_V1 {value}]"), false).unwrap();
-    assert!(record
-        .line()
-        .contains("\"selected_remaining_at_failure_us\":null"));
+    assert!(
+        record
+            .line()
+            .contains("\"selected_remaining_at_failure_us\":null")
+    );
     value["selected_remaining_at_failure_us"] = serde_json::json!(0);
     let record = parse_history_record(&format!("[HISTORY_MEASUREMENT_V1 {value}]"), false).unwrap();
-    assert!(record
-        .line()
-        .contains("\"selected_remaining_at_failure_us\":0"));
+    assert!(
+        record
+            .line()
+            .contains("\"selected_remaining_at_failure_us\":0")
+    );
 }
 
 pub(super) fn host<T>(boundary: Boundary, operation: impl FnOnce() -> Result<T>) -> Result<T> {
@@ -1838,6 +1846,53 @@ pub(super) fn authority_error(error: &wholepact_authority::AuthorityError) -> Ou
     feature = "synthetic-born-joined-qualification"
 ))]
 pub(super) const DELIVERY_BOUNDARIES: &[&str] = &[
+    "DeliveryReceiveNativeDeadline",
+    "DeliveryReceiveRequest",
+    "DeliveryReceiveSource",
+    "DeliveryReceiveOriginalHistory",
+    "DeliveryReceiveOriginalBinding",
+    "DeliveryReceiveCurrentHistory",
+    "DeliveryReceiveRedisclosureBinding",
+    "DeliveryReceiveRecipientBinding",
+    "DeliveryReceiveViewingKey",
+    "DeliveryReceiveMaterialOwner",
+    "DeliveryReceiveLease",
+    "DeliveryReceiveNativeOrigin",
+    "DeliveryReceiveSourceUnderLease",
+    "DeliveryReceiveReceipts",
+    "DeliveryReceiveProposal",
+    "DeliveryReceiveAccount",
+    "DeliveryReceiveAccountBinding",
+    "DeliveryReceiveReviewerScope",
+    "DeliveryReceiveDeadline",
+    "DeliveryReceiveOriginalSource",
+    "DeliveryReceivePeer",
+    "DeliveryReceiveMaterialClock",
+    "DeliveryReceiveMaterialScope",
+    "DeliveryReceiveRequestDigest",
+    "DeliveryReceiveReadyWrite",
+    "DeliveryReceiveFrame",
+    "DeliveryReceiveCommandParse",
+    "DeliveryReceiveCommandBinding",
+    "DeliveryReceivePayloadLimit",
+    "DeliveryReceiveChunkDecode",
+    "DeliveryReceiveCurrentWrite",
+    "DeliveryReceiveReceivingWrite",
+    "DeliveryReceivePayloadBinding",
+    "DeliveryReceivePayloadParse",
+    "DeliveryReceivePayloadCanonical",
+    "DeliveryReceiveContributionBinding",
+    "DeliveryReceiveUnsignedDecode",
+    "DeliveryReceiveProvedDecode",
+    "DeliveryReceiveEconomics",
+    "DeliveryReceiveFinalBinding",
+    "DeliveryReceiveFinalSource",
+    "DeliveryReceiveFinalPeer",
+    "DeliveryReceiveFinalDeadline",
+    "DeliveryReceiveFinalMaterialClock",
+    "DeliveryReceiveFinalMaterialScope",
+    "DeliveryReceiveImportedWrite",
+    "DeliveryReceiveTerminal",
     "DeliveryExportProofCurrent",
     "DeliveryExportProofOrigin",
     "DeliveryExportSourceBefore",
@@ -2242,26 +2297,29 @@ fn admission_parser_requires_every_exact_field_and_rejects_duplicates() {
                     .as_object_mut()
                     .unwrap()
                     .remove(&key);
-                assert!(parse_admission_record(
-                    &format!("{}{missing}]", ADMISSION_PREFIXES[slot]),
-                    slot
-                )
-                .is_none());
+                assert!(
+                    parse_admission_record(
+                        &format!("{}{missing}]", ADMISSION_PREFIXES[slot]),
+                        slot
+                    )
+                    .is_none()
+                );
                 let mut confused = original.clone();
                 at(&mut confused, &path)[&key] = serde_json::json!(["private"]);
-                assert!(parse_admission_record(
-                    &format!("{}{confused}]", ADMISSION_PREFIXES[slot]),
-                    slot
-                )
-                .is_none());
+                assert!(
+                    parse_admission_record(
+                        &format!("{}{confused}]", ADMISSION_PREFIXES[slot]),
+                        slot
+                    )
+                    .is_none()
+                );
             }
             let mut unknown = original.clone();
             at(&mut unknown, &path)["private"] = serde_json::json!("payload");
-            assert!(parse_admission_record(
-                &format!("{}{unknown}]", ADMISSION_PREFIXES[slot]),
-                slot
-            )
-            .is_none());
+            assert!(
+                parse_admission_record(&format!("{}{unknown}]", ADMISSION_PREFIXES[slot]), slot)
+                    .is_none()
+            );
             let text = original.to_string();
             let key = at(&mut object, &path)
                 .as_object()
@@ -2275,11 +2333,10 @@ fn admission_parser_requires_every_exact_field_and_rejects_duplicates() {
                 &format!("\"{key}\":null,\"{key}\":"),
                 1,
             );
-            assert!(parse_admission_record(
-                &format!("{}{duplicate}]", ADMISSION_PREFIXES[slot]),
-                slot
-            )
-            .is_none());
+            assert!(
+                parse_admission_record(&format!("{}{duplicate}]", ADMISSION_PREFIXES[slot]), slot)
+                    .is_none()
+            );
         }
     }
 }
@@ -2320,11 +2377,13 @@ fn admission_parser_preserves_unavailable_zero_and_commit_uncertainty() {
     assert!(parse_history_record(&format!("[HISTORY_MEASUREMENT_V1 {history}]"), false).is_none());
     for phase in ["Snapshot", "Page"] {
         rows[0]["phase"] = serde_json::json!(phase);
-        assert!(parse_admission_record(
-            &format!("{}{row}]", ADMISSION_PREFIXES[0], row = rows[0]),
-            0
-        )
-        .is_none());
+        assert!(
+            parse_admission_record(
+                &format!("{}{row}]", ADMISSION_PREFIXES[0], row = rows[0]),
+                0
+            )
+            .is_none()
+        );
     }
 }
 
@@ -2344,11 +2403,13 @@ fn admission_parser_rejects_out_of_bounds_and_type_confused_scalars() {
                     .is_none()
             );
         }
-        assert!(parse_admission_record(
-            &format!("{}{}]", ADMISSION_PREFIXES[slot], " ".repeat(4097)),
-            slot
-        )
-        .is_none());
+        assert!(
+            parse_admission_record(
+                &format!("{}{}]", ADMISSION_PREFIXES[slot], " ".repeat(4097)),
+                slot
+            )
+            .is_none()
+        );
     }
     for value in [
         serde_json::json!(-1),
@@ -2419,8 +2480,8 @@ fn admission_capture_slots_are_independent_sticky_and_bounded() {
 #[cfg(feature = "synthetic-born-joined-qualification")]
 mod durable_flow_projection {
     use super::{
-        admission_io_kind_label, history_check_site_label, history_checkpoint_label,
-        history_selected_limit_label, required_history_nullable, PublicHistoryCost,
+        PublicHistoryCost, admission_io_kind_label, history_check_site_label,
+        history_checkpoint_label, history_selected_limit_label, required_history_nullable,
     };
     use wholepact_authority::transport::history_diagnostics_v1::{
         CheckedHistoryCostV1, CheckedHistoryMeasurementV1, CheckedHistoryPhaseV1,
@@ -4372,10 +4433,10 @@ mod durable_flow_projection {
                 value["lower_call_measurement"]["measurement"]["phase"] =
                     serde_json::json!(purpose);
                 if *purpose == "Reserve" {
-                    value["lower_call_measurement"]["measurement"]
-                        ["caller_remaining_at_budget_start_us"] = serde_json::Value::Null;
-                    value["lower_call_measurement"]["measurement"]
-                        ["caller_remaining_at_failure_us"] = serde_json::Value::Null;
+                    value["lower_call_measurement"]["measurement"]["caller_remaining_at_budget_start_us"] =
+                        serde_json::Value::Null;
+                    value["lower_call_measurement"]["measurement"]["caller_remaining_at_failure_us"] =
+                        serde_json::Value::Null;
                 }
                 assert!(accepted(&value));
             }
@@ -4632,7 +4693,9 @@ mod durable_flow_projection {
                         format!("\\u{:04x}{}", key.as_bytes()[0], &key[1..]),
                     ] {
                         let duplicate = format!("{{\"{spelling}\":{entry},{}", &fragment[1..]);
-                        assert!(lifecycle_parse(&text.replacen(&fragment, &duplicate, 1)).is_none());
+                        assert!(
+                            lifecycle_parse(&text.replacen(&fragment, &duplicate, 1)).is_none()
+                        );
                     }
                     for bad in [
                         serde_json::json!([]),
@@ -4828,13 +4891,13 @@ mod durable_flow_projection {
         }
     }
 }
-#[cfg(feature = "synthetic-born-joined-qualification")]
-pub(super) use durable_flow_projection::{
-    emit_durable_flow, DurableFlowCapture, DurableLifecycleCapture,
-};
 #[cfg(all(test, feature = "synthetic-born-joined-qualification"))]
 pub(super) use durable_flow_projection::{
     DURABLE_FLOW_MAXIMAL_TEST_JSON, DURABLE_LIFECYCLE_MAXIMAL_TEST_JSON,
+};
+#[cfg(feature = "synthetic-born-joined-qualification")]
+pub(super) use durable_flow_projection::{
+    DurableFlowCapture, DurableLifecycleCapture, emit_durable_flow,
 };
 
 // Optional, data-only transport. The Host leaf owns the single strict typed
@@ -4936,8 +4999,8 @@ mod private_fixed_projection {
     feature = "synthetic-born-joined-qualification"
 ))]
 pub(super) use private_fixed_projection::{
-    emit_private_fixed_diagnostic, emit_private_fixed_diagnostic_unavailable,
-    PrivateFixedDiagnosticCapture,
+    PrivateFixedDiagnosticCapture, emit_private_fixed_diagnostic,
+    emit_private_fixed_diagnostic_unavailable,
 };
 #[cfg(all(
     test,
@@ -4968,7 +5031,7 @@ fn private_fixed_test_parse(value: &serde_json::Value) -> bool {
     feature = "synthetic-born-joined-qualification"
 ))]
 fn private_fixed_diagnostic_strict_public_schema_and_worker_relations() {
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     let original: Value = serde_json::from_str(PRIVATE_FIXED_DIAGNOSTIC_TEST_JSON).unwrap();
     assert!(private_fixed_test_parse(&original));
     for path in [
@@ -5045,7 +5108,7 @@ fn private_fixed_diagnostic_strict_public_schema_and_worker_relations() {
 ))]
 fn private_fixed_diagnostic_canonicalizes_only_valid_enum_records() {
     use crate::host::durable_private_workspace_v1::PrivateFixedDiagnosticV1;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     let original: Value = serde_json::from_str(PRIVATE_FIXED_DIAGNOSTIC_TEST_JSON).unwrap();
     let states = [
         "NotApplicable",
@@ -5134,7 +5197,7 @@ fn private_fixed_diagnostic_canonicalizes_only_valid_enum_records() {
 ))]
 fn private_fixed_diagnostic_rejects_duplicate_unknown_private_or_oversized_record() {
     use crate::host::durable_private_workspace_v1::PrivateFixedDiagnosticV1;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     let original: Value = serde_json::from_str(PRIVATE_FIXED_DIAGNOSTIC_TEST_JSON).unwrap();
     for path in [
         "",

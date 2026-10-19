@@ -2,22 +2,25 @@
 //! conversion back to the precursor, generic Engine, raw Store or private bytes.
 //! The immutable fixed prefix and the append-only export history are distinct.
 use super::*;
+use crate::Envelope;
 use crate::durable_construction_v1::{
-    original_roster_v2,
+    DurableMaterialActionV1, LocalDurableMaterialConsentV1, original_roster_v2,
     review_export_v1::{
         self, DurableReviewExportScopeV1, ExportExposure, ExportIntent,
         LocalDurableReviewExportConsentV1, MAX_EXPORT_INTENTS,
     },
-    DurableMaterialActionV1, LocalDurableMaterialConsentV1,
 };
-use crate::Envelope;
-use wholepact_proof_jobs::{CheckpointScope, LocalAction, LocalProofConsent, VerifiedCheckpoint};
+use sha2::{Digest, Sha256};
+use wholepact_proof_jobs::{
+    CheckpointScope, JobSummary, LocalAction, LocalProofConsent, VerifiedCheckpoint,
+};
 use wholepact_protocol::durable_proposal_v1::FixedProposalIdentityV1;
 use wholepact_signer::authority_bridge::{
+    BridgeError,
     durable_review_ipc_v1::{
         DurableReviewOutputActionV1, DurableReviewPayloadV1, PreparedDurableReviewDeliveryV1,
+        PreparedDurableReviewPayloadV2,
     },
-    BridgeError,
 };
 use wholepact_store::{CommandContext, MutationResult};
 
@@ -405,6 +408,206 @@ pub struct PrivateDurableAdmissionDeliveryV2 {
     pub export_count: usize,
     pub export_history_digest: String,
 }
+/// One local immutable preparation, borrowing the actual original coordinator.
+/// This owns private bytes but grants no disclosure permission. No Clone, serde,
+/// Debug, raw-byte getter, caller-data constructor or reusable authority exists.
+pub struct PreparedPrivateDurableAdmissionDeliveryV2<'owner, 'source> {
+    owner: &'owner PrivateDurableAdmissionCoordinatorV2<'source>,
+    payload: PreparedDurableReviewPayloadV2,
+    source: OriginalDeliverySourceBindingV2,
+    proof: OriginalDeliveryProofBindingV2,
+}
+
+/// Consuming join of those exact prepared bytes and one actual sealed recipient.
+/// The only public projection is inert review metadata, never a send permission.
+pub struct BoundPrivateDurableAdmissionDeliveryV2<'owner, 'source, 'recipient> {
+    prepared: PreparedPrivateDurableAdmissionDeliveryV2<'owner, 'source>,
+    recipient: PreparedDurableReviewDeliveryV1<'recipient>,
+    scope: DurableReviewExportScopeV1,
+}
+
+// Exact private comparison records. These contain commitments and metadata, not
+// capabilities; only the original coordinator can populate production records.
+#[derive(PartialEq, Eq)]
+struct OriginalDeliverySourceBindingV2 {
+    principal_id: String,
+    workspace: serde_json::Value,
+    metadata_origin: [u8; 32],
+    proof_origin: [u8; 32],
+    marker_digest: String,
+    native_association_digest: String,
+    prefix_history_digest: String,
+    full_history_digest: String,
+    materials: serde_json::Value,
+    sources: Vec<review_export_v1::DurableReviewSourceV1>,
+}
+#[derive(PartialEq, Eq)]
+struct OriginalDeliveryProofBindingV2 {
+    original_request_key: String,
+    identity: FixedProposalIdentityV1,
+    summary: JobSummary,
+    scope: CheckpointScope,
+    unsigned_digest: [u8; 32],
+    proved_digest: [u8; 32],
+    output_actions: Vec<DurableReviewOutputActionV1>,
+}
+fn require_prepared_binding<T: PartialEq>(
+    expected: &T,
+    actual: &T,
+    cause: ExportObservation<'_>,
+    site: ExportCauseSite,
+) -> Result<()> {
+    if expected != actual {
+        return export_predicate_error(cause, site, denied());
+    }
+    Ok(())
+}
+impl<'owner, 'source> PreparedPrivateDurableAdmissionDeliveryV2<'owner, 'source> {
+    /// Consume the local preparation and bind only the real current recipient.
+    /// Current local read approval must be supplied anew; preparation approval
+    /// is neither retained nor reused as present inspection/export permission.
+    pub fn bind_current_v2<'recipient>(
+        self,
+        access: &Access,
+        recipient: PreparedDurableReviewDeliveryV1<'recipient>,
+        consent: &dyn LocalPrivateDurableAdmissionConsentV2,
+        proof: &dyn LocalProofConsent,
+        material: &dyn LocalDurableMaterialConsentV1,
+    ) -> Result<BoundPrivateDurableAdmissionDeliveryV2<'owner, 'source, 'recipient>> {
+        self.bind_observed(
+            access,
+            recipient,
+            consent,
+            proof,
+            material,
+            DurableMaterialActionV1::ReadForExactConstruction,
+            None,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn bind_observed<'recipient>(
+        self,
+        access: &Access,
+        recipient: PreparedDurableReviewDeliveryV1<'recipient>,
+        consent: &dyn LocalPrivateDurableAdmissionConsentV2,
+        proof: &dyn LocalProofConsent,
+        material: &dyn LocalDurableMaterialConsentV1,
+        action: DurableMaterialActionV1,
+        cause: ExportObservation<'_>,
+    ) -> Result<BoundPrivateDurableAdmissionDeliveryV2<'owner, 'source, 'recipient>> {
+        let gate = ProofGate {
+            owner: self.owner,
+            access,
+            consent,
+            proof,
+            material,
+            action,
+            cause,
+        };
+        let scope = self.review_scope(access, &recipient, &gate)?;
+        Ok(BoundPrivateDurableAdmissionDeliveryV2 {
+            prepared: self,
+            recipient,
+            scope,
+        })
+    }
+    fn review_scope(
+        &self,
+        access: &Access,
+        recipient: &PreparedDurableReviewDeliveryV1<'_>,
+        gate: &ProofGate<'_, '_>,
+    ) -> Result<DurableReviewExportScopeV1> {
+        use ExportCauseSite as S;
+        let cause = gate.cause;
+        check_recipient(recipient, cause)?;
+        gate.check()?;
+        let (_, history) = self.owner.check_observed(access, gate.consent, cause)?;
+        let source = self
+            .owner
+            .delivery_source_binding(access, &history, cause)?;
+        require_prepared_binding(&self.source, &source, cause, S::ExportSources)?;
+        let scope = DurableReviewExportScopeV1 {
+            schema_version: 1,
+            principal_id: source.principal_id,
+            proposal: self.proof.identity.clone(),
+            recipient: recipient.descriptor().clone(),
+            sources: source.sources,
+            payload_digest: self.payload.payload_digest().into(),
+            payload_length: self.payload.payload_bytes(),
+        };
+        let roster = export_result(cause, S::ExportRoster, original_roster_v2(&history.prefix))?;
+        export_result(
+            cause,
+            S::ExportRecipientBinding,
+            review_export_v1::validate_recipient(
+                &roster,
+                &history.prefix.view.candidates[0],
+                &scope,
+            ),
+        )?;
+        gate.check()?;
+        let (_, after) = self.owner.check_observed(access, gate.consent, cause)?;
+        require_prepared_binding(
+            &self.source.full_history_digest,
+            &after.full_digest,
+            cause,
+            S::ExportHistory,
+        )?;
+        check_recipient(recipient, cause)?;
+        Ok(scope)
+    }
+}
+impl BoundPrivateDurableAdmissionDeliveryV2<'_, '_, '_> {
+    pub fn scope(&self) -> &DurableReviewExportScopeV1 {
+        &self.scope
+    }
+
+    /// Check the same owned sealed recipient without exposing or cloning it.
+    /// Host keeps its original before/after foreground-review checks here.
+    pub fn check_current_v2(&self) -> std::result::Result<(), BridgeError> {
+        self.recipient.check_current()
+    }
+
+    /// Consume before any fallible final check. The final original verified proof
+    /// is comparison evidence only; it never regenerates the transport payload.
+    pub fn deliver_v2(
+        self,
+        access: &Access,
+        consent: &dyn LocalPrivateDurableAdmissionConsentV2,
+        proof: &dyn LocalProofConsent,
+        material: &dyn LocalDurableMaterialConsentV1,
+        export: &dyn LocalDurableReviewExportConsentV1,
+    ) -> Result<PrivateDurableAdmissionDeliveryV2> {
+        let cause = ExportCause::new();
+        let result = export_result(
+            Some(&cause),
+            ExportCauseSite::ExportEntry,
+            self.deliver_observed(access, consent, proof, material, export, &cause),
+        );
+        cause.attach(result)
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn deliver_observed(
+        self,
+        access: &Access,
+        consent: &dyn LocalPrivateDurableAdmissionConsentV2,
+        proof: &dyn LocalProofConsent,
+        material: &dyn LocalDurableMaterialConsentV1,
+        export: &dyn LocalDurableReviewExportConsentV1,
+        cause: &ExportCause,
+    ) -> Result<PrivateDurableAdmissionDeliveryV2> {
+        let Self {
+            prepared,
+            recipient,
+            scope,
+        } = self;
+        let owner = prepared.owner;
+        owner.deliver_prepared_observed(
+            access, prepared, recipient, scope, consent, proof, material, export, cause,
+        )
+    }
+}
+
 struct History {
     prefix: Envelope,
     prefix_digest: String,
@@ -585,9 +788,84 @@ impl<'source> PrivateDurableAdmissionCoordinatorV2<'source> {
         })
     }
 
-    /// Source-owned preview for the exact already prepared live recipient. The
-    /// Host reviews this exact metadata, not a caller-supplied scope. Bytes stay
-    /// private and are rebuilt/compared when the separately approved send runs.
+    /// Prepare and encode exactly once before a genuinely new native recipient
+    /// exists. This is local private reading/custody, not disclosure permission.
+    pub fn prepare_original_delivery_v2(
+        &self,
+        access: &Access,
+        consent: &dyn LocalPrivateDurableAdmissionConsentV2,
+        proof: &dyn LocalProofConsent,
+        material: &dyn LocalDurableMaterialConsentV1,
+    ) -> Result<PreparedPrivateDurableAdmissionDeliveryV2<'_, 'source>> {
+        self.prepare_original_delivery_observed(
+            access,
+            consent,
+            proof,
+            material,
+            DurableMaterialActionV1::ReadForExactConstruction,
+            None,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_original_delivery_observed(
+        &self,
+        access: &Access,
+        consent: &dyn LocalPrivateDurableAdmissionConsentV2,
+        proof: &dyn LocalProofConsent,
+        material: &dyn LocalDurableMaterialConsentV1,
+        action: DurableMaterialActionV1,
+        cause: ExportObservation<'_>,
+    ) -> Result<PreparedPrivateDurableAdmissionDeliveryV2<'_, 'source>> {
+        use ExportCauseSite as S;
+        let (_, history) = self.check_observed(access, consent, cause)?;
+        let gate = ProofGate {
+            owner: self,
+            access,
+            consent,
+            proof,
+            material,
+            action,
+            cause,
+        };
+        gate.check()?;
+        let (checkpoint, key, identity) = self.verified(&history, access, &gate)?;
+        let output_actions = self.delivery_output_actions(access, &history, &checkpoint, cause)?;
+        let source = self.delivery_source_binding(access, &history, cause)?;
+        let proof = delivery_proof_binding(&checkpoint, key, identity, output_actions);
+        let roster = export_result(cause, S::ExportRoster, original_roster_v2(&history.prefix))?;
+        // This is the sole construction and encoding of the prepared transport
+        // payload. The opaque Bridge owner retains that exact allocation.
+        let payload = export_result(
+            cause,
+            S::ExportPayload,
+            DurableReviewPayloadV1 {
+                version: 1,
+                unsigned_pczt_hex: hex::encode(checkpoint.private_unsigned_pczt_bytes()),
+                proved_pczt_hex: hex::encode(checkpoint.pczt_bytes()),
+                contributions: roster.owners.values().map(|i| i.outbox.clone()).collect(),
+                output_actions: proof.output_actions.clone(),
+            }
+            .into_prepared_v2()
+            .map_err(|_| damaged()),
+        )?;
+        gate.check()?;
+        let (_, after) = self.check_observed(access, consent, cause)?;
+        require_prepared_binding(
+            &source.full_history_digest,
+            &after.full_digest,
+            cause,
+            S::ExportHistory,
+        )?;
+        Ok(PreparedPrivateDurableAdmissionDeliveryV2 {
+            owner: self,
+            payload,
+            source,
+            proof,
+        })
+    }
+
+    /// Compatibility preview for an already live recipient. New Host paths use
+    /// the consuming preparation before opening the genuine recipient instead.
     pub fn review_original_delivery_v2(
         &self,
         access: &Access,
@@ -597,7 +875,14 @@ impl<'source> PrivateDurableAdmissionCoordinatorV2<'source> {
         material: &dyn LocalDurableMaterialConsentV1,
     ) -> Result<DurableReviewExportScopeV1> {
         recipient.check_current().map_err(|_| denied())?;
-        let (_, history) = self.check(access, consent)?;
+        let prepared = self.prepare_original_delivery_observed(
+            access,
+            consent,
+            proof,
+            material,
+            DurableMaterialActionV1::ExportForLocalNativeReview,
+            None,
+        )?;
         let gate = ProofGate {
             owner: self,
             access,
@@ -607,14 +892,7 @@ impl<'source> PrivateDurableAdmissionCoordinatorV2<'source> {
             action: DurableMaterialActionV1::ExportForLocalNativeReview,
             cause: None,
         };
-        let (_, scope) = self.payload(access, recipient, &history, &gate)?;
-        gate.check()?;
-        let (_, after) = self.check(access, consent)?;
-        if after.full_digest != history.full_digest {
-            return Err(damaged());
-        }
-        recipient.check_current().map_err(|_| denied())?;
-        Ok(scope)
+        prepared.review_scope(access, recipient, &gate)
     }
 
     /// Commit permanent DisclosedOrUnknown before invoking the only sealed
@@ -650,10 +928,50 @@ impl<'source> PrivateDurableAdmissionCoordinatorV2<'source> {
         export: &dyn LocalDurableReviewExportConsentV1,
         observation: &ExportCause,
     ) -> Result<PrivateDurableAdmissionDeliveryV2> {
+        check_recipient(&recipient, Some(observation))?;
+        self.prepare_original_delivery_observed(
+            access,
+            consent,
+            proof,
+            material,
+            DurableMaterialActionV1::ExportForLocalNativeReview,
+            Some(observation),
+        )?
+        .bind_observed(
+            access,
+            recipient,
+            consent,
+            proof,
+            material,
+            DurableMaterialActionV1::ExportForLocalNativeReview,
+            Some(observation),
+        )?
+        .deliver_observed(access, consent, proof, material, export, observation)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn deliver_prepared_observed(
+        &self,
+        access: &Access,
+        prepared: PreparedPrivateDurableAdmissionDeliveryV2<'_, 'source>,
+        recipient: PreparedDurableReviewDeliveryV1<'_>,
+        scope: DurableReviewExportScopeV1,
+        consent: &dyn LocalPrivateDurableAdmissionConsentV2,
+        proof: &dyn LocalProofConsent,
+        material: &dyn LocalDurableMaterialConsentV1,
+        export: &dyn LocalDurableReviewExportConsentV1,
+        observation: &ExportCause,
+    ) -> Result<PrivateDurableAdmissionDeliveryV2> {
         use ExportCauseSite as S;
         let cause = Some(observation);
+        let PreparedPrivateDurableAdmissionDeliveryV2 {
+            payload,
+            source,
+            proof: prepared_proof,
+            ..
+        } = prepared;
         check_recipient(&recipient, cause)?;
-        let (before, history) = self.check_observed(access, consent, cause)?;
+        let (_, history) = self.check_observed(access, consent, cause)?;
         let gate = ProofGate {
             owner: self,
             access,
@@ -663,7 +981,34 @@ impl<'source> PrivateDurableAdmissionCoordinatorV2<'source> {
             action: DurableMaterialActionV1::ExportForLocalNativeReview,
             cause,
         };
-        let (payload, scope) = self.payload(access, &recipient, &history, &gate)?;
+        gate.check()?;
+        // Do not substitute proof connection currentness for full original
+        // verification. Reloaded private bytes are comparison evidence only.
+        let (checkpoint, key, identity) = self.verified(&history, access, &gate)?;
+        let output_actions = self.delivery_output_actions(access, &history, &checkpoint, cause)?;
+        let actual_proof = delivery_proof_binding(&checkpoint, key, identity, output_actions);
+        require_prepared_binding(
+            &prepared_proof,
+            &actual_proof,
+            cause,
+            S::ExportVerifiedProof,
+        )?;
+        // Proof verification can take time. Re-read and authenticate the full
+        // current history again before comparing it to the original preparation.
+        let (before, history) = self.check_observed(access, consent, cause)?;
+        let actual_source = self.delivery_source_binding(access, &history, cause)?;
+        require_prepared_binding(&source, &actual_source, cause, S::ExportSources)?;
+        let actual_scope = DurableReviewExportScopeV1 {
+            schema_version: 1,
+            principal_id: actual_source.principal_id,
+            proposal: actual_proof.identity,
+            recipient: recipient.descriptor().clone(),
+            sources: actual_source.sources,
+            payload_digest: payload.payload_digest().into(),
+            payload_length: payload.payload_bytes(),
+        };
+        require_prepared_binding(&scope, &actual_scope, cause, S::ExportRecipientBinding)?;
+        drop(checkpoint);
         let delivery_gate = DeliveryGate {
             proof: &gate,
             scope: &scope,
@@ -790,7 +1135,9 @@ impl<'source> PrivateDurableAdmissionCoordinatorV2<'source> {
                     .check(true)
                     .map_err(|_| BridgeError::Permission)
             };
-            recipient.deliver(&payload, &check).map_err(|_| denied())?;
+            recipient
+                .deliver_prepared_v2(payload, &check)
+                .map_err(|_| denied())?;
             delivery_gate.check(true)?;
             let (current, history) = self.check(access, consent)?;
             Ok(PrivateDurableAdmissionDeliveryV2 {
@@ -860,22 +1207,16 @@ impl<'source> PrivateDurableAdmissionCoordinatorV2<'source> {
         gate.check()?;
         Ok((checkpoint, key, identity))
     }
-    fn payload(
+    fn delivery_output_actions(
         &self,
         access: &Access,
-        recipient: &PreparedDurableReviewDeliveryV1<'_>,
         history: &History,
-        gate: &ProofGate<'_, '_>,
-    ) -> Result<(DurableReviewPayloadV1, DurableReviewExportScopeV1)> {
-        use ExportCauseSite as S;
-        let cause = gate.cause;
-        gate.check()?;
-        check_recipient(recipient, cause)?;
-        let (checkpoint, _, identity) = self.verified(history, access, gate)?;
-        let roster = export_result(cause, S::ExportRoster, original_roster_v2(&history.prefix))?;
+        checkpoint: &VerifiedCheckpoint,
+        cause: ExportObservation<'_>,
+    ) -> Result<Vec<DurableReviewOutputActionV1>> {
         let receipt = export_result(
             cause,
-            S::ExportOutputActions,
+            ExportCauseSite::ExportOutputActions,
             history
                 .prefix
                 .checkpoint_receipts
@@ -885,62 +1226,61 @@ impl<'source> PrivateDurableAdmissionCoordinatorV2<'source> {
         )?;
         let mappings = export_result(
             cause,
-            S::ExportOutputActions,
+            ExportCauseSite::ExportOutputActions,
             crate::durable_proposals_v1::original_review_output_actions_v2(
                 &history.prefix,
                 access,
-                &checkpoint,
+                checkpoint,
                 receipt,
             ),
         )?;
-        let payload = DurableReviewPayloadV1 {
-            version: 1,
-            unsigned_pczt_hex: hex::encode(checkpoint.private_unsigned_pczt_bytes()),
-            proved_pczt_hex: hex::encode(checkpoint.pczt_bytes()),
-            contributions: roster.owners.values().map(|i| i.outbox.clone()).collect(),
-            output_actions: mappings
-                .iter()
-                .map(|m| DurableReviewOutputActionV1 {
-                    output_id: m.output_id.clone(),
-                    action_index: m.action_index,
-                })
-                .collect(),
-        };
-        let encoded = export_result(
+        Ok(mappings
+            .into_iter()
+            .map(|m| DurableReviewOutputActionV1 {
+                output_id: m.output_id,
+                action_index: m.action_index,
+            })
+            .collect())
+    }
+    fn delivery_source_binding(
+        &self,
+        access: &Access,
+        history: &History,
+        cause: ExportObservation<'_>,
+    ) -> Result<OriginalDeliverySourceBindingV2> {
+        use ExportCauseSite as S;
+        let roster = export_result(cause, S::ExportRoster, original_roster_v2(&history.prefix))?;
+        let candidate = export_result(
             cause,
-            S::ExportPayload,
-            payload.encode().map_err(|_| damaged()),
+            S::ExportSources,
+            history.prefix.view.candidates.first().ok_or_else(damaged),
         )?;
-        let scope = DurableReviewExportScopeV1 {
-            schema_version: 1,
+        let materials = export_result(
+            cause,
+            S::ExportMaterialCeilings,
+            self.original
+                .stage_materials_v3(access, &history.prefix, &candidate.candidate_id),
+        )?;
+        Ok(OriginalDeliverySourceBindingV2 {
             principal_id: access.principal_id.clone(),
-            proposal: identity,
-            recipient: recipient.descriptor().clone(),
+            workspace: export_result(
+                cause,
+                S::ExportSources,
+                serde_json::to_value(&self.original.scope).map_err(|_| damaged()),
+            )?,
+            metadata_origin: self.original.origin,
+            proof_origin: self.original.proof_origin,
+            marker_digest: export_result(cause, S::ExportMarker, self.origin_marker_digest())?,
+            native_association_digest: self.original.marker.native_association_digest.clone(),
+            prefix_history_digest: history.prefix_digest.clone(),
+            full_history_digest: history.full_digest.clone(),
+            materials: export_result(
+                cause,
+                S::ExportMaterialCeilings,
+                serde_json::to_value(&materials).map_err(|_| damaged()),
+            )?,
             sources: export_result(cause, S::ExportSources, review_export_v1::sources(&roster))?,
-            payload_digest: export_result(
-                cause,
-                S::ExportPayload,
-                payload.digest().map_err(|_| damaged()),
-            )?,
-            payload_length: export_result(
-                cause,
-                S::ExportPayload,
-                encoded.len().try_into().map_err(|_| damaged()),
-            )?,
-        };
-        drop(encoded);
-        export_result(
-            cause,
-            S::ExportRecipientBinding,
-            review_export_v1::validate_recipient(
-                &roster,
-                &history.prefix.view.candidates[0],
-                &scope,
-            ),
-        )?;
-        gate.check()?;
-        check_recipient(recipient, cause)?;
-        Ok((payload, scope))
+        })
     }
 
     fn check(
@@ -1218,6 +1558,23 @@ impl<'source> PrivateDurableAdmissionCoordinatorV2<'source> {
             full_digest,
             export_revisions,
         })
+    }
+}
+
+fn delivery_proof_binding(
+    checkpoint: &VerifiedCheckpoint,
+    original_request_key: String,
+    identity: FixedProposalIdentityV1,
+    output_actions: Vec<DurableReviewOutputActionV1>,
+) -> OriginalDeliveryProofBindingV2 {
+    OriginalDeliveryProofBindingV2 {
+        original_request_key,
+        identity,
+        summary: checkpoint.summary().clone(),
+        scope: checkpoint.scope().clone(),
+        unsigned_digest: Sha256::digest(checkpoint.private_unsigned_pczt_bytes()).into(),
+        proved_digest: Sha256::digest(checkpoint.pczt_bytes()).into(),
+        output_actions,
     }
 }
 
@@ -1818,6 +2175,325 @@ mod tests {
             payload_digest: h,
             payload_length: 123,
         }
+    }
+    // Inert comparison fixtures only. They cannot manufacture an original
+    // coordinator, verified checkpoint, prepared owner or sealed recipient.
+    fn prepared_source_binding() -> OriginalDeliverySourceBindingV2 {
+        OriginalDeliverySourceBindingV2 {
+            principal_id: "operator".into(),
+            workspace: serde_json::json!({"source_digest":"source","protected_destination":"original"}),
+            metadata_origin: [1; 32],
+            proof_origin: [2; 32],
+            marker_digest: "marker".into(),
+            native_association_digest: "association".into(),
+            prefix_history_digest: "prefix".into(),
+            full_history_digest: "full-with-original-export-suffix".into(),
+            materials: serde_json::json!([
+                {"material_digest":"first","scope":{"valid_from_unix_seconds":10,"valid_until_unix_seconds":90}},
+                {"material_digest":"second","scope":{"valid_from_unix_seconds":20,"valid_until_unix_seconds":80}}
+            ]),
+            sources: scope("review").sources,
+        }
+    }
+    fn prepared_proof_binding() -> OriginalDeliveryProofBindingV2 {
+        OriginalDeliveryProofBindingV2 {
+            original_request_key: "original-key".into(),
+            identity: scope("review").proposal,
+            summary: JobSummary {
+                job_id: "job".into(),
+                scope_digest: "scope".into(),
+                candidate_id: "candidate".into(),
+                state: wholepact_proof_jobs::JobState::Succeeded,
+                attempt: 1,
+                input_digest: "input".into(),
+                manifest_digest: "manifest".into(),
+                effects_commitment: "effects".into(),
+                coordination_request_digest: "request".into(),
+                result_digest: Some("result".into()),
+                review_binding: "review".into(),
+                encrypted_checkpoint_created: true,
+                proof_verified: true,
+                chain_validated: false,
+                authorization_allowed: false,
+                distribution_allowed: false,
+            },
+            scope: CheckpointScope {
+                principal_id: "operator".into(),
+                candidate_id: "candidate".into(),
+                manifest_digest: "manifest".into(),
+                artifact_digest: "artifact".into(),
+                effects_commitment: "effects".into(),
+                coordination_request_digest: "request".into(),
+                review_binding: "review".into(),
+                account_ids: vec!["first".into(), "second".into()],
+                local_operator: "operator".into(),
+                purpose: "local-read-only".into(),
+                retention_policy: "original".into(),
+            },
+            unsigned_digest: [3; 32],
+            proved_digest: [4; 32],
+            output_actions: vec![DurableReviewOutputActionV1 {
+                output_id: "output".into(),
+                action_index: 1,
+            }],
+        }
+    }
+    fn assert_prepared_comparison_stops_effect<T: PartialEq>(expected: &T, changed: &T) {
+        let effects = std::cell::Cell::new(0);
+        let cause = ExportCause::new();
+        let result = (|| {
+            require_prepared_binding(
+                expected,
+                changed,
+                Some(&cause),
+                ExportCauseSite::ExportPayload,
+            )?;
+            effects.set(effects.get() + 1);
+            Ok::<(), ApiError>(())
+        })();
+        assert_eq!(result.unwrap_err().code, "DISCLOSURE_DENIED");
+        assert_eq!(effects.get(), 0);
+        assert_eq!(
+            cause_pair(&cause),
+            Some(("ExportPayload", "PredicateDenied"))
+        );
+    }
+    #[test]
+    fn admission_prepared_source_comparison_rejects_every_original_binding_change() {
+        let original = prepared_source_binding();
+        require_prepared_binding(
+            &original,
+            &prepared_source_binding(),
+            None,
+            ExportCauseSite::ExportSources,
+        )
+        .unwrap();
+        let mutations: &[fn(&mut OriginalDeliverySourceBindingV2)] = &[
+            |v| v.principal_id.push('x'),
+            |v| v.workspace["source_digest"] = "other".into(),
+            |v| v.workspace["protected_destination"] = "other".into(),
+            |v| v.metadata_origin[0] ^= 1,
+            |v| v.proof_origin[0] ^= 1,
+            |v| v.marker_digest.push('x'),
+            |v| v.native_association_digest.push('x'),
+            |v| v.prefix_history_digest.push('x'),
+            |v| v.full_history_digest.push('x'),
+            |v| v.materials[0]["material_digest"] = "other".into(),
+            |v| v.materials[1]["material_digest"] = "other".into(),
+            |v| v.materials[0]["scope"]["valid_from_unix_seconds"] = 120.into(),
+            |v| v.materials[1]["scope"]["valid_from_unix_seconds"] = 120.into(),
+            |v| v.materials[0]["scope"]["valid_until_unix_seconds"] = 120.into(),
+            |v| v.materials[1]["scope"]["valid_until_unix_seconds"] = 120.into(),
+            |v| v.sources[0].account_id.push('x'),
+            |v| v.sources[0].outbox_reference.push('x'),
+            |v| v.sources[0].request_digest.push('x'),
+            |v| v.sources[0].material_digest.push('x'),
+            |v| v.sources[0].scope_digest.push('x'),
+            |v| v.sources.clear(),
+        ];
+        for mutate in mutations {
+            let mut changed = prepared_source_binding();
+            mutate(&mut changed);
+            assert_prepared_comparison_stops_effect(&original, &changed);
+        }
+    }
+    #[test]
+    fn admission_prepared_proof_comparison_rejects_every_verified_binding_change() {
+        let original = prepared_proof_binding();
+        require_prepared_binding(
+            &original,
+            &prepared_proof_binding(),
+            None,
+            ExportCauseSite::ExportVerifiedProof,
+        )
+        .unwrap();
+        let mutations: &[fn(&mut OriginalDeliveryProofBindingV2)] = &[
+            |v| v.original_request_key.push('x'),
+            |v| v.identity.network_profile_id.push('x'),
+            |v| v.identity.agreement_id.push('x'),
+            |v| v.identity.obligation_id.push('x'),
+            |v| v.identity.proposal_id.push('x'),
+            |v| v.identity.proposal_digest.push('x'),
+            |v| v.identity.manifest_digest.push('x'),
+            |v| v.identity.unsigned_artifact_digest.push('x'),
+            |v| v.identity.proved_artifact_digest.push('x'),
+            |v| v.identity.effects_commitment.push('x'),
+            |v| v.identity.policy_digest.push('x'),
+            |v| v.identity.review_binding.push('x'),
+            |v| v.identity.action_mapping_digest.push('x'),
+            |v| v.identity.anchor.push('x'),
+            |v| v.identity.proposal_binding.push('x'),
+            |v| v.identity.schema_version += 1,
+            |v| v.identity.revision += 1,
+            |v| v.identity.expiry_height += 1,
+            |v| v.summary.job_id.push('x'),
+            |v| v.summary.scope_digest.push('x'),
+            |v| v.summary.candidate_id.push('x'),
+            |v| v.summary.input_digest.push('x'),
+            |v| v.summary.manifest_digest.push('x'),
+            |v| v.summary.effects_commitment.push('x'),
+            |v| v.summary.coordination_request_digest.push('x'),
+            |v| v.summary.review_binding.push('x'),
+            |v| v.summary.state = wholepact_proof_jobs::JobState::Failed,
+            |v| v.summary.attempt += 1,
+            |v| v.summary.result_digest = None,
+            |v| v.summary.encrypted_checkpoint_created = !v.summary.encrypted_checkpoint_created,
+            |v| v.summary.proof_verified = !v.summary.proof_verified,
+            |v| v.summary.chain_validated = !v.summary.chain_validated,
+            |v| v.summary.authorization_allowed = !v.summary.authorization_allowed,
+            |v| v.summary.distribution_allowed = !v.summary.distribution_allowed,
+            |v| v.scope.principal_id.push('x'),
+            |v| v.scope.candidate_id.push('x'),
+            |v| v.scope.manifest_digest.push('x'),
+            |v| v.scope.artifact_digest.push('x'),
+            |v| v.scope.effects_commitment.push('x'),
+            |v| v.scope.coordination_request_digest.push('x'),
+            |v| v.scope.review_binding.push('x'),
+            |v| v.scope.local_operator.push('x'),
+            |v| v.scope.purpose.push('x'),
+            |v| v.scope.retention_policy.push('x'),
+            |v| v.scope.account_ids.swap(0, 1),
+            |v| v.unsigned_digest[0] ^= 1,
+            |v| v.proved_digest[0] ^= 1,
+            |v| v.output_actions[0].output_id.push('x'),
+            |v| v.output_actions[0].action_index += 1,
+            |v| v.output_actions.clear(),
+        ];
+        for mutate in mutations {
+            let mut changed = prepared_proof_binding();
+            mutate(&mut changed);
+            assert_prepared_comparison_stops_effect(&original, &changed);
+        }
+    }
+    #[test]
+    fn admission_prepared_scope_comparison_rejects_recipient_or_payload_substitution() {
+        let original = scope("review");
+        let mutations: &[fn(&mut DurableReviewExportScopeV1)] = &[
+            |v| v.principal_id.push('x'),
+            |v| v.payload_digest.push('x'),
+            |v| v.schema_version += 1,
+            |v| v.payload_length += 1,
+            |v| v.proposal.proposal_binding.push('x'),
+            |v| v.sources[0].material_digest.push('x'),
+            |v| v.recipient.version += 1,
+            |v| v.recipient.account_id.push('x'),
+            |v| v.recipient.participant_id.push('x'),
+            |v| v.recipient.agreement_id.push('x'),
+            |v| v.recipient.manifest_digest.push('x'),
+            |v| v.recipient.provider_enrollment_reference.push('x'),
+            |v| v.recipient.signer_process_instance.push('x'),
+            |v| v.recipient.local_grant_id.push('x'),
+            |v| v.recipient.local_channel_digest.push('x'),
+            |v| v.recipient.request.operation_id.push('x'),
+            |v| v.recipient.request.enrollment_ref.push('x'),
+            |v| v.recipient.request.accepted_manifest_ref.push('x'),
+            |v| v.recipient.request.proposal_binding.push('x'),
+            |v| v.recipient.request.own_disclosure.operation_id.push('x'),
+            |v| {
+                v.recipient
+                    .request
+                    .own_disclosure
+                    .expected_request_digest
+                    .push('x')
+            },
+            |v| {
+                v.recipient.request.current_disclosure =
+                    Some(v.recipient.request.own_disclosure.clone())
+            },
+        ];
+        for mutate in mutations {
+            let mut changed = scope("review");
+            mutate(&mut changed);
+            assert_prepared_comparison_stops_effect(&original, &changed);
+        }
+    }
+    #[test]
+    fn admission_prepared_owners_are_consuming_and_not_clone_serde_or_debug() {
+        macro_rules! not_impl {
+            ($ty:ty, $bound:path) => {{
+                trait AmbiguousIfImpl<A> {
+                    fn check() {}
+                }
+                impl<T: ?Sized> AmbiguousIfImpl<()> for T {}
+                struct Implemented;
+                impl<T: ?Sized + $bound> AmbiguousIfImpl<Implemented> for T {}
+                let _ = <$ty as AmbiguousIfImpl<_>>::check;
+            }};
+        }
+        type Prepared = PreparedPrivateDurableAdmissionDeliveryV2<'static, 'static>;
+        type Bound = BoundPrivateDurableAdmissionDeliveryV2<'static, 'static, 'static>;
+        not_impl!(Prepared, Clone);
+        not_impl!(Prepared, std::fmt::Debug);
+        not_impl!(Prepared, serde::Serialize);
+        not_impl!(Prepared, serde::Deserialize<'static>);
+        not_impl!(Bound, Clone);
+        not_impl!(Bound, std::fmt::Debug);
+        not_impl!(Bound, serde::Serialize);
+        not_impl!(Bound, serde::Deserialize<'static>);
+    }
+    #[test]
+    fn admission_prepared_production_keeps_full_verification_and_commit_before_bytes() {
+        let production = include_str!("delivery_admission_v2.rs")
+            .split("\n#[cfg(test)]\nmod tests {")
+            .next()
+            .unwrap();
+        let preparation = production
+            .split("    fn prepare_original_delivery_observed(")
+            .nth(1)
+            .unwrap()
+            .split("    /// Compatibility preview")
+            .next()
+            .unwrap();
+        assert_eq!(preparation.matches("DurableReviewPayloadV1 {").count(), 1);
+        assert_eq!(preparation.matches(".into_prepared_v2()").count(), 1);
+        assert!(!preparation.contains("PreparedDurableReviewDeliveryV1"));
+        let final_delivery = production
+            .split("    fn deliver_prepared_observed(")
+            .nth(1)
+            .unwrap()
+            .split("    fn verified(")
+            .next()
+            .unwrap();
+        assert!(final_delivery.contains("self.verified(&history, access, &gate)?"));
+        assert!(
+            final_delivery
+                .contains("self.delivery_output_actions(access, &history, &checkpoint, cause)?")
+        );
+        assert!(production.contains("self.original.load_original_verified("));
+        assert!(
+            production.contains("crate::durable_proposals_v1::original_review_output_actions_v2(")
+        );
+        assert!(!final_delivery.contains("DurableReviewPayloadV1 {"));
+        assert!(!final_delivery.contains(".into_prepared_v2()"));
+        assert!(!final_delivery.contains("payload.encode()"));
+        assert!(!final_delivery.contains("payload.digest()"));
+        let verify = final_delivery.find("self.verified(").unwrap();
+        let source_compare = final_delivery
+            .find("require_prepared_binding(&source, &actual_source")
+            .unwrap();
+        let intent = final_delivery
+            .find("ExportExposure::DisclosedOrUnknown")
+            .unwrap();
+        let store = final_delivery.find(".update_agreement(").unwrap();
+        let transport = final_delivery
+            .find(".deliver_prepared_v2(payload, &check)")
+            .unwrap();
+        assert!(
+            verify < source_compare
+                && source_compare < intent
+                && intent < store
+                && store < transport
+        );
+        assert!(final_delivery.contains("result.map_err(disclosure_unknown)"));
+        assert_eq!(final_delivery.matches("observation.freeze()").count(), 2);
+        assert!(production.contains("full_history_digest: history.full_digest.clone()"));
+        assert!(production.contains("prefix_history_digest: history.prefix_digest.clone()"));
+        assert!(production.contains(
+            "unsigned_digest: Sha256::digest(checkpoint.private_unsigned_pczt_bytes()).into()"
+        ));
+        assert!(
+            production.contains("proved_digest: Sha256::digest(checkpoint.pczt_bytes()).into()")
+        );
     }
     fn intent(operation: &str) -> ExportIntent {
         ExportIntent {
@@ -2736,6 +3412,40 @@ mod request_history_tests {
         let value: DurableConstructionOutboxV1 = value;
         checked(value.validate());
         value
+    }
+    #[test]
+    fn admission_prepared_material_scope_absolute_ceilings_do_not_renew() {
+        // Reuse only the existing inert mathematical scope fixture and the
+        // exact check_valid_at kernel called by stage_materials_v3. No native
+        // grant, original coordinator, recipient or successful delivery exists.
+        let fixture = fixture();
+        let candidate =
+            crate::candidates::build_exact_candidate_v2(fixture.request.clone()).unwrap();
+        let originals = (0..2)
+            .map(|index| {
+                outbox(
+                    &candidate.proposal,
+                    material(&fixture, index),
+                    index,
+                    Path::new("/inert/original"),
+                    100,
+                    200 + index as u64,
+                )
+            })
+            .collect::<Vec<_>>();
+        for (index, original) in originals.iter().enumerate() {
+            let scope = &original.request().scope;
+            let before = serde_json::to_value(scope).unwrap();
+            let ceiling = 200 + index as u64;
+            assert!(scope.check_valid_at(99).is_err());
+            scope.check_valid_at(100).unwrap();
+            scope.check_valid_at(ceiling - 1).unwrap();
+            assert!(scope.check_valid_at(ceiling).is_err());
+            assert!(scope.check_valid_at(ceiling + 1).is_err());
+            assert_eq!(serde_json::to_value(scope).unwrap(), before);
+        }
+        assert!(originals[0].request().scope.check_valid_at(200).is_err());
+        originals[1].request().scope.check_valid_at(200).unwrap();
     }
     fn advance(e: &Envelope) -> Envelope {
         let mut e = e.clone();

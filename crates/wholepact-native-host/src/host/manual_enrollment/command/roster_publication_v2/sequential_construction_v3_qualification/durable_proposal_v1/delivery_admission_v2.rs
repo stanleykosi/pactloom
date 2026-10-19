@@ -13,8 +13,8 @@ use std::{
     },
     path::{Component, Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
 };
 use wholepact_signer::authority_bridge::{
@@ -718,9 +718,15 @@ fn producer_inputs() -> Vec<Input<'static>> {
         "Inspect original fixed-prefix and bounded admission-export history metadata",
     ));
     for _ in 0..2 {
-        inputs.push(review("Request one native-approved redisclosure of this exact original material to this current paired recipient. No capture, reconstruction or validity renewal."));
         inputs.push(review(
             "Inspect original fixed-prefix and bounded admission-export history metadata",
+        ));
+        inputs.push(review(
+            "Approve LOCAL exact-byte preparation for original delivery.",
+        ));
+        inputs.push(review("Request one native-approved redisclosure of this exact original material to this current paired recipient. No capture, reconstruction or validity renewal."));
+        inputs.push(review(
+            "Inspect fresh original delivery metadata for the actual new recipient.",
         ));
         inputs.push(review(
             "Approve exact original delivery export and prospective admission request.",
@@ -1142,6 +1148,8 @@ pub(super) fn continue_completed_original(
             done(&original.signers, 0)?;
             for index in 1..=2 {
                 let account = &original.born[index];
+                let (client, exported) = at(B::DeliverySourceExport, || {
+                    host.private_original_delivery_export_v2(&workspace, &choices, || {
                 original
                     .signers
                     .send(C::OpenDelivery(index, proposal.clone()))
@@ -1242,8 +1250,8 @@ pub(super) fn continue_completed_original(
                         identity.clone(),
                     ))
                     .map_err(worker_error)?;
-                let exported = at(B::DeliverySourceExport, || {
-                    host.private_original_delivery_export_v2(&workspace, &client, request, &choices)
+                        Ok((client, request))
+                    })
                 })?;
                 done(&original.signers, index)?;
                 // The original independent witness serves the pristine bootstrap
@@ -1725,10 +1733,12 @@ mod tests {
         ] {
             assert!(!value.as_object().unwrap().contains_key(forbidden));
         }
-        assert!(serde_json::from_str::<PublicOutcomeV3>(
-            &(json.trim_end_matches('}').to_owned() + ",\"schema\":3}")
-        )
-        .is_err());
+        assert!(
+            serde_json::from_str::<PublicOutcomeV3>(
+                &(json.trim_end_matches('}').to_owned() + ",\"schema\":3}")
+            )
+            .is_err()
+        );
         row.first_failure = Some("unbounded-private-error".into());
         assert!(row.public_json().is_err());
     }
@@ -1839,7 +1849,9 @@ mod tests {
             ("DeliveryExportIntake", "EngineDisclosureDenied"),
             ("DeliveryExportScopePredicate", "PredicateDenied"),
         ] {
-            let marker = format!("[JOINED_DIAGNOSTIC {boundary} {outcome}]\n[JOINED_DIAGNOSTIC DeliveryExportCommit EngineDisclosureDenied]\n");
+            let marker = format!(
+                "[JOINED_DIAGNOSTIC {boundary} {outcome}]\n[JOINED_DIAGNOSTIC DeliveryExportCommit EngineDisclosureDenied]\n"
+            );
             let child = failed_child(marker.as_bytes(), 111, 117, true);
             let mut row = PublicOutcomeV3::pending();
             row.producer_reaped = true;
@@ -1854,6 +1866,47 @@ mod tests {
             assert_eq!(decoded.first_outcome.as_deref(), Some(outcome));
             assert_eq!(decoded.failed_child_inputs_completed, Some(111));
             assert_eq!(decoded.failed_child_inputs_expected, Some(117));
+            assert_eq!(decoded.schema, 3);
+            assert!(!decoded.authorization_allowed && !decoded.distribution_allowed);
+            assert!(!decoded.reader_no_effects_verified);
+            assert!(json.len() <= 2048);
+        }
+    }
+    #[test]
+    fn delivery_receiver_first_cause_survives_close_cascade_and_cleanup() {
+        // Actual capture/serialization kernels with inert finite markers. This
+        // does not establish a native receiver failure or stream chronology.
+        for (boundary, outcome) in [
+            ("DeliveryReceiveDeadline", "PredicateDenied"),
+            ("DeliveryReceiveReceipts", "JournalExpired"),
+            ("DeliveryReceiveMaterialScope", "ConstructionStale"),
+            ("DeliveryReceiveFrame", "OriginAuthentication"),
+            ("DeliveryReceiveSource", "SignerLocked"),
+        ] {
+            let marker = format!(
+                "[JOINED_DIAGNOSTIC {boundary} {outcome}]\n[JOINED_DIAGNOSTIC DeliveryRecipientWriteIo OriginIoBrokenPipe]\n"
+            );
+            let child = failed_child(marker.as_bytes(), 113, 121, true);
+            let mut row = PublicOutcomeV3::pending();
+            row.producer_reaped = true;
+            row.producer_group_absent = true;
+            row.fail_child(&child, "DeliverySourceExport");
+            assert!(row.first_outcome.is_none());
+            let mut withheld = PublicOutcomeV3::pending();
+            withheld.producer_reaped = true;
+            withheld.producer_group_absent = true;
+            withheld.fail_child(&child, "DeliverySourceExport");
+            withheld.root_cleanup = "retained".into();
+            withheld.disclose_child_observation_after_cleanup();
+            assert!(withheld.first_outcome.is_none());
+            row.root_cleanup = "closed_absent".into();
+            row.disclose_child_observation_after_cleanup();
+            let json = row.public_json().unwrap();
+            let decoded: PublicOutcomeV3 = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded.first_failure.as_deref(), Some(boundary));
+            assert_eq!(decoded.first_outcome.as_deref(), Some(outcome));
+            assert_eq!(decoded.failed_child_inputs_completed, Some(113));
+            assert_eq!(decoded.failed_child_inputs_expected, Some(121));
             assert_eq!(decoded.schema, 3);
             assert!(!decoded.authorization_allowed && !decoded.distribution_allowed);
             assert!(!decoded.reader_no_effects_verified);
@@ -2033,6 +2086,61 @@ mod tests {
             assert!(!death_marker_v2(&text, true, true, false).unwrap());
         }
     }
+    #[test]
+    fn prepared_delivery_reviews_precede_new_entry_and_never_renew_old_approvals() {
+        // Actual finite prompt schedule and lexical production wiring only.
+        // This is not a positive native owner or end-to-end timing fixture.
+        let inputs = producer_inputs();
+        let details: Vec<_> = inputs
+            .iter()
+            .filter_map(|input| match input {
+                Input::ExactReview { detail, .. } => Some(*detail),
+                _ => None,
+            })
+            .collect();
+        let expected = [
+            "Inspect original fixed-prefix and bounded admission-export history metadata",
+            "Approve LOCAL exact-byte preparation for original delivery.",
+            "Request one native-approved redisclosure of this exact original material to this current paired recipient. No capture, reconstruction or validity renewal.",
+            "Inspect fresh original delivery metadata for the actual new recipient.",
+            "Approve exact original delivery export and prospective admission request.",
+        ];
+        assert_eq!(
+            details
+                .windows(expected.len())
+                .filter(|window| *window == expected)
+                .count(),
+            2
+        );
+        for prompt in [&expected[1], &expected[3]] {
+            assert_eq!(details.iter().filter(|actual| *actual == prompt).count(), 2);
+        }
+        let source = include_str!("delivery_admission_v2.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let helper = source.find("private_original_delivery_export_v2(").unwrap();
+        let open = source[helper..]
+            .find("send(C::OpenDelivery(index, proposal.clone()))")
+            .unwrap()
+            + helper;
+        let pending = source[open..].find("send(C::PollDeliveryImport(").unwrap() + open;
+        let returned = source[pending..].find("Ok((client, request))").unwrap() + pending;
+        assert!(helper < open && open < pending && pending < returned);
+        assert_eq!(
+            source
+                .matches("send(C::OpenDelivery(index, proposal.clone()))")
+                .count(),
+            1
+        );
+        assert_eq!(
+            source
+                .matches("private_original_delivery_export_v2(")
+                .count(),
+            1
+        );
+    }
+
     #[test]
     fn delivery_native_branch_preserves_completed_precursor_and_original_deadlines() {
         let source = include_str!("private_fixed_v2.rs");
