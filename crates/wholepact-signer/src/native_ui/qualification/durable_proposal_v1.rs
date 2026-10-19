@@ -160,6 +160,93 @@ struct DurableFixtureAdmissionObservationV1 {
     original_is_operational: bool,
 }
 
+pub(in crate::native_ui) struct DurableFinancialImportWaitV1<'a> {
+    fixture: &'a mut DurableNativeFixtureV1,
+    token: &'a DurableFlowObservationTokenV1,
+    request: &'a DurableReviewDeliveryRequestV1,
+    identity: &'a FixedProposalIdentityV1,
+    deadline: Instant,
+    state: witness_wait_v1::PollState,
+}
+impl DurableFinancialImportWaitV1<'_> {
+    pub(in crate::native_ui) fn deadline(&self) -> Instant {
+        self.deadline
+    }
+    pub(in crate::native_ui) fn poll(&mut self) -> Result<bool> {
+        let token = self.token;
+        let request = self.request;
+        let identity = self.identity;
+        self.fixture.observe_lifecycle_once_v1(
+            flow_diag_v1::DurableLifecyclePointV1::FinancialImportPollStart,
+        );
+        if self.fixture.matching_flow_v1(token).is_some()
+            && self
+                .fixture
+                .flow_import_expected
+                .as_ref()
+                .is_none_or(|expected| !expected.matches_poll(request, identity, EPOCH))
+        {
+            token.observer().mark_incomplete();
+        }
+        let original = self.state.poll(
+            self.fixture,
+            || Error::ReviewMismatch,
+            |fixture| fixture.pending_wait_live_v1(),
+            |fixture| {
+                fixture.measure_pending_wait_v1(
+                    flow_diag_v1::DurablePendingWaitKindV1::Poll,
+                    |fixture| fixture.poll_financial_import_pending_v1(request, identity),
+                )
+            },
+            |fixture| {
+                fixture.pending_wait_full_exit_v1()?;
+                let records = fixture.records_data_v1()?;
+                if request.enrollment_ref != records.enrollment_ref
+                    || request.accepted_manifest_ref != records.accepted_manifest_ref
+                {
+                    return Err(Error::ReviewMismatch);
+                }
+                fixture.phase = Phase::FinancialImported;
+                fixture.observe_lifecycle_once_v1(
+                    flow_diag_v1::DurableLifecyclePointV1::FinancialImportComplete,
+                );
+                Ok(())
+            },
+        );
+        DurableNativeFixtureV1::observe_fixture_result_v1(
+            self.fixture.matching_flow_v1(token),
+            DurableFlowStageV1::FixtureState,
+            &original,
+        );
+        original
+    }
+}
+
+pub(in crate::native_ui) struct DurableDisclosureWaitV1<'a> {
+    fixture: &'a mut DurableNativeFixtureV1,
+    deadline: Instant,
+    state: witness_wait_v1::PollState,
+}
+impl DurableDisclosureWaitV1<'_> {
+    pub(in crate::native_ui) fn deadline(&self) -> Instant {
+        self.deadline
+    }
+    pub(in crate::native_ui) fn poll(&mut self) -> Result<bool> {
+        self.state.poll(
+            self.fixture,
+            || Error::ReviewMismatch,
+            |fixture| fixture.pending_wait_live_v1(),
+            |fixture| {
+                fixture.measure_pending_wait_v1(
+                    flow_diag_v1::DurablePendingWaitKindV1::Poll,
+                    |fixture| fixture.poll_disclosure_pending_v1(),
+                )
+            },
+            |fixture| fixture.pending_wait_full_exit_v1(),
+        )
+    }
+}
+
 // Inert correlation at the historical branch's return boundary, not a source,
 // native decision or session factory. The caller must first execute and drain
 // the real authenticated history operation. A prepared review is not history.
@@ -334,6 +421,37 @@ impl DurableNativeFixtureV1 {
             observer.point(point);
         }
     }
+    fn observe_lifecycle_once_v1(&self, point: flow_diag_v1::DurableLifecyclePointV1) {
+        if let Some(observer) = self.lifecycle.as_ref() {
+            observer.point_once(point);
+        }
+    }
+    fn measure_pending_wait_v1<T>(
+        &mut self,
+        kind: flow_diag_v1::DurablePendingWaitKindV1,
+        call: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let lifecycle = self.lifecycle.clone();
+        flow_diag_v1::observe_pending_wait_v1(lifecycle.as_ref(), kind, || call(self))
+    }
+    fn pending_wait_full_entry_v1(&mut self) -> Result<()> {
+        self.measure_pending_wait_v1(
+            flow_diag_v1::DurablePendingWaitKindV1::FullPrecheck,
+            |fixture| fixture.check(),
+        )
+    }
+    fn pending_wait_live_v1(&mut self) -> Result<()> {
+        self.measure_pending_wait_v1(
+            flow_diag_v1::DurablePendingWaitKindV1::Liveness,
+            |fixture| fixture.check_pending_witness_v1(),
+        )
+    }
+    fn pending_wait_full_exit_v1(&mut self) -> Result<()> {
+        self.measure_pending_wait_v1(
+            flow_diag_v1::DurablePendingWaitKindV1::FullPostcheck,
+            |fixture| fixture.check(),
+        )
+    }
     fn check(&self) -> Result<()> {
         let original = self.original.as_ref().ok_or(Error::Locked)?;
         let open = self.runtime.open.as_ref().ok_or(Error::Locked)?;
@@ -452,11 +570,19 @@ impl DurableNativeFixtureV1 {
             return Err(Error::ReviewMismatch);
         }
         self.phase = Phase::Accepted;
-        self.observe_lifecycle_v1(flow_diag_v1::DurableLifecyclePointV1::AcceptComplete);
+        self.observe_lifecycle_once_v1(if self.reconciled_writer.is_some() {
+            flow_diag_v1::DurableLifecyclePointV1::PostReconcileAcceptComplete
+        } else {
+            flow_diag_v1::DurableLifecyclePointV1::AcceptComplete
+        });
         Ok(records)
     }
     pub(in crate::native_ui) fn records(&self) -> Result<DurableNativeRecordsV1> {
         self.check()?;
+        self.records_data_v1()
+    }
+    // Inert record equality only, called behind the caller's actual full gate.
+    fn records_data_v1(&self) -> Result<DurableNativeRecordsV1> {
         let open = self.runtime.open.as_ref().ok_or(Error::Locked)?;
         let enrollment = open.enrollment.as_ref().ok_or(Error::ReviewMismatch)?;
         let manifest = open.manifest.as_ref().ok_or(Error::ReviewMismatch)?;
@@ -609,6 +735,75 @@ impl DurableNativeFixtureV1 {
         let Some(pending) = &self.runtime.pending else {
             return Ok(false);
         };
+        let captured = self.expected_disclosure_capture_v1(pending)?;
+        approve(&mut self.runtime)?;
+        if let Some(request) = captured {
+            self.expected = Some(ExpectedDisclosure::Durable(request));
+        }
+        self.phase = Phase::Disclosed;
+        self.observe_post_reconcile_disclosure_v1();
+        Ok(true)
+    }
+    pub(in crate::native_ui) fn begin_disclosure_wait(
+        &mut self,
+    ) -> Result<DurableDisclosureWaitV1<'_>> {
+        let (state, deadline) = witness_wait_v1::begin(self, |fixture| {
+            fixture.measure_pending_wait_v1(
+                flow_diag_v1::DurablePendingWaitKindV1::FullPrecheck,
+                |fixture| fixture.deadline(),
+            )
+        })?;
+        Ok(DurableDisclosureWaitV1 {
+            fixture: self,
+            deadline,
+            state,
+        })
+    }
+    fn poll_disclosure_pending_v1(&mut self) -> Result<bool> {
+        if self.phase == Phase::Disclosed {
+            return Ok(true);
+        }
+        if self.phase != Phase::Disclosure {
+            return Err(Error::ReviewMismatch);
+        }
+        self.runtime.poll(EPOCH);
+        if self.runtime.pending.is_none() {
+            return Ok(false);
+        }
+        // The full original source gate runs only once a real review exists,
+        // before its exact request matching and the genuine native approval.
+        witness_wait_v1::before_approval(
+            self,
+            |fixture| fixture.pending_wait_full_entry_v1(),
+            |fixture| {
+                let pending = fixture
+                    .runtime
+                    .pending
+                    .as_ref()
+                    .ok_or(Error::ReviewMismatch)?;
+                let captured = fixture.expected_disclosure_capture_v1(pending)?;
+                approve(&mut fixture.runtime)?;
+                if let Some(request) = captured {
+                    fixture.expected = Some(ExpectedDisclosure::Durable(request));
+                }
+                fixture.phase = Phase::Disclosed;
+                fixture.observe_post_reconcile_disclosure_v1();
+                Ok(true)
+            },
+        )
+    }
+    fn observe_post_reconcile_disclosure_v1(&self) {
+        if self.lifecycle_redisclosure_pending && self.reconciled_writer.is_some() {
+            self.observe_lifecycle_once_v1(
+                flow_diag_v1::DurableLifecyclePointV1::PostReconcileRedisclosureNativeComplete,
+            );
+        }
+    }
+    // Request matching and inert capture only; no source or authority check.
+    fn expected_disclosure_capture_v1(
+        &self,
+        pending: &PendingDecision,
+    ) -> Result<Option<DurableConstructionRequestV1>> {
         let same = match (&self.expected, &pending.operation) {
             (Some(ExpectedDisclosure::Initial(request)), Operation::Preconstruction(prepared)) => {
                 prepared
@@ -674,12 +869,7 @@ impl DurableNativeFixtureV1 {
             }
             _ => None,
         };
-        approve(&mut self.runtime)?;
-        if let Some(request) = captured {
-            self.expected = Some(ExpectedDisclosure::Durable(request));
-        }
-        self.phase = Phase::Disclosed;
-        Ok(true)
+        Ok(captured)
     }
     /// Assert the maintained native append committed its exact immutable request,
     /// not just that a review click returned. No outbox bytes leave via this API.
@@ -762,7 +952,13 @@ impl DurableNativeFixtureV1 {
             .as_ref()
             .ok_or(Error::ReviewMismatch)?
             .check_current()?;
-        self.check()
+        let original = self.check();
+        if original.is_ok() {
+            self.observe_lifecycle_once_v1(
+                flow_diag_v1::DurableLifecyclePointV1::ViewingSetupComplete,
+            );
+        }
+        original
     }
     /// Uses only the credential lifetime retained by this original nominal
     /// witness fixture; neither arbitrary paths nor caller witness pins enter.
@@ -1142,6 +1338,9 @@ impl DurableNativeFixtureV1 {
         result: DurableFlowResultV1,
     ) -> Option<DurableFlowDiagnosticV1> {
         self.matching_flow_v1(&token)?;
+        if result == DurableFlowResultV1::ReturnedErr {
+            self.observe_lifecycle_once_v1(flow_diag_v1::DurableLifecyclePointV1::FixtureFailure);
+        }
         if let Some(open) = self.runtime.open.as_mut() {
             if open
                 .durable_witness
@@ -1279,39 +1478,64 @@ impl DurableNativeFixtureV1 {
             QualificationDurableWitnessCompletionV1::ReconciliationCommitted,
         )?;
         *stage = DurableFlowStageV1::Completion;
-        // Observe actual invalidation and drain. Never refresh or rewrite the
-        // old session, references, import, pairing or original owner deadline.
-        loop {
-            self.check()?;
-            self.runtime.poll(EPOCH);
-            let open = self.runtime.open.as_ref().ok_or(Error::Locked)?;
-            if open.revocations.is_empty() {
-                if open.session.is_some()
-                    || open.enrollment.is_some()
-                    || open.manifest.is_some()
-                    || open.durable_review.is_some()
-                    || open.durable_import_job.is_some()
-                    || open.durable_wallet_job.is_some()
-                    || open.witness_job.is_some()
-                    || !open.writer_reconciled
-                    || self.runtime.pending.is_some()
-                    || !Arc::ptr_eq(open.witness.as_ref().ok_or(Error::Locked)?, &writer)
-                    || !Arc::ptr_eq(open.owner_witness.as_ref().ok_or(Error::Locked)?, &owner)
-                    || open.writer_receipt.as_ref() != Some(&receipt)
-                {
-                    return Err(Error::ReviewMismatch);
-                }
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(2));
+        // Observe actual invalidation and drain without rescanning the full
+        // journal on each pending redraw. The original owned polling refusal
+        // returns unchanged, and success still crosses the full exit gate.
+        {
+            let mut waiting = (&mut *self, None::<Error>);
+            witness_wait_v1::run(
+                &mut waiting,
+                |(fixture, _)| fixture.pending_wait_full_entry_v1(),
+                |(fixture, _)| fixture.pending_wait_live_v1(),
+                |(fixture, failure)| {
+                    fixture.measure_pending_wait_v1(
+                        flow_diag_v1::DurablePendingWaitKindV1::Poll,
+                        |fixture| {
+                            fixture.runtime.poll(EPOCH);
+                            match fixture.runtime.open.as_ref() {
+                                Some(open) => open.revocations.is_empty(),
+                                None => {
+                                    *failure = Some(Error::Locked);
+                                    true
+                                }
+                            }
+                        },
+                    )
+                },
+                |(fixture, failure)| {
+                    if let Some(original) = failure.take() {
+                        return Err(original);
+                    }
+                    fixture.pending_wait_full_exit_v1()
+                },
+                |_| std::thread::sleep(Duration::from_millis(2)),
+            )?;
         }
-        self.check()?;
+        let open = self.runtime.open.as_ref().ok_or(Error::Locked)?;
+        if open.session.is_some()
+            || open.enrollment.is_some()
+            || open.manifest.is_some()
+            || open.durable_review.is_some()
+            || open.durable_import_job.is_some()
+            || open.durable_wallet_job.is_some()
+            || open.witness_job.is_some()
+            || !open.writer_reconciled
+            || self.runtime.pending.is_some()
+            || !Arc::ptr_eq(open.witness.as_ref().ok_or(Error::Locked)?, &writer)
+            || !Arc::ptr_eq(open.owner_witness.as_ref().ok_or(Error::Locked)?, &owner)
+            || open.writer_receipt.as_ref() != Some(&receipt)
+        {
+            return Err(Error::ReviewMismatch);
+        }
         self.reconciled_records = Some(old_records);
         self.reconciled_writer = Some((writer.durable_instance_v1(), receipt));
         self.expected = None;
         // This phase change is allowed only after the observations above. The
         // subsequent acceptance still invokes the genuine fresh native route.
         self.phase = Phase::Paired;
+        self.observe_lifecycle_once_v1(
+            flow_diag_v1::DurableLifecyclePointV1::WriterReconcileComplete,
+        );
         Ok(())
     }
     fn drain_witness_to_review(&mut self) -> Result<()> {
@@ -1480,6 +1704,65 @@ impl DurableNativeFixtureV1 {
             return Err(Error::ReviewMismatch);
         }
         self.phase = Phase::FinancialImported;
+        Ok(true)
+    }
+
+    pub(in crate::native_ui) fn begin_financial_import_wait_diagnosed<'a>(
+        &'a mut self,
+        token: &'a DurableFlowObservationTokenV1,
+        request: &'a DurableReviewDeliveryRequestV1,
+        identity: &'a FixedProposalIdentityV1,
+    ) -> Result<DurableFinancialImportWaitV1<'a>> {
+        let (state, deadline) = witness_wait_v1::begin(self, |fixture| {
+            fixture.measure_pending_wait_v1(
+                flow_diag_v1::DurablePendingWaitKindV1::FullPrecheck,
+                |fixture| fixture.financial_import_deadline_diagnosed(token),
+            )
+        })?;
+        Ok(DurableFinancialImportWaitV1 {
+            fixture: self,
+            token,
+            request,
+            identity,
+            deadline,
+            state,
+        })
+    }
+    fn poll_financial_import_pending_v1(
+        &mut self,
+        request: &DurableReviewDeliveryRequestV1,
+        identity: &FixedProposalIdentityV1,
+    ) -> Result<bool> {
+        self.runtime.poll(EPOCH);
+        self.runtime.poll_durable_import_v1(EPOCH);
+        if self.runtime.pending.is_some() {
+            return Err(Error::ReviewMismatch);
+        }
+        if !matches!(self.phase, Phase::Disclosed | Phase::FinancialImported) {
+            return Err(Error::ReviewMismatch);
+        }
+        let open = self.runtime.open.as_ref().ok_or(Error::Locked)?;
+        if !open.writer_reconciled
+            || open.writer_receipt.is_none()
+            || open.wallet.is_none()
+            || open.wallet_job.is_some()
+            || open.durable_wallet_job.is_some()
+            || self.runtime.signing_job.is_some()
+            || !open.revocations.is_empty()
+        {
+            return Err(Error::ReviewMismatch);
+        }
+        flow_diag_v1::observe_result(
+            self.flow_observation.as_ref(),
+            DurableFlowStageV1::WalletSource,
+            open.wallet.as_ref().ok_or(Error::Locked)?.check_current(),
+        )?;
+        let Some(imported) = &open.durable_review else {
+            return Ok(false);
+        };
+        if &imported.request != request || imported.fixed.verified().identity() != identity {
+            return Err(Error::ReviewMismatch);
+        }
         Ok(true)
     }
 
@@ -1763,20 +2046,27 @@ impl DurableNativeFixtureV1 {
             self.missing_flow_completion_v1();
             return Err(Error::ReviewMismatch);
         }
-        loop {
-            self.check()?;
-            self.runtime.poll(EPOCH);
-            self.runtime.poll_durable_wallet_review_v1(EPOCH);
-            if self
-                .runtime
-                .open
-                .as_ref()
-                .is_none_or(|o| o.durable_wallet_job.is_none())
-            {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(2));
-        }
+        witness_wait_v1::run(
+            self,
+            |fixture| fixture.pending_wait_full_entry_v1(),
+            |fixture| fixture.pending_wait_live_v1(),
+            |fixture| {
+                fixture.measure_pending_wait_v1(
+                    flow_diag_v1::DurablePendingWaitKindV1::Poll,
+                    |fixture| {
+                        fixture.runtime.poll(EPOCH);
+                        fixture.runtime.poll_durable_wallet_review_v1(EPOCH);
+                        fixture
+                            .runtime
+                            .open
+                            .as_ref()
+                            .is_none_or(|open| open.durable_wallet_job.is_none())
+                    },
+                )
+            },
+            |fixture| fixture.pending_wait_full_exit_v1(),
+            |_| std::thread::sleep(Duration::from_millis(2)),
+        )?;
         *stage = DurableFlowStageV1::Completion;
         let history = match self.runtime.pending.as_ref().map(|p| &p.operation) {
             Some(Operation::DurableDisclosureV1 { flow, .. })
@@ -1852,6 +2142,7 @@ impl DurableNativeFixtureV1 {
         }
         self.signed = Some((actual.0.clone(), actual.1.clone(), after));
         self.phase = Phase::Signed;
+        self.observe_lifecycle_once_v1(flow_diag_v1::DurableLifecyclePointV1::InitialSignComplete);
         Ok(actual)
     }
     pub(in crate::native_ui) fn close(mut self) -> Result<AcknowledgedBornFixture> {

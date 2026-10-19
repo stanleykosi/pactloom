@@ -510,6 +510,13 @@ pub enum DurableLifecyclePointV1 {
     AcquireWorkerLaunch,
     FixtureFailure,
     AfterDrain,
+    WriterReconcileComplete,
+    PostReconcileAcceptComplete,
+    ViewingSetupComplete,
+    PostReconcileRedisclosureNativeComplete,
+    FinancialImportPollStart,
+    FinancialImportComplete,
+    InitialSignComplete,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum DurablePendingWaitKindV1 {
@@ -539,7 +546,7 @@ pub struct DurableLifecycleDiagnosticV1 {
     operation: DurableFlowOperationV1,
     fixture_result: DurableFlowResultV1,
     owner_budget_us: u32,
-    points: [Option<DurableLifecyclePointMeasurementV1>; 13],
+    points: [Option<DurableLifecyclePointMeasurementV1>; 20],
     pending_wait: [DurablePendingWaitCostV1; 4],
     worker_purpose: Option<DurableFlowJobPurposeV1>,
     worker_started_to_client_entry_us: Option<u32>,
@@ -564,7 +571,7 @@ impl DurableLifecycleDiagnosticV1 {
 }
 #[derive(Default)]
 struct LifecycleDataV1 {
-    points: [Option<DurableLifecyclePointMeasurementV1>; 13],
+    points: [Option<DurableLifecyclePointMeasurementV1>; 20],
     pending_wait: [DurablePendingWaitCostV1; 4],
     clamped: bool,
 }
@@ -616,6 +623,33 @@ impl DurableLifecycleObserverV1 {
             });
         });
     }
+    /// Repeatable observation of a fixed first landmark, never a permission
+    /// cache. A repeated call does not read a clock or alter the first value.
+    pub(crate) fn point_once(&self, point: DurableLifecyclePointV1) {
+        self.point_once_with_clock(point, Instant::now);
+    }
+    pub(crate) fn point_once_at(&self, point: DurableLifecyclePointV1, now: Instant) {
+        self.point_once_with_clock(point, || now);
+    }
+    fn point_once_with_clock(&self, point: DurableLifecyclePointV1, now: impl FnOnce() -> Instant) {
+        self.update(|data| {
+            if data.points[point as usize].is_some() {
+                return;
+            }
+            let Some(age) = self
+                .original_start
+                .and_then(|start| now().checked_duration_since(start))
+            else {
+                self.shared.incomplete.store(true, Ordering::Release);
+                return;
+            };
+            let age_us = lifecycle_micros(age, &mut data.clamped);
+            data.points[point as usize] = Some(DurableLifecyclePointMeasurementV1 {
+                age_us,
+                remaining_us: LIFECYCLE_BUDGET_US.saturating_sub(age_us),
+            });
+        });
+    }
     pub(crate) fn cost(&self, kind: DurablePendingWaitKindV1, elapsed: Duration) {
         self.update(|data| {
             let micros = lifecycle_micros(elapsed, &mut data.clamped);
@@ -640,24 +674,40 @@ impl DurableLifecycleObserverV1 {
         timing: WorkerTimingV1,
         flow_incomplete: bool,
     ) -> Option<DurableLifecycleDiagnosticV1> {
-        if operation != DurableFlowOperationV1::WriterReconcile {
+        if purpose.is_some_and(|purpose| !job_matches_operation(operation, purpose)) {
+            self.shared.incomplete.store(true, Ordering::Release);
             return None;
         }
         let Ok(data) = self.shared.data.try_lock() else {
             self.shared.incomplete.store(true, Ordering::Release);
             return None;
         };
+        // Later operations retain only same-owner landmarks and cumulative
+        // pending-wait costs. Their current job cannot inherit a successful
+        // writer worker's client spans or an earlier drain observation.
+        let writer = operation == DurableFlowOperationV1::WriterReconcile;
+        let timing = if writer && purpose.is_some() {
+            timing
+        } else {
+            WorkerTimingV1::default()
+        };
+        let mut points = data.points;
+        let stale_drain = !writer && points[DurableLifecyclePointV1::AfterDrain as usize].is_some();
+        if !writer {
+            points[DurableLifecyclePointV1::AfterDrain as usize] = None;
+        }
         Some(DurableLifecycleDiagnosticV1 {
             operation,
             fixture_result: DurableFlowResultV1::ReturnedErr,
             owner_budget_us: LIFECYCLE_BUDGET_US,
-            points: data.points,
+            points,
             pending_wait: data.pending_wait,
             worker_purpose: purpose,
             worker_started_to_client_entry_us: timing.client_entry_us,
             worker_started_to_client_return_us: timing.client_return_us,
             clamped: data.clamped || timing.clamped,
             incomplete: flow_incomplete
+                || stale_drain
                 || timing.incomplete
                 || self.original_start.is_none()
                 || self.shared.incomplete.load(Ordering::Acquire),
@@ -1665,7 +1715,22 @@ impl DurableFlowObserverV1 {
         if result == DurableFlowResultV1::ReturnedOk {
             return None;
         }
-        Some(self.snapshot_active(&active, result))
+        let mut diagnostic = self.snapshot_active(&active, result);
+        // Preserve the original seal-before-drain boundary for these flows.
+        // Attaching inert owner timing does not observe a later worker result,
+        // produce an aftermath, or change the owned operational error.
+        drop(data);
+        if active.operation != DurableFlowOperationV1::WriterReconcile {
+            diagnostic.lifecycle = self.lifecycle.as_ref().and_then(|lifecycle| {
+                lifecycle.snapshot(
+                    active.operation,
+                    active.completion.purpose,
+                    WorkerTimingV1::default(),
+                    diagnostic.incomplete,
+                )
+            });
+        }
+        Some(diagnostic)
     }
     fn snapshot_active(
         &self,
@@ -2449,7 +2514,7 @@ mod tests {
         assert!(lifecycle
             .snapshot(
                 DurableFlowOperationV1::InitialSign,
-                None,
+                Some(DurableFlowJobPurposeV1::Acquire),
                 WorkerTimingV1::default(),
                 false
             )
@@ -2531,6 +2596,257 @@ mod tests {
             .update(|active| active.worker_timing.started)
             .flatten()
             .is_none());
+    }
+    #[test]
+    fn durable_lifecycle_successful_reconcile_survives_to_exact_later_failure_without_renewal() {
+        use DurableFlowJobPurposeV1 as J;
+        use DurableFlowOperationV1 as O;
+        use DurableLifecyclePointV1 as P;
+        for (operation, purpose) in [
+            (O::FinancialImport, Some(J::Import)),
+            (O::FinancialImport, None),
+            (O::InitialSign, Some(J::WalletReview)),
+            (O::InitialSign, Some(J::Sign)),
+            (O::InitialSign, None),
+            (O::RetainedRetry, None),
+            (O::ResultService, Some(J::ResultService)),
+            (O::ResultService, None),
+        ] {
+            let collector = DurableFlowCollectorV1::default();
+            let start = Instant::now();
+            let lifecycle = DurableLifecycleObserverV1::new(start + Duration::from_secs(120));
+            lifecycle.point_at(P::NativeOpenComplete, start + Duration::from_secs(2));
+            lifecycle.point_at(P::AcceptComplete, start + Duration::from_secs(4));
+            lifecycle.point_at(P::RedisclosureComplete, start + Duration::from_secs(8));
+            lifecycle.point_at(P::ImportComplete, start + Duration::from_secs(12));
+            let writer = collector
+                .arm(O::WriterReconcile)
+                .with_lifecycle(Some(&lifecycle));
+            let job = writer.job_start(J::Acquire, 1);
+            job.started();
+            writer.call_enter(DurableFlowCallV1::WriterAcquire);
+            let original = writer.observe_transport(
+                DurableFlowTransportPurposeV1::Acquire,
+                DurableFlowStageV1::AcquireCall,
+                None,
+                Ok::<(), CheckedHistoryFailureV1>(()),
+            );
+            writer.call_return(DurableFlowCallV1::WriterAcquire, &original);
+            job.returned(DurableFlowStageV1::AcquireCall, &original);
+            job.received(DurableFlowStageV1::AcquireCall, &original);
+            lifecycle.point_at(P::WriterReconcileComplete, start + Duration::from_secs(80));
+            assert!(writer.finish(DurableFlowResultV1::ReturnedOk).is_none());
+            lifecycle.point_at(
+                P::PostReconcileAcceptComplete,
+                start + Duration::from_secs(84),
+            );
+            lifecycle.point_at(P::ViewingSetupComplete, start + Duration::from_secs(88));
+            lifecycle.point_at(
+                P::PostReconcileRedisclosureNativeComplete,
+                start + Duration::from_secs(92),
+            );
+            lifecycle.point_once_at(P::FinancialImportPollStart, start + Duration::from_secs(95));
+            let current = collector.arm(operation).with_lifecycle(Some(&lifecycle));
+            if let Some(purpose) = purpose {
+                current.job_start(purpose, 2);
+            }
+            let error = crate::Error::Io(std::io::Error::from_raw_os_error(1818));
+            current.record_error(
+                DurableFlowStageV1::ImportReceive,
+                &super::super::BridgeError::Ipc,
+            );
+            current.record_terminal(DurableFlowStageV1::FixtureState, &error);
+            lifecycle.point_once_at(P::FixtureFailure, start + Duration::from_secs(121));
+            let diagnostic = current.finish(DurableFlowResultV1::ReturnedErr).unwrap();
+            assert!(diagnostic.operation() == operation);
+            assert!(diagnostic.completion().purpose() == purpose);
+            assert!(diagnostic.after_drain().is_none());
+            assert!(diagnostic.first_error().unwrap().code() == DurableFlowErrorCodeV1::BridgeIpc);
+            assert!(
+                diagnostic.terminal_error().unwrap().code() == DurableFlowErrorCodeV1::SignerIo
+            );
+            let observed = diagnostic.lifecycle().unwrap();
+            assert!(observed.operation() == operation && observed.worker_purpose() == purpose);
+            assert!(observed.fixture_result() == DurableFlowResultV1::ReturnedErr);
+            assert!(observed.owner_budget_us() == 120_000_000);
+            for (point, seconds) in [
+                (P::NativeOpenComplete, 2),
+                (P::AcceptComplete, 4),
+                (P::RedisclosureComplete, 8),
+                (P::ImportComplete, 12),
+                (P::WriterReconcileComplete, 80),
+                (P::PostReconcileAcceptComplete, 84),
+                (P::ViewingSetupComplete, 88),
+                (P::PostReconcileRedisclosureNativeComplete, 92),
+                (P::FinancialImportPollStart, 95),
+            ] {
+                let value = observed.point(point).unwrap();
+                assert!(value.age_us() == seconds * 1_000_000);
+                assert!(value.remaining_us() == (120 - seconds) * 1_000_000);
+            }
+            let failure_point = observed.point(P::FixtureFailure).unwrap();
+            assert!(failure_point.age_us() == 121_000_000 && failure_point.remaining_us() == 0);
+            assert!(observed.point(P::AfterDrain).is_none());
+            assert!(observed.worker_started_to_client_entry_us().is_none());
+            assert!(observed.worker_started_to_client_return_us().is_none());
+            assert!(!observed.incomplete());
+            let failure = DurableFlowFailureV1::new(error, Some(diagnostic));
+            assert!(
+                matches!(failure.into_error(), crate::Error::Io(error) if error.raw_os_error() == Some(1818))
+            );
+        }
+    }
+    #[test]
+    fn durable_lifecycle_later_success_never_emits_and_pending_finish_does_not_gain_aftermath() {
+        use DurableFlowJobPurposeV1 as J;
+        use DurableFlowOperationV1 as O;
+        for (operation, purpose) in [
+            (O::FinancialImport, Some(J::Import)),
+            (O::InitialSign, Some(J::Sign)),
+            (O::RetainedRetry, None),
+            (O::ResultService, Some(J::ResultService)),
+        ] {
+            let collector = DurableFlowCollectorV1::default();
+            let lifecycle =
+                DurableLifecycleObserverV1::new(Instant::now() + Duration::from_secs(120));
+            let success = collector.arm(operation).with_lifecycle(Some(&lifecycle));
+            if let Some(purpose) = purpose {
+                success.job_start(purpose, 1);
+            }
+            assert!(success.finish(DurableFlowResultV1::ReturnedOk).is_none());
+            let current = collector.arm(operation).with_lifecycle(Some(&lifecycle));
+            let job = purpose.map(|purpose| current.job_start(purpose, 2));
+            let diagnostic = current.finish(DurableFlowResultV1::ReturnedErr).unwrap();
+            if let Some(job) = job {
+                job.returned(DurableFlowStageV1::Completion, &Ok::<(), crate::Error>(()));
+            }
+            current.record_drain(&Ok::<(), crate::Error>(()));
+            assert!(current.finish(DurableFlowResultV1::ReturnedErr).is_none());
+            assert!(diagnostic.after_drain().is_none());
+            assert!(diagnostic
+                .lifecycle()
+                .unwrap()
+                .point(DurableLifecyclePointV1::AfterDrain)
+                .is_none());
+            assert!(diagnostic
+                .lifecycle()
+                .unwrap()
+                .worker_started_to_client_return_us()
+                .is_none());
+            assert!(diagnostic.completion().result() == DurableFlowResultV1::NotObserved);
+        }
+    }
+    #[test]
+    fn durable_lifecycle_later_scope_rejects_wrong_purpose_and_never_exports_writer_spans() {
+        use DurableFlowJobPurposeV1 as J;
+        use DurableFlowOperationV1 as O;
+        for (operation, purpose) in [
+            (O::FinancialImport, J::Import),
+            (O::InitialSign, J::WalletReview),
+            (O::InitialSign, J::Sign),
+            (O::ResultService, J::ResultService),
+        ] {
+            let start = Instant::now();
+            let lifecycle = DurableLifecycleObserverV1::new(start + Duration::from_secs(120));
+            lifecycle.point_at(
+                DurableLifecyclePointV1::AfterDrain,
+                start + Duration::from_secs(100),
+            );
+            let timing = WorkerTimingV1 {
+                client_entry_us: Some(7),
+                client_return_us: Some(11),
+                ..WorkerTimingV1::default()
+            };
+            let observed = lifecycle
+                .snapshot(operation, Some(purpose), timing, false)
+                .unwrap();
+            assert!(observed.worker_purpose() == Some(purpose));
+            assert!(observed.worker_started_to_client_entry_us().is_none());
+            assert!(observed.worker_started_to_client_return_us().is_none());
+            assert!(observed
+                .point(DurableLifecyclePointV1::AfterDrain)
+                .is_none());
+            assert!(observed.incomplete());
+            assert!(lifecycle
+                .snapshot(operation, Some(J::Acquire), timing, false)
+                .is_none());
+        }
+        let lifecycle = DurableLifecycleObserverV1::new(Instant::now() + Duration::from_secs(120));
+        assert!(lifecycle
+            .snapshot(
+                O::RetainedRetry,
+                Some(J::Sign),
+                WorkerTimingV1::default(),
+                false
+            )
+            .is_none());
+        assert!(lifecycle
+            .snapshot(
+                O::WriterReconcile,
+                Some(J::Import),
+                WorkerTimingV1::default(),
+                false
+            )
+            .is_none());
+    }
+    #[test]
+    fn durable_lifecycle_first_only_landmark_preserves_value_and_avoids_repeat_or_contended_clocks()
+    {
+        let start = Instant::now();
+        let lifecycle = DurableLifecycleObserverV1::new(start + Duration::from_secs(120));
+        let clocks = Cell::new(0);
+        for seconds in [10, 11, 12] {
+            lifecycle.point_once_with_clock(
+                DurableLifecyclePointV1::FinancialImportPollStart,
+                || {
+                    clocks.set(clocks.get() + 1);
+                    start + Duration::from_secs(seconds)
+                },
+            );
+        }
+        assert!(clocks.get() == 1);
+        lifecycle.point_once(DurableLifecyclePointV1::FinancialImportPollStart);
+        lifecycle.point_once_at(
+            DurableLifecyclePointV1::FinancialImportComplete,
+            start + Duration::from_secs(60),
+        );
+        lifecycle.point_once_at(
+            DurableLifecyclePointV1::InitialSignComplete,
+            start + Duration::from_secs(90),
+        );
+        let observed = lifecycle
+            .snapshot(
+                DurableFlowOperationV1::ResultService,
+                Some(DurableFlowJobPurposeV1::ResultService),
+                WorkerTimingV1::default(),
+                false,
+            )
+            .unwrap();
+        let point = observed
+            .point(DurableLifecyclePointV1::FinancialImportPollStart)
+            .unwrap();
+        assert!(point.age_us() == 10_000_000 && point.remaining_us() == 110_000_000);
+        assert!(
+            observed
+                .point(DurableLifecyclePointV1::FinancialImportComplete)
+                .unwrap()
+                .age_us()
+                == 60_000_000
+        );
+        assert!(
+            observed
+                .point(DurableLifecyclePointV1::InitialSignComplete)
+                .unwrap()
+                .age_us()
+                == 90_000_000
+        );
+        assert!(!observed.incomplete());
+        let guard = lifecycle.shared.data.lock().unwrap();
+        lifecycle.point_once_with_clock(DurableLifecyclePointV1::FixtureFailure, || {
+            panic!("contended optional collection must not sample a clock")
+        });
+        drop(guard);
+        assert!(lifecycle.shared.incomplete.load(Ordering::Acquire));
     }
     const CALLS: [DurableFlowCallV1; 11] = [
         DurableFlowCallV1::WriterAcquire,

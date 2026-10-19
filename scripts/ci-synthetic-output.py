@@ -226,9 +226,15 @@ LIFECYCLE_PRIVATE_PREFIX = '[DURABLE_LIFECYCLE_V1 '
 LIFECYCLE_PREFIX = 'CI_SYNTHETIC_DURABLE_LIFECYCLE '
 LIFECYCLE_INVALID = 'CI_SYNTHETIC_DURABLE_LIFECYCLE invalid=true details_withheld=true'
 LIFECYCLE_FIELDS = ('version','operation','fixture_result','owner_budget_us','points','pending_wait','worker_purpose','worker_started_to_client_entry_us','worker_started_to_client_return_us','clamped','incomplete')
-LIFECYCLE_POINT_FIELDS = ('native_open_complete','pair_complete','witness_setup_complete','accept_complete','redisclosure_complete','import_complete','historical_lookup_complete','acquire_prepare_launch','acquire_prepare_complete','acquire_native_approval','acquire_worker_launch','fixture_failure','after_drain')
+LIFECYCLE_POINT_FIELDS = ('native_open_complete','pair_complete','witness_setup_complete','accept_complete','redisclosure_complete','import_complete','historical_lookup_complete','acquire_prepare_launch','acquire_prepare_complete','acquire_native_approval','acquire_worker_launch','writer_reconcile_complete','post_reconcile_accept_complete','viewing_setup_complete','post_reconcile_redisclosure_native_complete','financial_import_poll_start','financial_import_complete','initial_sign_complete','fixture_failure','after_drain')
 LIFECYCLE_WAIT_FIELDS = ('full_precheck','full_postcheck','liveness','poll')
-LIFECYCLE_JOB_PURPOSE = frozenset(('AcquirePrepare','Acquire','ActivationPrepare','Activate','ReconcilePrepare','Reconcile'))
+LIFECYCLE_OPERATION_JOBS = {
+    'WriterReconcile': frozenset(('AcquirePrepare','Acquire','ActivationPrepare','Activate','ReconcilePrepare','Reconcile')),
+    'FinancialImport': frozenset(('Import',)),
+    'InitialSign': frozenset(('WalletReview','Sign')),
+    'RetainedRetry': frozenset(),
+    'ResultService': frozenset(('ResultService',)),
+}
 
 STORAGE_BOOTSTRAP_TEST = 'recovery_generation::layered::tests::native_layered_current_eight_nine_parent_provenance_is_exact_and_not_relabelable'
 SIGNER_VALIDATION_TESTS = (
@@ -729,7 +735,7 @@ class DurableFlowDiagnostics:
 def public_durable_lifecycle(text):
     row=flow_object(history_json(text,2048),LIFECYCLE_FIELDS)
     if type(row['version']) is not int or row['version']!=1: raise ValueError('lifecycle version')
-    if row['operation']!='WriterReconcile' or row['fixture_result']!='ReturnedErr':
+    if not history_enum(row['operation'],FLOW_OPERATION) or row['fixture_result']!='ReturnedErr':
         raise ValueError('lifecycle failure scope')
     if type(row['owner_budget_us']) is not int or row['owner_budget_us']!=120000000:
         raise ValueError('lifecycle original budget')
@@ -754,10 +760,12 @@ def public_durable_lifecycle(text):
             raise ValueError('lifecycle cost consistency')
         wait[key]=cost
     row['pending_wait']=wait
-    if not history_enum(row['worker_purpose'],LIFECYCLE_JOB_PURPOSE,True):
+    if not history_enum(row['worker_purpose'],LIFECYCLE_OPERATION_JOBS[row['operation']],True):
         raise ValueError('lifecycle worker purpose')
     entry=row['worker_started_to_client_entry_us']; returned=row['worker_started_to_client_return_us']
     if not admission_duration(entry) or not admission_duration(returned): raise ValueError('lifecycle worker duration')
+    if row['operation']!='WriterReconcile' and (points['after_drain'] is not None or entry is not None or returned is not None):
+        raise ValueError('lifecycle later snapshot is not writer aftermath')
     if row['worker_purpose'] is None and (entry is not None or returned is not None):
         raise ValueError('lifecycle worker without job')
     if returned is not None and (entry is None or returned<entry):
@@ -768,7 +776,8 @@ def public_durable_lifecycle(text):
 def lifecycle_matches_flow(value, flow):
     return (flow is not None and value['operation']==flow['operation']
         and value['worker_purpose']==flow['completion']['purpose']
-        and (value['points']['after_drain'] is None or flow['after_drain'] is not None))
+        and (value['points']['after_drain'] is None or flow['after_drain'] is not None)
+        and (value['operation']=='WriterReconcile' or flow['after_drain'] is None))
 
 
 class DurableLifecycleDiagnostics:

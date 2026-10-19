@@ -3352,9 +3352,17 @@ mod durable_flow_projection {
         "CI_SYNTHETIC_DURABLE_LIFECYCLE invalid=true details_withheld=true";
     const LIFECYCLE_MAX_PAYLOAD: usize = 2048;
     const LIFECYCLE_OWNER_BUDGET_US: u32 = 120_000_000;
-    const LIFECYCLE_JOB_PURPOSES: &[&str] = &[
-        "AcquirePrepare", "Acquire", "ActivationPrepare", "Activate", "ReconcilePrepare", "Reconcile",
-    ];
+    fn lifecycle_job_matches_operation(operation: &str, purpose: Option<&str>) -> bool {
+        let allowed: &[&str] = match operation {
+            "WriterReconcile" => &["AcquirePrepare", "Acquire", "ActivationPrepare", "Activate", "ReconcilePrepare", "Reconcile"],
+            "FinancialImport" => &["Import"],
+            "InitialSign" => &["WalletReview", "Sign"],
+            "RetainedRetry" => &[],
+            "ResultService" => &["ResultService"],
+            _ => return false,
+        };
+        optional_enum(purpose, allowed)
+    }
 
     #[derive(serde::Deserialize, serde::Serialize)]
     #[serde(deny_unknown_fields)]
@@ -3400,6 +3408,13 @@ mod durable_flow_projection {
         acquire_prepare_complete => AcquirePrepareComplete,
         acquire_native_approval => AcquireNativeApproval,
         acquire_worker_launch => AcquireWorkerLaunch,
+        writer_reconcile_complete => WriterReconcileComplete,
+        post_reconcile_accept_complete => PostReconcileAcceptComplete,
+        viewing_setup_complete => ViewingSetupComplete,
+        post_reconcile_redisclosure_native_complete => PostReconcileRedisclosureNativeComplete,
+        financial_import_poll_start => FinancialImportPollStart,
+        financial_import_complete => FinancialImportComplete,
+        initial_sign_complete => InitialSignComplete,
         fixture_failure => FixtureFailure,
         after_drain => AfterDrain,
     }
@@ -3465,12 +3480,16 @@ mod durable_flow_projection {
     impl PublicDurableLifecycle {
         fn valid(&self) -> bool {
             self.version == 1
-                && self.operation == "WriterReconcile"
+                && lifecycle_job_matches_operation(&self.operation, self.worker_purpose.as_deref())
                 && self.fixture_result == "ReturnedErr"
                 && self.owner_budget_us == LIFECYCLE_OWNER_BUDGET_US
                 && self.points.valid()
                 && self.pending_wait.valid(self.clamped)
-                && optional_enum(self.worker_purpose.as_deref(), LIFECYCLE_JOB_PURPOSES)
+                // Later operations are sealed failure-time snapshots, not writer aftermath.
+                && (self.operation == "WriterReconcile"
+                    || (self.points.after_drain.is_none()
+                        && self.worker_started_to_client_entry_us.is_none()
+                        && self.worker_started_to_client_return_us.is_none()))
                 && duration(self.worker_started_to_client_entry_us)
                 && duration(self.worker_started_to_client_return_us)
                 && (self.worker_purpose.is_some()
@@ -3484,6 +3503,7 @@ mod durable_flow_projection {
             self.operation == flow.operation
                 && self.worker_purpose == flow.completion.purpose
                 && (self.points.after_drain.is_none() || flow.after_drain.is_some())
+                && (self.operation == "WriterReconcile" || flow.after_drain.is_none())
         }
     }
     fn lifecycle_public(value: &DurableLifecycleDiagnosticV1) -> PublicDurableLifecycle {
@@ -3551,7 +3571,7 @@ mod durable_flow_projection {
     pub(crate) const DURABLE_FLOW_MAXIMAL_TEST_JSON: &str = r#"{"version":1,"operation":"WriterReconcile","first_error":{"stage":"AuthorizationSource","domain":"Signer","code":"ConsentJournal","nested_code":"JournalNamedRecipientHistoryUnsupported"},"terminal_error":{"stage":"AuthorizationSource","domain":"Signer","code":"ConsentJournal","nested_code":"JournalNamedRecipientHistoryUnsupported"},"fixture_result":"ReturnedErr","completion":{"purpose":"ActivationPrepare","result":"NotObserved","receive":"Disconnected","presentation":"NotObserved"},"call_outcomes":{"writer_acquire":"ReturnedErr","writer_activate":"ReturnedErr","active_verify":"ReturnedErr","reconciliation":"ReturnedErr","session_invalidation":"ReturnedErr","release":"ReturnedErr","request_retention":"ReturnedErr","reservation":"ReturnedErr","permit_retention":"ReturnedErr","key_use":"ReturnedErr","result_retention":"ReturnedErr"},"lower_call_measurement":{"purpose":"Activate","stage":"CommittedHeadValidation","authority_code":"ConstructionHistoryUnsupported","io_kind":"Timeout","callback_stage":"WorkspaceCurrent","measurement":{"phase":"Activate","check_site":"BeforeRequestWrite","checkpoint":"DeadlineSelection","selected_limit":"Exchange","selected_budget_us":600000000,"caller_remaining_at_budget_start_us":600000000,"caller_remaining_at_failure_us":600000000,"selected_remaining_at_failure_us":600000000,"operation_elapsed_us":600000000,"exchange_elapsed_us":600000000,"pre_budget_callback_calls":1,"pre_budget_callback_us":600000000,"operation_cost":{"callback_calls":1000000,"callback_us":600000000,"callback_max_us":600000000,"connect_calls":1000000,"connect_us":600000000,"handshake_calls":1000000,"handshake_us":600000000,"frame_write_calls":1000000,"frame_write_us":600000000,"frame_read_calls":1000000,"frame_read_us":600000000},"exchange_cost":{"callback_calls":1000000,"callback_us":600000000,"callback_max_us":600000000,"connect_calls":1000000,"connect_us":600000000,"handshake_calls":1000000,"handshake_us":600000000,"frame_write_calls":1000000,"frame_write_us":600000000,"frame_read_calls":1000000,"frame_read_us":600000000},"clamped":false,"incomplete":false}},"clamped":false,"incomplete":false,"after_drain":{"drain_result":"ReturnedErr","drain_error":{"stage":"Close","domain":"Signer","code":"ConsentJournal","nested_code":"JournalNamedRecipientHistoryUnsupported"},"worker_purpose":"ActivationPrepare","worker_result":"ReturnedErr","worker_error":{"stage":"AuthorizationSource","domain":"Signer","code":"ConsentJournal","nested_code":"JournalNamedRecipientHistoryUnsupported"},"call_outcomes":{"writer_acquire":"ReturnedErr","writer_activate":"ReturnedErr","active_verify":"ReturnedErr","reconciliation":"ReturnedErr","session_invalidation":"ReturnedErr","release":"ReturnedErr","request_retention":"ReturnedErr","reservation":"ReturnedErr","permit_retention":"ReturnedErr","key_use":"ReturnedErr","result_retention":"ReturnedErr"},"lower_call_measurement":null,"clamped":false,"incomplete":false}}"#;
 
     #[cfg(test)]
-    pub(crate) const DURABLE_LIFECYCLE_MAXIMAL_TEST_JSON: &str = r#"{"version":1,"operation":"WriterReconcile","fixture_result":"ReturnedErr","owner_budget_us":120000000,"points":{"native_open_complete":{"age_us":100000000,"remaining_us":20000000},"pair_complete":{"age_us":100000000,"remaining_us":20000000},"witness_setup_complete":{"age_us":100000000,"remaining_us":20000000},"accept_complete":{"age_us":100000000,"remaining_us":20000000},"redisclosure_complete":{"age_us":100000000,"remaining_us":20000000},"import_complete":{"age_us":100000000,"remaining_us":20000000},"historical_lookup_complete":{"age_us":100000000,"remaining_us":20000000},"acquire_prepare_launch":{"age_us":100000000,"remaining_us":20000000},"acquire_prepare_complete":{"age_us":100000000,"remaining_us":20000000},"acquire_native_approval":{"age_us":100000000,"remaining_us":20000000},"acquire_worker_launch":{"age_us":100000000,"remaining_us":20000000},"fixture_failure":{"age_us":100000000,"remaining_us":20000000},"after_drain":{"age_us":100000000,"remaining_us":20000000}},"pending_wait":{"full_precheck":{"calls":1000000,"total_us":600000000,"max_us":600000000},"full_postcheck":{"calls":1000000,"total_us":600000000,"max_us":600000000},"liveness":{"calls":1000000,"total_us":600000000,"max_us":600000000},"poll":{"calls":1000000,"total_us":600000000,"max_us":600000000}},"worker_purpose":"ActivationPrepare","worker_started_to_client_entry_us":600000000,"worker_started_to_client_return_us":600000000,"clamped":false,"incomplete":false}"#;
+    pub(crate) const DURABLE_LIFECYCLE_MAXIMAL_TEST_JSON: &str = r#"{"version":1,"operation":"WriterReconcile","fixture_result":"ReturnedErr","owner_budget_us":120000000,"points":{"native_open_complete":{"age_us":100000000,"remaining_us":20000000},"pair_complete":{"age_us":100000000,"remaining_us":20000000},"witness_setup_complete":{"age_us":100000000,"remaining_us":20000000},"accept_complete":{"age_us":100000000,"remaining_us":20000000},"redisclosure_complete":{"age_us":100000000,"remaining_us":20000000},"import_complete":{"age_us":100000000,"remaining_us":20000000},"historical_lookup_complete":{"age_us":100000000,"remaining_us":20000000},"acquire_prepare_launch":{"age_us":100000000,"remaining_us":20000000},"acquire_prepare_complete":{"age_us":100000000,"remaining_us":20000000},"acquire_native_approval":{"age_us":100000000,"remaining_us":20000000},"acquire_worker_launch":{"age_us":100000000,"remaining_us":20000000},"writer_reconcile_complete":{"age_us":100000000,"remaining_us":20000000},"post_reconcile_accept_complete":{"age_us":100000000,"remaining_us":20000000},"viewing_setup_complete":{"age_us":100000000,"remaining_us":20000000},"post_reconcile_redisclosure_native_complete":{"age_us":100000000,"remaining_us":20000000},"financial_import_poll_start":{"age_us":100000000,"remaining_us":20000000},"financial_import_complete":{"age_us":100000000,"remaining_us":20000000},"initial_sign_complete":{"age_us":100000000,"remaining_us":20000000},"fixture_failure":{"age_us":100000000,"remaining_us":20000000},"after_drain":{"age_us":100000000,"remaining_us":20000000}},"pending_wait":{"full_precheck":{"calls":1000000,"total_us":600000000,"max_us":600000000},"full_postcheck":{"calls":1000000,"total_us":600000000,"max_us":600000000},"liveness":{"calls":1000000,"total_us":600000000,"max_us":600000000},"poll":{"calls":1000000,"total_us":600000000,"max_us":600000000}},"worker_purpose":"ActivationPrepare","worker_started_to_client_entry_us":600000000,"worker_started_to_client_return_us":600000000,"clamped":false,"incomplete":false}"#;
 
     #[cfg(test)]
     mod tests {
@@ -4107,7 +4127,7 @@ mod durable_flow_projection {
             let value = lifecycle_parse(DURABLE_LIFECYCLE_MAXIMAL_TEST_JSON).unwrap();
             let text = lifecycle_canonical(&value).unwrap();
             assert_eq!(text, DURABLE_LIFECYCLE_MAXIMAL_TEST_JSON);
-            assert_eq!(text.len(), 1450);
+            assert_eq!(text.len(), 1979);
             let exact = format!("{}{}", text, " ".repeat(LIFECYCLE_MAX_PAYLOAD - text.len()));
             assert_eq!(exact.len(), 2048);
             assert_eq!(lifecycle_canonical(&lifecycle_parse(&exact).unwrap()).unwrap(), text);
@@ -4122,6 +4142,50 @@ mod durable_flow_projection {
             flow.completion.purpose = Some("ActivationPrepare".into());
             flow.after_drain = None;
             assert!(!value.matches_flow(&flow));
+            // Each later failure pairs with its own sealed FLOW without rewriting
+            // original errors, completion, CALL states or earlier owner landmarks.
+            for (operation, purpose) in [
+                ("FinancialImport", Some("Import")),
+                ("InitialSign", Some("Sign")),
+                ("RetainedRetry", None),
+                ("ResultService", Some("ResultService")),
+            ] {
+                let mut lifecycle = lifecycle_parse(DURABLE_LIFECYCLE_MAXIMAL_TEST_JSON).unwrap();
+                lifecycle.operation = operation.into();
+                lifecycle.worker_purpose = purpose.map(str::to_owned);
+                lifecycle.worker_started_to_client_entry_us = None;
+                lifecycle.worker_started_to_client_return_us = None;
+                lifecycle.points.after_drain = None;
+                let mut flow = parse_payload(DURABLE_FLOW_MAXIMAL_TEST_JSON).unwrap();
+                flow.operation = operation.into();
+                flow.completion.purpose = purpose.map(str::to_owned);
+                flow.completion.result = "NotObserved".into();
+                flow.completion.receive = if purpose.is_some() { "Pending" } else { "Missing" }.into();
+                flow.completion.presentation = "NotObserved".into();
+                flow.after_drain = None;
+                flow.lower_call_measurement = None;
+                let initial = canonical_payload(&flow).unwrap();
+                assert!(lifecycle.valid());
+                assert!(lifecycle.matches_flow(&flow));
+                assert!(lifecycle.points.native_open_complete.is_some());
+                assert!(lifecycle.points.writer_reconcile_complete.is_some());
+                assert_eq!(canonical_payload(&flow).unwrap(), initial);
+                let serialized = lifecycle_canonical(&lifecycle).unwrap();
+                assert!(serialized.len() <= 1979);
+                assert!(lifecycle_parse(&serialized).unwrap().matches_flow(&flow));
+                for later_span in [false, true] {
+                    if later_span { lifecycle.worker_started_to_client_return_us = Some(1); }
+                    else { lifecycle.worker_started_to_client_entry_us = Some(0); }
+                    assert!(!lifecycle.valid());
+                    lifecycle.worker_started_to_client_entry_us = None;
+                    lifecycle.worker_started_to_client_return_us = None;
+                }
+                lifecycle.points.after_drain = Some(PublicLifecyclePoint { age_us: 120_000_000, remaining_us: 0 });
+                assert!(!lifecycle.valid());
+                lifecycle.points.after_drain = None;
+                flow.after_drain = parse_payload(DURABLE_FLOW_MAXIMAL_TEST_JSON).unwrap().after_drain;
+                assert!(!lifecycle.matches_flow(&flow));
+            }
         }
         #[test]
         fn durable_lifecycle_exact_scopes_bounds_and_arithmetic() {
@@ -4165,6 +4229,25 @@ mod durable_flow_projection {
                 value["worker_started_to_client_return_us"] = serde_json::json!(returned);
                 assert_eq!(lifecycle_parse(&value.to_string()).is_some(), valid);
             }
+            let operations: &[(&str, &[&str])] = &[
+                ("WriterReconcile", &["AcquirePrepare", "Acquire", "ActivationPrepare", "Activate", "ReconcilePrepare", "Reconcile"]),
+                ("FinancialImport", &["Import"]),
+                ("InitialSign", &["WalletReview", "Sign"]),
+                ("RetainedRetry", &[]),
+                ("ResultService", &["ResultService"]),
+            ];
+            for &(operation, purposes) in operations {
+                for purpose in std::iter::once(None).chain(FLOW_JOB_PURPOSE.iter().copied().map(Some)) {
+                    let mut value = original.clone();
+                    value["operation"] = serde_json::json!(operation);
+                    value["worker_purpose"] = serde_json::json!(purpose);
+                    value["worker_started_to_client_entry_us"] = serde_json::Value::Null;
+                    value["worker_started_to_client_return_us"] = serde_json::Value::Null;
+                    value["points"]["after_drain"] = serde_json::Value::Null;
+                    assert_eq!(lifecycle_parse(&value.to_string()).is_some(), purpose.is_none_or(|purpose| purposes.contains(&purpose)));
+                }
+            }
+            assert_eq!(original["points"].as_object().unwrap().len(), 20);
             let mut value = original;
             for point in value["points"].as_object_mut().unwrap().values_mut() { *point = serde_json::Value::Null; }
             value["worker_purpose"] = serde_json::Value::Null;

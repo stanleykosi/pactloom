@@ -9,7 +9,9 @@ use crate::authority_bridge::{
     durable_review_ipc_v1::DurableReviewDeliveryRequestV1,
     preconstruction_ipc::PreconstructionRequest,
 };
-use crate::native_ui::runtime::durable_proposal_qualification_v1::DurableNativeFixtureV1;
+use crate::native_ui::runtime::durable_proposal_qualification_v1::{
+    DurableDisclosureWaitV1, DurableFinancialImportWaitV1, DurableNativeFixtureV1,
+};
 pub use crate::native_ui::runtime::durable_proposal_qualification_v1::{
     DurableAdmissionCallFailureV1, DurableAdmissionCallbackStageV1, DurableAdmissionCompletionV1,
     DurableAdmissionDispatchFailureV1, DurableAdmissionDispatchMeasurementV1,
@@ -33,6 +35,31 @@ pub use crate::authority_bridge::durable_flow_diagnostics_v1::{
 
 pub struct EphemeralDurableNativeV1 {
     inner: DurableNativeFixtureV1,
+}
+/// One fixed synthetic import wait. Exclusive borrowing prevents interleaving
+/// another request or operation; dropping the waiter makes no success claim.
+pub struct EphemeralDurableFinancialImportWaitV1<'a> {
+    inner: DurableFinancialImportWaitV1<'a>,
+}
+impl EphemeralDurableFinancialImportWaitV1<'_> {
+    pub fn deadline(&self) -> Instant {
+        self.inner.deadline()
+    }
+    pub fn poll(&mut self) -> Result<bool> {
+        self.inner.poll()
+    }
+}
+/// One fixed paired disclosure wait, never a reusable validation or approval.
+pub struct EphemeralDurableDisclosureWaitV1<'a> {
+    inner: DurableDisclosureWaitV1<'a>,
+}
+impl EphemeralDurableDisclosureWaitV1<'_> {
+    pub fn deadline(&self) -> Instant {
+        self.inner.deadline()
+    }
+    pub fn poll(&mut self) -> Result<bool> {
+        self.inner.poll()
+    }
 }
 impl EphemeralAcknowledgedBornV1 {
     /// The same genuine opener, with opt-in inert owner-lifetime evidence only.
@@ -66,6 +93,23 @@ impl EphemeralAcknowledgedBornV1 {
     }
 }
 impl EphemeralDurableNativeV1 {
+    pub fn begin_financial_import_wait_diagnosed<'a>(
+        &'a mut self,
+        token: &'a DurableFlowObservationTokenV1,
+        request: &'a DurableReviewDeliveryRequestV1,
+        identity: &'a wholepact_protocol::durable_proposal_v1::FixedProposalIdentityV1,
+    ) -> Result<EphemeralDurableFinancialImportWaitV1<'a>> {
+        Ok(EphemeralDurableFinancialImportWaitV1 {
+            inner: self
+                .inner
+                .begin_financial_import_wait_diagnosed(token, request, identity)?,
+        })
+    }
+    pub fn begin_disclosure_wait(&mut self) -> Result<EphemeralDurableDisclosureWaitV1<'_>> {
+        Ok(EphemeralDurableDisclosureWaitV1 {
+            inner: self.inner.begin_disclosure_wait()?,
+        })
+    }
     pub fn endpoint(&self) -> Result<PathBuf> {
         self.inner.endpoint()
     }
