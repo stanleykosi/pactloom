@@ -16,6 +16,29 @@ use pczt::{
     },
 };
 use rand::{rand_core::UnwrapErr, rngs::SysRng};
+use std::sync::OnceLock;
+
+#[cfg(test)]
+std::thread_local! {
+    static PUBLIC_VERIFYING_KEY_INITIALIZATIONS_FOR_TEST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static ACTUAL_PROOF_VERIFICATIONS_FOR_TEST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn initialize_post_nu6_3_verifying_key(cell: &OnceLock<VerifyingKey>) -> &VerifyingKey {
+    cell.get_or_init(|| {
+        #[cfg(test)]
+        PUBLIC_VERIFYING_KEY_INITIALIZATIONS_FOR_TEST.with(|count| count.set(count.get() + 1));
+        VerifyingKey::build(OrchardCircuitVersion::PostNu6_3)
+    })
+}
+
+fn post_nu6_3_verifying_key() -> &'static VerifyingKey {
+    // Immutable public parameters for this exact circuit version only. Never
+    // retain a PCZT, witness, policy, review binding, proof, or acceptance result.
+    // The process-local static also requires VerifyingKey to be Send + Sync.
+    static KEY: OnceLock<VerifyingKey> = OnceLock::new();
+    initialize_post_nu6_3_verifying_key(&KEY)
+}
 
 /// Conservative proving envelope, separate from the parser's 64-action ceiling.
 /// Larger owner/note counts are not a qualified proving service configuration.
@@ -89,6 +112,8 @@ fn verify_proof(pczt: Pczt, vk: &VerifyingKey) -> Result<usize, String> {
                     .ok_or_else(|| error("Invalid proof instance".into()))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
+            #[cfg(test)]
+            ACTUAL_PROOF_VERIFICATIONS_FOR_TEST.with(|count| count.set(count.get() + 1));
             proof
                 .verify(vk, &instances)
                 .map_err(|_| error("Actual Ironwood proof verification failed".into()))?;
@@ -110,6 +135,32 @@ pub fn verify_proved_candidate(
     if pczt.ironwood().zkproof().is_none() {
         return Err("Ironwood proof missing".into());
     }
+    let proof_bytes = verify_proof(pczt, post_nu6_3_verifying_key())?;
+    Ok(ProvedCandidate {
+        pczt_bytes: bytes.to_vec(),
+        economic_review: review,
+        proof_verified: true,
+        proof_bytes,
+        chain_validated: false,
+        distribution_allowed: false,
+        authorization_allowed: false,
+        encrypted_checkpoint_created: false,
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn verify_proved_candidate_with_fresh_public_parameters_for_test(
+    bytes: &[u8],
+    policy: &ReviewPolicy,
+    expected_binding: &str,
+    limits: ProvingLimits,
+) -> Result<ProvedCandidate, String> {
+    // Independent reference for the original verification path: retain its
+    // complete preflight order and construct a fresh, fixed public key.
+    let (pczt, review) = checked_review(bytes, policy, expected_binding, limits)?;
+    if pczt.ironwood().zkproof().is_none() {
+        return Err("Ironwood proof missing".into());
+    }
     let vk = VerifyingKey::build(OrchardCircuitVersion::PostNu6_3);
     let proof_bytes = verify_proof(pczt, &vk)?;
     Ok(ProvedCandidate {
@@ -122,6 +173,24 @@ pub fn verify_proved_candidate(
         authorization_allowed: false,
         encrypted_checkpoint_created: false,
     })
+}
+
+#[cfg(test)]
+pub(crate) fn verify_proof_with_public_parameters_for_test(
+    pczt: Pczt,
+    fresh: bool,
+) -> Result<usize, String> {
+    if fresh {
+        let vk = VerifyingKey::build(OrchardCircuitVersion::PostNu6_3);
+        verify_proof(pczt, &vk)
+    } else {
+        verify_proof(pczt, post_nu6_3_verifying_key())
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn actual_proof_verification_count_for_test() -> usize {
+    ACTUAL_PROOF_VERIFICATIONS_FOR_TEST.with(std::cell::Cell::get)
 }
 
 /// Create exactly one Ironwood proof from already permitted witnesses. Requires
@@ -168,4 +237,98 @@ pub fn prove_reviewed(
         authorization_allowed: false,
         encrypted_checkpoint_created: false,
     })
+}
+
+#[cfg(test)]
+mod public_parameter_reuse_tests {
+    use super::*;
+    use std::sync::Barrier;
+
+    #[test]
+    fn post_nu6_3_public_verifying_key_is_send_and_sync() {
+        fn assert_send_and_sync<T: Send + Sync>() {}
+        assert_send_and_sync::<VerifyingKey>();
+        assert_send_and_sync::<OnceLock<VerifyingKey>>();
+    }
+
+    #[test]
+    fn post_nu6_3_public_verifying_key_initializes_once_across_threads() {
+        const THREADS: usize = 8;
+        // Exercise the production initializer with a local cell. Do not reset
+        // or depend on the lifetime or initialization of the production static.
+        let cell = OnceLock::new();
+        let ready = Barrier::new(THREADS);
+        std::thread::scope(|scope| {
+            let handles = (0..THREADS)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let before = PUBLIC_VERIFYING_KEY_INITIALIZATIONS_FOR_TEST
+                            .with(std::cell::Cell::get);
+                        ready.wait();
+                        let key = initialize_post_nu6_3_verifying_key(&cell);
+                        let after = PUBLIC_VERIFYING_KEY_INITIALIZATIONS_FOR_TEST
+                            .with(std::cell::Cell::get);
+                        (key, after - before)
+                    })
+                })
+                .collect::<Vec<_>>();
+            let results = handles
+                .into_iter()
+                .map(|handle| {
+                    handle
+                        .join()
+                        .expect("public parameter initialization thread")
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(results.iter().map(|(_, count)| count).sum::<usize>(), 1);
+            let first = results[0].0;
+            for (key, _) in &results {
+                assert!(std::ptr::eq(first, *key));
+                assert!(key.circuit_version() == OrchardCircuitVersion::PostNu6_3);
+                assert!(key.supports_cross_address_restriction());
+            }
+            let before = PUBLIC_VERIFYING_KEY_INITIALIZATIONS_FOR_TEST.with(std::cell::Cell::get);
+            assert!(std::ptr::eq(
+                first,
+                initialize_post_nu6_3_verifying_key(&cell),
+            ));
+            let after = PUBLIC_VERIFYING_KEY_INITIALIZATIONS_FOR_TEST.with(std::cell::Cell::get);
+            assert_eq!(before, after);
+        });
+    }
+}
+
+#[cfg(test)]
+mod public_parameter_cost_tests {
+    use super::*;
+    use std::{io::Write, time::Instant};
+
+    /// Public circuit parameters only: no account, witness, proof, signer,
+    /// native owner, network, private data, or accepted-proof cache is created.
+    /// These separate same-process samples are not a cold-machine benchmark or
+    /// attribution of complete import time. Actual proof verification is NOT
+    /// measured here. Each sample deliberately constructs a separate key rather
+    /// than using the production public-parameter singleton.
+    #[test]
+    #[ignore = "Explicit public circuit-parameter construction component measurement"]
+    fn post_nu6_3_verifying_key_construction_cost_is_public_component_only() {
+        const MAX_REPORTED_US: u128 = 600_000_000;
+        for ordinal in 1..=2 {
+            let started = Instant::now();
+            // The exact fixed public circuit version and constructor used by
+            // verify_proved_candidate. Do not replace with a proof-result cache.
+            let key = std::hint::black_box(VerifyingKey::build(OrchardCircuitVersion::PostNu6_3));
+            let elapsed_us = started.elapsed().as_micros();
+            assert!(key.circuit_version() == OrchardCircuitVersion::PostNu6_3);
+            assert!(key.supports_cross_address_restriction());
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "LOCAL_PUBLIC_VERIFYING_KEY_COST_V1 component_only=true circuit=PostNu6_3 ordinal={} elapsed_us={} clamped={} proof_verification_measured=false",
+                ordinal,
+                elapsed_us.min(MAX_REPORTED_US),
+                elapsed_us > MAX_REPORTED_US,
+            );
+            drop(key);
+        }
+    }
 }
