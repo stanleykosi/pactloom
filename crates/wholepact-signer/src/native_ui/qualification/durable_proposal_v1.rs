@@ -16,9 +16,7 @@ pub use super::durable_witness_v1::{
     DurableAdmissionPreparationFailureV1, DurableAdmissionPreparationStageV1,
     DurableAdmissionRetentionV1,
 };
-use super::durable_witness_v1::{
-    DurableWitnessPreparedV1, QualificationDurableWitnessCompletionV1,
-};
+use super::durable_witness_v1::{DurableWitnessPreparedV1, QualificationDurableWitnessCompletionV1};
 use super::*;
 use crate::authority_bridge::durable_flow_diagnostics_v1::{
     self as flow_diag_v1, DurableFlowDiagnosticV1, DurableFlowFailureV1,
@@ -111,6 +109,8 @@ enum Phase {
     Imported,
     AdmissionPrepared,
     Admitted,
+    AcquireReplyLost,
+    AcquireRetriedPending,
     FinancialImported,
     Signed,
 }
@@ -137,6 +137,7 @@ pub(in crate::native_ui) struct DurableNativeFixtureV1 {
     signed: Option<(HistoryRequest, AuthorizationCommit, Vec<(u64, [u8; 32])>)>,
     // Inert correlations only. These never reconstruct a review or permission.
     admission: Option<wholepact_authority::OwnerControlRequest>,
+    acquire_reply_loss: Option<AcquireReplyLossCorrelationV1>,
     reconciled_records: Option<DurableNativeRecordsV1>,
     reconciled_writer: Option<(Arc<()>, wholepact_authority::WriterSessionReceipt)>,
     // This owner is inert data only and survives the real OpenAccount close.
@@ -151,6 +152,143 @@ pub(in crate::native_ui) struct DurableNativeFixtureV1 {
     flow_pending_drain: Option<flow_diag_v1::DurableFlowObserverV1>,
     flow_service: Option<flow_diag_v1::DurableFlowJobObservationV1>,
     flow_import_expected: Option<super::durable_review_v1::DurableFlowImportExpectationV1>,
+}
+
+/// Expected synthetic loss, not retry authority. The original operational Error
+/// and its actual finite diagnostic remain owned, unformatted and unserialized.
+pub struct DurableAcquireReplyLossV1 {
+    error: Error,
+    diagnostic: DurableFlowDiagnosticV1,
+}
+impl DurableAcquireReplyLossV1 {
+    pub fn error(&self) -> &Error {
+        &self.error
+    }
+    pub fn diagnostic(&self) -> &DurableFlowDiagnosticV1 {
+        &self.diagnostic
+    }
+    pub fn into_error(self) -> Error {
+        self.error
+    }
+    pub fn is_expected_loss(&self) -> bool {
+        acquire_loss_diagnostic_v1(&self.error, &self.diagnostic)
+    }
+}
+
+// Only inert identity/equality data. No retained source, workspace, approved
+// object, client, session key or authority-producing constructor is exposed.
+struct AcquireReplyLossCorrelationV1 {
+    entry: String,
+    records: DurableNativeRecordsV1,
+    source_markers: [usize; 3],
+    writer: Arc<()>,
+    owner: Arc<()>,
+    deadline: Instant,
+    ledger: Vec<(u64, [u8; 32])>,
+    digest: String,
+    review_deadline: Instant,
+    history_digest: String,
+    first_attempt: u64,
+    retry_started: bool,
+}
+fn acquire_immutable_equal_v1(
+    before: &AcquireReplyLossCorrelationV1,
+    entry: &str,
+    records: &DurableNativeRecordsV1,
+    source_markers: [usize; 3],
+    writer: &Arc<()>,
+    owner: &Arc<()>,
+    deadline: Instant,
+    ledger: &[(u64, [u8; 32])],
+) -> bool {
+    before.entry == entry
+        && &before.records == records
+        && before.source_markers == source_markers
+        && Arc::ptr_eq(&before.writer, writer)
+        && Arc::ptr_eq(&before.owner, owner)
+        && before.deadline == deadline
+        && before.ledger == ledger
+        && ledger.len() == 14
+}
+fn acquire_retry_phase_v1(phase: Phase, retry_started: bool) -> bool {
+    phase == Phase::AcquireReplyLost && !retry_started
+}
+fn acquire_idle_v1(flags: [bool; 12]) -> bool {
+    !flags.into_iter().any(|value| value)
+}
+#[derive(Clone, Copy)]
+struct AcquireLossFactsV1 {
+    uncertain: bool,
+    complete: bool,
+    purpose: Option<flow_diag_v1::DurableFlowJobPurposeV1>,
+    result: DurableFlowResultV1,
+    receive: flow_diag_v1::DurableFlowReceiveV1,
+    suppressed: bool,
+    acquire_failed: bool,
+    other_calls: bool,
+    lower: Option<(
+        flow_diag_v1::DurableFlowTransportPurposeV1,
+        flow_diag_v1::DurableFlowTransportStageV1,
+        Option<wholepact_authority::transport::history_diagnostics_v1::CheckedHistoryIoKindV1>,
+    )>,
+    callback_failed: bool,
+    lower_authority_uncertain: bool,
+}
+fn acquire_loss_facts_v1(facts: AcquireLossFactsV1) -> bool {
+    use flow_diag_v1::{
+        DurableFlowJobPurposeV1 as J, DurableFlowReceiveV1 as R,
+        DurableFlowTransportPurposeV1 as P, DurableFlowTransportStageV1 as S,
+    };
+    use wholepact_authority::transport::history_diagnostics_v1::CheckedHistoryIoKindV1 as I;
+    facts.uncertain
+        && facts.complete
+        && facts.purpose == Some(J::Acquire)
+        && facts.result == DurableFlowResultV1::ReturnedErr
+        && facts.receive == R::Received
+        && !facts.suppressed
+        && facts.acquire_failed
+        && !facts.other_calls
+        && facts.lower == Some((P::Acquire, S::ResponseRead, Some(I::Closed)))
+        && !facts.callback_failed
+        && facts.lower_authority_uncertain
+}
+fn acquire_loss_diagnostic_v1(error: &Error, diagnostic: &DurableFlowDiagnosticV1) -> bool {
+    use flow_diag_v1::DurableFlowCallOutcomeV1 as C;
+    let calls = diagnostic.call_outcomes();
+    let lower = diagnostic.lower_call_measurement();
+    acquire_loss_facts_v1(AcquireLossFactsV1 {
+        uncertain: matches!(error, Error::Uncertain),
+        complete: diagnostic.operation() == DurableFlowOperationV1::WriterReconcile
+            && diagnostic.fixture_result() == DurableFlowResultV1::ReturnedErr
+            && !diagnostic.incomplete()
+            && !diagnostic.clamped()
+            && diagnostic.terminal_error().is_none(),
+        purpose: diagnostic.completion().purpose(),
+        result: diagnostic.completion().result(),
+        receive: diagnostic.completion().receive(),
+        suppressed: diagnostic.completion().presentation()
+            == flow_diag_v1::DurableFlowPresentationV1::Suppressed,
+        acquire_failed: calls.writer_acquire() == C::ReturnedErr,
+        other_calls: [
+            calls.writer_activate(),
+            calls.active_verify(),
+            calls.reconciliation(),
+            calls.session_invalidation(),
+            calls.release(),
+            calls.request_retention(),
+            calls.reservation(),
+            calls.permit_retention(),
+            calls.key_use(),
+            calls.result_retention(),
+        ]
+        .into_iter()
+        .any(|call| call != C::NotObserved),
+        lower: lower.map(|lower| (lower.purpose(), lower.stage(), lower.io_kind())),
+        callback_failed: lower.is_some_and(|lower| lower.callback_stage().is_some()),
+        lower_authority_uncertain: lower.is_some_and(|lower| {
+            lower.authority_code() == flow_diag_v1::DurableFlowAuthorityCodeV1::Uncertain
+        }),
+    })
 }
 
 struct DurableFixtureAdmissionObservationV1 {
@@ -405,6 +543,7 @@ impl DurableNativeFixtureV1 {
             original_inventory,
             signed: None,
             admission: None,
+            acquire_reply_loss: None,
             reconciled_records: None,
             reconciled_writer: None,
             flow_collector: Default::default(),
@@ -1356,6 +1495,320 @@ impl DurableNativeFixtureV1 {
         self.flow_service = None;
         self.flow_import_expected = None;
         token.observer().finish(result)
+    }
+    fn acquire_source_markers_v1(&self) -> Result<[usize; 3]> {
+        let open = self.runtime.open.as_ref().ok_or(Error::Locked)?;
+        Ok([
+            Arc::as_ptr(open.durable_born_entry.as_ref().ok_or(Error::Locked)?) as usize,
+            Arc::as_ptr(open.durable_review.as_ref().ok_or(Error::Locked)?) as usize,
+            Arc::as_ptr(open.session.as_ref().ok_or(Error::Locked)?) as usize,
+        ])
+    }
+    fn require_acquire_idle_v1(&self, receipt_expected: bool) -> Result<()> {
+        self.check()?;
+        let open = self.runtime.open.as_ref().ok_or(Error::Locked)?;
+        // Full imported-source check, not merely an inert identity comparison.
+        open.durable_witness_source_v1()?.check_current()?;
+        if !acquire_idle_v1([
+            self.runtime.pending.is_some(),
+            self.runtime.signing_job.is_some(),
+            open.wallet.is_some(),
+            open.wallet_job.is_some(),
+            open.durable_wallet_job.is_some(),
+            open.durable_import_job.is_some(),
+            open.witness_job.is_some(),
+            !open.revocations.is_empty(),
+            open.writer_reconciled,
+            open.writer_receipt.is_some() != receipt_expected,
+            self.reconciled_records.is_some() || self.reconciled_writer.is_some(),
+            self.signed.is_some(),
+        ]) || self.admission.is_none()
+            || self
+                .runtime
+                .qualification_committed_durable_admission_v1()?
+                .as_ref()
+                != self.admission.as_ref()
+        {
+            return Err(Error::ReviewMismatch);
+        }
+        Ok(())
+    }
+    fn require_acquire_correlation_v1(
+        &self,
+        correlation: &AcquireReplyLossCorrelationV1,
+        receipt_expected: bool,
+    ) -> Result<()> {
+        self.require_acquire_idle_v1(receipt_expected)?;
+        let open = self.runtime.open.as_ref().ok_or(Error::Locked)?;
+        if !acquire_immutable_equal_v1(
+            correlation,
+            &self.entry,
+            &self.records()?,
+            self.acquire_source_markers_v1()?,
+            &open
+                .witness
+                .as_ref()
+                .ok_or(Error::Locked)?
+                .durable_instance_v1(),
+            &open
+                .owner_witness
+                .as_ref()
+                .ok_or(Error::Locked)?
+                .durable_instance_v1(),
+            self.deadline()?,
+            &self.signing_ledger()?,
+        ) || !open.durable_witness.qualification_session_retained_v1(
+            &correlation.digest,
+            correlation.review_deadline,
+            &correlation.history_digest,
+        )? || Instant::now() >= correlation.review_deadline
+        {
+            return Err(Error::ReviewMismatch);
+        }
+        Ok(())
+    }
+    fn acquire_terminal_v1(
+        &mut self,
+        token: &DurableFlowObservationTokenV1,
+        stage: DurableFlowStageV1,
+        error: Error,
+    ) -> DurableFlowFailureV1 {
+        let failure = DurableFlowFailureV1::new_pending(error, token.observer().clone());
+        // A later real source/deadline refusal may already be the terminal
+        // reason. Preserve it separately from the original owned worker error;
+        // do not overwrite it or mark a contradictory duplicate terminal.
+        let failure = if failure
+            .diagnostic()
+            .is_none_or(|diagnostic| diagnostic.terminal_error().is_none())
+        {
+            token.observer().record_terminal(stage, failure.error());
+            DurableFlowFailureV1::new_pending(failure.into_error(), token.observer().clone())
+        } else {
+            failure
+        };
+        self.observe_lifecycle_v1(flow_diag_v1::DurableLifecyclePointV1::FixtureFailure);
+        self.flow_pending_drain = Some(token.observer().clone());
+        failure
+    }
+    // Expected loss alone takes this nonterminal branch. No failure landmark,
+    // ordinary pending-drain seal, reconciliation, or new native approval.
+    fn finish_expected_acquire_loss_v1(
+        &mut self,
+        token: DurableFlowObservationTokenV1,
+    ) -> Option<DurableFlowDiagnosticV1> {
+        self.matching_flow_v1(&token)?;
+        if let Some(open) = self.runtime.open.as_mut() {
+            open.durable_witness.flow_observation = None;
+            open.durable_witness.flow_import = None;
+        }
+        self.flow_observation = None;
+        self.flow_service = None;
+        self.flow_import_expected = None;
+        token.observer().finish(DurableFlowResultV1::ReturnedErr)
+    }
+    pub(in crate::native_ui) fn acquire_original_writer_expecting_reply_loss_diagnosed(
+        &mut self,
+    ) -> std::result::Result<DurableAcquireReplyLossV1, DurableFlowFailureV1> {
+        let token = self.arm_flow_v1(DurableFlowOperationV1::WriterReconcile);
+        let mut stage = DurableFlowStageV1::FixtureState;
+        let result = (|| -> Result<(AcquireReplyLossCorrelationV1, Error)> {
+            self.require_acquire_idle_v1(false)?;
+            let open = self.runtime.open.as_ref().ok_or(Error::Locked)?;
+            if self.phase != Phase::Admitted
+                || self.acquire_reply_loss.is_some()
+                || !open.durable_witness.qualification_session_absent_v1()
+            {
+                return Err(Error::ReviewMismatch);
+            }
+            let mut correlation = AcquireReplyLossCorrelationV1 {
+                entry: self.entry.clone(),
+                records: self.records()?,
+                source_markers: self.acquire_source_markers_v1()?,
+                writer: open
+                    .witness
+                    .as_ref()
+                    .ok_or(Error::Locked)?
+                    .durable_instance_v1(),
+                owner: open
+                    .owner_witness
+                    .as_ref()
+                    .ok_or(Error::Locked)?
+                    .durable_instance_v1(),
+                deadline: self.deadline()?,
+                ledger: self.signing_ledger()?,
+                digest: String::new(),
+                review_deadline: self.deadline()?,
+                history_digest: String::new(),
+                first_attempt: 0,
+                retry_started: false,
+            };
+            stage = DurableFlowStageV1::AcquirePrepare;
+            self.runtime.prepare_durable_session_v1(EPOCH)?;
+            stage = DurableFlowStageV1::Completion;
+            self.drain_witness_to_review()?;
+            let pending = self.runtime.pending.as_ref().ok_or(Error::ReviewMismatch)?;
+            let prepared = match &pending.operation {
+                Operation::DurableWitnessV1(prepared) => match prepared.as_ref() {
+                    DurableWitnessPreparedV1::Session(prepared) => prepared,
+                    _ => return Err(Error::ReviewMismatch),
+                },
+                _ => return Err(Error::ReviewMismatch),
+            };
+            correlation.digest = pending.review.digest().to_owned();
+            if correlation.digest != prepared.digest() {
+                return Err(Error::ReviewMismatch);
+            }
+            (correlation.review_deadline, correlation.history_digest) =
+                prepared.qualification_correlation_v1()?;
+            self.observe_lifecycle_v1(
+                flow_diag_v1::DurableLifecyclePointV1::AcquirePrepareComplete,
+            );
+            correlation.first_attempt = self
+                .runtime
+                .begin_qualification_session_v1(token.observer(), &correlation.digest)
+                .ok_or(Error::Unavailable)?;
+            stage = DurableFlowStageV1::AcquireNative;
+            approve(&mut self.runtime)?;
+            stage = DurableFlowStageV1::Completion;
+            let drained = self.drain_witness_to_review();
+            let actual = self.runtime.take_qualification_session_error_v1(
+                correlation.first_attempt,
+                &correlation.digest,
+            );
+            if let Err(error) = drained {
+                token.observer().record_terminal(stage, &error);
+                return Err(actual.unwrap_or(error));
+            }
+            let actual = actual.ok_or(Error::ReviewMismatch)?;
+            if self
+                .runtime
+                .qualification_session_result_v1(correlation.first_attempt, &correlation.digest)
+                != Some(false)
+            {
+                return Err(actual);
+            }
+            if let Err(error) = self.require_acquire_correlation_v1(&correlation, false) {
+                token
+                    .observer()
+                    .record_terminal(DurableFlowStageV1::FixtureState, &error);
+                return Err(actual);
+            }
+            Ok((correlation, actual))
+        })();
+        let (correlation, actual) = match result {
+            Ok(value) => value,
+            Err(error) => return Err(self.acquire_terminal_v1(&token, stage, error)),
+        };
+        let observed = DurableFlowFailureV1::new_pending(actual, token.observer().clone());
+        if !observed
+            .diagnostic()
+            .is_some_and(|diagnostic| acquire_loss_diagnostic_v1(observed.error(), diagnostic))
+        {
+            return Err(self.acquire_terminal_v1(&token, stage, observed.into_error()));
+        }
+        let observer = token.observer().clone();
+        let Some(diagnostic) = self.finish_expected_acquire_loss_v1(token) else {
+            self.observe_lifecycle_v1(flow_diag_v1::DurableLifecyclePointV1::FixtureFailure);
+            self.flow_pending_drain = Some(observer.clone());
+            return Err(DurableFlowFailureV1::new_pending(
+                observed.into_error(),
+                observer,
+            ));
+        };
+        let result = DurableAcquireReplyLossV1 {
+            error: observed.into_error(),
+            diagnostic,
+        };
+        if !result.is_expected_loss() {
+            return Err(DurableFlowFailureV1::new(
+                result.error,
+                Some(result.diagnostic),
+            ));
+        }
+        self.acquire_reply_loss = Some(correlation);
+        self.phase = Phase::AcquireReplyLost;
+        Ok(result)
+    }
+    pub(in crate::native_ui) fn retry_original_writer_after_reply_loss_diagnosed(
+        &mut self,
+    ) -> std::result::Result<wholepact_authority::WriterSessionReceipt, DurableFlowFailureV1> {
+        let token = self.arm_flow_v1(DurableFlowOperationV1::WriterReconcile);
+        let mut stage = DurableFlowStageV1::FixtureState;
+        let result = (|| -> Result<wholepact_authority::WriterSessionReceipt> {
+            let correlation = self
+                .acquire_reply_loss
+                .as_ref()
+                .ok_or(Error::ReviewMismatch)?;
+            if !acquire_retry_phase_v1(self.phase, correlation.retry_started) {
+                return Err(Error::ReviewMismatch);
+            }
+            self.require_acquire_correlation_v1(correlation, false)?;
+            let digest = correlation.digest.clone();
+            let first_attempt = correlation.first_attempt;
+            let attempt = self
+                .runtime
+                .begin_qualification_session_v1(token.observer(), &digest)
+                .ok_or(Error::Unavailable)?;
+            if attempt == first_attempt {
+                return Err(Error::ReviewMismatch);
+            }
+            self.acquire_reply_loss
+                .as_mut()
+                .ok_or(Error::ReviewMismatch)?
+                .retry_started = true;
+            stage = DurableFlowStageV1::AcquireCall;
+            // The sole retry entry point. It clones the original approved Arc and
+            // the same workspace/client; no prepare/approval/reentry is involved.
+            self.runtime.retry_durable_witness_v1(1, EPOCH)?;
+            stage = DurableFlowStageV1::Completion;
+            let drained = self.drain_witness_to_review();
+            let actual = self
+                .runtime
+                .take_qualification_session_error_v1(attempt, &digest);
+            if let Err(error) = drained {
+                token.observer().record_terminal(stage, &error);
+                return Err(actual.unwrap_or(error));
+            }
+            if let Some(error) = actual {
+                return Err(error);
+            }
+            if self
+                .runtime
+                .qualification_session_result_v1(attempt, &digest)
+                != Some(true)
+                || self
+                    .runtime
+                    .qualification_durable_witness_completion_v1(&digest)
+                    != Some(QualificationDurableWitnessCompletionV1::SessionAcquired)
+            {
+                self.missing_flow_completion_v1();
+                return Err(Error::ReviewMismatch);
+            }
+            self.require_acquire_correlation_v1(
+                self.acquire_reply_loss
+                    .as_ref()
+                    .ok_or(Error::ReviewMismatch)?,
+                true,
+            )?;
+            let receipt = self
+                .runtime
+                .open
+                .as_ref()
+                .ok_or(Error::Locked)?
+                .writer_receipt
+                .as_ref()
+                .ok_or(Error::ReviewMismatch)?
+                .clone();
+            self.phase = Phase::AcquireRetriedPending;
+            Ok(receipt)
+        })();
+        match result {
+            Ok(receipt) => {
+                self.finish_flow_v1(token, DurableFlowResultV1::ReturnedOk);
+                Ok(receipt)
+            }
+            Err(error) => Err(self.acquire_terminal_v1(&token, stage, error)),
+        }
     }
     pub(in crate::native_ui) fn reconcile_original_writer_diagnosed(
         &mut self,
@@ -2504,5 +2957,180 @@ mod durable_flow_fixture_tests {
         assert!(report.completion().result() == DurableFlowResultV1::ReturnedErr);
         assert!(report.completion().receive() == Receive::Missing);
         assert!(report.completion().purpose() == Some(Purpose::WalletReview));
+    }
+}
+
+#[cfg(test)]
+mod acquire_reply_loss_fixture_tests {
+    use super::*;
+    use flow_diag_v1::{
+        DurableFlowJobPurposeV1 as J, DurableFlowReceiveV1 as R,
+        DurableFlowTransportPurposeV1 as P, DurableFlowTransportStageV1 as S,
+    };
+    use wholepact_authority::transport::history_diagnostics_v1::CheckedHistoryIoKindV1 as I;
+
+    fn inert_facts() -> AcquireLossFactsV1 {
+        AcquireLossFactsV1 {
+            uncertain: true,
+            complete: true,
+            purpose: Some(J::Acquire),
+            result: DurableFlowResultV1::ReturnedErr,
+            receive: R::Received,
+            suppressed: false,
+            acquire_failed: true,
+            other_calls: false,
+            lower: Some((P::Acquire, S::ResponseRead, Some(I::Closed))),
+            callback_failed: false,
+            lower_authority_uncertain: true,
+        }
+    }
+    #[test]
+    fn expected_loss_classifier_requires_exact_actual_completion_and_lower_facts() {
+        assert!(acquire_loss_facts_v1(inert_facts()));
+        for mode in 0..17 {
+            let mut facts = inert_facts();
+            match mode {
+                0 => facts.uncertain = false,
+                1 => facts.complete = false,
+                2 => facts.purpose = None,
+                3 => facts.purpose = Some(J::AcquirePrepare),
+                4 => facts.result = DurableFlowResultV1::ReturnedOk,
+                5 => facts.result = DurableFlowResultV1::NotObserved,
+                6 => facts.receive = R::Missing,
+                7 => facts.receive = R::Disconnected,
+                8 => facts.receive = R::Invalidated,
+                9 => facts.suppressed = true,
+                10 => facts.acquire_failed = false,
+                11 => facts.other_calls = true,
+                12 => facts.lower = None,
+                13 => facts.lower = Some((P::Activate, S::ResponseRead, Some(I::Closed))),
+                14 => facts.lower = Some((P::Acquire, S::RequestWrite, Some(I::Closed))),
+                15 => facts.callback_failed = true,
+                _ => facts.lower_authority_uncertain = false,
+            }
+            assert!(!acquire_loss_facts_v1(facts));
+        }
+        for io in [None, Some(I::Timeout), Some(I::Refused), Some(I::Other)] {
+            let mut facts = inert_facts();
+            facts.lower = Some((P::Acquire, S::ResponseRead, io));
+            assert!(!acquire_loss_facts_v1(facts));
+        }
+    }
+    #[test]
+    fn pending_retry_phase_and_receipt_job_state_guards_are_closed() {
+        for phase in [
+            Phase::Pair,
+            Phase::Paired,
+            Phase::Accepted,
+            Phase::Disclosure,
+            Phase::Disclosed,
+            Phase::Imported,
+            Phase::AdmissionPrepared,
+            Phase::Admitted,
+            Phase::AcquireReplyLost,
+            Phase::AcquireRetriedPending,
+            Phase::FinancialImported,
+            Phase::Signed,
+        ] {
+            assert_eq!(
+                acquire_retry_phase_v1(phase, false),
+                phase == Phase::AcquireReplyLost
+            );
+            assert!(!acquire_retry_phase_v1(phase, true));
+        }
+        assert!(acquire_idle_v1([false; 12]));
+        for index in 0..12 {
+            let mut flags = [false; 12];
+            flags[index] = true;
+            assert!(!acquire_idle_v1(flags));
+        }
+    }
+    #[test]
+    fn exact_immutable_acquire_correlations_reject_every_changed_dimension() {
+        let deadline = Instant::now();
+        let records = DurableNativeRecordsV1 {
+            enrollment_ref: "inert-enrollment".into(),
+            accepted_manifest_ref: "inert-manifest".into(),
+        };
+        let writer = Arc::new(());
+        let owner = Arc::new(());
+        let ledger = vec![(0, [0; 32]); 14];
+        let before = AcquireReplyLossCorrelationV1 {
+            entry: "inert-entry".into(),
+            records: records.clone(),
+            source_markers: [1, 2, 3],
+            writer: writer.clone(),
+            owner: owner.clone(),
+            deadline,
+            ledger: ledger.clone(),
+            digest: "inert-review".into(),
+            review_deadline: deadline,
+            history_digest: "inert-history".into(),
+            first_attempt: 1,
+            retry_started: false,
+        };
+        assert!(acquire_immutable_equal_v1(
+            &before,
+            "inert-entry",
+            &records,
+            [1, 2, 3],
+            &writer,
+            &owner,
+            deadline,
+            &ledger
+        ));
+        for mode in 0..10 {
+            let mut entry = "inert-entry";
+            let mut changed_records = records.clone();
+            let mut markers = [1, 2, 3];
+            let mut changed_writer = writer.clone();
+            let mut changed_owner = owner.clone();
+            let mut changed_deadline = deadline;
+            let mut changed_ledger = ledger.clone();
+            match mode {
+                0 => entry = "other-entry",
+                1 => changed_records.enrollment_ref.push('x'),
+                2 => changed_records.accepted_manifest_ref.push('x'),
+                3 => markers[0] += 1,
+                4 => markers[1] += 1,
+                5 => markers[2] += 1,
+                6 => changed_writer = Arc::new(()),
+                7 => changed_owner = Arc::new(()),
+                8 => changed_deadline += Duration::from_nanos(1),
+                _ => changed_ledger[13].1[31] = 1,
+            }
+            assert!(!acquire_immutable_equal_v1(
+                &before,
+                entry,
+                &changed_records,
+                markers,
+                &changed_writer,
+                &changed_owner,
+                changed_deadline,
+                &changed_ledger
+            ));
+        }
+        let mut changed = ledger.clone();
+        changed[0].0 += 1;
+        assert!(!acquire_immutable_equal_v1(
+            &before,
+            "inert-entry",
+            &records,
+            [1, 2, 3],
+            &writer,
+            &owner,
+            deadline,
+            &changed
+        ));
+        assert!(!acquire_immutable_equal_v1(
+            &before,
+            "inert-entry",
+            &records,
+            [1, 2, 3],
+            &writer,
+            &owner,
+            deadline,
+            &ledger[..13]
+        ));
     }
 }

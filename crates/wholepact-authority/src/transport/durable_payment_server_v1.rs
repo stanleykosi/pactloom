@@ -9,7 +9,11 @@ use crate::durable_payment_owner_v1::{
 #[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
 pub(super) enum DurablePaymentServingV1 {
     Admission(std::sync::Mutex<NativeDurablePaymentAdmissionSourceV1>),
-    Committed(ConfiguredDurablePaymentWitnessV1),
+    Committed {
+        owner: ConfiguredDurablePaymentWitnessV1,
+        #[cfg(feature = "synthetic-qualification")]
+        acquire_reply_loss: Option<super::durable_acquire_reply_loss_v1::PlanV1>,
+    },
 }
 #[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
 pub fn open_born_durable_payment_v1_for_server(
@@ -49,7 +53,11 @@ impl AuthorityServer {
             ConfiguredDurablePaymentWitnessV1::from_original(journal, admission_operation_id)?;
         owner.require_endpoint(&tls.certificate_digest, actual_listen)?;
         let mut server = Self::new(owner.journal(), tls);
-        server.durable_payment = Some(Arc::new(DurablePaymentServingV1::Committed(owner)));
+        server.durable_payment = Some(Arc::new(DurablePaymentServingV1::Committed {
+            owner,
+            #[cfg(feature = "synthetic-qualification")]
+            acquire_reply_loss: None,
+        }));
         Ok(server)
     }
     #[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
@@ -80,7 +88,7 @@ impl AuthorityServer {
                     .try_lock()
                     .map_err(|_| AuthorityError::Permission)?
                     .check_open()?,
-                DurablePaymentServingV1::Committed(_) => {
+                DurablePaymentServingV1::Committed { .. } => {
                     self.journal.require_born_read_current()?
                 }
             }
@@ -104,7 +112,7 @@ impl AuthorityServer {
                         source.check_open()?;
                     }
                 }
-                DurablePaymentServingV1::Committed(_) => {
+                DurablePaymentServingV1::Committed { .. } => {
                     self.journal.require_born_read_current()?
                 }
             }
@@ -125,7 +133,7 @@ impl AuthorityServer {
                     .try_lock()
                     .map_err(|_| AuthorityError::Permission)?
                     .require_endpoint(&self.tls.certificate_digest, &listen)?,
-                DurablePaymentServingV1::Committed(owner) => {
+                DurablePaymentServingV1::Committed { owner, .. } => {
                     owner.require_endpoint(&self.tls.certificate_digest, &listen)?
                 }
             }
@@ -198,7 +206,7 @@ impl AuthorityServer {
                             .commit_native_durable_payment_v1(&mut source, peer, request)
                             .map(WireResponse::Mutation)
                     }
-                    DurablePaymentServingV1::Committed(owner) => self
+                    DurablePaymentServingV1::Committed { owner, .. } => self
                         .journal
                         .mutate_durable_payment_v1(
                             owner,

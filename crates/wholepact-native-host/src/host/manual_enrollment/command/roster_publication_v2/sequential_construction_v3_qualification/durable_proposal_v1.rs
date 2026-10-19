@@ -31,6 +31,12 @@ pub(super) fn exercise_fixed_signing_stage(terminal: crate::terminal::Terminal) 
     preproof::exercise_with_fixed_signing(initial)
 }
 
+/// Separate pending-session qualification, never a fixed-signing continuation.
+pub(super) fn exercise_acquire_reply_loss_stage(terminal: crate::terminal::Terminal) -> Result<()> {
+    let initial = initial::prepare(terminal)?;
+    preproof::exercise_with_acquire_reply_loss(initial)
+}
+
 #[test]
 #[ignore = "Explicit approved isolated Linux synthetic runner only; no local native IPC execution"]
 fn durable_proposal_native_owner_reopen_retains_exact_fixed_proof() {
@@ -43,5 +49,13 @@ fn durable_proposal_native_owner_reopen_retains_exact_fixed_proof() {
 fn durable_proposal_native_fixed_signing_retains_exact_results() {
     foreground_child("durable-proposal-native-fixed-signing-v1", &inputs()).expect(
         "genuine native fixed signing and exact retained results; no chain consensus or submission",
+    );
+}
+
+#[test]
+#[ignore = "Explicit approved isolated Linux synthetic runner only; no local native IPC execution"]
+fn durable_proposal_native_acquire_reply_loss_retries_original_session() {
+    foreground_child("durable-proposal-native-acquire-reply-loss-v1", &inputs()).expect(
+        "original pending-session recovery after one committed Acquire reply loss; no activation or signing",
     );
 }

@@ -34,10 +34,11 @@ use wholepact_signer::native_ui::synthetic_born_joined_qualification::{
     DurableAdmissionDispatchFailureV1, DurableAdmissionDispatchStageV1,
     DurableAdmissionHistoryFailureV1, DurableAdmissionPreparationFailureV1,
     DurableAdmissionPreparationStageV1, DurableNativeEntryFailureV1, DurableNativeEntryStageV1,
-    DurableNativeRecordsV1, DurableFlowFailureV1, DurableFlowResultV1, EphemeralAcknowledgedBornV1,
-    EphemeralDurableNativeV1, EphemeralExportedBirthV1, EphemeralFirstAnchorIntentV1,
-    EphemeralFirstAnchorPublicationV1, EphemeralOriginalRosterIntentV1, EphemeralPendingBornV1,
-    EphemeralRosterPublicationV1, OriginalBirthSetupV1,
+    DurableNativeRecordsV1, DurableAcquireReplyLossV1, DurableFlowFailureV1, DurableFlowResultV1,
+    EphemeralAcknowledgedBornV1, EphemeralDurableNativeV1, EphemeralExportedBirthV1,
+    EphemeralFirstAnchorIntentV1, EphemeralFirstAnchorPublicationV1,
+    EphemeralOriginalRosterIntentV1, EphemeralPendingBornV1, EphemeralRosterPublicationV1,
+    OriginalBirthSetupV1,
 };
 use wholepact_signer_origin::{
     InstalledSignerProvider, PairScope,
@@ -329,6 +330,8 @@ pub(super) enum JoinedSignerCommandV1 {
     ApproveDurableAdmission(usize),
     ObserveCommittedDurableAdmission(usize, wholepact_authority::OwnerControlRequest),
     ReconcileDurableWriter(usize),
+    AcquireDurableWriterExpectingReplyLoss(usize),
+    RetryDurableWriterAfterReplyLoss(usize),
     ConfigureDurableWallet(usize, String),
     AcceptDurable(usize),
     ArmInitial(usize, PreconstructionRequest),
@@ -395,6 +398,14 @@ pub(super) enum JoinedSignerReplyV1 {
     DurableAdmissionRequest {
         index: usize,
         request: OwnerControlRequest,
+    },
+    DurableAcquireReplyLost {
+        index: usize,
+        observation: DurableAcquireReplyLossV1,
+    },
+    DurableAcquireRetried {
+        index: usize,
+        receipt: wholepact_authority::WriterSessionReceipt,
     },
     Done {
         index: usize,
@@ -664,15 +675,9 @@ fn poll_until(
     }
 }
 
-fn execute(
-    command: JoinedSignerCommandV1,
-    states: &mut [Option<State>; 3],
-    public: &[OriginalPublic; 3],
-    cancelled: &AtomicBool,
-) -> Result<JoinedSignerReplyV1> {
+fn command_index(command: &JoinedSignerCommandV1) -> usize {
     use JoinedSignerCommandV1 as C;
-    use JoinedSignerReplyV1 as R;
-    let index = match &command {
+    match command {
         C::ExportBirth(i)
         | C::Acknowledge(i)
         | C::OpenSingleIntent(i, _)
@@ -693,6 +698,8 @@ fn execute(
         | C::ApproveDurableAdmission(i)
         | C::ObserveCommittedDurableAdmission(i, _)
         | C::ReconcileDurableWriter(i)
+        | C::AcquireDurableWriterExpectingReplyLoss(i)
+        | C::RetryDurableWriterAfterReplyLoss(i)
         | C::ConfigureDurableWallet(i, _)
         | C::AcceptDurable(i)
         | C::ArmInitial(i, _)
@@ -705,7 +712,18 @@ fn execute(
         | C::PollDisclosure(i)
         | C::CaptureCommitted(i)
         | C::CloseDurable(i) => *i,
-    };
+    }
+}
+
+fn execute(
+    command: JoinedSignerCommandV1,
+    states: &mut [Option<State>; 3],
+    public: &[OriginalPublic; 3],
+    cancelled: &AtomicBool,
+) -> Result<JoinedSignerReplyV1> {
+    use JoinedSignerCommandV1 as C;
+    use JoinedSignerReplyV1 as R;
+    let index = command_index(&command);
     let slot = states.get_mut(index).ok_or("durable account index")?;
     let state = slot.take().ok_or("durable retained state missing")?;
     let (next, reply) = match (command, state) {
@@ -1003,6 +1021,42 @@ fn execute(
             }
             (State::Durable(entry), R::Done { index })
         }
+        (C::AcquireDurableWriterExpectingReplyLoss(_), State::Durable(mut entry)) if index == 1 => {
+            // Expected loss is an opaque, verified nonterminal result. It must
+            // never pass through durable_flow_error or emit a terminal marker.
+            let observation = match entry.acquire_original_writer_expecting_reply_loss_diagnosed() {
+                Ok(observation) => observation,
+                Err(mut failure) => {
+                    drop(entry);
+                    failure.finalize_after_drain();
+                    return Err(durable_flow_error(
+                        failure,
+                        "original writer committed Acquire reply-loss qualification",
+                    ));
+                }
+            };
+            (
+                State::Durable(entry),
+                R::DurableAcquireReplyLost { index, observation },
+            )
+        }
+        (C::RetryDurableWriterAfterReplyLoss(_), State::Durable(mut entry)) if index == 1 => {
+            let receipt = match entry.retry_original_writer_after_reply_loss_diagnosed() {
+                Ok(receipt) => receipt,
+                Err(mut failure) => {
+                    drop(entry);
+                    failure.finalize_after_drain();
+                    return Err(durable_flow_error(
+                        failure,
+                        "same original writer Acquire retry after committed reply loss",
+                    ));
+                }
+            };
+            (
+                State::Durable(entry),
+                R::DurableAcquireRetried { index, receipt },
+            )
+        }
         (C::ConfigureDurableWallet(_, setup), State::Durable(mut entry)) if index > 0 => {
             entry
                 .configure_durable_wallet(&setup)
@@ -1160,6 +1214,55 @@ fn execute(
 #[cfg(test)]
 mod admission_diagnostic_tests {
     use super::*;
+
+    #[test]
+    fn pure_acquire_reply_loss_command_indices_preserve_existing_routes() {
+        for index in 0..=3 {
+            let commands = [
+                JoinedSignerCommandV1::ExportBirth(index),
+                JoinedSignerCommandV1::Acknowledge(index),
+                JoinedSignerCommandV1::PollDurablePair(index),
+                JoinedSignerCommandV1::ConfigureDurableWitness(index),
+                JoinedSignerCommandV1::PrepareDurableAdmission(index),
+                JoinedSignerCommandV1::ApproveDurableAdmission(index),
+                JoinedSignerCommandV1::ReconcileDurableWriter(index),
+                JoinedSignerCommandV1::AcquireDurableWriterExpectingReplyLoss(index),
+                JoinedSignerCommandV1::RetryDurableWriterAfterReplyLoss(index),
+                JoinedSignerCommandV1::AcceptDurable(index),
+                JoinedSignerCommandV1::PollDisclosure(index),
+                JoinedSignerCommandV1::CaptureCommitted(index),
+                JoinedSignerCommandV1::CloseDurable(index),
+            ];
+            for command in commands {
+                assert_eq!(command_index(&command), index);
+            }
+        }
+    }
+
+    #[test]
+    fn pure_acquire_reply_loss_expected_result_is_nonterminal() {
+        // Do not manufacture the opaque observation to exercise native state.
+        // This source contract verifies the only success route retains Durable
+        // and returns the verified observation instead of a terminal mapper.
+        let source = include_str!("worker.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let first = source
+            .find("C::AcquireDurableWriterExpectingReplyLoss(_)")
+            .unwrap();
+        let retry = source[first..]
+            .find("C::RetryDurableWriterAfterReplyLoss(_)")
+            .unwrap()
+            + first;
+        let body = &source[first..retry];
+        assert!(body.contains("Ok(observation) => observation"));
+        assert!(body.contains("State::Durable(entry)"));
+        assert!(body.contains("R::DurableAcquireReplyLost"));
+        assert!(!body.contains("diagnostic::emit("));
+        assert!(!body.contains("observation.into_error()"));
+        assert!(!body.contains("WriterReconcileComplete"));
+    }
 
     #[test]
     fn pure_admission_boundary_routing_preserves_context() {

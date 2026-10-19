@@ -18,7 +18,7 @@ pub use crate::native_ui::runtime::durable_proposal_qualification_v1::{
     DurableAdmissionDispatchStageV1, DurableAdmissionHistoryFailureV1,
     DurableAdmissionPreparationFailureV1, DurableAdmissionPreparationStageV1,
     DurableAdmissionRetentionV1, DurableNativeEntryFailureV1, DurableNativeEntryStageV1,
-    DurableNativeRecordsV1,
+    DurableNativeRecordsV1, DurableAcquireReplyLossV1,
 };
 
 pub use crate::authority_bridge::durable_flow_diagnostics_v1::{
@@ -242,6 +242,18 @@ impl EphemeralDurableNativeV1 {
         result: DurableFlowResultV1,
     ) -> Option<DurableFlowDiagnosticV1> {
         self.inner.finish_result_service_diagnostics(token, result)
+    }
+    pub fn acquire_original_writer_expecting_reply_loss_diagnosed(
+        &mut self,
+    ) -> std::result::Result<DurableAcquireReplyLossV1, DurableFlowFailureV1> {
+        self.inner
+            .acquire_original_writer_expecting_reply_loss_diagnosed()
+    }
+    pub fn retry_original_writer_after_reply_loss_diagnosed(
+        &mut self,
+    ) -> std::result::Result<wholepact_authority::WriterSessionReceipt, DurableFlowFailureV1> {
+        self.inner
+            .retry_original_writer_after_reply_loss_diagnosed()
     }
     pub fn reconcile_original_writer_diagnosed(
         &mut self,

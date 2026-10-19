@@ -1,8 +1,24 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-19, 02:09 UTC.
+Updated: 2026-10-19, 03:28 UTC.
 
-**Incomplete implementation. No full native financial signing, public testnet settlement, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
+**The bounded synthetic native two-owner fixed-signing fixture passed. Product qualification remains incomplete: no public testnet settlement, OS-process restart recovery, attended GUI reliability, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
+
+## Committed Acquire reply-loss qualification added; native result pending
+
+A separate synthetic-only phase selects the actual fresh no-proof financial Acquire after the unchanged real dispatch and output-current check, then shuts down only that response socket. The existing frame writer must return its actual transport error. The signer requires the exact attempt's real Acquire/ResponseRead/Closed/Authority Uncertain evidence and uses only the existing kind-1 retry with the original approved object, client, key, captured history and deadline. After original signer close and server join, an original-journal audit requires an unchanged bootstrap prefix plus exactly one new financial Acquire/session-key row and the identical receipt and timestamps, with no activation or reservation. No journal kernel, policy, lifetime or full-signing body behavior changed.
+
+Independent source review covered all18 paths and corrected fixture-identity reuse, stale-outcome error erasure and a missing lower-error predicate. All-features Authority/Signer/Host compilation passed (8m04s), all21 exact safe component tests passed, Host80 and Python137 passed, shell syntax passed, and non-synthetic durable Signer compilation passed (3m13s). These are component/build results only. The new real native lost-response phase is not yet qualified.
+
+The durable submission path also remains incomplete: the existing signing fixture closes each original writer before the completed union exists, and the current durable financial profile does not authorize generic dispatch mutations. Completing submission needs a separately reviewed purpose-specific custody, protocol/history and Host composition, not registration of a dormant verifier or reuse of a different profile's authority.
+
+## CI21: two-owner native fixed signing and retained-result replay passed
+
+[Run 39188700738](https://github.com/stanleykosi/pactloom/actions/runs/39188700738), qualifier `15000f6831511849a019f6d0bcde71cf702ef482`, completed successfully at 02:42:30 UTC. Native owner reopening passed at 02:25:46 and fixed signing passed at 02:32:00, each with verified cleanup. Python130, Host80, encrypted bootstrap, final Signer41, durable endpoint1 (two cycles), Authority renderer6 and replay validation3 passed. These suite totals overlap and are not a count of unique guarantees.
+
+Source-reviewed success assertions cover both owners' genuine signing, production retained-result reentry without new review or signing/wallet jobs, identical row counts and complete row fingerprints across 14 signer tables, and repeated authenticated outbox retrieval with byte-identical results and committed digests. Authenticated signature intake replay, one-to-two-owner signature completeness, exact signature union replay, and the cryptographically verified transaction checkpoint also passed. No transaction distribution or chain submission was enabled.
+
+This establishes a complete bounded synthetic signing path, not broad human-paced or variable-history reliability. The replay checks use the same process and open journals: they do not prove recovery after a lost reply, process crash, restored state or acquired-client loss. The original 120-second owner, financial expiry, custody and fail-closed recovery contracts remain unchanged. A separate committed-operation/lost-response qualification is the next targeted gate; public testnet submission and recipient observation remain outstanding.
 
 ## CI20: fresh import passed, owner expired before signing; public verifier parameters reused
 

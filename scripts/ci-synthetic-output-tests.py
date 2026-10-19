@@ -40,6 +40,109 @@ class PublicOutputTests(unittest.TestCase):
         workflow=(ROOT/'.github/workflows/durable-native-linux.yml').read_text()
         self.assertIn('timeout-minutes: 150',workflow)
 
+    def test_durable_acquire_reply_loss_is_exact_ignored_and_preserves_every_old_phase(self):
+        expected={
+            'initial': ('initial_joined_v3::actual_three_born_initial_roster_publications_preserve_refusal',300,False),
+            'full': ('full_payment_inputs_v1::actual_three_born_full_payment_uses_one_original_synthetic_path',1080,True),
+            'durable-owner-reopen': ('durable_proposal_v1::durable_proposal_native_owner_reopen_retains_exact_fixed_proof',1080,True),
+            'durable-fixed-signing': ('durable_proposal_v1::durable_proposal_native_fixed_signing_retains_exact_results',1080,True),
+            'durable-acquire-reply-loss': ('durable_proposal_v1::durable_proposal_native_acquire_reply_loss_retries_original_session',1080,True),
+        }
+        self.assertEqual(set(output.TESTS),set(expected))
+        self.assertEqual(len({name for name,_ in output.TESTS.values()}),5)
+        self.assertEqual(output.DURABLE_DIAGNOSTIC_PHASES,
+                         frozenset(('durable-fixed-signing','durable-acquire-reply-loss')))
+        for phase,(suffix,seconds,ignored) in expected.items():
+            name=output.PREFIX+suffix
+            self.assertEqual(output.phase_selection(phase),
+                             (name,seconds,['--exact',name,'--test-threads=1']+(['--ignored'] if ignored else [])))
+        for phase in ('durable-acquire','durable-acquire-reply-loss-v1','durable-acquire-reply-loss ',
+                      'durable-acquire-reply-loss*','durable-proposal-native-acquire-reply-loss-v1','*'):
+            with self.assertRaises(KeyError): output.phase_selection(phase)
+
+    def test_durable_acquire_reply_loss_producer_selector_stage_and_cleanup_match(self):
+        base=ROOT/'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3_qualification'
+        source=(base/'durable_proposal_v1.rs').read_text()
+        name=output.TESTS['durable-acquire-reply-loss'][0].rsplit('::',1)[1]
+        stage='durable-proposal-native-acquire-reply-loss-v1'
+        matches=re.findall(r'#\[test\]\s*#\[ignore = "[^"\n]+"\]\s*fn '+name+r'\(\)\s*\{(.*?)\n\}',source,re.S)
+        self.assertEqual(len(matches),1)
+        self.assertIn('foreground_child("'+stage+'", &inputs())',matches[0])
+        self.assertEqual(source.count('fn '+name+'()'),1)
+        wrapper=source.split('fn exercise_acquire_reply_loss_stage(',1)[1].split('\n}',1)[0]
+        self.assertIn('initial::prepare(terminal)?',wrapper)
+        self.assertIn('preproof::exercise_with_acquire_reply_loss(initial)',wrapper)
+        parent=base.with_suffix('.rs').read_text()
+        safety=parent.split('let safety_seconds = if matches!(',1)[1].split('let deadline =',1)[0]
+        self.assertEqual(set(re.findall(r'"([a-z0-9-]+)"',safety)),{
+            'three-born-retained-inputs-v3','three-born-all-observations-v3',
+            'three-born-constructed-checkpoint-v3','three-born-full-payment-v1',
+            'durable-proposal-native-owner-reopen-v1','durable-proposal-native-fixed-signing-v1',stage})
+        self.assertRegex(safety,r'\)\s*\{\s*900\s*\}\s*else\s*\{\s*180\s*\}')
+        dispatch=parent.split('if stage == "'+stage+'" {',1)[1].split('\n    }',1)[0]
+        self.assertIn('durable_proposal_v1::exercise_acquire_reply_loss_stage(terminal).unwrap();',dispatch)
+        self.assertIn('return;',dispatch)
+        gate=parent.split('if (stage == "durable-proposal-native-fixed-signing-v1"',1)[1].split('\n    if outcome.is_err()',1)[0]
+        self.assertEqual(re.findall(r'\|\| stage == "([a-z0-9-]+)"',gate),[stage])
+        self.assertIn('&& process.verified()',gate)
+        self.assertIn('&& root_cleanup == TemporaryRootCleanupV1::ClosedAndAbsenceVerified',gate)
+        for method in ('history_measurement_lines','admission_diagnostic_lines','durable_flow_lines','durable_lifecycle_lines'):
+            self.assertRegex(gate,r'\b'+method+r'\s*\(\s*\)')
+        self.assertNotIn('outcome.is_ok()',gate)
+        self.assertEqual(parent.count('"'+stage+'"'),3)
+
+    def test_durable_acquire_reply_loss_reuses_only_same_compiled_binary_in_separate_gate(self):
+        shell=(ROOT/'scripts/ci-durable-native-linux.sh').read_text()
+        call='TMPDIR="$runtime_root" python3 -B scripts/ci-synthetic-output.py "$executable" durable-acquire-reply-loss'
+        self.assertEqual(shell.count(call),1)
+        self.assertEqual(shell.count('cargo test --locked --release -p wholepact-native-host '),1)
+        self.assertLess(shell.index('sha256sum "$executable"'),shell.index(call))
+        self.assertLess(shell.index('"$executable" durable-fixed-signing'),shell.index(call))
+        self.assertLess(shell.index(call),shell.index('cargo test --locked --release -p wholepact-signer '))
+        self.assertIn('original pending-session Acquire reply-loss recovery checks passed;',shell)
+        self.assertIn('no OS-process restart, public-chain settlement, attended GUI, Windows or production activation claimed.',shell)
+        self.assertIn('set -euo pipefail',shell)
+        self.assertIn('export CARGO_HOME="$build_root/cargo" CARGO_TARGET_DIR="$build_root/target"',shell)
+        self.assertNotIn('--ignored',shell)
+        self.assertIn('timeout-minutes: 150',(ROOT/'.github/workflows/durable-native-linux.yml').read_text())
+
+    def test_durable_acquire_reply_loss_producer_requires_retry_receipt_joined_audit_and_no_signing(self):
+        base=ROOT/'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3_qualification/durable_proposal_v1'
+        leaf=(base/'fixed_signing/acquire_reply_loss.rs').read_text().split('#[cfg(test)]',1)[0]
+        ordered=(
+            '.send(Command::AcquireDurableWriterExpectingReplyLoss(index))',
+            'observation.is_expected_loss()',
+            '.send(Command::RetryDurableWriterAfterReplyLoss(index))',
+            'let retry_receipt = match worker.receive()',
+            'Reply::DurableAcquireRetried {',
+            'drop(expected_loss);',
+            '.send(Command::CloseDurable(index))',
+            'drop(client);',
+            'drop(financial_server);',
+            '.audit_committed_durable_payment_reply_loss_v1(fault_observation, &retry_receipt)',
+            'report.original_acquire_committed',
+            'drop(retry_receipt);',
+            'trace.complete();',
+            'Ok(())',
+        )
+        recovery=leaf[leaf.index(ordered[0]):]
+        positions=[recovery.index(item) for item in ordered]
+        self.assertEqual(positions,sorted(positions))
+        self.assertEqual(leaf.count(ordered[0]),1)
+        self.assertEqual(leaf.count(ordered[2]),1)
+        for forbidden in ('WriterReconcileComplete','Command::ReconcileDurableWriter',
+                          'Command::ConfigureDurableWallet','Command::SignDurable',
+                          'B::DurableHostWriterReconcile','B::DurableHostSign'):
+            self.assertNotIn(forbidden,leaf)
+        worker=(base/'worker.rs').read_text()
+        expected=worker.split('(C::AcquireDurableWriterExpectingReplyLoss(_),',1)[1].split('(C::RetryDurableWriterAfterReplyLoss(_),',1)[0]
+        self.assertIn('Ok(observation) => observation,',expected)
+        self.assertIn('State::Durable(entry)',expected)
+        self.assertIn('R::DurableAcquireReplyLost { index, observation }',expected)
+        self.assertIn('failure.finalize_after_drain();',expected)
+        self.assertIn('return Err(durable_flow_error(',expected)
+        self.assertNotIn('diagnostic::emit',expected)
+
     def test_durable_runner_does_not_claim_full_payment_or_process_restart(self):
         shell=(ROOT/'scripts/ci-durable-native-linux.sh').read_text()
         workflow=(ROOT/'.github/workflows/durable-native-linux.yml').read_text()
@@ -124,7 +227,8 @@ class PublicOutputTests(unittest.TestCase):
                'python3 -B scripts/ci-synthetic-output.py "$executable" pure',
                'python3 -B scripts/ci-synthetic-output.py "$executable" storage-bootstrap',
                'python3 -B scripts/ci-synthetic-output.py "$executable" durable-owner-reopen',
-               'python3 -B scripts/ci-synthetic-output.py "$executable" durable-fixed-signing']
+               'python3 -B scripts/ci-synthetic-output.py "$executable" durable-fixed-signing',
+               'python3 -B scripts/ci-synthetic-output.py "$executable" durable-acquire-reply-loss']
         positions=[shell.index('TMPDIR="$runtime_root" '+line) for line in early]
         self.assertEqual(positions,sorted(positions))
         signer_build=shell.index('cargo test --locked --release -p wholepact-signer ')
@@ -1529,7 +1633,7 @@ class PublicHistoryMeasurementTests(unittest.TestCase):
             nullable=re.findall(r'^    [a-z_]+: Option<',body,re.M)
             self.assertEqual(body.count('#[serde(deserialize_with = "required_history_nullable")]'),len(nullable))
         parent=self.base.with_suffix('.rs').read_text()
-        gate=parent.split('if stage == "durable-proposal-native-fixed-signing-v1"',1)[1].split('\n    if outcome.is_err()',1)[0]
+        gate=parent.split('if (stage == "durable-proposal-native-fixed-signing-v1"',1)[1].split('\n    if outcome.is_err()',1)[0]
         self.assertIn('&& process.verified()',gate)
         self.assertIn('&& root_cleanup == TemporaryRootCleanupV1::ClosedAndAbsenceVerified',gate)
         self.assertRegex(gate,r'\btranscript\s*\.\s*history_measurement_lines\s*\(\s*\)')
@@ -1744,14 +1848,14 @@ class PublicAdmissionDiagnosticTests(unittest.TestCase):
             other=fake(lines,status=0,phase=phase)
             for prefix in output.ADMISSION_PREFIXES: self.assertNotIn(prefix,other)
         source=(ROOT/'scripts/ci-synthetic-output.py').read_text()
-        gate=source.split("if phase=='durable-fixed-signing' and cleanup_observed:",1)[1].split("if phase=='full'",1)[0]
+        gate=source.split('if phase in DURABLE_DIAGNOSTIC_PHASES and cleanup_observed:',1)[1].split("if phase=='full'",1)[0]
         self.assertIn('admission_diagnostics.emit()',gate)
         self.assertIn('if total > 16*1024*1024:',source)
         transcript=(self.base/'rolling_transcript_v1.rs').read_text()
         self.assertIn('pub(super) const MAX_BYTES: usize = 262_144;',transcript)
         self.assertEqual(transcript.split('pub(super) fn tail(',1)[0].count('self.admission_diagnostics.discard_for_budget();'),3)
         parent=self.base.with_suffix('.rs').read_text()
-        gate=parent.split('if stage == "durable-proposal-native-fixed-signing-v1"',1)[1].split('\n    if outcome.is_err()',1)[0]
+        gate=parent.split('if (stage == "durable-proposal-native-fixed-signing-v1"',1)[1].split('\n    if outcome.is_err()',1)[0]
         self.assertIn('&& process.verified()',gate)
         self.assertIn('&& root_cleanup == TemporaryRootCleanupV1::ClosedAndAbsenceVerified',gate)
         self.assertIn('transcript.admission_diagnostic_lines()',gate)
@@ -2284,10 +2388,10 @@ class PublicDurableFlowTests(unittest.TestCase):
             self.assertIn('phase=durable-fixed-signing passed=true cleanup_verified=true',result)
             self.assertNotIn('private',result); self.assertNotIn('payload',result)
         parent=self.base.with_suffix('.rs').read_text()
-        gate=parent.split('if stage == "durable-proposal-native-fixed-signing-v1"',1)[1].split('\n    if outcome.is_err()',1)[0]
+        gate=parent.split('if (stage == "durable-proposal-native-fixed-signing-v1"',1)[1].split('\n    if outcome.is_err()',1)[0]
         self.assertIn('&& process.verified()',gate); self.assertIn('&& root_cleanup == TemporaryRootCleanupV1::ClosedAndAbsenceVerified',gate)
         self.assertIn('transcript.durable_flow_lines()',gate); self.assertNotIn('outcome.is_ok()',gate)
-        source=(ROOT/'scripts/ci-synthetic-output.py').read_text(); gate=source.split("if phase=='durable-fixed-signing' and cleanup_observed:",1)[1].split("if phase=='full'",1)[0]
+        source=(ROOT/'scripts/ci-synthetic-output.py').read_text(); gate=source.split('if phase in DURABLE_DIAGNOSTIC_PHASES and cleanup_observed:',1)[1].split("if phase=='full'",1)[0]
         self.assertIn('durable_flow.emit()',gate); self.assertIn('if total > 16*1024*1024:',source)
         rolling=(self.base/'rolling_transcript_v1.rs').read_text()
         self.assertIn('pub(super) const MAX_BYTES: usize = 262_144;',rolling)
@@ -2494,9 +2598,100 @@ class PublicDurableLifecycleTests(unittest.TestCase):
         self.assertIn('pub(super) const MAX_BYTES: usize = 262_144;',rolling)
         self.assertEqual(rolling.split('pub(super) fn tail(',1)[0].count('self.durable_lifecycle.discard_for_budget();'),3)
         source=(ROOT/'scripts/ci-synthetic-output.py').read_text()
-        gate=source.split("if phase=='durable-fixed-signing' and cleanup_observed:",1)[1].split("if phase=='full'",1)[0]
+        gate=source.split('if phase in DURABLE_DIAGNOSTIC_PHASES and cleanup_observed:',1)[1].split("if phase=='full'",1)[0]
         self.assertIn('durable_lifecycle.emit(durable_flow)',gate)
         self.assertIn('if total > 16*1024*1024:',source)
+
+
+class DurableAcquireReplyLossGateTests(unittest.TestCase):
+    phase='durable-acquire-reply-loss'
+
+    def diagnostic_lines(self):
+        # Parser models only. They are never native-session or journal evidence.
+        history=PublicHistoryMeasurementTests()
+        admission=PublicAdmissionDiagnosticTests()
+        flow=PublicDurableFlowTests().record()
+        error=dict(stage='AcquireCall',domain='Signer',code='Uncertain',nested_code=None)
+        flow.update(first_error=error.copy(),terminal_error=error.copy())
+        flow['completion']=dict(purpose='Acquire',result='ReturnedErr',receive='Received',presentation='Suppressed')
+        flow['call_outcomes']={key:'NotObserved' for key in output.FLOW_CALL_FIELDS}
+        flow['call_outcomes']['writer_acquire']='ReturnedErr'
+        lower=flow['lower_call_measurement']
+        lower.update(purpose='Acquire',stage='ResponseRead',authority_code='Uncertain',io_kind='Closed',callback_stage=None)
+        lower['measurement']['phase']='Acquire'
+        flow['after_drain'].update(drain_result='ReturnedOk',drain_error=None,worker_purpose='Acquire',
+                                   worker_result='ReturnedErr',worker_error=error.copy(),
+                                   call_outcomes=flow['call_outcomes'].copy())
+        lifecycle=PublicDurableLifecycleTests().record()
+        lifecycle['worker_purpose']='Acquire'
+        lifecycle['points']={key:None for key in output.LIFECYCLE_POINT_FIELDS}
+        lifecycle['points']['fixture_failure']=dict(age_us=100000000,remaining_us=20000000)
+        lifecycle['points']['after_drain']=dict(age_us=100000000,remaining_us=20000000)
+        return ([history.line(history.record())]
+                +[history.line(history.server_record(point),True) for point in output.HISTORY_SERVER_POINTS]
+                +[admission.line(slot,row) for slot,row in enumerate(admission.records())]
+                +[PublicDurableFlowTests().line(flow),PublicDurableLifecycleTests().line(lifecycle)])
+
+    def test_acquire_diagnostics_use_existing_closed_schemas_only_after_verified_cleanup(self):
+        lines=self.diagnostic_lines()
+        prefixes=(output.HISTORY_MEASUREMENT_PREFIX,output.HISTORY_SERVER_MEASUREMENT_PREFIX,
+                  *output.ADMISSION_PREFIXES,output.FLOW_PREFIX,output.LIFECYCLE_PREFIX)
+        fake=PublicTimingTests().run_fake
+        failed=fake(lines,phase=self.phase)
+        self.assertNotIn('passed=true',failed)
+        for prefix in prefixes:
+            self.assertIn(prefix,failed)
+            self.assertLess(failed.index('[JOINED_CLEANUP '),failed.index(prefix))
+        for kwargs in (dict(verified=False),dict(cleanup_present=False),
+                       dict(status=0,verified=False),dict(status=0,cleanup_present=False)):
+            unverified=fake(lines,phase=self.phase,**kwargs)
+            self.assertNotIn('passed=true',unverified)
+            for prefix in prefixes: self.assertNotIn(prefix,unverified)
+        for phase in ('initial','full','durable-owner-reopen'):
+            unrelated=fake(lines,status=0,phase=phase)
+            for prefix in prefixes: self.assertNotIn(prefix,unrelated)
+
+    def test_acquire_success_has_no_terminal_loss_or_payment_claim_and_failure_stays_failure(self):
+        fake=PublicTimingTests().run_fake
+        result=fake([],status=0,phase=self.phase)
+        self.assertIn('CI_SYNTHETIC_RESULT phase='+self.phase+' passed=true cleanup_verified=true',result)
+        for forbidden in ('[JOINED_FAILURE ',output.FLOW_PREFIX,output.MARKER,
+                          'WriterReconcileComplete','writer_reconcile_complete','signing_verified=true'):
+            self.assertNotIn(forbidden,result)
+        self.assertNotIn('passed=true',fake([],phase=self.phase))
+        # An ordinary terminal failure is never special-cased into expected loss.
+        with self.assertRaises(RuntimeError):
+            fake([PublicOutputTests().failure()],status=0,phase=self.phase)
+        # A payment DTO cannot be reinterpreted as an Acquire qualification.
+        with self.assertRaises(ValueError):
+            fake([output.MARKER+json.dumps(PublicOutputTests().record())],status=0,phase=self.phase)
+
+    def test_acquire_unknown_private_truncated_and_stronger_diagnostics_are_withheld(self):
+        fake=PublicTimingTests().run_fake
+        name=output.TESTS[self.phase][0]
+        private='private-session-receipt-or-key'
+        raw=['CI_SYNTHETIC_ACQUIRE_RECEIPT '+private,'[DURABLE_FLOW_V1 '+private+']',
+             'test another_selector ... '+output.FLOW_PREFIX+'{"private":"'+private+'"}',
+             'WriterReconcileComplete '+private]
+        for line in raw: self.assertIsNone(output.public_line(line.encode(),name))
+        result=fake(raw,status=0,phase=self.phase)
+        self.assertNotIn(private,result)
+        self.assertNotIn('WriterReconcileComplete',result)
+        row=PublicDurableFlowTests().record()
+        for field,value in (('operation','AcquireReplyLoss'),('fixture_result','ReturnedOk')):
+            changed=dict(row,**{field:value})
+            with self.assertRaises(ValueError): output.public_durable_flow(json.dumps(changed))
+        malformed=[output.FLOW_PREFIX+'{"private":"'+private+'"}',
+                   self.diagnostic_lines()[-2][:-1],
+                   output.LIFECYCLE_PREFIX+'{"private":"'+private+'"}']
+        for line in malformed:
+            projected=output.public_line(line.encode(),name)
+            self.assertIn(projected[0],('durable_flow_invalid','durable_lifecycle_invalid'))
+            result=fake([line],status=0,phase=self.phase)
+            self.assertNotIn(private,result)
+            self.assertIn('invalid=true details_withheld=true',result)
+        # Optional malformed diagnostics cannot substitute for a failed scenario.
+        self.assertNotIn('passed=true',fake(malformed,phase=self.phase))
 
 
 if __name__=='__main__':

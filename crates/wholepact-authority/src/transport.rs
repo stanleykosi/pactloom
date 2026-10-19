@@ -8,8 +8,20 @@ pub use born_offline_dispatch_v1::AuthenticatedBornOfflineDispatchV1;
 #[cfg(feature = "synthetic-qualification")]
 pub mod admission_diagnostics_v1;
 mod born_offline_witness_v1;
+#[cfg(all(
+    feature = "synthetic-qualification",
+    feature = "native-witness-owner",
+    target_os = "linux"
+))]
+mod durable_acquire_reply_loss_v1;
 mod durable_payment_client_v1;
 mod durable_payment_server_v1;
+#[cfg(all(
+    feature = "synthetic-qualification",
+    feature = "native-witness-owner",
+    target_os = "linux"
+))]
+pub(crate) use durable_acquire_reply_loss_v1::DurableAcquireReplyLossObservationV1;
 #[cfg(feature = "synthetic-qualification")]
 pub mod history_diagnostics_v1;
 #[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
@@ -2132,18 +2144,65 @@ impl AuthorityServer {
         admission_stage!(observer, WaitCurrent);
         self.check_durable_payment_wait_v1()?;
         if self.is_durable_payment_server_v1() {
+            #[cfg(all(
+                feature = "synthetic-qualification",
+                feature = "native-witness-owner",
+                target_os = "linux"
+            ))]
+            let reply_loss_candidate =
+                self.durable_acquire_reply_loss_candidate_v1(&peer, &exporter, &request);
             admission_stage!(observer, SemanticDispatch);
             let response = admission_measure!(
                 observer,
                 Dispatch,
                 self.serve_durable_payment_request_v1(&peer, &exporter, request)
             );
-            let response = admission_result!(observer, observe_semantic, response)
-                .unwrap_or_else(WireResponse::Rejected);
+            let response = admission_result!(observer, observe_semantic, response);
+            // Only this connection's successful real dispatch can yield the
+            // fresh-commit observation. It cannot consume the one-shot yet.
+            #[cfg(all(
+                feature = "synthetic-qualification",
+                feature = "native-witness-owner",
+                target_os = "linux"
+            ))]
+            let committed_reply = reply_loss_candidate.and_then(|c| c.after_dispatch(&response));
+            let response = response.unwrap_or_else(WireResponse::Rejected);
             admission_stage!(observer, OutputCheck);
             self.check_durable_payment_output_v1(&response)?;
+            #[cfg(all(
+                feature = "synthetic-qualification",
+                feature = "native-witness-owner",
+                target_os = "linux"
+            ))]
+            let selected_reply = committed_reply.and_then(|c| c.after_output_check());
+            #[cfg(all(
+                feature = "synthetic-qualification",
+                feature = "native-witness-owner",
+                target_os = "linux"
+            ))]
+            if let Some(selected) = &selected_reply {
+                // Do not return this syscall's result or skip the normal write.
+                // The selected receipt has already committed, and every state
+                // lock was released before touching this exact socket.
+                let shutdown = stream.sock.socket.shutdown(std::net::Shutdown::Both);
+                selected.observe_shutdown(&shutdown);
+            }
             admission_stage!(observer, FrameWrite);
-            #[cfg(feature = "synthetic-qualification")]
+            #[cfg(all(
+                feature = "synthetic-qualification",
+                feature = "native-witness-owner",
+                target_os = "linux"
+            ))]
+            durable_acquire_reply_loss_v1::write_frame(
+                &mut stream,
+                &response,
+                observer,
+                selected_reply,
+            )?;
+            #[cfg(all(
+                feature = "synthetic-qualification",
+                not(all(feature = "native-witness-owner", target_os = "linux"))
+            ))]
             admission_diagnostics_v1::write_frame(&mut stream, &response, observer)?;
             #[cfg(not(feature = "synthetic-qualification"))]
             write_frame(&mut stream, &response)?;

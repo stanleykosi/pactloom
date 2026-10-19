@@ -17,10 +17,13 @@ pub(crate) use window::{
 };
 mod window;
 #[cfg(feature = "synthetic-qualification")]
-pub(crate) use window::ephemeral_fixture_v1::RetainedConstructionFixtureLivenessV1;
+pub(crate) use window::ephemeral_fixture_v1::{
+    DurableAcquireReplyLossArmV1, RetainedConstructionFixtureLivenessV1,
+};
 #[cfg(feature = "synthetic-qualification")]
 pub use window::ephemeral_fixture_v1::{
-    EphemeralConstructionClientScopeV1, EphemeralHistoryServerV1, EphemeralNativeWitnessV1,
+    EphemeralConstructionClientScopeV1, EphemeralDurableAcquireReplyLossObservationV1,
+    EphemeralDurableAcquireReplyLossReportV1, EphemeralHistoryServerV1, EphemeralNativeWitnessV1,
     EphemeralRosterAttemptV2, EphemeralWitnessOriginV1,
 };
 

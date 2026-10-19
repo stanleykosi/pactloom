@@ -28,6 +28,10 @@ const PROFILE: &str = "ironwood-testnet-nu7-candidate";
 
 #[path = "ephemeral_fixture_v1/durable_payment_v1.rs"]
 mod durable_payment_v1;
+pub(crate) use durable_payment_v1::DurableAcquireReplyLossArmV1;
+pub use durable_payment_v1::{
+    EphemeralDurableAcquireReplyLossObservationV1, EphemeralDurableAcquireReplyLossReportV1,
+};
 #[path = "ephemeral_fixture_v1/public_control_navigation_v1.rs"]
 mod public_control_navigation_v1;
 #[path = "ephemeral_fixture_v1/roster_v3.rs"]

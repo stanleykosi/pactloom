@@ -955,6 +955,15 @@ impl PreparedDurableWriterSessionV1 {
             admission,
         })
     }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(super) fn qualification_correlation_v1(&self) -> Result<(Instant, String)> {
+        Ok((
+            self.custody.deadline,
+            self.history
+                .history_digest()
+                .map_err(|_| Error::ReviewMismatch)?,
+        ))
+    }
     pub(super) fn digest(&self) -> &str {
         &self.custody.digest
     }
@@ -1453,6 +1462,107 @@ pub(super) struct DurableWitnessRuntimeV1 {
     qualification_preparation: QualificationDurablePreparationV1,
     #[cfg(feature = "synthetic-born-joined-qualification")]
     qualification_admission: QualificationDurableAdmissionV1,
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    qualification_session: QualificationSessionV1,
+}
+// Inert per-dispatch evidence only. A review digest is deliberately insufficient:
+// the first Acquire and its genuine retry share the same approved review.
+#[cfg(feature = "synthetic-born-joined-qualification")]
+#[derive(Clone)]
+pub(super) struct QualificationSessionAttemptV1 {
+    serial: u64,
+    digest: String,
+    observer: flow_diag_v1::DurableFlowObserverV1,
+}
+#[cfg(feature = "synthetic-born-joined-qualification")]
+#[derive(Default)]
+struct QualificationSessionV1 {
+    next: u64,
+    active: Option<QualificationSessionAttemptV1>,
+    dispatched: bool,
+    accepted: Option<bool>,
+    error: Option<Error>,
+}
+#[cfg(feature = "synthetic-born-joined-qualification")]
+impl QualificationSessionV1 {
+    fn begin(
+        &mut self,
+        observer: &flow_diag_v1::DurableFlowObserverV1,
+        digest: &str,
+    ) -> Option<u64> {
+        self.active = None;
+        self.dispatched = false;
+        self.accepted = None;
+        self.error = None;
+        let serial = self.next.checked_add(1)?;
+        self.next = serial;
+        self.active = Some(QualificationSessionAttemptV1 {
+            serial,
+            digest: digest.into(),
+            observer: observer.clone(),
+        });
+        Some(serial)
+    }
+    fn dispatch(
+        &mut self,
+        observer: Option<&flow_diag_v1::DurableFlowObserverV1>,
+        digest: &str,
+    ) -> Option<QualificationSessionAttemptV1> {
+        let active = self.active.as_ref()?;
+        if self.dispatched
+            || active.digest != digest
+            || !observer.is_some_and(|observer| active.observer.same_attempt(observer))
+        {
+            return None;
+        }
+        self.dispatched = true;
+        Some(active.clone())
+    }
+    fn matches(&self, serial: u64, digest: &str) -> bool {
+        self.active.as_ref().is_some_and(|active| {
+            active.serial == serial
+                && active.digest == digest
+                && active.observer.same_attempt(&active.observer)
+        })
+    }
+    fn accept(
+        &mut self,
+        attempt: Option<QualificationSessionAttemptV1>,
+        observer: Option<&flow_diag_v1::DurableFlowObserverV1>,
+        digest: &str,
+        error: Option<Error>,
+    ) {
+        let Some(attempt) = attempt else {
+            return;
+        };
+        if self.accepted.is_some()
+            || !self.dispatched
+            || !self.matches(attempt.serial, digest)
+            || attempt.digest != digest
+            || !observer.is_some_and(|observer| attempt.observer.same_attempt(observer))
+            || !self
+                .active
+                .as_ref()
+                .is_some_and(|active| active.observer.same_attempt(&attempt.observer))
+        {
+            return;
+        }
+        self.accepted = Some(error.is_none());
+        self.error = error;
+    }
+    fn absent(&mut self) {
+        self.active = None;
+        self.dispatched = false;
+        self.accepted = None;
+        self.error = None;
+    }
+    fn take_error(&mut self, serial: u64, digest: &str) -> Option<Error> {
+        if self.matches(serial, digest) && self.accepted == Some(false) {
+            self.error.take()
+        } else {
+            None
+        }
+    }
 }
 /// Closed synthetic diagnostics. These names carry no request or private data.
 #[cfg(feature = "synthetic-born-joined-qualification")]
@@ -1978,9 +2088,11 @@ impl DurableWitnessRuntimeV1 {
     pub(super) fn observe_admission_disconnected_v1(&mut self) {
         self.qualification_admission
             .absent(DurableAdmissionCompletionV1::Disconnected);
+        self.qualification_session.absent();
     }
     #[cfg(feature = "synthetic-born-joined-qualification")]
     pub(super) fn observe_admission_invalidated_v1(&mut self, outcome: DurableWitnessOutcomeV1) {
+        self.qualification_session.absent();
         if let DurableWitnessOutcomeV1::Admission {
             dispatch,
             result,
@@ -1999,6 +2111,32 @@ impl DurableWitnessRuntimeV1 {
         self.admission_retry = None;
         self.session_retry = None;
         self.activation_retry = None;
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        self.qualification_session.absent();
+    }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(super) fn qualification_session_retained_v1(
+        &self,
+        digest: &str,
+        deadline: Instant,
+        history_digest: &str,
+    ) -> Result<bool> {
+        let Some(approved) = &self.session_retry else {
+            return Ok(false);
+        };
+        Ok(self.activation_retry.is_none()
+            && approved.0.custody.digest == digest
+            && approved.0.custody.deadline == deadline
+            && approved
+                .0
+                .history
+                .history_digest()
+                .map_err(|_| Error::ReviewMismatch)?
+                == history_digest)
+    }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(super) fn qualification_session_absent_v1(&self) -> bool {
+        self.session_retry.is_none() && self.activation_retry.is_none()
     }
 }
 impl DurableWitnessPreparedV1 {
@@ -2065,6 +2203,8 @@ pub(super) enum DurableWitnessOutcomeV1 {
     Session {
         approved: Arc<ApprovedDurableWriterSessionV1>,
         result: Result<WriterSessionReceipt>,
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        observation: Option<QualificationSessionAttemptV1>,
     },
     Activation {
         approved: Arc<ApprovedDurableWriterActivationV1>,
@@ -2073,6 +2213,42 @@ pub(super) enum DurableWitnessOutcomeV1 {
     Reconciled(Result<DurableReconciliationOutcomeV1>),
 }
 impl NativeRuntime {
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(super) fn begin_qualification_session_v1(
+        &mut self,
+        observer: &flow_diag_v1::DurableFlowObserverV1,
+        digest: &str,
+    ) -> Option<u64> {
+        let open = self.open.as_mut()?;
+        open.durable_witness.qualification_completion = None;
+        open.durable_witness
+            .qualification_session
+            .begin(observer, digest)
+    }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(super) fn qualification_session_result_v1(
+        &self,
+        serial: u64,
+        digest: &str,
+    ) -> Option<bool> {
+        let state = &self.open.as_ref()?.durable_witness.qualification_session;
+        state
+            .matches(serial, digest)
+            .then_some(state.accepted)
+            .flatten()
+    }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(super) fn take_qualification_session_error_v1(
+        &mut self,
+        serial: u64,
+        digest: &str,
+    ) -> Option<Error> {
+        self.open
+            .as_mut()?
+            .durable_witness
+            .qualification_session
+            .take_error(serial, digest)
+    }
     #[cfg(feature = "synthetic-born-joined-qualification")]
     pub(super) fn reset_qualification_admission_dispatch_v1(&mut self) {
         if let Some(open) = self.open.as_mut() {
@@ -2555,6 +2731,12 @@ impl NativeRuntime {
                         flow_diag_v1::DurableLifecyclePointV1::AcquireNativeApproval,
                     );
                 }
+                #[cfg(feature = "synthetic-born-joined-qualification")]
+                let session_observation = self.open.as_mut().and_then(|open| {
+                    open.durable_witness
+                        .qualification_session
+                        .dispatch(observer.as_ref(), &approved.0.custody.digest)
+                });
                 self.start_flow_witness_job_v1(
                     epoch,
                     #[cfg(feature = "synthetic-born-joined-qualification")]
@@ -2576,6 +2758,8 @@ impl NativeRuntime {
                         WitnessOutcome::DurablePaymentV1(DurableWitnessOutcomeV1::Session {
                             approved,
                             result,
+                            #[cfg(feature = "synthetic-born-joined-qualification")]
+                            observation: session_observation,
                         })
                     },
                 )
@@ -2679,17 +2863,40 @@ impl NativeRuntime {
                     .clone()
                     .ok_or(Error::RecoveryRequired)?;
                 let witness = open.witness.clone().ok_or(Error::Locked)?;
-                self.start_witness_job(epoch, move |cancelled| {
-                    let result = if cancelled.load(Ordering::Acquire) {
-                        Err(Error::Locked)
-                    } else {
-                        approved.acquire(&witness)
-                    };
-                    WitnessOutcome::DurablePaymentV1(DurableWitnessOutcomeV1::Session {
-                        approved,
-                        result,
-                    })
-                })
+                #[cfg(feature = "synthetic-born-joined-qualification")]
+                let observer = open.durable_witness.flow_observation.clone();
+                #[cfg(feature = "synthetic-born-joined-qualification")]
+                let session_observation = self.open.as_mut().and_then(|open| {
+                    open.durable_witness
+                        .qualification_session
+                        .dispatch(observer.as_ref(), &approved.0.custody.digest)
+                });
+                self.start_flow_witness_job_v1(
+                    epoch,
+                    #[cfg(feature = "synthetic-born-joined-qualification")]
+                    flow_diag_v1::DurableFlowJobPurposeV1::Acquire,
+                    #[cfg(feature = "synthetic-born-joined-qualification")]
+                    flow_diag_v1::DurableFlowStageV1::AcquireCall,
+                    #[cfg(feature = "synthetic-born-joined-qualification")]
+                    observer.clone(),
+                    move |cancelled| {
+                        let result = if cancelled.load(Ordering::Acquire) {
+                            Err(Error::Locked)
+                        } else {
+                            approved.acquire_inner(
+                                &witness,
+                                #[cfg(feature = "synthetic-born-joined-qualification")]
+                                observer.as_ref(),
+                            )
+                        };
+                        WitnessOutcome::DurablePaymentV1(DurableWitnessOutcomeV1::Session {
+                            approved,
+                            result,
+                            #[cfg(feature = "synthetic-born-joined-qualification")]
+                            observation: session_observation,
+                        })
+                    },
+                )
             }
             2 => {
                 let approved = open
@@ -2728,6 +2935,7 @@ fn qualification_completion_from_outcome_v1(
         DurableWitnessOutcomeV1::Session {
             approved,
             result: Ok(_),
+            ..
         } => Some((approved.0.custody.digest.clone(), C::SessionAcquired)),
         DurableWitnessOutcomeV1::Activation {
             approved,
@@ -2822,7 +3030,10 @@ pub(super) fn complete_inner(
             open.durable_witness
                 .qualification_preparation
                 .record_with_history(attempt, stage, error, history_failure);
-            return ("Durable witness history or source was rejected. No new body, session or approval was substituted.", None);
+            return (
+                "Durable witness history or source was rejected. No new body, session or approval was substituted.",
+                None,
+            );
         }
         let (message, prepared) = complete_inner(open, *outcome, observer);
         if let Some((digest, display, operation)) = prepared {
@@ -2864,7 +3075,13 @@ pub(super) fn complete_inner(
             let digest = value.digest().into();
             #[cfg(feature = "synthetic-born-joined-qualification")]
             let stage = value.flow_native_stage_v1();
-            let display = durable_witness_display_result_v1(value.display(), #[cfg(feature = "synthetic-born-joined-qualification")] observer, #[cfg(feature = "synthetic-born-joined-qualification")] stage);
+            let display = durable_witness_display_result_v1(
+                value.display(),
+                #[cfg(feature = "synthetic-born-joined-qualification")]
+                observer,
+                #[cfg(feature = "synthetic-born-joined-qualification")]
+                stage,
+            );
             (
                 "Review the exact source-bound durable witness operation.",
                 Some((digest, display, Operation::DurableWitnessV1(value))),
@@ -2874,7 +3091,10 @@ pub(super) fn complete_inner(
             // Correlation only. Every later live constructor independently
             // rejoins current source, exact intent, complete history and limits.
             open.durable_witness.admission_id = Some(id);
-            ("Exact retained admission is committed in authenticated complete history. This is historical evidence, not renewed approval or a replacement session.", None)
+            (
+                "Exact retained admission is committed in authenticated complete history. This is historical evidence, not renewed approval or a replacement session.",
+                None,
+            )
         }
         DurableWitnessOutcomeV1::Admission {
             dispatch,
@@ -2894,7 +3114,10 @@ pub(super) fn complete_inner(
                     false,
                     result.err(),
                 );
-                return ("No admission dispatch was confirmed. Inspect the original local intent before retrying; do not assume local retention or remote rollback, and never create a replacement body or ID.", None);
+                return (
+                    "No admission dispatch was confirmed. Inspect the original local intent before retrying; do not assume local retention or remote rollback, and never create a replacement body or ID.",
+                    None,
+                );
             };
             if result.is_ok() {
                 open.durable_witness.admission_id = Some(dispatch.retained.request().operation_id.clone());
@@ -2918,20 +3141,47 @@ pub(super) fn complete_inner(
             );
             (message, None)
         }
-        DurableWitnessOutcomeV1::Session { approved, result } => {
+        DurableWitnessOutcomeV1::Session {
+            approved,
+            result,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            observation,
+        } => {
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            let digest = approved.0.custody.digest.clone();
             open.durable_witness.session_retry = Some(approved);
             match result {
                 Ok(receipt) => {
+                    #[cfg(feature = "synthetic-born-joined-qualification")]
+                    open.durable_witness.qualification_session.accept(
+                        observation,
+                        observer,
+                        &digest,
+                        None,
+                    );
                     open.writer_receipt = Some(receipt);
                     (
                         "Exact durable writer session acquired. Separate original-owner activation is required.",
                         None,
                     )
                 }
-                Err(_) => (
-                    "Writer acquisition is uncertain. Keep this same client/key and exact pre-acquire request; never prepare a replacement session.",
-                    None,
-                ),
+                Err(error) => {
+                    // This is the original owned operational error, at its original
+                    // discard point, after the unchanged production receive gate.
+                    #[cfg(feature = "synthetic-born-joined-qualification")]
+                    open.durable_witness.qualification_session.accept(
+                        observation,
+                        observer,
+                        &digest,
+                        Some(error),
+                    );
+                    #[cfg(not(feature = "synthetic-born-joined-qualification"))]
+                    let _ = error;
+                    (
+                        "Writer acquisition is uncertain. Keep this same client/key and exact pre-acquire request; never prepare a replacement session.",
+                        None,
+                    )
+                }
             }
         }
         DurableWitnessOutcomeV1::Activation { approved, result } => {
@@ -2965,7 +3215,10 @@ pub(super) fn complete_inner(
             };
             (message, None)
         }
-        _ => ("Durable witness history or source was rejected. No new body, session or approval was substituted.", None),
+        _ => (
+            "Durable witness history or source was rejected. No new body, session or approval was substituted.",
+            None,
+        ),
     }
 }
 
@@ -4049,5 +4302,208 @@ mod durable_flow_reconciliation_tests {
         let report = current.finish(Observed::ReturnedErr).unwrap();
         assert!(report.first_error().is_none());
         assert!(report.incomplete());
+    }
+}
+
+#[cfg(all(test, feature = "synthetic-born-joined-qualification"))]
+mod acquire_reply_loss_session_tests {
+    use super::*;
+    use flow_diag_v1::{
+        DurableFlowCollectorV1 as Collector, DurableFlowJobPurposeV1 as Purpose,
+        DurableFlowOperationV1 as Flow, DurableFlowResultV1 as Observed,
+        DurableFlowStageV1 as Stage,
+    };
+
+    #[derive(Debug)]
+    struct OriginalError(u8);
+    impl std::fmt::Display for OriginalError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "inert-test-{}", self.0)
+        }
+    }
+    impl std::error::Error for OriginalError {}
+
+    #[test]
+    fn actual_session_error_is_owned_once_and_correlated_to_observed_job() {
+        let collector = Collector::default();
+        let observer = collector.arm(Flow::WriterReconcile);
+        let mut state = QualificationSessionV1::default();
+        let serial = state.begin(&observer, "same-review").unwrap();
+        let attempt = state.dispatch(Some(&observer), "same-review").unwrap();
+        assert!(state.dispatch(Some(&observer), "same-review").is_none());
+        let job = observer.job_start(Purpose::Acquire, 1);
+        let owned = Box::new(OriginalError(41));
+        let original_address = (&*owned as *const OriginalError) as usize;
+        let owned: Box<dyn std::error::Error + Send + Sync> = owned;
+        let result: Result<()> = Err(Error::Io(std::io::Error::other(owned)));
+        job.returned(Stage::AcquireCall, &result);
+        job.received(Stage::AcquireCall, &result);
+        state.accept(Some(attempt), Some(&observer), "same-review", result.err());
+        assert!(state.accepted == Some(false));
+        let error = state.take_error(serial, "same-review").unwrap();
+        match error {
+            Error::Io(error) => {
+                let actual = error
+                    .get_ref()
+                    .unwrap()
+                    .downcast_ref::<OriginalError>()
+                    .unwrap();
+                assert_eq!(actual as *const OriginalError as usize, original_address);
+            }
+            _ => panic!("actual owned error was replaced"),
+        }
+        assert!(state.take_error(serial, "same-review").is_none());
+        let diagnostic = observer.finish(Observed::ReturnedErr).unwrap();
+        assert!(diagnostic.completion().purpose() == Some(Purpose::Acquire));
+        assert!(diagnostic.completion().result() == Observed::ReturnedErr);
+        assert!(diagnostic.completion().receive() == flow_diag_v1::DurableFlowReceiveV1::Received);
+    }
+
+    #[test]
+    fn session_error_wrong_digest_stale_attempt_and_wrong_observer_never_match() {
+        let collector = Collector::default();
+        let first = collector.arm(Flow::WriterReconcile);
+        let mut state = QualificationSessionV1::default();
+        let first_serial = state.begin(&first, "same-review").unwrap();
+        let stale = state.dispatch(Some(&first), "same-review").unwrap();
+        state.accept(
+            Some(stale.clone()),
+            Some(&first),
+            "same-review",
+            Some(Error::Authentication),
+        );
+        assert!(state.take_error(first_serial, "wrong-review").is_none());
+        assert!(matches!(
+            state.take_error(first_serial, "same-review"),
+            Some(Error::Authentication)
+        ));
+        let retry = collector.arm(Flow::WriterReconcile);
+        let serial = state.begin(&retry, "same-review").unwrap();
+        assert_ne!(serial, first_serial);
+        let current = state.dispatch(Some(&retry), "same-review").unwrap();
+        state.accept(
+            Some(stale),
+            Some(&retry),
+            "same-review",
+            Some(Error::Uncertain),
+        );
+        assert!(state.accepted.is_none());
+        assert!(state.take_error(serial, "same-review").is_none());
+        state.accept(
+            Some(current),
+            Some(&first),
+            "same-review",
+            Some(Error::Uncertain),
+        );
+        assert!(state.accepted.is_none());
+        assert!(state.take_error(serial, "same-review").is_none());
+    }
+
+    #[test]
+    fn stale_and_duplicate_session_results_cannot_erase_or_replace_current_error() {
+        let collector = Collector::default();
+        let first = collector.arm(Flow::WriterReconcile);
+        let mut state = QualificationSessionV1::default();
+        let old_serial = state.begin(&first, "review").unwrap();
+        let old = state.dispatch(Some(&first), "review").unwrap();
+        let current = collector.arm(Flow::WriterReconcile);
+        let serial = state.begin(&current, "review").unwrap();
+        let payload = state.dispatch(Some(&current), "review").unwrap();
+        state.accept(
+            Some(payload.clone()),
+            Some(&current),
+            "review",
+            Some(Error::Authentication),
+        );
+        state.accept(Some(old), Some(&current), "review", Some(Error::Uncertain));
+        state.accept(Some(payload.clone()), Some(&current), "review", None);
+        state.accept(Some(payload), Some(&current), "review", Some(Error::Locked));
+        state.accept(None, None, "review", Some(Error::InvalidData));
+        assert!(state.accepted == Some(false));
+        assert!(state.take_error(old_serial, "review").is_none());
+        assert!(state.take_error(serial, "wrong-review").is_none());
+        assert!(matches!(
+            state.take_error(serial, "review"),
+            Some(Error::Authentication)
+        ));
+        assert!(state.take_error(serial, "review").is_none());
+    }
+
+    #[test]
+    fn session_success_missing_disconnected_invalidated_and_overflow_are_not_errors() {
+        for mode in 0..5 {
+            let collector = Collector::default();
+            let observer = collector.arm(Flow::WriterReconcile);
+            let mut state = QualificationSessionV1::default();
+            let serial = state.begin(&observer, "review").unwrap();
+            let attempt = state.dispatch(Some(&observer), "review").unwrap();
+            match mode {
+                0 => state.accept(Some(attempt), Some(&observer), "review", None),
+                1 => state.accept(None, Some(&observer), "review", Some(Error::Uncertain)),
+                2 | 3 => {
+                    let delayed = attempt.clone();
+                    state.accept(
+                        Some(attempt),
+                        Some(&observer),
+                        "review",
+                        Some(Error::Uncertain),
+                    );
+                    state.absent();
+                    state.accept(
+                        Some(delayed),
+                        Some(&observer),
+                        "review",
+                        Some(Error::Authentication),
+                    );
+                }
+                _ => {
+                    state.next = u64::MAX;
+                    assert!(state.begin(&observer, "review").is_none());
+                    state.accept(
+                        Some(attempt),
+                        Some(&observer),
+                        "review",
+                        Some(Error::Uncertain),
+                    );
+                }
+            }
+            assert!(state.take_error(serial, "review").is_none());
+        }
+    }
+
+    #[test]
+    fn session_evidence_none_and_reset_do_not_mutate_original_retry_slots() {
+        let collector = Collector::default();
+        let observer = collector.arm(Flow::WriterReconcile);
+        let mut runtime = DurableWitnessRuntimeV1::default();
+        let serial = runtime
+            .qualification_session
+            .begin(&observer, "review")
+            .unwrap();
+        let payload = runtime
+            .qualification_session
+            .dispatch(Some(&observer), "review");
+        runtime.qualification_session.accept(
+            payload,
+            Some(&observer),
+            "review",
+            Some(Error::Uncertain),
+        );
+        assert!(runtime.session_retry.is_none() && runtime.activation_retry.is_none());
+        assert!(
+            runtime
+                .qualification_session
+                .take_error(serial, "review")
+                .is_some()
+        );
+        runtime.qualification_session.begin(&observer, "review");
+        assert!(runtime.session_retry.is_none() && runtime.activation_retry.is_none());
+        assert!(runtime.qualification_session.error.is_none());
+        // No Approved or receipt factory is used. The observer's type cannot
+        // access either production slot, and unobserved collection is inert.
+        runtime
+            .qualification_session
+            .accept(None, None, "review", Some(Error::Authentication));
+        assert!(runtime.qualification_session.error.is_none());
     }
 }
