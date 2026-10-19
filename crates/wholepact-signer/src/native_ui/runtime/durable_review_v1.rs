@@ -1700,17 +1700,262 @@ pub(super) fn check_selected_witness_setup(open: &OpenAccount, json: &str) -> Re
     }
     Ok(())
 }
-pub(super) fn check_configured_witnesses(open: &OpenAccount) -> Result<()> {
-    if open.durable_born_entry.is_some() {
-        for witness in [open.witness.as_ref(), open.owner_witness.as_ref()]
-            .into_iter()
-            .flatten()
-        {
-            witness.check_current()?;
-            check_witness_descriptor(open, &witness.disclosure())?;
+// Closed same-call preparation only. These two slots are the actual selected
+// workspaces; neither a descriptor nor this Result carries current authority.
+fn check_configured_witnesses_v1<S, W>(
+    source: Option<&S>,
+    workspaces: [Option<&W>; 2],
+    workspace_current: impl Fn(&W) -> Result<()>,
+    workspace_disclosure: impl Fn(&W) -> wholepact_authority::WitnessDisclosureDescriptor,
+    original_disclosure: impl FnOnce(&S) -> Result<wholepact_authority::WitnessDisclosureDescriptor>,
+    late_source_current: impl FnOnce(&S) -> Result<()>,
+) -> Result<()> {
+    let Some(source) = source else {
+        return Ok(());
+    };
+    if workspaces.iter().all(Option::is_none) {
+        return Ok(());
+    }
+    let mut disclosures = [None, None];
+    for (index, workspace) in workspaces.iter().enumerate() {
+        if let Some(workspace) = workspace {
+            workspace_current(workspace)?;
+            disclosures[index] = Some(workspace_disclosure(workspace));
         }
     }
+    let original = original_disclosure(source)?;
+    if disclosures
+        .iter()
+        .flatten()
+        .any(|actual| actual != &original)
+    {
+        return Err(Error::ReviewMismatch);
+    }
+    // The original entry performs its full native/original/journal check here.
+    // This is not an imported-source receipt or current-epoch acquisition.
+    late_source_current(source)?;
+    for workspace in workspaces.into_iter().flatten() {
+        workspace_current(workspace)?;
+    }
     Ok(())
+}
+pub(super) fn check_configured_witnesses(open: &OpenAccount) -> Result<()> {
+    check_configured_witnesses_v1(
+        open.durable_born_entry.as_deref(),
+        [open.witness.as_deref(), open.owner_witness.as_deref()],
+        |workspace| workspace.check_current(),
+        |workspace| workspace.disclosure(),
+        |source| source.original_witness_disclosure_data_v1(),
+        |source| source.check_current(),
+    )
+}
+
+#[cfg(test)]
+mod configured_witness_preparation_tests {
+    use super::*;
+    use std::cell::{Cell, RefCell};
+    use wholepact_authority::WitnessDisclosureDescriptor;
+
+    // Inert descriptor equality fixtures, never native or imported authority.
+    fn descriptor() -> WitnessDisclosureDescriptor {
+        WitnessDisclosureDescriptor {
+            endpoint: "127.0.0.1:7443".into(),
+            server_name: "inert.example".into(),
+            witness_id: "inert-witness".into(),
+            account_id: "inert-account".into(),
+            network_profile_id: "inert-network".into(),
+            policy_digest: "11".repeat(32),
+            pinned_server_certificate_digest: "22".repeat(32),
+        }
+    }
+
+    #[test]
+    fn configured_preparation_actual_kernel_orders_zero_one_and_two_slots() {
+        for has_source in [false, true] {
+            for occupied in [[false, false], [true, false], [false, true], [true, true]] {
+                let slots = [0, 1];
+                let source = ();
+                let events = RefCell::new(Vec::new());
+                let result = check_configured_witnesses_v1(
+                    has_source.then_some(&source),
+                    [
+                        occupied[0].then_some(&slots[0]),
+                        occupied[1].then_some(&slots[1]),
+                    ],
+                    |slot| {
+                        events.borrow_mut().push(("current", *slot));
+                        Ok(())
+                    },
+                    |slot| {
+                        events.borrow_mut().push(("descriptor", *slot));
+                        descriptor()
+                    },
+                    |_| {
+                        events.borrow_mut().push(("original", 0));
+                        Ok(descriptor())
+                    },
+                    |_| {
+                        events.borrow_mut().push(("late", 0));
+                        Ok(())
+                    },
+                );
+                assert!(result.is_ok());
+                let mut expected = Vec::new();
+                if has_source && occupied.iter().any(|value| *value) {
+                    for slot in 0..2 {
+                        if occupied[slot] {
+                            expected.extend([("current", slot), ("descriptor", slot)]);
+                        }
+                    }
+                    expected.extend([("original", 0), ("late", 0)]);
+                    for slot in 0..2 {
+                        if occupied[slot] {
+                            expected.push(("current", slot));
+                        }
+                    }
+                }
+                assert!(*events.borrow() == expected);
+            }
+        }
+    }
+
+    #[test]
+    fn configured_preparation_actual_kernel_preserves_each_owned_error() {
+        // Descriptor reads are infallible and must follow their actual lifetime
+        // gate. Every fallible phase keeps the original owned error and stops.
+        for fail_at in [0, 2, 4, 5, 6, 7] {
+            let calls = Cell::new([0; 2]);
+            let events = RefCell::new(Vec::new());
+            let step = |at| -> Result<()> {
+                events.borrow_mut().push(at);
+                if at == fail_at {
+                    Err(Error::Io(std::io::Error::from_raw_os_error(1400 + at)))
+                } else {
+                    Ok(())
+                }
+            };
+            let result = check_configured_witnesses_v1(
+                Some(&()),
+                [Some(&0_usize), Some(&1_usize)],
+                |slot| {
+                    let mut counts = calls.get();
+                    let at = if counts[*slot] == 0 {
+                        2 * *slot
+                    } else {
+                        6 + *slot
+                    };
+                    counts[*slot] += 1;
+                    calls.set(counts);
+                    step(at as i32)
+                },
+                |slot| {
+                    events.borrow_mut().push((2 * *slot + 1) as i32);
+                    descriptor()
+                },
+                |_| {
+                    step(4)?;
+                    Ok(descriptor())
+                },
+                |_| step(5),
+            );
+            assert!(
+                matches!(result, Err(Error::Io(error)) if error.raw_os_error() == Some(1400 + fail_at))
+            );
+            assert!(*events.borrow() == (0..=fail_at).collect::<Vec<_>>());
+        }
+    }
+
+    #[test]
+    fn configured_preparation_actual_kernel_rejects_every_descriptor_field() {
+        let original = descriptor();
+        let encoded = serde_json::to_value(&original).unwrap();
+        let fields = encoded.as_object().unwrap();
+        assert!(
+            fields.keys().map(String::as_str).collect::<Vec<_>>()
+                == [
+                    "account_id",
+                    "endpoint",
+                    "network_profile_id",
+                    "pinned_server_certificate_digest",
+                    "policy_digest",
+                    "server_name",
+                    "witness_id",
+                ]
+        );
+        for field in fields.keys() {
+            let mut changed = encoded.clone();
+            changed[field] =
+                serde_json::Value::String(format!("{}x", fields[field].as_str().unwrap()));
+            let changed: WitnessDisclosureDescriptor = serde_json::from_value(changed).unwrap();
+            for wrong_slot in 0..2 {
+                let events = RefCell::new(Vec::new());
+                let result = check_configured_witnesses_v1(
+                    Some(&()),
+                    [Some(&0), Some(&1)],
+                    |slot| {
+                        events.borrow_mut().push(("current", *slot));
+                        Ok(())
+                    },
+                    |slot| {
+                        events.borrow_mut().push(("descriptor", *slot));
+                        if *slot == wrong_slot {
+                            changed.clone()
+                        } else {
+                            original.clone()
+                        }
+                    },
+                    |_| {
+                        events.borrow_mut().push(("original", 0));
+                        Ok(original.clone())
+                    },
+                    |_| panic!("mismatched descriptor must stop before the late source check"),
+                );
+                assert!(
+                    matches!(result, Err(Error::ReviewMismatch)),
+                    "{field} in slot {wrong_slot}"
+                );
+                assert!(
+                    *events.borrow()
+                        == [
+                            ("current", 0),
+                            ("descriptor", 0),
+                            ("current", 1),
+                            ("descriptor", 1),
+                            ("original", 0),
+                        ]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn configured_preparation_actual_kernel_rechecks_invalidated_workspaces() {
+        for invalidated in 0..2 {
+            let late_completed = Cell::new(false);
+            let final_calls = RefCell::new(Vec::new());
+            let result = check_configured_witnesses_v1(
+                Some(&()),
+                [Some(&0), Some(&1)],
+                |slot| {
+                    if late_completed.get() {
+                        final_calls.borrow_mut().push(*slot);
+                        if *slot == invalidated {
+                            return Err(Error::Locked);
+                        }
+                    }
+                    Ok(())
+                },
+                |_| descriptor(),
+                |_| Ok(descriptor()),
+                |_| {
+                    late_completed.set(true);
+                    Ok(())
+                },
+            );
+            assert!(matches!(result, Err(Error::Locked)));
+            assert!(*final_calls.borrow() == (0..=invalidated).collect::<Vec<_>>());
+        }
+    }
 }
 
 #[cfg(all(test, feature = "synthetic-born-joined-qualification"))]

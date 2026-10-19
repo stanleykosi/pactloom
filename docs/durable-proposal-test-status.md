@@ -1,8 +1,16 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-19, 00:12 UTC.
+Updated: 2026-10-19, 01:10 UTC.
 
 **Incomplete implementation. No full native financial signing, public testnet settlement, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
+
+## CI19: owner budget exhausted at activation approval; same-call validation reduced
+
+[Run 39179831461](https://github.com/stanleykosi/pactloom/actions/runs/39179831461), qualifier `926dc56f6853a6e5cb57dbf78972ef761ff6c3de`, passed build/Python130/Host80/bootstrap/baseline/cleanup. Actual Acquire returned Ok and ActivationPrepare was received/accepted; owner expiry and JournalPermission occurred at ActivationNative before an activation call was observed. After-drain evidence preserved the successful preparation worker separately. Lifecycle: import complete46.121s, historical lookup68.918s, acquisition preparation74.727–89.545s, native approval90.610s, acquisition worker launch92.982s, failure120.221s. Pending-loop full checks consumed about3.51s, not the dominant total. No acquired-session renewal or replacement is justified.
+
+The seven-file reduction combines pure per-object material validation and canonical digest derivation, preserving bytes/errors/recursive original row joins without cross-row/call caches. Same-call configured witness and ReviewCustody preparation remove duplicate snapshots while retaining late full original/imported validation, fresh record epoch/BOTH receipts, final workspace credentials and original fixed deadline. Historical admission removes only an outer duplicate; committed and retry branches retain mandatory full checks. Every transport callback remains. These are performance changes, not a relaxed lifetime contract.
+
+All-features Host+Signer+Wallet build passed (7m16s). Wallet10 selected cases (four new), signer material4, preparation11, benchmark2, born54, receipt6 and Host80 passed; suites overlap. Non-synthetic durable Signer build passed (2m49s), and all11 preparation kernels passed there. Representative encrypted journal samples fell from about194–201ms to90.192/92.317/94.364ms; frozen old outbox composition26.016/21.024/21.352ms versus combined7.332/7.705/7.194ms preserved exact proposal/digests. Component savings do not prove the full120s native cycle or reliability across variable history, CPU/I/O or attended review. Full signing/retry and settlement remain unverified.
 
 ## CI18: writer lifecycle passed; fresh financial import expired
 

@@ -396,6 +396,42 @@ fn committed_intent(
     Ok(intent)
 }
 
+// Exact historical request equality must precede the unchanged committed check.
+// This returns no reusable intent or source-validation token.
+fn check_historical_admission_v1(
+    retained: &OwnerControlRequest,
+    witnessed: &OwnerControlRequest,
+    committed: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    if witnessed != retained {
+        return Err(Error::RecoveryRequired);
+    }
+    committed()
+}
+
+// Fixed preparation sequence only: the output is inert data for the private
+// constructor, never permission to skip a later custody/currentness check.
+fn prepare_review_custody_v1(
+    early_source_data: impl FnOnce() -> Result<()>,
+    original_disclosure: impl FnOnce() -> Result<WitnessDisclosureDescriptor>,
+    credential: impl Fn(&WitnessDisclosureDescriptor) -> Result<()>,
+    original_deadline: impl FnOnce() -> Result<Instant>,
+    late_source_current: impl FnOnce() -> Result<()>,
+) -> Result<(WitnessDisclosureDescriptor, Instant)> {
+    early_source_data()?;
+    let disclosure = original_disclosure()?;
+    credential(&disclosure)?;
+    // Save the original absolute bound BEFORE the expensive complete check.
+    // Late work must consume this interval, never start a fresh one.
+    let deadline = original_deadline()?;
+    late_source_current()?;
+    if Instant::now() >= deadline {
+        return Err(Error::ReviewMismatch);
+    }
+    credential(&disclosure)?;
+    Ok((disclosure, deadline))
+}
+
 struct ReviewCustody {
     source: Arc<DurableWitnessImportedSourceV1>,
     instance: Arc<()>,
@@ -413,16 +449,28 @@ impl ReviewCustody {
         digest: String,
         display: String,
     ) -> Result<Self> {
-        source.check_current()?;
-        let disclosure = source.entry().original_witness_disclosure()?;
-        workspace.require_durable_credential_v1(
-            &source.entry().native_binding(),
-            &disclosure,
-            certificate,
+        let (disclosure, deadline) = prepare_review_custody_v1(
+            // Deny-only native/source/peer/privacy preflight. Despite its name,
+            // this helper neither acquires nor asserts a held journal fence.
+            || source.check_data_current_under_fence(),
+            || source.entry().original_witness_disclosure_data_v1(),
+            |disclosure| {
+                workspace.require_durable_credential_v1(
+                    &source.entry().native_binding(),
+                    disclosure,
+                    certificate,
+                )
+            },
+            || {
+                Ok(source
+                    .deadline()?
+                    .min(Instant::now() + Duration::from_secs(120)))
+            },
+            // Keep the imported source's complete check unchanged: fresh epoch
+            // and records, its actual fence/full snapshot, BOTH fresh receipts,
+            // and original source/peer/scopes/deadline. No lease is retained.
+            || source.check_current(),
         )?;
-        let deadline = source
-            .deadline()?
-            .min(Instant::now() + Duration::from_secs(120));
         let display = Zeroizing::new(format!("{}\n\nCurrent local enrollment: {}\nCurrent accepted manifest: {}\nBoth original material-use scopes and the actual local peer remain required throughout this operation.", display, source.enrollment_ref(), source.manifest_ref()));
         Ok(Self {
             source,
@@ -2189,18 +2237,21 @@ impl NativeRuntime {
                     stage = DurableAdmissionPreparationStageV1::RetainedIntent;
                 }
                 if let Some(retained) = local_intent(&source)? {
-                    require_intent(&source, &retained)?;
+                    // Early deny-only preflight, not intent or journal authority.
+                    // Both branches below retain their own complete intent gate.
+                    source.check_data_current_under_fence()?;
                     match history
                         .durable_payment_admission_v1(&retained.request().operation_id)
                         .map_err(|_| Error::RecoveryRequired)?
                     {
-                        Some(exact) if exact == retained.request() => {
-                            committed_intent(&source, &history, &exact.operation_id)?;
+                        Some(exact) => {
+                            check_historical_admission_v1(retained.request(), exact, || {
+                                committed_intent(&source, &history, &exact.operation_id).map(|_| ())
+                            })?;
                             return Ok(DurableWitnessOutcomeV1::HistoricalAdmission(Ok(exact
                                 .operation_id
                                 .clone())));
                         }
-                        Some(_) => return Err(Error::RecoveryRequired),
                         None => {
                             let prepared = PreparedDurableWitnessAdmissionV1::prepare_exact_retry(
                                 &owner,
@@ -3025,6 +3076,349 @@ mod custody_tests {
             valid_until_ms: 2,
         }
     }
+    fn preparation_descriptor() -> WitnessDisclosureDescriptor {
+        WitnessDisclosureDescriptor {
+            endpoint: "127.0.0.1:7443".into(),
+            server_name: "inert.example".into(),
+            witness_id: "inert-witness".into(),
+            account_id: "inert-account".into(),
+            network_profile_id: "inert-network".into(),
+            policy_digest: "11".repeat(32),
+            pinned_server_certificate_digest: "22".repeat(32),
+        }
+    }
+
+    #[test]
+    fn review_preparation_actual_kernel_orders_each_gate_once_and_reuses_descriptor() {
+        let expected = preparation_descriptor();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let events = std::cell::RefCell::new(Vec::new());
+        let seen_descriptor = std::cell::Cell::new(None);
+        let result = prepare_review_custody_v1(
+            || {
+                events.borrow_mut().push(0);
+                Ok(())
+            },
+            || {
+                events.borrow_mut().push(1);
+                Ok(expected.clone())
+            },
+            |actual| {
+                assert!(actual == &expected);
+                let pointer = actual as *const WitnessDisclosureDescriptor;
+                if let Some(first) = seen_descriptor.get() {
+                    assert!(std::ptr::eq(first, pointer));
+                    events.borrow_mut().push(5);
+                } else {
+                    seen_descriptor.set(Some(pointer));
+                    events.borrow_mut().push(2);
+                }
+                Ok(())
+            },
+            || {
+                events.borrow_mut().push(3);
+                Ok(deadline)
+            },
+            || {
+                events.borrow_mut().push(4);
+                Ok(())
+            },
+        );
+        let (actual, saved_deadline) = result.unwrap();
+        assert!(actual == expected);
+        assert!(saved_deadline == deadline);
+        assert!(*events.borrow() == [0, 1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn review_preparation_actual_kernel_preserves_owned_errors_and_short_circuits() {
+        for fail_at in 0..6 {
+            let events = std::cell::RefCell::new(Vec::new());
+            let credential_calls = std::cell::Cell::new(0);
+            let step = |at| -> Result<()> {
+                events.borrow_mut().push(at);
+                if at == fail_at {
+                    Err(Error::Io(std::io::Error::from_raw_os_error(1500 + at)))
+                } else {
+                    Ok(())
+                }
+            };
+            let result = prepare_review_custody_v1(
+                || step(0),
+                || {
+                    step(1)?;
+                    Ok(preparation_descriptor())
+                },
+                |_| {
+                    let at = if credential_calls.get() == 0 { 2 } else { 5 };
+                    credential_calls.set(credential_calls.get() + 1);
+                    step(at)
+                },
+                || {
+                    step(3)?;
+                    Ok(Instant::now() + Duration::from_secs(60))
+                },
+                || step(4),
+            );
+            assert!(
+                matches!(result, Err(Error::Io(error)) if error.raw_os_error() == Some(1500 + fail_at))
+            );
+            assert!(*events.borrow() == (0..=fail_at).collect::<Vec<_>>());
+        }
+    }
+
+    #[test]
+    fn review_preparation_actual_kernel_never_renews_saved_deadline_after_late_work() {
+        let original = Instant::now();
+        let available_deadline = std::cell::Cell::new(original);
+        let deadline_calls = std::cell::Cell::new(0);
+        let credential_calls = std::cell::Cell::new(0);
+        let late_calls = std::cell::Cell::new(0);
+        let result = prepare_review_custody_v1(
+            || Ok(()),
+            || Ok(preparation_descriptor()),
+            |_| {
+                credential_calls.set(credential_calls.get() + 1);
+                Ok(())
+            },
+            || {
+                deadline_calls.set(deadline_calls.get() + 1);
+                Ok(available_deadline.get())
+            },
+            || {
+                assert!(deadline_calls.get() == 1);
+                late_calls.set(late_calls.get() + 1);
+                // Even if a later read could offer a new interval, this attempt
+                // remains bound to its one saved deadline. No sleeps or issuer.
+                available_deadline.set(Instant::now() + Duration::from_secs(120));
+                Ok(())
+            },
+        );
+        assert!(matches!(result, Err(Error::ReviewMismatch)));
+        assert!(deadline_calls.get() == 1);
+        assert!(late_calls.get() == 1);
+        assert!(credential_calls.get() == 1);
+        assert!(available_deadline.get() > original);
+    }
+
+    #[test]
+    fn review_preparation_actual_kernel_rejects_final_credential_invalidation() {
+        let late_completed = std::cell::Cell::new(false);
+        let credential_calls = std::cell::Cell::new(0);
+        let result = prepare_review_custody_v1(
+            || Ok(()),
+            || Ok(preparation_descriptor()),
+            |_| {
+                credential_calls.set(credential_calls.get() + 1);
+                if late_completed.get() {
+                    Err(Error::Authentication)
+                } else {
+                    Ok(())
+                }
+            },
+            || Ok(Instant::now() + Duration::from_secs(60)),
+            || {
+                late_completed.set(true);
+                Ok(())
+            },
+        );
+        assert!(matches!(result, Err(Error::Authentication)));
+        assert!(credential_calls.get() == 2);
+    }
+
+    fn historical_request_data() -> OwnerControlRequest {
+        OwnerControlRequest {
+            operation_id: "inert-historical-operation".into(),
+            account_id: "inert-account".into(),
+            network_profile_id: "inert-network".into(),
+            expected_head: wholepact_authority::AuthorityHead {
+                sequence: 1,
+                digest: "33".repeat(32),
+            },
+            writer_epoch: 2,
+            control: OwnerControl::AdmitDurablePaymentV1 {
+                record: Box::new(
+                    wholepact_authority::durable_payment_v1::DurablePaymentAdmissionRecordV1 {
+                        terms: callback_terms_data("historical-admission"),
+                        witness_native_review_digest: "44".repeat(32),
+                    },
+                ),
+            },
+        }
+    }
+
+    #[test]
+    fn historical_preparation_actual_kernel_requires_late_committed_check() {
+        let request = historical_request_data();
+        for fails in [false, true] {
+            let calls = std::cell::Cell::new(0);
+            let result = check_historical_admission_v1(&request, &request, || {
+                calls.set(calls.get() + 1);
+                if fails {
+                    Err(Error::Io(std::io::Error::from_raw_os_error(1600)))
+                } else {
+                    Ok(())
+                }
+            });
+            assert!(calls.get() == 1);
+            if fails {
+                assert!(
+                    matches!(result, Err(Error::Io(error)) if error.raw_os_error() == Some(1600))
+                );
+            } else {
+                assert!(result.is_ok());
+            }
+        }
+    }
+
+    #[test]
+    fn historical_preparation_actual_kernel_rejects_every_request_leaf_substitution() {
+        fn leaf_paths(value: &serde_json::Value, prefix: &str, paths: &mut Vec<String>) {
+            match value {
+                serde_json::Value::Object(fields) => {
+                    for (name, value) in fields {
+                        leaf_paths(value, &format!("{prefix}/{name}"), paths);
+                    }
+                }
+                serde_json::Value::Array(values) => {
+                    for (index, value) in values.iter().enumerate() {
+                        leaf_paths(value, &format!("{prefix}/{index}"), paths);
+                    }
+                }
+                _ => paths.push(prefix.into()),
+            }
+        }
+        let expected = historical_request_data();
+        let encoded = serde_json::to_value(&expected).unwrap();
+        let mut paths = Vec::new();
+        leaf_paths(&encoded, "", &mut paths);
+        // Check the actual path inventory, including the enum discriminant,
+        // rather than relying on a guessed leaf count or a hand-picked subset.
+        let mut inventory = [
+            "/operation_id",
+            "/account_id",
+            "/network_profile_id",
+            "/expected_head/sequence",
+            "/expected_head/digest",
+            "/writer_epoch",
+            "/control/action",
+            "/control/record/witness_native_review_digest",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        inventory.extend(
+            [
+                "version",
+                "identity/account_id",
+                "identity/full_viewing_key_digest",
+                "identity/network_profile_id",
+                "identity/derivation_domain",
+                "original_policy_digest",
+                "original_genesis_digest",
+                "original_birth_commit_digest",
+                "original_roster_extension_digest",
+                "original_enrollment_ref",
+                "writer_certificate_digest",
+                "fixed/schema_version",
+                "fixed/network_profile_id",
+                "fixed/agreement_id",
+                "fixed/obligation_id",
+                "fixed/proposal_id",
+                "fixed/revision",
+                "fixed/expiry_height",
+                "fixed/proposal_digest",
+                "fixed/manifest_digest",
+                "fixed/unsigned_artifact_digest",
+                "fixed/proved_artifact_digest",
+                "fixed/effects_commitment",
+                "fixed/policy_digest",
+                "fixed/review_binding",
+                "fixed/action_mapping_digest",
+                "fixed/anchor",
+                "fixed/proposal_binding",
+                "authorization_id",
+                "recipient_policy_scope_digest",
+                "concrete_recipient_scope_digest",
+                "inputs/0/input_id",
+                "inputs/0/nullifier",
+                "inputs/0/action_index",
+                "inputs/0/value_zatoshis",
+                "maximum_debit_zatoshis",
+                "fee_share_zatoshis",
+                "transaction_fee_zatoshis",
+                "valid_from_ms",
+                "valid_until_ms",
+            ]
+            .into_iter()
+            .map(|path| format!("/control/record/terms/{path}")),
+        );
+        inventory.sort();
+        paths.sort();
+        assert!(paths == inventory);
+        for path in paths {
+            let actual = if path == "/control/action" {
+                let mut actual = expected.clone();
+                actual.control = OwnerControl::RequireRecovery;
+                actual
+            } else {
+                let mut changed = encoded.clone();
+                match changed.pointer_mut(&path).unwrap() {
+                    serde_json::Value::String(value) => value.push('x'),
+                    serde_json::Value::Number(value) => {
+                        *value = serde_json::Number::from(value.as_u64().unwrap() + 1);
+                    }
+                    _ => panic!("unexpected inert request field: {path}"),
+                }
+                serde_json::from_value(changed).unwrap()
+            };
+            for changed_retained in [false, true] {
+                let (retained, witnessed) = if changed_retained {
+                    (&actual, &expected)
+                } else {
+                    (&expected, &actual)
+                };
+                let result = check_historical_admission_v1(retained, witnessed, || {
+                    panic!("changed complete request must not reach committed validation")
+                });
+                assert!(matches!(result, Err(Error::RecoveryRequired)), "{path}");
+            }
+        }
+    }
+
+    #[test]
+    fn historical_preparation_actual_kernel_rejects_changed_input_inventory() {
+        let mut expected = historical_request_data();
+        let OwnerControl::AdmitDurablePaymentV1 { record } = &mut expected.control else {
+            unreachable!();
+        };
+        let mut second = record.terms.inputs[0].clone();
+        second.input_id.push('2');
+        second.nullifier = "55".repeat(32);
+        second.action_index += 1;
+        record.terms.inputs.push(second);
+        let original_inputs = record.terms.inputs.clone();
+        let mut reordered = original_inputs.clone();
+        reordered.reverse();
+        for inputs in [
+            Vec::new(),
+            vec![original_inputs[0].clone()],
+            vec![original_inputs[0].clone(); 2],
+            reordered,
+        ] {
+            let mut actual = expected.clone();
+            let OwnerControl::AdmitDurablePaymentV1 { record } = &mut actual.control else {
+                unreachable!();
+            };
+            record.terms.inputs = inputs;
+            assert!(matches!(
+                check_historical_admission_v1(&expected, &actual, || {
+                    panic!("changed input inventory must stop before committed validation")
+                }),
+                Err(Error::RecoveryRequired)
+            ));
+        }
+    }
+
     #[test]
     fn durable_callback_terms_kernel_checks_once_in_order_for_three_purposes() {
         // The three concrete call sites are source-reviewed separately. These
