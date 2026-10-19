@@ -32,6 +32,9 @@ mod born_offline_witness_journal_v1;
 #[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
 #[path = "durable_payment_journal_v1.rs"]
 mod durable_payment_journal_v1;
+#[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
+#[path = "durable_delivery_admission_journal_v2.rs"]
+mod durable_delivery_admission_journal_v2;
 
 const APPLICATION_ID: i64 = 0x57504157;
 const SCHEMA_VERSION: i64 = 6;
@@ -347,6 +350,7 @@ impl AuthorityJournal {
                 | AuthorityMutation::AuthorizeBornOfflineDispatchV1(_)
                 | AuthorityMutation::OwnerControl(OwnerControlRequest {
                     control: OwnerControl::AdmitDurablePaymentV1 { .. }
+                        | OwnerControl::AdmitDurablePaymentWithDeliveryV2 { .. }
                         | OwnerControl::EnrollBornOfflineV1 { .. }
                         | OwnerControl::InstallBornOfflineArtifactsV1 { .. }
                         | OwnerControl::GrantConstructionTransportV1 { .. }
@@ -417,6 +421,7 @@ impl AuthorityJournal {
                 | AuthorityMutation::UseConstructionTransportV1(_)
                 | AuthorityMutation::OwnerControl(OwnerControlRequest {
                     control: OwnerControl::AdmitDurablePaymentV1 { .. }
+                        | OwnerControl::AdmitDurablePaymentWithDeliveryV2 { .. }
                         | OwnerControl::GrantConstructionTransportV1 { .. },
                     ..
                 })
@@ -444,6 +449,7 @@ impl AuthorityJournal {
         };
         authenticate_admission(&tx, peer)?;
         let mut ledger = load(&tx)?;
+        ledger.require_delivery_admission_only_v2(&mutation)?;
         self.require_born_bootstrap_mutation(&ledger, &mutation, now)?;
         let mut event = Event {
             original_request_link: None,
@@ -679,6 +685,9 @@ impl AuthorityJournal {
                 .lock()
                 .map_err(|_| AuthorityError::Storage)?;
             let ledger = load(c.connection())?;
+            if ledger.selected_durable_delivery_admission_v2()?.is_some() {
+                return Err(AuthorityError::PolicyDenied);
+            }
             (ledger.policy, ledger.snapshot)
         };
         if peer != snapshot.writer_certificate_digest {
@@ -765,6 +774,7 @@ impl AuthorityJournal {
                 .map_err(|_| AuthorityError::Storage)?;
             authenticate_admission(c.connection(), peer)?;
             let ledger = load(c.connection())?;
+            ledger.require_delivery_admission_only_v2(&mutation)?;
             let event = Event {
                 original_request_link: None,
                 mutation: mutation.clone(),
@@ -1162,6 +1172,7 @@ pub(crate) fn load(c: &Connection) -> Result<Ledger> {
         let birth = crate::pending_birth_storage::read(c, &ledger.policy)?;
         ledger.validate_manual_birth(birth.as_ref())?;
         ledger.validate_durable_payment_birth_v1(birth.as_ref())?;
+        ledger.validate_durable_delivery_birth_v2(birth.as_ref())?;
         ledger.validate_born_offline_birth_v1(birth.as_ref())?;
     } else if ledger.policy.account_use_genesis.is_some() {
         return Err(AuthorityError::CorruptHistory);
@@ -1200,6 +1211,8 @@ fn verify_schema_against(c: &Connection, expected_sql: &str) -> Result<()> {
 }
 
 fn read_session_key(c: &Connection, id: &str) -> Result<Zeroizing<[u8; 32]>> {
+    #[cfg(all(test, feature = "native-witness-owner", target_os = "linux"))]
+    durable_delivery_admission_journal_v2::observe_operational_key_read_for_test();
     let version: i64 = c.pragma_query_value(None, "user_version", |r| r.get(0))?;
     if version == SCHEMA_VERSION {
         let count: u64 = c.query_row(
@@ -1324,6 +1337,7 @@ impl AuthorityJournal {
                 .lock()
                 .map_err(|_| AuthorityError::Storage)?;
             let ledger = load(c.connection())?;
+            ledger.require_delivery_admission_only_v2(&mutation)?;
             let selected = ledger
                 .historical_session(&request.operation_id)
                 .or_else(|| {
@@ -1385,6 +1399,7 @@ impl AuthorityJournal {
                 .lock()
                 .map_err(|_| AuthorityError::Storage)?;
             let ledger = load(c.connection())?;
+            ledger.require_delivery_admission_only_v2(&mutation)?;
             let selected = ledger
                 .historical_session(&request.operation_id)
                 .or_else(|| {
@@ -1479,6 +1494,7 @@ impl AuthorityJournal {
                 .lock()
                 .map_err(|_| AuthorityError::Storage)?;
             let ledger = load(c.connection())?;
+            ledger.require_delivery_admission_only_v2(&mutation)?;
             if ledger.snapshot.writer_certificate_digest != peer {
                 return Err(AuthorityError::Permission);
             }

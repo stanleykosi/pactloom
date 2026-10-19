@@ -28,6 +28,8 @@ const PROFILE: &str = "ironwood-testnet-nu7-candidate";
 
 #[path = "ephemeral_fixture_v1/durable_payment_v1.rs"]
 mod durable_payment_v1;
+#[path = "ephemeral_fixture_v1/durable_delivery_admission_v2.rs"]
+mod durable_delivery_admission_v2;
 pub(crate) use durable_payment_v1::DurableAcquireReplyLossArmV1;
 pub use durable_payment_v1::{
     EphemeralDurableAcquireReplyLossObservationV1, EphemeralDurableAcquireReplyLossReportV1,
@@ -93,8 +95,9 @@ impl EphemeralWitnessOriginV1 {
     }
 }
 
-/// All files are generated below this concrete owner before any signer birth
-/// deadline begins. No caller path, arbitrary root or imported key is accepted.
+/// Fresh fixtures generate all files below their concrete owner before signer
+/// birth deadlines begin. The separate bounded v2 historical route reopens only
+/// exact preserved originals, with a fresh native audit and no new authority.
 pub struct EphemeralNativeWitnessV1 {
     window: Window,
     context: egui::Context,
@@ -104,6 +107,7 @@ pub struct EphemeralNativeWitnessV1 {
     installation: Arc<EphemeralWitnessInstallation>,
     listener: OriginalListenerV1,
     durable_payment: durable_payment_v1::FixturePhaseV1,
+    durable_delivery: durable_delivery_admission_v2::FixturePhaseV2,
     tls: ServerTls,
     server_certificate_digest: String,
     owner_certificate: Vec<u8>,
@@ -199,6 +203,7 @@ impl EphemeralNativeWitnessV1 {
                 server_handles: Arc::new(AtomicUsize::new(0)),
             },
             durable_payment: durable_payment_v1::FixturePhaseV1::Idle,
+            durable_delivery: durable_delivery_admission_v2::FixturePhaseV2::default(),
             server_certificate_digest: crate::transport::certificate_digest(&certificate),
             tls,
             owner_certificate,
@@ -271,7 +276,8 @@ impl EphemeralNativeWitnessV1 {
     /// DER owner certificate before proposing, reviewing or committing birth.
     pub fn enroll_signed_birth(&mut self, account_id: &str, signed_envelope: &[u8]) -> Result<()> {
         crate::hash(account_id)?;
-        if signed_envelope.is_empty()
+        if self.durable_delivery.historical_only
+            || signed_envelope.is_empty()
             || signed_envelope.len() > crate::MAX_FRAME_BYTES
             || !self.window.can_select()
         {
@@ -300,6 +306,13 @@ impl EphemeralNativeWitnessV1 {
         let journal =
             crate::witness_locator::open_born_history(self.original_namespace_input(account_id)?)?;
         drop(journal);
+        // Retain only the actual original public signed envelope. A later
+        // synthetic existing-original audit re-verifies it against this same
+        // namespace; it never re-signs a birth or renews its original deadline.
+        self.durable_delivery
+            .original_signed_births
+            .entry(account_id.into())
+            .or_insert_with(|| signed_envelope.to_vec());
         Ok(())
     }
 
@@ -429,6 +442,12 @@ impl EphemeralNativeWitnessV1 {
         result
     }
     fn click(&mut self, label: &str) -> Result<()> {
+        if self.durable_delivery.historical_only
+            && (!self.durable_delivery.native_historical_audit
+                || ![ENROLL, CONTINUE, UNDERSTOOD, AUTHORIZE].contains(&label))
+        {
+            return Err(AuthorityError::Permission);
+        }
         let output = self.frame(vec![], true);
         let position = output
             .shapes
@@ -785,17 +804,21 @@ mod tests {
         let fixture = EphemeralNativeWitnessV1::new().unwrap();
         let original = fixture.origin().unwrap();
         assert!(!original.witness_id.is_empty());
-        assert!(original
-            .endpoint
-            .to_socket_addrs()
-            .unwrap()
-            .all(|a| a.ip().is_loopback()));
-        assert!(fixture
-            .installation
-            .probe()
-            .unwrap()
-            .require_absent()
-            .is_err());
+        assert!(
+            original
+                .endpoint
+                .to_socket_addrs()
+                .unwrap()
+                .all(|a| a.ip().is_loopback())
+        );
+        assert!(
+            fixture
+                .installation
+                .probe()
+                .unwrap()
+                .require_absent()
+                .is_err()
+        );
         let files = fixture
             .installation
             .probe()

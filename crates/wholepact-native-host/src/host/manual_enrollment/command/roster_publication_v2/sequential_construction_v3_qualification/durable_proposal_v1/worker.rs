@@ -35,8 +35,8 @@ use wholepact_signer::native_ui::synthetic_born_joined_qualification::{
     DurableAdmissionHistoryFailureV1, DurableAdmissionPreparationFailureV1,
     DurableAdmissionPreparationStageV1, DurableNativeEntryFailureV1, DurableNativeEntryStageV1,
     DurableNativeRecordsV1, DurableAcquireReplyLossV1, DurableFlowFailureV1, DurableFlowResultV1,
-    EphemeralAcknowledgedBornV1, EphemeralDurableNativeV1, EphemeralExportedBirthV1,
-    EphemeralFirstAnchorIntentV1, EphemeralFirstAnchorPublicationV1,
+    EphemeralAcknowledgedBornV1, EphemeralDurableNativeV1, EphemeralDurableDeliveryNativeV2,
+    EphemeralExportedBirthV1, EphemeralFirstAnchorIntentV1, EphemeralFirstAnchorPublicationV1,
     EphemeralOriginalRosterIntentV1, EphemeralPendingBornV1, EphemeralRosterPublicationV1,
     OriginalBirthSetupV1,
 };
@@ -310,6 +310,23 @@ pub(super) struct JoinedSignerPeerV1 {
     pub deadline: Instant,
 }
 pub(super) enum JoinedSignerCommandV1 {
+    DropUnselectedAnchor(usize),
+    OpenDelivery(usize, wholepact_core::ProposalInput),
+    DeliveryPeer(usize),
+    PollDeliveryPair(usize),
+    AcceptDelivery(usize),
+    ConfigureDeliveryWitness(usize),
+    PollDeliveryRedisclosure(usize, DurableConstructionRedisclosureRequestV1, Arc<AtomicBool>),
+    PollDeliveryImport(usize, DurableReviewDeliveryRequestV1, wholepact_protocol::durable_proposal_v1::FixedProposalIdentityV1),
+    PollDeliveryAdmission(usize, wholepact_signer::authority_bridge::durable_delivery_admission_ipc_v2::DurableDeliveryAdmissionRequestV2),
+    ApproveDelivery(usize),
+    AwaitDeliveryResponse(usize),
+    AwaitDeliveryAudit(usize),
+    ServeDeliveryData(usize, Arc<AtomicBool>),
+    AuditDeliveryDenials(usize),
+    PreserveDelivery(usize),
+    CloseDeliveryReader(usize),
+    ServeOriginalEvidence(Arc<AtomicBool>),
     ExportBirth(usize),
     Acknowledge(usize),
     OpenSingleIntent(usize, HostManualEnrollmentIntent),
@@ -356,7 +373,10 @@ pub(super) enum JoinedSignerCommandV1 {
     CaptureCommitted(usize),
     CloseDurable(usize),
 }
+pub(super) use wholepact_signer::native_ui::synthetic_born_joined_qualification::DurableDeliveryReopenSelectorV2 as DeliveryReopenV2;
 pub(super) enum JoinedSignerReplyV1 {
+    DeliveryStatus { index: usize, status: wholepact_signer::authority_bridge::durable_delivery_admission_ipc_v2::DurableDeliveryAdmissionStatusV2 },
+    DeliveryPreserved { index: usize, original: DeliveryReopenV2 },
     BirthExport {
         index: usize,
         account_id: String,
@@ -426,6 +446,8 @@ enum State {
     RosterIntent(EphemeralOriginalRosterIntentV1),
     RosterPublication(EphemeralRosterPublicationV1, bool),
     Durable(Box<EphemeralDurableNativeV1>),
+    Delivery(Box<EphemeralDurableDeliveryNativeV2>),
+    PreservedDelivery,
 }
 enum OriginalWitnessOriginsV1 {
     ConstructorOnly(EphemeralWitnessOriginV1),
@@ -472,7 +494,7 @@ impl JoinedSignerWorkerV1 {
                         Err(mpsc::RecvTimeoutError::Timeout) => continue,
                         Err(_) => break,
                     };
-                    let reply = execute(command, &mut states, &public, &flag);
+                    let reply = execute(command, &mut states, Some(&public), &flag);
                     let failed = reply.is_err();
                     if outgoing.send(reply).is_err() || failed {
                         break;
@@ -496,6 +518,71 @@ impl JoinedSignerWorkerV1 {
             Err(_) => {
                 worker.stop_and_join()?;
                 Err("durable startup disconnected")
+            }
+        }
+    }
+    /// Fresh native production entries over the same preserved originals.
+    /// This reader neither recreates birth nor accepts another manifest.
+    pub fn reopen_delivery(originals: [DeliveryReopenV2; 2]) -> Result<Self> {
+        let (commands, incoming) = mpsc::channel();
+        let (outgoing, replies) = mpsc::channel();
+        let (started, startup) = mpsc::sync_channel(1);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let flag = cancelled.clone();
+        let join = thread::Builder::new()
+            .name("synthetic-delivery-original-reader".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || {
+                let opened = (|| -> Result<[Option<State>; 3]> {
+                    let mut states: [Option<State>; 3] = std::array::from_fn(|_| None);
+                    for (slot, original) in originals.into_iter().enumerate() {
+                        let entry =
+                            EphemeralDurableDeliveryNativeV2::reopen_original_selector(original)
+                                .map_err(durable_entry_error)?;
+                        states[slot + 1] = Some(State::Delivery(Box::new(entry)));
+                    }
+                    Ok(states)
+                })();
+                let mut states = match opened {
+                    Ok(states) => states,
+                    Err(error) => {
+                        let _ = started.send(Err(error));
+                        return;
+                    }
+                };
+                if started.send(Ok(())).is_err() {
+                    return;
+                }
+                while !flag.load(Ordering::Acquire) {
+                    let command = match incoming.recv_timeout(Duration::from_millis(20)) {
+                        Ok(command) => command,
+                        Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                        Err(_) => break,
+                    };
+                    let reply = execute(command, &mut states, None, &flag);
+                    let failed = reply.is_err();
+                    if outgoing.send(reply).is_err() || failed {
+                        break;
+                    }
+                }
+                drop(states);
+            })
+            .map_err(|_| "delivery reader thread")?;
+        let mut worker = Self {
+            commands: Some(commands),
+            replies,
+            cancelled,
+            join: Some(join),
+        };
+        match startup.recv() {
+            Ok(Ok(())) => Ok(worker),
+            Ok(Err(error)) => {
+                worker.stop_and_join()?;
+                Err(error)
+            }
+            Err(_) => {
+                worker.stop_and_join()?;
+                Err("delivery reader startup disconnected")
             }
         }
     }
@@ -678,6 +765,23 @@ fn poll_until(
 fn command_index(command: &JoinedSignerCommandV1) -> usize {
     use JoinedSignerCommandV1 as C;
     match command {
+        C::ServeOriginalEvidence(_) => 0,
+        C::DropUnselectedAnchor(i)
+        | C::OpenDelivery(i, _)
+        | C::DeliveryPeer(i)
+        | C::PollDeliveryPair(i)
+        | C::AcceptDelivery(i)
+        | C::ConfigureDeliveryWitness(i)
+        | C::PollDeliveryRedisclosure(i, _, _)
+        | C::PollDeliveryImport(i, _, _)
+        | C::PollDeliveryAdmission(i, _)
+        | C::ApproveDelivery(i)
+        | C::AwaitDeliveryResponse(i)
+        | C::AwaitDeliveryAudit(i)
+        | C::ServeDeliveryData(i, _)
+        | C::AuditDeliveryDenials(i)
+        | C::PreserveDelivery(i)
+        | C::CloseDeliveryReader(i) => *i,
         C::ExportBirth(i)
         | C::Acknowledge(i)
         | C::OpenSingleIntent(i, _)
@@ -715,18 +819,331 @@ fn command_index(command: &JoinedSignerCommandV1) -> usize {
     }
 }
 
+fn delivery_failure_error(
+    failure: wholepact_signer::native_ui::synthetic_born_joined_qualification::DurableDeliveryFailureV2,
+) -> wholepact_signer::Error {
+    use wholepact_signer::native_ui::synthetic_born_joined_qualification::DurableDeliveryStageV2 as S;
+    let (_attempt, stage, error, import, transport) = failure.into_parts();
+    let boundary = match stage {
+        S::Import => B::DeliverySourceExport,
+        S::OriginalEvidence => B::DeliveryCredentialRegistration,
+        S::History | S::Audit => B::DeliveryHistoricalRead,
+        _ => B::DeliveryNativeAdmission,
+    };
+    if let Some(import) = import {
+        use wholepact_signer::authority_bridge::BridgeError as E;
+        let outcome = match import {
+            E::Binding => Outcome::BridgeBinding,
+            E::Conflict => Outcome::BridgeConflict,
+            E::Missing => Outcome::BridgeMissing,
+            E::Uncertain => Outcome::BridgeUncertain,
+            E::Limit => Outcome::BridgeLimit,
+            E::Permission => Outcome::BridgePermission,
+            E::RecoveryRequired => Outcome::BridgeRecoveryRequired,
+            E::CompleteOriginRecoveryUnavailable => {
+                Outcome::BridgeCompleteOriginRecoveryUnavailable
+            }
+            E::Verification => Outcome::BridgeVerification,
+            E::SignerOriginUnavailable => Outcome::BridgeSignerOriginUnavailable,
+            E::Journal(_) => Outcome::BridgeJournal,
+            E::Authority(_) => Outcome::BridgeAuthority,
+            E::Wallet(_) => Outcome::BridgeWallet,
+            E::Ipc => Outcome::BridgeIpc,
+        };
+        diagnostic::emit(boundary, outcome);
+    }
+    if let Some(transport) = transport {
+        let admission = matches!(stage, S::OwnerSend);
+        if admission {
+            diagnostic::emit_admission_measurement(transport.measurement());
+        } else {
+            diagnostic::emit_history_measurement(transport.measurement());
+        }
+        diagnostic::emit(
+            checked_authority_boundary(transport.stage(), admission).unwrap_or(boundary),
+            diagnostic::authority_error(&transport.error()),
+        );
+    }
+    diagnostic::emit(boundary, diagnostic::signer_error(&error));
+    error
+}
+
+fn delivery_peer(
+    index: usize,
+    entry: &EphemeralDurableDeliveryNativeV2,
+) -> Result<JoinedSignerReplyV1> {
+    Ok(JoinedSignerReplyV1::DurablePeer {
+        index,
+        peer: JoinedSignerPeerV1 {
+            endpoint: entry
+                .endpoint()
+                .map_err(|error| signer_error(error, "delivery endpoint"))?,
+            provider: entry
+                .provider()
+                .map_err(|error| signer_error(error, "delivery provider"))?,
+            deadline: entry
+                .deadline()
+                .map_err(|error| signer_error(error, "delivery deadline"))?,
+        },
+        scope: entry.scope().clone(),
+        entry_digest: entry.native_entry_digest().into(),
+    })
+}
+
 fn execute(
     command: JoinedSignerCommandV1,
     states: &mut [Option<State>; 3],
-    public: &[OriginalPublic; 3],
+    public: Option<&[OriginalPublic; 3]>,
     cancelled: &AtomicBool,
 ) -> Result<JoinedSignerReplyV1> {
     use JoinedSignerCommandV1 as C;
     use JoinedSignerReplyV1 as R;
+    if let C::ServeOriginalEvidence(stop) = &command {
+        // Both exact old paired originals stay responsive during the consuming
+        // registration's repeated metadata-only source checks. This loop does
+        // not accept a review, manifest or payment request.
+        let deadline = states[1..]
+            .iter()
+            .try_fold(None, |deadline: Option<Instant>, state| {
+                let Some(State::Durable(entry)) = state else {
+                    return Err("original evidence state");
+                };
+                let current = entry
+                    .deadline()
+                    .map_err(|error| signer_error(error, "original evidence deadline"))?;
+                Ok(Some(deadline.map_or(current, |old| old.min(current))))
+            })?
+            .ok_or("original evidence owners missing")?;
+        while !stop.load(Ordering::Acquire) {
+            if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
+                return Err("original evidence cancelled or expired");
+            }
+            for state in &mut states[1..] {
+                let Some(State::Durable(entry)) = state else {
+                    return Err("original evidence state changed");
+                };
+                entry
+                    .poll_data_only()
+                    .map_err(|error| signer_error(error, "original evidence native poll"))?;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        return Ok(R::Done { index: 0 });
+    }
     let index = command_index(&command);
     let slot = states.get_mut(index).ok_or("durable account index")?;
     let state = slot.take().ok_or("durable retained state missing")?;
     let (next, reply) = match (command, state) {
+        (C::DropUnselectedAnchor(_), State::Acknowledged(account)) if index == 0 => {
+            drop(account);
+            (State::PreservedDelivery, R::Done { index })
+        }
+        (C::OpenDelivery(_, proposal), State::Acknowledged(account)) if index > 0 => {
+            let entry = account
+                .open_fresh_durable_delivery_v2(proposal, 1_000_000)
+                .map_err(durable_entry_error)?;
+            let reply = delivery_peer(index, &entry)?;
+            (State::Delivery(Box::new(entry)), reply)
+        }
+        (C::DeliveryPeer(_), State::Delivery(entry)) => {
+            let reply = delivery_peer(index, &entry)?;
+            (State::Delivery(entry), reply)
+        }
+        (C::PollDeliveryPair(_), State::Delivery(mut entry)) => {
+            poll_until(
+                entry
+                    .deadline()
+                    .map_err(|error| signer_error(error, "delivery pair deadline"))?,
+                cancelled,
+                || entry.poll_exact_pairing(),
+                "exact delivery native pairing",
+            )?;
+            (State::Delivery(entry), R::Done { index })
+        }
+        (C::AcceptDelivery(_), State::Delivery(mut entry)) => {
+            let records = entry
+                .accept_exact_manifest()
+                .map_err(|error| signer_error(error, "exact delivery accepted manifest"))?;
+            (State::Delivery(entry), R::Records { index, records })
+        }
+        (C::ConfigureDeliveryWitness(_), State::Delivery(mut entry)) => {
+            entry
+                .configure_original_witness()
+                .map_err(|error| signer_error(error, "delivery original owner configuration"))?;
+            (State::Delivery(entry), R::Done { index })
+        }
+        (C::PollDeliveryRedisclosure(_, request, stop), State::Delivery(mut entry)) => {
+            let deadline = entry
+                .deadline()
+                .map_err(|error| signer_error(error, "delivery redisclosure deadline"))?;
+            poll_until(
+                deadline,
+                cancelled,
+                || {
+                    entry.poll_exact_redisclosure(&request).map_err(|error| {
+                        diagnostic::emit(B::DeliverySourceExport, diagnostic::signer_error(&error));
+                        error
+                    })
+                },
+                "exact original current-recipient native redisclosure",
+            )?;
+            // A genuine native approval starts the maintained asynchronous
+            // retain-before-bytes worker. Continue servicing only this entry
+            // until the actual paired client receives its bounded response.
+            while !stop.load(Ordering::Acquire) {
+                if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
+                    return Err("delivery redisclosure cancelled or expired");
+                }
+                entry.poll_data_only().map_err(|error| {
+                    signer_error(error, "delivery redisclosure native response")
+                })?;
+                if let Some(failure) = entry.take_failure() {
+                    return Err(signer_error(
+                        delivery_failure_error(failure),
+                        "delivery redisclosure worker refused",
+                    ));
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+            (State::Delivery(entry), R::Done { index })
+        }
+        (C::PollDeliveryImport(_, request, identity), State::Delivery(mut entry)) => {
+            poll_until(
+                entry
+                    .deadline()
+                    .map_err(|error| signer_error(error, "delivery import deadline"))?,
+                cancelled,
+                || {
+                    let result = entry.poll_exact_import(&request, &identity);
+                    if let Some(failure) = entry.take_failure() {
+                        return Err(delivery_failure_error(failure));
+                    }
+                    result
+                },
+                "exact delivery native source import",
+            )?;
+            (State::Delivery(entry), R::Done { index })
+        }
+        (C::PollDeliveryAdmission(_, request), State::Delivery(mut entry)) => {
+            let mut actual = None;
+            poll_until(
+                entry
+                    .deadline()
+                    .map_err(|error| signer_error(error, "delivery review deadline"))?,
+                cancelled,
+                || {
+                    let result = entry.poll_admission_review(&request);
+                    if let Some(failure) = entry.take_failure() {
+                        return Err(delivery_failure_error(failure));
+                    }
+                    actual = result?;
+                    Ok(actual.is_some())
+                },
+                "exact prospective delivery admission review",
+            )?;
+            (
+                State::Delivery(entry),
+                R::DurableAdmissionRequest {
+                    index,
+                    request: actual.ok_or("delivery native review missing")?,
+                },
+            )
+        }
+        (C::ApproveDelivery(_), State::Delivery(mut entry)) => {
+            entry
+                .approve_admission()
+                .map_err(|error| signer_error(error, "delivery genuine native approval"))?;
+            (State::Delivery(entry), R::Done { index })
+        }
+        (C::AwaitDeliveryResponse(_), State::Delivery(mut entry)) => {
+            poll_until(
+                entry
+                    .deadline()
+                    .map_err(|error| signer_error(error, "delivery owner-response deadline"))?,
+                cancelled,
+                || {
+                    entry.poll_data_only()?;
+                    if let Some(failure) = entry.take_failure() {
+                        return Err(delivery_failure_error(failure));
+                    }
+                    entry.admission_response_received()
+                },
+                "actual unaudited owner response and retained original intent",
+            )?;
+            (State::Delivery(entry), R::Done { index })
+        }
+        (C::AwaitDeliveryAudit(_), State::Delivery(mut entry)) => {
+            // This invokes the actual production read-only continuation exactly
+            // once. No native admission approval or owner send is replayed.
+            entry.begin_admission_history_audit().map_err(|error| {
+                signer_error(error, "delivery explicit read-only audit continuation")
+            })?;
+            let mut status = None;
+            poll_until(
+                entry
+                    .deadline()
+                    .map_err(|error| signer_error(error, "delivery commit deadline"))?,
+                cancelled,
+                || {
+                    entry.poll_data_only()?;
+                    if let Some(failure) = entry.take_failure() {
+                        return Err(delivery_failure_error(failure));
+                    }
+                    status = entry.admission_status()?;
+                    Ok(status.is_some())
+                },
+                "exact delivery immutable intent and witness status",
+            )?;
+            (
+                State::Delivery(entry),
+                R::DeliveryStatus {
+                    index,
+                    status: status.ok_or("delivery native status missing")?,
+                },
+            )
+        }
+        (C::ServeDeliveryData(_, stop), State::Delivery(mut entry)) => {
+            let deadline = entry
+                .deadline()
+                .map_err(|error| signer_error(error, "delivery history deadline"))?;
+            while !stop.load(Ordering::Acquire) {
+                if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
+                    return Err("delivery history cancelled or expired");
+                }
+                entry
+                    .poll_data_only()
+                    .map_err(|error| signer_error(error, "delivery data-only native poll"))?;
+                if let Some(failure) = entry.take_failure() {
+                    return Err(signer_error(
+                        delivery_failure_error(failure),
+                        "delivery data-only source failure",
+                    ));
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+            (State::Delivery(entry), R::Done { index })
+        }
+        (C::AuditDeliveryDenials(_), State::Delivery(mut entry)) => {
+            entry.require_financial_routes_denied().map_err(|error| {
+                signer_error(error, "delivery financial routes must remain denied")
+            })?;
+            (State::Delivery(entry), R::Done { index })
+        }
+        (C::CloseDeliveryReader(_), State::Delivery(entry)) => {
+            entry
+                .close_existing_entry()
+                .map_err(|error| signer_error(error, "delivery historical reader drain"))?;
+            (State::PreservedDelivery, R::Done { index })
+        }
+        (C::PreserveDelivery(_), State::Delivery(entry)) => {
+            let original = entry.close_preserving_originals().map_err(|error| {
+                signer_error(error, "delivery native drain and preserve originals")
+            })?;
+            (
+                State::PreservedDelivery,
+                R::DeliveryPreserved { index, original },
+            )
+        }
         (C::ExportBirth(_), State::Pending(account)) => {
             let exported = account
                 .export_owner_request()
@@ -743,7 +1160,7 @@ fn execute(
             let account = exported.acknowledge_original().map_err(|error| {
                 signer_error(error, "native original birth history and acknowledgement")
             })?;
-            let metadata = &public[index];
+            let metadata = &public.ok_or("original birth metadata unavailable")?[index];
             if account.account_id() != metadata.account_id {
                 return Err("acknowledged identity differs from original policy");
             }

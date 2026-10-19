@@ -968,3 +968,6 @@ pub use settlement_source::*;
 #[path = "automation_authority.rs"]
 mod automation_authority;
 pub use automation_authority::*;
+
+#[path = "durable_delivery_admission_intent_v2.rs"]
+pub(crate) mod durable_delivery_admission_intent_v2;

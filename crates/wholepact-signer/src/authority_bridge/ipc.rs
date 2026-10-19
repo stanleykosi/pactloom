@@ -836,9 +836,7 @@ impl OriginalHistoryClient {
         request: serde_json::Value,
         original_deadline: Instant,
     ) -> Result<(UnixStream, Instant)> {
-        use super::host_recovery_ipc::v5::transfer_io::{
-            require_before_deadline, write_frame_until,
-        };
+        use super::host_recovery_ipc::v5::transfer_io::{require_before_deadline, write_frame_until};
         let deadline = original_deadline.min(self.grant.expires);
         require_before_deadline(deadline)?;
         require_quarantined_v5_request(self.mode, &self.scope, &request)?;
@@ -1569,3 +1567,73 @@ mod born_opener_tests {
 
 mod born_pairing;
 pub use born_pairing::PendingBornHistoryPairV1;
+
+#[cfg(feature = "durable-proposal")]
+impl OriginalHistoryClient {
+    pub(super) fn durable_delivery_exchange_deadline_v2(&self) -> Instant {
+        self.grant
+            .expires
+            .min(Instant::now() + Duration::from_secs(120))
+    }
+    pub(super) fn check_durable_delivery_request_origin_v2(
+        &self,
+        stream: &UnixStream,
+        command: &super::durable_delivery_admission_ipc_v2::DurableDeliveryCommandV2,
+    ) -> Result<()> {
+        if matches!(
+            command,
+            super::durable_delivery_admission_ipc_v2::DurableDeliveryCommandV2::Admit { .. }
+        ) {
+            return self.check_durable_review_origin_v1(stream);
+        }
+        // Public original evidence and historical status need only the actual
+        // native-approved history grant, never private-material export rights.
+        if self.mode != PairingMode::Ordinary
+            || !self.scope.history_read
+            || Instant::now() >= self.grant.expires
+        {
+            return Err(BridgeError::Permission);
+        }
+        let actual = self.provider.verify_server(stream)?;
+        self.peer
+            .same_live_process(&actual)
+            .map_err(|_| BridgeError::Permission)?;
+        self.peer.check_alive().map_err(|_| BridgeError::Permission)
+    }
+    pub(super) fn check_durable_delivery_peer_v2(
+        &self,
+        stream: &UnixStream,
+        data: &super::durable_delivery_admission_ipc_v2::OriginalWitnessPublicDataV2,
+    ) -> Result<()> {
+        self.check_durable_delivery_request_origin_v2(stream, &super::durable_delivery_admission_ipc_v2::DurableDeliveryCommandV2::OriginalWitnessEvidence {})?;
+        data.validate()?;
+        if data.original_terms.identity.account_id != self.scope.account_id
+            || data.original_terms.scope.agreement_id != self.scope.agreement_id
+            || data.original_terms.scope.participant_id != self.scope.participant_id
+            || data.local_grant_id != self.grant.grant_id
+        {
+            return Err(BridgeError::Binding);
+        }
+        Ok(())
+    }
+}
+#[cfg(feature = "durable-proposal")]
+impl OriginalHistoryClient {
+    pub(super) fn check_durable_delivery_status_v2(
+        &self,
+        status: &super::durable_delivery_admission_ipc_v2::DurableDeliveryAdmissionStatusV2,
+    ) -> Result<()> {
+        status.validate()?;
+        if status.scope.authorization.identity.account_id != self.scope.account_id
+            || status.scope.authorization.fixed.agreement_id != self.scope.agreement_id
+            || status.scope.authorization.fixed.manifest_digest != self.scope.manifest_digest
+            || !status.scope.delivery.owners.iter().any(|owner| {
+                owner.account_id == self.scope.account_id
+                    && owner.participant_id == self.scope.participant_id
+            })
+        {
+            return Err(BridgeError::Binding);
+        }
+        Ok(())
+    }
+}

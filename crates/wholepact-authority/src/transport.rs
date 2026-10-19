@@ -15,6 +15,7 @@ mod born_offline_witness_v1;
 ))]
 mod durable_acquire_reply_loss_v1;
 mod durable_payment_client_v1;
+mod durable_delivery_admission_v2;
 mod durable_payment_server_v1;
 #[cfg(all(
     feature = "synthetic-qualification",
@@ -805,7 +806,7 @@ impl AuthorityClient {
                 Some(next) if next == after && next < snapshot.head.sequence => continue,
                 None if after == snapshot.head.sequence => break,
                 _ => {
-                    return observed_history_result!(observer, Err(AuthorityError::CorruptHistory))
+                    return observed_history_result!(observer, Err(AuthorityError::CorruptHistory));
                 }
             }
         }
@@ -822,6 +823,10 @@ impl AuthorityClient {
         observed_history_result!(
             observer,
             ledger.validate_durable_payment_birth_v1(pending_birth_commit.as_ref())
+        )?;
+        observed_history_result!(
+            observer,
+            ledger.validate_durable_delivery_birth_v2(pending_birth_commit.as_ref())
         )?;
         observed_history_result!(
             observer,
@@ -2022,6 +2027,8 @@ pub struct AuthorityServer {
     admission_observer: Option<admission_diagnostics_v1::AdmissionWitnessObserverV1>,
     #[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
     durable_payment: Option<Arc<durable_payment_server_v1::DurablePaymentServingV1>>,
+    #[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
+    durable_delivery_admission_v2: Option<Arc<std::sync::Mutex<crate::durable_delivery_admission_owner_v2::NativeDurableDeliveryAdmissionSourceV2>>>,
     #[cfg(all(feature="born-offline-witness-owner",target_os="linux"))]
     born_offline_witness: Option<Arc<std::sync::Mutex<crate::born_offline_retry_v1::configured_born_witness::ConfiguredBornOfflineWitnessV1>>>,
     #[cfg(all(feature = "offline-witness-owner", target_os = "linux"))]
@@ -2043,6 +2050,8 @@ impl AuthorityServer {
             admission_observer: None,
             #[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
             durable_payment: None,
+            #[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
+            durable_delivery_admission_v2: None,
             #[cfg(all(feature = "born-offline-witness-owner", target_os = "linux"))]
             born_offline_witness: None,
             #[cfg(all(feature = "offline-witness-owner", target_os = "linux"))]
@@ -2078,8 +2087,10 @@ impl AuthorityServer {
         let observer = self.admission_observer.as_ref();
         admission_stage!(observer, SocketBinding);
         self.require_durable_payment_socket_v1(&socket)?;
+        self.require_durable_delivery_socket_v2(&socket)?;
         admission_stage!(observer, WaitCurrent);
         self.check_durable_payment_wait_v1()?;
+        self.check_durable_delivery_wait_v2()?;
         let mut socket = DeadlineSocket { socket, deadline };
         admission_stage!(observer, TlsSetup);
         let mut connection = ServerConnection::new(self.tls.config.clone())
@@ -2087,6 +2098,7 @@ impl AuthorityServer {
         while connection.is_handshaking() {
             admission_stage!(observer, WaitCurrent);
             self.check_durable_payment_wait_v1()?;
+            self.check_durable_delivery_wait_v2()?;
             admission_stage!(observer, TlsHandshake);
             let completed =
                 admission_measure!(observer, Handshake, connection.complete_io(&mut socket));
@@ -2099,6 +2111,7 @@ impl AuthorityServer {
         }
         admission_stage!(observer, WaitCurrent);
         self.check_durable_payment_wait_v1()?;
+        self.check_durable_delivery_wait_v2()?;
         admission_stage!(observer, PeerBinding);
         if connection.alpn_protocol() != Some(ALPN) {
             return Err(AuthorityError::Authentication);
@@ -2136,6 +2149,7 @@ impl AuthorityServer {
         let mut stream = StreamOwned::new(connection, socket);
         admission_stage!(observer, WaitCurrent);
         self.check_durable_payment_wait_v1()?;
+        self.check_durable_delivery_wait_v2()?;
         admission_stage!(observer, FrameRead);
         #[cfg(feature = "synthetic-qualification")]
         let request: WireRequest = admission_diagnostics_v1::read_frame(&mut stream, observer)?;
@@ -2143,6 +2157,34 @@ impl AuthorityServer {
         let request: WireRequest = read_frame(&mut stream)?;
         admission_stage!(observer, WaitCurrent);
         self.check_durable_payment_wait_v1()?;
+        self.check_durable_delivery_wait_v2()?;
+        if self.is_durable_delivery_admission_v2() {
+            admission_stage!(observer, SemanticDispatch);
+            let response = admission_measure!(
+                observer,
+                Dispatch,
+                self.serve_durable_delivery_admission_v2(&peer, request)
+            );
+            let response = admission_result!(observer, observe_semantic, response)
+                .unwrap_or_else(WireResponse::Rejected);
+            admission_stage!(observer, OutputCheck);
+            self.check_durable_delivery_output_v2(&response)?;
+            admission_stage!(observer, FrameWrite);
+            #[cfg(feature = "synthetic-qualification")]
+            admission_diagnostics_v1::write_frame(&mut stream, &response, observer)?;
+            #[cfg(not(feature = "synthetic-qualification"))]
+            write_frame(&mut stream, &response)?;
+            admission_stage!(observer, CloseFlush);
+            stream.conn.send_close_notify();
+            let flushed = stream.flush();
+            #[cfg(feature = "synthetic-qualification")]
+            let flushed = match observer {
+                Some(observer) => observer.observe_io(flushed),
+                None => flushed,
+            };
+            flushed.map_err(|_| AuthorityError::Uncertain)?;
+            return Ok(());
+        }
         if self.is_durable_payment_server_v1() {
             #[cfg(all(
                 feature = "synthetic-qualification",
@@ -2356,15 +2398,17 @@ impl AuthorityServer {
         for _ in 0..8 {
             let receiver = receive.clone();
             let server = self.clone();
-            workers.push(std::thread::spawn(move || loop {
-                let next = match receiver.lock() {
-                    Ok(receiver) => receiver.recv(),
-                    Err(_) => return,
-                };
-                let Ok((socket, deadline, _guard)) = next else {
-                    return;
-                };
-                let _ = server.serve_connection_before(socket, deadline);
+            workers.push(std::thread::spawn(move || {
+                loop {
+                    let next = match receiver.lock() {
+                        Ok(receiver) => receiver.recv(),
+                        Err(_) => return,
+                    };
+                    let Ok((socket, deadline, _guard)) = next else {
+                        return;
+                    };
+                    let _ = server.serve_connection_before(socket, deadline);
+                }
             }));
         }
         let mut accepted = 0;
@@ -2958,6 +3002,7 @@ pub mod synthetic {
         let ledger = ledger.ok_or(AuthorityError::CorruptHistory)?;
         ledger.validate_manual_birth(pending_birth_commit.as_ref())?;
         ledger.validate_durable_payment_birth_v1(pending_birth_commit.as_ref())?;
+        ledger.validate_durable_delivery_birth_v2(pending_birth_commit.as_ref())?;
         ledger.validate_born_offline_birth_v1(pending_birth_commit.as_ref())?;
         let manual_roster_attempt = if ledger.manual_roster_extension()?.is_some() {
             Some(ledger.latest_manual_roster_attempt_v2()?)

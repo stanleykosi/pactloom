@@ -58,38 +58,38 @@ const PURPOSE: &str = "durable-private-coordination-v1";
 const MAX_REGISTRY: usize = 131_112;
 #[derive(Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-struct Association {
-    version: u16,
-    purpose: String,
-    dependency_id: String,
-    profile_id: String,
-    generation_id: String,
-    inventory_digest: String,
-    generation_plan_digest: String,
-    parent_coverage_digest: String,
-    original_financial_origin_digest: String,
-    host_directory_identity: String,
-    source_store_destination_identity: String,
-    source_digest: String,
-    principal_id: String,
-    agreement_id: String,
-    obligation_id: String,
-    reviewer_account_ids: Vec<String>,
-    workspace_root: PathBuf,
-    database_path: PathBuf,
-    retention_policy: String,
+pub(in crate::host) struct Association {
+    pub(in crate::host) version: u16,
+    pub(in crate::host) purpose: String,
+    pub(in crate::host) dependency_id: String,
+    pub(in crate::host) profile_id: String,
+    pub(in crate::host) generation_id: String,
+    pub(in crate::host) inventory_digest: String,
+    pub(in crate::host) generation_plan_digest: String,
+    pub(in crate::host) parent_coverage_digest: String,
+    pub(in crate::host) original_financial_origin_digest: String,
+    pub(in crate::host) host_directory_identity: String,
+    pub(in crate::host) source_store_destination_identity: String,
+    pub(in crate::host) source_digest: String,
+    pub(in crate::host) principal_id: String,
+    pub(in crate::host) agreement_id: String,
+    pub(in crate::host) obligation_id: String,
+    pub(in crate::host) reviewer_account_ids: Vec<String>,
+    pub(in crate::host) workspace_root: PathBuf,
+    pub(in crate::host) database_path: PathBuf,
+    pub(in crate::host) retention_policy: String,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-struct OriginalProofDescriptorV1 {
-    role: String,
-    profile_owner: String,
-    financial_root: PathBuf,
-    financial_directory_identity: String,
-    basename: String,
-    key_slot: u8,
-    original_proof_origin: [u8; 32],
+pub(in crate::host) struct OriginalProofDescriptorV1 {
+    pub(in crate::host) role: String,
+    pub(in crate::host) profile_owner: String,
+    pub(in crate::host) financial_root: PathBuf,
+    pub(in crate::host) financial_directory_identity: String,
+    pub(in crate::host) basename: String,
+    pub(in crate::host) key_slot: u8,
+    pub(in crate::host) original_proof_origin: [u8; 32],
 }
 impl OriginalProofDescriptorV1 {
     fn from_host(host: &Host) -> Result<Self> {
@@ -118,13 +118,13 @@ impl OriginalProofDescriptorV1 {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Pending {
-    version: u16,
-    purpose: String,
-    association: Association,
-    proof: OriginalProofDescriptorV1,
-    initialization_plan: PrivateWorkspaceInitializationPlanV1,
-    database_key: [u8; 32],
+pub(in crate::host) struct Pending {
+    pub(in crate::host) version: u16,
+    pub(in crate::host) purpose: String,
+    pub(in crate::host) association: Association,
+    pub(in crate::host) proof: OriginalProofDescriptorV1,
+    pub(in crate::host) initialization_plan: PrivateWorkspaceInitializationPlanV1,
+    pub(in crate::host) database_key: [u8; 32],
 }
 impl Drop for Pending {
     fn drop(&mut self) {
@@ -133,14 +133,14 @@ impl Drop for Pending {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Committed {
-    version: u16,
-    pending_ciphertext_digest: String,
-    pending_original_file_origin: String,
-    association_digest: String,
-    workspace_directory_identity: String,
-    original_database_origin: [u8; 32],
-    seed: PrivateWorkspaceSeedBindingV1,
+pub(in crate::host) struct Committed {
+    pub(in crate::host) version: u16,
+    pub(in crate::host) pending_ciphertext_digest: String,
+    pub(in crate::host) pending_original_file_origin: String,
+    pub(in crate::host) association_digest: String,
+    pub(in crate::host) workspace_directory_identity: String,
+    pub(in crate::host) original_database_origin: [u8; 32],
+    pub(in crate::host) seed: PrivateWorkspaceSeedBindingV1,
 }
 fn digest<T: Serialize>(value: &T) -> Result<String> {
     wholepact_core::proposal::canonical_digest(
@@ -235,11 +235,11 @@ fn validate_pending(p: &Pending, secrets: &Secrets) -> Result<()> {
 pub(crate) struct OriginalWorkspacePublicationV1 {
     pending_file: PrivateWorkspaceFileV1,
     commit_file: PrivateWorkspaceFileV1,
-    pending: Pending,
-    committed: Committed,
+    pub(in crate::host) pending: Pending,
+    pub(in crate::host) committed: Committed,
 }
 pub(crate) struct OriginalWorkspaceFilesV1 {
-    original: OriginalWorkspacePublicationV1,
+    pub(in crate::host) original: OriginalWorkspacePublicationV1,
 }
 fn require_publication_order(pending_final: bool, commit_final: bool) -> Result<()> {
     if !pending_final && commit_final {
@@ -308,6 +308,10 @@ impl OriginalWorkspacePublicationV1 {
         )
     }
     fn check(&self, directory: &Directory, secrets: &Secrets) -> Result<()> {
+        let anchor = secrets.private_workspace_anchor().ok_or(Error::Authentication)?;
+        self.check_retained(directory, secrets, anchor)
+    }
+    fn check_retained(&self, directory: &Directory, secrets: &Secrets, anchor: &[u8]) -> Result<()> {
         validate_pending(&self.pending, secrets)?;
         self.pending_file.check(directory, MAX_REGISTRY)?;
         self.commit_file.check(directory, MAX_REGISTRY)?;
@@ -323,7 +327,7 @@ impl OriginalWorkspacePublicationV1 {
                     &self.committed.workspace_directory_identity,
                     self.committed.original_database_origin,
                 )?
-            || secrets.private_workspace_anchor() != Some(self.anchor(directory)?.as_slice())
+            || anchor != self.anchor(directory)?.as_slice()
         {
             return Err(Error::Authentication);
         }
@@ -399,6 +403,32 @@ impl OriginalWorkspaceFilesV1 {
         self.original.check_inventory(directory, secrets)
     }
 }
+impl OriginalWorkspaceFilesV1 {
+    pub(in crate::host) fn check_retained_registration_v3(&self, directory:&Directory,secrets:&Secrets)->Result<()> {
+        if !self.original.pending_file.is_final() || !self.original.commit_file.is_final() { return Err(Error::Authentication); }
+        self.original.check(directory,secrets)
+    }
+    /// Exact combined reader: final workspace roles only. No v3 projection is made.
+    pub(in crate::host) fn inspect_combined_v4(directory: &Directory, secrets: &Secrets) -> Result<Self> {
+        let anchor = secrets.combined_workspace_anchor_v4().ok_or(Error::Authentication)?;
+        let pending_file = PrivateWorkspaceFileV1::open(directory, PENDING, PENDING, MAX_REGISTRY)?;
+        let commit_file = PrivateWorkspaceFileV1::open(directory, COMMIT, COMMIT, MAX_REGISTRY)?;
+        let pending: Pending = wholepact_core::parse_typed_json(
+            &crate::recovery_generation::unseal_private_workspace_dependency_v1(secrets, true, &pending_file.bytes(directory, MAX_REGISTRY)?)?
+        ).map_err(|_| Error::Authentication)?;
+        let committed: Committed = wholepact_core::parse_typed_json(
+            &crate::recovery_generation::unseal_private_workspace_dependency_v1(secrets, false, &commit_file.bytes(directory, MAX_REGISTRY)?)?
+        ).map_err(|_| Error::Authentication)?;
+        let original = OriginalWorkspacePublicationV1 { pending_file, commit_file, pending, committed };
+        original.check_retained(directory, secrets, anchor)?;
+        Ok(Self { original })
+    }
+    pub(in crate::host) fn check_combined_v4(&self, directory: &Directory, secrets: &Secrets) -> Result<()> {
+        if !self.original.pending_file.is_final() || !self.original.commit_file.is_final() { return Err(Error::Authentication); }
+        self.original.check_retained(directory, secrets, secrets.combined_workspace_anchor_v4().ok_or(Error::Authentication)?)
+    }
+}
+
 fn workspace_anchor(
     directory: &Directory,
     association: &str,
@@ -654,7 +684,7 @@ fn association(
 
 /// Source-only publication owner. It cannot return its Engine, source target,
 /// financial evidence or metadata snapshot, and it cannot authorize an effect.
-struct PrivateWorkspacePublicationSourceV1<'a> {
+pub(in crate::host) struct PrivateWorkspacePublicationSourceV1<'a> {
     engine: Engine,
     financial: crate::financial_profile::FinancialReadProfile,
     metadata: wholepact_storage_security::EncryptedReadSnapshot,
@@ -662,6 +692,7 @@ struct PrivateWorkspacePublicationSourceV1<'a> {
     directory: &'a Directory,
     secrets: &'a Secrets,
     files: &'a OriginalWorkspacePublicationV1,
+    combined: Option<&'a super::durable_dispatcher_v2::OriginalWorkspaceDispatcherPublicationV4>,
     approval: &'a HistoricalApproval,
     workspace: Directory,
 }
@@ -673,6 +704,20 @@ impl<'a> PrivateWorkspacePublicationSourceV1<'a> {
         financial_password: &[u8],
         approval: &'a HistoricalApproval,
     ) -> Result<Self> {
+        Self::open_inner(directory, secrets, files, None, financial_password, approval)
+    }
+    pub(in crate::host) fn open_combined_v4(
+        directory: &'a Directory, secrets: &'a Secrets,
+        files: &'a super::durable_dispatcher_v2::OriginalWorkspaceDispatcherPublicationV4,
+        financial_password: &[u8], approval: &'a HistoricalApproval,
+    ) -> Result<Self> {
+        Self::open_inner(directory, secrets, &files.workspace().original, Some(files), financial_password, approval)
+    }
+    fn open_inner(
+        directory: &'a Directory, secrets: &'a Secrets, files: &'a OriginalWorkspacePublicationV1,
+        combined: Option<&'a super::durable_dispatcher_v2::OriginalWorkspaceDispatcherPublicationV4>,
+        financial_password: &[u8], approval: &'a HistoricalApproval,
+    ) -> Result<Self> {
         reader_result!(
             ReaderSourceOpen,
             observe_private_fixed_host_v1,
@@ -681,7 +726,7 @@ impl<'a> PrivateWorkspacePublicationSourceV1<'a> {
         reader_result!(
             ReaderFinalRegistry,
             observe_private_fixed_host_v1,
-            files.check_inventory(directory, secrets)
+            match combined { Some(c) => c.check_inventory(directory, secrets), None => files.check_inventory(directory, secrets) }
         )?;
         let pending = &files.pending;
         let financial = reader_result!(
@@ -757,17 +802,18 @@ impl<'a> PrivateWorkspacePublicationSourceV1<'a> {
         reader_result!(
             ReaderMetadataInitializedSchema,
             observe_private_fixed_engine_v1,
-            PreparedPrivateDurableCoordinatorV1::check_initialized_original_v1(
-                &pending.association.database_path,
-                &DatabaseKey::from_bytes(pending.database_key),
-                files.committed.original_database_origin,
-            )
+            match combined {
+                Some(_) => wholepact_engine::PrivateDurableAdmissionCoordinatorV2::check_initialized_admission_original_v2(
+                    &pending.association.database_path, &DatabaseKey::from_bytes(pending.database_key), files.committed.original_database_origin),
+                None => PreparedPrivateDurableCoordinatorV1::check_initialized_original_v1(
+                    &pending.association.database_path, &DatabaseKey::from_bytes(pending.database_key), files.committed.original_database_origin),
+            }
         )
         .map_err(storage_engine_error)?;
         let target = reader_result!(
             ReaderSourceStore,
             observe_private_fixed_host_v1,
-            ManualCommittedTarget::open_workspace_publication_source_v1(directory, secrets, files)
+            match combined { Some(c) => ManualCommittedTarget::open_dispatcher_publication_source_v4(directory, secrets, c), None => ManualCommittedTarget::open_workspace_publication_source_v1(directory, secrets, files) }
         )?;
         reader_result!(
             ReaderSourceStore,
@@ -778,9 +824,10 @@ impl<'a> PrivateWorkspacePublicationSourceV1<'a> {
         let engine = Engine::from_store(reader_result!(
             ReaderSourceStore,
             observe_private_fixed_host_v1,
-            crate::recovery_generation::open_workspace_publication_source_store_v1(
-                directory, secrets, files,
-            )
+            match combined {
+                Some(c) => crate::recovery_generation::open_dispatcher_publication_source_store_v4(directory, secrets, c),
+                None => crate::recovery_generation::open_workspace_publication_source_store_v1(directory, secrets, files),
+            }
         )?);
         // This bounded access projection is used only for the separately approved
         // source read. It is never enrolled into a Host or issued as authority.
@@ -801,6 +848,7 @@ impl<'a> PrivateWorkspacePublicationSourceV1<'a> {
             directory,
             secrets,
             files,
+            combined,
             approval,
             workspace,
         };
@@ -811,7 +859,7 @@ impl<'a> PrivateWorkspacePublicationSourceV1<'a> {
         )?;
         Ok(result)
     }
-    fn into_exclusions(self) -> Result<PrivateWorkspacePublicationExclusionsV1> {
+    pub(in crate::host) fn into_exclusions(self) -> Result<PrivateWorkspacePublicationExclusionsV1> {
         self.require_exact_association()?;
         let Self {
             engine,
@@ -821,6 +869,7 @@ impl<'a> PrivateWorkspacePublicationSourceV1<'a> {
             directory: _,
             secrets: _,
             files: _,
+            combined: _,
             approval: _,
             workspace,
         } = self;
@@ -831,7 +880,7 @@ impl<'a> PrivateWorkspacePublicationSourceV1<'a> {
             workspace,
         })
     }
-    fn require_exact_association(&self) -> Result<()> {
+    pub(in crate::host) fn require_exact_association(&self) -> Result<()> {
         reader_result!(
             ReaderSourceAssociation,
             observe_private_fixed_host_v1,
@@ -840,18 +889,17 @@ impl<'a> PrivateWorkspacePublicationSourceV1<'a> {
         reader_result!(
             ReaderFinalRegistry,
             observe_private_fixed_host_v1,
-            self.files.check_inventory(self.directory, self.secrets)
+            match self.combined { Some(c) => c.check_inventory(self.directory, self.secrets), None => self.files.check_inventory(self.directory, self.secrets) }
         )?;
         let p = &self.files.pending;
         let a = &p.association;
         let target = reader_result!(
             ReaderSourceStore,
             observe_private_fixed_host_v1,
-            ManualCommittedTarget::open_workspace_publication_source_v1(
-                self.directory,
-                self.secrets,
-                self.files,
-            )
+            match self.combined {
+                Some(c) => ManualCommittedTarget::open_dispatcher_publication_source_v4(self.directory, self.secrets, c),
+                None => ManualCommittedTarget::open_workspace_publication_source_v1(self.directory, self.secrets, self.files),
+            }
         )?;
         reader_result!(
             ReaderSourceStore,
@@ -936,6 +984,9 @@ impl<'a> PrivateWorkspacePublicationSourceV1<'a> {
                 Err(Error::Authentication)
             );
         }
+        if let Some(combined)=self.combined {
+            combined.check_publication_source_v4(self.directory,self.secrets,&self.engine,&self.access,&target,&self.financial)?;
+        }
         reader_result!(
             ReaderFinancialOriginal,
             observe_private_fixed_host_v1,
@@ -979,13 +1030,13 @@ impl<'a> PrivateWorkspacePublicationSourceV1<'a> {
 /// Exclusion-only remainder: no source Engine, runtime, operation or native
 /// authority getter. Original financial/metadata read handles and both locks
 /// remain held across every no-replace rename and directory fsync.
-struct PrivateWorkspacePublicationExclusionsV1 {
+pub(in crate::host) struct PrivateWorkspacePublicationExclusionsV1 {
     financial: crate::financial_profile::FinancialReadProfile,
     metadata: wholepact_storage_security::EncryptedReadSnapshot,
     workspace: Directory,
 }
 impl PrivateWorkspacePublicationExclusionsV1 {
-    fn check(
+    pub(in crate::host) fn check(
         &self,
         directory: &Directory,
         secrets: &Secrets,
@@ -1205,6 +1256,7 @@ impl Host {
                 authority,
                 transport,
                 submission,
+                submission_identity,
                 access,
                 config,
                 observation,
@@ -1212,6 +1264,8 @@ impl Host {
                 signer_review_clients,
                 resolution_source,
                 workspace_files,
+                dispatcher_files,
+                dispatcher,
                 directory,
             } = self;
             drop((
@@ -1223,7 +1277,7 @@ impl Host {
                 signer_review_clients,
                 resolution_source,
             ));
-            drop((authority, access, config, workspace_files));
+            drop((authority, access, config, workspace_files, dispatcher_files, dispatcher, submission_identity));
             // Only non-runtime publication state survives. Even seal/replace/fsync
             // failure drops this state; no stale v2 runtime capability exists.
             let secrets = secrets.bind_private_workspace_v3(anchor)?;
@@ -1486,6 +1540,14 @@ impl Host {
 }
 
 impl PrivateWorkspaceOwnerV1<'_> {
+    /// One-way source cut for dispatcher registration: preserve the actual
+    /// workspace lock while destroying coordinator/proof/source borrow owners.
+    pub(in crate::host) fn into_dispatcher_registration_exclusion_v4(self) -> Result<Directory> {
+        self.check_originals()?;
+        let Self {coordinator,committed_target,host:_,files:_,directory}=self;
+        drop((coordinator,committed_target));
+        Ok(directory)
+    }
     fn check_originals(&self) -> Result<()> {
         self.check_current_without_proof_lock_v2()?;
         reader_result!(

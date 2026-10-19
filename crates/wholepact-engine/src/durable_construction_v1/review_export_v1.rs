@@ -6,14 +6,14 @@ use super::*;
 use crate::proof_jobs::LocalProofJob;
 use wholepact_protocol::durable_proposal_v1::FixedProposalIdentityV1;
 use wholepact_signer::authority_bridge::{
+    BridgeError,
     durable_review_ipc_v1::{
         DurableReviewOutputActionV1, DurableReviewPayloadV1, DurableReviewRecipientV1,
-        PreparedDurableReviewDeliveryV1, MAX_DURABLE_REVIEW_PAYLOAD_BYTES_V1,
+        MAX_DURABLE_REVIEW_PAYLOAD_BYTES_V1, PreparedDurableReviewDeliveryV1,
     },
-    BridgeError,
 };
 
-const MAX_EXPORT_INTENTS: usize = 8;
+pub(crate) const MAX_EXPORT_INTENTS: usize = 8;
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -48,19 +48,19 @@ pub trait LocalDurableReviewExportConsentV1 {
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct ExportIntent {
-    scope: DurableReviewExportScopeV1,
+pub(crate) struct ExportIntent {
+    pub(crate) scope: DurableReviewExportScopeV1,
     // Deliberately never changed to "not shared" on timeout, cancellation or
     // process exit. A successful immediate reply is not spend approval either.
-    exposure: ExportExposure,
+    pub(crate) exposure: ExportExposure,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum ExportExposure {
+pub(crate) enum ExportExposure {
     DisclosedOrUnknown,
 }
 
-fn sources(roster: &Roster) -> Result<Vec<DurableReviewSourceV1>> {
+pub(crate) fn sources(roster: &Roster) -> Result<Vec<DurableReviewSourceV1>> {
     roster
         .owners
         .iter()
@@ -129,7 +129,7 @@ pub(super) fn validate_export_identity(
     Ok(())
 }
 
-fn validate_recipient(
+pub(crate) fn validate_recipient(
     roster: &Roster,
     candidate: &crate::CandidateView,
     scope: &DurableReviewExportScopeV1,

@@ -228,6 +228,24 @@ pub(crate) fn open_layered_parent_for_workspace_publication_v1(
     Ok(result)
 }
 
+#[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
+pub(crate) fn open_layered_parent_for_workspace_dispatcher_v4(directory: &Directory, secrets: &Secrets, files: &crate::host::durable_dispatcher_v2::OriginalWorkspaceDispatcherFilesV4) -> Result<(super::layered_metadata::CheckedLayeredMetadata, VerifiedGenerationCapsule)> {
+    files.check_inventory(directory, secrets)?;
+    let submission = files.submission_preflight(directory, secrets)?;
+    let result = open_layered_parent_checked_metadata(directory, workspace_metadata(directory, secrets)?)?;
+    submission.check()?;
+    files.check_inventory(directory, secrets)?;
+    Ok(result)
+}
+#[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
+pub(crate) fn open_layered_parent_for_dispatcher_publication_v4(directory: &Directory, secrets: &Secrets, files: &crate::host::durable_dispatcher_v2::OriginalWorkspaceDispatcherPublicationV4) -> Result<(super::layered_metadata::CheckedLayeredMetadata, VerifiedGenerationCapsule)> {
+    files.check_inventory(directory, secrets)?;
+    let submission = files.submission_preflight(directory, secrets)?;
+    let result = open_layered_parent_checked_metadata(directory, workspace_metadata(directory, secrets)?)?;
+    submission.check()?;
+    files.check_inventory(directory, secrets)?;
+    Ok(result)
+}
 pub(crate) fn capture_layered_metadata(
     directory: &Directory,
     secrets: &Secrets,

@@ -166,7 +166,7 @@ fn validate_original_rows(c: &Connection, intent: &DurablePaymentAdmissionIntent
     )?;
     Ok(())
 }
-fn read(
+pub(crate) fn read(
     c: &Connection,
     authorization_id: &str,
 ) -> Result<Option<RetainedDurablePaymentAdmissionIntentV1>> {
@@ -326,6 +326,7 @@ mod issuance {
                 let tx = c.transaction_with_behavior(TransactionBehavior::Deferred)?;
                 storage::check_account(&tx, &account)?;
                 storage::verify_schema(&tx)?;
+                financial_admission_intents::require_no_v2(&tx)?;
                 current_rows(&tx, &intent, &lease)?;
                 if let Some(old) = read(&tx, &record(&intent.request)?.terms.authorization_id)? {
                     if !old.0.same_remote_intent(&intent) {
@@ -370,6 +371,7 @@ mod issuance {
             self.database_identity.check_current(&c)?;
             let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
             storage::check_account(&tx, &r.account)?;
+            financial_admission_intents::require_no_v2(&tx)?;
             current_rows(&tx, &r.intent, &lease)?;
             check_current()?; // deny-only; MUST NOT reacquire journal/session fences.
             let auth = &record(&r.intent.request)?.terms.authorization_id;
@@ -386,6 +388,7 @@ mod issuance {
                 RetainedDurablePaymentAdmissionIntentV1(r.intent.clone())
             };
             storage::bounded(&tx, self.capacity_limits())?;
+            financial_admission_intents::require_no_v2(&tx)?;
             current_rows(&tx, &r.intent, &lease)?;
             self.database_identity.check_current(&tx)?;
             check_current()?;

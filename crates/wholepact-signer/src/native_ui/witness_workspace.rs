@@ -751,3 +751,6 @@ impl NativeWitnessWorkspace {
         })
     }
 }
+
+#[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+mod durable_delivery_admission_v2;

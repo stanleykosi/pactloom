@@ -136,6 +136,8 @@ impl WriterLocalInventory {
     ) -> Result<Self> {
         let offline = offline_history::read_existing_origin_cells(c, &account.account_id)?;
         let common_context_audit = construction_audit_v3::read_all(c, &account.account_id)?;
+        // A mixed historical schema is not a v1 financial inventory.
+        financial_admission_intents::require_no_v2(c)?;
         let durable_payment_intents = read_durable_payment_admission_intents_v1(c)?;
         let mut q = c.prepare("SELECT authorization_id,reference,nonce,enrollment_ref,manifest_ref FROM signer_original_consents ORDER BY authorization_id")?;
         let mut originals = Vec::new();

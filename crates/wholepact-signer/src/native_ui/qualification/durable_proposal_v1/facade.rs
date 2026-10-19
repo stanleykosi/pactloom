@@ -321,3 +321,134 @@ impl EphemeralDurableNativeV1 {
         })
     }
 }
+
+pub use crate::native_ui::runtime::durable_proposal_qualification_v1::{
+    DurableDeliveryFailureV2, DurableDeliveryStageV2,
+};
+pub struct EphemeralDurableDeliveryNativeV2 {
+    inner:crate::native_ui::runtime::durable_proposal_qualification_v1::DurableDeliveryNativeFixtureV2,
+}
+impl EphemeralAcknowledgedBornV1 {
+    pub fn open_fresh_durable_delivery_v2(
+        self,
+        proposal: wholepact_core::ProposalInput,
+        aggregate_budget_zatoshis: u64,
+    ) -> std::result::Result<EphemeralDurableDeliveryNativeV2, DurableNativeEntryFailureV1> {
+        Ok(EphemeralDurableDeliveryNativeV2{inner:crate::native_ui::runtime::durable_proposal_qualification_v1::DurableDeliveryNativeFixtureV2::open(self.original,proposal,aggregate_budget_zatoshis)?})
+    }
+}
+impl EphemeralDurableDeliveryNativeV2 {
+    /// Synthetic-only same-original process reentry. Paths/config are inert
+    /// inputs: the actual production source opener and native owner reverify
+    /// the original encrypted files. No acknowledged fixture is reconstructed.
+    pub fn open_existing_durable_delivery_v2(
+        root: PathBuf,
+        proposal: wholepact_core::ProposalInput,
+        aggregate_budget_zatoshis: u64,
+        owner_setup_json: String,
+    ) -> std::result::Result<Self, DurableNativeEntryFailureV1> {
+        Ok(Self{inner:crate::native_ui::runtime::durable_proposal_qualification_v1::DurableDeliveryNativeFixtureV2::open_existing(root,proposal,aggregate_budget_zatoshis,owner_setup_json)?})
+    }
+    pub fn endpoint(&self) -> Result<PathBuf> {
+        self.inner.endpoint()
+    }
+    pub fn provider(&self) -> Result<InstalledSignerProvider> {
+        self.inner.provider()
+    }
+    pub fn scope(&self) -> &wholepact_signer_origin::PairScope {
+        self.inner.scope()
+    }
+    pub fn deadline(&self) -> Result<Instant> {
+        self.inner.deadline()
+    }
+    pub fn native_entry_digest(&self) -> &str {
+        self.inner.entry_digest()
+    }
+    pub fn original_root(&self) -> Result<PathBuf> {
+        self.inner.original_root()
+    }
+    pub fn owner_configuration_for_reopen(&self) -> Result<String> {
+        self.inner.owner_setup_for_reopen()
+    }
+    pub fn poll_exact_pairing(&mut self) -> Result<bool> {
+        self.inner.poll_pair()
+    }
+    pub fn accept_exact_manifest(&mut self) -> Result<DurableNativeRecordsV1> {
+        self.inner.accept_exact_manifest()
+    }
+    pub fn configure_original_witness(&mut self) -> Result<()> {
+        self.inner.configure_original_witness()
+    }
+    pub fn poll_data_only(&mut self) -> Result<()> {
+        self.inner.poll_data_only()
+    }
+    pub fn poll_exact_redisclosure(
+        &mut self,
+        request: &DurableConstructionRedisclosureRequestV1,
+    ) -> Result<bool> {
+        self.inner.poll_exact_redisclosure(request)
+    }
+    /// True means only an actual Controlled response and local intent are held.
+    /// It is deliberately not a complete-history status or financial authority.
+    pub fn admission_response_received(&self) -> Result<bool> {
+        self.inner.admission_response_received()
+    }
+    pub fn begin_admission_history_audit(&mut self) -> Result<()> {
+        self.inner.begin_admission_history_audit()
+    }
+    pub fn poll_exact_import(
+        &mut self,
+        request: &DurableReviewDeliveryRequestV1,
+        identity: &wholepact_protocol::durable_proposal_v1::FixedProposalIdentityV1,
+    ) -> Result<bool> {
+        self.inner.poll_exact_import(request, identity)
+    }
+    pub fn poll_admission_review(
+        &mut self,
+        request:&crate::authority_bridge::durable_delivery_admission_ipc_v2::DurableDeliveryAdmissionRequestV2,
+    ) -> Result<Option<wholepact_authority::OwnerControlRequest>> {
+        self.inner.poll_admission_review(request)
+    }
+    pub fn approve_admission(&mut self) -> Result<()> {
+        self.inner.approve_admission()
+    }
+    pub fn admission_status(&self)->Result<Option<crate::authority_bridge::durable_delivery_admission_ipc_v2::DurableDeliveryAdmissionStatusV2>>{
+        self.inner.admission_status()
+    }
+    pub fn take_failure(&mut self) -> Option<DurableDeliveryFailureV2> {
+        self.inner.take_failure()
+    }
+    pub fn require_financial_routes_denied(&mut self) -> Result<()> {
+        self.inner.require_financial_routes_denied()
+    }
+    pub fn close_original_entry(self) -> Result<EphemeralAcknowledgedBornV1> {
+        Ok(EphemeralAcknowledgedBornV1 {
+            original: self.inner.close()?,
+        })
+    }
+    pub fn close_existing_entry(self) -> Result<()> {
+        self.inner.close_existing()
+    }
+}
+pub use crate::native_ui::runtime::durable_proposal_qualification_v1::DurableDeliveryReopenSelectorV2;
+impl EphemeralDurableDeliveryNativeV2 {
+    pub fn close_preserving_originals(self) -> Result<DurableDeliveryReopenSelectorV2> {
+        self.inner.close_preserving_originals()
+    }
+    pub fn reopen_original_selector(
+        selector: DurableDeliveryReopenSelectorV2,
+    ) -> std::result::Result<Self, DurableNativeEntryFailureV1> {
+        let expected_account = selector.account_id;
+        let version = selector.version;
+        let reopened = Self::open_existing_durable_delivery_v2(
+            selector.root,
+            selector.proposal,
+            selector.aggregate_budget_zatoshis,
+            selector.owner_setup_json,
+        )?;
+        if version != 2 || reopened.scope().account_id != expected_account {
+            return Err(DurableNativeEntryFailureV1::for_delivery_selector_mismatch());
+        }
+        Ok(reopened)
+    }
+}

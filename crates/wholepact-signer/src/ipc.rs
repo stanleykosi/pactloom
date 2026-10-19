@@ -5,9 +5,7 @@
 #![cfg_attr(not(feature = "native-ui"), allow(dead_code))]
 #[cfg(feature = "authority-signing")]
 use crate::authority_bridge::host_recovery_ipc::v5::V5TransferDialect;
-use crate::{
-    Error, Result, files::PrivateDirectory, native_peer::PeerProcess, review::validate_label,
-};
+use crate::{Error, Result, files::PrivateDirectory, native_peer::PeerProcess, review::validate_label};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
@@ -157,6 +155,8 @@ pub enum AppRequest {
     RequestDurableConstructionRedisclosureV1 {
         request: Box<crate::authority_bridge::durable_construction_v1::DurableConstructionRedisclosureRequestV1>,
     },
+    #[cfg(feature = "durable-proposal")]
+    RequestDurableDeliveryV2 { request: Box<crate::authority_bridge::durable_delivery_admission_ipc_v2::DurableDeliveryCommandV2> },
     #[cfg(feature = "durable-proposal")]
     RequestDurableProposalReviewV1 {
         request: Box<crate::authority_bridge::durable_review_ipc_v1::DurableReviewDeliveryRequestV1>,
@@ -540,8 +540,17 @@ impl AppRequest {
                 request.validate().map_err(|_| Error::InvalidData)?;
             }
             #[cfg(feature = "durable-proposal")]
+            Self::RequestDurableDeliveryV2 { request } => {
+                if !scope.history_read || (matches!(request.as_ref(), crate::authority_bridge::durable_delivery_admission_ipc_v2::DurableDeliveryCommandV2::Admit { .. }) && !scope.preconstruction_export) {
+                    return Err(Error::Authentication);
+                }
+                request.validate().map_err(|_| Error::InvalidData)?;
+            }
+            #[cfg(feature = "durable-proposal")]
             Self::RequestDurableProposalReviewV1 { request } => {
-                if !scope.history_read || !scope.preconstruction_export { return Err(Error::Authentication); }
+                if !scope.history_read || !scope.preconstruction_export {
+                    return Err(Error::Authentication);
+                }
                 request.validate().map_err(|_| Error::InvalidData)?;
             }
             #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
@@ -949,6 +958,8 @@ pub(crate) enum LocalEvent {
         request: Box<crate::authority_bridge::durable_construction_v1::DurableConstructionRedisclosureRequestV1>,
     },
     #[cfg(feature = "durable-proposal")]
+    DurableDeliveryV2 { peer: AuthenticatedPeer, stream: UnixStream, request: Box<crate::authority_bridge::durable_delivery_admission_ipc_v2::DurableDeliveryCommandV2> },
+    #[cfg(feature = "durable-proposal")]
     DurableProposalReviewV1 {
         peer: AuthenticatedPeer,
         stream: UnixStream,
@@ -1110,8 +1121,13 @@ impl IpcRevocation {
 #[derive(Clone)]
 enum IpcMode {
     Ordinary,
-    #[cfg(all(feature = "pending-birth-owner-signing", feature = "offline-review-foundation"))]
-    BornNamedVerifierV1 { exact: PairScope },
+    #[cfg(all(
+        feature = "pending-birth-owner-signing",
+        feature = "offline-review-foundation"
+    ))]
+    BornNamedVerifierV1 {
+        exact: PairScope,
+    },
     #[cfg(feature = "pending-birth-owner-signing")]
     PermanentStopV1 {
         account_id: String,
@@ -1133,11 +1149,16 @@ impl IpcMode {
     ) -> Result<()> {
         match self {
             Self::Ordinary => request.validate(scope),
-            #[cfg(all(feature = "pending-birth-owner-signing", feature = "offline-review-foundation"))]
+            #[cfg(all(
+                feature = "pending-birth-owner-signing",
+                feature = "offline-review-foundation"
+            ))]
             Self::BornNamedVerifierV1 { .. } => {
-                if !self.permits_scope(scope) || !self.permits_request(request) { return Err(Error::Authentication); }
+                if !self.permits_scope(scope) || !self.permits_request(request) {
+                    return Err(Error::Authentication);
+                }
                 request.validate(scope)
-            },
+            }
             #[cfg(feature = "pending-birth-owner-signing")]
             Self::PermanentStopV1 { .. } => {
                 if !self.permits_scope(scope) || !self.permits_request(request) {
@@ -1181,7 +1202,10 @@ impl IpcMode {
     fn permits_scope(&self, scope: &PairScope) -> bool {
         match self {
             Self::Ordinary => true,
-            #[cfg(all(feature = "pending-birth-owner-signing", feature = "offline-review-foundation"))]
+            #[cfg(all(
+                feature = "pending-birth-owner-signing",
+                feature = "offline-review-foundation"
+            ))]
             Self::BornNamedVerifierV1 { exact } => scope == exact,
             #[cfg(feature = "pending-birth-owner-signing")]
             Self::PermanentStopV1 { account_id } => {
@@ -1202,8 +1226,14 @@ impl IpcMode {
     fn permits_request(&self, request: &AppRequest) -> bool {
         match self {
             Self::Ordinary => true,
-            #[cfg(all(feature = "pending-birth-owner-signing", feature = "offline-review-foundation"))]
-            Self::BornNamedVerifierV1 { .. } => matches!(request, AppRequest::Status {} | AppRequest::RequestNamedVerifierPolicyV1 { .. }),
+            #[cfg(all(
+                feature = "pending-birth-owner-signing",
+                feature = "offline-review-foundation"
+            ))]
+            Self::BornNamedVerifierV1 { .. } => matches!(
+                request,
+                AppRequest::Status {} | AppRequest::RequestNamedVerifierPolicyV1 { .. }
+            ),
             #[cfg(feature = "pending-birth-owner-signing")]
             Self::PermanentStopV1 { account_id } => match request {
                 AppRequest::Status {} => true,
@@ -1274,10 +1304,18 @@ pub struct LocalIpc {
     scoped_born_qualification_v3: scoped_born_qualification_v3::ScopedBornQualificationV3,
 }
 impl LocalIpc {
-    #[cfg(all(feature = "pending-birth-owner-signing", feature = "offline-review-foundation"))]
-    pub(crate) fn bind_born_named_verifier_v1(directory: PrivateDirectory, exact: PairScope) -> Result<Self> {
+    #[cfg(all(
+        feature = "pending-birth-owner-signing",
+        feature = "offline-review-foundation"
+    ))]
+    pub(crate) fn bind_born_named_verifier_v1(
+        directory: PrivateDirectory,
+        exact: PairScope,
+    ) -> Result<Self> {
         exact.validate()?;
-        if exact.history_read || exact.authorization_export || exact.preconstruction_export { return Err(Error::Authentication); }
+        if exact.history_read || exact.authorization_export || exact.preconstruction_export {
+            return Err(Error::Authentication);
+        }
         // A restriction-only listener, never a native/account/pairing issuer.
         Self::bind_mode(directory, IpcMode::BornNamedVerifierV1 { exact })
     }
@@ -1799,6 +1837,10 @@ fn serve(
                                             request: request.clone(),
                                         })
                                         .map_err(|_| Error::Unavailable)?;
+                                }
+                                #[cfg(feature = "durable-proposal")]
+                                AppRequest::RequestDurableDeliveryV2 { ref request } => {
+                                    sender.try_send(LocalEvent::DurableDeliveryV2 { peer, stream: stream.try_clone()?, request:request.clone() }).map_err(|_| Error::Unavailable)?;
                                 }
                                 #[cfg(feature = "durable-proposal")]
                                 AppRequest::RequestDurableProposalReviewV1 { ref request } => {
@@ -2637,6 +2679,82 @@ mod born_host_scope_tests {
     }
 }
 
-#[cfg(all(test, feature = "pending-birth-owner-signing", feature = "offline-review-foundation"))]
+#[cfg(all(
+    test,
+    feature = "pending-birth-owner-signing",
+    feature = "offline-review-foundation"
+))]
 #[path = "ipc/born_named_verifier_tests.rs"]
 mod born_named_verifier_tests;
+
+#[cfg(all(test, feature = "durable-proposal"))]
+mod durable_delivery_scope_tests_v2 {
+    use super::*;
+    use crate::authority_bridge::durable_delivery_admission_ipc_v2::*;
+    #[test]
+    fn public_delivery_history_needs_only_history_but_admission_needs_preconstruction() {
+        let mut scope = PairScope {
+            account_id: "11".repeat(32),
+            agreement_id: "synthetic-agreement".into(),
+            participant_id: "alice".into(),
+            manifest_digest: "22".repeat(32),
+            history_read: true,
+            authorization_export: false,
+            preconstruction_export: false,
+        };
+        let evidence = AppRequest::RequestDurableDeliveryV2 {
+            request: Box::new(DurableDeliveryCommandV2::OriginalWitnessEvidence {}),
+        };
+        let history = AppRequest::RequestDurableDeliveryV2 {
+            request: Box::new(DurableDeliveryCommandV2::History {
+                request: DurableDeliveryHistoryRequestV2 {
+                    authorization_id: "synthetic-authorization".into(),
+                },
+            }),
+        };
+        // Inert request shape only. Actual source derivation validates the full
+        // delivery plan and never takes these claims as admission authority.
+        let admission: AppRequest = serde_json::from_value(serde_json::json!({
+            "operation":"request_durable_delivery_v2", "request": {"purpose":"admit", "request": {
+                "version":2,
+                "import_request":{"operation_id":"synthetic-import", "enrollment_ref":"33".repeat(32), "accepted_manifest_ref":"44".repeat(32), "own_disclosure":{"operation_id":"synthetic-material", "expected_request_digest":"55".repeat(32)}, "proposal_binding":"66".repeat(32)},
+                "delivery": {
+                    "dispatcher":{"principal_id":"synthetic-host", "public_identity_commitment":"77".repeat(32), "authentication_profile":"original_protected_host_dispatcher_v2", "custody_policy_commitment":"88".repeat(32)},
+                    "original_host_generation_binding_digest":"99".repeat(32), "original_host_profile_id":"synthetic-profile", "submission_journal_identity":"aa".repeat(32), "submission_operation_id":"synthetic-submission",
+                    "provider":{"source_id":"synthetic-provider", "endpoint":"https://provider.example", "trust_profile":"single_tls_provider_report_not_consensus"}, "route":{"kind":"direct"}, "owners":[], "valid_from_ms":1000, "valid_until_ms":2000,
+                    "minimum_expiry_margin_blocks":1, "maximum_fresh_admission_lifetime_ms":1000, "maximum_explicitly_approved_attempts":1,
+                    "extraction_rule":"first_durably_retained_verified_extraction", "retry_rule":"same_retained_bytes_with_fresh_admission", "attempt_rule":"explicit_immediate_host_decision"
+                }
+            }}
+        })).unwrap();
+        assert!(evidence.validate(&scope).is_ok());
+        assert!(history.validate(&scope).is_ok());
+        assert!(admission.validate(&scope).is_err());
+        scope.preconstruction_export = true;
+        assert!(evidence.validate(&scope).is_ok());
+        assert!(history.validate(&scope).is_ok());
+        assert!(admission.validate(&scope).is_ok());
+        scope.history_read = false;
+        assert!(evidence.validate(&scope).is_err());
+        assert!(history.validate(&scope).is_err());
+        assert!(admission.validate(&scope).is_err());
+    }
+    #[test]
+    fn delivery_commands_reject_financial_actions_unknown_fields_and_duplicate_purpose() {
+        for bytes in [
+            r#"{"purpose":"acquire"}"#,
+            r#"{"purpose":"activate"}"#,
+            r#"{"purpose":"reserve"}"#,
+            r#"{"purpose":"sign"}"#,
+            r#"{"purpose":"extract"}"#,
+            r#"{"purpose":"dispatch"}"#,
+            r#"{"purpose":"original_witness_evidence","replacement_root":"/tmp/untrusted"}"#,
+            r#"{"purpose":"original_witness_evidence","purpose":"original_witness_evidence"}"#,
+        ] {
+            assert!(
+                wholepact_core::parse_typed_json::<DurableDeliveryCommandV2>(bytes.as_bytes())
+                    .is_err()
+            );
+        }
+    }
+}

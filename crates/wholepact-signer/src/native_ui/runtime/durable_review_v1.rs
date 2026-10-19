@@ -1553,7 +1553,7 @@ impl NativeRuntime {
                 result
             );
             if let Err(unsent) = send.send((open, result)) {
-                unsent.0 .0.close();
+                unsent.0.0.close();
             }
         });
         self.signing_job = Some(SigningJob {
@@ -1573,6 +1573,7 @@ impl NativeRuntime {
 
 pub(super) fn allowed_event(event: &LocalEvent) -> bool {
     match event {
+        LocalEvent::DurableDeliveryV2 { request, .. } => matches!(request.as_ref(), crate::authority_bridge::durable_delivery_admission_ipc_v2::DurableDeliveryCommandV2::OriginalWitnessEvidence {}),
         LocalEvent::Pairing(_)
         | LocalEvent::History { .. }
         | LocalEvent::Export { .. }
@@ -1607,6 +1608,9 @@ pub(super) fn allowed_operation(operation: &Operation) -> bool {
     )
 }
 pub(super) fn check_plain_proposal(open: &OpenAccount, proposal: &Proposal) -> Result<()> {
+    if open.durable_delivery_entry.is_some() {
+        return super::durable_delivery_admission_v2::check_plain_proposal(open, proposal);
+    }
     let Some(source) = &open.durable_born_entry else {
         return Ok(());
     };
@@ -1681,6 +1685,12 @@ pub(super) fn check_witness_descriptor(
     open: &OpenAccount,
     descriptor: &wholepact_authority::WitnessDisclosureDescriptor,
 ) -> Result<()> {
+    if let Some(source) = &open.durable_delivery_entry {
+        source.check_current()?;
+        if source.original_witness_disclosure()? != *descriptor {
+            return Err(Error::ReviewMismatch);
+        }
+    }
     if let Some(source) = &open.durable_born_entry {
         source.check_current()?;
         if source.original_witness_disclosure()? != *descriptor {
@@ -1690,7 +1700,7 @@ pub(super) fn check_witness_descriptor(
     Ok(())
 }
 pub(super) fn check_selected_witness_setup(open: &OpenAccount, json: &str) -> Result<()> {
-    if open.durable_born_entry.is_some() {
+    if open.durable_born_entry.is_some() || open.durable_delivery_entry.is_some() {
         let selected = crate::native_ui::witness_workspace::prepare_selected_witness_configuration(
             json,
             &open.vault.account_id()?,

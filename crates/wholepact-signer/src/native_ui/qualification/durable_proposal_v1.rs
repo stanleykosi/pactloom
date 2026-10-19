@@ -2771,15 +2771,17 @@ mod tests {
     #[test]
     fn historical_admission_observation_requires_exact_original_request() {
         let expected = historical_admission_data();
-        assert!(require_historical_admission_observation_v1(
-            &expected,
-            Some(&expected),
-            false,
-            false,
-            false,
-            false,
-        )
-        .is_ok());
+        assert!(
+            require_historical_admission_observation_v1(
+                &expected,
+                Some(&expected),
+                false,
+                false,
+                false,
+                false,
+            )
+            .is_ok()
+        );
         for field in 0..10 {
             let mut changed = expected.clone();
             match field {
@@ -3132,5 +3134,636 @@ mod acquire_reply_loss_fixture_tests {
             deadline,
             &ledger[..13]
         ));
+    }
+}
+
+/// Separate synthetic driver for the production v2 admission-only native entry.
+/// Existing-root reentry never reconstructs an acknowledged fixture or native
+/// owner from serialized status; it invokes the actual protected-source opener.
+pub(in crate::native_ui) struct DurableDeliveryNativeFixtureV2 {
+    runtime: NativeRuntime,
+    original: Option<AcknowledgedBornFixture>,
+    root: PathBuf,
+    proposal: Proposal,
+    scope: PairScope,
+    budget: u64,
+    entry: String,
+    paired: bool,
+    original_inventory: BTreeSet<OsString>,
+    owner_setup: Zeroizing<String>,
+}
+pub use super::durable_delivery_admission_v2::{DurableDeliveryFailureV2, DurableDeliveryStageV2};
+impl DurableDeliveryNativeFixtureV2 {
+    pub(in crate::native_ui) fn open(
+        original: AcknowledgedBornFixture,
+        input: ProposalInput,
+        budget: u64,
+    ) -> std::result::Result<Self, DurableNativeEntryFailureV1> {
+        let root = original.root.clone();
+        let mut result = Self::open_existing(root, input, budget, String::new())?;
+        let configured = (|| -> Result<Zeroizing<String>> {
+            let open = result.runtime.open.as_ref().ok_or(Error::Locked)?;
+            let source = open.durable_delivery_entry.as_ref().ok_or(Error::Locked)?;
+            let d = source.original_witness_disclosure()?;
+            let o = original.credentials.origin();
+            if !original.root.starts_with(original.temporary.path())
+                || original.root == original.temporary.path()
+                || source.account().account_id()? != original.account_id
+                || d.endpoint != o.endpoint
+                || d.witness_id != o.witness_id
+                || d.pinned_server_certificate_digest != o.server_certificate_digest
+            {
+                return Err(Error::ReviewMismatch);
+            }
+            Ok(Zeroizing::new(serde_json::to_string(&serde_json::json!({
+                "schema_version":1,"endpoint":d.endpoint,"server_name":d.server_name,"witness_id":d.witness_id,"account_id":d.account_id,"network_profile_id":d.network_profile_id,"policy_digest":d.policy_digest,"pinned_server_certificate_digest":d.pinned_server_certificate_digest,
+                "trusted_server_root_der":o.trusted_server_root_file,"client_certificate_der":o.owner_certificate_file,"client_private_key_pkcs8_der":o.owner_key_file,
+                "operator_name":"Synthetic original never-funded witness","retention_statement":"Exact temporary qualification original only"
+            })).map_err(|_|Error::InvalidData)?))
+        })();
+        result.owner_setup = configured.map_err(|error| DurableNativeEntryFailureV1 {
+            stage: DurableNativeEntryStageV1::FixturePostActivation,
+            error,
+        })?;
+        result.original = Some(original);
+        Ok(result)
+    }
+    pub(in crate::native_ui) fn open_existing(
+        root: PathBuf,
+        input: ProposalInput,
+        budget: u64,
+        owner_setup: String,
+    ) -> std::result::Result<Self, DurableNativeEntryFailureV1> {
+        let mut stage = DurableNativeEntryStageV1::FixturePreflight;
+        let result = (|| -> Result<Self> {
+            let proposal = Proposal::validate(input).map_err(|_| Error::Verification)?;
+            if budget == 0 || !root.is_absolute() {
+                return Err(Error::InvalidData);
+            }
+            let inventory = original_inventory(&root)?;
+            let mut runtime = NativeRuntime::new(None);
+            runtime.root = root.to_str().ok_or(Error::InvalidData)?.into();
+            runtime.password = Zeroizing::new(
+                crate::native_ui::birth_workspace::born_roster_v3::SYNTHETIC_PENDING_PASSWORD
+                    .into(),
+            );
+            if runtime
+                .begin_durable_delivery_entry_v2(false, EPOCH)
+                .is_ok()
+                || runtime.begin_durable_delivery_entry_v2(true, 0).is_ok()
+                || runtime.open.is_some()
+                || runtime.durable_delivery_entry_job.is_some()
+            {
+                return Err(Error::ReviewMismatch);
+            }
+            stage = DurableNativeEntryStageV1::RuntimeActivation;
+            runtime.begin_durable_delivery_entry_v2(true, EPOCH)?;
+            while runtime.durable_delivery_entry_job.is_some() {
+                runtime.poll_durable_delivery_entry_v2(true, EPOCH);
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            if let Some((location, error)) = runtime.take_durable_entry_failure_for_qualification()
+            {
+                stage = location.into();
+                return Err(error);
+            }
+            stage = DurableNativeEntryStageV1::FixturePostActivation;
+            let open = runtime.open.as_ref().ok_or(Error::Locked)?;
+            let source = open
+                .durable_delivery_entry
+                .as_ref()
+                .ok_or(Error::Unavailable)?;
+            source.check_current()?;
+            let account = source.account().account_id()?;
+            require_plain_two_owner_manifest(&proposal, &account)?;
+            let participant = proposal
+                .manifest()
+                .participants
+                .iter()
+                .find(|p| p.account_id == account)
+                .ok_or(Error::ReviewMismatch)?;
+            let scope = PairScope {
+                account_id: account,
+                agreement_id: proposal.manifest().agreement.agreement_id.clone(),
+                participant_id: participant.participant_id.clone(),
+                manifest_digest: proposal.manifest_digest().into(),
+                history_read: true,
+                authorization_export: false,
+                preconstruction_export: true,
+            };
+            if open.supports_ordinary_routes()
+                || open.durable_born_entry.is_some()
+                || open.writer_receipt.is_some()
+                || open.writer_reconciled
+                || open.pairing.is_some()
+                || open.manifest.is_some()
+                || open.ipc.socket_path().starts_with(&root)
+            {
+                return Err(Error::ReviewMismatch);
+            }
+            let entry = open.authority.binding().entry_digest().into();
+            Ok(Self {
+                runtime,
+                original: None,
+                root,
+                proposal,
+                scope,
+                budget,
+                entry,
+                paired: false,
+                original_inventory: inventory,
+                owner_setup: Zeroizing::new(owner_setup),
+            })
+        })();
+        result.map_err(|error| DurableNativeEntryFailureV1 { stage, error })
+    }
+    fn check(&self) -> Result<()> {
+        let open = self.runtime.open.as_ref().ok_or(Error::Locked)?;
+        let source = open
+            .durable_delivery_entry
+            .as_ref()
+            .ok_or(Error::Unavailable)?;
+        source.check_current()?;
+        if source.original_root() != self.root
+            || source.account().account_id()? != self.scope.account_id
+            || open.authority.binding().entry_digest() != self.entry
+            || open.authority.binding() != source.native_binding()
+            || open.supports_ordinary_routes()
+            || open.durable_born_entry.is_some()
+        {
+            return Err(Error::ReviewMismatch);
+        }
+        Ok(())
+    }
+    pub(in crate::native_ui) fn endpoint(&self) -> Result<PathBuf> {
+        self.check()?;
+        Ok(self
+            .runtime
+            .open
+            .as_ref()
+            .ok_or(Error::Locked)?
+            .ipc
+            .socket_path()
+            .into())
+    }
+    pub(in crate::native_ui) fn provider(&self) -> Result<InstalledSignerProvider> {
+        self.check()?;
+        InstalledSignerProvider::qualification_current_process().map_err(|_| Error::Authentication)
+    }
+    pub(in crate::native_ui) fn scope(&self) -> &PairScope {
+        &self.scope
+    }
+    pub(in crate::native_ui) fn deadline(&self) -> Result<Instant> {
+        self.check()?;
+        self.runtime
+            .open
+            .as_ref()
+            .ok_or(Error::Locked)?
+            .authority
+            .binding()
+            .bounded_deadline()
+    }
+    pub(in crate::native_ui) fn entry_digest(&self) -> &str {
+        &self.entry
+    }
+    pub(in crate::native_ui) fn original_root(&self) -> Result<PathBuf> {
+        self.check()?;
+        Ok(self.root.clone())
+    }
+    pub(in crate::native_ui) fn owner_setup_for_reopen(&self) -> Result<String> {
+        self.check()?;
+        if self.owner_setup.is_empty() {
+            return Err(Error::Unavailable);
+        }
+        Ok(self.owner_setup.to_string())
+    }
+    pub(in crate::native_ui) fn poll_pair(&mut self) -> Result<bool> {
+        self.check()?;
+        self.runtime.poll(EPOCH);
+        if let Some(pending) = &self.runtime.pending {
+            if self.paired
+                || !matches!(&pending.operation,Operation::Pair(pair) if pair.scope==self.scope)
+            {
+                return Err(Error::ReviewMismatch);
+            }
+            approve(&mut self.runtime)?;
+            self.paired = true;
+        }
+        if let Some(pairing) = &self.runtime.open.as_ref().ok_or(Error::Locked)?.pairing {
+            pairing.check_current()?;
+            if pairing.peer.scope != self.scope {
+                return Err(Error::ReviewMismatch);
+            }
+            return Ok(self.paired);
+        }
+        Ok(false)
+    }
+    pub(in crate::native_ui) fn accept_exact_manifest(&mut self) -> Result<DurableNativeRecordsV1> {
+        self.check()?;
+        if !self.paired {
+            return Err(Error::Locked);
+        }
+        let open = self.runtime.open.as_ref().ok_or(Error::Locked)?;
+        // Historical readers do not call this. Existing accepted rows are not
+        // overwritten and their references never change in a retained scope.
+        if open.enrollment.is_some() || open.manifest.is_some() {
+            return Err(Error::ReviewMismatch);
+        }
+        self.runtime.proposal = Zeroizing::new(
+            serde_json::to_string(self.proposal.input()).map_err(|_| Error::InvalidData)?,
+        );
+        self.runtime.budget = self.budget.to_string();
+        self.runtime.stage_enrollment(EPOCH)?;
+        approve(&mut self.runtime)?;
+        self.runtime.stage_manifest(EPOCH)?;
+        approve(&mut self.runtime)?;
+        let open = self.runtime.open.as_ref().ok_or(Error::Locked)?;
+        Ok(DurableNativeRecordsV1 {
+            enrollment_ref: open
+                .enrollment
+                .as_ref()
+                .ok_or(Error::ReviewMismatch)?
+                .reference()
+                .into(),
+            accepted_manifest_ref: open
+                .manifest
+                .as_ref()
+                .ok_or(Error::ReviewMismatch)?
+                .reference()
+                .into(),
+        })
+    }
+    pub(in crate::native_ui) fn configure_original_witness(&mut self) -> Result<()> {
+        self.check()?;
+        if self.owner_setup.is_empty() {
+            return Err(Error::Unavailable);
+        }
+        self.runtime.owner_witness_setup = Zeroizing::new(self.owner_setup.to_string());
+        self.runtime.stage_owner_witness_setup(EPOCH)?;
+        approve(&mut self.runtime)?;
+        self.check()
+    }
+    pub(in crate::native_ui) fn poll_data_only(&mut self) -> Result<()> {
+        self.check()?;
+        self.runtime.poll(EPOCH);
+        if self.runtime.pending.is_some() {
+            return Err(Error::ReviewMismatch);
+        }
+        self.check()
+    }
+    pub(in crate::native_ui) fn poll_exact_redisclosure(
+        &mut self,
+        request: &DurableConstructionRedisclosureRequestV1,
+    ) -> Result<bool> {
+        self.check()?;
+        request.validate().map_err(|_| Error::ReviewMismatch)?;
+        self.runtime.poll(EPOCH);
+        let Some(pending) = &self.runtime.pending else {
+            return Ok(false);
+        };
+        let Operation::DurableDeliveryRedisclosureV2(prepared) = &pending.operation else {
+            return Err(Error::ReviewMismatch);
+        };
+        let open = self.runtime.open.as_ref().ok_or(Error::Locked)?;
+        let original = open
+            .journal
+            .prepare_durable_construction_redisclosure_source_v1(
+                &request.original,
+                open.session.as_ref().ok_or(Error::Locked)?,
+            )?;
+        let peer = open.check_pairing()?.peer.clone();
+        if original.redisclosure().is_some()
+            || request.original.expected_request_digest.as_deref()
+                != Some(original.request_digest())
+            || open
+                .enrollment
+                .as_ref()
+                .is_none_or(|e| e.reference() != request.enrollment_ref)
+            || open
+                .manifest
+                .as_ref()
+                .is_none_or(|m| m.reference() != request.accepted_manifest_ref)
+        {
+            return Err(Error::ReviewMismatch);
+        }
+        let mut expected = original.request().clone();
+        expected.operation_id = request.operation_id.clone();
+        expected.enrollment_ref = request.enrollment_ref.clone();
+        expected.accepted_manifest_ref = request.accepted_manifest_ref.clone();
+        expected.scope.constructor.authenticated_local_grant_digest = peer.key_digest.clone();
+        expected.scope.prover.authenticated_local_grant_digest = peer.key_digest.clone();
+        if prepared.request() != &expected {
+            return Err(Error::ReviewMismatch);
+        }
+        // Exercise the actual closed ingress classifier with the real peer:
+        // initial construction is denied, exact redisclosure is distinct.
+        let (stream, _other) = std::os::unix::net::UnixStream::pair()?;
+        if super::durable_delivery_admission_v2::allowed_event(&LocalEvent::DurableConstructionV1 {
+            stream,
+            peer: peer.clone(),
+            request: Box::new(expected.clone()),
+        }) {
+            return Err(Error::ReviewMismatch);
+        }
+        let (stream, _other) = std::os::unix::net::UnixStream::pair()?;
+        if !super::durable_delivery_admission_v2::allowed_event(
+            &LocalEvent::DurableConstructionRedisclosureV1 {
+                stream,
+                peer,
+                request: Box::new(request.clone()),
+            },
+        ) {
+            return Err(Error::ReviewMismatch);
+        }
+        // Whole request equality above includes original material, audience,
+        // captured source and absolute ceiling. Only the maintained recipient
+        // fields may differ; no new scope or capture is synthesized.
+        approve(&mut self.runtime)?;
+        Ok(true)
+    }
+    pub(in crate::native_ui) fn admission_response_received(&self) -> Result<bool> {
+        self.check()?;
+        Ok(self
+            .runtime
+            .open
+            .as_ref()
+            .ok_or(Error::Locked)?
+            .durable_delivery
+            .response_received())
+    }
+    pub(in crate::native_ui) fn begin_admission_history_audit(&mut self) -> Result<()> {
+        self.check()?;
+        self.runtime.begin_durable_delivery_history_audit_v2(EPOCH)
+    }
+    pub(in crate::native_ui) fn poll_exact_import(
+        &mut self,
+        request: &DurableReviewDeliveryRequestV1,
+        identity: &FixedProposalIdentityV1,
+    ) -> Result<bool> {
+        self.poll_data_only()?;
+        let open = self.runtime.open.as_ref().ok_or(Error::Locked)?;
+        if open.writer_receipt.is_some()
+            || open.writer_reconciled
+            || self.runtime.signing_job.is_some()
+        {
+            return Err(Error::ReviewMismatch);
+        }
+        let Some(imported) = &open.durable_delivery.imported else {
+            return Ok(false);
+        };
+        if &imported.request != request || imported.fixed.verified().identity() != identity {
+            return Err(Error::ReviewMismatch);
+        }
+        Ok(true)
+    }
+    pub(in crate::native_ui) fn poll_admission_review(
+        &mut self,
+        expected:&crate::authority_bridge::durable_delivery_admission_ipc_v2::DurableDeliveryAdmissionRequestV2,
+    ) -> Result<Option<wholepact_authority::OwnerControlRequest>> {
+        self.check()?;
+        self.runtime.poll(EPOCH);
+        let Some(pending) = &self.runtime.pending else {
+            return Ok(None);
+        };
+        let Operation::DurableDeliveryV2(prepared) = &pending.operation else {
+            return Err(Error::ReviewMismatch);
+        };
+        let request = prepared.request();
+        let wholepact_authority::OwnerControl::AdmitDurablePaymentWithDeliveryV2 { record } =
+            &request.control
+        else {
+            return Err(Error::ReviewMismatch);
+        };
+        if record.scope.delivery != expected.delivery
+            || record.scope.accepted_manifest_ref != expected.import_request.accepted_manifest_ref
+            || record.scope.authorization.fixed.proposal_binding
+                != expected.import_request.proposal_binding
+        {
+            return Err(Error::ReviewMismatch);
+        }
+        Ok(Some(request.clone()))
+    }
+    pub(in crate::native_ui) fn approve_admission(&mut self) -> Result<()> {
+        self.check()?;
+        if !matches!(
+            self.runtime.pending.as_ref().map(|p| &p.operation),
+            Some(Operation::DurableDeliveryV2(_))
+        ) {
+            return Err(Error::ReviewMismatch);
+        }
+        approve(&mut self.runtime)
+    }
+    pub(in crate::native_ui) fn admission_status(&self)->Result<Option<crate::authority_bridge::durable_delivery_admission_ipc_v2::DurableDeliveryAdmissionStatusV2>>{
+        self.check()?;
+        Ok(self
+            .runtime
+            .open
+            .as_ref()
+            .ok_or(Error::Locked)?
+            .durable_delivery
+            .status
+            .clone())
+    }
+    pub(in crate::native_ui) fn take_failure(&mut self) -> Option<DurableDeliveryFailureV2> {
+        self.runtime
+            .open
+            .as_mut()
+            .and_then(|o| o.durable_delivery.failure.take())
+    }
+    pub(in crate::native_ui) fn require_financial_routes_denied(&mut self) -> Result<()> {
+        self.check()?;
+        if self.runtime.prepare_writer_session(EPOCH).is_ok()
+            || self.runtime.prepare_writer_activation(EPOCH).is_ok()
+            || self.runtime.prepare_writer_reconciliation(EPOCH).is_ok()
+            || self.runtime.stage_provider(EPOCH).is_ok()
+            || self.runtime.stage_wallet_setup(EPOCH).is_ok()
+            || self.runtime.stage_witness_setup(EPOCH).is_ok()
+            || self.runtime.prepare_durable_admission_v1(EPOCH).is_ok()
+            || self.runtime.start_durable_wallet_review_v1(EPOCH).is_ok()
+            || self.runtime.pending.is_some()
+            || self.runtime.signing_job.is_some()
+        {
+            return Err(Error::ReviewMismatch);
+        }
+        let open = self.runtime.open.as_ref().ok_or(Error::Locked)?;
+        let peer = open.check_pairing()?.peer.clone();
+        // Exercise the SAME closed ingress classifier used before every real
+        // handler with the genuine held peer. These inert negative descriptors
+        // create no approval and are never sent to a signer or provider.
+        let history = HistoryRequest {
+            authorization_id: "synthetic-v2-denied-financial-route".into(),
+            expected_original_consent_ref: "01".repeat(32),
+            expected_enrollment_ref: "02".repeat(32),
+            expected_manifest_ref: "03".repeat(32),
+        };
+        for request in [
+            crate::ipc::AppRequest::RequestReview {
+                request_id: "synthetic-v2-denied-review".into(),
+                accepted_manifest_digest: self.scope.manifest_digest.clone(),
+                pczt_hex: String::new(),
+            },
+            crate::ipc::AppRequest::AcquireOriginalAuthorization {
+                history: history.clone(),
+            },
+            crate::ipc::AppRequest::RetrieveAuthorization {
+                history: history.clone(),
+            },
+        ] {
+            if super::durable_delivery_admission_v2::allowed_event(&LocalEvent::Request {
+                peer: peer.clone(),
+                request,
+            }) {
+                return Err(Error::ReviewMismatch);
+            }
+        }
+        let request = crate::authority_bridge::dispatch_ipc::DispatchRequest {
+            history,
+            operation_id: "synthetic-v2-denied-dispatch".into(),
+            backend: crate::authority_bridge::dispatch_ipc::BackendDisclosure {
+                schema_version: 1,
+                profile_id: "synthetic-v2-denied-profile".into(),
+                principal_id: "synthetic-v2-denied-principal".into(),
+                agreement_id: self.scope.agreement_id.clone(),
+                submission_journal_identity: "04".repeat(32),
+                descriptor: crate::authority_bridge::dispatch_ipc::DispatchTransaction {
+                    operation_id: "synthetic-v2-denied-submission".into(),
+                    obligation_id: self.proposal.manifest().agreement.obligation_id.clone(),
+                    proposal_id: self.proposal.input().proposal_id.clone(),
+                    transaction_id: "05".repeat(32),
+                    bytes_sha256: "06".repeat(32),
+                    expiry_height: 1,
+                    network: "testnet".into(),
+                    consensus_branch_id: 0x77190ad9,
+                },
+                backend: crate::authority_bridge::dispatch_ipc::DispatchBackend {
+                    source_id: "synthetic-provider".into(),
+                    endpoint: "https://provider.example".into(),
+                    trust_profile: "single_tls_provider_report_not_consensus".into(),
+                },
+                purpose: "submit_exact_retained_transaction".into(),
+                confidence: "single_tls_provider_report_not_consensus".into(),
+                minimum_expiry_margin_blocks: 1,
+            },
+        };
+        let (stream, _other) = std::os::unix::net::UnixStream::pair()?;
+        if super::durable_delivery_admission_v2::allowed_event(&LocalEvent::Dispatch {
+            peer,
+            stream,
+            request: Box::new(request),
+        }) || open.witness_job.is_some()
+            || open.wallet_job.is_some()
+            || open.durable_wallet_job.is_some()
+            || open.writer_receipt.is_some()
+            || open.writer_reconciled
+        {
+            return Err(Error::ReviewMismatch);
+        }
+        self.check()
+    }
+    pub(in crate::native_ui) fn close(mut self) -> Result<AcknowledgedBornFixture> {
+        self.drain_close()?;
+        if original_inventory(&self.root)? != self.original_inventory {
+            return Err(Error::ReviewMismatch);
+        }
+        self.original.take().ok_or(Error::Unavailable)
+    }
+    pub(in crate::native_ui) fn close_existing(mut self) -> Result<()> {
+        self.drain_close()?;
+        if original_inventory(&self.root)? != self.original_inventory {
+            return Err(Error::ReviewMismatch);
+        }
+        Ok(())
+    }
+    fn drain_close(&mut self) -> Result<()> {
+        self.runtime.lock();
+        while !self.runtime.closing_accounts.is_empty() {
+            self.runtime
+                .closing_accounts
+                .retain(|done| !done.load(Ordering::Acquire));
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        if self.runtime.open.is_some()
+            || self.runtime.pending.is_some()
+            || self.runtime.durable_delivery_entry_job.is_some()
+        {
+            return Err(Error::Uncertain);
+        }
+        Ok(())
+    }
+}
+impl Drop for DurableDeliveryNativeFixtureV2 {
+    fn drop(&mut self) {
+        let _ = self.drain_close();
+    }
+}
+
+/// Private-file selector only, with no credentials, original data ownership or
+/// restored native authority. The actual opener reauthenticates every original.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DurableDeliveryReopenSelectorV2 {
+    pub version: u16,
+    pub root: PathBuf,
+    pub proposal: ProposalInput,
+    pub aggregate_budget_zatoshis: u64,
+    pub account_id: String,
+    pub owner_setup_json: String,
+    /// Inert close-time observation. All original owners must be drained and
+    /// one actual shared container preserved before any selectors are published.
+    pub original_directory_preserved: bool,
+}
+impl DurableDeliveryNativeFixtureV2 {
+    pub(in crate::native_ui) fn close_preserving_originals(
+        mut self,
+    ) -> Result<DurableDeliveryReopenSelectorV2> {
+        self.check()?;
+        let mut selector = DurableDeliveryReopenSelectorV2 {
+            version: 2,
+            root: self.root.clone(),
+            proposal: self.proposal.input().clone(),
+            aggregate_budget_zatoshis: self.budget,
+            account_id: self.scope.account_id.clone(),
+            owner_setup_json: self.owner_setup.to_string(),
+            original_directory_preserved: false,
+        };
+        if selector.owner_setup_json.is_empty()
+            || serde_json::to_vec(&selector)
+                .map_err(|_| Error::InvalidData)?
+                .len()
+                > 256 * 1024
+        {
+            return Err(Error::InvalidData);
+        }
+        self.drain_close()?;
+        if original_inventory(&self.root)? != self.original_inventory {
+            return Err(Error::ReviewMismatch);
+        }
+        let original = self.original.take().ok_or(Error::Unavailable)?;
+        // Keep ONLY the genuinely held source's own temporary container after
+        // all native/IPC workers drained. No caller-selected directory is kept.
+        // Multiple original accounts genuinely share one container. Each
+        // closed owner releases its share; exactly the last drained owner can
+        // consume and preserve the actual TempDir. Earlier selectors must not
+        // be published until that final preservation has been established.
+        if let Some(directory) = Arc::into_inner(original.temporary) {
+            let kept = directory.keep();
+            if !self.root.starts_with(&kept) || self.root == kept {
+                return Err(Error::ReviewMismatch);
+            }
+            selector.original_directory_preserved = true;
+        }
+        // Independent witness fixture custody must separately keep its existing
+        // credential installation before that fixture is shut down. Paths in
+        // this selector cannot manufacture that custody or generate credentials.
+        drop(original.credentials);
+        Ok(selector)
+    }
+}
+impl DurableNativeEntryFailureV1 {
+    pub(in crate::native_ui) fn for_delivery_selector_mismatch() -> Self {
+        Self {
+            stage: DurableNativeEntryStageV1::FixturePostActivation,
+            error: Error::ReviewMismatch,
+        }
     }
 }

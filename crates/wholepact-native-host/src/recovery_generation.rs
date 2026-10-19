@@ -152,6 +152,22 @@ pub(crate) fn unseal_private_workspace_dependency_v1(
     Ok(plain)
 }
 
+#[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
+pub(crate) fn seal_durable_dispatcher_v2(secrets: &Secrets, pending: bool, bytes: &[u8]) -> Result<Vec<u8>> {
+    let max = if pending { 262_144 } else { 16_384 };
+    if bytes.len() > max { return Err(Error::Invalid); }
+    let result = seal(secrets, if pending { b"durable-dispatcher:pending:v2" } else { b"durable-dispatcher:commit:v2" }, bytes)?;
+    if result.len() > max + 40 { return Err(Error::Invalid); }
+    Ok(result)
+}
+#[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
+pub(crate) fn unseal_durable_dispatcher_v2(secrets: &Secrets, pending: bool, bytes: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+    let max = if pending { 262_144 } else { 16_384 };
+    if bytes.len() > max+ 40 { return Err(Error::Invalid); }
+    let result = unseal(secrets, if pending { b"durable-dispatcher:pending:v2" } else { b"durable-dispatcher:commit:v2" }, bytes)?;
+    if result.len() > max { return Err(Error::Invalid); }
+    Ok(result)
+}
 pub(crate) struct PendingGeneration {
     source: Inventory,
     directory: Directory,
@@ -1095,6 +1111,7 @@ mod publication {
     ))]
     pub(crate) use layered_publication::{
         open_private_workspace_original_store_v1, open_workspace_publication_source_store_v1,
+        open_workspace_dispatcher_original_store_v4, open_dispatcher_publication_source_store_v4,
     };
     #[cfg(all(feature = "manual-admission", target_os = "linux"))]
     pub(crate) mod manual_target;
@@ -1110,6 +1127,7 @@ mod publication {
 ))]
 pub(crate) use publication::{
     open_private_workspace_original_store_v1, open_workspace_publication_source_store_v1,
+        open_workspace_dispatcher_original_store_v4, open_dispatcher_publication_source_store_v4,
 };
 
 #[cfg(all(feature = "manual-admission", target_os = "linux"))]

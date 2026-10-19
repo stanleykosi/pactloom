@@ -119,6 +119,8 @@ except Exception:
     sys.exit(1)
 print('CI_OBSERVATION_WAVE passed=true native_authority=false', flush=True)
 PY_WAVE
+# New same-artifact prospective admission, actual death and original historical reopening.
+TMPDIR="$runtime_root" python3 -B scripts/ci-synthetic-output.py "$executable" durable-delivery-admission
 # Separate original-workspace producer SIGKILL and fresh-process read-only reopening.
 TMPDIR="$runtime_root" python3 -B scripts/ci-synthetic-output.py "$executable" durable-private-reopen
 TMPDIR="$runtime_root" python3 -B scripts/ci-synthetic-output.py "$executable" durable-owner-reopen

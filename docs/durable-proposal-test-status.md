@@ -1,8 +1,28 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-19, 15:45 UTC.
+Updated: 2026-10-19, 18:32 UTC.
 
-**The bounded synthetic native two-owner fixed-signing fixture passed. Product qualification remains incomplete: no public testnet settlement, OS-process restart recovery, attended GUI reliability, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
+**CI33 passed the bounded synthetic original-private-workspace completed-fixed SIGKILL/fresh-process read-only reopen path and all listed regressions. Product qualification remains incomplete: no public testnet settlement, restarted acquired financial session, attended GUI reliability, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
+
+## Delivery admission B1: source and component gates pass; native qualification pending
+
+The prospective delivery-admission milestone is implemented and independently source-reviewed across 71 source/test paths. The final all-feature five-library release build, 73 exact component tests, and one isolated storage self-child process-death/reap test pass. All 159 Python output/routing tests and shell syntax pass. Each selected Rust test was confirmed in its compiled catalogue and executed exactly once; zero-selected tests are not accepted. Non-synthetic build/compatibility and genuine same-artifact two-owner native admission, producer death and fresh original reader remain qualification gates, not completed evidence.
+
+The new route branches from the actual completed-fixed original artifact. A distinct, bounded native export commits its exposure state before private bytes; both Signers retain the full prospective delivery scope, and independent Witness history must confirm the exact two-owner result. It preserves committed exposure and uncertain outcomes rather than replacing requests, resetting original files or extending deadlines. The v4 original-file publication preserves the workspace anchor and adds a mandatory dispatcher anchor; read-only reopening does not grant financial authority.
+
+The separate new native qualification phase is ordered before the previous passing lifecycle phases. Existing gates remain. The component process test is not the complete native lifecycle and must not be reported as such. V2 acquisition, financial key use, extraction, dispatch and settlement stay denied. This milestone does not establish portable recovery, real credential enrollment, attended GUI reliability, deployment or public-testnet payment.
+
+Compiler integration corrections were narrow fixture/initializer/return fixes. The two initial component failures were corrected in tests: retained-session deletion must remain rejected, and changed native-review evidence must be rejected by the full original-disclosure and history correlation rather than an incomplete ledger-only predicate. Production retention and authorization guards were not relaxed. The complete 73-test inventory then passed.
+
+## CI33 PASS: actual original-workspace completed-fixed restart and all listed regression gates
+
+[Run 39280666819](https://github.com/stanleykosi/pactloom/actions/runs/39280666819), qualifier `b26eb558feb3d2d5feb38c083da0c90eced0e800`, source implementation `e14e4a90808c9c3f696e0e8e7abb14d180486ca4`, tree `ecad6b90353c698c623eb797ec4d175b4cdc26ae`, passed. GitHub Actions' incident delayed status reporting; retrieved job logs establish the result, and the run API subsequently confirmed terminal success at the16:42 UTC check.
+
+At16:09:28 UTC the actual source-owning producer completed and cryptographically verified its fixed checkpoint, was SIGKILLed, and was reaped with original group absence observed. A fresh process reopened the same original files read-only. Exact identity, checkpoint and idempotency were preserved; the reader succeeded with no effects and verified cleanup. The private-workspace marker explicitly leaves authorization/distribution/public-chain/attended-native flags false. This is real isolated synthetic process-death/reopen evidence, not a process simulation.
+
+Later separate fixture gates passed: durable owner/session reopen16:11:29; durable fixed signing16:19:09; same-request Acquire reply-loss recovery16:23:20. Signer validation41, endpoint1 with2 cycles, authority renderer6 and immutable replay3 passed, followed by empty runtime-container removal and the all-gates success marker16:34:44. Early Python153, Host97, encrypted bootstrap and real TCP overlap also passed.
+
+These separate fresh phases must not be stitched into a claim that the restarted private artifact completed one joint payment. Still unqualified: that same artifact's financial admission, both signatures, extraction, actual submission and settlement; acquired financial-session restart; portable backup recovery; attended GUI/Windows; deployment. Future delivery scope requires its own explicit authority and lineage, never reuse of the local checkpoint AdmitOriginal or existing read-only compound views. Existing v1 behavior and no-export boundaries remain unchanged.
 
 ## CI32: observation timeout cleared; repeated permission composition still ages held chain evidence
 

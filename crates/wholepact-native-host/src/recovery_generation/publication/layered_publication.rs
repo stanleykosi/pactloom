@@ -272,6 +272,10 @@ enum WorkspaceInventory<'a> {
         target_os = "linux"
     ))]
     Publication(&'a crate::host::durable_private_workspace_v1::OriginalWorkspacePublicationV1),
+#[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
+    CombinedOriginal(&'a crate::host::durable_dispatcher_v2::OriginalWorkspaceDispatcherFilesV4),
+#[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
+    CombinedPublication(&'a crate::host::durable_dispatcher_v2::OriginalWorkspaceDispatcherPublicationV4),
     // Retain the lifetime in unsupported configurations without a usable variant.
     #[cfg(not(all(
         feature = "durable-proposal",
@@ -316,6 +320,22 @@ pub(crate) fn open_workspace_publication_source_store_v1(
         WorkspaceInventory::Publication(files),
     )
 }
+#[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
+pub(crate) fn open_workspace_dispatcher_original_store_v4(directory: &Directory, secrets: &Secrets, files: &crate::host::durable_dispatcher_v2::OriginalWorkspaceDispatcherFilesV4) -> Result<wholepact_store::Store> {
+    // Preflight is before verify_auxiliaries or any maintained mutable constructor.
+    let submission = files.submission_preflight(directory, secrets)?;
+    let result = open_layered_checked_inner(directory, secrets, &directory.read(COMMIT, MAX_DOCUMENT)?, false, WorkspaceInventory::CombinedOriginal(files))?;
+    submission.check_identity_only()?;
+    Ok(result)
+}
+#[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
+pub(crate) fn open_dispatcher_publication_source_store_v4(directory: &Directory, secrets: &Secrets, files: &crate::host::durable_dispatcher_v2::OriginalWorkspaceDispatcherPublicationV4) -> Result<wholepact_store::Store> {
+    // Preflight is before verify_auxiliaries or any maintained mutable constructor.
+    let submission = files.submission_preflight(directory, secrets)?;
+    let result = open_layered_checked_inner(directory, secrets, &directory.read(COMMIT, MAX_DOCUMENT)?, false, WorkspaceInventory::CombinedPublication(files))?;
+    submission.check_identity_only()?;
+    Ok(result)
+}
 fn open_layered_checked_inner(
     directory: &Directory,
     secrets: &Secrets,
@@ -351,6 +371,16 @@ fn open_layered_checked_inner(
             if !matches!(version, 1 | 2 | 4) {
                 return Err(Error::RecoveryFinancialUnsupported);
             }
+            files.check_inventory(directory, secrets)?;
+        }
+#[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
+        WorkspaceInventory::CombinedOriginal(files) => {
+            if !matches!(version, 1 | 2 | 4) { return Err(Error::RecoveryFinancialUnsupported); }
+            files.check_inventory(directory, secrets)?;
+        }
+#[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
+        WorkspaceInventory::CombinedPublication(files) => {
+            if !matches!(version, 1 | 2 | 4) { return Err(Error::RecoveryFinancialUnsupported); }
             files.check_inventory(directory, secrets)?;
         }
         #[cfg(not(all(

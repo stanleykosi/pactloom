@@ -8,12 +8,13 @@ pub(crate) use lifecycle::{NativePublicationLease, NativeWorkerLease};
 pub(crate) use window::NativeBornOfflineArtifactsDecisionV1;
 pub(crate) use window::{
     NativeBornOfflineEnrollmentDecisionV1, NativeConstructionTransportGrantDecisionV1,
-    NativeDurablePaymentAdmissionDecisionV1, NativeEnrollmentDecision,
-    NativeManualEnrollmentExtensionDecision, NativeManualRosterConstructionDecisionV2,
-    NativeManualRosterConstructionDecisionV3, NativeManualRosterContinuationDecisionV2,
-    NativeManualRosterExtensionDecisionV2, NativeManualSessionContinuationDecision,
-    NativeNamespaceBackupDecision, NativeNamespaceRecoveryDisclosureDecision,
-    NativePermanentExclusionDecisionV1, NativeSetupDecision,
+    NativeDurablePaymentAdmissionDecisionV1, NativeDurableDeliveryAdmissionDecisionV2,
+    NativeEnrollmentDecision, NativeManualEnrollmentExtensionDecision,
+    NativeManualRosterConstructionDecisionV2, NativeManualRosterConstructionDecisionV3,
+    NativeManualRosterContinuationDecisionV2, NativeManualRosterExtensionDecisionV2,
+    NativeManualSessionContinuationDecision, NativeNamespaceBackupDecision,
+    NativeNamespaceRecoveryDisclosureDecision, NativePermanentExclusionDecisionV1,
+    NativeSetupDecision,
 };
 mod window;
 #[cfg(feature = "synthetic-qualification")]
@@ -31,9 +32,7 @@ pub use window::ephemeral_fixture_v1::{
     feature = "synthetic-qualification",
     feature = "born-offline-witness-owner"
 ))]
-pub use window::ephemeral_fixture_v1::{
-    EphemeralBornTransportKeyV1, EphemeralBornTransportPublicPinV1,
-};
+pub use window::ephemeral_fixture_v1::{EphemeralBornTransportKeyV1, EphemeralBornTransportPublicPinV1};
 
 use std::fmt;
 use winit::platform::wayland::EventLoopBuilderExtWayland;

@@ -104,11 +104,13 @@ pub struct ReconciledAuthorityHistory {
 }
 impl ReconciledAuthorityHistory {
     pub(crate) fn require_no_durable_payment_v1(&self) -> Result<()> {
-        if self
-            .owner_controls
-            .values()
-            .any(|r| matches!(r.control, OwnerControl::AdmitDurablePaymentV1 { .. }))
-        {
+        if self.owner_controls.values().any(|r| {
+            matches!(
+                r.control,
+                OwnerControl::AdmitDurablePaymentV1 { .. }
+                    | OwnerControl::AdmitDurablePaymentWithDeliveryV2 { .. }
+            )
+        }) {
             return Err(AuthorityError::PolicyDenied);
         }
         Ok(())
@@ -624,6 +626,10 @@ impl ReservationPermit {
 // frame is already bounded and boxing would not change the protocol boundary.
 #[allow(clippy::large_enum_variant)]
 pub enum OwnerControl {
+    /// Native-only prospective full-scope admission. Never a financial permit.
+    AdmitDurablePaymentWithDeliveryV2 {
+        record: Box<crate::durable_delivery_admission_v2::DurableDeliveryAdmissionRecordV2>,
+    },
     /// Historical data only. Every generic live append path rejects this variant.
     AdmitDurablePaymentV1 {
         record: Box<crate::durable_payment_v1::DurablePaymentAdmissionRecordV1>,

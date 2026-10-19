@@ -404,3 +404,15 @@ pub use named_recipient_setup::{OriginalNamedPaymentArtifactsV1, OriginalNamedRe
 #[cfg(test)]
 #[path = "durable_payment_admission_schema19_tests.rs"]
 mod durable_payment_admission_schema19_tests;
+
+pub(crate) use authority::durable_delivery_admission_intent_v2;
+mod financial_admission_intents;
+pub(crate) use durable_delivery_admission_intent_v2::RetainedDurableDeliveryAdmissionIntentV2;
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "native-ui",
+    target_os = "linux"
+))]
+pub(crate) use durable_delivery_admission_intent_v2::{
+    ApprovedDurableDeliveryAdmissionIntentV2, PreparedDurableDeliveryAdmissionIntentV2,
+};

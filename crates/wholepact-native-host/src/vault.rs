@@ -47,11 +47,11 @@ impl Secrets {
         Ok(self)
     }
     pub(crate) fn generation_plan_digest(&self) -> Option<&[u8]> {
-        matches!(self.bytes[0], 2 | 3).then(|| &self.bytes[LENGTH..LENGTH + 32])
+        matches!(self.bytes[0], 2 | 3 | 4).then(|| &self.bytes[LENGTH..LENGTH + 32])
     }
     #[cfg(feature = "financial-runtime")]
     pub(crate) fn generation_seal_key(&self) -> Result<Zeroizing<[u8; 32]>> {
-        if !matches!(self.bytes[0], 2 | 3) {
+        if !matches!(self.bytes[0], 2 | 3 | 4) {
             return Err(Error::Invalid);
         }
         Ok(Zeroizing::new(
@@ -83,10 +83,9 @@ impl Secrets {
         (self.bytes[0] == 3).then(|| &self.bytes[LENGTH + 64..LENGTH + 96])
     }
     pub(crate) fn require_portable_legacy(&self) -> Result<()> {
-        if self.private_workspace_anchor().is_some() {
-            return Err(Error::Invalid);
-        }
-        Ok(())
+        if (self.bytes.first() == Some(&1) && self.bytes.len() == LENGTH)
+            || (self.bytes.first() == Some(&2) && self.bytes.len() == LENGTH + 64)
+        { Ok(()) } else { Err(Error::Invalid) }
     }
     #[cfg(feature = "financial-runtime")]
     pub(crate) fn open_private_workspace_v3(bytes: &[u8], password: &[u8]) -> Result<Self> {
@@ -96,6 +95,36 @@ impl Secrets {
         }
         Ok(Self { bytes })
     }
+    /// The only next layout: append one dispatcher anchor to an exact v3.
+    #[cfg(feature = "financial-runtime")]
+    pub(crate) fn bind_workspace_dispatcher_v4(mut self, anchor: [u8; 32]) -> Result<Self> {
+        if self.bytes.first() != Some(&3) || self.bytes.len() != LENGTH + 96 {
+            return Err(Error::Invalid);
+        }
+        self.bytes[0] = 4;
+        self.bytes.extend_from_slice(&anchor);
+        Ok(self)
+    }
+    #[cfg(feature = "financial-runtime")]
+    pub(crate) fn open_workspace_dispatcher_v4(bytes: &[u8], password: &[u8]) -> Result<Self> {
+        let bytes = open(MAGIC, password, bytes)?;
+        if bytes.first() != Some(&4) || bytes.len() != LENGTH + 128 {
+            return Err(Error::Invalid);
+        }
+        Ok(Self { bytes })
+    }
+    #[cfg(feature = "financial-runtime")]
+    pub(crate) fn combined_workspace_anchor_v4(&self) -> Option<&[u8]> {
+        (self.bytes.first() == Some(&4) && self.bytes.len() == LENGTH + 128)
+            .then(|| &self.bytes[LENGTH + 64..LENGTH + 96])
+    }
+    #[cfg(feature = "financial-runtime")]
+    pub(crate) fn workspace_dispatcher_anchor_v4(&self) -> Option<&[u8]> {
+        (self.bytes.first() == Some(&4) && self.bytes.len() == LENGTH + 128)
+            .then(|| &self.bytes[LENGTH + 96..LENGTH + 128])
+    }
+    #[cfg(test)]
+    pub(crate) fn dispatcher_test_payload(&self) -> &[u8] { &self.bytes }
     pub(crate) fn same_recovery_material(&self, other: &Self) -> bool {
         self.bytes.as_slice() == other.bytes.as_slice()
     }
