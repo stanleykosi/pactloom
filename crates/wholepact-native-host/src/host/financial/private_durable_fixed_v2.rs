@@ -515,6 +515,31 @@ fn wall_seconds() -> Result<u64> {
         .map_err(|_| Error::Permission)
 }
 
+#[derive(Clone, Copy)]
+enum CurrentApprovalModeV2 {
+    ReviewMissing,
+    CachedOnly,
+}
+
+/// A missing approval may reach review only in the original foreground path.
+/// Cached denials never fall back to review, and every hit rechecks the actual
+/// original native approval before current material/source restrictions.
+fn current_approval_permission_v2<T>(
+    mode: CurrentApprovalModeV2,
+    cached: Option<&T>,
+    exact: impl FnOnce(&T) -> bool,
+    native: impl FnOnce(&T) -> bool,
+    current: impl FnOnce() -> bool,
+) -> Option<bool> {
+    match cached {
+        Some(approval) => Some(exact(approval) && native(approval) && current()),
+        None => match mode {
+            CurrentApprovalModeV2::ReviewMissing => None,
+            CurrentApprovalModeV2::CachedOnly => Some(false),
+        },
+    }
+}
+
 /// A real current Host privacy decision, not native owner provenance. The sealed
 /// native disclosure still has to be consumed by the maintained Engine intake.
 /// Every callback rechecks actual originals without reentering the proof mutex.
@@ -630,12 +655,13 @@ impl<'a, 'host> CurrentMaterialPrivacyV2<'a, 'host> {
         Ok(approved.iter().map(|(scope, _, _)| scope.clone()).collect())
     }
 }
-impl LocalDurableMaterialConsentV1 for CurrentMaterialPrivacyV2<'_, '_> {
-    fn permits(
+impl CurrentMaterialPrivacyV2<'_, '_> {
+    fn permits_current(
         &self,
         scope: &DurableConstructionScopeV1,
         material: &str,
         action: DurableMaterialActionV1,
+        mode: CurrentApprovalModeV2,
     ) -> bool {
         let Some(action) = material_action_tag(action) else {
             return false;
@@ -652,20 +678,26 @@ impl LocalDurableMaterialConsentV1 for CurrentMaterialPrivacyV2<'_, '_> {
         let Ok(mut approved) = self.approved.lock() else {
             return false;
         };
-        if let Some((original, digest, approval)) = approved
-            .iter()
-            .find(|(s, _, _)| s.account_id == scope.account_id)
-        {
-            return original == scope
-                && digest == material
-                && observed_private_permission_at_v1(
+        if let Some(allowed) = current_approval_permission_v2(
+            mode,
+            approved
+                .iter()
+                .find(|(s, _, _)| s.account_id == scope.account_id),
+            |(original, digest, _)| original == scope && digest == material,
+            |(_, _, approval)| {
+                observed_private_permission_at_v1(
                     PrivateDiagnosticSiteV1::HostMaterialNativeCheck,
                     approval.check(),
                 )
-                && observed_private_permission_at_v1(
+            },
+            || {
+                observed_private_permission_at_v1(
                     PrivateDiagnosticSiteV1::HostMaterialScope,
                     self.scope_current(scope),
-                );
+                )
+            },
+        ) {
+            return allowed;
         }
         if approved.len() >= 2 {
             return false;
@@ -690,6 +722,34 @@ impl LocalDurableMaterialConsentV1 for CurrentMaterialPrivacyV2<'_, '_> {
         true
     }
 }
+impl LocalDurableMaterialConsentV1 for CurrentMaterialPrivacyV2<'_, '_> {
+    fn permits(
+        &self,
+        scope: &DurableConstructionScopeV1,
+        material: &str,
+        action: DurableMaterialActionV1,
+    ) -> bool {
+        self.permits_current(
+            scope,
+            material,
+            action,
+            CurrentApprovalModeV2::ReviewMissing,
+        )
+    }
+}
+/// Borrow the original approval cache without any ability to prompt on a miss.
+struct CachedMaterialPrivacyV2<'cache, 'a, 'host>(&'cache CurrentMaterialPrivacyV2<'a, 'host>);
+impl LocalDurableMaterialConsentV1 for CachedMaterialPrivacyV2<'_, '_, '_> {
+    fn permits(
+        &self,
+        scope: &DurableConstructionScopeV1,
+        material: &str,
+        action: DurableMaterialActionV1,
+    ) -> bool {
+        self.0
+            .permits_current(scope, material, action, CurrentApprovalModeV2::CachedOnly)
+    }
+}
 fn valid_commitment(value: &str) -> bool {
     value.len() == 64
         && value
@@ -702,8 +762,13 @@ struct CurrentProofPrivacyV2<'a, 'host> {
     allowed: Vec<LocalAction>,
     approved: Mutex<Vec<(CheckpointScope, LocalAction, HistoricalApproval)>>,
 }
-impl LocalProofConsent for CurrentProofPrivacyV2<'_, '_> {
-    fn permits(&self, scope: &CheckpointScope, action: LocalAction) -> bool {
+impl CurrentProofPrivacyV2<'_, '_> {
+    fn permits_current(
+        &self,
+        scope: &CheckpointScope,
+        action: LocalAction,
+        mode: CurrentApprovalModeV2,
+    ) -> bool {
         if !self.allowed.contains(&action) {
             return false;
         }
@@ -757,14 +822,24 @@ impl LocalProofConsent for CurrentProofPrivacyV2<'_, '_> {
         if approved.iter().any(|(prior, _, _)| prior != scope) {
             return false;
         }
-        if let Some((_, _, native)) = approved.iter().find(|(_, a, _)| *a == action) {
-            return observed_private_permission_at_v1(
-                PrivateDiagnosticSiteV1::HostProofNativeCheck,
-                native.check(),
-            ) && observed_private_permission_at_v1(
-                PrivateDiagnosticSiteV1::HostProofScope,
-                self.material.check_complete(),
-            );
+        if let Some(allowed) = current_approval_permission_v2(
+            mode,
+            approved.iter().find(|(_, a, _)| *a == action),
+            |(original, approved_action, _)| original == scope && *approved_action == action,
+            |(_, _, native)| {
+                observed_private_permission_at_v1(
+                    PrivateDiagnosticSiteV1::HostProofNativeCheck,
+                    native.check(),
+                )
+            },
+            || {
+                observed_private_permission_at_v1(
+                    PrivateDiagnosticSiteV1::HostProofScope,
+                    self.material.check_complete(),
+                )
+            },
+        ) {
+            return allowed;
         }
         let Ok(detail) = serde_json::to_string_pretty(scope) else {
             return false;
@@ -783,6 +858,18 @@ impl LocalProofConsent for CurrentProofPrivacyV2<'_, '_> {
         }
         approved.push((scope.clone(), action, native));
         true
+    }
+}
+impl LocalProofConsent for CurrentProofPrivacyV2<'_, '_> {
+    fn permits(&self, scope: &CheckpointScope, action: LocalAction) -> bool {
+        self.permits_current(scope, action, CurrentApprovalModeV2::ReviewMissing)
+    }
+}
+struct CachedProofPrivacyV2<'cache, 'a, 'host>(&'cache CurrentProofPrivacyV2<'a, 'host>);
+impl LocalProofConsent for CachedProofPrivacyV2<'_, '_, '_> {
+    fn permits(&self, scope: &CheckpointScope, action: LocalAction) -> bool {
+        self.0
+            .permits_current(scope, action, CurrentApprovalModeV2::CachedOnly)
     }
 }
 
@@ -1412,6 +1499,7 @@ impl<'host> PrivateFixedSessionV2<'host> {
             .owner
             .exact_fixed_action_v2(PrivateWorkspaceActionV1::ObserveExactMaterial)?;
         let mut fresh = Vec::new();
+        let mut scan_approvals = Vec::new();
         for index in 0..2 {
             let (scope, backend) = self.captured[index].as_ref().ok_or(Error::Invalid)?;
             let wallet = &mut self.cache.wallets[index];
@@ -1449,8 +1537,8 @@ impl<'host> PrivateFixedSessionV2<'host> {
             );
             observe.check()?;
             native.check()?;
+            scan_approvals.push(native);
         }
-        drop(observe);
         complete_private_stage(PrivateBoundaryV2::Observe);
         begin_private_stage(PrivateBoundaryV2::Checkpoint);
         let checkpoint_diagnostic =
@@ -1473,32 +1561,100 @@ impl<'host> PrivateFixedSessionV2<'host> {
                 );
                 error
             })?;
-        let [left, right] = &mut self.cache.wallets;
-        let checkpoint = checkpoint_action
-            .coordinator()
-            .checkpoint_exact_original_v2(
-                self.host.access()?,
-                &checkpoint_key,
-                self.candidate.candidate_id(),
-                self.revision,
-                vec![
-                    DurableConstructionWalletSlotV1::new(
-                        left.wallet.as_mut().ok_or(Error::Invalid)?,
-                        &fresh[0],
+        let prepared = {
+            let [left, right] = &mut self.cache.wallets;
+            checkpoint_action
+                .coordinator()
+                .prepare_checkpoint_exact_original_v2(
+                    self.host.access()?,
+                    &checkpoint_key,
+                    self.candidate.candidate_id(),
+                    self.revision,
+                    vec![
+                        DurableConstructionWalletSlotV1::new(
+                            left.wallet.as_mut().ok_or(Error::Invalid)?,
+                            &fresh[0],
+                        )
+                        .map_err(|_| Error::Permission)?,
+                        DurableConstructionWalletSlotV1::new(
+                            right.wallet.as_mut().ok_or(Error::Invalid)?,
+                            &fresh[1],
+                        )
+                        .map_err(|_| Error::Permission)?,
+                    ],
+                    wholepact_protocol::proving::ProvingLimits { maximum_actions: 8 },
+                    &checkpoint_action,
+                    &proof,
+                    &material,
+                )
+                .map_err(observe_engine_checkpoint)?
+        };
+        // Preparation has released both held wallet locks before the exact
+        // artifact review. Discard its observations, never re-clock or clone
+        // them. The same original native approvals and absolute material bounds
+        // must admit a single new observation pass, with no further dialogs.
+        drop(fresh);
+        let cached_material = CachedMaterialPrivacyV2(&material);
+        let cached_proof = CachedProofPrivacyV2(&proof);
+        let mut fresh = Vec::new();
+        for index in 0..2 {
+            let (scope, backend) = self.captured[index].as_ref().ok_or(Error::Invalid)?;
+            let wallet = &mut self.cache.wallets[index];
+            wallet.check()?;
+            let native = scan_approvals.get(index).ok_or(Error::Invalid)?;
+            let sync = wallet.wallet.as_mut().ok_or(Error::Invalid)?;
+            let gate = CurrentScanAccessV2 {
+                host: self.host,
+                workspace: &self.owner,
+                directory: wallet.directory.as_ref().ok_or(Error::Invalid)?,
+                origin: wallet.origin.as_ref().ok_or(Error::Invalid)?,
+                account: sync.account_uuid(),
+                backend,
+                scope,
+                native,
+            };
+            observe.check()?;
+            fresh.push(
+                observe
+                    .coordinator()
+                    .observe_exact_material_v2(
+                        self.host.access()?,
+                        self.candidate.candidate_id(),
+                        &scope.account_id,
+                        sync,
+                        &observe,
+                        &cached_material,
+                        &gate,
                     )
-                    .map_err(|_| Error::Permission)?,
-                    DurableConstructionWalletSlotV1::new(
-                        right.wallet.as_mut().ok_or(Error::Invalid)?,
-                        &fresh[1],
-                    )
-                    .map_err(|_| Error::Permission)?,
-                ],
-                wholepact_protocol::proving::ProvingLimits { maximum_actions: 8 },
-                &checkpoint_action,
-                &proof,
-                &material,
-            )
-            .map_err(observe_engine_checkpoint)?;
+                    .await
+                    .map_err(observe_engine_observation)?,
+            );
+            observe.check()?;
+            native.check()?;
+        }
+        let checkpoint = {
+            let [left, right] = &mut self.cache.wallets;
+            prepared
+                .admit_original_v2(
+                    self.host.access()?,
+                    vec![
+                        DurableConstructionWalletSlotV1::new(
+                            left.wallet.as_mut().ok_or(Error::Invalid)?,
+                            &fresh[0],
+                        )
+                        .map_err(|_| Error::Permission)?,
+                        DurableConstructionWalletSlotV1::new(
+                            right.wallet.as_mut().ok_or(Error::Invalid)?,
+                            &fresh[1],
+                        )
+                        .map_err(|_| Error::Permission)?,
+                    ],
+                    &checkpoint_action,
+                    &cached_proof,
+                    &cached_material,
+                )
+                .map_err(observe_engine_checkpoint)?
+        };
         let revision = checkpoint.status().revision;
         let attempt = private_host_result_at_v1(
             PrivateDiagnosticSiteV1::HostCheckpointContinuation,
@@ -1511,6 +1667,7 @@ impl<'host> PrivateFixedSessionV2<'host> {
             checkpoint_action.check(),
         )?;
         drop(fresh);
+        drop(observe);
         complete_private_stage(PrivateBoundaryV2::Checkpoint);
         drop(checkpoint_diagnostic);
         begin_private_stage(PrivateBoundaryV2::Proof);
@@ -3835,6 +3992,228 @@ fn run_original_source_steps_v1(
 mod tests {
     use super::*;
     use std::cell::{Cell, RefCell};
+
+    #[test]
+    fn cached_only_missing_approval_never_reaches_review() {
+        let calls = RefCell::new(Vec::new());
+        let allowed = current_approval_permission_v2(
+            CurrentApprovalModeV2::CachedOnly,
+            None::<&()>,
+            |_| {
+                calls.borrow_mut().push("exact");
+                true
+            },
+            |_| {
+                calls.borrow_mut().push("native");
+                true
+            },
+            || {
+                calls.borrow_mut().push("current");
+                true
+            },
+        )
+        .unwrap_or_else(|| {
+            calls.borrow_mut().push("review");
+            true
+        });
+        assert!(!allowed);
+        assert!(calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn cached_only_exact_hit_rechecks_every_original_predicate() {
+        // Positive control for the shared selection kernel only. These inert
+        // predicates cannot manufacture a native approval or workspace owner.
+        let original = ("original-scope", "original-material");
+        let calls = RefCell::new(Vec::new());
+        for _ in 0..2 {
+            let allowed = current_approval_permission_v2(
+                CurrentApprovalModeV2::CachedOnly,
+                Some(&original),
+                |saved| {
+                    calls.borrow_mut().push("exact");
+                    saved == &original
+                },
+                |_| {
+                    calls.borrow_mut().push("native");
+                    true
+                },
+                || {
+                    calls.borrow_mut().push("current");
+                    true
+                },
+            )
+            .unwrap_or_else(|| {
+                calls.borrow_mut().push("review");
+                false
+            });
+            assert!(allowed);
+        }
+        assert_eq!(
+            *calls.borrow(),
+            vec!["exact", "native", "current", "exact", "native", "current"]
+        );
+    }
+
+    #[test]
+    fn cached_only_scope_material_or_action_mismatch_never_reaches_review() {
+        let saved = (
+            "original-scope",
+            "original-material",
+            LocalAction::RetainPrivateWitnesses,
+        );
+        for requested in [
+            (
+                "different-scope",
+                "original-material",
+                LocalAction::RetainPrivateWitnesses,
+            ),
+            (
+                "original-scope",
+                "different-material",
+                LocalAction::RetainPrivateWitnesses,
+            ),
+            (
+                "original-scope",
+                "original-material",
+                LocalAction::InspectStatus,
+            ),
+        ] {
+            let calls = RefCell::new(Vec::new());
+            let allowed = current_approval_permission_v2(
+                CurrentApprovalModeV2::CachedOnly,
+                Some(&saved),
+                |original| {
+                    calls.borrow_mut().push("exact");
+                    original == &requested
+                },
+                |_| {
+                    calls.borrow_mut().push("native");
+                    true
+                },
+                || {
+                    calls.borrow_mut().push("current");
+                    true
+                },
+            )
+            .unwrap_or_else(|| {
+                calls.borrow_mut().push("review");
+                true
+            });
+            assert!(!allowed);
+            assert_eq!(*calls.borrow(), vec!["exact"]);
+        }
+        // This is the actual proof-cache lookup shape. A retained exact artifact
+        // does not silently authorize a newly appearing job's status inspection.
+        let saved = [LocalAction::RetainPrivateWitnesses];
+        assert_eq!(
+            current_approval_permission_v2(
+                CurrentApprovalModeV2::CachedOnly,
+                saved
+                    .iter()
+                    .find(|action| **action == LocalAction::InspectStatus),
+                |_| panic!("missing status approval must not be checked"),
+                |_| panic!("missing status approval must not reach native consent"),
+                || panic!("missing status approval must not fall through"),
+            ),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn cached_only_original_native_expiry_or_disconnect_denies_without_review() {
+        for expired in [false, true] {
+            let original = HistoricalApproval::denied_for_test(expired);
+            let calls = RefCell::new(Vec::new());
+            let first_error = RefCell::new(None);
+            let allowed = current_approval_permission_v2(
+                CurrentApprovalModeV2::CachedOnly,
+                Some(&original),
+                |_| {
+                    calls.borrow_mut().push("exact");
+                    true
+                },
+                |approval| {
+                    calls.borrow_mut().push("native");
+                    match approval.check() {
+                        Ok(()) => true,
+                        Err(error) => {
+                            *first_error.borrow_mut() = Some(error);
+                            false
+                        }
+                    }
+                },
+                || {
+                    calls.borrow_mut().push("current");
+                    true
+                },
+            )
+            .unwrap_or_else(|| {
+                calls.borrow_mut().push("review");
+                true
+            });
+            assert!(!allowed);
+            assert!(first_error.borrow().is_some());
+            if expired {
+                assert!(matches!(*first_error.borrow(), Some(Error::Permission)));
+            }
+            assert_eq!(*calls.borrow(), vec!["exact", "native"]);
+        }
+    }
+
+    #[test]
+    fn cached_only_current_material_failure_preserves_original_check_order() {
+        // Inert predicates exercise the shared selection kernel, not a native
+        // grant or positive workspace owner. The actual current failure remains
+        // the first error and cannot be replaced by a fresh review attempt.
+        let calls = RefCell::new(Vec::new());
+        let first_error = RefCell::new(None);
+        let allowed = current_approval_permission_v2(
+            CurrentApprovalModeV2::CachedOnly,
+            Some(&()),
+            |_| {
+                calls.borrow_mut().push("exact");
+                true
+            },
+            |_| {
+                calls.borrow_mut().push("native");
+                true
+            },
+            || {
+                calls.borrow_mut().push("current");
+                *first_error.borrow_mut() = Some(Error::Authentication);
+                false
+            },
+        )
+        .unwrap_or_else(|| {
+            calls.borrow_mut().push("review");
+            *first_error.borrow_mut() = Some(Error::Terminal);
+            true
+        });
+        assert!(!allowed);
+        assert_eq!(*calls.borrow(), vec!["exact", "native", "current"]);
+        assert!(matches!(*first_error.borrow(), Some(Error::Authentication)));
+    }
+
+    #[test]
+    fn original_review_mode_never_renews_a_denied_cached_approval() {
+        let reviews = Cell::new(0);
+        for cached in [Some(&()), None] {
+            let allowed = current_approval_permission_v2(
+                CurrentApprovalModeV2::ReviewMissing,
+                cached,
+                |_| true,
+                |_| false,
+                || panic!("denied native approval must short-circuit current checks"),
+            )
+            .unwrap_or_else(|| {
+                reviews.set(reviews.get() + 1);
+                true
+            });
+            assert_eq!(allowed, cached.is_none());
+            assert_eq!(reviews.get(), usize::from(cached.is_none()));
+        }
+    }
 
     fn source_component() -> (
         wholepact_engine::Engine,
