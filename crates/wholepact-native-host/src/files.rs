@@ -218,6 +218,14 @@ pub(crate) fn private_workspace_name(name: &str) -> bool {
     name == PRIVATE_PENDING
         || name == PRIVATE_COMMIT
         || name.starts_with("staging-durable-private-")
+        || dispatcher_name(name)
+}
+
+pub(crate) const DISPATCHER_PENDING: &str = "durable-dispatcher.pending-v2";
+pub(crate) const DISPATCHER_COMMIT: &str = "durable-dispatcher.commit-v2";
+pub(crate) fn dispatcher_name(name: &str) -> bool {
+    name == DISPATCHER_PENDING || name == DISPATCHER_COMMIT
+        || name.starts_with("staging-durable-dispatcher-")
 }
 
 /// A bounded retained descriptor, never an origin reconstructed from a path.
@@ -227,9 +235,10 @@ pub(crate) fn private_workspace_name(name: &str) -> bool {
     feature = "manual-admission",
     target_os = "linux"
 ))]
-pub(crate) struct PrivateWorkspaceFileV1 {
+struct RetainedRoleFile {
     file: File,
     name: String,
+    role: RetainedRole,
     final_name: &'static str,
     directory_identity: String,
     dev: u64,
@@ -242,18 +251,11 @@ pub(crate) struct PrivateWorkspaceFileV1 {
     feature = "manual-admission",
     target_os = "linux"
 ))]
-impl PrivateWorkspaceFileV1 {
-    pub(crate) fn open(
-        directory: &Directory,
-        name: &str,
-        final_name: &'static str,
-        max: usize,
-    ) -> Result<Self> {
-        let prefix = match final_name {
-            PRIVATE_PENDING => "staging-durable-private-pending-v1-",
-            PRIVATE_COMMIT => "staging-durable-private-commit-v1-",
-            _ => return Err(Error::Invalid),
-        };
+impl RetainedRoleFile {
+    fn open(directory: &Directory, name: &str, role: RetainedRole) -> Result<Self> {
+        let final_name = role.final_name();
+        let max = role.max();
+        let prefix = role.prefix();
         if name != final_name {
             let suffix = name.strip_prefix(prefix).ok_or(Error::Invalid)?;
             if suffix.len() != 32
@@ -272,6 +274,7 @@ impl PrivateWorkspaceFileV1 {
         let result = Self {
             file,
             name: name.into(),
+            role,
             final_name,
             directory_identity: directory.manual_target_identity_digest()?,
             dev: metadata.dev(),
@@ -282,26 +285,11 @@ impl PrivateWorkspaceFileV1 {
         result.check(directory, max)?;
         Ok(result)
     }
-    pub(crate) fn stage(
-        directory: &Directory,
-        final_name: &'static str,
-        bytes: &[u8],
-        max: usize,
-    ) -> Result<Self> {
-        if bytes.len() > max {
-            return Err(Error::Invalid);
-        }
-        let role = match final_name {
-            PRIVATE_PENDING => "pending",
-            PRIVATE_COMMIT => "commit",
-            _ => return Err(Error::Invalid),
-        };
-        let name = format!(
-            "staging-durable-private-{role}-v1-{}",
-            hex::encode(crate::random::<16>()?)
-        );
+    fn stage(directory: &Directory, role: RetainedRole, bytes: &[u8]) -> Result<Self> {
+        if bytes.len() > role.max() { return Err(Error::Invalid); }
+        let name = format!("{}{}", role.prefix(), hex::encode(crate::random::<16>()?));
         directory.write_new(&name, bytes)?;
-        Self::open(directory, &name, final_name, max)
+        Self::open(directory, &name, role)
     }
     pub(crate) fn check(&self, directory: &Directory, max: usize) -> Result<()> {
         use sha2::{Digest, Sha256};
@@ -342,7 +330,7 @@ impl PrivateWorkspaceFileV1 {
     }
     pub(crate) fn origin(&self) -> Result<String> {
         wholepact_core::proposal::canonical_digest(
-            "wholepact:native-private-workspace-file-origin:v1",
+            self.role.origin_domain(),
             &(
                 &self.directory_identity,
                 self.final_name,
@@ -393,6 +381,82 @@ impl PrivateWorkspaceFileV1 {
     }
 }
 
+#[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
+#[derive(Clone, Copy)]
+enum RetainedRole { WorkspacePendingV1, WorkspaceCommitV1, DispatcherPendingV2, DispatcherCommitV2 }
+#[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
+impl RetainedRole {
+    fn final_name(self) -> &'static str { match self {
+        Self::WorkspacePendingV1 => PRIVATE_PENDING, Self::WorkspaceCommitV1 => PRIVATE_COMMIT,
+        Self::DispatcherPendingV2 => DISPATCHER_PENDING, Self::DispatcherCommitV2 => DISPATCHER_COMMIT,
+    }}
+    fn prefix(self) -> &'static str { match self {
+        Self::WorkspacePendingV1 => "staging-durable-private-pending-v1-",
+        Self::WorkspaceCommitV1 => "staging-durable-private-commit-v1-",
+        Self::DispatcherPendingV2 => "staging-durable-dispatcher-pending-v2-",
+        Self::DispatcherCommitV2 => "staging-durable-dispatcher-commit-v2-",
+    }}
+    fn max(self) -> usize { match self {
+        Self::WorkspacePendingV1 | Self::WorkspaceCommitV1 => 131_112,
+        Self::DispatcherPendingV2 => 262_184, Self::DispatcherCommitV2 => 16_424,
+    }}
+    fn origin_domain(self) -> &'static str { match self {
+        Self::WorkspacePendingV1 | Self::WorkspaceCommitV1 => "wholepact:native-private-workspace-file-origin:v1",
+        Self::DispatcherPendingV2 | Self::DispatcherCommitV2 => "wholepact:durable-dispatcher-file-origin:v2",
+    }}
+}
+#[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
+pub(crate) struct PrivateWorkspaceFileV1(RetainedRoleFile);
+#[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
+impl PrivateWorkspaceFileV1 {
+    fn role(name: &str) -> Result<RetainedRole> { match name { PRIVATE_PENDING => Ok(RetainedRole::WorkspacePendingV1), PRIVATE_COMMIT => Ok(RetainedRole::WorkspaceCommitV1), _ => Err(Error::Invalid) } }
+    pub(crate) fn open(directory: &Directory, name: &str, final_name: &'static str, max: usize) -> Result<Self> {
+        let role = Self::role(final_name)?;
+        if max != role.max() { return Err(Error::Invalid); }
+        RetainedRoleFile::open(directory, name, role).map(Self)
+    }
+    pub(crate) fn stage(directory: &Directory, final_name: &'static str, bytes: &[u8], max: usize) -> Result<Self> {
+        let role = Self::role(final_name)?;
+        if max != role.max() { return Err(Error::Invalid); }
+        RetainedRoleFile::stage(directory, role, bytes).map(Self)
+    }
+    pub(crate) fn check(&self, directory: &Directory, max: usize) -> Result<()> {
+        if max != self.0.role.max() { return Err(Error::Invalid); }
+        self.0.check(directory, max)
+    }
+    pub(crate) fn bytes(&self, directory: &Directory, max: usize) -> Result<Vec<u8>> { self.check(directory, max)?; self.0.bytes(directory, max) }
+    pub(crate) fn origin(&self) -> Result<String> { self.0.origin() }
+    pub(crate) fn name(&self) -> &str { self.0.name() }
+    pub(crate) fn is_final(&self) -> bool { self.0.is_final() }
+    pub(crate) fn ciphertext_digest(&self) -> &str { self.0.ciphertext_digest() }
+    pub(crate) fn publish(&mut self, directory: &Directory, max: usize) -> Result<()> { self.check(directory, max)?; self.0.publish(directory, max) }
+}
+#[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
+pub(crate) struct DispatcherFileV2(RetainedRoleFile);
+#[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
+impl DispatcherFileV2 {
+    fn role(name: &str) -> Result<RetainedRole> { match name { DISPATCHER_PENDING => Ok(RetainedRole::DispatcherPendingV2), DISPATCHER_COMMIT => Ok(RetainedRole::DispatcherCommitV2), _ => Err(Error::Invalid) } }
+    pub(crate) fn open(directory: &Directory, name: &str, final_name: &'static str, max: usize) -> Result<Self> {
+        let role = Self::role(final_name)?;
+        if max != role.max() { return Err(Error::Invalid); }
+        RetainedRoleFile::open(directory, name, role).map(Self)
+    }
+    pub(crate) fn stage(directory: &Directory, final_name: &'static str, bytes: &[u8], max: usize) -> Result<Self> {
+        let role = Self::role(final_name)?;
+        if max != role.max() { return Err(Error::Invalid); }
+        RetainedRoleFile::stage(directory, role, bytes).map(Self)
+    }
+    pub(crate) fn check(&self, directory: &Directory, max: usize) -> Result<()> {
+        if max != self.0.role.max() { return Err(Error::Invalid); }
+        self.0.check(directory, max)
+    }
+    pub(crate) fn bytes(&self, directory: &Directory, max: usize) -> Result<Vec<u8>> { self.check(directory, max)?; self.0.bytes(directory, max) }
+    pub(crate) fn origin(&self) -> Result<String> { self.0.origin() }
+    pub(crate) fn name(&self) -> &str { self.0.name() }
+    pub(crate) fn is_final(&self) -> bool { self.0.is_final() }
+    pub(crate) fn ciphertext_digest(&self) -> &str { self.0.ciphertext_digest() }
+    pub(crate) fn publish(&mut self, directory: &Directory, max: usize) -> Result<()> { self.check(directory, max)?; self.0.publish(directory, max) }
+}
 pub(crate) fn validate_absolute(p: &Path) -> Result<()> {
     if !p.is_absolute()
         || p.file_name().is_none()

@@ -63,6 +63,8 @@ mod born_offline_return_owner_v1;
     target_os = "linux"
 ))]
 pub(crate) mod durable_private_workspace_v1;
+#[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
+pub(crate) mod durable_dispatcher_v2;
 #[cfg(feature = "financial-runtime")]
 mod financial;
 #[cfg(test)]
@@ -170,6 +172,31 @@ enum Command {
         workspace: PathBuf,
     },
 
+#[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
+    DurableDeliveryAdmitV2 {
+        #[arg(long)] profile: PathBuf,
+        #[arg(long)] workspace: PathBuf,
+    },
+#[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
+    DurableDeliveryAdmissionStatusV2 {
+        #[arg(long)] profile: PathBuf,
+        #[arg(long)] workspace: PathBuf,
+    },
+#[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
+    DurableDispatcherFinishV4 {
+        #[arg(long)] profile: PathBuf,
+        #[arg(long)] workspace: PathBuf,
+    },
+#[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
+    DurableDispatcherStatusV4 {
+        #[arg(long)] profile: PathBuf,
+        #[arg(long)] workspace: PathBuf,
+    },
+#[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
+    DurableDispatcherRegisterV4 {
+        #[arg(long)] profile: PathBuf,
+        #[arg(long)] workspace: PathBuf,
+    },
     /// Back up a closed restricted successor, preserving its complete ancestor graph.
     #[cfg(feature = "financial-runtime")]
     GenerationBackup {
@@ -400,6 +427,16 @@ pub fn run() -> Result<()> {
 }
 fn dispatch(terminal: Terminal, command: Command) -> Result<()> {
     match command {
+#[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
+        Command::DurableDeliveryAdmitV2 {profile,workspace} => financial::durable_delivery_admission_v2::admit_original(terminal,&profile,&workspace),
+#[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
+        Command::DurableDeliveryAdmissionStatusV2 {profile,workspace} => financial::durable_delivery_admission_v2::read_original_status(terminal,&profile,&workspace),
+#[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
+        Command::DurableDispatcherFinishV4 {profile,workspace} => durable_dispatcher_v2::finish_command_v4(terminal,&profile,&workspace),
+#[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
+        Command::DurableDispatcherStatusV4 {profile,workspace} => durable_dispatcher_v2::status_command_v4(terminal,&profile,&workspace),
+#[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
+        Command::DurableDispatcherRegisterV4 {profile,workspace} => durable_dispatcher_v2::register_command_v4(terminal,&profile,&workspace),
         #[cfg(all(
             feature = "durable-proposal",
             feature = "manual-admission",
@@ -628,6 +665,7 @@ struct Host {
     authority: Arc<Authority>,
     transport: Arc<Mutex<ProtectedTransportRuntime>>,
     submission: Arc<Mutex<EncryptedSubmissionJournal>>,
+    submission_identity: wholepact_storage_security::DatabaseFileIdentity,
     access: Option<Access>,
     config: Option<SecurityConfig>,
     observation: Option<Operator>,
@@ -646,6 +684,10 @@ struct Host {
         target_os = "linux"
     ))]
     workspace_files: Option<durable_private_workspace_v1::OriginalWorkspaceFilesV1>,
+#[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
+    dispatcher_files: Option<durable_dispatcher_v2::OriginalWorkspaceDispatcherFilesV4>,
+#[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
+    dispatcher: Option<durable_dispatcher_v2::StoredDurableDispatcherV2>,
     // Rust drops fields in declaration order. Keep the exclusive profile lock
     // until every SQLite owner and possible final checkpoint above has dropped.
     directory: Directory,
@@ -703,6 +745,14 @@ impl Host {
         terminal: Terminal,
         store: Store,
     ) -> Result<Self> {
+        Self::open_runtime_from_store_checked(directory,secrets,terminal,store,None)
+    }
+    fn open_runtime_from_store_checked(
+        directory:Directory,secrets:Secrets,terminal:Terminal,store:Store,
+        expected_submission:Option<&wholepact_storage_security::DatabaseFileIdentity>,
+    )->Result<Self> {
+        #[cfg(feature = "financial-runtime")]
+        if secrets.combined_workspace_anchor_v4().is_some() && expected_submission.is_none() { return Err(Error::Authentication); }
         let engine = Engine::from_store(store);
         let inbox = SqliteReplayLedger::from_encrypted_connection(open_encrypted(
             directory.path(JOURNALS[1])?,
@@ -718,11 +768,11 @@ impl Host {
                 &outbox,
                 open_encrypted(directory.path(JOURNALS[2])?, &secrets.key(2)?)?,
             )?;
+        let submission_connection = open_encrypted(directory.path(JOURNALS[3])?, &secrets.key(3)?)?;
+        let submission_identity = submission_connection.database_identity()?;
+        if expected_submission.is_some_and(|expected| expected != &submission_identity) { return Err(Error::Authentication); }
         let submission = Arc::new(Mutex::new(
-            EncryptedSubmissionJournal::from_encrypted_connection(open_encrypted(
-                directory.path(JOURNALS[3])?,
-                &secrets.key(3)?,
-            )?)?,
+            EncryptedSubmissionJournal::from_encrypted_connection(submission_connection)?,
         ));
         let authority = Arc::new(Authority::new(
             terminal.clone(),
@@ -756,6 +806,7 @@ impl Host {
             authority,
             transport,
             submission,
+            submission_identity,
             access: None,
             config: None,
             observation: None,
@@ -771,6 +822,10 @@ impl Host {
                 target_os = "linux"
             ))]
             workspace_files: None,
+#[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
+            dispatcher_files: None,
+#[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
+            dispatcher: None,
         })
     }
     fn access(&self) -> Result<&Access> {

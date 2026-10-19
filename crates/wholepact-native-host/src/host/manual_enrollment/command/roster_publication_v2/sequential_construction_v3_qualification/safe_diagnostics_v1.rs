@@ -14,6 +14,7 @@ macro_rules! labels {
     };
 }
 labels! { Boundary {
+    DeliveryCredentialRegistration, DeliverySourceExport, DeliveryOriginalReopen, DeliveryUnsupportedAudit, DeliveryNativeAdmission, DeliveryHistoricalRead, DeliveryIdentityCompare, DeliveryDurableMarker, DeliveryProducerKill, DeliveryProducerReap, DeliveryReaderReap, DeliveryRootCleanup,
     PrivateWorkspaceBootstrap, PrivateSourceSelect, PrivateWorkspaceReserve, PrivateWorkspaceAnchor, PrivateWorkspacePublish, PrivateWorkspaceInitialize, PrivateWorkspaceCandidate, PrivateWorkspaceCapture, PrivateWorkspaceIntake, PrivateWorkspaceObserve, PrivateWorkspaceCheckpoint, PrivateWorkspaceProof, PrivateWorkspaceFreeze, PrivateWorkspaceScanCleanup, PrivateWorkspaceDurableMarker, PrivateWorkspaceProducerKill, PrivateWorkspaceProducerReap, PrivateWorkspaceReaderOpen, PrivateWorkspaceReadFixed, PrivateWorkspaceIdentityCompare, PrivateWorkspaceReaderReap, PrivateWorkspaceRootCleanup,
     SignerAdmissionCallCallerDeadline, SignerAdmissionCallExchangeDeadline, SignerAdmissionCallSourceCallback, SignerAdmissionCallBounds,
     SignerAdmissionCallRequestValidation, SignerAdmissionCallBinding, SignerAdmissionCallConnect, SignerAdmissionCallHandshake, SignerAdmissionCallPeerBinding, SignerAdmissionCallRequestBuild, SignerAdmissionCallRequestWrite, SignerAdmissionCallResponseRead, SignerAdmissionCallResponse, SignerAdmissionCallSnapshotValidation, SignerAdmissionCallCommittedHeadValidation, SignerAdmissionCallFinalValidation, SignerAdmissionDispatchFixtureState, SignerAdmissionDispatchReviewCorrelation, SignerAdmissionDispatchNativeApproval, SignerAdmissionDispatchIntentRetention, SignerAdmissionDispatchSubmitCustody, SignerAdmissionDispatchSubmitIntent, SignerAdmissionDispatchSubmitInterval, SignerAdmissionDispatchSubmitWorkspace, SignerAdmissionDispatchAuthorityCall, SignerAdmissionDispatchWorkerCompletion, SignerAdmissionDispatchCommittedCorrelation, SignerAdmissionCallbackWorkspaceCurrent, SignerAdmissionCallbackCustody, SignerAdmissionCallbackRequestValidation, SignerAdmissionCallIoTimeout, SignerAdmissionCallIoClosed, SignerAdmissionCallIoRefused, SignerAdmissionCallIoOther, SignerAdmissionCallCallbackError,
@@ -43,7 +44,7 @@ labels! { Boundary {
 } }
 labels! { Outcome {
     ExactPermission, ExactLineage, ExactBinding, ExactStorage, ExactRecoveryRequired, ExactStateChanged, ExactProfileChanged, ExactBudget, ExactRoster,
-    EngineDisclosureDenied, EngineDurableConstructionUnavailable, EngineDurableProposalRecoveryRequired, EngineMissingEvidence, EngineInvalidTerms, EngineUnsupportedCapability, EngineDebitCapExceeded, EnginePermissionDenied, EngineInternalError, EngineAccessDenied, EngineCandidateVerificationFailed, EngineIdempotencyConflict, EngineInvalidRequest, EngineInvalidTransition, EngineLiveAuthorizationExists, EngineManualConstructionDenied, EngineNotFound, EngineRecoveryRequired, EngineResourceExhausted, EngineRetainedObservationUnavailable, EngineRevisionConflict, EngineStorageProtectionRequired, EngineStorageUnavailable, EngineUnclassified, JobConsentDenied, JobIdempotencyConflict, JobInvalidRequest, JobNotFound, JobRecoveryRequired, JobResourceExhausted, JobStateConflict, JobStorage, JobUnsupportedSchema, JobVerificationFailed, ProtocolActionMapping, ProtocolBuilderInput, ProtocolBuilderOutput, ProtocolContext, ProtocolContribution, ProtocolDisclosure, ProtocolFee, ProtocolFinalize, ProtocolInput, ProtocolManifest, ProtocolOutput, ProtocolPczt, ProtocolUnclassified, StoreAlreadyExists, StoreBudgetExceeded, StoreDatabase, StoreEncoding, StoreFile, StoreIdempotencyConflict, StoreInputReserved, StoreInvalidInput, StoreInvalidTransition, StoreLiveAuthorizationExists, StoreNotFound, StorePoisoned, StoreRecoveryRequired, StoreResourceExhausted, StoreRevisionConflict, StoreStorageSecurity, StoreUnsupportedSchema, StoreWriterEpochMismatch,
+    EngineDurableProposalConflict, EngineDurableProfileUnavailable, EngineDisclosureUnknown, EngineDisclosureDenied, EngineDurableConstructionUnavailable, EngineDurableProposalRecoveryRequired, EngineMissingEvidence, EngineInvalidTerms, EngineUnsupportedCapability, EngineDebitCapExceeded, EnginePermissionDenied, EngineInternalError, EngineAccessDenied, EngineCandidateVerificationFailed, EngineIdempotencyConflict, EngineInvalidRequest, EngineInvalidTransition, EngineLiveAuthorizationExists, EngineManualConstructionDenied, EngineNotFound, EngineRecoveryRequired, EngineResourceExhausted, EngineRetainedObservationUnavailable, EngineRevisionConflict, EngineStorageProtectionRequired, EngineStorageUnavailable, EngineUnclassified, JobConsentDenied, JobIdempotencyConflict, JobInvalidRequest, JobNotFound, JobRecoveryRequired, JobResourceExhausted, JobStateConflict, JobStorage, JobUnsupportedSchema, JobVerificationFailed, ProtocolActionMapping, ProtocolBuilderInput, ProtocolBuilderOutput, ProtocolContext, ProtocolContribution, ProtocolDisclosure, ProtocolFee, ProtocolFinalize, ProtocolInput, ProtocolManifest, ProtocolOutput, ProtocolPczt, ProtocolUnclassified, StoreAlreadyExists, StoreBudgetExceeded, StoreDatabase, StoreEncoding, StoreFile, StoreIdempotencyConflict, StoreInputReserved, StoreInvalidInput, StoreInvalidTransition, StoreLiveAuthorizationExists, StoreNotFound, StorePoisoned, StoreRecoveryRequired, StoreResourceExhausted, StoreRevisionConflict, StoreStorageSecurity, StoreUnsupportedSchema, StoreWriterEpochMismatch,
     BridgeBinding, BridgeConflict, BridgeMissing, BridgeUncertain, BridgeLimit, BridgePermission, BridgeRecoveryRequired, BridgeCompleteOriginRecoveryUnavailable, BridgeVerification, BridgeSignerOriginUnavailable, BridgeJournal, BridgeAuthority, BridgeWallet, BridgeIpc,
     AuthorityInputEmpty, AuthorityInputWithinBound, AuthorityInputOverBound, AuthorityInvalidBinding, AuthorityPermission, AuthorityStaleHead, AuthorityConflict, AuthorityInactive, AuthorityRecoveryRequired, AuthorityExpired, AuthorityPolicyDenied, AuthorityBudgetExceeded, AuthorityInputReserved, AuthorityObligationReserved, AuthorityLimit, AuthorityStorage, AuthorityCorruptHistory, AuthorityPermanentStopUnavailable, AuthorityOfflineHistoryUnsupported, AuthorityConstructionHistoryUnsupported, AuthorityUnsupportedVersion, AuthorityAuthentication, AuthorityUncertain, AuthorityResolutionUnavailable, AuthoritySessionRequired, AuthoritySessionPending,
     OriginPermanentStopUnavailable, OriginRetirementEvidenceUnavailable, OriginSignerOriginUnavailable, OriginPeerLifetimeUnavailable, OriginAuthentication, OriginBinding, OriginConflict, OriginPermission, OriginInvalidData, OriginLocked, OriginCrypto, OriginIpc, OriginLimit, OriginIoTimedOut, OriginIoWouldBlock, OriginIoUnexpectedEof, OriginIoBrokenPipe, OriginIoConnectionReset, OriginIoConnectionAborted, OriginIoNotConnected, OriginIoInterrupted, OriginIoPermissionDenied, OriginIoOther,
@@ -70,21 +71,48 @@ pub(super) fn emit(boundary: Boundary, outcome: Outcome) {
     );
 }
 
-
 /// Reparse a product leaf's finite observer; no arbitrary label can escape.
-#[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "synthetic-born-joined-qualification"
+))]
 pub(super) fn emit_private_observation(boundary: &str, outcome: &str) -> bool {
-    let (Some(boundary), Some(outcome)) = (Boundary::parse(boundary), Outcome::parse(outcome)) else { return false; };
-    if !matches!(boundary, Boundary::PrivateWorkspaceBootstrap | Boundary::PrivateSourceSelect
-        | Boundary::PrivateWorkspaceReserve | Boundary::PrivateWorkspaceAnchor | Boundary::PrivateWorkspacePublish
-        | Boundary::PrivateWorkspaceInitialize | Boundary::PrivateWorkspaceCandidate | Boundary::PrivateWorkspaceCapture
-        | Boundary::PrivateWorkspaceIntake | Boundary::PrivateWorkspaceObserve | Boundary::PrivateWorkspaceCheckpoint
-        | Boundary::PrivateWorkspaceProof | Boundary::PrivateWorkspaceFreeze | Boundary::PrivateWorkspaceScanCleanup
-        | Boundary::PrivateWorkspaceDurableMarker | Boundary::PrivateWorkspaceProducerKill | Boundary::PrivateWorkspaceProducerReap
-        | Boundary::PrivateWorkspaceReaderOpen | Boundary::PrivateWorkspaceReadFixed | Boundary::PrivateWorkspaceIdentityCompare
-        | Boundary::PrivateWorkspaceReaderReap | Boundary::PrivateWorkspaceRootCleanup) { return false; }
-    if matches!(outcome, Outcome::Begin | Outcome::Complete) { return false; }
-    emit(boundary, outcome); true
+    let (Some(boundary), Some(outcome)) = (Boundary::parse(boundary), Outcome::parse(outcome))
+    else {
+        return false;
+    };
+    if !matches!(
+        boundary,
+        Boundary::PrivateWorkspaceBootstrap
+            | Boundary::PrivateSourceSelect
+            | Boundary::PrivateWorkspaceReserve
+            | Boundary::PrivateWorkspaceAnchor
+            | Boundary::PrivateWorkspacePublish
+            | Boundary::PrivateWorkspaceInitialize
+            | Boundary::PrivateWorkspaceCandidate
+            | Boundary::PrivateWorkspaceCapture
+            | Boundary::PrivateWorkspaceIntake
+            | Boundary::PrivateWorkspaceObserve
+            | Boundary::PrivateWorkspaceCheckpoint
+            | Boundary::PrivateWorkspaceProof
+            | Boundary::PrivateWorkspaceFreeze
+            | Boundary::PrivateWorkspaceScanCleanup
+            | Boundary::PrivateWorkspaceDurableMarker
+            | Boundary::PrivateWorkspaceProducerKill
+            | Boundary::PrivateWorkspaceProducerReap
+            | Boundary::PrivateWorkspaceReaderOpen
+            | Boundary::PrivateWorkspaceReadFixed
+            | Boundary::PrivateWorkspaceIdentityCompare
+            | Boundary::PrivateWorkspaceReaderReap
+            | Boundary::PrivateWorkspaceRootCleanup
+    ) {
+        return false;
+    }
+    if matches!(outcome, Outcome::Begin | Outcome::Complete) {
+        return false;
+    }
+    emit(boundary, outcome);
+    true
 }
 
 #[cfg(feature = "synthetic-born-joined-qualification")]
@@ -1623,10 +1651,12 @@ fn history_measurement_capture_is_canonical_bounded_and_sticky() {
     assert!(capture.public_lines()[0].contains("invalid=true"));
     capture.discard_for_budget();
     assert_eq!(capture.retained_bytes(), 0);
-    assert!(capture
-        .public_lines()
-        .iter()
-        .all(|line| line.contains("invalid=true")));
+    assert!(
+        capture
+            .public_lines()
+            .iter()
+            .all(|line| line.contains("invalid=true"))
+    );
     let mut capture = HistoryMeasurementCapture::default();
     capture.capture_line(&line, 1);
     capture.capture_line(&line, 8192);
@@ -1658,14 +1688,18 @@ fn history_measurement_parser_preserves_unavailable_and_exhausted() {
     }
     value["incomplete"] = serde_json::json!(true);
     let record = parse_history_record(&format!("[HISTORY_MEASUREMENT_V1 {value}]"), false).unwrap();
-    assert!(record
-        .line()
-        .contains("\"selected_remaining_at_failure_us\":null"));
+    assert!(
+        record
+            .line()
+            .contains("\"selected_remaining_at_failure_us\":null")
+    );
     value["selected_remaining_at_failure_us"] = serde_json::json!(0);
     let record = parse_history_record(&format!("[HISTORY_MEASUREMENT_V1 {value}]"), false).unwrap();
-    assert!(record
-        .line()
-        .contains("\"selected_remaining_at_failure_us\":0"));
+    assert!(
+        record
+            .line()
+            .contains("\"selected_remaining_at_failure_us\":0")
+    );
 }
 
 pub(super) fn host<T>(boundary: Boundary, operation: impl FnOnce() -> Result<T>) -> Result<T> {
@@ -1970,26 +2004,29 @@ fn admission_parser_requires_every_exact_field_and_rejects_duplicates() {
                     .as_object_mut()
                     .unwrap()
                     .remove(&key);
-                assert!(parse_admission_record(
-                    &format!("{}{missing}]", ADMISSION_PREFIXES[slot]),
-                    slot
-                )
-                .is_none());
+                assert!(
+                    parse_admission_record(
+                        &format!("{}{missing}]", ADMISSION_PREFIXES[slot]),
+                        slot
+                    )
+                    .is_none()
+                );
                 let mut confused = original.clone();
                 at(&mut confused, &path)[&key] = serde_json::json!(["private"]);
-                assert!(parse_admission_record(
-                    &format!("{}{confused}]", ADMISSION_PREFIXES[slot]),
-                    slot
-                )
-                .is_none());
+                assert!(
+                    parse_admission_record(
+                        &format!("{}{confused}]", ADMISSION_PREFIXES[slot]),
+                        slot
+                    )
+                    .is_none()
+                );
             }
             let mut unknown = original.clone();
             at(&mut unknown, &path)["private"] = serde_json::json!("payload");
-            assert!(parse_admission_record(
-                &format!("{}{unknown}]", ADMISSION_PREFIXES[slot]),
-                slot
-            )
-            .is_none());
+            assert!(
+                parse_admission_record(&format!("{}{unknown}]", ADMISSION_PREFIXES[slot]), slot)
+                    .is_none()
+            );
             let text = original.to_string();
             let key = at(&mut object, &path)
                 .as_object()
@@ -2003,11 +2040,10 @@ fn admission_parser_requires_every_exact_field_and_rejects_duplicates() {
                 &format!("\"{key}\":null,\"{key}\":"),
                 1,
             );
-            assert!(parse_admission_record(
-                &format!("{}{duplicate}]", ADMISSION_PREFIXES[slot]),
-                slot
-            )
-            .is_none());
+            assert!(
+                parse_admission_record(&format!("{}{duplicate}]", ADMISSION_PREFIXES[slot]), slot)
+                    .is_none()
+            );
         }
     }
 }
@@ -2048,11 +2084,13 @@ fn admission_parser_preserves_unavailable_zero_and_commit_uncertainty() {
     assert!(parse_history_record(&format!("[HISTORY_MEASUREMENT_V1 {history}]"), false).is_none());
     for phase in ["Snapshot", "Page"] {
         rows[0]["phase"] = serde_json::json!(phase);
-        assert!(parse_admission_record(
-            &format!("{}{row}]", ADMISSION_PREFIXES[0], row = rows[0]),
-            0
-        )
-        .is_none());
+        assert!(
+            parse_admission_record(
+                &format!("{}{row}]", ADMISSION_PREFIXES[0], row = rows[0]),
+                0
+            )
+            .is_none()
+        );
     }
 }
 
@@ -2072,11 +2110,13 @@ fn admission_parser_rejects_out_of_bounds_and_type_confused_scalars() {
                     .is_none()
             );
         }
-        assert!(parse_admission_record(
-            &format!("{}{}]", ADMISSION_PREFIXES[slot], " ".repeat(4097)),
-            slot
-        )
-        .is_none());
+        assert!(
+            parse_admission_record(
+                &format!("{}{}]", ADMISSION_PREFIXES[slot], " ".repeat(4097)),
+                slot
+            )
+            .is_none()
+        );
     }
     for value in [
         serde_json::json!(-1),
@@ -2154,13 +2194,13 @@ mod durable_flow_projection {
         CheckedHistoryCostV1, CheckedHistoryMeasurementV1, CheckedHistoryPhaseV1,
     };
     use wholepact_signer::native_ui::synthetic_born_joined_qualification::{
-        DurableFlowAfterDrainV1, DurableFlowAuthorityCodeV1, DurableFlowCallOutcomeV1, DurableFlowCallOutcomesV1, DurableFlowCallbackStageV1,
-        DurableLifecycleDiagnosticV1, DurableLifecyclePointV1, DurablePendingWaitKindV1,
-        DurableFlowDiagnosticV1, DurableFlowErrorCodeV1, DurableFlowErrorDomainV1,
-        DurableFlowErrorV1, DurableFlowJobPurposeV1, DurableFlowNestedCodeV1,
-        DurableFlowOperationV1, DurableFlowPresentationV1, DurableFlowReceiveV1,
-        DurableFlowResultV1, DurableFlowStageV1, DurableFlowTransportFailureV1,
-        DurableFlowTransportPurposeV1, DurableFlowTransportStageV1,
+        DurableFlowAfterDrainV1, DurableFlowAuthorityCodeV1, DurableFlowCallOutcomeV1,
+        DurableFlowCallOutcomesV1, DurableFlowCallbackStageV1, DurableLifecycleDiagnosticV1,
+        DurableLifecyclePointV1, DurablePendingWaitKindV1, DurableFlowDiagnosticV1,
+        DurableFlowErrorCodeV1, DurableFlowErrorDomainV1, DurableFlowErrorV1,
+        DurableFlowJobPurposeV1, DurableFlowNestedCodeV1, DurableFlowOperationV1,
+        DurableFlowPresentationV1, DurableFlowReceiveV1, DurableFlowResultV1, DurableFlowStageV1,
+        DurableFlowTransportFailureV1, DurableFlowTransportPurposeV1, DurableFlowTransportStageV1,
     };
     const PRIVATE_PREFIX: &str = "[DURABLE_FLOW_V1 ";
     const PUBLIC_PREFIX: &str = "CI_SYNTHETIC_DURABLE_FLOW ";
@@ -2973,14 +3013,20 @@ mod durable_flow_projection {
             ]
         }
         fn valid(&self) -> bool {
-            self.values().into_iter().all(|value| FLOW_CALL_OUTCOME.contains(&value))
+            self.values()
+                .into_iter()
+                .all(|value| FLOW_CALL_OUTCOME.contains(&value))
         }
         fn progresses_from(&self, before: &Self) -> bool {
-            before.values().into_iter().zip(self.values()).all(|(old, new)| match old {
-                "ReturnedOk" | "ReturnedErr" => old == new,
-                "Entered" => new != "NotObserved",
-                _ => true,
-            })
+            before
+                .values()
+                .into_iter()
+                .zip(self.values())
+                .all(|(old, new)| match old {
+                    "ReturnedOk" | "ReturnedErr" => old == new,
+                    "Entered" => new != "NotObserved",
+                    _ => true,
+                })
         }
     }
     #[derive(serde::Deserialize, serde::Serialize)]
@@ -3087,12 +3133,18 @@ mod durable_flow_projection {
         fn valid(&self, initial: &PublicDurableFlow) -> bool {
             matches!(self.drain_result.as_str(), "ReturnedOk" | "ReturnedErr")
                 && (self.drain_result == "ReturnedErr") == self.drain_error.is_some()
-                && self.drain_error.as_ref().is_none_or(|error| error.valid() && error.stage == "Close")
+                && self
+                    .drain_error
+                    .as_ref()
+                    .is_none_or(|error| error.valid() && error.stage == "Close")
                 && optional_enum(self.worker_purpose.as_deref(), FLOW_JOB_PURPOSE)
                 && self.worker_purpose == initial.completion.purpose
                 && FLOW_RESULT.contains(&self.worker_result.as_str())
                 && (self.worker_result == "ReturnedErr") == self.worker_error.is_some()
-                && self.worker_error.as_ref().is_none_or(PublicFlowError::valid)
+                && self
+                    .worker_error
+                    .as_ref()
+                    .is_none_or(PublicFlowError::valid)
                 && (self.worker_purpose.is_some() || self.worker_result == "NotObserved")
                 && (initial.completion.receive != "Received"
                     || self.worker_result == "NotObserved"
@@ -3126,7 +3178,9 @@ mod durable_flow_projection {
         Some(PublicFlowAfterDrain {
             drain_result: flow_result_label(value.drain_result()).into(),
             drain_error: value.drain_error().map(flow_error),
-            worker_purpose: value.worker_purpose().map(|purpose| flow_job_purpose_label(purpose).into()),
+            worker_purpose: value
+                .worker_purpose()
+                .map(|purpose| flow_job_purpose_label(purpose).into()),
             worker_result: flow_result_label(value.worker_result()).into(),
             worker_error: value.worker_error().map(flow_error),
             call_outcomes: flow_calls(value.call_outcomes()),
@@ -3169,7 +3223,10 @@ mod durable_flow_projection {
                     .is_none_or(PublicFlowError::valid)
                 && self.completion.valid()
                 && self.call_outcomes.valid()
-                && self.after_drain.as_ref().is_none_or(|after| after.valid(self))
+                && self
+                    .after_drain
+                    .as_ref()
+                    .is_none_or(|after| after.valid(self))
                 && self.lower_call_measurement.as_ref().is_none_or(|lower| {
                     lower.valid()
                         && (!lower.measurement.clamped || self.clamped)
@@ -3313,9 +3370,13 @@ mod durable_flow_projection {
         let _ = writeln!(output, "\n{PRIVATE_PREFIX}{text}]");
     }
     pub(crate) fn emit_durable_flow(value: &DurableFlowDiagnosticV1) {
-        let Some(public) = flow_public(value) else { return; };
+        let Some(public) = flow_public(value) else {
+            return;
+        };
         // Emit only a valid FLOW, then its exact paired final-once supplement.
-        if canonical_payload(&public).is_none() { return; }
+        if canonical_payload(&public).is_none() {
+            return;
+        }
         let mut output = std::io::stderr().lock();
         write_private_record(&mut output, &public);
         if let Some(lifecycle) = value.lifecycle() {
@@ -3383,7 +3444,14 @@ mod durable_flow_projection {
     const LIFECYCLE_OWNER_BUDGET_US: u32 = 120_000_000;
     fn lifecycle_job_matches_operation(operation: &str, purpose: Option<&str>) -> bool {
         let allowed: &[&str] = match operation {
-            "WriterReconcile" => &["AcquirePrepare", "Acquire", "ActivationPrepare", "Activate", "ReconcilePrepare", "Reconcile"],
+            "WriterReconcile" => &[
+                "AcquirePrepare",
+                "Acquire",
+                "ActivationPrepare",
+                "Activate",
+                "ReconcilePrepare",
+                "Reconcile",
+            ],
             "FinancialImport" => &["Import"],
             "InitialSign" => &["WalletReview", "Sign"],
             "RetainedRetry" => &[],
@@ -3460,7 +3528,8 @@ mod durable_flow_projection {
                 && self.total_us <= 600_000_000
                 && self.max_us <= self.total_us
                 && (self.calls != 0 || (self.total_us == 0 && self.max_us == 0))
-                && (clamped || u64::from(self.total_us) <= u64::from(self.calls) * u64::from(self.max_us))
+                && (clamped
+                    || u64::from(self.total_us) <= u64::from(self.calls) * u64::from(self.max_us))
         }
     }
     macro_rules! lifecycle_costs {
@@ -3543,7 +3612,9 @@ mod durable_flow_projection {
             owner_budget_us: value.owner_budget_us(),
             points: PublicLifecyclePoints::from_source(value),
             pending_wait: PublicLifecycleCosts::from_source(value),
-            worker_purpose: value.worker_purpose().map(|purpose| flow_job_purpose_label(purpose).into()),
+            worker_purpose: value
+                .worker_purpose()
+                .map(|purpose| flow_job_purpose_label(purpose).into()),
             worker_started_to_client_entry_us: value.worker_started_to_client_entry_us(),
             worker_started_to_client_return_us: value.worker_started_to_client_return_us(),
             clamped: value.clamped(),
@@ -3551,12 +3622,16 @@ mod durable_flow_projection {
         }
     }
     fn lifecycle_canonical(value: &PublicDurableLifecycle) -> Option<String> {
-        if !value.valid() { return None; }
+        if !value.valid() {
+            return None;
+        }
         let text = serde_json::to_string(value).ok()?;
         (text.len() <= LIFECYCLE_MAX_PAYLOAD).then_some(text)
     }
     fn lifecycle_parse(text: &str) -> Option<PublicDurableLifecycle> {
-        if text.len() > LIFECYCLE_MAX_PAYLOAD { return None; }
+        if text.len() > LIFECYCLE_MAX_PAYLOAD {
+            return None;
+        }
         let value: PublicDurableLifecycle = serde_json::from_str(text).ok()?;
         value.valid().then_some(value)
     }
@@ -3570,30 +3645,57 @@ mod durable_flow_projection {
             self.record.as_ref().map_or(0, String::len)
         }
         pub(crate) fn discard_for_budget(&mut self) {
-            if self.record.take().is_some() { self.invalid = true; }
+            if self.record.take().is_some() {
+                self.invalid = true;
+            }
         }
         pub(crate) fn capture_line(&mut self, line: &str, available: usize) {
-            if !line.starts_with("[DURABLE_LIFECYCLE_V1") && line != LIFECYCLE_INVALID { return; }
-            if self.invalid { return; }
-            let canonical = line.strip_prefix(LIFECYCLE_PRIVATE_PREFIX)
+            if !line.starts_with("[DURABLE_LIFECYCLE_V1") && line != LIFECYCLE_INVALID {
+                return;
+            }
+            if self.invalid {
+                return;
+            }
+            let canonical = line
+                .strip_prefix(LIFECYCLE_PRIVATE_PREFIX)
                 .and_then(|line| line.strip_suffix(']'))
-                .and_then(lifecycle_parse).as_ref().and_then(lifecycle_canonical)
+                .and_then(lifecycle_parse)
+                .as_ref()
+                .and_then(lifecycle_canonical)
                 .map(|text| format!("{LIFECYCLE_PUBLIC_PREFIX}{text}"));
             if self.record.is_none() {
                 if let Some(record) = canonical {
-                    if record.len() <= available { self.record = Some(record); return; }
+                    if record.len() <= available {
+                        self.record = Some(record);
+                        return;
+                    }
                 }
             }
             self.record = None;
             self.invalid = true;
         }
         pub(crate) fn public_lines(&self, flow: &DurableFlowCapture) -> Vec<&str> {
-            if self.invalid { return vec![LIFECYCLE_INVALID]; }
-            let Some(record) = self.record.as_deref() else { return vec![]; };
-            let paired = record.strip_prefix(LIFECYCLE_PUBLIC_PREFIX).and_then(lifecycle_parse)
-                .zip(flow.record.as_deref().and_then(|line| line.strip_prefix(PUBLIC_PREFIX)).and_then(parse_payload))
+            if self.invalid {
+                return vec![LIFECYCLE_INVALID];
+            }
+            let Some(record) = self.record.as_deref() else {
+                return vec![];
+            };
+            let paired = record
+                .strip_prefix(LIFECYCLE_PUBLIC_PREFIX)
+                .and_then(lifecycle_parse)
+                .zip(
+                    flow.record
+                        .as_deref()
+                        .and_then(|line| line.strip_prefix(PUBLIC_PREFIX))
+                        .and_then(parse_payload),
+                )
                 .is_some_and(|(lifecycle, flow)| lifecycle.matches_flow(&flow));
-            if paired { vec![record] } else { vec![LIFECYCLE_INVALID] }
+            if paired {
+                vec![record]
+            } else {
+                vec![LIFECYCLE_INVALID]
+            }
         }
     }
     #[cfg(test)]
@@ -3628,7 +3730,10 @@ mod durable_flow_projection {
             assert!(text.len() <= MAX_PAYLOAD);
             assert_eq!(text, DURABLE_FLOW_MAXIMAL_TEST_JSON);
             let escaped = text.replacen("WriterReconcile", "\\u0057riterReconcile", 1);
-            assert_eq!(canonical_payload(&parse_payload(&escaped).unwrap()).unwrap(), text);
+            assert_eq!(
+                canonical_payload(&parse_payload(&escaped).unwrap()).unwrap(),
+                text
+            );
             let mut slot = DurableFlowCapture::default();
             slot.capture_line(&format!("{PRIVATE_PREFIX}{text}]"), 8192);
             assert_eq!(
@@ -4090,12 +4195,22 @@ mod durable_flow_projection {
             value["after_drain"]["worker_error"] = serde_json::Value::Null;
             value["after_drain"]["drain_result"] = serde_json::json!("ReturnedOk");
             value["after_drain"]["drain_error"] = serde_json::Value::Null;
-            value["after_drain"]["call_outcomes"]["writer_acquire"] = serde_json::json!("ReturnedOk");
+            value["after_drain"]["call_outcomes"]["writer_acquire"] =
+                serde_json::json!("ReturnedOk");
             let initial = value.clone();
             assert!(accepted(&value));
             let parsed = parse_payload(&value.to_string()).unwrap();
-            let roundtrip: serde_json::Value = serde_json::from_str(&canonical_payload(&parsed).unwrap()).unwrap();
-            for key in ["first_error", "terminal_error", "completion", "call_outcomes", "lower_call_measurement", "clamped", "incomplete"] {
+            let roundtrip: serde_json::Value =
+                serde_json::from_str(&canonical_payload(&parsed).unwrap()).unwrap();
+            for key in [
+                "first_error",
+                "terminal_error",
+                "completion",
+                "call_outcomes",
+                "lower_call_measurement",
+                "clamped",
+                "incomplete",
+            ] {
                 assert_eq!(roundtrip[key], initial[key]);
             }
             assert_eq!(roundtrip["completion"]["receive"], "Pending");
@@ -4106,7 +4221,8 @@ mod durable_flow_projection {
                 ("worker_purpose", serde_json::json!("Activate")),
                 ("worker_error", initial["first_error"].clone()),
             ] {
-                let mut changed = value.clone(); changed["after_drain"][key] = bad;
+                let mut changed = value.clone();
+                changed["after_drain"][key] = bad;
                 assert!(!accepted(&changed));
             }
             value["completion"]["result"] = serde_json::json!("ReturnedErr");
@@ -4122,7 +4238,8 @@ mod durable_flow_projection {
                 for new in FLOW_CALL_OUTCOME {
                     let mut value = fixture();
                     value["call_outcomes"]["writer_acquire"] = serde_json::json!(old);
-                    value["after_drain"]["call_outcomes"]["writer_acquire"] = serde_json::json!(new);
+                    value["after_drain"]["call_outcomes"]["writer_acquire"] =
+                        serde_json::json!(new);
                     let valid = match *old {
                         "ReturnedOk" | "ReturnedErr" => old == new,
                         "Entered" => *new != "NotObserved",
@@ -4132,12 +4249,14 @@ mod durable_flow_projection {
                 }
             }
             let mut value = fixture();
-            value["after_drain"]["lower_call_measurement"] = value["lower_call_measurement"].clone();
+            value["after_drain"]["lower_call_measurement"] =
+                value["lower_call_measurement"].clone();
             assert!(!accepted(&value));
             value["lower_call_measurement"] = serde_json::Value::Null;
             assert!(accepted(&value));
             for flag in ["clamped", "incomplete"] {
-                value["after_drain"]["lower_call_measurement"]["measurement"][flag] = serde_json::json!(true);
+                value["after_drain"]["lower_call_measurement"]["measurement"][flag] =
+                    serde_json::json!(true);
                 assert!(!accepted(&value));
                 value["after_drain"][flag] = serde_json::json!(true);
                 assert!(accepted(&value));
@@ -4159,7 +4278,10 @@ mod durable_flow_projection {
             assert_eq!(text.len(), 1979);
             let exact = format!("{}{}", text, " ".repeat(LIFECYCLE_MAX_PAYLOAD - text.len()));
             assert_eq!(exact.len(), 2048);
-            assert_eq!(lifecycle_canonical(&lifecycle_parse(&exact).unwrap()).unwrap(), text);
+            assert_eq!(
+                lifecycle_canonical(&lifecycle_parse(&exact).unwrap()).unwrap(),
+                text
+            );
             assert!(lifecycle_parse(&(exact + " ")).is_none());
             let mut flow = parse_payload(DURABLE_FLOW_MAXIMAL_TEST_JSON).unwrap();
             assert!(value.matches_flow(&flow));
@@ -4189,7 +4311,12 @@ mod durable_flow_projection {
                 flow.operation = operation.into();
                 flow.completion.purpose = purpose.map(str::to_owned);
                 flow.completion.result = "NotObserved".into();
-                flow.completion.receive = if purpose.is_some() { "Pending" } else { "Missing" }.into();
+                flow.completion.receive = if purpose.is_some() {
+                    "Pending"
+                } else {
+                    "Missing"
+                }
+                .into();
                 flow.completion.presentation = "NotObserved".into();
                 flow.after_drain = None;
                 flow.lower_call_measurement = None;
@@ -4203,22 +4330,31 @@ mod durable_flow_projection {
                 assert!(serialized.len() <= 1979);
                 assert!(lifecycle_parse(&serialized).unwrap().matches_flow(&flow));
                 for later_span in [false, true] {
-                    if later_span { lifecycle.worker_started_to_client_return_us = Some(1); }
-                    else { lifecycle.worker_started_to_client_entry_us = Some(0); }
+                    if later_span {
+                        lifecycle.worker_started_to_client_return_us = Some(1);
+                    } else {
+                        lifecycle.worker_started_to_client_entry_us = Some(0);
+                    }
                     assert!(!lifecycle.valid());
                     lifecycle.worker_started_to_client_entry_us = None;
                     lifecycle.worker_started_to_client_return_us = None;
                 }
-                lifecycle.points.after_drain = Some(PublicLifecyclePoint { age_us: 120_000_000, remaining_us: 0 });
+                lifecycle.points.after_drain = Some(PublicLifecyclePoint {
+                    age_us: 120_000_000,
+                    remaining_us: 0,
+                });
                 assert!(!lifecycle.valid());
                 lifecycle.points.after_drain = None;
-                flow.after_drain = parse_payload(DURABLE_FLOW_MAXIMAL_TEST_JSON).unwrap().after_drain;
+                flow.after_drain = parse_payload(DURABLE_FLOW_MAXIMAL_TEST_JSON)
+                    .unwrap()
+                    .after_drain;
                 assert!(!lifecycle.matches_flow(&flow));
             }
         }
         #[test]
         fn durable_lifecycle_exact_scopes_bounds_and_arithmetic() {
-            let original: serde_json::Value = serde_json::from_str(DURABLE_LIFECYCLE_MAXIMAL_TEST_JSON).unwrap();
+            let original: serde_json::Value =
+                serde_json::from_str(DURABLE_LIFECYCLE_MAXIMAL_TEST_JSON).unwrap();
             let text = original.to_string();
             let mut paths = Vec::new();
             object_paths(&original, String::new(), &mut paths);
@@ -4230,55 +4366,113 @@ mod durable_flow_projection {
                 assert!(lifecycle_parse(&changed.to_string()).is_none());
                 for (key, entry) in object {
                     let mut changed = original.clone();
-                    changed.pointer_mut(&path).unwrap().as_object_mut().unwrap().remove(key);
+                    changed
+                        .pointer_mut(&path)
+                        .unwrap()
+                        .as_object_mut()
+                        .unwrap()
+                        .remove(key);
                     assert!(lifecycle_parse(&changed.to_string()).is_none());
-                    for spelling in [key.clone(), format!("\\u{:04x}{}", key.as_bytes()[0], &key[1..])] {
+                    for spelling in [
+                        key.clone(),
+                        format!("\\u{:04x}{}", key.as_bytes()[0], &key[1..]),
+                    ] {
                         let duplicate = format!("{{\"{spelling}\":{entry},{}", &fragment[1..]);
-                        assert!(lifecycle_parse(&text.replacen(&fragment, &duplicate, 1)).is_none());
+                        assert!(
+                            lifecycle_parse(&text.replacen(&fragment, &duplicate, 1)).is_none()
+                        );
                     }
-                    for bad in [serde_json::json!([]), serde_json::json!({}), serde_json::json!("private/path"), serde_json::json!(true), serde_json::json!(-1), serde_json::json!(1.0)] {
-                        if entry.is_boolean() && bad == serde_json::json!(true) { continue; }
-                        let mut changed = original.clone(); changed.pointer_mut(&path).unwrap()[key] = bad;
+                    for bad in [
+                        serde_json::json!([]),
+                        serde_json::json!({}),
+                        serde_json::json!("private/path"),
+                        serde_json::json!(true),
+                        serde_json::json!(-1),
+                        serde_json::json!(1.0),
+                    ] {
+                        if entry.is_boolean() && bad == serde_json::json!(true) {
+                            continue;
+                        }
+                        let mut changed = original.clone();
+                        changed.pointer_mut(&path).unwrap()[key] = bad;
                         assert!(lifecycle_parse(&changed.to_string()).is_none());
                     }
                 }
             }
-            for (age, remaining, valid) in [(0,120_000_000,true),(119_999_999,1,true),(120_000_000,0,true),(600_000_000,0,true),(600_000_001,0,false),(1,120_000_000,false)] {
+            for (age, remaining, valid) in [
+                (0, 120_000_000, true),
+                (119_999_999, 1, true),
+                (120_000_000, 0, true),
+                (600_000_000, 0, true),
+                (600_000_001, 0, false),
+                (1, 120_000_000, false),
+            ] {
                 let mut value = original.clone();
-                value["points"]["fixture_failure"] = serde_json::json!({"age_us":age,"remaining_us":remaining});
+                value["points"]["fixture_failure"] =
+                    serde_json::json!({"age_us":age,"remaining_us":remaining});
                 assert_eq!(lifecycle_parse(&value.to_string()).is_some(), valid);
             }
-            for cost in [serde_json::json!({"calls":0,"total_us":1,"max_us":1}),serde_json::json!({"calls":1,"total_us":10,"max_us":11}),serde_json::json!({"calls":1,"total_us":11,"max_us":10}),serde_json::json!({"calls":1_000_001,"total_us":0,"max_us":0})] {
-                let mut value = original.clone(); value["pending_wait"]["liveness"] = cost;
+            for cost in [
+                serde_json::json!({"calls":0,"total_us":1,"max_us":1}),
+                serde_json::json!({"calls":1,"total_us":10,"max_us":11}),
+                serde_json::json!({"calls":1,"total_us":11,"max_us":10}),
+                serde_json::json!({"calls":1_000_001,"total_us":0,"max_us":0}),
+            ] {
+                let mut value = original.clone();
+                value["pending_wait"]["liveness"] = cost;
                 assert!(lifecycle_parse(&value.to_string()).is_none());
             }
-            for (entry, returned, valid) in [(None,None,true),(Some(0),None,true),(Some(0),Some(0),true),(Some(2),Some(1),false),(None,Some(0),false),(Some(600_000_001),None,false)] {
+            for (entry, returned, valid) in [
+                (None, None, true),
+                (Some(0), None, true),
+                (Some(0), Some(0), true),
+                (Some(2), Some(1), false),
+                (None, Some(0), false),
+                (Some(600_000_001), None, false),
+            ] {
                 let mut value = original.clone();
                 value["worker_started_to_client_entry_us"] = serde_json::json!(entry);
                 value["worker_started_to_client_return_us"] = serde_json::json!(returned);
                 assert_eq!(lifecycle_parse(&value.to_string()).is_some(), valid);
             }
             let operations: &[(&str, &[&str])] = &[
-                ("WriterReconcile", &["AcquirePrepare", "Acquire", "ActivationPrepare", "Activate", "ReconcilePrepare", "Reconcile"]),
+                (
+                    "WriterReconcile",
+                    &[
+                        "AcquirePrepare",
+                        "Acquire",
+                        "ActivationPrepare",
+                        "Activate",
+                        "ReconcilePrepare",
+                        "Reconcile",
+                    ],
+                ),
                 ("FinancialImport", &["Import"]),
                 ("InitialSign", &["WalletReview", "Sign"]),
                 ("RetainedRetry", &[]),
                 ("ResultService", &["ResultService"]),
             ];
             for &(operation, purposes) in operations {
-                for purpose in std::iter::once(None).chain(FLOW_JOB_PURPOSE.iter().copied().map(Some)) {
+                for purpose in
+                    std::iter::once(None).chain(FLOW_JOB_PURPOSE.iter().copied().map(Some))
+                {
                     let mut value = original.clone();
                     value["operation"] = serde_json::json!(operation);
                     value["worker_purpose"] = serde_json::json!(purpose);
                     value["worker_started_to_client_entry_us"] = serde_json::Value::Null;
                     value["worker_started_to_client_return_us"] = serde_json::Value::Null;
                     value["points"]["after_drain"] = serde_json::Value::Null;
-                    assert_eq!(lifecycle_parse(&value.to_string()).is_some(), purpose.is_none_or(|purpose| purposes.contains(&purpose)));
+                    assert_eq!(
+                        lifecycle_parse(&value.to_string()).is_some(),
+                        purpose.is_none_or(|purpose| purposes.contains(&purpose))
+                    );
                 }
             }
             assert_eq!(original["points"].as_object().unwrap().len(), 20);
             let mut value = original;
-            for point in value["points"].as_object_mut().unwrap().values_mut() { *point = serde_json::Value::Null; }
+            for point in value["points"].as_object_mut().unwrap().values_mut() {
+                *point = serde_json::Value::Null;
+            }
             value["worker_purpose"] = serde_json::Value::Null;
             value["worker_started_to_client_entry_us"] = serde_json::Value::Null;
             value["worker_started_to_client_return_us"] = serde_json::Value::Null;
@@ -4288,10 +4482,19 @@ mod durable_flow_projection {
         fn durable_lifecycle_capture_sticky_optional_and_paired() {
             let valid = format!("{LIFECYCLE_PRIVATE_PREFIX}{DURABLE_LIFECYCLE_MAXIMAL_TEST_JSON}]");
             let mut flow = DurableFlowCapture::default();
-            flow.capture_line(&format!("{PRIVATE_PREFIX}{DURABLE_FLOW_MAXIMAL_TEST_JSON}]"), 8192);
-            for first in [&valid, "[DURABLE_LIFECYCLE_V1 {\"private\":\"secret\"}]", LIFECYCLE_INVALID, "[DURABLE_LIFECYCLE_V1]"] {
+            flow.capture_line(
+                &format!("{PRIVATE_PREFIX}{DURABLE_FLOW_MAXIMAL_TEST_JSON}]"),
+                8192,
+            );
+            for first in [
+                &valid,
+                "[DURABLE_LIFECYCLE_V1 {\"private\":\"secret\"}]",
+                LIFECYCLE_INVALID,
+                "[DURABLE_LIFECYCLE_V1]",
+            ] {
                 let mut slot = DurableLifecycleCapture::default();
-                slot.capture_line(first, 8192); slot.capture_line(&valid, 8192);
+                slot.capture_line(first, 8192);
+                slot.capture_line(&valid, 8192);
                 assert_eq!(slot.public_lines(&flow), vec![LIFECYCLE_INVALID]);
                 assert_eq!(slot.retained_bytes(), 0);
             }
@@ -4299,12 +4502,22 @@ mod durable_flow_projection {
             slot.capture_line(&format!("private {valid}"), 8192);
             assert!(slot.public_lines(&flow).is_empty());
             slot.capture_line(&valid, 8192);
-            assert_eq!(slot.public_lines(&flow), vec![format!("{LIFECYCLE_PUBLIC_PREFIX}{DURABLE_LIFECYCLE_MAXIMAL_TEST_JSON}").as_str()]);
-            assert_eq!(slot.public_lines(&DurableFlowCapture::default()), vec![LIFECYCLE_INVALID]);
+            assert_eq!(
+                slot.public_lines(&flow),
+                vec![
+                    format!("{LIFECYCLE_PUBLIC_PREFIX}{DURABLE_LIFECYCLE_MAXIMAL_TEST_JSON}")
+                        .as_str()
+                ]
+            );
+            assert_eq!(
+                slot.public_lines(&DurableFlowCapture::default()),
+                vec![LIFECYCLE_INVALID]
+            );
             slot.discard_for_budget();
             assert_eq!(slot.public_lines(&flow), vec![LIFECYCLE_INVALID]);
             let mut slot = DurableLifecycleCapture::default();
-            slot.capture_line(&valid, 1); slot.capture_line(&valid, 8192);
+            slot.capture_line(&valid, 1);
+            slot.capture_line(&valid, 8192);
             assert_eq!(slot.public_lines(&flow), vec![LIFECYCLE_INVALID]);
         }
         #[test]
@@ -4364,9 +4577,13 @@ mod durable_flow_projection {
     }
 }
 #[cfg(all(test, feature = "synthetic-born-joined-qualification"))]
-pub(super) use durable_flow_projection::{DURABLE_FLOW_MAXIMAL_TEST_JSON, DURABLE_LIFECYCLE_MAXIMAL_TEST_JSON};
+pub(super) use durable_flow_projection::{
+    DURABLE_FLOW_MAXIMAL_TEST_JSON, DURABLE_LIFECYCLE_MAXIMAL_TEST_JSON,
+};
 #[cfg(feature = "synthetic-born-joined-qualification")]
-pub(super) use durable_flow_projection::{DurableFlowCapture, DurableLifecycleCapture, emit_durable_flow};
+pub(super) use durable_flow_projection::{
+    DurableFlowCapture, DurableLifecycleCapture, emit_durable_flow,
+};
 
 // Optional, data-only transport. The Host leaf owns the single strict typed
 // parser; neither this adapter nor a transcript ever forwards raw JSON.

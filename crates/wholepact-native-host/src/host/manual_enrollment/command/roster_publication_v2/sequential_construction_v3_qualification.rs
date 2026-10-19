@@ -126,9 +126,11 @@ fn finite_prompt_rendering_preserves_exact_terminal_purpose() {
         assert_eq!(rendered.as_str(), expected);
         assert!(!source.contains(rendered.as_str()));
         assert!(format!("prefix {expected} suffix").contains(rendered.as_str()));
-        assert!(!expected
-            .replace("Exact purpose", "Other purpose")
-            .contains(rendered.as_str()));
+        assert!(
+            !expected
+                .replace("Exact purpose", "Other purpose")
+                .contains(rendered.as_str())
+        );
     }
     let ascii = "ASCII purpose: ~!09, keep spaces and newline\n";
     assert_eq!(
@@ -797,18 +799,42 @@ fn synthetic_foreground_child() {
     process_containment_v1::require_and_report_core_policy()
         .expect("inherited zero core limit and read-only collector classification");
     let stage = std::env::var(CHILD_ENV).expect("bounded synthetic parent stage");
-    #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "synthetic-born-joined-qualification"
+    ))]
     if stage == "private-workspace-read-fixed-v1" {
         let terminal = crate::terminal::Terminal::open().expect("actual independent reader TTY");
         durable_proposal_v1::private_fixed_v2::read_fixed_child(terminal).unwrap();
         return;
     }
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "synthetic-born-joined-qualification"
+    ))]
+    if stage == "durable-delivery-native-history-v2" {
+        let terminal =
+            crate::terminal::Terminal::open().expect("actual independent delivery reader TTY");
+        durable_proposal_v1::delivery_admission_v2::read_delivery_child(terminal).unwrap();
+        return;
+    }
     let _synthetic_tls = synthetic_provider_tls_v1::child_server_config()
         .expect("owned test-process TLS identity, not chain qualification");
     let terminal = crate::terminal::Terminal::open().expect("actual foreground child TTY");
-    #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "synthetic-born-joined-qualification"
+    ))]
     if stage == "private-workspace-produce-fixed-v1" {
         durable_proposal_v1::private_fixed_v2::produce_fixed_child(terminal).unwrap();
+        return;
+    }
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "synthetic-born-joined-qualification"
+    ))]
+    if stage == "durable-delivery-native-admission-v2" {
+        durable_proposal_v1::private_fixed_v2::produce_delivery_child(terminal).unwrap();
         return;
     }
     if stage == "bounded-dispatch-review-v1" {
@@ -953,12 +979,14 @@ fn synthetic_foreground_child() {
             Ok(())
         })
         .unwrap();
-    assert!(approval
-        .effect(&mut || {
-            effects += 1;
-            Ok(())
-        })
-        .is_err());
+    assert!(
+        approval
+            .effect(&mut || {
+                effects += 1;
+                Ok(())
+            })
+            .is_err()
+    );
     assert_eq!(effects, 1);
     host.authority.fence.revoke().unwrap();
     drop(host);
@@ -1144,20 +1172,58 @@ fn joined_temporary_socket_names_fit_linux_pathname_budget() {
 #[path = "sequential_construction_v3_qualification/synthetic_born_submission_sink_v1.rs"]
 mod synthetic_born_submission_sink_v1;
 
-
-#[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "synthetic-born-joined-qualification"
+))]
 #[derive(Clone, Copy, Eq, PartialEq)]
-enum PrivateWorkspaceStageV1 { Producer, Reader }
-#[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+enum PrivateWorkspaceStageV1 {
+    Producer,
+    Reader,
+    DeliveryProducer,
+    DeliveryReader,
+}
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "synthetic-born-joined-qualification"
+))]
 impl PrivateWorkspaceStageV1 {
     fn label(self) -> &'static str {
         match self {
             Self::Producer => "private-workspace-produce-fixed-v1",
             Self::Reader => "private-workspace-read-fixed-v1",
+            Self::DeliveryProducer => "durable-delivery-native-admission-v2",
+            Self::DeliveryReader => "durable-delivery-native-history-v2",
+        }
+    }
+    fn producer(self) -> bool {
+        matches!(self, Self::Producer | Self::DeliveryProducer)
+    }
+    fn marker(self, tail: &str, complete: bool, terminal: bool) -> std::io::Result<bool> {
+        match self {
+            Self::Producer | Self::Reader => {
+                durable_proposal_v1::private_fixed_v2::death_marker_v1(
+                    tail,
+                    self.producer(),
+                    complete,
+                    terminal,
+                )
+            }
+            Self::DeliveryProducer | Self::DeliveryReader => {
+                durable_proposal_v1::delivery_admission_v2::death_marker_v2(
+                    tail,
+                    self.producer(),
+                    complete,
+                    terminal,
+                )
+            }
         }
     }
 }
-#[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "synthetic-born-joined-qualification"
+))]
 struct PrivateWorkspaceStageResultV1 {
     private_fixed_diagnostic:
         Option<crate::host::durable_private_workspace_v1::PrivateFixedDiagnosticV1>,
@@ -1189,7 +1255,10 @@ impl PrivateWorkspaceStageResultV1 {
 /// Exactly one stage, sharing the caller's original cutoff and returning the
 /// SAME TempDir only after existing exact process cleanup. No authority owner
 /// exists in this controller. Existing single-child adapter is unchanged.
-#[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "synthetic-born-joined-qualification"
+))]
 fn private_workspace_stage_v1(
     root: tempfile::TempDir,
     tls_material: Option<&synthetic_provider_tls_v1::ChildTlsMaterialV1>,
@@ -1198,16 +1267,21 @@ fn private_workspace_stage_v1(
     deadline: Instant,
     monotonic_cutoff_ns: u64,
 ) -> std::io::Result<PrivateWorkspaceStageResultV1> {
-    if (stage == PrivateWorkspaceStageV1::Producer) != tls_material.is_some() {
+    if stage.producer() != tls_material.is_some() {
         let _ = root.keep();
-        return Err(std::io::Error::other("exact private workspace child role refused"));
+        return Err(std::io::Error::other(
+            "exact private workspace child role refused",
+        ));
     }
     let child_temporary_root = owned_test_process_group_v1::PreSpawnTemporaryRootV1::new(root);
     let mut failure_reason = HarnessFailureReason::Unclassified;
-    let mut transcript = harness_transcript(&mut failure_reason,
+    let mut transcript = harness_transcript(
+        &mut failure_reason,
         rolling_transcript_v1::Transcript::new(inputs.iter().filter_map(|input| match input {
-            Input::CapturedPath { marker, .. } => Some(*marker), _ => None,
-        })))?;
+            Input::CapturedPath { marker, .. } => Some(*marker),
+            _ => None,
+        })),
+    )?;
     // This creates a temporary terminal, not an OS trust root or permission
     // override. The child still passes the actual foreground() implementation.
     let master_fd = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC) };
@@ -1234,7 +1308,9 @@ fn private_workspace_stage_v1(
             material.configure_child(&mut command);
         } else {
             // The reader has no TLS authority, server config or signer/witness.
-            command.env_remove("SSL_CERT_FILE").env_remove("SSL_CERT_DIR");
+            command
+                .env_remove("SSL_CERT_FILE")
+                .env_remove("SSL_CERT_DIR");
         }
         command
             .args([
@@ -1245,7 +1321,10 @@ fn private_workspace_stage_v1(
                 "--test-threads=1",
             ])
             .env(CHILD_ENV, stage.label())
-            .env("WHOLEPACT_TEST_ONLY_PRIVATE_WORKFLOW_CUTOFF_NS",monotonic_cutoff_ns.to_string())
+            .env(
+                "WHOLEPACT_TEST_ONLY_PRIVATE_WORKFLOW_CUTOFF_NS",
+                monotonic_cutoff_ns.to_string(),
+            )
             .env("TMPDIR", child_temporary_root.path())
             .env_remove("DISPLAY")
             .env_remove("WAYLAND_DISPLAY")
@@ -1280,7 +1359,9 @@ fn private_workspace_stage_v1(
     };
     if Instant::now() >= deadline {
         let _ = close_owned_temporary_root(child_temporary_root.into_tempdir());
-        return Err(std::io::Error::other("original two-process cutoff expired before child spawn"));
+        return Err(std::io::Error::other(
+            "original two-process cutoff expired before child spawn",
+        ));
     }
     let spawned = match owned_test_process_group_v1::spawn_with_checked_wait_policy(&mut command) {
         Ok(child) => child,
@@ -1307,35 +1388,59 @@ fn private_workspace_stage_v1(
         loop {
             if Instant::now() >= deadline {
                 failure_reason = HarnessFailureReason::Deadline;
-                return Err(std::io::Error::new(std::io::ErrorKind::TimedOut,"original two-process deadline expired"));
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "original two-process deadline expired",
+                ));
             }
-            if let Some(success) = harness_io(&mut failure_reason,
-                HarnessFailureReason::ChildObservation, child.observe_exit())? {
-                if stage == PrivateWorkspaceStageV1::Reader && success && next == inputs.len() {
+            if let Some(success) = harness_io(
+                &mut failure_reason,
+                HarnessFailureReason::ChildObservation,
+                child.observe_exit(),
+            )? {
+                if !stage.producer() && success && next == inputs.len() {
                     // Remaining PTY bytes may complete a split UTF-8 scalar.
                     // Only the bounded post-reap terminal drain finishes text.
                     return Ok(());
                 }
                 failure_reason = HarnessFailureReason::ChildExit;
-                return Err(std::io::Error::other("private workspace child exited before verified stage completion"));
+                return Err(std::io::Error::other(
+                    "private workspace child exited before verified stage completion",
+                ));
             }
-            let mut descriptor = libc::pollfd { fd: master.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+            let mut descriptor = libc::pollfd {
+                fd: master.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
             if unsafe { libc::poll(&mut descriptor, 1, 50) } < 0 {
                 failure_reason = HarnessFailureReason::PollIo;
                 return Err(std::io::Error::last_os_error());
             }
-            if descriptor.revents & libc::POLLIN == 0 { continue; }
+            if descriptor.revents & libc::POLLIN == 0 {
+                continue;
+            }
             let mut chunk = zeroize::Zeroizing::new([0u8; 4096]);
-            let length = harness_io(&mut failure_reason,HarnessFailureReason::ReadIo,master.read(&mut chunk[..]))?;
-            if length == 0 { continue; }
-            harness_transcript(&mut failure_reason, transcript.append(&chunk[..length],child.temporary_root()))?;
+            let length = harness_io(
+                &mut failure_reason,
+                HarnessFailureReason::ReadIo,
+                master.read(&mut chunk[..]),
+            )?;
+            if length == 0 {
+                continue;
+            }
+            harness_transcript(
+                &mut failure_reason,
+                transcript.append(&chunk[..length], child.temporary_root()),
+            )?;
             // Inspect BEFORE consuming any ordinary input. An early marker
             // cannot be erased by rolling transcript compaction.
-            if let Some(tail) = harness_transcript(&mut failure_reason,transcript.tail())? {
-                let recognized = durable_proposal_v1::private_fixed_v2::death_marker_v1(
-                    tail, stage == PrivateWorkspaceStageV1::Producer, next == inputs.len(), false)?;
+            if let Some(tail) = harness_transcript(&mut failure_reason, transcript.tail())? {
+                let recognized = stage.marker(tail, next == inputs.len(), false)?;
                 if recognized {
-                    if Instant::now() >= deadline { return Err(std::io::Error::other("original deadline expired")); }
+                    if Instant::now() >= deadline {
+                        return Err(std::io::Error::other("original deadline expired"));
+                    }
                     marker_seen = true;
                     break;
                 }
@@ -1458,30 +1563,51 @@ fn private_workspace_stage_v1(
     if process.verified() {
         // No consume/eviction occurs after the final input. Drain only already
         // available data, and require terminal EOF/EIO/hangup, not quietness.
-        let drained = private_workspace_terminal_drain_v1(&mut master,&mut transcript,
-            finished.root_for_explicit_close.as_ref().map(|root| root.path()));
+        let drained = private_workspace_terminal_drain_v1(
+            &mut master,
+            &mut transcript,
+            finished
+                .root_for_explicit_close
+                .as_ref()
+                .map(|root| root.path()),
+        );
         if outcome.is_ok() {
-            if let Err(error) = drained { failure_reason=HarnessFailureReason::ReadIo; outcome=Err(error); }
+            if let Err(error) = drained {
+                failure_reason = HarnessFailureReason::ReadIo;
+                outcome = Err(error);
+            }
         }
-        if stage == PrivateWorkspaceStageV1::Producer && outcome.is_ok() {
+        if stage.producer() && outcome.is_ok() {
             let valid = transcript.finish_text().is_ok()
-                && transcript.tail().ok().flatten().is_some_and(|tail|
-                    durable_proposal_v1::private_fixed_v2::death_marker_v1(tail,true,next==inputs.len(),true).unwrap_or(false));
+                && transcript.tail().ok().flatten().is_some_and(|tail| {
+                    stage
+                        .marker(tail, next == inputs.len(), true)
+                        .unwrap_or(false)
+                });
             if !marker_seen || !valid {
-                failure_reason=HarnessFailureReason::OutcomeRead;
-                outcome=Err(std::io::Error::other("terminal durable marker validation failed"));
+                failure_reason = HarnessFailureReason::OutcomeRead;
+                outcome = Err(std::io::Error::other(
+                    "terminal durable marker validation failed",
+                ));
             }
         }
     }
-    if stage == PrivateWorkspaceStageV1::Reader && outcome.is_ok()
-        && transcript.tail().ok().flatten().is_none_or(|tail|
-            durable_proposal_v1::private_fixed_v2::death_marker_v1(tail,false,next==inputs.len(),false).is_err()) {
-        failure_reason=HarnessFailureReason::OutcomeRead;
-        outcome=Err(std::io::Error::other("unexpected reader terminal marker"));
+    if !stage.producer()
+        && outcome.is_ok()
+        && transcript
+            .tail()
+            .ok()
+            .flatten()
+            .is_none_or(|tail| stage.marker(tail, next == inputs.len(), false).is_err())
+    {
+        failure_reason = HarnessFailureReason::OutcomeRead;
+        outcome = Err(std::io::Error::other("unexpected reader terminal marker"));
     }
     if !process.verified() && outcome.is_ok() {
-        failure_reason=HarnessFailureReason::CleanupUnverified;
-        outcome=Err(std::io::Error::other("private workspace process cleanup unverified"));
+        failure_reason = HarnessFailureReason::CleanupUnverified;
+        outcome = Err(std::io::Error::other(
+            "private workspace process cleanup unverified",
+        ));
     }
     transcript.finish_private_fixed_diagnostic();
     let private_fixed_diagnostic = if process.verified() {
@@ -1503,32 +1629,60 @@ fn private_workspace_stage_v1(
     })
 }
 
-#[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "synthetic-born-joined-qualification"
+))]
 fn private_workspace_terminal_drain_v1(
     master: &mut File,
     transcript: &mut rolling_transcript_v1::Transcript<'_>,
     root: Option<&std::path::Path>,
 ) -> std::io::Result<()> {
-    let root=root.ok_or_else(||std::io::Error::other("verified root unavailable"))?;
-    let flags=unsafe { libc::fcntl(master.as_raw_fd(),libc::F_GETFL) };
-    if flags<0 || unsafe { libc::fcntl(master.as_raw_fd(),libc::F_SETFL,flags|libc::O_NONBLOCK) }<0 {
+    let root = root.ok_or_else(|| std::io::Error::other("verified root unavailable"))?;
+    let flags = unsafe { libc::fcntl(master.as_raw_fd(), libc::F_GETFL) };
+    if flags < 0
+        || unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
+    {
         return Err(std::io::Error::last_os_error());
     }
     for _ in 0..64 {
-        let mut descriptor=libc::pollfd { fd:master.as_raw_fd(),events:libc::POLLIN,revents:0 };
-        let ready=unsafe { libc::poll(&mut descriptor,1,0) };
-        if ready<0 || descriptor.revents & (libc::POLLERR|libc::POLLNVAL)!=0 {
+        let mut descriptor = libc::pollfd {
+            fd: master.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ready = unsafe { libc::poll(&mut descriptor, 1, 0) };
+        if ready < 0 || descriptor.revents & (libc::POLLERR | libc::POLLNVAL) != 0 {
             return Err(std::io::Error::other("terminal drain observation failed"));
         }
-        let mut chunk=zeroize::Zeroizing::new([0u8;4096]);
+        let mut chunk = zeroize::Zeroizing::new([0u8; 4096]);
         match master.read(&mut chunk[..]) {
-            Ok(0) => return transcript.finish_text().map_err(|_|std::io::Error::other("terminal utf8 incomplete")),
-            Ok(length) => transcript.append(&chunk[..length],root).map_err(|_|std::io::Error::other("terminal bounded append failed"))?,
-            Err(error) if error.raw_os_error()==Some(libc::EIO) =>
-                return transcript.finish_text().map_err(|_|std::io::Error::other("terminal utf8 incomplete")),
-            Err(error) if error.kind()==std::io::ErrorKind::WouldBlock && descriptor.revents & libc::POLLHUP!=0 =>
-                return transcript.finish_text().map_err(|_|std::io::Error::other("terminal utf8 incomplete")),
-            Err(_) => return Err(std::io::Error::other("terminal EOF or hangup not established")),
+            Ok(0) => {
+                return transcript
+                    .finish_text()
+                    .map_err(|_| std::io::Error::other("terminal utf8 incomplete"));
+            }
+            Ok(length) => transcript
+                .append(&chunk[..length], root)
+                .map_err(|_| std::io::Error::other("terminal bounded append failed"))?,
+            Err(error) if error.raw_os_error() == Some(libc::EIO) => {
+                return transcript
+                    .finish_text()
+                    .map_err(|_| std::io::Error::other("terminal utf8 incomplete"));
+            }
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    && descriptor.revents & libc::POLLHUP != 0 =>
+            {
+                return transcript
+                    .finish_text()
+                    .map_err(|_| std::io::Error::other("terminal utf8 incomplete"));
+            }
+            Err(_) => {
+                return Err(std::io::Error::other(
+                    "terminal EOF or hangup not established",
+                ));
+            }
         }
     }
     Err(std::io::Error::other("terminal bounded drain incomplete"))

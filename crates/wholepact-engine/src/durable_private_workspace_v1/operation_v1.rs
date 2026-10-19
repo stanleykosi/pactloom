@@ -288,6 +288,14 @@ fn same<T: Serialize>(a: &T, b: &T) -> Result<bool> {
         == serde_json::to_value(b).map_err(|_| damaged())?)
 }
 pub(super) fn validate_shape(e: &Envelope) -> Result<()> {
+    validate_common_shape(e)?;
+    crate::durable_construction_v1::validate_private_roster_v2(e)?;
+    crate::durable_proposals_v1::validate_private_fixed_v2(e)?;
+    Ok(())
+}
+// Immutable envelope restrictions shared only by the two closed profiles.
+// Does not admit any roster or effect on its own.
+pub(super) fn validate_common_shape(e: &Envelope) -> Result<()> {
     if !e.durable_input_projections_v1.is_empty()
         || !e.sponsor_policies.is_empty()
         || !e.participant_records.is_empty()
@@ -323,8 +331,6 @@ pub(super) fn validate_shape(e: &Envelope) -> Result<()> {
             return Err(damaged());
         }
     }
-    crate::durable_construction_v1::validate_private_roster_v2(e)?;
-    crate::durable_proposals_v1::validate_private_fixed_v2(e)?;
     Ok(())
 }
 /// Clone the FULL typed envelope and copy only expressly allowed fields before

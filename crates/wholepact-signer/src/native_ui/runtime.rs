@@ -56,6 +56,8 @@ pub(in crate::native_ui) mod durable_proposal_qualification_v1;
 #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
 mod durable_review_v1;
 #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+mod durable_delivery_admission_v2;
+#[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
 mod durable_witness_v1;
 
 #[cfg(feature = "pending-birth-owner-signing")]
@@ -271,6 +273,10 @@ enum Operation {
     #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
     DurableWitnessV1(Box<durable_witness_v1::DurableWitnessPreparedV1>),
     #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+    DurableDeliveryV2(Box<durable_delivery_admission_v2::PreparedAdmissionV2>),
+    #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+    DurableDeliveryRedisclosureV2(Box<durable_delivery_admission_v2::PreparedRedisclosureV2>),
+    #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
     DurableDisclosureV1 {
         flow: Box<durable_review_v1::DurableSpendFlowV1>,
         review: Box<WitnessDisclosureReview>,
@@ -397,6 +403,10 @@ struct OpenAccount {
     #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
     durable_review: Option<Arc<durable_review_v1::ImportedDurableReviewV1>>,
     #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+    durable_delivery_entry: Option<Arc<crate::account::birth::enrollment::roster_v2::durable_entry_v1::FreshDurableDeliveryEntryV2>>,
+    #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+    durable_delivery: durable_delivery_admission_v2::DurableDeliveryRuntimeV2,
+    #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
     durable_witness: durable_witness_v1::DurableWitnessRuntimeV1,
     #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
     durable_import_job: Option<durable_review_v1::DurableImportJobV1>,
@@ -445,7 +455,7 @@ struct OpenAccount {
 impl OpenAccount {
     fn supports_ordinary_routes(&self) -> bool {
         #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
-        if self.durable_born_entry.is_some() {
+        if self.durable_born_entry.is_some() || self.durable_delivery_entry.is_some() {
             return false;
         }
         true
@@ -461,7 +471,10 @@ impl OpenAccount {
             self.durable_witness = durable_witness_v1::DurableWitnessRuntimeV1::default();
         }
         #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
-        self.clear_durable_review_v1();
+        {
+            self.clear_durable_review_v1();
+            self.durable_delivery.clear();
+        }
         // Close admission immediately, before waiting for any already-held
         // through-commit lease. The native event thread never waits for a client.
         #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
@@ -519,6 +532,10 @@ impl OpenAccount {
     }
     fn refresh_session(&mut self) -> Result<()> {
         #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        if let Some(source) = &self.durable_delivery_entry {
+            source.check_current()?;
+        }
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
         if let Some(source) = &self.durable_born_entry {
             source.check_current()?;
         }
@@ -538,7 +555,10 @@ impl OpenAccount {
     }
     fn close(mut self) {
         #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
-        self.clear_durable_review_v1();
+        {
+            self.clear_durable_review_v1();
+            self.durable_delivery.clear();
+        }
         self.ipc.revoke_all();
         #[cfg(feature = "authority-signing")]
         {
@@ -667,6 +687,8 @@ impl RetirementNativeEntry {
 pub(super) struct NativeRuntime {
     #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
     durable_entry_job: Option<durable_entry_v1::DurableEntryJobV1>,
+    #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+    durable_delivery_entry_job: Option<durable_entry_v1::DurableDeliveryEntryJobV2>,
     #[cfg(all(
         feature = "synthetic-born-joined-qualification",
         feature = "durable-proposal"
@@ -777,6 +799,8 @@ impl NativeRuntime {
         Self {
             #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
             durable_entry_job: None,
+            #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+            durable_delivery_entry_job: None,
             #[cfg(all(
                 feature = "synthetic-born-joined-qualification",
                 feature = "durable-proposal"
@@ -885,7 +909,17 @@ impl NativeRuntime {
     pub(super) fn lock(&mut self) {
         #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
         {
-            self.cancel_durable_entry_v1();
+            {
+                self.cancel_durable_entry_v1();
+                self.cancel_durable_delivery_entry_v2();
+            }
+            if let Some(source) = self
+                .open
+                .as_ref()
+                .and_then(|o| o.durable_delivery_entry.as_ref())
+            {
+                source.native_owner().revoke_pending_now();
+            }
             if let Some(source) = self
                 .open
                 .as_ref()
@@ -1019,13 +1053,25 @@ impl NativeRuntime {
         if self
             .open
             .as_ref()
+            .is_some_and(|o| o.durable_delivery_entry.is_some())
+        {
+            self.lock();
+            return;
+        }
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        if self
+            .open
+            .as_ref()
             .is_some_and(|o| o.durable_wallet_job.is_some() || o.durable_import_job.is_some())
         {
             self.lock();
             return;
         }
         #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
-        self.cancel_durable_entry_v1();
+        {
+            self.cancel_durable_entry_v1();
+            self.cancel_durable_delivery_entry_v2();
+        }
         #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
         self.named_verifier.blur();
         #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
@@ -1116,7 +1162,10 @@ impl NativeRuntime {
     }
     pub(super) fn navigate(&mut self) {
         #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
-        self.cancel_durable_entry_v1();
+        {
+            self.cancel_durable_entry_v1();
+            self.cancel_durable_delivery_entry_v2();
+        }
         #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
         self.named_verifier.clear();
         #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
@@ -1217,6 +1266,10 @@ impl NativeRuntime {
             authority: OpenNativeAuthority::Ordinary(authority),
             #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
             durable_born_entry: None,
+            #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+            durable_delivery_entry: None,
+            #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+            durable_delivery: Default::default(),
             #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
             durable_review: None,
             #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
@@ -1327,7 +1380,7 @@ impl NativeRuntime {
         if self
             .open
             .as_ref()
-            .is_some_and(|o| o.durable_born_entry.is_some())
+            .is_some_and(|o| o.durable_born_entry.is_some() || o.durable_delivery_entry.is_some())
         {
             return Err(Error::Unavailable);
         }
@@ -1384,7 +1437,7 @@ impl NativeRuntime {
         if self
             .open
             .as_ref()
-            .is_some_and(|o| o.durable_born_entry.is_some())
+            .is_some_and(|o| o.durable_born_entry.is_some() || o.durable_delivery_entry.is_some())
         {
             return Err(Error::Unavailable);
         }
@@ -1420,7 +1473,7 @@ impl NativeRuntime {
         if self
             .open
             .as_ref()
-            .is_some_and(|o| o.durable_born_entry.is_some())
+            .is_some_and(|o| o.durable_born_entry.is_some() || o.durable_delivery_entry.is_some())
         {
             return Err(Error::Unavailable);
         }
@@ -1441,6 +1494,8 @@ impl NativeRuntime {
         Ok(())
     }
     fn poll(&mut self, epoch: u64) {
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        self.poll_durable_delivery_v2(epoch);
         #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
         self.poll_durable_material_lifetime_v1();
         if self.pending.as_ref().is_some_and(|p| p.review.expired()) {
@@ -1508,6 +1563,13 @@ impl NativeRuntime {
                 )
             {
                 drop(event);
+                continue;
+            }
+            #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+            if open.durable_delivery_entry.is_some()
+                && !durable_delivery_admission_v2::allowed_event(&event)
+            {
+                self.message = "V2 admission-only entry denies every financial and ordinary route.";
                 continue;
             }
             #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
@@ -2143,6 +2205,14 @@ impl NativeRuntime {
                     stream,
                     request,
                 } => {
+                    #[cfg(feature = "pending-birth-owner-signing")]
+                    if open.durable_delivery_entry.is_some() {
+                        let _ = self.prepare_durable_delivery_redisclosure_v2(
+                            stream, peer, *request, epoch,
+                        );
+                        return;
+                    }
+
                     if self.pending.is_some()
                         || open.history_workers.len() >= 8
                         || open.check_pairing().is_err()
@@ -2174,13 +2244,33 @@ impl NativeRuntime {
                     }
                 }
                 #[cfg(feature = "durable-proposal")]
+                LocalEvent::DurableDeliveryV2 {
+                    stream,
+                    peer,
+                    request,
+                } => {
+                    #[cfg(feature = "pending-birth-owner-signing")]
+                    let _ = self.handle_durable_delivery_v2(stream, peer, *request, epoch);
+                    #[cfg(feature = "pending-birth-owner-signing")]
+                    return;
+                }
+                #[cfg(feature = "durable-proposal")]
                 LocalEvent::DurableProposalReviewV1 {
                     peer,
                     stream,
                     request,
                 } => {
                     #[cfg(feature = "pending-birth-owner-signing")]
-                    let _ = self.start_durable_import_v1(stream, peer, *request, epoch);
+                    if self
+                        .open
+                        .as_ref()
+                        .is_some_and(|o| o.durable_delivery_entry.is_some())
+                    {
+                        let _ =
+                            self.start_durable_delivery_import_v2(stream, peer, *request, epoch);
+                    } else {
+                        let _ = self.start_durable_import_v1(stream, peer, *request, epoch);
+                    }
                     return;
                 }
                 #[cfg(feature = "authority-signing")]
@@ -2799,7 +2889,8 @@ impl NativeRuntime {
                             "Durable construction uses its separate exact native disclosure and original-recipient history channel; a request grants no spending authority."
                         }
                         #[cfg(feature = "durable-proposal")]
-                        crate::ipc::AppRequest::RequestDurableProposalReviewV1 { .. } => {
+                        crate::ipc::AppRequest::RequestDurableProposalReviewV1 { .. }
+                        | crate::ipc::AppRequest::RequestDurableDeliveryV2 { .. } => {
                             "Exact durable proposal import requires its separate authenticated metadata handshake; received data is not native spending permission."
                         }
                         crate::ipc::AppRequest::Status {} => {
@@ -2838,6 +2929,18 @@ impl NativeRuntime {
         let budget: u64 = self.budget.parse().map_err(|_| Error::InvalidData)?;
         #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
         if open.durable_born_entry.as_ref().is_some_and(|source| {
+            budget
+                > source
+                    .record()
+                    .account_record
+                    .terms
+                    .scope
+                    .aggregate_budget_zatoshis
+        }) {
+            return Err(Error::ReviewMismatch);
+        }
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        if open.durable_delivery_entry.as_ref().is_some_and(|source| {
             budget
                 > source
                     .record()
@@ -2921,7 +3024,7 @@ impl NativeRuntime {
         if self
             .open
             .as_ref()
-            .is_some_and(|o| o.durable_born_entry.is_some())
+            .is_some_and(|o| o.durable_born_entry.is_some() || o.durable_delivery_entry.is_some())
         {
             return Err(Error::Unavailable);
         }
@@ -2980,7 +3083,7 @@ impl NativeRuntime {
         if self
             .open
             .as_ref()
-            .is_some_and(|o| o.durable_born_entry.is_some())
+            .is_some_and(|o| o.durable_born_entry.is_some() || o.durable_delivery_entry.is_some())
         {
             return Err(Error::Unavailable);
         }
@@ -3085,6 +3188,15 @@ impl NativeRuntime {
     }
     #[cfg(feature = "authority-signing")]
     fn stage_wallet_setup(&mut self, epoch: u64) -> Result<()> {
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        if self
+            .open
+            .as_ref()
+            .is_some_and(|o| o.durable_delivery_entry.is_some())
+        {
+            return Err(Error::Unavailable);
+        }
+
         let open = self.open.as_ref().ok_or(Error::Locked)?;
         #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
         if let Some(source) = &open.durable_born_entry {
@@ -3133,7 +3245,7 @@ impl NativeRuntime {
         if self
             .open
             .as_ref()
-            .is_some_and(|o| o.durable_born_entry.is_some())
+            .is_some_and(|o| o.durable_born_entry.is_some() || o.durable_delivery_entry.is_some())
         {
             return Err(Error::Unavailable);
         }
@@ -3187,6 +3299,15 @@ impl NativeRuntime {
     }
     #[cfg(feature = "authority-signing")]
     fn stage_witness_setup(&mut self, epoch: u64) -> Result<()> {
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        if self
+            .open
+            .as_ref()
+            .is_some_and(|o| o.durable_delivery_entry.is_some())
+        {
+            return Err(Error::Unavailable);
+        }
+
         let open = self.open.as_ref().ok_or(Error::Locked)?;
         if open.writer_retry.is_some() || open.writer_receipt.is_some() {
             return Err(Error::Locked);
@@ -3342,7 +3463,16 @@ impl NativeRuntime {
         if self
             .open
             .as_ref()
-            .is_some_and(|o| o.durable_born_entry.is_some())
+            .is_some_and(|o| o.durable_delivery_entry.is_some())
+        {
+            return Err(Error::Unavailable);
+        }
+
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        if self
+            .open
+            .as_ref()
+            .is_some_and(|o| o.durable_born_entry.is_some() || o.durable_delivery_entry.is_some())
         {
             return self.prepare_durable_session_v1(epoch);
         }
@@ -3388,7 +3518,16 @@ impl NativeRuntime {
         if self
             .open
             .as_ref()
-            .is_some_and(|o| o.durable_born_entry.is_some())
+            .is_some_and(|o| o.durable_delivery_entry.is_some())
+        {
+            return Err(Error::Unavailable);
+        }
+
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        if self
+            .open
+            .as_ref()
+            .is_some_and(|o| o.durable_born_entry.is_some() || o.durable_delivery_entry.is_some())
         {
             return self.prepare_durable_activation_v1(epoch);
         }
@@ -3435,7 +3574,16 @@ impl NativeRuntime {
         if self
             .open
             .as_ref()
-            .is_some_and(|o| o.durable_born_entry.is_some())
+            .is_some_and(|o| o.durable_delivery_entry.is_some())
+        {
+            return Err(Error::Unavailable);
+        }
+
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        if self
+            .open
+            .as_ref()
+            .is_some_and(|o| o.durable_born_entry.is_some() || o.durable_delivery_entry.is_some())
         {
             return self.prepare_durable_reconciliation_v1(epoch);
         }
@@ -3892,7 +4040,7 @@ impl NativeRuntime {
         if self
             .open
             .as_ref()
-            .is_some_and(|o| o.durable_born_entry.is_some())
+            .is_some_and(|o| o.durable_born_entry.is_some() || o.durable_delivery_entry.is_some())
         {
             return Err(Error::Unavailable);
         }
@@ -4065,7 +4213,7 @@ impl NativeRuntime {
                 )
             })();
             if let Err(unsent) = send.send((open, result)) {
-                unsent.0 .0.close();
+                unsent.0.0.close();
             }
         });
         self.signing_job = Some(SigningJob {
@@ -4189,7 +4337,7 @@ impl NativeRuntime {
                 }
             })();
             if let Err(unsent) = send.send((open, result)) {
-                unsent.0 .0.close();
+                unsent.0.0.close();
             }
         });
         self.signing_job = Some(SigningJob {
@@ -4342,6 +4490,20 @@ impl NativeRuntime {
     fn approve_inner(&mut self, focused: bool, epoch: u64) -> Result<()> {
         let pending = self.pending.take().ok_or(Error::ReviewMismatch)?;
         #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        if let Operation::DurableDeliveryRedisclosureV2(prepared) = &pending.operation {
+            prepared.check_current()?;
+        }
+
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        if self
+            .open
+            .as_ref()
+            .is_some_and(|o| o.durable_delivery_entry.is_some())
+            && !durable_delivery_admission_v2::allowed_operation(&pending.operation)
+        {
+            return Err(Error::Unavailable);
+        }
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
         if self
             .open
             .as_ref()
@@ -4381,6 +4543,14 @@ impl NativeRuntime {
         )?;
         self.confirmation.zeroize();
         #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        if let Operation::DurableDeliveryV2(prepared) = pending.operation {
+            return self.approve_durable_delivery_v2(*prepared, decision, epoch);
+        }
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        if let Operation::DurableDeliveryRedisclosureV2(prepared) = pending.operation {
+            return self.approve_durable_delivery_redisclosure_v2(*prepared, decision);
+        }
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
         if let Operation::DurableSpendV1 { flow, disclosure } = pending.operation {
             return self.begin_durable_signing_v1(*flow, *disclosure, decision);
         }
@@ -4403,7 +4573,10 @@ impl NativeRuntime {
         let open = self.open.as_mut().ok_or(Error::Locked)?;
         match pending.operation {
             #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
-            Operation::DurableSpendV1 { .. } | Operation::DurableDisclosureV1 { .. } => {
+            Operation::DurableSpendV1 { .. }
+            | Operation::DurableDisclosureV1 { .. }
+            | Operation::DurableDeliveryV2(_)
+            | Operation::DurableDeliveryRedisclosureV2(_) => {
                 unreachable!()
             }
             #[cfg(feature = "authority-signing")]
@@ -4883,7 +5056,10 @@ impl NativeRuntime {
                         feature = "durable-proposal",
                         feature = "pending-birth-owner-signing"
                     ))]
-                    Operation::DurableSpendV1 { .. } | Operation::DurableDisclosureV1 { .. } => {
+                    Operation::DurableSpendV1 { .. }
+                    | Operation::DurableDisclosureV1 { .. }
+                    | Operation::DurableDeliveryV2(_)
+                    | Operation::DurableDeliveryRedisclosureV2(_) => {
                         unreachable!()
                     }
                     Operation::Redelivery {
@@ -5036,7 +5212,7 @@ impl NativeRuntime {
         if self
             .open
             .as_ref()
-            .is_some_and(|o| o.durable_born_entry.is_some())
+            .is_some_and(|o| o.durable_born_entry.is_some() || o.durable_delivery_entry.is_some())
         {
             return Err(Error::Unavailable);
         }
@@ -5228,7 +5404,7 @@ impl NativeRuntime {
         if self
             .open
             .as_ref()
-            .is_some_and(|o| o.durable_born_entry.is_some())
+            .is_some_and(|o| o.durable_born_entry.is_some() || o.durable_delivery_entry.is_some())
         {
             return Err(Error::Unavailable);
         }
@@ -5599,7 +5775,10 @@ impl NativeRuntime {
         #[cfg(feature = "pending-birth-owner-signing")]
         self.born_enrolled_backup.poll_lifecycle(focused, epoch);
         #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
-        self.poll_durable_entry_v1(focused, epoch);
+        {
+            self.poll_durable_entry_v1(focused, epoch);
+            self.poll_durable_delivery_entry_v2(focused, epoch);
+        }
         if !focused {
             #[cfg(feature = "authority-signing")]
             self.birth.clear();
@@ -5979,6 +6158,15 @@ impl NativeRuntime {
                 });
                 #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
                 if ui
+                    .button("Fresh v2 prospective delivery admission / original history")
+                    .clicked_by(egui::PointerButton::Primary)
+                    && focused
+                {
+                    let _ = self.begin_durable_delivery_entry_v2(focused, epoch);
+                    return;
+                }
+                #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+                if ui
                     .button("Fresh entry to original born account for fixed durable proposal")
                     .clicked_by(egui::PointerButton::Primary)
                     && focused
@@ -6065,7 +6253,9 @@ impl NativeRuntime {
                 return;
             }
             #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
-            if self.durable_witness_ui_v1(ui, focused, epoch) {
+            if self.durable_delivery_ui_v2(ui, focused, epoch)
+                || self.durable_witness_ui_v1(ui, focused, epoch)
+            {
                 return;
             }
             let open = self.open.as_ref().unwrap();

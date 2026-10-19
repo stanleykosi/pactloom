@@ -10,6 +10,8 @@
 use super::*;
 #[path = "durable_proposal_v1/fixed_signing.rs"]
 mod fixed_signing;
+#[path = "durable_proposal_v1/delivery_admission_v2.rs"]
+pub(super) mod delivery_admission_v2;
 #[path = "durable_proposal_v1/private_fixed_v2.rs"]
 pub(super) mod private_fixed_v2;
 #[path = "durable_proposal_v1/initial.rs"]

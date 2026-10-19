@@ -529,6 +529,24 @@ impl<W: LocalWalletAccess> LocalWalletAccess for MaterialWalletGate<'_, W> {
     }
 }
 
+// Complete typed roster decoder for original-profile audits only. This does
+// not call a generic Engine reader or remove any export history.
+pub(crate) fn original_roster_v2(envelope: &Envelope) -> Result<Roster> {
+    validate_stored(envelope)?;
+    if envelope.view.candidates.len() != 1 || envelope.durable_construction_v1.len() != 1 {
+        return Err(damaged());
+    }
+    let id = &envelope.view.candidates[0].candidate_id;
+    serde_json::from_value(
+        envelope
+            .durable_construction_v1
+            .get(id)
+            .ok_or_else(damaged)?
+            .clone(),
+    )
+    .map_err(|_| damaged())
+}
+
 /// Restricted precursor shape: no native review exports or third owner.
 pub(crate) fn validate_private_roster_v2(envelope: &Envelope) -> Result<()> {
     validate_stored(envelope)?;

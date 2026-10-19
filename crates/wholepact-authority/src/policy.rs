@@ -341,6 +341,7 @@ impl Ledger {
         Ok(None)
     }
     pub fn apply(&mut self, event: &Event) -> Result<MutationResult> {
+        self.require_delivery_admission_only_v2(&event.mutation)?;
         if event.original_request_link.is_some()
             && !matches!(
                 event.mutation,
@@ -882,6 +883,12 @@ impl Ledger {
                 }
                 self.fence(&r.expected_head, r.writer_epoch)?;
                 match &r.control {
+                    OwnerControl::AdmitDurablePaymentWithDeliveryV2 { .. } => {
+                        if event.writer_session_id.is_some() {
+                            return Err(AuthorityError::Permission);
+                        }
+                        self.validate_new_durable_delivery_admission_v2(r, event.witness_time_ms)?;
+                    }
                     OwnerControl::AdmitDurablePaymentV1 { .. } => {
                         if event.writer_session_id.is_some() {
                             return Err(AuthorityError::Permission);
@@ -1135,6 +1142,7 @@ impl Ledger {
                 &r.control,
                 OwnerControl::ActivateWriter { .. }
                     | OwnerControl::AdmitDurablePaymentV1 { .. }
+                    | OwnerControl::AdmitDurablePaymentWithDeliveryV2 { .. }
                     | OwnerControl::EnrollBornOfflineV1 { .. }
                     | OwnerControl::InstallBornOfflineArtifactsV1 { .. }
                     | OwnerControl::GrantConstructionTransportV1 { .. }

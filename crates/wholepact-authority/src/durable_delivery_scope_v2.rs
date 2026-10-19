@@ -247,6 +247,19 @@ fn canonical_origin(origin: &str, scheme: &str, default_port: u16) -> Result<()>
     Ok(())
 }
 
+impl DurableDeliveryPlanV2 {
+    /// Validate only the exact provider and optional CONNECT origin spelling.
+    /// This pure preliminary check authenticates no source, owner or ceiling,
+    /// and does not replace the complete scope validation before admission.
+    pub fn validate_origins(&self) -> Result<()> {
+        canonical_origin(&self.provider.endpoint, "https://", 443)?;
+        if let DurableDeliveryRouteV2::ExistingHttpConnect { origin } = &self.route {
+            canonical_origin(origin, "http://", 80)?;
+        }
+        Ok(())
+    }
+}
+
 impl DurableDeliveryScopeV2 {
     /// Bounded, internally coherent historical claims only. No original-source
     /// authentication, current authorization, or authority-bearing return value.
@@ -271,10 +284,7 @@ impl DurableDeliveryScopeV2 {
         hash(&plan.submission_journal_identity)?;
         id(&plan.submission_operation_id)?;
         id(&plan.provider.source_id)?;
-        canonical_origin(&plan.provider.endpoint, "https://", 443)?;
-        if let DurableDeliveryRouteV2::ExistingHttpConnect { origin } = &plan.route {
-            canonical_origin(origin, "http://", 80)?;
-        }
+        plan.validate_origins()?;
         interval(plan.valid_from_ms, plan.valid_until_ms)?;
         if plan.submission_operation_id.len() < 16
             || plan.provider.trust_profile != "single_tls_provider_report_not_consensus"
@@ -488,4 +498,129 @@ pub fn parse_durable_delivery_scope_v2(bytes: &[u8]) -> Result<DurableDeliverySc
     let scope: DurableDeliveryScopeV2 = decode(bytes)?;
     scope.validate()?;
     Ok(scope)
+}
+
+#[cfg(test)]
+mod plan_origin_tests {
+    use super::*;
+
+    // Deliberately inert, incomplete identity data: this tests only origin
+    // grammar, never constructs an authenticated scope or a native permit.
+    fn plan(provider: &str, proxy: Option<&str>) -> DurableDeliveryPlanV2 {
+        DurableDeliveryPlanV2 {
+            dispatcher: DurableDeliveryDispatcherV2 {
+                principal_id: String::new(),
+                public_identity_commitment: String::new(),
+                authentication_profile:
+                    DurableDeliveryAuthenticationProfileV2::OriginalProtectedHostDispatcherV2,
+                custody_policy_commitment: String::new(),
+            },
+            original_host_generation_binding_digest: String::new(),
+            original_host_profile_id: String::new(),
+            submission_journal_identity: String::new(),
+            submission_operation_id: String::new(),
+            provider: PreconstructionProvider {
+                source_id: String::new(),
+                endpoint: provider.into(),
+                trust_profile: String::new(),
+            },
+            route: proxy.map_or(DurableDeliveryRouteV2::Direct {}, |origin| {
+                DurableDeliveryRouteV2::ExistingHttpConnect {
+                    origin: origin.into(),
+                }
+            }),
+            owners: Vec::new(),
+            valid_from_ms: 0,
+            valid_until_ms: 0,
+            minimum_expiry_margin_blocks: 0,
+            maximum_fresh_admission_lifetime_ms: 0,
+            maximum_explicitly_approved_attempts: 0,
+            extraction_rule:
+                DurableDeliveryExtractionRuleV2::FirstDurablyRetainedVerifiedExtraction,
+            retry_rule: DurableDeliveryRetryRuleV2::SameRetainedBytesWithFreshAdmission,
+            attempt_rule: DurableDeliveryAttemptRuleV2::ExplicitImmediateHostDecision,
+        }
+    }
+    fn old_origin_kernel(plan: &DurableDeliveryPlanV2) -> Result<()> {
+        canonical_origin(&plan.provider.endpoint, "https://", 443)?;
+        if let DurableDeliveryRouteV2::ExistingHttpConnect { origin } = &plan.route {
+            canonical_origin(origin, "http://", 80)?;
+        }
+        Ok(())
+    }
+    #[test]
+    fn exact_plan_origins_share_positive_scope_kernel_without_source_authority() {
+        for provider in [
+            "https://example.test",
+            "https://example.test:8443",
+            "https://127.0.0.1:4433",
+            "https://[2001:db8::1]",
+        ] {
+            for proxy in [
+                None,
+                Some("http://proxy.example.test"),
+                Some("http://127.0.0.1:8080"),
+                Some("http://[2001:db8::2]:8080"),
+            ] {
+                let value = plan(provider, proxy);
+                assert!(value.validate_origins().is_ok());
+                assert!(old_origin_kernel(&value).is_ok());
+                assert!(value.owners.is_empty());
+                assert_eq!(value.valid_until_ms, 0);
+            }
+        }
+    }
+    #[test]
+    fn exact_plan_origins_preserve_all_noncanonical_refusals() {
+        let bad = [
+            "http://example.test",
+            "https://EXAMPLE.test",
+            "https://user@example.test",
+            "https://example.test/",
+            "https://example.test/path",
+            "https://example.test?query",
+            "https://example.test#fragment",
+            "https://example.test:443",
+            "https://example.test:0443",
+            "https://127.1",
+            "https://127.00.0.1",
+            "https://2130706433",
+            "https://0x7f000001",
+            "https://[2001:0db8::1]",
+            "https://0.0.0.0",
+            "https://224.0.0.1",
+        ];
+        for provider in bad {
+            let value = plan(provider, None);
+            assert!(matches!(
+                value.validate_origins(),
+                Err(AuthorityError::InvalidBinding)
+            ));
+            assert!(matches!(
+                old_origin_kernel(&value),
+                Err(AuthorityError::InvalidBinding)
+            ));
+        }
+        for proxy in [
+            "https://proxy.test",
+            "http://USER@proxy.test",
+            "http://proxy.test/",
+            "http://proxy.test:80",
+            "http://proxy.test:080",
+            "http://127.1",
+            "http://127.00.0.1",
+            "http://2130706433",
+            "http://0x7f000001",
+        ] {
+            let value = plan("https://example.test", Some(proxy));
+            assert!(matches!(
+                value.validate_origins(),
+                Err(AuthorityError::InvalidBinding)
+            ));
+            assert!(matches!(
+                old_origin_kernel(&value),
+                Err(AuthorityError::InvalidBinding)
+            ));
+        }
+    }
 }

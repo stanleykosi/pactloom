@@ -1,8 +1,18 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-19, 16:43 UTC.
+Updated: 2026-10-19, 18:32 UTC.
 
 **CI33 passed the bounded synthetic original-private-workspace completed-fixed SIGKILL/fresh-process read-only reopen path and all listed regressions. Product qualification remains incomplete: no public testnet settlement, restarted acquired financial session, attended GUI reliability, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
+
+## Delivery admission B1: source and component gates pass; native qualification pending
+
+The prospective delivery-admission milestone is implemented and independently source-reviewed across 71 source/test paths. The final all-feature five-library release build, 73 exact component tests, and one isolated storage self-child process-death/reap test pass. All 159 Python output/routing tests and shell syntax pass. Each selected Rust test was confirmed in its compiled catalogue and executed exactly once; zero-selected tests are not accepted. Non-synthetic build/compatibility and genuine same-artifact two-owner native admission, producer death and fresh original reader remain qualification gates, not completed evidence.
+
+The new route branches from the actual completed-fixed original artifact. A distinct, bounded native export commits its exposure state before private bytes; both Signers retain the full prospective delivery scope, and independent Witness history must confirm the exact two-owner result. It preserves committed exposure and uncertain outcomes rather than replacing requests, resetting original files or extending deadlines. The v4 original-file publication preserves the workspace anchor and adds a mandatory dispatcher anchor; read-only reopening does not grant financial authority.
+
+The separate new native qualification phase is ordered before the previous passing lifecycle phases. Existing gates remain. The component process test is not the complete native lifecycle and must not be reported as such. V2 acquisition, financial key use, extraction, dispatch and settlement stay denied. This milestone does not establish portable recovery, real credential enrollment, attended GUI reliability, deployment or public-testnet payment.
+
+Compiler integration corrections were narrow fixture/initializer/return fixes. The two initial component failures were corrected in tests: retained-session deletion must remain rejected, and changed native-review evidence must be rejected by the full original-disclosure and history correlation rather than an incomplete ledger-only predicate. Production retention and authorization guards were not relaxed. The complete 73-test inventory then passed.
 
 ## CI33 PASS: actual original-workspace completed-fixed restart and all listed regression gates
 

@@ -517,7 +517,7 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
         )?
         .load()
     }
-    fn stage_materials_v3(
+    pub(super) fn stage_materials_v3(
         &self,
         access: &Access,
         before: &Envelope,
@@ -853,7 +853,7 @@ fn bounded_stage_review_v3(review: &PrivateFixedStageReviewV3) -> Result<()> {
     }
     Ok(())
 }
-fn retained_review_scope_v3(
+pub(super) fn retained_review_scope_v3(
     c: &CandidateView,
     receipt: &crate::candidates::CheckpointReceipt,
     materials: &[PrivateFixedMaterialReviewV3],
@@ -1003,7 +1003,7 @@ fn status(result: &wholepact_store::MutationResult) -> PrivateWorkspaceStatusV1 
 fn commit_digest<T: Serialize>(domain: &str, value: &T) -> Result<String> {
     wholepact_core::proposal::canonical_digest(domain, value).map_err(Into::into)
 }
-fn receipt_key(access: &Access, key: &str) -> Result<String> {
+pub(super) fn receipt_key(access: &Access, key: &str) -> Result<String> {
     crate::hash_domain(
         b"wholepact:checkpoint-receipt:v1\0",
         &json!({"principal":access.principal_id,"key":key}),
@@ -1298,7 +1298,7 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
         }
         Ok(status(&saved))
     }
-    fn check_intake(
+    pub(super) fn check_intake(
         &self,
         access: &Access,
         intake: &Intake,
@@ -2301,7 +2301,7 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
     }
     /// Full provenance includes the ORIGINAL receipt map key and actual saved
     /// constructor operation, not just candidate ID or a supplied manifest.
-    fn validate_original_lineage<'e>(
+    pub(super) fn validate_original_lineage<'e>(
         &self,
         envelope: &'e Envelope,
         access: &Access,
@@ -2557,7 +2557,7 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
         gate.check()?;
         Ok(status(&result))
     }
-    fn load_original_verified(
+    pub(super) fn load_original_verified(
         &self,
         envelope: &Envelope,
         access: &Access,
@@ -3106,6 +3106,63 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
             self.validate_original_lineage(envelope, access, key, summary, Some(observation))?;
         observation.stage(Site::OperationHistory);
         let history = self.audit_exact_history_observed(envelope, Some(observation))?;
+        self.verified_output_data_v2(
+            envelope,
+            access,
+            key,
+            checkpoint,
+            identity,
+            proof,
+            observation,
+            history,
+            receipt,
+        )
+    }
+    // The new profile supplies the digest of an actual saved prefix after
+    // auditing every original result and the complete current export suffix.
+    // No envelope is reconstructed by deleting exports from current state.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn verified_output_from_audited_prefix_v2(
+        &self,
+        envelope: &Envelope,
+        access: &Access,
+        key: &str,
+        checkpoint: &VerifiedCheckpoint,
+        identity: &wholepact_protocol::durable_proposal_v1::FixedProposalIdentityV1,
+        proof: &dyn LocalProofConsent,
+        observation: &Observation,
+        history: String,
+    ) -> Result<PrivateVerifiedFixedV2> {
+        let summary = checkpoint.summary();
+        observation.stage(Site::OutputLineage);
+        let receipt =
+            self.validate_original_lineage(envelope, access, key, summary, Some(observation))?;
+        self.verified_output_data_v2(
+            envelope,
+            access,
+            key,
+            checkpoint,
+            identity,
+            proof,
+            observation,
+            history,
+            receipt,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn verified_output_data_v2(
+        &self,
+        envelope: &Envelope,
+        access: &Access,
+        key: &str,
+        checkpoint: &VerifiedCheckpoint,
+        identity: &wholepact_protocol::durable_proposal_v1::FixedProposalIdentityV1,
+        proof: &dyn LocalProofConsent,
+        observation: &Observation,
+        history: String,
+        receipt: &crate::candidates::CheckpointReceipt,
+    ) -> Result<PrivateVerifiedFixedV2> {
+        let summary = checkpoint.summary();
         observation.stage(Site::ProofEventHistory);
         let proof_history = self
             .proof
@@ -4832,7 +4889,7 @@ pub(crate) mod diagnostics {
     pub(crate) fn construction(
         error:&wholepact_wallet::wallet::protected_sync::durable_construction_v1::DurableConstructionError,
     ) -> Cause {
-                use wholepact_wallet::wallet::protected_sync::durable_construction_v1::DurableConstructionError::*;
+        use wholepact_wallet::wallet::protected_sync::durable_construction_v1::DurableConstructionError::*;
         match error {
             Sync(e) => sync(e),
             Invalid => Cause {

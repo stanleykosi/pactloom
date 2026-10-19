@@ -22,6 +22,10 @@ mod offline_witness_transport_v1;
 pub mod native_witness_owner;
 
 mod admission;
+pub mod durable_delivery_admission_v2;
+mod durable_delivery_admission_policy_v2;
+#[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
+pub(crate) mod durable_delivery_admission_owner_v2;
 #[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
 pub(crate) mod durable_payment_owner_v1;
 mod durable_payment_policy_v1;

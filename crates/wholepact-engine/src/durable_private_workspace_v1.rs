@@ -17,7 +17,13 @@ use wholepact_storage_security::DatabaseKey;
 use wholepact_store::manual_enrollment::ManualEnrollmentRosterMember;
 use wholepact_store::private_workspace_origin_v1::PrivateWorkspaceOriginV1;
 
+mod delivery_admission_v2;
 mod exact_fixed_v2;
+pub use delivery_admission_v2::{
+    LocalPrivateDurableAdmissionConsentV2, PrivateDurableAdmissionCoordinatorV2,
+    PrivateDurableAdmissionDeliveryV2, PrivateDurableAdmissionInspectionV2,
+    PrivateDurableAdmissionStatusV2,
+};
 use diagnostics::{Observation, Operation, Site};
 pub(crate) use exact_fixed_v2::diagnostics;
 #[path = "durable_private_workspace_v1/operation_v1.rs"]
@@ -456,7 +462,53 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
             consent,
             PrivateWorkspaceActionV1::Reopen,
         )?;
-        preflight_original_metadata_observed(destination, key, expected_origin, Some(observation))?;
+        let result = Self::open_original_storage_v2(
+            source,
+            access,
+            destination,
+            key,
+            expected_origin,
+            scope,
+            native_association_digest,
+            proof,
+            expected_proof_origin,
+            observation,
+            OriginalMetadataProfileV2::Precursor,
+        )?;
+        result.audit_original_seed_observed_v1(access, plan, binding, Some(observation))?;
+        observation.stage(Site::SeedFinal);
+        result.check_observed(
+            access,
+            consent,
+            PrivateWorkspaceActionV1::Reopen,
+            Some(observation),
+        )?;
+        Ok(result)
+    }
+    // Only the two nominal original profiles call this storage primitive.
+    // It issues no permission and is never exported. Each caller separately
+    // checks its own live source consent and complete purpose-specific history.
+    #[allow(clippy::too_many_arguments)]
+    fn open_original_storage_v2(
+        source: PrivateDurableWorkspaceSourceV1<'source>,
+        access: &Access,
+        destination: &Path,
+        key: &DatabaseKey,
+        expected_origin: [u8; 32],
+        scope: PrivateWorkspaceScopeV1,
+        native_association_digest: &str,
+        proof: wholepact_proof_jobs::OriginalProofJobSourceV1<'source>,
+        expected_proof_origin: [u8; 32],
+        observation: &Observation,
+        profile: OriginalMetadataProfileV2,
+    ) -> Result<Self> {
+        preflight_original_metadata_profile_v2(
+            destination,
+            key,
+            expected_origin,
+            Some(observation),
+            profile,
+        )?;
         observation.stage(Site::MetadataOpen);
         let store = wholepact_store::Store::open_encrypted(destination, key).map_err(|error| {
             diagnostics::store_error(Some(observation), observation.site(), error)
@@ -486,7 +538,7 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
         if proof.origin_commitment() != expected_proof_origin {
             return Err(damaged());
         }
-        let result = Self {
+        Ok(Self {
             engine: Engine::from_store(store),
             source,
             scope,
@@ -494,16 +546,7 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
             marker,
             proof,
             proof_origin: expected_proof_origin,
-        };
-        result.audit_original_seed_observed_v1(access, plan, binding, Some(observation))?;
-        observation.stage(Site::SeedFinal);
-        result.check_observed(
-            access,
-            consent,
-            PrivateWorkspaceActionV1::Reopen,
-            Some(observation),
-        )?;
-        Ok(result)
+        })
     }
     /// Correlation needed by the exact native commit, never raw database access.
     pub fn original_origin(&self) -> [u8; 32] {
@@ -607,6 +650,12 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
         check_source_permission(&self.source, access, &self.scope, consent, action)
     }
     fn require_original_envelope(&self, envelope: &crate::Envelope) -> Result<()> {
+        self.require_original_identity_v2(envelope)?;
+        operation_v1::validate_shape(envelope)
+    }
+    // Source/marker identity only; each profile must additionally validate its
+    // complete shape and all saved operations before using the envelope.
+    fn require_original_identity_v2(&self, envelope: &crate::Envelope) -> Result<()> {
         if envelope.private_workspace_origin_v1.as_ref() != Some(&self.marker) {
             return Err(damaged());
         }
@@ -620,7 +669,6 @@ impl<'source> PrivateDurableCoordinatorV1<'source> {
         {
             return Err(denied());
         }
-        operation_v1::validate_shape(envelope)?;
         Ok(())
     }
     pub fn status(
@@ -1049,11 +1097,39 @@ fn preflight_original_metadata(
 ) -> Result<()> {
     preflight_original_metadata_observed(destination, key, expected, None)
 }
+#[derive(Clone, Copy)]
+enum OriginalMetadataProfileV2 {
+    Precursor,
+    Admission,
+}
+impl OriginalMetadataProfileV2 {
+    fn accepts_revision(self, revision: i64) -> bool {
+        match self {
+            Self::Precursor => (0..=8).contains(&revision),
+            Self::Admission => (8..=16).contains(&revision),
+        }
+    }
+}
 fn preflight_original_metadata_observed(
     destination: &Path,
     key: &DatabaseKey,
     expected: [u8; 32],
     observation: Option<&Observation>,
+) -> Result<()> {
+    preflight_original_metadata_profile_v2(
+        destination,
+        key,
+        expected,
+        observation,
+        OriginalMetadataProfileV2::Precursor,
+    )
+}
+fn preflight_original_metadata_profile_v2(
+    destination: &Path,
+    key: &DatabaseKey,
+    expected: [u8; 32],
+    observation: Option<&Observation>,
+    profile: OriginalMetadataProfileV2,
 ) -> Result<()> {
     if let Some(o) = observation {
         o.stage(Site::SnapshotOpen);
@@ -1219,7 +1295,7 @@ fn preflight_original_metadata_observed(
         || recovery != 1
         || !(0..=1).contains(&records)
         || foreign != 0
-        || !(0..=8).contains(&revision)
+        || !profile.accepts_revision(revision)
         || counts != (revision, revision, revision)
     {
         return Err(damaged());

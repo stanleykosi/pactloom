@@ -13,7 +13,7 @@ use crate::authority_bridge::{
 use crate::{
     Error, Result,
     account::AccountVault,
-    consent_journal::{SignerConsentJournal, SignerConsentSession},
+    consent_journal::{SignerConsentJournal, SignerConsentSession, PreconstructionRecordLease},
     ipc::AuthenticatedPeer,
 };
 use std::{
@@ -425,9 +425,27 @@ impl ApprovedDurableConstructionV1 {
     }
 
     pub(super) fn serve(
+        self,
+        journal: &SignerConsentJournal,
+        session: &SignerConsentSession,
+    ) -> authority_bridge::Result<()> {
+        self.serve_checked(journal, session, None)
+    }
+    /// V2 checks the complete original source under the very same held record
+    /// lease. This exposes neither the private stream nor its original clock.
+    pub(in crate::native_ui) fn serve_with_original_source_check_v2(
+        self,
+        journal: &SignerConsentJournal,
+        session: &SignerConsentSession,
+        check: impl Fn(&PreconstructionRecordLease<'_>) -> authority_bridge::Result<()>,
+    ) -> authority_bridge::Result<()> {
+        self.serve_checked(journal, session, Some(&check))
+    }
+    fn serve_checked(
         mut self,
         journal: &SignerConsentJournal,
         session: &SignerConsentSession,
+        check: Option<&dyn Fn(&PreconstructionRecordLease<'_>) -> authority_bridge::Result<()>>,
     ) -> authority_bridge::Result<()> {
         let lease = journal.acquire_preconstruction_records(
             &self.prepared.request.enrollment_ref,
@@ -437,6 +455,7 @@ impl ApprovedDurableConstructionV1 {
         lease.require_native_origin(&self.prepared.source)?;
         lease.require_current_durable_disclosure_receipts_v1()?;
         validate_original(&self.prepared.request, &lease)?;
+        check_original_source(&lease, check)?;
         // Commit is fenced against lock. Export holds that fence only across
         // each bounded syscall, never across the entire possibly slow delivery.
         let outbox = {
@@ -445,14 +464,17 @@ impl ApprovedDurableConstructionV1 {
                 .source
                 .publication_lease()
                 .map_err(|_| BridgeError::Permission)?;
+            check_original_source(&lease, check)?;
             journal.record_durable_construction_v1(&self, &lease)?
         };
         self.check_current()?;
         lease.require_current_durable_disclosure_receipts_v1()?;
+        check_original_source(&lease, check)?;
         let deadline =
             (self.prepared.started + Duration::from_secs(120)).min(self.prepared.peer.deadline());
         let p = &mut self.prepared;
         write_bounded(&mut p.stream, outbox, deadline, &p.source, &p.peer, || {
+            check_original_source(&lease, check)?;
             lease.require_current_durable_disclosure_receipts_v1()?;
             p.request
                 .scope
@@ -500,4 +522,106 @@ pub(super) fn serve_durable_construction_history_v1(
             Ok(())
         },
     )
+}
+
+// The optional legacy branch performs no additional source work. The shared
+// sequencing kernel is generic only over borrowed DATA, never an issuer.
+fn check_original_source<T>(
+    source: &T,
+    check: Option<&dyn Fn(&T) -> authority_bridge::Result<()>>,
+) -> authority_bridge::Result<()> {
+    match check {
+        Some(check) => check(source),
+        None => Ok(()),
+    }
+}
+#[cfg(test)]
+mod checked_serve_tests {
+    use super::*;
+    use std::cell::RefCell;
+    #[test]
+    fn legacy_checked_serve_none_and_noop_preserve_exact_borrow() {
+        let source = ("original stream and lease", Instant::now());
+        assert!(check_original_source(&source, None).is_ok());
+        assert!(
+            check_original_source(
+                &source,
+                Some(&|seen| {
+                    assert!(std::ptr::eq(seen, &source));
+                    assert_eq!(seen.1, source.1);
+                    Ok(())
+                })
+            )
+            .is_ok()
+        );
+    }
+    #[test]
+    fn optional_callback_denial_preserves_error_without_running_following_work() {
+        let events = RefCell::new(Vec::new());
+        let check = |_: &()| {
+            events.borrow_mut().push("check");
+            Err(BridgeError::Binding)
+        };
+        let result = (|| {
+            check_original_source(&(), Some(&check))?;
+            events.borrow_mut().push("commit");
+            events.borrow_mut().push("bytes");
+            Ok(())
+        })();
+        assert!(matches!(result, Err(BridgeError::Binding)));
+        assert_eq!(*events.borrow(), vec!["check"]);
+    }
+    #[test]
+    fn optional_callback_rechecks_after_an_intervening_change() {
+        let events = RefCell::new(Vec::new());
+        let check = |_: &()| {
+            let mut events = events.borrow_mut();
+            if events.contains(&"commit") {
+                return Err(BridgeError::Permission);
+            }
+            events.push("check");
+            Ok(())
+        };
+        let result = (|| {
+            check_original_source(&(), Some(&check))?;
+            events.borrow_mut().push("commit");
+            check_original_source(&(), Some(&check))?;
+            events.borrow_mut().push("bytes");
+            Ok(())
+        })();
+        assert!(matches!(result, Err(BridgeError::Permission)));
+        assert_eq!(*events.borrow(), vec!["check", "commit"]);
+    }
+}
+
+#[cfg(test)]
+mod checked_serve_source_order_tests {
+    #[test]
+    fn production_checked_serve_retains_before_the_original_bounded_write() {
+        // Static regression of the actual production orchestration; this does
+        // not claim to execute an authenticated native disclosure fixture.
+        let source = include_str!("durable_construction_v1.rs");
+        let body = source
+            .split("    fn serve_checked(")
+            .nth(1)
+            .unwrap()
+            .split("pub(super) fn serve_durable_construction_history_v1")
+            .next()
+            .unwrap();
+        let acquire = body.find("acquire_preconstruction_records").unwrap();
+        let first_check = body.find("check_original_source(&lease, check)").unwrap();
+        let retain = body.find("record_durable_construction_v1").unwrap();
+        let recheck = body[retain..]
+            .find("check_original_source(&lease, check)")
+            .unwrap()
+            + retain;
+        let write = body.find("write_bounded(").unwrap();
+        assert!(
+            acquire < first_check && first_check < retain && retain < recheck && recheck < write
+        );
+        assert_eq!(body.matches("acquire_preconstruction_records").count(), 1);
+        assert!(!body.contains("Instant::now()"));
+        assert!(body.contains("self.prepared.started + Duration::from_secs(120)"));
+        assert!(body[write..].contains("check_original_source(&lease, check)"));
+    }
 }

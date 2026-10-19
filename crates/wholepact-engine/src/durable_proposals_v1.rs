@@ -1110,3 +1110,25 @@ fn read_private_fixed_kernel_v2(
     }
     Ok(stored.identity)
 }
+
+// Actual verified original checkpoint/receipt join; no public bytes getter or
+// marker exception on any generic Engine API. The owning profile retains it.
+pub(crate) fn original_review_output_actions_v2(
+    envelope: &Envelope,
+    access: &Access,
+    checkpoint: &VerifiedCheckpoint,
+    receipt: &crate::candidates::CheckpointReceipt,
+) -> Result<Vec<OutputActionMapping>> {
+    read_private_fixed_v2(envelope, access, checkpoint, receipt)?;
+    let mappings: Mappings =
+        serde_json::from_value(receipt.action_mappings_v1.clone().ok_or_else(damaged)?)
+            .map_err(|_| damaged())?;
+    Ok(mappings
+        .outputs
+        .iter()
+        .map(|m| OutputActionMapping {
+            output_id: m.output_id.clone(),
+            action_index: m.action_index,
+        })
+        .collect())
+}

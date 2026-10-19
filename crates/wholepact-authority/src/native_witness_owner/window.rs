@@ -3,6 +3,8 @@
 //! canonical directory identity, retained original enrollment or a storage key.
 #[path = "window/durable_payment_v1.rs"]
 mod durable_payment_v1;
+#[path = "window/durable_delivery_admission_v2.rs"]
+mod durable_delivery_admission_v2;
 #[cfg(feature = "synthetic-qualification")]
 #[path = "window/ephemeral_fixture_v1.rs"]
 pub(super) mod ephemeral_fixture_v1;
@@ -73,9 +75,7 @@ use crate::manual_session_continuation_signature::{
     verify_manual_enrollment_session_continuation_owner_signature,
     ManualEnrollmentSessionContinuationOwnerSignature,
 };
-use crate::pending_birth_signature::{
-    verify_pending_birth_owner_signature, PendingBirthOwnerSignature,
-};
+use crate::pending_birth_signature::{verify_pending_birth_owner_signature, PendingBirthOwnerSignature};
 use crate::permanent_exclusion_owner::{
     commit_permanent_exclusion_v1, prepare_permanent_exclusion_v1, PermanentExclusionProposalV1,
 };
@@ -91,6 +91,7 @@ use crate::witness_locator::{
 };
 use crate::{AuthorityError, Result};
 pub(crate) use durable_payment_v1::NativeDurablePaymentAdmissionDecisionV1;
+pub(crate) use durable_delivery_admission_v2::NativeDurableDeliveryAdmissionDecisionV2;
 use eframe::egui::{self, Color32, RichText};
 use std::{
     io::Write,
@@ -285,6 +286,7 @@ impl NativePermanentExclusionDecisionV1 {
 #[derive(Default)]
 struct NativeInputs {
     durable_payment_v1: durable_payment_v1::InputsV1,
+    durable_delivery_admission_v2: durable_delivery_admission_v2::InputsV2,
     #[cfg(feature = "synthetic-qualification")]
     synthetic_installation: Option<
         std::sync::Arc<
@@ -424,6 +426,7 @@ impl NativeInputs {
     }
     fn discard_raw(&mut self) {
         self.durable_payment_v1.discard();
+        self.durable_delivery_admission_v2.discard();
         self.owner_certificate_hex.zeroize();
         self.signed_request_json.zeroize();
         self.signed_manual_extension_json.zeroize();
@@ -456,6 +459,7 @@ enum Phase {
 }
 enum Proposal {
     DurablePaymentV1(Box<durable_payment_v1::PreparedNativeV1>),
+    DurableDeliveryV2(Box<durable_delivery_admission_v2::PreparedNativeV2>),
     Setup(Box<NamespaceSetupProposal>),
     Enrollment(Box<NamespaceEnrollmentProposal>),
     ManualExtension(Box<ManualEnrollmentExtensionProposal>),
@@ -681,6 +685,7 @@ impl PendingReview {
 // Finite variants only. No backend accepts an arbitrary caller-supplied closure.
 enum Work {
     DurablePaymentV1(durable_payment_v1::WorkV1),
+    DurableDeliveryV2(durable_delivery_admission_v2::WorkV2),
     PrepareSetup(NamespaceSetupInput),
     PrepareEnrollment {
         input: NamespaceOpenInput,
@@ -780,6 +785,10 @@ enum Work {
     Discard(Box<Prepared>),
 }
 enum WorkResult {
+    DurableDeliveryAdmittedV2 {
+        display: Zeroizing<String>,
+        clock: ReviewClock,
+    },
     DurablePaymentAdmittedV1 {
         display: Zeroizing<String>,
         clock: ReviewClock,
@@ -914,6 +923,9 @@ fn launch_private_work(
     let cleanup = matches!(&work, Work::Discard(_));
     #[cfg(feature = "synthetic-qualification")]
     let admission_observer = match &work {
+        Work::DurableDeliveryV2(durable_delivery_admission_v2::WorkV2::Admit {
+            observer, ..
+        }) => observer.clone(),
         Work::DurablePaymentV1(durable_payment_v1::WorkV1::Admit { observer, .. }) => {
             observer.clone()
         }
@@ -1061,6 +1073,7 @@ fn launch_private_work(
                         .map(|display| WorkResult::PermanentlyExcludedV1 { display, clock })
                 }
                 Work::DurablePaymentV1(work) => durable_payment_v1::execute(work),
+                Work::DurableDeliveryV2(work) => durable_delivery_admission_v2::execute(work),
                 Work::PrepareManualRosterExtensionV2 { input, envelope } => (|| {
                     let body = parse_manual_roster_extension_envelope_v2(&envelope)?;
                     let verified = verify_manual_roster_enrollment_owner_signature_v2(
@@ -1706,6 +1719,20 @@ impl Window {
                 }
                 self.message = "The exact existing transport key and private mailboxes were retained in the original encrypted journal. This persistent import does not authorize a signature or payment. Preserve the complete namespace archive; uncertain outcomes must be inspected, never reset or replaced.";
             }
+            Ok(WorkResult::DurableDeliveryAdmittedV2 { display, clock }) => {
+                if durable_payment_v1::retain_receipt_v1(
+                    focused,
+                    || job.epoch == self.focus_epoch,
+                    || !job.owner.revoke_requested(),
+                    || !self.close_when_idle,
+                    || clock.check().is_ok(),
+                    #[cfg(feature = "synthetic-qualification")]
+                    job.admission_observer.as_ref(),
+                ) {
+                    self.last_archive_receipt = Some((clock, display));
+                }
+                self.message = "The exact prospective delivery scope is committed after original owner mTLS. This listener is closed. Historical reading is available, but Acquire, Activate, Reserve, signing, extraction and dispatch remain unsupported. An uncertain outcome requires exact history, not another request.";
+            }
             Ok(WorkResult::DurablePaymentAdmittedV1 { display, clock }) => {
                 if durable_payment_v1::retain_receipt_v1(
                     focused,
@@ -2110,6 +2137,7 @@ impl Window {
             }
             ui.separator();
             if durable_payment_v1::input_ui(self, ui, focused) { return; }
+            if durable_delivery_admission_v2::input_ui(self, ui, focused) { return; }
             ui.heading("Exact V2 Host roster addition");
             ui.label("Use the existing installed namespace and original account selected above. This distinct V2 signed request binds the exact Host predecessor and ordered roster, the exact added born account and its immutable first enrollment under its original policy. The Host roster predecessor is separate from the account extension predecessor. It cannot replace policy, reset lifetime charges, revive retired accounts or restore automation. Writer bootstrap is separate.");
             ui.add(egui::TextEdit::multiline(&mut *self.input.signed_manual_roster_extension_json).desired_rows(6).char_limit(crate::MAX_FRAME_BYTES));
@@ -2400,6 +2428,21 @@ impl Window {
             // These are the only production decision constructions, each coupled
             // to its backend-owned exact proposal. The GUI retains NativeOwner.
             let work = match prepared.proposal {
+                Proposal::DurableDeliveryV2(prepared) => {
+                    let durable_delivery_admission_v2::PreparedNativeV2 {
+                        proposal,
+                        tls,
+                        listener,
+                    } = *prepared;
+                    Work::DurableDeliveryV2(durable_delivery_admission_v2::WorkV2::Admit {
+                        decision: NativeDurableDeliveryAdmissionDecisionV2 { proposal, lease },
+                        tls,
+                        listener,
+                        clock: historical_clock,
+                        #[cfg(feature = "synthetic-qualification")]
+                        observer: self.admission_observer.clone(),
+                    })
+                }
                 Proposal::DurablePaymentV1(prepared) => {
                     let durable_payment_v1::PreparedNativeV1 {
                         proposal,
@@ -2692,17 +2735,19 @@ mod tests {
         };
         let serialized = serde_json::to_string(&envelope).unwrap();
         let parsed = parse_born_offline_enrollment_envelope_v1(&serialized).unwrap();
-        assert!(verify_born_offline_enrollment_v1_owner_signature(
-            &parsed,
-            &birth.request.policy.owner_certificate_digest
-        )
-        .is_err());
+        assert!(
+            verify_born_offline_enrollment_v1_owner_signature(
+                &parsed,
+                &birth.request.policy.owner_certificate_digest
+            )
+            .is_err()
+        );
         let mut with_flag = serde_json::to_value(&envelope).unwrap();
         with_flag["approved"] = serde_json::json!(true);
-        assert!(parse_born_offline_enrollment_envelope_v1(
-            &serde_json::to_string(&with_flag).unwrap()
-        )
-        .is_err());
+        assert!(
+            parse_born_offline_enrollment_envelope_v1(&serde_json::to_string(&with_flag).unwrap())
+                .is_err()
+        );
         let mut window = Window::new();
         *window.input.signed_born_offline_enrollment_json = serialized;
         window.discard();
@@ -2725,19 +2770,21 @@ mod tests {
         *input.signed_construction_transport_preauthorization_json =
             "synthetic-private-admission".into();
         input.discard_raw();
-        assert!(input
-            .signed_construction_transport_preauthorization_json
-            .is_empty());
+        assert!(
+            input
+                .signed_construction_transport_preauthorization_json
+                .is_empty()
+        );
     }
     #[test]
     fn construction_owner_parser_rejects_approval_flags_and_discards_raw_input() {
         for body in ["{}", r#"{"approved":true}"#, r#"{"native_decision":true}"#] {
             assert!(parse_manual_roster_construction_envelope_v2(body).is_err());
         }
-        assert!(parse_manual_roster_construction_envelope_v2(
-            &"x".repeat(crate::MAX_FRAME_BYTES + 1)
-        )
-        .is_err());
+        assert!(
+            parse_manual_roster_construction_envelope_v2(&"x".repeat(crate::MAX_FRAME_BYTES + 1))
+                .is_err()
+        );
         let mut input = NativeInputs::default();
         *input.signed_manual_roster_construction_json = "synthetic inert construction".into();
         input.discard_raw();
@@ -2754,10 +2801,10 @@ mod tests {
             parse_manual_roster_extension_envelope_v2(&"x".repeat(crate::MAX_FRAME_BYTES + 1))
                 .is_err()
         );
-        assert!(parse_manual_roster_continuation_envelope_v2(
-            &"x".repeat(crate::MAX_FRAME_BYTES + 1)
-        )
-        .is_err());
+        assert!(
+            parse_manual_roster_continuation_envelope_v2(&"x".repeat(crate::MAX_FRAME_BYTES + 1))
+                .is_err()
+        );
         let _: fn(&str) -> Result<ManualRosterEnrollmentOwnerSignatureV2> =
             parse_manual_roster_extension_envelope_v2;
         let _: fn(&str) -> Result<ManualRosterContinuationOwnerSignatureV2> =
@@ -2845,10 +2892,12 @@ mod tests {
         assert!(window.input.signed_manual_extension_json.is_empty());
         assert!(window.input.signed_manual_continuation_json.is_empty());
         assert!(window.input.signed_manual_roster_extension_json.is_empty());
-        assert!(window
-            .input
-            .signed_manual_roster_continuation_json
-            .is_empty());
+        assert!(
+            window
+                .input
+                .signed_manual_roster_continuation_json
+                .is_empty()
+        );
         assert!(window.confirmation.is_empty());
         assert!(!window.understood);
     }
@@ -2898,37 +2947,47 @@ mod tests {
     }
     #[test]
     fn historical_page_requests_cannot_exceed_finite_bounds() {
-        assert!(HistoricalRequest::Inventory {
-            first: 0,
-            limit: 16
-        }
-        .validate()
-        .is_ok());
+        assert!(
+            HistoricalRequest::Inventory {
+                first: 0,
+                limit: 16
+            }
+            .validate()
+            .is_ok()
+        );
         for limit in [0, 17, u32::MAX] {
-            assert!(HistoricalRequest::Inventory { first: 0, limit }
-                .validate()
-                .is_err());
+            assert!(
+                HistoricalRequest::Inventory { first: 0, limit }
+                    .validate()
+                    .is_err()
+            );
         }
         let digest = "a".repeat(64);
-        assert!(HistoricalRequest::AccountHistory {
-            intent_digest: digest.clone(),
-            first_sequence: 1,
-            limit: 32,
-        }
-        .validate()
-        .is_ok());
-        assert!(HistoricalRequest::AccountHistory {
-            intent_digest: digest,
-            first_sequence: 0,
-            limit: 32,
-        }
-        .validate()
-        .is_err());
-        assert!(HistoricalRequest::AccountSummary {
-            intent_digest: "untrusted".into()
-        }
-        .validate()
-        .is_err());
+        assert!(
+            HistoricalRequest::AccountHistory {
+                intent_digest: digest.clone(),
+                first_sequence: 1,
+                limit: 32,
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            HistoricalRequest::AccountHistory {
+                intent_digest: digest,
+                first_sequence: 0,
+                limit: 32,
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            HistoricalRequest::AccountSummary {
+                intent_digest: "untrusted".into()
+            }
+            .validate()
+            .is_err()
+        );
     }
     #[test]
     fn private_display_is_bounded_and_escapes_untrusted_controls() {
@@ -2960,12 +3019,13 @@ mod tests {
             Some(("old view", Zeroizing::new("synthetic private page".into())));
         *window.historical_input.intent_digest = "a".repeat(64);
         window.input.package_directory = "/synthetic/private-path".into();
-        assert!(send
-            .send(Ok(HistoricalOutput::Page {
+        assert!(
+            send.send(Ok(HistoricalOutput::Page {
                 label: "delayed view",
                 display: Zeroizing::new("synthetic delayed private page".into()),
             }))
-            .is_ok());
+            .is_ok()
+        );
         window.discard();
         window.poll_historical(&egui::Context::default(), true);
         assert!(window.historical_display.is_none());
@@ -2974,9 +3034,11 @@ mod tests {
         let historical = window.historical.as_mut().unwrap();
         assert!(historical.commands.is_none());
         assert!(!historical.owner.is_open());
-        assert!(historical
-            .request(HistoricalRequest::Summary, true, window.focus_epoch)
-            .is_err());
+        assert!(
+            historical
+                .request(HistoricalRequest::Summary, true, window.focus_epoch)
+                .is_err()
+        );
     }
     #[test]
     fn a_blocked_worker_does_not_block_gui_revocation_or_accept_another_job() {

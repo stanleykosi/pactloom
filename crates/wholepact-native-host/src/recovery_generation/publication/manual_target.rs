@@ -65,6 +65,16 @@ impl<'directory> ManualCommittedTarget<'directory> {
             )?;
         Self::from_checked_parent(directory, secrets, metadata, capsule)
     }
+#[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
+    pub(crate) fn open_workspace_dispatcher_original_v4(directory: &'directory Directory, secrets: &'directory Secrets, files: &crate::host::durable_dispatcher_v2::OriginalWorkspaceDispatcherFilesV4) -> Result<Self> {
+        let (metadata, capsule) = super::archive_history::open_layered_parent_for_workspace_dispatcher_v4(directory, secrets, files)?;
+        Self::from_checked_parent(directory, secrets, metadata, capsule)
+    }
+#[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
+    pub(crate) fn open_dispatcher_publication_source_v4(directory: &'directory Directory, secrets: &'directory Secrets, files: &crate::host::durable_dispatcher_v2::OriginalWorkspaceDispatcherPublicationV4) -> Result<Self> {
+        let (metadata, capsule) = super::archive_history::open_layered_parent_for_dispatcher_publication_v4(directory, secrets, files)?;
+        Self::from_checked_parent(directory, secrets, metadata, capsule)
+    }
     fn from_checked_parent(
         directory: &'directory Directory,
         secrets: &'directory Secrets,

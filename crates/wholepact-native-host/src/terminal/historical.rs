@@ -142,7 +142,82 @@ fn check_private_fixed_stage_deadline_v3(deadline: Instant) -> Result<()> {
 }
 // END private fixed stage V3 kernels.
 
+// A distinct purpose-specific composition. These kernels return only checked
+// data and cannot construct an approval or change an existing recipient window.
+fn bound_durable_delivery_review_v2(detail: &str) -> Result<()> {
+    let maximum = wholepact_storage_security::bundle::recovery::evidence::history::MAX_HISTORICAL_METADATA_BYTES;
+    const PROMPT: &str = "\nType APPROVE 0000000000000000 to approve this exact operation, or anything else to reject: ";
+    if detail.len() > maximum
+        || sanitize(detail)
+            .len()
+            .checked_add(PROMPT.len())
+            .is_none_or(|length| length > maximum)
+    {
+        return Err(Error::Invalid);
+    }
+    Ok(())
+}
+
+fn durable_delivery_disclosure_v2(
+    mut inspection: impl FnMut() -> Result<()>,
+    source: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    inspection()?;
+    source()?;
+    inspection()
+}
+
+fn durable_delivery_response_v2<T>(
+    response: impl FnOnce() -> Result<()>,
+    source: impl FnOnce() -> Result<T>,
+) -> Result<(Instant, T)> {
+    response()?;
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let result = source()?;
+    if Instant::now() >= deadline {
+        return Err(Error::Permission);
+    }
+    Ok((deadline, result))
+}
+
 impl Terminal {
+    /// Separate original-delivery purpose. The completed inspection admits only
+    /// disclosure of its exact review; it is never renewed into delivery power.
+    /// Callbacks must check the actual source without re-locking this terminal.
+    pub(crate) fn approve_durable_delivery_v2(
+        &self,
+        prior: &HistoricalApproval,
+        detail: &str,
+        before_disclosure: impl FnOnce() -> Result<()>,
+        after_response: impl FnOnce() -> Result<()>,
+    ) -> Result<HistoricalApproval> {
+        if !Arc::ptr_eq(&self.0, &prior.terminal.0) {
+            return Err(Error::Permission);
+        }
+        bound_durable_delivery_review_v2(detail)?;
+        let (deadline, foreground_file) = durable_delivery_response_v2(
+            || {
+                self.confirm_checked(detail, || {
+                    durable_delivery_disclosure_v2(|| prior.check(), before_disclosure)
+                })
+            },
+            || {
+                let file = self.0.lock().map_err(|_| Error::Terminal)?;
+                foreground(&file)?;
+                after_response()?;
+                foreground(&file)?;
+                Ok(file.try_clone()?)
+            },
+        )?;
+        let approval = HistoricalApproval {
+            terminal: self.clone(),
+            foreground_file,
+            deadline,
+            spent: AtomicBool::new(false),
+        };
+        approval.check()?;
+        Ok(approval)
+    }
     // BEGIN private fixed stage V3 terminal issuer.
     /// Issue a separately reviewed closed private-fixed stage, never renew the
     /// inspection that permitted its disclosure. Both source callbacks are
@@ -577,19 +652,23 @@ mod tests {
                 spent: AtomicBool::new(false),
             };
             let mut called = false;
-            assert!(approval
-                .effect(&mut || {
-                    called = true;
-                    Ok(())
-                })
-                .is_err());
+            assert!(
+                approval
+                    .effect(&mut || {
+                        called = true;
+                        Ok(())
+                    })
+                    .is_err()
+            );
             assert!(!called);
-            assert!(approval
-                .effect(&mut || {
-                    called = true;
-                    Ok(())
-                })
-                .is_err());
+            assert!(
+                approval
+                    .effect(&mut || {
+                        called = true;
+                        Ok(())
+                    })
+                    .is_err()
+            );
             assert!(!called);
         }
     }
@@ -610,13 +689,15 @@ mod tests {
             };
             let mut sink = tempfile::tempfile().unwrap();
             let mut disclosure_entered = false;
-            assert!(approval
-                .effect(&mut || {
-                    disclosure_entered = true;
-                    sink.write_all(b"synthetic private lineage metadata")?;
-                    Ok(())
-                })
-                .is_err());
+            assert!(
+                approval
+                    .effect(&mut || {
+                        disclosure_entered = true;
+                        sink.write_all(b"synthetic private lineage metadata")?;
+                        Ok(())
+                    })
+                    .is_err()
+            );
             assert!(!disclosure_entered);
             assert_eq!(sink.metadata().unwrap().len(), 0);
         }
@@ -631,9 +712,11 @@ mod tests {
             deadline: Instant::now(),
             spent: AtomicBool::new(true),
         };
-        assert!(terminal
-            .approve_historical_reviewed(&prior, "synthetic private scope")
-            .is_err());
+        assert!(
+            terminal
+                .approve_historical_reviewed(&prior, "synthetic private scope")
+                .is_err()
+        );
         assert_eq!(terminal.0.lock().unwrap().metadata().unwrap().len(), 0);
         let other = Terminal::disconnected_for_test();
         assert!(matches!(
@@ -652,9 +735,11 @@ mod tests {
             deadline: Instant::now(),
             spent: AtomicBool::new(true),
         };
-        assert!(terminal
-            .approve_publication_reviewed(&prior, &"a".repeat(64), "synthetic private roster")
-            .is_err());
+        assert!(
+            terminal
+                .approve_publication_reviewed(&prior, &"a".repeat(64), "synthetic private roster")
+                .is_err()
+        );
         assert_eq!(terminal.0.lock().unwrap().metadata().unwrap().len(), 0);
         let other = Terminal::disconnected_for_test();
         assert!(matches!(
@@ -728,5 +813,182 @@ mod tests {
             terminal.approve_historical("synthetic denied review"),
             Err(Error::Terminal)
         ));
+    }
+}
+
+#[cfg(test)]
+mod durable_delivery_v2_tests {
+    use super::*;
+    use std::cell::{Cell, RefCell};
+
+    #[test]
+    fn exact_disclosure_brackets_source_before_output_only() {
+        let trace = RefCell::new(Vec::new());
+        durable_delivery_disclosure_v2(
+            || {
+                trace.borrow_mut().push("inspection");
+                Ok(())
+            },
+            || {
+                trace.borrow_mut().push("source");
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(*trace.borrow(), ["inspection", "source", "inspection"]);
+        let called = Cell::new(false);
+        assert!(matches!(
+            durable_delivery_disclosure_v2(
+                || Err(Error::Permission),
+                || {
+                    called.set(true);
+                    Ok(())
+                },
+            ),
+            Err(Error::Permission)
+        ));
+        assert!(!called.get());
+        let checks = Cell::new(0);
+        assert!(matches!(
+            durable_delivery_disclosure_v2(
+                || {
+                    checks.set(checks.get() + 1);
+                    Ok(())
+                },
+                || Err(Error::Authentication),
+            ),
+            Err(Error::Authentication)
+        ));
+        assert_eq!(checks.get(), 1);
+    }
+
+    #[test]
+    fn source_expiring_during_inspection_never_admits_disclosure() {
+        let live = Cell::new(true);
+        assert!(matches!(
+            durable_delivery_disclosure_v2(
+                || if live.get() {
+                    Ok(())
+                } else {
+                    Err(Error::Permission)
+                },
+                || {
+                    live.set(false);
+                    Ok(())
+                },
+            ),
+            Err(Error::Permission)
+        ));
+    }
+
+    #[test]
+    fn response_starts_fixed_budget_before_source_and_preserves_original_error() {
+        let response = Cell::new(None);
+        let source = Cell::new(None);
+        let (deadline, value) = durable_delivery_response_v2(
+            || {
+                response.set(Some(Instant::now()));
+                Ok(())
+            },
+            || {
+                source.set(Some(Instant::now()));
+                Ok(Box::new(7u8))
+            },
+        )
+        .unwrap();
+        assert_eq!(*value, 7);
+        assert!(deadline >= response.get().unwrap() + Duration::from_secs(120));
+        assert!(deadline <= source.get().unwrap() + Duration::from_secs(120));
+        let post = Cell::new(0);
+        assert!(matches!(
+            durable_delivery_response_v2(
+                || Err(Error::Permission),
+                || {
+                    post.set(post.get() + 1);
+                    Ok(())
+                },
+            ),
+            Err(Error::Permission)
+        ));
+        assert_eq!(post.get(), 0);
+        assert!(matches!(
+            durable_delivery_response_v2(
+                || Ok(()),
+                || {
+                    post.set(post.get() + 1);
+                    Err::<(), _>(Error::Authentication)
+                },
+            ),
+            Err(Error::Authentication)
+        ));
+        assert_eq!(post.get(), 1);
+    }
+
+    #[test]
+    fn disconnected_expired_and_other_tty_never_issue_delivery_approval() {
+        for expired in [false, true] {
+            let prior = HistoricalApproval::denied_for_test(expired);
+            let terminal = prior.terminal.clone();
+            let calls = Cell::new(0);
+            assert!(
+                terminal
+                    .approve_durable_delivery_v2(
+                        &prior,
+                        "Exact synthetic original delivery review",
+                        || {
+                            calls.set(calls.get() + 1);
+                            Ok(())
+                        },
+                        || {
+                            calls.set(calls.get() + 1);
+                            Ok(())
+                        },
+                    )
+                    .is_err()
+            );
+            assert_eq!(calls.get(), 0);
+            assert_eq!(terminal.0.lock().unwrap().metadata().unwrap().len(), 0);
+            let other = Terminal::disconnected_for_test();
+            assert!(matches!(
+                other.approve_durable_delivery_v2(
+                    &prior,
+                    "Exact synthetic original delivery review",
+                    || Ok(()),
+                    || Ok(()),
+                ),
+                Err(Error::Permission)
+            ));
+            assert_eq!(other.0.lock().unwrap().metadata().unwrap().len(), 0);
+        }
+    }
+
+    #[test]
+    fn escaped_bounded_review_refuses_before_callbacks_or_output() {
+        let prior = HistoricalApproval::denied_for_test(false);
+        let terminal = prior.terminal.clone();
+        let called = Cell::new(false);
+        assert!(matches!(
+            terminal.approve_durable_delivery_v2(
+                &prior,
+                &"é".repeat(24_000),
+                || {
+                    called.set(true);
+                    Ok(())
+                },
+                || {
+                    called.set(true);
+                    Ok(())
+                },
+            ),
+            Err(Error::Invalid)
+        ));
+        assert!(!called.get());
+        assert_eq!(terminal.0.lock().unwrap().metadata().unwrap().len(), 0);
+        assert!(
+            bound_durable_delivery_review_v2(
+                "Original exact export and disabled financial operations"
+            )
+            .is_ok()
+        );
     }
 }

@@ -55,10 +55,12 @@ pub(crate) mod durable_private_workspace_v1;
     target_os = "linux"
 ))]
 pub use durable_private_workspace_v1::{
-    LocalPrivateFixedPermissionBoundaryV3, LocalPrivateWorkspaceConsentV1,
-    OriginalCheckpointOutcomeV2, OriginalProofAttemptV2, PreparedPrivateDurableCoordinatorV1,
-    PrivateDurableCoordinatorV1, PrivateDurableWorkspaceSourceV1, PrivateExactCandidateV2,
-    PrivateFixedArtifactCallbackV3, PrivateFixedMaterialReviewV3,
+    LocalPrivateDurableAdmissionConsentV2, LocalPrivateFixedPermissionBoundaryV3,
+    LocalPrivateWorkspaceConsentV1, OriginalCheckpointOutcomeV2, OriginalProofAttemptV2,
+    PreparedPrivateDurableCoordinatorV1, PrivateDurableAdmissionCoordinatorV2,
+    PrivateDurableAdmissionDeliveryV2, PrivateDurableAdmissionInspectionV2,
+    PrivateDurableAdmissionStatusV2, PrivateDurableCoordinatorV1, PrivateDurableWorkspaceSourceV1,
+    PrivateExactCandidateV2, PrivateFixedArtifactCallbackV3, PrivateFixedMaterialReviewV3,
     PrivateFixedObservationCallbackV3, PrivateFixedPermissionRequestV3, PrivateFixedStageReviewV3,
     PrivateFixedStageV3, PrivateFixedStatusV2, PrivateVerifiedFixedV2, PrivateWorkspaceActionV1,
     PrivateWorkspaceInitializationPlanV1, PrivateWorkspaceScopeV1, PrivateWorkspaceSeedBindingV1,

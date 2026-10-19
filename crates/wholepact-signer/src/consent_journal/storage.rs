@@ -1770,7 +1770,7 @@ fn verify_schema_before_common_audit(c: &Connection) -> Result<()> {
     drop(cost_named);
     #[cfg(test)]
     let cost_intents = validation_cost_v1::enter(validation_cost_v1::Phase::AdmissionIntents);
-    durable_payment_admission_intent_v1::validate_rows(c)?;
+    financial_admission_intents::validate_rows(c)?;
     #[cfg(test)]
     drop(cost_intents);
     #[cfg(not(all(
@@ -2120,21 +2120,20 @@ mod source_owner_tests {
         let f = SyntheticSource::new();
         drop(f.create());
         let before = f.files();
-        assert!(SignerConsentJournal::open_encrypted(
-            &f.path,
-            &DatabaseKey::from_bytes([178; 32]),
-            "synthetic-source",
-            &f.source
-        )
-        .is_err());
+        assert!(
+            SignerConsentJournal::open_encrypted(
+                &f.path,
+                &DatabaseKey::from_bytes([178; 32]),
+                "synthetic-source",
+                &f.source
+            )
+            .is_err()
+        );
         assert!(before == f.files(), "retained encrypted files changed");
-        assert!(SignerConsentJournal::open_encrypted(
-            &f.path,
-            &f.key,
-            "different-account",
-            &f.source
-        )
-        .is_err());
+        assert!(
+            SignerConsentJournal::open_encrypted(&f.path, &f.key, "different-account", &f.source)
+                .is_err()
+        );
         assert!(before == f.files(), "retained encrypted files changed");
         let c = wholepact_storage_security::open_encrypted(&f.path, &f.key).unwrap();
         c.connection()
@@ -2142,13 +2141,10 @@ mod source_owner_tests {
             .unwrap();
         drop(c);
         let before = f.files();
-        assert!(SignerConsentJournal::open_encrypted(
-            &f.path,
-            &f.key,
-            "synthetic-source",
-            &f.source
-        )
-        .is_err());
+        assert!(
+            SignerConsentJournal::open_encrypted(&f.path, &f.key, "synthetic-source", &f.source)
+                .is_err()
+        );
         assert!(before == f.files(), "retained encrypted files changed");
     }
 
@@ -2158,15 +2154,17 @@ mod source_owner_tests {
         drop(f.create());
         {
             let mut owner = f.source.begin(&f.path).unwrap();
-            assert!(open_preflighted_encrypted(
-                &mut owner,
-                &f.path,
-                &f.key,
-                "synthetic-source",
-                None,
-                &|_| Err(JournalError::Permission)
-            )
-            .is_err());
+            assert!(
+                open_preflighted_encrypted(
+                    &mut owner,
+                    &f.path,
+                    &f.key,
+                    "synthetic-source",
+                    None,
+                    &|_| Err(JournalError::Permission)
+                )
+                .is_err()
+            );
             assert!(owner.state.upgrade().is_none());
         }
         let calls = std::cell::Cell::new(0);
@@ -2195,13 +2193,10 @@ mod source_owner_tests {
         };
         assert!(state.upgrade().is_none());
         drop(state);
-        assert!(SignerConsentJournal::open_encrypted(
-            &f.path,
-            &f.key,
-            "synthetic-source",
-            &f.source
-        )
-        .is_err());
+        assert!(
+            SignerConsentJournal::open_encrypted(&f.path, &f.key, "synthetic-source", &f.source)
+                .is_err()
+        );
     }
 
     #[test]
@@ -2216,13 +2211,10 @@ mod source_owner_tests {
         assert!(!Arc::ptr_eq(&f.source, &alias_source));
         fs::hard_link(&f.path, &alias).unwrap();
         let before = f.files();
-        assert!(SignerConsentJournal::open_encrypted(
-            &alias,
-            &f.key,
-            "synthetic-source",
-            &alias_source
-        )
-        .is_err());
+        assert!(
+            SignerConsentJournal::open_encrypted(&alias, &f.key, "synthetic-source", &alias_source)
+                .is_err()
+        );
         assert!(before == f.files(), "retained encrypted files changed");
         fs::remove_file(&alias).unwrap();
         // Checkpoint before copying, then retain the original live handle while
@@ -2237,13 +2229,10 @@ mod source_owner_tests {
         fs::set_permissions(&alias, fs::Permissions::from_mode(0o600)).unwrap();
         fs::rename(&alias, &f.path).unwrap();
         let before = f.files();
-        assert!(SignerConsentJournal::open_encrypted(
-            &f.path,
-            &f.key,
-            "synthetic-source",
-            &f.source
-        )
-        .is_err());
+        assert!(
+            SignerConsentJournal::open_encrypted(&f.path, &f.key, "synthetic-source", &f.source)
+                .is_err()
+        );
         assert!(before == f.files(), "retained encrypted files changed");
     }
 }

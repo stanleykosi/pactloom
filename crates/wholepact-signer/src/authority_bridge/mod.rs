@@ -139,9 +139,7 @@ use crate::{
         SignerConsentSession,
     },
 };
-use protocol::{
-    AuthorizationDeliveryScope, RetainedAuthorizationRequest, RetainedAuthorizationResult,
-};
+use protocol::{AuthorizationDeliveryScope, RetainedAuthorizationRequest, RetainedAuthorizationResult};
 use sha2::{Digest, Sha256};
 use wholepact_authority::{AuthenticatedPermit, AuthorityClient, AuthorityHead};
 
@@ -644,3 +642,77 @@ pub mod manual_roster_inventory_v2;
 
 #[cfg(target_os = "linux")]
 pub mod account_inspection_ipc;
+
+#[cfg(all(feature = "durable-proposal", target_os = "linux"))]
+pub mod durable_delivery_admission_ipc_v2;
+
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "pending-birth-owner-signing",
+    feature = "native-ui",
+    target_os = "linux"
+))]
+#[path = "durable_proposal_v1/stable_returns_v2.rs"]
+mod durable_delivery_stable_returns_v2;
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "pending-birth-owner-signing",
+    feature = "native-ui",
+    target_os = "linux"
+))]
+pub(crate) fn validate_durable_delivery_policy_v2(
+    entry: &crate::account::birth::enrollment::roster_v2::durable_entry_v1::FreshDurableDeliveryEntryV2,
+    enrollment: &crate::consent_journal::AccountEnrollmentRecord,
+    manifest: &crate::consent_journal::AcceptedManifestRecord,
+    fixed: &wholepact_protocol::durable_proposal_v1::VerifiedFixedProposal,
+    inputs: &[wholepact_protocol::construction::InputActionMapping],
+    outputs: &[wholepact_protocol::construction::OutputActionMapping],
+) -> Result<String> {
+    entry
+        .check_original_source_current()
+        .map_err(|_| BridgeError::Permission)?;
+    let original = entry
+        .original_recipient_policy_export_v2()
+        .map_err(|_| BridgeError::Binding)?;
+    let binding =
+        crate::consent_journal::DurableBornPolicyBindingV1::from_original_stable_source_v2(
+            entry.record(),
+            enrollment,
+            manifest,
+            fixed.identity(),
+            &original,
+        )?;
+    durable_delivery_stable_returns_v2::verify_stable_returns_v2(
+        fixed,
+        inputs,
+        outputs,
+        &entry.account().fvk().map_err(|_| BridgeError::Binding)?,
+        &entry
+            .account()
+            .account_id()
+            .map_err(|_| BridgeError::Binding)?,
+        &binding.stable_return_requirements_v2(manifest)?,
+    )?;
+    // The export is validated original history. Its private preimage never
+    // leaves this signer; only its committed policy digest goes to the witness.
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct OriginalPolicy {
+        version: u16,
+        anchor: wholepact_core::born_policy_origin_v2::BornRecipientPolicyOriginV2,
+        original_birth_commit: wholepact_authority::pending_birth::PendingBirthCommitRecord,
+    }
+    let exact: OriginalPolicy =
+        serde_json::from_value(serde_json::to_value(&original).map_err(|_| BridgeError::Binding)?)
+            .map_err(|_| BridgeError::Binding)?;
+    if exact.version != 2
+        || exact.original_birth_commit.request.native_birth_digest != exact.anchor.birth_digest
+    {
+        return Err(BridgeError::Binding);
+    }
+    exact
+        .anchor
+        .recipient_policy
+        .digest()
+        .map_err(|_| BridgeError::Binding)
+}

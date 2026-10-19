@@ -42,6 +42,7 @@ class PublicOutputTests(unittest.TestCase):
 
     def test_durable_acquire_reply_loss_is_exact_ignored_and_preserves_every_old_phase(self):
         expected={
+            'durable-delivery-admission': ('durable_proposal_v1::delivery_admission_v2::durable_delivery_native_admission_reopens_original_after_process_death',1080,True),
             'durable-private-reopen': ('durable_proposal_v1::private_fixed_v2::private_workspace_actual_process_death_reopens_same_fixed_proof',1080,True),
             'initial': ('initial_joined_v3::actual_three_born_initial_roster_publications_preserve_refusal',300,False),
             'full': ('full_payment_inputs_v1::actual_three_born_full_payment_uses_one_original_synthetic_path',1080,True),
@@ -50,7 +51,7 @@ class PublicOutputTests(unittest.TestCase):
             'durable-acquire-reply-loss': ('durable_proposal_v1::durable_proposal_native_acquire_reply_loss_retries_original_session',1080,True),
         }
         self.assertEqual(set(output.TESTS),set(expected))
-        self.assertEqual(len({name for name,_ in output.TESTS.values()}),6)
+        self.assertEqual(len({name for name,_ in output.TESTS.values()}),7)
         self.assertEqual(output.DURABLE_DIAGNOSTIC_PHASES,
                          frozenset(('durable-fixed-signing','durable-acquire-reply-loss')))
         for phase,(suffix,seconds,ignored) in expected.items():
@@ -243,6 +244,7 @@ class PublicOutputTests(unittest.TestCase):
         early=['python3 -B scripts/ci-synthetic-output-tests.py',
                'python3 -B scripts/ci-synthetic-output.py "$executable" pure',
                'python3 -B scripts/ci-synthetic-output.py "$executable" storage-bootstrap',
+               'python3 -B scripts/ci-synthetic-output.py "$executable" durable-delivery-admission',
                'python3 -B scripts/ci-synthetic-output.py "$executable" durable-private-reopen',
                'python3 -B scripts/ci-synthetic-output.py "$executable" durable-owner-reopen',
                'python3 -B scripts/ci-synthetic-output.py "$executable" durable-fixed-signing',
@@ -3080,6 +3082,91 @@ class PrivateFixedDiagnosticOutputTests(unittest.TestCase):
         self.assertIn('MAX_BYTES: usize = 262_144',rolling)
         self.assertEqual(len(output.PRIVATE_WORKSPACE_FIELDS),20)
         self.assertEqual(output.TESTS['durable-private-reopen'][1],1080)
+
+
+class DurableDeliveryOutputTests(unittest.TestCase):
+    def record(self):
+        row={key:True for key in output.DURABLE_DELIVERY_BOOL_FIELDS}
+        row.update({key:False for key in output.DURABLE_DELIVERY_FALSE_FIELDS})
+        row.update(schema=2,phase='durable_delivery_admission',result='passed',first_failure=None,
+                   producer_exit='sigkill',reader_exit='success',root_cleanup='closed_absent',admission_count='2_of_2')
+        return row
+    def line(self,row=None):
+        return output.DURABLE_DELIVERY_PREFIX+json.dumps(self.record() if row is None else row,separators=(',',':'))
+    def test_exact_new_phase_preserves_original_gates_and_bounds(self):
+        name=output.PREFIX+'durable_proposal_v1::delivery_admission_v2::durable_delivery_native_admission_reopens_original_after_process_death'
+        self.assertEqual(output.phase_selection('durable-delivery-admission'),(name,1080,['--exact',name,'--test-threads=1','--ignored']))
+        shell=(ROOT/'scripts/ci-durable-native-linux.sh').read_text()
+        call='TMPDIR="$runtime_root" python3 -B scripts/ci-synthetic-output.py "$executable" durable-delivery-admission'
+        self.assertEqual(shell.count(call),1)
+        self.assertLess(shell.index('"$executable" storage-bootstrap'),shell.index(call))
+        self.assertLess(shell.index(call),shell.index('"$executable" durable-private-reopen'))
+        self.assertEqual(output.TESTS['durable-private-reopen'][1],1080)
+        self.assertNotIn('durable-delivery-admission',output.DURABLE_DIAGNOSTIC_PHASES)
+    def test_rust_python_result_inventory_and_selector_are_exact(self):
+        base=ROOT/'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3_qualification'
+        source=(base/'durable_proposal_v1/delivery_admission_v2.rs').read_text()
+        fields=re.search(r'struct PublicOutcomeV2\s*\{(.*?)\n\}',source,re.S).group(1)
+        actual=dict(re.findall(r'^\s+(\w+): ([^,]+),$',fields,re.M))
+        self.assertEqual(set(actual),output.DURABLE_DELIVERY_FIELDS)
+        self.assertEqual({key for key,ty in actual.items() if ty=='bool'},output.DURABLE_DELIVERY_BOOL_FIELDS|output.DURABLE_DELIVERY_FALSE_FIELDS)
+        boundaries=re.search(r'const BOUNDARIES: &\[&str\] = &\[(.*?)\];',source,re.S).group(1)
+        self.assertEqual(set(re.findall(r'"(\w+)"',boundaries)),output.DURABLE_DELIVERY_BOUNDARIES)
+        self.assertIn('const PUBLIC_PREFIX: &str = "'+output.DURABLE_DELIVERY_PREFIX+'";',source)
+        selector=output.TESTS['durable-delivery-admission'][0].rsplit('::',1)[1]
+        self.assertEqual(len(re.findall(r'#\[test\]\s*#\[ignore = "[^"\n]+"\]\s*fn '+selector+r'\(\)',source)),1)
+        public=source.split('fn public_json(&self)',1)[1].split('pub(in crate::host',1)[0]
+        self.assertIn('json.len() > 2048',public)
+        self.assertIn('Duration::from_secs(900)',source)
+    def test_closed_fields_duplicate_types_and_claims_are_strict(self):
+        row=self.record()
+        self.assertEqual(output.public_durable_delivery(json.dumps(row)),row)
+        self.assertLess(len(self.line().encode()),2048)
+        for key in output.DURABLE_DELIVERY_FIELDS:
+            missing=row.copy();missing.pop(key)
+            with self.assertRaises(ValueError):output.public_durable_delivery(json.dumps(missing))
+        for key in output.DURABLE_DELIVERY_BOOL_FIELDS:
+            for value in (1,0,None,'true'):
+                with self.assertRaises(ValueError):output.public_durable_delivery(json.dumps(dict(row,**{key:value})))
+        for key in output.DURABLE_DELIVERY_FALSE_FIELDS:
+            with self.assertRaises(ValueError):output.public_durable_delivery(json.dumps(dict(row,**{key:True})))
+        for bad in (json.dumps(row)[:-1]+',"schema":2}',json.dumps(dict(row,private_key='secret')),' '*2049+json.dumps(row)):
+            with self.assertRaises(ValueError):output.public_durable_delivery(bad)
+    def test_every_success_fact_is_required_and_partial_commit_is_not_success(self):
+        row=self.record()
+        for key in output.DURABLE_DELIVERY_BOOL_FIELDS:
+            with self.assertRaises(ValueError):output.public_durable_delivery(json.dumps(dict(row,**{key:False})))
+        for key,value in (('admission_count','1_of_2'),('admission_count','unverified'),('producer_exit','other'),('reader_exit','not_started'),('root_cleanup','retained'),('first_failure','DeliveryNativeAdmission')):
+            with self.assertRaises(ValueError):output.public_durable_delivery(json.dumps(dict(row,**{key:value})))
+        for count in ('0_of_2','1_of_2','2_of_2','unverified'):
+            failed=dict(row,result='failed',first_failure='DeliveryNativeAdmission',admission_count=count,reader_exit='not_started',reader_reaped=False,reader_group_absent=False)
+            self.assertEqual(output.public_durable_delivery(json.dumps(failed)),failed)
+    def test_fragmented_oversized_private_unknown_records_fail_closed(self):
+        line=self.line().encode()
+        for split in range(len(line)+1):
+            parser=output.BoundedLines('exact')
+            self.assertEqual(parser.feed(line[:split]),[])
+            self.assertEqual(parser.feed(line[split:]+b'\n'),[line])
+        self.assertEqual(output.public_line(b'test exact ... '+line,'exact'),('durable_delivery',self.record()))
+        self.assertIsNone(output.public_line(b'private '+line,'exact'))
+        for bad in (line[:-1],b'CI_SYNTHETIC_DURABLE_DELIVERY '+bytes([255]),b'CI_SYNTHETIC_DURABLE_DELIVERY_INVALID'):
+            with self.assertRaises(ValueError):output.public_line(bad,'exact')
+        parser=output.BoundedLines('exact')
+        rows=parser.feed(b'CI_SYNTHETIC_DURABLE_DELIVERY '+b'x'*9000+b'\n'+line+b'\n')
+        self.assertEqual(rows[0],output.DURABLE_DELIVERY_INVALID.encode())
+        with self.assertRaises(ValueError):output.public_line(rows[0],'exact')
+    def test_real_run_projection_requires_aggregate_cleanup_and_one_exact_result(self):
+        run=lambda rows,status=0,phase='durable-delivery-admission':PrivateWorkspaceOutputTests().run_fake(rows,status,phase)
+        text=run([self.line()])
+        self.assertIn('phase=durable-delivery-admission passed=true cleanup_verified=true',text)
+        self.assertEqual(text.count(output.DURABLE_DELIVERY_PREFIX),1)
+        with self.assertRaises(RuntimeError):run([])
+        with self.assertRaises(RuntimeError):run([self.line()],101)
+        with self.assertRaises(ValueError):run([self.line(),self.line()])
+        with self.assertRaises(ValueError):run([self.line()],phase='durable-private-reopen')
+        with self.assertRaises(ValueError):run([PrivateWorkspaceOutputTests().line()])
+        cleanup='[JOINED_CLEANUP group_signal=AlreadyAbsentWhileLeaderOwned group_absence=OriginalGroupAbsentObserved direct_child=Reaped root_cleanup=ClosedAndAbsenceVerified exit=Some(0) signal=None core_dumped=false]'
+        with self.assertRaises(ValueError):run([cleanup,self.line()])
 
 
 if __name__=='__main__':
