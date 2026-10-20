@@ -1,8 +1,16 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-20, 03:29 UTC.
+Updated: 2026-10-20, 03:42 UTC.
 
 **CI33 passed the bounded synthetic original-private-workspace completed-fixed SIGKILL/fresh-process read-only reopen path and all listed regressions. Product qualification remains incomplete: no public testnet settlement, restarted acquired financial session, attended GUI reliability, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
+
+## Closed B1 prerequisites passed; native integration pending
+
+The final reviewed V3 source at checkpoint63 (`a593397dd11085ca3a15a484ffccf12478cb2fcc`) completed the canonical all-feature release no-run build in 9m56s. All 24 selected actual component integrations passed: 15 encrypted Store/proof-store/Signer-journal integrations and 9 maintained-framing/production-observer integrations. Their combined measured execution time was 2.457 seconds after compilation. These are component results, not native admission or full-payment proof.
+
+The bounded-line parser/public projection integration also passed, preserving precise finite failure categories, rejecting private/free-form errors and retaining unknown-commit semantics. The actual CI selector was checked against the compiled ignored-test catalogue without executing it locally. Earlier fixture setup failures and inventory-only corrections are not counted as passes.
+
+Qualification mode is now explicitly `full`, which means the closed B1 native lifecycle entrypoint here, not full financial-payment or testnet qualification. The next isolated run will compile its exact public commit, pass the minimal real-peer gate and encrypted bootstrap, then exercise the genuine native V3 delivery/admission/original-process-death/reopen route. Its result remains pending. No unchanged component suite or older unrelated native fixture is rerun merely to increase counts.
 
 ## Closed B1 lifecycle V3: source checkpoint, qualification pending
 
