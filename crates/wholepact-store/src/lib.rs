@@ -25,7 +25,9 @@ mod draft_history;
 mod durable_input_projection_guard_v1;
 mod original_private_revision_v3;
 mod private_workspace_guard_v1;
-pub use original_private_revision_v3::OriginalPrivateRevisionPinV3;
+pub use original_private_revision_v3::{
+    OriginalPrivateRevisionPinV3, OriginalSourceReadRevisionPinV3,
+};
 pub mod private_workspace_origin_v1;
 const MAX_JSON_BYTES: usize = 1_048_576;
 pub const MAX_AGREEMENTS: u64 = 256;

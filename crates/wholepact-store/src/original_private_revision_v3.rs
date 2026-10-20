@@ -94,6 +94,79 @@ impl<'a> OriginalPrivateRevisionPinV3<'a> {
         original(self.store, connection)
     }
 }
+
+#[derive(PartialEq, Eq)]
+enum SourceProfileV3 {
+    Original,
+    Recovered {
+        binding: wholepact_storage_security::bundle::recovery::generation::GenerationBinding,
+        destination_identity: String,
+    },
+}
+
+/// Read-only observation of the actual encrypted source Store, including an
+/// authenticated recovered/layered root. This is not a private destination pin:
+/// it has no mutation target, successor, conversion or update operation.
+///
+/// The caller still performs its full source/provenance audit between capture
+/// and recheck. This token detects changes; it does not authenticate a new source
+/// or grant disclosure, native permission or financial authority.
+pub struct OriginalSourceReadRevisionPinV3<'a> {
+    store: &'a Store,
+    agreement_id: String,
+    revision: u64,
+    stamp: Stamp,
+    profile: SourceProfileV3,
+}
+impl OriginalSourceReadRevisionPinV3<'_> {
+    pub fn check_current_v3(&self) -> Result<()> {
+        let connection = self.store.connection.try_lock().map_err(|error| match error {
+            std::sync::TryLockError::WouldBlock => StoreError::ResourceExhausted,
+            std::sync::TryLockError::Poisoned(_) => StoreError::Poisoned,
+        })?;
+        if !connection.is_autocommit() {
+            return Err(StoreError::RevisionConflict);
+        }
+        if read_source_profile(self.store, &connection)? != self.profile
+            || Stamp::read(&connection)? != self.stamp
+            || selected_revision(&connection, &self.agreement_id)? != self.revision
+            || Stamp::read(&connection)? != self.stamp
+            || read_source_profile(self.store, &connection)? != self.profile
+        {
+            return Err(StoreError::RevisionConflict);
+        }
+        Ok(())
+    }
+}
+
+fn read_source_profile(store: &Store, connection: &Connection) -> Result<SourceProfileV3> {
+    if store.protection != StorageProtection::Encrypted {
+        return Err(StoreError::RecoveryRequired);
+    }
+    store
+        .original_database
+        .as_ref()
+        .ok_or(StoreError::RecoveryRequired)?
+        .check_current(connection)?;
+    if store.recovered_generation {
+        let (binding, destination_identity) =
+            store.original_read_generation_identity_v3(connection)?;
+        Ok(SourceProfileV3::Recovered {
+            binding,
+            destination_identity,
+        })
+    } else {
+        let stamp = Stamp::read(connection)?;
+        if store.recovered_binding.is_some()
+            || stamp.user_version != SCHEMA_VERSION
+            || stamp.application_id != 0
+        {
+            return Err(StoreError::RecoveryRequired);
+        }
+        Ok(SourceProfileV3::Original)
+    }
+}
+
 fn original(store: &Store, connection: &Connection) -> Result<()> {
     if store.protection != StorageProtection::Encrypted || store.recovered_generation {
         return Err(StoreError::RecoveryRequired);
@@ -120,6 +193,35 @@ fn selected_revision(connection: &Connection, id: &str) -> Result<u64> {
     Ok(revision as u64)
 }
 impl Store {
+    pub fn pin_original_source_read_revision_v3(
+        &self,
+        agreement_id: &str,
+    ) -> Result<OriginalSourceReadRevisionPinV3<'_>> {
+        validate_id(agreement_id)?;
+        let connection = self.connection.try_lock().map_err(|error| match error {
+            std::sync::TryLockError::WouldBlock => StoreError::ResourceExhausted,
+            std::sync::TryLockError::Poisoned(_) => StoreError::Poisoned,
+        })?;
+        if !connection.is_autocommit() {
+            return Err(StoreError::RevisionConflict);
+        }
+        let stamp = Stamp::read(&connection)?;
+        let profile = read_source_profile(self, &connection)?;
+        let revision = selected_revision(&connection, agreement_id)?;
+        if read_source_profile(self, &connection)? != profile
+            || Stamp::read(&connection)? != stamp
+        {
+            return Err(StoreError::RevisionConflict);
+        }
+        Ok(OriginalSourceReadRevisionPinV3 {
+            store: self,
+            agreement_id: agreement_id.into(),
+            revision,
+            stamp,
+            profile,
+        })
+    }
+
     pub fn pin_original_revision_v3(
         &self,
         agreement_id: &str,
@@ -186,6 +288,48 @@ mod tests {
             )
             .unwrap();
         (dir, path, store)
+    }
+    #[test]
+    fn encrypted_source_read_pin_preserves_original_destination_write_separation() {
+        let (_dir, _path, store) = fixture();
+        let command = context("source-read-then-original-write");
+        let before = store.get_agreement("agreement").unwrap().unwrap();
+        let history = serde_json::to_value(store.events_after(0, 100).unwrap()).unwrap();
+        let changes = store.connection.lock().unwrap().total_changes();
+        let read = store
+            .pin_original_source_read_revision_v3("agreement")
+            .unwrap();
+        // A separate original destination admission is still necessary; the
+        // read token has no conversion into the consuming mutation API.
+        let write = store.pin_original_revision_v3("agreement").unwrap();
+        store.verify_integrity().unwrap();
+        read.check_current_v3().unwrap();
+        write.check_current_v3().unwrap();
+        assert_eq!(store.get_agreement("agreement").unwrap().unwrap(), before);
+        assert_eq!(
+            serde_json::to_value(store.events_after(0, 100).unwrap()).unwrap(),
+            history
+        );
+        assert_eq!(store.connection.lock().unwrap().total_changes(), changes);
+        assert!(store.find_replay(&command).unwrap().is_none());
+
+        let (committed, successor) = store
+            .update_original_agreement_pinned_v3(
+                write,
+                &command,
+                "agreement",
+                before.revision,
+                serde_json::json!({"synthetic": 2}),
+                "synthetic.update",
+            )
+            .unwrap();
+        assert_eq!(committed.record.revision, before.revision + 1);
+        assert!(!committed.replayed);
+        successor.check_current_v3().unwrap();
+        assert!(matches!(
+            read.check_current_v3(),
+            Err(StoreError::RevisionConflict)
+        ));
     }
     #[test]
     fn encrypted_pin_rejects_independent_already_open_handle_write() {
