@@ -1,6 +1,9 @@
 //! The signer-owned native entry and exact decision provenance. A binary digest
 //! is reproducibility evidence, not proof of an installer/publisher or a human.
 //! Security relies on the correctly operating signer and trusted OS/compositor.
+#[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+#[path = "financial_authority_v1.rs"]
+pub(crate) mod financial_authority_v1;
 use crate::{Error, Result};
 use sha2::{Digest, Sha256};
 use std::{
@@ -592,12 +595,14 @@ pub(crate) struct NativeDecision {
     digest: String,
     // Actual consuming native click, never serialized or supplied by a request.
     consumed_at: Instant,
+    consumed_at_ms: u64,
 }
 impl NativeDecision {
     #[cfg(feature = "authority-signing")]
     pub(crate) fn consumed_at(&self) -> Instant {
         self.consumed_at
     }
+    pub(crate) fn consumed_at_unix_ms(&self) -> u64 { self.consumed_at_ms }
     pub(crate) fn binding(&self) -> &NativeAuthorityBinding {
         &self.source
     }
@@ -684,6 +689,7 @@ impl ExactNativeReview {
             source: self.source,
             digest: self.digest,
             consumed_at: Instant::now(),
+            consumed_at_ms: u64::try_from(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|_| Error::Locked)?.as_millis()).map_err(|_| Error::Locked)?,
         })
     }
 }
@@ -915,6 +921,7 @@ pub(crate) fn recovery_test_authority() -> NativeAuthority {
 pub(crate) fn recovery_test_decision(authority: &NativeAuthority, digest: &str) -> NativeDecision {
     NativeDecision {
         consumed_at: Instant::now(),
+        consumed_at_ms: u64::try_from(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()).unwrap(),
         source: authority.binding(),
         digest: digest.into(),
     }

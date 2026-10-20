@@ -502,11 +502,11 @@ fn profile_expiry_and_attempt_resource_bounds_fail_closed() {
     journal.bind_submission_plan(&plan).unwrap();
     for _ in 0..128 {
         journal
-            .begin_submission_attempt(&plan, "local-fixture", NOW)
+            .begin_submission_attempt(&plan, "local-fixture", NOW, None)
             .unwrap();
     }
     assert!(matches!(
-        journal.begin_submission_attempt(&plan, "local-fixture", NOW),
+        journal.begin_submission_attempt(&plan, "local-fixture", NOW, None),
         Err(ChainError::ResourceLimit)
     ));
     assert_eq!(
@@ -760,4 +760,168 @@ fn retention_lease_rechecks_and_journal_destination_are_explicit() {
             .unwrap()
             .is_none()
     );
+}
+
+/// Real encrypted submission journal plus the production orchestrator. The
+/// adapter pauses at its readiness boundary and applies the SAME immutable
+/// token ceiling required of the production RPC adapter before reading bytes.
+/// This does not claim a real network connection or valid funded payment.
+#[tokio::test]
+async fn retained_submission_caps_send_after_delayed_readiness() {
+    struct CappedAuthority {
+        until: u64,
+    }
+    struct CappedPermit {
+        until: u64,
+    }
+    impl SubmissionAuthority for CappedAuthority {
+        type Permit = CappedPermit;
+        fn authorize(&mut self, _: &SubmissionReview<'_>) -> Result<CappedPermit, ChainError> {
+            Ok(CappedPermit { until: self.until })
+        }
+    }
+    impl SubmissionPermit for CappedPermit {
+        fn valid_until_unix_seconds(&self) -> Option<u64> {
+            Some(self.until)
+        }
+        fn check_current(&mut self, review: &SubmissionReview<'_>) -> Result<(), ChainError> {
+            if review.now_unix_seconds > self.until {
+                Err(ChainError::SubmissionNotAuthorized)
+            } else {
+                Ok(())
+            }
+        }
+    }
+    struct DelayedReady {
+        context: ChainContext,
+        ready_at: u64,
+        observed_ceiling: Option<u64>,
+        sent: usize,
+    }
+    impl SubmissionBackend for DelayedReady {
+        fn identity(&self) -> &BackendIdentity {
+            self.context.source()
+        }
+        fn fresh_context(&mut self) -> SubmissionFuture<'_, Result<ChainContext, ChainError>> {
+            Box::pin(async { Ok(self.context.clone()) })
+        }
+        fn submit_exact<'a>(
+            &'a mut self,
+            dispatch: PreparedDispatch<'a>,
+        ) -> SubmissionFuture<'a, Result<BackendSubmissionResult, ChainError>> {
+            Box::pin(async move {
+                tokio::task::yield_now().await;
+                self.observed_ceiling = Some(dispatch.valid_until_unix_seconds());
+                if self.ready_at > dispatch.valid_until_unix_seconds() {
+                    return Err(ChainError::StaleChain);
+                }
+                assert!(!dispatch.exact_bytes().is_empty());
+                self.sent += 1;
+                Ok(BackendSubmissionResult::Acknowledged)
+            })
+        }
+    }
+    let (_dir, _path, _key, mut journal) = setup();
+    let plan = plan();
+    let mut authority = CappedAuthority { until: NOW + 1 };
+    let mut backend = DelayedReady {
+        context: context(),
+        ready_at: NOW + 2,
+        observed_ceiling: None,
+        sent: 0,
+    };
+    let report = submit_plan(
+        &mut journal,
+        &plan,
+        &mut backend,
+        &mut authority,
+        &Clock(NOW),
+        SubmissionPolicy::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(backend.observed_ceiling, Some(NOW + 1));
+    assert_eq!(backend.sent, 0);
+    assert!(matches!(
+        report.attempt.outcome,
+        SubmissionAttemptOutcome::Indeterminate { .. }
+    ));
+    // Exact original bytes remain retained, and an expired authority cannot
+    // enter the backend at all or reset/erase the first uncertain attempt.
+    authority.until = NOW - 1;
+    assert!(matches!(
+        submit_plan(
+            &mut journal,
+            &plan,
+            &mut backend,
+            &mut authority,
+            &Clock(NOW),
+            SubmissionPolicy::default()
+        )
+        .await,
+        Err(ChainError::SubmissionNotAuthorized)
+    ));
+    assert_eq!(backend.sent, 0);
+}
+
+/// Two real encrypted connections; the competing append happens after the
+/// authority selects its exact attempt but before the maintained write boundary.
+#[tokio::test]
+async fn original_delegation_attempt_is_checked_inside_journal_transaction() {
+    struct ExactAttempt {
+        path: std::path::PathBuf,
+        key: DatabaseKey,
+        plan: SubmissionPlan,
+    }
+    struct ExactPermit;
+    impl SubmissionAuthority for ExactAttempt {
+        type Permit = ExactPermit;
+        fn authorize(&mut self, _: &SubmissionReview<'_>) -> Result<ExactPermit, ChainError> {
+            let mut competitor = EncryptedSubmissionJournal::from_encrypted_connection(
+                open_encrypted(&self.path, &self.key).unwrap(),
+            )
+            .unwrap();
+            competitor.begin_submission_attempt(&self.plan, "local-fixture", NOW, Some(1))?;
+            Ok(ExactPermit)
+        }
+    }
+    impl SubmissionPermit for ExactPermit {
+        fn expected_attempt_number(&self) -> Option<u32> {
+            Some(1)
+        }
+        fn check_current(&mut self, _: &SubmissionReview<'_>) -> Result<(), ChainError> {
+            Ok(())
+        }
+    }
+    let (_dir, path, key, mut journal) = setup();
+    let plan = plan();
+    journal.bind_submission_plan(&plan).unwrap();
+    let mut authority = ExactAttempt {
+        path,
+        key,
+        plan: self::plan(),
+    };
+    let mut backend = Backend::new(vec![Ok(BackendSubmissionResult::Acknowledged)]);
+    assert!(matches!(
+        submit_plan(
+            &mut journal,
+            &plan,
+            &mut backend,
+            &mut authority,
+            &Clock(NOW),
+            SubmissionPolicy::default()
+        )
+        .await,
+        Err(ChainError::SubmissionNotAuthorized)
+    ));
+    assert!(backend.calls.is_empty());
+    let attempts = journal
+        .submission_attempts(&plan.descriptor.operation_id)
+        .unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0].number, 1);
+    assert!(matches!(
+        attempts[0].outcome,
+        SubmissionAttemptOutcome::Unknown
+    ));
 }

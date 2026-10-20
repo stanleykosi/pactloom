@@ -14,6 +14,8 @@ pub(crate) mod acquisition;
 pub(crate) mod continuation;
 #[cfg(feature = "durable-proposal")]
 pub(crate) mod durable_entry_v1;
+#[cfg(feature = "durable-proposal")]
+pub(crate) mod financial_source_v1;
 pub(crate) mod inventory;
 pub(crate) mod permanent_stop;
 pub(crate) mod publication;

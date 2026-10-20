@@ -2,30 +2,35 @@
 //! conversion back to the precursor, generic Engine, raw Store or private bytes.
 //! The immutable fixed prefix and the append-only export history are distinct.
 use super::*;
-use crate::Envelope;
 use crate::durable_construction_v1::{
-    DurableMaterialActionV1, LocalDurableMaterialConsentV1, original_roster_v2,
+    original_roster_v2,
     review_export_v1::{
         self, DurableReviewExportScopeV1, ExportExposure, ExportIntent,
         LocalDurableReviewExportConsentV1, MAX_EXPORT_INTENTS,
     },
+    DurableMaterialActionV1, LocalDurableMaterialConsentV1,
 };
+use crate::Envelope;
 use sha2::{Digest, Sha256};
 use wholepact_proof_jobs::{
     CheckpointScope, JobSummary, LocalAction, LocalProofConsent, VerifiedCheckpoint,
 };
 use wholepact_protocol::durable_proposal_v1::FixedProposalIdentityV1;
 use wholepact_signer::authority_bridge::{
-    BridgeError,
     durable_review_ipc_v1::{
         DurableReviewOutputActionV1, DurableReviewPayloadV1, PreparedDurableReviewDeliveryV1,
         PreparedDurableReviewPayloadV2,
     },
+    BridgeError,
 };
 use wholepact_store::{CommandContext, MutationResult};
 
 mod closed_review_v3;
-pub use closed_review_v3::{PreparedPrivateDurableAdmissionDeliveryV3, ClosedPrivateDurableAdmissionReviewV3, PrivateDurableAdmissionDeliveryV3, PrivateDurableAdmissionStatusV3};
+pub(super) mod financial_v1;
+pub use closed_review_v3::{
+    ClosedPrivateDurableAdmissionReviewV3, PreparedPrivateDurableAdmissionDeliveryV3,
+    PrivateDurableAdmissionDeliveryV3, PrivateDurableAdmissionStatusV3,
+};
 
 const EXPORT_CAUSE_KEY: &str = "private_durable_delivery_cause_v2";
 const EXPORT_CAUSE_COLLISION_KEY: &str = "private_durable_delivery_cause_collision_v2";
@@ -525,7 +530,9 @@ impl<'owner, 'source> PreparedPrivateDurableAdmissionDeliveryV2<'owner, 'source>
         check_recipient(recipient, cause)?;
         gate.check()?;
         let (current, history) = self.owner.check_observed(access, gate.consent, cause)?;
-        if !original_roster_v2(&current)?.review_exports_v3.is_empty() { return Err(denied()); }
+        if !original_roster_v2(&current)?.review_exports_v3.is_empty() {
+            return Err(denied());
+        }
         let source = self
             .owner
             .delivery_source_binding(access, &history, cause)?;
@@ -617,7 +624,10 @@ struct History {
     prefix_digest: String,
     full_digest: String,
     export_revisions: BTreeMap<String, u64>,
-    rows: Vec<(wholepact_store::StoredEvent, wholepact_store::StoredOperation)>,
+    rows: Vec<(
+        wholepact_store::StoredEvent,
+        wholepact_store::StoredOperation,
+    )>,
 }
 
 impl<'source> PrivateDurableAdmissionCoordinatorV2<'source> {
@@ -1022,7 +1032,9 @@ impl<'source> PrivateDurableAdmissionCoordinatorV2<'source> {
         delivery_gate.check(false)?;
         check_recipient(&recipient, cause)?;
         let mut roster = export_result(cause, S::ExportRoster, original_roster_v2(&before))?;
-        if !roster.review_exports_v3.is_empty() { return Err(denied()); }
+        if !roster.review_exports_v3.is_empty() {
+            return Err(denied());
+        }
         let prior_revision = history
             .export_revisions
             .get(&scope.recipient.request.operation_id)
@@ -1394,6 +1406,19 @@ impl<'source> PrivateDurableAdmissionCoordinatorV2<'source> {
             .store
             .events_after(0, (PREFIX_EVENTS + MAX_EXPORT_INTENTS + 1) as u32)
             .map_err(crate::store_error)?;
+        self.audit_admission_rows(access, current, cause, &events)
+    }
+    // Exact original prefix/export validator shared only with the source-owned
+    // financial profile. It receives a bounded original prefix of real rows;
+    // its caller separately authenticates every later financial event.
+    fn audit_admission_rows(
+        &self,
+        access: &Access,
+        current: &Envelope,
+        cause: ExportObservation<'_>,
+        events: &[wholepact_store::StoredEvent],
+    ) -> Result<History> {
+        let o = &self.original;
         if events.len() < PREFIX_EVENTS
             || events.len() > PREFIX_EVENTS + MAX_EXPORT_INTENTS
             || events.len() as u64 != current.view.revision
@@ -1512,16 +1537,31 @@ impl<'source> PrivateDurableAdmissionCoordinatorV2<'source> {
                 let (principal, operation_id, command) = if event.kind == EXPORT_EVENT {
                     let scope = validate_export_delta_observed(before, &envelope, cause)?;
                     let command = export_command(access, before.view.revision, &scope)?;
-                    (scope.principal_id, scope.recipient.request.operation_id, command)
+                    (
+                        scope.principal_id,
+                        scope.recipient.request.operation_id,
+                        command,
+                    )
                 } else {
                     let scope = closed_review_v3::validate_export_delta_v3(before, &envelope)?;
-                    let command = closed_review_v3::export_command_v3(access, before.view.revision, &scope)?;
-                    (scope.principal_id, scope.recipient.request.operation_id, command)
+                    let command =
+                        closed_review_v3::export_command_v3(access, before.view.revision, &scope)?;
+                    (
+                        scope.principal_id,
+                        scope.recipient.request.operation_id,
+                        command,
+                    )
                 };
                 if principal != access.principal_id
-                    || export_revisions.insert(operation_id, envelope.view.revision).is_some()
+                    || export_revisions
+                        .insert(operation_id, envelope.view.revision)
+                        .is_some()
                 {
-                    return export_predicate_error(cause, ExportCauseSite::ExportHistory, damaged());
+                    return export_predicate_error(
+                        cause,
+                        ExportCauseSite::ExportHistory,
+                        damaged(),
+                    );
                 }
                 let replay = o
                     .engine
@@ -1698,7 +1738,9 @@ fn validate_export_delta_kernel(
     }
     let old = original_roster_v2(before)?;
     let new = original_roster_v2(after)?;
-    if !old.review_exports_v3.is_empty() || !new.review_exports_v3.is_empty() { return Err(damaged()); }
+    if !old.review_exports_v3.is_empty() || !new.review_exports_v3.is_empty() {
+        return Err(damaged());
+    }
     if new.owners.len() != 2 {
         return export_predicate_error(cause, ExportCauseSite::ExportDelta, damaged());
     }
@@ -1897,6 +1939,23 @@ fn original_commands(
     key: &DatabaseKey,
     expected: [u8; 32],
 ) -> Result<BTreeMap<String, CommandContext>> {
+    original_commands_bounded(
+        destination,
+        key,
+        expected,
+        PREFIX_EVENTS + MAX_EXPORT_INTENTS,
+    )
+    .map(|(prefix, _)| prefix)
+}
+fn original_commands_bounded(
+    destination: &Path,
+    key: &DatabaseKey,
+    expected: [u8; 32],
+    maximum: usize,
+) -> Result<(
+    BTreeMap<String, CommandContext>,
+    BTreeMap<String, CommandContext>,
+)> {
     let snapshot = wholepact_storage_security::open_encrypted_read_snapshot(destination, key)
         .map_err(|_| damaged())?;
     if snapshot
@@ -1908,7 +1967,7 @@ fn original_commands(
         return Err(damaged());
     }
     let mut statement = snapshot.connection().prepare(
-        "SELECT principal_id,idempotency_key,request_digest,result FROM idempotency ORDER BY principal_id,idempotency_key LIMIT 17",
+        "SELECT principal_id,idempotency_key,request_digest,result FROM idempotency ORDER BY principal_id,idempotency_key LIMIT 405",
     ).map_err(|_| damaged())?;
     let rows = statement
         .query_map([], |row| {
@@ -1921,12 +1980,13 @@ fn original_commands(
         })
         .map_err(|_| damaged())?;
     let mut commands = BTreeMap::new();
+    let mut all_commands = BTreeMap::new();
     let mut count = 0;
     for row in rows {
         count += 1;
         let (principal_id, idempotency_key, request_digest, encoded) =
             row.map_err(|_| damaged())?;
-        if count > PREFIX_EVENTS + MAX_EXPORT_INTENTS || encoded.len() > 1024 * 1024 {
+        if count > maximum || encoded.len() > 1024 * 1024 {
             return Err(damaged());
         }
         let saved: MutationResult = serde_json::from_str(&encoded).map_err(|_| damaged())?;
@@ -1935,12 +1995,18 @@ fn original_commands(
         if serde_json::to_string(&saved).map_err(|_| damaged())? != encoded || saved.replayed {
             return Err(damaged());
         }
+        let command = CommandContext {
+            principal_id,
+            idempotency_key,
+            request_digest,
+        };
+        if all_commands
+            .insert(saved.operation_id.clone(), command.clone())
+            .is_some()
+        {
+            return Err(damaged());
+        }
         if saved.record.revision <= PREFIX_EVENTS as u64 {
-            let command = CommandContext {
-                principal_id,
-                idempotency_key,
-                request_digest,
-            };
             if commands.insert(saved.operation_id, command).is_some() {
                 return Err(damaged());
             }
@@ -1950,7 +2016,7 @@ fn original_commands(
         return Err(damaged());
     }
     snapshot.check_source_unchanged().map_err(|_| damaged())?;
-    Ok(commands)
+    Ok((commands, all_commands))
 }
 #[cfg(all(test, feature = "synthetic-qualification"))]
 fn validate_prefix_command(
@@ -2457,10 +2523,8 @@ mod tests {
             .next()
             .unwrap();
         assert!(final_delivery.contains("self.verified(&history, access, &gate)?"));
-        assert!(
-            final_delivery
-                .contains("self.delivery_output_actions(access, &history, &checkpoint, cause)?")
-        );
+        assert!(final_delivery
+            .contains("self.delivery_output_actions(access, &history, &checkpoint, cause)?"));
         assert!(production.contains("self.original.load_original_verified("));
         assert!(
             production.contains("crate::durable_proposals_v1::original_review_output_actions_v2(")
@@ -4110,7 +4174,10 @@ mod request_history_tests {
             .map(|event| checked(f.store.get_operation(&event.operation_id)).unwrap())
             .collect();
         assert_eq!(original_events.len(), 8);
-        assert!(f.commands.iter().all(|command| command.idempotency_key.len() >= 16));
+        assert!(f
+            .commands
+            .iter()
+            .all(|command| command.idempotency_key.len() >= 16));
         checked(scope.recipient.validate());
         checked(review_export_v3::validate_recipient(
             &roster, candidate, &scope,
@@ -4133,7 +4200,11 @@ mod request_history_tests {
                         .clone();
                 }
                 1 => {
-                    changed.recipient.request.own_disclosure.expected_request_digest = scope
+                    changed
+                        .recipient
+                        .request
+                        .own_disclosure
+                        .expected_request_digest = scope
                         .recipient
                         .request
                         .current_disclosure
@@ -4242,7 +4313,9 @@ mod request_history_tests {
                     == checked(serde_json::to_value(&f.commands[i]))
             );
             assert!(
-                checked(reopened.find_replay(original_command)).unwrap().record
+                checked(reopened.find_replay(original_command))
+                    .unwrap()
+                    .record
                     == f.saved[i].record
             );
         }
@@ -4254,8 +4327,10 @@ mod request_history_tests {
         assert!(reopened_record == appended.record);
         let reopened_envelope = checked(decode_private_record(&reopened_record));
         assert!(
-            checked(closed_review_v3::validate_export_delta_v3(before, &reopened_envelope))
-                == scope
+            checked(closed_review_v3::validate_export_delta_v3(
+                before,
+                &reopened_envelope
+            )) == scope
         );
         let reopened_roster = checked(original_roster_v2(&reopened_envelope));
         assert_eq!(reopened_roster.owners.len(), 2);

@@ -11,7 +11,7 @@ pub(super) struct FixturePhaseV2 {
     pub(super) native_historical_audit: bool,
     pub(super) original_signed_births: std::collections::BTreeMap<String, Vec<u8>>,
     pending: Option<OwnerControlRequest>,
-    committed: std::collections::BTreeMap<String, OwnerControlRequest>,
+    pub(super) committed: std::collections::BTreeMap<String, OwnerControlRequest>,
 }
 
 // Correlate inert typed data only. Human review text is not a wire format, and
@@ -639,6 +639,7 @@ impl EphemeralNativeWitnessV1 {
                 server_handles: Arc::new(AtomicUsize::new(0)),
             },
             durable_payment: durable_payment_v1::FixturePhaseV1::Idle,
+            financial_continuation: financial_continuation_v1::FixtureFinancialPhaseV1::default(),
             durable_delivery: FixturePhaseV2 {
                 historical_only: true,
                 ..FixturePhaseV2::default()

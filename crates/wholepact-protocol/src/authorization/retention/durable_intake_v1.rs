@@ -8,6 +8,8 @@
 //! expired IPC permission, new signature, or reconstructed capability is used.
 
 use super::*;
+#[cfg(feature = "submission-handoff")]
+mod submission_verification_v1;
 use serde::Deserialize;
 use std::collections::BTreeSet;
 use zeroize::Zeroize;
@@ -109,6 +111,15 @@ impl VerifiedRetainedUnionV1<'_> {
         )
     }
 
+    /// Read-only verification of an already completed original union. Missing
+    /// intent/result is refused; unlike retain/reconcile this performs no repair.
+    pub fn verify_completed_existing(&self, idempotency_key: &str) -> Result<SignedResultSummary> {
+        self.journal.verify_completed_existing(
+            self.context.clone(), idempotency_key, self.base, self.policy,
+            &self.signatures.0, self.limits, &self.consent(),
+        )
+    }
+
     /// Requires the union to have been retained first. Existing randomized
     /// extraction fencing is unchanged; missing originals are not regenerated.
     #[cfg(feature = "transaction-checkpoint")]
@@ -118,6 +129,19 @@ impl VerifiedRetainedUnionV1<'_> {
         local: super::transaction::LocalTransactionCheckpoint<'_>,
     ) -> Result<super::transaction::TransactionCheckpointSummary> {
         self.journal.checkpoint_transaction(
+            self.context.clone(), idempotency_key, self.base, self.policy,
+            &self.signatures.0, self.limits, &self.consent(), local,
+        )
+    }
+
+    /// Exact completed union only; no missing signed-result repair.
+    #[cfg(feature = "transaction-checkpoint")]
+    pub fn checkpoint_completed_transaction(
+        &self,
+        idempotency_key: &str,
+        local: super::transaction::LocalTransactionCheckpoint<'_>,
+    ) -> Result<super::transaction::TransactionCheckpointSummary> {
+        self.journal.checkpoint_completed_transaction(
             self.context.clone(), idempotency_key, self.base, self.policy,
             &self.signatures.0, self.limits, &self.consent(), local,
         )

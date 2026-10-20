@@ -357,6 +357,7 @@ pub(crate) fn history(
     events: &[Event],
 ) -> ReconciledAuthorityHistory {
     ReconciledAuthorityHistory {
+        completed_dispatches_v1: Vec::new(),
         durable_payment_history_supported_v1: false,
         construction_transport_history: ledger.construction_transport_history_v1(),
         manual_roster_construction_records_v3: ledger.roster_construction_history_v3(),

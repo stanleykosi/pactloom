@@ -1,8 +1,40 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-20, 05:59 UTC.
+Updated: 2026-10-20, 09:17 UTC.
 
-**CI33 passed the bounded synthetic original-private-workspace completed-fixed SIGKILL/fresh-process read-only reopen path and all listed regressions. Product qualification remains incomplete: no public testnet settlement, restarted acquired financial session, attended GUI reliability, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
+**CI44 passed the genuine two-owner delivery/admission, original-producer SIGKILL and fresh-process read-only original-history verification route. Financial signing/dispatch and public testnet settlement remain unqualified. This is a bounded admission/restart milestone, not a production release.**
+
+## Explicit saved-transaction financial continuation: first native qualification pending
+
+The separately approved bounded dispatch policy is now source-implemented. The complete locked offline release Host compilation passed in 2m29s after the Signer/Engine build passed in 6m39s. Independent source review found no remaining critical blocker for one isolated synthetic native qualification. Compilation is not financial acceptance; no native financial pass or public testnet settlement is claimed.
+
+The new explicit financial path preserves old admission-only denials. Both owners authorize exact original financial terms. Fresh purpose-specific actions perform signing; actual protected results and the first verified final transaction must be durably retained before original process death. A fresh Host may then verify the exact completed originals and obtain dedicated, bounded two-account dispatch admissions for only the saved bytes, without reviving signing authority. Human reviews precede short transport effects; original expiries and revocation remain enforced.
+
+Actual local encrypted component integrations passed: completed-only retained transaction verification without repair; saved-subset union verification; strict Authority financial history with old-writer-expiry dispatch and bounded replay; delayed-readiness send refusal; atomic expected-attempt refusal against a competing connection. The separate Signer schema test used deliberately invalid fixture rows with foreign keys disabled only in its test body: it verifies append-only storage and legacy rejection, not successful source transition or signing.
+
+The next explicit `financial` CI mode runs the genuine native signing, protected intake, completed-checkpoint, producer SIGKILL/reap, exact original reopen, partial admission reconciliation, stale-head refusal, bounded admission-pair retry, and one actual TLS saved-byte send to an isolated synthetic provider. The finite summary counts retained completed checkpoints, not instrumented extractor calls; admission-pair retry is not chain-Unknown retransmission. No unchanged B1 full lifecycle is rerun in this mode.
+
+Outstanding: this native run, actual chain-Unknown retransmission, public testnet settlement, standalone Host CLI routing, and recovery of an unfinished result return to a replacement Host. Independent signer-process isolation is not claimed. A completed saved transaction is the tested restart boundary, not arbitrary interruption anywhere in payment preparation.
+
+The synthetic wallet feature activates only the already-locked exact prost 0.14.4 dependency (previously a dev dependency) and existing serde_json. No dependency upgrade, lock graph expansion, production default activation, credentials, funded wallet data, or deployment is included.
+
+## CI44 passed: genuine two-owner admission and fresh read-only restart
+
+[Run 39377994352](https://github.com/stanleykosi/pactloom/actions/runs/39377994352), qualifier `473119d784ed83021506e0d23c6063f8d1c73f6d`, implementation `7280ce74c0e3812f1c2b2fb8d86065a7f826e5df`, passed at 06:29:40 UTC. Exact source tree: `adc1e85cd1a7cdb7cda286faabfce3a20451d55a`. The real-peer gate, 12m47s release build and encrypted bootstrap passed. The native lifecycle ran from 06:17:05 through 06:29:40.
+
+The same-attempt bounded evidence confirms:
+
+- Both genuine prospective admissions completed: `2_of_2`.
+- The original producer ended by the intended SIGKILL; its process group was absent and it was reaped.
+- A fresh reader succeeded using original files and fresh read permissions, not recovered live approvals.
+- The fixed proof and independently authenticated histories were verified.
+- Exact original prefix, export history, intents and scopes were preserved.
+- Reader no-effects verification and unsupported-action denial passed.
+- Reader group absence/reaping, closed/absent root cleanup and empty runtime removal passed.
+
+Financial authorization, distribution and public-chain verification remain false. This run does not demonstrate financial acquisition/reservation/signing, authentic detached-signature intake, final transaction extraction/dispatch, testnet settlement or attended GUI reliability. No success is inferred for those missing joins. The earlier component tests remain scoped evidence and are not counted as a financial cycle.
+
+This documentation-only checkpoint preserves the terminal result without rerunning unchanged code or moving the qualification branch. Further financial continuation requires its separately reviewed policy and implementation; the existing admission-only financial denials remain in place.
 
 ## CI43: both admissions completed; restarted read hit a Host permission-role bug
 

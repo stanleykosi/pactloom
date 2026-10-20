@@ -1,6 +1,9 @@
 //! Fixed original workspace + dispatcher attachment. No transport or spending API.
 //! Publication evidence is never a runtime source. Both original anchors and all
 //! original-file identities remain mandatory after the one-way vault transition.
+mod financial_v1;
+pub(in crate::host) use financial_v1::OriginalFinancialOwnerV1;
+
 use super::{Host, durable_private_workspace_v1 as workspace};
 use crate::{Error, Result, files::{Directory, DispatcherFileV2}, vault::Secrets,
     terminal::{Terminal, historical::HistoricalApproval}, recovery_generation::manual_target::ManualCommittedTarget};
@@ -292,9 +295,26 @@ impl OriginalWorkspaceDispatcherFilesV4 {
 }
 /// Private maintained TLS owners. No key/TLS accessor, Clone, serializer, Debug,
 /// credential rotation or network operation is implemented.
-pub(crate) struct StoredDurableDispatcherV2 { _destinations: [ClientTls;2] }
+pub(crate) struct StoredDurableDispatcherV2 {
+    destinations: [wholepact_authority::transport::AuthorityClient; 2],
+}
 impl StoredDurableDispatcherV2 {
-    fn open(files:&OriginalWorkspaceDispatcherFilesV4)->Result<Self> { Ok(Self { _destinations: files.original.pending.validate()? }) }
+    fn open(files: &OriginalWorkspaceDispatcherFilesV4) -> Result<Self> {
+        let tls = files.original.pending.validate()?;
+        let mut clients = Vec::with_capacity(2);
+        for (tls, destination) in tls.into_iter().zip(&files.original.pending.destinations) {
+            let witness = &destination.witness;
+            clients.push(wholepact_authority::transport::AuthorityClient::new(
+                witness.endpoint.parse().map_err(|_| Error::Authentication)?,
+                tls,
+                witness.witness_id.clone(),
+                witness.account_id.clone(),
+                witness.network_profile_id.clone(),
+                witness.policy_digest.clone(),
+            ).map_err(|_| Error::Authentication)?);
+        }
+        Ok(Self { destinations: clients.try_into().map_err(|_| Error::Authentication)? })
+    }
 }
 
 #[cfg(test)]

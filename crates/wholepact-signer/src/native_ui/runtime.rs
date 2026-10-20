@@ -498,6 +498,8 @@ mod durable_delivery_admission_v2;
 pub(crate) mod durable_delivery_v3;
 #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
 mod durable_witness_v1;
+#[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+pub(crate) mod financial_v1;
 
 #[cfg(feature = "pending-birth-owner-signing")]
 #[path = "qualification/born_common_context_entry_v3.rs"]
@@ -715,6 +717,8 @@ enum Operation {
     DurableDeliveryV2(Box<durable_delivery_admission_v2::PreparedAdmissionV2>),
     #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
     ClosedDeliveryV3(durable_delivery_v3::ClosedDeliveryDecisionV3),
+    #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+    FinancialV1(financial_v1::FinancialDecisionV1),
     #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
     DurableDeliveryRedisclosureV2(Box<durable_delivery_admission_v2::PreparedRedisclosureV2>),
     #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
@@ -1129,6 +1133,8 @@ pub(super) struct NativeRuntime {
     #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
     closed_delivery_v3: Option<durable_delivery_v3::DurableDeliveryRuntimeV3>,
     #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+    financial_v1: Option<financial_v1::FinancialRuntimeV1>,
+    #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
     closed_history_prior_v3: Zeroizing<String>,
     #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
     closed_history_selector_v3: Zeroizing<String>,
@@ -1247,6 +1253,8 @@ impl NativeRuntime {
             #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
             closed_delivery_v3: None,
             #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+            financial_v1: None,
+            #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
             closed_history_prior_v3: Zeroizing::new(String::new()),
             #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
             closed_history_selector_v3: Zeroizing::new(String::new()),
@@ -1360,6 +1368,8 @@ impl NativeRuntime {
         }
     }
     pub(super) fn lock(&mut self) {
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        self.close_financial_v1();
         #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
         self.close_closed_delivery_v3();
         #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
@@ -1950,6 +1960,8 @@ impl NativeRuntime {
     }
     fn poll(&mut self, epoch: u64) {
         #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        { self.poll_financial_v1(epoch); if self.financial_v1.is_some() { return; } }
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
         { self.poll_closed_delivery_v3(epoch); if self.closed_delivery_v3.is_some() { return; } }
         #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
         self.poll_durable_delivery_v2(epoch);
@@ -2044,7 +2056,7 @@ impl NativeRuntime {
             }
             match event {
                 #[cfg(all(feature = "durable-proposal", target_os = "linux"))]
-                LocalEvent::PrepareDurableRecipientV3 { .. } | LocalEvent::DurableDeliveryHistoryV3 { .. } | LocalEvent::DurableReceiveV3(_) => { self.message = "Closed V3 requests require their exact original custody context."; }
+                LocalEvent::FinancialResultV1 { .. } | LocalEvent::PrepareDurableRecipientV3 { .. } | LocalEvent::DurableDeliveryHistoryV3 { .. } | LocalEvent::DurableReceiveV3(_) => { self.message = "Closed V3 requests require their exact original custody context."; }
                 #[cfg(feature = "pending-birth-owner-signing")]
                 LocalEvent::BornRosterCommonContextHandoffAuthorizationV1 { stream, .. }
                 | LocalEvent::BornRosterCommonContextReentryV1 { stream, .. }
@@ -4959,7 +4971,11 @@ impl NativeRuntime {
         });
         #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
         let closed_decision = self.pending.as_ref().is_some_and(|pending|matches!(&pending.operation,Operation::ClosedDeliveryV3(_)));
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        let financial_decision = self.pending.as_ref().is_some_and(|p|matches!(&p.operation,Operation::FinancialV1(_)));
         let result = self.approve_inner(focused, epoch);
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        if financial_decision && result.is_err() { self.revoke_financial_v1(); }
         #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
         if closed_decision && result.is_err() {self.revoke_closed_delivery_v3();}
         #[cfg(all(
@@ -5036,6 +5052,10 @@ impl NativeRuntime {
         )?;
         self.confirmation.zeroize();
         #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        if let Operation::FinancialV1(operation) = pending.operation {
+            return self.approve_financial_v1(operation, decision, epoch);
+        }
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
         if let Operation::ClosedDeliveryV3(operation) = pending.operation {
             return self.approve_closed_delivery_v3(operation, decision, epoch);
         }
@@ -5072,6 +5092,7 @@ impl NativeRuntime {
             #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
             Operation::DurableSpendV1 { .. }
             | Operation::DurableDisclosureV1 { .. }
+            | Operation::FinancialV1(_)
             | Operation::ClosedDeliveryV3(_)
             | Operation::DurableDeliveryV2(_)
             | Operation::DurableDeliveryRedisclosureV2(_) => {
@@ -5556,7 +5577,8 @@ impl NativeRuntime {
                     ))]
                     Operation::DurableSpendV1 { .. }
                     | Operation::DurableDisclosureV1 { .. }
-                    | Operation::ClosedDeliveryV3(_)
+                    | Operation::FinancialV1(_)
+            | Operation::ClosedDeliveryV3(_)
             | Operation::DurableDeliveryV2(_)
                     | Operation::DurableDeliveryRedisclosureV2(_) => {
                         unreachable!()
@@ -5950,6 +5972,8 @@ impl NativeRuntime {
                     self.confirmation.zeroize();
                     #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
                     if self.closed_delivery_v3.is_some() {self.revoke_closed_delivery_v3();}
+                    #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+                    if self.financial_v1.is_some() {self.revoke_financial_v1();}
                     self.message = "Review was invalidated. Prepare it again.";
                 }
             } else {
@@ -5973,6 +5997,8 @@ impl NativeRuntime {
             {
                 #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
                 if self.closed_delivery_v3.is_some() { self.revoke_closed_delivery_v3(); }
+                #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+                if self.financial_v1.is_some() { self.revoke_financial_v1(); }
                 self.pending = None;
                 self.confirmation.zeroize();
             }
@@ -6190,6 +6216,16 @@ impl NativeRuntime {
 
     pub(super) fn ui(&mut self, ui: &mut egui::Ui, focused: bool, epoch: u64) {
         #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        if self.financial_v1.is_some() {
+            if !focused { self.revoke_financial_v1(); ui.label("Original financial workflow locked while unfocused."); return; }
+            self.poll_financial_v1(epoch);
+            if let Ok(endpoint)=self.financial_result_endpoint_v1() { ui.label(format!("Exact financial result endpoint: {}",endpoint.display())); }
+            self.exact_review_ui(ui,focused,epoch);ui.label(self.message);
+            if self.financial_phase_v1()==Some(financial_v1::FinancialPhaseV1::AwaitingAdmission) && ui.button("Review admission of the saved continuation after Witness approval").clicked_by(egui::PointerButton::Primary) && self.send_financial_continuation_v1().is_err() {self.message="Original continuation was not sent or is uncertain. Do not replace it.";}
+            if ui.button("Lock original financial workflow").clicked_by(egui::PointerButton::Primary) {self.lock();}
+            return;
+        }
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
         if self.closed_delivery_v3.is_some() {
             if !focused { self.revoke_closed_delivery_v3(); ui.label("Closed private view locked while unfocused."); return; }
             self.poll_closed_delivery_v3(epoch);
@@ -6198,6 +6234,19 @@ impl NativeRuntime {
             }
             self.exact_review_ui(ui, focused, epoch);
             ui.label(self.message);
+            if self.durable_delivery_v3_phase()==Some(durable_delivery_v3::DurableDeliveryPhaseV3::Complete) {
+                ui.label("Continue the exact admitted payment using a fresh unlock and separate financial decisions. Original expiry is unchanged.");
+                ui.add(egui::TextEdit::singleline(&mut *self.password).password(true));
+                ui.label("Existing original owner and writer Witness configurations:");
+                ui.add(egui::TextEdit::multiline(&mut *self.owner_witness_setup).desired_rows(2).char_limit(131_072));
+                ui.add(egui::TextEdit::multiline(&mut *self.witness_setup).desired_rows(2).char_limit(131_072));
+                ui.label("Exact-input viewing wallet configuration (separate review before contact):");
+                ui.add(egui::TextEdit::multiline(&mut *self.wallet_setup).desired_rows(2).char_limit(131_072));
+                if ui.button("Review original financial continuation").clicked_by(egui::PointerButton::Primary) {
+                    let outcome=self.financial_continuation_terms_v1().and_then(|terms|self.begin_financial_original_v1(focused,epoch,terms));
+                    if outcome.is_err(){self.message="Original financial entry refused. No old delivery permission was reused.";}
+                }
+            }
             if ui.button("Lock closed delivery").clicked_by(egui::PointerButton::Primary) { self.lock(); }
             return;
         }

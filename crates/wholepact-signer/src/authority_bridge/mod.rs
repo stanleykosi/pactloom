@@ -95,6 +95,8 @@ pub mod born_dispatch_ipc;
 pub mod born_history_ipc;
 #[cfg(target_os = "linux")]
 pub(crate) mod born_ipc_io;
+#[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing", feature = "native-ui", target_os = "linux"))]
+pub mod financial_continuation_v1;
 pub mod disclosure;
 #[cfg(target_os = "linux")]
 pub mod dispatch_ipc;

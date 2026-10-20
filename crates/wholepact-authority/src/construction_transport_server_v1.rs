@@ -222,6 +222,12 @@ impl AuthorityServer {
             durable_payment: None,
             #[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
             durable_delivery_admission_v2: None,
+            #[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
+            financial_signing: None,
+            #[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
+            financial_continuation_v1: None,
+            #[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
+            completed_dispatch_v1: None,
             #[cfg(all(feature = "offline-witness-owner", target_os = "linux"))]
             offline_witness: None,
             #[cfg(all(feature = "born-offline-witness-owner", target_os = "linux"))]

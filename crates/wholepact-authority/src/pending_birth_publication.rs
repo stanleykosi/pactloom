@@ -107,6 +107,35 @@ impl AuthorityJournal {
         })
     }
 
+    pub(crate) fn open_born_financial_history_only_v1(
+        owner: std::sync::Arc<crate::witness_locator::BornJournalOwner>,
+        path: &Path,
+        key: &DatabaseKey,
+        policy: &AccountPolicy,
+        expected: &PendingBirthCommitRecord,
+    ) -> Result<Self> {
+        owner.check_current()?;
+        // Exact namespace owner already holds writer/replacement exclusion.
+        let snapshot = wholepact_storage_security::open_encrypted_read_snapshot(path, key)?;
+        let (stamp, record) = namespace_financial_account_stamp_v1(snapshot.connection(), policy)?;
+        if record != *expected || stamp.quarantined {
+            return Err(AuthorityError::CorruptHistory);
+        }
+        drop(snapshot);
+        let connection = wholepact_storage_security::open_encrypted_quiescent(path, key)?;
+        let (actual, record) = namespace_financial_account_stamp_v1(connection.connection(), policy)?;
+        if record != *expected || actual != stamp || actual.quarantined {
+            return Err(AuthorityError::CorruptHistory);
+        }
+        owner.check_current()?;
+        Ok(Self {
+            connection: Mutex::new(connection),
+            resolution_node: Mutex::new(None),
+            born_owner: Some(owner),
+            born_manual_scope: None,
+        })
+    }
+
     pub(crate) fn create_pending_birth(reserved: &mut ReservedWitnessBirth) -> Result<Self> {
         reserved.check_current()?;
         let request = reserved.request().clone();

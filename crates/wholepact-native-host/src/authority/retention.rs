@@ -275,3 +275,115 @@ mod tests {
         }
     }
 }
+
+/// Closed exact review cache for the prompt-free interval after the final Host
+/// dispatch decision. No terminal, approval method or mutable cache is retained.
+/// This remains only local artifact/handoff permission, never spending authority.
+pub(crate) struct FrozenNativeRetentionConsentV1 {
+    principal: String,
+    candidate: String,
+    manifest: String,
+    job: String,
+    accounts: std::collections::BTreeSet<String>,
+    held: Held,
+    approved: BTreeMap<&'static str, String>,
+}
+impl NativeRetentionConsent {
+    pub(crate) fn freeze_for_dispatch(self) -> Result<FrozenNativeRetentionConsentV1> {
+        self.held.check()?;
+        let approved = self.approved.into_inner().map_err(|_| Error::Permission)?;
+        for action in [
+            "retain exact usable signatures",
+            "extract/read and retain exact complete transaction",
+            "copy exact retained transaction to the named local submission journal",
+        ] {
+            if !approved.contains_key(action) {
+                return Err(Error::Permission);
+            }
+        }
+        Ok(FrozenNativeRetentionConsentV1 {
+            principal: self.principal,
+            candidate: self.candidate,
+            manifest: self.manifest,
+            job: self.job,
+            accounts: self.accounts,
+            held: self.held,
+            approved,
+        })
+    }
+}
+impl FrozenNativeRetentionConsentV1 {
+    fn matches(&self, scope: &SignedRetentionScope) -> bool {
+        let c = &scope.context;
+        c.principal_id == self.principal
+            && c.candidate_id == self.candidate
+            && c.manifest_digest == self.manifest
+            && c.proof_job_id == self.job
+            && c.account_ids.len() == self.accounts.len()
+            && c.account_ids
+                .iter()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>()
+                == self.accounts
+    }
+    fn approved(&self, action: &'static str, detail: impl serde::Serialize) -> bool {
+        self.held.check().is_ok()
+            && serde_json::to_string_pretty(&detail)
+                .ok()
+                .is_some_and(|detail| self.approved.get(action) == Some(&detail))
+            && self.held.check().is_ok()
+    }
+    pub(crate) fn valid_until_unix_seconds(&self) -> u64 {
+        self.held.expires
+    }
+}
+impl SignedRetentionConsent for FrozenNativeRetentionConsentV1 {
+    fn permits(&self, scope: &SignedRetentionScope) -> bool {
+        self.matches(scope) && self.approved("retain exact usable signatures", scope)
+    }
+}
+impl TransactionRetentionConsent for FrozenNativeRetentionConsentV1 {
+    fn permits(&self, scope: &TransactionRetentionScope) -> bool {
+        SignedRetentionConsent::permits(self, &scope.signed_scope)
+            && self.approved("extract/read and retain exact complete transaction", scope)
+    }
+}
+impl SubmissionHandoffConsent for FrozenNativeRetentionConsentV1 {
+    fn permits(&self, scope: &SubmissionHandoffScope<'_>) -> bool {
+        TransactionRetentionConsent::permits(self, scope.retained)
+            && self.approved("copy exact retained transaction to the named local submission journal", serde_json::json!({
+                "retained": scope.retained, "descriptor": scope.descriptor, "backend": scope.backend,
+                "destination_journal_identity": scope.destination_journal_identity,
+            }))
+    }
+}
+
+/// One exact prepared signature-intake scope, with no terminal and no
+/// transaction/extraction/handoff trait. Prepared before the short Return lease.
+pub(crate) struct FrozenNativeSignedIntakeConsentV1 {
+    held: Held,
+    scope: String,
+}
+impl NativeRetentionConsent {
+    pub(crate) fn freeze_for_signed_intake(self) -> Result<FrozenNativeSignedIntakeConsentV1> {
+        self.held.check()?;
+        let mut approved = self.approved.into_inner().map_err(|_| Error::Permission)?;
+        if approved.len() != 1 {
+            return Err(Error::Permission);
+        }
+        let scope = approved
+            .remove("retain exact usable signatures")
+            .ok_or(Error::Permission)?;
+        Ok(FrozenNativeSignedIntakeConsentV1 {
+            held: self.held,
+            scope,
+        })
+    }
+}
+impl SignedRetentionConsent for FrozenNativeSignedIntakeConsentV1 {
+    fn permits(&self, scope: &SignedRetentionScope) -> bool {
+        self.held.check().is_ok()
+            && serde_json::to_string_pretty(scope).ok().as_ref() == Some(&self.scope)
+            && self.held.check().is_ok()
+    }
+}

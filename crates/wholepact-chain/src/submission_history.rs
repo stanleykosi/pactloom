@@ -184,6 +184,7 @@ impl EncryptedSubmissionJournal {
         plan: &SubmissionPlan,
         source: &str,
         now: u64,
+        expected_number: Option<u32>,
     ) -> Result<SubmissionAttempt, ChainError> {
         if !crate::reconciliation::valid_source_id(source) || now > i64::MAX as u64 {
             return Err(ChainError::InvalidConfiguration);
@@ -209,8 +210,12 @@ impl EncryptedSubmissionJournal {
         {
             return Err(ChainError::StaleChain);
         }
+        let number = history.len() as u32 + 1;
+        if expected_number.is_some_and(|expected| expected != number) {
+            return Err(ChainError::SubmissionNotAuthorized);
+        }
         let attempt = SubmissionAttempt {
-            number: history.len() as u32 + 1,
+            number,
             source_id: source.into(),
             started_at_unix_seconds: now,
             outcome: SubmissionAttemptOutcome::Unknown,

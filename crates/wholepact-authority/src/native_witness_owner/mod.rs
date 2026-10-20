@@ -9,6 +9,7 @@ pub(crate) use window::NativeBornOfflineArtifactsDecisionV1;
 pub(crate) use window::{
     NativeBornOfflineEnrollmentDecisionV1, NativeConstructionTransportGrantDecisionV1,
     NativeDurablePaymentAdmissionDecisionV1, NativeDurableDeliveryAdmissionDecisionV2,
+    NativeFinancialContinuationDecisionV1,
     NativeEnrollmentDecision, NativeManualEnrollmentExtensionDecision,
     NativeManualRosterConstructionDecisionV2, NativeManualRosterConstructionDecisionV3,
     NativeManualRosterContinuationDecisionV2, NativeManualRosterExtensionDecisionV2,

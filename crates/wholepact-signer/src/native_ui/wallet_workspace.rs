@@ -7,6 +7,8 @@ pub(super) mod durable_born_workspace_v1;
 #[cfg(feature = "durable-proposal")]
 mod durable_proposal_v1;
 
+#[cfg(all(feature="durable-proposal",feature="pending-birth-owner-signing"))]
+pub(in crate::native_ui) mod financial_v1;
 use super::authority::{NativeAuthority, NativeAuthorityBinding, NativeDecision};
 use crate::{
     Error, Result,

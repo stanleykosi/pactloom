@@ -37,6 +37,10 @@ pub(super) use durable_born_entry_v1::{
     validate_durable_born_prefix_v1, validate_durable_born_suffix_v1,
 };
 
+#[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing", target_os = "linux"))]
+#[path = "financial_profile_v1.rs"]
+pub(crate) mod financial_profile_v1;
+
 // Keep the observer's types private while measuring the closed snapshot path
 // with the same phase boundaries as the ordinary durable-born validator.
 #[cfg(all(
@@ -138,6 +142,26 @@ impl SignerJournalSourceOwner {
         Ok(OriginalSourceOpen { owner: self, state })
     }
 }
+// Closed executable-selected original profiles. Ordinary readers never infer
+// a financial transition from a user_version or caller-supplied flag.
+#[derive(Clone, Copy)]
+enum OriginalJournalProfile {
+    Current19,
+    #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing", target_os = "linux"))]
+    Financial20,
+}
+impl OriginalJournalProfile {
+    fn version(self) -> i64 { match self {
+        Self::Current19 => SCHEMA_VERSION,
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing", target_os = "linux"))]
+        Self::Financial20 => financial_profile_v1::VERSION,
+    } }
+    fn verify(self, c: &Connection) -> Result<()> { match self {
+        Self::Current19 => verify_schema(c),
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing", target_os = "linux"))]
+        Self::Financial20 => financial_profile_v1::verify_schema(c),
+    } }
+}
 impl OriginalSourceOpen<'_> {
     pub(super) fn require_exclusive(&self) -> Result<()> {
         if self.state.upgrade().is_some() {
@@ -154,6 +178,15 @@ impl OriginalSourceOpen<'_> {
         identity: &wholepact_storage_security::DatabaseFileIdentity,
         account_id: &str,
     ) -> Result<Arc<LiveCurrent19Source>> {
+        self.register_exact_profile(connection, identity, account_id, OriginalJournalProfile::Current19)
+    }
+    fn register_exact_profile(
+        &mut self,
+        connection: &Connection,
+        identity: &wholepact_storage_security::DatabaseFileIdentity,
+        account_id: &str,
+        profile: OriginalJournalProfile,
+    ) -> Result<Arc<LiveCurrent19Source>> {
         self.owner
             .directory
             .check_current()
@@ -163,12 +196,12 @@ impl OriginalSourceOpen<'_> {
             connection.pragma_query_value(None, "application_id", |r| r.get(0))?;
         let version: i64 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
         if application != APPLICATION_ID
-            || version != SCHEMA_VERSION
+            || version != profile.version()
             || read_account(connection)?.account_id != account_id
         {
             return Err(JournalError::InvalidBinding);
         }
-        verify_schema(connection)?;
+        profile.verify(connection)?;
         identity.check_current(connection)?;
         self.owner
             .directory
@@ -569,96 +602,7 @@ impl SignerConsentJournal {
         };
         validate_linkage(&result)?;
         validate_retained_durable_born_original_v1(&tx, &result)?;
-        sponsor::current_for_consent(&tx, t)?;
-        automation::current_for_consent(&tx, t)?;
-        account_use_storage::require_not_excluded(&tx, &account.account_id)?;
-        if let Some(old) = read_original(&tx, &t.authorization_id)? {
-            if old != result {
-                return Err(JournalError::Conflict);
-            }
-            return Ok(old);
-        }
-        offline_history::read_all(&tx, &account.account_id)?;
-        offline_history::require_accountwide_online_admission(&tx)?;
-        automation::check_outstanding(&tx, t)?;
-        let remote_id: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM signer_remote_exposures WHERE authorization_id=?1 UNION ALL SELECT 1 FROM signer_offline_remote_exposures WHERE authorization_id=?1 UNION ALL SELECT 1 FROM signer_offline_local_admissions WHERE authorization_id=?1)",
-            [&t.authorization_id],
-            |r| r.get(0),
-        )?;
-        if remote_id {
-            return Err(JournalError::Conflict);
-        }
-        let live: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM signer_release_intents WHERE account_id=?1 AND obligation_id=?2 UNION ALL SELECT 1 FROM signer_remote_exposures WHERE account_id=?1 AND obligation_id=?2 UNION ALL SELECT 1 FROM signer_offline_remote_exposures WHERE account_id=?1 AND obligation_id=?2 UNION ALL SELECT 1 FROM signer_offline_local_admissions WHERE account_id=?1 AND obligation_id=?2)", params![t.account_id,t.obligation_id], |r| r.get(0))?;
-        if live {
-            return Err(JournalError::LiveAuthorization);
-        }
-        // Budget is fixed in original native account enrollment, never supplied
-        // by the coordinator at release. All unresolved signer history counts.
-        let mut total: u128 = 0;
-        {
-            let mut q =
-                tx.prepare("SELECT maximum_debit FROM signer_release_intents l WHERE account_id=?1 AND (?2=0 OR NOT EXISTS(SELECT 1 FROM signer_settlement_events e WHERE e.authorization_id=l.authorization_id AND e.kind='canonical_consumed' AND e.sequence=(SELECT max(x.sequence) FROM signer_settlement_events x WHERE x.authorization_id=l.authorization_id))) UNION ALL SELECT maximum_debit FROM signer_remote_exposures r WHERE account_id=?1 AND NOT EXISTS(SELECT 1 FROM signer_original_consents o WHERE o.reference=r.original_consent_ref AND o.authorization_id=r.authorization_id) UNION ALL SELECT maximum_debit FROM signer_offline_remote_exposures WHERE account_id=?1 UNION ALL SELECT maximum_debit FROM signer_offline_local_admissions l WHERE account_id=?1 AND NOT EXISTS(SELECT 1 FROM signer_offline_remote_exposures r WHERE r.authorization_id=l.authorization_id)")?;
-            // Builds without a live independent source implementation must count
-            // every original release, including history resolved by another build.
-            for value in q.query_map(
-                params![&t.account_id, cfg!(feature = "authority-signing")],
-                |r| r.get::<_, String>(0),
-            )? {
-                let value = value?;
-                let amount = value
-                    .parse::<u64>()
-                    .map_err(|_| JournalError::InvalidBinding)?;
-                if amount.to_string() != value {
-                    return Err(JournalError::InvalidBinding);
-                }
-                total = total
-                    .checked_add(u128::from(amount))
-                    .ok_or(JournalError::BudgetExceeded)?;
-            }
-        }
-        if total + u128::from(t.maximum_debit_zatoshis)
-            > u128::from(result.enrollment.budget_limit_zatoshis())
-        {
-            return Err(JournalError::BudgetExceeded);
-        }
-        for input in &t.input_bindings {
-            let held: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM signer_input_reservations WHERE account_id=?1 AND input_id=?2 UNION ALL SELECT 1 FROM signer_remote_inputs WHERE account_id=?1 AND nullifier=?2 UNION ALL SELECT 1 FROM signer_offline_remote_inputs WHERE account_id=?1 AND nullifier=?2 UNION ALL SELECT 1 FROM signer_offline_local_inputs WHERE account_id=?1 AND nullifier=?2)", params![t.account_id,input.nullifier], |r| r.get(0))?;
-            if held {
-                return Err(JournalError::InputReserved);
-            }
-        }
-        let consent = encode(&a.record)?;
-        let release = encode(&result.release)?;
-        tx.execute(
-            "INSERT INTO signer_original_consents VALUES(?1,?2,?3,?4,?5,?6)",
-            params![
-                a.record.reference(),
-                t.enrollment_ref,
-                t.accepted_manifest_ref,
-                t.authorization_id,
-                t.receipt.nonce,
-                consent.as_str()
-            ],
-        )?;
-        tx.execute(
-            "INSERT INTO signer_release_intents VALUES(?1,?2,?3,?4,?5,?6,'outstanding_uncertain')",
-            params![
-                t.authorization_id,
-                a.record.reference(),
-                t.account_id,
-                t.obligation_id,
-                t.maximum_debit_zatoshis.to_string(),
-                release.as_str()
-            ],
-        )?;
-        for input in &t.input_bindings {
-            tx.execute(
-                "INSERT INTO signer_input_reservations VALUES(?1,?2,?3)",
-                params![t.account_id, input.nullifier, t.authorization_id],
-            )?;
-        }
-        bounded(&tx, self.capacity_limits())?;
+        let result = append_release_rows(&tx, &result, ReleaseRowProfile::OriginalV1, self.capacity_limits())?;
         tx.commit()?;
         Ok(result)
     }
@@ -1536,6 +1480,13 @@ pub(super) fn read_original(
     c: &Connection,
     authorization_id: &str,
 ) -> Result<Option<OriginalAuthorizationEvidence>> {
+    let Some(result) = read_original_unvalidated(c, authorization_id)? else { return Ok(None); };
+    validate_linkage(&result)?;
+    validate_retained_durable_born_original_v1(c, &result)?;
+    Ok(Some(result))
+}
+// Raw typed decode is private. Only closed validators below may return it.
+fn read_original_unvalidated(c: &Connection, authorization_id: &str) -> Result<Option<OriginalAuthorizationEvidence>> {
     let release: Option<(String,String)> = c.query_row("SELECT original_consent_ref,payload FROM signer_release_intents WHERE authorization_id=?1", [authorization_id], |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
     let Some((reference, raw)) = release else {
         return Ok(None);
@@ -1563,9 +1514,123 @@ pub(super) fn read_original(
         consent,
         release,
     };
-    validate_linkage(&result)?;
-    validate_retained_durable_born_original_v1(c, &result)?;
     Ok(Some(result))
+}
+// Both callers already hold an actual source/permission lease and Immediate
+// transaction. This closed kernel preserves existing input/budget exclusion and
+// exact replay; it never selects a profile from serialized caller data.
+#[derive(Clone, Copy)]
+enum ReleaseRowProfile {
+    OriginalV1,
+    #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing", target_os = "linux"))]
+    FinancialV1,
+}
+fn append_release_rows(c: &Connection, result: &OriginalAuthorizationEvidence, profile: ReleaseRowProfile, limits: (u64,u64)) -> Result<OriginalAuthorizationEvidence> {
+    if c.is_autocommit() { return Err(JournalError::InvalidBinding); }
+    let t = result.consent.terms();
+    let account = read_account(c)?;
+    if account.account_id != t.account_id || account.writer_epoch != t.receipt.writer_epoch || account.recovery_required { return Err(JournalError::Permission); }
+    match profile {
+        ReleaseRowProfile::OriginalV1 => { validate_linkage(result)?; validate_retained_durable_born_original_v1(c,result)?; },
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing", target_os = "linux"))]
+        ReleaseRowProfile::FinancialV1 => financial_profile_v1::validate_financial_linkage(c,result)?,
+    }
+        sponsor::current_for_consent(c, t)?;
+        automation::current_for_consent(c, t)?;
+        account_use_storage::require_not_excluded(c, &account.account_id)?;
+        let existing = match profile {
+            ReleaseRowProfile::OriginalV1 => read_original(c, &t.authorization_id)?,
+            #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing", target_os = "linux"))]
+            ReleaseRowProfile::FinancialV1 => financial_profile_v1::read_financial_original_v1(c, &t.authorization_id)?,
+        };
+        if let Some(old) = existing {
+            if &old != result {
+                return Err(JournalError::Conflict);
+            }
+            return Ok(old);
+        }
+        offline_history::read_all(c, &account.account_id)?;
+        offline_history::require_accountwide_online_admission(c)?;
+        automation::check_outstanding(c, t)?;
+        let remote_id: bool = c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM signer_remote_exposures WHERE authorization_id=?1 UNION ALL SELECT 1 FROM signer_offline_remote_exposures WHERE authorization_id=?1 UNION ALL SELECT 1 FROM signer_offline_local_admissions WHERE authorization_id=?1)",
+            [&t.authorization_id],
+            |r| r.get(0),
+        )?;
+        if remote_id {
+            return Err(JournalError::Conflict);
+        }
+        let live: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM signer_release_intents WHERE account_id=?1 AND obligation_id=?2 UNION ALL SELECT 1 FROM signer_remote_exposures WHERE account_id=?1 AND obligation_id=?2 UNION ALL SELECT 1 FROM signer_offline_remote_exposures WHERE account_id=?1 AND obligation_id=?2 UNION ALL SELECT 1 FROM signer_offline_local_admissions WHERE account_id=?1 AND obligation_id=?2)", params![t.account_id,t.obligation_id], |r| r.get(0))?;
+        if live {
+            return Err(JournalError::LiveAuthorization);
+        }
+        // Budget is fixed in original native account enrollment, never supplied
+        // by the coordinator at release. All unresolved signer history counts.
+        let mut total: u128 = 0;
+        {
+            let mut q =
+                c.prepare("SELECT maximum_debit FROM signer_release_intents l WHERE account_id=?1 AND (?2=0 OR NOT EXISTS(SELECT 1 FROM signer_settlement_events e WHERE e.authorization_id=l.authorization_id AND e.kind='canonical_consumed' AND e.sequence=(SELECT max(x.sequence) FROM signer_settlement_events x WHERE x.authorization_id=l.authorization_id))) UNION ALL SELECT maximum_debit FROM signer_remote_exposures r WHERE account_id=?1 AND NOT EXISTS(SELECT 1 FROM signer_original_consents o WHERE o.reference=r.original_consent_ref AND o.authorization_id=r.authorization_id) UNION ALL SELECT maximum_debit FROM signer_offline_remote_exposures WHERE account_id=?1 UNION ALL SELECT maximum_debit FROM signer_offline_local_admissions l WHERE account_id=?1 AND NOT EXISTS(SELECT 1 FROM signer_offline_remote_exposures r WHERE r.authorization_id=l.authorization_id)")?;
+            // Builds without a live independent source implementation must count
+            // every original release, including history resolved by another build.
+            for value in q.query_map(
+                params![&t.account_id, cfg!(feature = "authority-signing")],
+                |r| r.get::<_, String>(0),
+            )? {
+                let value = value?;
+                let amount = value
+                    .parse::<u64>()
+                    .map_err(|_| JournalError::InvalidBinding)?;
+                if amount.to_string() != value {
+                    return Err(JournalError::InvalidBinding);
+                }
+                total = total
+                    .checked_add(u128::from(amount))
+                    .ok_or(JournalError::BudgetExceeded)?;
+            }
+        }
+        if total + u128::from(t.maximum_debit_zatoshis)
+            > u128::from(result.enrollment.budget_limit_zatoshis())
+        {
+            return Err(JournalError::BudgetExceeded);
+        }
+        for input in &t.input_bindings {
+            let held: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM signer_input_reservations WHERE account_id=?1 AND input_id=?2 UNION ALL SELECT 1 FROM signer_remote_inputs WHERE account_id=?1 AND nullifier=?2 UNION ALL SELECT 1 FROM signer_offline_remote_inputs WHERE account_id=?1 AND nullifier=?2 UNION ALL SELECT 1 FROM signer_offline_local_inputs WHERE account_id=?1 AND nullifier=?2)", params![t.account_id,input.nullifier], |r| r.get(0))?;
+            if held {
+                return Err(JournalError::InputReserved);
+            }
+        }
+        let consent = encode(&result.consent)?;
+        let release = encode(&result.release)?;
+        c.execute(
+            "INSERT INTO signer_original_consents VALUES(?1,?2,?3,?4,?5,?6)",
+            params![
+                result.consent.reference(),
+                t.enrollment_ref,
+                t.accepted_manifest_ref,
+                t.authorization_id,
+                t.receipt.nonce,
+                consent.as_str()
+            ],
+        )?;
+        c.execute(
+            "INSERT INTO signer_release_intents VALUES(?1,?2,?3,?4,?5,?6,'outstanding_uncertain')",
+            params![
+                t.authorization_id,
+                result.consent.reference(),
+                t.account_id,
+                t.obligation_id,
+                t.maximum_debit_zatoshis.to_string(),
+                release.as_str()
+            ],
+        )?;
+        for input in &t.input_bindings {
+            c.execute(
+                "INSERT INTO signer_input_reservations VALUES(?1,?2,?3)",
+                params![t.account_id, input.nullifier, t.authorization_id],
+            )?;
+        }
+        bounded(c, limits)?;
+    Ok(result.clone())
 }
 pub(super) fn same_native_origin(a: &NativeConsentReceipt, b: &NativeConsentReceipt) -> bool {
     a.native_session_id == b.native_session_id
@@ -1574,21 +1639,18 @@ pub(super) fn same_native_origin(a: &NativeConsentReceipt, b: &NativeConsentRece
         && a.writer_epoch == b.writer_epoch
 }
 fn validate_linkage(e: &OriginalAuthorizationEvidence) -> Result<()> {
+    e.consent.validate()?;
+    if !same_native_origin(e.manifest.receipt(), &e.consent.terms().receipt) { return Err(JournalError::Permission); }
+    validate_economic_linkage(e)
+}
+// Shared mathematical/record linkage only. The caller must select an explicit
+// validated authority profile before this kernel; it never grants permission.
+fn validate_economic_linkage(e: &OriginalAuthorizationEvidence) -> Result<()> {
     e.enrollment.validate()?;
     let p = e.manifest.proposal()?;
-    e.consent.validate()?;
     let t = e.consent.terms();
-    e.enrollment.transport().validate_scope(
-        e.enrollment.account_id(),
-        e.enrollment.agreement_id(),
-        e.enrollment.participant_id(),
-        Some(p.manifest_digest()),
-    )?;
-    if !same_native_origin(e.enrollment.receipt(), e.manifest.receipt())
-        || !same_native_origin(e.manifest.receipt(), &t.receipt)
-    {
-        return Err(JournalError::Permission);
-    }
+    e.enrollment.transport().validate_scope(e.enrollment.account_id(), e.enrollment.agreement_id(), e.enrollment.participant_id(), Some(p.manifest_digest()))?;
+    if !same_native_origin(e.enrollment.receipt(), e.manifest.receipt()) { return Err(JournalError::Permission); }
     let owner = p
         .manifest()
         .participants
@@ -1761,6 +1823,12 @@ fn verify_schema_before_common_audit(c: &Connection) -> Result<()> {
     bounded(c, (MAX_BACKUP_ROWS, MAX_BACKUP_ENCODED_BYTES))?;
     #[cfg(test)]
     drop(cost_bounds);
+    verify_retained_schema19_cells(c)
+}
+
+// Private semantic kernel. Only exact executable schema validators call this.
+// It never chooses a profile from caller data and does not grant authority.
+fn verify_retained_schema19_cells(c: &Connection) -> Result<()> {
     #[cfg(test)]
     let cost_offline = validation_cost_v1::enter(validation_cost_v1::Phase::OfflineHistory);
     offline_history::read_all(c, &read_account(c)?.account_id)?;

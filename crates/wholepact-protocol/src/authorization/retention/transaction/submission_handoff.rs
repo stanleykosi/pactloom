@@ -39,6 +39,8 @@ pub struct VerifiedRetainedSubmission {
 }
 impl VerifiedRetainedSubmission {
     /// Exact original metadata from the scope checked against both private journals.
+    /// Inert original retention metadata; never a permission or byte export.
+    pub fn retention_scope(&self) -> &TransactionRetentionScope { &self.scope }
     pub fn signed_result_id(&self) -> &str {
         &self.scope.signed_result_id
     }
@@ -234,7 +236,7 @@ impl SignedResultJournal {
         submission_operation_id: &str,
         transactions: &LocalTransactionCheckpoint<'_>,
     ) -> std::result::Result<VerifiedRetainedSubmission, SubmissionHandoffError> {
-        let (scope, signed) = self.verified_transaction_predecessor(
+        let (scope, signed) = self.verified_completed_transaction_predecessor(
             context,
             signature_key,
             base,
@@ -264,12 +266,12 @@ impl SignedResultJournal {
                 .connection
                 .lock()
                 .map_err(|_| RetentionError::Storage)?;
-            let saved: Option<(String, Vec<u8>)> = c.query_row(
-                "SELECT substr(request_digest,1,65),scope FROM transaction_intents WHERE checkpoint_id=?1 AND length(scope)<=16384", [&id],
-                |r| Ok((r.get(0)?,r.get(1)?))).optional().map_err(db)?;
-            let (saved_request, saved_scope) = saved.ok_or(RetentionError::IntentNotFound)?;
-            let saved_scope = Zeroizing::new(saved_scope);
-            if saved_request != request || saved_scope.as_slice() != encoded.as_slice() {
+            let saved: Option<(String, String, Option<Vec<u8>>)> = c.query_row(
+                "SELECT substr(signed_result_id,1,72),substr(request_digest,1,65),CASE WHEN length(scope)<=16384 THEN scope ELSE NULL END FROM transaction_intents WHERE checkpoint_id=?1", [&id],
+                |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(db)?;
+            let (saved_result_id, saved_request, saved_scope) = saved.ok_or(RetentionError::IntentNotFound)?;
+            let saved_scope = Zeroizing::new(saved_scope.ok_or(RetentionError::VerificationFailed)?);
+            if saved_result_id != scope.signed_result_id || saved_request != request || saved_scope.as_slice() != encoded.as_slice() {
                 return Err(RetentionError::IdempotencyConflict.into());
             }
             let saved: Option<(Option<Vec<u8>>, String, String)> = c.query_row(
@@ -343,6 +345,12 @@ impl<'a, A: SubmissionAuthority> SubmissionAuthority for HandoffAuthority<'a, A>
     }
 }
 impl<P: SubmissionPermit> SubmissionPermit for HandoffPermit<'_, P> {
+    fn expected_attempt_number(&self) -> Option<u32> {
+        self.inner.expected_attempt_number()
+    }
+    fn valid_until_unix_seconds(&self) -> Option<u64> {
+        self.inner.valid_until_unix_seconds()
+    }
     fn check_current(
         &mut self,
         review: &SubmissionReview<'_>,
@@ -380,6 +388,11 @@ mod tests {
                 && s.descriptor.proposal_id == "synthetic-proposal-1"
                 && s.backend.trust_profile == "synthetic_never_chain_evidence"
         }
+    }
+    fn transaction_scope_digest(journal: &SignedResultJournal, id: &str) -> String {
+        journal.connection.lock().unwrap().query_row(
+            "SELECT digest FROM signed_results WHERE result_id=?1", [id], |r| r.get(0),
+        ).unwrap()
     }
     struct Authority;
     struct Permit;
@@ -513,6 +526,132 @@ mod tests {
                 },
             )
             .unwrap();
+        // Completed-only verification is a read, including all refusal paths.
+        // The fixture uses actual encrypted journals and real proved/signed bytes.
+        let changes_before = signed_journal.connection.lock().unwrap().total_changes();
+        let transaction_changes_before = transactions.connection.lock().unwrap().total_changes();
+        let verified = signed_journal.verify_completed_existing(
+            context.clone(), signature_key, &proof.pczt_bytes, &fixture.policy,
+            &signatures, limits, &consent,
+        ).unwrap();
+        assert_eq!(verified.signed_candidate_digest, transaction_scope_digest(&signed_journal, &verified.result_id));
+        assert!(matches!(signed_journal.verify_completed_existing(
+            context.clone(), "missing-completed-intent", &proof.pczt_bytes,
+            &fixture.policy, &signatures, limits, &consent,
+        ), Err(RetentionError::IntentNotFound)));
+        let unfinished = SignedResultJournal::from_encrypted_connection(
+            create_encrypted(path.join("unfinished.db"), &key).unwrap(),
+        ).unwrap();
+        let row: (String, String, String, String, Vec<u8>, Vec<u8>) = signed_journal.connection.lock().unwrap().query_row(
+            "SELECT result_id,principal_id,idem_key,request_digest,scope,signatures FROM signed_intents WHERE result_id=?1",
+            [&verified.result_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)),
+        ).unwrap();
+        unfinished.connection.lock().unwrap().execute(
+            "INSERT INTO signed_intents(result_id,principal_id,idem_key,request_digest,scope,signatures) VALUES (?1,?2,?3,?4,?5,?6)",
+            params![row.0,row.1,row.2,row.3,row.4,row.5],
+        ).unwrap();
+        let unfinished_changes = unfinished.connection.lock().unwrap().total_changes();
+        assert!(matches!(unfinished.verify_completed_existing(
+            context.clone(), signature_key, &proof.pczt_bytes, &fixture.policy,
+            &signatures, limits, &consent,
+        ), Err(RetentionError::RecoveryRequired)));
+        assert!(matches!(unfinished.checkpoint_completed_transaction(
+            context.clone(), signature_key, &proof.pczt_bytes, &fixture.policy,
+            &signatures, limits, &consent,
+            LocalTransactionCheckpoint { journal: &transactions, consent: &consent },
+        ), Err(RetentionError::RecoveryRequired)));
+        assert!(matches!(unfinished.verify_retained_submission(
+            context.clone(), signature_key, &proof.pczt_bytes, &fixture.policy,
+            &signatures, limits, &consent,
+            "synthetic-obligation-1", "synthetic-proposal-1", "synthetic-submission-1",
+            &LocalTransactionCheckpoint { journal: &transactions, consent: &consent },
+        ), Err(SubmissionHandoffError::Retention(RetentionError::RecoveryRequired))));
+        assert_eq!(unfinished.connection.lock().unwrap().total_changes(), unfinished_changes);
+        assert_eq!(signed_journal.connection.lock().unwrap().total_changes(), changes_before);
+        assert_eq!(transactions.connection.lock().unwrap().total_changes(), transaction_changes_before);
+        assert_eq!(transactions.extraction_invocations.load(std::sync::atomic::Ordering::SeqCst), 1);
+        drop(unfinished);
+        // Independent copies deliberately damage one original field at a time.
+        // These are test-only raw fixture edits, never a production repair API.
+        let intent_row: (String,String,String,Vec<u8>) = transactions.connection.lock().unwrap().query_row(
+            "SELECT checkpoint_id,signed_result_id,request_digest,scope FROM transaction_intents",
+            [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
+        ).unwrap();
+        let result_row: (Vec<u8>,String,String) = transactions.connection.lock().unwrap().query_row(
+            "SELECT bytes,digest,txid FROM transaction_results", [],
+            |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+        ).unwrap();
+        for case in 0..5 {
+            let copy = TransactionCheckpointJournal::from_encrypted_connection(
+                create_encrypted(path.join(format!("transaction-refusal-{case}.db")), &key).unwrap(),
+            ).unwrap();
+            {
+                let c = copy.connection.lock().unwrap();
+                c.execute_batch("PRAGMA ignore_check_constraints=ON;").unwrap();
+                if case != 0 {
+                    let signed_id = if case == 3 { "signed-wrong-original" } else { &intent_row.1 };
+                    let encoded = if case == 2 { vec![0;16385] } else { intent_row.3.clone() };
+                    c.execute("INSERT INTO transaction_intents(checkpoint_id,signed_result_id,request_digest,scope) VALUES (?1,?2,?3,?4)",
+                        params![intent_row.0,signed_id,intent_row.2,encoded]).unwrap();
+                    if case != 1 {
+                        let bytes = if case == 4 { vec![0;1048577] } else { result_row.0.clone() };
+                        c.execute("INSERT INTO transaction_results(checkpoint_id,bytes,digest,txid) VALUES (?1,?2,?3,?4)",
+                            params![intent_row.0,bytes,result_row.1,result_row.2]).unwrap();
+                    }
+                }
+            }
+            let changes = copy.connection.lock().unwrap().total_changes();
+            let result = signed_journal.verify_retained_submission(
+                context.clone(), signature_key, &proof.pczt_bytes, &fixture.policy,
+                &signatures, limits, &consent,
+                "synthetic-obligation-1", "synthetic-proposal-1", "synthetic-submission-1",
+                &LocalTransactionCheckpoint { journal: &copy, consent: &consent },
+            );
+            let expected = match case { 0 => RetentionError::IntentNotFound,
+                1 => RetentionError::RecoveryRequired, 3 => RetentionError::IdempotencyConflict,
+                _ => RetentionError::VerificationFailed };
+            assert!(matches!(result, Err(SubmissionHandoffError::Retention(error)) if error == expected));
+            assert_eq!(copy.connection.lock().unwrap().total_changes(), changes);
+            assert_eq!(copy.extraction_invocations.load(std::sync::atomic::Ordering::SeqCst), 0);
+        }
+        for case in 0..3 {
+            let copy = SignedResultJournal::from_encrypted_connection(
+                create_encrypted(path.join(format!("signed-refusal-{case}.db")), &key).unwrap(),
+            ).unwrap();
+            {
+                let c = copy.connection.lock().unwrap();
+                c.execute_batch("PRAGMA ignore_check_constraints=ON;").unwrap();
+                let scope = if case == 0 { vec![0;16385] } else { row.4.clone() };
+                let sigs = if case == 1 { vec![0;10241] } else { row.5.clone() };
+                c.execute("INSERT INTO signed_intents(result_id,principal_id,idem_key,request_digest,scope,signatures) VALUES (?1,?2,?3,?4,?5,?6)",
+                    params![row.0,row.1,row.2,row.3,scope,sigs]).unwrap();
+                let bytes: Vec<u8> = if case == 2 { vec![0;1048577] } else { vec![] };
+                c.execute("INSERT INTO signed_results(result_id,bytes,digest) VALUES (?1,?2,?3)",
+                    params![row.0,bytes,verified.signed_candidate_digest]).unwrap();
+            }
+            let changes = copy.connection.lock().unwrap().total_changes();
+            assert!(matches!(copy.verify_completed_existing(
+                context.clone(), signature_key, &proof.pczt_bytes, &fixture.policy,
+                &signatures, limits, &consent,
+            ), Err(RetentionError::VerificationFailed)));
+            assert_eq!(copy.connection.lock().unwrap().total_changes(), changes);
+        }
+        struct RevokeAfterVerification(std::cell::Cell<usize>);
+        impl SignedRetentionConsent for RevokeAfterVerification {
+            fn permits(&self, _: &SignedRetentionScope) -> bool {
+                let calls = self.0.get() + 1;
+                self.0.set(calls);
+                calls < 4
+            }
+        }
+        let revoked = RevokeAfterVerification(std::cell::Cell::new(0));
+        assert!(matches!(signed_journal.verify_completed_existing(
+            context.clone(), signature_key, &proof.pczt_bytes, &fixture.policy,
+            &signatures, limits, &revoked,
+        ), Err(RetentionError::ConsentDenied)));
+        assert_eq!(revoked.0.get(), 4);
+        assert_eq!(signed_journal.connection.lock().unwrap().total_changes(), changes_before);
+        assert_eq!(transactions.connection.lock().unwrap().total_changes(), transaction_changes_before);
         let chain =
             wholepact_chain::synthetic_chain_context_for_qualification(1_800_000_020).unwrap();
         let handoff = |journal: &mut EncryptedSubmissionJournal| {

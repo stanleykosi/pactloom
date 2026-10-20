@@ -272,6 +272,11 @@ impl Ledger {
                         || original,
                 )
             }
+            AuthorityMutation::AuthorizeCompletedDispatchV1(r) => {
+                let original = self.selected_financial_continuation_v1()?.ok_or(AuthorityError::Permission)?;
+                let OwnerControl::AdmitFinancialContinuationV1 {record} = &original.control else {return Err(AuthorityError::Permission);};
+                (&r.account_id, &r.network_profile_id, peer == &record.terms.scope.delivery.dispatcher.public_identity_commitment)
+            }
             AuthorityMutation::AuthorizeDispatch(r) => {
                 let owns_historical =
                     self.operations
@@ -342,6 +347,31 @@ impl Ledger {
     }
     pub fn apply(&mut self, event: &Event) -> Result<MutationResult> {
         self.require_delivery_admission_only_v2(&event.mutation)?;
+        if self.selected_financial_continuation_v1()?.is_some() || matches!(&event.mutation, AuthorityMutation::OwnerControl(OwnerControlRequest { control: OwnerControl::AdmitFinancialContinuationV1 {..}, .. })) {
+            return Err(AuthorityError::PolicyDenied);
+        }
+        self.apply_policy_kernel(event)
+    }
+    /// Closed profile entry used only by the exact financial source/loader.
+    /// Legacy entrypoints above retain their literal admission-only gate.
+    pub(crate) fn apply_financial_continuation_v1(&mut self, event: &Event) -> Result<MutationResult> {
+        if self.selected_financial_continuation_v1()?.is_none() {
+            if matches!(&event.mutation, AuthorityMutation::OwnerControl(OwnerControlRequest {control: OwnerControl::AdmitFinancialContinuationV1 {..}, ..})) {
+                let AuthorityMutation::OwnerControl(request) = &event.mutation else { unreachable!() };
+                self.validate_new_financial_continuation_v1(request, event.witness_time_ms)?;
+            } else { return self.apply(event); }
+        } else {
+            self.require_financial_continuation_history_v1()?;
+            let admission = self.selected_financial_continuation_v1()?.ok_or(AuthorityError::CorruptHistory)?.operation_id.clone();
+            match &event.mutation {
+                AuthorityMutation::OwnerControl(OwnerControlRequest {control: OwnerControl::Pause | OwnerControl::Revoke | OwnerControl::PermanentlyExcludeAccount {..}, ..}) => {},
+                AuthorityMutation::AuthorizeCompletedDispatchV1(request) => { self.require_completed_dispatch_v1(request, event)?; },
+                _ => self.require_financial_continuation_mutation_v1(&admission, &event.mutation, event.writer_session_id.as_deref(), event.witness_time_ms)?,
+            }
+        }
+        self.apply_policy_kernel(event)
+    }
+    fn apply_policy_kernel(&mut self, event: &Event) -> Result<MutationResult> {
         if event.original_request_link.is_some()
             && !matches!(
                 event.mutation,
@@ -358,6 +388,7 @@ impl Ledger {
             self.require_unfenced_durable_payment_session_v1(session_id)?;
         }
         let durable_admission = self.selected_durable_payment_admission_v1()?.cloned();
+        let financial_continuation = self.selected_financial_continuation_v1()?.cloned();
         if let Some(admission) = &durable_admission {
             if matches!(
                 &event.mutation,
@@ -382,6 +413,7 @@ impl Ledger {
         // Non-bootstrap events retain their own rules and remain readable under
         // later exclusion/quarantine; none become supported manual live history.
         if durable_admission.is_none()
+            && self.selected_financial_continuation_v1()?.is_none()
             && matches!(
                 &event.mutation,
                 AuthorityMutation::AcquireWriter(_)
@@ -623,7 +655,7 @@ impl Ledger {
                 // The NEW exact admission alone associates its original extension
                 // reference. The immutable birth allowlist is never changed.
                 if (!self.policy.enrollment_refs.contains(&r.enrollment_ref)
-                    && durable_admission.is_none())
+                    && durable_admission.is_none() && financial_continuation.is_none())
                     || !self.policy.agreement_ids.contains(&r.agreement_id)
                     || !self
                         .policy
@@ -695,6 +727,10 @@ impl Ledger {
                 MutationResult::BornOfflineDispatchAdmittedV1(Box::new(
                     self.apply_born_dispatch_v1(r, event, &next_head)?,
                 ))
+            }
+            AuthorityMutation::AuthorizeCompletedDispatchV1(r) => {
+                let admission = self.apply_completed_dispatch_v1(r, event, &next_head)?;
+                MutationResult::CompletedDispatchAdmittedV1(Box::new(admission))
             }
             AuthorityMutation::AuthorizeDispatch(r) => {
                 r.validate()?;
@@ -809,7 +845,10 @@ impl Ledger {
                                 _ => None,
                             })
                             .unwrap_or(u64::MAX),
-                    );
+                    ).min(financial_continuation.as_ref().and_then(|r| match &r.control {
+                        OwnerControl::AdmitFinancialContinuationV1 {record} => Some(record.terms.valid_until_ms),
+                        _ => None,
+                    }).unwrap_or(u64::MAX));
                 if expires <= event.witness_time_ms {
                     return Err(AuthorityError::Expired);
                 }
@@ -883,6 +922,10 @@ impl Ledger {
                 }
                 self.fence(&r.expected_head, r.writer_epoch)?;
                 match &r.control {
+                    OwnerControl::AdmitFinancialContinuationV1 { .. } => {
+                        if event.writer_session_id.is_some() { return Err(AuthorityError::Permission); }
+                        self.validate_new_financial_continuation_v1(r, event.witness_time_ms)?;
+                    }
                     OwnerControl::AdmitDurablePaymentWithDeliveryV2 { .. } => {
                         if event.writer_session_id.is_some() {
                             return Err(AuthorityError::Permission);
@@ -1136,6 +1179,7 @@ impl Ledger {
             | AuthorityMutation::ReserveBornOfflineV1(_)
             | AuthorityMutation::AuthorizeAutomaticKeyUse(_)
             | AuthorityMutation::AuthorizeDispatch(_)
+            | AuthorityMutation::AuthorizeCompletedDispatchV1(_)
             | AuthorityMutation::AuthorizeBornOfflineDispatchV1(_)
             | AuthorityMutation::AcquireWriter(_) => true,
             AuthorityMutation::OwnerControl(r) => matches!(
@@ -1143,6 +1187,7 @@ impl Ledger {
                 OwnerControl::ActivateWriter { .. }
                     | OwnerControl::AdmitDurablePaymentV1 { .. }
                     | OwnerControl::AdmitDurablePaymentWithDeliveryV2 { .. }
+                    | OwnerControl::AdmitFinancialContinuationV1 { .. }
                     | OwnerControl::EnrollBornOfflineV1 { .. }
                     | OwnerControl::InstallBornOfflineArtifactsV1 { .. }
                     | OwnerControl::GrantConstructionTransportV1 { .. }

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Closed B1 native lifecycle integration in one disposable Linux job.
+# Explicit B1 or completed-transaction financial lifecycle in a disposable job.
 # No secrets, public-chain calls, caches, runtime archives or global security changes.
-# This is not full financial payment, testnet settlement or attended GUI acceptance.
+# B1 is admission-only. Financial mode is synthetic saved-transaction restart
+# and dispatch, not testnet settlement or attended GUI acceptance.
 set -euo pipefail
 umask 077
 ulimit -c 0
@@ -10,6 +11,8 @@ ulimit -c 0
 [[ "${GITHUB_REF:-}" == refs/heads/qualification/durable-proposal-v1 ]]
 [[ "${GITHUB_EVENT_NAME:-}" == push && "${GITHUB_SHA:-}" =~ ^[0-9a-f]{40}$ ]]
 [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+qualification_mode="$(cat scripts/qualification-gate-mode)"
+[[ "$qualification_mode" == full || "$qualification_mode" == financial ]]
 [[ "$(uname -m)" == x86_64 ]]
 for program in rustup curl sha256sum tar make gcc perl tclsh pkg-config python3 timeout openssl; do
   command -v "$program" >/dev/null || { echo "Missing prerequisite: $program" >&2; exit 2; }
@@ -102,9 +105,14 @@ PY
 sha256sum "$executable"
 # Fail fast on the new native transition, without skipping final regression gates.
 # Actual encrypted provider integration on this fresh runner, then the complete
-# new B1 production lifecycle. Stop on the first failure with its bounded report.
+# selected production lifecycle. Stop on the first failure with its bounded report.
 # Unchanged older full-flow fixtures are not re-executed here, and their prior
 # evidence must not be presented as revalidation of this source checkpoint.
 TMPDIR="$runtime_root" python3 -B scripts/ci-synthetic-output.py "$executable" storage-bootstrap
-TMPDIR="$runtime_root" python3 -B scripts/ci-synthetic-output.py "$executable" durable-delivery-admission
-printf '%s\n' 'CI_B1_RESULT completed=true full_financial_payment_verified=false testnet_settlement_verified=false'
+if [[ "$qualification_mode" == financial ]]; then
+  TMPDIR="$runtime_root" python3 -B scripts/ci-durable-financial-output.py "$executable"
+  printf '%s\n' 'CI_FINANCIAL_LIFECYCLE completed=true testnet_settlement_verified=false'
+else
+  TMPDIR="$runtime_root" python3 -B scripts/ci-synthetic-output.py "$executable" durable-delivery-admission
+  printf '%s\n' 'CI_B1_RESULT completed=true full_financial_payment_verified=false testnet_settlement_verified=false'
+fi

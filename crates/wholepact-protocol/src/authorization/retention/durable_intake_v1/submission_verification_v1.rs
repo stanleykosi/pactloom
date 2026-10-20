@@ -1,5 +1,5 @@
 //! Read-only exact predecessor verification for a previously retained union.
-//! This leaf is unregistered until the durable Host submission issuer is wired.
+//! This verifies existing data only; no Host submission authority is issued.
 use super::*;
 use crate::authorization::retention::transaction::{
     submission_handoff::{SubmissionHandoffError, VerifiedRetainedSubmission},

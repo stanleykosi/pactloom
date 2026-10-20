@@ -65,6 +65,7 @@ impl<'a> ReservationView<'a> {
             | MutationResult::ProgressRecorded(_)
             | MutationResult::DispatchAdmitted(_)
             | MutationResult::BornOfflineDispatchAdmittedV1(_)
+            | MutationResult::CompletedDispatchAdmittedV1(_)
             | MutationResult::ResolutionRecorded(_)
             | MutationResult::ResolutionsReopened(_) => None,
         }

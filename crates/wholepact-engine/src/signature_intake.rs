@@ -1,7 +1,7 @@
 //! Authenticated transport to exact saved-proof signature inspection. This is not
 //! a release path. Native signer originals may establish a separately tagged local
 //! result origin; transport authentication alone never establishes account control.
-use crate::{Access, ApiError, Engine, Result, proof_jobs::LocalProofJob};
+use crate::{proof_jobs::LocalProofJob, Access, ApiError, Engine, Result};
 use serde::Deserialize;
 use wholepact_proof_jobs::VerifiedCheckpoint;
 use wholepact_protocol::authorization::retention::{
@@ -50,6 +50,13 @@ pub struct AuthenticatedAccountAssociation {
     manifest_digest: String,
     candidate_id: String,
 }
+
+#[cfg(all(
+    feature = "manual-admission",
+    feature = "signer-authority-bridge",
+    target_os = "linux"
+))]
+pub(crate) mod financial_continuation_v1;
 
 pub struct AuthenticatedSignatureDelivery<'a> {
     pub artifact: &'a ReceivedArtifact,

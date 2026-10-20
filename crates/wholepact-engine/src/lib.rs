@@ -55,6 +55,9 @@ pub(crate) mod durable_private_workspace_v1;
     target_os = "linux"
 ))]
 pub use durable_private_workspace_v1::{
+    LocalPrivateDurableFinancialConsentV1, PreparedPrivateFinancialV1,
+    PrivateDurableFinancialCoordinatorV1, PrivateDurableFinancialInspectionV1,
+    RetainedPrivateDispatchIntentV1, VerifiedPrivateDurableSubmissionV1,
     PreparedPrivateDurableAdmissionDeliveryV3, ClosedPrivateDurableAdmissionReviewV3, PrivateDurableAdmissionDeliveryV3, PrivateDurableAdmissionStatusV3,
     LocalPrivateDurableAdmissionConsentV2, LocalPrivateFixedPermissionBoundaryV3,
     LocalPrivateWorkspaceConsentV1, OriginalCheckpointOutcomeV2, OriginalProofAttemptV2,
@@ -69,6 +72,8 @@ pub use durable_private_workspace_v1::{
 };
 #[cfg(feature = "durable-proposal")]
 pub mod durable_proposals_v1;
+#[cfg(feature = "durable-proposal")]
+pub use durable_proposals_v1::submission_verification_v1::VerifiedDurableSubmissionV1;
 pub mod financial_preflight;
 #[cfg(all(feature = "manual-admission", target_os = "linux"))]
 pub mod manual_enrollment;

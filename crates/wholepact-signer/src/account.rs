@@ -247,6 +247,13 @@ impl DedicatedAccount {
         fence.require_account(self)?;
         Ok(key)
     }
+    #[cfg(all(feature="durable-proposal",feature="pending-birth-owner-signing",feature="native-ui",target_os="linux"))]
+    pub(crate) fn derive_financial_spending_key_v1(&self,fence:&crate::authority_bridge::financial_continuation_v1::FinancialKeyUseFenceV1<'_>)->Result<SpendingKey>{
+        if !self.born_authority_pending||self.recovery_required(){return Err(Error::Unavailable);}
+        fence.require_account(self)?;
+        let key=self.derive_spending_key()?;
+        fence.require_account(self)?;Ok(key)
+    }
     fn derive_spending_key(&self) -> Result<SpendingKey> {
         Self::derive_spending_key_from_entropy(&self.entropy, self.account_index)
     }

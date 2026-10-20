@@ -48,6 +48,8 @@ pub(crate) mod retention;
 mod settlement;
 #[cfg(feature = "financial-runtime")]
 pub(crate) mod submission;
+#[cfg(all(feature = "financial-runtime", feature = "durable-proposal"))]
+pub(crate) mod durable_submission_v1;
 use crate::{Error, Result, id, now, terminal::Terminal};
 use sha2::{Digest, Sha256};
 use std::{

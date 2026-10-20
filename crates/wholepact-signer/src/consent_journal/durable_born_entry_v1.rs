@@ -517,7 +517,7 @@ impl SignerConsentJournal {
 // loosen the V2 suffix reader. Empty original prefixes are accepted; any retained
 // admission must be V3-only, with the same original genesis and complete lineage.
 #[cfg(all(feature = "durable-proposal", target_os = "linux"))]
-fn validate_delivery_v3(
+pub(super) fn validate_delivery_v3(
     c: &Connection,
     genesis: &AccountUseGenesis,
     limits: (u64, u64),
@@ -543,6 +543,12 @@ fn validate_delivery_v3(
             return Err(JournalError::RecoveryRequired);
         }
     }
+    validate_delivery_v3_original_cells(c, genesis, &account)
+}
+// Historical original cells only. The caller already validated its exact
+// executable schema and explicit allowed-table policy in this snapshot.
+#[cfg(all(feature = "durable-proposal", target_os = "linux"))]
+pub(super) fn validate_delivery_v3_original_cells(c: &Connection, genesis: &AccountUseGenesis, account: &SignerAccountState) -> Result<()> {
     let mut foreign_keys = c.prepare("PRAGMA foreign_key_check")?;
     if foreign_keys.query([])?.next()?.is_some() {
         return Err(JournalError::InvalidBinding);

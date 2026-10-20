@@ -71,6 +71,7 @@ pub struct HistoryPage {
 /// Complete verified witness history; cannot be fabricated by deserializing
 /// summaries. Original permits are evidence, never newly minted signing tokens.
 pub struct ReconciledAuthorityHistory {
+    pub(crate) completed_dispatches_v1: Vec<crate::completed_dispatch_v1::CompletedDispatchAdmissionV1>,
     pub(crate) durable_payment_history_supported_v1: bool,
     pub(crate) construction_transport_history:
         crate::construction_transport_handoff_v1::ConstructionTransportHistoryV1,
@@ -109,6 +110,7 @@ impl ReconciledAuthorityHistory {
                 r.control,
                 OwnerControl::AdmitDurablePaymentV1 { .. }
                     | OwnerControl::AdmitDurablePaymentWithDeliveryV2 { .. }
+                    | OwnerControl::AdmitFinancialContinuationV1 { .. }
             )
         }) {
             return Err(AuthorityError::PolicyDenied);
@@ -626,6 +628,10 @@ impl ReservationPermit {
 // frame is already bounded and boxing would not change the protocol boundary.
 #[allow(clippy::large_enum_variant)]
 pub enum OwnerControl {
+    /// Explicit, separately native-approved original financial continuation.
+    AdmitFinancialContinuationV1 {
+        record: Box<crate::durable_financial_continuation_v1::FinancialContinuationRecordV1>,
+    },
     /// Native-only prospective full-scope admission. Never a financial permit.
     AdmitDurablePaymentWithDeliveryV2 {
         record: Box<crate::durable_delivery_admission_v2::DurableDeliveryAdmissionRecordV2>,
@@ -914,6 +920,7 @@ pub enum AuthorityMutation {
     AcquireWriter(AcquireWriterRequest),
     ReportProgress(ReportProgress),
     AuthorizeDispatch(AuthorizeDispatch),
+    AuthorizeCompletedDispatchV1(crate::completed_dispatch_v1::AuthorizeCompletedDispatchV1),
     AuthorizeBornOfflineDispatchV1(
         Box<crate::born_offline_dispatch_v1::BornOfflineDispatchRequestV1>,
     ),
@@ -942,6 +949,7 @@ impl AuthorityMutation {
             Self::AcquireWriter(r) => &r.operation_id,
             Self::ReportProgress(r) => &r.operation_id,
             Self::AuthorizeDispatch(r) => &r.operation_id,
+            Self::AuthorizeCompletedDispatchV1(r) => &r.operation_id,
             Self::AuthorizeBornOfflineDispatchV1(r) => &r.dispatch.operation_id,
             Self::QualifiedResolution(r) => &r.operation_id,
             Self::ReopenResolutions(r) => &r.operation_id,
@@ -994,6 +1002,7 @@ pub enum MutationResult {
     WriterPending(WriterSessionReceipt),
     ProgressRecorded(AccountSnapshot),
     DispatchAdmitted(Box<DispatchAdmission>),
+    CompletedDispatchAdmittedV1(Box<crate::completed_dispatch_v1::CompletedDispatchAdmissionV1>),
     BornOfflineDispatchAdmittedV1(
         Box<crate::born_offline_dispatch_v1::BornOfflineDispatchAdmissionV1>,
     ),
