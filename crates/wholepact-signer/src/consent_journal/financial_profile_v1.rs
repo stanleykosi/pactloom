@@ -300,19 +300,17 @@ impl FinancialConsentJournalV1 {
     }
 }
 
+fn expected_schema20_objects_v1()->Result<&'static Vec<SchemaObjectV1>> {
+    static EXPECTED:std::sync::OnceLock<Vec<SchemaObjectV1>>=std::sync::OnceLock::new();
+    if let Some(expected)=EXPECTED.get(){return Ok(expected);}
+    let built=build_expected_schema_objects_v1(EXTENSION)?;
+    let _=EXPECTED.set(built);
+    EXPECTED.get().ok_or(JournalError::Database)
+}
 pub(super) fn verify_schema(c: &Connection) -> Result<()> {
-    type Object = (String, String, String, Option<String>);
-    fn objects(c: &Connection) -> Result<Vec<Object>> {
-        let mut q = c.prepare("SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name")?;
-        let rows = q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
-    }
     if c.pragma_query_value::<i64, _>(None, "application_id", |r| r.get(0))? != APPLICATION_ID
         || c.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))? != VERSION { return Err(JournalError::UnsupportedSchema); }
-    let expected = Connection::open_in_memory()?;
-    expected.execute_batch(SCHEMA)?;
-    expected.execute_batch(EXTENSION)?;
-    if objects(c)? != objects(&expected)? { return Err(JournalError::UnsupportedSchema); }
+    verify_schema_objects_v1(c,expected_schema20_objects_v1()?)?;
     bounded_financial(c)?;
     verify_retained_schema19_cells(c)?;
     construction_audit_v3::read_all(c, &read_account(c)?.account_id)?;
@@ -488,5 +486,36 @@ mod tests {
         assert_eq!(before,original_rows_digest(&reopened).unwrap());
         assert_eq!(reopened.pragma_query_value::<i64,_>(None,"user_version",|r|r.get(0)).unwrap(),VERSION);
         assert_eq!(reopened.query_row("SELECT payload FROM signer_durable_payment_admission_intents",[],|r|r.get::<_,String>(0)).unwrap(),"original-inert-bytes");
+    }
+}
+
+#[cfg(test)]
+mod expected_schema_cache_tests_v1 {
+    use super::*;
+    #[test]
+    fn cached_expected_schema_20_matches_fresh_and_rejects_target_drift() {
+        let cached=expected_schema20_objects_v1().unwrap();
+        assert_eq!(*cached,build_expected_schema_objects_v1(EXTENSION).unwrap());
+        assert!(std::ptr::eq(cached,expected_schema20_objects_v1().unwrap()));
+        let target=Connection::open_in_memory().unwrap();target.execute_batch(SCHEMA).unwrap();
+        if !EXTENSION.is_empty(){target.execute_batch(EXTENSION).unwrap();}
+        verify_schema_objects_v1(&target,cached).unwrap();
+        target.execute_batch("CREATE TABLE unexpected_cache_probe(value TEXT)").unwrap();
+        assert!(matches!(verify_schema_objects_v1(&target,cached),Err(JournalError::UnsupportedSchema)));
+        target.execute_batch("DROP TABLE unexpected_cache_probe").unwrap();
+        verify_schema_objects_v1(&target,cached).unwrap();
+        target.execute_batch("CREATE INDEX unexpected_cache_index ON signer_account(writer_epoch)").unwrap();
+        assert!(matches!(verify_schema_objects_v1(&target,cached),Err(JournalError::UnsupportedSchema)));
+    }
+    #[test]
+    fn expected_schema_20_reference_component_benchmark() {
+        // Bounded reference-only measurement, not native/full-profile evidence.
+        // No timing threshold: overloaded CI must not turn this into a flaky test.
+        let cached=expected_schema20_objects_v1().unwrap();let start=std::time::Instant::now();
+        for _ in 0..16 {assert_eq!(*cached,build_expected_schema_objects_v1(EXTENSION).unwrap());}
+        let uncached=start.elapsed().as_micros();let start=std::time::Instant::now();
+        for _ in 0..16 {assert!(std::ptr::eq(cached,expected_schema20_objects_v1().unwrap()));}
+        let cached_us=start.elapsed().as_micros();
+        println!("SCHEMA_REFERENCE_COMPONENT profile=20 iterations=16 uncached_us={} cached_us={} full_profile_proven=false",uncached,cached_us);
     }
 }

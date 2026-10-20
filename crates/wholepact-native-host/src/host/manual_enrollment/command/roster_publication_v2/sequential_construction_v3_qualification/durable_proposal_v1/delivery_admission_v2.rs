@@ -1982,6 +1982,7 @@ mod tests {
         transcript.append(marker, Path::new("/tmp/owned")).unwrap();
         PrivateWorkspaceStageResultV1 {
             financial_progress_failure: None,
+                financial_progress_timing: None,
             financial_diagnostic: None,
             delivery_first_failure: transcript.delivery_first_failure(),
             private_fixed_diagnostic: None,

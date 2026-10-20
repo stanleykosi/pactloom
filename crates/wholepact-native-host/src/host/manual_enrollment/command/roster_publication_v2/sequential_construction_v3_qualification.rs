@@ -1253,6 +1253,7 @@ impl PrivateWorkspaceStageV1 {
 ))]
 struct PrivateWorkspaceStageResultV1 {
     financial_progress_failure: Option<financial_progress_v1::Failure>,
+    financial_progress_timing: Option<financial_progress_v1::Timing>,
     financial_diagnostic: Option<crate::host::financial_diagnostics_v1::FinancialDiagnosticV1>,
     delivery_first_failure: Option<safe_diagnostics_v1::DeliveryFailure>,
     private_fixed_diagnostic:
@@ -1323,7 +1324,7 @@ fn private_workspace_stage_v1(
     ) {
         transcript.enable_delivery_first_failure();
     }
-    if matches!(stage, PrivateWorkspaceStageV1::FinancialProducer) {transcript.enable_financial_progress();}
+    if matches!(stage, PrivateWorkspaceStageV1::FinancialProducer) {transcript.enable_financial_progress_at(deadline.checked_sub(Duration::from_secs(900)).ok_or_else(||std::io::Error::other("financial workflow origin unavailable"))?);}
     // This creates a temporary terminal, not an OS trust root or permission
     // override. The child still passes the actual foreground() implementation.
     let master_fd = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC) };
@@ -1604,6 +1605,7 @@ fn private_workspace_stage_v1(
         }
         Ok(())
     })();
+    transcript.freeze_financial_progress_timing(Instant::now());
     // Producer marker recognition immediately takes the one owned SIGKILL path.
     // Cleanup grace does not replace or extend the workflow cutoff.
     let finished = child.finish();
@@ -1682,7 +1684,9 @@ fn private_workspace_stage_v1(
         None
     };
     let financial_progress_failure = if process.verified() && outcome.is_err() {transcript.financial_progress_failure()} else {None};
+    let financial_progress_timing=if process.verified(){transcript.financial_progress_timing()}else{None};
     Ok(PrivateWorkspaceStageResultV1 {
+        financial_progress_timing,
         financial_progress_failure,
         financial_diagnostic,
         delivery_first_failure,
