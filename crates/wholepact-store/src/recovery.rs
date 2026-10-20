@@ -1551,6 +1551,29 @@ impl Store {
                 .ok_or(StoreError::RecoveryRequired)?,
         )
     }
+    /// Bounded read-only observation on the already authenticated generation
+    /// connection. Full provenance/history validation remains the opener and
+    /// source owner's responsibility; this never clears recovery or grants a
+    /// write capability.
+    pub(crate) fn original_read_generation_identity_v3(
+        &self,
+        c: &Connection,
+    ) -> Result<(GenerationBinding, String)> {
+        let binding = self
+            .recovered_binding
+            .as_ref()
+            .ok_or(StoreError::RecoveryRequired)?;
+        if !self.recovered_generation
+            || self.protection != StorageProtection::Encrypted
+            || !crate::backup::read_recovery_state(c)?.recovery_required
+        {
+            return Err(StoreError::RecoveryRequired);
+        }
+        // Use the maintained closed application/schema family, not the
+        // ordinary private destination's application 0 / schema constants.
+        layers::generation_template(c)?;
+        Ok((binding.clone(), layers::current_identity(c, binding)?))
+    }
     /// Restriction-only union with every obligation in the current signer's
     /// conservative witness history. The native host calls this before its final
     /// publication marker. This never clears a fence or activates authority.

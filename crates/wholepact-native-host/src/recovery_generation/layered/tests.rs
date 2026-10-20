@@ -423,6 +423,168 @@ fn native_layered_pending_exact_retry_rejects_changed_target_key_and_partial_cap
 }
 
 #[test]
+fn native_layered_original_source_read_pin_accepts_and_detects_changes() {
+    use wholepact_store::{Store, StoreError};
+
+    // One maintained encrypted lifecycle, never an in-memory recovered flag or
+    // a fabricated native admission. This destination remains unpublished.
+    let (_temp, _legacy_backup, _legacy_quarantine, g1) = published_empty_fixture();
+    let id = "source-pin-agreement";
+    add_current_data(&g1, id, 31);
+    let source = synthetic_capsule_quarantine(
+        &g1,
+        &g1.with_file_name("source-pin-capsule"),
+        &g1.with_file_name("source-pin-quarantine"),
+        231,
+    );
+    let target = g1.with_file_name("source-pin-generation");
+    let constructed = PendingLayeredGeneration::create(source, &target, PASSWORD)
+        .unwrap()
+        .construct_synthetic_storage()
+        .unwrap();
+    let pending = &constructed.pending;
+    let path = pending.directory.path("coordination.sqlite").unwrap();
+    let key = pending.secrets.key(0).unwrap();
+    let binding = pending.binding().unwrap();
+    let expected = pending
+        .source
+        .capsule()
+        .root()
+        .current_coordination()
+        .source_provenance();
+    let store = Store::open_recovered_generation(&path, &key, &binding, expected).unwrap();
+    let other = Store::open_recovered_generation(&path, &key, &binding, expected).unwrap();
+    // A third, independently authenticated generation handle is used only for
+    // header/schema negative cases. Ordinary encrypted open is not substituted.
+    let generation =
+        wholepact_storage_security::bundle::recovery::generation::open_recovered_generation(
+            &path,
+            &key,
+            &binding,
+            expected,
+            wholepact_store::recovery::coordination_layered_successor_template(),
+        )
+        .unwrap();
+    let connection = generation.connection();
+    connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .unwrap();
+    let agreements = store.list_agreements().unwrap();
+    let selected = store.get_agreement(id).unwrap().unwrap();
+    let events = store.events_after(0, 100).unwrap();
+    assert!(store.recovery_record_is_historical("agreement", id).unwrap());
+    assert!(store.recovery_state().unwrap().recovery_required);
+    let destination = store.settlement_destination().unwrap();
+    store.verify_integrity().unwrap();
+    // SQLite may update SHM read marks without changing persisted rows. Keep
+    // main/WAL ciphertext and all other files, not transient lock bookkeeping.
+    let persisted = || {
+        let mut tree = fingerprint(&target);
+        tree.retain(|path, _| !path.as_os_str().as_encoded_bytes().ends_with(b"-shm"));
+        tree
+    };
+    let before_reads = persisted();
+
+    // This is the original root-pin mismatch: the private mutation pin must
+    // still refuse this same authenticated recovered Store.
+    assert!(matches!(
+        store.pin_original_revision_v3(id),
+        Err(StoreError::RecoveryRequired)
+    ));
+    let read = store.pin_original_source_read_revision_v3(id).unwrap();
+    read.check_current_v3().unwrap();
+    store.verify_integrity().unwrap();
+    assert_eq!(store.list_agreements().unwrap(), agreements);
+    assert_eq!(store.get_agreement(id).unwrap().unwrap(), selected);
+    assert_eq!(store.events_after(0, 100).unwrap(), events);
+    assert_eq!(store.settlement_destination().unwrap(), destination);
+    assert!(store.recovery_state().unwrap().recovery_required);
+    read.check_current_v3().unwrap();
+    assert_eq!(before_reads, persisted());
+
+    // Restriction-only writes do not change the selected agreement. They still
+    // invalidate the observation through the actual owning connection.
+    store
+        .add_recovery_obligation_fences(
+            &binding,
+            &BTreeSet::from(["source-pin-own-obligation".into()]),
+        )
+        .unwrap();
+    assert!(matches!(
+        read.check_current_v3(),
+        Err(StoreError::RevisionConflict)
+    ));
+    assert_eq!(store.get_agreement(id).unwrap().unwrap(), selected);
+
+    let independent = store.pin_original_source_read_revision_v3(id).unwrap();
+    other
+        .add_recovery_obligation_fences(
+            &binding,
+            &BTreeSet::from(["source-pin-other-obligation".into()]),
+        )
+        .unwrap();
+    assert!(matches!(
+        independent.check_current_v3(),
+        Err(StoreError::RevisionConflict)
+    ));
+    assert_eq!(store.get_agreement(id).unwrap().unwrap(), selected);
+
+    // A changed actual schema cookie also invalidates, without altering any
+    // immutable lineage trigger or pretending the changed schema is authority.
+    let schema = store.pin_original_source_read_revision_v3(id).unwrap();
+    connection
+        .execute_batch("CREATE TABLE synthetic_source_pin_probe(value INTEGER);")
+        .unwrap();
+    assert!(schema.check_current_v3().is_err());
+    connection
+        .execute_batch("DROP TABLE synthetic_source_pin_probe;")
+        .unwrap();
+    assert!(schema.check_current_v3().is_err());
+
+    let user_version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    let application_id: i64 = connection
+        .pragma_query_value(None, "application_id", |row| row.get(0))
+        .unwrap();
+    for (header, changed, original) in [
+        ("user_version", user_version + 1000, user_version),
+        ("application_id", 0, application_id),
+    ] {
+        let header_pin = store.pin_original_source_read_revision_v3(id).unwrap();
+        connection.pragma_update(None, header, changed).unwrap();
+        assert!(header_pin.check_current_v3().is_err());
+        assert!(store.pin_original_source_read_revision_v3(id).is_err());
+        assert!(matches!(
+            store.pin_original_revision_v3(id),
+            Err(StoreError::RecoveryRequired)
+        ));
+        // Restore only for the next independent negative case. An old pin must
+        // remain stale even when the original header bytes are restored.
+        connection.pragma_update(None, header, original).unwrap();
+        assert!(header_pin.check_current_v3().is_err());
+    }
+    assert_eq!(store.get_agreement(id).unwrap().unwrap(), selected);
+    assert!(matches!(
+        store.pin_original_revision_v3(id),
+        Err(StoreError::RecoveryRequired)
+    ));
+
+    // Deliberately violate the retained owner-path contract last. Identical
+    // ciphertext at the pathname cannot rebind this already-open Store.
+    let file_pin = store.pin_original_source_read_revision_v3(id).unwrap();
+    let retained = path.with_extension("retained-original.sqlite");
+    std::fs::rename(&path, &retained).unwrap();
+    std::fs::copy(&retained, &path).unwrap();
+    assert!(file_pin.check_current_v3().is_err());
+    assert!(store.pin_original_source_read_revision_v3(id).is_err());
+    assert!(matches!(
+        store.pin_original_revision_v3(id),
+        Err(StoreError::RecoveryRequired)
+    ));
+}
+
+#[test]
 fn native_layered_saved_audit_never_replaces_required_live_publication_admission() {
     use wholepact_signer::authority_bridge::host_recovery_ipc::{
         HostRecoveryContinuityEvidence, HostRecoveryContinuityRequest,

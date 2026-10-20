@@ -8,7 +8,7 @@ use wholepact_signer::authority_bridge::durable_review_ipc_v3::{
     DurableDeliveryMaterialScopeRefV2, ImportedDurableReviewSessionV3,
     PreparedDurableReviewRecipientV3,
 };
-use wholepact_store::OriginalPrivateRevisionPinV3;
+use wholepact_store::{OriginalPrivateRevisionPinV3, OriginalSourceReadRevisionPinV3};
 
 pub(super) const EXPORT_EVENT_V3: &str = "private_durable_admission_review_disclosed_v3";
 const EXPORT_COMMAND_V3: &str = "private_durable_admission_review_export_v3";
@@ -24,7 +24,7 @@ pub struct PreparedPrivateDurableAdmissionDeliveryV3<'owner, 'source> {
     history: History,
     roster: Roster,
     metadata_pin: OriginalPrivateRevisionPinV3<'owner>,
-    root_pin: OriginalPrivateRevisionPinV3<'owner>,
+    root_pin: OriginalSourceReadRevisionPinV3<'owner>,
     proof_pin: OriginalProofReadRevisionV3<'source>,
     material_scopes: Vec<DurableDeliveryMaterialScopeRefV2>,
 }
@@ -66,7 +66,7 @@ impl<'source> PrivateDurableAdmissionCoordinatorV2<'source> {
         let scope = exact_fixed_v2::retained_review_scope_v3(candidate, receipt, &materials)?;
         let job = &candidate.proof_jobs.first().ok_or_else(damaged)?.job_id;
         let metadata_pin = self.original.engine.store.pin_original_revision_v3(self.original.source.agreement_id()).map_err(crate::store_error)?;
-        let root_pin = self.original.source.engine.store.pin_original_revision_v3(self.original.source.agreement_id()).map_err(crate::store_error)?;
+        let root_pin = self.original.source.engine.store.pin_original_source_read_revision_v3(self.original.source.agreement_id()).map_err(crate::store_error)?;
         let proof_pin = self.original.proof.pin_original_read_revision_v3(&access.principal_id, job, &scope).map_err(original_job_error_v2)?;
         // These actual same-connection observations bracket the full validation.
         let (current, history) = self.check(access, consent)?;
@@ -128,7 +128,7 @@ impl<'source> PrivateDurableAdmissionCoordinatorV2<'source> {
         let scope = exact_fixed_v2::retained_review_scope_v3(candidate, receipt, &materials)?;
         let job = &candidate.proof_jobs.first().ok_or_else(damaged)?.job_id;
         let metadata_pin = self.original.engine.store.pin_original_revision_v3(self.original.source.agreement_id()).map_err(crate::store_error)?;
-        let root_pin = self.original.source.engine.store.pin_original_revision_v3(self.original.source.agreement_id()).map_err(crate::store_error)?;
+        let root_pin = self.original.source.engine.store.pin_original_source_read_revision_v3(self.original.source.agreement_id()).map_err(crate::store_error)?;
         let proof_pin = self.original.proof.pin_original_read_revision_v3(&access.principal_id, job, &scope).map_err(original_job_error_v2)?;
         let (current, history) = self.check(access, consent)?;
         let gate = ProofGate { owner: self, access, consent, proof, material, action: DurableMaterialActionV1::ReadForExactConstruction, cause: None };
@@ -204,7 +204,7 @@ fn check_live_v3(
     consent: &dyn LocalPrivateDurableAdmissionConsentV2, proof: &dyn LocalProofConsent,
     material: &dyn LocalDurableMaterialConsentV1, action: DurableMaterialActionV1,
     checkpoint: &CheckpointScope, roster: &Roster,
-    metadata: &OriginalPrivateRevisionPinV3<'_>, root: &OriginalPrivateRevisionPinV3<'_>,
+    metadata: &OriginalPrivateRevisionPinV3<'_>, root: &OriginalSourceReadRevisionPinV3<'_>,
     proof_pin: &OriginalProofReadRevisionV3<'_>,
 ) -> Result<()> {
     let pins = || -> Result<()> {

@@ -1,16 +1,22 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-20, 03:42 UTC.
+Updated: 2026-10-20, 04:31 UTC.
 
 **CI33 passed the bounded synthetic original-private-workspace completed-fixed SIGKILL/fresh-process read-only reopen path and all listed regressions. Product qualification remains incomplete: no public testnet settlement, restarted acquired financial session, attended GUI reliability, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
 
-## Closed B1 prerequisites passed; native integration pending
+## CI41: native export preview refused; exact source-profile mismatch identified
+
+[Run 39365876217](https://github.com/stanleykosi/pactloom/actions/runs/39365876217), qualifier `c0af7584b332899d54b0b5aa61eabe629a90f292`, implementation `e8df2449225f9956fbe2b8d50f3829f8547de62e`, failed at 04:07:37 UTC. The minimal real-peer integration, 12m09s release build and encrypted bootstrap passed. The native lifecycle ran from 03:59:47 and reported `DeliveryExportPreview / EngineRecoveryRequired`, with 110 of 121 expected child inputs completed. No admission/history or fresh-reader success was established. Producer reaping/group absence, closed/absent root cleanup and empty runtime removal were verified.
+
+Independent source inspection found a deterministic profile mismatch: the closed preparation and fresh-read paths requested an original-private mutation revision pin for the authenticated layered root Store. That root is legitimately opened as a recovered generation; the private-destination pin correctly rejects such sources. The correction separates read-only authenticated source observation from private-destination write pinning. It must retain the maintained generation/template/identity checks and cannot grant mutation capability or weaken the private pin. The corrected all-feature Host/Store release build passed in 5m31s. Both affected encrypted integrations passed: actual layered-source acceptance/change detection (4.481s), and ordinary source observation/private-write separation (0.032s). They preserve the original mutation guard and verify read checks do not alter the retained source. The isolated native rerun remains pending; no unchanged rerun or timer increase is warranted.
+
+## Closed B1 component prerequisites passed
 
 The final reviewed V3 source at checkpoint63 (`a593397dd11085ca3a15a484ffccf12478cb2fcc`) completed the canonical all-feature release no-run build in 9m56s. All 24 selected actual component integrations passed: 15 encrypted Store/proof-store/Signer-journal integrations and 9 maintained-framing/production-observer integrations. Their combined measured execution time was 2.457 seconds after compilation. These are component results, not native admission or full-payment proof.
 
 The bounded-line parser/public projection integration also passed, preserving precise finite failure categories, rejecting private/free-form errors and retaining unknown-commit semantics. The actual CI selector was checked against the compiled ignored-test catalogue without executing it locally. Earlier fixture setup failures and inventory-only corrections are not counted as passes.
 
-Qualification mode is now explicitly `full`, which means the closed B1 native lifecycle entrypoint here, not full financial-payment or testnet qualification. The next isolated run will compile its exact public commit, pass the minimal real-peer gate and encrypted bootstrap, then exercise the genuine native V3 delivery/admission/original-process-death/reopen route. Its result remains pending. No unchanged component suite or older unrelated native fixture is rerun merely to increase counts.
+Qualification mode is now explicitly `full`, which means the closed B1 native lifecycle entrypoint here, not full financial-payment or testnet qualification. The isolated CI41 result is recorded above; the closed native route has not passed. No unchanged component suite or older unrelated native fixture is rerun merely to increase counts.
 
 ## Closed B1 lifecycle V3: source checkpoint, qualification pending
 
@@ -20,9 +26,9 @@ The Host's exact export is followed by a prompt-free fresh authenticated channel
 
 Finite per-attempt observations preserve original frame, source, I/O and explicit rejection causes without changing conservative outcome semantics. The closed native integration also checks old V2 entry eligibility refuses an actual retained V3 history without mutation, once at verified audit adoption rather than on every polling tick.
 
-Initial closed-route compilation passed before the final diagnostic-only refinement. Component validation stopped promptly on two fixture setup defects (private directory mode and too-short idempotency keys); both were corrected without weakening production validators. No encrypted component pass is claimed yet. The final set of 15 encrypted-component and 9 maintained-framing/adapter integrations is pending, followed by the isolated native B1 integration. No full joint payment, financial signing/dispatch, public testnet settlement or attended GUI reliability is claimed by this checkpoint.
+Initial component validation stopped promptly on two fixture setup defects (private directory mode and too-short idempotency keys); both were corrected without weakening production validators. The final 15 encrypted-component and 9 maintained-framing/adapter integrations passed as recorded above; CI41 then exposed the actual layered-root integration mismatch. No full joint payment, financial signing/dispatch, public testnet settlement or attended GUI reliability is claimed by this checkpoint.
 
-The qualification mode remains `origin` until those prerequisites are validated. The full-mode entrypoint now runs actual encrypted bootstrap and the closed B1 integration only, after the minimal origin integration. It does not repeat unchanged pure/source-string suites or unrelated older full-flow fixtures, and explicitly labels B1 as not full financial payment qualification.
+The qualification mode was advanced from `origin` to `full` at checkpoint64 after those component prerequisites passed. The full-mode entrypoint now runs actual encrypted bootstrap and the closed B1 integration only, after the minimal origin integration. It does not repeat unchanged pure/source-string suites or unrelated older full-flow fixtures, and explicitly labels B1 as not full financial payment qualification.
 
 ## CI40: narrow real transport integration passed
 
