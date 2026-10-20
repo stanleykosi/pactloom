@@ -85,6 +85,13 @@ struct FinancialPublicV1 {
     result: &'static str,
     first_failure: Option<FinancialBoundaryV1>,
     boundary_outcome: Option<FinancialOutcomeV1>,
+    source_failure_boundary: Option<&'static str>,
+    source_failure_outcome: Option<&'static str>,
+    failed_child_inputs_completed: Option<usize>,
+    failed_child_inputs_expected: Option<usize>,
+    private_fixed_primary:
+        Option<crate::host::financial::private_durable_fixed_v2::PrivateDiagnosticPrimaryV1>,
+    source_diagnostic_withheld: bool,
     producer_reaped: bool,
     producer_group_absent: bool,
     reader_reaped: bool,
@@ -107,10 +114,16 @@ struct FinancialPublicV1 {
 impl FinancialPublicV1 {
     fn pending() -> Self {
         Self {
-            schema: 1,
+            schema: 2,
             result: "failed",
             first_failure: None,
             boundary_outcome: None,
+            source_failure_boundary: None,
+            source_failure_outcome: None,
+            failed_child_inputs_completed: None,
+            failed_child_inputs_expected: None,
+            private_fixed_primary: None,
+            source_diagnostic_withheld: false,
             producer_reaped: false,
             producer_group_absent: false,
             reader_reaped: false,
@@ -138,9 +151,37 @@ impl FinancialPublicV1 {
         }
         self.result = "failed";
     }
+    fn observe_failed_child(&mut self, child: &PrivateWorkspaceStageResultV1) {
+        // This remains pending private evidence until emit_once applies cleanup.
+        if !child.process.verified() {
+            self.source_diagnostic_withheld = true;
+            return;
+        }
+        if child.expected == 0 || child.expected > 512 || child.next > child.expected {
+            self.source_diagnostic_withheld = true;
+            return;
+        }
+        self.failed_child_inputs_completed = Some(child.next);
+        self.failed_child_inputs_expected = Some(child.expected);
+        if let Some(pair) = child.delivery_first_failure {
+            let (boundary, outcome) = pair.labels();
+            self.source_failure_boundary = Some(boundary);
+            self.source_failure_outcome = Some(outcome);
+        }
+        self.private_fixed_primary = child
+            .private_fixed_diagnostic()
+            .map(|diagnostic| diagnostic.primary.clone());
+        self.source_diagnostic_withheld |= child.diagnostic_withheld();
+    }
     fn verified(&self) -> bool {
         self.first_failure.is_none()
             && self.boundary_outcome.is_none()
+            && self.source_failure_boundary.is_none()
+            && self.source_failure_outcome.is_none()
+            && self.failed_child_inputs_completed.is_none()
+            && self.failed_child_inputs_expected.is_none()
+            && self.private_fixed_primary.is_none()
+            && !self.source_diagnostic_withheld
             && self.producer_reaped
             && self.producer_group_absent
             && self.reader_reaped
@@ -161,6 +202,14 @@ impl FinancialPublicV1 {
             && !self.public_chain_verified
     }
     fn emit_once(mut self) -> io::Result<()> {
+        if self.root_cleanup != "closed_absent" {
+            self.source_failure_boundary = None;
+            self.source_failure_outcome = None;
+            self.failed_child_inputs_completed = None;
+            self.failed_child_inputs_expected = None;
+            self.private_fixed_primary = None;
+            self.source_diagnostic_withheld = true;
+        }
         if self.verified() {
             self.result = "passed";
         } else if self.first_failure.is_none() {
@@ -1059,6 +1108,7 @@ fn run_financial_lifecycle_v1() -> io::Result<()> {
                 .as_ref()
                 .is_some_and(|status| status.signal() == Some(libc::SIGKILL))
         {
+            public.observe_failed_child(&producer);
             let boundary = if public.producer_reaped && public.producer_group_absent {
                 root.as_ref()
                     .and_then(|root| last_financial_stage(root.path()).ok())
@@ -1099,6 +1149,7 @@ fn run_financial_lifecycle_v1() -> io::Result<()> {
                 .is_some_and(|status| status.success())
             || Instant::now() >= deadline
         {
+            public.observe_failed_child(&reader);
             let boundary = if public.reader_reaped && public.reader_group_absent {
                 root.as_ref()
                     .and_then(|root| last_financial_stage(root.path()).ok())

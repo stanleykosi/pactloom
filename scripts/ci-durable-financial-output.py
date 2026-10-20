@@ -5,12 +5,20 @@ No raw child text, transaction material, paths or exception strings are printed.
 This is synthetic native integration, never evidence of public-chain settlement.
 """
 import json
+import importlib.util
 import os
 import pathlib
 import selectors
 import subprocess
 import sys
 import time
+
+_spec = importlib.util.spec_from_file_location(
+    "closed_existing_diagnostics",
+    pathlib.Path(__file__).with_name("ci-synthetic-output.py"),
+)
+_diagnostics = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_diagnostics)
 
 TEST = (
     "host::manual_enrollment::command::roster_publication_v2::"
@@ -36,6 +44,9 @@ FIELDS = PROOFS | {
     "schema", "result", "first_failure", "boundary_outcome", "root_cleanup",
     "completed_extraction_checkpoint_count", "dedicated_dispatch_admissions",
     "synthetic_backend_only", "public_chain_verified",
+    "source_failure_boundary", "source_failure_outcome",
+    "failed_child_inputs_completed", "failed_child_inputs_expected",
+    "private_fixed_primary", "source_diagnostic_withheld",
 }
 
 
@@ -51,7 +62,7 @@ def unique_object(pairs):
 def validate(row):
     if not isinstance(row, dict) or set(row) != FIELDS:
         raise ValueError()
-    if type(row["schema"]) is not int or row["schema"] != 1:
+    if type(row["schema"]) is not int or row["schema"] != 2:
         raise ValueError()
     if row["result"] not in ("passed", "failed"):
         raise ValueError()
@@ -63,13 +74,42 @@ def validate(row):
         raise ValueError()
     if row["root_cleanup"] not in ("closed_absent", "unverified"):
         raise ValueError()
-    for key in PROOFS | {"synthetic_backend_only", "public_chain_verified"}:
+    for key in PROOFS | {"synthetic_backend_only", "public_chain_verified", "source_diagnostic_withheld"}:
         if type(row[key]) is not bool:
             raise ValueError()
     for key, maximum in (("completed_extraction_checkpoint_count", 1), ("dedicated_dispatch_admissions", 2)):
         if type(row[key]) is not int or not 0 <= row[key] <= maximum:
             raise ValueError()
     if not row["synthetic_backend_only"] or row["public_chain_verified"]:
+        raise ValueError()
+    boundary, outcome = row["source_failure_boundary"], row["source_failure_outcome"]
+    if (boundary is None) != (outcome is None):
+        raise ValueError()
+    if boundary is not None:
+        if (
+            type(boundary) is not str or boundary not in _diagnostics.DURABLE_DELIVERY_BOUNDARIES
+            or type(outcome) is not str or outcome not in _diagnostics.OUTCOMES
+            or outcome in ("Begin", "Complete")
+        ):
+            raise ValueError()
+    completed, expected = row["failed_child_inputs_completed"], row["failed_child_inputs_expected"]
+    if (completed is None) != (expected is None):
+        raise ValueError()
+    if completed is not None and (
+        type(completed) is not int or type(expected) is not int
+        or not 0 <= completed <= expected <= 512 or expected == 0
+    ):
+        raise ValueError()
+    primary = row["private_fixed_primary"]
+    if primary is not None:
+        _diagnostics.private_fixed_object(primary, _diagnostics.PRIVATE_FIXED_PRIMARY_FIELDS)
+        _diagnostics.private_fixed_primary(primary)
+    observed = any(value is not None for value in (boundary, outcome, completed, expected, primary))
+    if observed and (
+        row["result"] != "failed" or row["first_failure"] is None
+        or row["root_cleanup"] != "closed_absent"
+        or not row["producer_reaped"] or not row["producer_group_absent"]
+    ):
         raise ValueError()
     if row["result"] == "passed":
         if (
@@ -78,6 +118,7 @@ def validate(row):
             or row["root_cleanup"] != "closed_absent"
             or row["completed_extraction_checkpoint_count"] != 1
             or row["dedicated_dispatch_admissions"] != 2
+            or observed or row["source_diagnostic_withheld"]
         ):
             raise ValueError()
     return row
