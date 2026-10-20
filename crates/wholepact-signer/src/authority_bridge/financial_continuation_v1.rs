@@ -150,23 +150,53 @@ pub(crate) fn reserve_financial_authorization_v1<'a>(
         &approved,
         &request,
     )?;
-    source
-        .check_custody()
+    // This interval begins only after the exact release and request commits.
+    // It ends before the permit mutation; no pin is carried into key use.
+    use crate::account::birth::enrollment::roster_v2::financial_source_v1::FinancialOperationV1;
+    approved.check_current()?;
+    let reserve_pin = source
+        .prepare_financial_operation_source_pin_v1(
+            FinancialOperationV1::Reserve,
+            Some((
+                false,
+                &client.disclosure_descriptor(),
+                &history
+                    .continuation_record()
+                    .terms
+                    .scope
+                    .authorization
+                    .writer_certificate_digest,
+            )),
+        )
         .map_err(|_| BridgeError::Permission)?;
+    if reserve_pin.continuation_request() != history.continuation_request() {
+        return Err(BridgeError::Binding);
+    }
+    let exact_request_digest = request.reservation.request_digest()?;
+    let check_reservation = || -> Result<()> {
+        approved.check_current()?;
+        source
+            .check_financial_operation_source_pin_v1(&reserve_pin, FinancialOperationV1::Reserve)
+            .map_err(|_| BridgeError::Permission)?;
+        if request.reservation.request_digest()? != exact_request_digest
+            || reserve_pin.continuation_request() != history.continuation_request()
+        {
+            return Err(BridgeError::Binding);
+        }
+        approved.check_current()?;
+        Ok(())
+    };
+    check_reservation()?;
     let permit = client.reserve_financial_continuation_v1_checked_until(
         history,
         active,
         request.reservation.clone(),
         deadline,
-        || {
-            source
-                .check_custody()
-                .map_err(|_| wholepact_authority::AuthorityError::Permission)?;
-            approved
-                .check_current()
-                .map_err(|_| wholepact_authority::AuthorityError::Permission)
-        },
+        || check_reservation().map_err(|_| wholepact_authority::AuthorityError::Permission),
     )?;
+    check_reservation()?;
+    drop(check_reservation);
+    drop(reserve_pin);
     journal.retain_financial_permit_v1(
         &mut *source
             .financial_binding()

@@ -11,6 +11,7 @@ use crate::{
     },
 };
 use std::os::unix::fs::PermissionsExt;
+use crate::account::birth::enrollment::roster_v2::financial_source_v1::{FinancialOperationV1 as Operation,FinancialOperationSourcePinV1};
 use wholepact_storage_security::{DatabaseFileIdentity, DatabaseKey, create_encrypted};
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -127,7 +128,8 @@ impl PreparedFinancialWalletV1 {
         action: FinancialWalletActionV1,
     ) -> Result<(FinancialWalletCustodyV1, ReviewInputs)> {
         action.check_source(self.source.identity_digest())?;
-        self.source.check_custody()?;
+        let pin=self.source.prepare_financial_operation_source_pin_v1(Operation::WalletObserve,None)?;
+        action.check_source(self.source.identity_digest())?;
         if action.terms_digest() != self.digest {
             return Err(Error::ReviewMismatch);
         }
@@ -151,7 +153,7 @@ impl PreparedFinancialWalletV1 {
         identity
             .check_current(connection.connection())
             .map_err(|error| { diag::storage(&error); Error::Verification })?;
-        let account = self.source.financial_account()?;
+        let account = self.source.financial_account_for_operation_v1(&pin,Operation::WalletObserve)?;
         let fvk = account.fvk()?;
         let account_id = account.account_id()?;
         diag::at(Stage::WalletInitialize);
@@ -159,7 +161,7 @@ impl PreparedFinancialWalletV1 {
             .map_err(|error| { diag::wallet(&error); Error::RecoveryRequired })?;
         {
             let _held = action.publication_lease()?;
-            self.source.check_custody()?;
+            self.source.check_financial_operation_source_pin_v1(&pin,Operation::WalletObserve)?;
             action.check_source(self.source.identity_digest())?;
             diag::at(Stage::WalletImport);
             wallet
@@ -180,6 +182,7 @@ impl PreparedFinancialWalletV1 {
         diag::at(Stage::WalletStatus);
         let access = Access {
             source: &self.source,
+            pin: &pin,
             action: &action,
             identity: &identity,
             account: controller.account_uuid(),
@@ -255,6 +258,7 @@ impl PreparedFinancialWalletV1 {
     }
 }
 struct Access<'a> {
+    pin: &'a FinancialOperationSourcePinV1,
     source: &'a PreparedOriginalFinancialSourceV1,
     action: &'a FinancialWalletActionV1,
     identity: &'a DatabaseFileIdentity,
@@ -263,7 +267,8 @@ struct Access<'a> {
 }
 impl Access<'_> {
     fn check(&self) -> Result<()> {
-        self.source.check_custody().map_err(|error| { diag::signer(&error); error })?;
+        self.action.check_source(self.source.identity_digest()).map_err(|error| { diag::signer(&error); error })?;
+        self.source.check_financial_operation_source_pin_v1(self.pin,Operation::WalletObserve).map_err(|error| { diag::signer(&error); error })?;
         self.action.check_source(self.source.identity_digest()).map_err(|error| { diag::signer(&error); error })?;
         self.identity
             .check_retained_owner_path()

@@ -19,6 +19,9 @@ pub(crate) use return_pin::FinancialReturnJournalPinV1;
 #[path = "financial_admission_pin_v1.rs"]
 mod admission_pin;
 pub(crate) use admission_pin::FinancialAdmissionJournalPinV1;
+#[path = "financial_operation_pin_v1.rs"]
+mod operation_pin;
+pub(crate) use operation_pin::FinancialOperationJournalPinV1;
 #[path = "financial_session_v1.rs"]
 mod session;
 pub(crate) use session::{ApprovedFinancialSpendConsentV1, PreparedFinancialSpendV1};

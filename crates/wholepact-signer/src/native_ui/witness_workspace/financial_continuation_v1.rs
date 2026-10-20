@@ -4,6 +4,7 @@ use super::*;
 use crate::native_ui::runtime::financial_v1::diagnostics::{self as diag, FinancialNativeStageV1 as Stage};
 use crate::account::birth::enrollment::roster_v2::financial_source_v1::PreparedOriginalFinancialSourceV1;
 use crate::consent_journal::PendingFinancialContinuationAdmissionV1;
+use crate::account::birth::enrollment::roster_v2::financial_source_v1::FinancialOperationV1 as Operation;
 use crate::native_ui::financial_authority_v1::{FinancialAdmitActionV1, FinancialReadLeaseV1};
 use std::time::Instant;
 use wholepact_authority::{AccountSnapshot, ReconciledAuthorityHistory};
@@ -144,23 +145,21 @@ impl FinancialWitnessCustodyV1 {
         })
     }
     pub(in crate::native_ui) fn financial_history(&self,source:&PreparedOriginalFinancialSourceV1,read:&FinancialReadLeaseV1,deadline:Instant)->Result<wholepact_authority::durable_financial_continuation_v1::AuthenticatedFinancialContinuationHistoryV1>{
-        source.check_read(read)?;
-        self.check(source)?;
-        let exact = source.continuation_request()?;
+        read.check_source(source.identity_digest())?;
+        let disclosure=self.client.disclosure_descriptor();
+        let pin=source.prepare_financial_operation_source_pin_v1(Operation::HistoryRead,Some((self.owner,&disclosure,&self.certificate_digest)))?;
+        let check=|| -> Result<()> {
+            read.check_source(source.identity_digest())?;
+            source.check_financial_operation_source_pin_v1(&pin,Operation::HistoryRead)?;
+            read.check_source(source.identity_digest())
+        };
+        check()?;
+        let exact=pin.continuation_request();
         diag::at(Stage::FinancialHistoryRead);
-        let history = self
-            .client
-            .financial_continuation_history_v1_checked_until(&exact.operation_id, deadline, || {
-                source
-                    .check_read(read)
-                    .and_then(|_| self.check(source))
-                    .map_err(|error| { diag::signer(&error); wholepact_authority::AuthorityError::Permission })
-            })
-            .map_err(|error| { diag::authority(&error); Error::Uncertain })?;
-        if history.continuation_request() != &exact {
-            return Err(Error::ReviewMismatch);
-        }
-        source.check_read(read)?;
+        let history=self.client.financial_continuation_history_v1_checked_until(&exact.operation_id,deadline,||check().map_err(|error|{diag::signer(&error);wholepact_authority::AuthorityError::Permission}))
+            .map_err(|error|{diag::authority(&error);Error::Uncertain})?;
+        if history.continuation_request()!=exact {return Err(Error::ReviewMismatch);}
+        check()?;
         Ok(history)
     }
     pub(in crate::native_ui) fn acquire(
@@ -170,10 +169,17 @@ impl FinancialWitnessCustodyV1 {
         action: crate::native_ui::financial_authority_v1::FinancialAcquireActionV1,
         deadline: Instant,
     ) -> Result<wholepact_authority::WriterSessionReceipt> {
-        self.check(source)?;
         action.check_source(source.identity_digest())?;
+        let disclosure=self.client.disclosure_descriptor();
+        let pin=source.prepare_financial_operation_source_pin_v1(Operation::Acquire,Some((self.owner,&disclosure,&self.certificate_digest)))?;
+        let check=|| -> Result<()> {
+            action.check_source(source.identity_digest())?;
+            source.check_financial_operation_source_pin_v1(&pin,Operation::Acquire)?;
+            action.check_source(source.identity_digest())
+        };
+        check()?;
         if self.owner
-            || history.continuation_request() != &source.continuation_request()?
+            || history.continuation_request() != pin.continuation_request()
             || action.terms_digest() != financial_acquire_digest(history)?
         {
             return Err(Error::ReviewMismatch);
@@ -188,9 +194,7 @@ impl FinancialWitnessCustodyV1 {
                 &history.continuation_request().operation_id,
                 deadline,
                 || {
-                    source
-                        .check_custody()
-                        .and_then(|_| action.check_source(source.identity_digest()))
+                    check()
                         .map_err(|error| { diag::signer(&error); wholepact_authority::AuthorityError::Permission })
                 },
             )
@@ -202,14 +206,13 @@ impl FinancialWitnessCustodyV1 {
                 &history.continuation_request().operation_id,
                 deadline,
                 || {
-                    source
-                        .check_custody()
-                        .and_then(|_| action.check_source(source.identity_digest()))
+                    check()
                         .map_err(|error| { diag::signer(&error); wholepact_authority::AuthorityError::Permission })
                 },
             );
-        result
-            .map_err(|error| { diag::authority(&error); Error::Uncertain })
+        let result=result.map_err(|error| { diag::authority(&error); Error::Uncertain })?;
+        check()?;
+        Ok(result)
     }
     pub(in crate::native_ui) fn activate(
         &self,
@@ -219,10 +222,17 @@ impl FinancialWitnessCustodyV1 {
         action: crate::native_ui::financial_authority_v1::FinancialActivationActionV1,
         deadline: Instant,
     ) -> Result<AccountSnapshot> {
-        self.check(source)?;
         action.check_source(source.identity_digest())?;
+        let disclosure=self.client.disclosure_descriptor();
+        let pin=source.prepare_financial_operation_source_pin_v1(Operation::Activate,Some((self.owner,&disclosure,&self.certificate_digest)))?;
+        let check=|| -> Result<()> {
+            action.check_source(source.identity_digest())?;
+            source.check_financial_operation_source_pin_v1(&pin,Operation::Activate)?;
+            action.check_source(source.identity_digest())
+        };
+        check()?;
         if !self.owner
-            || history.continuation_request() != &source.continuation_request()?
+            || history.continuation_request() != pin.continuation_request()
             || action.terms_digest() != financial_activation_digest(history, request)?
         {
             return Err(Error::ReviewMismatch);
@@ -238,9 +248,7 @@ impl FinancialWitnessCustodyV1 {
                 request,
                 deadline,
                 || {
-                    source
-                        .check_custody()
-                        .and_then(|_| action.check_source(source.identity_digest()))
+                    check()
                         .map_err(|error| { diag::signer(&error); wholepact_authority::AuthorityError::Permission })
                 },
             )
@@ -253,14 +261,13 @@ impl FinancialWitnessCustodyV1 {
                 request,
                 deadline,
                 || {
-                    source
-                        .check_custody()
-                        .and_then(|_| action.check_source(source.identity_digest()))
+                    check()
                         .map_err(|error| { diag::signer(&error); wholepact_authority::AuthorityError::Permission })
                 },
             );
-        result
-            .map_err(|error| { diag::authority(&error); Error::Uncertain })
+        let result=result.map_err(|error| { diag::authority(&error); Error::Uncertain })?;
+        check()?;
+        Ok(result)
     }
 }
 pub(in crate::native_ui) fn financial_acquire_digest(
@@ -304,9 +311,16 @@ impl FinancialWitnessCustodyV1 {
         history:&wholepact_authority::durable_financial_continuation_v1::AuthenticatedFinancialContinuationHistoryV1,
         deadline: Instant,
     ) -> Result<wholepact_authority::AuthenticatedWriterSession> {
-        self.check(source)?;
-        source.check_read(read)?;
-        if self.owner || history.continuation_request() != &source.continuation_request()? {
+        read.check_source(source.identity_digest())?;
+        let disclosure=self.client.disclosure_descriptor();
+        let pin=source.prepare_financial_operation_source_pin_v1(Operation::VerifyActive,Some((self.owner,&disclosure,&self.certificate_digest)))?;
+        let check=|| -> Result<()> {
+            read.check_source(source.identity_digest())?;
+            source.check_financial_operation_source_pin_v1(&pin,Operation::VerifyActive)?;
+            read.check_source(source.identity_digest())
+        };
+        check()?;
+        if self.owner || history.continuation_request() != pin.continuation_request() {
             return Err(Error::ReviewMismatch);
         }
         diag::at(Stage::AuthorityVerifyActive);
@@ -319,9 +333,7 @@ impl FinancialWitnessCustodyV1 {
                 &history.continuation_request().operation_id,
                 deadline,
                 || {
-                    source
-                        .check_read(read)
-                        .and_then(|_| self.check(source))
+                    check()
                         .map_err(|error| { diag::signer(&error); wholepact_authority::AuthorityError::Permission })
                 },
             )
@@ -333,14 +345,13 @@ impl FinancialWitnessCustodyV1 {
                 &history.continuation_request().operation_id,
                 deadline,
                 || {
-                    source
-                        .check_read(read)
-                        .and_then(|_| self.check(source))
+                    check()
                         .map_err(|error| { diag::signer(&error); wholepact_authority::AuthorityError::Permission })
                 },
             );
-        result
-            .map_err(|error| { diag::authority(&error); Error::Uncertain })
+        let result=result.map_err(|error| { diag::authority(&error); Error::Uncertain })?;
+        check()?;
+        Ok(result)
     }
     pub(in crate::native_ui) fn sign(
         &self,
