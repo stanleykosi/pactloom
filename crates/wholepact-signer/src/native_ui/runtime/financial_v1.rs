@@ -121,6 +121,10 @@ pub(super) struct FinancialRuntimeV1 {
     revocations: Vec<FinancialNativeRevocationV1>,
     failure: Option<Error>,
     diagnostic: Option<FinancialNativeDiagnosticV1>,
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    progress: diagnostics::FinancialNativeProgressObserverV1,
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    next_job: Option<u32>,
     epoch: u64,
 }
 impl FinancialRuntimeV1 {
@@ -132,9 +136,17 @@ impl FinancialRuntimeV1 {
         if self.job.is_some() {
             return Err(Error::Unavailable);
         }
+        #[cfg(feature = "synthetic-born-joined-qualification")]
+        let progress = {
+            let id = self.next_job;
+            self.next_job = id.and_then(|id| id.checked_add(1));
+            self.progress.start(id, stage)
+        };
         let (tx, rx) = mpsc::channel();
         let worker = std::thread::spawn(move || {
             let scope = diagnostics::Scope::begin(stage);
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            scope.attach_progress(progress);
             let result = work();
             if let Err(error) = &result {
                 diagnostics::signer(error);
@@ -183,6 +195,15 @@ fn deadline(c: &Context) -> Instant {
 }
 
 impl NativeRuntime {
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub(in crate::native_ui) fn financial_progress_observer_v1(
+        &self,
+    ) -> Option<diagnostics::FinancialNativeProgressObserverV1> {
+        self.financial_v1
+            .as_ref()
+            .map(|runtime| runtime.progress.clone())
+    }
+
     pub(in crate::native_ui) fn financial_phase_v1(&self) -> Option<FinancialPhaseV1> {
         self.financial_v1.as_ref().map(|f| f.phase)
     }
@@ -295,6 +316,10 @@ impl NativeRuntime {
             revocations: Vec::new(),
             failure: None,
             diagnostic: None,
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            progress: diagnostics::FinancialNativeProgressObserverV1::new(),
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            next_job: Some(1),
             epoch,
         };
         runtime.spawn(Stage::SourceOpen, move || {

@@ -46,7 +46,7 @@ FIELDS = PROOFS | {
     "synthetic_backend_only", "public_chain_verified",
     "source_failure_boundary", "source_failure_outcome",
     "failed_child_inputs_completed", "failed_child_inputs_expected",
-    "private_fixed_primary", "source_diagnostic_withheld", "transport_failure", "financial_diagnostic",
+    "private_fixed_primary", "source_diagnostic_withheld", "transport_failure", "financial_diagnostic", "progress_failure",
 }
 
 READER_BOUNDARIES = frozenset("CompletedReopen DispatchAdmission PartialAdmissionReconciliation SavedTransactionDispatch ReaderReap".split())
@@ -89,6 +89,42 @@ def validate_authority_call(value):
             if type(v) is not int or not 0 <= v <= (1000000 if key.endswith("_calls") else 600000000):
                 raise ValueError()
     return value
+
+PROGRESS_PHASES = "SourceOpen ReadContinue Continue Admission ReadAcquire Acquire ReadActivate Activate Wallet ReadSign Sign".split()
+PROGRESS_WINDOWS = [(owner, phase) for owner in (1, 2) for phase in PROGRESS_PHASES] + [(0,"PairHistory"),(1,"Return"),(2,"Return"),(0,"FinalRetention"),(0,"Shutdown")]
+PROGRESS_CALLS = frozenset("Begin BeginFinancial ReadRequest WitnessStart ReadHistory BindHistory AwaitReturn WaitPhase Approve SendAdmission WitnessFinish StartServer DropServer ReadPeer Intake Preserve Complete Shutdown".split())
+# These are last-observed native stages, never a claim of current execution or cause.
+PROGRESS_NATIVE_STAGES = frozenset("SourceOpen HistoryRead Continue Admit Acquire Activate WalletPrepare WalletObserve SignPrepare Sign ReturnPrepare HostPreparedWait ReturnApprove ReturnServe ReviewStage ResultRequest AuthorityHistoryRead FinancialHistoryRead AuthorityAdmit AuthorityAcquire AuthorityActivate AuthorityVerifyActive WalletChain WalletBirthday WalletInitialize WalletImport WalletController WalletVerify WalletStatus WalletMaterial WalletSynchronize WalletTicket WalletReconcile".split())
+def validate_progress_failure(record):
+    if type(record) is not dict or set(record) != {"reason","last"}:
+        raise ValueError()
+    if type(record["reason"]) is not str or record["reason"] not in {"PhaseDeadline","InvalidProgress","GlobalDeadline"}:
+        raise ValueError()
+    last = record["last"]
+    if last is None:
+        if record["reason"] == "PhaseDeadline":
+            raise ValueError()
+        return
+    if type(last) is not dict or set(last) != {"window","owner","phase","call","last_native"}:
+        raise ValueError()
+    window = last["window"]
+    if type(window) is not int or not 0 <= window < len(PROGRESS_WINDOWS):
+        raise ValueError()
+    if type(last["owner"]) is not int or type(last["phase"]) is not str or (last["owner"],last["phase"]) != PROGRESS_WINDOWS[window]:
+        raise ValueError()
+    if type(last["call"]) is not str or last["call"] not in PROGRESS_CALLS:
+        raise ValueError()
+    job = last["last_native"]
+    if job is not None:
+        if type(job) is not dict or set(job) != {"owner","job_id","sequence","stage"}:
+            raise ValueError()
+        if type(job["owner"]) is not int or job["owner"] not in (1,2):
+            raise ValueError()
+        for key in ("job_id","sequence"):
+            if type(job[key]) is not int or not 1 <= job[key] <= (16777215 if key == "sequence" else 4294967295):
+                raise ValueError()
+        if type(job["stage"]) is not str or job["stage"] not in PROGRESS_NATIVE_STAGES:
+            raise ValueError()
 
 def validate_financial_diagnostic(record):
     if type(record) is not dict or set(record) != {"schema", "stage", "component", "error_class", "commit_state", "current_timing", "authority_call"}:
@@ -197,7 +233,12 @@ def validate(row):
     financial = row["financial_diagnostic"]
     if financial is not None:
         validate_financial_diagnostic(financial)
-    observed = any(value is not None for value in (boundary, outcome, completed, expected, primary, transport, financial))
+    progress = row["progress_failure"]
+    if progress is not None:
+        validate_progress_failure(progress)
+        if row["first_failure"] in READER_BOUNDARIES:
+            raise ValueError()
+    observed = any(value is not None for value in (boundary, outcome, completed, expected, primary, transport, financial, progress))
     if observed and (
         row["result"] != "failed" or row["first_failure"] is None
         or row["root_cleanup"] != "closed_absent"
