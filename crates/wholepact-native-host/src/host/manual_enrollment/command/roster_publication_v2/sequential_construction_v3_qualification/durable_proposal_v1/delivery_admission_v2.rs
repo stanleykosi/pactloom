@@ -22,10 +22,9 @@ use wholepact_signer::authority_bridge::{
         DurableConstructionHistoryRequestV1, DurableConstructionRedisclosureRequestV1,
         DurableConstructionRedisclosureSourceV1, DurableConstructionScopeV1,
     },
-    durable_delivery_admission_ipc_v2::{
-        DurableDeliveryAdmissionStatusV2, DurableDeliveryHistoryRequestV2,
-    },
     durable_review_ipc_v1::DurableReviewDeliveryRequestV1,
+    durable_review_ipc_v3::RecipientIntentV3,
+    durable_delivery_admission_ipc_v3::{DurableDeliveryAdmissionStatusV3},
     ipc::OriginalHistoryClient,
 };
 use worker::{JoinedSignerCommandV1 as C, JoinedSignerReplyV1 as R};
@@ -541,8 +540,8 @@ fn monotonic_now_ns() -> io::Result<u64> {
 fn committed_count(root: &Path) -> io::Result<&'static str> {
     let mut committed = Vec::new();
     for name in OWNER_FILES {
-        match read_record::<DurableDeliveryAdmissionStatusV2>(root, name) {
-            Ok(status) if status.validate().is_ok() && status.witness_committed => {
+        match read_record::<DurableDeliveryAdmissionStatusV3>(root, name) {
+            Ok(status) if status.verified_audit().is_ok() => {
                 committed.push(status)
             }
             Ok(_) => return Err(invalid()),
@@ -551,9 +550,9 @@ fn committed_count(root: &Path) -> io::Result<&'static str> {
         }
     }
     if committed.len() == 2
-        && (committed[0].scope.authorization.identity.account_id
-            == committed[1].scope.authorization.identity.account_id
-            || committed[0].scope.delivery != committed[1].scope.delivery)
+        && (committed[0].verified_audit().map_err(|_| invalid())?.scope.authorization.identity.account_id
+            == committed[1].verified_audit().map_err(|_| invalid())?.scope.authorization.identity.account_id
+            || committed[0].verified_audit().map_err(|_| invalid())?.scope.delivery != committed[1].verified_audit().map_err(|_| invalid())?.scope.delivery)
     {
         return Err(invalid());
     }
@@ -567,7 +566,7 @@ fn committed_count(root: &Path) -> io::Result<&'static str> {
 
 #[test]
 #[ignore = "Explicit approved isolated Linux synthetic runner only; actual native two-owner admission and process-death reopening"]
-fn durable_delivery_native_admission_reopens_original_after_process_death() {
+fn durable_delivery_native_v3_admission_reopens_original_after_process_death() {
     run_two_processes_v2().expect("same original fixed/material source and exact two-owner prospective admission survive verified death and independent original reopening; all financial actions denied");
 }
 fn run_two_processes_v2() -> io::Result<()> {
@@ -839,7 +838,7 @@ fn source_status_inputs(inputs: &mut Vec<Input<'static>>) {
         "Inspect original fixed-prefix and bounded admission-export history metadata",
     ));
     inputs.push(review(
-        "Read exact original delivery-admission fixed source and append-only export history.",
+        "Read, independently verify, and locally display the exact saved ORIGINAL fixed proof summary, BOTH original material scope metadata, and strict V2/V3 append-only export history.",
     ));
 }
 fn producer_inputs() -> Vec<Input<'static>> {
@@ -865,14 +864,14 @@ fn producer_inputs() -> Vec<Input<'static>> {
             "Inspect original fixed-prefix and bounded admission-export history metadata",
         ));
         inputs.push(review(
-            "Approve LOCAL exact-byte preparation for original delivery.",
+            "Approve LOCAL exact-byte preparation for closed original delivery.",
         ));
         inputs.push(review("Request one native-approved redisclosure of this exact original material to this current paired recipient. No capture, reconstruction or validity renewal."));
         inputs.push(review(
-            "Inspect fresh original delivery metadata for the actual new recipient.",
+            "Inspect exact closed original export metadata for the actually prepared native recipient.",
         ));
         inputs.push(review(
-            "Approve exact original delivery export and prospective admission request.",
+            "EXPORT EXACT ORIGINAL DELIVERY V3",
         ));
     }
     source_status_inputs(&mut inputs);
@@ -909,11 +908,12 @@ struct ReadyControlV2 {
     export_history_digest: String,
     originals: [worker::DeliveryReopenV2; 2],
     witness_reopen: Vec<u8>,
-    admissions: [DurableDeliveryAdmissionStatusV2; 2],
+    admissions: [DurableDeliveryAdmissionStatusV3; 2],
+    recipient_intents: [RecipientIntentV3; 2],
 }
 impl ReadyControlV2 {
     fn validate(&self, root: &Path) -> io::Result<()> {
-        if self.schema != 2
+        if self.schema != 3
             || self.witness_reopen.is_empty()
             || self.witness_reopen.len() > 256 * 1024
             || !hash(&self.fixed_prefix_digest)
@@ -954,25 +954,20 @@ impl ReadyControlV2 {
         {
             return Err(invalid());
         }
-        for (original, admission) in self.originals.iter().zip(&self.admissions) {
-            if original.version != 2
-                || original.account_id != admission.scope.authorization.identity.account_id
-                || original.owner_setup_json.is_empty()
-                || original.owner_setup_json.len() > 64 * 1024
-                || !admission.witness_committed
-                || admission.version != 2
-                || admission.validate().is_err()
-                || admission.scope.accepted_manifest_ref != admission.original_accepted_manifest_ref
-            {
-                return Err(invalid());
-            }
+        for ((original, admission), intent) in self.originals.iter().zip(&self.admissions).zip(&self.recipient_intents) {
+            let audit = admission.verified_audit().map_err(|_| invalid())?;
+            if original.version != 3 || original.account_id != audit.scope.authorization.identity.account_id
+                || original.owner_setup_json.is_empty() || original.owner_setup_json.len() > 64*1024
+                || audit.scope.accepted_manifest_ref != audit.original_accepted_manifest_ref
+                || intent.validate().is_err() || admission.intent_digest != intent.digest().map_err(|_| invalid())?
+                || original.account_id != intent.account_id
+                || audit.scope.delivery != intent.delivery
+            { return Err(invalid()); }
         }
-        if self.admissions[0].scope.authorization.identity.account_id
-            == self.admissions[1].scope.authorization.identity.account_id
-            || self.admissions[0].scope.delivery != self.admissions[1].scope.delivery
-        {
-            return Err(invalid());
-        }
+        let first = self.admissions[0].verified_audit().map_err(|_| invalid())?;
+        let second = self.admissions[1].verified_audit().map_err(|_| invalid())?;
+        if first.scope.authorization.identity.account_id == second.scope.authorization.identity.account_id
+            || first.scope.delivery != second.scope.delivery { return Err(invalid()); }
         Ok(())
     }
     fn write_once(&self, root: &Path) -> io::Result<()> {
@@ -1284,6 +1279,7 @@ pub(super) fn continue_completed_original(
         };
             let mut admissions = Vec::with_capacity(2);
             let mut preserved = Vec::with_capacity(2);
+            let mut recipient_intents = Vec::with_capacity(2);
             original
                 .signers
                 .send(C::DropUnselectedAnchor(0))
@@ -1291,8 +1287,9 @@ pub(super) fn continue_completed_original(
             done(&original.signers, 0)?;
             for index in 1..=2 {
                 let account = &original.born[index];
-                let (client, exported) = at(B::DeliverySourceExport, || {
-                    host.private_original_delivery_export_v2(&workspace, &choices, || {
+                let mut import_complete = None;
+                let export_result = at(B::DeliverySourceExport, || {
+                    host.private_original_delivery_export_v3(&workspace, &choices, |prepared_fixed, payload_digest, payload_bytes, delivery, materials| {
                 original
                     .signers
                     .send(C::OpenDelivery(index, proposal.clone()))
@@ -1385,97 +1382,90 @@ pub(super) fn continue_completed_original(
                     current_disclosure: Some(current_disclosure),
                     proposal_binding: identity.proposal_binding.clone(),
                 };
-                original
-                    .signers
-                    .send(C::PollDeliveryImport(
-                        index,
-                        request.clone(),
-                        identity.clone(),
-                    ))
-                    .map_err(worker_error)?;
-                        Ok((client, request))
+                if prepared_fixed != &identity { return Err(Error::Authentication); }
+                let prepared_complete = Arc::new(AtomicBool::new(false));
+                original.signers.send(C::PrepareClosedDelivery(index, request.clone(), prepared_fixed.clone(), payload_digest.into(), payload_bytes, delivery.clone(), materials.to_vec(), prepared_complete.clone())).map_err(worker_error)?;
+                let prepared_result = client.prepare_closed_recipient_v3(request, prepared_fixed.clone(), payload_digest.into(), payload_bytes, delivery.clone(), materials.to_vec()).map_err(bridge_error);
+                prepared_complete.store(true, Ordering::Release);
+                let prepared_stopped = done(&original.signers, index);
+                let prepared = prepared_result?;
+                prepared_stopped?;
+                // Keep the real closed controller responsive through Host review,
+                // activation, exact receive, and actual proof verification.
+                let complete = Arc::new(AtomicBool::new(false));
+                original.signers.send(C::PollClosedDeliveryImport(index, prepared_fixed.clone(), complete.clone())).map_err(worker_error)?;
+                import_complete = Some(complete);
+                Ok(prepared)
                     })
-                })?;
-                done(&original.signers, index)?;
+                });
+                let import_stopped = if let Some(complete) = import_complete {
+                    complete.store(true, Ordering::Release);
+                    done(&original.signers, index)
+                } else { Ok(()) };
+                let (client, exported) = export_result?;
+                import_stopped?;
                 // The original independent witness serves the pristine bootstrap
                 // only while the signer derives its genuine pending native review.
                 let history = original
                     .witness
                     .serve_original_delivery_bootstrap_history_v2(&account.account_id)
                     .map_err(|error| witness_error(B::DeliveryHistoricalRead, error))?;
-                original
-                    .signers
-                    .send(C::PollDeliveryAdmission(index, exported.request.clone()))
-                    .map_err(worker_error)?;
-                let status =
-                    std::thread::scope(|scope| -> Result<DurableDeliveryAdmissionStatusV2> {
-                        let exchange = scope.spawn(|| {
-                            client.request_durable_delivery_admission_v2(&exported.request)
-                        });
-                        let request = match original.signers.receive().map_err(worker_error)? {
-                            R::DurableAdmissionRequest {
-                                index: actual,
-                                request,
-                            } if actual == index => request,
-                            _ => return Err(Error::Authentication),
-                        };
-                        drop(history);
-                        at(B::DeliveryNativeAdmission, || {
-                            original
-                                .witness
-                                .start_exact_durable_delivery_admission_v2(
-                                    &account.account_id,
-                                    &request,
-                                )
-                                .map_err(|error| witness_error(B::DeliveryNativeAdmission, error))
-                        })?;
-                        original
-                            .signers
-                            .send(C::ApproveDelivery(index))
-                            .map_err(worker_error)?;
-                        done(&original.signers, index)?;
-                        original
-                            .signers
-                            .send(C::AwaitDeliveryResponse(index))
-                            .map_err(worker_error)?;
-                        at(B::DeliveryNativeAdmission, || {
-                            original
-                                .witness
-                                .finish_exact_durable_delivery_admission_v2()
-                                .map_err(|error| witness_error(B::DeliveryNativeAdmission, error))
-                        })?;
-                        done(&original.signers, index)?;
-                        // The owner response is an inert unaudited intermediate,
-                        // never a verified status. Establish the real original
-                        // read-only listener BEFORE invoking the production
-                        // one-time history continuation. The original admission
-                        // IPC stream stays held throughout, with its old cutoff.
-                        let committed_history = original
-                            .witness
-                            .serve_committed_durable_delivery_history_v2(&request.operation_id)
-                            .map_err(|error| witness_error(B::DeliveryHistoricalRead, error))?;
-                        original
-                            .signers
-                            .send(C::AwaitDeliveryAudit(index))
-                            .map_err(worker_error)?;
-                        let native = match original.signers.receive().map_err(worker_error)? {
-                            R::DeliveryStatus {
-                                index: actual,
-                                status,
-                            } if actual == index => status,
-                            _ => return Err(Error::Authentication),
-                        };
-                        let returned = exchange
-                            .join()
-                            .map_err(|_| Error::Authentication)?
-                            .map_err(bridge_error)?;
-                        drop(committed_history);
-                        if native != returned {
-                            return Err(Error::Authentication);
-                        }
-                        Ok(returned)
-                    })?;
-                crate::host::financial::durable_delivery_admission_v2::validate_admission_result_v2(&exported,&status)?;
+                original.signers.send(C::PollClosedDeliveryAdmission(index)).map_err(worker_error)?;
+                let status = std::thread::scope(|scope| -> Result<DurableDeliveryAdmissionStatusV3> {
+                    let response_complete = Arc::new(AtomicBool::new(false));
+                    let exchange_complete = response_complete.clone();
+                    let exchange = scope.spawn(move || {
+                        let result = (|| {
+                            let mut pending = client.request_admission_retained_v3()?;
+                            let status = pending.await_status_v3()?;
+                            Ok::<_, wholepact_signer::authority_bridge::BridgeError>((pending, status))
+                        })();
+                        exchange_complete.store(true, Ordering::Release);
+                        result
+                    });
+                    let request = match original.signers.receive().map_err(worker_error)? {
+                        R::DurableAdmissionRequest { index: actual, request } if actual == index => request,
+                        _ => return Err(Error::Authentication),
+                    };
+                    drop(history);
+                    // Signer review is conditional and completes before Witness
+                    // arms its unchanged native/CAS action. No request/intent has
+                    // been sent. Only connection-refused discovery may wait.
+                    original.signers.send(C::ApproveClosedDelivery(index)).map_err(worker_error)?;
+                    done(&original.signers, index)?;
+                    original.signers.send(C::AwaitClosedDeliveryResponse(index, response_complete)).map_err(worker_error)?;
+                    at(B::DeliveryNativeAdmission, || original.witness.start_exact_durable_delivery_admission_v2(&account.account_id, &request).map_err(|error| witness_error(B::DeliveryNativeAdmission, error)))?;
+                    at(B::DeliveryNativeAdmission, || original.witness.finish_exact_durable_delivery_admission_v2().map_err(|error| witness_error(B::DeliveryNativeAdmission, error)))?;
+                    let native_pending = match original.signers.receive().map_err(worker_error)? {
+                        R::ClosedDeliveryStatus { index: actual, status } if actual == index => status,
+                        _ => return Err(Error::Authentication),
+                    };
+                    let (pending, returned_pending) = exchange.join().map_err(|_| Error::Authentication)?.map_err(bridge_error)?;
+                    if native_pending != returned_pending || returned_pending.request != request || returned_pending.verified_audit().is_ok() {
+                        return Err(Error::Authentication);
+                    }
+                    // Drop the transport/action phase before a distinct fresh
+                    // read-only native review. Its inert retained operation is
+                    // never admission authority or a resend instruction.
+                    let committed_history = original.witness.serve_committed_durable_delivery_history_v2(&request.operation_id).map_err(|error| witness_error(B::DeliveryHistoricalRead, error))?;
+                    let audit_complete = Arc::new(AtomicBool::new(false));
+                    original.signers.send(C::AwaitClosedDeliveryAudit(index, audit_complete.clone())).map_err(worker_error)?;
+                    let returned = pending.read_original_status_v3().map_err(bridge_error);
+                    audit_complete.store(true, Ordering::Release);
+                    let native_result = original.signers.receive().map_err(worker_error);
+                    let returned = returned?;
+                    let native = match native_result? {
+                        R::ClosedDeliveryStatus { index: actual, status } if actual == index => status,
+                        _ => return Err(Error::Authentication),
+                    };
+                    drop(committed_history);
+                    if native != returned { return Err(Error::Authentication); }
+                    returned.verified_audit().map_err(bridge_error)?;
+                    Ok(returned)
+                })?;
+                let audited = status.verified_audit().map_err(bridge_error)?;
+                crate::host::financial::durable_delivery_admission_v2::validate_admission_result_v3(&exported, audited)?;
+                if status.intent_digest != exported.export_scope.recipient.digest().map_err(bridge_error)? { return Err(Error::Authentication); }
                 write_record(&scenario, OWNER_FILES[index - 1], &status)?;
                 at(B::DeliveryUnsupportedAudit, || {
                     original
@@ -1488,7 +1478,6 @@ pub(super) fn continue_completed_original(
                     .send(C::AuditDeliveryDenials(index))
                     .map_err(worker_error)?;
                 done(&original.signers, index)?;
-                drop(client);
                 original
                     .signers
                     .send(C::PreserveDelivery(index))
@@ -1500,21 +1489,22 @@ pub(super) fn continue_completed_original(
                     } if actual == index => original,
                     _ => return Err(Error::Authentication),
                 };
+                recipient_intents.push(exported.export_scope.recipient.clone());
                 admissions.push(status);
                 preserved.push(selector);
             }
             let status = at(B::DeliveryHistoricalRead, || {
-                host.private_original_delivery_status_v2(&workspace)
+                host.private_original_delivery_status_v3(&workspace)
             })?;
-            if digest(&status.fixed)? != fixed_prefix_digest
-                || status.export_count != 2
-                || !status.fixed.proof_verified
+            if digest(&status.source.fixed)? != fixed_prefix_digest
+                || status.source.export_count != 2
+                || !status.source.fixed.proof_verified
             {
                 return Err(Error::Authentication);
             }
             at(B::DeliveryUnsupportedAudit, || audit_host_denials(&host))?;
             let full_fixed_status_digest = digest(&status)?;
-            let export_history_digest = status.export_history_digest.clone();
+            let export_history_digest = status.source.export_history_digest.clone();
             drop(status);
             original.signers.shutdown().map_err(worker_error)?;
             let witness_reopen = original
@@ -1522,7 +1512,7 @@ pub(super) fn continue_completed_original(
                 .preserve_durable_delivery_originals_v2()
                 .map_err(|error| witness_error(B::DeliveryHistoricalRead, error))?;
             let ready = ReadyControlV2 {
-                schema: 2,
+                schema: 3,
                 profile,
                 workspace,
                 financial,
@@ -1532,6 +1522,7 @@ pub(super) fn continue_completed_original(
                 originals: preserved.try_into().map_err(|_| Error::Authentication)?,
                 witness_reopen,
                 admissions: admissions.try_into().map_err(|_| Error::Authentication)?,
+                recipient_intents: recipient_intents.try_into().map_err(|_| Error::Authentication)?,
             };
             if Instant::now() >= private_fixed_v2::child_original_cutoff()? {
                 return Err(Error::Permission);
@@ -1584,52 +1575,59 @@ pub(in crate::host::manual_enrollment::command::roster_publication_v2::sequentia
             // Positive current-source equality is established ONLY by the genuine
             // original fixed/material reader while the original ceilings still hold.
             let before = at(B::DeliveryHistoricalRead, || {
-                host.private_original_delivery_status_v2(&ready.workspace)
+                host.private_original_delivery_status_v3(&ready.workspace)
             })?;
-            if before.export_count != 2
-                || !before.fixed.proof_verified
-                || before.fixed.authorization_allowed
-                || digest(&before.fixed)? != ready.fixed_prefix_digest
+            if before.source.export_count != 2
+                || !before.source.fixed.proof_verified
+                || before.source.fixed.authorization_allowed
+                || digest(&before.source.fixed)? != ready.fixed_prefix_digest
                 || digest(&before)? != ready.full_fixed_status_digest
-                || before.export_history_digest != ready.export_history_digest
+                || before.source.export_history_digest != ready.export_history_digest
             {
                 return Err(Error::Authentication);
             }
             let mut witness = at(B::DeliveryOriginalReopen, || {
                 wholepact_authority::native_witness_owner::EphemeralNativeWitnessV1::reopen_durable_delivery_originals_v2(&ready.witness_reopen).map_err(|error|witness_error(B::DeliveryOriginalReopen,error))
             })?;
-            let signers = worker::JoinedSignerWorkerV1::reopen_delivery(ready.originals.clone())
-                .map_err(worker_error)?;
+            let signers = worker::JoinedSignerWorkerV1::reopen_closed_delivery(ready.originals.clone(), ready.recipient_intents.clone()).map_err(worker_error)?;
             for index in 1..=2 {
                 let expected = &ready.admissions[index - 1];
                 expected.validate().map_err(bridge_error)?;
-                signers.send(C::DeliveryPeer(index)).map_err(worker_error)?;
-                let client = pair_owner(&signers, index, true)?;
-                signers
-                    .send(C::ConfigureDeliveryWitness(index))
-                    .map_err(worker_error)?;
-                done(&signers, index)?;
+                let expected_audit = expected.verified_audit().map_err(bridge_error)?;
                 let server = witness
-                    .serve_committed_durable_delivery_history_v2(&expected.request.operation_id)
+                    .serve_committed_durable_delivery_history_v2(&expected_audit.request.operation_id)
                     .map_err(|error| witness_error(B::DeliveryHistoricalRead, error))?;
-                let stop = Arc::new(AtomicBool::new(false));
-                signers
-                    .send(C::ServeDeliveryData(index, stop.clone()))
-                    .map_err(worker_error)?;
-                let observed = client.durable_delivery_admission_history_v2(
-                    &DurableDeliveryHistoryRequestV2 {
-                        authorization_id: expected.scope.authorization.authorization_id.clone(),
-                    },
-                );
-                stop.store(true, Ordering::Release);
-                let stopped = done(&signers, index);
+                // A fresh production READ-ONLY opener authenticates the exact
+                // original V3 journal/files. These selectors issue no grant and
+                // this route cannot import or send another OwnerControl.
+                signers.send(C::ReopenClosedDeliveryAudit(index)).map_err(worker_error)?;
+                let peer = match signers.receive().map_err(worker_error)? {
+                    R::Peer(peer) => peer,
+                    _ => return Err(Error::Authentication),
+                };
+                let wholepact_authority::OwnerControl::AdmitDurablePaymentWithDeliveryV2 { record } = &expected_audit.request.control else { return Err(Error::Authentication); };
+                let history_request = wholepact_signer::authority_bridge::durable_delivery_admission_ipc_v3::DurableDeliveryHistoryRequestV3 {
+                    intent_digest: expected.intent_digest.clone(),
+                    authorization_id: record.scope.authorization.authorization_id.clone(),
+                };
+                let audit_complete = Arc::new(AtomicBool::new(false));
+                signers.send(C::AwaitClosedDeliveryAudit(index, audit_complete.clone())).map_err(worker_error)?;
+                let received = (|| {
+                    let client = wholepact_signer::authority_bridge::durable_delivery_admission_ipc_v3::ReopenedDurableDeliveryHistoryClientV3::connect(
+                        peer.provider, &peer.endpoint, ready.recipient_intents[index - 1].clone(), history_request,
+                    ).map_err(bridge_error)?;
+                    client.read_original_status_v3().map_err(bridge_error)
+                })();
+                audit_complete.store(true, Ordering::Release);
+                let native_result = signers.receive().map_err(worker_error);
+                let observed = received?;
+                let native = match native_result? {
+                    R::ClosedDeliveryStatus { index: actual, status } if actual == index => status,
+                    _ => return Err(Error::Authentication),
+                };
+                if observed != native { return Err(Error::Authentication); }
                 drop(server);
-                let observed =
-                    observed.map_err(|error| bridge_error_at(B::DeliveryHistoricalRead, error))?;
-                stopped?;
-                observed
-                    .validate()
-                    .map_err(|error| bridge_error_at(B::DeliveryHistoricalRead, error))?;
+                observed.verified_audit().map_err(bridge_error)?;
                 // Compare the ENTIRE original scope, request, local intent/FKs and
                 // authenticated complete history. No freshly accepted manifest or
                 // remote-only hash can substitute for these original source joins.
@@ -1647,7 +1645,6 @@ pub(in crate::host::manual_enrollment::command::roster_publication_v2::sequentia
                     .send(C::AuditDeliveryDenials(index))
                     .map_err(worker_error)?;
                 done(&signers, index)?;
-                drop(client);
                 signers
                     .send(C::CloseDeliveryReader(index))
                     .map_err(worker_error)?;
@@ -1657,18 +1654,18 @@ pub(in crate::host::manual_enrollment::command::roster_publication_v2::sequentia
             drop(witness);
             at(B::DeliveryUnsupportedAudit, || audit_host_denials(&host))?;
             let after = at(B::DeliveryHistoricalRead, || {
-                host.private_original_delivery_status_v2(&ready.workspace)
+                host.private_original_delivery_status_v3(&ready.workspace)
             })?;
             if Instant::now() >= original_cutoff || digest(&before)? != digest(&after)? {
                 return Err(Error::Authentication);
             }
             let completed = ReaderCompletionV2 {
                 schema: 2,
-                fixed_verified: after.fixed.proof_verified,
-                exact_fixed_prefix_preserved: digest(&after.fixed)? == ready.fixed_prefix_digest,
-                exact_export_history_preserved: after.export_history_digest
+                fixed_verified: after.source.fixed.proof_verified,
+                exact_fixed_prefix_preserved: digest(&after.source.fixed)? == ready.fixed_prefix_digest,
+                exact_export_history_preserved: after.source.export_history_digest
                     == ready.export_history_digest
-                    && after.export_count == 2,
+                    && after.source.export_count == 2,
                 exact_original_scopes_preserved: true,
                 exact_original_intents_preserved: true,
                 authenticated_histories_verified: true,
@@ -2468,10 +2465,10 @@ mod tests {
             .collect();
         let expected = [
             "Inspect original fixed-prefix and bounded admission-export history metadata",
-            "Approve LOCAL exact-byte preparation for original delivery.",
+            "Approve LOCAL exact-byte preparation for closed original delivery.",
             "Request one native-approved redisclosure of this exact original material to this current paired recipient. No capture, reconstruction or validity renewal.",
-            "Inspect fresh original delivery metadata for the actual new recipient.",
-            "Approve exact original delivery export and prospective admission request.",
+            "Inspect exact closed original export metadata for the actually prepared native recipient.",
+            "EXPORT EXACT ORIGINAL DELIVERY V3",
         ];
         assert_eq!(
             details
@@ -2487,13 +2484,13 @@ mod tests {
             .split("#[cfg(test)]")
             .next()
             .unwrap();
-        let helper = source.find("private_original_delivery_export_v2(").unwrap();
+        let helper = source.find("private_original_delivery_export_v3(").unwrap();
         let open = source[helper..]
             .find("send(C::OpenDelivery(index, proposal.clone()))")
             .unwrap()
             + helper;
-        let pending = source[open..].find("send(C::PollDeliveryImport(").unwrap() + open;
-        let returned = source[pending..].find("Ok((client, request))").unwrap() + pending;
+        let pending = source[open..].find("send(C::PrepareClosedDelivery(").unwrap() + open;
+        let returned = source[pending..].find("Ok(prepared)").unwrap() + pending;
         assert!(helper < open && open < pending && pending < returned);
         assert_eq!(
             source
@@ -2503,7 +2500,7 @@ mod tests {
         );
         assert_eq!(
             source
-                .matches("private_original_delivery_export_v2(")
+                .matches("private_original_delivery_export_v3(")
                 .count(),
             1
         );
@@ -2536,12 +2533,12 @@ mod tests {
         assert!(!local.contains("ArmRedisclosure("));
         assert!(local.contains("PollDeliveryRedisclosure("));
         assert!(local.contains("current_disclosure: Some(current_disclosure)"));
-        let commit = local.find("send(C::AwaitDeliveryResponse(index))").unwrap();
+        let commit = local.find("send(C::AwaitClosedDeliveryResponse(index,").unwrap();
         let listener = local[commit..]
             .find("serve_committed_durable_delivery_history_v2")
             .unwrap();
         let audit = local[commit..]
-            .find("send(C::AwaitDeliveryAudit(index))")
+            .find("send(C::AwaitClosedDeliveryAudit(index,")
             .unwrap();
         assert!(listener < audit);
         assert!(!local.contains("ReconcileDurableWriter("));

@@ -339,6 +339,7 @@ mod issuance {
                 storage::check_account(&tx, &account)?;
                 storage::verify_schema(&tx)?;
                 current_rows(&tx, &intent, &lease)?;
+                financial_admission_intents::require_no_v3(&tx)?;
                 if let Some(old) = read(
                     &tx,
                     &record(&intent.request)?
@@ -389,6 +390,7 @@ mod issuance {
             let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
             storage::check_account(&tx, &r.account)?;
             current_rows(&tx, &r.intent, &lease)?;
+            financial_admission_intents::require_no_v3(&tx)?;
             check_current()?; // deny-only; MUST NOT reacquire journal/session fences.
             let auth = &record(&r.intent.request)?
                 .scope
@@ -509,6 +511,7 @@ mod tests {
     }
     struct Fixture {
         journal: SignerConsentJournal,
+        source: Arc<SignerJournalSourceOwner>,
         session: SignerConsentSession,
         enrollment: AccountEnrollmentRecord,
         manifest: AcceptedManifestRecord,
@@ -677,6 +680,7 @@ mod tests {
             finish_request(&mut request, &disclosure);
             Self {
                 journal,
+                source,
                 session,
                 enrollment,
                 manifest,
@@ -1223,4 +1227,64 @@ mod tests {
             assert!(changed.validate().is_err());
         }
     }
+    #[test]
+    fn encrypted_v2_issuers_refuse_v3_under_another_authorization_without_rewrite() {
+        let f = Fixture::new();
+        // Obtain the real V2 approval first, then append a malformed V3-tagged
+        // row through the actual encrypted handle. This tests strict staging
+        // and the effect-time deny guard, not construction of a valid V3 issuer.
+        let approved = f.approved();
+        let raw = "{\"version\":3}";
+        {
+            let c = f.journal.connection.lock().unwrap();
+            c.execute("INSERT INTO signer_durable_payment_admission_intents(operation_id,authorization_id,request_digest,enrollment_ref,manifest_ref,payload) VALUES(?1,?2,?3,?4,?5,?6)", params![
+                "synthetic-other-v3-operation", "synthetic-other-v3-authorization", "ef".repeat(32),
+                f.enrollment.reference(), f.manifest.reference(), raw
+            ]).unwrap();
+        }
+        assert!(matches!(f.session.prepare_durable_delivery_admission_intent_v2(
+            &f.journal, f.request.clone(), f.disclosure.clone(), &f.owner,
+            f.enrollment.reference(), f.manifest.reference(),
+        ), Err(JournalError::InvalidBinding)));
+        assert!(matches!(f.journal.retain_durable_delivery_admission_intent_v2(approved, || Ok(())), Err(JournalError::RecoveryRequired)));
+        assert_eq!(f.count(), 1);
+        let c = f.journal.connection.lock().unwrap();
+        let preserved: String = c.query_row("SELECT payload FROM signer_durable_payment_admission_intents", [], |r| r.get(0)).unwrap();
+        assert_eq!(preserved, raw);
+        assert!(financial_admission_intents::read_all(&c).is_err());
+        assert!(financial_admission_intents::require_no_v2(&c).is_err());
+    }
+
+    #[test]
+    fn encrypted_version_dispatch_never_falls_back_or_changes_original_v2() {
+        for raw in ["{\"version\":3}", "{\"version\":77}", "{\"version\":2,\"version\":3}"] {
+            let f = Fixture::new();
+            let first = f.retain();
+            let before = first.history_digest().unwrap();
+            let c = f.journal.connection.lock().unwrap();
+            c.execute("INSERT INTO signer_durable_payment_admission_intents(operation_id,authorization_id,request_digest,enrollment_ref,manifest_ref,payload) VALUES(?1,?2,?3,?4,?5,?6)", params![
+                "synthetic-second-operation", "synthetic-second-authorization", "ef".repeat(32),
+                f.enrollment.reference(), f.manifest.reference(), raw
+            ]).unwrap();
+            assert!(financial_admission_intents::read_all(&c).is_err());
+            assert!(financial_admission_intents::require_no_v3(&c).is_err());
+            let own = read(&c, &record(first.request()).unwrap().scope.authorization.authorization_id).unwrap().unwrap();
+            assert_eq!(own.history_digest().unwrap(), before);
+            let genesis = account_use_storage::inspect(&c, &f.request.account_id).unwrap().genesis().unwrap().clone();
+            drop(c);
+            assert!(f.journal.check_durable_delivery_entry_v2(&genesis).is_err());
+            assert!(f.journal.check_durable_delivery_entry_v3(&genesis).is_err());
+            let path = f._dir.path().join("intent.sqlite");
+            f.session.invalidate().unwrap();
+            drop(f.session);
+            drop(f.journal);
+            // Drop the original handles and reopen the encrypted original. The
+            // strict readers must refuse, not reinterpret the old receipt or
+            // repair/migrate the incompatible suffix.
+            let key = wholepact_storage_security::DatabaseKey::from_bytes([131; 32]);
+            assert!(SignerConsentJournal::open_durable_delivery_entry_v3(&path, &key, &genesis, &f.source).is_err());
+            assert!(SignerConsentJournal::open_durable_delivery_entry_v2(&path, &key, &genesis, &f.source).is_err());
+        }
+    }
+
 }

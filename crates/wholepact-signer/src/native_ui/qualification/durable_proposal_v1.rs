@@ -4446,3 +4446,214 @@ mod delivery_import_wait_v2_tests {
         assert!(runtime.contains("check_current_under_preconstruction_lease"));
     }
 }
+
+/// The same genuine original fixture after the production V3 transition has
+/// consumed its setup entry. This wrapper owns cleanup, never native authority.
+/// In particular none of the V2 fixture currentness methods are used here.
+pub(in crate::native_ui) struct ClosedDeliveryNativeFixtureV3 {
+    inner: DurableDeliveryNativeFixtureV2,
+}
+impl DurableDeliveryNativeFixtureV2 {
+    pub(in crate::native_ui) fn poll_closed_receive_review_v3(
+        &mut self,
+        request: &DurableReviewDeliveryRequestV1,
+        fixed: &FixedProposalIdentityV1,
+        payload_digest: &str,
+        payload_bytes: u64,
+        delivery: &wholepact_authority::durable_delivery_scope_v2::DurableDeliveryPlanV2,
+        material_scopes: &[wholepact_authority::durable_delivery_scope_v2::DurableDeliveryMaterialScopeRefV2],
+    ) -> Result<bool> {
+        use super::durable_delivery_v3::DurableDeliveryPhaseV3 as Phase;
+        self.runtime.poll(EPOCH);
+        if let Some(error) = self.runtime.take_durable_delivery_v3_failure() {
+            return Err(error);
+        }
+        match self.runtime.durable_delivery_v3_phase() {
+            Some(Phase::ReceiveReview) => {
+                let actual = self.runtime.durable_delivery_v3_preparation()
+                    .ok_or(Error::ReviewMismatch)?;
+                if &actual.request != request || &actual.fixed != fixed
+                    || actual.payload_digest != payload_digest || actual.payload_bytes != payload_bytes
+                    || &actual.delivery != delivery || actual.material_scopes != material_scopes
+                    || actual.fixed.manifest_digest != self.proposal.manifest_digest()
+                    || actual.fixed.proposal_digest != self.proposal.proposal_digest()
+                { return Err(Error::ReviewMismatch); }
+                // The real pending native operation verifies focus, epoch and
+                // confirmation. The fixture does not create a decision or grant.
+                approve(&mut self.runtime)?;
+                Ok(false)
+            }
+            Some(Phase::Ready) => {
+                self.runtime.check_durable_delivery_v3()?;
+                self.runtime.require_closed_delivery_controls_v3()?;
+                let intent = self.runtime.durable_delivery_v3_intent()
+                    .ok_or(Error::ReviewMismatch)?;
+                if &intent.request != request || &intent.fixed != fixed
+                    || intent.payload_digest != payload_digest || intent.payload_bytes != payload_bytes
+                    || &intent.delivery != delivery || intent.material_scopes != material_scopes
+                    || intent.account_id != self.scope.account_id
+                    || intent.participant_id != self.scope.participant_id
+                { return Err(Error::ReviewMismatch); }
+                Ok(true)
+            }
+            None | Some(Phase::PreparingRead) => Ok(false),
+            _ => Err(Error::ReviewMismatch),
+        }
+    }
+    pub(in crate::native_ui) fn into_closed_delivery_v3(self) -> Result<ClosedDeliveryNativeFixtureV3> {
+        use super::durable_delivery_v3::DurableDeliveryPhaseV3 as Phase;
+        self.runtime.check_durable_delivery_v3()?;
+        if self.runtime.durable_delivery_v3_phase() != Some(Phase::Ready)
+            || self.runtime.open.is_some()
+        { return Err(Error::ReviewMismatch); }
+        Ok(ClosedDeliveryNativeFixtureV3 { inner: self })
+    }
+}
+impl ClosedDeliveryNativeFixtureV3 {
+    /// Inert selectors identify original files and a retained exact V3 row.
+    /// The production opener performs the actual KDF, original-only validation,
+    /// then a new read-only decision. No prior native owner is reconstructed.
+    pub(in crate::native_ui) fn open_history_existing(
+        selector: DurableDeliveryReopenSelectorV2,
+        prior: crate::authority_bridge::durable_review_ipc_v3::RecipientIntentV3,
+    ) -> Result<Self> {
+        if selector.version != 3 || selector.account_id != prior.account_id || !selector.root.is_absolute() {
+            return Err(Error::ReviewMismatch);
+        }
+        prior.validate().map_err(|_| Error::ReviewMismatch)?;
+        let proposal = Proposal::validate(selector.proposal).map_err(|_| Error::Verification)?;
+        require_plain_two_owner_manifest(&proposal, &selector.account_id)?;
+        if prior.fixed.proposal_digest != proposal.proposal_digest() || prior.fixed.manifest_digest != proposal.manifest_digest() {
+            return Err(Error::ReviewMismatch);
+        }
+        let inventory = original_inventory(&selector.root)?;
+        let authorization_id = prior.delivery.owners.iter().find(|owner| owner.account_id == prior.account_id && owner.participant_id == prior.participant_id)
+            .ok_or(Error::ReviewMismatch)?.original_authorization_id.clone();
+        let history = crate::authority_bridge::durable_delivery_admission_ipc_v3::DurableDeliveryHistoryRequestV3 {
+            intent_digest: prior.digest().map_err(|_| Error::ReviewMismatch)?, authorization_id,
+        };
+        let scope = PairScope { account_id: prior.account_id.clone(), agreement_id: prior.agreement_id.clone(), participant_id: prior.participant_id.clone(), manifest_digest: prior.manifest_digest.clone(), history_read: true, authorization_export: false, preconstruction_export: false };
+        let mut runtime = NativeRuntime::new(None);
+        runtime.root = selector.root.to_str().ok_or(Error::InvalidData)?.into();
+        runtime.password = Zeroizing::new(crate::native_ui::birth_workspace::born_roster_v3::SYNTHETIC_PENDING_PASSWORD.into());
+        runtime.owner_witness_setup = Zeroizing::new(selector.owner_setup_json.clone());
+        runtime.begin_durable_delivery_history_entry_v3(true, EPOCH, prior, history)?;
+        Ok(Self { inner: DurableDeliveryNativeFixtureV2 {
+            runtime, original: None, root: selector.root, proposal, scope,
+            budget: selector.aggregate_budget_zatoshis, entry: String::new(), paired: false,
+            original_inventory: inventory, owner_setup: Zeroizing::new(selector.owner_setup_json),
+        } })
+    }
+    pub(in crate::native_ui) fn provider(&self) -> Result<wholepact_signer_origin::InstalledSignerProvider> {
+        self.inner.runtime.durable_delivery_v3_provider()
+    }
+    pub(in crate::native_ui) fn endpoint(&self) -> Result<std::path::PathBuf> {
+        self.inner.runtime.durable_delivery_v3_endpoint()
+    }
+    pub(in crate::native_ui) fn deadline(&self) -> Result<Instant> {
+        self.inner.runtime.check_durable_delivery_v3()?;
+        self.inner.runtime.durable_delivery_v3_deadline().ok_or(Error::Locked)
+    }
+    pub(in crate::native_ui) fn poll(&mut self) -> Result<()> {
+        self.inner.runtime.poll(EPOCH);
+        if let Some(error) = self.inner.runtime.take_durable_delivery_v3_failure() {
+            return Err(error);
+        }
+        self.inner.runtime.check_durable_delivery_v3()
+    }
+    pub(in crate::native_ui) fn poll_verified_import(&mut self, fixed: &FixedProposalIdentityV1) -> Result<bool> {
+        use super::durable_delivery_v3::DurableDeliveryPhaseV3 as Phase;
+        self.poll()?;
+        let intent = self.inner.runtime.durable_delivery_v3_intent().ok_or(Error::ReviewMismatch)?;
+        if &intent.fixed != fixed { return Err(Error::ReviewMismatch); }
+        match self.inner.runtime.durable_delivery_v3_phase() {
+            Some(Phase::Ready | Phase::Receiving | Phase::Verifying) => Ok(false),
+            Some(Phase::ImportedVerified) => {
+                self.inner.runtime.require_closed_delivery_controls_v3()?;
+                Ok(true)
+            },
+            _ => Err(Error::ReviewMismatch),
+        }
+    }
+    pub(in crate::native_ui) fn poll_admission_review(
+        &mut self,
+    ) -> Result<Option<wholepact_authority::OwnerControlRequest>> {
+        use super::durable_delivery_v3::DurableDeliveryPhaseV3 as Phase;
+        self.poll()?;
+        match self.inner.runtime.durable_delivery_v3_phase() {
+            Some(Phase::ImportedVerified) => Ok(None),
+            Some(Phase::AdmissionReview) => Ok(Some(self.inner.runtime
+                .durable_delivery_v3_pending_owner_request().ok_or(Error::ReviewMismatch)?.clone())),
+            _ => Err(Error::ReviewMismatch),
+        }
+    }
+    pub(in crate::native_ui) fn approve_conditional_admission(&mut self) -> Result<()> {
+        use super::durable_delivery_v3::DurableDeliveryPhaseV3 as Phase;
+        self.inner.runtime.check_durable_delivery_v3()?;
+        if self.inner.runtime.durable_delivery_v3_phase() != Some(Phase::AdmissionReview) {
+            return Err(Error::ReviewMismatch);
+        }
+        approve(&mut self.inner.runtime)
+    }
+    pub(in crate::native_ui) fn admission_pending(&mut self) -> Result<bool> {
+        use super::durable_delivery_v3::DurableDeliveryPhaseV3 as Phase;
+        self.poll()?;
+        match self.inner.runtime.durable_delivery_v3_phase() {
+            Some(Phase::AwaitingWitnessReady | Phase::Admitting) => Ok(false),
+            Some(Phase::AwaitingAudit) => Ok(true),
+            _ => Err(Error::ReviewMismatch),
+        }
+    }
+    pub(in crate::native_ui) fn begin_history_audit(&mut self) -> Result<()> {
+        self.inner.runtime.begin_durable_delivery_history_audit_v3(EPOCH)
+    }
+    pub(in crate::native_ui) fn poll_history_audit(&mut self) -> Result<bool> {
+        use super::durable_delivery_v3::DurableDeliveryPhaseV3 as Phase;
+        self.inner.runtime.poll(EPOCH);
+        if let Some(error) = self.inner.runtime.take_durable_delivery_v3_failure() { return Err(error); }
+        if self.inner.runtime.is_closed_history_review_v3() {
+            // Only the actual pending fresh history or exact new-recipient
+            // decision is consumed. HistoryReview may remain during async work.
+            approve(&mut self.inner.runtime)?;
+            return Ok(false);
+        }
+        let complete = self.inner.runtime.durable_delivery_v3_phase() == Some(Phase::Complete);
+        if complete { self.inner.runtime.require_closed_delivery_controls_v3()?; }
+        Ok(complete)
+    }
+    pub(in crate::native_ui) fn status(&self) -> Result<crate::authority_bridge::durable_delivery_admission_ipc_v3::DurableDeliveryAdmissionStatusV3> {
+        self.inner.runtime.durable_delivery_v3_status().cloned().ok_or(Error::Unavailable)
+    }
+    pub(in crate::native_ui) fn require_financial_routes_denied(&mut self) -> Result<()> {
+        self.inner.runtime.require_durable_delivery_financial_denied_v3()
+    }
+    pub(in crate::native_ui) fn close_existing(mut self) -> Result<()> {
+        self.inner.drain_close()?;
+        if self.inner.runtime.durable_delivery_v3_phase().is_some() { return Err(Error::Uncertain); }
+        if original_inventory(&self.inner.root)? != self.inner.original_inventory {
+            return Err(Error::ReviewMismatch);
+        }
+        Ok(())
+    }
+    pub(in crate::native_ui) fn close_preserving_originals(mut self) -> Result<DurableDeliveryReopenSelectorV2> {
+        let mut selector = DurableDeliveryReopenSelectorV2 {
+            version: 3, root: self.inner.root.clone(), proposal: self.inner.proposal.input().clone(),
+            aggregate_budget_zatoshis: self.inner.budget, account_id: self.inner.scope.account_id.clone(),
+            owner_setup_json: self.inner.owner_setup.to_string(), original_directory_preserved: false,
+        };
+        if selector.owner_setup_json.is_empty() || serde_json::to_vec(&selector).map_err(|_| Error::InvalidData)?.len() > 256*1024 {
+            return Err(Error::InvalidData);
+        }
+        self.inner.drain_close()?;
+        if self.inner.runtime.durable_delivery_v3_phase().is_some() { return Err(Error::Uncertain); }
+        if original_inventory(&self.inner.root)? != self.inner.original_inventory { return Err(Error::ReviewMismatch); }
+        let original = self.inner.original.take().ok_or(Error::Unavailable)?;
+        if let Some(directory) = Arc::into_inner(original.temporary) {
+            let kept = directory.keep();
+            if !self.inner.root.starts_with(&kept) || self.inner.root == kept { return Err(Error::ReviewMismatch); }
+            selector.original_directory_preserved = true;
+        }
+        drop(original.credentials);
+        Ok(selector)
+    }
+}

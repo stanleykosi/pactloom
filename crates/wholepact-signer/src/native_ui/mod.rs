@@ -64,6 +64,8 @@ pub(crate) use authority::DormantNativeLifetime;
 #[cfg(feature = "authority-signing")]
 pub(crate) use authority::PendingAccountNativeAuthority;
 pub(crate) use authority::{NativeAuthority, NativeAuthorityBinding, NativeDecision};
+#[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+pub(crate) use authority::{receive_review_digest_v3, PreparedReceiveAndViewAuthorityV3, ConditionalDurableAdmissionV3, ExactDurableActionV3};
 pub(crate) use runtime::AuthenticatedPairing;
 mod pairing;
 mod state;
@@ -264,3 +266,6 @@ pub(crate) use born_manual_roster_v2::born_manual_roster::continuation_fixture::
 
 #[cfg(all(feature = "durable-proposal", target_os = "linux"))]
 pub(crate) mod durable_proposal_v1;
+
+#[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+pub(crate) use runtime::durable_delivery_v3::VerifiedImportV3;

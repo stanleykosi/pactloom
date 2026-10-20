@@ -674,23 +674,43 @@ pub(crate) fn validate_durable_delivery_policy_v2(
     let original = entry
         .original_recipient_policy_export_v2()
         .map_err(|_| BridgeError::Binding)?;
+    validate_prepared_delivery_policy_v3(
+        entry.record(), &original, entry.account(), enrollment, manifest, fixed, inputs, outputs,
+    )
+}
+/// Pure policy validation shared by independently checked original-source
+/// owners. This function issues no source, native or transport permission.
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "pending-birth-owner-signing",
+    feature = "native-ui",
+    target_os = "linux"
+))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn validate_prepared_delivery_policy_v3(
+    record: &crate::account::birth::enrollment::roster_v2::BornManualRosterEnrollmentRecordV2,
+    original: &crate::account::birth::recipient_policy_v2::OriginalRecipientPolicyExportV2,
+    account: &DedicatedAccount,
+    enrollment: &crate::consent_journal::AccountEnrollmentRecord,
+    manifest: &crate::consent_journal::AcceptedManifestRecord,
+    fixed: &wholepact_protocol::durable_proposal_v1::VerifiedFixedProposal,
+    inputs: &[wholepact_protocol::construction::InputActionMapping],
+    outputs: &[wholepact_protocol::construction::OutputActionMapping],
+) -> Result<String> {
     let binding =
         crate::consent_journal::DurableBornPolicyBindingV1::from_original_stable_source_v2(
-            entry.record(),
+            record,
             enrollment,
             manifest,
             fixed.identity(),
-            &original,
+            original,
         )?;
     durable_delivery_stable_returns_v2::verify_stable_returns_v2(
         fixed,
         inputs,
         outputs,
-        &entry.account().fvk().map_err(|_| BridgeError::Binding)?,
-        &entry
-            .account()
-            .account_id()
-            .map_err(|_| BridgeError::Binding)?,
+        &account.fvk().map_err(|_| BridgeError::Binding)?,
+        &account.account_id().map_err(|_| BridgeError::Binding)?,
         &binding.stable_return_requirements_v2(manifest)?,
     )?;
     // The export is validated original history. Its private preimage never
@@ -716,3 +736,8 @@ pub(crate) fn validate_durable_delivery_policy_v2(
         .digest()
         .map_err(|_| BridgeError::Binding)
 }
+
+#[cfg(all(feature = "durable-proposal", target_os = "linux"))]
+pub mod durable_review_ipc_v3;
+#[cfg(all(feature = "durable-proposal", target_os = "linux"))]
+pub mod durable_delivery_admission_ipc_v3;

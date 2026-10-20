@@ -5,8 +5,10 @@
 //! exports, authenticates a person, or grants distribution permission. Encryption
 //! is confidentiality at rest, not clone detection or authority-journal freshness.
 
+mod original_read_revision_v3;
 mod policy;
 mod status_snapshot;
+pub use original_read_revision_v3::OriginalProofReadRevisionV3;
 pub use status_snapshot::ProofStatusSnapshot;
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};

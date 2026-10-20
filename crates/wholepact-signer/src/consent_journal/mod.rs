@@ -106,6 +106,12 @@ pub(crate) mod named_recipient_records;
 mod offline_receipts;
 mod recovery_migration;
 mod storage;
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "pending-birth-owner-signing",
+    target_os = "linux"
+))]
+pub(crate) use storage::PreparedDeliveryJournalRevisionV3;
 pub use offline_history::{
     OfflineHistoryInventory, OfflineLocalAdmissionHistory, OfflineLocalKeyUseHistory,
     OfflineMinimalAdmissionHistoryStatement, OfflineNativeConsentHistoryReceipt,
@@ -416,3 +422,12 @@ pub(crate) use durable_delivery_admission_intent_v2::RetainedDurableDeliveryAdmi
 pub(crate) use durable_delivery_admission_intent_v2::{
     ApprovedDurableDeliveryAdmissionIntentV2, PreparedDurableDeliveryAdmissionIntentV2,
 };
+
+/// Preserve the original accepted-manifest receipt/reference validation before
+/// the closed delivery controller interprets its retained proposal.
+#[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing", target_os = "linux"))]
+pub(crate) fn validated_delivery_manifest_proposal_v3(
+    manifest: &AcceptedManifestRecord,
+) -> Result<wholepact_core::Proposal> {
+    manifest.proposal()
+}

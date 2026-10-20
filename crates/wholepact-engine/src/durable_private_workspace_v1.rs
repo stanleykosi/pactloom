@@ -20,6 +20,7 @@ use wholepact_store::private_workspace_origin_v1::PrivateWorkspaceOriginV1;
 mod delivery_admission_v2;
 mod exact_fixed_v2;
 pub use delivery_admission_v2::{
+    PreparedPrivateDurableAdmissionDeliveryV3, ClosedPrivateDurableAdmissionReviewV3, PrivateDurableAdmissionDeliveryV3, PrivateDurableAdmissionStatusV3,
     LocalPrivateDurableAdmissionConsentV2, PrivateDurableAdmissionCoordinatorV2,
     PrivateDurableAdmissionDeliveryV2, PrivateDurableAdmissionInspectionV2,
     PrivateDurableAdmissionStatusV2,

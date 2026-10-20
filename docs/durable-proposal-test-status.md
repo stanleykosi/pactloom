@@ -1,8 +1,26 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-20, 01:34 UTC.
+Updated: 2026-10-20, 03:29 UTC.
 
 **CI33 passed the bounded synthetic original-private-workspace completed-fixed SIGKILL/fresh-process read-only reopen path and all listed regressions. Product qualification remains incomplete: no public testnet settlement, restarted acquired financial session, attended GUI reliability, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
+
+## Closed B1 lifecycle V3: source checkpoint, qualification pending
+
+This source checkpoint implements a separately versioned original-source delivery/admission route. Encrypted immutable material and source-revision observations are separate from explicit revocable read/receive consent and fresh exact action permission. Preparation and human reviews precede the immediate transport phase. The original native/setup grants are revoked and drained rather than renewed; actual original-file custody, strict lineage and independently authenticated Witness expected-head CAS remain mandatory.
+
+The Host's exact export is followed by a prompt-free fresh authenticated channel to the same prepared process. Exposure is retained before private bytes. Actual verified import, not a byte receipt, is required for prospective admission. Conditional Signer admission review precedes the Witness's final native decision; exact metadata-only readiness and the eventual unchanged mutation use the same authenticated TLS stream, with retained local intent before mutation bytes. Lost outcomes stay pending/uncertain and reconcile under fresh read-only original-history permission, without resubmission. Normal Signer GUI and Host entrypoints reach the same historical opener exercised by qualification. Existing financial execution routes remain denied.
+
+Finite per-attempt observations preserve original frame, source, I/O and explicit rejection causes without changing conservative outcome semantics. The closed native integration also checks old V2 entry eligibility refuses an actual retained V3 history without mutation, once at verified audit adoption rather than on every polling tick.
+
+Initial closed-route compilation passed before the final diagnostic-only refinement. Component validation stopped promptly on two fixture setup defects (private directory mode and too-short idempotency keys); both were corrected without weakening production validators. No encrypted component pass is claimed yet. The final set of 15 encrypted-component and 9 maintained-framing/adapter integrations is pending, followed by the isolated native B1 integration. No full joint payment, financial signing/dispatch, public testnet settlement or attended GUI reliability is claimed by this checkpoint.
+
+The qualification mode remains `origin` until those prerequisites are validated. The full-mode entrypoint now runs actual encrypted bootstrap and the closed B1 integration only, after the minimal origin integration. It does not repeat unchanged pure/source-string suites or unrelated older full-flow fixtures, and explicitly labels B1 as not full financial payment qualification.
+
+## CI40: narrow real transport integration passed
+
+[Run 39354382837](https://github.com/stanleykosi/pactloom/actions/runs/39354382837), qualifier `156f823f66a96210f11e956906b39843056b78cf`, source `df9da095c8816ccda5d04320d198b594532e0f81`, passed at 01:37:08 UTC. The fresh minimal dependency graph compiled in 18.06 seconds. All nine real-process transport cases completed in approximately 0.37 seconds; every case reported its expected finite reader/writer result and verified direct-child/runtime cleanup. Observed failure cases correctly distinguished EOF, absolute deadline, missing credentials, wrong-peer credentials, exited peer, cancellation and BrokenPipe. This is production framing/kernel-peer integration evidence, not a helper-only simulation.
+
+The full native payment step was explicitly skipped in `origin` mode. This pass does not establish prepared source/privacy consent, independent admission, signing, durable financial restart or testnet settlement. Those remain separate acceptance gates. No unchanged narrow-only rerun is needed before continuing the reviewed lifecycle implementation.
 
 ## CI39 and the integration-first reset
 

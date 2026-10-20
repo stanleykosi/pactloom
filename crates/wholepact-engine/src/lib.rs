@@ -55,6 +55,7 @@ pub(crate) mod durable_private_workspace_v1;
     target_os = "linux"
 ))]
 pub use durable_private_workspace_v1::{
+    PreparedPrivateDurableAdmissionDeliveryV3, ClosedPrivateDurableAdmissionReviewV3, PrivateDurableAdmissionDeliveryV3, PrivateDurableAdmissionStatusV3,
     LocalPrivateDurableAdmissionConsentV2, LocalPrivateFixedPermissionBoundaryV3,
     LocalPrivateWorkspaceConsentV1, OriginalCheckpointOutcomeV2, OriginalProofAttemptV2,
     PreparedPrivateDurableCoordinatorV1, PrivateDurableAdmissionCoordinatorV2,

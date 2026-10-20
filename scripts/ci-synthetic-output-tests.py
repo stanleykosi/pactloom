@@ -42,7 +42,7 @@ class PublicOutputTests(unittest.TestCase):
 
     def test_durable_acquire_reply_loss_is_exact_ignored_and_preserves_every_old_phase(self):
         expected={
-            'durable-delivery-admission': ('durable_proposal_v1::delivery_admission_v2::durable_delivery_native_admission_reopens_original_after_process_death',1080,True),
+            'durable-delivery-admission': ('durable_proposal_v1::delivery_admission_v2::durable_delivery_native_v3_admission_reopens_original_after_process_death',1080,True),
             'durable-private-reopen': ('durable_proposal_v1::private_fixed_v2::private_workspace_actual_process_death_reopens_same_fixed_proof',1080,True),
             'initial': ('initial_joined_v3::actual_three_born_initial_roster_publications_preserve_refusal',300,False),
             'full': ('full_payment_inputs_v1::actual_three_born_full_payment_uses_one_original_synthetic_path',1080,True),
@@ -3109,13 +3109,15 @@ class DurableDeliveryOutputTests(unittest.TestCase):
     def line(self,row=None):
         return output.DURABLE_DELIVERY_PREFIX+json.dumps(self.record() if row is None else row,separators=(',',':'))
     def test_exact_new_phase_preserves_original_gates_and_bounds(self):
-        name=output.PREFIX+'durable_proposal_v1::delivery_admission_v2::durable_delivery_native_admission_reopens_original_after_process_death'
+        name=output.PREFIX+'durable_proposal_v1::delivery_admission_v2::durable_delivery_native_v3_admission_reopens_original_after_process_death'
         self.assertEqual(output.phase_selection('durable-delivery-admission'),(name,1080,['--exact',name,'--test-threads=1','--ignored']))
         shell=(ROOT/'scripts/ci-durable-native-linux.sh').read_text()
         call='TMPDIR="$runtime_root" python3 -B scripts/ci-synthetic-output.py "$executable" durable-delivery-admission'
         self.assertEqual(shell.count(call),1)
         self.assertLess(shell.index('"$executable" storage-bootstrap'),shell.index(call))
-        self.assertLess(shell.index(call),shell.index('"$executable" durable-private-reopen'))
+        self.assertNotIn('"$executable" durable-private-reopen',shell)
+        self.assertNotIn('"$executable" durable-fixed-signing',shell)
+        self.assertIn('B1',shell)
         self.assertEqual(output.TESTS['durable-private-reopen'][1],1080)
         self.assertNotIn('durable-delivery-admission',output.DURABLE_DIAGNOSTIC_PHASES)
     def test_rust_python_result_inventory_and_selector_are_exact(self):
@@ -3323,6 +3325,125 @@ class DurableDeliveryOutputTests(unittest.TestCase):
         for outcome in additions:
             row=dict(self.record(),result='failed',first_failure='DeliveryReceiveTerminal',first_outcome=outcome,admission_count='unverified')
             self.assertEqual(output.public_durable_delivery(json.dumps(row)),row)
+
+    def test_admission_observation_source_and_public_vocabularies_agree(self):
+        # Closed vocabulary validation, not evidence of an admitted operation.
+        stages = (
+            'RetainedBinding',
+            'BeforeSendChannel',
+            'BeforeSendSource',
+            'BeforeWriteChannel',
+            'WriteFrame',
+            'WritePrecheck',
+            'WriteIo',
+            'WritePostcheck',
+            'FlushPrecheck',
+            'FlushIo',
+            'FlushPostcheck',
+            'AfterWriteSource',
+            'AfterWriteChannel',
+            'ReadFrame',
+            'ReadPrecheck',
+            'ReadIo',
+            'ReadPostcheck',
+            'AfterReadSource',
+            'AfterReadChannel',
+            'ResponseRejected',
+            'ResponseVariant',
+            'Snapshot',
+            'CommittedHead',
+        )
+        io_kinds = (
+            'TimedOut',
+            'WouldBlock',
+            'Interrupted',
+            'UnexpectedEof',
+            'WriteZero',
+            'ConnectionAborted',
+            'ConnectionRefused',
+            'ConnectionReset',
+            'BrokenPipe',
+            'NotConnected',
+            'PermissionDenied',
+            'InvalidData',
+            'InvalidInput',
+            'Other',
+        )
+        authority = (ROOT/'crates/wholepact-authority/src/transport/durable_delivery_admission_v3.rs').read_text()
+        for name, expected in (('AdmissionFailureStageV3', stages), ('AdmissionIoKindV3', io_kinds)):
+            body = re.search(r'pub enum '+name+r'\s*\{(.*?)\n\}', authority, re.S).group(1)
+            actual = re.findall(r'^\s+(\w+),$', body, re.M)
+            self.assertEqual(actual, list(expected))
+            self.assertEqual(len(actual), len(set(actual)))
+        signer = (ROOT/'crates/wholepact-signer/src/native_ui/runtime.rs').read_text().split('pub(super) mod delivery_diagnostics_v2 {', 1)[1]
+        signer = signer.split('    #[cfg(test)]', 1)[0]
+        stage_body = re.search(r'labels!\s*\{\s*Stage\s*\{(.*?)\}\s*\}', signer, re.S).group(1)
+        outcome_body = re.search(r'labels!\s*\{\s*Outcome\s*\{(.*?)\}\s*\}', signer, re.S).group(1)
+        expected_stages = {'DeliveryAdmission'+stage for stage in stages}
+        expected_io = {'AuthorityIo'+kind for kind in io_kinds}
+        self.assertEqual(expected_stages, set(re.findall(r'\bDeliveryAdmission\w+', stage_body)))
+        self.assertEqual(expected_io, set(re.findall(r'\bAuthorityIo\w+', outcome_body)))
+        self.assertEqual(expected_stages, {stage for stage in output.DURABLE_DELIVERY_BOUNDARIES if stage.startswith('DeliveryAdmission')})
+        self.assertEqual(expected_io, {value for value in output.OUTCOMES if value.startswith('AuthorityIo')})
+        self.assertTrue(expected_stages.isdisjoint(output.DURABLE_DELIVERY_RETAINED_EXPORTER_BOUNDARIES))
+
+    def test_admission_observation_passes_bounded_projection_without_commit_claim(self):
+        # Exercise real bounded-line parsing and final public projection. These
+        # records describe failed attempts; they do not establish commit absence.
+        cases = (
+            ('DeliveryAdmissionWriteIo', 'AuthorityIoBrokenPipe'),
+            ('DeliveryAdmissionReadIo', 'AuthorityIoUnexpectedEof'),
+            ('DeliveryAdmissionFlushPostcheck', 'SignerLocked'),
+            ('DeliveryAdmissionResponseRejected', 'AuthorityPolicyDenied'),
+            ('DeliveryAdmissionResponseVariant', 'PredicateDenied'),
+            ('DeliveryAdmissionCommittedHead', 'AuthorityInvalidBinding'),
+        )
+        for stage, outcome in cases:
+            row = dict(self.record(), result='failed', first_failure=stage,
+                       first_outcome=outcome, admission_count='unverified',
+                       failed_child_inputs_completed=113, failed_child_inputs_expected=121,
+                       reader_exit='not_started', reader_reaped=False,
+                       reader_group_absent=False, reader_no_effects_verified=False)
+            encoded = self.line(row).encode('ascii')
+            parser = output.BoundedLines('exact')
+            self.assertEqual(parser.feed(encoded[:17]), [])
+            self.assertEqual(parser.feed(encoded[17:]+b'\n'), [encoded])
+            self.assertEqual(output.public_line(encoded, 'exact'), ('durable_delivery', row))
+            self.assertEqual(len(row), 28)
+            self.assertEqual(row['schema'], 4)
+            self.assertLess(len(encoded), 2048)
+            self.assertFalse(row['authorization_allowed'])
+            self.assertNotIn('commit_absent', row)
+            for bad in (dict(row, first_outcome='private IO error text'),
+                        dict(row, first_failure='DeliveryAdmissionPrivatePeer'),
+                        dict(row, producer_reaped=False),
+                        dict(row, root_cleanup='retained'),
+                        dict(row, result='passed')):
+                with self.assertRaises(ValueError):
+                    output.public_line(self.line(bad).encode('ascii'), 'exact')
+
+    def test_actual_frame_cause_vocabulary_keeps_schema_and_ambiguity(self):
+        causes = (
+            'Unclassified', 'Deadline', 'Eof', 'CredentialsMissing',
+            'CredentialsMismatch', 'AncillaryRejected', 'Truncated',
+            'PeerNotLive', 'CurrentCheck', 'Io', 'Limit', 'InvalidFrame',
+            'InvalidBudget',
+        )
+        labels = {'OriginFrame' + cause for cause in causes}
+        self.assertEqual(len(labels), 13)
+        self.assertEqual(labels, {item for item in output.OUTCOMES if item.startswith('OriginFrame')})
+        for boundary in ('DeliveryReceiveFrame', 'DeliveryRecipientFrame'):
+            for outcome in labels:
+                row = dict(self.record(), result='failed', first_failure=boundary,
+                           first_outcome=outcome, admission_count='unverified')
+                self.assertEqual(output.public_durable_delivery(json.dumps(row)), row)
+                self.assertEqual(len(row), 28)
+                self.assertFalse(row['authorization_allowed'])
+        for outcome in ('OriginFrameGuessedExpiry', 'OriginFramePrivatePeer'):
+            row = dict(self.record(), result='failed', first_failure='DeliveryReceiveFrame',
+                       first_outcome=outcome, admission_count='unverified')
+            with self.assertRaises(ValueError):
+                output.public_durable_delivery(json.dumps(row))
 
     def test_receiver_failure_projection_preserves_limits_and_no_effect_inference(self):
         for stage,outcome in (('DeliveryReceiveDeadline','PredicateDenied'),

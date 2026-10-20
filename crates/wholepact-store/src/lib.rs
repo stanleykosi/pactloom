@@ -23,7 +23,9 @@ const SCHEMA_VERSION: i64 = 5;
 pub mod backup;
 mod draft_history;
 mod durable_input_projection_guard_v1;
+mod original_private_revision_v3;
 mod private_workspace_guard_v1;
+pub use original_private_revision_v3::OriginalPrivateRevisionPinV3;
 pub mod private_workspace_origin_v1;
 const MAX_JSON_BYTES: usize = 1_048_576;
 pub const MAX_AGREEMENTS: u64 = 256;
@@ -474,6 +476,21 @@ impl Store {
         payload: Value,
         event_kind: &str,
     ) -> Result<MutationResult> {
+        self.commit_record_kernel_v3(
+            context, aggregate_type, id, expected_revision, payload, event_kind, None,
+        )
+        .map(|(result, _)| result)
+    }
+    fn commit_record_kernel_v3<'a>(
+        &'a self,
+        context: &CommandContext,
+        aggregate_type: &str,
+        id: &str,
+        expected_revision: Option<u64>,
+        payload: Value,
+        event_kind: &str,
+        pin: Option<OriginalPrivateRevisionPinV3<'a>>,
+    ) -> Result<(MutationResult, Option<OriginalPrivateRevisionPinV3<'a>>)> {
         // Automation lifecycle, budgets and authorization history are owned by
         // the trusted atomic runtime, never by generic client metadata writes.
         if aggregate_type.starts_with("automation_")
@@ -510,6 +527,15 @@ impl Store {
             Some(&context.principal_id),
         )?;
         let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // V3 only: compare the same actual connection inside the write fence,
+        // before replay or mutation. Legacy None follows the unchanged order.
+        if let Some(pin) = &pin {
+            if aggregate_type != "agreement" {
+                return Err(StoreError::RevisionConflict);
+            }
+            pin.require_target(self, id, expected_revision)?;
+            pin.check_locked(&tx)?;
+        }
         self.require_current_replay(&tx, context)?;
         crate::manual_enrollment::require_generic_request_not_manual(&tx, context)?;
         self.require_current_record_write(&tx, aggregate_type, id, &payload)?;
@@ -547,7 +573,10 @@ impl Store {
             if saved.record.id != id {
                 return Err(StoreError::IdempotencyConflict);
             }
-            return Ok(saved);
+            if pin.is_some() {
+                return Err(StoreError::RevisionConflict);
+            }
+            return Ok((saved, None));
         }
         if aggregate_type == "agreement" && event_kind == "agreement_terms_revised" {
             let old = existing.as_ref().ok_or(StoreError::NotFound)?;
@@ -621,13 +650,24 @@ impl Store {
         #[cfg(test)]
         durable_input_projection_guard_v1::run_commit_hook(false);
         self.check_private_record_destinations(&tx, &result.record.payload)?;
+        // Capture the exact post-write token while Immediate still excludes
+        // other SQLite writers. Own commit must not change data_version. An
+        // external commit between commit and recheck refuses refreshed custody.
+        let next_pin = if pin.is_some() {
+            Some(OriginalPrivateRevisionPinV3::capture_locked(self, &tx, id)?)
+        } else {
+            None
+        };
         tx.commit()?;
         #[cfg(test)]
         durable_input_projection_guard_v1::run_commit_hook(true);
         // A refusal here cannot undo the committed mutation. Preserve all
         // durable evidence; never retry as though no operation took place.
         self.check_private_record_destinations(&c, &result.record.payload)?;
-        Ok(result)
+        if let Some(next) = &next_pin {
+            next.check_locked(&c)?;
+        }
+        Ok((result, next_pin))
     }
 
     // A private-data record cannot be committed to a substituted destination

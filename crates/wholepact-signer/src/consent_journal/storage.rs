@@ -6,6 +6,19 @@ use super::*;
 ))]
 #[path = "durable_born_entry_v1.rs"]
 mod durable_born_entry_v1;
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "pending-birth-owner-signing",
+    target_os = "linux"
+))]
+#[path = "prepared_delivery_v3.rs"]
+mod prepared_delivery_v3;
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "pending-birth-owner-signing",
+    target_os = "linux"
+))]
+pub(crate) use prepared_delivery_v3::PreparedDeliveryJournalRevisionV3;
 #[cfg(test)]
 #[path = "validation_cost_v1.rs"]
 mod validation_cost_v1;

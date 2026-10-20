@@ -3,6 +3,8 @@
 //! material remains private data and never renews a native or writer capability.
 #[path = "durable_construction_v1/review_export_v1.rs"]
 pub mod review_export_v1;
+#[path = "durable_construction_v1/review_export_v3.rs"]
+pub mod review_export_v3;
 
 use crate::proof_jobs::LocalCheckpoint;
 use crate::{Access, ApiError, Engine, Envelope, Mutation, Result};
@@ -62,6 +64,8 @@ pub(crate) struct Roster {
     pub(crate) owners: BTreeMap<String, Intake>,
     #[serde(default)]
     pub(crate) review_exports: BTreeMap<String, review_export_v1::ExportIntent>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) review_exports_v3: BTreeMap<String, review_export_v3::ExportIntentV3>,
 }
 fn damaged() -> ApiError {
     ApiError::new(
@@ -107,6 +111,7 @@ pub(crate) fn validate_stored(envelope: &Envelope) -> Result<()> {
             return Err(damaged());
         }
         review_export_v1::validate_exports(&roster, candidate)?;
+        review_export_v3::validate_exports(&roster, candidate, envelope.durable_proposals_v1.get(id))?;
         review_export_v1::validate_export_identity(&roster, envelope.durable_proposals_v1.get(id))?;
         for (account, intake) in roster.owners {
             intake.outbox.validate().map_err(|_| damaged())?;
@@ -552,7 +557,7 @@ pub(crate) fn validate_private_roster_v2(envelope: &Envelope) -> Result<()> {
     validate_stored(envelope)?;
     for value in envelope.durable_construction_v1.values() {
         let roster: Roster = serde_json::from_value(value.clone()).map_err(|_| damaged())?;
-        if !roster.review_exports.is_empty() {
+        if !roster.review_exports.is_empty() || !roster.review_exports_v3.is_empty() {
             return Err(damaged());
         }
     }
@@ -583,6 +588,7 @@ pub(crate) fn validate_private_intake_delta_v2(before: &Envelope, after: &Envelo
     if new.owners.len() != old.owners.len() + 1
         || new.owners.len() > 2
         || !new.review_exports.is_empty()
+        || !new.review_exports_v3.is_empty()
     {
         return Err(damaged());
     }
