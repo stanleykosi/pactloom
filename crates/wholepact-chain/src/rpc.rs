@@ -196,19 +196,29 @@ impl Rpc {
         }
     }
 
+    #[cfg(feature = "submission-dispatch")]
     async fn connect_observed(&self) -> Result<tonic::transport::Channel, ChainError> {
         self.route.connect(&self.endpoint).await.map_err(|error| {
             self.observer.record(FailureSite::ConnectIncludingTls);
             error
         })
     }
+    async fn connect_read_observed_until(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> Result<tonic::transport::Channel, ChainError> {
+        crate::connect_driver::connect_until(self.route.clone(), self.endpoint.clone(), deadline)
+            .await
+            .map_err(|error| {
+                if error == ChainError::TransportUnavailable {
+                    self.observer.record(FailureSite::ConnectIncludingTls);
+                }
+                error
+            })
+    }
     pub(crate) async fn connect(&self) -> Result<tonic::transport::Channel, ChainError> {
-        tokio::time::timeout(
-            self.policy.request_timeout,
-            self.connect_observed(),
-        )
-        .await
-        .unwrap_or(Err(ChainError::Timeout))
+        let deadline = tokio::time::Instant::now() + self.policy.request_timeout;
+        self.connect_read_observed_until(deadline).await
     }
     pub fn new(endpoint: &str, policy: NetworkPolicy) -> Result<Self, ChainError> {
         let endpoint = Endpoint::from_shared(endpoint.to_owned())
@@ -271,9 +281,10 @@ impl Rpc {
         Req: Message + Default + Clone + Send + Sync + 'static,
         Resp: Message + Default + Send + 'static,
     {
-        tokio::time::timeout(
-            self.policy.request_timeout,
-            self.call_with_retries(method, request),
+        let operation_deadline = tokio::time::Instant::now() + self.policy.request_timeout;
+        tokio::time::timeout_at(
+            operation_deadline,
+            self.call_with_retries(method, request, operation_deadline),
         )
         .await
         .unwrap_or(Err(ChainError::Timeout))
@@ -282,6 +293,7 @@ impl Rpc {
         &self,
         method: &'static str,
         request: Req,
+        operation_deadline: tokio::time::Instant,
     ) -> Result<Observed<Resp>, ChainError>
     where
         Req: Message + Default + Clone + Send + Sync + 'static,
@@ -290,8 +302,10 @@ impl Rpc {
         for attempt in 0..=self.policy.retries {
             let mut req = Request::new(request.clone());
             req.set_timeout(self.policy.request_timeout);
-            let result = tokio::time::timeout(self.policy.request_timeout, async {
-                let channel = self.connect_observed().await?;
+            let attempt_deadline = tokio::time::Instant::now() + self.policy.request_timeout;
+            let connection_deadline = operation_deadline.min(attempt_deadline);
+            let result = tokio::time::timeout_at(attempt_deadline, async {
+                let channel = self.connect_read_observed_until(connection_deadline).await?;
                 let mut grpc = tonic::client::Grpc::new(BoundedChannel(
                     channel,
                     self.policy.maximum_response_bytes + 5,
@@ -302,6 +316,9 @@ impl Rpc {
                 grpc.ready()
                     .await
                     .map_err(|_| ChainError::TransportUnavailable)?;
+                if tokio::time::Instant::now() >= connection_deadline {
+                    return Err(ChainError::Timeout);
+                }
                 let path = tonic::codegen::http::uri::PathAndQuery::from_static(method);
                 grpc.unary(req, path, ProstCodec::<Req, Resp>::default())
                     .await

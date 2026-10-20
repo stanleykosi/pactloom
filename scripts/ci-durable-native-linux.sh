@@ -80,6 +80,29 @@ unset link_flags
 # Both runtime TLS CLI and encrypted storage use the verified 3.5.9 build.
 openssl version
 sha256sum Cargo.lock
+# Fail fast on real TLS scheduling/cancellation before compiling the Host.
+# Reuse this disposable target only within this exact source job, never a cache.
+if timeout --signal=TERM --kill-after=30s 1800s rustup run 1.99.0 cargo test --locked --release -p wholepact-chain --all-features --lib --no-run --message-format=json > "$build_root/chain-build-metadata.jsonl"; then
+  :
+else
+  build_status=$?
+  python3 -B scripts/ci-synthetic-build-errors.py "$build_root/chain-build-metadata.jsonl" chain || true
+  exit "$build_status"
+fi
+chain_executable="$(python3 - "$build_root/chain-build-metadata.jsonl" "$CARGO_TARGET_DIR" <<'PY_CHAIN'
+import json, pathlib, sys
+found=[]
+for line in pathlib.Path(sys.argv[1]).read_text().splitlines():
+    row=json.loads(line)
+    if row.get('reason')=='compiler-artifact' and row.get('target',{}).get('name')=='wholepact_chain' and row.get('profile',{}).get('test') and row.get('executable'):
+        found.append(pathlib.Path(row['executable']).resolve(strict=True))
+assert len(set(found))==1
+exe=found[0]; assert exe.is_file() and exe.is_relative_to(pathlib.Path(sys.argv[2]).resolve(strict=True))
+print(exe)
+PY_CHAIN
+)"
+sha256sum "$chain_executable"
+TMPDIR="$runtime_root" python3 -B scripts/ci-connect-driver-output.py "$chain_executable"
 # No project test executes during compilation; metadata contains public build data.
 if timeout --signal=TERM --kill-after=30s 3600s rustup run 1.99.0 cargo test --locked --release -p wholepact-native-host --all-features --lib --no-run --message-format=json > "$build_root/build-metadata.jsonl"; then
   :

@@ -1,8 +1,20 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-20, 13:39 UTC.
+Updated: 2026-10-20, 14:30 UTC.
 
 **CI44 passed the genuine two-owner delivery/admission, original-producer SIGKILL and fresh-process read-only original-history verification route. Financial signing/dispatch and public testnet settlement remain unqualified. This is a bounded admission/restart milestone, not a production release.**
+
+## CI51 localized TLS setup failures; independent read-only connection driver prepared
+
+[Run 39432970536](https://github.com/stanleykosi/pactloom/actions/runs/39432970536), qualification `812f02386412a9e7052c708ebd813d90ff364816`, implementation `37cef6c5b2e94006695cb2eefcd08c332ee0213e`, failed at13:59:56 UTC. Origin gates, clean10m53s Host compilation and encrypted bootstrap passed. Native preparation again stopped at input85/151, `WalletRosterAcquire / TransportUnavailable`. The new closed evidence recorded two connection-establishment failures and two provider TLS-handshake timeouts, with36 successful handshakes,38 accepted connections,38 requests/replies, no denials, no resource/deadline limits and no provider termination. Producer/root cleanup was verified; financial signing/intake/retention and reader execution were not reached. The two failures can be retries of one wallet, not necessarily one failure per owner.
+
+Source inspection identified a scheduling mechanism consistent with this evidence: both wallet observations intentionally share one caller task, including synchronous encrypted source/permission checks, while tonic polls initial TLS on that same task before creating its channel worker. One sibling's synchronous work can delay polling another's handshake while the independent provider's unchanged two-second TLS timer progresses. This is a source-grounded hypothesis, not yet uniquely measured causal attribution for CI51.
+
+The narrow correction independently drives only read-only connection establishment, carrying owned inert endpoint/route values but no wallet, permission callbacks, RPC request or private data. It inherits the original operation/attempt absolute deadline, rejects late queued channels and rechecks expiry before a read RPC. The concurrent borrowed-owner wave, original expiries, existing retries, TLS validation and inline submission path remain unchanged. Normal completion and explicit timeout await the owned task; external cancellation requests abort, with destruction when the runtime progresses. Existing tonic buffer/HTTP2 tasks remain drop-managed. No synchronous global-quiescence guarantee is claimed.
+
+An isolated real-TLS regression compares old inline and independent connections under a controlled blocking sibling, for direct and HTTP CONNECT routes at the original two-second server budget. It also checks cancellation before polling/during TLS/after successful unconsumed completion, original deadline including queued success, hostname refusal and absence of HTTP requests before caller resumption. Explicit child observations and socket closure replace sleep-based completion inference. The test uses two runtime workers and keeps a borrowed non-Send owner on the caller. It does not claim a current-thread-runtime independence guarantee or financial success.
+
+The closed supervisor passed nine controlled subprocess projection cases without sockets. Independent source/test review cleared the correction and cleanup assertions. The Chain release no-run build passed in19.79s and Host compatibility build passed in8m24s; no local socket tests ran. In isolated CI the exact Chain TLS mechanism suite now runs before the expensive Host build/full financial lifecycle, using the same disposable target and stopping immediately on failure. No public testnet settlement or full financial pass is claimed.
 
 ## CI50 failed during original wallet observation; closed transport evidence added
 
