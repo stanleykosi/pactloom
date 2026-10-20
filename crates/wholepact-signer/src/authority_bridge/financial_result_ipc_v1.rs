@@ -120,6 +120,25 @@ fn read<T: serde::de::DeserializeOwned>(
     wholepact_core::strict_json::parse_typed_json_with_byte_limit(&bytes, MAX_FRAME)
         .map_err(|_| BridgeError::Binding)
 }
+// Only inert preview / HostPrepared / READY frames use the setup budget.
+// Actual payload, Fetch, Current and Finish remain on the strict action reader.
+fn read_setup<T: serde::de::DeserializeOwned>(
+    stream: &UnixStream,
+    peer: &PeerProcess,
+    deadline: Instant,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<T> {
+    let bytes = wholepact_signer_origin::framing::read_setup_frame_capped_checked_until(
+        stream,
+        peer,
+        MAX_FRAME,
+        deadline,
+        || check().map_err(|_| wholepact_signer_origin::Error::Permission),
+    )
+    .map_err(|_| BridgeError::Ipc)?;
+    wholepact_core::strict_json::parse_typed_json_with_byte_limit(&bytes, MAX_FRAME)
+        .map_err(|_| BridgeError::Binding)
+}
 fn write<T: Serialize>(
     stream: &mut UnixStream,
     data: &T,
@@ -132,6 +151,7 @@ fn write<T: Serialize>(
 /// Actual source + exact retained bytes + observed recipient, awaiting a fresh
 /// ReturnExact native decision. It is not a public evidence constructor.
 pub(crate) struct PreparedFinancialReturnV1 {
+    setup_deadline: Instant,
     source: Arc<PreparedOriginalFinancialSourceV1>,
     peer: PeerProcess,
     evidence: Evidence,
@@ -146,6 +166,9 @@ impl PreparedFinancialReturnV1 {
         stream: &mut UnixStream,
     ) -> Result<Self> {
         request.validate()?;
+        let setup_deadline = source
+            .original_deadline()
+            .min(Instant::now() + Duration::from_secs(900));
         source
             .require_original_financial_host_v1(&peer)
             .map_err(|_| BridgeError::Permission)?;
@@ -225,6 +248,7 @@ impl PreparedFinancialReturnV1 {
             .map_err(|_| BridgeError::Permission)?;
         drop(read_owner);
         Ok(Self {
+            setup_deadline,
             source,
             peer,
             evidence,
@@ -234,17 +258,14 @@ impl PreparedFinancialReturnV1 {
     /// Wait with inert prepared data only. Do not stage the short native review
     /// until the Host has completed its own exact retention preflight.
     pub(crate) fn await_host_prepared(self, stream: &UnixStream) -> Result<Self> {
-        let deadline = self
-            .source
-            .original_deadline()
-            .min(Instant::now() + Duration::from_secs(900));
+        let deadline = self.setup_deadline.min(self.source.original_deadline());
         let current = || {
             self.source
                 .require_original_financial_host_v1(&self.peer)
                 .map_err(|_| BridgeError::Permission)
         };
         let expected = PreviewData::from_evidence(&self.evidence).digest()?;
-        match read(stream, &self.peer, deadline, &current)? {
+        match read_setup(stream, &self.peer, deadline, &current)? {
             Command::HostPrepared { preview_digest } if preview_digest == expected => {
                 current()?;
                 Ok(self)
@@ -587,6 +608,7 @@ impl AuthenticatedFinancialResultPreviewV1 {
     }
 }
 pub struct PreparedFinancialResultReceiverV1 {
+    setup_deadline: Instant,
     provider: crate::authority_bridge::provider::InstalledSignerProvider,
     peer: PeerProcess,
     stream: UnixStream,
@@ -616,10 +638,10 @@ impl PreparedFinancialResultReceiverV1 {
         write(
             &mut stream,
             &serde_json::json!({"command":"financial_result_v1","schema_version":1,"request":request}),
-            deadline,
+            deadline.min(Instant::now() + Duration::from_secs(120)),
             &current,
         )?;
-        let Response::Preview { preview } = read(&stream, &peer, deadline, &current)? else {
+        let Response::Preview { preview } = read_setup(&stream, &peer, deadline, &current)? else {
             return Err(BridgeError::Permission);
         };
         preview.validate()?;
@@ -627,6 +649,7 @@ impl PreparedFinancialResultReceiverV1 {
             return Err(BridgeError::Binding);
         }
         Ok(Self {
+            setup_deadline: deadline,
             provider,
             peer,
             stream,
@@ -640,9 +663,7 @@ impl PreparedFinancialResultReceiverV1 {
     /// Host preflight must finish before asking the Signer to make ReturnExact.
     /// No saved preview itself grants receive, key use, or dispatch permission.
     pub fn receive(mut self) -> Result<AuthenticatedFinancialResultLeaseV1> {
-        let deadline = self
-            .original_deadline
-            .min(Instant::now() + Duration::from_secs(900));
+        let deadline = self.setup_deadline.min(self.original_deadline);
         let current = || self.peer.check_alive().map_err(|_| BridgeError::Permission);
         let actual = self.provider.verify_server(&self.stream)?;
         self.peer
@@ -653,11 +674,11 @@ impl PreparedFinancialResultReceiverV1 {
             &Command::HostPrepared {
                 preview_digest: self.preview.data.digest()?,
             },
-            deadline,
+            deadline.min(Instant::now() + Duration::from_secs(120)),
             &current,
         )?;
         let Response::Ready { lease_id: ready } =
-            read(&self.stream, &self.peer, deadline, &current)?
+            read_setup(&self.stream, &self.peer, deadline, &current)?
         else {
             return Err(BridgeError::Permission);
         };
