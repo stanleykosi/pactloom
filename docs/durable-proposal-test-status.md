@@ -1,8 +1,20 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-20, 21:22 UTC.
+Updated: 2026-10-20, 22:17 UTC.
 
 **CI44 passed the genuine two-owner delivery/admission, original-producer SIGKILL and fresh-process read-only original-history verification route. Financial signing/dispatch and public testnet settlement remain unqualified. This is a bounded admission/restart milestone, not a production release.**
+
+## CI61 reached both signatures and original Return preparation; aggregate-cost repair prepared
+
+[Run39500089720](https://github.com/stanleykosi/pactloom/actions/runs/39500089720), qualification `49e020fce2c3ca28b55276d1f8b1748d9d1ef03e`, implementation `25cfd933160742e057453ad533be641c0d1c387d`, passed its early gates, Host build (12m58s) and encrypted bootstrap. The original 900-second total expired at 21:57:32 UTC, input 132/151, window 23, owner 1 Return/Intake. Last-observed native job 13 was ReturnServe. No individual phase cutoff fired. Producer, group and root cleanup were verified; no reader started.
+
+The ordered actual path establishes both owners completed signing and local result retention. ReturnServe additionally establishes the first exact retained-result/recipient snapshot, Return pin issuance, Host-prepared handshake and fresh Return approval completed. It does not establish Current exchange, authenticated Host intake or Finish completion. Final extraction, saved-byte dispatch, public settlement and unknown-chain retransmission remain unproven.
+
+The next cohesive repair caches only immutable expected schema tuples generated from the executable's static profile19/profile20 DDL. Every actual target schema, header, capacity and semantic check still runs. Constructor consolidation removes duplicate full replay around an already fully audited current snapshot, retaining the original immutable-source baseline, exact request/result/recipient binding, live pidfd, fresh native action and both wall-clock/monotonic limits. Generic custody and protected signing/key-use checks remain unchanged. There is no refresh-on-mismatch, new retry or expiry extension.
+
+Parent-measured bounded timing now separates initial setup, completed ordered windows and the current window. It freezes before teardown, uses the original workflow start and is disclosed only after verified cleanup. Timings are supervision observations, not authority or proof of an active native call.
+
+Independent review cleared the eleven-file repair. Combined Signer/Host release compilation passed in 7m53s. Eight exact in-memory schema/refusal, timing, cleanup and encrypted historical-component tests passed once; 121 closed projection/subprocess cases passed. Sixteen reference rebuilds measured 83,562 microseconds for profile19 and 88,954 for profile20 locally; cached retrieval was below the microsecond measurement resolution. This measures reference construction only, not full native speedup. Actual constructor composition and the remaining lifecycle require the next isolated run.
 
 ## CI60 demonstrated signing progress before aggregate expiry; read-only audit reuse prepared
 

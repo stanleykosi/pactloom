@@ -1785,32 +1785,45 @@ pub(super) fn verify_schema_with_common_audit(c: &Connection) -> Result<Validate
     })
 }
 
-fn verify_schema_before_common_audit(c: &Connection) -> Result<()> {
-    type SchemaObject = (String, String, String, Option<String>);
-    fn objects(c: &Connection) -> Result<Vec<SchemaObject>> {
-        let mut q =
-            c.prepare("SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name")?;
-        let rows = q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
-    }
+type SchemaObjectV1=(String,String,String,Option<String>);
+fn schema_objects_v1(c:&Connection)->Result<Vec<SchemaObjectV1>> {
+    let mut q=c.prepare("SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name")?;
+    let rows=q.query_map([],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
+    rows.collect::<std::result::Result<Vec<_>,_>>().map_err(Into::into)
+}
+// Trusted executable DDL only. No target observations or connection survive.
+fn build_expected_schema_objects_v1(extension:&str)->Result<Vec<SchemaObjectV1>> {
     #[cfg(test)]
-    let cost_reference_open =
-        validation_cost_v1::enter(validation_cost_v1::Phase::SchemaReferenceOpen);
-    let expected = Connection::open_in_memory()?;
+    let cost_reference_open=validation_cost_v1::enter(validation_cost_v1::Phase::SchemaReferenceOpen);
+    let expected=Connection::open_in_memory()?;
     #[cfg(test)]
     drop(cost_reference_open);
     #[cfg(test)]
-    let cost_reference_build =
-        validation_cost_v1::enter(validation_cost_v1::Phase::SchemaReferenceBuild);
+    let cost_reference_build=validation_cost_v1::enter(validation_cost_v1::Phase::SchemaReferenceBuild);
     expected.execute_batch(SCHEMA)?;
+    if !extension.is_empty(){expected.execute_batch(extension)?;}
     #[cfg(test)]
     drop(cost_reference_build);
+    schema_objects_v1(&expected)
+}
+fn expected_schema19_objects_v1()->Result<&'static Vec<SchemaObjectV1>> {
+    static EXPECTED:std::sync::OnceLock<Vec<SchemaObjectV1>>=std::sync::OnceLock::new();
+    if let Some(expected)=EXPECTED.get(){return Ok(expected);}
+    // Cache successes only. Initialization failures retain their original error.
+    // A racing initializer computes the same static DDL on its own connection.
+    let built=build_expected_schema_objects_v1("")?;
+    let _=EXPECTED.set(built);
+    EXPECTED.get().ok_or(JournalError::Database)
+}
+fn verify_schema_objects_v1(c:&Connection,expected:&[SchemaObjectV1])->Result<()> {
+    if schema_objects_v1(c)?.as_slice()!=expected {return Err(JournalError::UnsupportedSchema);}
+    Ok(())
+}
+fn verify_schema_before_common_audit(c: &Connection) -> Result<()> {
+    let expected=expected_schema19_objects_v1()?;
     #[cfg(test)]
     let cost_compare = validation_cost_v1::enter(validation_cost_v1::Phase::SchemaCompare);
-    if objects(c)? != objects(&expected)? {
-        return Err(JournalError::UnsupportedSchema);
-    }
+    verify_schema_objects_v1(c,expected)?;
     #[cfg(test)]
     drop(cost_compare);
     #[cfg(test)]
@@ -2315,5 +2328,35 @@ mod source_owner_tests {
                 .is_err()
         );
         assert!(before == f.files(), "retained encrypted files changed");
+    }
+}
+
+#[cfg(test)]
+mod expected_schema_cache_tests_v1 {
+    use super::*;
+    #[test]
+    fn cached_expected_schema_19_matches_fresh_and_rejects_target_drift() {
+        let cached=expected_schema19_objects_v1().unwrap();
+        assert_eq!(*cached,build_expected_schema_objects_v1("").unwrap());
+        assert!(std::ptr::eq(cached,expected_schema19_objects_v1().unwrap()));
+        let target=Connection::open_in_memory().unwrap();target.execute_batch(SCHEMA).unwrap();
+        verify_schema_objects_v1(&target,cached).unwrap();
+        target.execute_batch("CREATE TABLE unexpected_cache_probe(value TEXT)").unwrap();
+        assert!(matches!(verify_schema_objects_v1(&target,cached),Err(JournalError::UnsupportedSchema)));
+        target.execute_batch("DROP TABLE unexpected_cache_probe").unwrap();
+        verify_schema_objects_v1(&target,cached).unwrap();
+        target.execute_batch("CREATE INDEX unexpected_cache_index ON signer_account(writer_epoch)").unwrap();
+        assert!(matches!(verify_schema_objects_v1(&target,cached),Err(JournalError::UnsupportedSchema)));
+    }
+    #[test]
+    fn expected_schema_19_reference_component_benchmark() {
+        // Bounded reference-only measurement, not native/full-profile evidence.
+        // No timing threshold: overloaded CI must not turn this into a flaky test.
+        let cached=expected_schema19_objects_v1().unwrap();let start=std::time::Instant::now();
+        for _ in 0..16 {assert_eq!(*cached,build_expected_schema_objects_v1("").unwrap());}
+        let uncached=start.elapsed().as_micros();let start=std::time::Instant::now();
+        for _ in 0..16 {assert!(std::ptr::eq(cached,expected_schema19_objects_v1().unwrap()));}
+        let cached_us=start.elapsed().as_micros();
+        println!("SCHEMA_REFERENCE_COMPONENT profile=19 iterations=16 uncached_us={} cached_us={} full_profile_proven=false",uncached,cached_us);
     }
 }

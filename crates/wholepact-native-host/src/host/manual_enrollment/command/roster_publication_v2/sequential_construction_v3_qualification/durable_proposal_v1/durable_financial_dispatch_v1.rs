@@ -213,6 +213,7 @@ struct FinancialPublicV1 {
     financial_diagnostic: Option<crate::host::financial_diagnostics_v1::FinancialDiagnosticV1>,
     transport_failure: Option<FinancialTransportFailureV1>,
     progress_failure: Option<super::super::super::financial_progress_v1::Failure>,
+    progress_timing: Option<super::super::super::financial_progress_v1::Timing>,
     producer_reaped: bool,
     producer_group_absent: bool,
     reader_reaped: bool,
@@ -248,6 +249,7 @@ impl FinancialPublicV1 {
             financial_diagnostic: None,
             transport_failure: None,
             progress_failure: None,
+            progress_timing: None,
             producer_reaped: false,
             producer_group_absent: false,
             reader_reaped: false,
@@ -287,6 +289,7 @@ impl FinancialPublicV1 {
         }
         self.financial_diagnostic = child.financial_diagnostic.clone();
         self.progress_failure = child.financial_progress_failure.clone();
+        self.progress_timing = child.financial_progress_timing.clone();
         self.failed_child_inputs_completed = Some(child.next);
         self.failed_child_inputs_expected = Some(child.expected);
         if let Some(pair) = child.delivery_first_failure {
@@ -309,6 +312,7 @@ impl FinancialPublicV1 {
             && self.private_fixed_primary.is_none()
             && self.transport_failure.is_none()
             && self.progress_failure.is_none()
+            && self.progress_timing.is_none()
             && self.financial_diagnostic.is_none()
             && !self.source_diagnostic_withheld
             && self.producer_reaped
@@ -341,7 +345,7 @@ impl FinancialPublicV1 {
                     | FinancialBoundaryV1::ReaderReap
             )
         );
-        if reader_failure { self.progress_failure = None; }
+        if reader_failure { self.progress_failure = None; self.progress_timing = None; }
         if self.root_cleanup != "closed_absent"
             || !self.producer_reaped
             || !self.producer_group_absent
@@ -355,6 +359,7 @@ impl FinancialPublicV1 {
             self.source_diagnostic_withheld = true;
             self.transport_failure = None;
             self.progress_failure = None;
+            self.progress_timing = None;
             self.financial_diagnostic = None;
         }
     }
@@ -1489,10 +1494,12 @@ fn financial_diagnostic_requires_actual_stage_cleanup() {
             public.reader_reaped=missing!=3;public.reader_group_absent=missing!=4;
             public.financial_diagnostic=Some(record);
             public.progress_failure=Some(super::super::super::financial_progress_v1::Failure{reason:super::super::super::financial_progress_v1::Reason::GlobalDeadline,last:None});
+            public.progress_timing=Some(super::super::super::financial_progress_v1::Timing{elapsed_before_first_window_ms:None,completed_window_elapsed_ms:Vec::new(),current_window_elapsed_ms:None,total_elapsed_ms:900_000,clamped:false});
             public.withhold_unverified_diagnostics();
             let permitted=missing>=3 && (!reader || missing==5);
             assert_eq!(public.financial_diagnostic.is_some(),permitted);
             assert_eq!(public.progress_failure.is_some(),permitted && !reader);
+            assert_eq!(public.progress_timing.is_some(),permitted && !reader);
         }
     }
 }

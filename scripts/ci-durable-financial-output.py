@@ -46,7 +46,7 @@ FIELDS = PROOFS | {
     "synthetic_backend_only", "public_chain_verified",
     "source_failure_boundary", "source_failure_outcome",
     "failed_child_inputs_completed", "failed_child_inputs_expected",
-    "private_fixed_primary", "source_diagnostic_withheld", "transport_failure", "financial_diagnostic", "progress_failure",
+    "private_fixed_primary", "source_diagnostic_withheld", "transport_failure", "financial_diagnostic", "progress_failure", "progress_timing",
 }
 
 READER_BOUNDARIES = frozenset("CompletedReopen DispatchAdmission PartialAdmissionReconciliation SavedTransactionDispatch ReaderReap".split())
@@ -124,6 +124,28 @@ def validate_progress_failure(record):
             if type(job[key]) is not int or not 1 <= job[key] <= (16777215 if key == "sequence" else 4294967295):
                 raise ValueError()
         if type(job["stage"]) is not str or job["stage"] not in PROGRESS_NATIVE_STAGES:
+            raise ValueError()
+
+def validate_progress_timing(record, progress):
+    keys = {"elapsed_before_first_window_ms", "completed_window_elapsed_ms", "current_window_elapsed_ms", "total_elapsed_ms", "clamped"}
+    if type(record) is not dict or set(record) != keys or type(record["clamped"]) is not bool:
+        raise ValueError()
+    def bounded(value):
+        return type(value) is int and 0 <= value <= 900_000
+    before, current = record["elapsed_before_first_window_ms"], record["current_window_elapsed_ms"]
+    completed, total = record["completed_window_elapsed_ms"], record["total_elapsed_ms"]
+    if not bounded(total) or type(completed) is not list or len(completed) > 26 or not all(bounded(v) for v in completed):
+        raise ValueError()
+    if record["clamped"] and total != 900_000:
+        raise ValueError()
+    if before is None and current is None:
+        if completed:
+            raise ValueError()
+    elif not bounded(before) or not bounded(current) or before + current + sum(completed) != total:
+        raise ValueError()
+    if progress is not None:
+        last = progress["last"]
+        if (last is None and before is not None) or (last is not None and (before is None or len(completed) != last["window"])):
             raise ValueError()
 
 def validate_financial_diagnostic(record):
@@ -238,7 +260,12 @@ def validate(row):
         validate_progress_failure(progress)
         if row["first_failure"] in READER_BOUNDARIES:
             raise ValueError()
-    observed = any(value is not None for value in (boundary, outcome, completed, expected, primary, transport, financial, progress))
+    timing = row["progress_timing"]
+    if timing is not None:
+        validate_progress_timing(timing, progress)
+        if row["first_failure"] in READER_BOUNDARIES:
+            raise ValueError()
+    observed = any(value is not None for value in (boundary, outcome, completed, expected, primary, transport, financial, progress, timing))
     if observed and (
         row["result"] != "failed" or row["first_failure"] is None
         or row["root_cleanup"] != "closed_absent"

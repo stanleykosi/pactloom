@@ -60,7 +60,13 @@ impl<'a> Transcript<'a> {
     #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
     pub(super) fn finish_financial_progress(&mut self){if let Some(capture)=self.financial_progress.as_mut(){capture.finish_partial(&self.bytes[self.line_start..]);}}
     #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
-    pub(super) fn enable_financial_progress(&mut self){self.financial_progress=Some(Default::default());}
+    pub(super) fn enable_financial_progress(&mut self){self.enable_financial_progress_at(std::time::Instant::now());}
+    #[cfg(all(feature="durable-proposal",feature="synthetic-born-joined-qualification"))]
+    pub(super) fn enable_financial_progress_at(&mut self,start:std::time::Instant){self.financial_progress=Some(super::financial_progress_v1::Capture::with_workflow_start(start));}
+    #[cfg(all(feature="durable-proposal",feature="synthetic-born-joined-qualification"))]
+    pub(super) fn freeze_financial_progress_timing(&mut self,now:std::time::Instant){if let Some(capture)=self.financial_progress.as_mut(){capture.freeze_timing(now);}}
+    #[cfg(all(feature="durable-proposal",feature="synthetic-born-joined-qualification"))]
+    pub(super) fn financial_progress_timing(&self)->Option<super::financial_progress_v1::Timing>{self.financial_progress.as_ref().and_then(|capture|capture.timing())}
     #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
     pub(super) fn financial_progress_check(&mut self,now:std::time::Instant)->Option<super::financial_progress_v1::Failure>{self.financial_progress.as_mut().and_then(|capture|capture.failure_at(now))}
     #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]

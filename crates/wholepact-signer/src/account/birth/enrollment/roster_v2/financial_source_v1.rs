@@ -82,6 +82,7 @@ enum OriginalJournalV1 {
 pub(crate) struct PreparedOriginalFinancialSourceV1 {
     retained: RetainedBornManualRosterEnrollmentV2,
     original_commit: publication::BornManualRosterCommitV2,
+    original_disclosure: wholepact_authority::WitnessDisclosureDescriptor,
     journal: OriginalJournalV1,
     binding: std::sync::Mutex<FinancialSourceBindingV1>,
     identity: String,
@@ -110,6 +111,7 @@ impl PreparedOriginalFinancialSourceV1 {
             .ok_or(Error::RecoveryRequired)?;
         retained.check_current_source(&owner)?;
         let original_commit = publication::read_commit(&retained)?;
+        let original_disclosure = retained.disclosure()?;
         let genesis = &retained.record.account_record.genesis;
         if genesis.identity.account_id != terms.scope.authorization.identity.account_id {
             return Err(Error::ReviewMismatch);
@@ -150,6 +152,7 @@ impl PreparedOriginalFinancialSourceV1 {
         Ok(Self {
             retained,
             original_commit,
+            original_disclosure,
             journal: OriginalJournalV1::Before(journal),
             identity: binding.identity_digest().into(),
             binding: std::sync::Mutex::new(binding),
@@ -175,6 +178,7 @@ impl PreparedOriginalFinancialSourceV1 {
             .ok_or(Error::RecoveryRequired)?;
         retained.check_current_source(&owner)?;
         let original_commit = publication::read_commit(&retained)?;
+        let original_disclosure = retained.disclosure()?;
         let genesis = &retained.record.account_record.genesis;
         let journal = FinancialConsentJournalV1::open_original(
             &account.directory.root().join(JOURNAL),
@@ -214,6 +218,7 @@ impl PreparedOriginalFinancialSourceV1 {
         Ok(Self {
             retained,
             original_commit,
+            original_disclosure,
             journal: OriginalJournalV1::Financial(journal),
             identity: binding.identity_digest().into(),
             binding: std::sync::Mutex::new(binding),
@@ -306,6 +311,7 @@ impl PreparedOriginalFinancialSourceV1 {
         let Self {
             retained,
             original_commit,
+            original_disclosure,
             journal,
             binding,
             identity: _,
@@ -327,6 +333,7 @@ impl PreparedOriginalFinancialSourceV1 {
         let result = Self {
             retained,
             original_commit,
+            original_disclosure,
             journal: OriginalJournalV1::Financial(journal),
             identity: binding.identity_digest().into(),
             binding: std::sync::Mutex::new(binding),
@@ -490,14 +497,16 @@ impl PreparedOriginalFinancialSourceV1 {
         journal: FinancialReturnJournalPinV1,
         peer: &crate::native_peer::PeerProcess,
     ) -> Result<FinancialReturnSourcePinV1> {
-        // Keep all full source validation at issuance. The journal pin itself
-        // was issued inside the same audited snapshot as the saved result.
-        self.require_original_financial_host_v1(peer)?;
+        // The journal pin was issued with the full result/recipient audit in
+        // one snapshot. Bind it to the actual retained original pidfd, not a
+        // second semantic read or a process reopened from an instance string.
+        self.check_retained_financial_peer_v1(peer)?;
         let pin = FinancialReturnSourcePinV1 {
             source_identity: self.identity.clone(),
             journal,
         };
         self.check_financial_return_source_pin_v1(&pin, peer)?;
+        self.check_immutable_original_v1()?;
         Ok(pin)
     }
     pub(crate) fn check_financial_return_source_pin_v1(
@@ -561,8 +570,19 @@ impl PreparedOriginalFinancialSourceV1 {
     ) -> Result<FinancialAdmissionSourcePinV1> {
         // Full original custody, exact owner certificate/disclosure, and pending
         // intent checks stay at issuance. No ordinary custody checker is relaxed.
-        self.require_original_owner_witness(disclosure, certificate_digest)?;
-        self.check_pending(pending)?;
+        self.check_immutable_original_v1()?;
+        if disclosure != &self.original_disclosure
+            || certificate_digest
+                != self
+                    .retained
+                    .record
+                    .account_record
+                    .terms
+                    .signer
+                    .owner_certificate_digest
+        {
+            return Err(Error::Authentication);
+        }
         let admission_terms_digest = pending.admission_terms_digest(self.identity_digest())?;
         // This issuer audits the actual current and transition bindings together
         // with the immutable pending request in one original read snapshot. The
@@ -585,6 +605,7 @@ impl PreparedOriginalFinancialSourceV1 {
             disclosure,
             certificate_digest,
         )?;
+        self.check_immutable_original_v1()?;
         Ok(pin)
     }
     pub(crate) fn check_financial_admission_source_pin_v1(
@@ -661,10 +682,10 @@ impl PreparedOriginalFinancialSourceV1 {
         if !operation.accepts_witness_role(witness.as_ref().map(|(owner, _, _)| *owner)) {
             return Err(Error::Authentication);
         }
-        // Keep the complete retained account/publication audit at issuance. The
-        // journal factory separately audits exact20 and its immutable intent in
-        // one snapshot, then verifies the same revision after commit.
-        self.check_custody()?;
+        // The actual opener fully audited the immutable original account and
+        // publication. Sample that exact baseline, then audit current journal
+        // semantics once in the factory, never reuse across a revision change.
+        self.check_immutable_original_v1()?;
         let journal = self
             .financial_journal()?
             .prepare_financial_operation_pin_v1(&*self.financial_binding()?)?;
@@ -685,7 +706,7 @@ impl PreparedOriginalFinancialSourceV1 {
                     .writer_certificate_digest
             };
             if journal.terms().scope.witness != *disclosure
-                || self.retained.disclosure()? != *disclosure
+                || self.original_disclosure != *disclosure
                 || expected_certificate != certificate
             {
                 return Err(Error::Authentication);
@@ -697,6 +718,7 @@ impl PreparedOriginalFinancialSourceV1 {
             journal,
         };
         self.check_financial_operation_source_pin_v1(&pin, operation)?;
+        self.check_immutable_original_v1()?;
         Ok(pin)
     }
     pub(crate) fn check_financial_operation_source_pin_v1(
@@ -765,5 +787,53 @@ mod operation_role_tests {
                 assert_eq!(operation.accepts_witness_role(actual), actual == expected);
             }
         }
+    }
+}
+
+impl PreparedOriginalFinancialSourceV1 {
+    /// Only for constructor consolidation around a full current journal audit.
+    /// The immutable baseline and disclosure originate in the actual opener.
+    pub(crate) fn check_immutable_original_v1(&self) -> Result<()> {
+        self.lifetime.check_connected()?;
+        let now = u64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|_| Error::Locked)?
+                .as_millis(),
+        )
+        .map_err(|_| Error::Locked)?;
+        if now >= self.original_ceiling_ms || Instant::now() >= self.original_deadline {
+            return Err(Error::Locked);
+        }
+        if immutable(&self.retained)? != self.immutable {
+            return Err(Error::ReviewMismatch);
+        }
+        self.lifetime.check_connected()?;
+        let now = u64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|_| Error::Locked)?
+                .as_millis(),
+        )
+        .map_err(|_| Error::Locked)?;
+        if now >= self.original_ceiling_ms || Instant::now() >= self.original_deadline {
+            return Err(Error::Locked);
+        }
+        Ok(())
+    }
+    pub(crate) fn check_retained_financial_peer_v1(
+        &self,
+        peer: &crate::native_peer::PeerProcess,
+    ) -> Result<()> {
+        self.check_immutable_original_v1()?;
+        peer.check_alive()?;
+        {
+            let held = self.recipient.lock().map_err(|_| Error::Locked)?;
+            held.as_ref()
+                .ok_or(Error::Authentication)?
+                .same_live_process(peer)?;
+        }
+        peer.check_alive()?;
+        self.check_immutable_original_v1()
     }
 }

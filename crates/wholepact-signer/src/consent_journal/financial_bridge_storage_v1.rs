@@ -136,7 +136,7 @@ impl FinancialConsentJournalV1 {
     /// A fresh read decision can retrieve historical bytes but cannot return
     /// them under an authenticated origin. ReturnExact needs its own new click.
     pub(crate) fn financial_retained_result_v1(&self,source:&FinancialSourceBindingV1,read:&crate::native_ui::financial_authority_v1::FinancialReadLeaseV1)
-        ->BridgeResult<(OriginalAuthorizationEvidence,RetainedAuthorizationRequest,RetainedWitnessPermit,RetainedAuthorizationResult,FinancialReturnJournalPinV1)> {
+        ->BridgeResult<(OriginalAuthorizationEvidence,RetainedAuthorizationRequest,RetainedWitnessPermit,RetainedAuthorizationResult,FinancialReturnJournalPinV1,wholepact_authority::OwnerControlRequest)> {
         read.check_source(source.identity_digest()).map_err(|_|BridgeError::Permission)?;
         let publication=read.publication_lease().map_err(|_|BridgeError::Permission)?;
         let _fence=self.journal.authority_fence.read().map_err(|_|JournalError::Permission)?;
@@ -158,6 +158,6 @@ impl FinancialConsentJournalV1 {
         if !c.is_autocommit(){return Err(JournalError::Conflict.into());}
         pin.require(self,source,&c)?;
         drop(publication);
-        Ok((original,request,permit,result,pin))
+        Ok((original,request,permit,result,pin,retained.request().clone()))
     }
 }

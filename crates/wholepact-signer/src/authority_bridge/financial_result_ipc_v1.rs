@@ -315,13 +315,13 @@ impl PreparedFinancialReturnV1 {
             .original_deadline()
             .min(Instant::now() + Duration::from_secs(900));
         source
-            .require_original_financial_host_v1(&peer)
+            .check_retained_financial_peer_v1(&peer)
             .map_err(|_| BridgeError::Permission)?;
-        source
-            .check_read(&read_owner)
+        read_owner
+            .check_source(source.identity_digest())
             .map_err(|_| BridgeError::Permission)?;
         peer.check_alive().map_err(|_| BridgeError::Permission)?;
-        let (original, _, _, result, journal_pin) = source
+        let (original, _, _, result, journal_pin, continuation) = source
             .financial_journal()
             .map_err(|_| BridgeError::Permission)?
             .financial_retained_result_v1(
@@ -330,9 +330,12 @@ impl PreparedFinancialReturnV1 {
                     .map_err(|_| BridgeError::Permission)?,
                 &read_owner,
             )?;
-        let continuation = source
-            .continuation_request()
-            .map_err(|_| BridgeError::Binding)?;
+        read_owner
+            .check_source(source.identity_digest())
+            .map_err(|_| BridgeError::Permission)?;
+        source
+            .check_retained_financial_peer_v1(&peer)
+            .map_err(|_| BridgeError::Permission)?;
         let OwnerControl::AdmitFinancialContinuationV1 { record } = &continuation.control else {
             return Err(BridgeError::Binding);
         };
@@ -395,8 +398,14 @@ impl PreparedFinancialReturnV1 {
                     .map_err(|_| BridgeError::Permission)
             },
         )?;
+        read_owner
+            .check_source(source.identity_digest())
+            .map_err(|_| BridgeError::Permission)?;
         source
-            .check_read(&read_owner)
+            .check_financial_return_source_pin_v1(&source_pin, &peer)
+            .map_err(|_| BridgeError::Permission)?;
+        read_owner
+            .check_source(source.identity_digest())
             .map_err(|_| BridgeError::Permission)?;
         drop(read_owner);
         Ok(Self {
@@ -445,11 +454,11 @@ impl PreparedFinancialReturnV1 {
         self,
         action: FinancialReturnActionV1,
     ) -> Result<ApprovedFinancialReturnV1> {
-        self.source
-            .check_custody()
+        action
+            .check_source(self.source.identity_digest())
             .map_err(|_| BridgeError::Permission)?;
-        self.peer
-            .check_alive()
+        self.source
+            .check_financial_return_source_pin_v1(&self.source_pin, &self.peer)
             .map_err(|_| BridgeError::Permission)?;
         action
             .check_source(self.source.identity_digest())
