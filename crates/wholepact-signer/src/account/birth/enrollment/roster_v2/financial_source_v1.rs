@@ -2,8 +2,8 @@
 //! owner or historical receipt can be converted into this source.
 use super::*;
 use crate::consent_journal::{
-    FinancialConsentJournalV1, FinancialSourceBindingV1, PendingFinancialContinuationAdmissionV1,
-    PreparedFinancialContinuationIntentV1,
+    FinancialConsentJournalV1, FinancialReturnJournalPinV1, FinancialSourceBindingV1,
+    PendingFinancialContinuationAdmissionV1, PreparedFinancialContinuationIntentV1,
 };
 use crate::native_ui::{
     DormantNativeLifetime,
@@ -472,6 +472,65 @@ impl PreparedOriginalFinancialSourceV1 {
         } else {
             *held = Some(peer);
         }
+        Ok(())
+    }
+}
+
+/// Inert, original-only continuity proof for one already audited result read.
+/// It cannot authorize a read, signature, return or mutation and is never
+/// refreshed. Only the private prepared Return owner retains this pin.
+pub(crate) struct FinancialReturnSourcePinV1 {
+    source_identity: String,
+    journal: FinancialReturnJournalPinV1,
+}
+impl PreparedOriginalFinancialSourceV1 {
+    pub(crate) fn prepare_financial_return_source_pin_v1(
+        &self,
+        journal: FinancialReturnJournalPinV1,
+        peer: &crate::native_peer::PeerProcess,
+    ) -> Result<FinancialReturnSourcePinV1> {
+        // Keep all full source validation at issuance. The journal pin itself
+        // was issued inside the same audited snapshot as the saved result.
+        self.require_original_financial_host_v1(peer)?;
+        let pin = FinancialReturnSourcePinV1 {
+            source_identity: self.identity.clone(),
+            journal,
+        };
+        self.check_financial_return_source_pin_v1(&pin, peer)?;
+        Ok(pin)
+    }
+    pub(crate) fn check_financial_return_source_pin_v1(
+        &self,
+        pin: &FinancialReturnSourcePinV1,
+        peer: &crate::native_peer::PeerProcess,
+    ) -> Result<()> {
+        self.lifetime.check_connected()?;
+        if self.identity != pin.source_identity || Instant::now() >= self.original_deadline {
+            return Err(Error::Locked);
+        }
+        if immutable(&self.retained)? != self.immutable {
+            return Err(Error::ReviewMismatch);
+        }
+        self.financial_journal()?
+            .check_financial_return_pin_v1(&*self.financial_binding()?, &pin.journal)?;
+        {
+            let held = self.recipient.lock().map_err(|_| Error::Locked)?;
+            let original = held.as_ref().ok_or(Error::Authentication)?;
+            if original.instance() != pin.journal.original_host_instance() {
+                return Err(Error::Authentication);
+            }
+            original.same_live_process(peer)?;
+        }
+        // No journal/peer/binding lock survives this bounded check or crosses
+        // a socket wait. Metadata work cannot extend original source lifetime.
+        if immutable(&self.retained)? != self.immutable {
+            return Err(Error::ReviewMismatch);
+        }
+        self.lifetime.check_connected()?;
+        if Instant::now() >= self.original_deadline {
+            return Err(Error::Locked);
+        }
+        peer.check_alive()?;
         Ok(())
     }
 }

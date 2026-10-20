@@ -56,13 +56,28 @@ FINANCIAL_COMMIT_STATES = frozenset("NotEstablished IntakeCommitted OutcomeUncer
 FINANCIAL_ERRORS = frozenset("StaleHead Inactive PolicyDenied BudgetExceeded InputReserved ObligationReserved CorruptHistory SessionRequired SessionPending Permission Binding Conflict Missing RecoveryRequired Verification Storage ResourceLimit Expired Uncertain Unsupported Authentication Terminal Invalid Locked Ipc Journal Authority Wallet SignerOriginUnavailable DurableProposalConflict DurableProposalRecoveryRequired SignaturesIncomplete RetentionDenied RetentionConflict OriginalIntentMissing RetentionRecoveryRequired SubmissionUnresolved FinancialOutcomeReconciliation RevisionConflict Timeout Interrupted TransportUnavailable WrongNetwork WrongBranch StaleChain ContradictoryChain BackendFailure ClockUnavailable Other FrameUnclassified FrameDeadline FrameEof FrameCredentialsMissing FrameCredentialsMismatch FrameAncillaryRejected FrameTruncated FramePeerNotLive FrameCurrentCheck FrameIo FrameLimit FrameInvalid FrameInvalidBudget".split())
 
 def validate_financial_diagnostic(record):
-    if type(record) is not dict or set(record) != {"schema", "stage", "component", "error_class", "commit_state"}:
+    if type(record) is not dict or set(record) != {"schema", "stage", "component", "error_class", "commit_state", "current_timing"}:
         raise ValueError()
     if type(record["schema"]) is not int or record["schema"] != 1:
         raise ValueError()
     for key, values in (("stage", FINANCIAL_STAGES), ("component", FINANCIAL_COMPONENTS), ("error_class", FINANCIAL_ERRORS), ("commit_state", FINANCIAL_COMMIT_STATES)):
         if type(record[key]) is not str or record[key] not in values:
             raise ValueError()
+    timing = record["current_timing"]
+    if timing is not None:
+        stages = {"ResultCurrentLock", "ResultCurrentPeer", "ResultCurrentProviderVerification", "ResultCurrentWrite", "ResultCurrentRead", "ResultCurrentMatch"}
+        if record["component"] != "SignerBridge" or record["stage"] not in stages:
+            raise ValueError()
+        required = {"budget_ms", "roundtrip_elapsed_ms"}
+        optional = {"provider_elapsed_ms", "remaining_before_write_ms", "remaining_before_read_ms"}
+        if type(timing) is not dict or set(timing) != required | optional:
+            raise ValueError()
+        for key in required | optional:
+            value = timing[key]
+            if key in optional and value is None:
+                continue
+            if type(value) is not int or not 0 <= value <= 2001:
+                raise ValueError()
     return record
 
 

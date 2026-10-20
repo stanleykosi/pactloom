@@ -136,11 +136,12 @@ impl FinancialConsentJournalV1 {
     /// A fresh read decision can retrieve historical bytes but cannot return
     /// them under an authenticated origin. ReturnExact needs its own new click.
     pub(crate) fn financial_retained_result_v1(&self,source:&FinancialSourceBindingV1,read:&crate::native_ui::financial_authority_v1::FinancialReadLeaseV1)
-        ->BridgeResult<(OriginalAuthorizationEvidence,RetainedAuthorizationRequest,RetainedWitnessPermit,RetainedAuthorizationResult)> {
+        ->BridgeResult<(OriginalAuthorizationEvidence,RetainedAuthorizationRequest,RetainedWitnessPermit,RetainedAuthorizationResult,FinancialReturnJournalPinV1)> {
         read.check_source(source.identity_digest()).map_err(|_|BridgeError::Permission)?;
         let publication=read.publication_lease().map_err(|_|BridgeError::Permission)?;
         let _fence=self.journal.authority_fence.read().map_err(|_|JournalError::Permission)?;
         let mut c=self.journal.connection.lock().map_err(|_|JournalError::Database)?;
+        if !c.is_autocommit(){return Err(JournalError::Conflict.into());}
         source.require(&self.journal,&c)?;source.require_pin(&c)?;
         let tx=c.transaction_with_behavior(TransactionBehavior::Deferred).map_err(JournalError::from)?;
         validate(&tx,&self.genesis)?;
@@ -150,9 +151,13 @@ impl FinancialConsentJournalV1 {
         let permit=read_permit(&tx,id)?.ok_or(BridgeError::Missing)?;validate_permit(&request,&permit)?;
         let result=read_result(&tx,id)?.ok_or(BridgeError::Uncertain)?;result.validate(&request)?;
         source.require(&self.journal,&tx)?;source.require_pin(&tx)?;
+        let original_delivery=authority::durable_delivery_admission_intent_v3::read(&tx,id)?.ok_or(BridgeError::Missing)?;
+        let pin=FinancialReturnJournalPinV1::from_audited_result(self,source,&tx,original_delivery.recipient_intent().authorized_host_process_instance.clone(),result.result_digest.clone())?;
         read.check_source(source.identity_digest()).map_err(|_|BridgeError::Permission)?;
         tx.commit().map_err(JournalError::from)?;source.require_pin(&c)?;
+        if !c.is_autocommit(){return Err(JournalError::Conflict.into());}
+        pin.require(self,source,&c)?;
         drop(publication);
-        Ok((original,request,permit,result))
+        Ok((original,request,permit,result,pin))
     }
 }
