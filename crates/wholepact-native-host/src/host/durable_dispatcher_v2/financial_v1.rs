@@ -269,7 +269,12 @@ impl OriginalFinancialOwnerV1<'_> {
             self.check_effect_source().map_err(|_| wholepact_authority::AuthorityError::Permission)?;
             native.check_current().map_err(|_| wholepact_authority::AuthorityError::Permission)?;
             intent.check_current_v1(access, source, proof, material).map_err(|_| wholepact_authority::AuthorityError::Permission)
-        }).map_err(|_| Error::Receipt("DISPATCH_ADMISSION_UNKNOWN: preserve the exact retained pair requests and inspect the same original operations; no replacement or expiry renewal is authorized".into()))
+        }).map_err(|error| {
+            #[cfg(all(test, feature = "synthetic-born-joined-qualification"))]
+            report_financial_authority_failure_v1(false, &error);
+            let _ = error;
+            Error::Receipt("DISPATCH_ADMISSION_UNKNOWN: preserve the exact retained pair requests and inspect the same original operations; no replacement or expiry renewal is authorized".into())
+        })
     }
 }
 
@@ -295,7 +300,12 @@ impl OriginalFinancialOwnerV1<'_> {
         let history = client.financial_continuation_history_v1_checked_until(continuation_operation, approval.deadline(), || {
             self.check_read_source().map_err(|_| wholepact_authority::AuthorityError::Permission)?;
             approval.check().map_err(|_| wholepact_authority::AuthorityError::Permission)
-        }).map_err(|_| Error::Receipt("FINANCIAL_HISTORY_RECONCILIATION: original outcome remains uncertain; preserve exact operations".into()))?;
+        }).map_err(|error| {
+            #[cfg(all(test, feature = "synthetic-born-joined-qualification"))]
+            report_financial_authority_failure_v1(true, &error);
+            let _ = error;
+            Error::Receipt("FINANCIAL_HISTORY_RECONCILIATION: original outcome remains uncertain; preserve exact operations".into())
+        })?;
         let record = history.continuation_record();
         if record.terms.scope.authorization.identity.account_id != account
             || record.terms.scope.delivery.dispatcher != self.descriptor()?
@@ -400,4 +410,40 @@ impl OriginalFinancialOwnerV1<'_> {
         intent.check_current_v1(access, source, proof, material)?;
         Ok(())
     }
+}
+
+// Qualification-only finite first-failure evidence. No payload, source path,
+// request, certificate, receipt or key is formatted. Output cannot replace the
+// actual owned failure or turn an uncertain response into verified absence.
+#[cfg(all(test, feature = "synthetic-born-joined-qualification"))]
+fn report_financial_authority_failure_v1(history: bool, error: &wholepact_authority::AuthorityError) {
+    use std::io::Write;
+    use wholepact_authority::AuthorityError as E;
+    let outcome = match error {
+        E::InvalidBinding => "AuthorityInvalidBinding",
+        E::Permission => "AuthorityPermission",
+        E::StaleHead => "AuthorityStaleHead",
+        E::Conflict => "AuthorityConflict",
+        E::Inactive => "AuthorityInactive",
+        E::RecoveryRequired => "AuthorityRecoveryRequired",
+        E::Expired => "AuthorityExpired",
+        E::PolicyDenied => "AuthorityPolicyDenied",
+        E::BudgetExceeded => "AuthorityBudgetExceeded",
+        E::InputReserved => "AuthorityInputReserved",
+        E::ObligationReserved => "AuthorityObligationReserved",
+        E::Limit => "AuthorityLimit",
+        E::Storage => "AuthorityStorage",
+        E::CorruptHistory => "AuthorityCorruptHistory",
+        E::PermanentStopUnavailable => "AuthorityPermanentStopUnavailable",
+        E::OfflineHistoryUnsupported => "AuthorityOfflineHistoryUnsupported",
+        E::ConstructionHistoryUnsupported => "AuthorityConstructionHistoryUnsupported",
+        E::UnsupportedVersion => "AuthorityUnsupportedVersion",
+        E::Authentication => "AuthorityAuthentication",
+        E::Uncertain => "AuthorityUncertain",
+        E::ResolutionUnavailable => "AuthorityResolutionUnavailable",
+        E::SessionRequired => "AuthoritySessionRequired",
+        E::SessionPending => "AuthoritySessionPending",
+    };
+    let boundary = if history { "DeliveryHistoricalRead" } else { "DeliveryNativeAdmission" };
+    let _ = writeln!(std::io::stderr().lock(), "\n[JOINED_DIAGNOSTIC {boundary} {outcome}]");
 }

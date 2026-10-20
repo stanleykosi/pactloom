@@ -1,8 +1,18 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-20, 10:26 UTC.
+Updated: 2026-10-20, 11:13 UTC.
 
 **CI44 passed the genuine two-owner delivery/admission, original-producer SIGKILL and fresh-process read-only original-history verification route. Financial signing/dispatch and public testnet settlement remain unqualified. This is a bounded admission/restart milestone, not a production release.**
+
+## CI47 passed the prior lock boundary; dispatcher fixture certificate was untrusted
+
+[Run 39408388893](https://github.com/stanleykosi/pactloom/actions/runs/39408388893), qualification `0cb8eb88661517f14af96e6e9ceb188b39a8dffa`, implementation `09cecaa69932340b4c28eb75286d4f51bf827029`, exact tree `7035f66a128a15a54236c2db6e7fc20ae11b8bc1`, failed at 10:54:38 UTC. Clean release build passed in 11m00s, along with the real-peer gate and encrypted bootstrap. Native execution ran 10:43:48–10:54:38. The failure moved to 122/147 completed inputs, after creation of the two-account server and the first Host financial-history review. The closed source report was `PrivateWorkspaceCapture / HostReceipt` within `SignatureAndIntake`. Reaping, original group absence and cleanup were verified; reader did not start.
+
+Independent source review identified a concrete fixture credential mismatch: the earlier custody-only B1 helper made a self-signed dispatcher leaf, while the actual financial Witness TLS verifier trusts only the original fixture CA. A committed application-level pin cannot bypass WebPKI chain rejection. The financial branch now uses a distinct clientAuth dispatcher leaf signed by that exact original fixture CA, created before registration and approvals. Owner/writer/dispatcher separation, original trust root, server pin and production certificate verification remain unchanged; no CA key is exported. The original B1 custody-only helper is unchanged.
+
+The maintained file-only regression passed once using pinned OpenSSL 3.5.9: the actual original-CA leaf is accepted, the old self-signed leaf is refused, matching and mismatched keys are checked, and identities remain distinct. It creates disposable certificate files only, with no native authority, GUI, endpoint, IPC or socket. This is certificate-validation evidence, not a network handshake or native financial pass. The combined Authority/Host release build passed in 7m55s.
+
+Qualification-only diagnostics now preserve the exhaustive typed AuthorityError outcome before the generic HostReceipt wrapper, without raw receipt text or private material. Complete native payment, saved-transaction restart and dispatch remain unqualified pending the next isolated run.
 
 ## CI46 localized a real shared-installation lock bug
 
