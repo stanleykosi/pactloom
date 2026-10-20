@@ -69,7 +69,55 @@ DURABLE_DELIVERY_INVALID = 'CI_SYNTHETIC_DURABLE_DELIVERY_INVALID'
 DURABLE_DELIVERY_BOUNDARIES = PRIVATE_WORKSPACE_BOUNDARIES | frozenset('DeliveryCredentialRegistration DeliverySourceExport DeliveryRedisclosure DeliveryRedisclosurePrepare DeliveryRedisclosureApprove DeliveryRedisclosureServe DeliveryArtifactImportStart DeliveryArtifactImport DeliverySourceOpen DeliverySourceInspection DeliverySourcePlan DeliveryRecipientPrepare DeliveryExportPreview DeliveryExportApproval DeliveryExportCommit DeliveryExportPostcheck DeliveryNativeCheck DeliverySourceCheck DeliveryOriginalReopen DeliveryUnsupportedAudit DeliveryNativeAdmission DeliveryHistoricalRead DeliveryIdentityCompare DeliveryDurableMarker DeliveryProducerKill DeliveryProducerReap DeliveryReaderReap DeliveryRootCleanup DeliveryExportProofCurrent DeliveryExportProofOrigin DeliveryExportSourceBefore DeliveryExportSourceAfter DeliveryExportMetadataOrigin DeliveryExportMarker DeliveryExportHistory DeliveryExportMaterialCeilings DeliveryExportIntake DeliveryExportVerifiedProof DeliveryExportRoster DeliveryExportPayload DeliveryExportOutputActions DeliveryExportRecipientBinding DeliveryExportSources DeliveryExportCheckpointScope DeliveryExportProofPermission DeliveryExportPermission DeliveryExportReplayScope DeliveryExportCommand DeliveryExportReplayLookup DeliveryExportDelta DeliveryExportEntry DeliveryRecipientMutex DeliveryRecipientDeadline DeliveryRecipientOrigin DeliveryRecipientObserverClone DeliveryRecipientWriteSerialize DeliveryRecipientWriteLimit DeliveryRecipientWriteDeadline DeliveryRecipientWriteTimeout DeliveryRecipientWriteIo DeliveryRecipientWriteEmpty DeliveryRecipientFrame DeliveryRecipientResponseDecode DeliveryRecipientResponseDigest DeliveryRecipientResponse DeliverySourceScopePredicate DeliveryProofRolePredicate DeliveryMaterialActionPredicate DeliveryMaterialScopePredicate DeliveryExportScopePredicate DeliveryReceiveNativeDeadline DeliveryReceiveRequest DeliveryReceiveSource DeliveryReceiveOriginalHistory DeliveryReceiveOriginalBinding DeliveryReceiveCurrentHistory DeliveryReceiveRedisclosureBinding DeliveryReceiveRecipientBinding DeliveryReceiveViewingKey DeliveryReceiveMaterialOwner DeliveryReceiveLease DeliveryReceiveNativeOrigin DeliveryReceiveSourceUnderLease DeliveryReceiveReceipts DeliveryReceiveProposal DeliveryReceiveAccount DeliveryReceiveAccountBinding DeliveryReceiveReviewerScope DeliveryReceiveDeadline DeliveryReceiveOriginalSource DeliveryReceivePeer DeliveryReceiveMaterialClock DeliveryReceiveMaterialScope DeliveryReceiveRequestDigest DeliveryReceiveReadyWrite DeliveryReceiveFrame DeliveryReceiveCommandParse DeliveryReceiveCommandBinding DeliveryReceivePayloadLimit DeliveryReceiveChunkDecode DeliveryReceiveCurrentWrite DeliveryReceiveReceivingWrite DeliveryReceivePayloadBinding DeliveryReceivePayloadParse DeliveryReceivePayloadCanonical DeliveryReceiveContributionBinding DeliveryReceiveUnsignedDecode DeliveryReceiveProvedDecode DeliveryReceiveEconomics DeliveryReceiveFinalBinding DeliveryReceiveFinalSource DeliveryReceiveFinalPeer DeliveryReceiveFinalDeadline DeliveryReceiveFinalMaterialClock DeliveryReceiveFinalMaterialScope DeliveryReceiveImportedWrite DeliveryReceiveTerminal'.split())
 DURABLE_DELIVERY_FALSE_FIELDS = frozenset(('authorization_allowed','distribution_allowed','public_chain_verified'))
 DURABLE_DELIVERY_BOOL_FIELDS = frozenset(('producer_reaped','producer_group_absent','reader_reaped','reader_group_absent','fixed_verified','exact_fixed_prefix_preserved','exact_export_history_preserved','exact_original_scopes_preserved','exact_original_intents_preserved','authenticated_histories_verified','unsupported_actions_denied','reader_no_effects_verified'))
-DURABLE_DELIVERY_FIELDS = DURABLE_DELIVERY_FALSE_FIELDS | DURABLE_DELIVERY_BOOL_FIELDS | frozenset(('schema','phase','result','first_failure','first_outcome','failed_child_inputs_completed','failed_child_inputs_expected','producer_exit','reader_exit','root_cleanup','admission_count'))
+DURABLE_DELIVERY_FIELDS = DURABLE_DELIVERY_FALSE_FIELDS | DURABLE_DELIVERY_BOOL_FIELDS | frozenset(('schema','phase','result','first_failure','first_outcome','retained_exporter_failure','retained_exporter_outcome','failed_child_inputs_completed','failed_child_inputs_expected','producer_exit','reader_exit','root_cleanup','admission_count'))
+# The first matching retained-tail exporter observation, not first-ever or
+# causal evidence. Null does not establish exposure absence or completeness.
+DURABLE_DELIVERY_RETAINED_EXPORTER_BOUNDARIES = frozenset((
+    'DeliveryExportProofCurrent',
+    'DeliveryExportProofOrigin',
+    'DeliveryExportSourceBefore',
+    'DeliveryExportSourceAfter',
+    'DeliveryExportMetadataOrigin',
+    'DeliveryExportMarker',
+    'DeliveryExportHistory',
+    'DeliveryExportMaterialCeilings',
+    'DeliveryExportIntake',
+    'DeliveryExportVerifiedProof',
+    'DeliveryExportRoster',
+    'DeliveryExportPayload',
+    'DeliveryExportOutputActions',
+    'DeliveryExportRecipientBinding',
+    'DeliveryExportSources',
+    'DeliveryExportCheckpointScope',
+    'DeliveryExportProofPermission',
+    'DeliveryExportPermission',
+    'DeliveryExportReplayScope',
+    'DeliveryExportCommand',
+    'DeliveryExportReplayLookup',
+    'DeliveryExportDelta',
+    'DeliveryExportEntry',
+    'DeliveryRecipientMutex',
+    'DeliveryRecipientDeadline',
+    'DeliveryRecipientOrigin',
+    'DeliveryRecipientObserverClone',
+    'DeliveryRecipientWriteSerialize',
+    'DeliveryRecipientWriteLimit',
+    'DeliveryRecipientWriteDeadline',
+    'DeliveryRecipientWriteTimeout',
+    'DeliveryRecipientWriteIo',
+    'DeliveryRecipientWriteEmpty',
+    'DeliveryRecipientFrame',
+    'DeliveryRecipientResponseDecode',
+    'DeliveryRecipientResponseDigest',
+    'DeliveryRecipientResponse',
+    'DeliverySourceScopePredicate',
+    'DeliveryProofRolePredicate',
+    'DeliveryMaterialActionPredicate',
+    'DeliveryMaterialScopePredicate',
+    'DeliveryExportScopePredicate',
+    'DeliveryNativeCheck',
+    'DeliverySourceCheck',
+))
 
 # Independent, closed, bounded optional observation. Never an outcome/permit.
 PRIVATE_FIXED_DIAGNOSTIC_PREFIX = 'CI_SYNTHETIC_PRIVATE_FIXED_DIAGNOSTIC '
@@ -985,7 +1033,7 @@ def public_durable_delivery(text):
     if len(text.encode('utf8')) > 2048: raise ValueError('oversized durable delivery result')
     row=json.loads(text,object_pairs_hook=distinct_object)
     if type(row) is not dict or set(row)!=DURABLE_DELIVERY_FIELDS: raise ValueError('durable delivery fields')
-    if type(row['schema']) is not int or row['schema']!=3: raise ValueError('durable delivery schema')
+    if type(row['schema']) is not int or row['schema']!=4: raise ValueError('durable delivery schema')
     if type(row['phase']) is not str or row['phase']!='durable_delivery_admission': raise ValueError('durable delivery phase')
     if type(row['result']) is not str or row['result'] not in ('passed','failed'): raise ValueError('durable delivery result')
     if row['first_failure'] is not None and (type(row['first_failure']) is not str or row['first_failure'] not in DURABLE_DELIVERY_BOUNDARIES): raise ValueError('durable delivery boundary')
@@ -997,7 +1045,14 @@ def public_durable_delivery(text):
     if (completed is None)!=(expected is None): raise ValueError('durable delivery partial input progress')
     if completed is not None and (type(completed) is not int or type(expected) is not int or not 0<=completed<=expected<=512 or expected==0 or row['first_failure'] is None):
         raise ValueError('durable delivery input progress')
-    if (row['result']=='passed' or row['root_cleanup']!='closed_absent' or row['producer_reaped'] is not True or row['producer_group_absent'] is not True) and any(value is not None for value in (observed,completed,expected)):
+    retained_failure=row['retained_exporter_failure']
+    retained_outcome=row['retained_exporter_outcome']
+    if (retained_failure is None)!=(retained_outcome is None): raise ValueError('durable delivery partial retained exporter observation')
+    if retained_failure is not None and (type(retained_failure) is not str or retained_failure not in DURABLE_DELIVERY_RETAINED_EXPORTER_BOUNDARIES
+        or type(retained_outcome) is not str or retained_outcome not in OUTCOMES or retained_outcome in ('Begin','Complete')
+        or row['first_failure'] is None or completed is None):
+        raise ValueError('durable delivery finite retained exporter observation')
+    if (row['result']=='passed' or row['root_cleanup']!='closed_absent' or row['producer_reaped'] is not True or row['producer_group_absent'] is not True) and any(value is not None for value in (observed,completed,expected,retained_failure,retained_outcome)):
         raise ValueError('durable delivery optional observation gate')
     for key,values in (('producer_exit',('sigkill','other','unverified')),('reader_exit',('success','other','not_started','unverified')),('root_cleanup',('closed_absent','retained','unverified')),('admission_count',('unverified','0_of_2','1_of_2','2_of_2'))):
         if type(row[key]) is not str or row[key] not in values: raise ValueError('durable delivery closed status')

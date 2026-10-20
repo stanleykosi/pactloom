@@ -3101,8 +3101,9 @@ class DurableDeliveryOutputTests(unittest.TestCase):
     def record(self):
         row={key:True for key in output.DURABLE_DELIVERY_BOOL_FIELDS}
         row.update({key:False for key in output.DURABLE_DELIVERY_FALSE_FIELDS})
-        row.update(schema=3,phase='durable_delivery_admission',result='passed',first_failure=None,
+        row.update(schema=4,phase='durable_delivery_admission',result='passed',first_failure=None,
                    first_outcome=None,failed_child_inputs_completed=None,failed_child_inputs_expected=None,
+                   retained_exporter_failure=None,retained_exporter_outcome=None,
                    producer_exit='sigkill',reader_exit='success',root_cleanup='closed_absent',admission_count='2_of_2')
         return row
     def line(self,row=None):
@@ -3120,7 +3121,7 @@ class DurableDeliveryOutputTests(unittest.TestCase):
     def test_rust_python_result_inventory_and_selector_are_exact(self):
         base=ROOT/'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3_qualification'
         source=(base/'durable_proposal_v1/delivery_admission_v2.rs').read_text()
-        fields=re.search(r'struct PublicOutcomeV3\s*\{(.*?)\n\}',source,re.S).group(1)
+        fields=re.search(r'struct PublicOutcomeV4\s*\{(.*?)\n\}',source,re.S).group(1)
         skipped=re.findall(r'#\[serde\(skip\)\]\s*(\w+): ([^,]+),',fields)
         self.assertEqual(skipped,[('pending_child_observation','Option<FailedChildObservation>')])
         fields=re.sub(r'#\[serde\(skip\)\]\s*\w+: [^,]+,','',fields)
@@ -3135,7 +3136,10 @@ class DurableDeliveryOutputTests(unittest.TestCase):
         selector=output.TESTS['durable-delivery-admission'][0].rsplit('::',1)[1]
         self.assertEqual(len(re.findall(r'#\[test\]\s*#\[ignore = "[^"\n]+"\]\s*fn '+selector+r'\(\)',source)),1)
         public=source.split('fn public_json(&self)',1)[1].split('pub(in crate::host',1)[0]
-        self.assertIn('json.len() > 2048',public)
+        self.assertRegex(public,r'serialize_delivery_with_exporter_priority\(\s*serde_json::to_value\(self\)\.map_err\(\|_\| invalid\(\)\)\?,\s*2048,\s*\)')
+        serializer=source.split('fn serialize_delivery_with_exporter_priority(',1)[1].split('\n}\n',1)[0]
+        self.assertEqual(serializer.count('if json.len() > maximum'),2)
+        self.assertRegex(serializer,r'if json\.len\(\) > maximum\s*\{\s*return Err\(invalid\(\)\);\s*\}\s*Ok\(json\)')
         self.assertIn('Duration::from_secs(900)',source)
     def test_closed_fields_duplicate_types_and_claims_are_strict(self):
         row=self.record()
@@ -3230,8 +3234,8 @@ class DurableDeliveryOutputTests(unittest.TestCase):
                      failed_child_inputs_completed=111,failed_child_inputs_expected=117,
                      admission_count='unverified')
             self.assertEqual(output.public_durable_delivery(json.dumps(row)),row)
-            self.assertEqual(row['schema'],3)
-            self.assertEqual(len(row),26)
+            self.assertEqual(row['schema'],4)
+            self.assertEqual(len(row),28)
             self.assertFalse(row['authorization_allowed'])
         row=dict(self.record(),result='failed',first_failure='DeliveryRecipientFrame',first_outcome='OriginAuthentication')
         self.assertEqual(output.public_durable_delivery(json.dumps(row)),row)
@@ -3331,8 +3335,8 @@ class DurableDeliveryOutputTests(unittest.TestCase):
                      admission_count='unverified',reader_exit='not_started',reader_reaped=False,
                      reader_group_absent=False,reader_no_effects_verified=False)
             self.assertEqual(output.public_durable_delivery(json.dumps(row)),row)
-            self.assertEqual(row['schema'],3)
-            self.assertEqual(len(row),26)
+            self.assertEqual(row['schema'],4)
+            self.assertEqual(len(row),28)
             self.assertLess(len(self.line(row).encode()),2048)
             self.assertFalse(row['authorization_allowed'])
             self.assertNotIn('no_effects',row)
@@ -3382,6 +3386,214 @@ class DurableDeliveryOutputTests(unittest.TestCase):
         with self.assertRaises(ValueError):run([PrivateWorkspaceOutputTests().line()])
         cleanup='[JOINED_CLEANUP group_signal=AlreadyAbsentWhileLeaderOwned group_absence=OriginalGroupAbsentObserved direct_child=Reaped root_cleanup=ClosedAndAbsenceVerified exit=Some(0) signal=None core_dumped=false]'
         with self.assertRaises(ValueError):run([cleanup,self.line()])
+
+
+class DurableDeliveryRetainedExporterOutputTests(unittest.TestCase):
+    """Schema/parser checks only, not evidence of native delivery or causality."""
+    exporter_boundaries=(
+        'DeliveryExportProofCurrent',
+        'DeliveryExportProofOrigin',
+        'DeliveryExportSourceBefore',
+        'DeliveryExportSourceAfter',
+        'DeliveryExportMetadataOrigin',
+        'DeliveryExportMarker',
+        'DeliveryExportHistory',
+        'DeliveryExportMaterialCeilings',
+        'DeliveryExportIntake',
+        'DeliveryExportVerifiedProof',
+        'DeliveryExportRoster',
+        'DeliveryExportPayload',
+        'DeliveryExportOutputActions',
+        'DeliveryExportRecipientBinding',
+        'DeliveryExportSources',
+        'DeliveryExportCheckpointScope',
+        'DeliveryExportProofPermission',
+        'DeliveryExportPermission',
+        'DeliveryExportReplayScope',
+        'DeliveryExportCommand',
+        'DeliveryExportReplayLookup',
+        'DeliveryExportDelta',
+        'DeliveryExportEntry',
+        'DeliveryRecipientMutex',
+        'DeliveryRecipientDeadline',
+        'DeliveryRecipientOrigin',
+        'DeliveryRecipientObserverClone',
+        'DeliveryRecipientWriteSerialize',
+        'DeliveryRecipientWriteLimit',
+        'DeliveryRecipientWriteDeadline',
+        'DeliveryRecipientWriteTimeout',
+        'DeliveryRecipientWriteIo',
+        'DeliveryRecipientWriteEmpty',
+        'DeliveryRecipientFrame',
+        'DeliveryRecipientResponseDecode',
+        'DeliveryRecipientResponseDigest',
+        'DeliveryRecipientResponse',
+        'DeliverySourceScopePredicate',
+        'DeliveryProofRolePredicate',
+        'DeliveryMaterialActionPredicate',
+        'DeliveryMaterialScopePredicate',
+        'DeliveryExportScopePredicate',
+        'DeliveryNativeCheck',
+        'DeliverySourceCheck',
+    )
+
+    def record(self):
+        return dict(DurableDeliveryOutputTests().record(),result='failed',
+                    first_failure='DeliveryReceiveFrame',first_outcome='OriginAuthentication',
+                    retained_exporter_failure='DeliveryExportPermission',
+                    retained_exporter_outcome='EngineDisclosureDenied',
+                    failed_child_inputs_completed=113,failed_child_inputs_expected=121,
+                    admission_count='unverified',reader_exit='not_started',reader_reaped=False,
+                    reader_group_absent=False,reader_no_effects_verified=False)
+
+    def test_schema4_has_exact28_fields_and_required_nullable_pair(self):
+        expected=frozenset((
+            'schema','phase','result','first_failure','first_outcome',
+            'retained_exporter_failure','retained_exporter_outcome',
+            'failed_child_inputs_completed','failed_child_inputs_expected',
+            'producer_exit','producer_reaped','producer_group_absent',
+            'reader_exit','reader_reaped','reader_group_absent','root_cleanup',
+            'admission_count','fixed_verified','exact_fixed_prefix_preserved',
+            'exact_export_history_preserved','exact_original_scopes_preserved',
+            'exact_original_intents_preserved','authenticated_histories_verified',
+            'unsupported_actions_denied','reader_no_effects_verified',
+            'authorization_allowed','distribution_allowed','public_chain_verified',
+        ))
+        self.assertEqual(len(expected),28)
+        self.assertEqual(output.DURABLE_DELIVERY_FIELDS,expected)
+        row=self.record()
+        self.assertEqual(set(row),expected)
+        self.assertEqual(row['schema'],4)
+        for fields in (('retained_exporter_failure',),('retained_exporter_outcome',),
+                       ('retained_exporter_failure','retained_exporter_outcome')):
+            missing=row.copy()
+            for field in fields: missing.pop(field)
+            with self.assertRaises(ValueError): output.public_durable_delivery(json.dumps(missing))
+        nulls=dict(row,retained_exporter_failure=None,retained_exporter_outcome=None)
+        self.assertEqual(output.public_durable_delivery(json.dumps(nulls)),nulls)
+        source=(ROOT/'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3_qualification/durable_proposal_v1/delivery_admission_v2.rs').read_text()
+        fields=re.search(r'struct PublicOutcomeV4\s*\{(.*?)\n\}',source,re.S).group(1)
+        for field in ('retained_exporter_failure','retained_exporter_outcome'):
+            self.assertRegex(fields,r'#\[serde\(deserialize_with = "required_nullable"\)\]\s*'+field+r': Option<String>,')
+
+    def test_exact44_exporter_boundary_inventory_matches_rust_without_vocabulary_growth(self):
+        self.assertEqual(len(self.exporter_boundaries),44)
+        self.assertEqual(len(set(self.exporter_boundaries)),44)
+        self.assertEqual(output.DURABLE_DELIVERY_RETAINED_EXPORTER_BOUNDARIES,
+                         frozenset(self.exporter_boundaries))
+        self.assertTrue(set(self.exporter_boundaries)<=output.DURABLE_DELIVERY_BOUNDARIES)
+        source=(ROOT/'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3_qualification/durable_proposal_v1/delivery_admission_v2.rs').read_text()
+        body=re.search(r'const RETAINED_EXPORTER_BOUNDARIES: &\[&str\] = &\[(.*?)\];',source,re.S).group(1)
+        labels=re.findall(r'"(\w+)"',body)
+        self.assertEqual(len(labels),44)
+        self.assertEqual(set(labels),set(self.exporter_boundaries))
+        self.assertTrue(set(labels).isdisjoint(name for name in output.DURABLE_DELIVERY_BOUNDARIES
+                                             if name.startswith(('DeliveryReceive','DeliveryRedisclosure'))))
+
+    def test_every_retained_boundary_and_terminal_outcome_preserves_original_pair(self):
+        original=self.record()
+        terminal=output.OUTCOMES-{'Begin','Complete'}
+        for field,values in (('retained_exporter_failure',self.exporter_boundaries),
+                             ('retained_exporter_outcome',terminal)):
+            for value in values:
+                row=dict(original,**{field:value})
+                parsed=output.public_durable_delivery(json.dumps(row))
+                self.assertEqual(parsed,row)
+                self.assertEqual((parsed['first_failure'],parsed['first_outcome']),
+                                 ('DeliveryReceiveFrame','OriginAuthentication'))
+                self.assertFalse(parsed['reader_no_effects_verified'])
+                self.assertTrue(all(parsed[key] is False for key in output.DURABLE_DELIVERY_FALSE_FIELDS))
+        # The existing original outcome stays independently nullable. Neither
+        # pair asserts first-ever ordering, cause, rollback or exposure absence.
+        row=dict(original,first_outcome=None)
+        self.assertEqual(output.public_durable_delivery(json.dumps(row)),row)
+
+    def test_retained_pair_rejects_partial_malformed_private_wrapper_and_receiver_values(self):
+        row=self.record()
+        bad_boundaries=(None,'','private/source/path','DeliveryReceiveFrame',
+                        'DeliveryRedisclosureServe','DeliveryExportCommit','DeliverySourceExport',
+                        'DeliveryRecipientPrepare','PrivateWorkspaceRootCleanup',
+                        'DeliveryExportPermission private',0,True,[],{},['DeliveryExportPermission'])
+        bad_outcomes=(None,'','Begin','Complete','private peer message','EngineDisclosureDenied private',
+                      0,True,[],{},['EngineDisclosureDenied'])
+        for field,values in (('retained_exporter_failure',bad_boundaries),
+                             ('retained_exporter_outcome',bad_outcomes)):
+            for value in values:
+                with self.assertRaises(ValueError):
+                    output.public_durable_delivery(json.dumps(dict(row,**{field:value})))
+        text=json.dumps(row,separators=(',',':'))
+        for field in ('retained_exporter_failure','retained_exporter_outcome'):
+            duplicate=text[:-1]+',"'+field+'":null}'
+            with self.assertRaises(ValueError): output.public_durable_delivery(duplicate)
+        for key in ('retained_exporter_private','retained_exporter_elapsed_ms','no_effects'):
+            with self.assertRaises(ValueError):
+                output.public_durable_delivery(json.dumps(dict(row,**{key:'private'})))
+
+    def test_nonnull_retained_pair_requires_original_failure_and_existing_input_progress(self):
+        row=self.record()
+        for changes in (dict(first_failure=None),
+                        dict(failed_child_inputs_completed=None,failed_child_inputs_expected=None),
+                        dict(failed_child_inputs_completed=None),dict(failed_child_inputs_expected=None),
+                        dict(failed_child_inputs_completed=True),dict(failed_child_inputs_expected=False),
+                        dict(failed_child_inputs_completed=-1),dict(failed_child_inputs_completed=122),
+                        dict(failed_child_inputs_expected=513),
+                        dict(failed_child_inputs_completed=0,failed_child_inputs_expected=0)):
+            with self.assertRaises(ValueError):
+                output.public_durable_delivery(json.dumps(dict(row,**changes)))
+        for completed,expected in ((0,1),(512,512)):
+            valid=dict(row,failed_child_inputs_completed=completed,failed_child_inputs_expected=expected)
+            self.assertEqual(output.public_durable_delivery(json.dumps(valid)),valid)
+
+    def test_retained_observation_uses_existing_failure_and_verified_cleanup_gate(self):
+        row=self.record()
+        for changes in (dict(root_cleanup='retained'),dict(root_cleanup='unverified'),
+                        dict(producer_reaped=False),dict(producer_group_absent=False),
+                        dict(result='passed')):
+            with self.assertRaises(ValueError):
+                output.public_durable_delivery(json.dumps(dict(row,**changes)))
+        absent=dict(row,first_outcome=None,failed_child_inputs_completed=None,
+                    failed_child_inputs_expected=None,retained_exporter_failure=None,
+                    retained_exporter_outcome=None)
+        for changes in (dict(root_cleanup='retained'),dict(root_cleanup='unverified'),
+                        dict(producer_reaped=False),dict(producer_group_absent=False)):
+            withheld=dict(absent,**changes)
+            self.assertEqual(output.public_durable_delivery(json.dumps(withheld)),withheld)
+        # The producer-side observation does not invent a reader cleanup gate.
+        self.assertEqual(output.public_durable_delivery(json.dumps(row)),row)
+        reader_failed=dict(row,reader_exit='other',reader_reaped=True,reader_group_absent=True)
+        self.assertEqual(output.public_durable_delivery(json.dumps(reader_failed)),reader_failed)
+
+    def test_success_requires_both_retained_fields_null_and_old_schemas_refuse(self):
+        success=DurableDeliveryOutputTests().record()
+        self.assertEqual(output.public_durable_delivery(json.dumps(success)),success)
+        for changes in (dict(retained_exporter_failure='DeliveryNativeCheck'),
+                        dict(retained_exporter_outcome='HostPermission'),
+                        dict(retained_exporter_failure='DeliveryNativeCheck',retained_exporter_outcome='HostPermission')):
+            with self.assertRaises(ValueError):
+                output.public_durable_delivery(json.dumps(dict(success,**changes)))
+        for schema in (1,2,3,True,4.0,'4',None):
+            with self.assertRaises(ValueError):
+                output.public_durable_delivery(json.dumps(dict(self.record(),schema=schema)))
+        legacy=dict(success,schema=3)
+        del legacy['retained_exporter_failure']; del legacy['retained_exporter_outcome']
+        self.assertEqual(len(legacy),26)
+        with self.assertRaises(ValueError): output.public_durable_delivery(json.dumps(legacy))
+
+    def test_retained_pair_keeps_exact2048_byte_cap_and_existing_public_framing(self):
+        row=self.record()
+        row.update(retained_exporter_failure=max(self.exporter_boundaries,key=len),
+                   retained_exporter_outcome=max(output.OUTCOMES-{'Begin','Complete'},key=len),
+                   failed_child_inputs_completed=512,failed_child_inputs_expected=512)
+        text=json.dumps(row,separators=(',',':'))
+        self.assertLess(len(text.encode('utf8')),2048)
+        at_limit=text+' '*(2048-len(text.encode('utf8')))
+        self.assertEqual(output.public_durable_delivery(at_limit),row)
+        with self.assertRaises(ValueError): output.public_durable_delivery(at_limit+' ')
+        line=(output.DURABLE_DELIVERY_PREFIX+text).encode('utf8')
+        self.assertEqual(output.public_line(line,'exact'),('durable_delivery',row))
+        self.assertEqual(output.public_line(b'test exact ... '+line,'exact'),('durable_delivery',row))
+        self.assertIsNone(output.public_line(b'private '+line,'exact'))
+        with self.assertRaises(ValueError): output.public_line(line[:-1],'exact')
 
 
 if __name__=='__main__':

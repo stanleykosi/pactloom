@@ -1,8 +1,18 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-19, 23:51 UTC.
+Updated: 2026-10-20, 00:47 UTC.
 
 **CI33 passed the bounded synthetic original-private-workspace completed-fixed SIGKILL/fresh-process read-only reopen path and all listed regressions. Product qualification remains incomplete: no public testnet settlement, restarted acquired financial session, attended GUI reliability, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
+
+## CI38: receiver frame refusal is first observed; retain existing exporter evidence separately
+
+[Run 39344953174](https://github.com/stanleykosi/pactloom/actions/runs/39344953174), qualifier `319f47a21c562d35d5c7a7781329df129f81f631`, source `9f1de85fe2b17ed8fb34df34be95abc5229cfc44`, passed build (12m04s), pure97, encrypted bootstrap and observation preflight. At 00:25:43 UTC the first observed pair was DeliveryReceiveFrame / OriginAuthentication, inputs113/121. Producer was reaped with group absence; reader did not start; root cleanup was closed/absent and runtime removed empty. The prepared ordering did not establish full admission/restart. Local checkpoint60 non-synthetic build and all21 compatible targeted controls also passed before this run.
+
+The frame category can represent the original absolute deadline, EOF, sender-credential/ancillary rejection or peer liveness. It is not enough to infer which side initiated closure or a cryptographic key mismatch. A consumed Host recipient can be dropped on an earlier Engine error before Host emits that already-sanitized lower cause. The receiver can then report EOF first. Existing bounded child summary retains the later exporter observation, but the B1 public result previously used only its first-observed latch.
+
+The three-path correction changes projection only: schema4 adds a required-nullable retained exporter boundary/outcome pair from the same failed, reaped, cleanup-verified child's existing last64 finite summary. Only the closed44 lower exporter sites are eligible; receiver, wrappers and success markers are excluded. Malformed/unavailable/absent data remains null. The original first pair is unchanged, the2048-byte cap retains priority, and the supplement is explicitly a retained observation, not first-ever or causal evidence. No Engine, Signer, transport, framing, clock or authority behavior changes.
+
+All19 affected Python projection tests pass. Host qualification compilation (5m09s) and all13 exact new/affected Rust controls pass. Unchanged production-feature and other component evidence is reused; no production Rust path changed. Native payment and restart remain unproven.
 
 ## CI37: closed recipient persists; prepare exact payload before fresh native entry
 
