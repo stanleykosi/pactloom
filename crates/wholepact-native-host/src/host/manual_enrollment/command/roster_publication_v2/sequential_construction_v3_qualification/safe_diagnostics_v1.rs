@@ -4939,7 +4939,7 @@ mod private_fixed_projection {
                 return None;
             }
             let value: FinancialDiagnosticV1 = serde_json::from_str(payload).ok()?;
-            if value.schema != 1 || serde_json::to_string(&value).ok()? != payload {
+            if !value.is_valid_v1() || serde_json::to_string(&value).ok()? != payload {
                 return None;
             }
             Some(value)
@@ -5092,6 +5092,7 @@ mod private_fixed_projection {
             component: C::SignerBridge,
             error_class: E::Binding,
             commit_state: K::NotEstablished,
+            current_timing: None,
         };
         let json = serde_json::to_string(&record).unwrap();
         let line = format!("{FINANCIAL_PREFIX}{json}]");

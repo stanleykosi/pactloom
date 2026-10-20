@@ -2,7 +2,9 @@
 //! only this authenticated receive path can construct the public lease.
 use crate::authority_bridge::{BridgeError, Result, financial_continuation_v1::*};
 use crate::{
-    account::birth::enrollment::roster_v2::financial_source_v1::PreparedOriginalFinancialSourceV1,
+    account::birth::enrollment::roster_v2::financial_source_v1::{
+        FinancialReturnSourcePinV1, PreparedOriginalFinancialSourceV1,
+    },
     native_peer::PeerProcess,
     native_ui::financial_authority_v1::{FinancialReadLeaseV1, FinancialReturnActionV1},
 };
@@ -56,8 +58,26 @@ pub enum FinancialResultErrorClassV1 {
     Wallet,
     Ipc,
 }
+/// Relative monotonic observations for the same first failing Current call.
+/// 2001 means greater than 2000ms; None means that phase was not reached.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FinancialResultCurrentTimingV1 {
+    pub budget_ms: u16,
+    pub provider_elapsed_ms: Option<u16>,
+    pub remaining_before_write_ms: Option<u16>,
+    pub remaining_before_read_ms: Option<u16>,
+    pub roundtrip_elapsed_ms: u16,
+}
+fn bounded_elapsed_ms(value: Duration) -> u16 {
+    if value > Duration::from_millis(2000) {
+        2001
+    } else {
+        value.as_millis() as u16
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FinancialResultDiagnosticV1 {
+    pub current_timing: Option<FinancialResultCurrentTimingV1>,
     pub stage: FinancialResultStageV1,
     pub error_class: FinancialResultErrorClassV1,
     pub frame_cause: Option<wholepact_signer_origin::framing::FrameReadCause>,
@@ -68,12 +88,14 @@ pub struct FinancialResultObservedErrorV1 {
     pub diagnostic: Option<FinancialResultDiagnosticV1>,
 }
 struct FinancialResultObserverV1 {
+    timing: std::cell::Cell<Option<FinancialResultCurrentTimingV1>>,
     stage: std::cell::Cell<FinancialResultStageV1>,
     frame: std::cell::Cell<Option<wholepact_signer_origin::framing::FrameReadCause>>,
 }
 impl FinancialResultObserverV1 {
     fn new(stage: FinancialResultStageV1) -> Self {
         Self {
+            timing: std::cell::Cell::new(None),
             stage: std::cell::Cell::new(stage),
             frame: std::cell::Cell::new(None),
         }
@@ -101,6 +123,7 @@ impl FinancialResultObserverV1 {
             BridgeError::Ipc => C::Ipc,
         };
         FinancialResultDiagnosticV1 {
+            current_timing: self.timing.get(),
             stage: self.stage.get(),
             error_class,
             frame_cause: self.frame.get(),
@@ -272,6 +295,7 @@ fn write<T: Serialize>(
 /// Actual source + exact retained bytes + observed recipient, awaiting a fresh
 /// ReturnExact native decision. It is not a public evidence constructor.
 pub(crate) struct PreparedFinancialReturnV1 {
+    source_pin: FinancialReturnSourcePinV1,
     setup_deadline: Instant,
     source: Arc<PreparedOriginalFinancialSourceV1>,
     peer: PeerProcess,
@@ -297,7 +321,7 @@ impl PreparedFinancialReturnV1 {
             .check_read(&read_owner)
             .map_err(|_| BridgeError::Permission)?;
         peer.check_alive().map_err(|_| BridgeError::Permission)?;
-        let (original, _, _, result) = source
+        let (original, _, _, result, journal_pin) = source
             .financial_journal()
             .map_err(|_| BridgeError::Permission)?
             .financial_retained_result_v1(
@@ -338,6 +362,12 @@ impl PreparedFinancialReturnV1 {
             outbox: result.outbox_payload.clone(),
         };
         evidence.validate()?;
+        if journal_pin.result_digest() != evidence.result_digest {
+            return Err(BridgeError::Binding);
+        }
+        let source_pin = source
+            .prepare_financial_return_source_pin_v1(journal_pin, &peer)
+            .map_err(|_| BridgeError::Permission)?;
         let digest = wholepact_core::proposal::canonical_digest(
             "wholepact:financial-exact-result-return:v1",
             &(
@@ -358,9 +388,10 @@ impl PreparedFinancialReturnV1 {
                 .original_deadline()
                 .min(Instant::now() + Duration::from_secs(2)),
             &|| {
-                source
-                    .check_read(&read_owner)
-                    .and_then(|_| source.require_original_financial_host_v1(&peer))
+                read_owner
+                    .check_source(source.identity_digest())
+                    .and_then(|_| source.check_financial_return_source_pin_v1(&source_pin, &peer))
+                    .and_then(|_| read_owner.check_current())
                     .map_err(|_| BridgeError::Permission)
             },
         )?;
@@ -369,6 +400,7 @@ impl PreparedFinancialReturnV1 {
             .map_err(|_| BridgeError::Permission)?;
         drop(read_owner);
         Ok(Self {
+            source_pin,
             setup_deadline,
             source,
             peer,
@@ -382,7 +414,7 @@ impl PreparedFinancialReturnV1 {
         let deadline = self.setup_deadline.min(self.source.original_deadline());
         let current = || {
             self.source
-                .require_original_financial_host_v1(&self.peer)
+                .check_financial_return_source_pin_v1(&self.source_pin, &self.peer)
                 .map_err(|_| BridgeError::Permission)
         };
         let expected = PreviewData::from_evidence(&self.evidence).digest()?;
@@ -437,16 +469,15 @@ pub(crate) struct ApprovedFinancialReturnV1 {
 }
 impl ApprovedFinancialReturnV1 {
     fn check(&self) -> Result<()> {
-        self.prepared
-            .source
-            .require_original_financial_host_v1(&self.prepared.peer)
-            .map_err(|_| BridgeError::Permission)?;
         self.action
             .check_source(self.prepared.source.identity_digest())
             .map_err(|_| BridgeError::Permission)?;
         self.prepared
-            .peer
-            .check_alive()
+            .source
+            .check_financial_return_source_pin_v1(&self.prepared.source_pin, &self.prepared.peer)
+            .map_err(|_| BridgeError::Permission)?;
+        self.action
+            .check_source(self.prepared.source.identity_digest())
             .map_err(|_| BridgeError::Permission)
     }
     pub(crate) fn serve(self, mut stream: UnixStream) -> Result<()> {
@@ -555,8 +586,16 @@ impl AuthenticatedFinancialResultLeaseV1 {
             .receive()
     }
     pub fn check_current(&self) -> Result<()> {
+        let started = Instant::now();
         let observer = FinancialResultObserverV1::new(FinancialResultStageV1::CurrentPeer);
-        let deadline = self.deadline.min(Instant::now() + Duration::from_secs(2));
+        let deadline = self.deadline.min(started + Duration::from_secs(2));
+        let mut timing = FinancialResultCurrentTimingV1 {
+            budget_ms: bounded_elapsed_ms(deadline.saturating_duration_since(started)),
+            provider_elapsed_ms: None,
+            remaining_before_write_ms: None,
+            remaining_before_read_ms: None,
+            roundtrip_elapsed_ms: 0,
+        };
         let current = || {
             if self.failed.load(Ordering::Acquire) || Instant::now() >= deadline {
                 return Err(BridgeError::Permission);
@@ -569,13 +608,19 @@ impl AuthenticatedFinancialResultLeaseV1 {
             let mut stream =
                 crate::authority_bridge::born_ipc_io::lock_until(&self.stream, deadline, &current)?;
             observer.at(FinancialResultStageV1::CurrentProviderVerification);
-            let actual = self.provider.verify_server(&stream)?;
+            let provider_started = Instant::now();
+            let actual = self.provider.verify_server(&stream);
+            timing.provider_elapsed_ms = Some(bounded_elapsed_ms(provider_started.elapsed()));
+            let actual = actual?;
             observer.at(FinancialResultStageV1::CurrentPeer);
             self.peer
                 .same_live_process(&actual)
                 .map_err(|_| BridgeError::Permission)?;
             let nonce = hex::encode(crate::vault::random::<32>().map_err(|_| BridgeError::Ipc)?);
             observer.at(FinancialResultStageV1::CurrentWrite);
+            timing.remaining_before_write_ms = Some(bounded_elapsed_ms(
+                deadline.saturating_duration_since(Instant::now()),
+            ));
             write(
                 &mut stream,
                 &Command::Check {
@@ -585,6 +630,9 @@ impl AuthenticatedFinancialResultLeaseV1 {
                 &current,
             )?;
             observer.at(FinancialResultStageV1::CurrentRead);
+            timing.remaining_before_read_ms = Some(bounded_elapsed_ms(
+                deadline.saturating_duration_since(Instant::now()),
+            ));
             let response = read_observed(&stream, &self.peer, deadline, &current, Some(&observer))?;
             observer.at(FinancialResultStageV1::CurrentMatch);
             match response {
@@ -596,6 +644,8 @@ impl AuthenticatedFinancialResultLeaseV1 {
             }
         })();
         if let Err(ref error) = result {
+            timing.roundtrip_elapsed_ms = bounded_elapsed_ms(started.elapsed());
+            observer.timing.set(Some(timing));
             if let Ok(mut diagnostic) = self.diagnostic.lock() {
                 if diagnostic.is_none() {
                     *diagnostic = Some(observer.diagnostic(error));
@@ -628,6 +678,7 @@ impl AuthenticatedFinancialResultLeaseV1 {
                 if let Some(diagnostic) = *value {
                     observer.stage.set(diagnostic.stage);
                     observer.frame.set(diagnostic.frame_cause);
+                    observer.timing.set(diagnostic.current_timing);
                 }
             }
             return Err(error);
@@ -918,6 +969,7 @@ impl PreparedFinancialResultReceiverV1 {
                 if let Some(diagnostic) = *value {
                     observer.stage.set(diagnostic.stage);
                     observer.frame.set(diagnostic.frame_cause);
+                    observer.timing.set(diagnostic.current_timing);
                 }
             }
             return Err(error);
@@ -992,6 +1044,31 @@ fn signature_digest(outbox: &str, participant_index: usize) -> Result<String> {
 mod diagnostic_tests {
     use super::*;
     #[test]
+    fn current_timing_bounds_and_unreached_phases_are_explicit() {
+        assert_eq!(bounded_elapsed_ms(Duration::ZERO), 0);
+        assert_eq!(bounded_elapsed_ms(Duration::from_millis(2000)), 2000);
+        assert_eq!(
+            bounded_elapsed_ms(Duration::from_millis(2000) + Duration::from_nanos(1)),
+            2001
+        );
+        let observer =
+            FinancialResultObserverV1::new(FinancialResultStageV1::CurrentProviderVerification);
+        let timing = FinancialResultCurrentTimingV1 {
+            budget_ms: 2000,
+            provider_elapsed_ms: Some(2001),
+            remaining_before_write_ms: None,
+            remaining_before_read_ms: None,
+            roundtrip_elapsed_ms: 2001,
+        };
+        observer.timing.set(Some(timing));
+        assert_eq!(
+            observer
+                .diagnostic(&BridgeError::SignerOriginUnavailable)
+                .current_timing,
+            Some(timing)
+        );
+    }
+    #[test]
     fn finite_observer_preserves_error_and_frame_cause() {
         let observer = FinancialResultObserverV1::new(FinancialResultStageV1::HeldRead);
         observer.frame.set(Some(
@@ -1002,6 +1079,7 @@ mod diagnostic_tests {
         assert_eq!(
             observed.diagnostic,
             Some(FinancialResultDiagnosticV1 {
+                current_timing: None,
                 stage: FinancialResultStageV1::HeldRead,
                 error_class: FinancialResultErrorClassV1::Ipc,
                 frame_cause: Some(wholepact_signer_origin::framing::FrameReadCause::Deadline),

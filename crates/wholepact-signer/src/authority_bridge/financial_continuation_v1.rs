@@ -218,6 +218,6 @@ pub use wholepact_authority::completed_dispatch_v1::{
 
 #[cfg(feature = "synthetic-born-joined-qualification")]
 pub use result_ipc::{
-    FinancialResultDiagnosticV1, FinancialResultErrorClassV1, FinancialResultObservedErrorV1,
-    FinancialResultStageV1,
+    FinancialResultCurrentTimingV1, FinancialResultDiagnosticV1, FinancialResultErrorClassV1,
+    FinancialResultObservedErrorV1, FinancialResultStageV1,
 };

@@ -133,6 +133,39 @@ pub(crate) enum FinancialErrorClassV1 {
     FrameInvalid,
     FrameInvalidBudget,
 }
+fn bounded_timing_ms_v1<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<u16, D::Error> {
+    let value = u16::deserialize(deserializer)?;
+    if value > 2001 {
+        return Err(serde::de::Error::custom("timing bound"));
+    }
+    Ok(value)
+}
+fn bounded_optional_timing_ms_v1<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u16>, D::Error> {
+    let value = Option::<u16>::deserialize(deserializer)?;
+    if value.is_some_and(|value| value > 2001) {
+        return Err(serde::de::Error::custom("timing bound"));
+    }
+    Ok(value)
+}
+/// Bounded elapsed invocation observations, not wire latency. 2001 means overrun.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FinancialCurrentTimingV1 {
+    #[serde(deserialize_with = "bounded_timing_ms_v1")]
+    pub budget_ms: u16,
+    #[serde(deserialize_with = "bounded_optional_timing_ms_v1")]
+    pub provider_elapsed_ms: Option<u16>,
+    #[serde(deserialize_with = "bounded_optional_timing_ms_v1")]
+    pub remaining_before_write_ms: Option<u16>,
+    #[serde(deserialize_with = "bounded_optional_timing_ms_v1")]
+    pub remaining_before_read_ms: Option<u16>,
+    #[serde(deserialize_with = "bounded_timing_ms_v1")]
+    pub roundtrip_elapsed_ms: u16,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct FinancialDiagnosticV1 {
@@ -141,6 +174,35 @@ pub(crate) struct FinancialDiagnosticV1 {
     pub component: FinancialComponentV1,
     pub error_class: FinancialErrorClassV1,
     pub commit_state: FinancialCommitStateV1,
+    pub current_timing: Option<FinancialCurrentTimingV1>,
+}
+impl FinancialDiagnosticV1 {
+    pub(crate) fn is_valid_v1(&self) -> bool {
+        self.schema == 1
+            && self.current_timing.map_or(true, |timing| {
+                self.component == FinancialComponentV1::SignerBridge
+                    && matches!(
+                        self.stage,
+                        FinancialStageV1::ResultCurrentLock
+                            | FinancialStageV1::ResultCurrentPeer
+                            | FinancialStageV1::ResultCurrentProviderVerification
+                            | FinancialStageV1::ResultCurrentWrite
+                            | FinancialStageV1::ResultCurrentRead
+                            | FinancialStageV1::ResultCurrentMatch
+                    )
+                    && timing.budget_ms <= 2001
+                    && timing
+                        .provider_elapsed_ms
+                        .map_or(true, |value| value <= 2001)
+                    && timing
+                        .remaining_before_write_ms
+                        .map_or(true, |value| value <= 2001)
+                    && timing
+                        .remaining_before_read_ms
+                        .map_or(true, |value| value <= 2001)
+                    && timing.roundtrip_elapsed_ms <= 2001
+            })
+    }
 }
 static FAILURE: Mutex<Option<FinancialDiagnosticV1>> = Mutex::new(None);
 pub(crate) fn reset_operation() {
@@ -156,7 +218,7 @@ pub(crate) fn reset_operation() {
     }
 }
 pub(crate) fn capture_first(record: FinancialDiagnosticV1) {
-    if record.schema != 1 {
+    if !record.is_valid_v1() {
         return;
     }
     if let Ok(mut slot) = FAILURE.lock() {
@@ -169,7 +231,7 @@ pub(crate) fn take_operation_failure() -> Option<FinancialDiagnosticV1> {
     FAILURE.lock().ok()?.take()
 }
 pub(crate) fn emit(record: FinancialDiagnosticV1) {
-    if record.schema == 1 {
+    if record.is_valid_v1() {
         if let Ok(json) = serde_json::to_string(&record) {
             use std::io::Write;
             let _ = writeln!(std::io::stderr().lock(), "[FINANCIAL_DIAGNOSTIC_V1 {json}]");
@@ -188,6 +250,7 @@ fn record(
         component,
         error_class,
         commit_state,
+        current_timing: None,
     });
 }
 pub(crate) fn host(stage: FinancialStageV1, state: FinancialCommitStateV1, error: &crate::Error) {
@@ -374,12 +437,69 @@ pub(crate) fn signer_result(
             E::Ipc => C::Ipc,
         }
     };
-    record(stage, state, FinancialComponentV1::SignerBridge, class);
+    capture_first(FinancialDiagnosticV1 {
+        schema: 1,
+        stage,
+        component: FinancialComponentV1::SignerBridge,
+        error_class: class,
+        commit_state: state,
+        current_timing: detail
+            .current_timing
+            .map(|timing| FinancialCurrentTimingV1 {
+                budget_ms: timing.budget_ms,
+                provider_elapsed_ms: timing.provider_elapsed_ms,
+                remaining_before_write_ms: timing.remaining_before_write_ms,
+                remaining_before_read_ms: timing.remaining_before_read_ms,
+                roundtrip_elapsed_ms: timing.roundtrip_elapsed_ms,
+            }),
+    });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn current_timing_is_bounded_and_only_valid_for_current_failure() {
+        let timing = FinancialCurrentTimingV1 {
+            budget_ms: 2000,
+            provider_elapsed_ms: Some(2001),
+            remaining_before_write_ms: Some(0),
+            remaining_before_read_ms: None,
+            roundtrip_elapsed_ms: 2001,
+        };
+        let mut record = FinancialDiagnosticV1 {
+            schema: 1,
+            stage: FinancialStageV1::ResultCurrentRead,
+            component: FinancialComponentV1::SignerBridge,
+            error_class: FinancialErrorClassV1::FrameDeadline,
+            commit_state: FinancialCommitStateV1::OutcomeUncertain,
+            current_timing: Some(timing),
+        };
+        assert!(record.is_valid_v1());
+        let value = serde_json::to_value(record).unwrap();
+        assert_eq!(
+            serde_json::from_value::<FinancialDiagnosticV1>(value.clone()).unwrap(),
+            record
+        );
+        for field in [
+            "budget_ms",
+            "provider_elapsed_ms",
+            "remaining_before_write_ms",
+            "remaining_before_read_ms",
+            "roundtrip_elapsed_ms",
+        ] {
+            let mut invalid = value.clone();
+            invalid["current_timing"][field] = serde_json::json!(2002);
+            assert!(serde_json::from_value::<FinancialDiagnosticV1>(invalid).is_err());
+        }
+        let mut invalid = value;
+        invalid["current_timing"]["private"] = serde_json::json!(1);
+        assert!(serde_json::from_value::<FinancialDiagnosticV1>(invalid).is_err());
+        record.stage = FinancialStageV1::ResultFinishRead;
+        assert!(!record.is_valid_v1());
+        record.current_timing = None;
+        assert!(record.is_valid_v1());
+    }
     #[test]
     fn operation_capture_discards_expected_refusal_and_preserves_first_inner_failure() {
         reset_operation();
@@ -424,7 +544,8 @@ mod tests {
                 "stage",
                 "component",
                 "error_class",
-                "commit_state"
+                "commit_state",
+                "current_timing"
             ]
             .into_iter()
             .map(str::to_owned)

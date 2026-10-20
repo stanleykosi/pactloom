@@ -13,6 +13,9 @@ const COLUMNS: &[&str] = &["operation_id", "authorization_id", "original_admissi
 mod intent;
 #[path = "financial_bridge_storage_v1.rs"]
 mod bridge;
+#[path = "financial_return_pin_v1.rs"]
+mod return_pin;
+pub(crate) use return_pin::FinancialReturnJournalPinV1;
 #[path = "financial_session_v1.rs"]
 mod session;
 pub(crate) use session::{ApprovedFinancialSpendConsentV1, PreparedFinancialSpendV1};

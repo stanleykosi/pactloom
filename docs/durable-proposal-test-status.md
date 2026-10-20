@@ -1,8 +1,20 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-20, 16:04 UTC.
+Updated: 2026-10-20, 16:58 UTC.
 
 **CI44 passed the genuine two-owner delivery/admission, original-producer SIGKILL and fresh-process read-only original-history verification route. Financial signing/dispatch and public testnet settlement remain unqualified. This is a bounded admission/restart milestone, not a production release.**
+
+## CI55 localized Current-reply expiry; return-only audited pin prepared
+
+[Run 39454553418](https://github.com/stanleykosi/pactloom/actions/runs/39454553418), qualification `2fc4a3a872973845c9737ca07e6cb2b0edd37e02`, implementation `b76aa8164f5bcf9c2e549f39209f8770e762afc2`, again passed all seven actual TLS mechanism groups and cleanup. Host compilation passed in 11m14s and encrypted bootstrap passed. Native financial execution failed at 16:34:13 UTC, first intake input 132/151, with the exact closed diagnostic `SignerBridge / ResultCurrentRead / FrameDeadline / NotEstablished`. Producer/group/root cleanup was verified; no reader or completed financial transaction is established.
+
+The diagnostic proves no Current reply was accepted within the original absolute budget. A reply may have arrived too late; it does not prove no bytes arrived or source revocation. Receive itself performs a Current challenge, so this does not establish entry into durable Engine intake. Source audit found at least 24 full source/profile/history audits in a simple Current round trip, before idle polling, because each framing callback recursively repeated full verification. Client installed-provider verification also shares the unchanged two-second budget; its contribution is not yet measured.
+
+The narrow repair mints a private, non-Clone, non-serializable return-only pin inside the existing fully audited snapshot, bound to the exact saved result and original recipient. It checks the original directory, registration and database file identity plus data_version, total_changes, schema_version, user_version and application_id before, inside and after a read transaction. It never refreshes after mismatch and holds no journal lock across socket waits. Only the already-prepared Return path uses it; generic source/custody validation is unchanged. Every callback still checks immutable source files, lifetime, original pidfd, original deadline and fresh Return action/revocation. No deadline, retry or authority scope is widened.
+
+The same first failing Current invocation can now carry bounded monotonic timing: original remaining budget, provider elapsed time, remaining time at write/read entry and total invocation elapsed. Unreached phases are null, not invented zero. Values are capped at 2000ms with sentinel 2001 for overrun; no endpoints, hashes, wall clocks or payloads are exposed. These numbers are diagnostics, not success evidence.
+
+Independent review cleared the repair. A narrow final peer-error conversion was corrected after compilation identified it. The combined Signer/Host build then passed in 7m49s. Three real disposable SQLCipher pin-kernel regressions passed, covering unchanged checks and refusal after dirty state, same-connection mutation/rollback, external restore, header drift, foreign handle, registration change and replaced file. These use private inert pin fixtures and do not prove valid profile issuance. Seven focused in-memory diagnostic tests, 29 projection cases and 26 timing-schema cases also passed. The actual original Host/Signer receive, Current, intake and Finish under unchanged budgets remain the required isolated acceptance test, pending the next run.
 
 ## CI54 verified the TLS mechanism; first financial intake remains unqualified
 
