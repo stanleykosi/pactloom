@@ -1,8 +1,18 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-20, 14:30 UTC.
+Updated: 2026-10-20, 14:48 UTC.
 
 **CI44 passed the genuine two-owner delivery/admission, original-producer SIGKILL and fresh-process read-only original-history verification route. Financial signing/dispatch and public testnet settlement remain unqualified. This is a bounded admission/restart milestone, not a production release.**
+
+## CI52 stopped in the early TLS mechanism gate; failure projection corrected
+
+[Run 39440335325](https://github.com/stanleykosi/pactloom/actions/runs/39440335325), qualification `8d376284ad8dc10a88ce432dc95afb2b970e1391`, implementation `6d0e4a715c069ff143d29dc72457344349ce1d31`, failed at14:37:30 UTC. Origin gates and the clean1m17s Chain release build passed. The new TLS mechanism test failed after approximately7.56 seconds, so the expensive Host build and full native financial lifecycle did not run. The public gate reported failure with cleanup unverified; the empty runtime container is not proof of socket/task cleanup.
+
+The success-only test summary failed to preserve case/assertion identity. The supervisor discarded nonprefix child output in memory, wrote no private transcript, and the run has zero uploaded artifacts. Consequently the exact CI52 failure cannot be recovered. Elapsed time is not used to infer a case or a causal production defect. The connection-driver implementation and all limits remain unchanged pending evidence.
+
+The diagnostic correction adds finite case/phase/check labels, sticky typed connect outcome, bounded TLS/proxy counters and a first-panic record containing only a closed source-unit label and capped static line/column. Panic payloads, raw paths, endpoints and private material are never inspected or projected. A catch boundary restores the original panic hook outside unwinding and preserves failure status. Background-task labels describe the current observation context, not a guaranteed causal task identity.
+
+The supervisor retains the first validated failure separately from later observations and emits it after the direct child is reaped, including nonzero exit, malformed later output or timeout/kill. Failure records force failure even if a success summary follows. Finite supervisor reasons distinguish missing, malformed, duplicated, excessive and timed-out output. Cleanup remains unverified on failure. Twenty-four controlled subprocess projection cases passed, including deliberate failure and retention paths; these are not TLS or payment tests. Independent source review cleared the two-file correction. The Chain-only release no-run compile passed in18.48s. The next instrumented gate is pending; unchanged Host production compilation need not be repeated locally.
 
 ## CI51 localized TLS setup failures; independent read-only connection driver prepared
 

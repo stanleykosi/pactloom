@@ -36,9 +36,180 @@ struct Evidence {
     accepted: AtomicUsize,
     tls: AtomicUsize,
     timed_out: AtomicUsize,
+    tls_errors: AtomicUsize,
+    proxy_headers: AtomicUsize,
+    proxy_target_connected: AtomicUsize,
+    proxy_copy_finished: AtomicUsize,
+    proxy_copy_outcome: AtomicUsize,
     closed: AtomicUsize,
     rpc: AtomicUsize,
     start: AtomicBool,
+}
+// Closed diagnostic state is owned only by this exact, serial CI selector.
+// Global case/phase/check identify occurrence context, not causal task identity,
+// when a concurrent worker panics. The source unit and location identify its check.
+const CASES: &[&str] = &[
+    "unstarted",
+    "direct_inline",
+    "direct_driven",
+    "http_connect_inline",
+    "http_connect_driven",
+    "cancel_before_poll",
+    "expired_before_poll",
+    "cancel_during_tls",
+    "stalled_deadline",
+    "drop_unconsumed",
+    "queued_deadline",
+    "direct_hostname_refusal",
+    "http_connect_hostname_refusal",
+];
+const PHASES: &[&str] = &[
+    "started",
+    "caller_resumed",
+    "connect_returned",
+    "assertions_passed",
+    "cleanup_verified",
+    "cleanup_started",
+    "probe_started",
+];
+const CHECKS: &[&str] = &[
+    "none",
+    "expect_no_http",
+    "expect_local_owner",
+    "expect_driven_success",
+    "expect_tls_success",
+    "expect_no_tls_timeout",
+    "probe_ready",
+    "probe_unary",
+    "expect_probe_count",
+    "expect_inline_failure",
+    "expect_tls_timeout",
+    "socket_close",
+    "server_join",
+    "proxy_join",
+    "expect_initial_pending",
+    "expect_hostname_refusal",
+    "expect_accepted",
+    "expect_no_tls_success",
+    "caller_accepted",
+    "driver_finished",
+    "expect_driver_started",
+    "expect_driver_success",
+    "expect_original_timeout",
+    "stalled_server_join",
+];
+static CHECK: AtomicUsize = AtomicUsize::new(0);
+fn checking(check: usize) {
+    CHECK.store(check, Ordering::SeqCst);
+}
+const OUTCOMES: &[&str] = &[
+    "unobserved",
+    "success",
+    "timeout",
+    "transport_unavailable",
+    "other_error",
+];
+static OUTCOME: AtomicUsize = AtomicUsize::new(0);
+static CASE: AtomicUsize = AtomicUsize::new(0);
+static PHASE: AtomicUsize = AtomicUsize::new(0);
+static FAILURE_RECORDED: AtomicBool = AtomicBool::new(false);
+static CURRENT_COUNTS: std::sync::Mutex<Option<Arc<Evidence>>> = std::sync::Mutex::new(None);
+fn diagnostic_row() -> serde_json::Value {
+    let counts = CURRENT_COUNTS.try_lock().ok().and_then(|g| g.clone());
+    let count = |f: fn(&Evidence) -> &AtomicUsize| {
+        counts
+            .as_ref()
+            .map_or(0, |c| f(c).load(Ordering::SeqCst).min(16))
+    };
+    let clamped = counts.as_ref().is_some_and(|e| {
+        [
+            &e.accepted,
+            &e.tls,
+            &e.timed_out,
+            &e.tls_errors,
+            &e.closed,
+            &e.rpc,
+            &e.proxy_headers,
+            &e.proxy_target_connected,
+            &e.proxy_copy_finished,
+        ]
+        .iter()
+        .any(|v| v.load(Ordering::SeqCst) > 16)
+    });
+    let copy_outcome = counts.as_ref().map_or("none", |e| {
+        ["none", "success", "io_error", "timeout"]
+            .get(e.proxy_copy_outcome.load(Ordering::SeqCst))
+            .copied()
+            .unwrap_or("none")
+    });
+    serde_json::json!({"outcome":OUTCOMES.get(OUTCOME.load(Ordering::SeqCst)).unwrap_or(&"unobserved"),"proxy_copy_outcome":copy_outcome,"active_check":CHECKS.get(CHECK.load(Ordering::SeqCst)).unwrap_or(&"none"),"counts_clamped":clamped,"tls_errors":count(|e|&e.tls_errors),"proxy_headers":count(|e|&e.proxy_headers),"proxy_target_connected":count(|e|&e.proxy_target_connected),"proxy_copy_finished":count(|e|&e.proxy_copy_finished),"schema":1,"case":CASES.get(CASE.load(Ordering::SeqCst)).unwrap_or(&"unstarted"),"phase":PHASES.get(PHASE.load(Ordering::SeqCst)).unwrap_or(&"started"),"counts_available":counts.is_some(),"accepted":count(|e|&e.accepted),"tls_success":count(|e|&e.tls),"tls_timeout":count(|e|&e.timed_out),"sockets_closed":count(|e|&e.closed),"http_requests":count(|e|&e.rpc),"cleanup_verified":false})
+}
+fn emit_diagnostic(prefix: &str, row: &serde_json::Value) {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    let _ = out.write_all(prefix.as_bytes());
+    let _ = serde_json::to_writer(&mut out, row);
+    let _ = out.write_all(b"\n");
+    let _ = out.flush();
+}
+fn observe(phase: usize, outcome: &'static str) {
+    PHASE.store(phase, Ordering::SeqCst);
+    if outcome != "unobserved" {
+        OUTCOME.store(
+            OUTCOMES
+                .iter()
+                .position(|value| *value == outcome)
+                .unwrap_or(0),
+            Ordering::SeqCst,
+        );
+    }
+    let mut row = diagnostic_row();
+    row["cleanup_verified"] = (phase == 4).into();
+    emit_diagnostic("CI_SYNTHETIC_CONNECT_DRIVER_OBSERVATION ", &row);
+}
+fn begin_case(case: usize) {
+    CASE.store(case, Ordering::SeqCst);
+    OUTCOME.store(0, Ordering::SeqCst);
+    checking(0);
+    if let Ok(mut counts) = CURRENT_COUNTS.lock() {
+        *counts = None;
+    }
+    observe(0, "unobserved");
+}
+fn connect_outcome(result: &Result<Channel, crate::ChainError>) -> &'static str {
+    match result {
+        Ok(_) => "success",
+        Err(crate::ChainError::Timeout) => "timeout",
+        Err(crate::ChainError::TransportUnavailable) => "transport_unavailable",
+        Err(_) => "other_error",
+    }
+}
+fn record_panic(info: &std::panic::PanicHookInfo<'_>) {
+    if FAILURE_RECORDED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let mut row = diagnostic_row();
+    let (unit, line, column) = info.location().map_or(("other", 0, 0), |location| {
+        let file = location.file();
+        let unit = if file.ends_with("connect_driver_tests.rs") {
+            "connect_driver_tests"
+        } else if file.ends_with("connect_driver.rs") {
+            "connect_driver"
+        } else if file.ends_with("tests/ephemeral_tls.rs") {
+            "ephemeral_tls"
+        } else {
+            "other"
+        };
+        (
+            unit,
+            location.line().min(10000),
+            location.column().min(1000),
+        )
+    });
+    row["source_unit"] = unit.into();
+    row["line"] = line.into();
+    row["column"] = column.into();
+    emit_diagnostic("CI_SYNTHETIC_CONNECT_DRIVER_FAILURE ", &row);
 }
 struct Tracked(TcpStream, Arc<Evidence>);
 impl Drop for Tracked {
@@ -99,7 +270,9 @@ impl axum::serve::Listener for Listener {
                 Err(_) => {
                     self.evidence.timed_out.fetch_add(1, Ordering::SeqCst);
                 }
-                Ok(Err(_)) => {}
+                Ok(Err(_)) => {
+                    self.evidence.tls_errors.fetch_add(1, Ordering::SeqCst);
+                }
             }
         }
     }
@@ -127,6 +300,9 @@ async fn server(gate: bool) -> Server {
     let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = tcp.local_addr().unwrap();
     let evidence = Arc::new(Evidence::default());
+    if let Ok(mut current) = CURRENT_COUNTS.lock() {
+        *current = Some(evidence.clone());
+    }
     let counts = evidence.clone();
     let app = axum::Router::new()
         .route(
@@ -199,11 +375,14 @@ async fn until(mut predicate: impl FnMut() -> bool) {
     .expect("bounded observation");
 }
 async fn cleanup(s: Server) {
+    observe(5, "unobserved");
+    checking(11);
     until(|| {
         s.evidence.closed.load(Ordering::SeqCst) == s.evidence.accepted.load(Ordering::SeqCst)
     })
     .await;
     let _ = s.stop.send(());
+    checking(12);
     timeout(LIMIT, s.task)
         .await
         .expect("server shutdown deadline")
@@ -216,6 +395,7 @@ async fn route(s: &Server, tunnel: bool) -> (ProxyRoute, Option<JoinHandle<()>>)
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let destination = s.addr;
+    let counts = s.evidence.clone();
     let task = tokio::spawn(async move {
         let (mut client, _) = listener.accept().await.unwrap();
         let mut header = Vec::new();
@@ -228,17 +408,28 @@ async fn route(s: &Server, tunnel: bool) -> (ProxyRoute, Option<JoinHandle<()>>)
         .await
         .unwrap();
         assert!(header.starts_with(b"CONNECT "));
+        counts.proxy_headers.fetch_add(1, Ordering::SeqCst);
         let mut target = TcpStream::connect(destination).await.unwrap();
+        counts.proxy_target_connected.fetch_add(1, Ordering::SeqCst);
         client
             .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             .await
             .unwrap();
-        let _ = timeout(
+        let copied = timeout(
             LIMIT,
             tokio::io::copy_bidirectional(&mut client, &mut target),
         )
-        .await
-        .expect("proxy ownership deadline");
+        .await;
+        counts.proxy_copy_outcome.store(
+            match &copied {
+                Ok(Ok(_)) => 1,
+                Ok(Err(_)) => 2,
+                Err(_) => 3,
+            },
+            Ordering::SeqCst,
+        );
+        let _ = copied.expect("proxy ownership deadline");
+        counts.proxy_copy_finished.fetch_add(1, Ordering::SeqCst);
     });
     (
         ProxyRoute::HttpTunnel(format!("http://{addr}").parse().unwrap()),
@@ -249,7 +440,9 @@ async fn route(s: &Server, tunnel: bool) -> (ProxyRoute, Option<JoinHandle<()>>)
 struct Empty {}
 async fn probe(channel: Channel) {
     let mut grpc = tonic::client::Grpc::new(channel);
+    checking(6);
     grpc.ready().await.expect("channel ready");
+    checking(7);
     let response: tonic::Response<Empty> = grpc
         .unary(
             tonic::Request::new(Empty {}),
@@ -261,6 +454,12 @@ async fn probe(channel: Channel) {
     drop(response);
 }
 async fn scheduling(tunnel: bool, driven: bool) {
+    begin_case(match (tunnel, driven) {
+        (false, false) => 1,
+        (false, true) => 2,
+        (true, false) => 3,
+        (true, true) => 4,
+    });
     let mut s = server(true).await;
     let ep = endpoint(&s, false);
     let (route, proxy) = route(&s, tunnel).await;
@@ -270,10 +469,13 @@ async fn scheduling(tunnel: bool, driven: bool) {
     let owner = Rc::new(Cell::new(0));
     let borrowed = &owner;
     let blocker = async {
+        checking(18);
         timeout(LIMIT, accepted).await.unwrap().unwrap();
         counts.start.store(true, Ordering::SeqCst);
         borrowed.set(1);
         std::thread::sleep(Duration::from_millis(2500));
+        observe(1, "unobserved");
+        checking(1);
         assert_eq!(counts.rpc.load(Ordering::SeqCst), 0);
         borrowed.set(2);
     };
@@ -285,26 +487,40 @@ async fn scheduling(tunnel: bool, driven: bool) {
         }
     };
     let (result, ()) = tokio::join!(connect, blocker);
+    observe(2, connect_outcome(&result));
+    checking(2);
     assert_eq!(owner.get(), 2);
     if driven {
+        checking(3);
         let channel = result.expect("independent initial TLS must progress");
+        checking(4);
         assert_eq!(s.evidence.tls.load(Ordering::SeqCst), 1);
+        checking(5);
         assert_eq!(s.evidence.timed_out.load(Ordering::SeqCst), 0);
+        observe(6, "success");
         probe(channel).await;
+        checking(8);
         assert_eq!(s.evidence.rpc.load(Ordering::SeqCst), 1);
     } else {
+        checking(9);
         assert!(result.is_err());
+        checking(10);
         assert_eq!(s.evidence.timed_out.load(Ordering::SeqCst), 1);
+        checking(1);
         assert_eq!(s.evidence.rpc.load(Ordering::SeqCst), 0);
     }
+    observe(3, "unobserved");
     cleanup(s).await;
     if let Some(proxy) = proxy {
+        checking(13);
         timeout(LIMIT, proxy).await.unwrap().unwrap();
     }
+    observe(4, "unobserved");
 }
 async fn poll_once<F: Future>(future: Pin<&mut F>) {
     let mut future = future;
     std::future::poll_fn(|cx| {
+        checking(14);
         assert!(
             future.as_mut().poll(cx).is_pending(),
             "initial connect unexpectedly complete"
@@ -314,6 +530,7 @@ async fn poll_once<F: Future>(future: Pin<&mut F>) {
     .await;
 }
 async fn cancel_before_poll() {
+    begin_case(5);
     let s = server(false).await;
     let observation = Arc::new(TestConnectObservation::default());
     let f = connect_until_observed(
@@ -328,6 +545,8 @@ async fn cancel_before_poll() {
     assert!(!observation.finished.load(Ordering::SeqCst));
     assert_eq!(s.evidence.accepted.load(Ordering::SeqCst), 0);
     cleanup(s).await;
+    observe(4, "unobserved");
+    begin_case(6);
     let s = server(false).await;
     assert!(matches!(
         connect_until(ProxyRoute::Direct, endpoint(&s, false), Instant::now()).await,
@@ -335,8 +554,10 @@ async fn cancel_before_poll() {
     ));
     assert_eq!(s.evidence.accepted.load(Ordering::SeqCst), 0);
     cleanup(s).await;
+    observe(4, "unobserved");
 }
 async fn stalled(deadline_case: bool) {
+    begin_case(if deadline_case { 8 } else { 7 });
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (tx, rx) = oneshot::channel();
@@ -385,19 +606,25 @@ async fn stalled(deadline_case: bool) {
     poll_once(f.as_mut()).await;
     timeout(LIMIT, rx).await.unwrap().unwrap();
     if deadline_case {
+        checking(22);
         assert!(matches!(f.as_mut().await, Err(crate::ChainError::Timeout)));
         assert!(Instant::now() >= deadline);
     }
     drop(f);
+    checking(19);
     until(|| observation.finished.load(Ordering::SeqCst)).await;
+    checking(20);
     assert!(observation.started.load(Ordering::SeqCst));
     assert!(!observation.succeeded.load(Ordering::SeqCst));
+    checking(23);
     timeout(LIMIT, task)
         .await
         .expect("cancelled socket close deadline")
         .expect("stalled server joined");
+    observe(4, "unobserved");
 }
 async fn drop_unconsumed(deadline_race: bool) {
+    begin_case(if deadline_race { 10 } else { 9 });
     let s = server(false).await;
     let observation = Arc::new(TestConnectObservation::default());
     let deadline = Instant::now()
@@ -413,38 +640,64 @@ async fn drop_unconsumed(deadline_race: bool) {
         observation.clone(),
     ));
     poll_once(f.as_mut()).await;
+    checking(19);
     until(|| observation.finished.load(Ordering::SeqCst)).await;
+    checking(20);
     assert!(observation.started.load(Ordering::SeqCst));
+    checking(21);
     assert!(observation.succeeded.load(Ordering::SeqCst));
     assert_eq!(s.evidence.tls.load(Ordering::SeqCst), 1);
+    checking(1);
     assert_eq!(s.evidence.rpc.load(Ordering::SeqCst), 0);
     // The actual child returned a Channel, but this caller has never polled its result.
     if deadline_race {
         tokio::time::sleep_until(deadline).await;
+        checking(22);
         assert!(matches!(f.as_mut().await, Err(crate::ChainError::Timeout)));
     }
     drop(f);
     cleanup(s).await;
+    observe(4, "unobserved");
 }
 async fn refusal(tunnel: bool) {
+    begin_case(if tunnel { 12 } else { 11 });
     let s = server(false).await;
     let (route, proxy) = route(&s, tunnel).await;
+    let result = connect_until(route, endpoint(&s, true), Instant::now() + LIMIT).await;
+    observe(2, connect_outcome(&result));
+    checking(15);
     assert!(matches!(
-        connect_until(route, endpoint(&s, true), Instant::now() + LIMIT).await,
+        result,
         Err(crate::ChainError::TransportUnavailable)
     ));
+    checking(16);
     assert_eq!(s.evidence.accepted.load(Ordering::SeqCst), 1);
+    checking(17);
     assert_eq!(s.evidence.tls.load(Ordering::SeqCst), 0);
     assert_eq!(s.evidence.timed_out.load(Ordering::SeqCst), 0);
+    checking(1);
     assert_eq!(s.evidence.rpc.load(Ordering::SeqCst), 0);
+    observe(3, "unobserved");
     cleanup(s).await;
     if let Some(proxy) = proxy {
+        checking(13);
         timeout(LIMIT, proxy).await.unwrap().unwrap();
     }
+    observe(4, "unobserved");
 }
 #[test]
 #[ignore = "CI-only actual loopback TLS scheduling and cancellation qualification"]
 fn independent_connect_preserves_tls_deadline_and_cancellation() {
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(record_panic));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run_mechanism));
+    // Restore outside unwinding; set_hook is forbidden on a panicking thread.
+    std::panic::set_hook(original_hook);
+    if let Err(payload) = result {
+        std::panic::resume_unwind(payload);
+    }
+}
+fn run_mechanism() {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
