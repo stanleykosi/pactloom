@@ -1678,6 +1678,8 @@ pub(in crate::host) struct PrivateFixedSessionV2<'host> {
     cache: OriginalConstructionScanCacheV2,
     captured: [Option<(DurableConstructionScopeV1, BackendIdentity)>; 2],
     finish_started: bool,
+    #[cfg(all(test, feature = "synthetic-born-joined-qualification"))]
+    transport_diagnostics: Option<wholepact_chain::TransportDiagnostics>,
 }
 fn fix_step_key(key: &str, stage: &str) -> Result<String> {
     if !(16..=128).contains(&key.len()) || !key.bytes().all(|b| (33..=126).contains(&b)) {
@@ -1801,10 +1803,26 @@ impl Host {
             cache,
             captured: [None, None],
             finish_started: false,
+            #[cfg(all(test, feature = "synthetic-born-joined-qualification"))]
+            transport_diagnostics: None,
         })
     }
 }
 impl<'host> PrivateFixedSessionV2<'host> {
+    /// Attach inert counters to the actual retained wallet adapters, once before
+    /// capture. No source, deadline, permission or transport policy is replaced.
+    #[cfg(all(test, feature = "synthetic-born-joined-qualification"))]
+    pub(in crate::host) fn set_transport_diagnostics_v1(
+        &mut self, diagnostics: wholepact_chain::TransportDiagnostics,
+    ) -> Result<()> {
+        if self.finish_started || self.captured.iter().any(Option::is_some)
+            || self.transport_diagnostics.is_some() {
+            return Err(Error::Permission);
+        }
+        self.transport_diagnostics = Some(diagnostics);
+        Ok(())
+    }
+
     pub(in crate::host) fn proposal(&self) -> &wholepact_core::ProposalInput {
         self.candidate.proposal()
     }
@@ -1935,6 +1953,11 @@ impl<'host> PrivateFixedSessionV2<'host> {
             &initial.scope.provider.endpoint,
             wholepact_chain::NetworkPolicy::default(),
         )?;
+        #[cfg(all(test, feature = "synthetic-born-joined-qualification"))]
+        let backend = match &self.transport_diagnostics {
+            Some(diagnostics) => backend.with_transport_diagnostics(diagnostics.clone()),
+            None => backend,
+        };
         let backend_identity = backend.identity().clone();
         if backend_identity.trust_profile != initial.scope.provider.trust_profile {
             return Err(Error::Authentication);

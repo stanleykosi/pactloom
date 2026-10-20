@@ -16,6 +16,9 @@ mod submission;
 mod submission_flow;
 mod sync_transport;
 mod wire_guard;
+mod transport_diagnostics;
+#[cfg(feature = "synthetic-qualification")]
+pub use transport_diagnostics::{TransportDiagnostics, TransportDiagnosticSnapshot};
 
 pub use reconciliation::*;
 #[cfg(feature = "submission-dispatch")]
@@ -317,6 +320,12 @@ pub struct ChainAdapter {
     rpc: rpc::Rpc,
 }
 impl ChainAdapter {
+    /// Attach bounded evidence counters; does not change errors, policy or authority.
+    #[cfg(feature = "synthetic-qualification")]
+    pub fn with_transport_diagnostics(mut self, diagnostics: TransportDiagnostics) -> Self {
+        self.rpc.observer.diagnostics = Some(diagnostics);
+        self
+    }
     /// Public, never-funded controlled fixtures only. This feature must not be enabled
     /// in a production embedding. Literal loopback only; no DNS, redirects or TLS bypass
     /// for remote hosts. Every resulting context retains synthetic provenance.
@@ -400,7 +409,7 @@ impl ChainAdapter {
         Ok(PublicSyncChannel::new(
             self.rpc.connect().await?,
             self.policy.maximum_response_bytes,
-        ))
+        ).with_observer(self.rpc.observer.clone()))
     }
     pub async fn context(&self) -> Result<ChainContext, ChainError> {
         let started = now()?;
