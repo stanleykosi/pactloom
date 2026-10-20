@@ -1,13 +1,48 @@
 //! Exact extracted Linux authenticated frame receiver. Each recvmsg chunk must
 //! carry the same kernel sender identity; inherited descriptors cannot substitute
 //! another process. No serialized credential is trusted.
-use crate::{Error, Result, native_peer::PeerProcess};
+use crate::{native_peer::PeerProcess, Error, Result};
 use std::{
     os::{fd::AsRawFd, unix::net::UnixStream},
     time::{Duration, Instant},
 };
 use zeroize::Zeroizing;
 const MAX_FRAME: usize = 2_100_000;
+
+/// Closed observations only: no peer identifiers, paths, payload or authority.
+/// These supplement, never change, the existing fail-closed Error result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameReadCause {
+    Unclassified,
+    Deadline,
+    Eof,
+    CredentialsMissing,
+    CredentialsMismatch,
+    AncillaryRejected,
+    Truncated,
+    PeerNotLive,
+    CurrentCheck,
+    Io,
+    FrameLimit,
+    InvalidFrame,
+    InvalidBudget,
+}
+#[derive(Debug)]
+pub struct ObservedFrameError {
+    pub cause: FrameReadCause,
+    pub error: Error,
+}
+fn observe<T>(
+    result: Result<T>,
+    cause: FrameReadCause,
+    observed: &mut FrameReadCause,
+) -> Result<T> {
+    result.map_err(|error| {
+        *observed = cause;
+        error
+    })
+}
+
 pub fn enable_credentials(fd: std::os::fd::RawFd) -> Result<()> {
     let enabled: libc::c_int = 1;
     // SAFETY: exact initialized integer input and valid socket descriptor.
@@ -71,22 +106,47 @@ pub fn read_frame_capped_checked_until(
     peer: &PeerProcess,
     max_wire_bytes: usize,
     deadline: Instant,
-    mut check_current: impl FnMut() -> Result<()>,
+    check_current: impl FnMut() -> Result<()>,
 ) -> Result<Zeroizing<Vec<u8>>> {
-    if max_wire_bytes == 0 || max_wire_bytes > MAX_FRAME {
-        return Err(Error::Limit);
-    }
-    if remaining_at(deadline, Instant::now())? > Duration::from_secs(120) {
-        return Err(Error::InvalidData);
-    }
-    check_current()?;
-    read_frame_inner(
-        stream,
-        peer,
-        deadline,
-        Some(max_wire_bytes),
-        Some(&mut check_current),
-    )
+    read_frame_capped_checked_observed_until(stream, peer, max_wire_bytes, deadline, check_current)
+        .map_err(|observed| observed.error)
+}
+
+/// Same production receive kernel and checks as the legacy entry point. The
+/// extra result is a closed cause classification, never an authentication grant.
+pub fn read_frame_capped_checked_observed_until(
+    stream: &UnixStream,
+    peer: &PeerProcess,
+    max_wire_bytes: usize,
+    deadline: Instant,
+    mut check_current: impl FnMut() -> Result<()>,
+) -> std::result::Result<Zeroizing<Vec<u8>>, ObservedFrameError> {
+    let mut cause = FrameReadCause::Unclassified;
+    let result = (|| {
+        if max_wire_bytes == 0 || max_wire_bytes > MAX_FRAME {
+            cause = FrameReadCause::FrameLimit;
+            return Err(Error::Limit);
+        }
+        if observe(
+            remaining_at(deadline, Instant::now()),
+            FrameReadCause::Deadline,
+            &mut cause,
+        )? > Duration::from_secs(120)
+        {
+            cause = FrameReadCause::InvalidBudget;
+            return Err(Error::InvalidData);
+        }
+        observe(check_current(), FrameReadCause::CurrentCheck, &mut cause)?;
+        read_frame_inner_observed(
+            stream,
+            peer,
+            deadline,
+            Some(max_wire_bytes),
+            Some(&mut check_current),
+            &mut cause,
+        )
+    })();
+    result.map_err(|error| ObservedFrameError { cause, error })
 }
 
 fn remaining_at(deadline: Instant, now: Instant) -> Result<Duration> {
@@ -126,36 +186,65 @@ fn read_frame_inner(
     peer: &PeerProcess,
     deadline: Instant,
     max_wire_bytes: Option<usize>,
+    check_current: Option<&mut dyn FnMut() -> Result<()>>,
+) -> Result<Zeroizing<Vec<u8>>> {
+    read_frame_inner_observed(
+        stream,
+        peer,
+        deadline,
+        max_wire_bytes,
+        check_current,
+        &mut FrameReadCause::Unclassified,
+    )
+}
+fn read_frame_inner_observed(
+    stream: &UnixStream,
+    peer: &PeerProcess,
+    deadline: Instant,
+    max_wire_bytes: Option<usize>,
     mut check_current: Option<&mut dyn FnMut() -> Result<()>>,
+    observed: &mut FrameReadCause,
 ) -> Result<Zeroizing<Vec<u8>>> {
     let mut frame = Zeroizing::new(Vec::new());
     if let Some(limit) = max_wire_bytes {
         // One bounded fallible allocation. No accumulating frame reallocation
         // leaves earlier private bytes behind, and the delimiter is not stored.
-        frame
-            .try_reserve_exact(limit - 1)
-            .map_err(|_| Error::Limit)?;
+        frame.try_reserve_exact(limit - 1).map_err(|_| {
+            *observed = FrameReadCause::FrameLimit;
+            Error::Limit
+        })?;
     }
     let mut chunk = Zeroizing::new([0u8; 8192]);
     loop {
         let remaining = if max_wire_bytes.is_some() {
-            remaining_at(deadline, Instant::now())?
+            observe(
+                remaining_at(deadline, Instant::now()),
+                FrameReadCause::Deadline,
+                observed,
+            )?
         } else {
             // Preserve the existing generic receiver's zero-duration/error
             // behavior; only the dedicated entry point adds strict expiry.
             deadline
                 .checked_duration_since(Instant::now())
-                .ok_or(Error::Authentication)?
+                .ok_or_else(|| {
+                    *observed = FrameReadCause::Deadline;
+                    Error::Authentication
+                })?
         };
         if let Some(check) = check_current.as_mut() {
-            check()?;
+            observe(check(), FrameReadCause::CurrentCheck, observed)?;
         }
         let timeout = if check_current.is_some() {
             remaining.min(Duration::from_millis(100))
         } else {
             remaining
         };
-        stream.set_read_timeout(Some(timeout))?;
+        observe(
+            stream.set_read_timeout(Some(timeout)).map_err(Error::Io),
+            FrameReadCause::Io,
+            observed,
+        )?;
         // Aligned ancillary storage for the mandatory kernel sender credentials.
         let mut control = [0usize; 16];
         let mut iov = libc::iovec {
@@ -181,6 +270,7 @@ fn read_frame_inner(
             {
                 continue;
             }
+            *observed = FrameReadCause::Io;
             return Err(Error::Io(error));
         }
         let n = got as usize;
@@ -226,20 +316,51 @@ fn read_frame_inner(
             || unexpected
             || msg.msg_flags & (libc::MSG_TRUNC | libc::MSG_CTRUNC) != 0
         {
+            // Report the first concrete condition in this one receive, not a
+            // causal order between independent endpoints.
+            *observed = if n == 0 {
+                FrameReadCause::Eof
+            } else if msg.msg_flags & (libc::MSG_TRUNC | libc::MSG_CTRUNC) != 0 {
+                FrameReadCause::Truncated
+            } else if unexpected {
+                FrameReadCause::AncillaryRejected
+            } else if credential_count == 0 {
+                FrameReadCause::CredentialsMissing
+            } else if credential_count != 1 || !authenticated {
+                FrameReadCause::CredentialsMismatch
+            } else {
+                FrameReadCause::FrameLimit
+            };
             return Err(Error::Authentication);
         }
         if max_wire_bytes.is_some() {
             // Ancillary descriptors were already closed on rejection paths.
             // Even the final successful receive cannot outlive this deadline.
-            remaining_at(deadline, Instant::now())?;
+            observe(
+                remaining_at(deadline, Instant::now()),
+                FrameReadCause::Deadline,
+                observed,
+            )?;
         }
-        peer.check_alive()?;
+        observe(peer.check_alive(), FrameReadCause::PeerNotLive, observed)?;
         if let Some(check) = check_current.as_mut() {
-            check()?;
+            observe(check(), FrameReadCause::CurrentCheck, observed)?;
         }
         if let Some(limit) = max_wire_bytes {
-            let complete = append_capped_chunk(&mut frame, &chunk[..n], limit)?;
-            remaining_at(deadline, Instant::now())?;
+            let complete =
+                append_capped_chunk(&mut frame, &chunk[..n], limit).map_err(|error| {
+                    *observed = if matches!(error, Error::Limit) {
+                        FrameReadCause::FrameLimit
+                    } else {
+                        FrameReadCause::InvalidFrame
+                    };
+                    error
+                })?;
+            observe(
+                remaining_at(deadline, Instant::now()),
+                FrameReadCause::Deadline,
+                observed,
+            )?;
             if complete {
                 return Ok(frame);
             }
@@ -247,6 +368,7 @@ fn read_frame_inner(
         }
         if let Some(end) = chunk[..n].iter().position(|b| *b == b'\n') {
             if end + 1 != n {
+                *observed = FrameReadCause::InvalidFrame;
                 return Err(Error::InvalidData);
             }
             frame.extend_from_slice(&chunk[..end]);

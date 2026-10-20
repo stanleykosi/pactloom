@@ -5,8 +5,8 @@ use crate::manual_continuation_v2::{
     HostManualEnrollmentContinuationRequestV2, ManualEnrollmentContinuationEvidenceV2,
 };
 use crate::{
-    Error, InstalledSignerProvider, Result, framing, hash, label, manual::*,
-    native_peer::PeerProcess,
+    framing, hash, label, manual::*, native_peer::PeerProcess, Error, InstalledSignerProvider,
+    Result,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -17,8 +17,8 @@ use std::{
     },
     path::{Path, PathBuf},
     sync::{
-        Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
+        Mutex,
     },
     time::{Duration, Instant},
 };
@@ -1193,6 +1193,19 @@ fn write_frame_until<T: Serialize>(
 ) -> Result<()> {
     write_frame_until_bounded(stream, value, deadline, original, MAX_MANUAL_FRAME)
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FrameWriteCause {
+    Unclassified,
+    Serialize,
+    FrameLimit,
+    Clock,
+    Budget,
+    Io,
+    ZeroWrite,
+    BrokenPipe,
+    Reset,
+    Timeout,
+}
 fn write_frame_until_bounded<T: Serialize>(
     stream: &mut UnixStream,
     value: &T,
@@ -1200,8 +1213,31 @@ fn write_frame_until_bounded<T: Serialize>(
     original: Option<(u64, u64)>,
     max_frame: usize,
 ) -> Result<()> {
-    let mut bytes = Zeroizing::new(serde_json::to_vec(value).map_err(|_| Error::Ipc)?);
+    write_frame_until_bounded_observed(
+        stream,
+        value,
+        deadline,
+        original,
+        max_frame,
+        &mut FrameWriteCause::Unclassified,
+    )
+}
+// The production writer itself records closed causes. No payload or authority
+// is copied into diagnostics, and the legacy error/lease poisoning is unchanged.
+fn write_frame_until_bounded_observed<T: Serialize>(
+    stream: &mut UnixStream,
+    value: &T,
+    deadline: Instant,
+    original: Option<(u64, u64)>,
+    max_frame: usize,
+    cause: &mut FrameWriteCause,
+) -> Result<()> {
+    let mut bytes = Zeroizing::new(serde_json::to_vec(value).map_err(|_| {
+        *cause = FrameWriteCause::Serialize;
+        Error::Ipc
+    })?);
     if bytes.len() >= max_frame {
+        *cause = FrameWriteCause::FrameLimit;
         return Err(Error::Limit);
     }
     bytes.push(b'\n');
@@ -1209,15 +1245,55 @@ fn write_frame_until_bounded<T: Serialize>(
     while sent < bytes.len() {
         // SO_SNDTIMEO alone is per syscall. Reset it only to the remaining
         // absolute phase/lease budget, never to a fresh two seconds.
-        let remaining = phase_budget(deadline, Instant::now(), original, now_ms()?)?;
-        stream.set_write_timeout(Some(remaining))?;
+        let remaining = phase_budget(
+            deadline,
+            Instant::now(),
+            original,
+            now_ms().map_err(|error| {
+                *cause = FrameWriteCause::Clock;
+                error
+            })?,
+        )
+        .map_err(|error| {
+            *cause = FrameWriteCause::Budget;
+            error
+        })?;
+        stream.set_write_timeout(Some(remaining)).map_err(|error| {
+            *cause = FrameWriteCause::Io;
+            Error::Io(error)
+        })?;
         match stream.write(&bytes[sent..]) {
-            Ok(0) => return Err(Error::Ipc),
+            Ok(0) => {
+                *cause = FrameWriteCause::ZeroWrite;
+                return Err(Error::Ipc);
+            }
             Ok(count) => sent += count,
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(_) => return Err(Error::Ipc),
+            Err(error) => {
+                *cause = match error.kind() {
+                    std::io::ErrorKind::BrokenPipe => FrameWriteCause::BrokenPipe,
+                    std::io::ErrorKind::ConnectionReset => FrameWriteCause::Reset,
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
+                        FrameWriteCause::Timeout
+                    }
+                    _ => FrameWriteCause::Io,
+                };
+                return Err(Error::Ipc);
+            }
         }
-        phase_budget(deadline, Instant::now(), original, now_ms()?)?;
+        phase_budget(
+            deadline,
+            Instant::now(),
+            original,
+            now_ms().map_err(|error| {
+                *cause = FrameWriteCause::Clock;
+                error
+            })?,
+        )
+        .map_err(|error| {
+            *cause = FrameWriteCause::Budget;
+            error
+        })?;
     }
     // UnixStream is unbuffered: all payload bytes and the newline were written.
     // A partial/late write is uncertain and the existing HeldLease failure path
@@ -1434,15 +1510,13 @@ mod tests {
                 Duration::from_millis(want)
             );
         }
-        assert!(
-            phase_budget(
-                deadline,
-                start + Duration::from_millis(750),
-                original,
-                10_750
-            )
-            .is_err()
-        );
+        assert!(phase_budget(
+            deadline,
+            start + Duration::from_millis(750),
+            original,
+            10_750
+        )
+        .is_err());
         assert!(phase_budget(deadline, start + Duration::from_millis(2000), None, 0).is_err());
         assert!(
             phase_budget(deadline, start + Duration::from_millis(10), original, 9_999).is_err()
@@ -1573,11 +1647,9 @@ mod completion_tests {
         }
         let mut wrong = CompletionState::initial_enrollment();
         wrong.begin().unwrap();
-        assert!(
-            wrong
-                .acknowledge(ManualAdmissionResponse::Denied {})
-                .is_err()
-        );
+        assert!(wrong
+            .acknowledge(ManualAdmissionResponse::Denied {})
+            .is_err());
         assert_eq!(wrong, CompletionState::Failed);
     }
 
@@ -1612,18 +1684,14 @@ mod completion_tests {
             assert!(state.begin().is_err());
         }
         let mut unsolicited = CompletionState::Pending;
-        assert!(
-            unsolicited
-                .acknowledge(ManualAdmissionResponse::Finished {})
-                .is_err()
-        );
+        assert!(unsolicited
+            .acknowledge(ManualAdmissionResponse::Finished {})
+            .is_err());
         let mut disconnected = CompletionState::Completing;
         disconnected.fail();
-        assert!(
-            disconnected
-                .acknowledge(ManualAdmissionResponse::Finished {})
-                .is_err()
-        );
+        assert!(disconnected
+            .acknowledge(ManualAdmissionResponse::Finished {})
+            .is_err());
         assert!(CompletionState::Legacy.begin().is_err());
     }
     #[test]
@@ -1786,12 +1854,12 @@ mod checked_local_connect_tests {
         let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
         listener.set_nonblocking(true).unwrap();
         assert!(connect_local_checked_until(&path, Instant::now(), || Ok(())).is_err());
-        assert!(
-            connect_local_checked_until(&path, Instant::now() + Duration::from_secs(1), || Err(
-                Error::Permission
-            ))
-            .is_err()
-        );
+        assert!(connect_local_checked_until(
+            &path,
+            Instant::now() + Duration::from_secs(1),
+            || Err(Error::Permission)
+        )
+        .is_err());
         assert_eq!(
             listener.accept().unwrap_err().kind(),
             std::io::ErrorKind::WouldBlock
@@ -1809,3 +1877,7 @@ mod checked_local_connect_tests {
         drop((stream, accepted));
     }
 }
+
+#[cfg(test)]
+#[path = "framing_integration_tests.rs"]
+mod framing_integration_tests;

@@ -1,8 +1,18 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-20, 00:47 UTC.
+Updated: 2026-10-20, 01:34 UTC.
 
 **CI33 passed the bounded synthetic original-private-workspace completed-fixed SIGKILL/fresh-process read-only reopen path and all listed regressions. Product qualification remains incomplete: no public testnet settlement, restarted acquired financial session, attended GUI reliability, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
+
+## CI39 and the integration-first reset
+
+[Run 39349852968](https://github.com/stanleykosi/pactloom/actions/runs/39349852968), qualifier `ac80ffe7d0f341814832b27bc9237aa7a7bbe447`, source `a2a52ccfa6b972c15b77890504a584aa59d84477`, failed after its 12m02s build. The same-attempt receiver reported `DeliveryReceiveOriginalSource / SignerLocked`; the retained exporter reported `DeliveryRecipientDeadline / BridgePermission`. The latter is an actual absolute deadline check, not an inference from broken pipe. It does not establish which endpoint initiated failure or which locked-source branch fired. Reader did not start; producer reaping, group absence and empty runtime cleanup were verified. Full joint payment remains unverified.
+
+The next checkpoint adds a minimal real-process production framing integration gate in the existing signer-origin crate. It covers valid and multi-chunk frames, live-peer EOF, absolute deadline, missing credentials, wrong peer, exited peer, cancellation and a broken writer pipe. It uses the actual writer, recvmsg reader and kernel peer adapter, not substitute transport logic. Closed cause observations supplement unchanged production error behavior. Per-attempt endpoint reports are emitted after bounded owned-child cleanup.
+
+The committed `scripts/qualification-gate-mode` is initially `origin`. The workflow runs the narrow gate first, and explicitly does not claim full native/payment qualification in this mode. Only an explicit reviewed change to `full` enables the existing full scenario after the narrow gate succeeds. Fresh dependency builds remain uncached; the narrow graph excludes wallet, GUI, SQLCipher and proving. Local compilation is no-run only; native/socket execution is confined to the isolated qualification workflow. Integration outcome is pending, not passed.
+
+Separately, lifecycle implementation is under review: durable exact artifacts must not inherit expired operational grants, and preparation/read consent must be distinct from exact one-use export/admission actions. Existing material ceilings, cryptographic checks and independent writer protection are not relaxed. V2 financial execution denials remain in place until their separate composition is implemented and reviewed.
 
 ## CI38: receiver frame refusal is first observed; retain existing exporter evidence separately
 

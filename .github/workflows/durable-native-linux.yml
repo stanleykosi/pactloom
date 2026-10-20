@@ -1,4 +1,4 @@
-name: Durable native owner reopen (Linux)
+name: Origin integration then explicit full qualification (Linux)
 on:
   push:
     branches: [qualification/durable-proposal-v1]
@@ -28,7 +28,27 @@ jobs:
           git -C source -c credential.helper= -c http.extraheader= fetch --no-tags --depth=1 https://github.com/stanleykosi/pactloom.git "$SOURCE_COMMIT"
           git -C source checkout --detach FETCH_HEAD
           test "$(git -C source rev-parse HEAD)" = "$SOURCE_COMMIT"
-      - name: Pinned build, durable check and required regressions
+      - name: Read explicit qualification mode (origin is not full qualification)
+        id: mode
+        shell: bash
+        working-directory: source
+        run: |
+          set -euo pipefail
+          mode="$(cat scripts/qualification-gate-mode)"
+          [[ "$mode" == origin || "$mode" == full ]]
+          [[ "$(wc -l < scripts/qualification-gate-mode)" -eq 1 ]]
+          printf 'gate=%s\n' "$mode" >> "$GITHUB_OUTPUT"
+      - name: Minimal real production origin integration (not full qualification)
+        shell: bash
+        working-directory: source
+        run: bash scripts/ci-origin-integration-linux.sh
+      - name: Narrow-only result (full native payment qualification not run)
+        if: steps.mode.outputs.gate == 'origin'
+        shell: bash
+        run: |
+          echo 'Origin integration passed. Full native/payment qualification was intentionally not run.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Full pinned build, durable check and required regressions
+        if: steps.mode.outputs.gate == 'full'
         shell: bash
         working-directory: source
         env:
