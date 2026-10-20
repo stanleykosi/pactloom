@@ -53,6 +53,22 @@ fn signer_error(error: wholepact_signer::Error, label: &'static str) -> &'static
     diagnostic::emit(B::SignerPollTerminal, diagnostic::signer_error(&error));
     label
 }
+// Capture only the actual failed command/job; the financial producer owns the
+// single public promotion after its original error is returned and cleanup runs.
+fn financial_signer_error(
+    error: wholepact_signer::Error,
+    label: &'static str,
+    stage: crate::host::financial_diagnostics_v1::FinancialStageV1,
+    detail: Option<wholepact_signer::native_ui::synthetic_born_joined_qualification::FinancialNativeDiagnosticV1>,
+) -> &'static str {
+    use crate::host::financial_diagnostics_v1 as f;
+    if let Some(detail) = detail {
+        f::native_job(detail);
+    } else {
+        f::signer(stage, f::FinancialCommitStateV1::OutcomeUncertain, &error);
+    }
+    signer_error(error, label)
+}
 // Same-result observation at the actual new production command boundary.
 // Lower native/Bridge observations retain precedence; no private text is emitted.
 fn closed_delivery_error(error: wholepact_signer::Error, boundary: B) -> wholepact_signer::Error {
@@ -1323,7 +1339,7 @@ fn execute(
         (C::BeginFinancialContinuation(_, wallet), State::ClosedDelivery(entry)) => {
             let entry = entry
                 .into_financial_continuation_v1(wallet)
-                .map_err(|e| signer_error(e, "exact original financial source entry"))?;
+                .map_err(|e| financial_signer_error(e, "exact original financial source entry", crate::host::financial_diagnostics_v1::FinancialStageV1::WorkerSourceOpen, None))?;
             (
                 State::FinancialContinuation(Box::new(entry)),
                 R::Done { index },
@@ -1332,7 +1348,7 @@ fn execute(
         (C::PollFinancialContinuation(_), State::FinancialContinuation(mut entry)) => {
             let phase = entry
                 .poll()
-                .map_err(|e| signer_error(e, "financial native phase"))?;
+                .map_err(|e| financial_signer_error(e, "financial native phase", crate::host::financial_diagnostics_v1::FinancialStageV1::WorkerPhaseWait, entry.last_failure_v1()))?;
             (
                 State::FinancialContinuation(entry),
                 R::FinancialPhase { index, phase },
@@ -1341,19 +1357,19 @@ fn execute(
         (C::ApproveFinancialContinuation(_), State::FinancialContinuation(mut entry)) => {
             entry
                 .approve_current_review()
-                .map_err(|e| signer_error(e, "financial exact final native review"))?;
+                .map_err(|e| financial_signer_error(e, "financial exact final native review", crate::host::financial_diagnostics_v1::FinancialStageV1::WorkerReview, entry.last_failure_v1()))?;
             (State::FinancialContinuation(entry), R::Done { index })
         }
         (C::SendFinancialContinuation(_), State::FinancialContinuation(mut entry)) => {
             entry
                 .send_pending_continuation()
-                .map_err(|e| signer_error(e, "financial exact retained admission send"))?;
+                .map_err(|e| financial_signer_error(e, "financial exact retained admission send", crate::host::financial_diagnostics_v1::FinancialStageV1::WorkerCommand, entry.last_failure_v1()))?;
             (State::FinancialContinuation(entry), R::Done { index })
         }
         (C::ReadFinancialContinuationRequest(_), State::FinancialContinuation(entry)) => {
             let request = entry
                 .pending_continuation_request()
-                .map_err(|e| signer_error(e, "financial exact pending request"))?;
+                .map_err(|e| financial_signer_error(e, "financial exact pending request", crate::host::financial_diagnostics_v1::FinancialStageV1::WorkerRequest, entry.last_failure_v1()))?;
             (
                 State::FinancialContinuation(entry),
                 R::FinancialRequest { index, request },
@@ -1362,7 +1378,7 @@ fn execute(
         (C::ReadFinancialActivationRequest(_), State::FinancialContinuation(entry)) => {
             let request = entry
                 .pending_activation_request()
-                .map_err(|e| signer_error(e, "financial exact activation request"))?;
+                .map_err(|e| financial_signer_error(e, "financial exact activation request", crate::host::financial_diagnostics_v1::FinancialStageV1::WorkerRequest, entry.last_failure_v1()))?;
             (
                 State::FinancialContinuation(entry),
                 R::FinancialRequest { index, request },
@@ -1372,17 +1388,17 @@ fn execute(
             let peer = JoinedSignerPeerV1 {
                 provider: entry
                     .provider()
-                    .map_err(|e| signer_error(e, "financial installed provider"))?,
+                    .map_err(|e| financial_signer_error(e, "financial installed provider", crate::host::financial_diagnostics_v1::FinancialStageV1::WorkerRequest, entry.last_failure_v1()))?,
                 endpoint: entry
                     .endpoint()
-                    .map_err(|e| signer_error(e, "financial protected endpoint"))?,
+                    .map_err(|e| financial_signer_error(e, "financial protected endpoint", crate::host::financial_diagnostics_v1::FinancialStageV1::WorkerRequest, entry.last_failure_v1()))?,
                 deadline: entry
                     .deadline()
-                    .map_err(|e| signer_error(e, "financial original deadline"))?,
+                    .map_err(|e| financial_signer_error(e, "financial original deadline", crate::host::financial_diagnostics_v1::FinancialStageV1::WorkerRequest, entry.last_failure_v1()))?,
             };
             let request = entry
                 .result_request()
-                .map_err(|e| signer_error(e, "financial exact result request"))?;
+                .map_err(|e| financial_signer_error(e, "financial exact result request", crate::host::financial_diagnostics_v1::FinancialStageV1::WorkerRequest, entry.last_failure_v1()))?;
             (
                 State::FinancialContinuation(entry),
                 R::FinancialResultPeer {
@@ -1396,7 +1412,7 @@ fn execute(
             use wholepact_signer::native_ui::synthetic_born_joined_qualification::FinancialQualificationPhaseV1 as P;
             let deadline = entry
                 .deadline()
-                .map_err(|e| signer_error(e, "financial result original deadline"))?;
+                .map_err(|e| financial_signer_error(e, "financial result original deadline", crate::host::financial_diagnostics_v1::FinancialStageV1::WorkerReturn, entry.last_failure_v1()))?;
             let mut stopping_since = None;
             loop {
                 if Instant::now() >= deadline {
@@ -1404,7 +1420,7 @@ fn execute(
                 }
                 let phase = entry
                     .poll()
-                    .map_err(|e| signer_error(e, "financial actual return native poll"))?;
+                    .map_err(|e| financial_signer_error(e, "financial actual return native poll", crate::host::financial_diagnostics_v1::FinancialStageV1::WorkerReturn, entry.last_failure_v1()))?;
                 if stop.load(Ordering::Acquire) {
                     if phase == P::Complete {
                         break;
@@ -1419,7 +1435,7 @@ fn execute(
                 match phase {
                     P::ReadReview | P::ReturnReview => entry
                         .approve_current_review()
-                        .map_err(|e| signer_error(e, "financial actual read/return primary"))?,
+                        .map_err(|e| financial_signer_error(e, "financial actual read/return primary", crate::host::financial_diagnostics_v1::FinancialStageV1::WorkerReview, entry.last_failure_v1()))?,
                     P::AwaitingReturn | P::Working => (),
                     P::Complete => break,
                     _ => return Err("financial return unexpected native purpose"),
@@ -1431,7 +1447,7 @@ fn execute(
         (C::PreserveFinancialContinuation(_), State::FinancialContinuation(entry)) => {
             let original = entry
                 .close_preserving_originals()
-                .map_err(|e| signer_error(e, "financial original native drain"))?;
+                .map_err(|e| financial_signer_error(e, "financial original native drain", crate::host::financial_diagnostics_v1::FinancialStageV1::WorkerDrain, None))?;
             (
                 State::PreservedDelivery,
                 R::DeliveryPreserved { index, original },

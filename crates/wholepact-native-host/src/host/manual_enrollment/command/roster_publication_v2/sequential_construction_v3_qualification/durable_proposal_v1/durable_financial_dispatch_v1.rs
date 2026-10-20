@@ -29,6 +29,40 @@ fn financial_host_operation<T>(boundary: B, operation: impl FnOnce() -> Result<T
     result
 }
 
+fn financial_witness_error(stage: financial_diagnostic::FinancialStageV1, boundary: B, error: wholepact_authority::AuthorityError) -> Error {
+    financial_diagnostic::authority(stage, financial_diagnostic::FinancialCommitStateV1::OutcomeUncertain, &error);
+    witness_error(boundary, error)
+}
+
+fn worker_error(label: &'static str) -> Error {
+    use financial_diagnostic::{FinancialStageV1 as S, FinancialCommitStateV1 as C};
+    let (stage, error) = match label {
+        "durable worker cancelled" | "durable worker closed" | "durable command disconnected" => (S::WorkerCommand, Error::Locked),
+        "durable reply disconnected" => (S::WorkerReply, Error::Locked),
+        "durable worker panicked" => (S::WorkerDrain, Error::Authentication),
+        "financial result original deadline expired" => (S::WorkerReturn, Error::Permission),
+        "financial return stopped without exact completion" => (S::WorkerReturn, Error::HistoricalExportIncomplete),
+        "financial return unexpected native purpose" => (S::WorkerReturn, Error::Authentication),
+        // Known typed job failures were captured before the worker returned this
+        // inert label. This fallback cannot overwrite their precise first cause.
+        _ => (S::WorkerReply, Error::Receipt("exact original delivery worker refused".into())),
+    };
+    financial_diagnostic::host(stage, C::OutcomeUncertain, &error);
+    super::worker_error(label)
+}
+
+fn done(worker: &worker::JoinedSignerWorkerV1, index: usize) -> Result<()> {
+    match worker.receive().map_err(worker_error)? {
+        R::Done { index: actual } if actual == index => Ok(()),
+        _ => {
+            let error = Error::Authentication;
+            financial_diagnostic::host(financial_diagnostic::FinancialStageV1::WorkerReply,
+                financial_diagnostic::FinancialCommitStateV1::OutcomeUncertain, &error);
+            Err(error)
+        }
+    }
+}
+
 const FINANCIAL_PUBLIC_PREFIX: &str = "CI_SYNTHETIC_DURABLE_FINANCIAL ";
 const FINANCIAL_DEATH_MARKER: &str = "SYNTHETIC_DURABLE_FINANCIAL_COMPLETED_V1=1";
 
@@ -383,6 +417,7 @@ fn financial_wait(
     index: usize,
     target: Phase,
 ) -> Result<()> {
+    let result = (|| {
     let deadline = private_fixed_v2::child_original_cutoff()?;
     loop {
         if Instant::now() >= deadline {
@@ -397,7 +432,14 @@ fn financial_wait(
         }
         std::thread::sleep(Duration::from_millis(5));
     }
+    })();
+    if let Err(error) = &result {
+        financial_diagnostic::host(financial_diagnostic::FinancialStageV1::WorkerPhaseWait,
+            financial_diagnostic::FinancialCommitStateV1::OutcomeUncertain, error);
+    }
+    result
 }
+
 fn financial_approve(worker: &worker::JoinedSignerWorkerV1, index: usize) -> Result<()> {
     worker
         .send(C::ApproveFinancialContinuation(index))
@@ -432,7 +474,7 @@ pub(super) fn continue_financial_producer(
             let server = original
                 .witness
                 .serve_committed_durable_delivery_history_v2(&original_admission.request.operation_id)
-                .map_err(|e| witness_error(B::DeliveryHistoricalRead, e))?;
+                .map_err(|e| financial_witness_error(financial_diagnostic::FinancialStageV1::WitnessHistoryService, B::DeliveryHistoricalRead, e))?;
             original
                 .signers
                 .send(C::BeginFinancialContinuation(index, wallet_setup.clone()))
@@ -465,7 +507,7 @@ pub(super) fn continue_financial_producer(
             original
                 .witness
                 .start_exact_financial_continuation_v1(&request.account_id, &request)
-                .map_err(|e| witness_error(B::DeliveryNativeAdmission, e))?;
+                .map_err(|e| financial_witness_error(financial_diagnostic::FinancialStageV1::WitnessContinuationReview, B::DeliveryNativeAdmission, e))?;
             original
                 .signers
                 .send(C::SendFinancialContinuation(index))
@@ -476,11 +518,11 @@ pub(super) fn continue_financial_producer(
             original
                 .witness
                 .finish_exact_financial_continuation_v1()
-                .map_err(|e| witness_error(B::DeliveryNativeAdmission, e))?;
+                .map_err(|e| financial_witness_error(financial_diagnostic::FinancialStageV1::WitnessContinuationCommit, B::DeliveryNativeAdmission, e))?;
             let server = original
                 .witness
                 .serve_committed_financial_signing_v1(&request.operation_id)
-                .map_err(|e| witness_error(B::DeliveryNativeAdmission, e))?;
+                .map_err(|e| financial_witness_error(financial_diagnostic::FinancialStageV1::WitnessSigningService, B::DeliveryNativeAdmission, e))?;
             financial_stage(&scenario, FinancialBoundaryV1::SignatureAndIntake)?;
             // Each action below is a real fresh final-primary review. No synthetic
             // decision, signature, session or historical grant is manufactured.
@@ -506,7 +548,7 @@ pub(super) fn continue_financial_producer(
         let server = original
             .witness
             .serve_committed_completed_dispatch_pair_v1()
-            .map_err(|e| witness_error(B::DeliveryHistoricalRead, e))?;
+            .map_err(|e| financial_witness_error(financial_diagnostic::FinancialStageV1::WitnessCompletedPairService, B::DeliveryHistoricalRead, e))?;
         let first = financial_host_operation(B::DeliveryHistoricalRead, || {
             host.read_original_financial_history_v1(
                 &workspace,
@@ -622,7 +664,7 @@ pub(super) fn continue_financial_producer(
         let witness_reopen = original
             .witness
             .preserve_financial_originals_v1()
-            .map_err(|e| witness_error(B::DeliveryHistoricalRead, e))?;
+            .map_err(|e| financial_witness_error(financial_diagnostic::FinancialStageV1::WitnessOriginalPreserve, B::DeliveryHistoricalRead, e))?;
         let ready = FinancialReadyV1 {
             schema: 1,
             profile,
@@ -930,7 +972,7 @@ fn read_financial_child_inner(terminal: crate::terminal::Terminal) -> Result<()>
         return Err(Error::Authentication);
     }
     let mut witness=wholepact_authority::native_witness_owner::EphemeralNativeWitnessV1::reopen_financial_originals_v1(&ready.witness_reopen)
-        .map_err(|e|witness_error(B::DeliveryOriginalReopen,e))?;
+        .map_err(|e|financial_witness_error(financial_diagnostic::FinancialStageV1::WitnessOriginalReopen, B::DeliveryOriginalReopen,e))?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -971,7 +1013,7 @@ fn read_financial_child_inner(terminal: crate::terminal::Terminal) -> Result<()>
     }
     let server = witness
         .serve_committed_completed_dispatch_pair_v1()
-        .map_err(|e| witness_error(B::DeliveryHistoricalRead, e))?;
+        .map_err(|e| financial_witness_error(financial_diagnostic::FinancialStageV1::WitnessCompletedPairService, B::DeliveryHistoricalRead, e))?;
     let first = financial_host_operation(B::DeliveryHistoricalRead, || {
         host.read_original_financial_history_v1(
             &ready.workspace,
@@ -996,7 +1038,7 @@ fn read_financial_child_inner(terminal: crate::terminal::Terminal) -> Result<()>
         usize::from(ready.continuations[1].account_id < ready.continuations[0].account_id);
     let server = witness
         .serve_committed_completed_dispatch_v1(&ready.continuations[first_index].operation_id)
-        .map_err(|e| witness_error(B::DeliveryNativeAdmission, e))?;
+        .map_err(|e| financial_witness_error(financial_diagnostic::FinancialStageV1::WitnessCompletedAccountService, B::DeliveryNativeAdmission, e))?;
     // Genuine A-only configured service produces one-sided admission. An error
     // is NOT absence: inspect both exact saved requests from full histories next.
     financial_stage(&scenario, FinancialBoundaryV1::DispatchAdmission)?;
@@ -1022,7 +1064,7 @@ fn read_financial_child_inner(terminal: crate::terminal::Terminal) -> Result<()>
         drop(second);
         let server = witness
             .serve_committed_completed_dispatch_pair_v1()
-            .map_err(|e| witness_error(B::DeliveryHistoricalRead, e))?;
+            .map_err(|e| financial_witness_error(financial_diagnostic::FinancialStageV1::WitnessCompletedPairService, B::DeliveryHistoricalRead, e))?;
         let first = financial_host_operation(B::DeliveryHistoricalRead, || {
             host.read_original_financial_history_v1(
                 &ready.workspace,

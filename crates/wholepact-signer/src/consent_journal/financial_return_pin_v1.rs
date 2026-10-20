@@ -183,4 +183,53 @@ mod tests {
         std::fs::copy(&held,&f.path).unwrap();
         assert!(f.check().is_err());
     }
+    /// Executes the actual private constructor and read-only commit ordering,
+    /// not merely a hand-built pin. The fixture still has no audited profile20
+    /// result or native Read owner: this proves revision mechanics ONLY.
+    #[test]
+    fn encrypted_return_pin_actual_constructor_survives_read_commit_and_refuses_mutation() {
+        let f=Fixture::new();
+        let pin={
+            let mut c=f.wrapper.journal.connection.lock().unwrap();
+            assert!(c.is_autocommit());
+            let before=return_revision(&c).unwrap();
+            assert!(FinancialReturnJournalPinV1::from_audited_result(
+                &f.wrapper,&f.source,&c,"88".repeat(32),"99".repeat(32),
+            ).is_err(),"constructor requires an existing snapshot");
+            let tx=c.transaction_with_behavior(TransactionBehavior::Deferred).unwrap();
+            let _:i64=tx.query_row("SELECT count(*) FROM sqlite_schema",[],|r|r.get(0)).unwrap();
+            let pin=FinancialReturnJournalPinV1::from_audited_result(
+                &f.wrapper,&f.source,&tx,"88".repeat(32),"99".repeat(32),
+            ).unwrap();
+            pin.require(&f.wrapper,&f.source,&tx).unwrap();
+            assert!(return_revision(&tx).unwrap()==before);
+            tx.commit().unwrap();
+            assert!(c.is_autocommit());
+            f.source.require_pin(&c).unwrap();
+            pin.require(&f.wrapper,&f.source,&c).unwrap();
+            assert!(return_revision(&c).unwrap()==before);
+            pin
+        };
+        f.wrapper.check_financial_return_pin_v1(&f.source,&pin).unwrap();
+        assert_eq!(pin.original_host_instance(),"88".repeat(32));
+        assert_eq!(pin.result_digest(),"99".repeat(32));
+        // A commit after issuance, even restoring the exact previous cells,
+        // invalidates this original pin. No factory retry/refresh follows.
+        let other=wholepact_storage_security::open_encrypted(&f.path,&f.key).unwrap().into_connection();
+        other.execute_batch("UPDATE signer_account SET writer_epoch=8; UPDATE signer_account SET writer_epoch=7").unwrap();
+        assert!(matches!(f.wrapper.check_financial_return_pin_v1(&f.source,&pin),Err(JournalError::Conflict)));
+
+        let f=Fixture::new();
+        let mut c=f.wrapper.journal.connection.lock().unwrap();
+        let tx=c.transaction_with_behavior(TransactionBehavior::Deferred).unwrap();
+        let _:i64=tx.query_row("SELECT count(*) FROM sqlite_schema",[],|r|r.get(0)).unwrap();
+        let pin=FinancialReturnJournalPinV1::from_audited_result(
+            &f.wrapper,&f.source,&tx,"88".repeat(32),"99".repeat(32),
+        ).unwrap();
+        tx.execute("UPDATE signer_account SET writer_epoch=writer_epoch",[]).unwrap();
+        assert!(matches!(pin.require(&f.wrapper,&f.source,&tx),Err(JournalError::Conflict)));
+        tx.rollback().unwrap();
+        assert!(matches!(pin.require(&f.wrapper,&f.source,&c),Err(JournalError::Conflict)));
+    }
+
 }

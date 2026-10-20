@@ -1,8 +1,20 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-20, 16:58 UTC.
+Updated: 2026-10-20, 17:51 UTC.
 
 **CI44 passed the genuine two-owner delivery/admission, original-producer SIGKILL and fresh-process read-only original-history verification route. Financial signing/dispatch and public testnet settlement remain unqualified. This is a bounded admission/restart milestone, not a production release.**
+
+## CI56 stopped before the first financial history read; original job causes retained
+
+[Run 39462405765](https://github.com/stanleykosi/pactloom/actions/runs/39462405765), qualification `06ffedc2b4d03b8754a81fd4af913729d6cf8123`, implementation `beed806365ea65362508fc121a983eb64198fe33`, passed the origin and seven actual TLS mechanism groups. Host compilation passed in 12m39s and encrypted bootstrap passed. Native execution failed at 17:30:27 UTC with input 120/151, `SignatureAndIntake / LifecycleHarness / Host / Other / NotEstablished`. Producer reap, process-group absence and root cleanup were verified. No completed financial result, extraction or reader execution is established.
+
+Source ordering excludes the new return-pin constructor as the directly reached failure site: it is called only after both financial history reads, binding and a protected result request, after input127. Input120 still covers the two-owner signing review loops and completed-dispatch-pair service setup. Existing worker error conversion discarded its finite original type, and the outer fallback could only report Other. No exact payment defect is inferred from that erased evidence.
+
+The correction carries each failed native job's exact stage and finite original cause alongside its unchanged result. It preserves nested Signer, Authority, wallet/sync, Chain, journal and storage variants before their existing conversions. Synchronous worker failures and every financial Witness setup boundary also retain explicit stages. Successful jobs clear their inert observations; the existing single-promotion rule preserves the first unexpected failure, while expected partial admission remains separately reconciled. Public projection is still closed, bounded and cleanup-gated, with no raw errors or private values. Original effect order, errors, permission checks, retries and deadlines are unchanged.
+
+Independent source review cleared the complete patch. The combined Signer/Host locked offline release build passed in 7m46s. The actual encrypted constructor-ordering regression passed once. Six exact in-memory ownership/projection checks and 35 closed Python projection cases also passed. These are bounded component/reporting results, not financial integration success. The next isolated full lifecycle run is pending.
+
+The new encrypted regression invokes the actual private return-pin constructor within a real Deferred snapshot, verifies unchanged revision counters across read-only commit and post-commit checks, and refuses autocommit issuance or later mutations/restores. It proves constructor/revision mechanics, not issuance from a valid full native profile. Actual original Host/Signer Current, authenticated intake, Finish, completed-only reopen and saved-byte dispatch remain unqualified until the isolated lifecycle succeeds. Public testnet settlement and retry after an actual unknown chain send remain unproven.
 
 ## CI55 localized Current-reply expiry; return-only audited pin prepared
 

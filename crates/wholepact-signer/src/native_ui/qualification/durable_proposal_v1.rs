@@ -4687,6 +4687,7 @@ impl ClosedDeliveryNativeFixtureV3 {
     }
 }
 impl FinancialNativeFixtureV1 {
+    pub(in crate::native_ui) fn last_failure_v1(&self)->Option<super::financial_v1::diagnostics::FinancialNativeDiagnosticV1>{self.inner.runtime.financial_diagnostic_v1()}
     pub(in crate::native_ui) fn provider(&self)->Result<wholepact_signer_origin::InstalledSignerProvider>{self.provider.borrow_mut().take().ok_or(Error::Unavailable)}
     pub(in crate::native_ui) fn endpoint(&self)->Result<std::path::PathBuf>{self.inner.runtime.financial_result_endpoint_v1()}
     pub(in crate::native_ui) fn deadline(&self)->Result<Instant>{if Instant::now()>=self.deadline{return Err(Error::Locked);}Ok(self.deadline)}

@@ -537,6 +537,15 @@ impl EphemeralClosedDeliveryNativeV3 {
 }
 
 pub use crate::native_ui::runtime::durable_proposal_qualification_v1::FinancialQualificationPhaseV1;
+pub use crate::native_ui::runtime::financial_v1::diagnostics::{FinancialNativeDiagnosticV1,FinancialNativeStageV1,FinancialNativeComponentV1,FinancialNativeErrorClassV1};
+/// Classifies an actual qualification failure without retaining data or granting authority.
+pub fn classify_financial_native_failure_v1(stage:FinancialNativeStageV1,error:&crate::Error)->Option<FinancialNativeDiagnosticV1>{
+    use crate::native_ui::runtime::financial_v1::diagnostics;
+    let scope=diagnostics::Scope::begin(stage);
+    diagnostics::signer(error);
+    scope.failure()
+}
+
 /// Actual synthetic native controller only. Every approval drives the existing
 /// reviewed exact native click path; no permission DTO or replacement source.
 pub struct EphemeralFinancialContinuationNativeV1 {
@@ -546,6 +555,7 @@ impl EphemeralClosedDeliveryNativeV3 {
     pub fn into_financial_continuation_v1(self,wallet_setup_json:String)->Result<EphemeralFinancialContinuationNativeV1>{Ok(EphemeralFinancialContinuationNativeV1{inner:self.inner.into_financial_continuation_v1(wallet_setup_json)?})}
 }
 impl EphemeralFinancialContinuationNativeV1 {
+    pub fn last_failure_v1(&self)->Option<FinancialNativeDiagnosticV1>{self.inner.last_failure_v1()}
     /// Moves the already established fixture's installed-process trust owner
     /// once, instead of constructing trust from a source receipt or DTO.
     pub fn provider(&self)->Result<wholepact_signer_origin::InstalledSignerProvider>{self.inner.provider()}
