@@ -8,6 +8,7 @@
 pub mod transaction;
 
 pub mod durable_intake_v1;
+mod completed_existing_v1;
 
 use super::{ExternalSignature, SignatureInspection, assemble_external_signatures};
 use crate::{proving::ProvingLimits, review::ReviewPolicy};

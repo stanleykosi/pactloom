@@ -59,6 +59,8 @@ pub use wholepact_signer_origin::PairScope;
 #[derive(Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 enum Envelope {
+    #[cfg(all(feature="durable-proposal", feature="pending-birth-owner-signing", feature="native-ui"))]
+    FinancialResultV1 {schema_version:u32,request:crate::authority_bridge::financial_continuation_v1::FinancialResultRequestV1},
     #[cfg(feature = "durable-proposal")]
     ClosedRecipientV3 { schema_version: u32, request: crate::authority_bridge::durable_review_ipc_v3::ClosedRecipientCommandV3 },
     RequestPairing {
@@ -888,6 +890,8 @@ impl PendingPairing {
     }
 }
 pub(crate) enum LocalEvent {
+    #[cfg(all(feature="durable-proposal", feature="pending-birth-owner-signing", feature="native-ui"))]
+    FinancialResultV1 {peer:PeerProcess,stream:UnixStream,request:crate::authority_bridge::financial_continuation_v1::FinancialResultRequestV1},
     #[cfg(feature = "durable-proposal")]
     DurableDeliveryHistoryV3 { peer: AuthenticatedPeer, stream: UnixStream, request: Box<crate::authority_bridge::durable_delivery_admission_ipc_v3::DurableDeliveryHistoryRequestV3> },
     #[cfg(feature = "durable-proposal")]
@@ -1615,6 +1619,15 @@ fn serve(
                     #[cfg(feature = "synthetic-born-joined-qualification")]
                     let _scoped_admission = scoped_v3.begin_admission()?;
                     match &mut envelope {
+                        #[cfg(all(feature="durable-proposal",feature="pending-birth-owner-signing",feature="native-ui"))]
+                        Envelope::FinancialResultV1{schema_version,request}=>{
+                            if *schema_version!=1||!matches!(mode,IpcMode::Ordinary){return Err(Error::Authentication);}
+                            request.validate().map_err(|_|Error::InvalidData)?;
+                            peer.check_alive()?;
+                            let actual=PeerProcess::observe(&stream)?;peer.same_live_process(&actual)?;
+                            sender.try_send(LocalEvent::FinancialResultV1{peer,stream:stream.try_clone()?,request:request.clone()}).map_err(|_|Error::Unavailable)?;
+                        }
+
                         #[cfg(feature = "durable-proposal")]
                         Envelope::ClosedRecipientV3 {schema_version, request} => {
                             if *schema_version != 3 || !matches!(mode, IpcMode::Ordinary) { return Err(Error::Authentication); }

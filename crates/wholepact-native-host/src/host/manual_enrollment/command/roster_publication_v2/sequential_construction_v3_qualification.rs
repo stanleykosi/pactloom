@@ -837,6 +837,16 @@ fn synthetic_foreground_child() {
         durable_proposal_v1::private_fixed_v2::produce_delivery_child(terminal).unwrap();
         return;
     }
+    #[cfg(all(feature = "durable-proposal",feature = "synthetic-born-joined-qualification"))]
+    if stage == "durable-financial-produce-v1" {
+        durable_proposal_v1::private_fixed_v2::produce_financial_child(terminal).unwrap();
+        return;
+    }
+    #[cfg(all(feature = "durable-proposal",feature = "synthetic-born-joined-qualification"))]
+    if stage == "durable-financial-dispatch-v1" {
+        durable_proposal_v1::delivery_admission_v2::durable_financial_dispatch_v1::read_financial_child(terminal).unwrap();
+        return;
+    }
     if stage == "bounded-dispatch-review-v1" {
         let digest = "a".repeat(64);
         let detail = "SYNTHETIC TEMPORARY DISPATCH REVIEW: controller-only; no transaction or financial effect";
@@ -1182,6 +1192,8 @@ enum PrivateWorkspaceStageV1 {
     Reader,
     DeliveryProducer,
     DeliveryReader,
+    FinancialProducer,
+    FinancialReader,
 }
 #[cfg(all(
     feature = "durable-proposal",
@@ -1194,10 +1206,12 @@ impl PrivateWorkspaceStageV1 {
             Self::Reader => "private-workspace-read-fixed-v1",
             Self::DeliveryProducer => "durable-delivery-native-admission-v2",
             Self::DeliveryReader => "durable-delivery-native-history-v2",
+            Self::FinancialProducer => "durable-financial-produce-v1",
+            Self::FinancialReader => "durable-financial-dispatch-v1",
         }
     }
     fn producer(self) -> bool {
-        matches!(self, Self::Producer | Self::DeliveryProducer)
+        matches!(self, Self::Producer | Self::DeliveryProducer | Self::FinancialProducer)
     }
     fn marker(self, tail: &str, complete: bool, terminal: bool) -> std::io::Result<bool> {
         match self {
@@ -1208,6 +1222,9 @@ impl PrivateWorkspaceStageV1 {
                     complete,
                     terminal,
                 )
+            }
+            Self::FinancialProducer | Self::FinancialReader => {
+                durable_proposal_v1::delivery_admission_v2::durable_financial_dispatch_v1::death_marker_financial_v1(tail,self.producer(),complete,terminal)
             }
             Self::DeliveryProducer | Self::DeliveryReader => {
                 durable_proposal_v1::delivery_admission_v2::death_marker_v2(
@@ -1268,7 +1285,8 @@ fn private_workspace_stage_v1(
     deadline: Instant,
     monotonic_cutoff_ns: u64,
 ) -> std::io::Result<PrivateWorkspaceStageResultV1> {
-    if stage.producer() != tls_material.is_some() {
+    let needs_original_tls = stage.producer() || matches!(stage, PrivateWorkspaceStageV1::FinancialReader);
+    if needs_original_tls != tls_material.is_some() {
         let _ = root.keep();
         return Err(std::io::Error::other(
             "exact private workspace child role refused",

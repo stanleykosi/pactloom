@@ -243,3 +243,144 @@ pub fn synthetic_payment_receiver_v1() -> String {
     let fvk = FullViewingKey::from(&key);
     wholepact_protocol::review::encode_testnet_receiver(&fvk.address_at(0u32, Scope::External))
 }
+
+/// Bounded serialization of the already-built PUBLIC fixture only. Reopening
+/// never calls the randomized builder and cannot create wallet or chain authority.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreservedPublicBlocksV1 {
+    version: u32,
+    prior_height: u32,
+    prior_hash: [u8; 32],
+    block_count: u32,
+    timestamp: u32,
+    blocks: Vec<Vec<u8>>,
+    trees: Vec<Vec<u8>>,
+    tip_height: u32,
+    tip_hash: [u8; 32],
+    anchor_height: u32,
+    anchor_hash: [u8; 32],
+    anchor_root: [u8; 32],
+    funding_input_ids: [String; 2],
+}
+impl SyntheticBornReceiverBlocksV1 {
+    pub fn preserve_public_original_v1(&self) -> Result<Vec<u8>, WalletError> {
+        use prost::Message;
+        let saved = PreservedPublicBlocksV1 {
+            version: 1,
+            prior_height: self.spec.prior_height,
+            prior_hash: self.spec.prior_hash_protocol,
+            block_count: self.spec.block_count,
+            timestamp: self.spec.timestamp,
+            blocks: self.blocks.iter().map(Message::encode_to_vec).collect(),
+            trees: self.trees.iter().map(Message::encode_to_vec).collect(),
+            tip_height: self.context.tip_height,
+            tip_hash: self.context.tip_hash_protocol,
+            anchor_height: self.context.anchor_height,
+            anchor_hash: self.context.anchor_hash_protocol,
+            anchor_root: self.context.anchor_root,
+            funding_input_ids: self.funding_input_ids.clone(),
+        };
+        let bytes = serde_json::to_vec(&saved).map_err(|_| WalletError::InvalidRequest)?;
+        if bytes.len() > 4 * 1024 * 1024 {
+            return Err(WalletError::InvalidRequest);
+        }
+        Ok(bytes)
+    }
+    pub fn reopen_public_original_v1(bytes: &[u8]) -> Result<Self, WalletError> {
+        use prost::Message;
+        if bytes.is_empty() || bytes.len() > 4 * 1024 * 1024 {
+            return Err(WalletError::InvalidRequest);
+        }
+        let saved: PreservedPublicBlocksV1 =
+            serde_json::from_slice(bytes).map_err(|_| WalletError::InvalidRequest)?;
+        if saved.version != 1
+            || !(1..=32).contains(&saved.block_count)
+            || saved.blocks.len() != saved.block_count as usize
+            || saved.trees.len() != saved.blocks.len() + 1
+            || saved.prior_height.checked_add(saved.block_count) != Some(saved.tip_height)
+            || saved.prior_height.checked_add(1) != Some(saved.anchor_height)
+            || saved.timestamp == 0
+            || saved.prior_hash == [0; 32]
+            || saved
+                .funding_input_ids
+                .iter()
+                .any(|v| v.is_empty() || v.len() > 128)
+            || saved.funding_input_ids[0] == saved.funding_input_ids[1]
+        {
+            return Err(WalletError::InvalidRequest);
+        }
+        let mut blocks = Vec::new();
+        for encoded in &saved.blocks {
+            if encoded.len() > 1024 * 1024 {
+                return Err(WalletError::InvalidRequest);
+            }
+            let block = CompactBlock::decode(encoded.as_slice())
+                .map_err(|_| WalletError::InvalidRequest)?;
+            if block.encode_to_vec() != *encoded {
+                return Err(WalletError::InvalidRequest);
+            }
+            blocks.push(block);
+        }
+        let mut trees = Vec::new();
+        for encoded in &saved.trees {
+            if encoded.len() > 1024 * 1024 {
+                return Err(WalletError::InvalidRequest);
+            }
+            let tree =
+                TreeState::decode(encoded.as_slice()).map_err(|_| WalletError::InvalidRequest)?;
+            if tree.encode_to_vec() != *encoded {
+                return Err(WalletError::InvalidRequest);
+            }
+            trees.push(tree);
+        }
+        let mut previous = saved.prior_hash.to_vec();
+        for (index, block) in blocks.iter().enumerate() {
+            if block.height != u64::from(saved.anchor_height) + index as u64
+                || block.prev_hash != previous
+                || block.hash.len() != 32
+                || trees[index + 1].height != block.height
+                || trees[index + 1].hash
+                    != display_hash(
+                        &block
+                            .hash
+                            .clone()
+                            .try_into()
+                            .map_err(|_| WalletError::InvalidRequest)?,
+                    )
+            {
+                return Err(WalletError::InvalidRequest);
+            }
+            previous = block.hash.clone();
+        }
+        if blocks.first().map(|b| b.hash.as_slice()) != Some(saved.anchor_hash.as_slice())
+            || previous != saved.tip_hash
+            || trees[0].height != u64::from(saved.prior_height)
+            || trees[0].hash != display_hash(&saved.prior_hash)
+        {
+            return Err(WalletError::InvalidRequest);
+        }
+        let result = Self {
+            spec: SyntheticBornChainSpecV1 {
+                prior_height: saved.prior_height,
+                prior_hash_protocol: saved.prior_hash,
+                block_count: saved.block_count,
+                timestamp: saved.timestamp,
+            },
+            blocks,
+            trees,
+            context: SelectionContext {
+                tip_height: saved.tip_height,
+                tip_hash_protocol: saved.tip_hash,
+                anchor_height: saved.anchor_height,
+                anchor_hash_protocol: saved.anchor_hash,
+                anchor_root: saved.anchor_root,
+            },
+            funding_input_ids: saved.funding_input_ids,
+        };
+        if result.preserve_public_original_v1()? != bytes {
+            return Err(WalletError::InvalidRequest);
+        }
+        Ok(result)
+    }
+}

@@ -93,6 +93,20 @@ pub trait SubmissionAuthority {
     fn authorize(&mut self, review: &SubmissionReview<'_>) -> Result<Self::Permit, ChainError>;
 }
 pub trait SubmissionPermit {
+    /// Optional exact attempt number committed by a bounded original delegation.
+    /// Compared inside the submission journal write transaction, not just before it.
+    fn expected_attempt_number(&self) -> Option<u32> {
+        None
+    }
+    /// Optional immutable INCLUSIVE wall-clock send ceiling. This is a
+    /// restriction, never authority: the backend must enforce it after any
+    /// asynchronous connection/readiness work and before sending bytes.
+    /// A strict millisecond deadline must be rounded conservatively to
+    /// `deadline_ms / 1000 - 1`, never rounded up. Legacy authorities without
+    /// an additional absolute deadline retain the existing context bound.
+    fn valid_until_unix_seconds(&self) -> Option<u64> {
+        None
+    }
     fn check_current(&mut self, review: &SubmissionReview<'_>) -> Result<(), ChainError>;
 }
 pub struct SubmissionReview<'a> {
@@ -343,16 +357,25 @@ pub async fn submit_plan<B: SubmissionBackend, A: SubmissionAuthority, C: Submis
         now_unix_seconds: now,
     };
     let mut permit = authority.authorize(&review)?;
+    let authority_until = permit.valid_until_unix_seconds();
+    let expected_attempt = permit.expected_attempt_number();
     let before_commit = clock.now_unix_seconds()?;
+    if authority_until.is_some_and(|until| before_commit > until) {
+        return Err(ChainError::SubmissionNotAuthorized);
+    }
     check_current(plan, &identity, &context, before_commit, policy)?;
     permit.check_current(&SubmissionReview {
         now_unix_seconds: before_commit,
         ..review
     })?;
     journal.bind_submission_plan(plan)?;
-    let mut attempt = journal.begin_submission_attempt(plan, &identity.source_id, now)?;
+    let mut attempt =
+        journal.begin_submission_attempt(plan, &identity.source_id, now, expected_attempt)?;
     // Disk commit and gate work can consume the context lifetime. Recheck after both.
     let current = clock.now_unix_seconds().and_then(|now| {
+        if authority_until.is_some_and(|until| now > until) {
+            return Err(ChainError::SubmissionNotAuthorized);
+        }
         check_current(plan, &identity, &context, now, policy)?;
         permit.check_current(&SubmissionReview {
             now_unix_seconds: now,
@@ -369,7 +392,10 @@ pub async fn submit_plan<B: SubmissionBackend, A: SubmissionAuthority, C: Submis
     let dispatch = PreparedDispatch {
         plan,
         backend: &identity,
-        valid_until_unix_seconds: context.valid_until_unix_seconds(),
+        valid_until_unix_seconds: authority_until
+            .map_or(context.valid_until_unix_seconds(), |authority_until| {
+                context.valid_until_unix_seconds().min(authority_until)
+            }),
     };
     let result = tokio::time::timeout(policy.dispatch_timeout, backend.submit_exact(dispatch))
         .await

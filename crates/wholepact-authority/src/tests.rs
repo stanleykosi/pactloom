@@ -1294,6 +1294,7 @@ fn remote_owner_cannot_inject_resolution_or_reopen_json() {
 fn reconciled_history_and_writer_session_share_budget_commitment() {
     let ledger = active_ledger();
     let mut history = ReconciledAuthorityHistory {
+        completed_dispatches_v1: Vec::new(),
         durable_payment_history_supported_v1: false,
         construction_transport_history:
             crate::construction_transport_handoff_v1::ConstructionTransportHistoryV1 {

@@ -68,7 +68,7 @@ struct AwaitingAuditV3 {
     controlled: Option<wholepact_authority::AccountSnapshot>,
     lower_error: Option<wholepact_authority::AuthorityError>,
 }
-enum OutcomeV3 { ReceiveFailed(authority_bridge::BridgeError,Option<Error>), AdmissionFailed(wholepact_authority::AuthorityError), Setup(SetupV3), HistorySetup(SetupV3), Received(Zeroizing<Vec<u8>>), Verified(VerifiedImportV3), Prepared(PreparedAdmissionV3), Awaiting(AwaitingAuditV3), Audited(DurableDeliveryAdmissionStatusV3) }
+enum OutcomeV3 { ReceiveFailed(authority_bridge::BridgeError,Option<Error>), AdmissionFailed(wholepact_authority::AuthorityError), Setup(SetupV3), HistorySetup(SetupV3), Received(Zeroizing<Vec<u8>>), Verified(VerifiedImportV3), Prepared(PreparedAdmissionV3), Awaiting(AwaitingAuditV3), Audited(DurableDeliveryAdmissionStatusV3,wholepact_authority::AuthorityHead) }
 struct JobV3 { receive: mpsc::Receiver<Result<OutcomeV3>>, worker: std::thread::JoinHandle<()> }
 pub(super) struct DurableDeliveryRuntimeV3 {
     phase: DurableDeliveryPhaseV3,
@@ -80,6 +80,8 @@ pub(super) struct DurableDeliveryRuntimeV3 {
     read_review: Option<PreparedDeliveryReadReviewV3>,
     active: Option<Arc<ActiveV3>>,
     imported: Option<Arc<VerifiedImportV3>>,
+    financial_material: Option<VerifiedDurableEconomicsV1>,
+    financial_admitted_head: Option<wholepact_authority::AuthorityHead>,
     prepared: Option<PreparedAdmissionV3>,
     awaiting: Option<AwaitingAuditV3>,
     job: Option<JobV3>,
@@ -99,7 +101,7 @@ pub(super) struct DurableDeliveryRuntimeV3 {
 impl DurableDeliveryRuntimeV3 {
     fn abort(&mut self, error:Error) {
         if let Some(active)=&self.active {active.source.read().invalidate();}
-        self.read_review=None; self.setup=None; self.imported=None; self.prepared=None; self.history_recipient=None;
+        self.read_review=None; self.setup=None; self.imported=None; self.financial_material=None; self.prepared=None; self.history_recipient=None;
         self.phase=if self.phase==DurableDeliveryPhaseV3::Complete {DurableDeliveryPhaseV3::Complete}else if self.awaiting.is_some() {DurableDeliveryPhaseV3::AwaitingAudit}else{DurableDeliveryPhaseV3::Aborted};
         self.failure=Some(error);
     }
@@ -164,7 +166,7 @@ impl NativeRuntime {
         let ipc=open.ipc;
         let directory=open.durable_ipc_directory;
         let closed_peer=original_peer.clone();
-        let mut closed=DurableDeliveryRuntimeV3 {peer:Some(closed_peer),phase:DurableDeliveryPhaseV3::PreparingRead,ipc,_directory:directory,preparation,setup:None,read_review:None,active:None,imported:None,prepared:None,awaiting:None,job:None,status:None,failure:None,epoch,history_requested:false,history_selector:None,admitting:Arc::new(AtomicBool::new(false)),lower_receive_error:None,lower_admission_error:None,retired_origin:Some(peer.native_origin.clone()),retired_peer:Some(peer.clone()),history_recipient:None,exact_pending_operation:None};
+        let mut closed=DurableDeliveryRuntimeV3 {peer:Some(closed_peer),phase:DurableDeliveryPhaseV3::PreparingRead,ipc,_directory:directory,preparation,setup:None,read_review:None,active:None,imported:None,financial_material:None,financial_admitted_head:None,prepared:None,awaiting:None,job:None,status:None,failure:None,epoch,history_requested:false,history_selector:None,admitting:Arc::new(AtomicBool::new(false)),lower_receive_error:None,lower_admission_error:None,retired_origin:Some(peer.native_origin.clone()),retired_peer:Some(peer.clone()),history_recipient:None,exact_pending_operation:None};
         closed.spawn(move || {
             // Every prior reader is joined before its journal/session/source is
             // consumed. A pending old capability is never copied into V3.
@@ -438,12 +440,15 @@ impl NativeRuntime {
                         OutcomeV3::Awaiting(awaiting)=> {
                             let status=DurableDeliveryAdmissionStatusV3 {version:3,intent_digest:closed.active.as_ref().ok_or(Error::Unavailable)?.intent.digest().map_err(|_|Error::ReviewMismatch)?,request:awaiting.retained.request().clone(),original_local_intent_digest:awaiting.retained.history_digest()?,state:if awaiting.controlled.is_some(){DurableDeliveryAdmissionStateV3::AwaitingAudit}else{DurableDeliveryAdmissionStateV3::Unknown},audit:None};
                             status.validate().map_err(|_|Error::ReviewMismatch)?;
-                            closed.imported=None;closed.prepared=None;closed.awaiting=Some(awaiting);closed.status=Some(status);closed.phase=DurableDeliveryPhaseV3::AwaitingAudit;
+                            let imported=closed.imported.take().ok_or(Error::Unavailable)?;
+                            let imported=Arc::try_unwrap(imported).map_err(|_|Error::Unavailable)?;
+                            closed.financial_material=Some(imported.fixed);drop(imported.active);
+                            closed.prepared=None;closed.awaiting=Some(awaiting);closed.status=Some(status);closed.phase=DurableDeliveryPhaseV3::AwaitingAudit;
                         }
-                        OutcomeV3::Audited(status)=> {
+                        OutcomeV3::Audited(status,head)=> {
                             #[cfg(feature="synthetic-born-joined-qualification")]
                             require_completed_v2_entry_refusal_v3(closed.active.as_ref().ok_or(Error::Unavailable)?)?;
-                            closed.status=Some(status);closed.phase=DurableDeliveryPhaseV3::Complete;
+                            closed.financial_admitted_head=Some(head);closed.status=Some(status);closed.phase=DurableDeliveryPhaseV3::Complete;
                         }
                     }
                     Ok(())
@@ -584,7 +589,7 @@ impl NativeRuntime {
         self.closed_history_prior_v3.zeroize();self.closed_history_selector_v3.zeroize();
         if let Some(closed)=&mut self.closed_delivery_v3 {
             if let Some(active)=&closed.active {active.source.read().invalidate();}
-            closed.read_review=None;closed.setup=None;closed.prepared=None;closed.imported=None;closed.history_recipient=None;
+            closed.read_review=None;closed.setup=None;closed.prepared=None;closed.imported=None;closed.financial_material=None;closed.history_recipient=None;
             if closed.awaiting.is_none() && closed.phase!=DurableDeliveryPhaseV3::Complete {closed.phase=DurableDeliveryPhaseV3::Aborted;}
         }
         self.pending=None;self.confirmation.zeroize();
@@ -642,7 +647,7 @@ impl NativeRuntime {
             let completed=DurableDeliveryAdmissionStatusV3 {version:3,intent_digest:selector.intent_digest,request:original.request().clone(),original_local_intent_digest:original.history_digest()?,state:DurableDeliveryAdmissionStateV3::Verified,audit:Some(audit)};
             completed.validate().map_err(|_|Error::ReviewMismatch)?;
             active.check()?;
-            Ok(OutcomeV3::Audited(completed))
+            Ok(OutcomeV3::Audited(completed,history.snapshot().head.clone()))
         })?;
         Ok(())
     }
@@ -669,7 +674,7 @@ impl NativeRuntime {
         let owner_setup=Zeroizing::new(self.owner_witness_setup.to_string());
         let endpoint=super::durable_entry_v1::create_durable_endpoint_v1(&root).map_err(|(_,error)|error)?;
         let preparation=prior.preparation();
-        let mut closed=DurableDeliveryRuntimeV3 {phase:DurableDeliveryPhaseV3::PreparingRead,ipc:endpoint.ipc,_directory:Some(endpoint.temporary),preparation,peer:None,setup:None,read_review:None,active:None,imported:None,prepared:None,awaiting:None,job:None,status:None,failure:None,epoch,history_requested:false,history_selector:Some(history),admitting:Arc::new(AtomicBool::new(false)),lower_receive_error:None,lower_admission_error:None,retired_origin:None,retired_peer:None,history_recipient:None,exact_pending_operation:None};
+        let mut closed=DurableDeliveryRuntimeV3 {phase:DurableDeliveryPhaseV3::PreparingRead,ipc:endpoint.ipc,_directory:Some(endpoint.temporary),preparation,peer:None,setup:None,read_review:None,active:None,imported:None,financial_material:None,financial_admitted_head:None,prepared:None,awaiting:None,job:None,status:None,failure:None,epoch,history_requested:false,history_selector:Some(history),admitting:Arc::new(AtomicBool::new(false)),lower_receive_error:None,lower_admission_error:None,retired_origin:None,retired_peer:None,history_recipient:None,exact_pending_operation:None};
         closed.spawn(move|| {
             let source=PreparedOriginalDeliverySourceV3::open_history(&root,&password,owner,&prior)?;
             let (enrollment,manifest,descriptor,certificate)=source.history_setup_metadata()?;
@@ -803,5 +808,36 @@ impl NativeRuntime {
         self.check_durable_delivery_v3()?;
         self.durable_delivery_v3_endpoint()?;
         wholepact_signer_origin::InstalledSignerProvider::qualification_current_process().map_err(|_|Error::Authentication)
+    }
+}
+
+impl NativeRuntime {
+    /// A one-way data-only handoff after successful original admission. No V3
+    /// session, IPC grant, source owner or native authority survives this call.
+    pub(super) fn detach_financial_material_v1(&mut self)->Result<(crate::native_ui::durable_proposal_v1::VerifiedDurableEconomicsV1,PeerProcess)> {
+        let closed=self.closed_delivery_v3.as_ref().ok_or(Error::Unavailable)?;
+        if closed.phase!=DurableDeliveryPhaseV3::Complete||closed.job.is_some()||self.pending.is_some(){return Err(Error::Unavailable);}
+        closed.active.as_ref().ok_or(Error::Unavailable)?.source.check_retained_custody()?;
+        let mut closed=self.closed_delivery_v3.take().ok_or(Error::Unavailable)?;
+        if let Some(active)=&closed.active{active.source.read().invalidate();}
+        closed.ipc.revoke_all();closed.prepared=None;closed.setup=None;
+        let fixed=closed.financial_material.take().ok_or(Error::Unavailable)?;
+        let peer=closed.active.as_ref().and_then(|a|a.peer.clone()).ok_or(Error::Authentication)?;peer.check_alive()?;
+        drop(closed);
+        self.confirmation.zeroize();
+        Ok((fixed,peer))
+    }
+}
+
+impl NativeRuntime {
+    /// Inert proposal from actual admitted V3 history, never a financial grant.
+    pub(in crate::native_ui) fn financial_continuation_terms_v1(&self)->Result<wholepact_authority::durable_financial_continuation_v1::FinancialContinuationTermsV1> {
+        use wholepact_authority::durable_financial_continuation_v1::{FinancialContinuationTermsV1,original_delivery_request_digest_v1};
+        let closed=self.closed_delivery_v3.as_ref().ok_or(Error::Unavailable)?;
+        if closed.phase!=DurableDeliveryPhaseV3::Complete||closed.financial_material.is_none()||closed.job.is_some(){return Err(Error::Unavailable);}
+        closed.active.as_ref().ok_or(Error::Unavailable)?.source.check_retained_custody()?;
+        let status=closed.status.as_ref().ok_or(Error::Unavailable)?;let audit=status.verified_audit().map_err(|_|Error::ReviewMismatch)?;
+        let terms=FinancialContinuationTermsV1{scope:audit.scope.clone(),original_delivery_operation_id:status.request.operation_id.clone(),original_delivery_request_digest:original_delivery_request_digest_v1(&status.request).map_err(|_|Error::ReviewMismatch)?,original_delivery_committed_head:closed.financial_admitted_head.clone().ok_or(Error::Unavailable)?,original_local_intent_digest:status.original_local_intent_digest.clone(),original_recipient_intent_digest:status.intent_digest.clone(),original_recipient_enrollment_ref:audit.original_enrollment_ref.clone(),original_recipient_manifest_ref:audit.original_accepted_manifest_ref.clone(),valid_from_ms:audit.scope.delivery.valid_from_ms,valid_until_ms:audit.scope.delivery.valid_until_ms};
+        terms.validate().map_err(|_|Error::ReviewMismatch)?;Ok(terms)
     }
 }

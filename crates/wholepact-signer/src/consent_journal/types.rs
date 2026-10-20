@@ -337,6 +337,28 @@ pub struct WalletSnapshotBinding {
 pub struct OriginalSpendConsent {
     pub(super) reference: String,
     pub(super) terms: SpendConsentTerms,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) financial_continuation_v1: Option<FinancialSpendBindingV1>,
+}
+/// Historical data from the explicit financial profile. No field or
+/// deserialization grants a live signing decision or restores a native owner.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FinancialSpendBindingV1 {
+    pub(crate) continuation_operation_id: String,
+    pub(crate) continuation_request_digest: String,
+    pub(crate) continuation_history_digest: String,
+    pub(crate) source_identity_digest: String,
+    pub(crate) terms_digest: String,
+    pub(crate) signing_terms_digest: String,
+    pub(crate) reviewed_head: wholepact_authority::AuthorityHead,
+    pub(crate) disclosure: wholepact_authority::WitnessDisclosureDescriptor,
+    pub(crate) action_review_digest: String,
+    pub(crate) native_session_digest: String,
+    pub(crate) principal_id: String,
+    pub(crate) measurement: String,
+    pub(crate) permission_generation: u64,
+    pub(crate) nonce: String,
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -385,11 +407,39 @@ impl OriginalSpendConsent {
         let record = Self {
             reference: digest("wholepact:signer-original-spend-consent:v1", &terms)?,
             terms,
+            financial_continuation_v1: None,
         };
         record.validate()?;
         Ok(record)
     }
     pub(super) fn validate(&self) -> Result<()> {
+        if self.financial_continuation_v1.is_some() { return Err(JournalError::RecoveryRequired); }
+        self.validate_terms()?;
+        if self.reference != digest("wholepact:signer-original-spend-consent:v1", &self.terms)? { return Err(JournalError::InvalidBinding); }
+        Ok(())
+    }
+    pub(super) fn new_financial_v1(terms: SpendConsentTerms, binding: FinancialSpendBindingV1) -> Result<Self> {
+        let reference = digest("wholepact:signer-original-financial-spend-consent:v1", &(&terms, &binding))?;
+        let record = Self { reference, terms, financial_continuation_v1: Some(binding) };
+        record.validate_financial_v1()?;
+        Ok(record)
+    }
+    pub(crate) fn financial_binding_v1(&self) -> Option<&FinancialSpendBindingV1> { self.financial_continuation_v1.as_ref() }
+    pub(crate) fn validate_financial_v1(&self) -> Result<()> {
+        self.validate_terms()?;
+        let b = self.financial_continuation_v1.as_ref().ok_or(JournalError::RecoveryRequired)?;
+        id(&b.continuation_operation_id)?; id(&b.principal_id)?;
+        for value in [&b.continuation_request_digest, &b.continuation_history_digest, &b.source_identity_digest, &b.terms_digest,
+            &b.signing_terms_digest, &b.reviewed_head.digest, &b.action_review_digest, &b.native_session_digest, &b.measurement, &b.nonce] { hash(value)?; }
+        b.disclosure.validate().map_err(|_| JournalError::InvalidBinding)?;
+        let t = &self.terms;
+        if b.reviewed_head.sequence == 0 || b.principal_id != t.principal_id || b.native_session_digest != t.receipt.native_session_id || b.measurement != t.receipt.trusted_launch_measurement
+            || b.permission_generation != t.receipt.permission_generation || b.permission_generation != 1 || b.nonce != t.receipt.nonce
+            || t.automation.is_some() || t.sponsor_policy.is_some() || t.sponsor_owner_attestation_digest.is_some() || t.durable_born_policy_v1.is_some()
+            || self.reference != digest("wholepact:signer-original-financial-spend-consent:v1", &(t,b))? { return Err(JournalError::InvalidBinding); }
+        Ok(())
+    }
+    fn validate_terms(&self) -> Result<()> {
         let t = &self.terms;
         for v in [
             &t.authorization_id,
@@ -465,9 +515,6 @@ impl OriginalSpendConsent {
             {
                 return Err(JournalError::InvalidBinding);
             }
-        }
-        if self.reference != digest("wholepact:signer-original-spend-consent:v1", t)? {
-            return Err(JournalError::InvalidBinding);
         }
         Ok(())
     }

@@ -16,6 +16,14 @@ mod born_offline_witness_v1;
 mod durable_acquire_reply_loss_v1;
 mod durable_payment_client_v1;
 mod durable_delivery_admission_v2;
+mod financial_continuation_v1;
+mod financial_signing_server_v1;
+mod financial_signing_client_v1;
+mod completed_dispatch_v1;
+#[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
+pub use completed_dispatch_v1::{open_born_completed_dispatch_v1_for_server, open_born_completed_dispatch_pair_v1_for_server};
+#[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
+pub use financial_signing_server_v1::open_born_financial_signing_v1_for_server;
 pub mod durable_delivery_admission_v3;
 pub use durable_delivery_admission_v3::AuthenticatedDurableAdmissionChannelV3;
 mod durable_payment_server_v1;
@@ -543,6 +551,18 @@ impl AuthorityClient {
         caller_deadline: Option<Instant>,
         #[cfg(feature = "synthetic-qualification")] observer: Option<&HistoryObserverV1>,
     ) -> Result<ReconciledAuthorityHistory> {
+        self.reconcile_history_profile_v1(check_current, bounded, caller_deadline,
+            #[cfg(feature = "synthetic-qualification")] observer,
+            crate::journal::OriginalHistoryProfileV1::Legacy)
+    }
+    fn reconcile_history_profile_v1(
+        &self,
+        check_current: &mut dyn FnMut() -> Result<()>,
+        bounded: bool,
+        caller_deadline: Option<Instant>,
+        #[cfg(feature = "synthetic-qualification")] observer: Option<&HistoryObserverV1>,
+        profile: crate::journal::OriginalHistoryProfileV1,
+    ) -> Result<ReconciledAuthorityHistory> {
         let started = std::time::Instant::now();
         let check = |check_current: &mut dyn FnMut() -> Result<()>| -> Result<()> {
             if let Some(deadline) = caller_deadline {
@@ -633,6 +653,7 @@ impl AuthorityClient {
         let mut offline_permits = Vec::new();
         let mut born_offline_permits = Vec::new();
         let mut born_offline_dispatches = Vec::new();
+        let mut completed_dispatches_v1 = Vec::new();
         let mut automatic_key_use_admissions = Vec::new();
         let mut recovery_fences = Vec::new();
         let mut committed_operation_ids = std::collections::BTreeSet::new();
@@ -768,8 +789,12 @@ impl AuthorityClient {
                     writer_session_id: entry.writer_session_id,
                 };
                 let previous = state.snapshot.clone();
-                match observed_history_result!(observer, state.apply(&event))? {
+                match observed_history_result!(observer, match profile {
+                    crate::journal::OriginalHistoryProfileV1::Legacy => state.apply(&event),
+                    crate::journal::OriginalHistoryProfileV1::FinancialContinuation => state.apply_financial_continuation_v1(&event),
+                })? {
                     MutationResult::Reserved(permit) => permits.push(*permit),
+                    MutationResult::CompletedDispatchAdmittedV1(admission) => completed_dispatches_v1.push(*admission),
                     MutationResult::OfflineReserved(permit) => offline_permits.push(*permit),
                     MutationResult::BornOfflineDispatchAdmittedV1(admission) => {
                         born_offline_dispatches.push(*admission)
@@ -828,7 +853,10 @@ impl AuthorityClient {
         )?;
         observed_history_result!(
             observer,
-            ledger.validate_durable_delivery_birth_v2(pending_birth_commit.as_ref())
+            match profile {
+                crate::journal::OriginalHistoryProfileV1::Legacy => ledger.validate_durable_delivery_birth_v2(pending_birth_commit.as_ref()),
+                crate::journal::OriginalHistoryProfileV1::FinancialContinuation => ledger.validate_financial_continuation_birth_v1(pending_birth_commit.as_ref()),
+            }
         )?;
         observed_history_result!(
             observer,
@@ -890,6 +918,7 @@ impl AuthorityClient {
             offline_permits,
             born_offline_permits,
             born_offline_dispatches,
+            completed_dispatches_v1,
             automatic_key_use_admissions,
             recovery_fences,
             committed_operation_ids,
@@ -2055,7 +2084,13 @@ pub struct AuthorityServer {
     #[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
     durable_payment: Option<Arc<durable_payment_server_v1::DurablePaymentServingV1>>,
     #[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
+    financial_signing: Option<Arc<financial_signing_server_v1::FinancialSigningServingV1>>,
+    #[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
+    completed_dispatch_v1: Option<Arc<std::collections::BTreeMap<String, Arc<crate::durable_financial_continuation_owner_v1::ConfiguredFinancialWitnessV1>>>>,
+    #[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
     durable_delivery_admission_v2: Option<Arc<std::sync::Mutex<crate::durable_delivery_admission_owner_v2::NativeDurableDeliveryAdmissionSourceV2>>>,
+    #[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
+    financial_continuation_v1: Option<Arc<std::sync::Mutex<crate::durable_financial_continuation_owner_v1::NativeFinancialContinuationSourceV1>>>,
     #[cfg(all(feature="born-offline-witness-owner",target_os="linux"))]
     born_offline_witness: Option<Arc<std::sync::Mutex<crate::born_offline_retry_v1::configured_born_witness::ConfiguredBornOfflineWitnessV1>>>,
     #[cfg(all(feature = "offline-witness-owner", target_os = "linux"))]
@@ -2078,7 +2113,13 @@ impl AuthorityServer {
             #[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
             durable_payment: None,
             #[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
+            financial_signing: None,
+            #[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
+            completed_dispatch_v1: None,
+            #[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
             durable_delivery_admission_v2: None,
+            #[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
+            financial_continuation_v1: None,
             #[cfg(all(feature = "born-offline-witness-owner", target_os = "linux"))]
             born_offline_witness: None,
             #[cfg(all(feature = "offline-witness-owner", target_os = "linux"))]
@@ -2114,10 +2155,16 @@ impl AuthorityServer {
         let observer = self.admission_observer.as_ref();
         admission_stage!(observer, SocketBinding);
         self.require_durable_payment_socket_v1(&socket)?;
+        self.require_financial_signing_socket_v1(&socket)?;
         self.require_durable_delivery_socket_v2(&socket)?;
+        self.require_financial_continuation_socket_v1(&socket)?;
+        self.completed_dispatch_wait_v1(Some(&socket))?;
         admission_stage!(observer, WaitCurrent);
         self.check_durable_payment_wait_v1()?;
+        self.check_financial_signing_wait_v1()?;
         self.check_durable_delivery_wait_v2()?;
+        self.check_financial_continuation_wait_v1()?;
+        self.completed_dispatch_wait_v1(None)?;
         let mut socket = DeadlineSocket { socket, deadline };
         admission_stage!(observer, TlsSetup);
         let mut connection = ServerConnection::new(self.tls.config.clone())
@@ -2125,7 +2172,10 @@ impl AuthorityServer {
         while connection.is_handshaking() {
             admission_stage!(observer, WaitCurrent);
             self.check_durable_payment_wait_v1()?;
+        self.check_financial_signing_wait_v1()?;
             self.check_durable_delivery_wait_v2()?;
+        self.check_financial_continuation_wait_v1()?;
+        self.completed_dispatch_wait_v1(None)?;
             admission_stage!(observer, TlsHandshake);
             let completed =
                 admission_measure!(observer, Handshake, connection.complete_io(&mut socket));
@@ -2138,7 +2188,10 @@ impl AuthorityServer {
         }
         admission_stage!(observer, WaitCurrent);
         self.check_durable_payment_wait_v1()?;
+        self.check_financial_signing_wait_v1()?;
         self.check_durable_delivery_wait_v2()?;
+        self.check_financial_continuation_wait_v1()?;
+        self.completed_dispatch_wait_v1(None)?;
         admission_stage!(observer, PeerBinding);
         if connection.alpn_protocol() != Some(ALPN) {
             return Err(AuthorityError::Authentication);
@@ -2176,7 +2229,10 @@ impl AuthorityServer {
         let mut stream = StreamOwned::new(connection, socket);
         admission_stage!(observer, WaitCurrent);
         self.check_durable_payment_wait_v1()?;
+        self.check_financial_signing_wait_v1()?;
         self.check_durable_delivery_wait_v2()?;
+        self.check_financial_continuation_wait_v1()?;
+        self.completed_dispatch_wait_v1(None)?;
         admission_stage!(observer, FrameRead);
         #[cfg(feature = "synthetic-qualification")]
         let request: WireRequest = admission_diagnostics_v1::read_frame(&mut stream, observer)?;
@@ -2184,7 +2240,10 @@ impl AuthorityServer {
         let request: WireRequest = read_frame(&mut stream)?;
         admission_stage!(observer, WaitCurrent);
         self.check_durable_payment_wait_v1()?;
+        self.check_financial_signing_wait_v1()?;
         self.check_durable_delivery_wait_v2()?;
+        self.check_financial_continuation_wait_v1()?;
+        self.completed_dispatch_wait_v1(None)?;
         if let WireRequest::PrepareDurableDeliveryAdmissionV3(preparation) = &request {
             return self.serve_durable_delivery_admission_v3(stream, &peer, preparation.clone());
         }
@@ -2213,6 +2272,49 @@ impl AuthorityServer {
                 None => flushed,
             };
             flushed.map_err(|_| AuthorityError::Uncertain)?;
+            return Ok(());
+        }
+        if self.is_financial_continuation_v1() {
+            admission_stage!(observer, SemanticDispatch);
+            let response = admission_measure!(
+                observer,
+                Dispatch,
+                self.serve_financial_continuation_v1(&peer, request)
+            );
+            let response = admission_result!(observer, observe_semantic, response)
+                .unwrap_or_else(WireResponse::Rejected);
+            admission_stage!(observer, OutputCheck);
+            self.check_financial_continuation_output_v1(&response)?;
+            admission_stage!(observer, FrameWrite);
+            #[cfg(feature = "synthetic-qualification")]
+            admission_diagnostics_v1::write_frame(&mut stream, &response, observer)?;
+            #[cfg(not(feature = "synthetic-qualification"))]
+            write_frame(&mut stream, &response)?;
+            admission_stage!(observer, CloseFlush);
+            stream.conn.send_close_notify();
+            let flushed = stream.flush();
+            #[cfg(feature = "synthetic-qualification")]
+            let flushed = match observer {
+                Some(observer) => observer.observe_io(flushed),
+                None => flushed,
+            };
+            flushed.map_err(|_| AuthorityError::Uncertain)?;
+            return Ok(());
+        }
+        if self.is_completed_dispatch_v1() {
+            let response = self.serve_completed_dispatch_v1(&peer, request).unwrap_or_else(WireResponse::Rejected);
+            self.completed_dispatch_wait_v1(None)?;
+            write_frame(&mut stream, &response)?;
+            stream.conn.send_close_notify();
+            stream.flush().map_err(|_| AuthorityError::Uncertain)?;
+            return Ok(());
+        }
+        if self.is_financial_signing_server_v1() {
+            let response = self.serve_financial_signing_request_v1(&peer, &exporter, request).unwrap_or_else(WireResponse::Rejected);
+            self.check_financial_signing_output_v1(&response)?;
+            write_frame(&mut stream, &response)?;
+            stream.conn.send_close_notify();
+            stream.flush().map_err(|_| AuthorityError::Uncertain)?;
             return Ok(());
         }
         if self.is_durable_payment_server_v1() {
@@ -2629,6 +2731,7 @@ pub mod synthetic {
         let mut offline_permits = Vec::new();
         let mut born_offline_permits = Vec::new();
         let mut born_offline_dispatches = Vec::new();
+        let mut completed_dispatches_v1 = Vec::new();
         let mut automatic_key_use_admissions = Vec::new();
         let mut recovery_fences = Vec::new();
         let mut committed_operation_ids = std::collections::BTreeSet::new();
@@ -2657,6 +2760,7 @@ pub mod synthetic {
                 let previous = state.snapshot.clone();
                 match state.apply(&event)? {
                     MutationResult::Reserved(permit) => permits.push(*permit),
+                    MutationResult::CompletedDispatchAdmittedV1(admission) => completed_dispatches_v1.push(*admission),
                     MutationResult::OfflineReserved(permit) => offline_permits.push(*permit),
                     MutationResult::BornOfflineDispatchAdmittedV1(admission) => {
                         born_offline_dispatches.push(*admission)
@@ -2720,6 +2824,7 @@ pub mod synthetic {
             offline_permits,
             born_offline_permits,
             born_offline_dispatches,
+            completed_dispatches_v1,
             automatic_key_use_admissions,
             recovery_fences,
             committed_operation_ids,
@@ -2921,6 +3026,7 @@ pub mod synthetic {
         let mut offline_permits = Vec::new();
         let mut born_offline_permits = Vec::new();
         let mut born_offline_dispatches = Vec::new();
+        let mut completed_dispatches_v1 = Vec::new();
         let mut automatic_key_use_admissions = Vec::new();
         let mut recovery_fences = Vec::new();
         let mut committed_operation_ids = std::collections::BTreeSet::new();
@@ -2994,6 +3100,7 @@ pub mod synthetic {
                 let previous = state.snapshot.clone();
                 match state.apply(&event)? {
                     MutationResult::Reserved(permit) => permits.push(*permit),
+                    MutationResult::CompletedDispatchAdmittedV1(admission) => completed_dispatches_v1.push(*admission),
                     MutationResult::OfflineReserved(permit) => offline_permits.push(*permit),
                     MutationResult::BornOfflineDispatchAdmittedV1(admission) => {
                         born_offline_dispatches.push(*admission)
@@ -3079,6 +3186,7 @@ pub mod synthetic {
             offline_permits,
             born_offline_permits,
             born_offline_dispatches,
+            completed_dispatches_v1,
             automatic_key_use_admissions,
             recovery_fences,
             committed_operation_ids,

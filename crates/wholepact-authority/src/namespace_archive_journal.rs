@@ -66,6 +66,12 @@ pub(crate) fn namespace_account_stamp(
     c: &Connection,
     expected: &AccountPolicy,
 ) -> Result<(NamespaceJournalStamp, PendingBirthCommitRecord)> {
+    namespace_account_stamp_profile(c, expected, OriginalHistoryProfileV1::Legacy)
+}
+pub(crate) fn namespace_financial_account_stamp_v1(c: &Connection, expected: &AccountPolicy) -> Result<(NamespaceJournalStamp, PendingBirthCommitRecord)> {
+    namespace_account_stamp_profile(c, expected, OriginalHistoryProfileV1::FinancialContinuation)
+}
+fn namespace_account_stamp_profile(c: &Connection, expected: &AccountPolicy, profile: OriginalHistoryProfileV1) -> Result<(NamespaceJournalStamp, PendingBirthCommitRecord)> {
     let app: i64 = c.pragma_query_value(None, "application_id", |r| r.get(0))?;
     let version: i64 = c.pragma_query_value(None, "user_version", |r| r.get(0))?;
     if app != APPLICATION_ID || !matches!(version, 5..=7) {
@@ -89,7 +95,7 @@ pub(crate) fn namespace_account_stamp(
     if count != wanted {
         return Err(AuthorityError::CorruptHistory);
     }
-    let ledger = load(c)?;
+    let ledger = load_profile(c, profile)?;
     let birth = crate::pending_birth_storage::read(c, &ledger.policy)?
         .ok_or(AuthorityError::CorruptHistory)?;
     if &ledger.policy != expected

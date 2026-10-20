@@ -35,6 +35,9 @@ mod durable_payment_journal_v1;
 #[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
 #[path = "durable_delivery_admission_journal_v2.rs"]
 mod durable_delivery_admission_journal_v2;
+#[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
+#[path = "durable_financial_continuation_journal_v1.rs"]
+mod durable_financial_continuation_journal_v1;
 
 const APPLICATION_ID: i64 = 0x57504157;
 const SCHEMA_VERSION: i64 = 6;
@@ -348,9 +351,11 @@ impl AuthorityJournal {
                 | AuthorityMutation::ReserveOfflineAuthorization(_)
                 | AuthorityMutation::ReserveBornOfflineV1(_)
                 | AuthorityMutation::AuthorizeBornOfflineDispatchV1(_)
+                | AuthorityMutation::AuthorizeCompletedDispatchV1(_)
                 | AuthorityMutation::OwnerControl(OwnerControlRequest {
                     control: OwnerControl::AdmitDurablePaymentV1 { .. }
                         | OwnerControl::AdmitDurablePaymentWithDeliveryV2 { .. }
+                        | OwnerControl::AdmitFinancialContinuationV1 { .. }
                         | OwnerControl::EnrollBornOfflineV1 { .. }
                         | OwnerControl::InstallBornOfflineArtifactsV1 { .. }
                         | OwnerControl::GrantConstructionTransportV1 { .. }
@@ -419,9 +424,11 @@ impl AuthorityJournal {
             &mutation,
             AuthorityMutation::ClaimConstructionTransportV1(_)
                 | AuthorityMutation::UseConstructionTransportV1(_)
+                | AuthorityMutation::AuthorizeCompletedDispatchV1(_)
                 | AuthorityMutation::OwnerControl(OwnerControlRequest {
                     control: OwnerControl::AdmitDurablePaymentV1 { .. }
                         | OwnerControl::AdmitDurablePaymentWithDeliveryV2 { .. }
+                        | OwnerControl::AdmitFinancialContinuationV1 { .. }
                         | OwnerControl::GrantConstructionTransportV1 { .. },
                     ..
                 })
@@ -516,6 +523,7 @@ impl AuthorityJournal {
                 | AuthorityMutation::ReserveOfflineAuthorization(_)
                 | AuthorityMutation::ReserveBornOfflineV1(_)
                 | AuthorityMutation::AuthorizeBornOfflineDispatchV1(_)
+                | AuthorityMutation::AuthorizeCompletedDispatchV1(_)
                 | AuthorityMutation::AuthorizeAutomaticKeyUse(_)
                 | AuthorityMutation::AuthorizeDispatch(_)
                 | AuthorityMutation::OwnerControl(OwnerControlRequest {
@@ -1071,7 +1079,11 @@ fn is_quarantined(c: &Connection) -> Result<bool> {
         |r| r.get(0),
     )?)
 }
-pub(crate) fn load(c: &Connection) -> Result<Ledger> {
+#[derive(Clone, Copy)]
+pub(crate) enum OriginalHistoryProfileV1 { Legacy, FinancialContinuation }
+pub(crate) fn load(c: &Connection) -> Result<Ledger> { load_profile(c, OriginalHistoryProfileV1::Legacy) }
+pub(crate) fn load_financial_continuation_v1(c: &Connection) -> Result<Ledger> { load_profile(c, OriginalHistoryProfileV1::FinancialContinuation) }
+fn load_profile(c: &Connection, profile: OriginalHistoryProfileV1) -> Result<Ledger> {
     let raw: Zeroizing<Vec<u8>> = Zeroizing::new(c.query_row(
         "SELECT policy FROM authority_genesis WHERE singleton=1",
         [],
@@ -1128,9 +1140,10 @@ pub(crate) fn load(c: &Connection) -> Result<Ledger> {
                 event.witness_time_ms,
             )?;
         }
-        ledger
-            .apply(&event)
-            .map_err(|_| AuthorityError::CorruptHistory)?;
+        match profile {
+            OriginalHistoryProfileV1::Legacy => ledger.apply(&event),
+            OriginalHistoryProfileV1::FinancialContinuation => ledger.apply_financial_continuation_v1(&event),
+        }.map_err(|_| AuthorityError::CorruptHistory)?;
         if ledger.snapshot.head.digest != head {
             return Err(AuthorityError::CorruptHistory);
         }
@@ -1172,7 +1185,10 @@ pub(crate) fn load(c: &Connection) -> Result<Ledger> {
         let birth = crate::pending_birth_storage::read(c, &ledger.policy)?;
         ledger.validate_manual_birth(birth.as_ref())?;
         ledger.validate_durable_payment_birth_v1(birth.as_ref())?;
-        ledger.validate_durable_delivery_birth_v2(birth.as_ref())?;
+        match profile {
+            OriginalHistoryProfileV1::Legacy => ledger.validate_durable_delivery_birth_v2(birth.as_ref())?,
+            OriginalHistoryProfileV1::FinancialContinuation => ledger.validate_financial_continuation_birth_v1(birth.as_ref())?,
+        }
         ledger.validate_born_offline_birth_v1(birth.as_ref())?;
     } else if ledger.policy.account_use_genesis.is_some() {
         return Err(AuthorityError::CorruptHistory);

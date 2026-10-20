@@ -18,12 +18,18 @@ use wholepact_store::manual_enrollment::ManualEnrollmentRosterMember;
 use wholepact_store::private_workspace_origin_v1::PrivateWorkspaceOriginV1;
 
 mod delivery_admission_v2;
+pub use delivery_admission_v2::financial_v1::{
+    LocalPrivateDurableFinancialConsentV1, PreparedPrivateFinancialV1,
+    PrivateDurableFinancialCoordinatorV1, PrivateDurableFinancialInspectionV1,
+    RetainedPrivateDispatchIntentV1, VerifiedPrivateDurableSubmissionV1,
+};
 mod exact_fixed_v2;
 pub use delivery_admission_v2::{
-    PreparedPrivateDurableAdmissionDeliveryV3, ClosedPrivateDurableAdmissionReviewV3, PrivateDurableAdmissionDeliveryV3, PrivateDurableAdmissionStatusV3,
-    LocalPrivateDurableAdmissionConsentV2, PrivateDurableAdmissionCoordinatorV2,
-    PrivateDurableAdmissionDeliveryV2, PrivateDurableAdmissionInspectionV2,
-    PrivateDurableAdmissionStatusV2,
+    ClosedPrivateDurableAdmissionReviewV3, LocalPrivateDurableAdmissionConsentV2,
+    PreparedPrivateDurableAdmissionDeliveryV3, PrivateDurableAdmissionCoordinatorV2,
+    PrivateDurableAdmissionDeliveryV2, PrivateDurableAdmissionDeliveryV3,
+    PrivateDurableAdmissionInspectionV2, PrivateDurableAdmissionStatusV2,
+    PrivateDurableAdmissionStatusV3,
 };
 use diagnostics::{Observation, Operation, Site};
 pub(crate) use exact_fixed_v2::diagnostics;
@@ -1102,12 +1108,14 @@ fn preflight_original_metadata(
 enum OriginalMetadataProfileV2 {
     Precursor,
     Admission,
+    Financial,
 }
 impl OriginalMetadataProfileV2 {
     fn accepts_revision(self, revision: i64) -> bool {
         match self {
             Self::Precursor => (0..=8).contains(&revision),
             Self::Admission => (8..=16).contains(&revision),
+            Self::Financial => (8..=404).contains(&revision),
         }
     }
 }

@@ -112,6 +112,8 @@ mod storage;
     target_os = "linux"
 ))]
 pub(crate) use storage::PreparedDeliveryJournalRevisionV3;
+#[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing", target_os = "linux"))]
+pub(crate) use storage::financial_profile_v1::{FinancialConsentJournalV1, FinancialSourceBindingV1, PreparedFinancialContinuationIntentV1, RetainedFinancialContinuationIntentV1, PendingFinancialContinuationAdmissionV1, ApprovedFinancialSpendConsentV1, PreparedFinancialSpendV1};
 pub use offline_history::{
     OfflineHistoryInventory, OfflineLocalAdmissionHistory, OfflineLocalKeyUseHistory,
     OfflineMinimalAdmissionHistoryStatement, OfflineNativeConsentHistoryReceipt,

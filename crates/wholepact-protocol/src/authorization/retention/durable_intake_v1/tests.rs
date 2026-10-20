@@ -180,7 +180,16 @@ fn saved_subsets_resume_with_full_verification_and_fail_closed() {
     assert!(!union.inspection().authorization_allowed);
     assert!(!union.inspection().distribution_allowed);
     assert!(!union.inspection().chain_validated);
+    let before_read = journal.connection.lock().unwrap().total_changes();
+    assert!(matches!(union.verify_completed_existing(UNION_KEY), Err(RetentionError::IntentNotFound)));
+    assert_eq!(journal.connection.lock().unwrap().total_changes(), before_read);
     let retained = union.retain(UNION_KEY).unwrap();
+    let after_retention = journal.connection.lock().unwrap().total_changes();
+    let completed = union.verify_completed_existing(UNION_KEY).unwrap();
+    assert_eq!(completed.result_id, retained.result_id);
+    assert_eq!(completed.request_digest, retained.request_digest);
+    assert_eq!(completed.signed_candidate_digest, retained.signed_candidate_digest);
+    assert_eq!(journal.connection.lock().unwrap().total_changes(), after_retention);
     assert!(!retained.exact_replay);
     assert!(!retained.transaction_extracted);
     assert!(!retained.authorization_allowed);

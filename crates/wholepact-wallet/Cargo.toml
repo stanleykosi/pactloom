@@ -9,12 +9,13 @@ description = "Testnet-only maintained-library wallet contribution adapter"
 [features]
 default = []
 protected-sync = ["dep:wholepact-signer-origin", "sync", "encrypted-storage", "dep:wholepact-chain", "dep:hex", "dep:wholepact-core", "dep:serde_json", "dep:sha2", "dep:zeroize"]
-synthetic-qualification = ["wallet", "orchard/zeroize"]
+synthetic-qualification = ["wallet", "orchard/zeroize", "dep:prost", "dep:serde_json"]
 encrypted-storage = ["wallet", "dep:wholepact-storage-security"]
 wallet = ["dep:zcash_client_backend", "dep:zcash_client_sqlite", "dep:zcash_keys", "dep:zcash_protocol", "dep:zcash_primitives", "dep:orchard", "dep:shardtree", "dep:incrementalmerkletree", "dep:rusqlite", "dep:rand", "dep:zip32", "dep:zcash_address", "dep:wholepact-protocol"]
 sync = ["wallet", "zcash_client_backend/lightwalletd-tonic-transport", "dep:tonic", "dep:tokio"]
 
 [dependencies]
+prost = { version = "=0.14.4", optional = true }
 wholepact-signer-origin = { path = "../wholepact-signer-origin", optional = true }
 wholepact-core = { path = "../wholepact-core", optional = true }
 serde_json = { workspace = true, optional = true }

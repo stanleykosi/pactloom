@@ -110,6 +110,31 @@ impl SignedResultJournal {
         gate(&consent, &scope)?;
         local.journal.checkpoint(&scope, &bytes, policy, &consent)
     }
+    /// Financial continuation extraction requires a completed original union.
+    /// Unlike the legacy explicit repair path, this never fills a missing signed
+    /// result. The unchanged extraction kernel fences intent-without-result.
+    #[allow(clippy::too_many_arguments)]
+    pub fn checkpoint_completed_transaction(
+        &self,
+        context: SignedCandidateContext,
+        idempotency_key: &str,
+        base: &[u8],
+        policy: &ReviewPolicy,
+        signatures: &[ExternalSignature],
+        limits: ProvingLimits,
+        signed_consent: &dyn SignedRetentionConsent,
+        local: LocalTransactionCheckpoint<'_>,
+    ) -> Result<TransactionCheckpointSummary> {
+        let (scope, bytes) = self.verified_completed_transaction_predecessor(
+            context, idempotency_key, base, policy, signatures, limits, signed_consent,
+        )?;
+        let consent = CombinedRetentionGate {
+            signed: signed_consent, transaction: local.consent,
+        };
+        gate(&consent, &scope)?;
+        local.journal.checkpoint(&scope, &bytes, policy, &consent)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn verified_transaction_predecessor(
         &self,

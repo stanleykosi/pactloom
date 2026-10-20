@@ -1,7 +1,7 @@
 //! Private purpose-bound append kernels. Neither method accepts a caller bool,
 //! generic mutation closure, raw scope descriptor or historical replay as authority.
 use super::*;
-use crate::durable_delivery_admission_owner_v2::{NativeDurableDeliveryAdmissionSourceV2};
+use crate::durable_delivery_admission_owner_v2::NativeDurableDeliveryAdmissionSourceV2;
 
 impl AuthorityJournal {
     pub(crate) fn commit_native_durable_delivery_admission_v2(
@@ -140,7 +140,7 @@ pub(super) fn observe_operational_key_read_for_test() {
     OPERATIONAL_KEY_READS.with(|count| count.set(count.get() + 1));
 }
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::durable_delivery_admission_v2::{
         prepare_durable_delivery_admission_request_v2, tests::request_fixture,
@@ -150,7 +150,14 @@ mod tests {
 
     /// Installs inert recorded-history bytes in a never-funded encrypted test
     /// journal. This is NOT a native issuer or positive native qualification.
-    fn recorded_journal(path: &Path) -> (AuthorityJournal, Vec<Event>, Vec<u8>) {
+    pub(crate) fn recorded_journal(path: &Path) -> (AuthorityJournal, Vec<Event>, Vec<u8>) {
+        recorded_journal_with_attempts(path, 1)
+    }
+
+    pub(crate) fn recorded_journal_with_attempts(
+        path: &Path,
+        attempts: u32,
+    ) -> (AuthorityJournal, Vec<Event>, Vec<u8>) {
         let (birth, old, _, request) = request_fixture();
         let extension = old
             .manual_roster_extension()
@@ -158,9 +165,10 @@ mod tests {
             .unwrap()
             .extension
             .clone();
-        let OwnerControl::AdmitDurablePaymentWithDeliveryV2 { record } = request.control else {
+        let OwnerControl::AdmitDurablePaymentWithDeliveryV2 { mut record } = request.control else {
             panic!()
         };
+        record.scope.delivery.maximum_explicitly_approved_attempts = attempts;
         let key = [0x73; 32];
         let mut ledger = Ledger::new(birth.request.policy.clone()).unwrap();
         let first = crate::manual_roster_witness_v2::tests::extension_event(&ledger, &extension);
@@ -329,7 +337,9 @@ mod tests {
         ));
         assert_eq!(load(&tx).unwrap().snapshot.head, original_head);
         assert_eq!(
-            read_session_key_retained(&tx, &acquire.session_id).unwrap().as_slice(),
+            read_session_key_retained(&tx, &acquire.session_id)
+                .unwrap()
+                .as_slice(),
             key.as_slice()
         );
         tx.rollback().unwrap();

@@ -5,6 +5,8 @@
 mod durable_payment_v1;
 #[path = "window/durable_delivery_admission_v2.rs"]
 mod durable_delivery_admission_v2;
+#[path = "window/financial_continuation_v1.rs"]
+mod financial_continuation_v1;
 #[cfg(feature = "synthetic-qualification")]
 #[path = "window/ephemeral_fixture_v1.rs"]
 pub(super) mod ephemeral_fixture_v1;
@@ -92,6 +94,7 @@ use crate::witness_locator::{
 use crate::{AuthorityError, Result};
 pub(crate) use durable_payment_v1::NativeDurablePaymentAdmissionDecisionV1;
 pub(crate) use durable_delivery_admission_v2::NativeDurableDeliveryAdmissionDecisionV2;
+pub(crate) use financial_continuation_v1::NativeFinancialContinuationDecisionV1;
 use eframe::egui::{self, Color32, RichText};
 use std::{
     io::Write,
@@ -287,6 +290,7 @@ impl NativePermanentExclusionDecisionV1 {
 struct NativeInputs {
     durable_payment_v1: durable_payment_v1::InputsV1,
     durable_delivery_admission_v2: durable_delivery_admission_v2::InputsV2,
+    financial_continuation_v1: financial_continuation_v1::InputsV1,
     #[cfg(feature = "synthetic-qualification")]
     synthetic_installation: Option<
         std::sync::Arc<
@@ -427,6 +431,7 @@ impl NativeInputs {
     fn discard_raw(&mut self) {
         self.durable_payment_v1.discard();
         self.durable_delivery_admission_v2.discard();
+        self.financial_continuation_v1.discard();
         self.owner_certificate_hex.zeroize();
         self.signed_request_json.zeroize();
         self.signed_manual_extension_json.zeroize();
@@ -460,6 +465,7 @@ enum Phase {
 enum Proposal {
     DurablePaymentV1(Box<durable_payment_v1::PreparedNativeV1>),
     DurableDeliveryV2(Box<durable_delivery_admission_v2::PreparedNativeV2>),
+    FinancialContinuationV1(Box<financial_continuation_v1::PreparedNativeV1>),
     Setup(Box<NamespaceSetupProposal>),
     Enrollment(Box<NamespaceEnrollmentProposal>),
     ManualExtension(Box<ManualEnrollmentExtensionProposal>),
@@ -686,6 +692,7 @@ impl PendingReview {
 enum Work {
     DurablePaymentV1(durable_payment_v1::WorkV1),
     DurableDeliveryV2(durable_delivery_admission_v2::WorkV2),
+    FinancialContinuationV1(financial_continuation_v1::WorkV1),
     PrepareSetup(NamespaceSetupInput),
     PrepareEnrollment {
         input: NamespaceOpenInput,
@@ -785,6 +792,7 @@ enum Work {
     Discard(Box<Prepared>),
 }
 enum WorkResult {
+    FinancialContinuationAdmittedV1 { display: Zeroizing<String>, clock: ReviewClock },
     DurableDeliveryAdmittedV2 {
         display: Zeroizing<String>,
         clock: ReviewClock,
@@ -1074,6 +1082,7 @@ fn launch_private_work(
                 }
                 Work::DurablePaymentV1(work) => durable_payment_v1::execute(work),
                 Work::DurableDeliveryV2(work) => durable_delivery_admission_v2::execute(work),
+                Work::FinancialContinuationV1(work) => financial_continuation_v1::execute(work),
                 Work::PrepareManualRosterExtensionV2 { input, envelope } => (|| {
                     let body = parse_manual_roster_extension_envelope_v2(&envelope)?;
                     let verified = verify_manual_roster_enrollment_owner_signature_v2(
@@ -1719,6 +1728,13 @@ impl Window {
                 }
                 self.message = "The exact existing transport key and private mailboxes were retained in the original encrypted journal. This persistent import does not authorize a signature or payment. Preserve the complete namespace archive; uncertain outcomes must be inspected, never reset or replaced.";
             }
+            Ok(WorkResult::FinancialContinuationAdmittedV1 { display, clock }) => {
+                if focused && job.epoch == self.focus_epoch && !job.owner.revoke_requested()
+                    && !self.close_when_idle && clock.check().is_ok() {
+                    self.last_archive_receipt = Some((clock, display));
+                }
+                self.message = "Exact financial continuation retained. Original expiry and attempt limits remain. Fresh signing is still required; completed signatures permit only the separately bounded immutable-transaction dispatcher. No payment was sent by this operation.";
+            }
             Ok(WorkResult::DurableDeliveryAdmittedV2 { display, clock }) => {
                 if durable_payment_v1::retain_receipt_v1(
                     focused,
@@ -2138,6 +2154,7 @@ impl Window {
             ui.separator();
             if durable_payment_v1::input_ui(self, ui, focused) { return; }
             if durable_delivery_admission_v2::input_ui(self, ui, focused) { return; }
+            if financial_continuation_v1::input_ui(self, ui, focused) { return; }
             ui.heading("Exact V2 Host roster addition");
             ui.label("Use the existing installed namespace and original account selected above. This distinct V2 signed request binds the exact Host predecessor and ordered roster, the exact added born account and its immutable first enrollment under its original policy. The Host roster predecessor is separate from the account extension predecessor. It cannot replace policy, reset lifetime charges, revive retired accounts or restore automation. Writer bootstrap is separate.");
             ui.add(egui::TextEdit::multiline(&mut *self.input.signed_manual_roster_extension_json).desired_rows(6).char_limit(crate::MAX_FRAME_BYTES));
@@ -2428,6 +2445,13 @@ impl Window {
             // These are the only production decision constructions, each coupled
             // to its backend-owned exact proposal. The GUI retains NativeOwner.
             let work = match prepared.proposal {
+                Proposal::FinancialContinuationV1(prepared) => {
+                    let financial_continuation_v1::PreparedNativeV1 { proposal, tls, listener } = *prepared;
+                    Work::FinancialContinuationV1(financial_continuation_v1::WorkV1::Admit {
+                        decision: NativeFinancialContinuationDecisionV1 { proposal, lease },
+                        tls, listener, clock: historical_clock,
+                    })
+                }
                 Proposal::DurableDeliveryV2(prepared) => {
                     let durable_delivery_admission_v2::PreparedNativeV2 {
                         proposal,

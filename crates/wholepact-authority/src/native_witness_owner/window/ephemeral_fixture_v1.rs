@@ -30,6 +30,8 @@ const PROFILE: &str = "ironwood-testnet-nu7-candidate";
 mod durable_payment_v1;
 #[path = "ephemeral_fixture_v1/durable_delivery_admission_v2.rs"]
 mod durable_delivery_admission_v2;
+#[path = "ephemeral_fixture_v1/financial_continuation_v1.rs"]
+mod financial_continuation_v1;
 pub(crate) use durable_payment_v1::DurableAcquireReplyLossArmV1;
 pub use durable_payment_v1::{
     EphemeralDurableAcquireReplyLossObservationV1, EphemeralDurableAcquireReplyLossReportV1,
@@ -108,6 +110,7 @@ pub struct EphemeralNativeWitnessV1 {
     listener: OriginalListenerV1,
     durable_payment: durable_payment_v1::FixturePhaseV1,
     durable_delivery: durable_delivery_admission_v2::FixturePhaseV2,
+    financial_continuation: financial_continuation_v1::FixtureFinancialPhaseV1,
     tls: ServerTls,
     server_certificate_digest: String,
     owner_certificate: Vec<u8>,
@@ -203,6 +206,7 @@ impl EphemeralNativeWitnessV1 {
                 server_handles: Arc::new(AtomicUsize::new(0)),
             },
             durable_payment: durable_payment_v1::FixturePhaseV1::Idle,
+            financial_continuation: financial_continuation_v1::FixtureFinancialPhaseV1::default(),
             durable_delivery: durable_delivery_admission_v2::FixturePhaseV2::default(),
             server_certificate_digest: crate::transport::certificate_digest(&certificate),
             tls,

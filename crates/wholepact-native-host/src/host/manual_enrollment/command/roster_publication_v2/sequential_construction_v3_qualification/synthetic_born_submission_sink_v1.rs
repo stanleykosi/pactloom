@@ -18,6 +18,7 @@ use std::{
     },
     time::Instant,
 };
+use wholepact_chain::SubmissionBackend as _;
 use wholepact_chain::{
     SubmissionAttemptOutcome, SubmissionDescriptor, SubmissionDispatchReport, SubmissionPlan,
     SubmissionState,
@@ -405,5 +406,181 @@ mod tests {
         let state = control.state.lock().unwrap();
         assert!(state.poisoned && matches!(state.phase, Phase::Closed));
         assert_eq!(state.attempts, 2);
+    }
+}
+
+/// Financial qualification adapter. Only the maintained orchestrator can mint
+/// PreparedDispatch; arming takes that actual token, never a descriptor DTO.
+pub(super) struct SyntheticFinancialSubmissionBackendV1<'a> {
+    provider: &'a SyntheticBornProviderV1,
+    inner: wholepact_chain::LightwalletSubmissionBackend,
+    expected: Option<SubmissionDescriptor>,
+}
+#[derive(serde::Serialize)]
+pub(super) struct SyntheticFinancialSubmissionReceiptV1 {
+    pub exact_saved_transaction_received: bool,
+    pub received_once: bool,
+    pub actual_tls_provider: bool,
+    pub public_network_settlement: bool,
+}
+impl<'a> SyntheticFinancialSubmissionBackendV1<'a> {
+    pub(super) fn no_private_submission_observed(&self) -> bool {
+        self.expected.is_none()
+            && self
+                .provider
+                .sink_control()
+                .state
+                .try_lock()
+                .is_ok_and(|state| {
+                    !state.ever_armed
+                        && state.attempts == 0
+                        && !state.poisoned
+                        && matches!(state.phase, Phase::Dormant)
+                })
+    }
+
+    pub(super) fn new(
+        provider: &'a SyntheticBornProviderV1,
+        adapter: wholepact_chain::ChainAdapter,
+    ) -> Result<Self> {
+        if adapter.identity().endpoint != provider.endpoint()
+            || Instant::now() >= provider.original_deadline()
+        {
+            return Err(Error::Authentication);
+        }
+        Ok(Self {
+            provider,
+            inner: wholepact_chain::LightwalletSubmissionBackend::new(adapter),
+            expected: None,
+        })
+    }
+    pub(super) fn finish(
+        &self,
+        report: &SubmissionDispatchReport,
+    ) -> Result<SyntheticFinancialSubmissionReceiptV1> {
+        let expected = self.expected.as_ref().ok_or(Error::Authentication)?;
+        if report.descriptor != *expected
+            || !matches!(
+                report.attempt.outcome,
+                SubmissionAttemptOutcome::Acknowledged
+            )
+            || !matches!(
+                report.historical_provider_state,
+                SubmissionState::BackendAcknowledged
+            )
+            || report.clears_authorization_exposure
+            || report.permits_replacement
+        {
+            return Err(Error::Authentication);
+        }
+        let state = self
+            .provider
+            .sink_control()
+            .state
+            .try_lock()
+            .map_err(|_| Error::Permission)?;
+        let Phase::Received {
+            descriptor,
+            bytes,
+            at,
+        } = &state.phase
+        else {
+            return Err(Error::Authentication);
+        };
+        if descriptor != expected
+            || bytes.is_empty()
+            || state.attempts != 1
+            || state.poisoned
+            || *at >= self.provider.original_deadline()
+        {
+            return Err(Error::Authentication);
+        }
+        Ok(SyntheticFinancialSubmissionReceiptV1 {
+            exact_saved_transaction_received: true,
+            received_once: true,
+            actual_tls_provider: true,
+            public_network_settlement: false,
+        })
+    }
+}
+impl wholepact_chain::SubmissionBackend for SyntheticFinancialSubmissionBackendV1<'_> {
+    fn identity(&self) -> &wholepact_chain::BackendIdentity {
+        self.inner.identity()
+    }
+    fn fresh_context(
+        &mut self,
+    ) -> wholepact_chain::SubmissionFuture<
+        '_,
+        std::result::Result<wholepact_chain::ChainContext, wholepact_chain::ChainError>,
+    > {
+        self.inner.fresh_context()
+    }
+    fn submit_exact<'a>(
+        &'a mut self,
+        dispatch: wholepact_chain::PreparedDispatch<'a>,
+    ) -> wholepact_chain::SubmissionFuture<
+        'a,
+        std::result::Result<wholepact_chain::BackendSubmissionResult, wholepact_chain::ChainError>,
+    > {
+        Box::pin(async move {
+            let denied = || wholepact_chain::ChainError::SubmissionNotAuthorized;
+            let observed = Instant::now();
+            let now = crate::now().map_err(|_| denied())?;
+            let remaining = dispatch
+                .valid_until_unix_seconds()
+                .checked_sub(now)
+                .filter(|v| *v > 0)
+                .ok_or_else(denied)?;
+            let deadline = self.provider.original_deadline().min(
+                observed
+                    .checked_add(std::time::Duration::from_secs(remaining))
+                    .ok_or_else(denied)?,
+            );
+            let descriptor = dispatch.descriptor().clone();
+            if self.expected.is_some()
+                || dispatch.backend() != self.inner.identity()
+                || dispatch.backend().endpoint != self.provider.endpoint()
+                || descriptor.network != "testnet"
+                || descriptor.expiry_height
+                    <= self
+                        .provider
+                        .original_material()
+                        .fabricated_context()
+                        .tip_height
+                || Instant::now() >= deadline
+            {
+                return Err(denied());
+            }
+            {
+                let mut state = self
+                    .provider
+                    .sink_control()
+                    .state
+                    .try_lock()
+                    .map_err(|_| denied())?;
+                if self.provider.sink_control().closed.load(Ordering::Acquire)
+                    || state.ever_armed
+                    || state.attempts != 0
+                    || state.poisoned
+                    || !matches!(state.phase, Phase::Dormant)
+                {
+                    return Err(denied());
+                }
+                state.ever_armed = true;
+                state.phase = Phase::Armed {
+                    descriptor: descriptor.clone(),
+                    deadline,
+                };
+            }
+            self.expected = Some(descriptor);
+            // The unchanged adapter performs its real TLS connect/readiness and
+            // final immutable token expiry check before disclosing private bytes.
+            self.inner.submit_exact(dispatch).await
+        })
+    }
+}
+impl Drop for SyntheticFinancialSubmissionBackendV1<'_> {
+    fn drop(&mut self) {
+        self.provider.sink_control().close();
     }
 }

@@ -992,3 +992,57 @@ mod durable_delivery_v2_tests {
         );
     }
 }
+
+/// Purpose-distinct finite setup custody for one exact local signature intake.
+/// No general historical/effect conversion or terminal access is exposed.
+#[cfg(all(feature = "durable-proposal", target_os = "linux"))]
+pub(crate) struct FinancialIntakeSetupApprovalV1 {
+    exact_scope: String,
+    foreground_file: File,
+    deadline: Instant,
+    wall_until: u64,
+}
+#[cfg(all(feature = "durable-proposal", target_os = "linux"))]
+impl FinancialIntakeSetupApprovalV1 {
+    pub(crate) fn require_scope(
+        &self,
+        scope: &wholepact_protocol::authorization::retention::SignedRetentionScope,
+    ) -> Result<()> {
+        if serde_json::to_string(scope)? != self.exact_scope {
+            return Err(Error::Permission);
+        }
+        self.check()
+    }
+    pub(crate) fn check(&self) -> Result<()> {
+        if Instant::now() >= self.deadline || crate::now()? >= self.wall_until {
+            return Err(Error::Permission);
+        }
+        foreground(&self.foreground_file)
+    }
+}
+#[cfg(all(feature = "durable-proposal", target_os = "linux"))]
+impl Terminal {
+    pub(crate) fn approve_financial_intake_setup_v1(
+        &self,
+        scope: &wholepact_protocol::authorization::retention::SignedRetentionScope,
+        original_until: u64,
+    ) -> Result<FinancialIntakeSetupApprovalV1> {
+        self.confirm(&format!("Prepare this ONE EXACT local signature intake while the Signer independently reviews returning its saved result. Permit only original-source verification and retention matching this exact scope. No signing, reservation, union, extraction or dispatch is allowed. Setup expires after at most 15 minutes and never after the original source ceilings. No usable signature bytes may arrive without the Signer's fresh exact Return decision.\n{}", serde_json::to_string_pretty(scope)?))?;
+        let now = crate::now()?;
+        let wall_until = original_until.min(now.checked_add(900).ok_or(Error::Permission)?);
+        let remaining = wall_until
+            .checked_sub(now)
+            .filter(|v| *v > 0)
+            .ok_or(Error::Permission)?;
+        let file = self.0.lock().map_err(|_| Error::Terminal)?;
+        foreground(&file)?;
+        Ok(FinancialIntakeSetupApprovalV1 {
+            exact_scope: serde_json::to_string(scope)?,
+            foreground_file: file.try_clone()?,
+            deadline: Instant::now()
+                .checked_add(Duration::from_secs(remaining))
+                .ok_or(Error::Permission)?,
+            wall_until,
+        })
+    }
+}

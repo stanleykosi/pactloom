@@ -1,16 +1,16 @@
 //! Original, anchored private workspace across real owned-process death. The
 //! controller owns no Host, source/financial keys, signer, witness or TLS config.
 //! Positive evidence comes only from actual production kernels and a new reader.
-use super::*;
 use super::safe_diagnostics_v1::{self as diagnostic, Boundary as B, Outcome};
-use std::io;
+use super::*;
 use crate::host::financial::private_durable_fixed_v2 as private_diagnostic;
 use private_diagnostic::{
     PrivateDiagnosticOperationV1 as DiagnosticOperation, PrivateDiagnosticSiteV1 as DiagnosticSite,
 };
+use std::io;
 #[path = "private_fixed_v2/control_v1.rs"]
 mod control_v1;
-use control_v1::{PublicOutcomeV1, ReadyControlV1, ReaderCompletionV1};
+use control_v1::{PublicOutcomeV1, ReaderCompletionV1, ReadyControlV1};
 
 const DEATH_MARKER: &str = "SYNTHETIC_PRIVATE_FIXED_DURABLE_V1=1";
 const WORKFLOW_LIMIT: Duration = Duration::from_secs(900);
@@ -727,13 +727,27 @@ fn source_engine_error(error: wholepact_engine::ApiError) -> Error {
 enum CompletedPreparationV2 {
     FixedReopen,
     DeliveryAdmission,
+    FinancialContinuation,
 }
 
-pub(in crate::host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification) fn produce_delivery_child(terminal: crate::terminal::Terminal) -> Result<()> {
+pub(in crate::host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification) fn produce_delivery_child(
+    terminal: crate::terminal::Terminal,
+) -> Result<()> {
     let _diagnostic_scope = private_diagnostic::begin_private_fixed_diagnostic_scope_v1();
     child_result(produce_fixed_inner(
         terminal,
         CompletedPreparationV2::DeliveryAdmission,
+    ))
+}
+
+pub(in crate::host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification) fn produce_financial_child(
+    terminal: crate::terminal::Terminal,
+) -> Result<()> {
+    let _diagnostic_scope = private_diagnostic::begin_private_fixed_diagnostic_scope_v1();
+    super::delivery_admission_v2::durable_financial_dispatch_v1::record_financial_preparation_v1()?;
+    child_result(produce_fixed_inner(
+        terminal,
+        CompletedPreparationV2::FinancialContinuation,
     ))
 }
 
@@ -742,27 +756,27 @@ fn produce_fixed_inner(
     continuation: CompletedPreparationV2,
 ) -> Result<()> {
     use crate::host::financial::private_durable_fixed_v2::{
-        PrivateSourceSelectionV1, PrivateSourceSelectionClaimV1, PrivateCaptureStageV2,
+        PrivateCaptureStageV2, PrivateSourceSelectionClaimV1, PrivateSourceSelectionV1,
     };
     use wholepact_core::{
-        ParticipantAllocation, ParticipationIntent, IntentStatus, ProposalManifest, ClaimedInput,
-        ClaimedOutput, OutputAllocation,
+        ClaimedInput, ClaimedOutput, IntentStatus, OutputAllocation, ParticipantAllocation,
+        ParticipationIntent, ProposalManifest,
     };
     use wholepact_signer::authority_bridge::{
-        ipc::OriginalHistoryClient,
-        preconstruction_ipc::{
-            PreconstructionRequest, PreconstructionScope, PreconstructionProvider,
-            PreconstructionBirthday,
-        },
         durable_construction_v1::{
             DurableConstructionCaptureRequestV1, DurableConstructionScopeV1,
         },
+        ipc::OriginalHistoryClient,
+        preconstruction_ipc::{
+            PreconstructionBirthday, PreconstructionProvider, PreconstructionRequest,
+            PreconstructionScope,
+        },
     };
     use wholepact_wallet::wallet::{
-        synthetic_born_receiver_blocks_v1::{
-            SyntheticBornReceiverBlocksV1, SyntheticBornChainSpecV1,
-        },
         protected_sync::durable_construction_v1::ConstructionReviewerV1,
+        synthetic_born_receiver_blocks_v1::{
+            SyntheticBornChainSpecV1, SyntheticBornReceiverBlocksV1,
+        },
     };
     use worker::{JoinedSignerCommandV1 as C, JoinedSignerReplyV1 as R};
     let scenario = scenario_root()?;
@@ -852,9 +866,18 @@ fn produce_fixed_inner(
     let host = at(B::PrivateWorkspaceInitialize, || {
         Host::open_private_workspace_registered_v1(terminal.clone(), &profile, &workspace, true)
     })?;
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
+    let runtime = if matches!(continuation, CompletedPreparationV2::FinancialContinuation) {
+        // The same finite provider must remain runnable while independent native
+        // signing workers perform their fresh wallet reads outside block_on.
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()?
+    } else {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+    };
     let blocks = SyntheticBornReceiverBlocksV1::build(
         [
             &original.born[1].public_receive_address,
@@ -1080,7 +1103,9 @@ fn produce_fixed_inner(
                 Ok(())
             },
         ))?;
-        if matches!(continuation, CompletedPreparationV2::DeliveryAdmission) {
+        if matches!(continuation, CompletedPreparationV2::DeliveryAdmission)
+            || matches!(continuation, CompletedPreparationV2::FinancialContinuation)
+        {
             delivery_original_disclosures.push(super::delivery_admission_v2::OriginalDisclosureV2 {
                 account_id: account.account_id.clone(),
                 history: wholepact_signer::authority_bridge::durable_construction_v1::DurableConstructionHistoryRequestV1 {
@@ -1114,12 +1139,31 @@ fn produce_fixed_inner(
         diagnostic::emit(B::PrivateWorkspaceCapture, Outcome::Complete);
     }
     let fixed = runtime.block_on(session.finish_fixed_v2())?;
-    if matches!(continuation, CompletedPreparationV2::DeliveryAdmission) {
+    if matches!(continuation, CompletedPreparationV2::DeliveryAdmission)
+        || matches!(continuation, CompletedPreparationV2::FinancialContinuation)
+    {
         // ONLY the new branch releases this successfully completed session.
         // Its proof/cache workers have finished; the old branch below retains
         // the identical session and Host through its original SIGKILL boundary.
         let proposal = session.proposal().clone();
         drop(session);
+        let financial_wallet_setup = if matches!(
+            continuation,
+            CompletedPreparationV2::FinancialContinuation
+        ) {
+            Some(serde_json::to_string(&serde_json::json!({
+                "schema_version": 1, "purpose": "fresh_born_ephemeral_viewing_wallet_v1",
+                "retention": "current_native_owner_only", "maximum_blocks": 16,
+                "policy": { "confidence": "trusted_single_provider_snapshot", "source_id": source_identity.source_id,
+                    "endpoint": source_identity.endpoint, "maximum_observation_age_seconds": 300,
+                    "minimum_confirmations": 1, "minimum_expiry_margin_blocks": 1 },
+                "birthday": { "prior_height": u32::try_from(birthday.height).map_err(|_| Error::Invalid)?,
+                    "prior_block_hash": birthday.hash, "sapling_tree": birthday.sapling_tree,
+                    "orchard_tree": birthday.orchard_tree, "ironwood_tree": birthday.ironwood_tree }
+            }))?)
+        } else {
+            None
+        };
         return super::delivery_admission_v2::continue_completed_original(
             terminal,
             host,
@@ -1133,6 +1177,7 @@ fn produce_fixed_inner(
             financial,
             delivery_original_disclosures,
             source_identity,
+            financial_wallet_setup,
         );
     }
     let expected = at(B::PrivateWorkspaceIdentityCompare, || {
@@ -1248,7 +1293,9 @@ fn read_fixed_inner(terminal: crate::terminal::Terminal) -> Result<()> {
 #[cfg(test)]
 mod pure_tests {
     use super::*;
-    use owned_test_process_group_v1::{DirectChildV1, GroupAbsenceV1, GroupSignalV1, ProcessCleanupV1};
+    use owned_test_process_group_v1::{
+        DirectChildV1, GroupAbsenceV1, GroupSignalV1, ProcessCleanupV1,
+    };
     fn process(signal: i32) -> ProcessCleanupV1 {
         ProcessCleanupV1 {
             group_signal: GroupSignalV1::SentWhileLeaderOwned,

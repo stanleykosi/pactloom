@@ -1131,6 +1131,50 @@ pub(crate) fn open_born_history(input: NamespaceOpenInput) -> Result<AuthorityJo
     )
 }
 
+pub(crate) fn open_born_financial_history_v1(input: NamespaceOpenInput) -> Result<AuthorityJournal> {
+    let core = open_namespace(&input)?;
+    let (intent, expected_record) = {
+        let c = core.registry.lock().map_err(|_| AuthorityError::Storage)?;
+        let tx = Transaction::new_unchecked(c.connection(), TransactionBehavior::Deferred)?;
+        let history = storage::load_exact(&tx, &core.namespace)?;
+        let mut selected = history
+            .prepared
+            .values()
+            .filter(|p| p.intent.identity().account_id == input.expected_account_id);
+        let prepared = selected.next().ok_or(AuthorityError::RecoveryRequired)?;
+        if selected.next().is_some() {
+            return Err(AuthorityError::CorruptHistory);
+        }
+        let digest = prepared.intent.digest(&core.namespace)?;
+        let completed = history
+            .completed
+            .get(&digest)
+            .ok_or(AuthorityError::RecoveryRequired)?;
+        (
+            prepared.intent.clone(),
+            completed.evidence.birth_commit.clone(),
+        )
+    };
+    let path = core.path_for(&intent)?;
+    let key = core.key_for(&intent)?;
+    let intent_digest = intent.digest(&core.namespace)?;
+    let owner = Arc::new(BornJournalOwner {
+        core,
+        intent,
+        path,
+        key,
+        intent_digest,
+    });
+    owner.check_current()?;
+    AuthorityJournal::open_born_financial_history_only_v1(
+        owner.clone(),
+        &owner.path,
+        &owner.key,
+        &owner.intent.request.policy,
+        &expected_record,
+    )
+}
+
 #[cfg(test)]
 mod registry_preflight_tests {
     //! Synthetic encrypted-storage negatives. They operate only in a fresh

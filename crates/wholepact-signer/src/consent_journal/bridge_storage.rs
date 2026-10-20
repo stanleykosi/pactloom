@@ -409,7 +409,7 @@ pub(super) fn read_permit(
         .map_err(JournalError::from)?;
     row.map(bridge_decode).transpose()
 }
-fn read_result(
+pub(super) fn read_result(
     c: &rusqlite::Connection,
     id: &str,
 ) -> BridgeResult<Option<RetainedAuthorizationResult>> {

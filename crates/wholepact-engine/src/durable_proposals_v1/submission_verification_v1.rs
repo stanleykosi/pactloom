@@ -1,7 +1,7 @@
 //! Purpose-distinct sealed predecessor for a durable union. Historical original
 //! signatures are data; a separate actual native/witness dispatch issuer must
 //! still authorize the exact final bytes, backend and submission journal.
-//! This leaf is unregistered until that complete Host composition is wired.
+//! Private financial callers additionally hold the original source-owned pins.
 use super::*;
 use wholepact_protocol::authorization::retention::transaction::submission_handoff::VerifiedRetainedSubmission;
 
@@ -9,11 +9,16 @@ use wholepact_protocol::authorization::retention::transaction::submission_handof
 /// original signed-result/transaction verification. There is no Deserialize,
 /// Clone, raw byte getter, public constructor, or ordinary profile conversion.
 pub struct VerifiedDurableSubmissionV1 {
-    retained: VerifiedRetainedSubmission,
-    fixed: FixedProposalIdentityV1,
-    signature_retention_key: String,
+    pub(super) retained: VerifiedRetainedSubmission,
+    pub(super) fixed: FixedProposalIdentityV1,
+    pub(super) signature_retention_key: String,
 }
 impl VerifiedDurableSubmissionV1 {
+    pub fn retention_scope(
+        &self,
+    ) -> &wholepact_protocol::authorization::retention::transaction::TransactionRetentionScope {
+        self.retained.retention_scope()
+    }
     pub fn fixed_identity(&self) -> &FixedProposalIdentityV1 {
         &self.fixed
     }

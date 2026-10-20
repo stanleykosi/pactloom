@@ -17,6 +17,8 @@ mod participant_delivery;
 pub(in crate::host) mod private_durable_fixed_v2;
 #[cfg(all(feature = "durable-proposal", target_os = "linux"))]
 pub(in crate::host) mod durable_delivery_admission_v2;
+#[cfg(all(feature = "durable-proposal", target_os = "linux"))]
+pub(in crate::host) mod private_financial_v1;
 mod proof_delivery;
 mod proof_execution_request;
 mod proof_request;

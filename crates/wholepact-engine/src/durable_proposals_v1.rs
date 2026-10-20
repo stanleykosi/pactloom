@@ -12,18 +12,22 @@ use std::collections::{BTreeMap, BTreeSet};
 use wholepact_proof_jobs::{CheckpointScope, LocalAction, LocalProofConsent, VerifiedCheckpoint};
 use wholepact_protocol::{
     authorization::retention::{
-        RetentionError, SignedCandidateContext, SignedRetentionConsent, SignedRetentionScope,
-        durable_intake_v1::{RetainedIntakeRefV1, retained_source_set_digest_v1},
+        durable_intake_v1::{retained_source_set_digest_v1, RetainedIntakeRefV1},
         transaction::{
-            LocalTransactionCheckpoint, TransactionCheckpointSummary,
             submission_handoff::{LocalSubmissionDispatch, LocalSubmissionHandoff},
+            LocalTransactionCheckpoint, TransactionCheckpointSummary,
         },
+        RetentionError, SignedCandidateContext, SignedRetentionConsent, SignedRetentionScope,
     },
     construction::{InputActionMapping, OutputActionMapping},
     durable_proposal_v1::{FixedProposalIdentityV1, VerifiedFixedProposal},
     proving::ProvingLimits,
 };
 use wholepact_transport::Timestamp;
+
+#[cfg(all(feature = "manual-admission", target_os = "linux"))]
+pub(crate) mod private_financial_v1;
+pub mod submission_verification_v1;
 
 const MAX_ACTIONS: usize = 8;
 
@@ -54,6 +58,12 @@ struct Intake {
     participant_id: String,
     action_indices: Vec<usize>,
     accepted_at: String,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_financial_binding_v1"
+    )]
+    financial_result_v1: Option<serde_json::Value>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -74,6 +84,24 @@ struct Stored {
     mappings: Mappings,
     intakes: BTreeMap<String, Intake>,
     union: Option<Union>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_financial_binding_v1"
+    )]
+    financial_binding_v1: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    financial_dispatch_v1: BTreeMap<u32, serde_json::Value>,
+}
+
+fn deserialize_financial_binding_v1<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<serde_json::Value>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    if value.is_null() || !value.is_object() {
+        return Err(serde::de::Error::custom("invalid financial binding"));
+    }
+    Ok(Some(value))
 }
 
 /// Non-authorizing progress, re-derived from exact encrypted artifacts, never a
@@ -116,8 +144,31 @@ pub(crate) fn validate_stored(envelope: &Envelope) -> Result<()> {
         {
             return Err(damaged());
         }
+        if (stored.financial_binding_v1.is_some() || !stored.financial_dispatch_v1.is_empty())
+            && envelope.private_workspace_origin_v1.is_none()
+        {
+            return Err(damaged());
+        }
+        if !stored.financial_dispatch_v1.is_empty() {
+            #[cfg(all(feature = "manual-admission", target_os = "linux"))]
+            private_financial_v1::validate_dispatch_history(&stored)?;
+            #[cfg(not(all(feature = "manual-admission", target_os = "linux")))]
+            return Err(damaged());
+        }
+        if let Some(binding) = &stored.financial_binding_v1 {
+            #[cfg(all(feature = "manual-admission", target_os = "linux"))]
+            {
+                private_financial_v1::decode_binding(binding)?.validate(&stored.identity)?;
+                private_financial_v1::validate_financial_intakes(&stored)?;
+            }
+            #[cfg(not(all(feature = "manual-admission", target_os = "linux")))]
+            return Err(damaged());
+        }
         let mut actions = BTreeSet::new();
         for (account, intake) in &stored.intakes {
+            if stored.financial_binding_v1.is_none() && intake.financial_result_v1.is_some() {
+                return Err(damaged());
+            }
             let participant = candidate
                 .proposal
                 .manifest
@@ -214,6 +265,8 @@ impl Engine {
             mappings,
             intakes: BTreeMap::new(),
             union: None,
+            financial_binding_v1: None,
+            financial_dispatch_v1: BTreeMap::new(),
         };
         put(&mut envelope, candidate_id, &stored)?;
         envelope.view.progress = "awaiting_authorization".into();
@@ -448,6 +501,7 @@ impl Engine {
                 participant_id,
                 action_indices: indices,
                 accepted_at: crate::now(),
+                financial_result_v1: None,
             },
         );
         put(&mut envelope, candidate_id, &stored)?;
@@ -983,7 +1037,11 @@ pub(crate) fn validate_private_fixed_v2(envelope: &Envelope) -> Result<()> {
     validate_stored(envelope)?;
     for value in envelope.durable_proposals_v1.values() {
         let stored: Stored = serde_json::from_value(value.clone()).map_err(|_| damaged())?;
-        if !stored.intakes.is_empty() || stored.union.is_some() {
+        if !stored.intakes.is_empty()
+            || stored.union.is_some()
+            || stored.financial_binding_v1.is_some()
+            || !stored.financial_dispatch_v1.is_empty()
+        {
             return Err(damaged());
         }
     }
@@ -1043,6 +1101,8 @@ fn freeze_private_fixed_kernel_v2(
         mappings,
         intakes: BTreeMap::new(),
         union: None,
+        financial_binding_v1: None,
+        financial_dispatch_v1: BTreeMap::new(),
     };
     put(envelope, &id, &stored)?;
     envelope.view.progress = "awaiting_authorization".into();
@@ -1096,6 +1156,8 @@ fn read_private_fixed_kernel_v2(
         || stored.proof_job_id != checkpoint.summary().job_id
         || !stored.intakes.is_empty()
         || stored.union.is_some()
+        || stored.financial_binding_v1.is_some()
+        || !stored.financial_dispatch_v1.is_empty()
         || serde_json::to_value(&stored.mappings).map_err(|_| damaged())?
             != serde_json::to_value(&mappings).map_err(|_| damaged())?
     {

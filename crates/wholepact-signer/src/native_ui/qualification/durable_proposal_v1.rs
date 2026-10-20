@@ -4657,3 +4657,61 @@ impl ClosedDeliveryNativeFixtureV3 {
         Ok(selector)
     }
 }
+
+/// Typed qualification driver around the real financial GUI runtime. No data
+/// constructor, native-decision factory or synthetic source replacement.
+pub(in crate::native_ui) struct FinancialNativeFixtureV1 {
+    inner:DurableDeliveryNativeFixtureV2,
+    provider:std::cell::RefCell<Option<wholepact_signer_origin::InstalledSignerProvider>>,
+    deadline:Instant,
+}
+#[derive(Clone,Copy,Debug,PartialEq,Eq,serde::Serialize,serde::Deserialize)]
+pub enum FinancialQualificationPhaseV1 { Opening,ReadReview,ContinueReview,AwaitingAdmission,AdmitReview,AcquireReview,ActivateReview,WalletReview,SignReview,AwaitingReturn,ReturnReview,Working,Complete,Aborted }
+impl ClosedDeliveryNativeFixtureV3 {
+    pub(in crate::native_ui) fn into_financial_continuation_v1(mut self,wallet_setup_json:String)->Result<FinancialNativeFixtureV1>{
+        let terms=self.inner.runtime.financial_continuation_terms_v1()?;
+        let provider=self.provider()?;
+        let now=u64::try_from(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|_|Error::Locked)?.as_millis()).map_err(|_|Error::Locked)?;
+        let deadline=Instant::now().checked_add(Duration::from_millis(terms.valid_until_ms.checked_sub(now).ok_or(Error::Locked)?)).ok_or(Error::InvalidData)?;
+        let original=self.inner.original.as_ref().ok_or(Error::Unavailable)?;
+        let origin=original.credentials.origin();let descriptor=&terms.scope.witness;
+        if descriptor.endpoint!=origin.endpoint||descriptor.witness_id!=origin.witness_id||descriptor.pinned_server_certificate_digest!=origin.server_certificate_digest{return Err(Error::ReviewMismatch);}
+        self.inner.runtime.witness_setup=Zeroizing::new(serde_json::to_string(&serde_json::json!({
+            "schema_version":1,"endpoint":descriptor.endpoint,"server_name":descriptor.server_name,"witness_id":descriptor.witness_id,"account_id":descriptor.account_id,"network_profile_id":descriptor.network_profile_id,"policy_digest":descriptor.policy_digest,"pinned_server_certificate_digest":descriptor.pinned_server_certificate_digest,"trusted_server_root_der":origin.trusted_server_root_file,"client_certificate_der":origin.writer_certificate_file,"client_private_key_pkcs8_der":origin.writer_key_file,"operator_name":"Synthetic original never-funded witness","retention_statement":"Exact temporary qualification original only"
+        })).map_err(|_|Error::InvalidData)?);
+        self.inner.runtime.owner_witness_setup=Zeroizing::new(self.inner.owner_setup.to_string());
+        self.inner.runtime.password=Zeroizing::new(crate::native_ui::birth_workspace::born_roster_v3::SYNTHETIC_PENDING_PASSWORD.into());
+        self.inner.runtime.wallet_setup=Zeroizing::new(wallet_setup_json);
+        self.inner.runtime.begin_financial_original_v1(true,EPOCH,terms)?;
+        Ok(FinancialNativeFixtureV1{inner:self.inner,provider:std::cell::RefCell::new(Some(provider)),deadline})
+    }
+}
+impl FinancialNativeFixtureV1 {
+    pub(in crate::native_ui) fn provider(&self)->Result<wholepact_signer_origin::InstalledSignerProvider>{self.provider.borrow_mut().take().ok_or(Error::Unavailable)}
+    pub(in crate::native_ui) fn endpoint(&self)->Result<std::path::PathBuf>{self.inner.runtime.financial_result_endpoint_v1()}
+    pub(in crate::native_ui) fn deadline(&self)->Result<Instant>{if Instant::now()>=self.deadline{return Err(Error::Locked);}Ok(self.deadline)}
+    pub(in crate::native_ui) fn poll(&mut self)->Result<FinancialQualificationPhaseV1>{
+        self.deadline()?;self.inner.runtime.poll(EPOCH);
+        if let Some(error)=self.inner.runtime.take_financial_failure_v1(){return Err(error);}
+        use super::financial_v1::FinancialPhaseV1 as P;use FinancialQualificationPhaseV1 as Q;
+        Ok(match self.inner.runtime.financial_phase_v1().ok_or(Error::Unavailable)?{P::Opening=>Q::Opening,P::ReadReview=>Q::ReadReview,P::ContinueReview=>Q::ContinueReview,P::AwaitingAdmission=>Q::AwaitingAdmission,P::AdmitReview=>Q::AdmitReview,P::AcquireReview=>Q::AcquireReview,P::ActivateReview=>Q::ActivateReview,P::WalletReview=>Q::WalletReview,P::SignReview=>Q::SignReview,P::AwaitingReturn=>Q::AwaitingReturn,P::ReturnReview=>Q::ReturnReview,P::Working=>Q::Working,P::Complete=>Q::Complete,P::Aborted=>Q::Aborted})
+    }
+    pub(in crate::native_ui) fn approve_current_review(&mut self)->Result<()>{
+        use FinancialQualificationPhaseV1 as P;
+        if !matches!(self.poll()?,P::ReadReview|P::ContinueReview|P::AdmitReview|P::AcquireReview|P::ActivateReview|P::WalletReview|P::SignReview|P::ReturnReview){return Err(Error::ReviewMismatch);}
+        approve(&mut self.inner.runtime)
+    }
+    pub(in crate::native_ui) fn send_pending_continuation(&mut self)->Result<()>{self.inner.runtime.send_financial_continuation_v1()}
+    pub(in crate::native_ui) fn result_request(&self)->Result<crate::authority_bridge::financial_continuation_v1::FinancialResultRequestV1>{self.inner.runtime.financial_result_request_v1()}
+    pub(in crate::native_ui) fn pending_continuation_request(&self)->Result<Option<wholepact_authority::OwnerControlRequest>>{self.deadline()?;Ok(self.inner.runtime.financial_pending_continuation_v1().cloned())}
+    pub(in crate::native_ui) fn pending_activation_request(&self)->Result<Option<wholepact_authority::OwnerControlRequest>>{self.deadline()?;Ok(self.inner.runtime.financial_activation_request_v1().cloned())}
+    pub(in crate::native_ui) fn close_preserving_originals(mut self)->Result<DurableDeliveryReopenSelectorV2>{
+        let mut selector=DurableDeliveryReopenSelectorV2{version:20,root:self.inner.root.clone(),proposal:self.inner.proposal.input().clone(),aggregate_budget_zatoshis:self.inner.budget,account_id:self.inner.scope.account_id.clone(),owner_setup_json:self.inner.owner_setup.to_string(),original_directory_preserved:false};
+        self.inner.drain_close()?;
+        if self.inner.runtime.financial_phase_v1().is_some(){return Err(Error::Uncertain);}
+        if original_inventory(&self.inner.root)?!=self.inner.original_inventory{return Err(Error::ReviewMismatch);}
+        let original=self.inner.original.take().ok_or(Error::Unavailable)?;
+        if let Some(directory)=Arc::into_inner(original.temporary){let kept=directory.keep();if !self.inner.root.starts_with(&kept)||self.inner.root==kept{return Err(Error::ReviewMismatch);}selector.original_directory_preserved=true;}
+        drop(original.credentials);Ok(selector)
+    }
+}

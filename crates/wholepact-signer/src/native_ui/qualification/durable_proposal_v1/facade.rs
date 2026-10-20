@@ -535,3 +535,27 @@ impl EphemeralClosedDeliveryNativeV3 {
     pub fn close_existing_entry(self) -> Result<()> { self.inner.close_existing() }
     pub fn close_preserving_originals(self) -> Result<DurableDeliveryReopenSelectorV2> { self.inner.close_preserving_originals() }
 }
+
+pub use crate::native_ui::runtime::durable_proposal_qualification_v1::FinancialQualificationPhaseV1;
+/// Actual synthetic native controller only. Every approval drives the existing
+/// reviewed exact native click path; no permission DTO or replacement source.
+pub struct EphemeralFinancialContinuationNativeV1 {
+    inner:crate::native_ui::runtime::durable_proposal_qualification_v1::FinancialNativeFixtureV1,
+}
+impl EphemeralClosedDeliveryNativeV3 {
+    pub fn into_financial_continuation_v1(self,wallet_setup_json:String)->Result<EphemeralFinancialContinuationNativeV1>{Ok(EphemeralFinancialContinuationNativeV1{inner:self.inner.into_financial_continuation_v1(wallet_setup_json)?})}
+}
+impl EphemeralFinancialContinuationNativeV1 {
+    /// Moves the already established fixture's installed-process trust owner
+    /// once, instead of constructing trust from a source receipt or DTO.
+    pub fn provider(&self)->Result<wholepact_signer_origin::InstalledSignerProvider>{self.inner.provider()}
+    pub fn endpoint(&self)->Result<std::path::PathBuf>{self.inner.endpoint()}
+    pub fn deadline(&self)->Result<Instant>{self.inner.deadline()}
+    pub fn poll(&mut self)->Result<FinancialQualificationPhaseV1>{self.inner.poll()}
+    pub fn approve_current_review(&mut self)->Result<()>{self.inner.approve_current_review()}
+    pub fn send_pending_continuation(&mut self)->Result<()>{self.inner.send_pending_continuation()}
+    pub fn pending_continuation_request(&self)->Result<Option<wholepact_authority::OwnerControlRequest>>{self.inner.pending_continuation_request()}
+    pub fn pending_activation_request(&self)->Result<Option<wholepact_authority::OwnerControlRequest>>{self.inner.pending_activation_request()}
+    pub fn result_request(&self)->Result<crate::authority_bridge::financial_continuation_v1::FinancialResultRequestV1>{self.inner.result_request()}
+    pub fn close_preserving_originals(self)->Result<DurableDeliveryReopenSelectorV2>{self.inner.close_preserving_originals()}
+}

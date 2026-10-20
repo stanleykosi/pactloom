@@ -1,4 +1,4 @@
-name: Origin integration then explicit B1 native lifecycle (Linux)
+name: Origin integration then explicit native lifecycle (Linux)
 on:
   push:
     branches: [qualification/durable-proposal-v1]
@@ -35,7 +35,7 @@ jobs:
         run: |
           set -euo pipefail
           mode="$(cat scripts/qualification-gate-mode)"
-          [[ "$mode" == origin || "$mode" == full ]]
+          [[ "$mode" == origin || "$mode" == full || "$mode" == financial ]]
           [[ "$(wc -l < scripts/qualification-gate-mode)" -eq 1 ]]
           printf 'gate=%s\n' "$mode" >> "$GITHUB_OUTPUT"
       - name: Minimal real production origin integration (not full qualification)
@@ -47,8 +47,8 @@ jobs:
         shell: bash
         run: |
           echo 'Origin integration passed. Full native/payment qualification was intentionally not run.' >> "$GITHUB_STEP_SUMMARY"
-      - name: Closed B1 native lifecycle (not full financial payment qualification)
-        if: steps.mode.outputs.gate == 'full'
+      - name: Explicit synthetic native lifecycle (not public-chain settlement)
+        if: steps.mode.outputs.gate == 'full' || steps.mode.outputs.gate == 'financial'
         shell: bash
         working-directory: source
         env:

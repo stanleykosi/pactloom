@@ -757,3 +757,6 @@ mod durable_delivery_admission_v2;
 
 #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
 pub(in crate::native_ui) mod durable_delivery_v3;
+
+#[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+pub(in crate::native_ui) mod financial_continuation_v1;

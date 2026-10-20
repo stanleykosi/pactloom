@@ -66,6 +66,8 @@ pub(crate) use authority::PendingAccountNativeAuthority;
 pub(crate) use authority::{NativeAuthority, NativeAuthorityBinding, NativeDecision};
 #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
 pub(crate) use authority::{receive_review_digest_v3, PreparedReceiveAndViewAuthorityV3, ConditionalDurableAdmissionV3, ExactDurableActionV3};
+#[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+pub(crate) use authority::financial_authority_v1;
 pub(crate) use runtime::AuthenticatedPairing;
 mod pairing;
 mod state;

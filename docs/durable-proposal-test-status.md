@@ -1,8 +1,22 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-20, 06:31 UTC.
+Updated: 2026-10-20, 09:17 UTC.
 
 **CI44 passed the genuine two-owner delivery/admission, original-producer SIGKILL and fresh-process read-only original-history verification route. Financial signing/dispatch and public testnet settlement remain unqualified. This is a bounded admission/restart milestone, not a production release.**
+
+## Explicit saved-transaction financial continuation: first native qualification pending
+
+The separately approved bounded dispatch policy is now source-implemented. The complete locked offline release Host compilation passed in 2m29s after the Signer/Engine build passed in 6m39s. Independent source review found no remaining critical blocker for one isolated synthetic native qualification. Compilation is not financial acceptance; no native financial pass or public testnet settlement is claimed.
+
+The new explicit financial path preserves old admission-only denials. Both owners authorize exact original financial terms. Fresh purpose-specific actions perform signing; actual protected results and the first verified final transaction must be durably retained before original process death. A fresh Host may then verify the exact completed originals and obtain dedicated, bounded two-account dispatch admissions for only the saved bytes, without reviving signing authority. Human reviews precede short transport effects; original expiries and revocation remain enforced.
+
+Actual local encrypted component integrations passed: completed-only retained transaction verification without repair; saved-subset union verification; strict Authority financial history with old-writer-expiry dispatch and bounded replay; delayed-readiness send refusal; atomic expected-attempt refusal against a competing connection. The separate Signer schema test used deliberately invalid fixture rows with foreign keys disabled only in its test body: it verifies append-only storage and legacy rejection, not successful source transition or signing.
+
+The next explicit `financial` CI mode runs the genuine native signing, protected intake, completed-checkpoint, producer SIGKILL/reap, exact original reopen, partial admission reconciliation, stale-head refusal, bounded admission-pair retry, and one actual TLS saved-byte send to an isolated synthetic provider. The finite summary counts retained completed checkpoints, not instrumented extractor calls; admission-pair retry is not chain-Unknown retransmission. No unchanged B1 full lifecycle is rerun in this mode.
+
+Outstanding: this native run, actual chain-Unknown retransmission, public testnet settlement, standalone Host CLI routing, and recovery of an unfinished result return to a replacement Host. Independent signer-process isolation is not claimed. A completed saved transaction is the tested restart boundary, not arbitrary interruption anywhere in payment preparation.
+
+The synthetic wallet feature activates only the already-locked exact prost 0.14.4 dependency (previously a dev dependency) and existing serde_json. No dependency upgrade, lock graph expansion, production default activation, credentials, funded wallet data, or deployment is included.
 
 ## CI44 passed: genuine two-owner admission and fresh read-only restart
 

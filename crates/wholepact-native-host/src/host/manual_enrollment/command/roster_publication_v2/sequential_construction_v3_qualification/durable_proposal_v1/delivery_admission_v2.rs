@@ -1217,6 +1217,7 @@ pub(super) fn continue_completed_original(
     financial: PathBuf,
     disclosures: Vec<OriginalDisclosureV2>,
     provider_identity: wholepact_chain::BackendIdentity,
+    financial_wallet_setup: Option<String>,
 ) -> Result<()> {
     crate::host::financial::durable_delivery_admission_v2::with_delivery_observer_v2(
         observe_delivery,
@@ -1233,10 +1234,15 @@ pub(super) fn continue_completed_original(
             let fixed_prefix_digest = digest(&fixed)?;
             // All actual proof/cache work was completed before entry. Close the
             // original provider/runtime before any v4 vault publication.
-            at(B::PrivateWorkspaceScanCleanup, || {
-                runtime.block_on(provider.shutdown()).map_err(Error::from)
-            })?;
-            drop(runtime);
+            let retained_provider = if financial_wallet_setup.is_some() {
+                Some((runtime, provider))
+            } else {
+                at(B::PrivateWorkspaceScanCleanup, || {
+                    runtime.block_on(provider.shutdown()).map_err(Error::from)
+                })?;
+                drop(runtime);
+                None
+            };
             drop(fixed);
             let origin = original
                 .witness
@@ -1304,7 +1310,7 @@ pub(super) fn continue_completed_original(
             submission_operation_id:"synthetic-original-delivery-admission-v2".into(),
             provider:wholepact_core::manual_construction::PreconstructionProvider {source_id:provider_identity.source_id,endpoint:provider_identity.endpoint,trust_profile:provider_identity.trust_profile.into()},
             route:wholepact_authority::durable_delivery_scope_v2::DurableDeliveryRouteV2::Direct {},
-            minimum_expiry_margin_blocks:1,maximum_fresh_admission_lifetime_ms:120_000,maximum_explicitly_approved_attempts:1,
+            minimum_expiry_margin_blocks:1,maximum_fresh_admission_lifetime_ms:120_000,maximum_explicitly_approved_attempts:if financial_wallet_setup.is_some(){3}else{1},
         };
             let mut admissions = Vec::with_capacity(2);
             let mut preserved = Vec::with_capacity(2);
@@ -1529,6 +1535,7 @@ pub(super) fn continue_completed_original(
                     .send(C::AuditDeliveryDenials(index))
                     .map_err(worker_error)?;
                 done(&original.signers, index)?;
+                if financial_wallet_setup.is_none() {
                 original
                     .signers
                     .send(C::PreserveDelivery(index))
@@ -1540,9 +1547,10 @@ pub(super) fn continue_completed_original(
                     } if actual == index => original,
                     _ => return Err(Error::Authentication),
                 };
+                    preserved.push(selector);
+                }
                 recipient_intents.push(exported.export_scope.recipient.clone());
                 admissions.push(status);
-                preserved.push(selector);
             }
             let status = at(B::DeliveryHistoricalRead, || {
                 host.private_original_delivery_status_v3(&workspace)
@@ -1557,6 +1565,16 @@ pub(super) fn continue_completed_original(
             let full_fixed_status_digest = digest(&status)?;
             let export_history_digest = status.source.export_history_digest.clone();
             drop(status);
+            if let Some(wallet_setup) = financial_wallet_setup {
+                let (runtime, provider) = retained_provider.ok_or(Error::Authentication)?;
+                return durable_financial_dispatch_v1::continue_financial_producer(
+                    terminal, host, original, profile, workspace, financial,
+                    fixed_prefix_digest, export_history_digest,
+                    admissions.try_into().map_err(|_| Error::Authentication)?,
+                    recipient_intents.try_into().map_err(|_| Error::Authentication)?,
+                    runtime, provider, wallet_setup,
+                );
+            }
             original.signers.shutdown().map_err(worker_error)?;
             let witness_reopen = original
                 .witness
@@ -2601,3 +2619,6 @@ mod tests {
         assert!(reader.contains("reopen_durable_delivery_originals_v2"));
     }
 }
+
+#[path = "durable_financial_dispatch_v1.rs"]
+pub(in crate::host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification) mod durable_financial_dispatch_v1;
