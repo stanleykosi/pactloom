@@ -71,6 +71,7 @@ const PHASES: &[&str] = &[
     "cleanup_verified",
     "cleanup_started",
     "probe_started",
+    "probe_finished",
 ];
 const CHECKS: &[&str] = &[
     "none",
@@ -97,6 +98,9 @@ const CHECKS: &[&str] = &[
     "expect_driver_success",
     "expect_original_timeout",
     "stalled_server_join",
+    "expect_inline_rpc_failure",
+    "expect_probe_success",
+    "expect_single_connection",
 ];
 static CHECK: AtomicUsize = AtomicUsize::new(0);
 fn checking(check: usize) {
@@ -109,6 +113,14 @@ const OUTCOMES: &[&str] = &[
     "transport_unavailable",
     "other_error",
 ];
+const PROBE_OUTCOMES: &[&str] = &[
+    "none",
+    "success",
+    "readiness_error",
+    "unary_error",
+    "timeout",
+];
+static PROBE_OUTCOME: AtomicUsize = AtomicUsize::new(0);
 static OUTCOME: AtomicUsize = AtomicUsize::new(0);
 static CASE: AtomicUsize = AtomicUsize::new(0);
 static PHASE: AtomicUsize = AtomicUsize::new(0);
@@ -142,7 +154,7 @@ fn diagnostic_row() -> serde_json::Value {
             .copied()
             .unwrap_or("none")
     });
-    serde_json::json!({"outcome":OUTCOMES.get(OUTCOME.load(Ordering::SeqCst)).unwrap_or(&"unobserved"),"proxy_copy_outcome":copy_outcome,"active_check":CHECKS.get(CHECK.load(Ordering::SeqCst)).unwrap_or(&"none"),"counts_clamped":clamped,"tls_errors":count(|e|&e.tls_errors),"proxy_headers":count(|e|&e.proxy_headers),"proxy_target_connected":count(|e|&e.proxy_target_connected),"proxy_copy_finished":count(|e|&e.proxy_copy_finished),"schema":1,"case":CASES.get(CASE.load(Ordering::SeqCst)).unwrap_or(&"unstarted"),"phase":PHASES.get(PHASE.load(Ordering::SeqCst)).unwrap_or(&"started"),"counts_available":counts.is_some(),"accepted":count(|e|&e.accepted),"tls_success":count(|e|&e.tls),"tls_timeout":count(|e|&e.timed_out),"sockets_closed":count(|e|&e.closed),"http_requests":count(|e|&e.rpc),"cleanup_verified":false})
+    serde_json::json!({"probe_outcome":PROBE_OUTCOMES.get(PROBE_OUTCOME.load(Ordering::SeqCst)).unwrap_or(&"none"),"outcome":OUTCOMES.get(OUTCOME.load(Ordering::SeqCst)).unwrap_or(&"unobserved"),"proxy_copy_outcome":copy_outcome,"active_check":CHECKS.get(CHECK.load(Ordering::SeqCst)).unwrap_or(&"none"),"counts_clamped":clamped,"tls_errors":count(|e|&e.tls_errors),"proxy_headers":count(|e|&e.proxy_headers),"proxy_target_connected":count(|e|&e.proxy_target_connected),"proxy_copy_finished":count(|e|&e.proxy_copy_finished),"schema":1,"case":CASES.get(CASE.load(Ordering::SeqCst)).unwrap_or(&"unstarted"),"phase":PHASES.get(PHASE.load(Ordering::SeqCst)).unwrap_or(&"started"),"counts_available":counts.is_some(),"accepted":count(|e|&e.accepted),"tls_success":count(|e|&e.tls),"tls_timeout":count(|e|&e.timed_out),"sockets_closed":count(|e|&e.closed),"http_requests":count(|e|&e.rpc),"cleanup_verified":false})
 }
 fn emit_diagnostic(prefix: &str, row: &serde_json::Value) {
     use std::io::Write;
@@ -170,6 +182,7 @@ fn observe(phase: usize, outcome: &'static str) {
 fn begin_case(case: usize) {
     CASE.store(case, Ordering::SeqCst);
     OUTCOME.store(0, Ordering::SeqCst);
+    PROBE_OUTCOME.store(0, Ordering::SeqCst);
     checking(0);
     if let Ok(mut counts) = CURRENT_COUNTS.lock() {
         *counts = None;
@@ -242,7 +255,8 @@ impl AsyncWrite for Tracked {
     }
 }
 struct Listener {
-    tcp: TcpListener,
+    tcp: Option<TcpListener>,
+    addr: std::net::SocketAddr,
     tls: TlsAcceptor,
     evidence: Arc<Evidence>,
     accepted: Option<oneshot::Sender<()>>,
@@ -253,7 +267,23 @@ impl axum::serve::Listener for Listener {
     type Addr = std::net::SocketAddr;
     async fn accept(&mut self) -> (Self::Io, Self::Addr) {
         loop {
-            let (tcp, addr) = self.tcp.accept().await.expect("loopback accept");
+            let (tcp, addr) = if self.gate {
+                let Some(listener) = self.tcp.take() else {
+                    return std::future::pending().await;
+                };
+                let accepted = listener.accept().await.expect("single loopback accept");
+                // Physically close the listener before the caller barrier. A failed
+                // original socket cannot be healed by tonic reconnecting later.
+                drop(listener);
+                accepted
+            } else {
+                self.tcp
+                    .as_ref()
+                    .expect("ordinary listener retained")
+                    .accept()
+                    .await
+                    .expect("loopback accept")
+            };
             self.evidence.accepted.fetch_add(1, Ordering::SeqCst);
             let tcp = Tracked(tcp, self.evidence.clone());
             if let Some(tx) = self.accepted.take() {
@@ -277,10 +307,11 @@ impl axum::serve::Listener for Listener {
         }
     }
     fn local_addr(&self) -> std::io::Result<Self::Addr> {
-        self.tcp.local_addr()
+        Ok(self.addr)
     }
 }
 struct Server {
+    single_accept: bool,
     addr: std::net::SocketAddr,
     pem: Vec<u8>,
     evidence: Arc<Evidence>,
@@ -327,7 +358,8 @@ async fn server(gate: bool) -> Server {
     let (tx, accepted) = oneshot::channel();
     let (stop, rx) = oneshot::channel();
     let listener = Listener {
-        tcp,
+        tcp: Some(tcp),
+        addr,
         tls: TlsAcceptor::from(Arc::new(config)),
         evidence: evidence.clone(),
         accepted: Some(tx),
@@ -342,6 +374,7 @@ async fn server(gate: bool) -> Server {
             .unwrap();
     });
     Server {
+        single_accept: gate,
         addr,
         pem,
         evidence,
@@ -395,9 +428,14 @@ async fn route(s: &Server, tunnel: bool) -> (ProxyRoute, Option<JoinHandle<()>>)
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let destination = s.addr;
+    let single_accept = s.single_accept;
     let counts = s.evidence.clone();
     let task = tokio::spawn(async move {
-        let (mut client, _) = listener.accept().await.unwrap();
+        let mut listener = Some(listener);
+        let (mut client, _) = listener.as_ref().unwrap().accept().await.unwrap();
+        if single_accept {
+            drop(listener.take());
+        }
         let mut header = Vec::new();
         timeout(LIMIT, async {
             while !header.ends_with(b"\r\n\r\n") {
@@ -438,20 +476,47 @@ async fn route(s: &Server, tunnel: bool) -> (ProxyRoute, Option<JoinHandle<()>>)
 }
 #[derive(Clone, PartialEq, prost::Message)]
 struct Empty {}
-async fn probe(channel: Channel) {
-    let mut grpc = tonic::client::Grpc::new(channel);
-    checking(6);
-    grpc.ready().await.expect("channel ready");
-    checking(7);
-    let response: tonic::Response<Empty> = grpc
-        .unary(
-            tonic::Request::new(Empty {}),
-            tonic::codegen::http::uri::PathAndQuery::from_static("/probe"),
-            tonic_prost::ProstCodec::default(),
-        )
+async fn probe_until(channel: Channel, deadline: Instant) -> usize {
+    let attempted = async {
+        if Instant::now() >= deadline {
+            return 4;
+        }
+        let mut grpc = tonic::client::Grpc::new(channel);
+        checking(6);
+        if grpc.ready().await.is_err() {
+            return 2;
+        }
+        if Instant::now() >= deadline {
+            return 4;
+        }
+        checking(7);
+        let response: Result<tonic::Response<Empty>, tonic::Status> = grpc
+            .unary(
+                tonic::Request::new(Empty {}),
+                tonic::codegen::http::uri::PathAndQuery::from_static("/probe"),
+                tonic_prost::ProstCodec::default(),
+            )
+            .await;
+        if Instant::now() >= deadline {
+            return 4;
+        }
+        if response.is_ok() {
+            1
+        } else {
+            3
+        }
+    };
+    let result = tokio::time::timeout_at(deadline, attempted)
         .await
-        .expect("real h2 RPC after caller resumes");
-    drop(response);
+        .unwrap_or(4);
+    let result = if Instant::now() >= deadline {
+        4
+    } else {
+        result
+    };
+    PROBE_OUTCOME.store(result, Ordering::SeqCst);
+    observe(7, "unobserved");
+    result
 }
 async fn scheduling(tunnel: bool, driven: bool) {
     begin_case(match (tunnel, driven) {
@@ -468,22 +533,42 @@ async fn scheduling(tunnel: bool, driven: bool) {
     // This borrowed Rc is intentionally !Send. It never enters the connect task.
     let owner = Rc::new(Cell::new(0));
     let borrowed = &owner;
+    let deadline = Instant::now() + LIMIT;
     let blocker = async {
         checking(18);
-        timeout(LIMIT, accepted).await.unwrap().unwrap();
+        tokio::time::timeout_at(deadline, accepted)
+            .await
+            .unwrap()
+            .unwrap();
         counts.start.store(true, Ordering::SeqCst);
         borrowed.set(1);
         std::thread::sleep(Duration::from_millis(2500));
         observe(1, "unobserved");
         checking(1);
         assert_eq!(counts.rpc.load(Ordering::SeqCst), 0);
+        checking(26);
+        assert_eq!(counts.accepted.load(Ordering::SeqCst), 1);
+        // These observations happen before join can repoll the inline connector.
+        if driven {
+            checking(4);
+            assert_eq!(counts.tls.load(Ordering::SeqCst), 1);
+            checking(5);
+            assert_eq!(counts.timed_out.load(Ordering::SeqCst), 0);
+        } else {
+            checking(17);
+            assert_eq!(counts.tls.load(Ordering::SeqCst), 0);
+            checking(10);
+            assert_eq!(counts.timed_out.load(Ordering::SeqCst), 1);
+        }
         borrowed.set(2);
     };
     let connect = async {
         if driven {
-            connect_until(route, ep, Instant::now() + LIMIT).await
+            connect_until(route, ep, deadline).await
         } else {
-            route.connect(&ep).await
+            tokio::time::timeout_at(deadline, route.connect(&ep))
+                .await
+                .unwrap_or(Err(crate::ChainError::Timeout))
         }
     };
     let (result, ()) = tokio::join!(connect, blocker);
@@ -498,16 +583,30 @@ async fn scheduling(tunnel: bool, driven: bool) {
         checking(5);
         assert_eq!(s.evidence.timed_out.load(Ordering::SeqCst), 0);
         observe(6, "success");
-        probe(channel).await;
+        let probe_result = probe_until(channel, deadline).await;
+        checking(25);
+        assert_eq!(probe_result, 1);
         checking(8);
         assert_eq!(s.evidence.rpc.load(Ordering::SeqCst), 1);
     } else {
-        checking(9);
-        assert!(result.is_err());
+        if let Ok(channel) = result {
+            // A tonic Channel handle is not evidence of a usable HTTP/2 socket.
+            // Exercise the actual service under the original remaining budget.
+            observe(6, "unobserved");
+            let probe_result = probe_until(channel, deadline).await;
+            checking(24);
+            assert!(matches!(probe_result, 2 | 3 | 4));
+        }
         checking(10);
         assert_eq!(s.evidence.timed_out.load(Ordering::SeqCst), 1);
         checking(1);
         assert_eq!(s.evidence.rpc.load(Ordering::SeqCst), 0);
+    }
+    checking(26);
+    assert_eq!(s.evidence.accepted.load(Ordering::SeqCst), 1);
+    if tunnel {
+        assert_eq!(s.evidence.proxy_headers.load(Ordering::SeqCst), 1);
+        assert_eq!(s.evidence.proxy_target_connected.load(Ordering::SeqCst), 1);
     }
     observe(3, "unobserved");
     cleanup(s).await;
