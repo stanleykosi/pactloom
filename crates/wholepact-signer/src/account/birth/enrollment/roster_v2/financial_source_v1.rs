@@ -623,3 +623,147 @@ impl PreparedOriginalFinancialSourceV1 {
         Ok(())
     }
 }
+
+/// Closed read-only intervals. These tags are not permission and cannot survive
+/// an original journal mutation or replace the actual native action owner.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FinancialOperationV1 {
+    HistoryRead,
+    Acquire,
+    Activate,
+    VerifyActive,
+    WalletObserve,
+    Reserve,
+}
+pub(crate) struct FinancialOperationSourcePinV1 {
+    source_identity: String,
+    operation: FinancialOperationV1,
+    journal: crate::consent_journal::FinancialOperationJournalPinV1,
+}
+impl FinancialOperationSourcePinV1 {
+    pub(crate) fn continuation_request(&self) -> &wholepact_authority::OwnerControlRequest {
+        self.journal.continuation_request()
+    }
+    pub(crate) fn terms(&self) -> &FinancialContinuationTermsV1 {
+        self.journal.terms()
+    }
+}
+impl PreparedOriginalFinancialSourceV1 {
+    pub(crate) fn prepare_financial_operation_source_pin_v1(
+        &self,
+        operation: FinancialOperationV1,
+        witness: Option<(
+            bool,
+            &wholepact_authority::WitnessDisclosureDescriptor,
+            &str,
+        )>,
+    ) -> Result<FinancialOperationSourcePinV1> {
+        if !operation.accepts_witness_role(witness.as_ref().map(|(owner, _, _)| *owner)) {
+            return Err(Error::Authentication);
+        }
+        // Keep the complete retained account/publication audit at issuance. The
+        // journal factory separately audits exact20 and its immutable intent in
+        // one snapshot, then verifies the same revision after commit.
+        self.check_custody()?;
+        let journal = self
+            .financial_journal()?
+            .prepare_financial_operation_pin_v1(&*self.financial_binding()?)?;
+        if let Some((owner, disclosure, certificate)) = witness {
+            let expected_certificate = if owner {
+                &self
+                    .retained
+                    .record
+                    .account_record
+                    .terms
+                    .signer
+                    .owner_certificate_digest
+            } else {
+                &journal
+                    .terms()
+                    .scope
+                    .authorization
+                    .writer_certificate_digest
+            };
+            if journal.terms().scope.witness != *disclosure
+                || self.retained.disclosure()? != *disclosure
+                || expected_certificate != certificate
+            {
+                return Err(Error::Authentication);
+            }
+        }
+        let pin = FinancialOperationSourcePinV1 {
+            source_identity: self.identity.clone(),
+            operation,
+            journal,
+        };
+        self.check_financial_operation_source_pin_v1(&pin, operation)?;
+        Ok(pin)
+    }
+    pub(crate) fn check_financial_operation_source_pin_v1(
+        &self,
+        pin: &FinancialOperationSourcePinV1,
+        operation: FinancialOperationV1,
+    ) -> Result<()> {
+        self.lifetime.check_connected()?;
+        if self.identity != pin.source_identity
+            || operation != pin.operation
+            || Instant::now() >= self.original_deadline
+        {
+            return Err(Error::Locked);
+        }
+        if immutable(&self.retained)? != self.immutable {
+            return Err(Error::ReviewMismatch);
+        }
+        self.financial_journal()?
+            .check_financial_operation_pin_v1(&*self.financial_binding()?, &pin.journal)?;
+        if immutable(&self.retained)? != self.immutable {
+            return Err(Error::ReviewMismatch);
+        }
+        self.lifetime.check_connected()?;
+        if Instant::now() >= self.original_deadline {
+            return Err(Error::Locked);
+        }
+        Ok(())
+    }
+    /// Source-owned account borrow after the exact operation pin check. No raw
+    /// getter, detached account, or authority is created by this observation.
+    pub(crate) fn financial_account_for_operation_v1(
+        &self,
+        pin: &FinancialOperationSourcePinV1,
+        operation: FinancialOperationV1,
+    ) -> Result<&crate::account::DedicatedAccount> {
+        self.check_financial_operation_source_pin_v1(pin, operation)?;
+        Ok(self.retained.account.account())
+    }
+}
+
+impl FinancialOperationV1 {
+    fn accepts_witness_role(self, owner: Option<bool>) -> bool {
+        use FinancialOperationV1::*;
+        matches!(
+            (self, owner),
+            (HistoryRead | Activate, Some(true))
+                | (Acquire | VerifyActive | Reserve, Some(false))
+                | (WalletObserve, None)
+        )
+    }
+}
+#[cfg(test)]
+mod operation_role_tests {
+    use super::FinancialOperationV1::*;
+    #[test]
+    fn financial_operation_witness_roles_are_closed() {
+        for (operation, expected) in [
+            (HistoryRead, Some(true)),
+            (Acquire, Some(false)),
+            (Activate, Some(true)),
+            (VerifyActive, Some(false)),
+            (WalletObserve, None),
+            (Reserve, Some(false)),
+        ] {
+            for actual in [None, Some(true), Some(false)] {
+                assert_eq!(operation.accepts_witness_role(actual), actual == expected);
+            }
+        }
+    }
+}

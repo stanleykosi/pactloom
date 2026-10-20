@@ -1,8 +1,20 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-20, 20:31 UTC.
+Updated: 2026-10-20, 21:22 UTC.
 
 **CI44 passed the genuine two-owner delivery/admission, original-producer SIGKILL and fresh-process read-only original-history verification route. Financial signing/dispatch and public testnet settlement remain unqualified. This is a bounded admission/restart milestone, not a production release.**
+
+## CI60 demonstrated signing progress before aggregate expiry; read-only audit reuse prepared
+
+[Run39492948779](https://github.com/stanleykosi/pactloom/actions/runs/39492948779), qualification `453d97210283eff006427b369e733ff6411d6c3c`, implementation `9615936b2089495658bb14cbf932281be85732d7`, passed origin/TLS gates, Host build (12m28s) and encrypted bootstrap. At21:05:38 UTC, the original900-second total expired with owner2 in ReadActivate/WaitPhase, window17, last-observed job7 FinancialHistoryRead. No individual120-second phase cutoff fired. Producer/group/root cleanup was verified.
+
+The ordered phase sequence establishes that owner1 reached AwaitingReturn after wallet signing returned AuthorizationCommit and local result retention completed; owner2 admission and acquisition also returned before its next history read. This is actual signing progress, not protected Host result intake, paired final extraction, dispatch or public settlement. The record establishes aggregate expiry rather than a single observed stuck phase, but does not quantify each phase's wall-clock share.
+
+Source audit found repeated full immutable-profile replay in unchanged read-only intervals: profile20 custody validation rebuilds schema and revalidates original enrollment, continuation, bridge and retained result evidence. History and active-verification callbacks repeat several such audits even though their local journal does not mutate. The cohesive repair uses a new opaque operation-local pin for History, Acquire, Activate, VerifyActive, WalletObserve and reserve transport. Each pin is minted only after a full current snapshot audit, bound to exact source/registration/file/revision/request/terms and closed Witness role. Every callback retains fresh action/read checks, original wall/monotonic expiry and immutable-file checks. A local mutation invalidates the pin; there is no refresh-on-mismatch or cross-write reuse.
+
+Reserve pin lifetime ends before the permit write. Protected signing/key-use checks and every mutation validator remain unchanged because their held permission spans Started and result commits. Generic custody/account APIs, original900-second total, action deadlines, transport limits, remote error precedence and uncertainty behavior are unchanged.
+
+Independent review cleared the seven-file repair. Combined Signer/Host compilation passed in about7m20s. Three disposable encrypted custody/refusal tests and one exhaustive6-by3 operation/Witness-role test passed once. These establish lower constructor mechanics and role closure, not issuance from a complete valid native profile. The next isolated lifecycle must verify actual factories, protected intake and exact saved-byte dispatch. Public testnet settlement and unknown-chain retransmission remain unproven.
 
 ## CI59 reached the global cutoff without a returned failure; phase supervision added
 
