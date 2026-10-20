@@ -66,6 +66,42 @@ pub(in crate::host::manual_enrollment::command::roster_publication_v2::sequentia
     financial_stage(&scenario_root()?, FinancialBoundaryV1::OriginalPreparation)?;
     Ok(())
 }
+// Failure-only observations from the actual retained-wallet adapters and the
+// original isolated provider. Counters are not a causal or atomic timeline.
+const TRANSPORT_FAILURE_FILE: &[u8] = b"durable-financial-transport-failure-v1.json\0";
+const MAX_TRANSPORT_FAILURE_BYTES: u64 = 2048;
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FinancialTransportFailureV1 {
+    chain: wholepact_chain::TransportDiagnosticSnapshot,
+    provider: synthetic_born_provider_v1::SyntheticProviderDiagnosticsV1,
+}
+impl FinancialTransportFailureV1 {
+    fn validate(&self) -> bool { self.chain.validate() && self.provider.validate() }
+}
+pub(in crate::host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification) fn record_financial_transport_failure_v1(
+    chain: wholepact_chain::TransportDiagnosticSnapshot,
+    provider: synthetic_born_provider_v1::SyntheticProviderDiagnosticsV1,
+) -> io::Result<()> {
+    let value = FinancialTransportFailureV1 { chain, provider };
+    if !value.validate() || serde_json::to_vec(&value).map_err(|_| invalid())?.len() as u64 > MAX_TRANSPORT_FAILURE_BYTES { return Err(invalid()); }
+    write_record(&scenario_root().map_err(|_| invalid())?, TRANSPORT_FAILURE_FILE, &value)
+}
+fn read_financial_transport_failure(root: &Path) -> io::Result<Option<FinancialTransportFailureV1>> {
+    let directory = directory(root)?;
+    let input = match file(&directory, TRANSPORT_FAILURE_FILE, libc::O_RDONLY) {
+        Ok(input) => input,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    check_file(&input)?;
+    let mut bytes = Vec::new();
+    input.take(MAX_TRANSPORT_FAILURE_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_TRANSPORT_FAILURE_BYTES { return Err(invalid()); }
+    let value: FinancialTransportFailureV1 = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+    if !value.validate() { return Err(invalid()); }
+    Ok(Some(value))
+}
 #[derive(Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum FinancialOutcomeV1 {
@@ -92,6 +128,7 @@ struct FinancialPublicV1 {
     private_fixed_primary:
         Option<crate::host::financial::private_durable_fixed_v2::PrivateDiagnosticPrimaryV1>,
     source_diagnostic_withheld: bool,
+    transport_failure: Option<FinancialTransportFailureV1>,
     producer_reaped: bool,
     producer_group_absent: bool,
     reader_reaped: bool,
@@ -114,7 +151,7 @@ struct FinancialPublicV1 {
 impl FinancialPublicV1 {
     fn pending() -> Self {
         Self {
-            schema: 2,
+            schema: 3,
             result: "failed",
             first_failure: None,
             boundary_outcome: None,
@@ -124,6 +161,7 @@ impl FinancialPublicV1 {
             failed_child_inputs_expected: None,
             private_fixed_primary: None,
             source_diagnostic_withheld: false,
+            transport_failure: None,
             producer_reaped: false,
             producer_group_absent: false,
             reader_reaped: false,
@@ -181,6 +219,7 @@ impl FinancialPublicV1 {
             && self.failed_child_inputs_completed.is_none()
             && self.failed_child_inputs_expected.is_none()
             && self.private_fixed_primary.is_none()
+            && self.transport_failure.is_none()
             && !self.source_diagnostic_withheld
             && self.producer_reaped
             && self.producer_group_absent
@@ -209,6 +248,7 @@ impl FinancialPublicV1 {
             self.failed_child_inputs_expected = None;
             self.private_fixed_primary = None;
             self.source_diagnostic_withheld = true;
+            self.transport_failure = None;
         }
         if self.verified() {
             self.result = "passed";
@@ -1139,6 +1179,14 @@ fn run_financial_lifecycle_v1() -> io::Result<()> {
                 .is_some_and(|status| status.signal() == Some(libc::SIGKILL))
         {
             public.observe_failed_child(&producer);
+            if producer.process.verified() {
+                if let Some(root) = root.as_ref() {
+                    match read_financial_transport_failure(root.path()) {
+                        Ok(value) => public.transport_failure = value,
+                        Err(_) => public.source_diagnostic_withheld = true,
+                    }
+                }
+            }
             let boundary = if public.producer_reaped && public.producer_group_absent {
                 root.as_ref()
                     .and_then(|root| last_financial_stage(root.path()).ok())

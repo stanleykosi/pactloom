@@ -6,23 +6,23 @@
 
 use super::synthetic_born_submission_sink_v1::SyntheticSinkControlV1;
 use axum::{
-    Router,
-    body::{Body, to_bytes},
+    body::{to_bytes, Body},
     extract::{Request, State},
     http::Response,
     routing::post,
+    Router,
 };
 use prost::Message;
 use std::{
     io,
     sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
-        atomic::{AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
 use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
-use tokio_rustls::{TlsAcceptor, rustls::ServerConfig};
+use tokio_rustls::{rustls::ServerConfig, TlsAcceptor};
 use wholepact_wallet::wallet::synthetic_born_receiver_blocks_v1::{
     BlockId, BlockRange, Empty, LightdInfo, SyntheticBornReceiverBlocksV1,
 };
@@ -30,6 +30,132 @@ use wholepact_wallet::wallet::synthetic_born_receiver_blocks_v1::{
 const SERVICE: &str = "/cash.z.wallet.sdk.rpc.CompactTxStreamer/";
 const MAX_REQUESTS: usize = 4096;
 const MAX_CONNECTIONS: usize = 512;
+
+// Diagnostic observations only, never source/effect authority. Independent atomic
+// counters are not an atomic timeline and do not establish a causal failure.
+const MAX_DIAGNOSTIC_COUNT: usize = 1_000_000;
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SyntheticProviderDiagnosticsV1 {
+    pub(super) accepted_connections: usize,
+    pub(super) accept_errors: usize,
+    pub(super) handshake_successes: usize,
+    pub(super) handshake_errors: usize,
+    pub(super) handshake_timeouts: usize,
+    pub(super) connection_limit_stops: usize,
+    pub(super) connection_deadline_stops: usize,
+    pub(super) requests: usize,
+    pub(super) denied: usize,
+    pub(super) request_limit_denials: usize,
+    pub(super) request_deadline_denials: usize,
+    pub(super) request_shape_denials: usize,
+    pub(super) body_read_errors: usize,
+    pub(super) body_read_timeouts: usize,
+    pub(super) frame_denials: usize,
+    pub(super) method_denials: usize,
+    pub(super) replies: usize,
+    pub(super) deadline_elapsed: bool,
+    pub(super) server_finished: bool,
+    pub(super) clamped: bool,
+}
+impl SyntheticProviderDiagnosticsV1 {
+    pub(super) fn validate(&self) -> bool {
+        [
+            self.accepted_connections,
+            self.accept_errors,
+            self.handshake_successes,
+            self.handshake_errors,
+            self.handshake_timeouts,
+            self.connection_limit_stops,
+            self.connection_deadline_stops,
+            self.requests,
+            self.denied,
+            self.request_limit_denials,
+            self.request_deadline_denials,
+            self.request_shape_denials,
+            self.body_read_errors,
+            self.body_read_timeouts,
+            self.frame_denials,
+            self.method_denials,
+            self.replies,
+        ]
+        .into_iter()
+        .all(|value| value <= MAX_DIAGNOSTIC_COUNT)
+    }
+}
+#[derive(Default)]
+struct ProviderCountersV1 {
+    accepted_connections: AtomicUsize,
+    accept_errors: AtomicUsize,
+    handshake_successes: AtomicUsize,
+    handshake_errors: AtomicUsize,
+    handshake_timeouts: AtomicUsize,
+    connection_limit_stops: AtomicUsize,
+    connection_deadline_stops: AtomicUsize,
+    requests: AtomicUsize,
+    denied: AtomicUsize,
+    request_limit_denials: AtomicUsize,
+    request_deadline_denials: AtomicUsize,
+    request_shape_denials: AtomicUsize,
+    body_read_errors: AtomicUsize,
+    body_read_timeouts: AtomicUsize,
+    frame_denials: AtomicUsize,
+    method_denials: AtomicUsize,
+    replies: AtomicUsize,
+    server_finished: AtomicBool,
+    clamped: AtomicBool,
+}
+#[derive(Clone)]
+pub(super) struct SyntheticProviderDiagnosticHandleV1 {
+    counters: Arc<ProviderCountersV1>,
+    deadline: Instant,
+}
+impl SyntheticProviderDiagnosticHandleV1 {
+    pub(super) fn snapshot(&self) -> SyntheticProviderDiagnosticsV1 {
+        let c = &self.counters;
+        SyntheticProviderDiagnosticsV1 {
+            accepted_connections: c.accepted_connections.load(Ordering::SeqCst),
+            accept_errors: c.accept_errors.load(Ordering::SeqCst),
+            handshake_successes: c.handshake_successes.load(Ordering::SeqCst),
+            handshake_errors: c.handshake_errors.load(Ordering::SeqCst),
+            handshake_timeouts: c.handshake_timeouts.load(Ordering::SeqCst),
+            connection_limit_stops: c.connection_limit_stops.load(Ordering::SeqCst),
+            connection_deadline_stops: c.connection_deadline_stops.load(Ordering::SeqCst),
+            requests: c.requests.load(Ordering::SeqCst),
+            denied: c.denied.load(Ordering::SeqCst),
+            request_limit_denials: c.request_limit_denials.load(Ordering::SeqCst),
+            request_deadline_denials: c.request_deadline_denials.load(Ordering::SeqCst),
+            request_shape_denials: c.request_shape_denials.load(Ordering::SeqCst),
+            body_read_errors: c.body_read_errors.load(Ordering::SeqCst),
+            body_read_timeouts: c.body_read_timeouts.load(Ordering::SeqCst),
+            frame_denials: c.frame_denials.load(Ordering::SeqCst),
+            method_denials: c.method_denials.load(Ordering::SeqCst),
+            replies: c.replies.load(Ordering::SeqCst),
+            deadline_elapsed: Instant::now() >= self.deadline,
+            server_finished: c.server_finished.load(Ordering::SeqCst),
+            clamped: c.clamped.load(Ordering::SeqCst),
+        }
+    }
+    fn increment(&self, counter: &AtomicUsize) {
+        if counter
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+                (value < MAX_DIAGNOSTIC_COUNT).then(|| value + 1)
+            })
+            .is_err()
+        {
+            self.counters.clamped.store(true, Ordering::SeqCst);
+        }
+    }
+}
+struct ProviderTaskFinishedV1(SyntheticProviderDiagnosticHandleV1);
+impl Drop for ProviderTaskFinishedV1 {
+    fn drop(&mut self) {
+        self.0
+            .counters
+            .server_finished
+            .store(true, Ordering::SeqCst);
+    }
+}
 
 #[derive(Clone)]
 struct PublicState {
@@ -39,6 +165,7 @@ struct PublicState {
     deadline: Instant,
     expires_at_ms: u64,
     sink: SyntheticSinkControlV1,
+    diagnostics: SyntheticProviderDiagnosticHandleV1,
 }
 
 pub(super) struct SyntheticBornProviderV1 {
@@ -90,6 +217,10 @@ impl SyntheticBornProviderV1 {
             deadline,
             expires_at_ms,
             sink: SyntheticSinkControlV1::default(),
+            diagnostics: SyntheticProviderDiagnosticHandleV1 {
+                counters: Arc::new(ProviderCountersV1::default()),
+                deadline,
+            },
         };
         let application = Router::new()
             .route("/{*path}", post(public_read))
@@ -99,9 +230,12 @@ impl SyntheticBornProviderV1 {
             acceptor: TlsAcceptor::from(Arc::new(tls)),
             accepted: 0,
             deadline,
+            diagnostics: state.diagnostics.clone(),
         };
         let (shutdown, receive) = oneshot::channel();
+        let finished = ProviderTaskFinishedV1(state.diagnostics.clone());
         let server = tokio::spawn(async move {
+            let _finished = finished;
             let serve = axum::serve(listener, application).with_graceful_shutdown(async move {
                 tokio::select! {
                     _ = receive => {},
@@ -121,6 +255,12 @@ impl SyntheticBornProviderV1 {
             shutdown: Some(shutdown),
             server: Some(server),
         })
+    }
+    pub(super) fn diagnostic_handle_v1(&self) -> SyntheticProviderDiagnosticHandleV1 {
+        self.state.diagnostics.clone()
+    }
+    pub(super) fn diagnostics_snapshot_v1(&self) -> SyntheticProviderDiagnosticsV1 {
+        self.state.diagnostics.snapshot()
     }
     pub(super) fn endpoint(&self) -> &str {
         &self.endpoint
@@ -179,27 +319,50 @@ struct TlsListener {
     acceptor: TlsAcceptor,
     accepted: usize,
     deadline: Instant,
+    diagnostics: SyntheticProviderDiagnosticHandleV1,
 }
 impl axum::serve::Listener for TlsListener {
     type Io = tokio_rustls::server::TlsStream<tokio::net::TcpStream>;
     type Addr = std::net::SocketAddr;
     async fn accept(&mut self) -> (Self::Io, Self::Addr) {
         loop {
-            if self.accepted >= MAX_CONNECTIONS || Instant::now() >= self.deadline {
+            let connection_limit = self.accepted >= MAX_CONNECTIONS;
+            if connection_limit || Instant::now() >= self.deadline {
+                if connection_limit {
+                    self.diagnostics
+                        .increment(&self.diagnostics.counters.connection_limit_stops);
+                } else {
+                    self.diagnostics
+                        .increment(&self.diagnostics.counters.connection_deadline_stops);
+                }
                 return std::future::pending().await;
             }
             let Ok((socket, address)) = self.listener.accept().await else {
+                self.diagnostics
+                    .increment(&self.diagnostics.counters.accept_errors);
                 return std::future::pending().await;
             };
             self.accepted += 1;
+            self.diagnostics
+                .increment(&self.diagnostics.counters.accepted_connections);
             let until = self.deadline.min(Instant::now() + Duration::from_secs(2));
-            if let Ok(Ok(stream)) = tokio::time::timeout_at(
+            match tokio::time::timeout_at(
                 tokio::time::Instant::from_std(until),
                 self.acceptor.accept(socket),
             )
             .await
             {
-                return (stream, address);
+                Ok(Ok(stream)) => {
+                    self.diagnostics
+                        .increment(&self.diagnostics.counters.handshake_successes);
+                    return (stream, address);
+                }
+                Ok(Err(_)) => self
+                    .diagnostics
+                    .increment(&self.diagnostics.counters.handshake_errors),
+                Err(_) => self
+                    .diagnostics
+                    .increment(&self.diagnostics.counters.handshake_timeouts),
             }
         }
     }
@@ -210,16 +373,27 @@ impl axum::serve::Listener for TlsListener {
 
 async fn public_read(State(state): State<PublicState>, request: Request) -> Response<Body> {
     let count = state.requests.fetch_add(1, Ordering::SeqCst);
+    let d = &state.diagnostics;
+    d.increment(&d.counters.requests);
     let method = request
         .uri()
         .path()
         .strip_prefix(SERVICE)
         .map(str::to_owned);
-    if count >= MAX_REQUESTS
-        || Instant::now() >= state.deadline
+    let request_limit = count >= MAX_REQUESTS;
+    let request_expired = !request_limit && Instant::now() >= state.deadline;
+    if request_limit
+        || request_expired
         || request.uri().query().is_some()
         || request.headers().contains_key("authorization")
     {
+        if request_limit {
+            d.increment(&d.counters.request_limit_denials);
+        } else if request_expired {
+            d.increment(&d.counters.request_deadline_denials);
+        } else {
+            d.increment(&d.counters.request_shape_denials);
+        }
         return refused(&state);
     }
     let body_limit = if method.as_deref() == Some("SendTransaction") {
@@ -228,18 +402,27 @@ async fn public_read(State(state): State<PublicState>, request: Request) -> Resp
         4096
     };
     let read_deadline = state.deadline.min(Instant::now() + Duration::from_secs(2));
-    let Ok(Ok(bytes)) = tokio::time::timeout_at(
+    let bytes = match tokio::time::timeout_at(
         tokio::time::Instant::from_std(read_deadline),
         to_bytes(request.into_body(), body_limit),
     )
     .await
-    else {
-        return refused(&state);
+    {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(_)) => {
+            d.increment(&d.counters.body_read_errors);
+            return refused(&state);
+        }
+        Err(_) => {
+            d.increment(&d.counters.body_read_timeouts);
+            return refused(&state);
+        }
     };
     if bytes.len() < 5
         || bytes[0] != 0
         || u32::from_be_bytes(bytes[1..5].try_into().unwrap()) as usize != bytes.len() - 5
     {
+        d.increment(&d.counters.frame_denials);
         return refused(&state);
     }
     let data = &bytes[5..];
@@ -254,11 +437,14 @@ async fn public_read(State(state): State<PublicState>, request: Request) -> Resp
         reply(&state.material, method.as_deref().unwrap_or(""), data)
     };
     let Some(body) = reply else {
+        d.increment(&d.counters.method_denials);
         return refused(&state);
     };
     if Instant::now() >= state.deadline {
+        d.increment(&d.counters.request_deadline_denials);
         return refused(&state);
     }
+    d.increment(&d.counters.replies);
     Response::builder()
         .header("content-type", "application/grpc")
         .header("grpc-status", "0")
@@ -268,6 +454,9 @@ async fn public_read(State(state): State<PublicState>, request: Request) -> Resp
 }
 fn refused(state: &PublicState) -> Response<Body> {
     state.denied.fetch_add(1, Ordering::SeqCst);
+    state
+        .diagnostics
+        .increment(&state.diagnostics.counters.denied);
     Response::builder()
         .header("content-type", "application/grpc")
         .header("grpc-status", "12")
@@ -445,5 +634,45 @@ impl SyntheticBornProviderV1 {
         let material = SyntheticBornReceiverBlocksV1::reopen_public_original_v1(&saved.material)
             .map_err(|_| io::Error::other("fixture material"))?;
         Self::start_at(material, tls, deadline, &address.to_string()).await
+    }
+}
+
+#[cfg(test)]
+mod provider_diagnostic_tests {
+    use super::*;
+    #[test]
+    fn provider_diagnostics_are_bounded_inert_and_closed() {
+        let handle = SyntheticProviderDiagnosticHandleV1 {
+            counters: Arc::new(ProviderCountersV1::default()),
+            deadline: Instant::now() + Duration::from_secs(1),
+        };
+        let first = handle.snapshot();
+        assert!(first.validate());
+        assert_eq!(first.handshake_errors, 0);
+        assert!(!first.clamped && !first.server_finished);
+        handle
+            .counters
+            .handshake_errors
+            .store(MAX_DIAGNOSTIC_COUNT, Ordering::SeqCst);
+        handle.increment(&handle.counters.handshake_errors);
+        let clamped = handle.snapshot();
+        assert!(clamped.validate() && clamped.clamped);
+        assert_eq!(clamped.handshake_errors, MAX_DIAGNOSTIC_COUNT);
+        let bytes = serde_json::to_vec(&clamped).unwrap();
+        assert!(bytes.len() < 1024);
+        let decoded: SyntheticProviderDiagnosticsV1 = serde_json::from_slice(&bytes).unwrap();
+        assert!(decoded.validate());
+        let mut object = serde_json::to_value(&decoded).unwrap();
+        object
+            .as_object_mut()
+            .unwrap()
+            .insert("raw_error".into(), "forbidden".into());
+        assert!(serde_json::from_value::<SyntheticProviderDiagnosticsV1>(object).is_err());
+        let mut invalid = decoded;
+        invalid.requests = MAX_DIAGNOSTIC_COUNT + 1;
+        assert!(!invalid.validate());
+        let finished = ProviderTaskFinishedV1(handle.clone());
+        drop(finished);
+        assert!(handle.snapshot().server_finished);
     }
 }

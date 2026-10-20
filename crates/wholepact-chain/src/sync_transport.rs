@@ -1,5 +1,6 @@
 //! Public-only streaming transport for the maintained wallet scanner.
 use crate::{ChainError, RpcCacheObservation};
+use crate::transport_diagnostics::{Observer, FailureSite};
 use std::{
     future::Future,
     pin::Pin,
@@ -19,13 +20,19 @@ use tower::Service;
 pub struct PublicSyncChannel {
     channel: Channel,
     maximum_response_bytes: usize,
+    observer: Observer,
 }
 impl PublicSyncChannel {
     pub(crate) fn new(channel: Channel, maximum_response_bytes: usize) -> Self {
         Self {
             channel,
             maximum_response_bytes,
+            observer: Observer::default(),
         }
+    }
+    pub(crate) fn with_observer(mut self, observer: Observer) -> Self {
+        self.observer = observer;
+        self
     }
     pub fn cache_observation(
         method: &'static str,
@@ -41,7 +48,10 @@ impl Service<Request<Body>> for PublicSyncChannel {
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         self.channel
             .poll_ready(cx)
-            .map_err(|_| ChainError::TransportUnavailable)
+            .map_err(|_| {
+                self.observer.record(FailureSite::Readiness);
+                ChainError::TransportUnavailable
+            })
     }
     fn call(&mut self, request: Request<Body>) -> Self::Future {
         const PREFIX: &str = "/cash.z.wallet.sdk.rpc.CompactTxStreamer/";
@@ -66,11 +76,15 @@ impl Service<Request<Body>> for PublicSyncChannel {
         let method = request.uri().path().to_owned();
         let response = self.channel.call(request);
         let maximum = self.maximum_response_bytes;
+        let observer = self.observer.clone();
         Box::pin(async move {
             let response = response
                 .await
-                .map_err(|_| ChainError::TransportUnavailable)?;
-            crate::wire_guard::guard_response(response, maximum, &method).await
+                .map_err(|_| {
+                    observer.record(FailureSite::Request);
+                    ChainError::TransportUnavailable
+                })?;
+            crate::wire_guard::guard_response_observed(response, maximum, &method, &observer).await
         })
     }
 }

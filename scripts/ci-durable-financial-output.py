@@ -46,7 +46,7 @@ FIELDS = PROOFS | {
     "synthetic_backend_only", "public_chain_verified",
     "source_failure_boundary", "source_failure_outcome",
     "failed_child_inputs_completed", "failed_child_inputs_expected",
-    "private_fixed_primary", "source_diagnostic_withheld",
+    "private_fixed_primary", "source_diagnostic_withheld", "transport_failure",
 }
 
 
@@ -62,7 +62,7 @@ def unique_object(pairs):
 def validate(row):
     if not isinstance(row, dict) or set(row) != FIELDS:
         raise ValueError()
-    if type(row["schema"]) is not int or row["schema"] != 2:
+    if type(row["schema"]) is not int or row["schema"] != 3:
         raise ValueError()
     if row["result"] not in ("passed", "failed"):
         raise ValueError()
@@ -104,7 +104,26 @@ def validate(row):
     if primary is not None:
         _diagnostics.private_fixed_object(primary, _diagnostics.PRIVATE_FIXED_PRIMARY_FIELDS)
         _diagnostics.private_fixed_primary(primary)
-    observed = any(value is not None for value in (boundary, outcome, completed, expected, primary))
+    transport = row["transport_failure"]
+    if transport is not None:
+        if type(transport) is not dict or set(transport) != {"chain", "provider"}:
+            raise ValueError()
+        counters = {
+            "chain": set("connect_including_tls readiness request body_drain unary_status".split()),
+            "provider": set("accepted_connections accept_errors handshake_successes handshake_errors handshake_timeouts connection_limit_stops connection_deadline_stops requests denied request_limit_denials request_deadline_denials request_shape_denials body_read_errors body_read_timeouts frame_denials method_denials replies".split()),
+        }
+        for group, names in counters.items():
+            flags = {"deadline_elapsed", "server_finished", "clamped"} if group == "provider" else set()
+            value = transport[group]
+            if type(value) is not dict or set(value) != names | flags:
+                raise ValueError()
+            if any(type(value[name]) is not int or not 0 <= value[name] <= 1_000_000 for name in names):
+                raise ValueError()
+            if any(type(value[name]) is not bool for name in flags):
+                raise ValueError()
+        if row["first_failure"] != "OriginalPreparation":
+            raise ValueError()
+    observed = any(value is not None for value in (boundary, outcome, completed, expected, primary, transport))
     if observed and (
         row["result"] != "failed" or row["first_failure"] is None
         or row["root_cleanup"] != "closed_absent"

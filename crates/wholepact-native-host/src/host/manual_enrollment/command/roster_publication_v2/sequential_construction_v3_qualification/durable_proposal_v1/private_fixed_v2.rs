@@ -939,6 +939,10 @@ fn produce_fixed_inner(
     let mut session = at(B::PrivateWorkspaceCandidate, || {
         host.private_fixed_session_v2(&workspace, FIX_KEY, request, &cache)
     })?;
+    let transport_diagnostics = wholepact_chain::TransportDiagnostics::default();
+    if matches!(continuation, CompletedPreparationV2::FinancialContinuation) {
+        session.set_transport_diagnostics_v1(transport_diagnostics.clone())?;
+    }
     let accounts = session.reviewer_account_ids();
     if accounts.len() != 2 {
         return Err(Error::Authentication);
@@ -1138,7 +1142,18 @@ fn produce_fixed_inner(
         done(&original.signers, index)?;
         diagnostic::emit(B::PrivateWorkspaceCapture, Outcome::Complete);
     }
-    let fixed = runtime.block_on(session.finish_fixed_v2())?;
+    let fixed = match runtime.block_on(session.finish_fixed_v2()) {
+        Ok(fixed) => fixed,
+        Err(error) => {
+            if matches!(continuation, CompletedPreparationV2::FinancialContinuation) {
+                // Recording must never replace the actual failure or retry work.
+                let _ = super::delivery_admission_v2::durable_financial_dispatch_v1::record_financial_transport_failure_v1(
+                    transport_diagnostics.snapshot(), provider.diagnostics_snapshot_v1(),
+                );
+            }
+            return Err(error);
+        }
+    };
     if matches!(continuation, CompletedPreparationV2::DeliveryAdmission)
         || matches!(continuation, CompletedPreparationV2::FinancialContinuation)
     {

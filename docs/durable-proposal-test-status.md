@@ -1,8 +1,18 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-20, 12:49 UTC.
+Updated: 2026-10-20, 13:39 UTC.
 
 **CI44 passed the genuine two-owner delivery/admission, original-producer SIGKILL and fresh-process read-only original-history verification route. Financial signing/dispatch and public testnet settlement remain unqualified. This is a bounded admission/restart milestone, not a production release.**
+
+## CI50 failed during original wallet observation; closed transport evidence added
+
+[Run 39425669012](https://github.com/stanleykosi/pactloom/actions/runs/39425669012), qualification `50be4179aa3817380cfe019ee1ef4c8ca3cc1705`, implementation `eb0cf8da7d7e86197261287863e38df2943e0cc0`, failed after the real-peer gate, clean 13m50s release build and encrypted bootstrap passed. Native execution ran 13:09:31–13:11:55 UTC and stopped at input85/151 in `OriginalPreparation`: source `PrivateWorkspaceObserve / EngineDurableConstructionUnavailable`, private diagnostic `Chain / Checkpoint / WalletRosterAcquire / TransportUnavailable`. Producer reaping, group absence and root cleanup were verified. Reader execution and the financial retention correction were not reached.
+
+Source tracing places this at actual original wallet reobservation after the Host Prepare decision. The provider is an isolated loopback fixture, not a public service. Existing evidence cannot distinguish connection establishment, readiness, request or response-body failure, and does not establish an external outage or a payment-code cause.
+
+The diagnostic-only correction attaches an optional synthetic observer to the two actual captured-wallet adapters. Five closed counters record connection establishment including opaque TCP/proxy/TLS, readiness, request, body drain and unavailable unary-status boundaries. Unary status may count propagation of the same inner failure; the shared counters are cumulative observations, not unique request counts or independent causes. The original provider contributes17 finite counters and three flags covering accepts, handshakes, requests, denials, body reads and task state. Neither observer exposes endpoints, payloads, raw errors, credentials or transaction data.
+
+On an actual fixed-preparation failure, a bounded closed sidecar records these observations without replacing the original error. Schema3 projects it only after verified producer cleanup and root removal. Unknown fields, incorrect types, excess counts and invalid success/cleanup combinations are rejected. Ten pure parser/static cases passed; this is reporting evidence, not transport or payment execution. No timeout, retry, original expiry, authority, source policy or generic error semantics changed. The combined Chain/Host locked offline release no-run build passed in 8m40s. The next isolated financial qualification remains pending. No financial or public-testnet success is claimed.
 
 ## CI49 verified transport setup; bounded financial retention correction prepared
 

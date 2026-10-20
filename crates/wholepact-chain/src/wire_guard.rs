@@ -9,10 +9,20 @@ use tonic::{body::Body, codegen::http::Response};
 const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
 const MAX_COMPACT_ITEMS: usize = 8192;
 
+#[cfg(test)]
 pub(crate) async fn guard_response(
     response: Response<Body>,
     maximum_bytes: usize,
     method: &str,
+) -> Result<Response<Body>, ChainError> {
+    guard_response_observed(response, maximum_bytes, method, &Default::default()).await
+}
+
+pub(crate) async fn guard_response_observed(
+    response: Response<Body>,
+    maximum_bytes: usize,
+    method: &str,
+    observer: &crate::transport_diagnostics::Observer,
 ) -> Result<Response<Body>, ChainError> {
     let (parts, body) = response.into_parts();
     // Collect only the bounded raw response. No protobuf messages have been allocated.
@@ -30,6 +40,7 @@ pub(crate) async fn guard_response(
             if error.is::<http_body_util::LengthLimitError>() {
                 ChainError::ResourceLimit
             } else {
+                observer.record(crate::transport_diagnostics::FailureSite::BodyDrain);
                 ChainError::TransportUnavailable
             }
         })?;
@@ -233,6 +244,30 @@ mod tests {
             Err(ChainError::ResourceLimit)
         );
     }
+    #[cfg(feature = "synthetic-qualification")]
+    #[tokio::test]
+    async fn diagnostic_body_failure_is_site_grounded_not_resource_failure() {
+        use crate::transport_diagnostics::{Observer, TransportDiagnostics};
+        let diagnostics = TransportDiagnostics::default();
+        let observer = Observer { diagnostics: Some(diagnostics.clone()) };
+        let body = Full::new(tonic::codegen::Bytes::new())
+            .map_err(|never| -> std::io::Error { match never {} })
+            .with_trailers(async {
+                Some(Err(std::io::Error::from(std::io::ErrorKind::ConnectionReset)))
+            });
+        assert!(matches!(
+            guard_response_observed(Response::new(Body::new(body)), 100, "GetBlock", &observer).await,
+            Err(ChainError::TransportUnavailable)
+        ));
+        assert_eq!(diagnostics.snapshot().body_drain, 1);
+        let oversized = Full::new(tonic::codegen::Bytes::from(vec![0; 101]));
+        assert!(matches!(
+            guard_response_observed(Response::new(Body::new(oversized)), 100, "GetBlock", &observer).await,
+            Err(ChainError::ResourceLimit)
+        ));
+        assert_eq!(diagnostics.snapshot().body_drain, 1);
+    }
+
     #[tokio::test]
     async fn fragmented_raw_body_has_one_buffer_and_a_fragment_budget() {
         use tonic::codegen::{

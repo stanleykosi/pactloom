@@ -2,6 +2,7 @@
 //! Field numbers/wire types are unchanged; unused fields are intentionally skipped.
 use crate::{CacheStatus, ChainError, NetworkPolicy, RpcCacheObservation, proxy::ProxyRoute};
 use prost::Message;
+use crate::transport_diagnostics::{Observer, FailureSite};
 use tonic::{
     Request,
     transport::{ClientTlsConfig, Endpoint},
@@ -133,7 +134,7 @@ pub(crate) fn cache_observation(
 // Unary decoding bounds do not cap all bytes while draining trailers. Bound
 // the complete HTTP/2 body too, including its five-byte gRPC envelope.
 #[derive(Clone)]
-struct BoundedChannel(tonic::transport::Channel, usize);
+struct BoundedChannel(tonic::transport::Channel, usize, Observer);
 impl tower::Service<tonic::codegen::http::Request<tonic::body::Body>> for BoundedChannel {
     type Response = tonic::codegen::http::Response<tonic::body::Body>;
     type Error = tonic::Status;
@@ -146,17 +147,24 @@ impl tower::Service<tonic::codegen::http::Request<tonic::body::Body>> for Bounde
     ) -> std::task::Poll<Result<(), Self::Error>> {
         self.0
             .poll_ready(cx)
-            .map_err(|error| tonic::Status::from_error(Box::new(error)))
+            .map_err(|error| {
+                self.2.record(FailureSite::Readiness);
+                tonic::Status::from_error(Box::new(error))
+            })
     }
     fn call(&mut self, request: tonic::codegen::http::Request<tonic::body::Body>) -> Self::Future {
         let method = request.uri().path().to_owned();
         let response = self.0.call(request);
         let limit = self.1;
+        let observer = self.2.clone();
         Box::pin(async move {
             let response = response
                 .await
-                .map_err(|error| tonic::Status::from_error(Box::new(error)))?;
-            crate::wire_guard::guard_response(response, limit, &method)
+                .map_err(|error| {
+                    observer.record(FailureSite::Request);
+                    tonic::Status::from_error(Box::new(error))
+                })?;
+            crate::wire_guard::guard_response_observed(response, limit, &method, &observer)
                 .await
                 .map_err(|error| match error {
                     ChainError::ResourceLimit => {
@@ -175,6 +183,7 @@ pub(crate) struct Rpc {
     endpoint: Endpoint,
     policy: NetworkPolicy,
     route: ProxyRoute,
+    pub(crate) observer: Observer,
 }
 impl Rpc {
     pub(crate) fn public_read_route_v1(&self) -> crate::public_read_profile_v1::PublicReadRouteV1 {
@@ -187,10 +196,16 @@ impl Rpc {
         }
     }
 
+    async fn connect_observed(&self) -> Result<tonic::transport::Channel, ChainError> {
+        self.route.connect(&self.endpoint).await.map_err(|error| {
+            self.observer.record(FailureSite::ConnectIncludingTls);
+            error
+        })
+    }
     pub(crate) async fn connect(&self) -> Result<tonic::transport::Channel, ChainError> {
         tokio::time::timeout(
             self.policy.request_timeout,
-            self.route.connect(&self.endpoint),
+            self.connect_observed(),
         )
         .await
         .unwrap_or(Err(ChainError::Timeout))
@@ -208,6 +223,7 @@ impl Rpc {
             endpoint,
             policy,
             route,
+            observer: Observer::default(),
         })
     }
     #[cfg(any(test, feature = "synthetic-qualification"))]
@@ -218,6 +234,7 @@ impl Rpc {
                 .connect_timeout(policy.request_timeout),
             policy,
             route: ProxyRoute::Direct,
+            observer: Observer::default(),
         }
     }
     #[cfg(test)]
@@ -242,6 +259,7 @@ impl Rpc {
             endpoint,
             policy,
             route,
+            observer: Observer::default(),
         }
     }
     pub(crate) async fn call<Req, Resp>(
@@ -273,10 +291,11 @@ impl Rpc {
             let mut req = Request::new(request.clone());
             req.set_timeout(self.policy.request_timeout);
             let result = tokio::time::timeout(self.policy.request_timeout, async {
-                let channel = self.route.connect(&self.endpoint).await?;
+                let channel = self.connect_observed().await?;
                 let mut grpc = tonic::client::Grpc::new(BoundedChannel(
                     channel,
                     self.policy.maximum_response_bytes + 5,
+                    self.observer.clone(),
                 ))
                 .max_decoding_message_size(self.policy.maximum_response_bytes)
                 .max_encoding_message_size(1024);
@@ -297,7 +316,10 @@ impl Rpc {
                         tonic::Code::NotFound => ChainError::NotObserved,
                         tonic::Code::Cancelled => ChainError::ObservationInterrupted,
                         tonic::Code::DeadlineExceeded => ChainError::Timeout,
-                        tonic::Code::Unavailable => ChainError::TransportUnavailable,
+                        tonic::Code::Unavailable => {
+                            self.observer.record(FailureSite::UnaryStatus);
+                            ChainError::TransportUnavailable
+                        },
                         tonic::Code::ResourceExhausted => ChainError::ResourceLimit,
                         tonic::Code::Unimplemented => ChainError::UnsupportedCapability,
                         // Do not expose server-provided errors, metadata, or transaction bytes.
@@ -335,8 +357,8 @@ impl Rpc {
             return Err(ChainError::ResourceLimit);
         }
         tokio::time::timeout(self.policy.request_timeout, async {
-            let channel = self.route.connect(&self.endpoint).await?;
-            let mut grpc = tonic::client::Grpc::new(BoundedChannel(channel, 4096 + 5))
+            let channel = self.connect_observed().await?;
+            let mut grpc = tonic::client::Grpc::new(BoundedChannel(channel, 4096 + 5, self.observer.clone()))
                 .max_decoding_message_size(4096)
                 .max_encoding_message_size(2 * 1024 * 1024 + 16);
             grpc.ready()
@@ -361,7 +383,10 @@ impl Rpc {
                 .map_err(|s| match s.code() {
                     tonic::Code::Cancelled => ChainError::ObservationInterrupted,
                     tonic::Code::DeadlineExceeded => ChainError::Timeout,
-                    tonic::Code::Unavailable => ChainError::TransportUnavailable,
+                    tonic::Code::Unavailable => {
+                            self.observer.record(FailureSite::UnaryStatus);
+                            ChainError::TransportUnavailable
+                        },
                     tonic::Code::ResourceExhausted => ChainError::ResourceLimit,
                     tonic::Code::Unimplemented => ChainError::UnsupportedCapability,
                     _ => ChainError::BackendFailure {
