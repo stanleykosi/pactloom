@@ -3,17 +3,17 @@
 //! adoption or restored activation exists. All setup/enrollment mutation consumes
 //! the real native module's private one-shot decision and retained publication.
 use super::*;
-use crate::AuthorityJournal;
 use crate::journal::PendingBirthTargetInspection;
 use crate::native_witness_owner::{
     NativeEnrollmentDecision, NativePublicationLease, NativeSetupDecision,
 };
 use crate::pending_birth_signature::VerifiedPendingBirthOwnerSignature;
+use crate::AuthorityJournal;
 use ring::{
     hkdf,
     rand::{SecureRandom, SystemRandom},
 };
-use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
 use std::{
     fs,
     os::unix::fs::MetadataExt,
@@ -21,7 +21,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 use wholepact_storage_security::witness_namespace_fs::{
-    DirectoryStamp, InstallationFiles, InstallationProbe, read_existing_storage_key,
+    read_existing_storage_key, DirectoryStamp, InstallationFiles, InstallationProbe,
 };
 use wholepact_storage_security::{DatabaseFileIdentity, DatabaseKey, EncryptedConnection};
 use zeroize::Zeroizing;
@@ -1131,8 +1131,68 @@ pub(crate) fn open_born_history(input: NamespaceOpenInput) -> Result<AuthorityJo
     )
 }
 
-pub(crate) fn open_born_financial_history_v1(input: NamespaceOpenInput) -> Result<AuthorityJournal> {
+pub(crate) fn open_born_financial_history_v1(
+    input: NamespaceOpenInput,
+) -> Result<AuthorityJournal> {
     let core = open_namespace(&input)?;
+    open_financial_account_under_namespace_v1(core, &input.expected_account_id)
+}
+
+/// Open a bounded set of exact original accounts under ONE held installation
+/// owner. Reopening the same exclusive namespace for each route is forbidden:
+/// it conflicts with the first route's live directory/registry locks.
+pub(crate) fn open_born_financial_histories_v1(
+    inputs: &[NamespaceOpenInput],
+) -> Result<Vec<AuthorityJournal>> {
+    let first = inputs.first().ok_or(AuthorityError::Limit)?;
+    if inputs.len() > 2 {
+        return Err(AuthorityError::Limit);
+    }
+    let mut accounts = BTreeSet::new();
+    for input in inputs {
+        input.setup().validate()?;
+        hash(&input.expected_account_id)?;
+        if !accounts.insert(input.expected_account_id.as_str()) {
+            return Err(AuthorityError::Conflict);
+        }
+        if !same_financial_namespace_v1(first, input) {
+            return Err(AuthorityError::InvalidBinding);
+        }
+    }
+    let core = open_namespace(first)?;
+    let mut journals = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        journals.push(open_financial_account_under_namespace_v1(
+            Arc::clone(&core),
+            &input.expected_account_id,
+        )?);
+    }
+    core.check_current()?;
+    Ok(journals)
+}
+fn same_financial_namespace_v1(a: &NamespaceOpenInput, b: &NamespaceOpenInput) -> bool {
+    #[cfg(feature = "synthetic-qualification")]
+    if !match (&a.synthetic_installation, &b.synthetic_installation) {
+        (None, None) => true,
+        (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+        _ => false,
+    } {
+        return false;
+    }
+    a.endpoint == b.endpoint
+        && a.server_name == b.server_name
+        && a.witness_id == b.witness_id
+        && a.pinned_server_certificate_digest == b.pinned_server_certificate_digest
+        && a.owner_certificate_digest == b.owner_certificate_digest
+        && a.network_profile_id == b.network_profile_id
+        && a.storage_key_file == b.storage_key_file
+}
+fn open_financial_account_under_namespace_v1(
+    core: Arc<NamespaceCore>,
+    expected_account_id: &str,
+) -> Result<AuthorityJournal> {
+    hash(expected_account_id)?;
+    core.check_current()?;
     let (intent, expected_record) = {
         let c = core.registry.lock().map_err(|_| AuthorityError::Storage)?;
         let tx = Transaction::new_unchecked(c.connection(), TransactionBehavior::Deferred)?;
@@ -1140,7 +1200,7 @@ pub(crate) fn open_born_financial_history_v1(input: NamespaceOpenInput) -> Resul
         let mut selected = history
             .prepared
             .values()
-            .filter(|p| p.intent.identity().account_id == input.expected_account_id);
+            .filter(|p| p.intent.identity().account_id == expected_account_id);
         let prepared = selected.next().ok_or(AuthorityError::RecoveryRequired)?;
         if selected.next().is_some() {
             return Err(AuthorityError::CorruptHistory);
@@ -1351,5 +1411,88 @@ impl BornJournalOwner {
         self.check_mutation_current()?;
         identity.check_current(original.connection())?;
         Ok((inbox, outbox))
+    }
+}
+
+#[cfg(all(test, feature = "synthetic-qualification"))]
+mod shared_financial_namespace_lock_tests {
+    use super::*;
+
+    /// Storage-component regression only, not native permission or a completed
+    /// financial source. Real installation locks and encrypted files reproduce
+    /// the router's old second-open failure without opening a socket or GUI.
+    #[test]
+    fn one_installation_owner_holds_two_encrypted_account_handles() {
+        use wholepact_storage_security::witness_namespace_fs::EphemeralWitnessInstallation;
+        let installation = EphemeralWitnessInstallation::new().unwrap();
+        let files = installation
+            .probe()
+            .unwrap()
+            .create_once(&"a".repeat(64))
+            .unwrap();
+        let key_a = DatabaseKey::from_bytes([0x31; 32]);
+        let key_b = DatabaseKey::from_bytes([0x32; 32]);
+        let path_a = files.root_path().join("journals/account-a.wp");
+        let path_b = files.root_path().join("journals/account-b.wp");
+        for (path, key) in [(&path_a, &key_a), (&path_b, &key_b)] {
+            let c = wholepact_storage_security::create_encrypted(path, key).unwrap();
+            c.connection().execute_batch("CREATE TABLE retained_head(singleton INTEGER PRIMARY KEY, sequence INTEGER NOT NULL); INSERT INTO retained_head VALUES(1,0);").unwrap();
+        }
+        // Exactly the second independent namespace open used by the old router.
+        assert!(matches!(
+            installation.probe(),
+            Err(wholepact_storage_security::StorageSecurityError::UnsafePath)
+        ));
+        let owner = Arc::new(files);
+        let retained_a = Arc::clone(&owner);
+        let retained_b = Arc::clone(&owner);
+        let a = wholepact_storage_security::open_encrypted_quiescent(&path_a, &key_a).unwrap();
+        let b = wholepact_storage_security::open_encrypted_quiescent(&path_b, &key_b).unwrap();
+        assert!(wholepact_storage_security::open_encrypted_read_snapshot(&path_a, &key_b).is_err());
+        for c in [&a, &b] {
+            assert_eq!(
+                c.connection()
+                    .execute(
+                        "UPDATE retained_head SET sequence=1 WHERE singleton=1 AND sequence=0",
+                        []
+                    )
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                c.connection()
+                    .execute(
+                        "UPDATE retained_head SET sequence=2 WHERE singleton=1 AND sequence=0",
+                        []
+                    )
+                    .unwrap(),
+                0
+            );
+        }
+        retained_a.check_current().unwrap();
+        retained_b.check_current().unwrap();
+        drop(owner);
+        drop(a);
+        drop(retained_a);
+        assert!(
+            installation.probe().is_err(),
+            "second account still retains original exclusion"
+        );
+        drop(b);
+        drop(retained_b);
+        let reopened = installation.probe().unwrap().open_existing().unwrap();
+        reopened.check_current().unwrap();
+        for (path, key) in [(&path_a, &key_a), (&path_b, &key_b)] {
+            let c = wholepact_storage_security::open_encrypted_read_snapshot(path, key).unwrap();
+            let sequence: u64 = c
+                .connection()
+                .query_row(
+                    "SELECT sequence FROM retained_head WHERE singleton=1",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(sequence, 1);
+        }
     }
 }

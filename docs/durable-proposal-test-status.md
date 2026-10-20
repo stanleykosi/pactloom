@@ -1,8 +1,18 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-20, 09:49 UTC.
+Updated: 2026-10-20, 10:26 UTC.
 
 **CI44 passed the genuine two-owner delivery/admission, original-producer SIGKILL and fresh-process read-only original-history verification route. Financial signing/dispatch and public testnet settlement remain unqualified. This is a bounded admission/restart milestone, not a production release.**
+
+## CI46 localized a real shared-installation lock bug
+
+[Run 39403943993](https://github.com/stanleykosi/pactloom/actions/runs/39403943993), qualification `eb02a7719a45d34fb3e290180d6b36ea2c95e2cf`, implementation `217748fdc3d90fddc22c0871f714ffebe3e642cb`, exact tree `0f3376d5824698621b3f9b2bb9b692333156ed2c`, failed at 10:15:25 UTC. The clean release build passed in 9m19s, along with real-peer and encrypted bootstrap checks. Native execution ran 10:04:43–10:15:25. The closed report identified `SignatureAndIntake`, actual source `DeliveryHistoricalRead / AuthorityStorage`, and 120/147 completed inputs. Producer reap/group absence and closed/absent cleanup were verified; the reader never started.
+
+Source mapping places this failure at construction of the completed-dispatch two-account server, before the first new Host financial prompt. Both native signer loops must reach their AwaitingReturn state before this call; that is meaningful source-localized progress, not a completed signature-intake, final checkpoint, dispatch or public settlement result. The public completion flags remain unverified.
+
+The pair constructor independently opened the same original Witness installation twice. The first account retained its NamespaceCore and exclusive root/journals locks; the second open failed the existing exclusive probe and mapped UnsafePath to AuthorityStorage. The correction opens one actual audited NamespaceCore and derives two individually authenticated account journal owners under that shared locked core. Exact setup equality, unique bounded account selection, complete per-account birth/financial history checks, inventory checks and exclusive locks remain intact. No storage/security gate is relaxed.
+
+The new local regression exercises actual encrypted account files and installation locks: second independent probe refusal, two handles under one owner, wrong-key refusal, independent CAS/stale-CAS, lock retention until the final owner drops, then exact persisted-file reopen. This is storage-component evidence, not fabricated original birth/source authority. The combined Authority/Host release build passed in 7m37s and this exact encrypted lock regression passed once. The actual configured pair and complete financial lifecycle still require isolated native requalification.
 
 ## CI45 failed in original preparation; causal diagnostic was not projected
 
