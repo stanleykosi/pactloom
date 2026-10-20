@@ -1,8 +1,18 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-20, 14:48 UTC.
+Updated: 2026-10-20, 15:03 UTC.
 
 **CI44 passed the genuine two-owner delivery/admission, original-producer SIGKILL and fresh-process read-only original-history verification route. Financial signing/dispatch and public testnet settlement remain unqualified. This is a bounded admission/restart milestone, not a production release.**
+
+## CI53 identified a connection-handle oracle error; real RPC oracle prepared
+
+[Run 39442895868](https://github.com/stanleykosi/pactloom/actions/runs/39442895868), qualification `b6422255ff1e9431fb514b7d51d74f8cd98e8c27`, implementation `2fcd9eef38d86d9c76d3a97d2ee31964bc3a8cf0`, failed at 14:55:31 UTC in the early TLS mechanism gate. Origin checks and the clean 1m42s Chain build passed. The retained failure names `http_connect_inline / expect_inline_failure`: connection construction returned a Channel, while the server recorded one TLS timeout, zero completed TLS handshakes, one closed socket and zero HTTP requests. The proxy had one header and target connection. Full Host compilation and financial execution did not run; failure cleanup remains unverified.
+
+Source inspection explains why a Channel is not an adequate remote-readiness oracle. A client can finish its local TLS state from buffered server messages after the server has expired waiting for the client's final messages. HTTP/2 client construction does not await server SETTINGS, and tonic buffer readiness does not prove a working remote service. The production adapter already requires the actual unary response; this result does not justify changing production transport or TLS validation.
+
+The test-only correction observes server handshake counters before the blocked caller resumes the inline connector. It physically closes both scheduling listeners after their first accepted connection so reconnect cannot heal the reference. The old inline path must miss the original server deadline and, if it returns a Channel, fail an actual readiness/unary probe. The independently driven path must complete server TLS during caller blockage and then one real unary response. Both use the same original absolute case deadline, with explicit expiry checks before and after the probe, unchanged two-second server limit and unchanged 2.5-second controlled blocker. Exact connection counts and joined cleanup remain required. A closed probe outcome is added to the existing failure projection.
+
+Independent source review cleared the two-file test/projector correction. Twenty-four controlled projection subprocess cases and ten additional probe-enum validation cases passed without sockets. The Chain-only release no-run compile passed in 18.39 seconds. The corrected isolated mechanism and subsequent financial lifecycle remain pending. No production driver, policy, retry or timeout change is included.
 
 ## CI52 stopped in the early TLS mechanism gate; failure projection corrected
 
