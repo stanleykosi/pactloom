@@ -1301,7 +1301,7 @@ fn private_workspace_stage_v1(
             _ => None,
         })),
     )?;
-    if matches!(stage, PrivateWorkspaceStageV1::DeliveryProducer | PrivateWorkspaceStageV1::DeliveryReader) {
+    if matches!(stage, PrivateWorkspaceStageV1::DeliveryProducer | PrivateWorkspaceStageV1::DeliveryReader | PrivateWorkspaceStageV1::FinancialProducer | PrivateWorkspaceStageV1::FinancialReader) {
         transcript.enable_delivery_first_failure();
     }
     // This creates a temporary terminal, not an OS trust root or permission

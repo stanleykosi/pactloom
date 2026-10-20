@@ -1,8 +1,18 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-20, 09:17 UTC.
+Updated: 2026-10-20, 09:49 UTC.
 
 **CI44 passed the genuine two-owner delivery/admission, original-producer SIGKILL and fresh-process read-only original-history verification route. Financial signing/dispatch and public testnet settlement remain unqualified. This is a bounded admission/restart milestone, not a production release.**
+
+## CI45 failed in original preparation; causal diagnostic was not projected
+
+[Run 39400402492](https://github.com/stanleykosi/pactloom/actions/runs/39400402492), qualification `485bd132fd475d10fbad6702510461024ea60511`, implementation `aacf73947d39d516dc716411dfc2c21f5cb54910`, exact tree `7b08011b9d8c3b57e5a0c93d65b368fb16b90943`, failed at 09:39:18 UTC. Real-peer precheck, clean 10m36s release build and encrypted bootstrap passed. The native producer ran approximately 114 seconds; reader did not start. Producer reap/group absence, closed/absent root cleanup and empty runtime removal were verified.
+
+The only bounded phase was `OriginalPreparation / unverified`. Neither financial continuation, signature intake, completed checkpoint nor dispatch was verified. False prefix-verification flags are unverified outcomes, not proof of source corruption. The original runtime transcript was not published and cannot honestly be reconstructed from the public result.
+
+Source audit identified an evidence-loss bug: the parent enabled the maintained closed first-failure decoder only for old delivery producer/reader roles, not new financial roles. It also omitted captured finite preparation diagnostics/input progress from the financial summary. The correction explicitly enables those roles and projects only existing closed boundary/outcome enums, bounded input counts and the strict five-enum private-fixed primary, after verified child reaping/group absence and cleanup. Schema2 remains bounded to4096 bytes and excludes raw child text or private records. The projection passed10 controlled subprocess cases, including malformed, duplicated, oversized, incomplete and cleanup-unverified output refusal. These checks validate reporting, not payments.
+
+No causal payment-code defect has yet been established, and no timeout, authority, deadline, source or payment policy was changed. The next isolated run is an instrumented diagnostic integration to expose the exact preparation refusal; it is not a claimed payment fix or an unchanged rerun.
 
 ## Explicit saved-transaction financial continuation: first native qualification pending
 
