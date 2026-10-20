@@ -244,7 +244,11 @@ impl OriginalFinancialOwnerV1<'_> {
     {
         self.check_effect_source()?;
         native.check_current()?;
-        intent.check_current_v1(access, source, proof, material)?;
+        intent.check_current_v1(access, source, proof, material).map_err(|error| {
+            #[cfg(all(test,feature="synthetic-born-joined-qualification",feature="durable-proposal"))]
+            crate::host::financial_diagnostics_v1::engine_current(&error);
+            error
+        })?;
         let request = intent.requests().get(index).ok_or(Error::Invalid)?;
         if &request.context != native.context()
             || request.host_reviewed_at_ms != native.reviewed_at_ms()
@@ -268,8 +272,14 @@ impl OriginalFinancialOwnerV1<'_> {
         client.authorize_completed_dispatch_v1_checked_until(request, deadline, || {
             self.check_effect_source().map_err(|_| wholepact_authority::AuthorityError::Permission)?;
             native.check_current().map_err(|_| wholepact_authority::AuthorityError::Permission)?;
-            intent.check_current_v1(access, source, proof, material).map_err(|_| wholepact_authority::AuthorityError::Permission)
+            intent.check_current_v1(access, source, proof, material).map_err(|error| {
+                #[cfg(all(test,feature="synthetic-born-joined-qualification",feature="durable-proposal"))]
+                crate::host::financial_diagnostics_v1::engine_current(&error);
+                wholepact_authority::AuthorityError::Permission
+            })
         }).map_err(|error| {
+            #[cfg(all(test,feature="synthetic-born-joined-qualification",feature="durable-proposal"))]
+            crate::host::financial_diagnostics_v1::authority_current(&error);
             #[cfg(all(test, feature = "synthetic-born-joined-qualification"))]
             report_financial_authority_failure_v1(false, &error);
             let _ = error;
@@ -301,6 +311,8 @@ impl OriginalFinancialOwnerV1<'_> {
             self.check_read_source().map_err(|_| wholepact_authority::AuthorityError::Permission)?;
             approval.check().map_err(|_| wholepact_authority::AuthorityError::Permission)
         }).map_err(|error| {
+            #[cfg(all(test,feature="synthetic-born-joined-qualification",feature="durable-proposal"))]
+            crate::host::financial_diagnostics_v1::authority_current(&error);
             #[cfg(all(test, feature = "synthetic-born-joined-qualification"))]
             report_financial_authority_failure_v1(true, &error);
             let _ = error;
@@ -336,7 +348,11 @@ impl OriginalFinancialOwnerV1<'_> {
         material: &dyn wholepact_engine::durable_construction_v1::LocalDurableMaterialConsentV1,
         approval: &HistoricalApproval,
     ) -> Result<()> {
-        intent.check_current_v1(access, source, proof, material)?;
+        intent.check_current_v1(access, source, proof, material).map_err(|error| {
+            #[cfg(all(test,feature="synthetic-born-joined-qualification",feature="durable-proposal"))]
+            crate::host::financial_diagnostics_v1::engine_current(&error);
+            error
+        })?;
         let original = intent.requests().get(index).ok_or(Error::Invalid)?;
         let continuation = original
             .context
@@ -395,6 +411,8 @@ impl OriginalFinancialOwnerV1<'_> {
             },
         );
         if !matches!(outcome, Err(wholepact_authority::AuthorityError::StaleHead)) {
+            #[cfg(all(test,feature="synthetic-born-joined-qualification",feature="durable-proposal"))]
+            if let Err(error)=&outcome {crate::host::financial_diagnostics_v1::authority_current(error);}
             return Err(Error::Receipt("SYNTHETIC_STALE_PROBE_UNEXPECTED_OR_UNCERTAIN: preserve originals, no retry or send".into()));
         }
         let after = self.financial_history_v1(&original.account_id, &continuation, approval)?;
@@ -407,7 +425,11 @@ impl OriginalFinancialOwnerV1<'_> {
         {
             return Err(Error::Authentication);
         }
-        intent.check_current_v1(access, source, proof, material)?;
+        intent.check_current_v1(access, source, proof, material).map_err(|error| {
+            #[cfg(all(test,feature="synthetic-born-joined-qualification",feature="durable-proposal"))]
+            crate::host::financial_diagnostics_v1::engine_current(&error);
+            error
+        })?;
         Ok(())
     }
 }

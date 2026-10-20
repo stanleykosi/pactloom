@@ -18,6 +18,101 @@ use std::{
     time::{Duration, Instant},
 };
 use wholepact_protocol::durable_proposal_v1::FixedProposalIdentityV1;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FinancialResultStageV1 {
+    InstalledProviderVerification,
+    HostPreparedWrite,
+    ReadyWait,
+    ReadyMatch,
+    FetchWrite,
+    HeldRead,
+    EvidenceValidation,
+    PreviewMatch,
+    HeldMatch,
+    CurrentLock,
+    CurrentPeer,
+    CurrentProviderVerification,
+    CurrentWrite,
+    CurrentRead,
+    CurrentMatch,
+    FinishWrite,
+    FinishRead,
+    FinishMatch,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FinancialResultErrorClassV1 {
+    Binding,
+    Conflict,
+    Missing,
+    Uncertain,
+    Limit,
+    Permission,
+    RecoveryRequired,
+    CompleteOriginRecoveryUnavailable,
+    Verification,
+    SignerOriginUnavailable,
+    Journal,
+    Authority,
+    Wallet,
+    Ipc,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FinancialResultDiagnosticV1 {
+    pub stage: FinancialResultStageV1,
+    pub error_class: FinancialResultErrorClassV1,
+    pub frame_cause: Option<wholepact_signer_origin::framing::FrameReadCause>,
+}
+#[derive(Debug)]
+pub struct FinancialResultObservedErrorV1 {
+    pub error: BridgeError,
+    pub diagnostic: Option<FinancialResultDiagnosticV1>,
+}
+struct FinancialResultObserverV1 {
+    stage: std::cell::Cell<FinancialResultStageV1>,
+    frame: std::cell::Cell<Option<wholepact_signer_origin::framing::FrameReadCause>>,
+}
+impl FinancialResultObserverV1 {
+    fn new(stage: FinancialResultStageV1) -> Self {
+        Self {
+            stage: std::cell::Cell::new(stage),
+            frame: std::cell::Cell::new(None),
+        }
+    }
+    fn at(&self, stage: FinancialResultStageV1) {
+        self.stage.set(stage);
+        self.frame.set(None);
+    }
+    fn diagnostic(&self, error: &BridgeError) -> FinancialResultDiagnosticV1 {
+        use FinancialResultErrorClassV1 as C;
+        let error_class = match error {
+            BridgeError::Binding => C::Binding,
+            BridgeError::Conflict => C::Conflict,
+            BridgeError::Missing => C::Missing,
+            BridgeError::Uncertain => C::Uncertain,
+            BridgeError::Limit => C::Limit,
+            BridgeError::Permission => C::Permission,
+            BridgeError::RecoveryRequired => C::RecoveryRequired,
+            BridgeError::CompleteOriginRecoveryUnavailable => C::CompleteOriginRecoveryUnavailable,
+            BridgeError::Verification => C::Verification,
+            BridgeError::SignerOriginUnavailable => C::SignerOriginUnavailable,
+            BridgeError::Journal(_) => C::Journal,
+            BridgeError::Authority(_) => C::Authority,
+            BridgeError::Wallet(_) => C::Wallet,
+            BridgeError::Ipc => C::Ipc,
+        };
+        FinancialResultDiagnosticV1 {
+            stage: self.stage.get(),
+            error_class,
+            frame_cause: self.frame.get(),
+        }
+    }
+    fn error(&self, error: BridgeError) -> FinancialResultObservedErrorV1 {
+        FinancialResultObservedErrorV1 {
+            diagnostic: Some(self.diagnostic(&error)),
+            error,
+        }
+    }
+}
 const MAX_FRAME: usize = 512 * 1024;
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -107,16 +202,28 @@ fn read<T: serde::de::DeserializeOwned>(
     deadline: Instant,
     check: &dyn Fn() -> Result<()>,
 ) -> Result<T> {
-    let bytes = zeroize::Zeroizing::new(
-        wholepact_signer_origin::framing::read_frame_capped_checked_until(
-            stream,
-            peer,
-            MAX_FRAME,
-            deadline,
-            || check().map_err(|_| wholepact_signer_origin::Error::Permission),
-        )
-        .map_err(|_| BridgeError::Ipc)?,
-    );
+    read_observed(stream, peer, deadline, check, None)
+}
+fn read_observed<T: serde::de::DeserializeOwned>(
+    stream: &UnixStream,
+    peer: &PeerProcess,
+    deadline: Instant,
+    check: &dyn Fn() -> Result<()>,
+    observer: Option<&FinancialResultObserverV1>,
+) -> Result<T> {
+    let bytes = wholepact_signer_origin::framing::read_frame_capped_checked_observed_until(
+        stream,
+        peer,
+        MAX_FRAME,
+        deadline,
+        || check().map_err(|_| wholepact_signer_origin::Error::Permission),
+    )
+    .map_err(|failure| {
+        if let Some(observer) = observer {
+            observer.frame.set(Some(failure.cause));
+        }
+        BridgeError::Ipc
+    })?;
     wholepact_core::strict_json::parse_typed_json_with_byte_limit(&bytes, MAX_FRAME)
         .map_err(|_| BridgeError::Binding)
 }
@@ -128,14 +235,28 @@ fn read_setup<T: serde::de::DeserializeOwned>(
     deadline: Instant,
     check: &dyn Fn() -> Result<()>,
 ) -> Result<T> {
-    let bytes = wholepact_signer_origin::framing::read_setup_frame_capped_checked_until(
+    read_setup_observed(stream, peer, deadline, check, None)
+}
+fn read_setup_observed<T: serde::de::DeserializeOwned>(
+    stream: &UnixStream,
+    peer: &PeerProcess,
+    deadline: Instant,
+    check: &dyn Fn() -> Result<()>,
+    observer: Option<&FinancialResultObserverV1>,
+) -> Result<T> {
+    let bytes = wholepact_signer_origin::framing::read_setup_frame_capped_checked_observed_until(
         stream,
         peer,
         MAX_FRAME,
         deadline,
         || check().map_err(|_| wholepact_signer_origin::Error::Permission),
     )
-    .map_err(|_| BridgeError::Ipc)?;
+    .map_err(|failure| {
+        if let Some(observer) = observer {
+            observer.frame.set(Some(failure.cause));
+        }
+        BridgeError::Ipc
+    })?;
     wholepact_core::strict_json::parse_typed_json_with_byte_limit(&bytes, MAX_FRAME)
         .map_err(|_| BridgeError::Binding)
 }
@@ -414,6 +535,7 @@ impl ApprovedFinancialReturnV1 {
 /// Owns the actual installed trust anchor and checked kernel peer, not an old
 /// signing lease or a caller-asserted delivery record. No Clone/serde constructor.
 pub struct AuthenticatedFinancialResultLeaseV1 {
+    diagnostic: Mutex<Option<FinancialResultDiagnosticV1>>,
     provider: crate::authority_bridge::provider::InstalledSignerProvider,
     peer: PeerProcess,
     stream: Mutex<UnixStream>,
@@ -433,6 +555,7 @@ impl AuthenticatedFinancialResultLeaseV1 {
             .receive()
     }
     pub fn check_current(&self) -> Result<()> {
+        let observer = FinancialResultObserverV1::new(FinancialResultStageV1::CurrentPeer);
         let deadline = self.deadline.min(Instant::now() + Duration::from_secs(2));
         let current = || {
             if self.failed.load(Ordering::Acquire) || Instant::now() >= deadline {
@@ -442,13 +565,17 @@ impl AuthenticatedFinancialResultLeaseV1 {
         };
         let result = (|| {
             current()?;
+            observer.at(FinancialResultStageV1::CurrentLock);
             let mut stream =
                 crate::authority_bridge::born_ipc_io::lock_until(&self.stream, deadline, &current)?;
+            observer.at(FinancialResultStageV1::CurrentProviderVerification);
             let actual = self.provider.verify_server(&stream)?;
+            observer.at(FinancialResultStageV1::CurrentPeer);
             self.peer
                 .same_live_process(&actual)
                 .map_err(|_| BridgeError::Permission)?;
             let nonce = hex::encode(crate::vault::random::<32>().map_err(|_| BridgeError::Ipc)?);
+            observer.at(FinancialResultStageV1::CurrentWrite);
             write(
                 &mut stream,
                 &Command::Check {
@@ -457,7 +584,10 @@ impl AuthenticatedFinancialResultLeaseV1 {
                 deadline,
                 &current,
             )?;
-            match read(&stream, &self.peer, deadline, &current)? {
+            observer.at(FinancialResultStageV1::CurrentRead);
+            let response = read_observed(&stream, &self.peer, deadline, &current, Some(&observer))?;
+            observer.at(FinancialResultStageV1::CurrentMatch);
+            match response {
                 Response::Current {
                     lease_id,
                     nonce: actual,
@@ -465,15 +595,43 @@ impl AuthenticatedFinancialResultLeaseV1 {
                 _ => Err(BridgeError::Permission),
             }
         })();
-        if result.is_err() {
+        if let Err(ref error) = result {
+            if let Ok(mut diagnostic) = self.diagnostic.lock() {
+                if diagnostic.is_none() {
+                    *diagnostic = Some(observer.diagnostic(error));
+                }
+            }
             self.failed.store(true, Ordering::Release);
         }
         result
     }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub fn last_failure_v1(&self) -> Option<FinancialResultDiagnosticV1> {
+        self.diagnostic.lock().ok().and_then(|v| *v)
+    }
     /// Call only after the consumer's durable exact-intake commit. A missing
     /// reply is uncertain acknowledgement, never permission to sign again.
     pub fn finish(self) -> Result<()> {
-        self.check_current()?;
+        self.finish_kernel(&FinancialResultObserverV1::new(
+            FinancialResultStageV1::CurrentPeer,
+        ))
+    }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub fn finish_observed_v1(self) -> std::result::Result<(), FinancialResultObservedErrorV1> {
+        let observer = FinancialResultObserverV1::new(FinancialResultStageV1::CurrentPeer);
+        self.finish_kernel(&observer)
+            .map_err(|error| observer.error(error))
+    }
+    fn finish_kernel(self, observer: &FinancialResultObserverV1) -> Result<()> {
+        if let Err(error) = self.check_current() {
+            if let Ok(value) = self.diagnostic.lock() {
+                if let Some(diagnostic) = *value {
+                    observer.stage.set(diagnostic.stage);
+                    observer.frame.set(diagnostic.frame_cause);
+                }
+            }
+            return Err(error);
+        }
         let deadline = self.deadline.min(Instant::now() + Duration::from_secs(2));
         let mut stream = self.stream.into_inner().map_err(|_| BridgeError::Ipc)?;
         let current = || {
@@ -482,8 +640,12 @@ impl AuthenticatedFinancialResultLeaseV1 {
             }
             self.peer.check_alive().map_err(|_| BridgeError::Permission)
         };
+        observer.at(FinancialResultStageV1::FinishWrite);
         write(&mut stream, &Command::Finish, deadline, &current)?;
-        match read(&stream, &self.peer, deadline, &current)? {
+        observer.at(FinancialResultStageV1::FinishRead);
+        let response = read_observed(&stream, &self.peer, deadline, &current, Some(observer))?;
+        observer.at(FinancialResultStageV1::FinishMatch);
+        match response {
             Response::Finished => Ok(()),
             _ => Err(BridgeError::Uncertain),
         }
@@ -662,13 +824,33 @@ impl PreparedFinancialResultReceiverV1 {
     }
     /// Host preflight must finish before asking the Signer to make ReturnExact.
     /// No saved preview itself grants receive, key use, or dispatch permission.
-    pub fn receive(mut self) -> Result<AuthenticatedFinancialResultLeaseV1> {
+    pub fn receive(self) -> Result<AuthenticatedFinancialResultLeaseV1> {
+        self.receive_kernel(&FinancialResultObserverV1::new(
+            FinancialResultStageV1::InstalledProviderVerification,
+        ))
+    }
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    pub fn receive_observed_v1(
+        self,
+    ) -> std::result::Result<AuthenticatedFinancialResultLeaseV1, FinancialResultObservedErrorV1>
+    {
+        let observer =
+            FinancialResultObserverV1::new(FinancialResultStageV1::InstalledProviderVerification);
+        self.receive_kernel(&observer)
+            .map_err(|error| observer.error(error))
+    }
+    fn receive_kernel(
+        mut self,
+        observer: &FinancialResultObserverV1,
+    ) -> Result<AuthenticatedFinancialResultLeaseV1> {
         let deadline = self.setup_deadline.min(self.original_deadline);
         let current = || self.peer.check_alive().map_err(|_| BridgeError::Permission);
+        observer.at(FinancialResultStageV1::InstalledProviderVerification);
         let actual = self.provider.verify_server(&self.stream)?;
         self.peer
             .same_live_process(&actual)
             .map_err(|_| BridgeError::Permission)?;
+        observer.at(FinancialResultStageV1::HostPreparedWrite);
         write(
             &mut self.stream,
             &Command::HostPrepared {
@@ -677,16 +859,20 @@ impl PreparedFinancialResultReceiverV1 {
             deadline.min(Instant::now() + Duration::from_secs(120)),
             &current,
         )?;
-        let Response::Ready { lease_id: ready } =
-            read_setup(&self.stream, &self.peer, deadline, &current)?
-        else {
+        observer.at(FinancialResultStageV1::ReadyWait);
+        let response =
+            read_setup_observed(&self.stream, &self.peer, deadline, &current, Some(observer))?;
+        observer.at(FinancialResultStageV1::ReadyMatch);
+        let Response::Ready { lease_id: ready } = response else {
             return Err(BridgeError::Permission);
         };
+        observer.at(FinancialResultStageV1::ReadyMatch);
         crate::authority_bridge::born_history_ipc::hash(&ready)?;
         let started = Instant::now();
         let deadline = self
             .original_deadline
             .min(started + Duration::from_secs(120));
+        observer.at(FinancialResultStageV1::FetchWrite);
         write(
             &mut self.stream,
             &Command::Fetch {
@@ -695,24 +881,30 @@ impl PreparedFinancialResultReceiverV1 {
             deadline,
             &current,
         )?;
+        observer.at(FinancialResultStageV1::HeldRead);
+        let response = read_observed(&self.stream, &self.peer, deadline, &current, Some(observer))?;
+        observer.at(FinancialResultStageV1::HeldMatch);
         let Response::Held {
             lease_id,
             remaining_ms,
             evidence,
-        } = read(&self.stream, &self.peer, deadline, &current)?
+        } = response
         else {
             return Err(BridgeError::Permission);
         };
+        observer.at(FinancialResultStageV1::EvidenceValidation);
         evidence.validate()?;
-        if lease_id != ready
-            || remaining_ms == 0
-            || remaining_ms > 120_000
-            || PreviewData::from_evidence(&evidence) != self.preview.data
-        {
+        observer.at(FinancialResultStageV1::HeldMatch);
+        if lease_id != ready || remaining_ms == 0 || remaining_ms > 120_000 {
+            return Err(BridgeError::Binding);
+        }
+        observer.at(FinancialResultStageV1::PreviewMatch);
+        if PreviewData::from_evidence(&evidence) != self.preview.data {
             return Err(BridgeError::Binding);
         }
         let deadline = deadline.min(started + Duration::from_millis(remaining_ms));
         let lease = AuthenticatedFinancialResultLeaseV1 {
+            diagnostic: Mutex::new(None),
             provider: self.provider,
             peer: self.peer,
             stream: Mutex::new(self.stream),
@@ -721,7 +913,15 @@ impl PreparedFinancialResultReceiverV1 {
             evidence: *evidence,
             deadline,
         };
-        lease.check_current()?;
+        if let Err(error) = lease.check_current() {
+            if let Ok(value) = lease.diagnostic.lock() {
+                if let Some(diagnostic) = *value {
+                    observer.stage.set(diagnostic.stage);
+                    observer.frame.set(diagnostic.frame_cause);
+                }
+            }
+            return Err(error);
+        }
         Ok(lease)
     }
 }
@@ -786,4 +986,32 @@ fn signature_digest(outbox: &str, participant_index: usize) -> Result<String> {
         hash.update(bytes.as_slice());
     }
     Ok(hex::encode(hash.finalize()))
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+    #[test]
+    fn finite_observer_preserves_error_and_frame_cause() {
+        let observer = FinancialResultObserverV1::new(FinancialResultStageV1::HeldRead);
+        observer.frame.set(Some(
+            wholepact_signer_origin::framing::FrameReadCause::Deadline,
+        ));
+        let observed = observer.error(BridgeError::Ipc);
+        assert!(matches!(observed.error, BridgeError::Ipc));
+        assert_eq!(
+            observed.diagnostic,
+            Some(FinancialResultDiagnosticV1 {
+                stage: FinancialResultStageV1::HeldRead,
+                error_class: FinancialResultErrorClassV1::Ipc,
+                frame_cause: Some(wholepact_signer_origin::framing::FrameReadCause::Deadline),
+            })
+        );
+        observer.at(FinancialResultStageV1::EvidenceValidation);
+        assert_eq!(observer.diagnostic(&BridgeError::Binding).frame_cause, None);
+        assert_eq!(
+            observer.diagnostic(&BridgeError::Binding).error_class,
+            FinancialResultErrorClassV1::Binding
+        );
+    }
 }

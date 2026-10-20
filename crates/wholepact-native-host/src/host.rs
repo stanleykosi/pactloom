@@ -1,3 +1,5 @@
+#[cfg(all(test, feature = "synthetic-born-joined-qualification", feature = "durable-proposal"))]
+pub(crate) mod financial_diagnostics_v1;
 // Diagnostic projection exists only in the explicit synthetic test build. In
 // every other build this macro expands to the original expression, evaluated once.
 macro_rules! roster_trace {

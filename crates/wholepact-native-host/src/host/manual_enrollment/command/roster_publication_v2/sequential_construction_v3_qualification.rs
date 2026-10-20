@@ -126,11 +126,9 @@ fn finite_prompt_rendering_preserves_exact_terminal_purpose() {
         assert_eq!(rendered.as_str(), expected);
         assert!(!source.contains(rendered.as_str()));
         assert!(format!("prefix {expected} suffix").contains(rendered.as_str()));
-        assert!(
-            !expected
-                .replace("Exact purpose", "Other purpose")
-                .contains(rendered.as_str())
-        );
+        assert!(!expected
+            .replace("Exact purpose", "Other purpose")
+            .contains(rendered.as_str()));
     }
     let ascii = "ASCII purpose: ~!09, keep spaces and newline\n";
     assert_eq!(
@@ -837,12 +835,18 @@ fn synthetic_foreground_child() {
         durable_proposal_v1::private_fixed_v2::produce_delivery_child(terminal).unwrap();
         return;
     }
-    #[cfg(all(feature = "durable-proposal",feature = "synthetic-born-joined-qualification"))]
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "synthetic-born-joined-qualification"
+    ))]
     if stage == "durable-financial-produce-v1" {
         durable_proposal_v1::private_fixed_v2::produce_financial_child(terminal).unwrap();
         return;
     }
-    #[cfg(all(feature = "durable-proposal",feature = "synthetic-born-joined-qualification"))]
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "synthetic-born-joined-qualification"
+    ))]
     if stage == "durable-financial-dispatch-v1" {
         durable_proposal_v1::delivery_admission_v2::durable_financial_dispatch_v1::read_financial_child(terminal).unwrap();
         return;
@@ -989,14 +993,12 @@ fn synthetic_foreground_child() {
             Ok(())
         })
         .unwrap();
-    assert!(
-        approval
-            .effect(&mut || {
-                effects += 1;
-                Ok(())
-            })
-            .is_err()
-    );
+    assert!(approval
+        .effect(&mut || {
+            effects += 1;
+            Ok(())
+        })
+        .is_err());
     assert_eq!(effects, 1);
     host.authority.fence.revoke().unwrap();
     drop(host);
@@ -1211,7 +1213,10 @@ impl PrivateWorkspaceStageV1 {
         }
     }
     fn producer(self) -> bool {
-        matches!(self, Self::Producer | Self::DeliveryProducer | Self::FinancialProducer)
+        matches!(
+            self,
+            Self::Producer | Self::DeliveryProducer | Self::FinancialProducer
+        )
     }
     fn marker(self, tail: &str, complete: bool, terminal: bool) -> std::io::Result<bool> {
         match self {
@@ -1242,6 +1247,7 @@ impl PrivateWorkspaceStageV1 {
     feature = "synthetic-born-joined-qualification"
 ))]
 struct PrivateWorkspaceStageResultV1 {
+    financial_diagnostic: Option<crate::host::financial_diagnostics_v1::FinancialDiagnosticV1>,
     delivery_first_failure: Option<safe_diagnostics_v1::DeliveryFailure>,
     private_fixed_diagnostic:
         Option<crate::host::durable_private_workspace_v1::PrivateFixedDiagnosticV1>,
@@ -1285,7 +1291,8 @@ fn private_workspace_stage_v1(
     deadline: Instant,
     monotonic_cutoff_ns: u64,
 ) -> std::io::Result<PrivateWorkspaceStageResultV1> {
-    let needs_original_tls = stage.producer() || matches!(stage, PrivateWorkspaceStageV1::FinancialReader);
+    let needs_original_tls =
+        stage.producer() || matches!(stage, PrivateWorkspaceStageV1::FinancialReader);
     if needs_original_tls != tls_material.is_some() {
         let _ = root.keep();
         return Err(std::io::Error::other(
@@ -1301,7 +1308,13 @@ fn private_workspace_stage_v1(
             _ => None,
         })),
     )?;
-    if matches!(stage, PrivateWorkspaceStageV1::DeliveryProducer | PrivateWorkspaceStageV1::DeliveryReader | PrivateWorkspaceStageV1::FinancialProducer | PrivateWorkspaceStageV1::FinancialReader) {
+    if matches!(
+        stage,
+        PrivateWorkspaceStageV1::DeliveryProducer
+            | PrivateWorkspaceStageV1::DeliveryReader
+            | PrivateWorkspaceStageV1::FinancialProducer
+            | PrivateWorkspaceStageV1::FinancialReader
+    ) {
         transcript.enable_delivery_first_failure();
     }
     // This creates a temporary terminal, not an OS trust root or permission
@@ -1645,7 +1658,13 @@ fn private_workspace_stage_v1(
     } else {
         None
     };
+    let financial_diagnostic = if process.verified() {
+        transcript.financial_diagnostic().cloned()
+    } else {
+        None
+    };
     Ok(PrivateWorkspaceStageResultV1 {
+        financial_diagnostic,
         delivery_first_failure,
         private_fixed_diagnostic,
         diagnostic_withheld,

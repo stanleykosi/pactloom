@@ -46,8 +46,24 @@ FIELDS = PROOFS | {
     "synthetic_backend_only", "public_chain_verified",
     "source_failure_boundary", "source_failure_outcome",
     "failed_child_inputs_completed", "failed_child_inputs_expected",
-    "private_fixed_primary", "source_diagnostic_withheld", "transport_failure",
+    "private_fixed_primary", "source_diagnostic_withheld", "transport_failure", "financial_diagnostic",
 }
+
+READER_BOUNDARIES = frozenset("CompletedReopen DispatchAdmission PartialAdmissionReconciliation SavedTransactionDispatch ReaderReap".split())
+FINANCIAL_STAGES = frozenset("LifecycleHarness InputValidation OriginalSource ReadConsent EffectConsent SourcePreparation RetentionContexts ContinuationBinding ResultPreview SignedRetentionApproval IntakeSetupApproval RetentionFreeze ResultReceive AuthenticatedIntake ResultFinishAcknowledgement UnionRetention TransactionCheckpoint CompletedVerification DispatchReview PairIntentRetention RetainedPairRead AdmissionFirst AdmissionSecond AdmissionReceiptRetention DispatchReverification BackendContext SavedTransactionHandoff DispatchOutcome FinancialHistory AuditSummary StaleRefusal Currentness ResultInstalledProviderVerification ResultHostPreparedWrite ResultReadyWait ResultFetchWrite ResultHeldRead ResultEvidenceValidation ResultPreviewMatch ResultCurrentProviderVerification ResultCurrentWrite ResultCurrentRead ResultCurrentMatch ResultFinishWrite ResultFinishRead ResultCurrentLock ResultCurrentPeer ResultReadyMatch ResultHeldMatch ResultFinishMatch".split())
+FINANCIAL_COMPONENTS = frozenset("Authority Host Engine SignerBridge Chain".split())
+FINANCIAL_COMMIT_STATES = frozenset("NotEstablished IntakeCommitted OutcomeUncertain".split())
+FINANCIAL_ERRORS = frozenset("StaleHead Inactive PolicyDenied BudgetExceeded InputReserved ObligationReserved CorruptHistory SessionRequired SessionPending Permission Binding Conflict Missing RecoveryRequired Verification Storage ResourceLimit Expired Uncertain Unsupported Authentication Terminal Invalid Locked Ipc Journal Authority Wallet SignerOriginUnavailable DurableProposalConflict DurableProposalRecoveryRequired SignaturesIncomplete RetentionDenied RetentionConflict OriginalIntentMissing RetentionRecoveryRequired SubmissionUnresolved FinancialOutcomeReconciliation RevisionConflict Timeout Interrupted TransportUnavailable WrongNetwork WrongBranch StaleChain ContradictoryChain BackendFailure ClockUnavailable Other FrameUnclassified FrameDeadline FrameEof FrameCredentialsMissing FrameCredentialsMismatch FrameAncillaryRejected FrameTruncated FramePeerNotLive FrameCurrentCheck FrameIo FrameLimit FrameInvalid FrameInvalidBudget".split())
+
+def validate_financial_diagnostic(record):
+    if type(record) is not dict or set(record) != {"schema", "stage", "component", "error_class", "commit_state"}:
+        raise ValueError()
+    if type(record["schema"]) is not int or record["schema"] != 1:
+        raise ValueError()
+    for key, values in (("stage", FINANCIAL_STAGES), ("component", FINANCIAL_COMPONENTS), ("error_class", FINANCIAL_ERRORS), ("commit_state", FINANCIAL_COMMIT_STATES)):
+        if type(record[key]) is not str or record[key] not in values:
+            raise ValueError()
+    return record
 
 
 def unique_object(pairs):
@@ -62,7 +78,7 @@ def unique_object(pairs):
 def validate(row):
     if not isinstance(row, dict) or set(row) != FIELDS:
         raise ValueError()
-    if type(row["schema"]) is not int or row["schema"] != 3:
+    if type(row["schema"]) is not int or row["schema"] != 4:
         raise ValueError()
     if row["result"] not in ("passed", "failed"):
         raise ValueError()
@@ -123,12 +139,17 @@ def validate(row):
                 raise ValueError()
         if row["first_failure"] != "OriginalPreparation":
             raise ValueError()
-    observed = any(value is not None for value in (boundary, outcome, completed, expected, primary, transport))
+    financial = row["financial_diagnostic"]
+    if financial is not None:
+        validate_financial_diagnostic(financial)
+    observed = any(value is not None for value in (boundary, outcome, completed, expected, primary, transport, financial))
     if observed and (
         row["result"] != "failed" or row["first_failure"] is None
         or row["root_cleanup"] != "closed_absent"
         or not row["producer_reaped"] or not row["producer_group_absent"]
     ):
+        raise ValueError()
+    if observed and row["first_failure"] in READER_BOUNDARIES and (not row["reader_reaped"] or not row["reader_group_absent"]):
         raise ValueError()
     if row["result"] == "passed":
         if (
