@@ -1,8 +1,20 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-20, 11:13 UTC.
+Updated: 2026-10-20, 12:03 UTC.
 
 **CI44 passed the genuine two-owner delivery/admission, original-producer SIGKILL and fresh-process read-only original-history verification route. Financial signing/dispatch and public testnet settlement remain unqualified. This is a bounded admission/restart milestone, not a production release.**
+
+## CI48 reached protected-result preparation; setup/frame budget mismatch corrected
+
+[Run 39413649832](https://github.com/stanleykosi/pactloom/actions/runs/39413649832), qualification `73bafadc7dffa899375672e20890689fbd8a1d27`, implementation `560cd72f55b9eef87d6a3f38061f3e09235eaba0`, exact tree `8ec72cc630e0c404fe36553428de9b4e57c75b40`, failed at 11:38:33 UTC. The clean release build passed in 9m39s, along with origin and encrypted bootstrap checks. Native execution ran 11:27:19–11:38:33. The report reached 127/147 inputs, `SignatureAndIntake`, source `DeliveryNativeAdmission / BridgeIpc`; producer cleanup was verified and reader did not start. Source mapping places it after both financial history reads and bind reviews, at preparation of the first protected signature-result receiver.
+
+The setup path supplied a deadline up to900 seconds to a maintained frame reader that rejects any remaining budget over120 seconds before reading. This deterministic parameter-contract mismatch explains the immediate IPC refusal. The correction keeps one fixed bounded setup deadline, waits for readability without consuming bytes while checking source/peer liveness, then invokes the unchanged recvmsg frame reader once with a maximum120-second transfer deadline. It does not restart partial frames or renew the setup ceiling. Setup writes are also capped at120 seconds; actual live-action/read/finish limits remain unchanged.
+
+A new exact isolated origin suite covers real kernel peers and setup success, unchanged generic-budget rejection, idle/partial-frame original ceiling, idle/partial revocation and peer exit. All child ownership and directory cleanup must be verified before pass output. The existing nine action-framing cases remain a regression gate for the shared module. Both suites run before the expensive Host build; no local socket/native execution occurred.
+
+The corrected minimal origin compile passed in5.27s and resumed Host release compile passed in6m16s. An earlier cloud exec connection interruption left its Host result unverified; that incomplete attempt is not counted as passed. The next qualification mode is intentionally `origin` only to establish the new real transport integration quickly.
+
+A separate pre-run source audit found another deterministic downstream issue: the legacy retention consent permits only one exact signed scope, whereas union verification requires both participant subsets and the union. A financial-only bounded three-context/three-scope composition is being prepared without weakening legacy scope-drift refusal. Full financial qualification remains blocked until that separate correction is reviewed and compiled. No full payment, restart-dispatch or public-chain settlement pass is claimed.
 
 ## CI47 passed the prior lock boundary; dispatcher fixture certificate was untrusted
 

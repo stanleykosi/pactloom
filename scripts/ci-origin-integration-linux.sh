@@ -55,56 +55,63 @@ assert len(set(candidates))==1
 exe=candidates[0]
 assert exe.is_file() and exe.is_relative_to(pathlib.Path(sys.argv[2]).resolve(strict=True))
 print('CI_ORIGIN_IMAGE sha256='+hashlib.sha256(exe.read_bytes()).hexdigest(), flush=True)
-name='client::framing_integration_tests::production_frames_real_peer_contract'
-listed=subprocess.run([str(exe),'--ignored','--exact',name,'--list'],capture_output=True,timeout=10)
-assert listed.returncode==0 and not listed.stderr
-assert [line for line in listed.stdout.decode().splitlines() if line.endswith(': test')]==[name+': test']
-cases=['Success','Large','Eof','Deadline','MissingCredentials','WrongPeer','PeerExit','Cancel','BrokenPipe']
-receivers={'Frame','ReadClosed','Unclassified','Deadline','Eof','CredentialsMissing','CredentialsMismatch','AncillaryRejected','Truncated','PeerNotLive','CurrentCheck','Io','FrameLimit','InvalidFrame','InvalidBudget','Root','Bind','Passcred','Nonblocking','Image','Spawn','Accept','Timeout','KernelPeerUnavailable','Start','Shutdown','Wait','WaitDeadline','Release'}
-writers={'Sent','Idle','Closed','BrokenPipe','Reset','Timeout','Budget','OtherFailure','Unobserved'}
-pattern=re.compile(r'ORIGIN_INTEGRATION attempt=(\d+) case=([A-Za-z]+) receiver=([A-Za-z]+) writer=([A-Za-z]+) elapsed_ms=(\d+) cleanup=(true|false) passed=(true|false)')
-# One known direct process. Never emit panic output, arbitrary stderr or paths.
-# Each test owns/reaps its direct child. If the outer deadline fires, no runtime
-# cleanup claim is made; disposable runner teardown remains responsible.
-process=subprocess.Popen([str(exe),'--ignored','--exact',name,'--test-threads=1','--nocapture'],stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
-selector=selectors.DefaultSelector()
-selector.register(process.stdout,selectors.EVENT_READ)
-raw=bytearray(); pending=bytearray(); rows=[]; deadline=time.monotonic()+45
-failure=False
-try:
-    while selector.get_map():
-        if time.monotonic()>=deadline: raise TimeoutError()
-        for key,_ in selector.select(min(0.1,max(0,deadline-time.monotonic()))):
-            chunk=os.read(key.fileobj.fileno(),4096)
-            if not chunk:
-                selector.unregister(key.fileobj); continue
-            raw.extend(chunk); pending.extend(chunk)
-            if len(raw)>65536 or len(pending)>8192: raise ValueError()
-            while b'\n' in pending:
-                line,_,remaining=pending.partition(b'\n');pending=bytearray(remaining)
-                # libtest can prefix the first uncaptured line with its test name.
-                offset=line.find(b'ORIGIN_INTEGRATION ')
-                if offset<0: continue
-                match=pattern.fullmatch(line[offset:].decode('ascii'))
-                if not match: raise ValueError()
-                attempt,case,receiver,writer,elapsed,cleanup,passed=match.groups()
-                if int(attempt)!=len(rows) or len(rows)>=len(cases) or case!=cases[len(rows)] or receiver not in receivers or writer not in writers or int(elapsed)>45000: raise ValueError()
-                rows.append(match.groups())
-                print('CI_'+match.group(0),flush=True)
-    status=process.wait(timeout=max(0.1,deadline-time.monotonic()))
-    ok=status==0 and len(rows)==9 and all(row[-2:]==('true','true') for row in rows)
-    ok=ok and b'test result: ok. 1 passed; 0 failed;' in raw
-except Exception:
-    failure=True; ok=False
-    # Popen retains exact direct-child ownership; poll reaps before a possible
-    # kill. No process-group signal or cleanup of uncertain runtime paths.
-    if process.poll() is None:
-        process.kill()
-        try: process.wait(timeout=5)
-        except Exception: pass
-finally:
-    selector.close()
-    if process.stdout: process.stdout.close()
-print('CI_ORIGIN_RESULT passed='+str(ok).lower()+' native_payment_verified=false full_product_verified=false outer_failure='+str(failure).lower(),flush=True)
-if not ok: sys.exit(1)
+def run_suite(suite,name,prefix,cases):
+    listed=subprocess.run([str(exe),'--ignored','--exact',name,'--list'],capture_output=True,timeout=10)
+    assert listed.returncode==0 and not listed.stderr
+    assert [line for line in listed.stdout.decode().splitlines() if line.endswith(': test')]==[name+': test']
+    receivers={'Frame','ReadClosed','Unclassified','Deadline','Eof','CredentialsMissing','CredentialsMismatch','AncillaryRejected','Truncated','PeerNotLive','CurrentCheck','Io','FrameLimit','InvalidFrame','InvalidBudget','Root','Bind','Passcred','Nonblocking','Image','Spawn','Accept','Timeout','KernelPeerUnavailable','Start','Shutdown','Wait','WaitDeadline','Release'}
+    writers={'Sent','Idle','Closed','BrokenPipe','Reset','Timeout','Budget','OtherFailure','Unobserved'}
+    pattern=re.compile(re.escape(prefix)+r' attempt=(\d+) case=([A-Za-z]+) receiver=([A-Za-z]+) writer=([A-Za-z]+) elapsed_ms=(\d+) cleanup=(true|false) passed=(true|false)')
+    # One known direct process. Never emit panic output, arbitrary stderr or paths.
+    # Each test owns/reaps its direct child. If the outer deadline fires, no runtime
+    # cleanup claim is made; disposable runner teardown remains responsible.
+    process=subprocess.Popen([str(exe),'--ignored','--exact',name,'--test-threads=1','--nocapture'],stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+    selector=selectors.DefaultSelector()
+    selector.register(process.stdout,selectors.EVENT_READ)
+    raw=bytearray(); pending=bytearray(); rows=[]; deadline=time.monotonic()+45
+    failure=False
+    try:
+        while selector.get_map():
+            if time.monotonic()>=deadline: raise TimeoutError()
+            for key,_ in selector.select(min(0.1,max(0,deadline-time.monotonic()))):
+                chunk=os.read(key.fileobj.fileno(),4096)
+                if not chunk:
+                    selector.unregister(key.fileobj); continue
+                raw.extend(chunk); pending.extend(chunk)
+                if len(raw)>65536 or len(pending)>8192: raise ValueError()
+                while b'\n' in pending:
+                    line,_,remaining=pending.partition(b'\n');pending=bytearray(remaining)
+                    # libtest can prefix the first uncaptured line with its test name.
+                    offset=line.find((prefix+' ').encode('ascii'))
+                    if offset<0: continue
+                    match=pattern.fullmatch(line[offset:].decode('ascii'))
+                    if not match: raise ValueError()
+                    attempt,case,receiver,writer,elapsed,cleanup,passed=match.groups()
+                    if int(attempt)!=len(rows) or len(rows)>=len(cases) or case!=cases[len(rows)] or receiver not in receivers or writer not in writers or int(elapsed)>45000: raise ValueError()
+                    rows.append(match.groups())
+                    print('CI_'+match.group(0),flush=True)
+        status=process.wait(timeout=max(0.1,deadline-time.monotonic()))
+        ok=status==0 and len(rows)==len(cases) and all(row[-2:]==('true','true') for row in rows)
+        ok=ok and b'test result: ok. 1 passed; 0 failed;' in raw
+    except Exception:
+        failure=True; ok=False
+        # Popen retains exact direct-child ownership; poll reaps before a possible
+        # kill. No process-group signal or cleanup of uncertain runtime paths.
+        if process.poll() is None:
+            process.kill()
+            try: process.wait(timeout=5)
+            except Exception: pass
+    finally:
+        selector.close()
+        if process.stdout: process.stdout.close()
+    first_unverified=next((row[1] for row in rows if row[-2:]!=('true','true')), cases[len(rows)] if len(rows)<len(cases) else 'none')
+    print('CI_ORIGIN_SUITE suite='+suite+' passed='+str(ok).lower()+' first_unverified_case='+first_unverified+' native_payment_verified=false outer_failure='+str(failure).lower(),flush=True)
+    if not ok: sys.exit(1)
+
+run_suite('action', 'client::framing_integration_tests::production_frames_real_peer_contract',
+          'ORIGIN_INTEGRATION', ['Success','Large','Eof','Deadline','MissingCredentials','WrongPeer','PeerExit','Cancel','BrokenPipe'])
+run_suite('inert_setup', 'framing::setup_integration_tests::financial_setup_real_peer_contract',
+          'ORIGIN_SETUP_INTEGRATION', ['SetupSuccess','GenericBudget','IdleCeiling','PartialCeiling','IdleRevocation','PartialRevocation','PeerExit'])
+print('CI_ORIGIN_RESULT passed=true native_payment_verified=false full_product_verified=false',flush=True)
+
 PY

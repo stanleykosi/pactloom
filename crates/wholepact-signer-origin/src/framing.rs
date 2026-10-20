@@ -1,7 +1,7 @@
 //! Exact extracted Linux authenticated frame receiver. Each recvmsg chunk must
 //! carry the same kernel sender identity; inherited descriptors cannot substitute
 //! another process. No serialized credential is trusted.
-use crate::{native_peer::PeerProcess, Error, Result};
+use crate::{Error, Result, native_peer::PeerProcess};
 use std::{
     os::{fd::AsRawFd, unix::net::UnixStream},
     time::{Duration, Instant},
@@ -110,6 +110,68 @@ pub fn read_frame_capped_checked_until(
 ) -> Result<Zeroizing<Vec<u8>>> {
     read_frame_capped_checked_observed_until(stream, peer, max_wire_bytes, deadline, check_current)
         .map_err(|observed| observed.error)
+}
+
+/// Wait only for inert setup metadata, without consuming any socket bytes.
+/// Once readable, perform exactly one unchanged authenticated action-budget
+/// frame read. A failed or partial transfer is never retried or renewed here.
+pub fn read_setup_frame_capped_checked_until(
+    stream: &UnixStream,
+    peer: &PeerProcess,
+    max_wire_bytes: usize,
+    setup_deadline: Instant,
+    mut check_current: impl FnMut() -> Result<()>,
+) -> Result<Zeroizing<Vec<u8>>> {
+    if max_wire_bytes == 0 || max_wire_bytes > MAX_FRAME {
+        return Err(Error::Limit);
+    }
+    if remaining_at(setup_deadline, Instant::now())? > Duration::from_secs(900) {
+        return Err(Error::InvalidData);
+    }
+    loop {
+        check_current()?;
+        peer.check_alive()?;
+        let remaining = remaining_at(setup_deadline, Instant::now())?;
+        let wait_ms = remaining.as_millis().clamp(1, 100) as libc::c_int;
+        let mut descriptor = libc::pollfd {
+            fd: stream.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one initialized pollfd borrowed only for this bounded call.
+        let ready = unsafe { libc::poll(&mut descriptor, 1, wait_ms) };
+        let poll_error = (ready < 0).then(std::io::Error::last_os_error);
+        check_current()?;
+        peer.check_alive()?;
+        remaining_at(setup_deadline, Instant::now())?;
+        if let Some(error) = poll_error {
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(Error::Io(error));
+        }
+        if ready == 0 {
+            continue;
+        }
+        if descriptor.revents & (libc::POLLERR | libc::POLLNVAL | libc::POLLHUP) != 0 {
+            return Err(Error::Authentication);
+        }
+        if descriptor.revents & libc::POLLIN != 0 {
+            let transfer_deadline = setup_transfer_deadline(setup_deadline, Instant::now())?;
+            return read_frame_capped_checked_until(
+                stream,
+                peer,
+                max_wire_bytes,
+                transfer_deadline,
+                check_current,
+            );
+        }
+        return Err(Error::Authentication);
+    }
+}
+fn setup_transfer_deadline(setup_deadline: Instant, now: Instant) -> Result<Instant> {
+    remaining_at(setup_deadline, now)?;
+    Ok(setup_deadline.min(now + Duration::from_secs(120)))
 }
 
 /// Same production receive kernel and checks as the legacy entry point. The
@@ -428,4 +490,21 @@ mod bounded_tests {
         assert!(remaining_at(deadline, deadline).is_err());
         assert!(remaining_at(deadline, deadline + Duration::from_nanos(1)).is_err());
     }
+    #[test]
+    fn setup_transfer_preserves_original_ceiling_and_action_budget() {
+        let now = Instant::now();
+        let original = now + Duration::from_secs(900);
+        assert_eq!(
+            setup_transfer_deadline(original, now).unwrap(),
+            now + Duration::from_secs(120)
+        );
+        let late = now + Duration::from_secs(850);
+        assert_eq!(setup_transfer_deadline(original, late).unwrap(), original);
+        assert!(setup_transfer_deadline(original, original).is_err());
+        assert!(setup_transfer_deadline(original, original + Duration::from_nanos(1)).is_err());
+    }
 }
+
+#[cfg(test)]
+#[path = "framing_setup_integration_tests.rs"]
+mod setup_integration_tests;
