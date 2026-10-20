@@ -680,6 +680,21 @@ impl<'source> PrivateDurableFinancialCoordinatorV1<'source> {
     }
 }
 impl<'owner, 'source> PreparedPrivateFinancialV1<'owner, 'source> {
+    /// Enumerate only the original two source contexts and their exact union.
+    /// This reads no signatures and grants no retention or financial effect.
+    pub fn financial_retention_contexts_v1(
+        &self,
+        access: &Access,
+        consent: &dyn LocalPrivateDurableFinancialConsentV1,
+        proof: &dyn LocalProofConsent,
+        material: &dyn LocalDurableMaterialConsentV1,
+    ) -> Result<crate::FinancialRetentionContextsV1> {
+        self.check_current_v1(access, consent, proof, material)?;
+        let contexts = self.kernel.retention_contexts()?;
+        self.check_current_v1(access, consent, proof, material)?;
+        Ok(contexts)
+    }
+
     pub fn original_financial_valid_until_ms_v1(&self) -> Result<u64> {
         let records = &self.kernel.binding().continuations;
         if records.len() != 2 {

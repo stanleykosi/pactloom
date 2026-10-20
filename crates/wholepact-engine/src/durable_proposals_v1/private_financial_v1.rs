@@ -985,3 +985,50 @@ impl PreparedFinancialKernelV1 {
         )
     }
 }
+
+/// The exactly enumerated contexts of the two original retained source subsets
+/// and their union. This is inert review metadata, not signature verification or
+/// retention consent. Protocol still verifies each original row and computes its
+/// exact signature-set digest before the Host can freeze a full-scope approval.
+pub struct FinancialRetentionContextsV1 {
+    source_contexts: [SignedCandidateContext; 2],
+    union_context: SignedCandidateContext,
+}
+impl FinancialRetentionContextsV1 {
+    pub fn source_contexts(&self) -> &[SignedCandidateContext; 2] {
+        &self.source_contexts
+    }
+    pub fn union_context(&self) -> &SignedCandidateContext {
+        &self.union_context
+    }
+}
+impl PreparedFinancialKernelV1 {
+    pub(crate) fn retention_contexts(&self) -> Result<FinancialRetentionContextsV1> {
+        validate_stored(&self.envelope)?;
+        if self.stored.intakes.len() != 2 || self.binding.continuations.len() != 2 {
+            return Err(incomplete());
+        }
+        let union_context = union_context(&self.stored, &self.checkpoint)?;
+        let mut contexts = Vec::with_capacity(2);
+        let mut provenances = BTreeSet::new();
+        let mut results = BTreeSet::new();
+        for (account, intake) in &self.stored.intakes {
+            financial_owner(&self.binding, account, intake)?;
+            let provenance = &intake.reference.delivery_provenance_digest;
+            if !digest(provenance)
+                || provenance == &union_context.delivery_provenance_digest
+                || !provenances.insert(provenance)
+                || !results.insert(&intake.reference.result_id)
+            {
+                return Err(damaged());
+            }
+            let mut context = union_context.clone();
+            context.delivery_provenance_digest = provenance.clone();
+            contexts.push(context);
+        }
+        Ok(FinancialRetentionContextsV1 {
+            source_contexts: contexts.try_into().map_err(|_| damaged())?,
+            union_context,
+        })
+    }
+}

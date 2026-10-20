@@ -634,9 +634,7 @@ fn financial_producer_inputs() -> Vec<Input<'static>> {
     inputs.push(review(
         "Combine only the two exact retained original signature subsets",
     ));
-    inputs.push(review(
-        "Approve retain exact usable signatures for this EXACT scope?",
-    ));
+    financial_three_scope_retention_inputs(&mut inputs);
     inputs.push(review(
         "Approve extract/read and retain exact complete transaction for this EXACT scope?",
     ));
@@ -683,12 +681,21 @@ pub(in crate::host::manual_enrollment::command::roster_publication_v2::sequentia
     Ok(count == 1)
 }
 
+// Exact production order: both source scopes sorted by retained result ID,
+// then their retained union. Each actual prompt includes its full exact scope.
+// This helper is never used by singleton result intake.
+fn financial_three_scope_retention_inputs(inputs: &mut Vec<Input<'static>>) {
+    for _ in 0..3 {
+        inputs.push(review(
+            "Approve retain exact usable signatures for this EXACT scope?",
+        ));
+    }
+}
+
 fn financial_audit_inputs(inputs: &mut Vec<Input<'static>>) {
     financial_owner_input(inputs);
     inputs.push(review("Read and verify the exact completed original financial transaction and retained dispatch lineage"));
-    inputs.push(review(
-        "Approve retain exact usable signatures for this EXACT scope?",
-    ));
+    financial_three_scope_retention_inputs(inputs);
     inputs.push(review(
         "Approve extract/read and retain exact complete transaction for this EXACT scope?",
     ));
@@ -1012,9 +1019,7 @@ pub(in crate::host::manual_enrollment::command::roster_publication_v2::sequentia
 fn financial_dispatch_inputs(inputs: &mut Vec<Input<'static>>) {
     financial_owner_input(inputs);
     inputs.push(review("Read and mathematically verify only the saved original financial union and completed transaction"));
-    inputs.push(review(
-        "Approve retain exact usable signatures for this EXACT scope?",
-    ));
+    financial_three_scope_retention_inputs(inputs);
     inputs.push(review(
         "Approve extract/read and retain exact complete transaction for this EXACT scope?",
     ));
@@ -1053,6 +1058,31 @@ fn financial_reader_inputs() -> Vec<Input<'static>> {
         financial_history_inputs(&mut inputs);
     }
     inputs
+}
+
+#[test]
+fn financial_retention_prompt_contract_is_exact_and_bounded() {
+    let signed = "Approve retain exact usable signatures for this EXACT scope?";
+    let producer = financial_producer_inputs();
+    let reader = financial_reader_inputs();
+    assert_eq!(producer.len(), 151);
+    assert_eq!(reader.len(), 58);
+    let signed_count = |inputs: &[Input<'_>]| {
+        inputs.iter().filter(|input|
+        matches!(input, Input::ExactReview { detail, approve: true } if *detail == signed)
+    ).count()
+    };
+    // Two singleton intakes plus completion and completed audit's exact triples.
+    assert_eq!(signed_count(&producer), 8);
+    // Three completed audits plus two explicit dispatch attempts, no intake.
+    assert_eq!(signed_count(&reader), 15);
+    for make in [financial_audit_inputs, financial_dispatch_inputs] {
+        let mut inputs = Vec::new();
+        make(&mut inputs);
+        assert!(inputs[2..5].iter().all(|input|
+            matches!(input, Input::ExactReview { detail, approve: true } if *detail == signed)
+        ));
+    }
 }
 
 #[test]

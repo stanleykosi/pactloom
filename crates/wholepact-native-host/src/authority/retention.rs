@@ -387,3 +387,8 @@ impl SignedRetentionConsent for FrozenNativeSignedIntakeConsentV1 {
             && self.held.check().is_ok()
     }
 }
+
+#[cfg(all(feature="durable-proposal",feature="manual-admission",target_os="linux"))]
+mod financial_v1;
+#[cfg(all(feature="durable-proposal",feature="manual-admission",target_os="linux"))]
+pub(crate) use financial_v1::{NativeFinancialRetentionConsentV1, FrozenNativeFinancialRetentionConsentV1};

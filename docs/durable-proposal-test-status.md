@@ -1,8 +1,18 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-20, 12:03 UTC.
+Updated: 2026-10-20, 12:49 UTC.
 
 **CI44 passed the genuine two-owner delivery/admission, original-producer SIGKILL and fresh-process read-only original-history verification route. Financial signing/dispatch and public testnet settlement remain unqualified. This is a bounded admission/restart milestone, not a production release.**
+
+## CI49 verified transport setup; bounded financial retention correction prepared
+
+[Run 39419633118](https://github.com/stanleykosi/pactloom/actions/runs/39419633118), qualification `1db35069d36d05cad05ea7c6283cbe822c34726e`, implementation `cc2635b2df5eaa7ba15b3f52198fa3931a6c3835`, passed the origin-only gate. All nine maintained action-framing cases and seven new actual-peer setup cases passed with verified child/directory cleanup. This exercised real sockets in the isolated runner; it did not run the full native financial lifecycle or establish payment success.
+
+Independent source review found a separate downstream composition defect before another full run: the legacy retention consent deliberately permits one exact signed scope, while actual union verification requires both original subset scopes and the resulting union scope. Reusing that singleton would refuse the second source even after valid signature intake.
+
+The financial path now obtains exactly two original subset contexts and their union context from the actual pinned Engine source. A dedicated financial-only owner requires a separate explicit approval for each complete signed scope, refuses any fourth context or changed digest, and permits transaction retention only for the approved union. Dispatch freezes all three exact scopes plus the exact transaction/handoff under the same original privacy deadline and drops the terminal, so no new prompt or permission renewal occurs after final dispatch approval. Legacy singleton consent and single-result intake remain unchanged. The native harness presents the three required approvals at the corresponding completion, audit and dispatch boundaries.
+
+The whole Host locked offline release no-run build passed in 8m00s. No new native tests were executed locally. The added cache/routing and prompt-shape checks are not payment evidence. Full native signature intake, immutable extraction, producer restart and saved-byte dispatch remain pending the next isolated financial qualification. No public testnet settlement, uncertain-chain retransmission or standalone production Host CLI completion is claimed.
 
 ## CI48 reached protected-result preparation; setup/frame budget mismatch corrected
 
