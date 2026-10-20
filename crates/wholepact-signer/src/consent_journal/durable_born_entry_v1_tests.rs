@@ -114,6 +114,19 @@ impl Fixture {
         self.original_in_session(&session)
     }
     fn original_in_session(&self, session: &SignerConsentSession) -> OriginalAuthorizationEvidence {
+        let (enrollment, manifest) = self.preconstruction_in_session(session);
+        let mut terms = crate::consent_journal::tests::terms(
+            session,
+            &enrollment,
+            &manifest,
+            "authorization-a",
+        );
+        terms.artifact_digest = manifest.proposal().unwrap().input().artifact_digest.clone().unwrap();
+        self.journal
+            .record_original_consent_release(fixture::approve_spend(session, terms))
+            .unwrap()
+    }
+    fn preconstruction_in_session(&self, session: &SignerConsentSession) -> (AccountEnrollmentRecord, AcceptedManifestRecord) {
         let mut input =
             crate::consent_journal::tests::proposal("agreement-a", "obligation-a", "proposal-a")
                 .input()
@@ -171,16 +184,7 @@ impl Fixture {
             .journal
             .record_accepted_manifest(session.approve_manifest(prepared, decision).unwrap())
             .unwrap();
-        let mut terms = crate::consent_journal::tests::terms(
-            session,
-            &enrollment,
-            &manifest,
-            "authorization-a",
-        );
-        terms.artifact_digest = proposal.input().artifact_digest.clone().unwrap();
-        self.journal
-            .record_original_consent_release(fixture::approve_spend(session, terms))
-            .unwrap()
+        (enrollment, manifest)
     }
     // Only the encrypted-journal component of a late gate. This does not
     // construct or qualify native custody, policy export or a source owner.
@@ -294,6 +298,103 @@ impl Fixture {
 #[cfg(feature = "synthetic-qualification")]
 #[path = "durable_born_validation_cost_tests.rs"]
 mod cost_measurement;
+
+/// Real encrypted journal/component integration only. The maintained fixture
+/// supplies historical enrollment rows, never a V3 native/read/action owner.
+#[cfg(all(feature = "durable-proposal", target_os = "linux"))]
+mod prepared_delivery_revision_v3 {
+    use super::*;
+
+    #[test]
+    fn encrypted_v3_pin_detects_already_open_independent_handle_restore() {
+        let f = Fixture::new();
+        let session = fixture::session(&f.journal, "synthetic-owner");
+        let (enrollment, manifest) = f.preconstruction_in_session(&session);
+        let second = SignerConsentJournal::open_durable_delivery_entry_v3(
+            &f.path, &f.key, &f.genesis, &f.source,
+        ).unwrap();
+        let pin = f.journal.prepare_delivery_journal_revision_v3(
+            &f.genesis, enrollment.reference(), manifest.reference(),
+        ).unwrap();
+        f.journal.check_delivery_journal_revision_v3(&pin).unwrap();
+        // A revision token is never transferable to another actual connection.
+        assert!(second.check_delivery_journal_revision_v3(&pin).is_err());
+        let before = f.commitment();
+        {
+            let c = second.connection.lock().unwrap();
+            c.execute("UPDATE signer_account SET writer_epoch=8", []).unwrap();
+            c.execute("UPDATE signer_account SET writer_epoch=7", []).unwrap();
+        }
+        assert_eq!(before, f.commitment());
+        assert!(matches!(f.journal.check_delivery_journal_revision_v3(&pin), Err(JournalError::Conflict)));
+        let attempted = std::cell::Cell::new(false);
+        assert!(f.journal.with_delivery_journal_effect_v3(pin, |_| {
+            attempted.set(true);
+            Ok(())
+        }).is_err());
+        assert!(!attempted.get(), "stale pin reached the actual effect closure");
+        assert_eq!(before, f.commitment());
+    }
+
+    #[test]
+    fn encrypted_v3_pin_detects_same_connection_noop_write() {
+        let f = Fixture::new();
+        let session = fixture::session(&f.journal, "synthetic-owner");
+        let (enrollment, manifest) = f.preconstruction_in_session(&session);
+        let pin = f.journal.prepare_delivery_journal_revision_v3(
+            &f.genesis, enrollment.reference(), manifest.reference(),
+        ).unwrap();
+        let before = f.commitment();
+        // data_version alone does not see a write on its own connection.
+        f.journal.connection.lock().unwrap().execute(
+            "UPDATE signer_account SET writer_epoch=writer_epoch", [],
+        ).unwrap();
+        assert_eq!(before, f.commitment());
+        assert!(matches!(f.journal.check_delivery_journal_revision_v3(&pin), Err(JournalError::Conflict)));
+        assert!(f.journal.refresh_delivery_journal_revision_v3(pin).is_err());
+        assert_eq!(before, f.commitment());
+    }
+
+    #[test]
+    fn encrypted_v3_pin_refuses_own_legitimate_append_until_full_preparation() {
+        let f = Fixture::new();
+        let session = fixture::session(&f.journal, "synthetic-owner");
+        let (enrollment, manifest) = f.preconstruction_in_session(&session);
+        let pin = f.journal.prepare_delivery_journal_revision_v3(
+            &f.genesis, enrollment.reference(), manifest.reference(),
+        ).unwrap();
+        let mut terms = enrollment.terms.clone();
+        terms.aggregate_budget_limit_zatoshis += 1;
+        let appended = f.journal.record_enrollment(fixture::approve_enrollment(&session, terms)).unwrap();
+        assert_ne!(appended.reference(), enrollment.reference());
+        let committed = f.commitment();
+        assert!(matches!(f.journal.check_delivery_journal_revision_v3(&pin), Err(JournalError::Conflict)));
+        let fresh = f.journal.prepare_delivery_journal_revision_v3(
+            &f.genesis, enrollment.reference(), manifest.reference(),
+        ).unwrap();
+        f.journal.check_delivery_journal_revision_v3(&fresh).unwrap();
+        assert_eq!(committed, f.commitment());
+        assert_eq!(f.journal.connection.lock().unwrap().query_row(
+            "SELECT count(*) FROM signer_enrollments", [], |r| r.get::<_, u64>(0),
+        ).unwrap(), 2);
+    }
+
+    #[test]
+    fn encrypted_v3_pin_rejects_physical_original_replacement() {
+        let f = Fixture::new();
+        let session = fixture::session(&f.journal, "synthetic-owner");
+        let (enrollment, manifest) = f.preconstruction_in_session(&session);
+        let pin = f.journal.prepare_delivery_journal_revision_v3(
+            &f.genesis, enrollment.reference(), manifest.reference(),
+        ).unwrap();
+        f.journal.connection.lock().unwrap().execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
+        let copy = f.path.with_file_name("replacement.sqlite");
+        fs::copy(&f.path, &copy).unwrap();
+        fs::set_permissions(&copy, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::rename(&copy, &f.path).unwrap();
+        assert!(f.journal.check_delivery_journal_revision_v3(&pin).is_err());
+    }
+}
 
 #[test]
 fn original_current_schema_reopens_with_new_binding_without_mutation() {

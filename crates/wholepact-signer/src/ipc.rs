@@ -30,6 +30,8 @@ use std::{
 };
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, Zeroizing};
+#[cfg(feature = "durable-proposal")]
+pub(crate) mod durable_receive_v3;
 const MAX_GRANTS: usize = 16;
 /// Public location metadata only. Knowledge of this narrow endpoint grants no
 /// pairing, source disclosure, native approval or financial authority.
@@ -57,6 +59,8 @@ pub use wholepact_signer_origin::PairScope;
 #[derive(Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 enum Envelope {
+    #[cfg(feature = "durable-proposal")]
+    ClosedRecipientV3 { schema_version: u32, request: crate::authority_bridge::durable_review_ipc_v3::ClosedRecipientCommandV3 },
     RequestPairing {
         schema_version: u32,
         application_label: String,
@@ -79,6 +83,10 @@ impl Drop for Envelope {
 #[derive(Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AppRequest {
+    #[cfg(feature = "durable-proposal")]
+    RequestDurableDeliveryHistoryV3 { request: Box<crate::authority_bridge::durable_delivery_admission_ipc_v3::DurableDeliveryHistoryRequestV3> },
+    #[cfg(feature = "durable-proposal")]
+    PrepareDurableRecipientV3 { request: Box<crate::authority_bridge::durable_review_ipc_v3::PrepareClosedRecipientRequestV3> },
     #[cfg(feature = "pending-birth-owner-signing")]
     RequestBornPermanentStopV1 { request: Box<wholepact_signer_origin::permanent_stop_v1::HostPermanentStopRequestV1> },
     #[cfg(feature = "pending-birth-owner-signing")]
@@ -547,6 +555,16 @@ impl AppRequest {
                 request.validate().map_err(|_| Error::InvalidData)?;
             }
             #[cfg(feature = "durable-proposal")]
+            Self::RequestDurableDeliveryHistoryV3 { request } => {
+                if !scope.history_read { return Err(Error::Authentication); }
+                request.validate().map_err(|_| Error::InvalidData)?;
+            }
+            #[cfg(feature = "durable-proposal")]
+            Self::PrepareDurableRecipientV3 { request } => {
+                if !scope.history_read || !scope.preconstruction_export || request.fixed.agreement_id != scope.agreement_id || request.fixed.manifest_digest != scope.manifest_digest { return Err(Error::Authentication); }
+                request.validate().map_err(|_| Error::InvalidData)?;
+            }
+            #[cfg(feature = "durable-proposal")]
             Self::RequestDurableProposalReviewV1 { request } => {
                 if !scope.history_read || !scope.preconstruction_export {
                     return Err(Error::Authentication);
@@ -870,6 +888,12 @@ impl PendingPairing {
     }
 }
 pub(crate) enum LocalEvent {
+    #[cfg(feature = "durable-proposal")]
+    DurableDeliveryHistoryV3 { peer: AuthenticatedPeer, stream: UnixStream, request: Box<crate::authority_bridge::durable_delivery_admission_ipc_v3::DurableDeliveryHistoryRequestV3> },
+    #[cfg(feature = "durable-proposal")]
+    PrepareDurableRecipientV3 { peer: AuthenticatedPeer, stream: UnixStream, request: Box<crate::authority_bridge::durable_review_ipc_v3::PrepareClosedRecipientRequestV3> },
+    #[cfg(feature = "durable-proposal")]
+    DurableReceiveV3(durable_receive_v3::AuthenticatedDurableReceiveRequestV3),
     #[cfg(feature = "pending-birth-owner-signing")]
     BornPermanentStopV1(Box<permanent_stop::AuthenticatedPermanentStopRequestV1>),
     #[cfg(feature = "pending-birth-owner-signing")]
@@ -1454,6 +1478,16 @@ impl LocalIpc {
         self.generation = self.generation.saturating_add(1);
         while self.events.try_recv().is_ok() {}
     }
+    /// Closed V3 custody has no ordinary request consumer. Revoke every old
+    /// grant without discarding already authenticated closed metadata polls;
+    /// the closed runtime independently rejects all other queued event kinds.
+    #[cfg(feature = "durable-proposal")]
+    pub(crate) fn revoke_legacy_grants_for_closed_delivery_v3(&mut self) -> Result<()> {
+        let next = self.generation.checked_add(1).ok_or(Error::Locked)?;
+        self.grants.lock().map_err(|_| Error::Locked)?.clear();
+        self.generation = next;
+        Ok(())
+    }
     #[cfg(feature = "native-ui")]
     pub(crate) fn approve_pairing(
         &self,
@@ -1581,6 +1615,12 @@ fn serve(
                     #[cfg(feature = "synthetic-born-joined-qualification")]
                     let _scoped_admission = scoped_v3.begin_admission()?;
                     match &mut envelope {
+                        #[cfg(feature = "durable-proposal")]
+                        Envelope::ClosedRecipientV3 {schema_version, request} => {
+                            if *schema_version != 3 || !matches!(mode, IpcMode::Ordinary) { return Err(Error::Authentication); }
+                            let admitted = durable_receive_v3::AuthenticatedDurableReceiveRequestV3::admitted(stream.try_clone()?,peer,request.clone())?;
+                            sender.try_send(LocalEvent::DurableReceiveV3(admitted)).map_err(|_| Error::Unavailable)?;
+                        }
                         Envelope::RequestPairing {
                             schema_version,
                             application_label,
@@ -1627,6 +1667,14 @@ fn serve(
                                 authenticate(&grants, peer, grant_id, token_hex, request, &mode)?;
                             let request = std::mem::replace(request, AppRequest::Status {});
                             match request {
+                                #[cfg(feature = "durable-proposal")]
+                                AppRequest::RequestDurableDeliveryHistoryV3 { ref request } => {
+                                    sender.try_send(LocalEvent::DurableDeliveryHistoryV3 {peer,stream:stream.try_clone()?,request:request.clone()}).map_err(|_| Error::Unavailable)?;
+                                }
+                                #[cfg(feature = "durable-proposal")]
+                                AppRequest::PrepareDurableRecipientV3 { ref request } => {
+                                    sender.try_send(LocalEvent::PrepareDurableRecipientV3 {peer,stream:stream.try_clone()?,request:request.clone()}).map_err(|_| Error::Unavailable)?;
+                                }
                                 #[cfg(feature = "pending-birth-owner-signing")]
                                 AppRequest::RequestBornCandidateSelectionV1 { ref request } => {
                                     sender

@@ -513,6 +513,148 @@ impl SignerConsentJournal {
     }
 }
 
+// Purpose-distinct original V3 reopening. This deliberately does not call or
+// loosen the V2 suffix reader. Empty original prefixes are accepted; any retained
+// admission must be V3-only, with the same original genesis and complete lineage.
+#[cfg(all(feature = "durable-proposal", target_os = "linux"))]
+fn validate_delivery_v3(
+    c: &Connection,
+    genesis: &AccountUseGenesis,
+    limits: (u64, u64),
+) -> Result<()> {
+    let account = validate_durable_born_prefix_v1(c, genesis, limits)?;
+    for (table, _) in CAPACITY_TABLES {
+        if matches!(
+            *table,
+            "signer_account"
+                | "signer_account_use_genesis"
+                | "signer_enrollments"
+                | "signer_accepted_manifests"
+                | "signer_durable_construction_outbox"
+                | "signer_durable_payment_admission_intents"
+        ) {
+            continue;
+        }
+        if c.query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM \"{table}\")"),
+            [],
+            |r| r.get::<_, bool>(0),
+        )? {
+            return Err(JournalError::RecoveryRequired);
+        }
+    }
+    let mut foreign_keys = c.prepare("PRAGMA foreign_key_check")?;
+    if foreign_keys.query([])?.next()?.is_some() {
+        return Err(JournalError::InvalidBinding);
+    }
+    let mut enrollments = c.prepare("SELECT reference,account_id,agreement_id,participant_id FROM signer_enrollments ORDER BY reference")?;
+    for row in enrollments.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+        ))
+    })? {
+        let (reference, id, agreement, participant) = row?;
+        let e = read_enrollment(c, &reference)?.ok_or(JournalError::NotFound)?;
+        if e.account_id() != account.account_id
+            || e.account_id() != id
+            || e.agreement_id() != agreement
+            || e.participant_id() != participant
+            || e.receipt().writer_epoch() > account.writer_epoch
+            || e.account_fvk_digest() != genesis.identity.full_viewing_key_digest
+            || e.terms.network_profile_id != genesis.identity.network_profile_id
+        {
+            return Err(JournalError::InvalidBinding);
+        }
+    }
+    let mut manifests = c.prepare("SELECT reference,enrollment_ref,proposal_id,proposal_digest FROM signer_accepted_manifests ORDER BY reference")?;
+    for row in manifests.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+        ))
+    })? {
+        let (reference, enrollment, proposal_id, proposal_digest) = row?;
+        let m = read_manifest(c, &reference)?.ok_or(JournalError::NotFound)?;
+        let e = read_enrollment(c, &enrollment)?.ok_or(JournalError::NotFound)?;
+        let p = m.proposal()?;
+        if m.enrollment_ref() != enrollment
+            || m.terms.account_id != account.account_id
+            || m.terms.account_id != e.account_id()
+            || m.terms.principal_id != e.principal_id()
+            || p.input().proposal_id != proposal_id
+            || p.proposal_digest() != proposal_digest
+            || p.manifest().agreement.agreement_id != e.agreement_id()
+            || p.manifest().agreement.network_profile_id != e.terms.network_profile_id
+            || !same_native_origin(m.receipt(), e.receipt())
+        {
+            return Err(JournalError::InvalidBinding);
+        }
+        e.transport().validate_scope(
+            e.account_id(),
+            e.agreement_id(),
+            e.participant_id(),
+            Some(p.manifest_digest()),
+        )?;
+        if !p.manifest().participants.iter().any(|owner| {
+            owner.account_id == e.account_id() && owner.participant_id == e.participant_id()
+        }) {
+            return Err(JournalError::InvalidBinding);
+        }
+    }
+    // Historical data kernel validates every typed outbox cell, exact local
+    // enrollment/manifest foreign key and original native origin. It does not
+    // issue authority or call the v1-only financial intent reader.
+    durable_construction_v1::validate_rows(c)?;
+    let intents = financial_admission_intents::read_all(c)?;
+    if intents.len() > 1 {
+        return Err(JournalError::Conflict);
+    }
+    for intent in intents {
+        let financial_admission_intents::HistoricalFinancialAdmissionIntent::V3(intent) = intent
+        else {
+            return Err(JournalError::RecoveryRequired);
+        };
+        require_witness(intent.disclosure(), genesis)?;
+        if intent.owner_certificate_digest() != genesis.owner_certificate_digest {
+            return Err(JournalError::InvalidBinding);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(all(feature = "durable-proposal", target_os = "linux"))]
+impl SignerConsentJournal {
+    pub(crate) fn open_durable_delivery_entry_v3(
+        path: &Path,
+        key: &DatabaseKey,
+        genesis: &AccountUseGenesis,
+        source: &Arc<SignerJournalSourceOwner>,
+    ) -> Result<Self> {
+        let mut owner = source.begin(path)?;
+        let opened = open_preflighted_encrypted(
+            &mut owner, path, key, &genesis.identity.account_id, Some(genesis),
+            &|c| validate_delivery_v3(c, genesis, (MAX_BACKUP_ROWS, MAX_BACKUP_ENCODED_BYTES)),
+        )?;
+        Ok(Self::from_owned_source(opened))
+    }
+    pub(crate) fn check_durable_delivery_entry_v3(&self, genesis: &AccountUseGenesis) -> Result<()> {
+        let _fence = self.authority_fence.read().map_err(|_| JournalError::Permission)?;
+        let mut c = self.connection.lock().map_err(|_| JournalError::Database)?;
+        if !c.is_autocommit() { return Err(JournalError::Database); }
+        self.database_identity.check_current(&c)?;
+        let tx = c.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        validate_delivery_v3(&tx, genesis, self.capacity_limits())?;
+        self.database_identity.check_current(&tx)?;
+        tx.commit()?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 #[path = "durable_born_entry_v1_tests.rs"]
 mod tests;

@@ -24,6 +24,9 @@ use wholepact_signer::authority_bridge::{
 };
 use wholepact_store::{CommandContext, MutationResult};
 
+mod closed_review_v3;
+pub use closed_review_v3::{PreparedPrivateDurableAdmissionDeliveryV3, ClosedPrivateDurableAdmissionReviewV3, PrivateDurableAdmissionDeliveryV3, PrivateDurableAdmissionStatusV3};
+
 const EXPORT_CAUSE_KEY: &str = "private_durable_delivery_cause_v2";
 const EXPORT_CAUSE_COLLISION_KEY: &str = "private_durable_delivery_cause_collision_v2";
 
@@ -521,7 +524,8 @@ impl<'owner, 'source> PreparedPrivateDurableAdmissionDeliveryV2<'owner, 'source>
         let cause = gate.cause;
         check_recipient(recipient, cause)?;
         gate.check()?;
-        let (_, history) = self.owner.check_observed(access, gate.consent, cause)?;
+        let (current, history) = self.owner.check_observed(access, gate.consent, cause)?;
+        if !original_roster_v2(&current)?.review_exports_v3.is_empty() { return Err(denied()); }
         let source = self
             .owner
             .delivery_source_binding(access, &history, cause)?;
@@ -613,6 +617,7 @@ struct History {
     prefix_digest: String,
     full_digest: String,
     export_revisions: BTreeMap<String, u64>,
+    rows: Vec<(wholepact_store::StoredEvent, wholepact_store::StoredOperation)>,
 }
 
 impl<'source> PrivateDurableAdmissionCoordinatorV2<'source> {
@@ -1017,6 +1022,7 @@ impl<'source> PrivateDurableAdmissionCoordinatorV2<'source> {
         delivery_gate.check(false)?;
         check_recipient(&recipient, cause)?;
         let mut roster = export_result(cause, S::ExportRoster, original_roster_v2(&before))?;
+        if !roster.review_exports_v3.is_empty() { return Err(denied()); }
         let prior_revision = history
             .export_revisions
             .get(&scope.recipient.request.operation_id)
@@ -1405,12 +1411,11 @@ impl<'source> PrivateDurableAdmissionCoordinatorV2<'source> {
                 || event.sequence != (i + 1) as u64
                 || event.payload
                     != serde_json::json!({"id":o.source.agreement_id(),"revision":i + 1})
-                || event.kind
-                    != if i < PREFIX_EVENTS {
-                        PREFIX_KINDS[i]
-                    } else {
-                        EXPORT_EVENT
-                    }
+                || if i < PREFIX_EVENTS {
+                    event.kind != PREFIX_KINDS[i]
+                } else {
+                    event.kind != EXPORT_EVENT && event.kind != closed_review_v3::EXPORT_EVENT_V3
+                }
             {
                 return export_predicate_error(cause, ExportCauseSite::ExportHistory, damaged());
             }
@@ -1504,26 +1509,20 @@ impl<'source> PrivateDurableAdmissionCoordinatorV2<'source> {
             } else {
                 o.require_original_identity_v2(&envelope)?;
                 let before = previous.as_ref().ok_or_else(damaged)?;
-                let scope = validate_export_delta_observed(before, &envelope, cause)?;
-                if scope.principal_id != access.principal_id
-                    || export_revisions
-                        .insert(
-                            scope.recipient.request.operation_id.clone(),
-                            envelope.view.revision,
-                        )
-                        .is_some()
+                let (principal, operation_id, command) = if event.kind == EXPORT_EVENT {
+                    let scope = validate_export_delta_observed(before, &envelope, cause)?;
+                    let command = export_command(access, before.view.revision, &scope)?;
+                    (scope.principal_id, scope.recipient.request.operation_id, command)
+                } else {
+                    let scope = closed_review_v3::validate_export_delta_v3(before, &envelope)?;
+                    let command = closed_review_v3::export_command_v3(access, before.view.revision, &scope)?;
+                    (scope.principal_id, scope.recipient.request.operation_id, command)
+                };
+                if principal != access.principal_id
+                    || export_revisions.insert(operation_id, envelope.view.revision).is_some()
                 {
-                    return export_predicate_error(
-                        cause,
-                        ExportCauseSite::ExportHistory,
-                        damaged(),
-                    );
+                    return export_predicate_error(cause, ExportCauseSite::ExportHistory, damaged());
                 }
-                let command = export_result(
-                    cause,
-                    ExportCauseSite::ExportCommand,
-                    export_command(access, before.view.revision, &scope),
-                )?;
                 let replay = o
                     .engine
                     .store
@@ -1541,7 +1540,7 @@ impl<'source> PrivateDurableAdmissionCoordinatorV2<'source> {
                     );
                 }
             }
-            history.push((event, operation));
+            history.push((event.clone(), operation));
             previous = Some(envelope);
         }
         if crate::encode(previous.as_ref().ok_or_else(damaged)?)? != crate::encode(current)? {
@@ -1557,6 +1556,7 @@ impl<'source> PrivateDurableAdmissionCoordinatorV2<'source> {
             prefix_digest,
             full_digest,
             export_revisions,
+            rows: history,
         })
     }
 }
@@ -1623,6 +1623,7 @@ fn require_completed_prefix_observed(e: &Envelope, cause: ExportObservation<'_>)
     let c = &e.view.candidates[0];
     if roster.owners.len() != 2
         || !roster.review_exports.is_empty()
+        || !roster.review_exports_v3.is_empty()
         || c.proof_jobs.len() != 1
         || c.proof_jobs[0].state != "succeeded"
         || c.proof_jobs[0].attempt != 1
@@ -1697,6 +1698,7 @@ fn validate_export_delta_kernel(
     }
     let old = original_roster_v2(before)?;
     let new = original_roster_v2(after)?;
+    if !old.review_exports_v3.is_empty() || !new.review_exports_v3.is_empty() { return Err(damaged()); }
     if new.owners.len() != 2 {
         return export_predicate_error(cause, ExportCauseSite::ExportDelta, damaged());
     }

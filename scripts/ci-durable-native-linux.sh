@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# One expressly authorized disposable Linux job. No secrets, public-chain calls,
-# caches, runtime archives or global security changes. This is not GUI acceptance.
+# Closed B1 native lifecycle integration in one disposable Linux job.
+# No secrets, public-chain calls, caches, runtime archives or global security changes.
+# This is not full financial payment, testnet settlement or attended GUI acceptance.
 set -euo pipefail
 umask 077
 ulimit -c 0
@@ -46,8 +47,8 @@ trap finish EXIT
 export CARGO_HOME="$build_root/cargo" CARGO_TARGET_DIR="$build_root/target"
 export WHOLEPACT_SQLCIPHER_PREFIX="$build_root/sqlcipher"
 export CARGO_BUILD_JOBS=3 CARGO_INCREMENTAL=0 WHOLEPACT_BUILD_JOBS=3
-# Source/projection regressions are cheap: fail before toolchain/dependency builds.
-TMPDIR="$runtime_root" python3 -B scripts/ci-synthetic-output-tests.py
+# Integration-only entrypoint: static review/type checking precedes publication.
+# Do not repeat the unchanged pure/source-string suites or count them as acceptance.
 unset RUST_MIN_STACK RUST_BACKTRACE RUST_LOG
 # Official numbered toolchain, not floating stable or the runner's future default.
 timeout --signal=TERM --kill-after=30s 600s rustup toolchain install 1.99.0 --profile minimal --no-self-update
@@ -100,93 +101,10 @@ PY
 )"
 sha256sum "$executable"
 # Fail fast on the new native transition, without skipping final regression gates.
-# Scope TMPDIR to each test only; later compiler processes keep their own defaults.
-TMPDIR="$runtime_root" python3 -B scripts/ci-synthetic-output.py "$executable" pure
+# Actual encrypted provider integration on this fresh runner, then the complete
+# new B1 production lifecycle. Stop on the first failure with its bounded report.
+# Unchanged older full-flow fixtures are not re-executed here, and their prior
+# evidence must not be presented as revalidation of this source checkpoint.
 TMPDIR="$runtime_root" python3 -B scripts/ci-synthetic-output.py "$executable" storage-bootstrap
-# CI-only loopback scheduling preflight. Never part of the local safe test gate.
-# Exact ignored selector only; no raw test output or arbitrary exception text.
-TMPDIR="$runtime_root" python3 -B - "$executable" <<'PY_WAVE'
-import subprocess, sys
-name = 'host::financial::private_durable_fixed_v2::observation_wave_v3_tests::observation_wave_actual_localhost_requests_overlap_before_responses'
-try:
-    listed = subprocess.run([sys.argv[1], name, '--ignored', '--exact', '--list'], capture_output=True, text=True, timeout=15)
-    assert listed.returncode == 0
-    assert [line for line in listed.stdout.splitlines() if line.endswith(': test')] == [name + ': test']
-    result = subprocess.run([sys.argv[1], name, '--ignored', '--exact', '--test-threads=1'], capture_output=True, text=True, timeout=30)
-    assert result.returncode == 0 and 'test result: ok. 1 passed; 0 failed;' in result.stdout
-except Exception:
-    print('CI_OBSERVATION_WAVE passed=false details_withheld=true', flush=True)
-    sys.exit(1)
-print('CI_OBSERVATION_WAVE passed=true native_authority=false', flush=True)
-PY_WAVE
-# New same-artifact prospective admission, actual death and original historical reopening.
 TMPDIR="$runtime_root" python3 -B scripts/ci-synthetic-output.py "$executable" durable-delivery-admission
-# Separate original-workspace producer SIGKILL and fresh-process read-only reopening.
-TMPDIR="$runtime_root" python3 -B scripts/ci-synthetic-output.py "$executable" durable-private-reopen
-TMPDIR="$runtime_root" python3 -B scripts/ci-synthetic-output.py "$executable" durable-owner-reopen
-TMPDIR="$runtime_root" python3 -B scripts/ci-synthetic-output.py "$executable" durable-fixed-signing
-# A separate fresh fixture reuses only this compiled binary, not prior custody.
-TMPDIR="$runtime_root" python3 -B scripts/ci-synthetic-output.py "$executable" durable-acquire-reply-loss
-# The private account/envelope regressions live in the signer lib, not the Host
-# executable. Reuse this exact release target and dependencies; do not run a
-# broad signer suite or any ignored/native tests during this separate build.
-# The unchanged 150-minute whole-job cap is authoritative and may interrupt
-# before all individual phase maxima are exhausted; they are not additive grants.
-if timeout --signal=TERM --kill-after=30s 1200s rustup run 1.99.0 cargo test --locked --release -p wholepact-signer --all-features --lib --no-run --message-format=json > "$build_root/signer-build-metadata.jsonl"; then
-  :
-else
-  build_status=$?
-  # Only tracked public Rust locations and closed codes may escape. Projection
-  # failure never replaces the original compiler/timeout failure or resumes.
-  python3 -B scripts/ci-synthetic-build-errors.py "$build_root/signer-build-metadata.jsonl" signer || true
-  exit "$build_status"
-fi
-signer_executable="$(python3 - "$build_root/signer-build-metadata.jsonl" "$CARGO_TARGET_DIR" <<'PY'
-import json, pathlib, sys
-found=[]
-for line in pathlib.Path(sys.argv[1]).read_text().splitlines():
-    row=json.loads(line)
-    if row.get('reason')=='compiler-artifact' and row.get('target',{}).get('name')=='wholepact_signer' and row.get('profile',{}).get('test') and row.get('executable'):
-        found.append(pathlib.Path(row['executable']).resolve(strict=True))
-assert len(set(found))==1
-exe=found[0]; assert exe.is_file() and exe.is_relative_to(pathlib.Path(sys.argv[2]).resolve(strict=True))
-print(exe)
-PY
-)"
-sha256sum "$signer_executable"
-# Exact private renderer regressions require the authority lib. Reuse the same
-# pinned release target; this build runs no tests. The 150-minute outer job cap
-# remains authoritative, not an additive guarantee of per-phase maxima.
-if timeout --signal=TERM --kill-after=30s 1200s rustup run 1.99.0 cargo test --locked --release -p wholepact-authority --all-features --lib --no-run --message-format=json > "$build_root/authority-build-metadata.jsonl"; then
-  :
-else
-  build_status=$?
-  # Only tracked public Rust locations and closed codes may escape. Projection
-  # failure never replaces the original compiler/timeout failure or resumes.
-  python3 -B scripts/ci-synthetic-build-errors.py "$build_root/authority-build-metadata.jsonl" authority || true
-  exit "$build_status"
-fi
-authority_executable="$(python3 - "$build_root/authority-build-metadata.jsonl" "$CARGO_TARGET_DIR" <<'PY'
-import json, pathlib, sys
-found=[]
-for line in pathlib.Path(sys.argv[1]).read_text().splitlines():
-    row=json.loads(line)
-    if row.get('reason')=='compiler-artifact' and row.get('target',{}).get('name')=='wholepact_authority' and row.get('profile',{}).get('test') and row.get('executable'):
-        found.append(pathlib.Path(row['executable']).resolve(strict=True))
-assert len(set(found))==1
-exe=found[0]; assert exe.is_file() and exe.is_relative_to(pathlib.Path(sys.argv[2]).resolve(strict=True))
-print(exe)
-PY
-)"
-sha256sum "$authority_executable"
-# All runtime output is bounded and allowlisted by this script; never tee raw PTY,
-# test panics, private paths, wallets, collector files or process environments.
-export TMPDIR="$runtime_root"
-python3 -B scripts/ci-synthetic-output.py "$signer_executable" signer-validation
-python3 -B scripts/ci-synthetic-output.py "$signer_executable" signer-durable-endpoint
-python3 -B scripts/ci-synthetic-output.py "$authority_executable" authority-rendering
-# A leftover runtime container is a job failure, never an implicit cleanup pass.
-rmdir -- "$runtime_root"
-trap - EXIT
-echo 'CI_RUNTIME_CONTAINER empty_removed=true'
-printf '%s\n' 'All listed regressions and synthetic-only durable native-owner/session reopening, exact fixed signing and original pending-session Acquire reply-loss recovery checks passed; separate original private-workspace completed-fixed SIGKILL and fresh-process exact read-only reopening passed. The old owner/session baseline is not process-restart evidence. No public-chain settlement, attended GUI, Windows or production activation claimed.'
+printf '%s\n' 'CI_B1_RESULT completed=true full_financial_payment_verified=false testnet_settlement_verified=false'

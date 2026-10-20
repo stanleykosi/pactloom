@@ -143,6 +143,10 @@ pub struct PreparedDurableReviewPayloadV2 {
     digest: String,
 }
 impl PreparedDurableReviewPayloadV2 {
+    /// Move the one original allocation into the closed V3 transport, never re-encode.
+    pub(crate) fn into_exact_parts_v3(self) -> (Zeroizing<Vec<u8>>, String) {
+        (self.raw, self.digest)
+    }
     pub fn payload_digest(&self) -> &str {
         &self.digest
     }

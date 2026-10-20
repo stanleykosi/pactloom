@@ -625,6 +625,30 @@ impl<'host> OriginalDeliveryAdmissionOwnerV2<'host> {
         if self.directory.manual_target_identity_digest()?!=self.files.original.workspace.original.committed.workspace_directory_identity { return Err(Error::Authentication); }
         Ok(())
     }
+    /// Actual held original file/principal checks after closed preparation.
+    /// The Engine owns same-connection metadata/proof revision observations.
+    /// No initial inspection approval, TLS reconstruction or source/history
+    /// interpretation is repeated in an immediate export frame callback.
+    pub(in crate::host) fn check_closed_source_v3(&self)->Result<()> {
+        self.host.require_private_workspace_read_session_v1()?;
+        self.host.require_manual_session()?;
+        self.target.check_current()?;
+        self.files.original.workspace.check_combined_v4(&self.host.directory,&self.host.secrets)?;
+        self.files.original.pending_file.check(&self.host.directory,MAX_PENDING)?;
+        self.files.original.commit_file.check(&self.host.directory,MAX_COMMIT)?;
+        if !self.files.original.pending_file.is_final() || !self.files.original.commit_file.is_final()
+            || self.host.access()?.principal_id != self.files.original.pending.principal_id
+            || self.host.dispatcher.is_none() || self.host.workspace_files.is_some()
+            || self.host.submission.lock().map_err(|_|Error::Locked)?.identity()!=self.files.original.pending.submission_journal_identity
+            || self.host.financial.as_ref().ok_or(Error::Locked)?.manual_original_primary_origin_digest(&self.host.directory,&self.host.secrets)?!=self.files.original.pending.original_host.financial_journal_origin_digest
+        { return Err(Error::Authentication); }
+        self.host.submission_identity.check_retained_owner_path()?;
+        self.directory.inventory_of(&["private-coordination.sqlite"],&["profile.lock"])?;
+        if self.directory.manual_target_identity_digest()?!=self.files.original.workspace.original.committed.workspace_directory_identity { return Err(Error::Authentication); }
+        self.host.directory.inventory_of(&["coordination.sqlite","inbox.sqlite","outbox.sqlite","submission.sqlite","history.capsule.sqlite"],
+            &["profile.lock","profile.vault","recovery.plan","generation.manifest","generation.commit","generation.keys","financial.attached","financial.inventory",crate::files::PRIVATE_PENDING,crate::files::PRIVATE_COMMIT,self.files.original.pending_file.name(),self.files.original.commit_file.name()])?;
+        self.target.check_current()
+    }
     pub(in crate::host) fn dispatcher_descriptor(&self)->Result<DurableDeliveryDispatcherV2> {
         self.check_current_without_proof_lock_v2()?; self.files.original.pending.descriptor()
     }

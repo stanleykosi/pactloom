@@ -83,7 +83,30 @@ pub(super) mod delivery_diagnostics_v2 {
         DeliveryRedisclosurePrepare,
         DeliveryRedisclosureApprove,
         DeliveryRedisclosureServe,
-        DeliveryArtifactImportStart,
+        DeliveryArtifactImportStart, DeliveryArtifactImport, DeliveryNativeAdmission, DeliveryHistoricalRead,
+        DeliveryAdmissionRetainedBinding,
+        DeliveryAdmissionBeforeSendChannel,
+        DeliveryAdmissionBeforeSendSource,
+        DeliveryAdmissionBeforeWriteChannel,
+        DeliveryAdmissionWriteFrame,
+        DeliveryAdmissionWritePrecheck,
+        DeliveryAdmissionWriteIo,
+        DeliveryAdmissionWritePostcheck,
+        DeliveryAdmissionFlushPrecheck,
+        DeliveryAdmissionFlushIo,
+        DeliveryAdmissionFlushPostcheck,
+        DeliveryAdmissionAfterWriteSource,
+        DeliveryAdmissionAfterWriteChannel,
+        DeliveryAdmissionReadFrame,
+        DeliveryAdmissionReadPrecheck,
+        DeliveryAdmissionReadIo,
+        DeliveryAdmissionReadPostcheck,
+        DeliveryAdmissionAfterReadSource,
+        DeliveryAdmissionAfterReadChannel,
+        DeliveryAdmissionResponseRejected,
+        DeliveryAdmissionResponseVariant,
+        DeliveryAdmissionSnapshot,
+        DeliveryAdmissionCommittedHead,
     } }
     labels! { Outcome {
         SignerUnavailable, SignerPeerLifetimeUnavailable, SignerIo,
@@ -96,6 +119,44 @@ pub(super) mod delivery_diagnostics_v2 {
         BridgeCompleteOriginRecoveryUnavailable, BridgeVerification,
         BridgeSignerOriginUnavailable, BridgeJournal, BridgeAuthority,
         BridgeWallet, BridgeIpc, WorkerFailure,
+        AuthorityInvalidBinding,
+        AuthorityPermission,
+        AuthorityStaleHead,
+        AuthorityConflict,
+        AuthorityInactive,
+        AuthorityRecoveryRequired,
+        AuthorityExpired,
+        AuthorityPolicyDenied,
+        AuthorityBudgetExceeded,
+        AuthorityInputReserved,
+        AuthorityObligationReserved,
+        AuthorityLimit,
+        AuthorityStorage,
+        AuthorityCorruptHistory,
+        AuthorityPermanentStopUnavailable,
+        AuthorityOfflineHistoryUnsupported,
+        AuthorityConstructionHistoryUnsupported,
+        AuthorityUnsupportedVersion,
+        AuthorityAuthentication,
+        AuthorityUncertain,
+        AuthorityResolutionUnavailable,
+        AuthoritySessionRequired,
+        AuthoritySessionPending,
+        AuthorityIoTimedOut,
+        AuthorityIoWouldBlock,
+        AuthorityIoInterrupted,
+        AuthorityIoUnexpectedEof,
+        AuthorityIoWriteZero,
+        AuthorityIoConnectionAborted,
+        AuthorityIoConnectionRefused,
+        AuthorityIoConnectionReset,
+        AuthorityIoBrokenPipe,
+        AuthorityIoNotConnected,
+        AuthorityIoPermissionDenied,
+        AuthorityIoInvalidData,
+        AuthorityIoInvalidInput,
+        AuthorityIoOther,
+        PredicateDenied,
     } }
     fn signer_error(error: &Error) -> Outcome {
         match error {
@@ -136,6 +197,91 @@ pub(super) mod delivery_diagnostics_v2 {
             BridgeError::Ipc => Outcome::BridgeIpc,
         }
     }
+    // Project only the actual first failure from this completed send attempt.
+    // An IO cause keeps priority over a later source postcheck. Source details
+    // are used only when the transport selected that callback as its first cause.
+    pub(in crate::native_ui) fn admission_failure_v3(
+        observation: &wholepact_authority::transport::durable_delivery_admission_v3::AdmissionFailureObservationV3,
+        source_error: Option<&Error>,
+    ) {
+        use wholepact_authority::transport::durable_delivery_admission_v3::{
+            AdmissionFailureStageV3 as S, AdmissionFailureCauseV3 as C,
+            AdmissionIoKindV3 as I,
+        };
+        use wholepact_authority::AuthorityError as A;
+        let stage = match observation.stage {
+            S::RetainedBinding => Stage::DeliveryAdmissionRetainedBinding,
+            S::BeforeSendChannel => Stage::DeliveryAdmissionBeforeSendChannel,
+            S::BeforeSendSource => Stage::DeliveryAdmissionBeforeSendSource,
+            S::BeforeWriteChannel => Stage::DeliveryAdmissionBeforeWriteChannel,
+            S::WriteFrame => Stage::DeliveryAdmissionWriteFrame,
+            S::WritePrecheck => Stage::DeliveryAdmissionWritePrecheck,
+            S::WriteIo => Stage::DeliveryAdmissionWriteIo,
+            S::WritePostcheck => Stage::DeliveryAdmissionWritePostcheck,
+            S::FlushPrecheck => Stage::DeliveryAdmissionFlushPrecheck,
+            S::FlushIo => Stage::DeliveryAdmissionFlushIo,
+            S::FlushPostcheck => Stage::DeliveryAdmissionFlushPostcheck,
+            S::AfterWriteSource => Stage::DeliveryAdmissionAfterWriteSource,
+            S::AfterWriteChannel => Stage::DeliveryAdmissionAfterWriteChannel,
+            S::ReadFrame => Stage::DeliveryAdmissionReadFrame,
+            S::ReadPrecheck => Stage::DeliveryAdmissionReadPrecheck,
+            S::ReadIo => Stage::DeliveryAdmissionReadIo,
+            S::ReadPostcheck => Stage::DeliveryAdmissionReadPostcheck,
+            S::AfterReadSource => Stage::DeliveryAdmissionAfterReadSource,
+            S::AfterReadChannel => Stage::DeliveryAdmissionAfterReadChannel,
+            S::ResponseRejected => Stage::DeliveryAdmissionResponseRejected,
+            S::ResponseVariant => Stage::DeliveryAdmissionResponseVariant,
+            S::Snapshot => Stage::DeliveryAdmissionSnapshot,
+            S::CommittedHead => Stage::DeliveryAdmissionCommittedHead,
+        };
+        let authority = |error| match error {
+            A::InvalidBinding => Outcome::AuthorityInvalidBinding,
+            A::Permission => Outcome::AuthorityPermission,
+            A::StaleHead => Outcome::AuthorityStaleHead,
+            A::Conflict => Outcome::AuthorityConflict,
+            A::Inactive => Outcome::AuthorityInactive,
+            A::RecoveryRequired => Outcome::AuthorityRecoveryRequired,
+            A::Expired => Outcome::AuthorityExpired,
+            A::PolicyDenied => Outcome::AuthorityPolicyDenied,
+            A::BudgetExceeded => Outcome::AuthorityBudgetExceeded,
+            A::InputReserved => Outcome::AuthorityInputReserved,
+            A::ObligationReserved => Outcome::AuthorityObligationReserved,
+            A::Limit => Outcome::AuthorityLimit,
+            A::Storage => Outcome::AuthorityStorage,
+            A::CorruptHistory => Outcome::AuthorityCorruptHistory,
+            A::PermanentStopUnavailable => Outcome::AuthorityPermanentStopUnavailable,
+            A::OfflineHistoryUnsupported => Outcome::AuthorityOfflineHistoryUnsupported,
+            A::ConstructionHistoryUnsupported => Outcome::AuthorityConstructionHistoryUnsupported,
+            A::UnsupportedVersion => Outcome::AuthorityUnsupportedVersion,
+            A::Authentication => Outcome::AuthorityAuthentication,
+            A::Uncertain => Outcome::AuthorityUncertain,
+            A::ResolutionUnavailable => Outcome::AuthorityResolutionUnavailable,
+            A::SessionRequired => Outcome::AuthoritySessionRequired,
+            A::SessionPending => Outcome::AuthoritySessionPending,
+        };
+        let outcome = match observation.cause {
+            C::Authority(error) => authority(error),
+            C::Source(error) => source_error.map(signer_error).unwrap_or_else(|| authority(error)),
+            C::Io(kind) => match kind {
+                I::TimedOut => Outcome::AuthorityIoTimedOut,
+                I::WouldBlock => Outcome::AuthorityIoWouldBlock,
+                I::Interrupted => Outcome::AuthorityIoInterrupted,
+                I::UnexpectedEof => Outcome::AuthorityIoUnexpectedEof,
+                I::WriteZero => Outcome::AuthorityIoWriteZero,
+                I::ConnectionAborted => Outcome::AuthorityIoConnectionAborted,
+                I::ConnectionRefused => Outcome::AuthorityIoConnectionRefused,
+                I::ConnectionReset => Outcome::AuthorityIoConnectionReset,
+                I::BrokenPipe => Outcome::AuthorityIoBrokenPipe,
+                I::NotConnected => Outcome::AuthorityIoNotConnected,
+                I::PermissionDenied => Outcome::AuthorityIoPermissionDenied,
+                I::InvalidData => Outcome::AuthorityIoInvalidData,
+                I::InvalidInput => Outcome::AuthorityIoInvalidInput,
+                I::Other => Outcome::AuthorityIoOther,
+            },
+            C::PredicateDenied => Outcome::PredicateDenied,
+        };
+        emit(stage, outcome);
+    }
     fn emit(stage: Stage, outcome: Outcome) {
         // Diagnostics must not turn a failed stderr write into a runtime panic.
         // Only closed enum labels reach this sink, never error/value payloads.
@@ -157,6 +303,8 @@ pub(super) mod delivery_diagnostics_v2 {
         }
         original
     }
+    pub(in crate::native_ui) fn signer_failure(stage: Stage, error: &Error) { emit(stage, signer_error(error)); }
+    pub(in crate::native_ui) fn bridge_failure(stage: Stage, error: &BridgeError) { emit(stage, bridge_error(error)); }
     pub(in crate::native_ui) fn signer_result<T>(
         stage: Stage,
         original: crate::Result<T>,
@@ -346,6 +494,8 @@ pub(in crate::native_ui) mod durable_proposal_qualification_v1;
 mod durable_review_v1;
 #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
 mod durable_delivery_admission_v2;
+#[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+pub(crate) mod durable_delivery_v3;
 #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
 mod durable_witness_v1;
 
@@ -563,6 +713,8 @@ enum Operation {
     DurableWitnessV1(Box<durable_witness_v1::DurableWitnessPreparedV1>),
     #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
     DurableDeliveryV2(Box<durable_delivery_admission_v2::PreparedAdmissionV2>),
+    #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+    ClosedDeliveryV3(durable_delivery_v3::ClosedDeliveryDecisionV3),
     #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
     DurableDeliveryRedisclosureV2(Box<durable_delivery_admission_v2::PreparedRedisclosureV2>),
     #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
@@ -975,6 +1127,12 @@ impl RetirementNativeEntry {
 }
 pub(super) struct NativeRuntime {
     #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+    closed_delivery_v3: Option<durable_delivery_v3::DurableDeliveryRuntimeV3>,
+    #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+    closed_history_prior_v3: Zeroizing<String>,
+    #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+    closed_history_selector_v3: Zeroizing<String>,
+    #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
     durable_entry_job: Option<durable_entry_v1::DurableEntryJobV1>,
     #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
     durable_delivery_entry_job: Option<durable_entry_v1::DurableDeliveryEntryJobV2>,
@@ -1087,6 +1245,12 @@ impl NativeRuntime {
     pub(super) fn new(parent_channel: Option<crate::native_launch::ParentChannel>) -> Self {
         Self {
             #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+            closed_delivery_v3: None,
+            #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+            closed_history_prior_v3: Zeroizing::new(String::new()),
+            #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+            closed_history_selector_v3: Zeroizing::new(String::new()),
+            #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
             durable_entry_job: None,
             #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
             durable_delivery_entry_job: None,
@@ -1196,6 +1360,8 @@ impl NativeRuntime {
         }
     }
     pub(super) fn lock(&mut self) {
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        self.close_closed_delivery_v3();
         #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
         {
             {
@@ -1784,6 +1950,8 @@ impl NativeRuntime {
     }
     fn poll(&mut self, epoch: u64) {
         #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        { self.poll_closed_delivery_v3(epoch); if self.closed_delivery_v3.is_some() { return; } }
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
         self.poll_durable_delivery_v2(epoch);
         #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
         self.poll_durable_material_lifetime_v1();
@@ -1855,6 +2023,13 @@ impl NativeRuntime {
                 continue;
             }
             #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+            if let LocalEvent::PrepareDurableRecipientV3 { stream, peer, request } = event {
+                if self.begin_prepared_delivery_v3(stream, peer, *request, epoch).is_err() {
+                    self.message = "Closed original preparation failed; no read or action grant was issued.";
+                }
+                return;
+            }
+            #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
             if open.durable_delivery_entry.is_some()
                 && !durable_delivery_admission_v2::allowed_event(&event)
             {
@@ -1868,6 +2043,8 @@ impl NativeRuntime {
                 continue;
             }
             match event {
+                #[cfg(all(feature = "durable-proposal", target_os = "linux"))]
+                LocalEvent::PrepareDurableRecipientV3 { .. } | LocalEvent::DurableDeliveryHistoryV3 { .. } | LocalEvent::DurableReceiveV3(_) => { self.message = "Closed V3 requests require their exact original custody context."; }
                 #[cfg(feature = "pending-birth-owner-signing")]
                 LocalEvent::BornRosterCommonContextHandoffAuthorizationV1 { stream, .. }
                 | LocalEvent::BornRosterCommonContextReentryV1 { stream, .. }
@@ -3080,6 +3257,8 @@ impl NativeRuntime {
                         }
                     }
                     self.message = match request {
+                        #[cfg(all(feature = "durable-proposal", target_os = "linux"))]
+                        crate::ipc::AppRequest::PrepareDurableRecipientV3 { .. } | crate::ipc::AppRequest::RequestDurableDeliveryHistoryV3 { .. } => "Closed V3 requests require their exact original custody context.",
                         #[cfg(feature = "pending-birth-owner-signing")]
                         crate::ipc::AppRequest::RequestBornRosterCommonContextHandoffAuthorizationV1 { .. }
                         | crate::ipc::AppRequest::RequestBornRosterCommonContextReentryV1 { .. }
@@ -4778,7 +4957,11 @@ impl NativeRuntime {
         let delivery_redisclosure = self.pending.as_ref().is_some_and(|pending| {
             matches!(&pending.operation, Operation::DurableDeliveryRedisclosureV2(_))
         });
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        let closed_decision = self.pending.as_ref().is_some_and(|pending|matches!(&pending.operation,Operation::ClosedDeliveryV3(_)));
         let result = self.approve_inner(focused, epoch);
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        if closed_decision && result.is_err() {self.revoke_closed_delivery_v3();}
         #[cfg(all(
             feature = "synthetic-born-joined-qualification",
             feature = "durable-proposal"
@@ -4853,6 +5036,10 @@ impl NativeRuntime {
         )?;
         self.confirmation.zeroize();
         #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        if let Operation::ClosedDeliveryV3(operation) = pending.operation {
+            return self.approve_closed_delivery_v3(operation, decision, epoch);
+        }
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
         if let Operation::DurableDeliveryV2(prepared) = pending.operation {
             return self.approve_durable_delivery_v2(*prepared, decision, epoch);
         }
@@ -4885,6 +5072,7 @@ impl NativeRuntime {
             #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
             Operation::DurableSpendV1 { .. }
             | Operation::DurableDisclosureV1 { .. }
+            | Operation::ClosedDeliveryV3(_)
             | Operation::DurableDeliveryV2(_)
             | Operation::DurableDeliveryRedisclosureV2(_) => {
                 unreachable!()
@@ -5368,7 +5556,8 @@ impl NativeRuntime {
                     ))]
                     Operation::DurableSpendV1 { .. }
                     | Operation::DurableDisclosureV1 { .. }
-                    | Operation::DurableDeliveryV2(_)
+                    | Operation::ClosedDeliveryV3(_)
+            | Operation::DurableDeliveryV2(_)
                     | Operation::DurableDeliveryRedisclosureV2(_) => {
                         unreachable!()
                     }
@@ -5758,6 +5947,9 @@ impl NativeRuntime {
                         .is_err()
                 {
                     self.pending = None;
+                    self.confirmation.zeroize();
+                    #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+                    if self.closed_delivery_v3.is_some() {self.revoke_closed_delivery_v3();}
                     self.message = "Review was invalidated. Prepare it again.";
                 }
             } else {
@@ -5779,6 +5971,8 @@ impl NativeRuntime {
                 .button("Reject and discard pending decision")
                 .clicked_by(egui::PointerButton::Primary)
             {
+                #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+                if self.closed_delivery_v3.is_some() { self.revoke_closed_delivery_v3(); }
                 self.pending = None;
                 self.confirmation.zeroize();
             }
@@ -5995,6 +6189,18 @@ impl NativeRuntime {
     }
 
     pub(super) fn ui(&mut self, ui: &mut egui::Ui, focused: bool, epoch: u64) {
+        #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+        if self.closed_delivery_v3.is_some() {
+            if !focused { self.revoke_closed_delivery_v3(); ui.label("Closed private view locked while unfocused."); return; }
+            self.poll_closed_delivery_v3(epoch);
+            if let Ok(endpoint)=self.durable_delivery_v3_endpoint() {
+                ui.label(format!("Exact closed endpoint: {}",endpoint.display()));
+            }
+            self.exact_review_ui(ui, focused, epoch);
+            ui.label(self.message);
+            if ui.button("Lock closed delivery").clicked_by(egui::PointerButton::Primary) { self.lock(); }
+            return;
+        }
         #[cfg(all(feature = "authority-signing", feature = "offline-review-foundation"))]
         if self.open.as_ref().is_some_and(|o| o.born_bridge_active) {
             if !focused {
@@ -6466,6 +6672,8 @@ impl NativeRuntime {
                             else { "Restricted historical entry was refused. No writer session or financial authority was created." };
                     }
                 });
+                #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+                if self.closed_history_entry_ui_v3(ui, focused, epoch) { return; }
                 #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
                 if ui
                     .button("Fresh v2 prospective delivery admission / original history")

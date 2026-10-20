@@ -75,7 +75,7 @@ macro_rules! receive_denied_v2 {
 }
 
 #[cfg(feature = "synthetic-born-joined-qualification")]
-mod receiver_diagnostics_v2 {
+pub(super) mod receiver_diagnostics_v2 {
     use super::{BridgeError, Error};
     use crate::consent_journal::JournalError;
     use std::{cell::Cell, io::Write};
@@ -197,6 +197,19 @@ mod receiver_diagnostics_v2 {
         OriginIoInterrupted,
         OriginIoPermissionDenied,
         OriginIoOther,
+        OriginFrameUnclassified,
+        OriginFrameDeadline,
+        OriginFrameEof,
+        OriginFrameCredentialsMissing,
+        OriginFrameCredentialsMismatch,
+        OriginFrameAncillaryRejected,
+        OriginFrameTruncated,
+        OriginFramePeerNotLive,
+        OriginFrameCurrentCheck,
+        OriginFrameIo,
+        OriginFrameLimit,
+        OriginFrameInvalidFrame,
+        OriginFrameInvalidBudget,
         JournalExpired,
         JournalPermission,
         JournalOther,
@@ -217,7 +230,7 @@ mod receiver_diagnostics_v2 {
         SeenFinite(Stage, Outcome),
     }
     #[derive(Default)]
-    pub(super) struct Collector(Cell<FirstCause>);
+    pub(in crate::native_ui::runtime) struct Collector(Cell<FirstCause>);
     impl Collector {
         fn record(&self, stage: Stage, outcome: Option<Outcome>) {
             if matches!(self.0.get(), FirstCause::Vacant) {
@@ -234,7 +247,29 @@ mod receiver_diagnostics_v2 {
                 FirstCause::SeenFinite(stage, outcome) => (stage, outcome),
             }
         }
-        pub(super) fn emit_terminal(&self, error: &BridgeError) {
+        pub(in crate::native_ui::runtime) fn source(&self, error: &Error) {
+            self.record(Stage::DeliveryReceiveSource, Some(signer_outcome(error)));
+        }
+        pub(in crate::native_ui::runtime) fn frame(&self, error: &wholepact_signer_origin::framing::ObservedFrameError) {
+            use wholepact_signer_origin::framing::FrameReadCause;
+            let outcome = match error.cause {
+                FrameReadCause::Unclassified => Outcome::OriginFrameUnclassified,
+                FrameReadCause::Deadline => Outcome::OriginFrameDeadline,
+                FrameReadCause::Eof => Outcome::OriginFrameEof,
+                FrameReadCause::CredentialsMissing => Outcome::OriginFrameCredentialsMissing,
+                FrameReadCause::CredentialsMismatch => Outcome::OriginFrameCredentialsMismatch,
+                FrameReadCause::AncillaryRejected => Outcome::OriginFrameAncillaryRejected,
+                FrameReadCause::Truncated => Outcome::OriginFrameTruncated,
+                FrameReadCause::PeerNotLive => Outcome::OriginFramePeerNotLive,
+                FrameReadCause::CurrentCheck => Outcome::OriginFrameCurrentCheck,
+                FrameReadCause::Io => Outcome::OriginFrameIo,
+                FrameReadCause::FrameLimit => Outcome::OriginFrameLimit,
+                FrameReadCause::InvalidFrame => Outcome::OriginFrameInvalidFrame,
+                FrameReadCause::InvalidBudget => Outcome::OriginFrameInvalidBudget,
+            };
+            self.record(Stage::DeliveryReceiveFrame, Some(outcome));
+        }
+        pub(in crate::native_ui::runtime) fn emit_terminal(&self, error: &BridgeError) {
             self.emit_terminal_to(error, &mut std::io::stderr().lock());
         }
         fn emit_terminal_to(&self, error: &BridgeError, writer: &mut impl Write) {

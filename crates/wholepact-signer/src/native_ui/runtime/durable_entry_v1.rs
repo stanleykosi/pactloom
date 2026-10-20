@@ -9,11 +9,11 @@ use std::{os::unix::fs::PermissionsExt, path::PathBuf, sync::mpsc, time::Instant
 
 /// Drop order is deliberate: the actual IPC worker/socket drains before its
 /// external private container is removed, including activation-error paths.
-struct DurableEntryEndpointV1 {
-    ipc: LocalIpc,
-    temporary: tempfile::TempDir,
+pub(super) struct DurableEntryEndpointV1 {
+    pub(super) ipc: LocalIpc,
+    pub(super) temporary: tempfile::TempDir,
 }
-fn create_durable_endpoint_v1(
+pub(super) fn create_durable_endpoint_v1(
     original_root: &Path,
 ) -> DurableEntryOpenResultV1<DurableEntryEndpointV1> {
     let create = DurableEntryFailureStageV1::EndpointCreate;

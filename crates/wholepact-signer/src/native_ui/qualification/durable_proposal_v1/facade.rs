@@ -490,3 +490,48 @@ impl EphemeralDurableDeliveryNativeV2 {
         Ok(reopened)
     }
 }
+
+/// Qualification custody of an actual production V3 controller. No public
+/// constructor, synthetic native decision or source-authority conversion.
+pub struct EphemeralClosedDeliveryNativeV3 {
+    inner: crate::native_ui::runtime::durable_proposal_qualification_v1::ClosedDeliveryNativeFixtureV3,
+}
+impl EphemeralDurableDeliveryNativeV2 {
+    pub fn poll_closed_receive_review_v3(
+        &mut self,
+        request: &DurableReviewDeliveryRequestV1,
+        fixed: &wholepact_protocol::durable_proposal_v1::FixedProposalIdentityV1,
+        payload_digest: &str,
+        payload_bytes: u64,
+        delivery: &wholepact_authority::durable_delivery_scope_v2::DurableDeliveryPlanV2,
+        materials: &[wholepact_authority::durable_delivery_scope_v2::DurableDeliveryMaterialScopeRefV2],
+    ) -> Result<bool> {
+        self.inner.poll_closed_receive_review_v3(request, fixed, payload_digest, payload_bytes, delivery, materials)
+    }
+    pub fn into_closed_delivery_v3(self) -> Result<EphemeralClosedDeliveryNativeV3> {
+        Ok(EphemeralClosedDeliveryNativeV3 { inner: self.inner.into_closed_delivery_v3()? })
+    }
+}
+impl EphemeralClosedDeliveryNativeV3 {
+    pub fn open_history_existing(selector: DurableDeliveryReopenSelectorV2, prior: crate::authority_bridge::durable_review_ipc_v3::RecipientIntentV3) -> Result<Self> {
+        Ok(Self { inner: crate::native_ui::runtime::durable_proposal_qualification_v1::ClosedDeliveryNativeFixtureV3::open_history_existing(selector, prior)? })
+    }
+    pub fn provider(&self) -> Result<wholepact_signer_origin::InstalledSignerProvider> { self.inner.provider() }
+    pub fn endpoint(&self) -> Result<std::path::PathBuf> { self.inner.endpoint() }
+    pub fn deadline(&self) -> Result<Instant> { self.inner.deadline() }
+    pub fn poll_data_only(&mut self) -> Result<()> { self.inner.poll() }
+    pub fn poll_verified_import(&mut self, fixed: &wholepact_protocol::durable_proposal_v1::FixedProposalIdentityV1) -> Result<bool> {
+        self.inner.poll_verified_import(fixed)
+    }
+    pub fn poll_admission_review(&mut self) -> Result<Option<wholepact_authority::OwnerControlRequest>> {
+        self.inner.poll_admission_review()
+    }
+    pub fn approve_conditional_admission(&mut self) -> Result<()> { self.inner.approve_conditional_admission() }
+    pub fn admission_pending(&mut self) -> Result<bool> { self.inner.admission_pending() }
+    pub fn begin_history_audit(&mut self) -> Result<()> { self.inner.begin_history_audit() }
+    pub fn poll_history_audit(&mut self) -> Result<bool> { self.inner.poll_history_audit() }
+    pub fn status(&self) -> Result<crate::authority_bridge::durable_delivery_admission_ipc_v3::DurableDeliveryAdmissionStatusV3> { self.inner.status() }
+    pub fn require_financial_routes_denied(&mut self) -> Result<()> { self.inner.require_financial_routes_denied() }
+    pub fn close_existing_entry(self) -> Result<()> { self.inner.close_existing() }
+    pub fn close_preserving_originals(self) -> Result<DurableDeliveryReopenSelectorV2> { self.inner.close_preserving_originals() }
+}

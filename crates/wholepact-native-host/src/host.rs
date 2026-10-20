@@ -178,6 +178,16 @@ enum Command {
         #[arg(long)] workspace: PathBuf,
     },
 #[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
+    DurableDeliveryAdmitV3 {
+        #[arg(long)] profile: PathBuf,
+        #[arg(long)] workspace: PathBuf,
+    },
+#[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
+    DurableDeliveryAdmissionStatusV3 {
+        #[arg(long)] profile: PathBuf,
+        #[arg(long)] workspace: PathBuf,
+    },
+#[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
     DurableDeliveryAdmissionStatusV2 {
         #[arg(long)] profile: PathBuf,
         #[arg(long)] workspace: PathBuf,
@@ -431,6 +441,10 @@ fn dispatch(terminal: Terminal, command: Command) -> Result<()> {
         Command::DurableDeliveryAdmitV2 {profile,workspace} => financial::durable_delivery_admission_v2::admit_original(terminal,&profile,&workspace),
 #[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
         Command::DurableDeliveryAdmissionStatusV2 {profile,workspace} => financial::durable_delivery_admission_v2::read_original_status(terminal,&profile,&workspace),
+#[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
+        Command::DurableDeliveryAdmitV3 {profile,workspace} => financial::durable_delivery_admission_v2::admit_original_v3(terminal,&profile,&workspace),
+#[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
+        Command::DurableDeliveryAdmissionStatusV3 {profile,workspace} => financial::durable_delivery_admission_v2::read_original_status_v3(terminal,&profile,&workspace),
 #[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
         Command::DurableDispatcherFinishV4 {profile,workspace} => durable_dispatcher_v2::finish_command_v4(terminal,&profile,&workspace),
 #[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]

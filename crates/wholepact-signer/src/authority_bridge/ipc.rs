@@ -1637,3 +1637,52 @@ impl OriginalHistoryClient {
         Ok(())
     }
 }
+
+#[cfg(feature = "durable-proposal")]
+impl OriginalHistoryClient {
+    /// The old grant authorizes only this bounded staging request. It is
+    /// destroyed after the matching Staged ACK, before any fresh native review.
+    pub(super) fn open_closed_stage_request_v3(&self, request: serde_json::Value, require_export: bool, deadline: Instant) -> Result<UnixStream> {
+        let operation = if require_export { "prepare_durable_recipient_v3" } else { "request_durable_delivery_history_v3" };
+        if request.get("operation").and_then(|value| value.as_str()) != Some(operation) { return Err(BridgeError::Permission); }
+        let check = || {
+            if self.mode != PairingMode::Ordinary || !self.scope.history_read
+                || (require_export && !self.scope.preconstruction_export)
+                || Instant::now() >= deadline.min(self.grant.expires) { return Err(BridgeError::Permission); }
+            self.peer.check_alive().map_err(|_| BridgeError::Permission)
+        };
+        let mut stream = super::durable_review_ipc_v3::observe_origin_v3(wholepact_signer_origin::connect_local_checked_until(&self.socket,deadline.min(self.grant.expires),|| check().map_err(|_| wholepact_signer_origin::Error::Permission))).map_err(|_| BridgeError::Ipc)?;
+        crate::ipc::enable_credentials(stream.as_raw_fd()).map_err(|_| BridgeError::Ipc)?;
+        self.check_closed_stage_origin_v3(&stream,require_export,deadline)?;
+        let observer = stream.try_clone().map_err(|_| BridgeError::Ipc)?;
+        super::durable_review_ipc_v1::bounded_write(&mut stream,&serde_json::json!({"command":"request","schema_version":1,"grant_id":self.grant.grant_id,"token_hex":self.grant.token_hex.as_str(),"request":request}),deadline.min(self.grant.expires),|| self.check_closed_stage_origin_v3(&observer,require_export,deadline))?;
+        Ok(stream)
+    }
+    pub(super) fn check_closed_stage_origin_v3(&self,stream:&UnixStream,require_export:bool,deadline:Instant)->Result<()> {
+        if self.mode != PairingMode::Ordinary || !self.scope.history_read
+            || (require_export && !self.scope.preconstruction_export)
+            || Instant::now() >= deadline.min(self.grant.expires) { return Err(BridgeError::Permission); }
+        let observed = super::durable_review_ipc_v3::observe_origin_v3(self.provider.verify_server(stream))?;
+        super::durable_review_ipc_v3::observe_origin_v3(self.peer.same_live_process(&observed)).map_err(|_| BridgeError::Permission)?;
+        super::durable_review_ipc_v3::observe_origin_v3(self.peer.check_alive()).map_err(|_| BridgeError::Permission)
+    }
+    pub(super) fn closed_provider_reference_v3(&self) -> &str {
+        self.provider.native_enrollment_reference()
+    }
+    pub(super) fn into_closed_origin_v3(self) -> Result<super::durable_review_ipc_v3::ClosedRecipientOriginV3> {
+        self.into_closed_origin_checked_v3(true)
+    }
+    pub(super) fn into_closed_history_origin_v3(self) -> Result<super::durable_review_ipc_v3::ClosedRecipientOriginV3> {
+        self.into_closed_origin_checked_v3(false)
+    }
+    fn into_closed_origin_checked_v3(self, require_export: bool) -> Result<super::durable_review_ipc_v3::ClosedRecipientOriginV3> {
+        if self.mode != PairingMode::Ordinary || self.active_leases.load(Ordering::Acquire) != 0
+            || !self.scope.history_read || (require_export && !self.scope.preconstruction_export) {
+            return Err(BridgeError::Permission);
+        }
+        self.peer.check_alive().map_err(|_| BridgeError::Permission)?;
+        let Self {provider,socket,peer,scope,grant,active_leases:_,mode:_} = self;
+        drop(grant);
+        Ok(super::durable_review_ipc_v3::ClosedRecipientOriginV3 {provider,socket,peer,scope})
+    }
+}

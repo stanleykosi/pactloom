@@ -16,6 +16,8 @@ mod born_offline_witness_v1;
 mod durable_acquire_reply_loss_v1;
 mod durable_payment_client_v1;
 mod durable_delivery_admission_v2;
+pub mod durable_delivery_admission_v3;
+pub use durable_delivery_admission_v3::AuthenticatedDurableAdmissionChannelV3;
 mod durable_payment_server_v1;
 #[cfg(all(
     feature = "synthetic-qualification",
@@ -1735,94 +1737,18 @@ impl AuthorityClient {
             None,
         )
     }
-    // One shared kernel: existing callers pass no diagnostic observer.
-    fn call_with_inner_checked_observed(
+    fn open_authenticated_stream_checked(
         &self,
-        build: impl FnOnce(&[u8; 32]) -> Result<WireRequest>,
+        deadline: Instant,
         caller_deadline: Option<Instant>,
-        mut current: impl FnMut() -> Result<()>,
-        #[cfg(feature = "synthetic-qualification")] observation: Option<(
-            &HistoryObserverV1,
-            HistoryPhaseV1,
-        )>,
-    ) -> Result<WireResponse> {
+        check: &mut impl FnMut() -> Result<()>,
+        connect_failure: Option<&mut Option<std::io::ErrorKind>>,
+        #[cfg(feature = "synthetic-qualification")] observation: Option<(&HistoryObserverV1, HistoryPhaseV1)>,
+    ) -> Result<(ClientConnection, CallerDeadlineSocket, Zeroizing<[u8; 32]>)> {
         #[cfg(feature = "synthetic-qualification")]
         let observer = observation.map(|(observer, _)| observer);
         #[cfg(feature = "synthetic-qualification")]
-        if let Some((observer, phase)) = observation {
-            observer.begin_exchange(phase);
-        }
-        #[cfg(feature = "synthetic-qualification")]
-        let checked = history_diagnostics_v1::callback_observed(observer, || current());
-        #[cfg(not(feature = "synthetic-qualification"))]
-        let checked = current();
-        checked.map_err(|error| {
-            #[cfg(feature = "synthetic-qualification")]
-            if let Some(observer) = observer {
-                observer.record(CheckedHistoryStageV1::SourceCallback, None, error);
-            }
-            error
-        })?;
-        #[cfg(feature = "synthetic-qualification")]
-        if let Some(observer) = observer {
-            observer.checkpoint(HistoryCheckpointV1::DeadlineSelection);
-        }
-        let started = Instant::now();
-        let deadline = match caller_deadline {
-            Some(deadline) => {
-                bounded_transport_deadline_at(started, deadline).map_err(|error| {
-                    #[cfg(feature = "synthetic-qualification")]
-                    if let Some(observer) = observer {
-                        observer.record(CheckedHistoryStageV1::CallerDeadline, None, error);
-                    }
-                    error
-                })?
-            }
-            None => started + IO_TIMEOUT,
-        };
-        #[cfg(feature = "synthetic-qualification")]
-        let deadline_stage =
-            history_diagnostics_v1::selected_deadline_stage(deadline, caller_deadline);
-        #[cfg(feature = "synthetic-qualification")]
-        if let Some(observer) = observer {
-            observer.select_deadline(started, deadline);
-        }
-        let mut check = || -> Result<()> {
-            if caller_deadline.is_some() {
-                require_before_caller_deadline(deadline).map_err(|error| {
-                    #[cfg(feature = "synthetic-qualification")]
-                    if let Some(observer) = observer {
-                        observer.record(deadline_stage, None, error);
-                    }
-                    error
-                })?;
-            }
-            #[cfg(feature = "synthetic-qualification")]
-            let checked = history_diagnostics_v1::callback_observed(observer, || current());
-            #[cfg(not(feature = "synthetic-qualification"))]
-            let checked = current();
-            checked.map_err(|error| {
-                #[cfg(feature = "synthetic-qualification")]
-                if let Some(observer) = observer {
-                    observer.record(CheckedHistoryStageV1::SourceCallback, None, error);
-                }
-                error
-            })?;
-            #[cfg(feature = "synthetic-qualification")]
-            if let Some(observer) = observer {
-                observer.checkpoint(HistoryCheckpointV1::AfterCallback);
-            }
-            if caller_deadline.is_some() {
-                require_before_caller_deadline(deadline).map_err(|error| {
-                    #[cfg(feature = "synthetic-qualification")]
-                    if let Some(observer) = observer {
-                        observer.record(deadline_stage, None, error);
-                    }
-                    error
-                })?;
-            }
-            Ok(())
-        };
+        let deadline_stage = history_diagnostics_v1::selected_deadline_stage(deadline, caller_deadline);
         #[cfg(feature = "synthetic-qualification")]
         if let Some(observer) = observer {
             observer.checkpoint(HistoryCheckpointV1::ConnectRemaining);
@@ -1851,6 +1777,12 @@ impl AuthorityClient {
         let connect_token =
             observer.map(|observer| observer.start_operation(HistoryOperationV1::Connect));
         let connected = TcpStream::connect_timeout(&self.endpoint, connect_timeout);
+        // V3 discovery may distinguish only an actual failure of this original
+        // preconnection operation. No TLS, framing or later failure updates it.
+        // Legacy callers pass None and retain their original result mapping.
+        if let (Some(failure), Err(error)) = (connect_failure, &connected) {
+            *failure = Some(error.kind());
+        }
         #[cfg(feature = "synthetic-qualification")]
         let connected = match observer {
             Some(observer) => observer.observe_io(connected),
@@ -1939,6 +1871,101 @@ impl AuthorityClient {
             observer.exchange_check(HistoryCheckSiteV1::AfterPeerBinding);
         }
         check()?;
+        Ok((connection, socket, exporter))
+    }
+    // One shared kernel: existing callers pass no diagnostic observer.
+    fn call_with_inner_checked_observed(
+        &self,
+        build: impl FnOnce(&[u8; 32]) -> Result<WireRequest>,
+        caller_deadline: Option<Instant>,
+        mut current: impl FnMut() -> Result<()>,
+        #[cfg(feature = "synthetic-qualification")] observation: Option<(
+            &HistoryObserverV1,
+            HistoryPhaseV1,
+        )>,
+    ) -> Result<WireResponse> {
+        #[cfg(feature = "synthetic-qualification")]
+        let observer = observation.map(|(observer, _)| observer);
+        #[cfg(feature = "synthetic-qualification")]
+        if let Some((observer, phase)) = observation {
+            observer.begin_exchange(phase);
+        }
+        #[cfg(feature = "synthetic-qualification")]
+        let checked = history_diagnostics_v1::callback_observed(observer, || current());
+        #[cfg(not(feature = "synthetic-qualification"))]
+        let checked = current();
+        checked.map_err(|error| {
+            #[cfg(feature = "synthetic-qualification")]
+            if let Some(observer) = observer {
+                observer.record(CheckedHistoryStageV1::SourceCallback, None, error);
+            }
+            error
+        })?;
+        #[cfg(feature = "synthetic-qualification")]
+        if let Some(observer) = observer {
+            observer.checkpoint(HistoryCheckpointV1::DeadlineSelection);
+        }
+        let started = Instant::now();
+        let deadline = match caller_deadline {
+            Some(deadline) => {
+                bounded_transport_deadline_at(started, deadline).map_err(|error| {
+                    #[cfg(feature = "synthetic-qualification")]
+                    if let Some(observer) = observer {
+                        observer.record(CheckedHistoryStageV1::CallerDeadline, None, error);
+                    }
+                    error
+                })?
+            }
+            None => started + IO_TIMEOUT,
+        };
+        #[cfg(feature = "synthetic-qualification")]
+        let deadline_stage =
+            history_diagnostics_v1::selected_deadline_stage(deadline, caller_deadline);
+        #[cfg(feature = "synthetic-qualification")]
+        if let Some(observer) = observer {
+            observer.select_deadline(started, deadline);
+        }
+        let mut check = || -> Result<()> {
+            if caller_deadline.is_some() {
+                require_before_caller_deadline(deadline).map_err(|error| {
+                    #[cfg(feature = "synthetic-qualification")]
+                    if let Some(observer) = observer {
+                        observer.record(deadline_stage, None, error);
+                    }
+                    error
+                })?;
+            }
+            #[cfg(feature = "synthetic-qualification")]
+            let checked = history_diagnostics_v1::callback_observed(observer, || current());
+            #[cfg(not(feature = "synthetic-qualification"))]
+            let checked = current();
+            checked.map_err(|error| {
+                #[cfg(feature = "synthetic-qualification")]
+                if let Some(observer) = observer {
+                    observer.record(CheckedHistoryStageV1::SourceCallback, None, error);
+                }
+                error
+            })?;
+            #[cfg(feature = "synthetic-qualification")]
+            if let Some(observer) = observer {
+                observer.checkpoint(HistoryCheckpointV1::AfterCallback);
+            }
+            if caller_deadline.is_some() {
+                require_before_caller_deadline(deadline).map_err(|error| {
+                    #[cfg(feature = "synthetic-qualification")]
+                    if let Some(observer) = observer {
+                        observer.record(deadline_stage, None, error);
+                    }
+                    error
+                })?;
+            }
+            Ok(())
+        };
+        let (connection, socket, exporter) = self.open_authenticated_stream_checked(
+            deadline, caller_deadline, &mut check, None,
+            #[cfg(feature = "synthetic-qualification")]
+            observation,
+        )?;
         #[cfg(feature = "synthetic-qualification")]
         if let Some((observer, phase)) = observation {
             observer.enter(phase.stage(HistoryCallStepV1::RequestBuild));
@@ -2158,6 +2185,9 @@ impl AuthorityServer {
         admission_stage!(observer, WaitCurrent);
         self.check_durable_payment_wait_v1()?;
         self.check_durable_delivery_wait_v2()?;
+        if let WireRequest::PrepareDurableDeliveryAdmissionV3(preparation) = &request {
+            return self.serve_durable_delivery_admission_v3(stream, &peer, preparation.clone());
+        }
         if self.is_durable_delivery_admission_v2() {
             admission_stage!(observer, SemanticDispatch);
             let response = admission_measure!(
@@ -2276,6 +2306,7 @@ impl AuthorityServer {
             );
         }
         let result = match request {
+            WireRequest::PrepareDurableDeliveryAdmissionV3(_) => Err(AuthorityError::Permission),
             WireRequest::ObserveBornOfflineAdmissionTimeV1(request) => {
                 if !self.is_born_offline_server_v1() {
                     Err(AuthorityError::Permission)

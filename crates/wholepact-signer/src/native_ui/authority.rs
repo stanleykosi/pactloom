@@ -232,6 +232,11 @@ impl PendingAccountNativeAuthority {
     /// Retains only the original parent-channel liveness obligation. It cannot
     /// approve a review, publish an endpoint, or access the account or a grant.
     #[cfg(feature = "pending-birth-owner-signing")]
+    #[cfg(feature = "durable-proposal")]
+    pub(crate) fn revoke_prepared_delivery_transition(&self) {
+        self.revoke_pending_now();
+    }
+    #[cfg(feature = "pending-birth-owner-signing")]
     pub(crate) fn dormant_lifetime(&self) -> Result<DormantNativeLifetime> {
         self.check_current()?;
         Ok(DormantNativeLifetime {
@@ -281,6 +286,194 @@ impl DormantNativeLifetime {
             channel.check_connected()?;
         }
         Ok(())
+    }
+}
+
+/// A closed review issuer for one already-prepared original source. This has
+/// no account/read/transport API. Its short review clock is NOT the read clock.
+#[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+pub(super) struct PreparedDeliveryReadReviewV3 {
+    native: NativeAuthority,
+    source_digest: String,
+    reviewed_digest: String,
+    material_deadline: Instant,
+}
+#[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+impl PreparedDeliveryReadReviewV3 {
+    pub(super) fn enter(
+        entry: super::runtime::PendingBirthEntry,
+        source_digest: &str,
+        reviewed_digest: &str,
+        material_deadline: Instant,
+    ) -> Result<Self> {
+        let (_, parent) = entry.into_parts();
+        for value in [source_digest, reviewed_digest] {
+            if value.len() != 64 || !value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+                return Err(Error::InvalidData);
+            }
+        }
+        let now = Instant::now();
+        if now >= material_deadline { return Err(Error::Locked); }
+        let native = NativeAuthority::entered_retirement_window(
+            (now + Duration::from_secs(120)).min(material_deadline), parent,
+        )?;
+        Ok(Self { native, source_digest: source_digest.into(), reviewed_digest: reviewed_digest.into(), material_deadline })
+    }
+    pub(super) fn native(&self) -> &NativeAuthority { &self.native }
+    pub(super) fn approve(self, decision: NativeDecision) -> Result<PreparedReceiveAndViewAuthorityV3> {
+        self.native.check_current()?;
+        if decision.binding() != &self.native.binding()
+            || decision.reviewed_digest() != self.reviewed_digest
+            || decision.consumed_at() > Instant::now()
+        { return Err(Error::ReviewMismatch); }
+        let deadline = (decision.consumed_at() + Duration::from_secs(120)).min(self.material_deadline);
+        if Instant::now() >= deadline { return Err(Error::Locked); }
+        // A NEW purpose-bound native instance, not mutation/renewal of the
+        // review issuer or any old setup grant. Image measurement was completed
+        // before review and remains tied to this actual process; no KDF, image
+        // scan, pairing or source reconstruction occurs after the response.
+        let native = NativeAuthority {
+            binding: NativeAuthorityBinding {
+                instance: Arc::new(AtomicBool::new(true)),
+                publication: Arc::new(std::sync::RwLock::new(())),
+                expires_at: Some(deadline),
+                retirement_parent: self.native.binding.retirement_parent.clone(),
+                identity: hex::encode(crate::vault::random::<32>()?),
+                construction_transport: Arc::new(std::sync::Mutex::new(None)),
+            },
+            principal: self.native.principal.clone(),
+            measurement: self.native.measurement.clone(),
+        };
+        Ok(PreparedReceiveAndViewAuthorityV3 {
+            native,
+            source_digest: self.source_digest,
+            receive_decision_digest: self.reviewed_digest,
+            receive_unused: AtomicBool::new(true),
+            history_only: false,
+            approved_at: decision.consumed_at(),
+            deadline,
+        })
+    }
+}
+
+/// Revocable READ120 permission, with a distinct one-use conditional inbound
+/// consent. It cannot issue a PairScope, spending session or generic native key
+/// owner. Lock/drop invalidates every binding and private view.
+#[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+pub(crate) struct PreparedReceiveAndViewAuthorityV3 {
+    native: NativeAuthority,
+    source_digest: String,
+    receive_decision_digest: String,
+    receive_unused: AtomicBool,
+    history_only: bool,
+    approved_at: Instant,
+    deadline: Instant,
+}
+#[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+pub(crate) fn receive_review_digest_v3(intent: &crate::authority_bridge::durable_review_ipc_v3::RecipientIntentV3) -> Result<String> {
+    intent.validate().map_err(|_| Error::InvalidData)?;
+    wholepact_core::proposal::canonical_digest("wholepact:receive-and-view-exact:v3", &(
+        intent.preparation(), &intent.source_identity_digest, intent.source_generation,
+        &intent.authorized_host_process_instance, &intent.original_enrollment_ref,
+        &intent.original_manifest_ref, &intent.account_id, &intent.participant_id,
+        &intent.agreement_id, &intent.manifest_digest,
+    )).map_err(|_| Error::InvalidData)
+}
+#[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+impl PreparedReceiveAndViewAuthorityV3 {
+    pub(crate) fn check_source(&self, digest: &str) -> Result<()> {
+        self.native.check_current()?;
+        if digest != self.source_digest || Instant::now() >= self.deadline { return Err(Error::Locked); }
+        Ok(())
+    }
+    pub(crate) fn check_recipient(&self, intent: &crate::authority_bridge::durable_review_ipc_v3::RecipientIntentV3) -> Result<()> {
+        self.check_source(&intent.source_identity_digest)?;
+        if intent.read_session_digest != self.binding().entry_digest()
+            || intent.receive_decision_digest != self.receive_decision_digest
+            || receive_review_digest_v3(intent)? != self.receive_decision_digest {
+            return Err(Error::ReviewMismatch);
+        }
+        Ok(())
+    }
+    pub(crate) fn binding(&self) -> NativeAuthorityBinding { self.native.binding() }
+    pub(crate) fn deadline(&self) -> Result<Instant> { self.check_source(&self.source_digest)?; Ok(self.deadline) }
+    pub(crate) fn receive_decision_digest(&self) -> &str { &self.receive_decision_digest }
+    pub(crate) fn approved_at(&self) -> Instant { self.approved_at }
+    pub(crate) fn measurement(&self) -> &str { self.native.measurement() }
+    pub(crate) fn principal_id(&self) -> &str { self.native.principal_id() }
+    pub(super) fn native(&self) -> &NativeAuthority { &self.native }
+    pub(super) fn restrict_history_only(mut self) -> Self { self.history_only = true; self.receive_unused.store(false, Ordering::Release); self }
+    pub(crate) fn invalidate(&self) { self.native.revoke_informational_now(); }
+    pub(super) fn consume_receive(&self) -> Result<ExactDurableActionV3> {
+        self.check_source(&self.source_digest)?;
+        if self.history_only || self.receive_unused.compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire).is_err() {
+            return Err(Error::ReviewMismatch);
+        }
+        Ok(ExactDurableActionV3 { source: self.binding(), deadline: (Instant::now() + Duration::from_secs(120)).min(self.deadline), admission: None })
+    }
+    pub(super) fn approve_conditional_admission(
+        &self, decision: NativeDecision, reviewed_digest: &str, request: wholepact_authority::OwnerControlRequest,
+    ) -> Result<ConditionalDurableAdmissionV3> {
+        self.check_source(&self.source_digest)?;
+        if self.history_only || decision.binding() != &self.binding() || decision.reviewed_digest() != reviewed_digest {
+            return Err(Error::ReviewMismatch);
+        }
+        Ok(ConditionalDurableAdmissionV3 { source: self.binding(), reviewed_digest: reviewed_digest.into(), deadline: self.deadline, reviewed_at: decision.consumed_at(), request })
+    }
+}
+#[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+pub(crate) struct ConditionalDurableAdmissionV3 {
+    source: NativeAuthorityBinding,
+    reviewed_digest: String,
+    deadline: Instant,
+    reviewed_at: Instant,
+    request: wholepact_authority::OwnerControlRequest,
+}
+#[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+impl ConditionalDurableAdmissionV3 {
+    pub(crate) fn check_current(&self) -> Result<()> {
+        self.source.check_current()?;
+        if Instant::now() >= self.deadline { return Err(Error::Locked); }
+        Ok(())
+    }
+    pub(crate) fn reviewed_digest(&self) -> &str { &self.reviewed_digest }
+    pub(crate) fn reviewed_at(&self) -> Instant { self.reviewed_at }
+    pub(crate) fn activate(
+        self,
+        ready: &wholepact_authority::transport::AuthenticatedDurableAdmissionChannelV3<'_>,
+    ) -> Result<ExactDurableActionV3> {
+        self.check_current()?;
+        ready.check_current().map_err(|_| Error::Authentication)?;
+        if ready.request() != &self.request { return Err(Error::ReviewMismatch); }
+        Ok(ExactDurableActionV3 { source: self.source, deadline: (Instant::now() + Duration::from_secs(120)).min(self.deadline).min(ready.deadline()), admission: Some((self.request, self.reviewed_digest, self.reviewed_at)) })
+    }
+}
+#[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+pub(crate) struct ExactDurableActionV3 {
+    source: NativeAuthorityBinding,
+    deadline: Instant,
+    admission: Option<(wholepact_authority::OwnerControlRequest, String, Instant)>,
+}
+#[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+impl ExactDurableActionV3 {
+    pub(crate) fn check_current(&self) -> Result<()> {
+        self.source.check_current()?;
+        if Instant::now() >= self.deadline { return Err(Error::Locked); }
+        Ok(())
+    }
+    pub(crate) fn binding(&self) -> &NativeAuthorityBinding { &self.source }
+    pub(crate) fn deadline(&self) -> Instant { self.deadline }
+    pub(crate) fn admission_request(&self) -> Result<&wholepact_authority::OwnerControlRequest> {
+        self.check_current()?;
+        Ok(&self.admission.as_ref().ok_or(Error::ReviewMismatch)?.0)
+    }
+    pub(crate) fn reviewed_digest(&self) -> Result<&str> {
+        self.check_current()?;
+        Ok(&self.admission.as_ref().ok_or(Error::ReviewMismatch)?.1)
+    }
+    pub(crate) fn reviewed_at(&self) -> Result<Instant> {
+        self.check_current()?;
+        Ok(self.admission.as_ref().ok_or(Error::ReviewMismatch)?.2)
     }
 }
 

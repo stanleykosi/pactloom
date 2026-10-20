@@ -971,3 +971,12 @@ pub use automation_authority::*;
 
 #[path = "durable_delivery_admission_intent_v2.rs"]
 pub(crate) mod durable_delivery_admission_intent_v2;
+
+// V3 is purpose-distinct from the generic session/receipt issuer above.
+#[cfg(all(feature = "durable-proposal", target_os = "linux"))]
+#[path = "durable_delivery_admission_intent_v3.rs"]
+pub(crate) mod durable_delivery_admission_intent_v3;
+#[cfg(all(feature = "durable-proposal", target_os = "linux"))]
+pub(crate) use durable_delivery_admission_intent_v3::{
+    PreparedDurableDeliveryAdmissionIntentV3, RetainedDurableDeliveryAdmissionIntentV3,
+};

@@ -35,7 +35,7 @@ use wholepact_signer::native_ui::synthetic_born_joined_qualification::{
     DurableAdmissionHistoryFailureV1, DurableAdmissionPreparationFailureV1,
     DurableAdmissionPreparationStageV1, DurableFlowFailureV1, DurableFlowResultV1,
     DurableNativeEntryFailureV1, DurableNativeEntryStageV1, DurableNativeRecordsV1,
-    EphemeralAcknowledgedBornV1, EphemeralDurableDeliveryNativeV2, EphemeralDurableNativeV1,
+    EphemeralAcknowledgedBornV1, EphemeralDurableDeliveryNativeV2, EphemeralClosedDeliveryNativeV3, EphemeralDurableNativeV1,
     EphemeralExportedBirthV1, EphemeralFirstAnchorIntentV1, EphemeralFirstAnchorPublicationV1,
     EphemeralOriginalRosterIntentV1, EphemeralPendingBornV1, EphemeralRosterPublicationV1,
     OriginalBirthSetupV1,
@@ -52,6 +52,12 @@ type Result<T> = std::result::Result<T, &'static str>;
 fn signer_error(error: wholepact_signer::Error, label: &'static str) -> &'static str {
     diagnostic::emit(B::SignerPollTerminal, diagnostic::signer_error(&error));
     label
+}
+// Same-result observation at the actual new production command boundary.
+// Lower native/Bridge observations retain precedence; no private text is emitted.
+fn closed_delivery_error(error: wholepact_signer::Error, boundary: B) -> wholepact_signer::Error {
+    diagnostic::emit_delivery_observation(boundary, diagnostic::signer_error(&error));
+    error
 }
 fn durable_flow_error(failure: DurableFlowFailureV1, label: &'static str) -> &'static str {
     // The original fixture Error controls the unchanged terminal mapping.
@@ -317,6 +323,13 @@ pub(super) enum JoinedSignerCommandV1 {
     AcceptDelivery(usize),
     ConfigureDeliveryWitness(usize),
     PollDeliveryRedisclosure(usize, DurableConstructionRedisclosureRequestV1, Arc<AtomicBool>),
+    PrepareClosedDelivery(usize, DurableReviewDeliveryRequestV1, wholepact_protocol::durable_proposal_v1::FixedProposalIdentityV1, String, u64, wholepact_authority::durable_delivery_scope_v2::DurableDeliveryPlanV2, Vec<wholepact_authority::durable_delivery_scope_v2::DurableDeliveryMaterialScopeRefV2>, Arc<AtomicBool>),
+    PollClosedDeliveryImport(usize, wholepact_protocol::durable_proposal_v1::FixedProposalIdentityV1, Arc<AtomicBool>),
+    PollClosedDeliveryAdmission(usize),
+    ApproveClosedDelivery(usize),
+    AwaitClosedDeliveryResponse(usize, Arc<AtomicBool>),
+    AwaitClosedDeliveryAudit(usize, Arc<AtomicBool>),
+    ReopenClosedDeliveryAudit(usize),
     PollDeliveryImport(usize, DurableReviewDeliveryRequestV1, wholepact_protocol::durable_proposal_v1::FixedProposalIdentityV1),
     PollDeliveryAdmission(usize, wholepact_signer::authority_bridge::durable_delivery_admission_ipc_v2::DurableDeliveryAdmissionRequestV2),
     ApproveDelivery(usize),
@@ -375,6 +388,7 @@ pub(super) enum JoinedSignerCommandV1 {
 }
 pub(super) use wholepact_signer::native_ui::synthetic_born_joined_qualification::DurableDeliveryReopenSelectorV2 as DeliveryReopenV2;
 pub(super) enum JoinedSignerReplyV1 {
+    ClosedDeliveryStatus { index: usize, status: wholepact_signer::authority_bridge::durable_delivery_admission_ipc_v3::DurableDeliveryAdmissionStatusV3 },
     DeliveryStatus { index: usize, status: wholepact_signer::authority_bridge::durable_delivery_admission_ipc_v2::DurableDeliveryAdmissionStatusV2 },
     DeliveryPreserved { index: usize, original: DeliveryReopenV2 },
     BirthExport {
@@ -447,6 +461,8 @@ enum State {
     RosterPublication(EphemeralRosterPublicationV1, bool),
     Durable(Box<EphemeralDurableNativeV1>),
     Delivery(Box<EphemeralDurableDeliveryNativeV2>),
+    ClosedDelivery(Box<EphemeralClosedDeliveryNativeV3>),
+    ClosedReopen(DeliveryReopenV2, wholepact_signer::authority_bridge::durable_review_ipc_v3::RecipientIntentV3),
     PreservedDelivery,
 }
 enum OriginalWitnessOriginsV1 {
@@ -585,6 +601,30 @@ impl JoinedSignerWorkerV1 {
                 Err("delivery reader startup disconnected")
             }
         }
+    }
+    /// Stores only inert original selectors. Each actual read entry is opened
+    /// later, after that owner's authenticated history listener is established.
+    pub fn reopen_closed_delivery(originals: [DeliveryReopenV2; 2], intents: [wholepact_signer::authority_bridge::durable_review_ipc_v3::RecipientIntentV3; 2]) -> Result<Self> {
+        let (commands, incoming) = mpsc::channel();
+        let (outgoing, replies) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let flag = cancelled.clone();
+        let join = thread::Builder::new().name("synthetic-closed-delivery-reader".into()).stack_size(8*1024*1024).spawn(move || {
+            let mut states: [Option<State>; 3] = std::array::from_fn(|_| None);
+            for (slot, (original, intent)) in originals.into_iter().zip(intents).enumerate() {
+                states[slot+1] = Some(State::ClosedReopen(original, intent));
+            }
+            while !flag.load(Ordering::Acquire) {
+                let command = match incoming.recv_timeout(Duration::from_millis(20)) {
+                    Ok(command) => command, Err(mpsc::RecvTimeoutError::Timeout) => continue, Err(_) => break,
+                };
+                let reply = execute(command, &mut states, None, &flag);
+                let failed = reply.is_err();
+                if outgoing.send(reply).is_err() || failed { break; }
+            }
+            drop(states);
+        }).map_err(|_| "closed reader thread")?;
+        Ok(Self { commands: Some(commands), replies, cancelled, join: Some(join) })
     }
     pub fn send(&self, command: JoinedSignerCommandV1) -> Result<()> {
         if self.cancelled.load(Ordering::Acquire) {
@@ -762,6 +802,22 @@ fn poll_until(
     }
 }
 
+// Host completion bounds only the response-serving wait. It neither proves a
+// native outcome nor grants authority; an early failed Host call terminates
+// through the unchanged fixture error/drop-drain path instead of timing out.
+fn closed_delivery_host_complete(
+    terminal: bool,
+    host_complete: &AtomicBool,
+) -> wholepact_signer::Result<bool> {
+    if !host_complete.load(Ordering::Acquire) {
+        return Ok(false);
+    }
+    if !terminal {
+        return Err(wholepact_signer::Error::Uncertain);
+    }
+    Ok(true)
+}
+
 // Data-only terminal failure observation precedes the same pending-stop checks.
 // A queued success is not returned by take_failure and still traverses the
 // borrowed wait's original live and full successful-exit gates.
@@ -798,6 +854,13 @@ fn command_index(command: &JoinedSignerCommandV1) -> usize {
         | C::AcceptDelivery(i)
         | C::ConfigureDeliveryWitness(i)
         | C::PollDeliveryRedisclosure(i, _, _)
+        | C::PrepareClosedDelivery(i, _, _, _, _, _, _, _)
+        | C::PollClosedDeliveryImport(i, _, _)
+        | C::PollClosedDeliveryAdmission(i)
+        | C::ApproveClosedDelivery(i)
+        | C::AwaitClosedDeliveryResponse(i, _)
+        | C::AwaitClosedDeliveryAudit(i, _)
+        | C::ReopenClosedDeliveryAudit(i)
         | C::PollDeliveryImport(i, _, _)
         | C::PollDeliveryAdmission(i, _)
         | C::ApproveDelivery(i)
@@ -1034,6 +1097,98 @@ fn execute(
                 thread::sleep(Duration::from_millis(5));
             }
             (State::Delivery(entry), R::Done { index })
+        }
+        (C::PrepareClosedDelivery(_, request, fixed, digest, bytes, plan, materials, host_complete), State::Delivery(mut entry)) => {
+            // This is an outer fixture wait only. No action/read permission is
+            // created by this budget; the production decision issues READ120.
+            // Ready alone is not wire completion: keep the actual runtime
+            // responsive until the matching Host preparation call has returned.
+            poll_until(Instant::now() + Duration::from_secs(120), cancelled,
+                || {
+                    let ready = entry.poll_closed_receive_review_v3(&request, &fixed, &digest, bytes, &plan, &materials)
+                        .map_err(|error| closed_delivery_error(error, B::DeliveryRecipientPrepare))?;
+                    closed_delivery_host_complete(ready, &host_complete)
+                        .map_err(|error| closed_delivery_error(error, B::DeliveryRecipientPrepare))
+                },
+                "actual source-bound receive-and-view review")?;
+            let entry = entry.into_closed_delivery_v3().map_err(|error| signer_error(error, "closed source custody handoff"))?;
+            (State::ClosedDelivery(Box::new(entry)), R::Done { index })
+        }
+        (C::PollClosedDeliveryImport(_, fixed, host_complete), State::ClosedDelivery(mut entry)) => {
+            poll_until(entry.deadline().map_err(|error| signer_error(error, "closed import deadline"))?, cancelled,
+                || {
+                    let verified = entry.poll_verified_import(&fixed)
+                        .map_err(|error| closed_delivery_error(error, B::DeliveryArtifactImport))?;
+                    closed_delivery_host_complete(verified, &host_complete)
+                        .map_err(|error| closed_delivery_error(error, B::DeliveryArtifactImport))
+                }, "actual closed exact-byte import verification")?;
+            (State::ClosedDelivery(entry), R::Done { index })
+        }
+        (C::PollClosedDeliveryAdmission(_), State::ClosedDelivery(mut entry)) => {
+            let mut actual = None;
+            poll_until(entry.deadline().map_err(|error| signer_error(error, "conditional admission read deadline"))?, cancelled,
+                || { actual = entry.poll_admission_review().map_err(|error| closed_delivery_error(error, B::DeliveryNativeAdmission))?; Ok(actual.is_some()) }, "actual exact conditional admission review")?;
+            (State::ClosedDelivery(entry), R::DurableAdmissionRequest { index, request: actual.ok_or("closed exact review missing")? })
+        }
+        (C::ApproveClosedDelivery(_), State::ClosedDelivery(mut entry)) => {
+            entry.approve_conditional_admission().map_err(|error| signer_error(closed_delivery_error(error, B::DeliveryNativeAdmission), "conditional exact admission decision"))?;
+            (State::ClosedDelivery(entry), R::Done { index })
+        }
+        (C::AwaitClosedDeliveryResponse(_, host_complete), State::ClosedDelivery(mut entry)) => {
+            poll_until(entry.deadline().map_err(|error| signer_error(error, "closed admission deadline"))?, cancelled,
+                || {
+                    let retained = entry.admission_pending()
+                        .map_err(|error| closed_delivery_error(error, B::DeliveryNativeAdmission))?;
+                    closed_delivery_host_complete(retained, &host_complete)
+                        .map_err(|error| closed_delivery_error(error, B::DeliveryNativeAdmission))
+                }, "actual retained admission or unknown intermediate")?;
+            let status = entry.status().map_err(|error| signer_error(error, "closed retained status"))?;
+            (State::ClosedDelivery(entry), R::ClosedDeliveryStatus { index, status })
+        }
+        (C::ReopenClosedDeliveryAudit(_), State::ClosedReopen(original, intent)) => {
+            let mut entry = EphemeralClosedDeliveryNativeV3::open_history_existing(original, intent).map_err(|error| signer_error(closed_delivery_error(error, B::DeliveryOriginalReopen), "actual original V3 read-only reopen"))?;
+            poll_until(Instant::now() + Duration::from_secs(120), cancelled,
+                || entry.poll_history_audit().map_err(|error| closed_delivery_error(error, B::DeliveryHistoricalRead)), "actual original fresh read-only history")?;
+            let status = entry.status().map_err(|error| signer_error(error, "reopened V3 history result"))?;
+            status.verified_audit().map_err(|_| "reopened V3 history not verified")?;
+            // The initial genuine history review opens the read-only entry.
+            // Its local result is not a substitute for the Host's fresh
+            // recipient handshake and verified response on this endpoint.
+            let peer = JoinedSignerPeerV1 {
+                endpoint: entry.endpoint().map_err(|error| signer_error(error, "reopened V3 history endpoint"))?,
+                provider: entry.provider().map_err(|error| signer_error(error, "reopened V3 history provider"))?,
+                deadline: entry.deadline().map_err(|error| signer_error(error, "reopened V3 history deadline"))?,
+            };
+            (State::ClosedDelivery(Box::new(entry)), R::Peer(peer))
+        }
+        (C::AwaitClosedDeliveryAudit(_, host_complete), State::ClosedDelivery(mut entry)) => {
+            // Fresh history review is a separate closed purpose. No prior
+            // transport/read grant is used as authority for this wait.
+            // A reopened entry already has a local Complete phase. Continue
+            // processing the exact pending HistoryRecipient review and wire
+            // requests until the matching Host history client has returned.
+            poll_until(Instant::now() + Duration::from_secs(120), cancelled,
+                || {
+                    let complete = entry.poll_history_audit()
+                        .map_err(|error| closed_delivery_error(error, B::DeliveryHistoricalRead))?;
+                    closed_delivery_host_complete(complete, &host_complete)
+                        .map_err(|error| closed_delivery_error(error, B::DeliveryHistoricalRead))
+                }, "fresh exact read-only complete history audit")?;
+            let status = entry.status().map_err(|error| signer_error(error, "closed verified status"))?;
+            status.verified_audit().map_err(|_| "closed audit not verified")?;
+            (State::ClosedDelivery(entry), R::ClosedDeliveryStatus { index, status })
+        }
+        (C::AuditDeliveryDenials(_), State::ClosedDelivery(mut entry)) => {
+            entry.require_financial_routes_denied().map_err(|error| signer_error(error, "closed financial routes denied"))?;
+            (State::ClosedDelivery(entry), R::Done { index })
+        }
+        (C::CloseDeliveryReader(_), State::ClosedDelivery(entry)) => {
+            entry.close_existing_entry().map_err(|error| signer_error(error, "closed historical reader drain"))?;
+            (State::PreservedDelivery, R::Done { index })
+        }
+        (C::PreserveDelivery(_), State::ClosedDelivery(entry)) => {
+            let original = entry.close_preserving_originals().map_err(|error| signer_error(error, "closed original preserve"))?;
+            (State::PreservedDelivery, R::DeliveryPreserved { index, original })
         }
         (C::PollDeliveryImport(_, request, identity), State::Delivery(mut entry)) => {
             if let Some(failure) = entry.drain_import_failure_before_wait(&request) {

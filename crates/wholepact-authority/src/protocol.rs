@@ -1016,6 +1016,7 @@ pub(crate) struct WriterSessionProof {
     deny_unknown_fields
 )]
 pub(crate) enum WireRequest {
+    PrepareDurableDeliveryAdmissionV3(crate::transport::durable_delivery_admission_v3::DurableAdmissionPrepareV3),
     ObserveBornOfflineAdmissionTimeV1(Box<crate::born_offline_clock_v1::BornOfflineClockRequestV1>),
     AuthorizeBornOfflineDispatchV1 {
         request: Box<crate::born_offline_dispatch_v1::BornOfflineDispatchRequestV1>,
@@ -1069,6 +1070,7 @@ pub(crate) enum WireRequest {
     deny_unknown_fields
 )]
 pub(crate) enum WireResponse {
+    DurableDeliveryAdmissionReadyV3(crate::transport::durable_delivery_admission_v3::DurableAdmissionPrepareV3),
     BornOfflineAdmissionTimeV1(Box<crate::born_offline_clock_v1::BornOfflineClockResponseV1>),
     BornOfflineDispatchV1(Box<crate::born_offline_dispatch_v1::BornOfflineDispatchAdmissionV1>),
     BornOfflineDeliveryV1(Box<crate::born_offline_witness_v1::BornOfflineDeliveryBodyV1>),

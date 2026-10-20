@@ -177,6 +177,22 @@ impl NativeDurableDeliveryAdmissionSourceV2 {
             .ok_or(AuthorityError::Permission)?
             .check_mutation_current()
     }
+    /// Read-only preamble check on the actual already armed source. The metadata
+    /// is compared with its privately held complete request and current head;
+    /// it does not consume native publication or mutate the ledger.
+    pub(crate) fn require_preparation_v3(
+        &self,
+        peer: &str,
+        preparation: &crate::transport::durable_delivery_admission_v3::DurableAdmissionPrepareV3,
+    ) -> Result<()> {
+        self.check_open()?;
+        preparation.matches(&self.proposal.expected)?;
+        let connection = self.proposal.journal.connection.lock().map_err(|_| AuthorityError::Storage)?;
+        let ledger = crate::journal::load(connection.connection())?;
+        if peer != ledger.policy.owner_certificate_digest { return Err(AuthorityError::Authentication); }
+        self.proposal.validate_locked(&ledger, now_ms()?)?;
+        self.check_open()
+    }
     pub(crate) fn require_exact_locked(
         &self,
         journal: &AuthorityJournal,
