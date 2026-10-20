@@ -1,8 +1,16 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-20, 04:31 UTC.
+Updated: 2026-10-20, 05:14 UTC.
 
 **CI33 passed the bounded synthetic original-private-workspace completed-fixed SIGKILL/fresh-process read-only reopen path and all listed regressions. Product qualification remains incomplete: no public testnet settlement, restarted acquired financial session, attended GUI reliability, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
+
+## CI42: distinct original/current receipt lineages were incorrectly equated
+
+[Run 39370145698](https://github.com/stanleykosi/pactloom/actions/runs/39370145698), qualifier `44ffed024758b9306055fda6639bb9290515ddf3`, implementation `73997d5f97be79755c87d07c6587d228414b9fe8`, failed at 04:51:18 UTC. Minimal real-peer integration, 10m21s release build and encrypted bootstrap passed. The native lifecycle reported `DeliveryExportPreview / EngineDisclosureDenied` after 112 of 121 expected inputs. Reader did not start; producer reaping/group absence, closed/absent root cleanup and empty runtime removal were verified. No native admission or full payment success is claimed.
+
+The exact source contradiction was independently confirmed: Engine required the original captured contribution's enrollment/manifest references to equal the fresh recipient admission references. Fresh native enrollment/manifest records intentionally have different references. Original material already remains bound by its exact disclosure operation and complete request digest; the actual sealed recipient issuer and encrypted Signer journal independently validate original-to-current redisclosure and current receipt foreign keys. The correction removes only those two invalid equalities, retaining all other identity, payload, material, audience and source checks. No wire/schema, permissions or clock change is made.
+
+The affected all-feature Host/Engine release build passed in 3m16s. One actual encrypted Store/Bridge/Engine DATA-lineage integration passed in 1.218s, including 14 negative substitutions, exact V3 suffix append and original-file reopen with the eight-event prefix/owners preserved. This fixture is not native authority evidence. The genuine native qualifier separately requires actual capture/current references to differ and validates the real sealed recipient's current request and original disclosure. Its rerun is pending.
 
 ## CI41: native export preview refused; exact source-profile mismatch identified
 

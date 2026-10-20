@@ -3467,6 +3467,11 @@ mod request_history_tests {
         saved: Vec<MutationResult>,
     }
     fn saved_history() -> SavedHistory {
+        saved_history_with_fixed_identity(|_| {})
+    }
+    fn saved_history_with_fixed_identity(
+        prepare_identity: impl FnOnce(&mut FixedProposalIdentityV1),
+    ) -> SavedHistory {
         let f = fixture();
         let dir = tempfile::tempdir().unwrap();
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -3657,7 +3662,7 @@ mod request_history_tests {
             )
             .unwrap(),
         );
-        let identity = FixedProposalIdentityV1 {
+        let mut identity = FixedProposalIdentityV1 {
             schema_version: 1,
             network_profile_id: PROFILE_ID.into(),
             agreement_id: f.agreement.agreement_id.clone(),
@@ -3676,6 +3681,7 @@ mod request_history_tests {
             anchor: hash(0xc9),
             proposal_binding: hash(0xca),
         };
+        prepare_identity(&mut identity);
         let mut after = advance(envelopes.last().unwrap());
         after.view.progress = "awaiting_authorization".into();
         after.durable_proposals_v1.insert(c.candidate_id.clone(),json!({"schema_version":1,"principal_id":access.principal_id,
@@ -3921,5 +3927,348 @@ mod request_history_tests {
         let mut altered = after;
         altered.view.agreement.purpose.push('x');
         assert!(validate_export_delta(before, &altered).is_err());
+    }
+    #[test]
+    fn admission_encrypted_v3_lineage_keeps_capture_refs_and_current_recipient_distinct() {
+        use crate::durable_construction_v1::review_export_v3::{
+            self, DurableReviewExportScopeV3, ExportIntentV3,
+        };
+        use wholepact_signer::authority_bridge::{
+            durable_construction_v1::DurableConstructionHistoryRequestV1,
+            durable_proposal_v1::manual_authorization_id,
+            durable_review_ipc_v1::DurableReviewDeliveryRequestV1,
+            durable_review_ipc_v3::RecipientIntentV3,
+        };
+
+        // DATA-only encrypted Store/Bridge/Engine component. The descriptors
+        // below are inert claims, not native owners, a sealed recipient, a
+        // verified proof, or permission to disclose. The genuine route is B1.
+        let f = saved_history_with_fixed_identity(|identity| {
+            // Canonicalize only this inert identity BEFORE its initial row is
+            // saved. The default fixture remains byte-for-byte unchanged. This
+            // encoding matches the private Protocol/Authority binding kernels;
+            // actual Bridge validation below independently checks the result.
+            let mut binding = Sha256::new();
+            binding.update(b"wholepact:durable-fixed-proposal:pczt-0.10.0-pre.1:v1\0");
+            binding.update(identity.schema_version.to_le_bytes());
+            binding.update(identity.revision.to_le_bytes());
+            binding.update(identity.expiry_height.to_le_bytes());
+            for value in [
+                &identity.network_profile_id,
+                &identity.agreement_id,
+                &identity.obligation_id,
+                &identity.proposal_id,
+                &identity.proposal_digest,
+                &identity.manifest_digest,
+                &identity.unsigned_artifact_digest,
+                &identity.proved_artifact_digest,
+                &identity.effects_commitment,
+                &identity.policy_digest,
+                &identity.review_binding,
+                &identity.action_mapping_digest,
+                &identity.anchor,
+            ] {
+                binding.update((value.len() as u64).to_le_bytes());
+                binding.update(value.as_bytes());
+            }
+            identity.proposal_binding = hex::encode(binding.finalize());
+        });
+        let agreement_id = &f.envelopes.last().unwrap().view.agreement.agreement_id;
+        let before_record = checked(f.store.get_agreement(agreement_id)).unwrap();
+        assert!(before_record == f.saved[7].record);
+        let before_envelope = checked(decode_private_record(&before_record));
+        let before = &before_envelope;
+        let candidate = &before.view.candidates[0];
+        let roster = checked(original_roster_v2(before));
+        let own = roster.owners.values().next().unwrap();
+        let identity: FixedProposalIdentityV1 = checked(serde_json::from_value(
+            before.durable_proposals_v1[&candidate.candidate_id]["identity"].clone(),
+        ));
+        let material_scopes = checked(review_export_v3::material_scopes(&roster));
+        let owners: Vec<_> = roster
+            .owners
+            .iter()
+            .map(|(account, intake)| {
+                json!({
+                    "account_id": account,
+                    "participant_id": intake.outbox.request().scope.participant_id,
+                    "original_authorization_id": checked(manual_authorization_id(&identity, account)),
+                })
+            })
+            .collect();
+        let source = checked(serde_json::to_value(&own.outbox.request().material));
+        let valid_from_ms = material_scopes
+            .iter()
+            .map(|s| s.valid_from_unix_seconds)
+            .max()
+            .unwrap()
+            * 1000;
+        let valid_until_ms = material_scopes
+            .iter()
+            .map(|s| s.valid_until_unix_seconds)
+            .min()
+            .unwrap()
+            * 1000;
+        let current_enrollment = hash(0xd1);
+        let current_manifest = hash(0xd2);
+        assert!(current_enrollment != own.outbox.request().enrollment_ref);
+        assert!(current_manifest != own.outbox.request().accepted_manifest_ref);
+        let recipient = RecipientIntentV3 {
+            version: 3,
+            request: DurableReviewDeliveryRequestV1 {
+                operation_id: "inert-lineage-v3-export".into(),
+                enrollment_ref: current_enrollment.clone(),
+                accepted_manifest_ref: current_manifest.clone(),
+                own_disclosure: DurableConstructionHistoryRequestV1 {
+                    operation_id: own.outbox.request().operation_id.clone(),
+                    expected_request_digest: own.outbox.request_digest().into(),
+                },
+                current_disclosure: Some(DurableConstructionHistoryRequestV1 {
+                    operation_id: "inert-lineage-v3-redisclosure".into(),
+                    expected_request_digest: hash(0xd3),
+                }),
+                proposal_binding: identity.proposal_binding.clone(),
+            },
+            fixed: identity.clone(),
+            payload_digest: hash(0xd4),
+            payload_bytes: 123,
+            delivery: checked(serde_json::from_value(json!({
+                "dispatcher": {
+                    "principal_id": f.access.principal_id,
+                    "public_identity_commitment": hash(0xd5),
+                    "authentication_profile": "original_protected_host_dispatcher_v2",
+                    "custody_policy_commitment": hash(0xd6),
+                },
+                "original_host_generation_binding_digest": hash(0xd7),
+                "original_host_profile_id": "data-only-no-native-host",
+                "submission_journal_identity": hash(0xd8),
+                "submission_operation_id": "inert-lineage-v3-submission",
+                "provider": {
+                    "source_id": source["source"]["source_id"],
+                    "endpoint": source["source"]["endpoint"],
+                    "trust_profile": source["source"]["trust_profile"],
+                },
+                "route": {"kind": "direct"},
+                "owners": owners,
+                "valid_from_ms": valid_from_ms,
+                "valid_until_ms": valid_until_ms,
+                "minimum_expiry_margin_blocks": 1,
+                "maximum_fresh_admission_lifetime_ms": 1000,
+                "maximum_explicitly_approved_attempts": 1,
+                "extraction_rule": "first_durably_retained_verified_extraction",
+                "retry_rule": "same_retained_bytes_with_fresh_admission",
+                "attempt_rule": "explicit_immediate_host_decision",
+            }))),
+            material_scopes,
+            account_id: own.outbox.request().scope.account_id.clone(),
+            participant_id: own.outbox.request().scope.participant_id.clone(),
+            agreement_id: identity.agreement_id.clone(),
+            manifest_digest: identity.manifest_digest.clone(),
+            provider_enrollment_reference: own.signer_enrollment_reference.clone(),
+            signer_process_instance: own.signer_process_instance.clone(),
+            authorized_host_process_instance: hash(0xd9),
+            source_identity_digest: hash(0xda),
+            source_generation: 1,
+            read_session_digest: hash(0xdb),
+            receive_decision_digest: hash(0xdc),
+            // These name the recipient's retained admission rows, not the
+            // old capture rows committed by own_disclosure's complete digest.
+            original_enrollment_ref: current_enrollment,
+            original_manifest_ref: current_manifest,
+        };
+        let scope = DurableReviewExportScopeV3 {
+            schema_version: 3,
+            principal_id: f.access.principal_id.clone(),
+            proposal: identity.clone(),
+            sources: checked(review_export_v1::sources(&roster)),
+            payload_digest: recipient.payload_digest.clone(),
+            payload_length: recipient.payload_bytes,
+            recipient,
+        };
+        let snapshot = || {
+            checked(
+                PrivateDurableAdmissionCoordinatorV2::check_initialized_admission_original_v2(
+                    &f.path, &f.key, f.origin,
+                ),
+            );
+            let events = checked(f.store.events_after(0, 17));
+            let operations: Vec<_> = events
+                .iter()
+                .map(|event| checked(f.store.get_operation(&event.operation_id)).unwrap())
+                .collect();
+            checked(serde_json::to_vec(&(
+                checked(f.store.list_agreements()),
+                events,
+                operations,
+                checked(original_commands(&f.path, &f.key, f.origin)),
+            )))
+        };
+        let original_rows = snapshot();
+        let original_events = checked(f.store.events_after(0, 17));
+        let original_operations: Vec<_> = original_events
+            .iter()
+            .map(|event| checked(f.store.get_operation(&event.operation_id)).unwrap())
+            .collect();
+        assert_eq!(original_events.len(), 8);
+        assert!(f.commands.iter().all(|command| command.idempotency_key.len() >= 16));
+        checked(scope.recipient.validate());
+        checked(review_export_v3::validate_recipient(
+            &roster, candidate, &scope,
+        ));
+
+        // Every mutation below is still just a data check. In particular, an
+        // attacker changing both fresh references coherently is NOT authenticated
+        // or rejected by this comparison; the sealed native route owns that check.
+        for mutation in 0..14 {
+            let mut changed = scope.clone();
+            match mutation {
+                0 => {
+                    changed.recipient.request.own_disclosure.operation_id = scope
+                        .recipient
+                        .request
+                        .current_disclosure
+                        .as_ref()
+                        .unwrap()
+                        .operation_id
+                        .clone();
+                }
+                1 => {
+                    changed.recipient.request.own_disclosure.expected_request_digest = scope
+                        .recipient
+                        .request
+                        .current_disclosure
+                        .as_ref()
+                        .unwrap()
+                        .expected_request_digest
+                        .clone();
+                }
+                2 => changed.recipient.request.enrollment_ref = hash(0xee),
+                3 => changed.recipient.request.accepted_manifest_ref = hash(0xee),
+                4 => {
+                    changed.recipient.original_enrollment_ref =
+                        own.outbox.request().enrollment_ref.clone();
+                }
+                5 => {
+                    changed.recipient.original_manifest_ref =
+                        own.outbox.request().accepted_manifest_ref.clone();
+                }
+                6 => changed.recipient.request.current_disclosure = None,
+                7 => changed.payload_digest = hash(0xee),
+                8 => changed.payload_length += 1,
+                9 => changed.sources[0].outbox_reference = hash(0xee),
+                10 => changed.sources[0].request_digest = hash(0xee),
+                11 => changed.sources[0].material_digest = hash(0xee),
+                12 => changed.recipient.material_scopes[0].original_scope_digest = hash(0xee),
+                13 => changed.recipient.material_scopes[0].valid_until_unix_seconds += 1,
+                _ => unreachable!(),
+            }
+            if (2..=5).contains(&mutation) {
+                assert!(changed.recipient.validate().is_err());
+            } else {
+                checked(changed.recipient.validate());
+            }
+            assert!(
+                review_export_v3::validate_recipient(&roster, candidate, &changed).is_err(),
+                "inert lineage substitution {mutation} was accepted"
+            );
+            assert!(snapshot() == original_rows);
+        }
+        assert!(snapshot() == original_rows);
+
+        let mut exported = roster.clone();
+        exported.review_exports_v3.insert(
+            scope.recipient.request.operation_id.clone(),
+            ExportIntentV3 {
+                scope: scope.clone(),
+                exposure: ExportExposure::DisclosedOrUnknown,
+            },
+        );
+        let mut after = advance(before);
+        after.durable_construction_v1.insert(
+            identity.proposal_id.clone(),
+            checked(serde_json::to_value(exported)),
+        );
+        assert!(checked(closed_review_v3::validate_export_delta_v3(before, &after)) == scope);
+        let mut changed_prefix = after.clone();
+        changed_prefix
+            .checkpoint_receipts
+            .values_mut()
+            .next()
+            .unwrap()
+            .artifact_digest = hash(0xee);
+        assert!(closed_review_v3::validate_export_delta_v3(before, &changed_prefix).is_err());
+        assert!(snapshot() == original_rows);
+        let command = checked(closed_review_v3::export_command_v3(&f.access, 8, &scope));
+        assert!(command.idempotency_key.len() >= 16);
+        assert!(checked(f.store.find_replay(&command)).is_none());
+        let appended = checked(f.store.update_agreement(
+            &command,
+            &identity.agreement_id,
+            8,
+            checked(crate::encode(&after)),
+            closed_review_v3::EXPORT_EVENT_V3,
+        ));
+        assert_eq!(appended.record.revision, 9);
+        assert_eq!(appended.event_sequence, 9);
+        assert!(!appended.replayed);
+
+        drop(f.store);
+        let reopened = checked(wholepact_store::Store::open_encrypted(&f.path, &f.key));
+        assert!(reopened.protection() == wholepact_store::StorageProtection::Encrypted);
+        assert!(checked(reopened.verify_original_encrypted_destination(&f.path)) == f.origin);
+        checked(reopened.verify_integrity());
+        checked(
+            PrivateDurableAdmissionCoordinatorV2::check_initialized_admission_original_v2(
+                &f.path, &f.key, f.origin,
+            ),
+        );
+        let events = checked(reopened.events_after(0, 17));
+        assert_eq!(events.len(), 9);
+        assert!(events[..8] == original_events[..]);
+        let prefix_commands = checked(original_commands(&f.path, &f.key, f.origin));
+        assert_eq!(prefix_commands.len(), 8);
+        for i in 0..8 {
+            let event = &events[i];
+            assert!(event.kind == PREFIX_KINDS[i]);
+            assert!(event.operation_id == f.saved[i].operation_id);
+            assert_eq!(event.aggregate_revision, (i + 1) as u64);
+            let operation = checked(reopened.get_operation(&event.operation_id)).unwrap();
+            assert!(operation == original_operations[i]);
+            let saved: MutationResult = checked(serde_json::from_value(operation.result));
+            assert!(saved == f.saved[i]);
+            let original_command = &prefix_commands[&event.operation_id];
+            assert!(
+                checked(serde_json::to_value(original_command))
+                    == checked(serde_json::to_value(&f.commands[i]))
+            );
+            assert!(
+                checked(reopened.find_replay(original_command)).unwrap().record
+                    == f.saved[i].record
+            );
+        }
+        assert!(events[8].kind == closed_review_v3::EXPORT_EVENT_V3);
+        assert!(events[8].operation_id == appended.operation_id);
+        let replay = checked(reopened.find_replay(&command)).unwrap();
+        assert!(replay.record == appended.record);
+        let reopened_record = checked(reopened.get_agreement(&identity.agreement_id)).unwrap();
+        assert!(reopened_record == appended.record);
+        let reopened_envelope = checked(decode_private_record(&reopened_record));
+        assert!(
+            checked(closed_review_v3::validate_export_delta_v3(before, &reopened_envelope))
+                == scope
+        );
+        let reopened_roster = checked(original_roster_v2(&reopened_envelope));
+        assert_eq!(reopened_roster.owners.len(), 2);
+        assert!(reopened_roster.review_exports.is_empty());
+        assert_eq!(reopened_roster.review_exports_v3.len(), 1);
+        for (account, original) in &roster.owners {
+            let retained = &reopened_roster.owners[account];
+            checked(retained.outbox.validate());
+            assert!(retained.outbox == original.outbox);
+        }
+        assert!(
+            checked(serde_json::to_value(&reopened_roster.owners))
+                == checked(serde_json::to_value(&roster.owners))
+        );
     }
 }
