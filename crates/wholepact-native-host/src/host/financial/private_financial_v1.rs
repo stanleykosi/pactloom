@@ -96,7 +96,7 @@ struct ProductionDurableSubmissionAuthorityV1<'a, 'prepared, 'owner, 'source, 'h
     admissions: &'a [wholepact_authority::completed_dispatch_v1::AuthenticatedCompletedDispatchAdmissionV1;
             2],
     native: &'a crate::authority::durable_submission_v1::NativeDurableSubmissionConsentV1,
-    retention: &'a crate::authority::retention::FrozenNativeRetentionConsentV1,
+    retention: &'a crate::authority::retention::FrozenNativeFinancialRetentionConsentV1,
     used: bool,
 }
 struct ProductionDurableSubmissionPermitV1<'a, 'prepared, 'owner, 'source, 'host> {
@@ -106,7 +106,7 @@ struct ProductionDurableSubmissionPermitV1<'a, 'prepared, 'owner, 'source, 'host
     admissions: &'a [wholepact_authority::completed_dispatch_v1::AuthenticatedCompletedDispatchAdmissionV1;
             2],
     native: &'a crate::authority::durable_submission_v1::NativeDurableSubmissionConsentV1,
-    retention: &'a crate::authority::retention::FrozenNativeRetentionConsentV1,
+    retention: &'a crate::authority::retention::FrozenNativeFinancialRetentionConsentV1,
     send_until: u64,
     expected_attempt: u32,
 }
@@ -303,20 +303,15 @@ impl Host {
             approval: &approval,
         };
         read.check()?;
-        let scope = inspection.checkpoint_scope();
         let financial = self.financial.as_ref().ok_or(Error::Locked)?;
-        let retention = self.authority.retention_consent(
-            &scope.principal_id,
-            &scope.candidate_id,
-            &scope.manifest_digest,
-            inspection.proof_job_id(),
-            scope.account_ids.iter().cloned().collect(),
-        )?;
         let access = self.access()?;
         let mut prepared = owner
             .coordinator()
             .prepare_original_financial_v1(access, &read, &read, &read)
             .map_err(|_| financial_failure("FIXED_SOURCE_VERIFICATION"))?;
+        let contexts = prepared.financial_retention_contexts_v1(access, &read, &read, &read)
+            .map_err(|_| financial_failure("RETENTION_CONTEXTS"))?;
+        let retention = self.authority.financial_retention_consent_v1(&contexts)?;
         let operation = histories[0]
             .continuation_record()
             .terms
@@ -740,19 +735,15 @@ impl Host {
             read: &read,
             effect: &approval,
         };
-        let scope = inspection.checkpoint_scope();
-        let retention = self.authority.retention_consent(
-            &scope.principal_id,
-            &scope.candidate_id,
-            &scope.manifest_digest,
-            inspection.proof_job_id(),
-            scope.account_ids.iter().cloned().collect(),
-        )?;
         let financial = self.financial.as_ref().ok_or(Error::Locked)?;
         let prepared = owner
             .coordinator()
             .prepare_original_financial_v1(self.access()?, &effect, &read, &read)
             .map_err(|_| financial_failure("FIXED_SOURCE_VERIFICATION"))?;
+        let contexts = prepared.financial_retention_contexts_v1(
+            self.access()?, &effect, &read, &read,
+        ).map_err(|_| financial_failure("RETENTION_CONTEXTS"))?;
+        let retention = self.authority.financial_retention_consent_v1(&contexts)?;
         prepared
             .retain_original_union_v1(
                 self.access()?,
@@ -891,14 +882,6 @@ impl Host {
             inspection,
             approval: &approval,
         };
-        let scope = inspection.checkpoint_scope();
-        let retention = self.authority.retention_consent(
-            &scope.principal_id,
-            &scope.candidate_id,
-            &scope.manifest_digest,
-            inspection.proof_job_id(),
-            scope.account_ids.iter().cloned().collect(),
-        )?;
         let financial = self.financial.as_ref().ok_or(Error::Locked)?;
         let prepared = owner.coordinator().prepare_original_financial_v1(
             self.access()?,
@@ -906,6 +889,10 @@ impl Host {
             &read,
             &read,
         )?;
+        let contexts = prepared.financial_retention_contexts_v1(
+            self.access()?, &read, &read, &read,
+        ).map_err(|_| financial_failure("RETENTION_CONTEXTS"))?;
+        let retention = self.authority.financial_retention_consent_v1(&contexts)?;
         let verified = prepared.verify_completed_submission_v1(
             self.access()?,
             operation,
