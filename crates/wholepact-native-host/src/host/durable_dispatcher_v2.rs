@@ -593,6 +593,22 @@ pub(in crate::host) struct OriginalDeliveryAdmissionOwnerV2<'host> {
     inspection:HistoricalApproval,
     directory:Directory,
 }
+/// Fixed internal roles only. This checks the actual enrolled Host principal
+/// and revocation fence; it creates neither a source owner nor native consent.
+enum ClosedOriginalSourcePurposeV3 {
+    HistoricalRead,
+    ManualEffect,
+}
+fn require_closed_original_source_permission_v3(
+    host: &Host,
+    purpose: ClosedOriginalSourcePurposeV3,
+) -> Result<()> {
+    host.require_private_workspace_read_session_v1()?;
+    match purpose {
+        ClosedOriginalSourcePurposeV3::HistoricalRead => Ok(()),
+        ClosedOriginalSourcePurposeV3::ManualEffect => host.require_manual_session(),
+    }
+}
 impl Host {
     pub(in crate::host) fn original_delivery_admission_owner_v2<'host>(&'host self,root:&Path)->Result<OriginalDeliveryAdmissionOwnerV2<'host>> {
         let files=self.dispatcher_files.as_ref().ok_or(Error::Authentication)?;
@@ -630,8 +646,16 @@ impl<'host> OriginalDeliveryAdmissionOwnerV2<'host> {
     /// No initial inspection approval, TLS reconstruction or source/history
     /// interpretation is repeated in an immediate export frame callback.
     pub(in crate::host) fn check_closed_source_v3(&self)->Result<()> {
-        self.host.require_private_workspace_read_session_v1()?;
-        self.host.require_manual_session()?;
+        require_closed_original_source_permission_v3(self.host, ClosedOriginalSourcePurposeV3::ManualEffect)?;
+        self.check_closed_source_identity_v3()
+    }
+    /// Historical read has the same exact original-file/source conjunction,
+    /// but never requires or grants Coordinate/Disclose permission.
+    pub(in crate::host) fn check_closed_read_source_v3(&self)->Result<()> {
+        require_closed_original_source_permission_v3(self.host, ClosedOriginalSourcePurposeV3::HistoricalRead)?;
+        self.check_closed_source_identity_v3()
+    }
+    fn check_closed_source_identity_v3(&self)->Result<()> {
         self.target.check_current()?;
         self.files.original.workspace.check_combined_v4(&self.host.directory,&self.host.secrets)?;
         self.files.original.pending_file.check(&self.host.directory,MAX_PENDING)?;

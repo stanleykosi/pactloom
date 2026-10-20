@@ -55,6 +55,41 @@ impl LocalDurableReviewExportConsentV3 for ClosedConsentV3<'_, '_> {
         self.export.is_some_and(|exact| exact == scope) && self.check().is_ok()
     }
 }
+/// Separate historical-read role: never implements export consent, and never
+/// reinterprets pre-export preparation (whose export scope is also absent).
+struct ClosedHistoricalReadConsentV3<'a, 'host> {
+    host: &'a Host,
+    owner: &'a OriginalDeliveryAdmissionOwnerV2<'host>,
+    inspection: &'a PrivateDurableAdmissionInspectionV2,
+    approval: &'a HistoricalApproval,
+}
+impl ClosedHistoricalReadConsentV3<'_, '_> {
+    fn check(&self) -> Result<()> {
+        self.approval.check()?;
+        self.owner.check_closed_read_source_v3()?;
+        current_materials(self.inspection)?;
+        if !same(self.owner.workspace_scope(), self.inspection.workspace_scope())?
+            || self.host.access()?.principal_id != self.inspection.workspace_scope().principal_id()
+        { return Err(Error::Authentication); }
+        self.approval.check()
+    }
+}
+impl LocalPrivateDurableAdmissionConsentV2 for ClosedHistoricalReadConsentV3<'_, '_> {
+    fn permits_source(&self, scope: &PrivateWorkspaceScopeV1) -> bool {
+        same(scope, self.inspection.workspace_scope()).unwrap_or(false) && self.check().is_ok()
+    }
+}
+impl LocalProofConsent for ClosedHistoricalReadConsentV3<'_, '_> {
+    fn permits(&self, scope: &CheckpointScope, action: LocalAction) -> bool {
+        proof_matches(self.inspection, scope, action) && self.check().is_ok()
+    }
+}
+impl LocalDurableMaterialConsentV1 for ClosedHistoricalReadConsentV3<'_, '_> {
+    fn permits(&self, scope: &DurableConstructionScopeV1, digest: &str, action: DurableMaterialActionV1) -> bool {
+        matches!(action, DurableMaterialActionV1::ReadForExactConstruction)
+            && material_matches(self.inspection, scope, digest) && self.check().is_ok()
+    }
+}
 fn unknown() -> Error {
     Error::Receipt("DISCLOSURE_UNKNOWN: exact V3 export is retained as disclosed-or-unknown; preserve the original operation and do not resend private bytes".into())
 }
@@ -146,9 +181,9 @@ impl Host {
         let approval = self.terminal.approve_durable_delivery_v2(
             owner.inspection_approval(), &detail,
             || { owner.inspection_approval().check()?; current_source(self, &owner, &inspection) },
-            || { owner.check_closed_source_v3()?; current_materials(&inspection) },
+            || { owner.check_closed_read_source_v3()?; current_materials(&inspection) },
         )?;
-        let read = ClosedConsentV3 { host: self, owner: &owner, inspection: &inspection, approval: &approval, export: None };
+        let read = ClosedHistoricalReadConsentV3 { host: self, owner: &owner, inspection: &inspection, approval: &approval };
         let mut display_error = None;
         let result = owner.coordinator().read_original_fixed_checked_v3(
             self.access()?, &read, &read, &read, |status, current| {

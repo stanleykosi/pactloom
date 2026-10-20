@@ -1,8 +1,16 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-20, 05:14 UTC.
+Updated: 2026-10-20, 05:59 UTC.
 
 **CI33 passed the bounded synthetic original-private-workspace completed-fixed SIGKILL/fresh-process read-only reopen path and all listed regressions. Product qualification remains incomplete: no public testnet settlement, restarted acquired financial session, attended GUI reliability, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
+
+## CI43: both admissions completed; restarted read hit a Host permission-role bug
+
+[Run 39373981941](https://github.com/stanleykosi/pactloom/actions/runs/39373981941), qualifier `570ed050a17a5a4bb6179fcf6db78546d2566b7a`, implementation `103661c5d096809a2b199ebc13f7534d808dc099`, reached **2 of 2 genuine prospective admissions** and the intended producer SIGKILL. The fresh reader then failed at 05:43:26 UTC with `DeliveryHistoricalRead / HostPermission`, 12 of 14 reader inputs completed. Both process groups were absent/reaped and runtime cleanup was verified. The 12m42s release build, real-peer integration and encrypted bootstrap passed. This is admission progress, not completed restart verification or a financial payment.
+
+The read-only Host session correctly denied a manual-effect permission request erroneously reused by the status path immediately after its read review. A second shared consent check had the same mismatch. The correction uses a distinct historical-only consent and named Read-only source check over unchanged file/material/principal validation. It does not give the reader Coordinate/Disclose permissions, alter manual preparation/export, infer purpose from an absent export scope, or extend any deadline.
+
+The affected Host release build passed in 3m00s. One actual encrypted Host/Authority enrollment/session/config/revocation-fence integration passed in 0.315s, including read-only/manual separation, mismatched principal, revocation and persistent-journal noninterference. This is permission integration, not fabricated native/source authority. The genuine reader additionally checks READ success and real export-entry Permission refusal before any recipient callback; its 14 prompts are unchanged. The complete native restart requalification remains pending.
 
 ## CI42: distinct original/current receipt lineages were incorrectly equated
 

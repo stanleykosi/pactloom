@@ -1162,6 +1162,33 @@ fn audit_host_denials(host: &Host) -> Result<()> {
     }
     Ok(())
 }
+/// Actual newly enrolled READ-only Host, not a permissions DTO or remembered
+/// assertion. The real export entry must refuse before source opening/prompts.
+fn require_reader_only_v3(host: &Host, workspace: &Path, recipient: &RecipientIntentV3) -> Result<()> {
+    host.require_private_workspace_read_session_v1()?;
+    if !matches!(host.require_manual_session(), Err(Error::Permission)) {
+        return Err(Error::Authentication);
+    }
+    let plan = &recipient.delivery;
+    let choices = crate::host::financial::durable_delivery_admission_v2::DeliveryChoicesV2 {
+        submission_operation_id: plan.submission_operation_id.clone(),
+        provider: plan.provider.clone(),
+        route: plan.route.clone(),
+        minimum_expiry_margin_blocks: plan.minimum_expiry_margin_blocks,
+        maximum_fresh_admission_lifetime_ms: plan.maximum_fresh_admission_lifetime_ms,
+        maximum_explicitly_approved_attempts: plan.maximum_explicitly_approved_attempts,
+    };
+    let mut reached_recipient = false;
+    let denied = host.private_original_delivery_export_v3(workspace, &choices, |_, _, _, _, _| {
+        reached_recipient = true;
+        Err(Error::Authentication)
+    });
+    host.require_private_workspace_read_session_v1()?;
+    if reached_recipient || !matches!(denied, Err(Error::Permission)) {
+        return Err(Error::Authentication);
+    }
+    Ok(())
+}
 
 /// Inert correlation copied only from the successful actual original capture.
 /// This cannot open a source or authorize a current recipient.
@@ -1596,6 +1623,7 @@ pub(in crate::host::manual_enrollment::command::roster_publication_v2::sequentia
             {
                 return Err(Error::Authentication);
             }
+            require_reader_only_v3(&host, &ready.workspace, &ready.recipient_intents[0])?;
             // Positive current-source equality is established ONLY by the genuine
             // original fixed/material reader while the original ceilings still hold.
             let before = at(B::DeliveryHistoricalRead, || {
@@ -1680,6 +1708,7 @@ pub(in crate::host::manual_enrollment::command::roster_publication_v2::sequentia
             let after = at(B::DeliveryHistoricalRead, || {
                 host.private_original_delivery_status_v3(&ready.workspace)
             })?;
+            require_reader_only_v3(&host, &ready.workspace, &ready.recipient_intents[0])?;
             if Instant::now() >= original_cutoff || digest(&before)? != digest(&after)? {
                 return Err(Error::Authentication);
             }
