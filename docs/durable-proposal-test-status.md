@@ -1,8 +1,26 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-20, 05:59 UTC.
+Updated: 2026-10-20, 06:31 UTC.
 
-**CI33 passed the bounded synthetic original-private-workspace completed-fixed SIGKILL/fresh-process read-only reopen path and all listed regressions. Product qualification remains incomplete: no public testnet settlement, restarted acquired financial session, attended GUI reliability, or production activation is claimed.** Source checkpoints are recoverable work in progress, not releases.
+**CI44 passed the genuine two-owner delivery/admission, original-producer SIGKILL and fresh-process read-only original-history verification route. Financial signing/dispatch and public testnet settlement remain unqualified. This is a bounded admission/restart milestone, not a production release.**
+
+## CI44 passed: genuine two-owner admission and fresh read-only restart
+
+[Run 39377994352](https://github.com/stanleykosi/pactloom/actions/runs/39377994352), qualifier `473119d784ed83021506e0d23c6063f8d1c73f6d`, implementation `7280ce74c0e3812f1c2b2fb8d86065a7f826e5df`, passed at 06:29:40 UTC. Exact source tree: `adc1e85cd1a7cdb7cda286faabfce3a20451d55a`. The real-peer gate, 12m47s release build and encrypted bootstrap passed. The native lifecycle ran from 06:17:05 through 06:29:40.
+
+The same-attempt bounded evidence confirms:
+
+- Both genuine prospective admissions completed: `2_of_2`.
+- The original producer ended by the intended SIGKILL; its process group was absent and it was reaped.
+- A fresh reader succeeded using original files and fresh read permissions, not recovered live approvals.
+- The fixed proof and independently authenticated histories were verified.
+- Exact original prefix, export history, intents and scopes were preserved.
+- Reader no-effects verification and unsupported-action denial passed.
+- Reader group absence/reaping, closed/absent root cleanup and empty runtime removal passed.
+
+Financial authorization, distribution and public-chain verification remain false. This run does not demonstrate financial acquisition/reservation/signing, authentic detached-signature intake, final transaction extraction/dispatch, testnet settlement or attended GUI reliability. No success is inferred for those missing joins. The earlier component tests remain scoped evidence and are not counted as a financial cycle.
+
+This documentation-only checkpoint preserves the terminal result without rerunning unchanged code or moving the qualification branch. Further financial continuation requires its separately reviewed policy and implementation; the existing admission-only financial denials remain in place.
 
 ## CI43: both admissions completed; restarted read hit a Host permission-role bug
 
