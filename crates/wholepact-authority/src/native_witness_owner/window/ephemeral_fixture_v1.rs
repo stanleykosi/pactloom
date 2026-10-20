@@ -26,10 +26,10 @@ const UNDERSTOOD: &str = "I reviewed this complete exact operation and its perma
 const AUTHORIZE: &str = "Authorize this exact one-time owner operation";
 const PROFILE: &str = "ironwood-testnet-nu7-candidate";
 
-#[path = "ephemeral_fixture_v1/durable_payment_v1.rs"]
-mod durable_payment_v1;
 #[path = "ephemeral_fixture_v1/durable_delivery_admission_v2.rs"]
 mod durable_delivery_admission_v2;
+#[path = "ephemeral_fixture_v1/durable_payment_v1.rs"]
+mod durable_payment_v1;
 #[path = "ephemeral_fixture_v1/financial_continuation_v1.rs"]
 mod financial_continuation_v1;
 pub(crate) use durable_payment_v1::DurableAcquireReplyLossArmV1;
@@ -273,6 +273,70 @@ impl EphemeralNativeWitnessV1 {
             credential_root: self.root.clone(),
             _installation: self.installation.clone(),
         })
+    }
+
+    /// Exact initial synthetic dispatcher leaf/key only. The CA signing key is
+    /// never exported. This is credential custody, not enrollment or authority;
+    /// the financial continuation still commits its distinct leaf pin.
+    pub fn dedicated_dispatcher_credentials_v1(&self) -> Result<(Vec<u8>, Zeroizing<Vec<u8>>)> {
+        let certificate =
+            wholepact_storage_security::witness_namespace_fs::read_existing_private_file(
+                &self.root.join("dispatcher.der"),
+                16 * 1024,
+            )?;
+        let key = wholepact_storage_security::witness_namespace_fs::read_existing_private_file(
+            &self.root.join("dispatcher.pk8"),
+            16 * 1024,
+        )?;
+        let pin =
+            crate::transport::certificate_digest(&CertificateDer::from(certificate.as_slice()));
+        let origin = self.origin()?;
+        if [
+            &origin.owner_certificate_digest,
+            &origin.writer_certificate_digest,
+            &origin.server_certificate_digest,
+        ]
+        .contains(&&pin)
+        {
+            return Err(AuthorityError::Authentication);
+        }
+        let ca = wholepact_storage_security::witness_namespace_fs::read_existing_private_file(
+            &self.root.join("ca.der"),
+            16 * 1024,
+        )?;
+        let mut roots = rustls::RootCertStore::empty();
+        roots
+            .add(CertificateDer::from(ca.to_vec()))
+            .map_err(|_| AuthorityError::Authentication)?;
+        let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
+            Arc::new(roots),
+            Arc::new(rustls::crypto::ring::default_provider()),
+        )
+        .build()
+        .map_err(|_| AuthorityError::Authentication)?;
+        verifier
+            .verify_client_cert(
+                &CertificateDer::from(certificate.as_slice()),
+                &[],
+                rustls::pki_types::UnixTime::now(),
+            )
+            .map_err(|_| AuthorityError::Authentication)?;
+        rustls::sign::CertifiedKey::from_der(
+            vec![CertificateDer::from(certificate.to_vec())],
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.to_vec())),
+            &rustls::crypto::ring::default_provider(),
+        )
+        .and_then(|certified| certified.keys_match())
+        .map_err(|_| AuthorityError::Authentication)?;
+        // Maintained rustls configuration uses the exact retained leaf/key.
+        let _client = crate::transport::ClientTls::new(
+            origin.server_name,
+            origin.server_certificate_digest,
+            vec![CertificateDer::from(ca.to_vec())],
+            vec![CertificateDer::from(certificate.to_vec())],
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.to_vec())),
+        )?;
+        Ok((certificate.to_vec(), key))
     }
 
     /// The caller supplies ONLY the actual signer-private exported public JSON.
@@ -740,7 +804,8 @@ fn create_tls_material(
     ])?;
     run(&["x509", "-in", "ca.pem", "-outform", "DER", "-out", "ca.der"])?;
     fs::write(root.join("leaf.ext"), b"basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth,clientAuth\nsubjectAltName=DNS:localhost\n").map_err(|_| AuthorityError::Storage)?;
-    for name in ["owner", "writer", "server"] {
+    fs::write(root.join("dispatcher.ext"), b"basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=clientAuth\n").map_err(|_| AuthorityError::Storage)?;
+    for name in ["owner", "writer", "server", "dispatcher"] {
         let key = format!("{name}.key");
         let csr = format!("{name}.csr");
         let der = format!("{name}.der");
@@ -775,7 +840,11 @@ fn create_tls_material(
             "1",
             "-sha256",
             "-extfile",
-            "leaf.ext",
+            if name == "dispatcher" {
+                "dispatcher.ext"
+            } else {
+                "leaf.ext"
+            },
             "-outform",
             "DER",
             "-out",
@@ -803,26 +872,105 @@ fn create_tls_material(
 mod tests {
     use super::*;
     use std::net::ToSocketAddrs;
+    /// No listener, GUI, owner decision or enrollment. The maintained bounded
+    /// fixture subprocess creates only ephemeral filesystem TLS material.
+    #[test]
+    fn dedicated_dispatcher_leaf_chains_to_original_ca_and_key() {
+        let installation = EphemeralWitnessInstallation::new().unwrap();
+        let root = installation
+            .probe()
+            .unwrap()
+            .root_path()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        create_tls_material(&root, &installation).unwrap();
+        let ca = CertificateDer::from(fs::read(root.join("ca.der")).unwrap());
+        let dispatcher = CertificateDer::from(fs::read(root.join("dispatcher.der")).unwrap());
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(ca).unwrap();
+        let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
+            Arc::new(roots),
+            Arc::new(rustls::crypto::ring::default_provider()),
+        )
+        .build()
+        .unwrap();
+        verifier
+            .verify_client_cert(&dispatcher, &[], rustls::pki_types::UnixTime::now())
+            .unwrap();
+        let key = fs::read(root.join("dispatcher.pk8")).unwrap();
+        rustls::sign::CertifiedKey::from_der(
+            vec![dispatcher.clone()],
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key)),
+            &rustls::crypto::ring::default_provider(),
+        )
+        .unwrap()
+        .keys_match()
+        .unwrap();
+        let wrong_key = fs::read(root.join("owner.pk8")).unwrap();
+        assert!(rustls::sign::CertifiedKey::from_der(
+            vec![dispatcher.clone()],
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(wrong_key)),
+            &rustls::crypto::ring::default_provider()
+        )
+        .is_err());
+        // Reproduce the old self-signed form, with the same dispatcher key.
+        tls_child_v1::run_openssl(
+            &root,
+            &installation,
+            &[
+                "req",
+                "-new",
+                "-x509",
+                "-key",
+                "dispatcher.key",
+                "-sha256",
+                "-days",
+                "1",
+                "-subj",
+                "/CN=old-self-signed-dispatcher",
+                "-addext",
+                "basicConstraints=critical,CA:FALSE",
+                "-addext",
+                "keyUsage=critical,digitalSignature",
+                "-addext",
+                "extendedKeyUsage=clientAuth",
+                "-outform",
+                "DER",
+                "-out",
+                "old-dispatcher.der",
+            ],
+            Instant::now() + std::time::Duration::from_secs(30),
+        )
+        .unwrap();
+        let old = CertificateDer::from(fs::read(root.join("old-dispatcher.der")).unwrap());
+        assert!(verifier
+            .verify_client_cert(&old, &[], rustls::pki_types::UnixTime::now())
+            .is_err());
+        for name in ["owner.der", "writer.der", "server.der"] {
+            assert_ne!(
+                dispatcher.as_ref(),
+                fs::read(root.join(name)).unwrap().as_slice()
+            );
+        }
+    }
+
     #[test]
     fn actual_ephemeral_native_namespace_setup_preserves_original_registry() {
         let fixture = EphemeralNativeWitnessV1::new().unwrap();
         let original = fixture.origin().unwrap();
         assert!(!original.witness_id.is_empty());
-        assert!(
-            original
-                .endpoint
-                .to_socket_addrs()
-                .unwrap()
-                .all(|a| a.ip().is_loopback())
-        );
-        assert!(
-            fixture
-                .installation
-                .probe()
-                .unwrap()
-                .require_absent()
-                .is_err()
-        );
+        assert!(original
+            .endpoint
+            .to_socket_addrs()
+            .unwrap()
+            .all(|a| a.ip().is_loopback()));
+        assert!(fixture
+            .installation
+            .probe()
+            .unwrap()
+            .require_absent()
+            .is_err());
         let files = fixture
             .installation
             .probe()

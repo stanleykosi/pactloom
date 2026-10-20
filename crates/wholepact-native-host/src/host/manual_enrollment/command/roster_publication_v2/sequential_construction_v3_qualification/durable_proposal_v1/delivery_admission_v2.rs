@@ -1249,8 +1249,25 @@ pub(super) fn continue_completed_original(
                 .origin()
                 .map_err(|_| Error::Authentication)?;
             let roots = crate::files::read_private(&origin.trusted_server_root_file, 16 * 1024)?;
-            let credentials =
-                dedicated_dispatcher_credentials(&scenario, &original.born[1..], roots)?;
+            let credentials = if financial_wallet_setup.is_some() {
+                // The original fixture CA already authenticates this distinct
+                // clientAuth leaf. Scope approval still independently pins its
+                // exact certificate; no trust root or TLS policy is widened.
+                let (certificate, private_key_pkcs8) = original.witness
+                    .dedicated_dispatcher_credentials_v1()
+                    .map_err(|e| witness_error(B::DeliveryCredentialRegistration, e))?;
+                crate::host::durable_dispatcher_v2::DispatcherCredentialsV2 {
+                    client_chain_der: vec![certificate],
+                    private_key_pkcs8,
+                    server_roots: original.born[1..].iter().map(|owner|
+                        crate::host::durable_dispatcher_v2::DispatcherRootsV2 {
+                            account_id: owner.account_id.clone(),
+                            roots_der: vec![roots.clone()],
+                        }).collect(),
+                }
+            } else {
+                dedicated_dispatcher_credentials(&scenario, &original.born[1..], roots)?
+            };
             drop(origin);
             let mut clients = Vec::with_capacity(2);
             for index in 1..=2 {
