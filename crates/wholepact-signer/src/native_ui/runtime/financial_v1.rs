@@ -466,6 +466,7 @@ impl NativeRuntime {
             Err(_) => (
                 Err(Error::Unavailable),
                 Some(FinancialNativeDiagnosticV1 {
+                    authority_call: None,
                     stage: job.stage,
                     component: diagnostics::FinancialNativeComponentV1::Signer,
                     error_class: diagnostics::FinancialNativeErrorClassV1::Unavailable,
