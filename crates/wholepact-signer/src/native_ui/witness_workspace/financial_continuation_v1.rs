@@ -1,6 +1,7 @@
 //! Separate owner/writer credential custody for the explicit financial profile.
 //! Configuration proves key/certificate consistency, not remote authentication.
 use super::*;
+use crate::native_ui::runtime::financial_v1::diagnostics::{self as diag, FinancialNativeStageV1 as Stage};
 use crate::account::birth::enrollment::roster_v2::financial_source_v1::PreparedOriginalFinancialSourceV1;
 use crate::consent_journal::PendingFinancialContinuationAdmissionV1;
 use crate::native_ui::financial_authority_v1::{FinancialAdmitActionV1, FinancialReadLeaseV1};
@@ -55,15 +56,16 @@ impl FinancialWitnessCustodyV1 {
     ) -> Result<ReconciledAuthorityHistory> {
         source.check_read(read)?;
         self.check(source)?;
+        diag::at(Stage::AuthorityHistoryRead);
         let history = self
             .client
             .reconcile_history_checked_until(deadline, || {
                 source
                     .check_read(read)
                     .and_then(|_| self.check(source))
-                    .map_err(|_| wholepact_authority::AuthorityError::Permission)
+                    .map_err(|error| { diag::signer(&error); wholepact_authority::AuthorityError::Permission })
             })
-            .map_err(|_| Error::Uncertain)?;
+            .map_err(|error| { diag::authority(&error); Error::Uncertain })?;
         source.check_read(read)?;
         self.check(source)?;
         Ok(history)
@@ -87,16 +89,18 @@ impl FinancialWitnessCustodyV1 {
             Ok(())
         };
         check()?;
+        diag::at(Stage::AuthorityAdmit);
         let result = self.client.admit_financial_continuation_v1_checked_until(
             pending.request(),
             deadline.min(source.original_deadline()),
-            || check().map_err(|_| wholepact_authority::AuthorityError::Permission),
+            || check().map_err(|error| { diag::signer(&error); wholepact_authority::AuthorityError::Permission }),
         );
+        if let Err(error)=&result { diag::authority(error); }
         let current = check();
         drop(action);
         drop(pending);
         current?;
-        result.map_err(|_| Error::Uncertain)
+        result.map_err(|error| { diag::authority(&error); Error::Uncertain })
     }
 }
 impl FinancialWitnessCustodyV1 {
@@ -122,15 +126,16 @@ impl FinancialWitnessCustodyV1 {
         source.check_read(read)?;
         self.check(source)?;
         let exact = source.continuation_request()?;
+        diag::at(Stage::FinancialHistoryRead);
         let history = self
             .client
             .financial_continuation_history_v1_checked_until(&exact.operation_id, deadline, || {
                 source
                     .check_read(read)
                     .and_then(|_| self.check(source))
-                    .map_err(|_| wholepact_authority::AuthorityError::Permission)
+                    .map_err(|error| { diag::signer(&error); wholepact_authority::AuthorityError::Permission })
             })
-            .map_err(|_| Error::Uncertain)?;
+            .map_err(|error| { diag::authority(&error); Error::Uncertain })?;
         if history.continuation_request() != &exact {
             return Err(Error::ReviewMismatch);
         }
@@ -152,6 +157,7 @@ impl FinancialWitnessCustodyV1 {
         {
             return Err(Error::ReviewMismatch);
         }
+        diag::at(Stage::AuthorityAcquire);
         self.client
             .acquire_financial_continuation_writer_v1_checked_until(
                 history,
@@ -161,10 +167,10 @@ impl FinancialWitnessCustodyV1 {
                     source
                         .check_custody()
                         .and_then(|_| action.check_source(source.identity_digest()))
-                        .map_err(|_| wholepact_authority::AuthorityError::Permission)
+                        .map_err(|error| { diag::signer(&error); wholepact_authority::AuthorityError::Permission })
                 },
             )
-            .map_err(|_| Error::Uncertain)
+            .map_err(|error| { diag::authority(&error); Error::Uncertain })
     }
     pub(in crate::native_ui) fn activate(
         &self,
@@ -182,6 +188,7 @@ impl FinancialWitnessCustodyV1 {
         {
             return Err(Error::ReviewMismatch);
         }
+        diag::at(Stage::AuthorityActivate);
         self.client
             .activate_financial_continuation_writer_v1_checked_until(
                 history,
@@ -192,10 +199,10 @@ impl FinancialWitnessCustodyV1 {
                     source
                         .check_custody()
                         .and_then(|_| action.check_source(source.identity_digest()))
-                        .map_err(|_| wholepact_authority::AuthorityError::Permission)
+                        .map_err(|error| { diag::signer(&error); wholepact_authority::AuthorityError::Permission })
                 },
             )
-            .map_err(|_| Error::Uncertain)
+            .map_err(|error| { diag::authority(&error); Error::Uncertain })
     }
 }
 pub(in crate::native_ui) fn financial_acquire_digest(
@@ -244,6 +251,7 @@ impl FinancialWitnessCustodyV1 {
         if self.owner || history.continuation_request() != &source.continuation_request()? {
             return Err(Error::ReviewMismatch);
         }
+        diag::at(Stage::AuthorityVerifyActive);
         self.client
             .verify_financial_continuation_session_v1_checked_until(
                 history,
@@ -253,10 +261,10 @@ impl FinancialWitnessCustodyV1 {
                     source
                         .check_read(read)
                         .and_then(|_| self.check(source))
-                        .map_err(|_| wholepact_authority::AuthorityError::Permission)
+                        .map_err(|error| { diag::signer(&error); wholepact_authority::AuthorityError::Permission })
                 },
             )
-            .map_err(|_| Error::Uncertain)
+            .map_err(|error| { diag::authority(&error); Error::Uncertain })
     }
     pub(in crate::native_ui) fn sign(
         &self,
@@ -269,7 +277,7 @@ impl FinancialWitnessCustodyV1 {
         deadline: Instant,
     ) -> crate::authority_bridge::Result<crate::authority_bridge::AuthorizationCommit> {
         self.check(source)
-            .map_err(|_| crate::authority_bridge::BridgeError::Permission)?;
+            .map_err(|error| { diag::signer(&error); crate::authority_bridge::BridgeError::Permission })?;
         if self.owner {
             return Err(crate::authority_bridge::BridgeError::Permission);
         }
