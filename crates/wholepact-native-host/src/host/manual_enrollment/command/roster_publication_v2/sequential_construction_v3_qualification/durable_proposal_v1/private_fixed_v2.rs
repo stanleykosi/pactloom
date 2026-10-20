@@ -1088,6 +1088,8 @@ fn produce_fixed_inner(
                     expected_request_digest: reference.request_digest.clone(),
                 },
                 scope: capture_command.scope.clone(),
+                enrollment_ref: capture_command.enrollment_ref.clone(),
+                accepted_manifest_ref: capture_command.accepted_manifest_ref.clone(),
                 material_digest: reference.material_digest.clone(),
                 outbox_reference: reference.outbox_reference.clone(),
             });

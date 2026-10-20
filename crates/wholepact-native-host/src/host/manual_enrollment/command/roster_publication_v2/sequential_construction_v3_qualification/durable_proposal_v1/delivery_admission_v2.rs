@@ -1169,6 +1169,8 @@ pub(super) struct OriginalDisclosureV2 {
     pub account_id: String,
     pub history: DurableConstructionHistoryRequestV1,
     pub scope: DurableConstructionScopeV1,
+    pub enrollment_ref: String,
+    pub accepted_manifest_ref: String,
     pub material_digest: String,
     pub outbox_reference: String,
 }
@@ -1316,6 +1318,14 @@ pub(super) fn continue_completed_original(
                     .find(|source| source.account_id == account.account_id)
                     .ok_or(Error::Authentication)?;
                 let own_disclosure = original_disclosure.history.clone();
+                // These are the actual capture and fresh native receipt pairs.
+                // Reusing the capture refs would conceal the lineage bug this
+                // restarted-recipient route must exercise.
+                if original_disclosure.enrollment_ref == records.enrollment_ref
+                    || original_disclosure.accepted_manifest_ref == records.accepted_manifest_ref
+                {
+                    return Err(Error::Authentication);
+                }
                 let redisclosure_request = DurableConstructionRedisclosureRequestV1 {
                     operation_id: format!("synthetic-original-current-recipient-v2-{index}"),
                     original: DurableConstructionRedisclosureSourceV1 {
@@ -1385,11 +1395,25 @@ pub(super) fn continue_completed_original(
                 if prepared_fixed != &identity { return Err(Error::Authentication); }
                 let prepared_complete = Arc::new(AtomicBool::new(false));
                 original.signers.send(C::PrepareClosedDelivery(index, request.clone(), prepared_fixed.clone(), payload_digest.into(), payload_bytes, delivery.clone(), materials.to_vec(), prepared_complete.clone())).map_err(worker_error)?;
+                let expected_request = request.clone();
                 let prepared_result = client.prepare_closed_recipient_v3(request, prepared_fixed.clone(), payload_digest.into(), payload_bytes, delivery.clone(), materials.to_vec()).map_err(bridge_error);
                 prepared_complete.store(true, Ordering::Release);
                 let prepared_stopped = done(&original.signers, index);
                 let prepared = prepared_result?;
                 prepared_stopped?;
+                // Inspect only the actual sealed recipient's inert descriptor.
+                // Its retained admission refs are CURRENT; own_disclosure still
+                // names the exact original capture, whose payload never changes.
+                let actual = prepared.intent();
+                if actual.request != expected_request
+                    || actual.request.own_disclosure != original_disclosure.history
+                    || actual.original_enrollment_ref != expected_request.enrollment_ref
+                    || actual.original_manifest_ref != expected_request.accepted_manifest_ref
+                    || actual.original_enrollment_ref == original_disclosure.enrollment_ref
+                    || actual.original_manifest_ref == original_disclosure.accepted_manifest_ref
+                {
+                    return Err(Error::Authentication);
+                }
                 // Keep the real closed controller responsive through Host review,
                 // activation, exact receive, and actual proof verification.
                 let complete = Arc::new(AtomicBool::new(false));

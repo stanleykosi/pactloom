@@ -65,10 +65,14 @@ pub(crate) fn validate_recipient(roster: &Roster, candidate: &crate::CandidateVi
         || !candidate.proposal.manifest.participants.iter().any(|p| p.account_id == recipient.account_id && p.participant_id == recipient.participant_id)
     { return Err(denied()); }
     let own = roster.owners.get(&recipient.account_id).ok_or_else(damaged)?;
+    // The original material is bound by its exact operation and complete request
+    // digest, which already commits to its ORIGINAL capture receipt references.
+    // RecipientIntentV3::original_* names the retained RECIPIENT admission rows,
+    // joined by its validator to the current request, not those older capture
+    // rows. The sealed recipient issuer independently validates the approved
+    // original-to-current redisclosure; do not equate these distinct lineages.
     if own.outbox.request().operation_id != recipient.request.own_disclosure.operation_id
         || own.outbox.request_digest() != recipient.request.own_disclosure.expected_request_digest
-        || own.outbox.request().enrollment_ref != recipient.original_enrollment_ref
-        || own.outbox.request().accepted_manifest_ref != recipient.original_manifest_ref
         || recipient.request.current_disclosure.is_none()
     { return Err(denied()); }
     for intake in roster.owners.values() {
