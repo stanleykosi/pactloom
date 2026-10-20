@@ -569,3 +569,5 @@ impl EphemeralFinancialContinuationNativeV1 {
     pub fn result_request(&self)->Result<crate::authority_bridge::financial_continuation_v1::FinancialResultRequestV1>{self.inner.result_request()}
     pub fn close_preserving_originals(self)->Result<DurableDeliveryReopenSelectorV2>{self.inner.close_preserving_originals()}
 }
+
+pub use crate::native_ui::runtime::financial_v1::diagnostics::{FinancialAuthorityCallV1, FinancialAuthorityCostV1, FinancialAuthorityStageV1, FinancialAuthorityCheckSiteV1, FinancialAuthorityCheckpointV1, FinancialAuthoritySelectedLimitV1};

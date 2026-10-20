@@ -55,8 +55,43 @@ FINANCIAL_COMPONENTS = frozenset("Store Journal StorageSecurity Signer Wallet Sy
 FINANCIAL_COMMIT_STATES = frozenset("NotEstablished IntakeCommitted OutcomeUncertain".split())
 FINANCIAL_ERRORS = frozenset("StoreDatabase StoreEncoding StorePoisoned StoreIdempotencyConflict StoreRevisionConflict StoreNotFound StoreAlreadyExists StoreInvalidInput StoreUnsupportedSchema StoreRecoveryRequired StoreWriterEpochMismatch StoreLiveAuthorizationExists StoreInputReserved StoreResourceExhausted StoreBudgetExceeded StoreInvalidTransition StoreFile JournalStorage JournalDatabase JournalPermission JournalExpired JournalRecoveryRequired JournalUnsupportedSchema JournalOfflineHistoryUnsupported JournalNamedRecipientHistoryUnsupported JournalConstructionHistoryUnsupported JournalInvalidBinding JournalConflict JournalNotFound JournalLiveAuthorization JournalInputReserved JournalBudgetExceeded JournalLimit StorageUnsupportedPlatform StorageQuarantinedDatabase StorageRecoveredGeneration StorageGenerationArchive StorageUninitializedDatabase StorageUnsafePath StorageAlreadyExists StorageMissingDatabase StoragePlaintextRefused StorageUnqualifiedRuntime StorageAuthenticationFailed StorageDatabase StorageIo StorageSnapshotLimit StorageSourceChanged Unavailable PeerLifetimeUnavailable Io InvalidData Crypto BackupRequired AlreadyOpen ReviewMismatch ConsentJournal Store Limit CompleteOriginRecoveryUnavailable AuthorityInvalidBinding AuthorityPermission AuthorityStaleHead AuthorityConflict AuthorityInactive AuthorityRecoveryRequired AuthorityExpired AuthorityPolicyDenied AuthorityBudgetExceeded AuthorityInputReserved AuthorityObligationReserved AuthorityLimit AuthorityStorage AuthorityCorruptHistory AuthorityPermanentStopUnavailable AuthorityOfflineHistoryUnsupported AuthorityConstructionHistoryUnsupported AuthorityUnsupportedVersion AuthorityAuthentication AuthorityUncertain AuthorityResolutionUnavailable AuthoritySessionRequired AuthoritySessionPending WalletStorage WalletAccountScope WalletAccountMismatch WalletIncompleteSync WalletUnsupportedProfile WalletChainMismatch WalletInsufficientFunds WalletInvalidRequest WalletMissingWitness WalletInvalidNote WalletScan WalletTransport SyncAccessDenied SyncInvalidRequest SyncInterrupted SyncReconciliationRequired SyncInvalidResponse SyncResourceLimit SyncNoCurrentObservation ChainInvalidConfiguration ChainWrongNetwork ChainUnsupportedProxyConfiguration ChainWrongBranch ChainStaleChain ChainContradictoryChain ChainTimeout ChainTransportUnavailable ChainObservationInterrupted ChainMissingAncestryEvidence ChainNotObserved ChainResourceLimit ChainMalformedEvidence ChainUnsupportedCapability ChainBackendFailure ChainClockUnavailable ChainIdempotencyConflict ChainJournalFailure ChainSubmissionNotAuthorized ChainSubmissionExpiryMargin ChainObligationConflict ChainSubmissionOutcomeUnrecorded ChainSubmissionRetentionUncertain DurableInvalid DurableBinding DurableStale DurableStorage KeyUsePermission KeyUsePolicy KeyUseSelectionExpired KeyUseStorage KeyUseRecoveryRequired KeyUseStateChanged KeyUseExpiry StaleHead Inactive PolicyDenied BudgetExceeded InputReserved ObligationReserved CorruptHistory SessionRequired SessionPending Permission Binding Conflict Missing RecoveryRequired Verification Storage ResourceLimit Expired Uncertain Unsupported Authentication Terminal Invalid Locked Ipc Journal Authority Wallet SignerOriginUnavailable DurableProposalConflict DurableProposalRecoveryRequired SignaturesIncomplete RetentionDenied RetentionConflict OriginalIntentMissing RetentionRecoveryRequired SubmissionUnresolved FinancialOutcomeReconciliation RevisionConflict Timeout Interrupted TransportUnavailable WrongNetwork WrongBranch StaleChain ContradictoryChain BackendFailure ClockUnavailable Other FrameUnclassified FrameDeadline FrameEof FrameCredentialsMissing FrameCredentialsMismatch FrameAncillaryRejected FrameTruncated FramePeerNotLive FrameCurrentCheck FrameIo FrameLimit FrameInvalid FrameInvalidBudget".split())
 
+AUTHORITY_STAGES = frozenset("CallerDeadline ExchangeDeadline SourceCallback SnapshotConnect SnapshotHandshake SnapshotPeerBinding SnapshotRequestBuild SnapshotRequestWrite SnapshotResponseRead SnapshotResponse SnapshotValidation PageConnect PageHandshake PagePeerBinding PageRequestBuild PageRequestWrite PageResponseRead PageResponse PageValidation EventReplay FinalValidation Bounds AdmissionRequestValidation AdmissionBinding AdmissionConnect AdmissionHandshake AdmissionPeerBinding AdmissionRequestBuild AdmissionRequestWrite AdmissionResponseRead AdmissionResponse AdmissionSnapshotValidation AdmissionCommittedHeadValidation AdmissionFinalValidation FlowRequestValidation FlowBinding FlowSession FlowConnect FlowHandshake FlowPeerBinding FlowRequestBuild FlowRequestWrite FlowResponseRead FlowResponse FlowSnapshotValidation FlowReceiptValidation FlowCommittedHeadValidation FlowFinalValidation".split())
+AUTHORITY_CHECK_SITES = frozenset("ReplayInitial ReplayAfterSnapshot ReplayBeforePage ReplayAfterPage ReplayFinal ExchangeInitial BeforeConnect AfterConnect BeforeHandshakeIo AfterHandshake AfterPeerBinding AfterRequestBuild BeforeRequestWrite AfterRequestWrite AfterResponseRead".split())
+AUTHORITY_CHECKPOINTS = frozenset("EntryDeadline DeadlineSelection ConnectRemaining BeforeCallback Callback AfterCallback Operation Validation".split())
+AUTHORITY_LIMITS = frozenset("Caller Exchange".split())
+AUTHORITY_COST_FIELDS = frozenset("callback_calls callback_us callback_max_us connect_calls connect_us handshake_calls handshake_us frame_write_calls frame_write_us frame_read_calls frame_read_us".split())
+AUTHORITY_OPTIONAL_MICROS = frozenset("selected_budget_us caller_remaining_at_failure_us selected_remaining_at_failure_us exchange_elapsed_us".split())
+AUTHORITY_FIELDS = AUTHORITY_OPTIONAL_MICROS | {"stage", "check_site", "checkpoint", "selected_limit", "exchange_cost", "clamped", "incomplete", "pre_budget_callback_calls", "pre_budget_callback_us"}
+
+def validate_authority_call(value):
+    if type(value) is not dict or set(value) != AUTHORITY_FIELDS:
+        raise ValueError()
+    for key, values, optional in (("stage", AUTHORITY_STAGES, False), ("check_site", AUTHORITY_CHECK_SITES, True), ("checkpoint", AUTHORITY_CHECKPOINTS, False), ("selected_limit", AUTHORITY_LIMITS, True)):
+        v = value[key]
+        if optional and v is None:
+            continue
+        if type(v) is not str or v not in values:
+            raise ValueError()
+    for key in AUTHORITY_OPTIONAL_MICROS | {"pre_budget_callback_us", "pre_budget_callback_calls"}:
+        v = value[key]
+        if key in AUTHORITY_OPTIONAL_MICROS and v is None:
+            continue
+        if type(v) is not int or not 0 <= v <= (1 if key == "pre_budget_callback_calls" else 600000000):
+            raise ValueError()
+    for key in ("clamped", "incomplete"):
+        if type(value[key]) is not bool:
+            raise ValueError()
+    cost = value["exchange_cost"]
+    if cost is not None:
+        if type(cost) is not dict or set(cost) != AUTHORITY_COST_FIELDS:
+            raise ValueError()
+        for key, v in cost.items():
+            if type(v) is not int or not 0 <= v <= (1000000 if key.endswith("_calls") else 600000000):
+                raise ValueError()
+    return value
+
 def validate_financial_diagnostic(record):
-    if type(record) is not dict or set(record) != {"schema", "stage", "component", "error_class", "commit_state", "current_timing"}:
+    if type(record) is not dict or set(record) != {"schema", "stage", "component", "error_class", "commit_state", "current_timing", "authority_call"}:
         raise ValueError()
     if type(record["schema"]) is not int or record["schema"] != 1:
         raise ValueError()
@@ -78,6 +113,11 @@ def validate_financial_diagnostic(record):
                 continue
             if type(value) is not int or not 0 <= value <= 2001:
                 raise ValueError()
+    authority_call = record["authority_call"]
+    if authority_call is not None:
+        if timing is not None or record["stage"] not in {"NativeAuthorityAdmit", "NativeAuthorityAcquire", "NativeAuthorityActivate", "NativeAuthorityVerifyActive"}:
+            raise ValueError()
+        validate_authority_call(authority_call)
     return record
 
 

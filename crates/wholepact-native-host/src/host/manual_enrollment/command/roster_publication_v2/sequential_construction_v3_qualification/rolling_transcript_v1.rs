@@ -1723,6 +1723,7 @@ fn financial_diagnostic_survives_all_fragment_boundaries() {
         error_class: E::Uncertain,
         commit_state: K::IntakeCommitted,
         current_timing: None,
+        authority_call: None,
     };
     let json = serde_json::to_string(&value).unwrap();
     let line = format!("[FINANCIAL_DIAGNOSTIC_V1 {json}]\r\n");

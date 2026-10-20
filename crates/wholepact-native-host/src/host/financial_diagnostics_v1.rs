@@ -377,10 +377,16 @@ pub(crate) struct FinancialDiagnosticV1 {
     pub error_class: FinancialErrorClassV1,
     pub commit_state: FinancialCommitStateV1,
     pub current_timing: Option<FinancialCurrentTimingV1>,
+    pub authority_call: Option<wholepact_signer::native_ui::synthetic_born_joined_qualification::FinancialAuthorityCallV1>,
 }
 impl FinancialDiagnosticV1 {
     pub(crate) fn is_valid_v1(&self) -> bool {
         self.schema == 1
+            && self.authority_call.as_ref().map_or(true, |call| {
+                self.current_timing.is_none()
+                    && matches!(self.stage, FinancialStageV1::NativeAuthorityAdmit | FinancialStageV1::NativeAuthorityAcquire | FinancialStageV1::NativeAuthorityActivate | FinancialStageV1::NativeAuthorityVerifyActive)
+                    && call.is_valid_v1()
+            })
             && self.current_timing.map_or(true, |timing| {
                 self.component == FinancialComponentV1::SignerBridge
                     && matches!(
@@ -453,6 +459,7 @@ fn record(
         error_class,
         commit_state,
         current_timing: None,
+        authority_call: None,
     });
 }
 pub(crate) fn host(stage: FinancialStageV1, state: FinancialCommitStateV1, error: &crate::Error) {
@@ -654,6 +661,7 @@ pub(crate) fn signer_result(
                 remaining_before_read_ms: timing.remaining_before_read_ms,
                 roundtrip_elapsed_ms: timing.roundtrip_elapsed_ms,
             }),
+        authority_call: None,
     });
 }
 
@@ -676,6 +684,7 @@ mod tests {
             error_class: FinancialErrorClassV1::FrameDeadline,
             commit_state: FinancialCommitStateV1::OutcomeUncertain,
             current_timing: Some(timing),
+            authority_call: None,
         };
         assert!(record.is_valid_v1());
         let value = serde_json::to_value(record).unwrap();
@@ -815,7 +824,7 @@ mod native_join_tests {
             FinancialNativeComponentV1 as P, FinancialNativeErrorClassV1 as E,
         };
         reset_operation();
-        native_job(D { stage: S::AuthorityAcquire, component: P::Authority, error_class: E::AuthorityExpired });
+        native_job(D { stage: S::AuthorityAcquire, component: P::Authority, error_class: E::AuthorityExpired, authority_call: None });
         host(FinancialStageV1::WorkerReply, FinancialCommitStateV1::OutcomeUncertain, &crate::Error::Receipt("inert outer label".into()));
         let detail = take_operation_failure().unwrap();
         assert_eq!(detail.stage, FinancialStageV1::NativeAuthorityAcquire);
@@ -1041,11 +1050,50 @@ fn native_at(stage: FinancialStageV1, state: FinancialCommitStateV1, detail: who
         E::StorageSnapshotLimit => FinancialErrorClassV1::StorageSnapshotLimit,
         E::StorageSourceChanged => FinancialErrorClassV1::StorageSourceChanged,
     };
-    record(stage, state, component, class);
+    capture_first(FinancialDiagnosticV1 {
+        schema: 1, stage, component, error_class: class, commit_state: state,
+        current_timing: None, authority_call: detail.authority_call,
+    });
 }
 pub(crate) fn signer(stage: FinancialStageV1, state: FinancialCommitStateV1, error: &wholepact_signer::Error) {
     use wholepact_signer::native_ui::synthetic_born_joined_qualification::{classify_financial_native_failure_v1, FinancialNativeStageV1};
     if let Some(detail) = classify_financial_native_failure_v1(FinancialNativeStageV1::ReviewStage, error) {
         native_at(stage, state, detail);
+    }
+}
+
+#[cfg(test)]
+mod authority_call_tests {
+    use super::*;
+    #[test]
+    fn authority_call_keeps_original_cause_and_rejects_unrelated_stage() {
+        use wholepact_signer::native_ui::synthetic_born_joined_qualification::{
+            FinancialNativeDiagnosticV1 as D, FinancialNativeStageV1 as S,
+            FinancialNativeComponentV1 as P, FinancialNativeErrorClassV1 as E,
+        };
+        let call = serde_json::from_value(serde_json::json!({
+            "stage":"ExchangeDeadline", "check_site":"AfterResponseRead",
+            "checkpoint":"AfterCallback", "selected_limit":"Exchange",
+            "selected_budget_us":10000000, "caller_remaining_at_failure_us":100000000,
+            "selected_remaining_at_failure_us":0, "exchange_elapsed_us":10000001,
+            "exchange_cost":null, "clamped":false, "incomplete":false,
+            "pre_budget_callback_calls":1, "pre_budget_callback_us":100
+        })).unwrap();
+        reset_operation();
+        native_job(D {stage:S::AuthorityAdmit, component:P::Authority,
+            error_class:E::AuthorityPermission, authority_call:Some(call)});
+        let mut value=take_operation_failure().unwrap();
+        assert_eq!(value.error_class,FinancialErrorClassV1::AuthorityPermission);
+        assert_eq!(value.authority_call,Some(call));
+        assert_eq!(value.commit_state,FinancialCommitStateV1::OutcomeUncertain);
+        assert!(value.is_valid_v1());
+        // Callback-first source errors retain their original component rather
+        // than being rewritten as remote permission refusal.
+        value.component=FinancialComponentV1::Journal;
+        value.error_class=FinancialErrorClassV1::JournalInvalidBinding;
+        assert!(value.is_valid_v1());
+        value.stage=FinancialStageV1::ResultCurrentRead;
+        assert!(!value.is_valid_v1());
+        reset_operation();
     }
 }

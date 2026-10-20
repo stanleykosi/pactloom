@@ -90,6 +90,15 @@ impl FinancialWitnessCustodyV1 {
         };
         check()?;
         diag::at(Stage::AuthorityAdmit);
+        #[cfg(feature = "synthetic-qualification")]
+        let observation = diag::begin_checked_authority();
+        #[cfg(feature = "synthetic-qualification")]
+        let result = self.client.admit_financial_continuation_v1_diagnosed_checked_until(
+            pending.request(),
+            deadline.min(source.original_deadline()),
+            || check().map_err(|error| { diag::signer(&error); wholepact_authority::AuthorityError::Permission }),
+        ).map_err(|failure| diag::checked_authority(failure, observation));
+        #[cfg(not(feature = "synthetic-qualification"))]
         let result = self.client.admit_financial_continuation_v1_checked_until(
             pending.request(),
             deadline.min(source.original_deadline()),
@@ -158,8 +167,11 @@ impl FinancialWitnessCustodyV1 {
             return Err(Error::ReviewMismatch);
         }
         diag::at(Stage::AuthorityAcquire);
-        self.client
-            .acquire_financial_continuation_writer_v1_checked_until(
+        #[cfg(feature = "synthetic-qualification")]
+        let observation = diag::begin_checked_authority();
+        #[cfg(feature = "synthetic-qualification")]
+        let result = self.client
+            .acquire_financial_continuation_writer_v1_diagnosed_checked_until(
                 history,
                 &history.continuation_request().operation_id,
                 deadline,
@@ -170,6 +182,21 @@ impl FinancialWitnessCustodyV1 {
                         .map_err(|error| { diag::signer(&error); wholepact_authority::AuthorityError::Permission })
                 },
             )
+            .map_err(|failure| diag::checked_authority(failure, observation));
+        #[cfg(not(feature = "synthetic-qualification"))]
+        let result = self.client
+            .acquire_financial_continuation_writer_v1_checked_until(
+                history,
+                &history.continuation_request().operation_id,
+                deadline,
+                || {
+                    source
+                        .check_custody()
+                        .and_then(|_| action.check_source(source.identity_digest()))
+                        .map_err(|error| { diag::signer(&error); wholepact_authority::AuthorityError::Permission })
+                },
+            );
+        result
             .map_err(|error| { diag::authority(&error); Error::Uncertain })
     }
     pub(in crate::native_ui) fn activate(
@@ -189,8 +216,11 @@ impl FinancialWitnessCustodyV1 {
             return Err(Error::ReviewMismatch);
         }
         diag::at(Stage::AuthorityActivate);
-        self.client
-            .activate_financial_continuation_writer_v1_checked_until(
+        #[cfg(feature = "synthetic-qualification")]
+        let observation = diag::begin_checked_authority();
+        #[cfg(feature = "synthetic-qualification")]
+        let result = self.client
+            .activate_financial_continuation_writer_v1_diagnosed_checked_until(
                 history,
                 &history.continuation_request().operation_id,
                 request,
@@ -202,6 +232,22 @@ impl FinancialWitnessCustodyV1 {
                         .map_err(|error| { diag::signer(&error); wholepact_authority::AuthorityError::Permission })
                 },
             )
+            .map_err(|failure| diag::checked_authority(failure, observation));
+        #[cfg(not(feature = "synthetic-qualification"))]
+        let result = self.client
+            .activate_financial_continuation_writer_v1_checked_until(
+                history,
+                &history.continuation_request().operation_id,
+                request,
+                deadline,
+                || {
+                    source
+                        .check_custody()
+                        .and_then(|_| action.check_source(source.identity_digest()))
+                        .map_err(|error| { diag::signer(&error); wholepact_authority::AuthorityError::Permission })
+                },
+            );
+        result
             .map_err(|error| { diag::authority(&error); Error::Uncertain })
     }
 }
@@ -252,8 +298,11 @@ impl FinancialWitnessCustodyV1 {
             return Err(Error::ReviewMismatch);
         }
         diag::at(Stage::AuthorityVerifyActive);
-        self.client
-            .verify_financial_continuation_session_v1_checked_until(
+        #[cfg(feature = "synthetic-qualification")]
+        let observation = diag::begin_checked_authority();
+        #[cfg(feature = "synthetic-qualification")]
+        let result = self.client
+            .verify_financial_continuation_session_v1_diagnosed_checked_until(
                 history,
                 &history.continuation_request().operation_id,
                 deadline,
@@ -264,6 +313,21 @@ impl FinancialWitnessCustodyV1 {
                         .map_err(|error| { diag::signer(&error); wholepact_authority::AuthorityError::Permission })
                 },
             )
+            .map_err(|failure| diag::checked_authority(failure, observation));
+        #[cfg(not(feature = "synthetic-qualification"))]
+        let result = self.client
+            .verify_financial_continuation_session_v1_checked_until(
+                history,
+                &history.continuation_request().operation_id,
+                deadline,
+                || {
+                    source
+                        .check_read(read)
+                        .and_then(|_| self.check(source))
+                        .map_err(|error| { diag::signer(&error); wholepact_authority::AuthorityError::Permission })
+                },
+            );
+        result
             .map_err(|error| { diag::authority(&error); Error::Uncertain })
     }
     pub(in crate::native_ui) fn sign(

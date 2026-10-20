@@ -206,12 +206,15 @@ pub enum FinancialNativeErrorClassV1 {
     StorageSourceChanged,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FinancialNativeDiagnosticV1 {
     pub stage: FinancialNativeStageV1,
     pub component: FinancialNativeComponentV1,
     pub error_class: FinancialNativeErrorClassV1,
+    pub authority_call: Option<FinancialAuthorityCallV1>,
 }
 struct Observer {
+    identity: std::rc::Rc<()>,
     stage: FinancialNativeStageV1,
     failure: Option<FinancialNativeDiagnosticV1>,
 }
@@ -223,6 +226,7 @@ impl Scope {
     pub(in crate::native_ui) fn begin(stage: FinancialNativeStageV1) -> Self {
         let previous = ACTIVE.with(|slot| {
             slot.replace(Some(Observer {
+                identity: std::rc::Rc::new(()),
                 stage,
                 failure: None,
             }))
@@ -256,6 +260,7 @@ pub(in crate::native_ui) fn capture(
                     stage: o.stage,
                     component,
                     error_class,
+                    authority_call: None,
                 });
             }
         }
@@ -306,6 +311,399 @@ pub(in crate::native_ui) fn bridge(error: &crate::authority_bridge::BridgeError)
             E::Ipc => C::Ipc,
         },
     );
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum FinancialAuthorityStageV1 {
+    CallerDeadline,
+    ExchangeDeadline,
+    SourceCallback,
+    SnapshotConnect,
+    SnapshotHandshake,
+    SnapshotPeerBinding,
+    SnapshotRequestBuild,
+    SnapshotRequestWrite,
+    SnapshotResponseRead,
+    SnapshotResponse,
+    SnapshotValidation,
+    PageConnect,
+    PageHandshake,
+    PagePeerBinding,
+    PageRequestBuild,
+    PageRequestWrite,
+    PageResponseRead,
+    PageResponse,
+    PageValidation,
+    EventReplay,
+    FinalValidation,
+    Bounds,
+    AdmissionRequestValidation,
+    AdmissionBinding,
+    AdmissionConnect,
+    AdmissionHandshake,
+    AdmissionPeerBinding,
+    AdmissionRequestBuild,
+    AdmissionRequestWrite,
+    AdmissionResponseRead,
+    AdmissionResponse,
+    AdmissionSnapshotValidation,
+    AdmissionCommittedHeadValidation,
+    AdmissionFinalValidation,
+    FlowRequestValidation,
+    FlowBinding,
+    FlowSession,
+    FlowConnect,
+    FlowHandshake,
+    FlowPeerBinding,
+    FlowRequestBuild,
+    FlowRequestWrite,
+    FlowResponseRead,
+    FlowResponse,
+    FlowSnapshotValidation,
+    FlowReceiptValidation,
+    FlowCommittedHeadValidation,
+    FlowFinalValidation,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum FinancialAuthorityCheckSiteV1 {
+    ReplayInitial,
+    ReplayAfterSnapshot,
+    ReplayBeforePage,
+    ReplayAfterPage,
+    ReplayFinal,
+    ExchangeInitial,
+    BeforeConnect,
+    AfterConnect,
+    BeforeHandshakeIo,
+    AfterHandshake,
+    AfterPeerBinding,
+    AfterRequestBuild,
+    BeforeRequestWrite,
+    AfterRequestWrite,
+    AfterResponseRead,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum FinancialAuthorityCheckpointV1 {
+    EntryDeadline,
+    DeadlineSelection,
+    ConnectRemaining,
+    BeforeCallback,
+    Callback,
+    AfterCallback,
+    Operation,
+    Validation,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum FinancialAuthoritySelectedLimitV1 {
+    Caller,
+    Exchange,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FinancialAuthorityCostV1 {
+    #[serde(deserialize_with = "bounded_count")]
+    pub callback_calls: u32,
+    #[serde(deserialize_with = "bounded_micros")]
+    pub callback_us: u32,
+    #[serde(deserialize_with = "bounded_micros")]
+    pub callback_max_us: u32,
+    #[serde(deserialize_with = "bounded_count")]
+    pub connect_calls: u32,
+    #[serde(deserialize_with = "bounded_micros")]
+    pub connect_us: u32,
+    #[serde(deserialize_with = "bounded_count")]
+    pub handshake_calls: u32,
+    #[serde(deserialize_with = "bounded_micros")]
+    pub handshake_us: u32,
+    #[serde(deserialize_with = "bounded_count")]
+    pub frame_write_calls: u32,
+    #[serde(deserialize_with = "bounded_micros")]
+    pub frame_write_us: u32,
+    #[serde(deserialize_with = "bounded_count")]
+    pub frame_read_calls: u32,
+    #[serde(deserialize_with = "bounded_micros")]
+    pub frame_read_us: u32,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FinancialAuthorityCallV1 {
+    pub stage: FinancialAuthorityStageV1,
+    pub check_site: Option<FinancialAuthorityCheckSiteV1>,
+    pub checkpoint: FinancialAuthorityCheckpointV1,
+    pub selected_limit: Option<FinancialAuthoritySelectedLimitV1>,
+    #[serde(deserialize_with = "bounded_optional_micros")]
+    pub selected_budget_us: Option<u32>,
+    #[serde(deserialize_with = "bounded_optional_micros")]
+    pub caller_remaining_at_failure_us: Option<u32>,
+    #[serde(deserialize_with = "bounded_optional_micros")]
+    pub selected_remaining_at_failure_us: Option<u32>,
+    #[serde(deserialize_with = "bounded_optional_micros")]
+    pub exchange_elapsed_us: Option<u32>,
+    pub exchange_cost: Option<FinancialAuthorityCostV1>,
+    pub clamped: bool,
+    pub incomplete: bool,
+    #[serde(deserialize_with = "bounded_pre_budget_count")]
+    pub pre_budget_callback_calls: u8,
+    #[serde(deserialize_with = "bounded_micros")]
+    pub pre_budget_callback_us: u32,
+}
+#[cfg(feature = "synthetic-qualification")]
+impl From<wholepact_authority::transport::history_diagnostics_v1::CheckedHistoryStageV1>
+    for FinancialAuthorityStageV1
+{
+    fn from(
+        value: wholepact_authority::transport::history_diagnostics_v1::CheckedHistoryStageV1,
+    ) -> Self {
+        use wholepact_authority::transport::history_diagnostics_v1::CheckedHistoryStageV1 as S;
+        match value {
+            S::CallerDeadline => Self::CallerDeadline,
+            S::ExchangeDeadline => Self::ExchangeDeadline,
+            S::SourceCallback => Self::SourceCallback,
+            S::SnapshotConnect => Self::SnapshotConnect,
+            S::SnapshotHandshake => Self::SnapshotHandshake,
+            S::SnapshotPeerBinding => Self::SnapshotPeerBinding,
+            S::SnapshotRequestBuild => Self::SnapshotRequestBuild,
+            S::SnapshotRequestWrite => Self::SnapshotRequestWrite,
+            S::SnapshotResponseRead => Self::SnapshotResponseRead,
+            S::SnapshotResponse => Self::SnapshotResponse,
+            S::SnapshotValidation => Self::SnapshotValidation,
+            S::PageConnect => Self::PageConnect,
+            S::PageHandshake => Self::PageHandshake,
+            S::PagePeerBinding => Self::PagePeerBinding,
+            S::PageRequestBuild => Self::PageRequestBuild,
+            S::PageRequestWrite => Self::PageRequestWrite,
+            S::PageResponseRead => Self::PageResponseRead,
+            S::PageResponse => Self::PageResponse,
+            S::PageValidation => Self::PageValidation,
+            S::EventReplay => Self::EventReplay,
+            S::FinalValidation => Self::FinalValidation,
+            S::Bounds => Self::Bounds,
+            S::AdmissionRequestValidation => Self::AdmissionRequestValidation,
+            S::AdmissionBinding => Self::AdmissionBinding,
+            S::AdmissionConnect => Self::AdmissionConnect,
+            S::AdmissionHandshake => Self::AdmissionHandshake,
+            S::AdmissionPeerBinding => Self::AdmissionPeerBinding,
+            S::AdmissionRequestBuild => Self::AdmissionRequestBuild,
+            S::AdmissionRequestWrite => Self::AdmissionRequestWrite,
+            S::AdmissionResponseRead => Self::AdmissionResponseRead,
+            S::AdmissionResponse => Self::AdmissionResponse,
+            S::AdmissionSnapshotValidation => Self::AdmissionSnapshotValidation,
+            S::AdmissionCommittedHeadValidation => Self::AdmissionCommittedHeadValidation,
+            S::AdmissionFinalValidation => Self::AdmissionFinalValidation,
+            S::FlowRequestValidation => Self::FlowRequestValidation,
+            S::FlowBinding => Self::FlowBinding,
+            S::FlowSession => Self::FlowSession,
+            S::FlowConnect => Self::FlowConnect,
+            S::FlowHandshake => Self::FlowHandshake,
+            S::FlowPeerBinding => Self::FlowPeerBinding,
+            S::FlowRequestBuild => Self::FlowRequestBuild,
+            S::FlowRequestWrite => Self::FlowRequestWrite,
+            S::FlowResponseRead => Self::FlowResponseRead,
+            S::FlowResponse => Self::FlowResponse,
+            S::FlowSnapshotValidation => Self::FlowSnapshotValidation,
+            S::FlowReceiptValidation => Self::FlowReceiptValidation,
+            S::FlowCommittedHeadValidation => Self::FlowCommittedHeadValidation,
+            S::FlowFinalValidation => Self::FlowFinalValidation,
+        }
+    }
+}
+#[cfg(feature = "synthetic-qualification")]
+impl From<wholepact_authority::transport::history_diagnostics_v1::CheckedHistoryCheckSiteV1>
+    for FinancialAuthorityCheckSiteV1
+{
+    fn from(
+        value: wholepact_authority::transport::history_diagnostics_v1::CheckedHistoryCheckSiteV1,
+    ) -> Self {
+        use wholepact_authority::transport::history_diagnostics_v1::CheckedHistoryCheckSiteV1 as S;
+        match value {
+            S::ReplayInitial => Self::ReplayInitial,
+            S::ReplayAfterSnapshot => Self::ReplayAfterSnapshot,
+            S::ReplayBeforePage => Self::ReplayBeforePage,
+            S::ReplayAfterPage => Self::ReplayAfterPage,
+            S::ReplayFinal => Self::ReplayFinal,
+            S::ExchangeInitial => Self::ExchangeInitial,
+            S::BeforeConnect => Self::BeforeConnect,
+            S::AfterConnect => Self::AfterConnect,
+            S::BeforeHandshakeIo => Self::BeforeHandshakeIo,
+            S::AfterHandshake => Self::AfterHandshake,
+            S::AfterPeerBinding => Self::AfterPeerBinding,
+            S::AfterRequestBuild => Self::AfterRequestBuild,
+            S::BeforeRequestWrite => Self::BeforeRequestWrite,
+            S::AfterRequestWrite => Self::AfterRequestWrite,
+            S::AfterResponseRead => Self::AfterResponseRead,
+        }
+    }
+}
+#[cfg(feature = "synthetic-qualification")]
+impl From<wholepact_authority::transport::history_diagnostics_v1::CheckedHistoryCheckpointV1>
+    for FinancialAuthorityCheckpointV1
+{
+    fn from(
+        value: wholepact_authority::transport::history_diagnostics_v1::CheckedHistoryCheckpointV1,
+    ) -> Self {
+        use wholepact_authority::transport::history_diagnostics_v1::CheckedHistoryCheckpointV1 as S;
+        match value {
+            S::EntryDeadline => Self::EntryDeadline,
+            S::DeadlineSelection => Self::DeadlineSelection,
+            S::ConnectRemaining => Self::ConnectRemaining,
+            S::BeforeCallback => Self::BeforeCallback,
+            S::Callback => Self::Callback,
+            S::AfterCallback => Self::AfterCallback,
+            S::Operation => Self::Operation,
+            S::Validation => Self::Validation,
+        }
+    }
+}
+#[cfg(feature = "synthetic-qualification")]
+impl From<wholepact_authority::transport::history_diagnostics_v1::CheckedHistorySelectedLimitV1>
+    for FinancialAuthoritySelectedLimitV1
+{
+    fn from(
+        value: wholepact_authority::transport::history_diagnostics_v1::CheckedHistorySelectedLimitV1,
+    ) -> Self {
+        use wholepact_authority::transport::history_diagnostics_v1::CheckedHistorySelectedLimitV1 as S;
+        match value {
+            S::Caller => Self::Caller,
+            S::Exchange => Self::Exchange,
+        }
+    }
+}
+
+impl FinancialAuthorityCallV1 {
+    /// Observational bounds only. This is never authorization or a retry check.
+    pub fn is_valid_v1(&self) -> bool {
+        self.pre_budget_callback_calls <= 1
+            && self
+                .selected_budget_us
+                .is_none_or(|value| value <= 600_000_000)
+            && self
+                .caller_remaining_at_failure_us
+                .is_none_or(|value| value <= 600_000_000)
+            && self
+                .selected_remaining_at_failure_us
+                .is_none_or(|value| value <= 600_000_000)
+            && self
+                .exchange_elapsed_us
+                .is_none_or(|value| value <= 600_000_000)
+            && self.pre_budget_callback_us <= 600_000_000
+            && self.exchange_cost.as_ref().is_none_or(|cost| {
+                cost.callback_calls <= 1_000_000
+                    && cost.callback_us <= 600_000_000
+                    && cost.callback_max_us <= 600_000_000
+                    && cost.connect_calls <= 1_000_000
+                    && cost.connect_us <= 600_000_000
+                    && cost.handshake_calls <= 1_000_000
+                    && cost.handshake_us <= 600_000_000
+                    && cost.frame_write_calls <= 1_000_000
+                    && cost.frame_write_us <= 600_000_000
+                    && cost.frame_read_calls <= 1_000_000
+                    && cost.frame_read_us <= 600_000_000
+            })
+    }
+}
+
+fn bounded_micros<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
+    let value = <u32 as serde::Deserialize>::deserialize(deserializer)?;
+    if value > 600_000_000 {
+        return Err(serde::de::Error::custom("diagnostic micros out of bounds"));
+    }
+    Ok(value)
+}
+fn bounded_count<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
+    let value = <u32 as serde::Deserialize>::deserialize(deserializer)?;
+    if value > 1_000_000 {
+        return Err(serde::de::Error::custom("diagnostic count out of bounds"));
+    }
+    Ok(value)
+}
+fn bounded_optional_micros<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u32>, D::Error> {
+    let value = <Option<u32> as serde::Deserialize>::deserialize(deserializer)?;
+    if value.is_some_and(|value| value > 600_000_000) {
+        return Err(serde::de::Error::custom("diagnostic micros out of bounds"));
+    }
+    Ok(value)
+}
+/// Only a call entered before any failure may attach its own transport snapshot.
+#[cfg(feature = "synthetic-qualification")]
+pub(in crate::native_ui) struct CheckedAuthorityObservation {
+    entered: Option<(std::rc::Rc<()>, FinancialNativeStageV1)>,
+}
+#[cfg(feature = "synthetic-qualification")]
+pub(in crate::native_ui) fn begin_checked_authority() -> CheckedAuthorityObservation {
+    CheckedAuthorityObservation {
+        entered: ACTIVE.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .filter(|o| o.failure.is_none())
+                .map(|o| (std::rc::Rc::clone(&o.identity), o.stage))
+        }),
+    }
+}
+
+/// Preserve bounded original evidence, never permission or a retry signal.
+#[cfg(feature = "synthetic-qualification")]
+pub(in crate::native_ui) fn checked_authority(
+    failure: wholepact_authority::transport::history_diagnostics_v1::CheckedHistoryFailureV1,
+    observation: CheckedAuthorityObservation,
+) -> wholepact_authority::AuthorityError {
+    let measurement = failure.measurement();
+    let call = FinancialAuthorityCallV1 {
+        stage: failure.stage().into(),
+        check_site: measurement.check_site().map(Into::into),
+        checkpoint: measurement.checkpoint().into(),
+        selected_limit: measurement.selected_limit().map(Into::into),
+        selected_budget_us: measurement.selected_budget_us(),
+        caller_remaining_at_failure_us: measurement.caller_remaining_at_failure_us(),
+        selected_remaining_at_failure_us: measurement.selected_remaining_at_failure_us(),
+        exchange_elapsed_us: measurement.exchange_elapsed_us(),
+        exchange_cost: measurement
+            .exchange_cost()
+            .map(|cost| FinancialAuthorityCostV1 {
+                callback_calls: cost.callback_calls(),
+                callback_us: cost.callback_us(),
+                callback_max_us: cost.callback_max_us(),
+                connect_calls: cost.connect_calls(),
+                connect_us: cost.connect_us(),
+                handshake_calls: cost.handshake_calls(),
+                handshake_us: cost.handshake_us(),
+                frame_write_calls: cost.frame_write_calls(),
+                frame_write_us: cost.frame_write_us(),
+                frame_read_calls: cost.frame_read_calls(),
+                frame_read_us: cost.frame_read_us(),
+            }),
+        clamped: measurement.clamped(),
+        incomplete: measurement.incomplete(),
+        pre_budget_callback_calls: measurement.pre_budget_callback_calls(),
+        pre_budget_callback_us: measurement.pre_budget_callback_us(),
+    };
+    // Keep the outer operation and any earlier callback's precise Signer cause.
+    authority(&failure.error());
+    attach_checked_authority(observation, call);
+    // into_error() is the observed cause, not necessarily the kernel return.
+    // Any failure after dispatch may already be committed. Never retry here.
+    failure.returned_error()
+}
+
+#[cfg(feature = "synthetic-qualification")]
+fn attach_checked_authority(
+    observation: CheckedAuthorityObservation,
+    call: FinancialAuthorityCallV1,
+) {
+    ACTIVE.with(|slot| {
+        if let (Some(observer), Some((identity, stage))) =
+            (slot.borrow_mut().as_mut(), observation.entered)
+        {
+            if std::rc::Rc::ptr_eq(&identity, &observer.identity) {
+                if let Some(diagnostic) = observer.failure.as_mut() {
+                    if stage == diagnostic.stage && diagnostic.authority_call.is_none() {
+                        diagnostic.authority_call = Some(call);
+                    }
+                }
+            }
+        }
+    });
 }
 
 pub(in crate::native_ui) fn authority(error: &wholepact_authority::AuthorityError) {
@@ -533,4 +931,16 @@ pub(in crate::native_ui) fn store_error(error: &wholepact_store::StoreError) {
             E::File(_) => C::StoreFile,
         },
     );
+}
+
+fn bounded_pre_budget_count<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<u8, D::Error> {
+    let value = <u8 as serde::Deserialize>::deserialize(deserializer)?;
+    if value > 1 {
+        return Err(serde::de::Error::custom(
+            "diagnostic pre-budget count out of bounds",
+        ));
+    }
+    Ok(value)
 }

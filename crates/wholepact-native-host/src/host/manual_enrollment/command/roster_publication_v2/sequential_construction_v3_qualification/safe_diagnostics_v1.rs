@@ -5093,6 +5093,7 @@ mod private_fixed_projection {
             error_class: E::Binding,
             commit_state: K::NotEstablished,
             current_timing: None,
+        authority_call: None,
         };
         let json = serde_json::to_string(&record).unwrap();
         let line = format!("{FINANCIAL_PREFIX}{json}]");

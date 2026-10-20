@@ -1,8 +1,18 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-20, 17:51 UTC.
+Updated: 2026-10-20, 18:46 UTC.
 
 **CI44 passed the genuine two-owner delivery/admission, original-producer SIGKILL and fresh-process read-only original-history verification route. Financial signing/dispatch and public testnet settlement remain unqualified. This is a bounded admission/restart milestone, not a production release.**
+
+## CI57 retained admission Permission; checked-call evidence added
+
+[Run 39469992680](https://github.com/stanleykosi/pactloom/actions/runs/39469992680), qualification `c9747cf646c6ac52dacc7c887f7922dee5aa7582`, implementation `70d9aab694ac5246fcef862a8bc4b428b7bd1712`, passed the origin and seven real TLS mechanism groups, Host build (12m05s) and encrypted bootstrap. Native execution failed at 18:22:16 UTC, input120/151, with `NativeAuthorityAdmit / Authority / AuthorityPermission / OutcomeUncertain`. Producer reap, process-group absence and root cleanup were verified; no financial result or reader execution is established.
+
+Permission alone does not establish a remote denial. The maintained Authority transport also uses that error for an exhausted caller or selected exchange deadline. The harness can verify the committed Witness admission before polling the still-finishing Signer job, so a late client completion remains possible. No retry, re-signing, deadline increase or permission relaxation is justified by this evidence.
+
+The qualification-only call path now uses the existing diagnosed admission, acquisition, activation and active-verification kernels. It preserves the original returned error and all callbacks and deadlines. A same-call optional record carries the finite checkpoint, check site, selected limit, remaining budgets and bounded callback/transport costs; unavailable phases remain null. The original nested callback cause cannot be overwritten or annotated by a later call. Ordinary production API paths are unchanged. These observations distinguish local deadline/source refusal from remote rejection without treating uncertain commit as absence.
+
+Independent review cleared the exact source. After a missing optional field in an existing pure test was corrected, combined Signer/Host compilation passed in 2m18s. Seven exact in-memory tests and71 closed Python validation/subprocess cases passed. This is a diagnostic contract improvement, not a behavioral payment repair. The next isolated lifecycle is pending; actual Current/intake/Finish, completed-only reopen, saved-byte dispatch, public testnet settlement and unknown-chain retransmission remain unqualified.
 
 ## CI56 stopped before the first financial history read; original job causes retained
 

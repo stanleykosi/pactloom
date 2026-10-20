@@ -1442,7 +1442,7 @@ fn run_financial_lifecycle_v1() -> io::Result<()> {
 #[test]
 fn financial_diagnostic_requires_actual_stage_cleanup() {
     use financial_diagnostic::{FinancialDiagnosticV1,FinancialStageV1 as S,FinancialComponentV1 as C,FinancialErrorClassV1 as E,FinancialCommitStateV1 as K};
-    let record=FinancialDiagnosticV1{schema:1,stage:S::ResultReceive,component:C::SignerBridge,error_class:E::Binding,commit_state:K::NotEstablished,current_timing:None};
+    let record=FinancialDiagnosticV1{schema:1,stage:S::ResultReceive,component:C::SignerBridge,error_class:E::Binding,commit_state:K::NotEstablished,current_timing:None,authority_call:None};
     for reader in [false,true] {
         for missing in 0..6 {
             let mut public=FinancialPublicV1::pending();
