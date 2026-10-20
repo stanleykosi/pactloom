@@ -7,6 +7,9 @@ pub mod backup;
 pub mod local_node;
 pub mod public_read_profile_v1;
 mod proxy;
+mod connect_driver;
+#[cfg(test)]
+mod connect_driver_tests;
 mod reconciliation;
 mod rpc;
 #[cfg(feature = "submission-dispatch")]

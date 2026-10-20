@@ -10,6 +10,7 @@ use tonic::{
     transport::{Channel, Endpoint},
 };
 
+#[derive(Clone)]
 pub(crate) enum ProxyRoute {
     Direct,
     HttpTunnel(Uri),
