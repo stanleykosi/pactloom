@@ -1,8 +1,18 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-20, 18:46 UTC.
+Updated: 2026-10-20, 19:33 UTC.
 
 **CI44 passed the genuine two-owner delivery/admission, original-producer SIGKILL and fresh-process read-only original-history verification route. Financial signing/dispatch and public testnet settlement remain unqualified. This is a bounded admission/restart milestone, not a production release.**
+
+## CI58 established admission callback budget exhaustion; admission-only repair prepared
+
+[Run39477913650](https://github.com/stanleykosi/pactloom/actions/runs/39477913650), qualification `d6ae85d76648fc6473279e3ea8760b7d02cd508e`, implementation `03b384732defd117604db5ce13bfa7d12fda4a58`, passed origin/TLS gates, Host build (12m14s) and encrypted bootstrap. Native execution failed at19:17:30 UTC, input120/151. Cleanup was verified; no completed financial result or reader is established.
+
+The new record establishes local `ExchangeDeadline` at `AfterRequestWrite / AfterCallback`: eight source callbacks consumed10,506,491 microseconds against the unchanged10,000,000-microsecond exchange budget. The longest callback took1,878,201 microseconds. Connect took106, TLS680 and request write115 microseconds; no response read began. The original caller still had104,170,509 microseconds remaining. Thus repeated source validation, not slow network or an established remote denial, exhausted this exchange. Since the request was written, commit outcome remains uncertain and must not be treated as absent or retried blindly.
+
+The narrow admission-only repair fully audits the current prepared source, distinct original pending source, exact retained request/history, Witness identity and terms in one snapshot. It then retains an opaque same-registration/file/revision pin, checking five SQLite counters before/inside/after a read transaction and after commit. Each transport callback still checks fresh action generation/revocation, original terms and expiry, lifetime, immutable source files, exact Witness/certificate, and both source identities. No pin refresh, generic custody weakening, new request, retry or deadline expansion is included.
+
+Independent source review cleared the five-file repair. Combined Signer/Host compilation passed in about7m40s. Three real disposable encrypted constructor/refusal regressions passed once, including distinct source identities, mutation/rollback/restoration, header drift, foreign registration/binding and file replacement. These prove inner custody mechanics, not full valid profile20 issuance. Actual audited admission, Current/intake/Finish, completed-only reopen and saved-byte dispatch remain pending the next isolated native run. Public testnet settlement and unknown-chain retransmission remain unproven.
 
 ## CI57 retained admission Permission; checked-call evidence added
 
