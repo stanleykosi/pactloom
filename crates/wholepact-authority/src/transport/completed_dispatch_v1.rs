@@ -41,30 +41,30 @@ impl AuthorityServer {
         if inputs.is_empty() || inputs.len() > 2 {
             return Err(AuthorityError::Limit);
         }
+        // Authenticate one concrete installation owner, retaining its exclusive
+        // locks while separately opening and auditing each exact account journal.
+        let namespace_inputs: Vec<_> = inputs.iter().map(|(input, _)| input.clone()).collect();
+        for input in &namespace_inputs {
+            if input.pinned_server_certificate_digest != tls.certificate_digest
+                || input.endpoint != actual_listen
+            {
+                return Err(AuthorityError::Authentication);
+            }
+        }
+        let journals = crate::witness_locator::open_born_financial_histories_v1(&namespace_inputs)?;
         let mut sources = std::collections::BTreeMap::new();
         let mut base = None;
-        for (input, operation) in inputs {
-            let mut server = Self::from_born_completed_dispatch_namespace_v1(
-                input,
-                &operation,
-                tls.clone(),
-                actual_listen,
-            )?;
-            let original = server
-                .completed_dispatch_v1
-                .take()
-                .ok_or(AuthorityError::Permission)?;
-            for (account, source) in original.iter() {
-                source.require_endpoint(&tls.certificate_digest, actual_listen)?;
-                if sources
-                    .insert(account.clone(), Arc::clone(source))
-                    .is_some()
-                {
-                    return Err(AuthorityError::Conflict);
-                }
-            }
+        for ((input, operation), journal) in inputs.into_iter().zip(journals) {
+            let source = ConfiguredFinancialWitnessV1::from_original(journal, &operation)?;
+            source.require_endpoint(&tls.certificate_digest, actual_listen)?;
             if base.is_none() {
-                base = Some(server);
+                base = Some(Self::new(source.journal(), tls.clone()));
+            }
+            if sources
+                .insert(input.expected_account_id, Arc::new(source))
+                .is_some()
+            {
+                return Err(AuthorityError::Conflict);
             }
         }
         let mut server = base.ok_or(AuthorityError::Permission)?;
