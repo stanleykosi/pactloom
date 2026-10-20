@@ -490,7 +490,7 @@ enum State {
     Durable(Box<EphemeralDurableNativeV1>),
     Delivery(Box<EphemeralDurableDeliveryNativeV2>),
     ClosedDelivery(Box<EphemeralClosedDeliveryNativeV3>),
-    FinancialContinuation(Box<wholepact_signer::native_ui::synthetic_born_joined_qualification::EphemeralFinancialContinuationNativeV1>),
+    FinancialContinuation(Box<wholepact_signer::native_ui::synthetic_born_joined_qualification::EphemeralFinancialContinuationNativeV1>, FinancialProgressReporter),
     ClosedReopen(DeliveryReopenV2, wholepact_signer::authority_bridge::durable_review_ipc_v3::RecipientIntentV3),
     PreservedDelivery,
 }
@@ -1337,70 +1337,127 @@ fn execute(
             )
         }
         (C::BeginFinancialContinuation(_, wallet), State::ClosedDelivery(entry)) => {
-            let entry = entry
-                .into_financial_continuation_v1(wallet)
-                .map_err(|e| financial_signer_error(e, "exact original financial source entry", crate::host::financial_diagnostics_v1::FinancialStageV1::WorkerSourceOpen, None))?;
+            let entry = entry.into_financial_continuation_v1(wallet).map_err(|e| {
+                financial_signer_error(
+                    e,
+                    "exact original financial source entry",
+                    crate::host::financial_diagnostics_v1::FinancialStageV1::WorkerSourceOpen,
+                    None,
+                )
+            })?;
+            let reporter = FinancialProgressReporter::start(index, &entry);
             (
-                State::FinancialContinuation(Box::new(entry)),
+                State::FinancialContinuation(Box::new(entry), reporter),
                 R::Done { index },
             )
         }
-        (C::PollFinancialContinuation(_), State::FinancialContinuation(mut entry)) => {
-            let phase = entry
-                .poll()
-                .map_err(|e| financial_signer_error(e, "financial native phase", crate::host::financial_diagnostics_v1::FinancialStageV1::WorkerPhaseWait, entry.last_failure_v1()))?;
+        (C::PollFinancialContinuation(_), State::FinancialContinuation(mut entry, reporter)) => {
+            let phase = entry.poll().map_err(|e| {
+                financial_signer_error(
+                    e,
+                    "financial native phase",
+                    crate::host::financial_diagnostics_v1::FinancialStageV1::WorkerPhaseWait,
+                    entry.last_failure_v1(),
+                )
+            })?;
             (
-                State::FinancialContinuation(entry),
+                State::FinancialContinuation(entry, reporter),
                 R::FinancialPhase { index, phase },
             )
         }
-        (C::ApproveFinancialContinuation(_), State::FinancialContinuation(mut entry)) => {
-            entry
-                .approve_current_review()
-                .map_err(|e| financial_signer_error(e, "financial exact final native review", crate::host::financial_diagnostics_v1::FinancialStageV1::WorkerReview, entry.last_failure_v1()))?;
-            (State::FinancialContinuation(entry), R::Done { index })
-        }
-        (C::SendFinancialContinuation(_), State::FinancialContinuation(mut entry)) => {
-            entry
-                .send_pending_continuation()
-                .map_err(|e| financial_signer_error(e, "financial exact retained admission send", crate::host::financial_diagnostics_v1::FinancialStageV1::WorkerCommand, entry.last_failure_v1()))?;
-            (State::FinancialContinuation(entry), R::Done { index })
-        }
-        (C::ReadFinancialContinuationRequest(_), State::FinancialContinuation(entry)) => {
-            let request = entry
-                .pending_continuation_request()
-                .map_err(|e| financial_signer_error(e, "financial exact pending request", crate::host::financial_diagnostics_v1::FinancialStageV1::WorkerRequest, entry.last_failure_v1()))?;
+        (C::ApproveFinancialContinuation(_), State::FinancialContinuation(mut entry, reporter)) => {
+            entry.approve_current_review().map_err(|e| {
+                financial_signer_error(
+                    e,
+                    "financial exact final native review",
+                    crate::host::financial_diagnostics_v1::FinancialStageV1::WorkerReview,
+                    entry.last_failure_v1(),
+                )
+            })?;
             (
-                State::FinancialContinuation(entry),
+                State::FinancialContinuation(entry, reporter),
+                R::Done { index },
+            )
+        }
+        (C::SendFinancialContinuation(_), State::FinancialContinuation(mut entry, reporter)) => {
+            entry.send_pending_continuation().map_err(|e| {
+                financial_signer_error(
+                    e,
+                    "financial exact retained admission send",
+                    crate::host::financial_diagnostics_v1::FinancialStageV1::WorkerCommand,
+                    entry.last_failure_v1(),
+                )
+            })?;
+            (
+                State::FinancialContinuation(entry, reporter),
+                R::Done { index },
+            )
+        }
+        (C::ReadFinancialContinuationRequest(_), State::FinancialContinuation(entry, reporter)) => {
+            let request = entry.pending_continuation_request().map_err(|e| {
+                financial_signer_error(
+                    e,
+                    "financial exact pending request",
+                    crate::host::financial_diagnostics_v1::FinancialStageV1::WorkerRequest,
+                    entry.last_failure_v1(),
+                )
+            })?;
+            (
+                State::FinancialContinuation(entry, reporter),
                 R::FinancialRequest { index, request },
             )
         }
-        (C::ReadFinancialActivationRequest(_), State::FinancialContinuation(entry)) => {
-            let request = entry
-                .pending_activation_request()
-                .map_err(|e| financial_signer_error(e, "financial exact activation request", crate::host::financial_diagnostics_v1::FinancialStageV1::WorkerRequest, entry.last_failure_v1()))?;
+        (C::ReadFinancialActivationRequest(_), State::FinancialContinuation(entry, reporter)) => {
+            let request = entry.pending_activation_request().map_err(|e| {
+                financial_signer_error(
+                    e,
+                    "financial exact activation request",
+                    crate::host::financial_diagnostics_v1::FinancialStageV1::WorkerRequest,
+                    entry.last_failure_v1(),
+                )
+            })?;
             (
-                State::FinancialContinuation(entry),
+                State::FinancialContinuation(entry, reporter),
                 R::FinancialRequest { index, request },
             )
         }
-        (C::ReadFinancialResultPeer(_), State::FinancialContinuation(entry)) => {
+        (C::ReadFinancialResultPeer(_), State::FinancialContinuation(entry, reporter)) => {
             let peer = JoinedSignerPeerV1 {
-                provider: entry
-                    .provider()
-                    .map_err(|e| financial_signer_error(e, "financial installed provider", crate::host::financial_diagnostics_v1::FinancialStageV1::WorkerRequest, entry.last_failure_v1()))?,
-                endpoint: entry
-                    .endpoint()
-                    .map_err(|e| financial_signer_error(e, "financial protected endpoint", crate::host::financial_diagnostics_v1::FinancialStageV1::WorkerRequest, entry.last_failure_v1()))?,
-                deadline: entry
-                    .deadline()
-                    .map_err(|e| financial_signer_error(e, "financial original deadline", crate::host::financial_diagnostics_v1::FinancialStageV1::WorkerRequest, entry.last_failure_v1()))?,
+                provider: entry.provider().map_err(|e| {
+                    financial_signer_error(
+                        e,
+                        "financial installed provider",
+                        crate::host::financial_diagnostics_v1::FinancialStageV1::WorkerRequest,
+                        entry.last_failure_v1(),
+                    )
+                })?,
+                endpoint: entry.endpoint().map_err(|e| {
+                    financial_signer_error(
+                        e,
+                        "financial protected endpoint",
+                        crate::host::financial_diagnostics_v1::FinancialStageV1::WorkerRequest,
+                        entry.last_failure_v1(),
+                    )
+                })?,
+                deadline: entry.deadline().map_err(|e| {
+                    financial_signer_error(
+                        e,
+                        "financial original deadline",
+                        crate::host::financial_diagnostics_v1::FinancialStageV1::WorkerRequest,
+                        entry.last_failure_v1(),
+                    )
+                })?,
             };
-            let request = entry
-                .result_request()
-                .map_err(|e| financial_signer_error(e, "financial exact result request", crate::host::financial_diagnostics_v1::FinancialStageV1::WorkerRequest, entry.last_failure_v1()))?;
+            let request = entry.result_request().map_err(|e| {
+                financial_signer_error(
+                    e,
+                    "financial exact result request",
+                    crate::host::financial_diagnostics_v1::FinancialStageV1::WorkerRequest,
+                    entry.last_failure_v1(),
+                )
+            })?;
             (
-                State::FinancialContinuation(entry),
+                State::FinancialContinuation(entry, reporter),
                 R::FinancialResultPeer {
                     index,
                     peer,
@@ -1408,19 +1465,29 @@ fn execute(
                 },
             )
         }
-        (C::ServeFinancialResult(_, stop), State::FinancialContinuation(mut entry)) => {
+        (C::ServeFinancialResult(_, stop), State::FinancialContinuation(mut entry, reporter)) => {
             use wholepact_signer::native_ui::synthetic_born_joined_qualification::FinancialQualificationPhaseV1 as P;
-            let deadline = entry
-                .deadline()
-                .map_err(|e| financial_signer_error(e, "financial result original deadline", crate::host::financial_diagnostics_v1::FinancialStageV1::WorkerReturn, entry.last_failure_v1()))?;
+            let deadline = entry.deadline().map_err(|e| {
+                financial_signer_error(
+                    e,
+                    "financial result original deadline",
+                    crate::host::financial_diagnostics_v1::FinancialStageV1::WorkerReturn,
+                    entry.last_failure_v1(),
+                )
+            })?;
             let mut stopping_since = None;
             loop {
                 if Instant::now() >= deadline {
                     return Err("financial result original deadline expired");
                 }
-                let phase = entry
-                    .poll()
-                    .map_err(|e| financial_signer_error(e, "financial actual return native poll", crate::host::financial_diagnostics_v1::FinancialStageV1::WorkerReturn, entry.last_failure_v1()))?;
+                let phase = entry.poll().map_err(|e| {
+                    financial_signer_error(
+                        e,
+                        "financial actual return native poll",
+                        crate::host::financial_diagnostics_v1::FinancialStageV1::WorkerReturn,
+                        entry.last_failure_v1(),
+                    )
+                })?;
                 if stop.load(Ordering::Acquire) {
                     if phase == P::Complete {
                         break;
@@ -1442,12 +1509,21 @@ fn execute(
                 }
                 thread::sleep(Duration::from_millis(5));
             }
-            (State::FinancialContinuation(entry), R::Done { index })
+            (
+                State::FinancialContinuation(entry, reporter),
+                R::Done { index },
+            )
         }
-        (C::PreserveFinancialContinuation(_), State::FinancialContinuation(entry)) => {
-            let original = entry
-                .close_preserving_originals()
-                .map_err(|e| financial_signer_error(e, "financial original native drain", crate::host::financial_diagnostics_v1::FinancialStageV1::WorkerDrain, None))?;
+        (C::PreserveFinancialContinuation(_), State::FinancialContinuation(entry, reporter)) => {
+            drop(reporter);
+            let original = entry.close_preserving_originals().map_err(|e| {
+                financial_signer_error(
+                    e,
+                    "financial original native drain",
+                    crate::host::financial_diagnostics_v1::FinancialStageV1::WorkerDrain,
+                    None,
+                )
+            })?;
             (
                 State::PreservedDelivery,
                 R::DeliveryPreserved { index, original },
@@ -2376,4 +2452,126 @@ mod delivery_import_wait_tests {
         .unwrap_err();
         assert_eq!(&*returned.0 as *const u8, address);
     }
+}
+
+/// Qualification-only observation thread. No authority, source access, or retry.
+/// Its independently opened nonblocking stderr descriptor never changes flags
+/// on the inherited PTY and never takes the process stderr formatting lock.
+struct FinancialProgressReporter {
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+impl FinancialProgressReporter {
+    fn start(
+        index: usize,
+        entry:&wholepact_signer::native_ui::synthetic_born_joined_qualification::EphemeralFinancialContinuationNativeV1,
+    ) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut result = Self {
+            stop: stop.clone(),
+            thread: None,
+        };
+        let Ok(owner) = u8::try_from(index) else {
+            return result;
+        };
+        if !(1..=2).contains(&owner) {
+            return result;
+        }
+        let Some(observer) = entry.progress_observer_v1() else {
+            return result;
+        };
+        let Ok(deadline) = entry.deadline() else {
+            return result;
+        };
+        let Ok(cutoff) = super::private_fixed_v2::child_original_cutoff() else {
+            return result;
+        };
+        let deadline = deadline.min(cutoff);
+        let Some(mut output) = nonblocking_financial_progress_output() else {
+            return result;
+        };
+        result.thread = thread::Builder::new()
+            .name("synthetic-financial-progress".into())
+            .spawn(move || {
+                use std::io::Write;
+                let mut last = None;
+                let mut emitted = 0u16;
+                while !stop.load(Ordering::Acquire) && Instant::now() < deadline {
+                    if let Some(current) = observer.snapshot() {
+                        if last != Some(current) && emitted < 256 {
+                            last = Some(current);
+                            emitted += 1;
+                            let record = super::super::financial_progress_v1::Record::Job {
+                                owner,
+                                job_id: current.job_id,
+                                sequence: current.sequence,
+                                stage: current.stage,
+                            };
+                            if let Ok(json) = serde_json::to_string(&record) {
+                                let line = format!("\n[FINANCIAL_PROGRESS_V1 {json}]\n");
+                                if line.len() <= 480 {
+                                    // Exactly one nonblocking write; no retry on a
+                                    // full PTY, interruption, or a partial write.
+                                    if !matches!(output.write(line.as_bytes()), Ok(n) if n == line.len()) {
+                                        // Telemetry is unavailable after any incomplete
+                                        // record; never retry or append repair bytes.
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    thread::sleep(Duration::from_millis(50));
+                }
+            })
+            .ok();
+        result
+    }
+}
+impl Drop for FinancialProgressReporter {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+fn nonblocking_financial_progress_output() -> Option<std::fs::File> {
+    use std::os::{fd::AsRawFd, unix::fs::OpenOptionsExt};
+    let output = std::fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC | libc::O_NOCTTY)
+        .open("/proc/self/fd/2")
+        .ok()?;
+    let mut original = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let mut opened = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: both stat buffers are valid writable storage; descriptors are
+    // borrowed for inspection only and no flags on inherited stderr change.
+    let valid = unsafe {
+        libc::fstat(2, original.as_mut_ptr()) == 0
+            && libc::fstat(output.as_raw_fd(), opened.as_mut_ptr()) == 0
+    };
+    if !valid {
+        return None;
+    }
+    // SAFETY: successful fstat initialized both structures above.
+    let (original, opened) = unsafe { (original.assume_init(), opened.assume_init()) };
+    if (original.st_dev, original.st_ino, original.st_rdev)
+        != (opened.st_dev, opened.st_ino, opened.st_rdev)
+    {
+        return None;
+    }
+    let kind = opened.st_mode & libc::S_IFMT;
+    // Regular files can block despite O_NONBLOCK. Accept only this inherited
+    // pipe or TTY endpoint, never a newly selected diagnostic destination.
+    if kind != libc::S_IFIFO
+        && !(kind == libc::S_IFCHR && unsafe { libc::isatty(output.as_raw_fd()) } == 1)
+    {
+        return None;
+    }
+    let flags = unsafe { libc::fcntl(output.as_raw_fd(), libc::F_GETFL) };
+    if flags < 0 || flags & libc::O_NONBLOCK == 0 {
+        return None;
+    }
+    Some(output)
 }

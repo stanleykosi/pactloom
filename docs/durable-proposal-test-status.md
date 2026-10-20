@@ -1,8 +1,20 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-20, 19:33 UTC.
+Updated: 2026-10-20, 20:31 UTC.
 
 **CI44 passed the genuine two-owner delivery/admission, original-producer SIGKILL and fresh-process read-only original-history verification route. Financial signing/dispatch and public testnet settlement remain unqualified. This is a bounded admission/restart milestone, not a production release.**
+
+## CI59 reached the global cutoff without a returned failure; phase supervision added
+
+[Run39484623795](https://github.com/stanleykosi/pactloom/actions/runs/39484623795), qualification `325136a6c4b86cf9d4fca2b465a7c1b2d9c21d06`, implementation `95e7f46ef0a3ba8628930dab024cbcea4e9fe520`, passed origin/TLS gates, Host build (12m22s) and encrypted bootstrap. Native execution ended at20:06:51 UTC after the original900-second workflow cutoff, with input120/151 and SignatureAndIntake. No returned financial/source diagnostic was captured. Producer/group/root cleanup was verified, and no reader or completed financial result is established.
+
+This differs from the measured admission deadline failure in CI58. The recorded stage follows Witness commit, excluding a pre-request pin-constructor deadlock, but input120 stays unchanged throughout both owners' native review/signing loops. Independent source audits found no concrete recursive lock, held connection across I/O or join-before-send defect in the new pin. The stalled operation remains unknown; no speculative pin change or timeout increase is justified.
+
+Qualification now supervises27 explicitly ordered action/setup windows in the parent process, with a fixed120-second liveness cutoff per window and the original900-second total still enforced. Each window starts before its approval/send or setup; wait/call markers and job pulses cannot renew it. Actual financial action limits remain unchanged. Grouped Host history, intake, retention and shutdown windows use120seconds only as a qualification liveness cap, not a claim of production permission expiry. Parent kill/reap handles blocked child receive/join without waiting for cooperative checks.
+
+A same-job atomic observer supplies bounded last-observed native stages, separately from sticky returned failures. It is historical and potentially lossy, not proof of the currently active operation or cause. The qualification reporter uses nonblocking finite writes and stops on partial/error output without retry. Malformed/partial progress fails closed while retaining the last valid observation. Public records remain closed and are disclosed only after verified producer/group/root cleanup; no raw paths, errors or payment data are included.
+
+Independent review cleared the12-file change. After a one-line import correction, combined Signer/Host compilation passed in about2m15s. Ten exact pure tests and97 closed Python validation/subprocess cases passed, covering immutable windows, stale-job isolation, bounded vocabularies, fragmentation, invalid records and cleanup gating. These are supervision/reporting results, not a payment repair or native success. The next isolated run must identify actual progress or the exact stalled phase; full financial dispatch, public testnet settlement and unknown-chain retransmission remain unproven.
 
 ## CI58 established admission callback budget exhaustion; admission-only repair prepared
 

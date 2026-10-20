@@ -217,3 +217,107 @@ fn authority_metadata_bounds_unknown_fields_and_nulls_are_closed() {
         diagnostic
     );
 }
+
+#[cfg(feature = "synthetic-born-joined-qualification")]
+#[test]
+fn live_progress_is_atomic_same_job_and_separate_from_failure() {
+    let observer = FinancialNativeProgressObserverV1::new();
+    assert!(observer.snapshot().is_none());
+    let token = observer
+        .start(Some(1), FinancialNativeStageV1::Admit)
+        .unwrap();
+    let scope = Scope::begin(FinancialNativeStageV1::Admit);
+    scope.attach_progress(Some(token));
+    at(FinancialNativeStageV1::AuthorityAdmit);
+    let first = observer.snapshot().unwrap();
+    assert_eq!(
+        (first.job_id, first.sequence, first.stage),
+        (1, 2, FinancialNativeStageV1::AuthorityAdmit)
+    );
+    signer(&Error::Locked);
+    let failure = scope.failure();
+    at(FinancialNativeStageV1::AuthorityAdmit);
+    assert_eq!(observer.snapshot().unwrap().sequence, 3);
+    assert_eq!(scope.failure(), failure);
+    let _next = observer
+        .start(Some(2), FinancialNativeStageV1::HistoryRead)
+        .unwrap();
+    at(FinancialNativeStageV1::Sign);
+    assert_eq!(
+        observer.snapshot().unwrap(),
+        FinancialNativeProgressV1 {
+            job_id: 2,
+            sequence: 1,
+            stage: FinancialNativeStageV1::HistoryRead
+        }
+    );
+    // Reads do not advance the pulse or refresh anything.
+    assert_eq!(observer.snapshot(), observer.clone().snapshot());
+}
+
+#[cfg(feature = "synthetic-born-joined-qualification")]
+#[test]
+fn live_progress_exhaustion_becomes_unavailable_without_wraparound() {
+    use std::sync::atomic::Ordering;
+    let observer = FinancialNativeProgressObserverV1::new();
+    let token = observer
+        .start(Some(7), FinancialNativeStageV1::Sign)
+        .unwrap();
+    observer.0.store(
+        (7u64 << 32) | (0x00ff_ffffu64 << 8) | FinancialNativeStageV1::Sign as u64,
+        Ordering::Release,
+    );
+    token.publish(FinancialNativeStageV1::Sign);
+    assert!(observer.snapshot().is_none());
+    token.publish(FinancialNativeStageV1::ReturnServe);
+    assert!(observer.snapshot().is_none());
+    assert!(observer.start(None, FinancialNativeStageV1::Sign).is_none());
+    assert!(observer.snapshot().is_none());
+}
+
+#[cfg(feature = "synthetic-born-joined-qualification")]
+#[test]
+fn live_progress_all_stages_roundtrip() {
+    let observer = FinancialNativeProgressObserverV1::new();
+    for stage in [
+        FinancialNativeStageV1::SourceOpen,
+        FinancialNativeStageV1::HistoryRead,
+        FinancialNativeStageV1::Continue,
+        FinancialNativeStageV1::Admit,
+        FinancialNativeStageV1::Acquire,
+        FinancialNativeStageV1::Activate,
+        FinancialNativeStageV1::WalletPrepare,
+        FinancialNativeStageV1::WalletObserve,
+        FinancialNativeStageV1::SignPrepare,
+        FinancialNativeStageV1::Sign,
+        FinancialNativeStageV1::ReturnPrepare,
+        FinancialNativeStageV1::HostPreparedWait,
+        FinancialNativeStageV1::ReturnApprove,
+        FinancialNativeStageV1::ReturnServe,
+        FinancialNativeStageV1::ReviewStage,
+        FinancialNativeStageV1::ResultRequest,
+        FinancialNativeStageV1::AuthorityHistoryRead,
+        FinancialNativeStageV1::FinancialHistoryRead,
+        FinancialNativeStageV1::AuthorityAdmit,
+        FinancialNativeStageV1::AuthorityAcquire,
+        FinancialNativeStageV1::AuthorityActivate,
+        FinancialNativeStageV1::AuthorityVerifyActive,
+        FinancialNativeStageV1::WalletChain,
+        FinancialNativeStageV1::WalletBirthday,
+        FinancialNativeStageV1::WalletInitialize,
+        FinancialNativeStageV1::WalletImport,
+        FinancialNativeStageV1::WalletController,
+        FinancialNativeStageV1::WalletVerify,
+        FinancialNativeStageV1::WalletStatus,
+        FinancialNativeStageV1::WalletMaterial,
+        FinancialNativeStageV1::WalletSynchronize,
+        FinancialNativeStageV1::WalletTicket,
+        FinancialNativeStageV1::WalletReconcile,
+    ] {
+        let token = observer.start(Some(1), stage).unwrap();
+        assert_eq!(observer.snapshot().unwrap().stage, stage);
+        token.publish(stage);
+        assert_eq!(observer.snapshot().unwrap().stage, stage);
+        assert_eq!(observer.snapshot().unwrap().sequence, 2);
+    }
+}

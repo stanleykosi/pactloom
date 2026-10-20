@@ -214,6 +214,8 @@ pub struct FinancialNativeDiagnosticV1 {
     pub authority_call: Option<FinancialAuthorityCallV1>,
 }
 struct Observer {
+    #[cfg(feature = "synthetic-born-joined-qualification")]
+    progress: Option<FinancialProgressTokenV1>,
     identity: std::rc::Rc<()>,
     stage: FinancialNativeStageV1,
     failure: Option<FinancialNativeDiagnosticV1>,
@@ -226,6 +228,8 @@ impl Scope {
     pub(in crate::native_ui) fn begin(stage: FinancialNativeStageV1) -> Self {
         let previous = ACTIVE.with(|slot| {
             slot.replace(Some(Observer {
+                #[cfg(feature = "synthetic-born-joined-qualification")]
+                progress: None,
                 identity: std::rc::Rc::new(()),
                 stage,
                 failure: None,
@@ -246,6 +250,10 @@ pub(in crate::native_ui) fn at(stage: FinancialNativeStageV1) {
     ACTIVE.with(|slot| {
         if let Some(o) = slot.borrow_mut().as_mut() {
             o.stage = stage;
+            #[cfg(feature = "synthetic-born-joined-qualification")]
+            if let Some(token) = &o.progress {
+                token.publish(stage);
+            }
         }
     });
 }
@@ -943,4 +951,170 @@ fn bounded_pre_budget_count<'de, D: serde::Deserializer<'de>>(
         ));
     }
     Ok(value)
+}
+
+/// Qualification-only location observation, never permission or completion.
+#[cfg(feature = "synthetic-born-joined-qualification")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FinancialNativeProgressV1 {
+    pub job_id: u32,
+    pub sequence: u32,
+    pub stage: FinancialNativeStageV1,
+}
+#[cfg(feature = "synthetic-born-joined-qualification")]
+#[derive(Clone)]
+pub struct FinancialNativeProgressObserverV1(std::sync::Arc<std::sync::atomic::AtomicU64>);
+#[cfg(feature = "synthetic-born-joined-qualification")]
+impl FinancialNativeProgressObserverV1 {
+    pub(in crate::native_ui) fn new() -> Self {
+        Self(std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)))
+    }
+    /// Last observed job location, retained after completion. This does not
+    /// establish that the job is still running or that any step completed.
+    pub fn snapshot(&self) -> Option<FinancialNativeProgressV1> {
+        let raw = self.0.load(std::sync::atomic::Ordering::Acquire);
+        let job_id = (raw >> 32) as u32;
+        let sequence = ((raw >> 8) & 0x00ff_ffff) as u32;
+        if job_id == 0 || sequence == 0 {
+            return None;
+        }
+        let stage = match (raw & 0xff) as u8 {
+            0 => FinancialNativeStageV1::SourceOpen,
+            1 => FinancialNativeStageV1::HistoryRead,
+            2 => FinancialNativeStageV1::Continue,
+            3 => FinancialNativeStageV1::Admit,
+            4 => FinancialNativeStageV1::Acquire,
+            5 => FinancialNativeStageV1::Activate,
+            6 => FinancialNativeStageV1::WalletPrepare,
+            7 => FinancialNativeStageV1::WalletObserve,
+            8 => FinancialNativeStageV1::SignPrepare,
+            9 => FinancialNativeStageV1::Sign,
+            10 => FinancialNativeStageV1::ReturnPrepare,
+            11 => FinancialNativeStageV1::HostPreparedWait,
+            12 => FinancialNativeStageV1::ReturnApprove,
+            13 => FinancialNativeStageV1::ReturnServe,
+            14 => FinancialNativeStageV1::ReviewStage,
+            15 => FinancialNativeStageV1::ResultRequest,
+            16 => FinancialNativeStageV1::AuthorityHistoryRead,
+            17 => FinancialNativeStageV1::FinancialHistoryRead,
+            18 => FinancialNativeStageV1::AuthorityAdmit,
+            19 => FinancialNativeStageV1::AuthorityAcquire,
+            20 => FinancialNativeStageV1::AuthorityActivate,
+            21 => FinancialNativeStageV1::AuthorityVerifyActive,
+            22 => FinancialNativeStageV1::WalletChain,
+            23 => FinancialNativeStageV1::WalletBirthday,
+            24 => FinancialNativeStageV1::WalletInitialize,
+            25 => FinancialNativeStageV1::WalletImport,
+            26 => FinancialNativeStageV1::WalletController,
+            27 => FinancialNativeStageV1::WalletVerify,
+            28 => FinancialNativeStageV1::WalletStatus,
+            29 => FinancialNativeStageV1::WalletMaterial,
+            30 => FinancialNativeStageV1::WalletSynchronize,
+            31 => FinancialNativeStageV1::WalletTicket,
+            32 => FinancialNativeStageV1::WalletReconcile,
+            _ => return None,
+        };
+        Some(FinancialNativeProgressV1 {
+            job_id,
+            sequence,
+            stage,
+        })
+    }
+    pub(in crate::native_ui) fn start(
+        &self,
+        job_id: Option<u32>,
+        stage: FinancialNativeStageV1,
+    ) -> Option<FinancialProgressTokenV1> {
+        let Some(job_id) = job_id.filter(|id| *id != 0) else {
+            self.0.store(0, std::sync::atomic::Ordering::Release);
+            return None;
+        };
+        self.0.store(
+            (u64::from(job_id) << 32) | (1 << 8) | u64::from(progress_stage_code(stage)),
+            std::sync::atomic::Ordering::Release,
+        );
+        Some(FinancialProgressTokenV1 {
+            observer: self.clone(),
+            job_id,
+        })
+    }
+}
+#[cfg(feature = "synthetic-born-joined-qualification")]
+pub(in crate::native_ui) struct FinancialProgressTokenV1 {
+    observer: FinancialNativeProgressObserverV1,
+    job_id: u32,
+}
+#[cfg(feature = "synthetic-born-joined-qualification")]
+impl FinancialProgressTokenV1 {
+    fn publish(&self, stage: FinancialNativeStageV1) {
+        let raw = self.observer.0.load(std::sync::atomic::Ordering::Acquire);
+        if (raw >> 32) as u32 != self.job_id {
+            return;
+        }
+        let sequence = ((raw >> 8) & 0x00ff_ffff) as u32;
+        let next = if sequence == 0x00ff_ffff {
+            0
+        } else {
+            (u64::from(self.job_id) << 32)
+                | (u64::from(sequence + 1) << 8)
+                | u64::from(progress_stage_code(stage))
+        };
+        // One bounded CAS, never spin or delay a native operation for telemetry.
+        let _ = self.observer.0.compare_exchange(
+            raw,
+            next,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        );
+    }
+}
+#[cfg(feature = "synthetic-born-joined-qualification")]
+impl Scope {
+    pub(in crate::native_ui) fn attach_progress(&self, token: Option<FinancialProgressTokenV1>) {
+        ACTIVE.with(|slot| {
+            if let Some(observer) = slot.borrow_mut().as_mut() {
+                observer.progress = token;
+            }
+        });
+    }
+}
+
+#[cfg(feature = "synthetic-born-joined-qualification")]
+fn progress_stage_code(stage: FinancialNativeStageV1) -> u8 {
+    match stage {
+        FinancialNativeStageV1::SourceOpen => 0,
+        FinancialNativeStageV1::HistoryRead => 1,
+        FinancialNativeStageV1::Continue => 2,
+        FinancialNativeStageV1::Admit => 3,
+        FinancialNativeStageV1::Acquire => 4,
+        FinancialNativeStageV1::Activate => 5,
+        FinancialNativeStageV1::WalletPrepare => 6,
+        FinancialNativeStageV1::WalletObserve => 7,
+        FinancialNativeStageV1::SignPrepare => 8,
+        FinancialNativeStageV1::Sign => 9,
+        FinancialNativeStageV1::ReturnPrepare => 10,
+        FinancialNativeStageV1::HostPreparedWait => 11,
+        FinancialNativeStageV1::ReturnApprove => 12,
+        FinancialNativeStageV1::ReturnServe => 13,
+        FinancialNativeStageV1::ReviewStage => 14,
+        FinancialNativeStageV1::ResultRequest => 15,
+        FinancialNativeStageV1::AuthorityHistoryRead => 16,
+        FinancialNativeStageV1::FinancialHistoryRead => 17,
+        FinancialNativeStageV1::AuthorityAdmit => 18,
+        FinancialNativeStageV1::AuthorityAcquire => 19,
+        FinancialNativeStageV1::AuthorityActivate => 20,
+        FinancialNativeStageV1::AuthorityVerifyActive => 21,
+        FinancialNativeStageV1::WalletChain => 22,
+        FinancialNativeStageV1::WalletBirthday => 23,
+        FinancialNativeStageV1::WalletInitialize => 24,
+        FinancialNativeStageV1::WalletImport => 25,
+        FinancialNativeStageV1::WalletController => 26,
+        FinancialNativeStageV1::WalletVerify => 27,
+        FinancialNativeStageV1::WalletStatus => 28,
+        FinancialNativeStageV1::WalletMaterial => 29,
+        FinancialNativeStageV1::WalletSynchronize => 30,
+        FinancialNativeStageV1::WalletTicket => 31,
+        FinancialNativeStageV1::WalletReconcile => 32,
+    }
 }

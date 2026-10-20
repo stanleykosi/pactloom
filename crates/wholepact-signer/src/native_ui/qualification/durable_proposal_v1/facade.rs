@@ -555,6 +555,7 @@ impl EphemeralClosedDeliveryNativeV3 {
     pub fn into_financial_continuation_v1(self,wallet_setup_json:String)->Result<EphemeralFinancialContinuationNativeV1>{Ok(EphemeralFinancialContinuationNativeV1{inner:self.inner.into_financial_continuation_v1(wallet_setup_json)?})}
 }
 impl EphemeralFinancialContinuationNativeV1 {
+    pub fn progress_observer_v1(&self)->Option<FinancialNativeProgressObserverV1>{self.inner.progress_observer_v1()}
     pub fn last_failure_v1(&self)->Option<FinancialNativeDiagnosticV1>{self.inner.last_failure_v1()}
     /// Moves the already established fixture's installed-process trust owner
     /// once, instead of constructing trust from a source receipt or DTO.
@@ -571,3 +572,5 @@ impl EphemeralFinancialContinuationNativeV1 {
 }
 
 pub use crate::native_ui::runtime::financial_v1::diagnostics::{FinancialAuthorityCallV1, FinancialAuthorityCostV1, FinancialAuthorityStageV1, FinancialAuthorityCheckSiteV1, FinancialAuthorityCheckpointV1, FinancialAuthoritySelectedLimitV1};
+
+pub use crate::native_ui::runtime::financial_v1::diagnostics::{FinancialNativeProgressObserverV1,FinancialNativeProgressV1};

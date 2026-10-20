@@ -1,6 +1,7 @@
 //! Separate actual financial lifecycle qualification. This does not change the
 //! B1 admission-only baseline or revive a serialized source/consent capability.
 use super::*;
+use super::super::financial_progress_v1 as progress;
 
 use crate::host::financial_diagnostics_v1 as financial_diagnostic;
 static FINANCIAL_FAILURE_EMITTED: AtomicBool = AtomicBool::new(false);
@@ -211,6 +212,7 @@ struct FinancialPublicV1 {
     source_diagnostic_withheld: bool,
     financial_diagnostic: Option<crate::host::financial_diagnostics_v1::FinancialDiagnosticV1>,
     transport_failure: Option<FinancialTransportFailureV1>,
+    progress_failure: Option<super::super::super::financial_progress_v1::Failure>,
     producer_reaped: bool,
     producer_group_absent: bool,
     reader_reaped: bool,
@@ -245,6 +247,7 @@ impl FinancialPublicV1 {
             source_diagnostic_withheld: false,
             financial_diagnostic: None,
             transport_failure: None,
+            progress_failure: None,
             producer_reaped: false,
             producer_group_absent: false,
             reader_reaped: false,
@@ -283,6 +286,7 @@ impl FinancialPublicV1 {
             return;
         }
         self.financial_diagnostic = child.financial_diagnostic.clone();
+        self.progress_failure = child.financial_progress_failure.clone();
         self.failed_child_inputs_completed = Some(child.next);
         self.failed_child_inputs_expected = Some(child.expected);
         if let Some(pair) = child.delivery_first_failure {
@@ -304,6 +308,7 @@ impl FinancialPublicV1 {
             && self.failed_child_inputs_expected.is_none()
             && self.private_fixed_primary.is_none()
             && self.transport_failure.is_none()
+            && self.progress_failure.is_none()
             && self.financial_diagnostic.is_none()
             && !self.source_diagnostic_withheld
             && self.producer_reaped
@@ -336,6 +341,7 @@ impl FinancialPublicV1 {
                     | FinancialBoundaryV1::ReaderReap
             )
         );
+        if reader_failure { self.progress_failure = None; }
         if self.root_cleanup != "closed_absent"
             || !self.producer_reaped
             || !self.producer_group_absent
@@ -348,6 +354,7 @@ impl FinancialPublicV1 {
             self.private_fixed_primary = None;
             self.source_diagnostic_withheld = true;
             self.transport_failure = None;
+            self.progress_failure = None;
             self.financial_diagnostic = None;
         }
     }
@@ -417,6 +424,7 @@ fn financial_wait(
     index: usize,
     target: Phase,
 ) -> Result<()> {
+    progress::emit_call(progress::Call::WaitPhase);
     let result = (|| {
     let deadline = private_fixed_v2::child_original_cutoff()?;
     loop {
@@ -441,6 +449,7 @@ fn financial_wait(
 }
 
 fn financial_approve(worker: &worker::JoinedSignerWorkerV1, index: usize) -> Result<()> {
+    progress::emit_call(progress::Call::Approve);
     worker
         .send(C::ApproveFinancialContinuation(index))
         .map_err(worker_error)?;
@@ -470,21 +479,27 @@ pub(super) fn continue_financial_producer(
         let mut continuations = Vec::new();
         for index in 1..=2 {
             financial_stage(&scenario, FinancialBoundaryV1::ContinuationAdmission)?;
+            progress::emit_begin(index as u8, progress::Phase::SourceOpen);
+            progress::emit_call(progress::Call::StartServer);
             let original_admission = &admissions[index - 1];
             let server = original
                 .witness
                 .serve_committed_durable_delivery_history_v2(&original_admission.request.operation_id)
                 .map_err(|e| financial_witness_error(financial_diagnostic::FinancialStageV1::WitnessHistoryService, B::DeliveryHistoricalRead, e))?;
+            progress::emit_call(progress::Call::BeginFinancial);
             original
                 .signers
                 .send(C::BeginFinancialContinuation(index, wallet_setup.clone()))
                 .map_err(worker_error)?;
             done(&original.signers, index)?;
             financial_wait(&original.signers, index, Phase::ReadReview)?;
+            progress::emit_begin(index as u8, progress::Phase::ReadContinue);
             financial_approve(&original.signers, index)?;
             financial_wait(&original.signers, index, Phase::ContinueReview)?;
+            progress::emit_begin(index as u8, progress::Phase::Continue);
             financial_approve(&original.signers, index)?;
             financial_wait(&original.signers, index, Phase::AwaitingAdmission)?;
+            progress::emit_call(progress::Call::ReadRequest);
             original
                 .signers
                 .send(C::ReadFinancialContinuationRequest(index))
@@ -503,11 +518,15 @@ pub(super) fn continue_financial_producer(
                 || record.terms.original_delivery_request_digest!=wholepact_authority::durable_financial_continuation_v1::original_delivery_request_digest_v1(&original_admission.request).map_err(|_|Error::Authentication)? {
                 return Err(Error::Authentication);
             }
+            progress::emit_call(progress::Call::DropServer);
             drop(server);
+            progress::emit_call(progress::Call::WitnessStart);
             original
                 .witness
                 .start_exact_financial_continuation_v1(&request.account_id, &request)
                 .map_err(|e| financial_witness_error(financial_diagnostic::FinancialStageV1::WitnessContinuationReview, B::DeliveryNativeAdmission, e))?;
+            progress::emit_begin(index as u8, progress::Phase::Admission);
+            progress::emit_call(progress::Call::SendAdmission);
             original
                 .signers
                 .send(C::SendFinancialContinuation(index))
@@ -515,10 +534,12 @@ pub(super) fn continue_financial_producer(
             done(&original.signers, index)?;
             financial_wait(&original.signers, index, Phase::AdmitReview)?;
             financial_approve(&original.signers, index)?;
+            progress::emit_call(progress::Call::WitnessFinish);
             original
                 .witness
                 .finish_exact_financial_continuation_v1()
                 .map_err(|e| financial_witness_error(financial_diagnostic::FinancialStageV1::WitnessContinuationCommit, B::DeliveryNativeAdmission, e))?;
+            progress::emit_call(progress::Call::StartServer);
             let server = original
                 .witness
                 .serve_committed_financial_signing_v1(&request.operation_id)
@@ -526,29 +547,35 @@ pub(super) fn continue_financial_producer(
             financial_stage(&scenario, FinancialBoundaryV1::SignatureAndIntake)?;
             // Each action below is a real fresh final-primary review. No synthetic
             // decision, signature, session or historical grant is manufactured.
-            for phase in [
-                Phase::ReadReview,
-                Phase::AcquireReview,
-                Phase::ReadReview,
-                Phase::ActivateReview,
-                Phase::WalletReview,
-                Phase::ReadReview,
-                Phase::SignReview,
+            for (phase, window) in [
+                (Phase::ReadReview, progress::Phase::ReadAcquire),
+                (Phase::AcquireReview, progress::Phase::Acquire),
+                (Phase::ReadReview, progress::Phase::ReadActivate),
+                (Phase::ActivateReview, progress::Phase::Activate),
+                (Phase::WalletReview, progress::Phase::Wallet),
+                (Phase::ReadReview, progress::Phase::ReadSign),
+                (Phase::SignReview, progress::Phase::Sign),
             ] {
+                // Waiting belongs to the PREVIOUS action, never a fresh budget.
                 financial_wait(&original.signers, index, phase)?;
+                progress::emit_begin(index as u8, window);
                 financial_approve(&original.signers, index)?;
             }
             financial_wait(&original.signers, index, Phase::AwaitingReturn)?;
+            progress::emit_call(progress::Call::DropServer);
             drop(server);
             continuations.push(request);
         }
         let continuations: [OwnerControlRequest; 2] = continuations
             .try_into()
             .map_err(|_| Error::Authentication)?;
+        progress::emit_begin(0, progress::Phase::PairHistory);
+        progress::emit_call(progress::Call::StartServer);
         let server = original
             .witness
             .serve_committed_completed_dispatch_pair_v1()
             .map_err(|e| financial_witness_error(financial_diagnostic::FinancialStageV1::WitnessCompletedPairService, B::DeliveryHistoricalRead, e))?;
+        progress::emit_call(progress::Call::ReadHistory);
         let first = financial_host_operation(B::DeliveryHistoricalRead, || {
             host.read_original_financial_history_v1(
                 &workspace,
@@ -569,6 +596,7 @@ pub(super) fn continue_financial_producer(
             return Err(Error::Authentication);
         }
         financial_stage(&scenario, FinancialBoundaryV1::SignatureAndIntake)?;
+        progress::emit_call(progress::Call::BindHistory);
         financial_host_operation(B::PrivateWorkspaceIntake, || {
             host.bind_original_financial_continuations_v1(
                 &workspace,
@@ -577,6 +605,8 @@ pub(super) fn continue_financial_producer(
             )
         })?;
         for index in 1..=2 {
+            progress::emit_begin(index as u8, progress::Phase::Return);
+            progress::emit_call(progress::Call::ReadPeer);
             original
                 .signers
                 .send(C::ReadFinancialResultPeer(index))
@@ -594,6 +624,7 @@ pub(super) fn continue_financial_producer(
                 .signers
                 .send(C::ServeFinancialResult(index, stop.clone()))
                 .map_err(worker_error)?;
+            progress::emit_call(progress::Call::Intake);
             let result = (|| {
                 let receiver=wholepact_signer::authority_bridge::financial_continuation_v1::PreparedFinancialResultReceiverV1::prepare(peer.provider,&peer.endpoint,&request,peer.deadline).map_err(bridge_error)?;
                 financial_host_operation(B::PrivateWorkspaceIntake, || {
@@ -606,9 +637,11 @@ pub(super) fn continue_financial_producer(
                 })
             })();
             stop.store(true, Ordering::Release);
+            progress::emit_call(progress::Call::AwaitReturn);
             let returned = done(&original.signers, index);
             result?;
             returned?;
+            progress::emit_call(progress::Call::Preserve);
             original
                 .signers
                 .send(C::PreserveFinancialContinuation(index))
@@ -618,6 +651,8 @@ pub(super) fn continue_financial_producer(
                 _ => return Err(Error::Authentication),
             }
         }
+        progress::emit_begin(0, progress::Phase::FinalRetention);
+        progress::emit_call(progress::Call::Complete);
         financial_stage(&scenario, FinancialBoundaryV1::FinalTransactionRetention)?;
         let completed = financial_host_operation(B::PrivateWorkspaceCheckpoint, || {
             host.complete_original_financial_transaction_v1(
@@ -654,6 +689,8 @@ pub(super) fn continue_financial_producer(
         {
             return Err(Error::Authentication);
         }
+        progress::emit_begin(0, progress::Phase::Shutdown);
+        progress::emit_call(progress::Call::Shutdown);
         let provider_reopen = provider.preserve_public_original_v1()?;
         drop(first);
         drop(second);
@@ -1451,9 +1488,11 @@ fn financial_diagnostic_requires_actual_stage_cleanup() {
             public.producer_reaped=missing!=1;public.producer_group_absent=missing!=2;
             public.reader_reaped=missing!=3;public.reader_group_absent=missing!=4;
             public.financial_diagnostic=Some(record);
+            public.progress_failure=Some(super::super::super::financial_progress_v1::Failure{reason:super::super::super::financial_progress_v1::Reason::GlobalDeadline,last:None});
             public.withhold_unverified_diagnostics();
             let permitted=missing>=3 && (!reader || missing==5);
             assert_eq!(public.financial_diagnostic.is_some(),permitted);
+            assert_eq!(public.progress_failure.is_some(),permitted && !reader);
         }
     }
 }

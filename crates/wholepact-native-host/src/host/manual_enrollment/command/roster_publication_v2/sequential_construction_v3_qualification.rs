@@ -76,6 +76,9 @@ mod safe_diagnostics_v1;
 
 #[path = "sequential_construction_v3_qualification/rolling_transcript_v1.rs"]
 mod rolling_transcript_v1;
+#[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+#[path = "sequential_construction_v3_qualification/financial_progress_v1.rs"]
+mod financial_progress_v1;
 
 #[path = "sequential_construction_v3_qualification/owned_test_process_group_v1.rs"]
 mod owned_test_process_group_v1;
@@ -230,6 +233,8 @@ enum HarnessFailureReason {
     InvalidChallenge,
     OutcomeRead,
     CleanupUnverified,
+    FinancialPhaseDeadline,
+    FinancialProgressInvalid,
 }
 
 fn harness_io<T>(
@@ -1247,6 +1252,7 @@ impl PrivateWorkspaceStageV1 {
     feature = "synthetic-born-joined-qualification"
 ))]
 struct PrivateWorkspaceStageResultV1 {
+    financial_progress_failure: Option<financial_progress_v1::Failure>,
     financial_diagnostic: Option<crate::host::financial_diagnostics_v1::FinancialDiagnosticV1>,
     delivery_first_failure: Option<safe_diagnostics_v1::DeliveryFailure>,
     private_fixed_diagnostic:
@@ -1317,6 +1323,7 @@ fn private_workspace_stage_v1(
     ) {
         transcript.enable_delivery_first_failure();
     }
+    if matches!(stage, PrivateWorkspaceStageV1::FinancialProducer) {transcript.enable_financial_progress();}
     // This creates a temporary terminal, not an OS trust root or permission
     // override. The child still passes the actual foreground() implementation.
     let master_fd = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC) };
@@ -1421,7 +1428,12 @@ fn private_workspace_stage_v1(
     let mut marker_seen = false;
     let mut outcome = (|| -> std::io::Result<()> {
         loop {
+            if let Some(failure) = transcript.financial_progress_check(Instant::now()) {
+                failure_reason = match failure.reason {financial_progress_v1::Reason::PhaseDeadline=>HarnessFailureReason::FinancialPhaseDeadline,_=>HarnessFailureReason::FinancialProgressInvalid};
+                return Err(std::io::Error::new(std::io::ErrorKind::TimedOut,"financial qualification supervision stopped stalled phase"));
+            }
             if Instant::now() >= deadline {
+                transcript.financial_progress_global_deadline();
                 failure_reason = HarnessFailureReason::Deadline;
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
@@ -1474,6 +1486,7 @@ fn private_workspace_stage_v1(
                 let recognized = stage.marker(tail, next == inputs.len(), false)?;
                 if recognized {
                     if Instant::now() >= deadline {
+                        transcript.financial_progress_global_deadline();
                         return Err(std::io::Error::other("original deadline expired"));
                     }
                     marker_seen = true;
@@ -1644,6 +1657,11 @@ fn private_workspace_stage_v1(
             "private workspace process cleanup unverified",
         ));
     }
+    transcript.finish_financial_progress();
+    if transcript.financial_progress_failure().is_some() && outcome.is_ok() {
+        failure_reason=HarnessFailureReason::FinancialProgressInvalid;
+        outcome=Err(std::io::Error::other("financial progress protocol incomplete"));
+    }
     transcript.finish_private_fixed_diagnostic();
     let private_fixed_diagnostic = if process.verified() {
         transcript.private_fixed_diagnostic().cloned()
@@ -1663,7 +1681,9 @@ fn private_workspace_stage_v1(
     } else {
         None
     };
+    let financial_progress_failure = if process.verified() && outcome.is_err() {transcript.financial_progress_failure()} else {None};
     Ok(PrivateWorkspaceStageResultV1 {
+        financial_progress_failure,
         financial_diagnostic,
         delivery_first_failure,
         private_fixed_diagnostic,
