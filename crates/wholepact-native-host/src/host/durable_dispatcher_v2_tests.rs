@@ -1,5 +1,6 @@
-//! Isolated source/storage components only. No credential generation, network,
-//! native source issuer or true same-original admission qualification occurs here.
+//! Isolated source/storage components and maintained Host session integration.
+//! No live credentials, network, native source issuer or true same-original
+//! admission qualification occurs here.
 use super::*;
 use std::os::unix::fs::{MetadataExt,PermissionsExt};
 pub(super) const PASSWORD:&[u8]=b"isolated-dispatcher-storage-password";
@@ -149,4 +150,122 @@ fn submission_noncanonical_or_zero_singleton_identity_is_not_adopted() {
         let before=bytes(&directory);
         assert!(OriginalSubmissionPreflightV2::open(&directory,&secrets,&origin,&identity).is_err());assert_eq!(before,bytes(&directory));
     }
+}
+
+#[test]
+fn encrypted_host_closed_source_permission_session_and_revocation_integration() {
+    use std::collections::BTreeSet;
+    use wholepact_engine::Access;
+    use wholepact_service::security::{ClientConfig, Permission, SecurityConfig};
+
+    const PRINCIPAL: &str = "closed-source-reader-v3";
+    const OTHER_PRINCIPAL: &str = "closed-source-other-v3";
+    const OPERATION: &str = "closed-source-observation-v3";
+
+    fn config(principal: &str, permissions: &[Permission]) -> SecurityConfig {
+        let config = SecurityConfig {
+            clients: vec![ClientConfig {
+                client_id: principal.into(),
+                // Public, inert fixture only; no service or credential file is created.
+                bootstrap_token: "closed-source-session-test-not-a-secret".into(),
+                permissions: permissions.iter().copied().collect(),
+                agreement_ids: BTreeSet::new(),
+                all_agreements: false,
+                include_owned_agreements: false,
+            }],
+            allowed_origins: BTreeSet::new(),
+        };
+        config.validate().unwrap();
+        config
+    }
+    fn session(host: &mut Host, principal: &str, permissions: &[Permission]) {
+        host.access = Some(Access {
+            principal_id: principal.into(),
+            agreement_ids: BTreeSet::new(),
+            all_agreements: false,
+            include_owned_agreements: false,
+        });
+        host.config = Some(config(principal, permissions));
+    }
+    fn journal_state(host: &Host) -> Vec<u8> {
+        let journal = host.submission.lock().unwrap();
+        let intent = journal.recover_intent_summary(OPERATION).unwrap();
+        let descriptor = journal.retained_submission_descriptor(OPERATION).unwrap();
+        let attempts = journal.submission_attempts(OPERATION).unwrap();
+        assert!(intent.is_none() && descriptor.is_none() && attempts.is_empty());
+        serde_json::to_vec(&(journal.identity(), intent, descriptor, attempts)).unwrap()
+    }
+    fn persisted_bytes(host: &Host) -> Vec<(String, u64, Vec<u8>)> {
+        // SQLite readers may update transient SHM read marks. Preserve every
+        // authoritative main DB/WAL, vault/lock and inode, plus logical rows.
+        bytes(&host.directory).into_iter()
+            .filter(|(name, _, _)| !name.ends_with("-shm"))
+            .collect()
+    }
+    fn observe(host: &Host, historical_read: bool, manual_effect: bool) {
+        let journal_before = journal_state(host);
+        let original_bytes = persisted_bytes(host);
+        for (purpose, allowed) in [
+            (ClosedOriginalSourcePurposeV3::HistoricalRead, historical_read),
+            (ClosedOriginalSourcePurposeV3::ManualEffect, manual_effect),
+        ] {
+            let result = require_closed_original_source_permission_v3(host, purpose);
+            if allowed {
+                result.unwrap();
+            } else {
+                assert!(matches!(result, Err(Error::Permission)));
+            }
+            assert_eq!(journal_state(host), journal_before);
+            assert_eq!(persisted_bytes(host), original_bytes);
+        }
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let profile = std::fs::canonicalize(temp.path()).unwrap().join("host");
+    super::super::initialize(&profile, PASSWORD).unwrap();
+    let directory = Directory::open(&profile).unwrap();
+    assert_eq!(std::fs::metadata(&profile).unwrap().mode() & 0o777, 0o700);
+    let secrets = Secrets::open(&directory.read("profile.vault", 1024).unwrap(), PASSWORD).unwrap();
+    let mut host = Host::open(directory, secrets, Terminal::disconnected_for_test()).unwrap();
+    let initial_journal = journal_state(&host);
+    let original_bytes = persisted_bytes(&host);
+    let full = [Permission::Read, Permission::Coordinate, Permission::Disclose];
+
+    // Exercise the actual Host, validated service configuration and Authority,
+    // not a permission-set predicate or a fabricated source owner/approval.
+    observe(&host, false, false);
+    session(&mut host, PRINCIPAL, &full);
+    observe(&host, false, false); // Configured but not enrolled with Authority.
+    host.authority.enroll(PRINCIPAL).unwrap();
+
+    session(&mut host, PRINCIPAL, &[Permission::Read]);
+    observe(&host, true, false);
+    for partial in [
+        vec![Permission::Read, Permission::Coordinate],
+        vec![Permission::Read, Permission::Disclose],
+    ] {
+        session(&mut host, PRINCIPAL, &partial);
+        observe(&host, true, false);
+    }
+    session(&mut host, PRINCIPAL, &[Permission::Coordinate, Permission::Disclose]);
+    observe(&host, false, false); // Manual permissions never substitute for READ.
+    host.config = None;
+    observe(&host, false, false);
+
+    session(&mut host, PRINCIPAL, &full);
+    host.config = Some(config(OTHER_PRINCIPAL, &full));
+    observe(&host, false, false); // Access/config principal mismatch.
+    session(&mut host, OTHER_PRINCIPAL, &full);
+    observe(&host, false, false); // Matching config cannot replace enrolled identity.
+
+    session(&mut host, PRINCIPAL, &full);
+    observe(&host, true, true);
+    host.authority.fence.revoke().unwrap();
+    observe(&host, false, false); // Actual fence revocation, not a simulated flag.
+
+    assert_eq!(journal_state(&host), initial_journal);
+    assert_eq!(persisted_bytes(&host), original_bytes);
+    // This establishes only the production selector's session/permission/fence
+    // composition. Exact source identity and native approval are separate gates.
 }
