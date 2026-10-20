@@ -2,6 +2,33 @@
 //! B1 admission-only baseline or revive a serialized source/consent capability.
 use super::*;
 
+use crate::host::financial_diagnostics_v1 as financial_diagnostic;
+static FINANCIAL_FAILURE_EMITTED: AtomicBool = AtomicBool::new(false);
+fn promote_financial_failure<T>(result: &Result<T>) {
+    let captured = financial_diagnostic::take_operation_failure();
+    if let Err(error) = result {
+        if !FINANCIAL_FAILURE_EMITTED.swap(true, Ordering::SeqCst) {
+            let captured = captured.or_else(|| {
+                financial_diagnostic::host(
+                    financial_diagnostic::FinancialStageV1::LifecycleHarness,
+                    financial_diagnostic::FinancialCommitStateV1::NotEstablished,
+                    error,
+                );
+                financial_diagnostic::take_operation_failure()
+            });
+            if let Some(captured) = captured {
+                financial_diagnostic::emit(captured);
+            }
+        }
+    }
+}
+fn financial_host_operation<T>(boundary: B, operation: impl FnOnce() -> Result<T>) -> Result<T> {
+    financial_diagnostic::reset_operation();
+    let result = diagnostic::host(boundary, operation);
+    promote_financial_failure(&result);
+    result
+}
+
 const FINANCIAL_PUBLIC_PREFIX: &str = "CI_SYNTHETIC_DURABLE_FINANCIAL ";
 const FINANCIAL_DEATH_MARKER: &str = "SYNTHETIC_DURABLE_FINANCIAL_COMPLETED_V1=1";
 
@@ -77,17 +104,30 @@ struct FinancialTransportFailureV1 {
     provider: synthetic_born_provider_v1::SyntheticProviderDiagnosticsV1,
 }
 impl FinancialTransportFailureV1 {
-    fn validate(&self) -> bool { self.chain.validate() && self.provider.validate() }
+    fn validate(&self) -> bool {
+        self.chain.validate() && self.provider.validate()
+    }
 }
 pub(in crate::host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification) fn record_financial_transport_failure_v1(
     chain: wholepact_chain::TransportDiagnosticSnapshot,
     provider: synthetic_born_provider_v1::SyntheticProviderDiagnosticsV1,
 ) -> io::Result<()> {
     let value = FinancialTransportFailureV1 { chain, provider };
-    if !value.validate() || serde_json::to_vec(&value).map_err(|_| invalid())?.len() as u64 > MAX_TRANSPORT_FAILURE_BYTES { return Err(invalid()); }
-    write_record(&scenario_root().map_err(|_| invalid())?, TRANSPORT_FAILURE_FILE, &value)
+    if !value.validate()
+        || serde_json::to_vec(&value).map_err(|_| invalid())?.len() as u64
+            > MAX_TRANSPORT_FAILURE_BYTES
+    {
+        return Err(invalid());
+    }
+    write_record(
+        &scenario_root().map_err(|_| invalid())?,
+        TRANSPORT_FAILURE_FILE,
+        &value,
+    )
 }
-fn read_financial_transport_failure(root: &Path) -> io::Result<Option<FinancialTransportFailureV1>> {
+fn read_financial_transport_failure(
+    root: &Path,
+) -> io::Result<Option<FinancialTransportFailureV1>> {
     let directory = directory(root)?;
     let input = match file(&directory, TRANSPORT_FAILURE_FILE, libc::O_RDONLY) {
         Ok(input) => input,
@@ -96,10 +136,17 @@ fn read_financial_transport_failure(root: &Path) -> io::Result<Option<FinancialT
     };
     check_file(&input)?;
     let mut bytes = Vec::new();
-    input.take(MAX_TRANSPORT_FAILURE_BYTES + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_TRANSPORT_FAILURE_BYTES { return Err(invalid()); }
-    let value: FinancialTransportFailureV1 = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
-    if !value.validate() { return Err(invalid()); }
+    input
+        .take(MAX_TRANSPORT_FAILURE_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_TRANSPORT_FAILURE_BYTES {
+        return Err(invalid());
+    }
+    let value: FinancialTransportFailureV1 =
+        serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+    if !value.validate() {
+        return Err(invalid());
+    }
     Ok(Some(value))
 }
 #[derive(Clone, Copy, Serialize)]
@@ -128,6 +175,7 @@ struct FinancialPublicV1 {
     private_fixed_primary:
         Option<crate::host::financial::private_durable_fixed_v2::PrivateDiagnosticPrimaryV1>,
     source_diagnostic_withheld: bool,
+    financial_diagnostic: Option<crate::host::financial_diagnostics_v1::FinancialDiagnosticV1>,
     transport_failure: Option<FinancialTransportFailureV1>,
     producer_reaped: bool,
     producer_group_absent: bool,
@@ -151,7 +199,7 @@ struct FinancialPublicV1 {
 impl FinancialPublicV1 {
     fn pending() -> Self {
         Self {
-            schema: 3,
+            schema: 4,
             result: "failed",
             first_failure: None,
             boundary_outcome: None,
@@ -161,6 +209,7 @@ impl FinancialPublicV1 {
             failed_child_inputs_expected: None,
             private_fixed_primary: None,
             source_diagnostic_withheld: false,
+            financial_diagnostic: None,
             transport_failure: None,
             producer_reaped: false,
             producer_group_absent: false,
@@ -199,6 +248,7 @@ impl FinancialPublicV1 {
             self.source_diagnostic_withheld = true;
             return;
         }
+        self.financial_diagnostic = child.financial_diagnostic.clone();
         self.failed_child_inputs_completed = Some(child.next);
         self.failed_child_inputs_expected = Some(child.expected);
         if let Some(pair) = child.delivery_first_failure {
@@ -220,6 +270,7 @@ impl FinancialPublicV1 {
             && self.failed_child_inputs_expected.is_none()
             && self.private_fixed_primary.is_none()
             && self.transport_failure.is_none()
+            && self.financial_diagnostic.is_none()
             && !self.source_diagnostic_withheld
             && self.producer_reaped
             && self.producer_group_absent
@@ -240,8 +291,22 @@ impl FinancialPublicV1 {
             && self.synthetic_backend_only
             && !self.public_chain_verified
     }
-    fn emit_once(mut self) -> io::Result<()> {
-        if self.root_cleanup != "closed_absent" {
+    fn withhold_unverified_diagnostics(&mut self) {
+        let reader_failure = matches!(
+            self.first_failure,
+            Some(
+                FinancialBoundaryV1::CompletedReopen
+                    | FinancialBoundaryV1::DispatchAdmission
+                    | FinancialBoundaryV1::PartialAdmissionReconciliation
+                    | FinancialBoundaryV1::SavedTransactionDispatch
+                    | FinancialBoundaryV1::ReaderReap
+            )
+        );
+        if self.root_cleanup != "closed_absent"
+            || !self.producer_reaped
+            || !self.producer_group_absent
+            || (reader_failure && (!self.reader_reaped || !self.reader_group_absent))
+        {
             self.source_failure_boundary = None;
             self.source_failure_outcome = None;
             self.failed_child_inputs_completed = None;
@@ -249,7 +314,11 @@ impl FinancialPublicV1 {
             self.private_fixed_primary = None;
             self.source_diagnostic_withheld = true;
             self.transport_failure = None;
+            self.financial_diagnostic = None;
         }
+    }
+    fn emit_once(mut self) -> io::Result<()> {
+        self.withhold_unverified_diagnostics();
         if self.verified() {
             self.result = "passed";
         } else if self.first_failure.is_none() {
@@ -352,223 +421,240 @@ pub(super) fn continue_financial_producer(
     provider: synthetic_born_provider_v1::SyntheticBornProviderV1,
     wallet_setup: String,
 ) -> Result<()> {
-    let scenario = scenario_root()?;
-    financial_stage(&scenario, FinancialBoundaryV1::ContinuationAdmission)?;
-    let mut continuations = Vec::new();
-    for index in 1..=2 {
+    financial_diagnostic::reset_operation();
+    let result = (|| -> Result<()> {
+        let scenario = scenario_root()?;
         financial_stage(&scenario, FinancialBoundaryV1::ContinuationAdmission)?;
-        let original_admission = &admissions[index - 1];
-        let server = original
-            .witness
-            .serve_committed_durable_delivery_history_v2(&original_admission.request.operation_id)
-            .map_err(|e| witness_error(B::DeliveryHistoricalRead, e))?;
-        original
-            .signers
-            .send(C::BeginFinancialContinuation(index, wallet_setup.clone()))
-            .map_err(worker_error)?;
-        done(&original.signers, index)?;
-        financial_wait(&original.signers, index, Phase::ReadReview)?;
-        financial_approve(&original.signers, index)?;
-        financial_wait(&original.signers, index, Phase::ContinueReview)?;
-        financial_approve(&original.signers, index)?;
-        financial_wait(&original.signers, index, Phase::AwaitingAdmission)?;
-        original
-            .signers
-            .send(C::ReadFinancialContinuationRequest(index))
-            .map_err(worker_error)?;
-        let request = match original.signers.receive().map_err(worker_error)? {
-            R::FinancialRequest {
-                index: actual,
-                request: Some(request),
-            } if actual == index => request,
-            _ => return Err(Error::Authentication),
-        };
-        let OwnerControl::AdmitFinancialContinuationV1 { record } = &request.control else {
-            return Err(Error::Authentication);
-        };
-        if record.terms.original_delivery_operation_id!=original_admission.request.operation_id
-            || record.terms.original_delivery_request_digest!=wholepact_authority::durable_financial_continuation_v1::original_delivery_request_digest_v1(&original_admission.request).map_err(|_|Error::Authentication)? {
-            return Err(Error::Authentication);
-        }
-        drop(server);
-        original
-            .witness
-            .start_exact_financial_continuation_v1(&request.account_id, &request)
-            .map_err(|e| witness_error(B::DeliveryNativeAdmission, e))?;
-        original
-            .signers
-            .send(C::SendFinancialContinuation(index))
-            .map_err(worker_error)?;
-        done(&original.signers, index)?;
-        financial_wait(&original.signers, index, Phase::AdmitReview)?;
-        financial_approve(&original.signers, index)?;
-        original
-            .witness
-            .finish_exact_financial_continuation_v1()
-            .map_err(|e| witness_error(B::DeliveryNativeAdmission, e))?;
-        let server = original
-            .witness
-            .serve_committed_financial_signing_v1(&request.operation_id)
-            .map_err(|e| witness_error(B::DeliveryNativeAdmission, e))?;
-        financial_stage(&scenario, FinancialBoundaryV1::SignatureAndIntake)?;
-        // Each action below is a real fresh final-primary review. No synthetic
-        // decision, signature, session or historical grant is manufactured.
-        for phase in [
-            Phase::ReadReview,
-            Phase::AcquireReview,
-            Phase::ReadReview,
-            Phase::ActivateReview,
-            Phase::WalletReview,
-            Phase::ReadReview,
-            Phase::SignReview,
-        ] {
-            financial_wait(&original.signers, index, phase)?;
+        let mut continuations = Vec::new();
+        for index in 1..=2 {
+            financial_stage(&scenario, FinancialBoundaryV1::ContinuationAdmission)?;
+            let original_admission = &admissions[index - 1];
+            let server = original
+                .witness
+                .serve_committed_durable_delivery_history_v2(&original_admission.request.operation_id)
+                .map_err(|e| witness_error(B::DeliveryHistoricalRead, e))?;
+            original
+                .signers
+                .send(C::BeginFinancialContinuation(index, wallet_setup.clone()))
+                .map_err(worker_error)?;
+            done(&original.signers, index)?;
+            financial_wait(&original.signers, index, Phase::ReadReview)?;
             financial_approve(&original.signers, index)?;
+            financial_wait(&original.signers, index, Phase::ContinueReview)?;
+            financial_approve(&original.signers, index)?;
+            financial_wait(&original.signers, index, Phase::AwaitingAdmission)?;
+            original
+                .signers
+                .send(C::ReadFinancialContinuationRequest(index))
+                .map_err(worker_error)?;
+            let request = match original.signers.receive().map_err(worker_error)? {
+                R::FinancialRequest {
+                    index: actual,
+                    request: Some(request),
+                } if actual == index => request,
+                _ => return Err(Error::Authentication),
+            };
+            let OwnerControl::AdmitFinancialContinuationV1 { record } = &request.control else {
+                return Err(Error::Authentication);
+            };
+            if record.terms.original_delivery_operation_id!=original_admission.request.operation_id
+                || record.terms.original_delivery_request_digest!=wholepact_authority::durable_financial_continuation_v1::original_delivery_request_digest_v1(&original_admission.request).map_err(|_|Error::Authentication)? {
+                return Err(Error::Authentication);
+            }
+            drop(server);
+            original
+                .witness
+                .start_exact_financial_continuation_v1(&request.account_id, &request)
+                .map_err(|e| witness_error(B::DeliveryNativeAdmission, e))?;
+            original
+                .signers
+                .send(C::SendFinancialContinuation(index))
+                .map_err(worker_error)?;
+            done(&original.signers, index)?;
+            financial_wait(&original.signers, index, Phase::AdmitReview)?;
+            financial_approve(&original.signers, index)?;
+            original
+                .witness
+                .finish_exact_financial_continuation_v1()
+                .map_err(|e| witness_error(B::DeliveryNativeAdmission, e))?;
+            let server = original
+                .witness
+                .serve_committed_financial_signing_v1(&request.operation_id)
+                .map_err(|e| witness_error(B::DeliveryNativeAdmission, e))?;
+            financial_stage(&scenario, FinancialBoundaryV1::SignatureAndIntake)?;
+            // Each action below is a real fresh final-primary review. No synthetic
+            // decision, signature, session or historical grant is manufactured.
+            for phase in [
+                Phase::ReadReview,
+                Phase::AcquireReview,
+                Phase::ReadReview,
+                Phase::ActivateReview,
+                Phase::WalletReview,
+                Phase::ReadReview,
+                Phase::SignReview,
+            ] {
+                financial_wait(&original.signers, index, phase)?;
+                financial_approve(&original.signers, index)?;
+            }
+            financial_wait(&original.signers, index, Phase::AwaitingReturn)?;
+            drop(server);
+            continuations.push(request);
         }
-        financial_wait(&original.signers, index, Phase::AwaitingReturn)?;
-        drop(server);
-        continuations.push(request);
-    }
-    let continuations: [OwnerControlRequest; 2] = continuations
-        .try_into()
-        .map_err(|_| Error::Authentication)?;
-    let server = original
-        .witness
-        .serve_committed_completed_dispatch_pair_v1()
-        .map_err(|e| witness_error(B::DeliveryHistoricalRead, e))?;
-    let first = host.read_original_financial_history_v1(
-        &workspace,
-        &continuations[0].account_id,
-        &continuations[0].operation_id,
-    )?;
-    let second = host.read_original_financial_history_v1(
-        &workspace,
-        &continuations[1].account_id,
-        &continuations[1].operation_id,
-    )?;
-    if first.continuation_request() != &continuations[0]
-        || second.continuation_request() != &continuations[1]
-    {
-        return Err(Error::Authentication);
-    }
-    financial_stage(&scenario, FinancialBoundaryV1::SignatureAndIntake)?;
-    host.bind_original_financial_continuations_v1(
-        &workspace,
-        "synthetic-financial-bind-v1",
-        [&first, &second],
-    )?;
-    for index in 1..=2 {
-        original
-            .signers
-            .send(C::ReadFinancialResultPeer(index))
-            .map_err(worker_error)?;
-        let (peer, request) = match original.signers.receive().map_err(worker_error)? {
-            R::FinancialResultPeer {
-                index: actual,
-                peer,
-                request,
-            } if actual == index => (peer, request),
-            _ => return Err(Error::Authentication),
-        };
-        let stop = Arc::new(AtomicBool::new(false));
-        original
-            .signers
-            .send(C::ServeFinancialResult(index, stop.clone()))
-            .map_err(worker_error)?;
-        let result = (|| {
-            let receiver=wholepact_signer::authority_bridge::financial_continuation_v1::PreparedFinancialResultReceiverV1::prepare(peer.provider,&peer.endpoint,&request,peer.deadline).map_err(bridge_error)?;
-            host.intake_original_financial_result_v1(
+        let continuations: [OwnerControlRequest; 2] = continuations
+            .try_into()
+            .map_err(|_| Error::Authentication)?;
+        let server = original
+            .witness
+            .serve_committed_completed_dispatch_pair_v1()
+            .map_err(|e| witness_error(B::DeliveryHistoricalRead, e))?;
+        let first = financial_host_operation(B::DeliveryHistoricalRead, || {
+            host.read_original_financial_history_v1(
                 &workspace,
-                &format!("synthetic-financial-intake-{index}"),
-                receiver,
-                if index == 1 { &first } else { &second },
+                &continuations[0].account_id,
+                &continuations[0].operation_id,
             )
-        })();
-        stop.store(true, Ordering::Release);
-        let returned = done(&original.signers, index);
-        result?;
-        returned?;
-        original
-            .signers
-            .send(C::PreserveFinancialContinuation(index))
-            .map_err(worker_error)?;
-        match original.signers.receive().map_err(worker_error)? {
-            R::DeliveryPreserved { index: actual, .. } if actual == index => (),
-            _ => return Err(Error::Authentication),
+        })?;
+        let second = financial_host_operation(B::DeliveryHistoricalRead, || {
+            host.read_original_financial_history_v1(
+                &workspace,
+                &continuations[1].account_id,
+                &continuations[1].operation_id,
+            )
+        })?;
+        if first.continuation_request() != &continuations[0]
+            || second.continuation_request() != &continuations[1]
+        {
+            return Err(Error::Authentication);
         }
-    }
-    financial_stage(&scenario, FinancialBoundaryV1::FinalTransactionRetention)?;
-    let completed = host.complete_original_financial_transaction_v1(
-        &workspace,
-        "synthetic-financial-complete-v1",
-    )?;
-    if completed.exact_replay
-        || !completed.cryptographic_transaction_verified
-        || !completed.transaction_extracted
-        || completed.chain_validated
-        || completed.authorization_allowed
-        || completed.distribution_allowed
-        || completed.release_allowed
-    {
-        return Err(Error::Authentication);
-    }
-    let OwnerControl::AdmitFinancialContinuationV1 { record } = &continuations[0].control else {
-        return Err(Error::Authentication);
-    };
-    let summary = host.verify_completed_private_financial_summary_v1(
-        &workspace,
-        &record.terms.scope.delivery.submission_operation_id,
-    )?;
-    if summary.checkpoint_id != completed.checkpoint_id
-        || summary.transaction_digest != completed.transaction_digest
-        || summary.transaction_id != completed.txid
-        || summary.frozen_export_history_digest != export_history_digest
-        || summary.fixed_identity != serde_json::to_value(&record.terms.scope.authorization.fixed)?
-        || summary.next_delegation_attempt != 1
-        || summary.latest_requests.is_some()
-    {
-        return Err(Error::Authentication);
-    }
-    let provider_reopen = provider.preserve_public_original_v1()?;
-    drop(first);
-    drop(second);
-    drop(server);
-    original.signers.shutdown().map_err(worker_error)?;
-    runtime.block_on(provider.shutdown()).map_err(Error::from)?;
-    drop(runtime);
-    let witness_reopen = original
-        .witness
-        .preserve_financial_originals_v1()
-        .map_err(|e| witness_error(B::DeliveryHistoricalRead, e))?;
-    let ready = FinancialReadyV1 {
-        schema: 1,
-        profile,
-        workspace,
-        financial,
-        fixed_prefix_digest,
-        export_history_digest,
-        continuations,
-        witness_reopen,
-        provider_reopen_digest: digest(&provider_reopen)?,
-        provider_reopen,
-        fixed_identity: summary.fixed_identity,
-        original_valid_until_ms: summary.original_valid_until_ms,
-        transaction_checkpoint_id: completed.checkpoint_id,
-        transaction_digest: completed.transaction_digest,
-        transaction_id: completed.txid,
-        signed_result_id: completed.signed_result_id,
-    };
-    let approval=terminal.approve_historical("SYNTHETIC ORIGINAL FINANCIAL: both genuine signature results are already retained and one immutable final transaction is saved. Close all signer and provider workers, retain these exact original files, then permit controlled producer process death. A successor may only verify the completed original and request a fresh bounded dispatch; no signature or extraction may be recreated.")?;
-    approval.effect(&mut || {
-        ready.validate(&scenario)?;
-        write_record(&scenario, FINANCIAL_READY, &ready)?;
-        Ok(())
-    })?;
-    terminal.message(&format!("{FINANCIAL_DEATH_MARKER}\n"))?;
-    let _keep_actual_originals = (&host, &original.temporary);
-    loop {
-        std::thread::park();
-    }
+        financial_stage(&scenario, FinancialBoundaryV1::SignatureAndIntake)?;
+        financial_host_operation(B::PrivateWorkspaceIntake, || {
+            host.bind_original_financial_continuations_v1(
+                &workspace,
+                "synthetic-financial-bind-v1",
+                [&first, &second],
+            )
+        })?;
+        for index in 1..=2 {
+            original
+                .signers
+                .send(C::ReadFinancialResultPeer(index))
+                .map_err(worker_error)?;
+            let (peer, request) = match original.signers.receive().map_err(worker_error)? {
+                R::FinancialResultPeer {
+                    index: actual,
+                    peer,
+                    request,
+                } if actual == index => (peer, request),
+                _ => return Err(Error::Authentication),
+            };
+            let stop = Arc::new(AtomicBool::new(false));
+            original
+                .signers
+                .send(C::ServeFinancialResult(index, stop.clone()))
+                .map_err(worker_error)?;
+            let result = (|| {
+                let receiver=wholepact_signer::authority_bridge::financial_continuation_v1::PreparedFinancialResultReceiverV1::prepare(peer.provider,&peer.endpoint,&request,peer.deadline).map_err(bridge_error)?;
+                financial_host_operation(B::PrivateWorkspaceIntake, || {
+                    host.intake_original_financial_result_v1(
+                        &workspace,
+                        &format!("synthetic-financial-intake-{index}"),
+                        receiver,
+                        if index == 1 { &first } else { &second },
+                    )
+                })
+            })();
+            stop.store(true, Ordering::Release);
+            let returned = done(&original.signers, index);
+            result?;
+            returned?;
+            original
+                .signers
+                .send(C::PreserveFinancialContinuation(index))
+                .map_err(worker_error)?;
+            match original.signers.receive().map_err(worker_error)? {
+                R::DeliveryPreserved { index: actual, .. } if actual == index => (),
+                _ => return Err(Error::Authentication),
+            }
+        }
+        financial_stage(&scenario, FinancialBoundaryV1::FinalTransactionRetention)?;
+        let completed = financial_host_operation(B::PrivateWorkspaceCheckpoint, || {
+            host.complete_original_financial_transaction_v1(
+                &workspace,
+                "synthetic-financial-complete-v1",
+            )
+        })?;
+        if completed.exact_replay
+            || !completed.cryptographic_transaction_verified
+            || !completed.transaction_extracted
+            || completed.chain_validated
+            || completed.authorization_allowed
+            || completed.distribution_allowed
+            || completed.release_allowed
+        {
+            return Err(Error::Authentication);
+        }
+        let OwnerControl::AdmitFinancialContinuationV1 { record } = &continuations[0].control else {
+            return Err(Error::Authentication);
+        };
+        let summary = financial_host_operation(B::PrivateWorkspaceReadFixed, || {
+            host.verify_completed_private_financial_summary_v1(
+                &workspace,
+                &record.terms.scope.delivery.submission_operation_id,
+            )
+        })?;
+        if summary.checkpoint_id != completed.checkpoint_id
+            || summary.transaction_digest != completed.transaction_digest
+            || summary.transaction_id != completed.txid
+            || summary.frozen_export_history_digest != export_history_digest
+            || summary.fixed_identity != serde_json::to_value(&record.terms.scope.authorization.fixed)?
+            || summary.next_delegation_attempt != 1
+            || summary.latest_requests.is_some()
+        {
+            return Err(Error::Authentication);
+        }
+        let provider_reopen = provider.preserve_public_original_v1()?;
+        drop(first);
+        drop(second);
+        drop(server);
+        original.signers.shutdown().map_err(worker_error)?;
+        runtime.block_on(provider.shutdown()).map_err(Error::from)?;
+        drop(runtime);
+        let witness_reopen = original
+            .witness
+            .preserve_financial_originals_v1()
+            .map_err(|e| witness_error(B::DeliveryHistoricalRead, e))?;
+        let ready = FinancialReadyV1 {
+            schema: 1,
+            profile,
+            workspace,
+            financial,
+            fixed_prefix_digest,
+            export_history_digest,
+            continuations,
+            witness_reopen,
+            provider_reopen_digest: digest(&provider_reopen)?,
+            provider_reopen,
+            fixed_identity: summary.fixed_identity,
+            original_valid_until_ms: summary.original_valid_until_ms,
+            transaction_checkpoint_id: completed.checkpoint_id,
+            transaction_digest: completed.transaction_digest,
+            transaction_id: completed.txid,
+            signed_result_id: completed.signed_result_id,
+        };
+        let approval=terminal.approve_historical("SYNTHETIC ORIGINAL FINANCIAL: both genuine signature results are already retained and one immutable final transaction is saved. Close all signer and provider workers, retain these exact original files, then permit controlled producer process death. A successor may only verify the completed original and request a fresh bounded dispatch; no signature or extraction may be recreated.")?;
+        approval.effect(&mut || {
+            ready.validate(&scenario)?;
+            write_record(&scenario, FINANCIAL_READY, &ready)?;
+            Ok(())
+        })?;
+        terminal.message(&format!("{FINANCIAL_DEATH_MARKER}\n"))?;
+        let _keep_actual_originals = (&host, &original.temporary);
+        loop {
+            std::thread::park();
+        }
+    })();
+    promote_financial_failure(&result);
+    result
 }
 
 impl FinancialReadyV1 {
@@ -813,6 +899,14 @@ fn require_completed_original(
 pub(in crate::host::manual_enrollment::command::roster_publication_v2::sequential_construction_v3::qualification) fn read_financial_child(
     terminal: crate::terminal::Terminal,
 ) -> Result<()> {
+    financial_diagnostic::reset_operation();
+    let result = diagnostic::host(B::PrivateWorkspaceReaderOpen, || {
+        read_financial_child_inner(terminal)
+    });
+    promote_financial_failure(&result);
+    result
+}
+fn read_financial_child_inner(terminal: crate::terminal::Terminal) -> Result<()> {
     let scenario = scenario_root()?;
     financial_stage(&scenario, FinancialBoundaryV1::CompletedReopen)?;
     let ready = FinancialReadyV1::read_original(&scenario)?;
@@ -868,8 +962,9 @@ pub(in crate::host::manual_enrollment::command::roster_publication_v2::sequentia
         synthetic_born_submission_sink_v1::SyntheticFinancialSubmissionBackendV1::new(
             &provider, adapter,
         )?;
-    let summary =
-        host.verify_completed_private_financial_summary_v1(&ready.workspace, operation)?;
+    let summary = financial_host_operation(B::PrivateWorkspaceReadFixed, || {
+        host.verify_completed_private_financial_summary_v1(&ready.workspace, operation)
+    })?;
     require_completed_original(&ready, &summary)?;
     if summary.next_delegation_attempt != 1 || summary.latest_requests.is_some() {
         return Err(Error::Authentication);
@@ -877,16 +972,20 @@ pub(in crate::host::manual_enrollment::command::roster_publication_v2::sequentia
     let server = witness
         .serve_committed_completed_dispatch_pair_v1()
         .map_err(|e| witness_error(B::DeliveryHistoricalRead, e))?;
-    let first = host.read_original_financial_history_v1(
-        &ready.workspace,
-        &ready.continuations[0].account_id,
-        &ready.continuations[0].operation_id,
-    )?;
-    let second = host.read_original_financial_history_v1(
-        &ready.workspace,
-        &ready.continuations[1].account_id,
-        &ready.continuations[1].operation_id,
-    )?;
+    let first = financial_host_operation(B::DeliveryHistoricalRead, || {
+        host.read_original_financial_history_v1(
+            &ready.workspace,
+            &ready.continuations[0].account_id,
+            &ready.continuations[0].operation_id,
+        )
+    })?;
+    let second = financial_host_operation(B::DeliveryHistoricalRead, || {
+        host.read_original_financial_history_v1(
+            &ready.workspace,
+            &ready.continuations[1].account_id,
+            &ready.continuations[1].operation_id,
+        )
+    })?;
     if first.continuation_request() != &ready.continuations[0]
         || second.continuation_request() != &ready.continuations[1]
     {
@@ -901,6 +1000,7 @@ pub(in crate::host::manual_enrollment::command::roster_publication_v2::sequentia
     // Genuine A-only configured service produces one-sided admission. An error
     // is NOT absence: inspect both exact saved requests from full histories next.
     financial_stage(&scenario, FinancialBoundaryV1::DispatchAdmission)?;
+    financial_diagnostic::reset_operation();
     let partial = runtime.block_on(host.dispatch_completed_private_financial_v1(
         &ready.workspace,
         "synthetic-financial-pair-one",
@@ -908,73 +1008,95 @@ pub(in crate::host::manual_enrollment::command::roster_publication_v2::sequentia
         &mut backend,
         &wholepact_chain::SystemSubmissionClock,
     ));
-    if partial.is_ok() || !backend.no_private_submission_observed() {
-        return Err(Error::Authentication);
-    }
-    financial_stage(
-        &scenario,
-        FinancialBoundaryV1::PartialAdmissionReconciliation,
-    )?;
-    drop(server);
-    drop(first);
-    drop(second);
-    let server = witness
-        .serve_committed_completed_dispatch_pair_v1()
-        .map_err(|e| witness_error(B::DeliveryHistoricalRead, e))?;
-    let first = host.read_original_financial_history_v1(
-        &ready.workspace,
-        &ready.continuations[0].account_id,
-        &ready.continuations[0].operation_id,
-    )?;
-    let second = host.read_original_financial_history_v1(
-        &ready.workspace,
-        &ready.continuations[1].account_id,
-        &ready.continuations[1].operation_id,
-    )?;
-    let partial_summary =
-        host.verify_completed_private_financial_summary_v1(&ready.workspace, operation)?;
-    require_completed_original(&ready, &partial_summary)?;
-    if partial_summary.next_delegation_attempt != 2 {
-        return Err(Error::Authentication);
-    }
-    let old_pair = partial_summary
-        .latest_requests
-        .ok_or(Error::Authentication)?;
-    let histories = [&first, &second];
-    let mut committed = 0;
-    for (index, request) in old_pair.iter().enumerate() {
-        let history = histories
-            .iter()
-            .find(|h| h.snapshot().account_id == request.account_id)
-            .ok_or(Error::Authentication)?;
-        let result = history
-            .completed_dispatch_outcome(request)
-            .map_err(|_| Error::Authentication)?;
-        if (index == 0) != result.is_some()
-            || request.context.attempt != 1
-            || request.context.final_transaction_digest != ready.transaction_digest
-        {
+    let expected_partial_diagnostic = financial_diagnostic::take_operation_failure();
+    let reconciled = (|| -> Result<_> {
+        if partial.is_ok() || !backend.no_private_submission_observed() {
             return Err(Error::Authentication);
         }
-        if let Some(admission) = result {
-            if admission.expires_at_ms > ready.original_valid_until_ms {
+        financial_stage(
+            &scenario,
+            FinancialBoundaryV1::PartialAdmissionReconciliation,
+        )?;
+        drop(server);
+        drop(first);
+        drop(second);
+        let server = witness
+            .serve_committed_completed_dispatch_pair_v1()
+            .map_err(|e| witness_error(B::DeliveryHistoricalRead, e))?;
+        let first = financial_host_operation(B::DeliveryHistoricalRead, || {
+            host.read_original_financial_history_v1(
+                &ready.workspace,
+                &ready.continuations[0].account_id,
+                &ready.continuations[0].operation_id,
+            )
+        })?;
+        let second = financial_host_operation(B::DeliveryHistoricalRead, || {
+            host.read_original_financial_history_v1(
+                &ready.workspace,
+                &ready.continuations[1].account_id,
+                &ready.continuations[1].operation_id,
+            )
+        })?;
+        let partial_summary = financial_host_operation(B::PrivateWorkspaceReadFixed, || {
+            host.verify_completed_private_financial_summary_v1(&ready.workspace, operation)
+        })?;
+        require_completed_original(&ready, &partial_summary)?;
+        if partial_summary.next_delegation_attempt != 2 {
+            return Err(Error::Authentication);
+        }
+        let old_pair = partial_summary
+            .latest_requests
+            .ok_or(Error::Authentication)?;
+        let histories = [&first, &second];
+        let mut committed = 0;
+        for (index, request) in old_pair.iter().enumerate() {
+            let history = histories
+                .iter()
+                .find(|h| h.snapshot().account_id == request.account_id)
+                .ok_or(Error::Authentication)?;
+            let result = history
+                .completed_dispatch_outcome(request)
+                .map_err(|_| Error::Authentication)?;
+            if (index == 0) != result.is_some()
+                || request.context.attempt != 1
+                || request.context.final_transaction_digest != ready.transaction_digest
+            {
                 return Err(Error::Authentication);
             }
-            committed += 1;
+            if let Some(admission) = result {
+                if admission.expires_at_ms > ready.original_valid_until_ms {
+                    return Err(Error::Authentication);
+                }
+                committed += 1;
+            }
         }
+        if committed != 1 || !backend.no_private_submission_observed() {
+            return Err(Error::Authentication);
+        }
+        Ok((server, first, second, old_pair))
+    })();
+    if reconciled.is_err() && !FINANCIAL_FAILURE_EMITTED.load(Ordering::SeqCst) {
+        financial_diagnostic::reset_operation();
+        if let Some(candidate) = expected_partial_diagnostic {financial_diagnostic::capture_first(candidate);}
+        promote_financial_failure(&reconciled);
     }
-    if committed != 1 || !backend.no_private_submission_observed() {
-        return Err(Error::Authentication);
-    }
-    host.require_stale_financial_dispatch_refused_v1(&ready.workspace, &old_pair[0])?;
+    let (server, first, second, old_pair) = reconciled?;
+    // Only exact full-history reconciliation established this expected partial case.
+    // It must never become the first failure of a later independent operation.
+    drop(expected_partial_diagnostic);
+    financial_host_operation(B::DeliveryNativeAdmission, || {
+        host.require_stale_financial_dispatch_refused_v1(&ready.workspace, &old_pair[0])
+    })?;
     financial_stage(&scenario, FinancialBoundaryV1::SavedTransactionDispatch)?;
-    let report = runtime.block_on(host.dispatch_completed_private_financial_v1(
-        &ready.workspace,
-        "synthetic-financial-pair-two",
-        [&first, &second],
-        &mut backend,
-        &wholepact_chain::SystemSubmissionClock,
-    ))?;
+    let report = financial_host_operation(B::DeliveryNativeAdmission, || {
+        runtime.block_on(host.dispatch_completed_private_financial_v1(
+            &ready.workspace,
+            "synthetic-financial-pair-two",
+            [&first, &second],
+            &mut backend,
+            &wholepact_chain::SystemSubmissionClock,
+        ))
+    })?;
     let received = backend.finish(&report)?;
     if !received.exact_saved_transaction_received
         || !received.received_once
@@ -986,23 +1108,28 @@ pub(in crate::host::manual_enrollment::command::roster_publication_v2::sequentia
     {
         return Err(Error::Authentication);
     }
-    let final_summary =
-        host.verify_completed_private_financial_summary_v1(&ready.workspace, operation)?;
+    let final_summary = financial_host_operation(B::PrivateWorkspaceReadFixed, || {
+        host.verify_completed_private_financial_summary_v1(&ready.workspace, operation)
+    })?;
     require_completed_original(&ready, &final_summary)?;
     if final_summary.next_delegation_attempt != 3 {
         return Err(Error::Authentication);
     }
     let final_pair = final_summary.latest_requests.ok_or(Error::Authentication)?;
-    let final_first = host.read_original_financial_history_v1(
-        &ready.workspace,
-        &ready.continuations[0].account_id,
-        &ready.continuations[0].operation_id,
-    )?;
-    let final_second = host.read_original_financial_history_v1(
-        &ready.workspace,
-        &ready.continuations[1].account_id,
-        &ready.continuations[1].operation_id,
-    )?;
+    let final_first = financial_host_operation(B::DeliveryHistoricalRead, || {
+        host.read_original_financial_history_v1(
+            &ready.workspace,
+            &ready.continuations[0].account_id,
+            &ready.continuations[0].operation_id,
+        )
+    })?;
+    let final_second = financial_host_operation(B::DeliveryHistoricalRead, || {
+        host.read_original_financial_history_v1(
+            &ready.workspace,
+            &ready.continuations[1].account_id,
+            &ready.continuations[1].operation_id,
+        )
+    })?;
     for (old, new) in old_pair.iter().zip(&final_pair) {
         let mut immutable = old.context.clone();
         immutable.attempt = 2;
@@ -1268,4 +1395,23 @@ fn run_financial_lifecycle_v1() -> io::Result<()> {
         );
     }
     public.emit_once()
+}
+
+#[test]
+fn financial_diagnostic_requires_actual_stage_cleanup() {
+    use financial_diagnostic::{FinancialDiagnosticV1,FinancialStageV1 as S,FinancialComponentV1 as C,FinancialErrorClassV1 as E,FinancialCommitStateV1 as K};
+    let record=FinancialDiagnosticV1{schema:1,stage:S::ResultReceive,component:C::SignerBridge,error_class:E::Binding,commit_state:K::NotEstablished};
+    for reader in [false,true] {
+        for missing in 0..6 {
+            let mut public=FinancialPublicV1::pending();
+            public.first_failure=Some(if reader {FinancialBoundaryV1::SavedTransactionDispatch}else{FinancialBoundaryV1::SignatureAndIntake});
+            public.root_cleanup=if missing==0 {"unverified"}else{"closed_absent"};
+            public.producer_reaped=missing!=1;public.producer_group_absent=missing!=2;
+            public.reader_reaped=missing!=3;public.reader_group_absent=missing!=4;
+            public.financial_diagnostic=Some(record);
+            public.withhold_unverified_diagnostics();
+            let permitted=missing>=3 && (!reader || missing==5);
+            assert_eq!(public.financial_diagnostic.is_some(),permitted);
+        }
+    }
 }

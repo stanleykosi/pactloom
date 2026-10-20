@@ -120,54 +120,106 @@ pub fn read_setup_frame_capped_checked_until(
     peer: &PeerProcess,
     max_wire_bytes: usize,
     setup_deadline: Instant,
-    mut check_current: impl FnMut() -> Result<()>,
+    check_current: impl FnMut() -> Result<()>,
 ) -> Result<Zeroizing<Vec<u8>>> {
-    if max_wire_bytes == 0 || max_wire_bytes > MAX_FRAME {
-        return Err(Error::Limit);
-    }
-    if remaining_at(setup_deadline, Instant::now())? > Duration::from_secs(900) {
-        return Err(Error::InvalidData);
-    }
-    loop {
-        check_current()?;
-        peer.check_alive()?;
-        let remaining = remaining_at(setup_deadline, Instant::now())?;
-        let wait_ms = remaining.as_millis().clamp(1, 100) as libc::c_int;
-        let mut descriptor = libc::pollfd {
-            fd: stream.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        // SAFETY: one initialized pollfd borrowed only for this bounded call.
-        let ready = unsafe { libc::poll(&mut descriptor, 1, wait_ms) };
-        let poll_error = (ready < 0).then(std::io::Error::last_os_error);
-        check_current()?;
-        peer.check_alive()?;
-        remaining_at(setup_deadline, Instant::now())?;
-        if let Some(error) = poll_error {
-            if error.kind() == std::io::ErrorKind::Interrupted {
+    read_setup_frame_capped_checked_observed_until(
+        stream,
+        peer,
+        max_wire_bytes,
+        setup_deadline,
+        check_current,
+    )
+    .map_err(|failure| failure.error)
+}
+
+/// Same setup/transfer kernel, with a finite failure cause and unchanged error.
+pub fn read_setup_frame_capped_checked_observed_until(
+    stream: &UnixStream,
+    peer: &PeerProcess,
+    max_wire_bytes: usize,
+    setup_deadline: Instant,
+    mut check_current: impl FnMut() -> Result<()>,
+) -> std::result::Result<Zeroizing<Vec<u8>>, ObservedFrameError> {
+    let mut cause = FrameReadCause::Unclassified;
+    let result = (|| {
+        if max_wire_bytes == 0 || max_wire_bytes > MAX_FRAME {
+            cause = FrameReadCause::FrameLimit;
+            return Err(Error::Limit);
+        }
+        if observe(
+            remaining_at(setup_deadline, Instant::now()),
+            FrameReadCause::Deadline,
+            &mut cause,
+        )? > Duration::from_secs(900)
+        {
+            cause = FrameReadCause::InvalidBudget;
+            return Err(Error::InvalidData);
+        }
+        loop {
+            observe(check_current(), FrameReadCause::CurrentCheck, &mut cause)?;
+            observe(peer.check_alive(), FrameReadCause::PeerNotLive, &mut cause)?;
+            let remaining = observe(
+                remaining_at(setup_deadline, Instant::now()),
+                FrameReadCause::Deadline,
+                &mut cause,
+            )?;
+            let wait_ms = remaining.as_millis().clamp(1, 100) as libc::c_int;
+            let mut descriptor = libc::pollfd {
+                fd: stream.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: one initialized pollfd borrowed only for this bounded call.
+            let ready = unsafe { libc::poll(&mut descriptor, 1, wait_ms) };
+            let poll_error = (ready < 0).then(std::io::Error::last_os_error);
+            observe(check_current(), FrameReadCause::CurrentCheck, &mut cause)?;
+            observe(peer.check_alive(), FrameReadCause::PeerNotLive, &mut cause)?;
+            observe(
+                remaining_at(setup_deadline, Instant::now()),
+                FrameReadCause::Deadline,
+                &mut cause,
+            )?;
+            if let Some(error) = poll_error {
+                if error.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                cause = FrameReadCause::Io;
+                return Err(Error::Io(error));
+            }
+            if ready == 0 {
                 continue;
             }
-            return Err(Error::Io(error));
-        }
-        if ready == 0 {
-            continue;
-        }
-        if descriptor.revents & (libc::POLLERR | libc::POLLNVAL | libc::POLLHUP) != 0 {
+            if descriptor.revents & (libc::POLLERR | libc::POLLNVAL | libc::POLLHUP) != 0 {
+                cause = if descriptor.revents & (libc::POLLERR | libc::POLLNVAL) != 0 {
+                    FrameReadCause::Io
+                } else {
+                    FrameReadCause::Eof
+                };
+                return Err(Error::Authentication);
+            }
+            if descriptor.revents & libc::POLLIN != 0 {
+                let transfer_deadline = observe(
+                    setup_transfer_deadline(setup_deadline, Instant::now()),
+                    FrameReadCause::Deadline,
+                    &mut cause,
+                )?;
+                return read_frame_capped_checked_observed_until(
+                    stream,
+                    peer,
+                    max_wire_bytes,
+                    transfer_deadline,
+                    check_current,
+                )
+                .map_err(|failure| {
+                    cause = failure.cause;
+                    failure.error
+                });
+            }
+            cause = FrameReadCause::InvalidFrame;
             return Err(Error::Authentication);
         }
-        if descriptor.revents & libc::POLLIN != 0 {
-            let transfer_deadline = setup_transfer_deadline(setup_deadline, Instant::now())?;
-            return read_frame_capped_checked_until(
-                stream,
-                peer,
-                max_wire_bytes,
-                transfer_deadline,
-                check_current,
-            );
-        }
-        return Err(Error::Authentication);
-    }
+    })();
+    result.map_err(|error| ObservedFrameError { cause, error })
 }
 fn setup_transfer_deadline(setup_deadline: Instant, now: Instant) -> Result<Instant> {
     remaining_at(setup_deadline, now)?;

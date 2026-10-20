@@ -1,8 +1,18 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-20, 15:03 UTC.
+Updated: 2026-10-20, 16:04 UTC.
 
 **CI44 passed the genuine two-owner delivery/admission, original-producer SIGKILL and fresh-process read-only original-history verification route. Financial signing/dispatch and public testnet settlement remain unqualified. This is a bounded admission/restart milestone, not a production release.**
+
+## CI54 verified the TLS mechanism; first financial intake remains unqualified
+
+[Run 39445159354](https://github.com/stanleykosi/pactloom/actions/runs/39445159354), qualification `672296e2989ab2a9678997d74b09ce6d80c8f025`, implementation `57bf08df5020cd1e86f48f310c1e6d6dd24d1e6e`, passed all seven actual TLS mechanism groups with verified cleanup at 15:08:45 UTC: direct and CONNECT scheduling, cancellation, unconsumed connected-result destruction, original deadlines, and hostname refusal. This is transport evidence, not payment evidence. The full Host build passed in 9m04s and encrypted bootstrap passed.
+
+The native financial lifecycle failed at 15:29:33 UTC after input 132/151, which is the first exact local signature-intake setup approval. No completed intake or financial transaction is established. The old generic HostReceipt projection cannot distinguish protected receive, authenticated intake, or final acknowledgement; its PrivateWorkspaceCapture label was stale from preparation and is not a causal attribution. Producer reap/group absence and root cleanup were verified; the reader did not start. Source audits found no deterministic preview, signature-digest, retention-scope or handshake mismatch. No behavioral repair is claimed.
+
+The diagnostic-only correction covers remaining binding, intake, finalization, audit, history, admission, dispatch and producer/reader harness failures with closed stage, component, error-class and commit-state enums. It captures actual Engine and Authority classes before generic receipt conversion and Signer receive/current/finish subphases with finite framing causes. ReadyWait uses an observed wrapper around the same existing setup kernel and unchanged deadlines. All original errors and checks remain intact. Expected one-sided admission refusal stays operation-local and is promoted only if its reconciliation invariant fails; it cannot mask a later unexpected failure. A finish-acknowledgement failure explicitly preserves IntakeCommitted rather than implying non-delivery.
+
+Public schema 4 requires verified child/group/root cleanup, including reader cleanup for reader-stage evidence. The bounded typed capture shares the existing transcript budget and never projects raw error strings or private payloads. Independent review cleared all 13 source files. Combined Signer/Host release compilation passed in 9m36s; five exact in-memory Rust diagnostic tests and 29 controlled Python projection cases passed. These tests do not execute sockets, native authority or signing. The next isolated native run is pending; durable financial completion and public testnet settlement remain unqualified.
 
 ## CI53 identified a connection-handle oracle error; real RPC oracle prepared
 

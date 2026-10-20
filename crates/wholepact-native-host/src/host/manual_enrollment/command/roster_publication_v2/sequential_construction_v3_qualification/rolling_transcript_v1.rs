@@ -32,7 +32,10 @@ pub(super) struct Transcript<'a> {
     line_start: usize,
     paths: BTreeMap<&'a str, Option<CapturedPath>>,
     diagnostics: VecDeque<String>,
-    #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "synthetic-born-joined-qualification"
+    ))]
     delivery_first_failure: Option<super::safe_diagnostics_v1::DeliveryFailureCapture>,
     #[cfg(feature = "synthetic-born-joined-qualification")]
     timing: crate::host::synthetic_roster_timing_v1::Capture,
@@ -78,7 +81,10 @@ impl<'a> Transcript<'a> {
             line_start: 0,
             paths,
             diagnostics: VecDeque::new(),
-            #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+            #[cfg(all(
+                feature = "durable-proposal",
+                feature = "synthetic-born-joined-qualification"
+            ))]
             delivery_first_failure: None,
             #[cfg(feature = "synthetic-born-joined-qualification")]
             timing: Default::default(),
@@ -118,19 +124,42 @@ impl<'a> Transcript<'a> {
     }
 
     // Disabled for every older adapter. Only the B1 delivery child stages opt in.
-    #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "synthetic-born-joined-qualification"
+    ))]
     pub(super) fn enable_delivery_first_failure(&mut self) {
-        self.delivery_first_failure.get_or_insert_with(Default::default);
+        self.delivery_first_failure
+            .get_or_insert_with(Default::default);
     }
-    #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
-    pub(super) fn delivery_first_failure(&self) -> Option<super::safe_diagnostics_v1::DeliveryFailure> {
-        self.delivery_first_failure.as_ref().and_then(|capture| capture.value())
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "synthetic-born-joined-qualification"
+    ))]
+    pub(super) fn delivery_first_failure(
+        &self,
+    ) -> Option<super::safe_diagnostics_v1::DeliveryFailure> {
+        self.delivery_first_failure
+            .as_ref()
+            .and_then(|capture| capture.value())
     }
     fn delivery_first_failure_retained_bytes(&self) -> usize {
-        #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
-        { self.delivery_first_failure.as_ref().map_or(0, |capture| capture.retained_bytes()) }
-        #[cfg(not(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification")))]
-        { 0 }
+        #[cfg(all(
+            feature = "durable-proposal",
+            feature = "synthetic-born-joined-qualification"
+        ))]
+        {
+            self.delivery_first_failure
+                .as_ref()
+                .map_or(0, |capture| capture.retained_bytes())
+        }
+        #[cfg(not(all(
+            feature = "durable-proposal",
+            feature = "synthetic-born-joined-qualification"
+        )))]
+        {
+            0
+        }
     }
 
     fn timing_retained_bytes(&self) -> usize {
@@ -175,9 +204,13 @@ impl<'a> Transcript<'a> {
     }
     fn durable_lifecycle_retained_bytes(&self) -> usize {
         #[cfg(feature = "synthetic-born-joined-qualification")]
-        { self.durable_lifecycle.retained_bytes() }
+        {
+            self.durable_lifecycle.retained_bytes()
+        }
         #[cfg(not(feature = "synthetic-born-joined-qualification"))]
-        { 0 }
+        {
+            0
+        }
     }
     fn private_fixed_diagnostic_retained_bytes(&self) -> usize {
         #[cfg(all(
@@ -223,6 +256,15 @@ impl<'a> Transcript<'a> {
         feature = "durable-proposal",
         feature = "synthetic-born-joined-qualification"
     ))]
+    pub(super) fn financial_diagnostic(
+        &self,
+    ) -> Option<&crate::host::financial_diagnostics_v1::FinancialDiagnosticV1> {
+        self.private_fixed_diagnostic.financial_value()
+    }
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "synthetic-born-joined-qualification"
+    ))]
     pub(super) fn diagnostic_withheld(&self) -> bool {
         self.private_fixed_diagnostic.withheld()
     }
@@ -261,7 +303,10 @@ impl<'a> Transcript<'a> {
         // Optional retained copies yield to the original transcript budget.
         // Their original raw PTY bytes still count normally; no raw limit is
         // bypassed, and truly over-budget original text still fails below.
-        #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+        #[cfg(all(
+            feature = "durable-proposal",
+            feature = "synthetic-born-joined-qualification"
+        ))]
         if chunk.len() > MAX_BYTES.saturating_sub(self.retained_bytes()) {
             if let Some(capture) = &mut self.delivery_first_failure {
                 capture.discard_for_budget();
@@ -311,7 +356,10 @@ impl<'a> Transcript<'a> {
                     retained = retained - removed - count.saturating_sub(1)
                         + entry.len()
                         + new_count.saturating_sub(1);
-                    #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+                    #[cfg(all(
+                        feature = "durable-proposal",
+                        feature = "synthetic-born-joined-qualification"
+                    ))]
                     if retained > MAX_BYTES {
                         if let Some(capture) = &mut self.delivery_first_failure {
                             retained -= capture.retained_bytes();
@@ -355,17 +403,25 @@ impl<'a> Transcript<'a> {
             ))]
             let private_fixed_line = line.strip_suffix('\r').unwrap_or(line);
             let line = line.trim_end_matches('\r');
-            #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+            #[cfg(all(
+                feature = "durable-proposal",
+                feature = "synthetic-born-joined-qualification"
+            ))]
             if let Some(capture) = &mut self.delivery_first_failure {
                 if capture.retained_bytes() > 0 {
                     // Existing optional diagnostic copies have priority over
                     // this new slot too. Preflight only finite valid records;
                     // never let the slot change their original budget result.
-                    let required = self.history_measurements.additional_bytes_for_line(line)
+                    let required = self
+                        .history_measurements
+                        .additional_bytes_for_line(line)
                         .or_else(|| self.admission_diagnostics.additional_bytes_for_line(line))
                         .or_else(|| self.durable_flow.additional_bytes_for_line(line))
                         .or_else(|| self.durable_lifecycle.additional_bytes_for_line(line))
-                        .or_else(|| self.private_fixed_diagnostic.additional_bytes_for_line(private_fixed_line));
+                        .or_else(|| {
+                            self.private_fixed_diagnostic
+                                .additional_bytes_for_line(private_fixed_line)
+                        });
                     if required.is_some_and(|bytes| bytes > MAX_BYTES.saturating_sub(retained)) {
                         retained -= capture.retained_bytes();
                         capture.discard_for_budget();
@@ -419,7 +475,10 @@ impl<'a> Transcript<'a> {
                         return Err(Failure::InvalidPath);
                     }
                     retained = retained - path.as_ref().map_or(0, |p| p.value.len()) + value.len();
-                    #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+                    #[cfg(all(
+                        feature = "durable-proposal",
+                        feature = "synthetic-born-joined-qualification"
+                    ))]
                     if retained > MAX_BYTES {
                         if let Some(capture) = &mut self.delivery_first_failure {
                             retained -= capture.retained_bytes();
@@ -450,7 +509,10 @@ impl<'a> Transcript<'a> {
                         return Err(Failure::OutputLimit);
                     }
                     let Some(absolute_end) = self.base.checked_add(end + 1) else {
-                        #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+                        #[cfg(all(
+                            feature = "durable-proposal",
+                            feature = "synthetic-born-joined-qualification"
+                        ))]
                         if let Some(capture) = &mut self.delivery_first_failure {
                             capture.discard_for_budget();
                         }
@@ -465,10 +527,16 @@ impl<'a> Transcript<'a> {
                     });
                 }
             }
-            #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+            #[cfg(all(
+                feature = "durable-proposal",
+                feature = "synthetic-born-joined-qualification"
+            ))]
             if let Some(capture) = &mut self.delivery_first_failure {
                 let previous = capture.retained_bytes();
-                capture.capture_complete_line(&self.bytes[self.line_start..end], MAX_BYTES.saturating_sub(retained));
+                capture.capture_complete_line(
+                    &self.bytes[self.line_start..end],
+                    MAX_BYTES.saturating_sub(retained),
+                );
                 retained = retained - previous + capture.retained_bytes();
             }
             self.line_start = end + 1;
@@ -499,9 +567,15 @@ impl<'a> Transcript<'a> {
     /// The latest complete exact marker must precede this matched prompt, not
     /// merely occur later in the same read. A used marker cannot be reused.
     pub(super) fn path(&mut self, marker: &str, prompt_in_tail: usize) -> Result<&str, Failure> {
-        let Some(prompt) = self.base.checked_add(self.consumed)
-            .and_then(|position| position.checked_add(prompt_in_tail)) else {
-            #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+        let Some(prompt) = self
+            .base
+            .checked_add(self.consumed)
+            .and_then(|position| position.checked_add(prompt_in_tail))
+        else {
+            #[cfg(all(
+                feature = "durable-proposal",
+                feature = "synthetic-born-joined-qualification"
+            ))]
             if let Some(capture) = &mut self.delivery_first_failure {
                 capture.discard_for_budget();
             }
@@ -529,7 +603,10 @@ impl<'a> Transcript<'a> {
         }
         let cut = self.line_start;
         let Some(base) = self.base.checked_add(cut) else {
-            #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+            #[cfg(all(
+                feature = "durable-proposal",
+                feature = "synthetic-born-joined-qualification"
+            ))]
             if let Some(capture) = &mut self.delivery_first_failure {
                 capture.discard_for_budget();
             }
@@ -574,7 +651,7 @@ mod tests {
     #[test]
     #[cfg(feature = "synthetic-born-joined-qualification")]
     fn actual_full_input_markers_fit_the_fixed_metadata_bound() {
-        use super::super::{Input, full_payment_inputs_v1};
+        use super::super::{full_payment_inputs_v1, Input};
         let inputs = full_payment_inputs_v1::inputs();
         assert_eq!(inputs.len(), 204);
         let names = inputs
@@ -1127,17 +1204,34 @@ mod tests {
     fn durable_lifecycle_split_compaction_and_pairing() {
         let root = Path::new("/tmp/owned");
         let mut transcript = Transcript::new([]).unwrap();
-        let flow = format!("[DURABLE_FLOW_V1 {}]\n", super::super::safe_diagnostics_v1::DURABLE_FLOW_MAXIMAL_TEST_JSON);
-        let lifecycle = format!("[DURABLE_LIFECYCLE_V1 {}]\r\n", super::super::safe_diagnostics_v1::DURABLE_LIFECYCLE_MAXIMAL_TEST_JSON);
+        let flow = format!(
+            "[DURABLE_FLOW_V1 {}]\n",
+            super::super::safe_diagnostics_v1::DURABLE_FLOW_MAXIMAL_TEST_JSON
+        );
+        let lifecycle = format!(
+            "[DURABLE_LIFECYCLE_V1 {}]\r\n",
+            super::super::safe_diagnostics_v1::DURABLE_LIFECYCLE_MAXIMAL_TEST_JSON
+        );
         transcript.append(flow.as_bytes(), root).unwrap();
         let split = lifecycle.len() / 2;
-        transcript.append(&lifecycle.as_bytes()[..split], root).unwrap();
+        transcript
+            .append(&lifecycle.as_bytes()[..split], root)
+            .unwrap();
         assert!(transcript.durable_lifecycle_lines().is_empty());
-        transcript.append(&lifecycle.as_bytes()[split..], root).unwrap();
+        transcript
+            .append(&lifecycle.as_bytes()[split..], root)
+            .unwrap();
         transcript.consume(None).unwrap();
         assert!(transcript.bytes.is_empty());
-        assert!(transcript.durable_lifecycle_lines()[0].starts_with("CI_SYNTHETIC_DURABLE_LIFECYCLE {"));
-        assert_eq!(transcript.retained_bytes(), transcript.timing_retained_bytes() + transcript.durable_flow_retained_bytes() + transcript.durable_lifecycle_retained_bytes());
+        assert!(
+            transcript.durable_lifecycle_lines()[0].starts_with("CI_SYNTHETIC_DURABLE_LIFECYCLE {")
+        );
+        assert_eq!(
+            transcript.retained_bytes(),
+            transcript.timing_retained_bytes()
+                + transcript.durable_flow_retained_bytes()
+                + transcript.durable_lifecycle_retained_bytes()
+        );
         transcript.append(lifecycle.as_bytes(), root).unwrap();
         assert!(transcript.durable_lifecycle_lines()[0].contains("invalid=true"));
         assert!(!transcript.durable_flow_lines()[0].contains("invalid=true"));
@@ -1148,12 +1242,17 @@ mod tests {
         let root = Path::new("/tmp/owned");
         let mut measured = Transcript::new([]).unwrap();
         let mut original = Transcript::new([]).unwrap();
-        let lines = format!("[DURABLE_FLOW_V1 {}]\n[DURABLE_LIFECYCLE_V1 {}]\n", super::super::safe_diagnostics_v1::DURABLE_FLOW_MAXIMAL_TEST_JSON, super::super::safe_diagnostics_v1::DURABLE_LIFECYCLE_MAXIMAL_TEST_JSON);
+        let lines = format!(
+            "[DURABLE_FLOW_V1 {}]\n[DURABLE_LIFECYCLE_V1 {}]\n",
+            super::super::safe_diagnostics_v1::DURABLE_FLOW_MAXIMAL_TEST_JSON,
+            super::super::safe_diagnostics_v1::DURABLE_LIFECYCLE_MAXIMAL_TEST_JSON
+        );
         measured.append(lines.as_bytes(), root).unwrap();
         measured.consume(None).unwrap();
         assert!(measured.durable_lifecycle_retained_bytes() > 0);
         let chunk = vec![b'x'; MAX_BYTES - original.timing_retained_bytes()];
-        original.append(&chunk, root).unwrap(); measured.append(&chunk, root).unwrap();
+        original.append(&chunk, root).unwrap();
+        measured.append(&chunk, root).unwrap();
         assert_eq!(measured.retained_bytes(), original.retained_bytes());
         assert_eq!(measured.durable_lifecycle_retained_bytes(), 0);
         assert_eq!(measured.durable_flow_retained_bytes(), 0);
@@ -1165,14 +1264,30 @@ mod tests {
     #[cfg(feature = "synthetic-born-joined-qualification")]
     fn durable_lifecycle_optional_copy_yields_to_original_metadata_budget() {
         let root = Path::new("/tmp/owned");
-        for metadata in ["[JOINED_DIAGNOSTIC Bootstrap Begin]\n", "SYNTHETIC_JOINED_DRAFT_PATH=/tmp/owned/exact\n"] {
+        for metadata in [
+            "[JOINED_DIAGNOSTIC Bootstrap Begin]\n",
+            "SYNTHETIC_JOINED_DRAFT_PATH=/tmp/owned/exact\n",
+        ] {
             let mut measured = Transcript::new([MARKER]).unwrap();
             let mut original = Transcript::new([MARKER]).unwrap();
-            let lines = format!("[DURABLE_FLOW_V1 {}]\n[DURABLE_LIFECYCLE_V1 {}]\n", super::super::safe_diagnostics_v1::DURABLE_FLOW_MAXIMAL_TEST_JSON, super::super::safe_diagnostics_v1::DURABLE_LIFECYCLE_MAXIMAL_TEST_JSON);
-            measured.append(lines.as_bytes(), root).unwrap(); measured.consume(None).unwrap();
-            let filler = MAX_BYTES - measured.timing_retained_bytes() - measured.durable_flow_retained_bytes() - measured.durable_lifecycle_retained_bytes() - metadata.len() - 1;
-            let mut chunk = vec![b'x'; filler]; chunk.push(b'\n'); chunk.extend_from_slice(metadata.as_bytes());
-            original.append(&chunk, root).unwrap(); measured.append(&chunk, root).unwrap();
+            let lines = format!(
+                "[DURABLE_FLOW_V1 {}]\n[DURABLE_LIFECYCLE_V1 {}]\n",
+                super::super::safe_diagnostics_v1::DURABLE_FLOW_MAXIMAL_TEST_JSON,
+                super::super::safe_diagnostics_v1::DURABLE_LIFECYCLE_MAXIMAL_TEST_JSON
+            );
+            measured.append(lines.as_bytes(), root).unwrap();
+            measured.consume(None).unwrap();
+            let filler = MAX_BYTES
+                - measured.timing_retained_bytes()
+                - measured.durable_flow_retained_bytes()
+                - measured.durable_lifecycle_retained_bytes()
+                - metadata.len()
+                - 1;
+            let mut chunk = vec![b'x'; filler];
+            chunk.push(b'\n');
+            chunk.extend_from_slice(metadata.as_bytes());
+            original.append(&chunk, root).unwrap();
+            measured.append(&chunk, root).unwrap();
             assert_eq!(measured.durable_lifecycle_retained_bytes(), 0);
             assert_eq!(measured.durable_flow_retained_bytes(), 0);
             assert_eq!(measured.retained_bytes(), original.retained_bytes());
@@ -1314,7 +1429,11 @@ mod tests {
     }
 }
 
-#[cfg(all(test, feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+#[cfg(all(
+    test,
+    feature = "durable-proposal",
+    feature = "synthetic-born-joined-qualification"
+))]
 mod delivery_first_failure_tests {
     use super::*;
     const FIRST: &[u8] = b"[JOINED_DIAGNOSTIC DeliveryExportCommit EngineDisclosureUnknown]\n";
@@ -1326,7 +1445,9 @@ mod delivery_first_failure_tests {
         transcript
     }
     fn labels(transcript: &Transcript<'_>) -> Option<(&'static str, &'static str)> {
-        transcript.delivery_first_failure().map(|pair| pair.labels())
+        transcript
+            .delivery_first_failure()
+            .map(|pair| pair.labels())
     }
     #[test]
     fn delivery_first_failure_survives_more_than_64_later_diagnostics() {
@@ -1335,15 +1456,24 @@ mod delivery_first_failure_tests {
         transcript.append(FIRST, root).unwrap();
         transcript.consume(None).unwrap();
         let pair_bytes = "DeliveryExportCommit:EngineDisclosureUnknown".len();
-        assert_eq!(transcript.delivery_first_failure_retained_bytes(), pair_bytes);
-        assert_eq!(transcript.retained_bytes(), pair_bytes + transcript.summary().len() + transcript.timing_retained_bytes());
+        assert_eq!(
+            transcript.delivery_first_failure_retained_bytes(),
+            pair_bytes
+        );
+        assert_eq!(
+            transcript.retained_bytes(),
+            pair_bytes + transcript.summary().len() + transcript.timing_retained_bytes()
+        );
         for _ in 0..80 {
             transcript.append(LATER, root).unwrap();
             transcript.consume(None).unwrap();
         }
         assert_eq!(transcript.summary().split(',').count(), MAX_DIAGNOSTICS);
         assert!(!transcript.summary().contains("DeliveryExportCommit"));
-        assert_eq!(labels(&transcript), Some(("DeliveryExportCommit", "EngineDisclosureUnknown")));
+        assert_eq!(
+            labels(&transcript),
+            Some(("DeliveryExportCommit", "EngineDisclosureUnknown"))
+        );
     }
     #[test]
     fn delivery_first_failure_requires_complete_exact_finite_marker() {
@@ -1369,9 +1499,15 @@ mod delivery_first_failure_tests {
         transcript.append(&FIRST[..FIRST.len() - 1], root).unwrap();
         assert!(labels(&transcript).is_none());
         transcript.append(b"\r\n", root).unwrap();
-        assert_eq!(labels(&transcript), Some(("DeliveryExportCommit", "EngineDisclosureUnknown")));
+        assert_eq!(
+            labels(&transcript),
+            Some(("DeliveryExportCommit", "EngineDisclosureUnknown"))
+        );
         transcript.append(LATER, root).unwrap();
-        assert_eq!(labels(&transcript), Some(("DeliveryExportCommit", "EngineDisclosureUnknown")));
+        assert_eq!(
+            labels(&transcript),
+            Some(("DeliveryExportCommit", "EngineDisclosureUnknown"))
+        );
     }
     #[test]
     fn delivery_first_failure_is_opt_in_and_isolated_per_child() {
@@ -1384,10 +1520,19 @@ mod delivery_first_failure_tests {
         assert!(labels(&old_adapter).is_none());
         assert!(labels(&reader).is_none());
         reader.append(LATER, root).unwrap();
-        assert_eq!(labels(&producer), Some(("DeliveryExportCommit", "EngineDisclosureUnknown")));
-        assert_eq!(labels(&reader), Some(("DeliveryArtifactImport", "BridgeBinding")));
+        assert_eq!(
+            labels(&producer),
+            Some(("DeliveryExportCommit", "EngineDisclosureUnknown"))
+        );
+        assert_eq!(
+            labels(&reader),
+            Some(("DeliveryArtifactImport", "BridgeBinding"))
+        );
         assert_eq!(old_adapter.summary(), producer.summary());
-        assert_eq!(producer.retained_bytes() - old_adapter.retained_bytes(), producer.delivery_first_failure_retained_bytes());
+        assert_eq!(
+            producer.retained_bytes() - old_adapter.retained_bytes(),
+            producer.delivery_first_failure_retained_bytes()
+        );
     }
     #[test]
     fn delivery_first_failure_yields_to_chunk_budget_and_never_recaptures() {
@@ -1413,7 +1558,10 @@ mod delivery_first_failure_tests {
             transcript.append(LATER, root).unwrap();
             assert!(labels(&transcript).is_none());
             assert_eq!(transcript.delivery_first_failure_retained_bytes(), 0);
-            assert!(matches!(transcript.delivery_first_failure, Some(super::super::safe_diagnostics_v1::DeliveryFailureCapture::Unavailable)));
+            assert!(matches!(
+                transcript.delivery_first_failure,
+                Some(super::super::safe_diagnostics_v1::DeliveryFailureCapture::Unavailable)
+            ));
         }
     }
     #[test]
@@ -1429,7 +1577,8 @@ mod delivery_first_failure_tests {
             original.append(FIRST, root).unwrap();
             transcript.consume(None).unwrap();
             original.consume(None).unwrap();
-            let mut chunk = vec![b'x'; MAX_BYTES - transcript.retained_bytes() - metadata.len() - 1];
+            let mut chunk =
+                vec![b'x'; MAX_BYTES - transcript.retained_bytes() - metadata.len() - 1];
             chunk.push(b'\n');
             chunk.extend_from_slice(metadata.as_bytes());
             transcript.append(&chunk, root).unwrap();
@@ -1447,11 +1596,26 @@ mod delivery_first_failure_tests {
         use super::super::safe_diagnostics_v1 as diagnostics;
         let root = Path::new("/tmp/owned");
         for record in [
-            format!("[HISTORY_MEASUREMENT_V1 {}]", diagnostics::HISTORY_MEASUREMENT_TEST_JSON),
-            format!("[ADMISSION_MEASUREMENT_V1 {}]", diagnostics::ADMISSION_MEASUREMENT_TEST_JSON),
-            format!("[DURABLE_FLOW_V1 {}]", diagnostics::DURABLE_FLOW_MAXIMAL_TEST_JSON),
-            format!("[DURABLE_LIFECYCLE_V1 {}]", diagnostics::DURABLE_LIFECYCLE_MAXIMAL_TEST_JSON),
-            format!("CI_SYNTHETIC_PRIVATE_FIXED_DIAGNOSTIC {}", diagnostics::PRIVATE_FIXED_DIAGNOSTIC_TEST_JSON),
+            format!(
+                "[HISTORY_MEASUREMENT_V1 {}]",
+                diagnostics::HISTORY_MEASUREMENT_TEST_JSON
+            ),
+            format!(
+                "[ADMISSION_MEASUREMENT_V1 {}]",
+                diagnostics::ADMISSION_MEASUREMENT_TEST_JSON
+            ),
+            format!(
+                "[DURABLE_FLOW_V1 {}]",
+                diagnostics::DURABLE_FLOW_MAXIMAL_TEST_JSON
+            ),
+            format!(
+                "[DURABLE_LIFECYCLE_V1 {}]",
+                diagnostics::DURABLE_LIFECYCLE_MAXIMAL_TEST_JSON
+            ),
+            format!(
+                "CI_SYNTHETIC_PRIVATE_FIXED_DIAGNOSTIC {}",
+                diagnostics::PRIVATE_FIXED_DIAGNOSTIC_TEST_JSON
+            ),
         ] {
             let mut transcript = delivery([]);
             let mut original = Transcript::new([]).unwrap();
@@ -1459,11 +1623,25 @@ mod delivery_first_failure_tests {
             original.append(FIRST, root).unwrap();
             transcript.consume(None).unwrap();
             original.consume(None).unwrap();
-            let required = transcript.history_measurements.additional_bytes_for_line(&record)
-                .or_else(|| transcript.admission_diagnostics.additional_bytes_for_line(&record))
+            let required = transcript
+                .history_measurements
+                .additional_bytes_for_line(&record)
+                .or_else(|| {
+                    transcript
+                        .admission_diagnostics
+                        .additional_bytes_for_line(&record)
+                })
                 .or_else(|| transcript.durable_flow.additional_bytes_for_line(&record))
-                .or_else(|| transcript.durable_lifecycle.additional_bytes_for_line(&record))
-                .or_else(|| transcript.private_fixed_diagnostic.additional_bytes_for_line(&record))
+                .or_else(|| {
+                    transcript
+                        .durable_lifecycle
+                        .additional_bytes_for_line(&record)
+                })
+                .or_else(|| {
+                    transcript
+                        .private_fixed_diagnostic
+                        .additional_bytes_for_line(&record)
+                })
                 .unwrap();
             // Raw line plus old capture fit exactly without the optional pair.
             let filler = MAX_BYTES - original.retained_bytes() - required - record.len() - 2;
@@ -1475,12 +1653,30 @@ mod delivery_first_failure_tests {
             transcript.append(&chunk, root).unwrap();
             assert!(labels(&transcript).is_none());
             assert_eq!(transcript.retained_bytes(), original.retained_bytes());
-            assert_eq!(transcript.history_measurement_lines(), original.history_measurement_lines());
-            assert_eq!(transcript.admission_diagnostic_lines(), original.admission_diagnostic_lines());
-            assert_eq!(transcript.durable_flow_lines(), original.durable_flow_lines());
-            assert_eq!(transcript.durable_lifecycle_lines(), original.durable_lifecycle_lines());
-            assert_eq!(transcript.private_fixed_diagnostic_retained_bytes(), original.private_fixed_diagnostic_retained_bytes());
-            assert_eq!(transcript.diagnostic_withheld(), original.diagnostic_withheld());
+            assert_eq!(
+                transcript.history_measurement_lines(),
+                original.history_measurement_lines()
+            );
+            assert_eq!(
+                transcript.admission_diagnostic_lines(),
+                original.admission_diagnostic_lines()
+            );
+            assert_eq!(
+                transcript.durable_flow_lines(),
+                original.durable_flow_lines()
+            );
+            assert_eq!(
+                transcript.durable_lifecycle_lines(),
+                original.durable_lifecycle_lines()
+            );
+            assert_eq!(
+                transcript.private_fixed_diagnostic_retained_bytes(),
+                original.private_fixed_diagnostic_retained_bytes()
+            );
+            assert_eq!(
+                transcript.diagnostic_withheld(),
+                original.diagnostic_withheld()
+            );
         }
     }
     #[test]
@@ -1507,5 +1703,35 @@ mod delivery_first_failure_tests {
         assert!(matches!(capture, DeliveryFailureCapture::Unavailable));
         capture.capture_complete_line(&LATER[..LATER.len() - 1], MAX_BYTES);
         assert!(capture.value().is_none());
+    }
+}
+
+#[test]
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "synthetic-born-joined-qualification"
+))]
+fn financial_diagnostic_survives_all_fragment_boundaries() {
+    use crate::host::financial_diagnostics_v1::{
+        FinancialCommitStateV1 as K, FinancialComponentV1 as C, FinancialDiagnosticV1,
+        FinancialErrorClassV1 as E, FinancialStageV1 as S,
+    };
+    let value = FinancialDiagnosticV1 {
+        schema: 1,
+        stage: S::ResultFinishAcknowledgement,
+        component: C::SignerBridge,
+        error_class: E::Uncertain,
+        commit_state: K::IntakeCommitted,
+    };
+    let json = serde_json::to_string(&value).unwrap();
+    let line = format!("[FINANCIAL_DIAGNOSTIC_V1 {json}]\r\n");
+    for split in 0..line.len() {
+        let mut transcript = Transcript::new([]).unwrap();
+        transcript.append(&line.as_bytes()[..split], Path::new("/tmp/owned")).unwrap();
+        assert!(transcript.financial_diagnostic().is_none());
+        transcript.append(&line.as_bytes()[split..], Path::new("/tmp/owned")).unwrap();
+        transcript.finish_private_fixed_diagnostic();
+        assert_eq!(transcript.financial_diagnostic(), Some(&value));
+        assert!(transcript.retained_bytes() <= MAX_BYTES);
     }
 }

@@ -14,6 +14,34 @@ use wholepact_engine::{
 use wholepact_proof_jobs::{CheckpointScope, LocalAction, LocalProofConsent};
 use wholepact_signer::authority_bridge::durable_construction_v1::DurableConstructionScopeV1;
 
+// Diagnostics are erased outside the explicit synthetic qualification build.
+macro_rules! financial_record {
+    ($kind:ident, $stage:ident, $state:ident, $error:expr) => {{
+        #[cfg(all(
+            test,
+            feature = "synthetic-born-joined-qualification",
+            feature = "durable-proposal"
+        ))]
+        crate::host::financial_diagnostics_v1::$kind(
+            crate::host::financial_diagnostics_v1::FinancialStageV1::$stage,
+            crate::host::financial_diagnostics_v1::FinancialCommitStateV1::$state,
+            $error,
+        );
+    }};
+}
+macro_rules! financial_step {
+    ($stage:ident, $state:ident) => {{
+        #[cfg(all(
+            test,
+            feature = "synthetic-born-joined-qualification",
+            feature = "durable-proposal"
+        ))]
+        crate::host::financial_diagnostics_v1::set_stage(
+            crate::host::financial_diagnostics_v1::FinancialStageV1::$stage,
+            crate::host::financial_diagnostics_v1::FinancialCommitStateV1::$state,
+        );
+    }};
+}
 fn same<T: serde::Serialize>(left: &T, right: &T) -> bool {
     serde_json::to_vec(left)
         .ok()
@@ -277,6 +305,8 @@ impl Host {
         backend: &mut B,
         clock: &C,
     ) -> Result<wholepact_chain::SubmissionDispatchReport> {
+        financial_step!(InputValidation, NotEstablished);
+        let result = async {
         use wholepact_authority::completed_dispatch_v1::{
             AuthorizeCompletedDispatchV1, CompletedDispatchContextV1,
         };
@@ -292,10 +322,12 @@ impl Host {
         let command_key =
             wholepact_core::proposal::canonical_digest("wholepact:host-financial-command:v1", &key)
                 .map_err(|_| Error::Invalid)?;
+        financial_step!(OriginalSource, NotEstablished);
         let owner = self
             .original_financial_owner_v1(root)
-            .map_err(|_| financial_failure("ORIGINAL_SOURCE"))?;
+            .map_err(|error| { financial_record!(host, OriginalSource, NotEstablished, &error); financial_failure("ORIGINAL_SOURCE") })?;
         let inspection = owner.initial_inspection();
+        financial_step!(ReadConsent, NotEstablished);
         let approval = self.terminal.approve_historical("Read and mathematically verify only the saved original financial union and completed transaction for this exact dispatch review. Missing or uncertain extraction must remain fenced; this read cannot repair, re-sign or extract.")?;
         let read = ClosedFinancialReadConsentV1 {
             owner: &owner,
@@ -305,13 +337,16 @@ impl Host {
         read.check()?;
         let financial = self.financial.as_ref().ok_or(Error::Locked)?;
         let access = self.access()?;
+        financial_step!(SourcePreparation, NotEstablished);
         let mut prepared = owner
             .coordinator()
             .prepare_original_financial_v1(access, &read, &read, &read)
-            .map_err(|_| financial_failure("FIXED_SOURCE_VERIFICATION"))?;
-        let contexts = prepared.financial_retention_contexts_v1(access, &read, &read, &read)
-            .map_err(|_| financial_failure("RETENTION_CONTEXTS"))?;
-        let retention = self.authority.financial_retention_consent_v1(&contexts)?;
+            .map_err(|error| { financial_record!(engine, SourcePreparation, NotEstablished, &error); financial_failure("FIXED_SOURCE_VERIFICATION") })?;
+        financial_step!(RetentionContexts, NotEstablished);
+            let contexts = prepared.financial_retention_contexts_v1(access, &read, &read, &read)
+            .map_err(|error| { financial_record!(engine, RetentionContexts, NotEstablished, &error); financial_failure("RETENTION_CONTEXTS") })?;
+        financial_step!(SignedRetentionApproval, NotEstablished);
+            let retention = self.authority.financial_retention_consent_v1(&contexts)?;
         let operation = histories[0]
             .continuation_record()
             .terms
@@ -319,6 +354,7 @@ impl Host {
             .delivery
             .submission_operation_id
             .clone();
+        financial_step!(CompletedVerification, NotEstablished);
         let verified = prepared
             .verify_completed_submission_v1(
                 access,
@@ -335,7 +371,8 @@ impl Host {
                 &read,
                 &read,
             )
-            .map_err(|_| financial_failure("COMPLETED_VERIFICATION"))?;
+            .map_err(|error| { financial_record!(engine, CompletedVerification, NotEstablished, &error); financial_failure("COMPLETED_VERIFICATION") })?;
+        financial_step!(Currentness, NotEstablished);
         let journal_identity = owner.submission_journal_identity()?;
         let backend_identity = backend.identity().clone();
         // This exact metadata comes from the sealed completed predecessor, never
@@ -351,7 +388,9 @@ impl Host {
         ) {
             return Err(Error::Permission);
         }
+        financial_step!(RetentionFreeze, NotEstablished);
         let frozen = retention.freeze_for_dispatch()?;
+        financial_step!(DispatchReview, NotEstablished);
         let descriptor = verified.retained().descriptor();
         let context = CompletedDispatchContextV1 {
             fixed: serde_json::from_value(serde_json::to_value(
@@ -374,10 +413,11 @@ impl Host {
                     &backend_identity,
                     verified.delivery_plan(),
                 )?,
-            attempt: prepared.next_dispatch_attempt_v1()?,
+            attempt: prepared.next_dispatch_attempt_v1().map_err(|error| { financial_record!(engine, AuditSummary, NotEstablished, &error); error })?,
         };
-        verified.validate_completed_dispatch_context_v1(&context)?;
+        verified.validate_completed_dispatch_context_v1(&context).map_err(|error| { financial_record!(engine, DispatchReview, NotEstablished, &error); error })?;
         // Last human prompt. Every gate below is closed and has no terminal.
+        financial_step!(DispatchReview, NotEstablished);
         let native = self.authority.approve_exact_durable_submission_v1(
             verified.retained(),
             context,
@@ -414,6 +454,7 @@ impl Host {
         let requests: [AuthorizeCompletedDispatchV1; 2] =
             requests.try_into().map_err(|_| Error::Invalid)?;
         {
+            financial_step!(PairIntentRetention, OutcomeUncertain);
             let journal = self.submission.lock().map_err(|_| Error::Locked)?;
             prepared = prepared
                 .retain_dispatch_intent_v1(
@@ -434,21 +475,24 @@ impl Host {
                     &read,
                     &read,
                 )
-                .map_err(|_| financial_failure("PAIR_INTENT"))?;
+                .map_err(|error| { financial_record!(engine, PairIntentRetention, OutcomeUncertain, &error); financial_failure("PAIR_INTENT") })?;
         }
         let mut admissions = Vec::with_capacity(2);
         for index in 0..2 {
+            financial_step!(RetainedPairRead, OutcomeUncertain);
             let intent = prepared.retained_dispatch_intent_v1(
                 native.context().attempt,
                 access,
                 &effect,
                 &read,
                 &read,
-            )?;
+            ).map_err(|error| { financial_record!(engine, RetainedPairRead, OutcomeUncertain, &error); error })?;
+            if index == 0 { financial_step!(AdmissionFirst, OutcomeUncertain); } else { financial_step!(AdmissionSecond, OutcomeUncertain); }
             let admission = owner.admit_completed_dispatch_v1(
                 &intent, index, access, &effect, &read, &read, &native,
             )?;
             drop(intent);
+            financial_step!(AdmissionReceiptRetention, OutcomeUncertain);
             prepared = prepared
                 .retain_dispatch_admission_v1(
                     access,
@@ -458,10 +502,11 @@ impl Host {
                     &read,
                     &read,
                 )
-                .map_err(|_| financial_failure("ADMISSION_RETENTION"))?;
+                .map_err(|error| { financial_record!(engine, AdmissionReceiptRetention, OutcomeUncertain, &error); financial_failure("ADMISSION_RETENTION") })?;
             admissions.push(admission);
         }
         let admissions: [_; 2] = admissions.try_into().map_err(|_| Error::Invalid)?;
+        financial_step!(DispatchReverification, OutcomeUncertain);
         let verified = prepared
             .verify_completed_submission_v1(
                 access,
@@ -478,13 +523,14 @@ impl Host {
                 &read,
                 &read,
             )
-            .map_err(|_| financial_failure("COMPLETED_VERIFICATION"))?;
+            .map_err(|error| { financial_record!(engine, DispatchReverification, OutcomeUncertain, &error); financial_failure("COMPLETED_VERIFICATION") })?;
         let policy = wholepact_chain::SubmissionPolicy {
             minimum_expiry_margin_blocks: native.context().delivery.minimum_expiry_margin_blocks,
             ..Default::default()
         };
         // Fresh provider context is not a human prompt or authority renewal.
-        let chain_context = backend.fresh_context().await?;
+        financial_step!(BackendContext, OutcomeUncertain);
+        let chain_context = backend.fresh_context().await.map_err(|error| { financial_record!(chain, BackendContext, OutcomeUncertain, &error); error })?;
         let mut journal = self.submission.lock().map_err(|_| Error::Locked)?;
         let mut authority = ProductionDurableSubmissionAuthorityV1 {
             verified: &verified,
@@ -495,6 +541,7 @@ impl Host {
             retention: &frozen,
             used: false,
         };
+        financial_step!(SavedTransactionHandoff, OutcomeUncertain);
         prepared
             .retain_original_submission_v1(
                 access,
@@ -520,7 +567,7 @@ impl Host {
                 &read,
                 &read,
             )
-            .map_err(|_| financial_failure("SAVED_TRANSACTION_HANDOFF"))?;
+            .map_err(|error| { financial_record!(engine, SavedTransactionHandoff, OutcomeUncertain, &error); financial_failure("SAVED_TRANSACTION_HANDOFF") })?;
         let mut authority = ProductionDurableSubmissionAuthorityV1 {
             verified: &verified,
             access,
@@ -530,6 +577,7 @@ impl Host {
             retention: &frozen,
             used: false,
         };
+        financial_step!(DispatchOutcome, OutcomeUncertain);
         prepared
             .dispatch_original_submission_v1(
                 access,
@@ -555,7 +603,18 @@ impl Host {
                 &read,
             )
             .await
-            .map_err(|_| financial_failure("DISPATCH_OUTCOME"))
+            .map_err(|error| { financial_record!(engine, DispatchOutcome, OutcomeUncertain, &error); financial_failure("DISPATCH_OUTCOME") })
+
+        }.await;
+        #[cfg(all(
+            test,
+            feature = "synthetic-born-joined-qualification",
+            feature = "durable-proposal"
+        ))]
+        if let Err(error) = &result {
+            crate::host::financial_diagnostics_v1::host_current(error);
+        }
+        result
     }
 }
 
@@ -581,34 +640,54 @@ impl Host {
         key: &str,
         histories: [&wholepact_signer::authority_bridge::financial_continuation_v1::AuthenticatedFinancialContinuationHistoryV1; 2],
     ) -> Result<u64> {
-        crate::id(key)?;
-        let owner = self
-            .original_financial_owner_v1(root)
-            .map_err(|_| financial_failure("ORIGINAL_SOURCE"))?;
-        let inspection = owner.initial_inspection();
-        let approval = self.terminal.approve_historical("Read this exact original saved fixed proof and both original financial continuation records. No signing, repair or dispatch is permitted by this read.")?;
-        let read = ClosedFinancialReadConsentV1 {
-            owner: &owner,
-            inspection,
-            approval: &approval,
-        };
-        let approval = self.terminal.approve_historical(&format!("Record the two authenticated owner financial continuations against this exact original fixed proposal {} at revision {}, command {}. This local association does not sign, reserve, extract or dispatch, and does not extend any owner deadline.", inspection.fixed_identity().proposal_id, inspection.revision(), key))?;
-        let effect = ClosedFinancialPreparationConsentV1 {
-            read: &read,
-            effect: &approval,
-        };
-        owner
-            .coordinator()
-            .bind_financial_continuations_v1(
-                self.access()?,
-                key,
-                inspection.revision(),
-                histories,
-                &effect,
-                &read,
-                &read,
-            )
-            .map_err(|_| financial_failure("CONTINUATION_BIND"))
+        financial_step!(InputValidation, NotEstablished);
+        let result = (|| -> Result<_> {
+            crate::id(key)?;
+            financial_step!(OriginalSource, NotEstablished);
+            let owner = self.original_financial_owner_v1(root).map_err(|error| {
+                financial_record!(host, OriginalSource, NotEstablished, &error);
+                financial_failure("ORIGINAL_SOURCE")
+            })?;
+            let inspection = owner.initial_inspection();
+            financial_step!(ReadConsent, NotEstablished);
+            let approval = self.terminal.approve_historical("Read this exact original saved fixed proof and both original financial continuation records. No signing, repair or dispatch is permitted by this read.")?;
+            let read = ClosedFinancialReadConsentV1 {
+                owner: &owner,
+                inspection,
+                approval: &approval,
+            };
+            financial_step!(EffectConsent, NotEstablished);
+            let approval = self.terminal.approve_historical(&format!("Record the two authenticated owner financial continuations against this exact original fixed proposal {} at revision {}, command {}. This local association does not sign, reserve, extract or dispatch, and does not extend any owner deadline.", inspection.fixed_identity().proposal_id, inspection.revision(), key))?;
+            let effect = ClosedFinancialPreparationConsentV1 {
+                read: &read,
+                effect: &approval,
+            };
+            financial_step!(ContinuationBinding, OutcomeUncertain);
+            owner
+                .coordinator()
+                .bind_financial_continuations_v1(
+                    self.access()?,
+                    key,
+                    inspection.revision(),
+                    histories,
+                    &effect,
+                    &read,
+                    &read,
+                )
+                .map_err(|error| {
+                    financial_record!(engine, ContinuationBinding, OutcomeUncertain, &error);
+                    financial_failure("CONTINUATION_BIND")
+                })
+        })();
+        #[cfg(all(
+            test,
+            feature = "synthetic-born-joined-qualification",
+            feature = "durable-proposal"
+        ))]
+        if let Err(error) = &result {
+            crate::host::financial_diagnostics_v1::host_current(error);
+        }
+        result
     }
 
     pub(in crate::host) fn intake_original_financial_result_v1(
@@ -618,96 +697,158 @@ impl Host {
         receiver: wholepact_signer::authority_bridge::financial_continuation_v1::PreparedFinancialResultReceiverV1,
         history: &wholepact_signer::authority_bridge::financial_continuation_v1::AuthenticatedFinancialContinuationHistoryV1,
     ) -> Result<u64> {
-        use wholepact_engine::signature_intake::LocalSignedRetention;
-        use wholepact_protocol::authorization::retention::SignedRetentionConsent;
-        crate::id(key)?;
-        let owner = self
-            .original_financial_owner_v1(root)
-            .map_err(|_| financial_failure("ORIGINAL_SOURCE"))?;
-        let inspection = owner.initial_inspection();
-        let read_approval = self.terminal.approve_historical("Read the exact original financial fixed proof and existing intake lineage for protected signer-result verification. No missing result may be regenerated.")?;
-        let read = ClosedFinancialReadConsentV1 {
-            owner: &owner,
-            inspection,
-            approval: &read_approval,
-        };
-        let effect_approval = self.terminal.approve_historical(&format!("Verify and retain one actual authenticated original signer result for fixed proposal {}, revision {}, command {}. The installed protected receive route and original source provenance must match. This cannot invoke signing or extract a transaction.", inspection.fixed_identity().proposal_id, inspection.revision(), key))?;
-        let effect = ClosedFinancialPreparationConsentV1 {
-            read: &read,
-            effect: &effect_approval,
-        };
-        let scope = inspection.checkpoint_scope();
-        let retention = self.authority.retention_consent(
-            &scope.principal_id,
-            &scope.candidate_id,
-            &scope.manifest_digest,
-            inspection.proof_job_id(),
-            scope.account_ids.iter().cloned().collect(),
-        )?;
-        let financial = self.financial.as_ref().ok_or(Error::Locked)?;
-        let prepared = owner
-            .coordinator()
-            .prepare_original_financial_v1(self.access()?, &effect, &read, &read)
-            .map_err(|_| financial_failure("FIXED_SOURCE_VERIFICATION"))?;
-        let expected_scope = prepared
-            .financial_result_retention_scope_v1(
-                receiver.preview(),
-                self.access()?,
-                &effect,
-                &read,
-                &read,
-            )
-            .map_err(|_| financial_failure("RESULT_PREFLIGHT"))?;
-        if !SignedRetentionConsent::permits(&retention, &expected_scope) {
-            return Err(Error::Permission);
+        financial_step!(InputValidation, NotEstablished);
+        let result = (|| -> Result<_> {
+            use wholepact_engine::signature_intake::LocalSignedRetention;
+            use wholepact_protocol::authorization::retention::SignedRetentionConsent;
+            crate::id(key)?;
+            financial_step!(OriginalSource, NotEstablished);
+            let owner = self.original_financial_owner_v1(root).map_err(|error| {
+                financial_record!(host, OriginalSource, NotEstablished, &error);
+                financial_failure("ORIGINAL_SOURCE")
+            })?;
+            let inspection = owner.initial_inspection();
+            financial_step!(ReadConsent, NotEstablished);
+            let read_approval = self.terminal.approve_historical("Read the exact original financial fixed proof and existing intake lineage for protected signer-result verification. No missing result may be regenerated.")?;
+            let read = ClosedFinancialReadConsentV1 {
+                owner: &owner,
+                inspection,
+                approval: &read_approval,
+            };
+            financial_step!(EffectConsent, NotEstablished);
+            let effect_approval = self.terminal.approve_historical(&format!("Verify and retain one actual authenticated original signer result for fixed proposal {}, revision {}, command {}. The installed protected receive route and original source provenance must match. This cannot invoke signing or extract a transaction.", inspection.fixed_identity().proposal_id, inspection.revision(), key))?;
+            let effect = ClosedFinancialPreparationConsentV1 {
+                read: &read,
+                effect: &effect_approval,
+            };
+            let scope = inspection.checkpoint_scope();
+            financial_step!(SignedRetentionApproval, NotEstablished);
+            let retention = self.authority.retention_consent(
+                &scope.principal_id,
+                &scope.candidate_id,
+                &scope.manifest_digest,
+                inspection.proof_job_id(),
+                scope.account_ids.iter().cloned().collect(),
+            )?;
+            let financial = self.financial.as_ref().ok_or(Error::Locked)?;
+            financial_step!(SourcePreparation, NotEstablished);
+            let prepared = owner
+                .coordinator()
+                .prepare_original_financial_v1(self.access()?, &effect, &read, &read)
+                .map_err(|error| {
+                    financial_record!(engine, SourcePreparation, NotEstablished, &error);
+                    financial_failure("FIXED_SOURCE_VERIFICATION")
+                })?;
+            financial_step!(ResultPreview, NotEstablished);
+            let expected_scope = prepared
+                .financial_result_retention_scope_v1(
+                    receiver.preview(),
+                    self.access()?,
+                    &effect,
+                    &read,
+                    &read,
+                )
+                .map_err(|error| {
+                    financial_record!(engine, ResultPreview, NotEstablished, &error);
+                    financial_failure("RESULT_PREFLIGHT")
+                })?;
+            financial_step!(SignedRetentionApproval, NotEstablished);
+            if !SignedRetentionConsent::permits(&retention, &expected_scope) {
+                return Err(Error::Permission);
+            }
+            let original_until = inspection
+                .materials()
+                .iter()
+                .map(|m| m.scope().valid_until_unix_seconds)
+                .chain(std::iter::once(
+                    prepared
+                        .original_financial_valid_until_ms_v1()
+                        .map_err(|error| {
+                            financial_record!(engine, Currentness, NotEstablished, &error);
+                            error
+                        })?
+                        / 1000,
+                ))
+                .min()
+                .ok_or(Error::Authentication)?;
+            financial_step!(IntakeSetupApproval, NotEstablished);
+            let setup_approval = self
+                .terminal
+                .approve_financial_intake_setup_v1(&expected_scope, original_until)?;
+            let setup = ClosedFinancialIntakeSetupV1 {
+                owner: &owner,
+                inspection,
+                approval: &setup_approval,
+                exact_scope: &expected_scope,
+            };
+            financial_step!(RetentionFreeze, NotEstablished);
+            let retention = retention.freeze_for_signed_intake()?;
+            drop(effect);
+            drop(read);
+            drop(effect_approval);
+            drop(read_approval);
+            // Only now may the independently approved Signer ReturnExact begin.
+            // All later gates are closed; no Host human wait consumes its lease.
+            financial_step!(ResultReceive, NotEstablished);
+            let delivery = {
+                #[cfg(all(test,feature="synthetic-born-joined-qualification",feature="durable-proposal"))]
+                let result=receiver.receive_observed_v1().map_err(|observed| {
+                    if let Some(detail)=observed.diagnostic {crate::host::financial_diagnostics_v1::signer_result(detail,crate::host::financial_diagnostics_v1::FinancialCommitStateV1::NotEstablished);}
+                    observed.error
+                });
+                #[cfg(not(all(test,feature="synthetic-born-joined-qualification",feature="durable-proposal")))]
+                let result=receiver.receive();
+                result
+            }.map_err(|error| {
+                financial_record!(bridge, ResultReceive, NotEstablished, &error);
+                financial_failure("RESULT_RECEIVE")
+            })?;
+            financial_step!(AuthenticatedIntake, OutcomeUncertain);
+            let revision = prepared
+                .intake_original_signature_v1(
+                    self.access()?,
+                    key,
+                    &delivery,
+                    history,
+                    LocalSignedRetention {
+                        journal: &financial.signed,
+                        consent: &retention,
+                    },
+                    &setup,
+                    &setup,
+                    &setup,
+                )
+                .map_err(|error| {
+                    #[cfg(all(test,feature="synthetic-born-joined-qualification",feature="durable-proposal"))]
+                    if let Some(detail)=delivery.last_failure_v1() {crate::host::financial_diagnostics_v1::signer_result(detail,crate::host::financial_diagnostics_v1::FinancialCommitStateV1::OutcomeUncertain);}
+                    financial_record!(engine, AuthenticatedIntake, OutcomeUncertain, &error);
+                    financial_failure("AUTHENTICATED_INTAKE")
+                })?;
+            financial_step!(ResultFinishAcknowledgement, IntakeCommitted);
+            {
+                #[cfg(all(test,feature="synthetic-born-joined-qualification",feature="durable-proposal"))]
+                let result=delivery.finish_observed_v1().map_err(|observed| {
+                    if let Some(detail)=observed.diagnostic {crate::host::financial_diagnostics_v1::signer_result(detail,crate::host::financial_diagnostics_v1::FinancialCommitStateV1::IntakeCommitted);}
+                    observed.error
+                });
+                #[cfg(not(all(test,feature="synthetic-born-joined-qualification",feature="durable-proposal")))]
+                let result=delivery.finish();
+                result
+            }.map_err(|error| {
+                financial_record!(bridge, ResultFinishAcknowledgement, IntakeCommitted, &error);
+                financial_failure("RESULT_FINISH_ACKNOWLEDGEMENT")
+            })?;
+            Ok(revision)
+        })();
+        #[cfg(all(
+            test,
+            feature = "synthetic-born-joined-qualification",
+            feature = "durable-proposal"
+        ))]
+        if let Err(error) = &result {
+            crate::host::financial_diagnostics_v1::host_current(error);
         }
-        let original_until = inspection
-            .materials()
-            .iter()
-            .map(|m| m.scope().valid_until_unix_seconds)
-            .chain(std::iter::once(
-                prepared.original_financial_valid_until_ms_v1()? / 1000,
-            ))
-            .min()
-            .ok_or(Error::Authentication)?;
-        let setup_approval = self
-            .terminal
-            .approve_financial_intake_setup_v1(&expected_scope, original_until)?;
-        let setup = ClosedFinancialIntakeSetupV1 {
-            owner: &owner,
-            inspection,
-            approval: &setup_approval,
-            exact_scope: &expected_scope,
-        };
-        let retention = retention.freeze_for_signed_intake()?;
-        drop(effect);
-        drop(read);
-        drop(effect_approval);
-        drop(read_approval);
-        // Only now may the independently approved Signer ReturnExact begin.
-        // All later gates are closed; no Host human wait consumes its lease.
-        let delivery = receiver
-            .receive()
-            .map_err(|_| financial_failure("RESULT_RECEIVE"))?;
-        let revision = prepared
-            .intake_original_signature_v1(
-                self.access()?,
-                key,
-                &delivery,
-                history,
-                LocalSignedRetention {
-                    journal: &financial.signed,
-                    consent: &retention,
-                },
-                &setup,
-                &setup,
-                &setup,
-            )
-            .map_err(|_| financial_failure("AUTHENTICATED_INTAKE"))?;
-        delivery
-            .finish()
-            .map_err(|_| financial_failure("RESULT_FINISH_ACKNOWLEDGEMENT"))?;
-        Ok(revision)
+        result
     }
 
     pub(in crate::host) fn complete_original_financial_transaction_v1(
@@ -717,68 +858,105 @@ impl Host {
     ) -> Result<
         wholepact_protocol::authorization::retention::transaction::TransactionCheckpointSummary,
     > {
-        use wholepact_engine::signature_intake::LocalSignedRetention;
-        use wholepact_protocol::authorization::retention::transaction::LocalTransactionCheckpoint;
-        crate::id(key)?;
-        let owner = self
-            .original_financial_owner_v1(root)
-            .map_err(|_| financial_failure("ORIGINAL_SOURCE"))?;
-        let inspection = owner.initial_inspection();
-        let approval = self.terminal.approve_historical("Read and verify the exact two retained financial signer results and original proof. Incomplete or uncertain result lineage remains fenced.")?;
-        let read = ClosedFinancialReadConsentV1 {
-            owner: &owner,
-            inspection,
-            approval: &approval,
-        };
-        let approval = self.terminal.approve_historical(&format!("Combine only the two exact retained original signature subsets for proposal {}, revision {}, command {}, then create its single immutable completed transaction checkpoint. An existing extraction intent without a result is RecoveryRequired, never permission to re-extract. This performs no network submission.", inspection.fixed_identity().proposal_id, inspection.revision(), key))?;
-        let effect = ClosedFinancialPreparationConsentV1 {
-            read: &read,
-            effect: &approval,
-        };
-        let financial = self.financial.as_ref().ok_or(Error::Locked)?;
-        let prepared = owner
-            .coordinator()
-            .prepare_original_financial_v1(self.access()?, &effect, &read, &read)
-            .map_err(|_| financial_failure("FIXED_SOURCE_VERIFICATION"))?;
-        let contexts = prepared.financial_retention_contexts_v1(
-            self.access()?, &effect, &read, &read,
-        ).map_err(|_| financial_failure("RETENTION_CONTEXTS"))?;
-        let retention = self.authority.financial_retention_consent_v1(&contexts)?;
-        prepared
-            .retain_original_union_v1(
-                self.access()?,
-                key,
-                LocalSignedRetention {
-                    journal: &financial.signed,
-                    consent: &retention,
-                },
-                &effect,
-                &read,
-                &read,
-            )
-            .map_err(|_| financial_failure("UNION_RETENTION"))?;
-        // Reload only after our own successful append. The coordinator audits the
-        // complete bounded lineage; no stale prepared pin is silently refreshed.
-        let prepared = owner
-            .coordinator()
-            .prepare_original_financial_v1(self.access()?, &effect, &read, &read)
-            .map_err(|_| financial_failure("FIXED_SOURCE_VERIFICATION"))?;
-        prepared
-            .checkpoint_original_transaction_v1(
-                self.access()?,
-                LocalSignedRetention {
-                    journal: &financial.signed,
-                    consent: &retention,
-                },
-                LocalTransactionCheckpoint {
-                    journal: &financial.transactions,
-                    consent: &retention,
-                },
-                &effect,
-                &read,
-                &read,
-            )
-            .map_err(|_| financial_failure("EXTRACTION_CHECKPOINT"))
+        financial_step!(InputValidation, NotEstablished);
+        let result = (|| -> Result<_> {
+            use wholepact_engine::signature_intake::LocalSignedRetention;
+            use wholepact_protocol::authorization::retention::transaction::LocalTransactionCheckpoint;
+            crate::id(key)?;
+            financial_step!(OriginalSource, NotEstablished);
+            let owner = self.original_financial_owner_v1(root).map_err(|error| {
+                financial_record!(host, OriginalSource, NotEstablished, &error);
+                financial_failure("ORIGINAL_SOURCE")
+            })?;
+            let inspection = owner.initial_inspection();
+            financial_step!(ReadConsent, NotEstablished);
+            let approval = self.terminal.approve_historical("Read and verify the exact two retained financial signer results and original proof. Incomplete or uncertain result lineage remains fenced.")?;
+            let read = ClosedFinancialReadConsentV1 {
+                owner: &owner,
+                inspection,
+                approval: &approval,
+            };
+            financial_step!(EffectConsent, NotEstablished);
+            let approval = self.terminal.approve_historical(&format!("Combine only the two exact retained original signature subsets for proposal {}, revision {}, command {}, then create its single immutable completed transaction checkpoint. An existing extraction intent without a result is RecoveryRequired, never permission to re-extract. This performs no network submission.", inspection.fixed_identity().proposal_id, inspection.revision(), key))?;
+            let effect = ClosedFinancialPreparationConsentV1 {
+                read: &read,
+                effect: &approval,
+            };
+            let financial = self.financial.as_ref().ok_or(Error::Locked)?;
+            financial_step!(SourcePreparation, NotEstablished);
+            let prepared = owner
+                .coordinator()
+                .prepare_original_financial_v1(self.access()?, &effect, &read, &read)
+                .map_err(|error| {
+                    financial_record!(engine, SourcePreparation, NotEstablished, &error);
+                    financial_failure("FIXED_SOURCE_VERIFICATION")
+                })?;
+            financial_step!(RetentionContexts, NotEstablished);
+            let contexts = prepared
+                .financial_retention_contexts_v1(self.access()?, &effect, &read, &read)
+                .map_err(|error| {
+                    financial_record!(engine, RetentionContexts, NotEstablished, &error);
+                    financial_failure("RETENTION_CONTEXTS")
+                })?;
+            financial_step!(SignedRetentionApproval, NotEstablished);
+            let retention = self.authority.financial_retention_consent_v1(&contexts)?;
+            financial_step!(UnionRetention, OutcomeUncertain);
+            prepared
+                .retain_original_union_v1(
+                    self.access()?,
+                    key,
+                    LocalSignedRetention {
+                        journal: &financial.signed,
+                        consent: &retention,
+                    },
+                    &effect,
+                    &read,
+                    &read,
+                )
+                .map_err(|error| {
+                    financial_record!(engine, UnionRetention, OutcomeUncertain, &error);
+                    financial_failure("UNION_RETENTION")
+                })?;
+            // Reload only after our own successful append. The coordinator audits the
+            // complete bounded lineage; no stale prepared pin is silently refreshed.
+            financial_step!(SourcePreparation, NotEstablished);
+            let prepared = owner
+                .coordinator()
+                .prepare_original_financial_v1(self.access()?, &effect, &read, &read)
+                .map_err(|error| {
+                    financial_record!(engine, SourcePreparation, NotEstablished, &error);
+                    financial_failure("FIXED_SOURCE_VERIFICATION")
+                })?;
+            financial_step!(TransactionCheckpoint, OutcomeUncertain);
+            prepared
+                .checkpoint_original_transaction_v1(
+                    self.access()?,
+                    LocalSignedRetention {
+                        journal: &financial.signed,
+                        consent: &retention,
+                    },
+                    LocalTransactionCheckpoint {
+                        journal: &financial.transactions,
+                        consent: &retention,
+                    },
+                    &effect,
+                    &read,
+                    &read,
+                )
+                .map_err(|error| {
+                    financial_record!(engine, TransactionCheckpoint, OutcomeUncertain, &error);
+                    financial_failure("EXTRACTION_CHECKPOINT")
+                })
+        })();
+        #[cfg(all(
+            test,
+            feature = "synthetic-born-joined-qualification",
+            feature = "durable-proposal"
+        ))]
+        if let Err(error) = &result {
+            crate::host::financial_diagnostics_v1::host_current(error);
+        }
+        result
     }
 }
 
@@ -792,9 +970,24 @@ impl Host {
     pub(in crate::host) fn read_original_financial_history_v1(
         &self, root: &std::path::Path, account: &str, continuation_operation: &str,
     ) -> Result<wholepact_authority::durable_financial_continuation_v1::AuthenticatedFinancialContinuationHistoryV1>{
-        let owner = self.original_financial_owner_v1(root)?;
-        let approval = self.terminal.approve_historical("Read the complete authenticated original financial Witness history through the planned dispatcher, including exact partial/uncertain dispatch outcomes. This read cannot append a request or recreate a live admission or old Host decision.")?;
-        owner.financial_history_v1(account, continuation_operation, &approval)
+        financial_step!(InputValidation, NotEstablished);
+        let result = (|| -> Result<_> {
+            financial_step!(OriginalSource, NotEstablished);
+            let owner = self.original_financial_owner_v1(root)?;
+            financial_step!(ReadConsent, NotEstablished);
+            let approval = self.terminal.approve_historical("Read the complete authenticated original financial Witness history through the planned dispatcher, including exact partial/uncertain dispatch outcomes. This read cannot append a request or recreate a live admission or old Host decision.")?;
+            financial_step!(FinancialHistory, NotEstablished);
+            owner.financial_history_v1(account, continuation_operation, &approval)
+        })();
+        #[cfg(all(
+            test,
+            feature = "synthetic-born-joined-qualification",
+            feature = "durable-proposal"
+        ))]
+        if let Err(error) = &result {
+            crate::host::financial_diagnostics_v1::host_current(error);
+        }
+        result
     }
 }
 
@@ -872,64 +1065,105 @@ impl Host {
         root: &std::path::Path,
         operation: &str,
     ) -> Result<CompletedPrivateFinancialSummaryV1> {
-        use wholepact_engine::signature_intake::LocalSignedRetention;
-        use wholepact_protocol::authorization::retention::transaction::LocalTransactionCheckpoint;
-        let owner = self.original_financial_owner_v1(root)?;
-        let inspection = owner.initial_inspection();
-        let approval = self.terminal.approve_historical("Read and verify the exact completed original financial transaction and retained dispatch lineage for an inert audit summary. This cannot repair, extract, renew an admission or send a request.")?;
-        let read = ClosedFinancialReadConsentV1 {
-            owner: &owner,
-            inspection,
-            approval: &approval,
-        };
-        let financial = self.financial.as_ref().ok_or(Error::Locked)?;
-        let prepared = owner.coordinator().prepare_original_financial_v1(
-            self.access()?,
-            &read,
-            &read,
-            &read,
-        )?;
-        let contexts = prepared.financial_retention_contexts_v1(
-            self.access()?, &read, &read, &read,
-        ).map_err(|_| financial_failure("RETENTION_CONTEXTS"))?;
-        let retention = self.authority.financial_retention_consent_v1(&contexts)?;
-        let verified = prepared.verify_completed_submission_v1(
-            self.access()?,
-            operation,
-            LocalSignedRetention {
-                journal: &financial.signed,
-                consent: &retention,
-            },
-            LocalTransactionCheckpoint {
-                journal: &financial.transactions,
-                consent: &retention,
-            },
-            &read,
-            &read,
-            &read,
-        )?;
-        let next = prepared.next_dispatch_attempt_v1()?;
-        let latest_requests = if next > 1 {
-            Some(
-                prepared
-                    .retained_dispatch_intent_v1(next - 1, self.access()?, &read, &read, &read)?
-                    .requests()
-                    .clone(),
-            )
-        } else {
-            None
-        };
-        read.check()?;
-        Ok(CompletedPrivateFinancialSummaryV1 {
-            checkpoint_id: verified.retained().checkpoint_id(),
-            transaction_digest: verified.retained().descriptor().bytes_sha256.clone(),
-            transaction_id: verified.retained().descriptor().transaction_id.clone(),
-            fixed_identity: serde_json::to_value(verified.retained().fixed_identity())?,
-            frozen_export_history_digest: inspection.frozen_export_history_digest.clone(),
-            next_delegation_attempt: next,
-            latest_requests,
-            original_valid_until_ms: prepared.original_financial_valid_until_ms_v1()?,
-        })
+        financial_step!(InputValidation, NotEstablished);
+        let result = (|| -> Result<_> {
+            use wholepact_engine::signature_intake::LocalSignedRetention;
+            use wholepact_protocol::authorization::retention::transaction::LocalTransactionCheckpoint;
+            financial_step!(OriginalSource, NotEstablished);
+            let owner = self.original_financial_owner_v1(root)?;
+            let inspection = owner.initial_inspection();
+            financial_step!(ReadConsent, NotEstablished);
+            let approval = self.terminal.approve_historical("Read and verify the exact completed original financial transaction and retained dispatch lineage for an inert audit summary. This cannot repair, extract, renew an admission or send a request.")?;
+            let read = ClosedFinancialReadConsentV1 {
+                owner: &owner,
+                inspection,
+                approval: &approval,
+            };
+            let financial = self.financial.as_ref().ok_or(Error::Locked)?;
+            financial_step!(SourcePreparation, NotEstablished);
+            let prepared = owner
+                .coordinator()
+                .prepare_original_financial_v1(self.access()?, &read, &read, &read)
+                .map_err(|error| {
+                    financial_record!(engine, SourcePreparation, NotEstablished, &error);
+                    error
+                })?;
+            financial_step!(RetentionContexts, NotEstablished);
+            let contexts = prepared
+                .financial_retention_contexts_v1(self.access()?, &read, &read, &read)
+                .map_err(|error| {
+                    financial_record!(engine, RetentionContexts, NotEstablished, &error);
+                    financial_failure("RETENTION_CONTEXTS")
+                })?;
+            financial_step!(SignedRetentionApproval, NotEstablished);
+            let retention = self.authority.financial_retention_consent_v1(&contexts)?;
+            financial_step!(CompletedVerification, NotEstablished);
+            let verified = prepared
+                .verify_completed_submission_v1(
+                    self.access()?,
+                    operation,
+                    LocalSignedRetention {
+                        journal: &financial.signed,
+                        consent: &retention,
+                    },
+                    LocalTransactionCheckpoint {
+                        journal: &financial.transactions,
+                        consent: &retention,
+                    },
+                    &read,
+                    &read,
+                    &read,
+                )
+                .map_err(|error| {
+                    financial_record!(engine, CompletedVerification, NotEstablished, &error);
+                    error
+                })?;
+            financial_step!(AuditSummary, NotEstablished);
+            let next = prepared.next_dispatch_attempt_v1().map_err(|error| {
+                financial_record!(engine, AuditSummary, NotEstablished, &error);
+                error
+            })?;
+            let latest_requests = if next > 1 {
+                financial_step!(RetainedPairRead, NotEstablished);
+                Some(
+                    prepared
+                        .retained_dispatch_intent_v1(next - 1, self.access()?, &read, &read, &read)
+                        .map_err(|error| {
+                            financial_record!(engine, RetainedPairRead, OutcomeUncertain, &error);
+                            error
+                        })?
+                        .requests()
+                        .clone(),
+                )
+            } else {
+                None
+            };
+            read.check()?;
+            Ok(CompletedPrivateFinancialSummaryV1 {
+                checkpoint_id: verified.retained().checkpoint_id(),
+                transaction_digest: verified.retained().descriptor().bytes_sha256.clone(),
+                transaction_id: verified.retained().descriptor().transaction_id.clone(),
+                fixed_identity: serde_json::to_value(verified.retained().fixed_identity())?,
+                frozen_export_history_digest: inspection.frozen_export_history_digest.clone(),
+                next_delegation_attempt: next,
+                latest_requests,
+                original_valid_until_ms: prepared.original_financial_valid_until_ms_v1().map_err(
+                    |error| {
+                        financial_record!(engine, Currentness, NotEstablished, &error);
+                        error
+                    },
+                )?,
+            })
+        })();
+        #[cfg(all(
+            test,
+            feature = "synthetic-born-joined-qualification",
+            feature = "durable-proposal"
+        ))]
+        if let Err(error) = &result {
+            crate::host::financial_diagnostics_v1::host_current(error);
+        }
+        result
     }
 }
 
@@ -940,40 +1174,63 @@ impl Host {
         root: &std::path::Path,
         claim: &wholepact_authority::completed_dispatch_v1::AuthorizeCompletedDispatchV1,
     ) -> Result<()> {
-        let owner = self.original_financial_owner_v1(root)?;
-        let inspection = owner.initial_inspection();
-        let approval = self.terminal.approve_historical("Verify the saved original dispatch pair and perform one never-funded qualification probe that is independently proven stale by current authenticated history. Require explicit StaleHead and unchanged history; any uncertain or unexpected outcome stops the test without sending transaction bytes.")?;
-        let read = ClosedFinancialReadConsentV1 {
-            owner: &owner,
-            inspection,
-            approval: &approval,
-        };
-        let prepared = owner.coordinator().prepare_original_financial_v1(
-            self.access()?,
-            &read,
-            &read,
-            &read,
-        )?;
-        let intent = prepared.retained_dispatch_intent_v1(
-            claim.context.attempt,
-            self.access()?,
-            &read,
-            &read,
-            &read,
-        )?;
-        let index = intent
-            .requests()
-            .iter()
-            .position(|request| request == claim)
-            .ok_or(Error::Authentication)?;
-        owner.require_stale_dispatch_refused_v1(
-            &intent,
-            index,
-            self.access()?,
-            &read,
-            &read,
-            &read,
-            &approval,
-        )
+        financial_step!(InputValidation, NotEstablished);
+        let result = (|| -> Result<_> {
+            financial_step!(OriginalSource, NotEstablished);
+            let owner = self.original_financial_owner_v1(root)?;
+            let inspection = owner.initial_inspection();
+            financial_step!(ReadConsent, NotEstablished);
+            let approval = self.terminal.approve_historical("Verify the saved original dispatch pair and perform one never-funded qualification probe that is independently proven stale by current authenticated history. Require explicit StaleHead and unchanged history; any uncertain or unexpected outcome stops the test without sending transaction bytes.")?;
+            let read = ClosedFinancialReadConsentV1 {
+                owner: &owner,
+                inspection,
+                approval: &approval,
+            };
+            financial_step!(SourcePreparation, NotEstablished);
+            let prepared = owner
+                .coordinator()
+                .prepare_original_financial_v1(self.access()?, &read, &read, &read)
+                .map_err(|error| {
+                    financial_record!(engine, SourcePreparation, NotEstablished, &error);
+                    error
+                })?;
+            financial_step!(RetainedPairRead, OutcomeUncertain);
+            let intent = prepared
+                .retained_dispatch_intent_v1(
+                    claim.context.attempt,
+                    self.access()?,
+                    &read,
+                    &read,
+                    &read,
+                )
+                .map_err(|error| {
+                    financial_record!(engine, RetainedPairRead, OutcomeUncertain, &error);
+                    error
+                })?;
+            let index = intent
+                .requests()
+                .iter()
+                .position(|request| request == claim)
+                .ok_or(Error::Authentication)?;
+            financial_step!(StaleRefusal, OutcomeUncertain);
+            owner.require_stale_dispatch_refused_v1(
+                &intent,
+                index,
+                self.access()?,
+                &read,
+                &read,
+                &read,
+                &approval,
+            )
+        })();
+        #[cfg(all(
+            test,
+            feature = "synthetic-born-joined-qualification",
+            feature = "durable-proposal"
+        ))]
+        if let Err(error) = &result {
+            crate::host::financial_diagnostics_v1::host_current(error);
+        }
+        result
     }
 }

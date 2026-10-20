@@ -1705,12 +1705,10 @@ fn history_measurement_capture_is_canonical_bounded_and_sticky() {
     assert!(capture.public_lines()[0].contains("invalid=true"));
     capture.discard_for_budget();
     assert_eq!(capture.retained_bytes(), 0);
-    assert!(
-        capture
-            .public_lines()
-            .iter()
-            .all(|line| line.contains("invalid=true"))
-    );
+    assert!(capture
+        .public_lines()
+        .iter()
+        .all(|line| line.contains("invalid=true")));
     let mut capture = HistoryMeasurementCapture::default();
     capture.capture_line(&line, 1);
     capture.capture_line(&line, 8192);
@@ -1742,18 +1740,14 @@ fn history_measurement_parser_preserves_unavailable_and_exhausted() {
     }
     value["incomplete"] = serde_json::json!(true);
     let record = parse_history_record(&format!("[HISTORY_MEASUREMENT_V1 {value}]"), false).unwrap();
-    assert!(
-        record
-            .line()
-            .contains("\"selected_remaining_at_failure_us\":null")
-    );
+    assert!(record
+        .line()
+        .contains("\"selected_remaining_at_failure_us\":null"));
     value["selected_remaining_at_failure_us"] = serde_json::json!(0);
     let record = parse_history_record(&format!("[HISTORY_MEASUREMENT_V1 {value}]"), false).unwrap();
-    assert!(
-        record
-            .line()
-            .contains("\"selected_remaining_at_failure_us\":0")
-    );
+    assert!(record
+        .line()
+        .contains("\"selected_remaining_at_failure_us\":0"));
 }
 
 pub(super) fn host<T>(boundary: Boundary, operation: impl FnOnce() -> Result<T>) -> Result<T> {
@@ -2323,29 +2317,26 @@ fn admission_parser_requires_every_exact_field_and_rejects_duplicates() {
                     .as_object_mut()
                     .unwrap()
                     .remove(&key);
-                assert!(
-                    parse_admission_record(
-                        &format!("{}{missing}]", ADMISSION_PREFIXES[slot]),
-                        slot
-                    )
-                    .is_none()
-                );
+                assert!(parse_admission_record(
+                    &format!("{}{missing}]", ADMISSION_PREFIXES[slot]),
+                    slot
+                )
+                .is_none());
                 let mut confused = original.clone();
                 at(&mut confused, &path)[&key] = serde_json::json!(["private"]);
-                assert!(
-                    parse_admission_record(
-                        &format!("{}{confused}]", ADMISSION_PREFIXES[slot]),
-                        slot
-                    )
-                    .is_none()
-                );
+                assert!(parse_admission_record(
+                    &format!("{}{confused}]", ADMISSION_PREFIXES[slot]),
+                    slot
+                )
+                .is_none());
             }
             let mut unknown = original.clone();
             at(&mut unknown, &path)["private"] = serde_json::json!("payload");
-            assert!(
-                parse_admission_record(&format!("{}{unknown}]", ADMISSION_PREFIXES[slot]), slot)
-                    .is_none()
-            );
+            assert!(parse_admission_record(
+                &format!("{}{unknown}]", ADMISSION_PREFIXES[slot]),
+                slot
+            )
+            .is_none());
             let text = original.to_string();
             let key = at(&mut object, &path)
                 .as_object()
@@ -2359,10 +2350,11 @@ fn admission_parser_requires_every_exact_field_and_rejects_duplicates() {
                 &format!("\"{key}\":null,\"{key}\":"),
                 1,
             );
-            assert!(
-                parse_admission_record(&format!("{}{duplicate}]", ADMISSION_PREFIXES[slot]), slot)
-                    .is_none()
-            );
+            assert!(parse_admission_record(
+                &format!("{}{duplicate}]", ADMISSION_PREFIXES[slot]),
+                slot
+            )
+            .is_none());
         }
     }
 }
@@ -2403,13 +2395,11 @@ fn admission_parser_preserves_unavailable_zero_and_commit_uncertainty() {
     assert!(parse_history_record(&format!("[HISTORY_MEASUREMENT_V1 {history}]"), false).is_none());
     for phase in ["Snapshot", "Page"] {
         rows[0]["phase"] = serde_json::json!(phase);
-        assert!(
-            parse_admission_record(
-                &format!("{}{row}]", ADMISSION_PREFIXES[0], row = rows[0]),
-                0
-            )
-            .is_none()
-        );
+        assert!(parse_admission_record(
+            &format!("{}{row}]", ADMISSION_PREFIXES[0], row = rows[0]),
+            0
+        )
+        .is_none());
     }
 }
 
@@ -2429,13 +2419,11 @@ fn admission_parser_rejects_out_of_bounds_and_type_confused_scalars() {
                     .is_none()
             );
         }
-        assert!(
-            parse_admission_record(
-                &format!("{}{}]", ADMISSION_PREFIXES[slot], " ".repeat(4097)),
-                slot
-            )
-            .is_none()
-        );
+        assert!(parse_admission_record(
+            &format!("{}{}]", ADMISSION_PREFIXES[slot], " ".repeat(4097)),
+            slot
+        )
+        .is_none());
     }
     for value in [
         serde_json::json!(-1),
@@ -2506,8 +2494,8 @@ fn admission_capture_slots_are_independent_sticky_and_bounded() {
 #[cfg(feature = "synthetic-born-joined-qualification")]
 mod durable_flow_projection {
     use super::{
-        PublicHistoryCost, admission_io_kind_label, history_check_site_label,
-        history_checkpoint_label, history_selected_limit_label, required_history_nullable,
+        admission_io_kind_label, history_check_site_label, history_checkpoint_label,
+        history_selected_limit_label, required_history_nullable, PublicHistoryCost,
     };
     use wholepact_authority::transport::history_diagnostics_v1::{
         CheckedHistoryCostV1, CheckedHistoryMeasurementV1, CheckedHistoryPhaseV1,
@@ -4459,10 +4447,10 @@ mod durable_flow_projection {
                 value["lower_call_measurement"]["measurement"]["phase"] =
                     serde_json::json!(purpose);
                 if *purpose == "Reserve" {
-                    value["lower_call_measurement"]["measurement"]["caller_remaining_at_budget_start_us"] =
-                        serde_json::Value::Null;
-                    value["lower_call_measurement"]["measurement"]["caller_remaining_at_failure_us"] =
-                        serde_json::Value::Null;
+                    value["lower_call_measurement"]["measurement"]
+                        ["caller_remaining_at_budget_start_us"] = serde_json::Value::Null;
+                    value["lower_call_measurement"]["measurement"]
+                        ["caller_remaining_at_failure_us"] = serde_json::Value::Null;
                 }
                 assert!(accepted(&value));
             }
@@ -4719,9 +4707,7 @@ mod durable_flow_projection {
                         format!("\\u{:04x}{}", key.as_bytes()[0], &key[1..]),
                     ] {
                         let duplicate = format!("{{\"{spelling}\":{entry},{}", &fragment[1..]);
-                        assert!(
-                            lifecycle_parse(&text.replacen(&fragment, &duplicate, 1)).is_none()
-                        );
+                        assert!(lifecycle_parse(&text.replacen(&fragment, &duplicate, 1)).is_none());
                     }
                     for bad in [
                         serde_json::json!([]),
@@ -4917,13 +4903,13 @@ mod durable_flow_projection {
         }
     }
 }
+#[cfg(feature = "synthetic-born-joined-qualification")]
+pub(super) use durable_flow_projection::{
+    emit_durable_flow, DurableFlowCapture, DurableLifecycleCapture,
+};
 #[cfg(all(test, feature = "synthetic-born-joined-qualification"))]
 pub(super) use durable_flow_projection::{
     DURABLE_FLOW_MAXIMAL_TEST_JSON, DURABLE_LIFECYCLE_MAXIMAL_TEST_JSON,
-};
-#[cfg(feature = "synthetic-born-joined-qualification")]
-pub(super) use durable_flow_projection::{
-    DurableFlowCapture, DurableLifecycleCapture, emit_durable_flow,
 };
 
 // Optional, data-only transport. The Host leaf owns the single strict typed
@@ -4937,8 +4923,83 @@ mod private_fixed_projection {
     pub(super) const PREFIX: &str = "CI_SYNTHETIC_PRIVATE_FIXED_DIAGNOSTIC ";
     pub(super) const UNAVAILABLE: &str = "CI_SYNTHETIC_PRIVATE_FIXED_DIAGNOSTIC_UNAVAILABLE";
 
+    use crate::host::financial_diagnostics_v1::FinancialDiagnosticV1;
+    const FINANCIAL_PREFIX: &str = "[FINANCIAL_DIAGNOSTIC_V1 ";
+    #[derive(Default)]
+    struct FinancialDiagnosticCapture {
+        value: Option<FinancialDiagnosticV1>,
+        retained: usize,
+        seen: bool,
+        invalid: bool,
+    }
+    impl FinancialDiagnosticCapture {
+        fn parse(line: &str) -> Option<FinancialDiagnosticV1> {
+            let payload = line.strip_prefix(FINANCIAL_PREFIX)?.strip_suffix(']')?;
+            if payload.len() > 2048 {
+                return None;
+            }
+            let value: FinancialDiagnosticV1 = serde_json::from_str(payload).ok()?;
+            if value.schema != 1 || serde_json::to_string(&value).ok()? != payload {
+                return None;
+            }
+            Some(value)
+        }
+        fn additional_bytes_for_line(&self, line: &str) -> Option<usize> {
+            if self.seen {
+                return None;
+            }
+            serde_json::to_vec(&Self::parse(line)?)
+                .ok()
+                .map(|bytes| bytes.len())
+        }
+        fn capture_line(&mut self, line: &str, available: usize) {
+            if !line.starts_with("[FINANCIAL_DIAGNOSTIC_V1") {
+                return;
+            }
+            if self.seen {
+                self.invalid = true;
+                return;
+            }
+            self.seen = true;
+            let Some(value) = Self::parse(line) else {
+                self.invalid = true;
+                return;
+            };
+            let Some(size) = serde_json::to_vec(&value).ok().map(|bytes| bytes.len()) else {
+                self.invalid = true;
+                return;
+            };
+            if size > available {
+                self.invalid = true;
+                return;
+            }
+            self.retained = size;
+            self.value = Some(value);
+        }
+        fn finish(&mut self, partial: &[u8]) {
+            if partial.starts_with(b"[FINANCIAL_DIAGNOSTIC_V1") {
+                self.seen = true;
+                self.invalid = true;
+            }
+        }
+        fn discard_for_budget(&mut self) {
+            if self.seen {
+                self.invalid = true;
+            }
+            self.value = None;
+            self.retained = 0;
+        }
+        fn value(&self) -> Option<&FinancialDiagnosticV1> {
+            if self.invalid {
+                None
+            } else {
+                self.value.as_ref()
+            }
+        }
+    }
     #[derive(Default)]
     pub(crate) struct PrivateFixedDiagnosticCapture {
+        financial: FinancialDiagnosticCapture,
         value: Option<PrivateFixedDiagnosticV1>,
         retained: usize,
         seen: bool,
@@ -4946,6 +5007,9 @@ mod private_fixed_projection {
     }
     impl PrivateFixedDiagnosticCapture {
         pub(crate) fn additional_bytes_for_line(&self, line: &str) -> Option<usize> {
+            if line.starts_with("[FINANCIAL_DIAGNOSTIC_V1") {
+                return self.financial.additional_bytes_for_line(line);
+            }
             if self.seen {
                 return None;
             }
@@ -4954,9 +5018,13 @@ mod private_fixed_projection {
         }
 
         pub(crate) fn retained_bytes(&self) -> usize {
-            self.retained
+            self.retained + self.financial.retained
         }
         pub(crate) fn capture_line(&mut self, line: &str, available: usize) {
+            if line.starts_with("[FINANCIAL_DIAGNOSTIC_V1") {
+                self.financial.capture_line(line, available);
+                return;
+            }
             if !line.starts_with("CI_SYNTHETIC_PRIVATE_FIXED_DIAGNOSTIC") {
                 return;
             }
@@ -4984,12 +5052,14 @@ mod private_fixed_projection {
             self.value = Some(value);
         }
         pub(crate) fn finish(&mut self, partial: &[u8]) {
+            self.financial.finish(partial);
             if partial.starts_with(b"CI_SYNTHETIC_PRIVATE_FIXED_DIAGNOSTIC") {
                 self.seen = true;
                 self.invalid = true;
             }
         }
         pub(crate) fn discard_for_budget(&mut self) {
+            self.financial.discard_for_budget();
             if self.seen {
                 self.invalid = true;
             }
@@ -5003,9 +5073,65 @@ mod private_fixed_projection {
                 self.value.as_ref()
             }
         }
-        pub(crate) fn withheld(&self) -> bool {
-            self.seen && self.invalid
+        pub(crate) fn financial_value(&self) -> Option<&FinancialDiagnosticV1> {
+            self.financial.value()
         }
+        pub(crate) fn withheld(&self) -> bool {
+            (self.seen && self.invalid) || (self.financial.seen && self.financial.invalid)
+        }
+    }
+    #[test]
+    fn financial_diagnostic_parser_is_closed_and_independent() {
+        use crate::host::financial_diagnostics_v1::{
+            FinancialCommitStateV1 as K, FinancialComponentV1 as C, FinancialErrorClassV1 as E,
+            FinancialStageV1 as S,
+        };
+        let record = FinancialDiagnosticV1 {
+            schema: 1,
+            stage: S::ResultReceive,
+            component: C::SignerBridge,
+            error_class: E::Binding,
+            commit_state: K::NotEstablished,
+        };
+        let json = serde_json::to_string(&record).unwrap();
+        let line = format!("{FINANCIAL_PREFIX}{json}]");
+        let mut capture = PrivateFixedDiagnosticCapture::default();
+        capture.capture_line(&line, 2048);
+        assert_eq!(capture.financial_value(), Some(&record));
+        assert_eq!(capture.retained_bytes(), json.len());
+        capture.capture_line(UNAVAILABLE, 2048);
+        assert!(capture.value().is_none());
+        assert_eq!(capture.financial_value(), Some(&record));
+        for bad in [
+            format!("{line} private"),
+            format!("{FINANCIAL_PREFIX}{{\"schema\":1,\"private\":\"sentinel\"}}]"),
+            line.replace("ResultReceive", "UnknownStage"),
+            line.replace("\"schema\":1", "\"schema\":2"),
+            line.replace("\"schema\":1", "\"schema\":1,\"schema\":1"),
+            line.replace("Binding", "private-sentinel"),
+            format!("{line}\r"),
+            line.trim_end_matches(']').to_owned(),
+        ] {
+            let mut capture = PrivateFixedDiagnosticCapture::default();
+            capture.capture_line(&bad, 2048);
+            assert!(capture.financial_value().is_none());
+            assert_eq!(capture.retained_bytes(), 0);
+        }
+        let mut capture = PrivateFixedDiagnosticCapture::default();
+        capture.capture_line(&line, json.len() - 1);
+        assert!(capture.financial_value().is_none() && capture.withheld());
+        let mut capture = PrivateFixedDiagnosticCapture::default();
+        capture.capture_line(&line, 2048);
+        capture.capture_line(&line, 2048);
+        assert!(capture.financial_value().is_none() && capture.withheld());
+        let mut capture = PrivateFixedDiagnosticCapture::default();
+        capture.capture_line(&line, 2048);
+        capture.discard_for_budget();
+        assert_eq!(capture.retained_bytes(), 0);
+        assert!(capture.financial_value().is_none() && capture.withheld());
+        let mut capture = PrivateFixedDiagnosticCapture::default();
+        capture.finish(line.as_bytes());
+        assert!(capture.financial_value().is_none() && capture.withheld());
     }
     pub(crate) fn emit_private_fixed_diagnostic(value: &PrivateFixedDiagnosticV1) {
         use std::io::Write;
@@ -5025,8 +5151,8 @@ mod private_fixed_projection {
     feature = "synthetic-born-joined-qualification"
 ))]
 pub(super) use private_fixed_projection::{
-    PrivateFixedDiagnosticCapture, emit_private_fixed_diagnostic,
-    emit_private_fixed_diagnostic_unavailable,
+    emit_private_fixed_diagnostic, emit_private_fixed_diagnostic_unavailable,
+    PrivateFixedDiagnosticCapture,
 };
 #[cfg(all(
     test,
@@ -5057,7 +5183,7 @@ fn private_fixed_test_parse(value: &serde_json::Value) -> bool {
     feature = "synthetic-born-joined-qualification"
 ))]
 fn private_fixed_diagnostic_strict_public_schema_and_worker_relations() {
-    use serde_json::{Value, json};
+    use serde_json::{json, Value};
     let original: Value = serde_json::from_str(PRIVATE_FIXED_DIAGNOSTIC_TEST_JSON).unwrap();
     assert!(private_fixed_test_parse(&original));
     for path in [
@@ -5134,7 +5260,7 @@ fn private_fixed_diagnostic_strict_public_schema_and_worker_relations() {
 ))]
 fn private_fixed_diagnostic_canonicalizes_only_valid_enum_records() {
     use crate::host::durable_private_workspace_v1::PrivateFixedDiagnosticV1;
-    use serde_json::{Value, json};
+    use serde_json::{json, Value};
     let original: Value = serde_json::from_str(PRIVATE_FIXED_DIAGNOSTIC_TEST_JSON).unwrap();
     let states = [
         "NotApplicable",
@@ -5223,7 +5349,7 @@ fn private_fixed_diagnostic_canonicalizes_only_valid_enum_records() {
 ))]
 fn private_fixed_diagnostic_rejects_duplicate_unknown_private_or_oversized_record() {
     use crate::host::durable_private_workspace_v1::PrivateFixedDiagnosticV1;
-    use serde_json::{Value, json};
+    use serde_json::{json, Value};
     let original: Value = serde_json::from_str(PRIVATE_FIXED_DIAGNOSTIC_TEST_JSON).unwrap();
     for path in [
         "",
