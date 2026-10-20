@@ -2,8 +2,9 @@
 //! owner or historical receipt can be converted into this source.
 use super::*;
 use crate::consent_journal::{
-    FinancialConsentJournalV1, FinancialReturnJournalPinV1, FinancialSourceBindingV1,
-    PendingFinancialContinuationAdmissionV1, PreparedFinancialContinuationIntentV1,
+    FinancialAdmissionJournalPinV1, FinancialConsentJournalV1, FinancialReturnJournalPinV1,
+    FinancialSourceBindingV1, PendingFinancialContinuationAdmissionV1,
+    PreparedFinancialContinuationIntentV1,
 };
 use crate::native_ui::{
     DormantNativeLifetime,
@@ -531,6 +532,94 @@ impl PreparedOriginalFinancialSourceV1 {
             return Err(Error::Locked);
         }
         peer.check_alive()?;
+        Ok(())
+    }
+}
+
+/// Inert, nonrefreshing continuity pin for one exact original admission. It is
+/// deliberately distinct from the completed-result Return pin: no result need
+/// exist yet, and both pending transition and current source identities matter.
+/// The fresh Admit owner remains required independently at every callback.
+pub(crate) struct FinancialAdmissionSourcePinV1 {
+    source_identity: String,
+    journal: FinancialAdmissionJournalPinV1,
+    disclosure: wholepact_authority::WitnessDisclosureDescriptor,
+    certificate_digest: String,
+    admission_terms_digest: String,
+}
+impl FinancialAdmissionSourcePinV1 {
+    pub(crate) fn admission_terms_digest(&self) -> &str {
+        &self.admission_terms_digest
+    }
+}
+impl PreparedOriginalFinancialSourceV1 {
+    pub(crate) fn prepare_financial_admission_source_pin_v1(
+        &self,
+        pending: &PendingFinancialContinuationAdmissionV1,
+        disclosure: &wholepact_authority::WitnessDisclosureDescriptor,
+        certificate_digest: &str,
+    ) -> Result<FinancialAdmissionSourcePinV1> {
+        // Full original custody, exact owner certificate/disclosure, and pending
+        // intent checks stay at issuance. No ordinary custody checker is relaxed.
+        self.require_original_owner_witness(disclosure, certificate_digest)?;
+        self.check_pending(pending)?;
+        let admission_terms_digest = pending.admission_terms_digest(self.identity_digest())?;
+        // This issuer audits the actual current and transition bindings together
+        // with the immutable pending request in one original read snapshot. The
+        // two source digests are intentionally distinct, not interchangeable.
+        let journal = self
+            .financial_journal()?
+            .prepare_financial_admission_pin_v1(&*self.financial_binding()?, pending)?;
+        let pin = FinancialAdmissionSourcePinV1 {
+            source_identity: self.identity.clone(),
+            journal,
+            disclosure: disclosure.clone(),
+            certificate_digest: certificate_digest.to_owned(),
+            admission_terms_digest,
+        };
+        // Recheck after the read-only transaction commits. A mutation during
+        // preflight fails closed; this function never re-pins or retries.
+        self.check_financial_admission_source_pin_v1(
+            &pin,
+            pending,
+            disclosure,
+            certificate_digest,
+        )?;
+        Ok(pin)
+    }
+    pub(crate) fn check_financial_admission_source_pin_v1(
+        &self,
+        pin: &FinancialAdmissionSourcePinV1,
+        pending: &PendingFinancialContinuationAdmissionV1,
+        disclosure: &wholepact_authority::WitnessDisclosureDescriptor,
+        certificate_digest: &str,
+    ) -> Result<()> {
+        self.lifetime.check_connected()?;
+        if self.identity != pin.source_identity || Instant::now() >= self.original_deadline {
+            return Err(Error::Locked);
+        }
+        if disclosure != &pin.disclosure || certificate_digest != pin.certificate_digest {
+            return Err(Error::Authentication);
+        }
+        // These are the already fully audited original files, including the
+        // original publication/roster records, under retained directory custody.
+        if immutable(&self.retained)? != self.immutable {
+            return Err(Error::ReviewMismatch);
+        }
+        self.financial_journal()?.check_financial_admission_pin_v1(
+            &*self.financial_binding()?,
+            pending,
+            &pin.journal,
+        )?;
+        // No lock is returned or retained over network I/O. Recheck after the
+        // bounded metadata/SQLite work so its time cannot extend source life.
+        if immutable(&self.retained)? != self.immutable {
+            return Err(Error::ReviewMismatch);
+        }
+        self.lifetime.check_connected()?;
+        if Instant::now() >= self.original_deadline {
+            return Err(Error::Locked);
+        }
         Ok(())
     }
 }

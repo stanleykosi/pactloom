@@ -79,14 +79,26 @@ impl FinancialWitnessCustodyV1 {
     ) -> Result<AccountSnapshot> {
         // ContinueExact has ended. This fresh action can send only the already
         // saved immutable request, after the independent Witness review.
+        if !self.owner { return Err(Error::Authentication); }
+        action.check_source(source.identity_digest())?;
+        let disclosure = self.client.disclosure_descriptor();
+        // Full original source, pending intent and owner witness audit happens
+        // once before entering the unchanged checked transport deadline.
+        let pin = source.prepare_financial_admission_source_pin_v1(
+            &pending, &disclosure, &self.certificate_digest,
+        )?;
         let check = || -> Result<()> {
-            self.check(source)?;
-            source.check_pending(&pending)?;
             action.check_source(source.identity_digest())?;
-            if action.terms_digest() != pending.admission_terms_digest(source.identity_digest())? {
+            if action.terms_digest() != pin.admission_terms_digest() {
                 return Err(Error::ReviewMismatch);
             }
-            Ok(())
+            source.check_financial_admission_source_pin_v1(
+                &pin, &pending, &disclosure, &self.certificate_digest,
+            )?;
+            if action.terms_digest() != pin.admission_terms_digest() {
+                return Err(Error::ReviewMismatch);
+            }
+            action.check_source(source.identity_digest())
         };
         check()?;
         diag::at(Stage::AuthorityAdmit);
