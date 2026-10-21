@@ -277,12 +277,31 @@ fn payload(packet:&Packet)->Result<Vec<u8>> {
     let limit=if matches!(packet,Packet::EntryCipher{..}){envelope::FRAME_LIMIT}else{MAX_PACKET};
     if bytes.len()>limit-8 {return Err(rejected("workflow packet oversized"));}Ok(bytes)
 }
+/// A consumed positive outbound was either sent once or restricted before any
+/// transport attempt. Restricted is never a post-attempt/no-effect assertion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FinancialSendProgressV1 { Sent, Restricted }
+impl FinancialSendProgressV1 {
+    pub(super) fn require_sent(self)->Result<()>{match self{Self::Sent=>Ok(()),Self::Restricted=>Err(rejected("positive workflow send restricted before attempt"))}}
+}
 pub(super) fn send(fd:RawFd,local:Role,peer:&PeerLifetime,packet:&Packet)->Result<()> {
     check_direction(local,peer.role(),packet)?;peer.check_alive()?;
     let body=Zeroizing::new(payload(packet)?);let mut bytes=Zeroizing::new(Vec::with_capacity(body.len()+8));
     bytes.extend_from_slice(&PREFIX);bytes.extend_from_slice(&[local as u8,0,0]);bytes.extend_from_slice(&body);
     let sent=unsafe{libc::send(fd,bytes.as_ptr().cast(),bytes.len(),libc::MSG_NOSIGNAL|libc::MSG_DONTWAIT)};
     if sent!=bytes.len() as isize{return Err(rejected("workflow send unavailable"));}peer.check_alive()
+}
+pub(super) fn send_positive(fd:RawFd,local:Role,peer:&PeerLifetime,packet:&Packet,phases:&crate::signer_continue_state::Phases,deadline:std::time::Instant)->Result<crate::FinancialSendProgressV1> {
+    if local != Role::Coordinator { return Err(rejected("positive sender is not original C")); }
+    check_direction(local,peer.role(),packet)?;peer.check_alive()?;
+    let body=Zeroizing::new(payload(packet)?);let mut bytes=Zeroizing::new(Vec::with_capacity(body.len()+8));
+    bytes.extend_from_slice(&PREFIX);bytes.extend_from_slice(&[local as u8,0,0]);bytes.extend_from_slice(&body);
+    // Encoding and original peer checks are complete. This exact retained cap
+    // and SAME C atomic word are sampled immediately before the one syscall.
+    peer.check_alive()?;crate::channel::require_time(deadline)?;
+    if phases.positive_send_restricted()? { return Ok(crate::FinancialSendProgressV1::Restricted); }
+    let sent=unsafe{libc::send(fd,bytes.as_ptr().cast(),bytes.len(),libc::MSG_NOSIGNAL|libc::MSG_DONTWAIT)};
+    if sent!=bytes.len() as isize{return Err(rejected("workflow send unavailable"));}peer.check_alive()?;Ok(crate::FinancialSendProgressV1::Sent)
 }
 pub(super) fn try_receive(fd:RawFd,local:Role,peer:&PeerLifetime)->Result<Option<Packet>> {
     peer.check_alive()?;let mut poll=libc::pollfd{fd,events:libc::POLLIN,revents:0};

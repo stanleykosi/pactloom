@@ -11,7 +11,8 @@ struct SetupReview{entry:Arc<EntryReviewed>,wire:Setup,ceiling:Instant}
 impl SetupReview{
     fn core(&self)->&Arc<Core>{&self.entry.core}
     fn slot(&self)->usize{self.entry.slot()}
-    fn check(&self)->Result<()>{self.entry.check_custody()?;crate::channel::require_time(self.ceiling)?;self.core().check_action_restrictions()}
+    fn check_bounds(&self)->Result<()>{self.entry.check_custody()?;crate::channel::require_time(self.ceiling)}
+    fn check(&self)->Result<()>{self.check_bounds()?;self.core().check_action_restrictions()}
 }
 struct WReview{setup:Arc<SetupReview>,data:FinancialWitnessPresentationV1,instance:String,challenge:String,ceiling:Instant,last_wall:AtomicU64}
 impl WReview{
@@ -117,7 +118,10 @@ impl CoordinatorFinancialEndpointV1{
     /// Binding and challenge work on the sole driver, not the native event tail.
     /// These ordinary paths do not open or inspect the selected role's source.
     pub fn prepare_witness_setup(&mut self,role:Target,inputs:FinancialWitnessInputsV1,original_native_ceiling:Instant)->Result<FinancialWitnessSetupTicketV1>{
-        self.core.check_action_restrictions()?;inputs.validate()?;let i=role.index();
+        self.try_prepare_witness_setup(role,inputs,original_native_ceiling)?.ok_or_else(||rejected("witness Setup preparation restricted"))
+    }
+    pub fn try_prepare_witness_setup(&mut self,role:Target,inputs:FinancialWitnessInputsV1,original_native_ceiling:Instant)->Result<Option<FinancialWitnessSetupTicketV1>>{
+        self.core.check()?;inputs.validate()?;let i=role.index();
         if !self.histories[i].retirement_completed(){return Err(rejected("append Setup before actual History retirement"));}
         let slot=self.slots[i].as_ref().ok_or_else(||rejected("financial Witness before original Signer"))?;
         if slot.wire_phase!=AWAITING_ADMISSION&&slot.wire_phase!=admit::ADMIT_REVIEW&&slot.wire_phase!=admit::ADMIT_ARMED&&slot.wire_phase!=admit::ADMIT_READY{return Err(rejected("financial Witness before saved continuation"));}
@@ -133,24 +137,35 @@ impl CoordinatorFinancialEndpointV1{
             signer_source_identity_digest:saved.source_identity_digest.clone(),admission_terms_digest:saved.admission_terms_digest.clone(),
             request_json:p.request_json.clone(),request_digest:p.request_digest.clone(),source_ceiling_ms:read.wire.source_ceiling_ms,source_expires_at_ms:read.wire.facts.source_expires_at_ms};
         let setup=Setup{continuation:flow,inputs,setup_challenge:state::nonce()?,setup_ceiling_ms:self.clocks.restrictive_offset(cap,entry.original_source)?};setup.validate()?;
-        let b=Arc::new(SetupReview{entry:Arc::clone(entry),wire:setup,ceiling:cap});b.check()?;
-        self.core.phase.witness_step(i,0,W_SETUP_REVIEW)?;self.witnesses[i].setup=Some(Arc::clone(&b));self.witnesses[i].wire_phase=W_SETUP_REVIEW;
-        Ok(FinancialWitnessSetupTicketV1{binding:b,consumed:false})
+        let b=Arc::new(SetupReview{entry:Arc::clone(entry),wire:setup,ceiling:cap});b.check_bounds()?;
+        if let Err(error)=self.core.phase.witness_step(i,0,W_SETUP_REVIEW){
+            if self.core.phase.witness_send_restricted(i,0)?{return Ok(None);}return Err(error);
+        }self.witnesses[i].setup=Some(Arc::clone(&b));self.witnesses[i].wire_phase=W_SETUP_REVIEW;
+        Ok(Some(FinancialWitnessSetupTicketV1{binding:b,consumed:false}))
+    }
+    fn send_witness_positive(&self,role:Target,packet:&WP,deadline:Instant)->Result<FinancialSendProgressV1>{
+        self.transport_check()?;
+        if let Some(c)=self.witnesses[role.index()].cleanup{crate::channel::require_time(c)?;}
+        self.tree.as_ref().ok_or_else(||rejected("positive witness tree consumed"))?.financial_witness(role)?.financial_witness_send_positive(packet,&self.core.phase,deadline)
     }
     fn send_witness(&self,role:Target,p:&WP)->Result<()>{self.transport_check()?;
         if let Some(deadline)=self.witnesses[role.index()].cleanup{crate::channel::require_time(deadline)?;}
         self.tree.as_ref().ok_or_else(||rejected("financial Witness tree consumed"))?.financial_witness(role)?.financial_witness_send(p)}
-    pub fn send_witness_setup(&mut self,mut outbound:FinancialWitnessSetupOutboundV1)->Result<()>{
+    pub fn send_witness_setup(&mut self,outbound:FinancialWitnessSetupOutboundV1)->Result<()>{self.try_send_witness_setup(outbound)?.require_sent()}
+    pub fn try_send_witness_setup(&mut self,mut outbound:FinancialWitnessSetupOutboundV1)->Result<FinancialSendProgressV1>{
         let b=&outbound.binding;let i=b.slot();if !Arc::ptr_eq(&self.core,b.core()){return Err(rejected("foreign financial Witness Setup outbound"));}
-        b.check()?;if self.witnesses[i].wire_phase!=W_SETUP_REVIEW||self.core.phase.witness_phase(i)!=W_SETUP_ADMITTED{return Err(rejected("financial Witness Setup send phase"));}
-        self.witnesses[i].wire_phase=W_SETUP_ADMITTED;outbound.consumed=true;
-        self.send_witness(b.wire.continuation.actor.signer_role,&WP::PrepareOnce{setup:b.wire.clone()})
+        b.check_bounds()?;if self.witnesses[i].wire_phase!=W_SETUP_REVIEW||self.core.phase.witness_phase(i)!=W_SETUP_ADMITTED{return Err(rejected("financial Witness Setup send phase"));}
+        if self.core.phase.witness_send_restricted(i,W_SETUP_ADMITTED)?{outbound.consumed=true;return Ok(FinancialSendProgressV1::Restricted);}outbound.consumed=true;
+        let progress=self.send_witness_positive(b.wire.continuation.actor.signer_role,&WP::PrepareOnce{setup:b.wire.clone()},b.ceiling)?;
+        if progress==FinancialSendProgressV1::Sent{self.witnesses[i].wire_phase=W_SETUP_ADMITTED;}Ok(progress)
     }
-    pub fn send_witness_arm(&mut self,mut outbound:FinancialWitnessArmOutboundV1)->Result<()>{
+    pub fn send_witness_arm(&mut self,outbound:FinancialWitnessArmOutboundV1)->Result<()>{self.try_send_witness_arm(outbound)?.require_sent()}
+    pub fn try_send_witness_arm(&mut self,mut outbound:FinancialWitnessArmOutboundV1)->Result<FinancialSendProgressV1>{
         let b=&outbound.binding;let i=b.slot();if !Arc::ptr_eq(&self.core,b.core()){return Err(rejected("foreign financial Witness Arm outbound"));}
-        b.check(false)?;if self.witnesses[i].wire_phase!=W_REVIEW||self.core.phase.witness_phase(i)!=W_ARMED{return Err(rejected("financial Witness Arm send phase"));}
-        self.witnesses[i].wire_phase=W_ARMED;outbound.consumed=true;
-        self.send_witness(b.data.continuation.actor.signer_role,&WP::Arm{setup_challenge:b.setup.wire.setup_challenge.clone(),witness_instance:b.instance.clone(),review_challenge:b.challenge.clone(),presentation_digest:b.data.presentation_digest.clone()})
+        b.check(true)?;if self.witnesses[i].wire_phase!=W_REVIEW||self.core.phase.witness_phase(i)!=W_ARMED{return Err(rejected("financial Witness Arm send phase"));}
+        if self.core.phase.witness_send_restricted(i,W_ARMED)?{outbound.consumed=true;return Ok(FinancialSendProgressV1::Restricted);}outbound.consumed=true;
+        let progress=self.send_witness_positive(b.data.continuation.actor.signer_role,&WP::Arm{setup_challenge:b.setup.wire.setup_challenge.clone(),witness_instance:b.instance.clone(),review_challenge:b.challenge.clone(),presentation_digest:b.data.presentation_digest.clone()},b.ceiling)?;
+        if progress==FinancialSendProgressV1::Sent{self.witnesses[i].wire_phase=W_ARMED;}Ok(progress)
     }
     pub fn send_witness_final(&mut self,mut outbound:FinancialWitnessFinalOutboundV1)->Result<()>{
         let r=&outbound.binding;let b=&r.review;let i=b.slot();
@@ -177,7 +192,6 @@ impl CoordinatorFinancialEndpointV1{
                     if slot.wire_phase!=W_SETUP_ADMITTED||slot.review.is_some()||setup_challenge!=setup.wire.setup_challenge||data.continuation!=setup.wire.continuation
                         ||!state::hash(&witness_instance)||!state::hash(&review_challenge){return Err(rejected("financial Witness Display binding"));}
                     slot.wire_phase=W_REVIEW;slot.display=Some(data.clone());slot.identity=Some((witness_instance.clone(),review_challenge.clone()));
-                    if self.core.phase.revoked(){return Ok(Some(CoordinatorFinancialWitnessEventV1::Restricted(role)));}
                     let now=Instant::now();let wall=state::wall_ms()?;
                     let ceiling=self.clocks.restrict_received(PROFILE,review_ceiling_ms,setup.entry.original_source,now)?.min(wall_ceiling(now,wall,data.prepared_at_ms,data.expires_at_ms)?);
                     let b=Arc::new(WReview{setup:Arc::clone(setup),data,instance:witness_instance,challenge:review_challenge,ceiling,last_wall:AtomicU64::new(wall)});slot.review=Some(Arc::clone(&b));
@@ -188,16 +202,13 @@ impl CoordinatorFinancialEndpointV1{
                 WP::Armed{setup_challenge,witness_instance,presentation_digest}=>{
                     let b=slot.review.as_ref().ok_or_else(||rejected("financial Witness Armed before Display"))?;
                     if slot.wire_phase!=W_ARMED||slot.armed_ack||setup_challenge!=b.setup.wire.setup_challenge||witness_instance!=b.instance||presentation_digest!=b.data.presentation_digest{return Err(rejected("financial Witness Armed binding"));}
-                    slot.armed_ack=true;if self.core.phase.revoked(){CoordinatorFinancialWitnessEventV1::Restricted(role)}else{
-                        b.check(true)?;
-                        if self.core.phase.witness_phase(i)!=W_ARMED{return Err(rejected("financial Witness Armed native phase"));}
-                        if self.core.phase.revoked(){CoordinatorFinancialWitnessEventV1::Restricted(role)}else{CoordinatorFinancialWitnessEventV1::Armed(FinancialWitnessArmedV1{binding:Arc::clone(b)})}}
+                    slot.armed_ack=true;b.check(true)?;
+                    if self.core.phase.witness_send_restricted(i,W_ARMED)?{CoordinatorFinancialWitnessEventV1::Restricted(role)}else{CoordinatorFinancialWitnessEventV1::Armed(FinancialWitnessArmedV1{binding:Arc::clone(b)})}
                 }
                 WP::Ready{setup_challenge,witness_instance,review_challenge,ready_challenge,accepted_ceiling_ms,data}=>{
                     let b=slot.review.as_ref().ok_or_else(||rejected("financial Witness Ready before Display"))?;
                     if slot.wire_phase!=W_ARMED||!slot.armed_ack||slot.ready.is_some()||setup_challenge!=b.setup.wire.setup_challenge||witness_instance!=b.instance||review_challenge!=b.challenge||!state::hash(&ready_challenge)||!data.matches(&b.data){return Err(rejected("financial Witness Ready binding"));}
                     slot.observed_ready=Some(data.clone());slot.wire_phase=W_READY;
-                    if self.core.phase.revoked(){return Ok(Some(CoordinatorFinancialWitnessEventV1::Restricted(role)));}
                     let now=Instant::now();let wall=state::wall_ms()?;
                     let ceiling=self.clocks.restrict_received(PROFILE,accepted_ceiling_ms,b.ceiling,now)?.min(wall_ceiling(now,wall,data.accepted_at_ms,data.accepted_tls_expires_at_ms)?);
                     let r=Arc::new(WReady{review:Arc::clone(b),data,challenge:ready_challenge,ceiling});slot.ready=Some(Arc::clone(&r));slot.wire_phase=W_READY;
@@ -256,10 +267,10 @@ impl CoordinatorFinancialEndpointV1{
 // destroying custody of a different already-admitted effect. Never mask an
 // unexpected phase or failed immutable/actor/clock validation with R.
 fn received_witness_progress(phase:&Phases,slot:usize,from:u8,to:u8)->Result<bool>{
+    if phase.witness_send_restricted(slot,from)?{return Ok(false);}
     match phase.witness_step(slot,from,to){
-        Ok(())=>Ok(!phase.revoked()),
-        Err(_) if phase.revoked()&&phase.witness_phase(slot)==from=>Ok(false),
-        Err(error)=>Err(error),
+        Ok(())=>Ok(!phase.witness_send_restricted(slot,to)?),
+        Err(error)=>{if phase.witness_send_restricted(slot,from)?{Ok(false)}else{Err(error)}}
     }
 }
 pub(super) fn witness_pending(core:&Core)->bool{(0..2).any(|i|witness_pending_phase(core.phase.witness_phase(i),core.witness_outbound[i].load(Ordering::Acquire)))}
@@ -320,5 +331,16 @@ impl CWSlot {
         assert_eq!(p.witness_phase(0),W_ADMITTED);assert!(p.witness_step(0,W_ADMITTED,0).is_err());
         assert!(witness_pending_phase(W_ADMITTED,PENDING));assert!(!witness_pending_phase(W_ADMITTED,SENT));
         assert!(!witness_pending_phase(W_ADMITTED,ABANDONED));assert!(!witness_pending_phase(W_READY,PENDING));
+    }
+}
+
+#[cfg(test)]mod positive_receive_snapshot_tests{
+    use super::*;
+    #[test]fn witness_receive_q_and_wrong_phase_are_fatal_even_after_r(){
+        let p=Phases::new();p.witness_step(0,0,W_SETUP_ADMITTED).unwrap();p.begin_quiescence(p.snapshot()).unwrap();p.revoke();
+        assert!(received_witness_progress(&p,0,W_SETUP_ADMITTED,W_REVIEW).is_err());
+        let p=Phases::new();p.witness_step(0,0,W_SETUP_ADMITTED).unwrap();p.revoke();
+        assert!(!received_witness_progress(&p,0,W_SETUP_ADMITTED,W_REVIEW).unwrap());
+        assert!(received_witness_progress(&p,0,W_REVIEW,W_REVIEW).is_err());
     }
 }

@@ -15,7 +15,8 @@ struct SetupReview {entry:Arc<EntryReviewed>,wire:Setup,ceiling:Instant}
 impl SetupReview {
     fn core(&self)->&Arc<Core>{&self.entry.core}
     fn slot(&self)->usize{self.entry.slot()}
-    fn check(&self)->Result<()>{self.entry.check_custody()?;self.core().check_action_restrictions()?;crate::channel::require_time(self.ceiling)}
+    fn check_bounds(&self)->Result<()>{self.entry.check_custody()?;crate::channel::require_time(self.ceiling)}
+    fn check(&self)->Result<()>{self.check_bounds()?;self.core().check_action_restrictions()}
 }
 struct GReview {setup:Arc<SetupReview>,data:FinancialSigningPresentationV1,instance:String,challenge:String,
     service_ceiling_ms:u64,service_ceiling:Instant,review_ceiling:Instant,last_wall:AtomicU64}
@@ -146,6 +147,9 @@ impl FinancialSigningServingV1 {
 }
 pub(in crate::financial_workflow_origin) struct SigningServiceLease{binding:Arc<GReview>}
 impl SigningServiceLease {
+    pub(in crate::financial_workflow_origin) fn check_bounds(&self)->Result<()>{self.binding.service_bounds()?;
+        if self.binding.core().phase.signing_phase(self.binding.slot())!=G_SERVING{return Err(rejected("Signing outbound service ended"));}Ok(())}
+    pub(in crate::financial_workflow_origin) fn deadline(&self)->Instant{self.binding.service_ceiling}
     pub(in crate::financial_workflow_origin) fn check(&self)->Result<()>{self.binding.service_check()?;
         if self.binding.core().phase.signing_phase(self.binding.slot())!=G_SERVING{return Err(rejected("Signing outbound service ended"));}Ok(())}
     pub(in crate::financial_workflow_origin) fn correlation(&self)->FinancialSigningServiceV1{self.binding.correlation()}
@@ -218,7 +222,10 @@ impl CoordinatorFinancialEndpointV1 {
     /// Paths are ordinary until the separate native Setup action. The original
     /// linkage comes only from this same slot's authenticated retained Admit.
     pub fn prepare_signing_setup(&mut self,role:Target,inputs:FinancialSigningInputsV1,original_native_ceiling:Instant)->Result<FinancialSigningSetupTicketV1>{
-        self.core.check_action_restrictions()?;inputs.validate()?;let i=role.index();
+        self.try_prepare_signing_setup(role,inputs,original_native_ceiling)?.ok_or_else(||rejected("signing Setup preparation restricted"))
+    }
+    pub fn try_prepare_signing_setup(&mut self,role:Target,inputs:FinancialSigningInputsV1,original_native_ceiling:Instant)->Result<Option<FinancialSigningSetupTicketV1>>{
+        self.core.check()?;inputs.validate()?;let i=role.index();
         let s=self.slots[i].as_ref().ok_or_else(||rejected("Signing setup before original Signer"))?;
         if s.wire_phase!=admit::AWAITING_NEXT_READ||self.signing_services[i].setup.is_some()
             ||!self.witnesses[i].retirement_completed(){return Err(rejected("Signing requires actual Admit and owned predecessor retirement"));}
@@ -234,9 +241,16 @@ impl CoordinatorFinancialEndpointV1 {
         crate::channel::require_time(ceiling)?;
         if ceiling.duration_since(now)>std::time::Duration::from_secs(120){return Err(rejected("Signing Setup ceiling too wide"));}
         let wire=Setup{inputs,original,setup_challenge:state::nonce()?,setup_ceiling_ms:self.clocks.restrictive_offset(ceiling,entry.original_source)?};wire.validate()?;
-        let b=Arc::new(SetupReview{entry:Arc::clone(entry),wire,ceiling});b.check()?;
-        self.core.phase.signing_step(i,0,G_SETUP_REVIEW)?;self.signing_services[i].setup=Some(Arc::clone(&b));self.signing_services[i].wire_phase=G_SETUP_REVIEW;
-        Ok(FinancialSigningSetupTicketV1{binding:b,consumed:false})
+        let b=Arc::new(SetupReview{entry:Arc::clone(entry),wire,ceiling});b.check_bounds()?;
+        if let Err(error)=self.core.phase.signing_step(i,0,G_SETUP_REVIEW){
+            if self.core.phase.signing_send_restricted(i,0)?{return Ok(None);}return Err(error);
+        }self.signing_services[i].setup=Some(Arc::clone(&b));self.signing_services[i].wire_phase=G_SETUP_REVIEW;
+        Ok(Some(FinancialSigningSetupTicketV1{binding:b,consumed:false}))
+    }
+    fn send_signing_positive(&self,role:Target,packet:&GP,deadline:Instant)->Result<FinancialSendProgressV1>{
+        self.transport_check()?;
+        if let Some(c)=self.signing_services[role.index()].cleanup{crate::channel::require_time(c)?;}
+        self.tree.as_ref().ok_or_else(||rejected("positive signing tree consumed"))?.financial_signing(role)?.financial_signing_send_positive(packet,&self.core.phase,deadline)
     }
     fn send_signing(&self, role: Target, packet: &GP) -> Result<()> {
         self.transport_check()?;
@@ -249,55 +263,57 @@ impl CoordinatorFinancialEndpointV1 {
             .financial_signing(role)?
             .financial_signing_send(packet)
     }
-    pub fn send_signing_setup(
+    pub fn send_signing_setup(&mut self,outbound:FinancialSigningSetupOutboundV1)->Result<()>{self.try_send_signing_setup(outbound)?.require_sent()}
+    pub fn try_send_signing_setup(
         &mut self,
         mut outbound: FinancialSigningSetupOutboundV1,
-    ) -> Result<()> {
+    ) -> Result<FinancialSendProgressV1> {
         let b = &outbound.binding;
         let i = b.slot();
         if !Arc::ptr_eq(&self.core, b.core()) {
             return Err(rejected("foreign financial signing Setup outbound"));
         }
-        b.check()?;
+        b.check_bounds()?;
         if self.signing_services[i].wire_phase != G_SETUP_REVIEW
             || self.core.phase.signing_phase(i) != G_SETUP_ADMITTED
         {
             return Err(rejected("financial signing Setup send phase"));
         }
-        self.signing_services[i].wire_phase = G_SETUP_ADMITTED;
+        if self.core.phase.signing_send_restricted(i,G_SETUP_ADMITTED)?{outbound.consumed=true;return Ok(FinancialSendProgressV1::Restricted);}
         outbound.consumed = true;
-        self.send_signing(
+        let progress=self.send_signing_positive(
             b.wire.original.actor.signer_role,
             &GP::PrepareOnce {
                 setup: b.wire.clone(),
-            },
-        )
+            },b.ceiling)?;
+        if progress==FinancialSendProgressV1::Sent{self.signing_services[i].wire_phase = G_SETUP_ADMITTED;}Ok(progress)
     }
-    pub fn send_signing_serve(
+    pub fn send_signing_serve(&mut self,outbound:FinancialSigningServeOutboundV1)->Result<()>{self.try_send_signing_serve(outbound)?.require_sent()}
+    pub fn try_send_signing_serve(
         &mut self,
         mut outbound: FinancialSigningServeOutboundV1,
-    ) -> Result<()> {
+    ) -> Result<FinancialSendProgressV1> {
         let b = &outbound.binding;
         let i = b.slot();
         if !Arc::ptr_eq(&self.core, b.core()) {
             return Err(rejected("foreign financial signing Serve outbound"));
         }
-        b.check()?;
+        b.check_bounds()?;
         if self.signing_services[i].wire_phase != G_REVIEW || self.core.phase.signing_phase(i) != G_SERVING
         {
             return Err(rejected("financial signing Serve send phase"));
         }
-        self.signing_services[i].wire_phase = G_SERVING;
+        if self.core.phase.signing_send_restricted(i,G_SERVING)?{outbound.consumed=true;return Ok(FinancialSendProgressV1::Restricted);}
         outbound.consumed = true;
-        self.send_signing(
+        let progress=self.send_signing_positive(
             b.data.original.actor.signer_role,
             &GP::Serve {
                 setup_challenge: b.setup.wire.setup_challenge.clone(),
                 witness_instance: b.instance.clone(),
                 serve_challenge: b.challenge.clone(),
                 presentation_digest: b.data.presentation_digest.clone(),
-            },
-        )
+            },b.review_ceiling)?;
+        if progress==FinancialSendProgressV1::Sent{self.signing_services[i].wire_phase = G_SERVING;}Ok(progress)
     }
     /// Restriction only: stops an existing actual service. It cannot stand in
     /// for a successful S effect or authorize another source/service purpose.
@@ -408,10 +424,7 @@ impl CoordinatorFinancialEndpointV1 {
                     }
                     slot.serving_ack = true;
                     b.service_bounds()?;
-                    if self.core.phase.signing_phase(i) != G_SERVING {
-                        return Err(rejected("financial signing Serving native phase"));
-                    }
-                    if self.core.phase.revoked() {
+                    if self.core.phase.signing_send_restricted(i,G_SERVING)? {
                         CoordinatorFinancialSigningEventV1::Restricted(role)
                     } else {
                         CoordinatorFinancialSigningEventV1::Serving(FinancialSigningServingV1 {
@@ -544,11 +557,11 @@ impl CoordinatorFinancialEndpointV1 {
         Ok(())
     }
 }
-fn received_signing_progress(phase: &Phases, slot: usize, from: u8, to: u8) -> Result<bool> {
-    match phase.signing_step(slot, from, to) {
-        Ok(()) => Ok(!phase.revoked()),
-        Err(_) if phase.revoked() && phase.signing_phase(slot) == from => Ok(false),
-        Err(error) => Err(error),
+fn received_signing_progress(phase:&Phases,slot:usize,from:u8,to:u8)->Result<bool>{
+    if phase.signing_send_restricted(slot,from)?{return Ok(false);}
+    match phase.signing_step(slot,from,to){
+        Ok(())=>Ok(!phase.signing_send_restricted(slot,to)?),
+        Err(error)=>{if phase.signing_send_restricted(slot,from)?{Ok(false)}else{Err(error)}}
     }
 }
 impl CGSlot {
@@ -599,5 +612,16 @@ mod tests {
         assert!(p.signing_step(1, G_REVIEW, G_SERVING).is_err());
         assert_eq!(p.signing_phase(0), G_SERVING);
         assert_eq!(p.signing_phase(1), G_REVIEW);
+    }
+}
+
+#[cfg(test)]mod positive_receive_snapshot_tests{
+    use super::*;
+    #[test]fn signing_receive_q_and_wrong_phase_are_fatal_even_after_r(){
+        let p=Phases::new();p.signing_step(0,0,G_SETUP_ADMITTED).unwrap();p.begin_quiescence(p.snapshot()).unwrap();p.revoke();
+        assert!(received_signing_progress(&p,0,G_SETUP_ADMITTED,G_REVIEW).is_err());
+        let p=Phases::new();p.signing_step(0,0,G_SETUP_ADMITTED).unwrap();p.revoke();
+        assert!(!received_signing_progress(&p,0,G_SETUP_ADMITTED,G_REVIEW).unwrap());
+        assert!(received_signing_progress(&p,0,G_REVIEW,G_REVIEW).is_err());
     }
 }

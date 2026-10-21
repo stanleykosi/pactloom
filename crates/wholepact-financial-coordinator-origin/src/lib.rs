@@ -169,3 +169,6 @@ pub fn record_process_exit_for_ci(code: i32) { ci::finished(code); }
 
 #[cfg(feature="coordinated-financial-workflow-v1")]
 pub use financial_workflow_origin::{CoordinatorWitnessRetirementTicketV1,CoordinatorWitnessRetirementOutboundV1,CoordinatorWitnessRetiredV1};
+
+#[cfg(feature="coordinated-financial-workflow-v1")]
+pub use financial_workflow_channel::FinancialSendProgressV1;

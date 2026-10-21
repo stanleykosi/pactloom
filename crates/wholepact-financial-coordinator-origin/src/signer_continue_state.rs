@@ -52,6 +52,42 @@ impl Phases {
         loop{if old&REVOKED!=0||old&QUIESCENT==0{return Err(rejected("retirement cannot resume restricted workflow"));}
             match self.word.compare_exchange_weak(old,old&!QUIESCENT,Ordering::AcqRel,Ordering::Acquire){Ok(_)=>return Ok(()),Err(actual)=>old=actual}}
     }
+    /// Restriction-only final sample. No actor/phase/clock validation is
+    /// replaced by this check; Q is always a fault, never ordinary R.
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn positive_send_restricted(&self)->Result<bool>{
+        let word=self.word.load(Ordering::Acquire);
+        if word&QUIESCENT!=0{return Err(rejected("positive send during exclusive retirement"));}
+        Ok(word&REVOKED!=0)
+    }
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn source_send_restricted(&self,slot:usize,expected:u8)->Result<bool>{
+        if slot>1{return Err(rejected("positive send fixed slot"));}
+        let word=self.word.load(Ordering::Acquire);
+        if ((word>>(slot*8))&0xff)!=u64::from(expected)||word&QUIESCENT!=0{return Err(rejected("positive send phase changed or quiescent"));}
+        Ok(word&REVOKED!=0)
+    }
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn witness_send_restricted(&self,slot:usize,expected:u8)->Result<bool>{
+        if slot>1{return Err(rejected("positive send fixed slot"));}
+        let word=self.word.load(Ordering::Acquire);
+        if ((word>>(16+slot*4))&0xf)!=u64::from(expected)||word&QUIESCENT!=0{return Err(rejected("positive send phase changed or quiescent"));}
+        Ok(word&REVOKED!=0)
+    }
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn history_send_restricted(&self,slot:usize,expected:u8)->Result<bool>{
+        if slot>1{return Err(rejected("positive send fixed slot"));}
+        let word=self.word.load(Ordering::Acquire);
+        if ((word>>(24+slot*3))&7)!=u64::from(expected)||word&QUIESCENT!=0{return Err(rejected("positive send phase changed or quiescent"));}
+        Ok(word&REVOKED!=0)
+    }
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn signing_send_restricted(&self,slot:usize,expected:u8)->Result<bool>{
+        if slot>1{return Err(rejected("positive send fixed slot"));}
+        let word=self.word.load(Ordering::Acquire);
+        if ((word>>(32+slot*4))&15)!=u64::from(expected)||word&QUIESCENT!=0{return Err(rejected("positive send phase changed or quiescent"));}
+        Ok(word&REVOKED!=0)
+    }
     pub(super) fn revoke(&self) {
         // EVERY local C restriction path, including errors and Drop, reaches
         // this ordering. Host observes R before local admission can observe R.
@@ -349,4 +385,26 @@ mod tests {
         assert!(original_deadline(epoch, 300_001, exact, epoch).is_err());
         assert!(original_deadline(epoch, u64::MAX, exact, epoch).is_err());
     }
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    #[test]
+    fn positive_send_classifies_only_exact_phase_ordinary_r(){
+        let p=Phases::new();p.step(0,0,18).unwrap();p.witness_step(0,0,2).unwrap();p.history_step(0,0,4).unwrap();p.signing_step(0,0,4).unwrap();
+        assert!(!p.source_send_restricted(0,18).unwrap());assert!(!p.positive_send_restricted().unwrap());
+        p.revoke();let frozen=p.snapshot();
+        assert!(p.source_send_restricted(0,18).unwrap());assert!(p.witness_send_restricted(0,2).unwrap());
+        assert!(p.history_send_restricted(0,4).unwrap());assert!(p.signing_send_restricted(0,4).unwrap());assert!(p.positive_send_restricted().unwrap());
+        assert!(p.source_send_restricted(0,17).is_err());assert!(p.witness_send_restricted(0,3).is_err());
+        assert!(p.history_send_restricted(0,3).is_err());assert!(p.signing_send_restricted(0,3).is_err());assert_eq!(p.snapshot(),frozen);
+    }
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    #[test]
+    fn positive_send_quiescence_and_failed_phase_are_never_restriction_success(){
+        let p=Phases::new();p.step(0,0,18).unwrap();p.begin_quiescence(p.snapshot()).unwrap();p.revoke();
+        assert!(p.positive_send_restricted().is_err());assert!(p.source_send_restricted(0,18).is_err());
+        assert!(p.witness_send_restricted(0,0).is_err());assert!(p.history_send_restricted(0,0).is_err());assert!(p.signing_send_restricted(0,0).is_err());
+        let p=Phases::new();p.history_step(0,0,4).unwrap();p.revoke();assert!(p.history_step(0,4,5).is_err());
+        assert!(p.history_send_restricted(0,4).unwrap());assert_eq!(p.history_phase(0),4);
+        assert!(p.history_send_restricted(2,4).is_err());
+    }
+
 }

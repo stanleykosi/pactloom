@@ -131,6 +131,39 @@ pub(super) fn send(fd: RawFd, local: Role, peer: &PeerLifetime, packet: &Packet)
     peer.check_alive()
 }
 
+pub(super) fn send_positive(fd: RawFd, local: Role, peer: &PeerLifetime, packet: &Packet, phases: &crate::signer_continue_state::Phases, deadline: std::time::Instant) -> Result<crate::FinancialSendProgressV1> {
+    if local != Role::Coordinator { return Err(rejected("positive sender is not original C")); }
+    check_direction(local, peer.role(), packet)?;
+    peer.check_alive()?;
+    let payload = Zeroizing::new(
+        serde_json::to_vec(packet).map_err(|_| rejected("financial signing Witness encode"))?,
+    );
+    if payload.len() > MAX_PACKET - 8 {
+        return Err(rejected("financial signing Witness packet too large"));
+    }
+    let mut bytes = Zeroizing::new(Vec::with_capacity(payload.len() + 8));
+    bytes.extend_from_slice(&PREFIX);
+    bytes.extend_from_slice(&[local as u8, 0, 0]);
+    bytes.extend_from_slice(&payload);
+    // One nonblocking attempt, never a retry or an unbounded UI/role wait.
+    // Encoding and original peer checks are complete. This exact retained cap
+    // and SAME C atomic word are sampled immediately before the one syscall.
+    peer.check_alive()?;crate::channel::require_time(deadline)?;
+    if phases.positive_send_restricted()? { return Ok(crate::FinancialSendProgressV1::Restricted); }
+    let sent = unsafe {
+        libc::send(
+            fd,
+            bytes.as_ptr().cast(),
+            bytes.len(),
+            libc::MSG_NOSIGNAL | libc::MSG_DONTWAIT,
+        )
+    };
+    if sent != bytes.len() as isize {
+        return Err(rejected("financial signing Witness send unavailable"));
+    }
+    peer.check_alive()?;Ok(crate::FinancialSendProgressV1::Sent)
+}
+
 pub(super) fn try_receive(fd: RawFd, local: Role, peer: &PeerLifetime) -> Result<Option<Packet>> {
     peer.check_alive()?;
     let mut poll = libc::pollfd {

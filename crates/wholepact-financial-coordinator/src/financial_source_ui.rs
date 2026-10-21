@@ -24,6 +24,10 @@ use std::{
 use wholepact_financial_coordinator_origin::{
     CoordinatorFinancialEndpointV1, CoordinatorFinancialEventV1 as Event,
     CoordinatorFinancialNativeV1, CoordinatorFinancialWitnessEventV1 as WitnessEvent,
+    CoordinatorFinancialHistoryEventV1 as HistoryEvent, FinancialHistoryInputsV1,
+    FinancialHistorySetupTicketV1, FinancialHistoryReviewTicketV1,
+    FinancialHistoryServingV1, FinancialHistoryPresentationV1,
+    CoordinatorWitnessRetirementTicketV1, CoordinatorWitnessRetiredV1,
     DeliveryFailureV1, FinancialContinueReadyTicketV1, FinancialContinueReviewTicketV1,
     FinancialWitnessArmedV1, FinancialWitnessInputsV1, FinancialWitnessOutcomeV1,
     FinancialWitnessPresentationV1, FinancialWitnessReadyTicketV1, FinancialWitnessReadyV1,
@@ -53,9 +57,16 @@ enum Phase {
     EntryConfirm,
     Password,
     Opening,
+    HistorySetupNeeded,
+    HistorySetupPreparing,
+    HistorySetupReview,
+    HistoryPreparing,
+    HistoryReview,
+    HistoryStarting,
     ReadReview,
     ReadConfirm,
     Reading,
+    HistoryRetiring,
     HistoryReady,
     ContinuePreparing,
     ContinueReview,
@@ -106,6 +117,9 @@ enum Intent {
     Begin(Role, Instant),
     EntryConfirm,
     EnterPassword,
+    PrepareHistory(Instant),
+    SetupHistory,
+    ServeHistory,
     ReadConfirm,
     Read,
     BeginContinue,
@@ -139,6 +153,10 @@ pub(super) fn run(
     let app = Window { native, driver: Rc::clone(&driver), session_deadline,
         phase: Phase::Selecting, active: None, progress: [Progress::NotStarted; 2],
         entry: None, read: None, continuation: None, continue_review: None, continue_ready: None,
+        history_setup: None, history_review: None, history_serving: None,
+        history_display: [None, None], history_disposed: [false; 2], history_closed: [false; 2],
+        history_retirement: None, history_retired: None, retirement_paused: None, history_resume_pending: None,
+        signing_disposed: [false; 2], signing_closed: [false; 2],
         continue_deadline: None, continue_expected: [None, None], continue_effect: [ContinueEffect::None; 2], saved: [None, None], password: None, binding: None, request_digest: String::new(),
         selectors: [FinancialWitnessInputsV1::default(), FinancialWitnessInputsV1::default()],
         retained_continue: [None, None], setup: None, signer_review: None, signer_ready: None,
@@ -190,6 +208,20 @@ struct Window {
     progress: [Progress; 2],
     entry: Option<SignerSourceEntryOfferV1>,
     read: Option<SignerFinancialReadTicketV1>,
+    history_setup: Option<FinancialHistorySetupTicketV1>,
+    history_review: Option<FinancialHistoryReviewTicketV1>,
+    history_serving: Option<FinancialHistoryServingV1>,
+    // Ordinary authenticated observations, never a replacement Serving owner.
+    history_display: [Option<FinancialHistoryPresentationV1>; 2],
+    history_disposed: [bool; 2],
+    history_closed: [bool; 2],
+    history_retirement: Option<CoordinatorWitnessRetirementTicketV1>,
+    history_retired: Option<CoordinatorWitnessRetiredV1>,
+    // Scheduling state set only after actual native pause, never a permission.
+    retirement_paused: Option<(Role, Instant)>,
+    history_resume_pending: Option<Role>,
+    signing_disposed: [bool; 2],
+    signing_closed: [bool; 2],
     continuation: Option<SignerContinuePresentationV1>,
     continue_review: Option<FinancialContinueReviewTicketV1>,
     continue_ready: Option<FinancialContinueReadyTicketV1>,
@@ -257,6 +289,13 @@ impl Window {
         self.acknowledged = false;
     }
     fn clear_review(&mut self) {
+        self.history_setup.take();
+        self.history_review.take();
+        self.history_serving.take();
+        self.history_retirement.take();
+        self.history_retired.take();
+        self.retirement_paused = None;
+        self.history_resume_pending = None;
         self.setup.take();
         self.signer_review.take();
         self.signer_ready.take();
@@ -301,6 +340,18 @@ impl Window {
             return;
         }
         let driver_revoked = self.driver.borrow().is_revoked();
+        if let Some((_, cutoff)) = self.retirement_paused {
+            // Ordinary Core root checks would falsely reject the actual target
+            // during its exclusive normal reap. Raw interruption still runs,
+            // and the nominal retirement owner checks all other original actors.
+            if driver_revoked || self.native.is_revoked() || Instant::now() >= cutoff
+                || Instant::now() >= self.session_deadline
+                || self.continue_deadline.is_some_and(|end| Instant::now() >= end)
+            {
+                self.revoke("Original retirement was interrupted or expired. No resumed action or completed disposal is inferred.");
+            }
+            return;
+        }
         if driver_revoked
             || self.native.check_current().is_err()
             || Instant::now() >= self.session_deadline
@@ -312,6 +363,9 @@ impl Window {
                 .read
                 .as_ref()
                 .is_some_and(|ticket| ticket.check_current().is_err())
+            || self.history_setup.as_ref().is_some_and(|t| t.check_current().is_err())
+            || self.history_review.as_ref().is_some_and(|t| t.check_current().is_err())
+            || self.history_serving.as_ref().is_some_and(|s| s.check_current().is_err())
             || self
                 .continue_review
                 .as_ref()
@@ -401,6 +455,8 @@ impl Window {
                         && disposal_confirmed
                         && self.disposed == [true; 2]
                         && self.witness_closed == [true; 2]
+                        && self.history_closed == [true; 2]
+                        && self.signing_closed == [true; 2]
                     {
                         "Both original Signer sources reported disposal and the owned tree cleanup completed. This is not a payment outcome."
                     } else {
@@ -444,6 +500,55 @@ impl Window {
                         self.revoke("The authenticated Signer admission outcome changed.");
                     } else {
                         self.revoke("Signer admission ended without a confirmed commit. Its actual outcome is retained separately from cleanup.");
+                    }
+                }
+                Ok(Outcome::SigningDisposed(role)) => self.signing_disposed[index(role)] = true,
+                Ok(Outcome::SigningClosed(role)) => self.signing_closed[index(role)] = true,
+                Ok(Outcome::SigningFailed(_)) => self.revoke("An original Signing role reported failure or restriction during cleanup. This is not a service-ready or financial outcome."),
+                Ok(Outcome::HistoryRetirement(ticket)) => {
+                    let role = ticket.role();
+                    if self.terminal() { drop(ticket); }
+                    else if self.phase != Phase::HistoryRetiring || self.active != Some(role)
+                        || !self.history_disposed[index(role)] || self.history_retirement.is_some()
+                        || self.retirement_paused.is_some() || self.history_resume_pending.is_some()
+                    {
+                        self.revoke("Unexpected original History retirement ticket.");
+                        drop(ticket);
+                    } else { self.history_retirement = Some(ticket); }
+                }
+                Ok(Outcome::HistoryRetired(completion)) => {
+                    let role = completion.role();
+                    if self.terminal() { drop(completion); }
+                    else if self.phase != Phase::HistoryRetiring || self.active != Some(role)
+                        || self.retirement_paused.is_none_or(|(expected, _)| expected != role)
+                        || self.history_retired.is_some()
+                    {
+                        self.revoke("Unexpected original History retirement completion.");
+                        drop(completion);
+                    } else { self.history_retired = Some(completion); }
+                }
+                Ok(Outcome::HistoryResumed(role)) => {
+                    if !self.terminal() {
+                        if self.phase != Phase::HistoryRetiring || self.active != Some(role)
+                            || self.retirement_paused.is_some() || self.history_resume_pending != Some(role)
+                        { self.revoke("History resume did not match actual native completion."); }
+                        else {
+                            self.history_resume_pending = None;
+                            self.history_closed[index(role)] = true;
+                            self.transition(Phase::HistoryReady, ctx.cumulative_frame_nr());
+                            self.message = "The original History service was disposed and normally retired, with matching Host and native resume. The already-prepared Continue remains a separate approval under its unchanged deadline.";
+                        }
+                    }
+                }
+                Ok(Outcome::History(event)) => {
+                    if self.accept_history_event(event, ctx.cumulative_frame_nr()).is_err() {
+                        self.revoke("The exact original History service event changed. No Read or retry is allowed.");
+                    }
+                }
+                Ok(Outcome::HistorySetup(_, ticket)) if self.terminal() => { drop(ticket); }
+                Ok(Outcome::HistorySetup(role, ticket)) => {
+                    if self.accept_history_setup(role, ticket, ctx.cumulative_frame_nr()).is_err() {
+                        self.revoke("The original History Setup selection or Read binding changed.");
                     }
                 }
                 Ok(Outcome::Witness(event)) => {
@@ -513,8 +618,8 @@ impl Window {
                         self.progress[index(role)] = Progress::HistoryRetained;
                         self.clear_review();
                         self.continue_deadline = Some(continue_deadline);
-                        self.transition(Phase::HistoryReady, ctx.cumulative_frame_nr());
-                        self.message = "The original Signer retains the authenticated history and one immutable local Continue preparation. Continue and financial admission have not been approved.";
+                        self.transition(Phase::HistoryRetiring, ctx.cumulative_frame_nr());
+                        self.message = "The Signer retained history and one immutable Continue preparation. Waiting for the original History service's actual disposal and owned retirement; Continue is not yet enabled.";
                     }
                 }
                 Ok(Outcome::Event(Event::ContinueDisplay(ticket))) => {
@@ -698,9 +803,74 @@ impl Window {
             return Err(rejected("unsolicited initial Read offer"));
         }
         self.read = Some(ticket);
-        self.transition(Phase::ReadReview, frame);
-        self.message =
-            "Unlocking did not authorize owner history Read or local Continue preparation. Review this separate combined action; it does not approve Continue or mutation.";
+        self.transition(Phase::HistorySetupNeeded, frame);
+        self.message = "Unlocking did not authorize history Read. The original Witness first needs separate exact Setup and owner-only Serve approvals; the Signer Read approval remains separate.";
+        Ok(())
+    }
+    fn accept_history_setup(
+        &mut self, role: Role, ticket: FinancialHistorySetupTicketV1, frame: u64,
+    ) -> Result<()> {
+        ticket.check_current()?;
+        let read = self.read.as_ref().ok_or_else(|| rejected("History Setup without Read"))?;
+        read.check_current()?;
+        if !self.focused_last || self.active != Some(role)
+            || self.phase != Phase::HistorySetupPreparing || self.history_setup.is_some()
+            || ticket.inputs() != &history_inputs(&self.selectors[index(role)])?
+            || ticket.read_binding().read != *read.presentation()
+            || ticket.native_deadline() > read.native_deadline()
+        { return Err(rejected("History Setup original selection changed")); }
+        self.history_setup = Some(ticket);
+        self.transition(Phase::HistorySetupReview, frame);
+        Ok(())
+    }
+    fn accept_history_event(&mut self, event: HistoryEvent, frame: u64) -> Result<()> {
+        // Terminal observations remain visible after cancellation. They never
+        // establish reaping or make a later Witness purpose available.
+        match event {
+            HistoryEvent::Disposed(role) => { self.history_disposed[index(role)] = true; return Ok(()); }
+            HistoryEvent::PurposeClosed(role) => { self.history_closed[index(role)] = true; return Ok(()); }
+            HistoryEvent::PreparationFailed(_) | HistoryEvent::ServiceFailed(_) | HistoryEvent::Restricted(_) => {
+                self.revoke("The original History service failed or became restricted. Actual source disposal and owned retirement remain separate.");
+                return Ok(());
+            }
+            _ => {}
+        }
+        if self.terminal() { drop(event); return Ok(()); }
+        match event {
+            HistoryEvent::Display(ticket) => {
+                ticket.check_current()?;
+                let p = ticket.presentation(); p.validate()?;
+                let role = p.read_binding.read.actor.signer_role;
+                let read = self.read.as_ref().ok_or_else(|| rejected("History display without Read"))?;
+                read.check_current()?;
+                if !self.focused_last || self.active != Some(role) || self.phase != Phase::HistoryPreparing
+                    || self.history_review.is_some() || self.history_display[index(role)].is_some()
+                    || p.read_binding.read != *read.presentation()
+                    || p.network_profile_id != self.selectors[index(role)].network_profile_id
+                    || ticket.native_deadline() > read.native_deadline()
+                { return Err(rejected("History display original Read changed")); }
+                self.history_display[index(role)] = Some(p.clone());
+                self.history_review = Some(ticket);
+                self.transition(Phase::HistoryReview, frame);
+            }
+            HistoryEvent::Serving(serving) => {
+                serving.check_current()?;
+                let p = serving.presentation();
+                let role = p.read_binding.read.actor.signer_role;
+                let read = self.read.as_ref().ok_or_else(|| rejected("History Serving without Read"))?;
+                read.check_current()?;
+                if !self.focused_last || self.active != Some(role) || self.phase != Phase::HistoryStarting
+                    || self.history_serving.is_some()
+                    || self.history_display[index(role)].as_ref() != Some(p)
+                    || p.read_binding.read != *read.presentation()
+                    || serving.native_deadline() > read.native_deadline()
+                { return Err(rejected("History Serving original review changed")); }
+                self.history_serving = Some(serving);
+                self.transition(Phase::ReadReview, frame);
+                self.message = "The actual original Witness is serving this one owner-only history. Review and approve the distinct Signer Read plus one local Continue preparation; no mutation is approved.";
+            }
+            _ => unreachable!("terminal History observations handled above"),
+        }
         Ok(())
     }
     fn accept_continue(
@@ -1373,6 +1543,41 @@ impl Window {
                         _ => {}
                     }
                 }
+                Phase::HistorySetupNeeded => {
+                    ui.heading("Separate original Witness history Setup");
+                    ui.label("The retained Signer Read ticket does not authorize Witness file/key reads or listener opening. Review a separate Setup bound to that exact original Read, using the existing selectors. No deadline is renewed.");
+                    if ui.add_enabled(later_frame, egui::Button::new("Review exact History Setup disclosure"))
+                        .clicked_by(egui::PointerButton::Primary) {
+                        if let Some(read) = &self.read {
+                            self.intent = Some(Intent::PrepareHistory((Instant::now() + Duration::from_secs(120)).min(read.native_deadline()).min(self.session_deadline)));
+                        }
+                    }
+                }
+                Phase::HistorySetupPreparing => { ui.label("Preparing the data-bound History Setup ticket. No protected file, key or listener operation is approved."); }
+                Phase::HistorySetupReview => {
+                    if let Some(ticket) = &self.history_setup {
+                        ui.heading("History Setup · exact protected files and listener");
+                        ui.label("Approval permits only the original Witness's named storage, TLS key and trust-file reads and this listener preparation. Owner-only Serve and Signer Read each remain separately unapproved.");
+                        if review_display(ui, &history_setup_display(ticket), visible && !ctx.will_discard()) { painted_to_end = true; }
+                        ui.label(format!("Original Setup ceiling remaining: {:?}", ticket.native_deadline().saturating_duration_since(Instant::now())));
+                        ui.checkbox(&mut acknowledged_in_pass, "I reviewed every exact path, source/owner binding, TLS pin, protected read and listener. I approve only this History Setup.");
+                        if ui.add_enabled(self.read_to_end && acknowledged_in_pass && later_frame, egui::Button::new("Approve exact History Setup"))
+                            .clicked_by(egui::PointerButton::Primary) { self.intent = Some(Intent::SetupHistory); }
+                    }
+                }
+                Phase::HistoryPreparing => { ui.label("The separately approved original History Setup is in progress. Awaiting its authenticated actual source review; no Serve or Signer Read is approved."); }
+                Phase::HistoryReview => {
+                    if let Some(ticket) = &self.history_review {
+                        ui.heading("Original Witness · serve one exact owner history");
+                        ui.label("This distinct approval permits only the displayed original owner-only history service. It does not approve Signer Read, Continue, append, signing or payment. Historical delivery head and actual current source head are distinct.");
+                        if review_display(ui, &history_display(ticket.presentation()), visible && !ctx.will_discard()) { painted_to_end = true; }
+                        ui.label(format!("Original history ceiling remaining: {:?}", ticket.native_deadline().saturating_duration_since(Instant::now())));
+                        ui.checkbox(&mut acknowledged_in_pass, "I reviewed this complete actual source, owner, disclosure, historical/current heads and original expiry. I approve only this one owner-history service.");
+                        if ui.add_enabled(self.read_to_end && acknowledged_in_pass && later_frame, egui::Button::new("Approve this exact History Serve"))
+                            .clicked_by(egui::PointerButton::Primary) { self.intent = Some(Intent::ServeHistory); }
+                    }
+                }
+                Phase::HistoryStarting => { ui.label("Waiting for the actual original Witness Serving acknowledgment. Native approval, a queued command or a UI phase does not establish readiness."); }
                 Phase::ReadReview | Phase::ReadConfirm => {
                     if let Some(ticket) = &self.read {
                         let p = ticket.presentation();
@@ -1390,6 +1595,9 @@ impl Window {
                         if ui.add_enabled(acknowledged_in_pass && later_frame, egui::Button::new("Approve this Read and one local preparation"))
                             .clicked_by(egui::PointerButton::Primary) { self.intent = Some(Intent::Read); }
                     }
+                }
+                Phase::HistoryRetiring => {
+                    ui.label("The original History service is ending. Actual disposal, exclusive Host quiescence, normal owned reap and matching native resume must finish under the existing cleanup cutoff. No new prompt, timeout allowance or source action is created. Cancel remains active.");
                 }
                 Phase::HistoryReady => {
                     ui.label("Read and exactly one immutable local preparation completed. Reviewing that prepared Continue is a separate action; its original deadline is already running.");
@@ -1482,6 +1690,16 @@ impl Window {
             return;
         }
         self.last_tail_frame = Some(frame);
+        if self.phase == Phase::HistoryRetiring {
+            if host_line.is_some() || password.is_some() || host_entry_blocks_source(self.host_entry) {
+                self.revoke("Protected input cannot overlap exclusive History retirement.");
+                return;
+            }
+            if self.history_retirement_tail().is_err() {
+                self.revoke("Original History retirement could not pause or resume. No new action or successful disposal is inferred.");
+            }
+            return;
+        }
         if let Some(submitted) = host_line {
             let ordinal = match self.host_entry {
                 HostEntry::Editing(ordinal) => ordinal,
@@ -1610,6 +1828,29 @@ impl Window {
                 );
                 self.transition(Phase::Password, frame);
             }
+            Intent::PrepareHistory(ceiling) if self.phase == Phase::HistorySetupNeeded => {
+                let role = self.active.ok_or_else(|| rejected("History Setup role missing"))?;
+                let read = self.read.as_ref().ok_or_else(|| rejected("History Setup Read missing"))?;
+                read.check_current()?;
+                if ceiling > read.native_deadline() { return Err(rejected("History Setup clock widened")); }
+                let inputs = history_inputs(&self.selectors[index(role)])?;
+                self.driver.borrow_mut().prepare_history(role, inputs, ceiling)?;
+                self.transition(Phase::HistorySetupPreparing, frame);
+            }
+            Intent::SetupHistory if self.phase == Phase::HistorySetupReview && self.read_to_end && self.acknowledged => {
+                let role = self.active.ok_or_else(|| rejected("History Setup role missing"))?;
+                let ticket = self.history_setup.take().ok_or_else(|| rejected("History Setup consumed"))?;
+                let outbound = self.native.admit_history_setup(ticket)?;
+                self.driver.borrow_mut().send_history_setup(role, outbound)?;
+                self.transition(Phase::HistoryPreparing, frame);
+            }
+            Intent::ServeHistory if self.phase == Phase::HistoryReview && self.read_to_end && self.acknowledged => {
+                let role = self.active.ok_or_else(|| rejected("History Serve role missing"))?;
+                let ticket = self.history_review.take().ok_or_else(|| rejected("History Serve consumed"))?;
+                let outbound = self.native.admit_history_serve(ticket)?;
+                self.driver.borrow_mut().send_history_serve(role, outbound)?;
+                self.transition(Phase::HistoryStarting, frame);
+            }
             Intent::ReadConfirm if self.phase == Phase::ReadReview && self.read_to_end => {
                 self.transition(Phase::ReadConfirm, frame)
             }
@@ -1621,7 +1862,12 @@ impl Window {
                     .read
                     .take()
                     .ok_or_else(|| rejected("initial Read ticket missing"))?;
-                let outbound = self.native.admit_initial_read(ticket)?;
+                let serving = self.history_serving.take()
+                    .ok_or_else(|| rejected("initial Read actual History Serving missing"))?;
+                let outbound = self.native.admit_initial_read(ticket, &serving)?;
+                // The genuine outbound retains its own same-Core service lease
+                // through send. This check-only handle is not later ancestry.
+                drop(serving);
                 self.driver.borrow_mut().send_read(role, outbound)?;
                 self.transition(Phase::Reading, frame);
             }
@@ -1712,6 +1958,31 @@ impl Window {
                 self.driver.borrow_mut().send_witness_arm(role, outbound)?;
             }
             _ => return Err(rejected("stale source-action intent")),
+        }
+        Ok(())
+    }
+    fn history_retirement_tail(&mut self) -> Result<()> {
+        if self.phase != Phase::HistoryRetiring || !self.focused_last || self.native.is_revoked() {
+            return Err(rejected("History retirement outside eligible native tail"));
+        }
+        if let Some(ticket) = self.history_retirement.take() {
+            let role = ticket.role(); let cutoff = ticket.deadline();
+            if self.active != Some(role) || self.retirement_paused.is_some() {
+                return Err(rejected("History retirement already paused"));
+            }
+            let outbound = self.native.pause_for_witness_retirement(ticket)?;
+            self.retirement_paused = Some((role, cutoff));
+            self.driver.borrow_mut().send_history_retirement(role, outbound)?;
+        } else if let Some(completion) = self.history_retired.take() {
+            let role = completion.role();
+            if self.retirement_paused.is_none_or(|(expected, _)| expected != role) {
+                return Err(rejected("History retirement completion changed"));
+            }
+            self.native.resume_after_witness_retirement(completion)?;
+            self.retirement_paused = None;
+            self.history_resume_pending = Some(role);
+            // The sole endpoint still must consume its private actual resume
+            // observation before its driver can report HistoryResumed.
         }
         Ok(())
     }
@@ -1955,6 +2226,26 @@ fn draw_selectors(ui: &mut egui::Ui, p: &mut FinancialWitnessInputsV1) {
                 );
             }
         });
+}
+fn history_inputs(p: &FinancialWitnessInputsV1) -> Result<FinancialHistoryInputsV1> {
+    if !selectors_valid(p) { return Err(rejected("History selectors changed or contain a request override")); }
+    let inputs = FinancialHistoryInputsV1 {
+        endpoint: p.endpoint.clone(), server_name: p.server_name.clone(), witness_id: p.witness_id.clone(),
+        pinned_server_certificate_digest: p.pinned_server_certificate_digest.clone(),
+        network_profile_id: p.network_profile_id.clone(), expected_account_id: p.expected_account_id.clone(),
+        owner_certificate_der_hex: p.owner_certificate_der_hex.clone(), storage_key_file: p.storage_key_file.clone(),
+        server_certificate_der: p.server_certificate_der.clone(), server_private_key_pkcs8_der: p.server_private_key_pkcs8_der.clone(),
+        trusted_client_root_der: p.trusted_client_root_der.clone(),
+    };
+    inputs.validate()?;
+    Ok(inputs)
+}
+fn history_setup_display(ticket: &FinancialHistorySetupTicketV1) -> String {
+    let p = ticket.inputs();
+    format!("Complete exact History Setup selectors (quoted values preserve distinctions):\nListener endpoint: {:?}\nTLS server name: {:?}\nWitness / namespace ID: {:?}\nPinned server certificate: {}\nNetwork: {:?}\nExpected account: {}\nPublic owner certificate DER hex: {:?}\nExisting storage key FILE PATH: {:?}\nExisting server certificate FILE PATH: {:?}\nExisting server private key FILE PATH: {:?}\nExisting trusted client root FILE PATH: {:?}\n\nComplete original Signer Read binding, not a grant:\n{:#?}", p.endpoint, p.server_name, p.witness_id, p.pinned_server_certificate_digest, p.network_profile_id, p.expected_account_id, p.owner_certificate_der_hex, p.storage_key_file, p.server_certificate_der, p.server_private_key_pkcs8_der, p.trusted_client_root_der, ticket.read_binding().read)
+}
+fn history_display(p: &FinancialHistoryPresentationV1) -> String {
+    format!("{}\n\nComplete authenticated owner-only History presentation:\nVersion: {}\nPurpose: {:?}\nMode: {:?}\nBackend review: {}\nPresentation: {}\nPrepared Unix ms: {}\nExpires Unix ms: {}\nAccount: {}\nNetwork: {:?}\nSource commitment: {}\nPolicy: {}\nOwner certificate: {}\nActual current head sequence: {}\nActual current head digest: {}\n\nComplete original Signer Read binding (delivery head is historical):\n{:#?}", p.display, p.version, p.purpose, p.mode, p.backend_review_digest, p.presentation_digest, p.prepared_at_ms, p.expires_at_ms, p.account_id, p.network_profile_id, p.source_commitment, p.policy_digest, p.owner_certificate_digest, p.expected_head_sequence, p.expected_head_digest, p.read_binding.read)
 }
 fn setup_display(ticket: &FinancialWitnessSetupTicketV1) -> String {
     let mut text = String::from(
@@ -2220,6 +2511,35 @@ mod tests {
         p.request_json.clear();
         p.server_name = "x".repeat(4097);
         assert!(!selectors_bounded(&p));
+    }
+    #[test]
+    fn initial_history_selectors_are_exact_ordinary_data_without_request_override() {
+        let p = FinancialWitnessInputsV1 {
+            endpoint: "127.0.0.1:10001".into(), server_name: "public.example".into(), witness_id: "public-witness".into(),
+            pinned_server_certificate_digest: "1".repeat(64), network_profile_id: "public-network".into(),
+            expected_account_id: "2".repeat(64), owner_certificate_der_hex: "aabb".into(),
+            storage_key_file: "/public/storage".into(), server_certificate_der: "/public/certificate".into(),
+            server_private_key_pkcs8_der: "/public/key-path".into(), trusted_client_root_der: "/public/root".into(),
+            request_json: String::new(),
+        };
+        let h = history_inputs(&p).unwrap();
+        let mut expected = serde_json::to_value(&p).unwrap();
+        expected.as_object_mut().unwrap().remove("request_json");
+        assert!(serde_json::to_value(&h).unwrap() == expected);
+        let mut injected = p.clone(); injected.request_json = "{}".into();
+        assert!(history_inputs(&injected).is_err());
+        let mut changed = p.clone(); changed.storage_key_file.push('\n');
+        assert!(history_inputs(&changed).is_err());
+    }
+    #[test]
+    fn initial_history_approval_phases_are_distinct_and_exclude_host_input() {
+        let phases = [Phase::HistorySetupNeeded, Phase::HistorySetupPreparing,
+            Phase::HistorySetupReview, Phase::HistoryPreparing, Phase::HistoryReview,
+            Phase::HistoryStarting, Phase::ReadReview, Phase::ReadConfirm, Phase::Reading, Phase::HistoryRetiring];
+        for (i, phase) in phases.iter().enumerate() {
+            assert!(!host_phase_allows_input(*phase));
+            for other in &phases[i + 1..] { assert_ne!(phase, other); }
+        }
     }
     #[test]
     fn pending_admission_and_missing_outcome_are_never_displayed_as_no_effect() {

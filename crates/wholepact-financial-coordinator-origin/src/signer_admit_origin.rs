@@ -168,22 +168,26 @@ impl CoordinatorFinancialNativeV1 {
     }
 }
 impl CoordinatorFinancialEndpointV1 {
-    pub fn send_admit_arm(&mut self,mut outbound:SignerAdmitArmOutboundV1)->Result<()>{
+    pub fn send_admit_arm(&mut self,outbound:SignerAdmitArmOutboundV1)->Result<()>{self.try_send_admit_arm(outbound)?.require_sent()}
+    pub fn try_send_admit_arm(&mut self,mut outbound:SignerAdmitArmOutboundV1)->Result<FinancialSendProgressV1>{
         let b=&outbound.binding;
         if !Arc::ptr_eq(&self.core,b.core()){return Err(rejected("foreign Signer Admit Arm outbound"));}
-        b.check()?;let slot=self.slots[b.slot()].as_mut().ok_or_else(||rejected("Signer Admit slot missing"))?;
+        b.check_bounds()?;let slot=self.slots[b.slot()].as_mut().ok_or_else(||rejected("Signer Admit slot missing"))?;
         if slot.wire_phase!=ADMIT_REVIEW||self.core.phase.phase(b.slot())!=ADMIT_ARMED{return Err(rejected("Signer Admit Arm transport phase"));}
-        slot.wire_phase=ADMIT_ARMED;outbound.consumed=true;
-        self.send(&Packet::AdmitArm{actor:b.wire.actor.clone(),presentation_digest:b.wire.presentation_digest.clone()})
+        if self.core.phase.source_send_restricted(b.slot(),ADMIT_ARMED)?{outbound.consumed=true;return Ok(FinancialSendProgressV1::Restricted);}outbound.consumed=true;
+        let progress=self.send_positive(&Packet::AdmitArm{actor:b.wire.actor.clone(),presentation_digest:b.wire.presentation_digest.clone()},b.ceiling)?;
+        if progress==FinancialSendProgressV1::Sent{self.slots[b.slot()].as_mut().unwrap().wire_phase=ADMIT_ARMED;}Ok(progress)
     }
-    pub fn send_admit_final(&mut self,mut outbound:SignerAdmitFinalOutboundV1)->Result<()>{
+    pub fn send_admit_final(&mut self,outbound:SignerAdmitFinalOutboundV1)->Result<()>{self.try_send_admit_final(outbound)?.require_sent()}
+    pub fn try_send_admit_final(&mut self,mut outbound:SignerAdmitFinalOutboundV1)->Result<FinancialSendProgressV1>{
         let r=&outbound.binding;let b=&r.review;
         if !Arc::ptr_eq(&self.core,b.core()){return Err(rejected("foreign Signer Admit Final outbound"));}
-        b.check()?;let slot=self.slots[b.slot()].as_mut().ok_or_else(||rejected("Signer Admit slot missing"))?;
+        b.check_bounds()?;let slot=self.slots[b.slot()].as_mut().ok_or_else(||rejected("Signer Admit slot missing"))?;
         if slot.wire_phase!=ADMIT_READY||self.core.phase.phase(b.slot())!=ADMIT_ADMITTED{return Err(rejected("Signer Admit Final transport phase"));}
-        slot.wire_phase=ADMIT_ADMITTED;outbound.consumed=true;
-        self.send(&Packet::AdmitFinal{actor:b.wire.actor.clone(),presentation_digest:b.wire.presentation_digest.clone(),ready_challenge:r.challenge.clone(),
-            admission_ready_digest:r.digest.clone(),witness_presentation_digest:outbound.witness_presentation.clone()})
+        if self.core.phase.source_send_restricted(b.slot(),ADMIT_ADMITTED)?{outbound.consumed=true;return Ok(FinancialSendProgressV1::Restricted);}outbound.consumed=true;
+        let progress=self.send_positive(&Packet::AdmitFinal{actor:b.wire.actor.clone(),presentation_digest:b.wire.presentation_digest.clone(),ready_challenge:r.challenge.clone(),
+            admission_ready_digest:r.digest.clone(),witness_presentation_digest:outbound.witness_presentation.clone()},b.ceiling)?;
+        if progress==FinancialSendProgressV1::Sent{self.slots[b.slot()].as_mut().unwrap().wire_phase=ADMIT_ADMITTED;}Ok(progress)
     }
     pub(super) fn receive_admit_event(&mut self,p:Packet)->Result<CoordinatorFinancialEventV1>{
         let role=p.target()?.ok_or_else(||rejected("Signer Admit missing target"))?;let i=role.index();
@@ -197,7 +201,6 @@ impl CoordinatorFinancialEndpointV1 {
                     ||!link(&data,&read.wire,&c.wire.as_ref().ok_or_else(||rejected("Signer Admit Continue display missing"))?.presentation,
                         c.saved.as_ref().ok_or_else(||rejected("Signer Admit saved source missing"))?){return Err(rejected("Signer Admit display retained binding"));}
                 slot.wire_phase=ADMIT_REVIEW;slot.admission.wire=Some(data.clone());
-                if self.core.phase.revoked(){return Ok(CoordinatorFinancialEventV1::Restricted(role));}
                 let deadline=self.clocks.restrict_received(PROFILE,data.admit_ceiling_ms,read.entry.original_source,Instant::now())?;
                 let b=Reviewed::new(Arc::clone(read),data,deadline)?;
                 slot.admission.review=Some(Arc::clone(&b));
@@ -209,7 +212,6 @@ impl CoordinatorFinancialEndpointV1 {
                 if slot.wire_phase!=ADMIT_ARMED||slot.admission.observed_ready.is_some()||slot.admission.outcome||actor!=wire.actor||presentation_digest!=wire.presentation_digest
                     ||!state::hash(&ready_challenge)||!state::hash(&admission_ready_digest){return Err(rejected("Signer Admit Ready mismatch"));}
                 slot.wire_phase=ADMIT_READY;slot.admission.observed_ready=Some(admission_ready_digest.clone());
-                if self.core.phase.revoked(){return Ok(CoordinatorFinancialEventV1::Restricted(role));}
                 let b=slot.admission.review.as_ref().ok_or_else(||rejected("Signer Admit positive review missing"))?;
                 b.check_bounds()?;let r=Arc::new(Ready{review:Arc::clone(b),challenge:ready_challenge,digest:admission_ready_digest});
                 slot.admission.ready=Some(Arc::clone(&r));
@@ -236,12 +238,13 @@ impl CoordinatorFinancialEndpointV1 {
 // authority, and cannot close unrelated already-admitted custody merely by
 // winning this exact phase CAS. Wrong phase remains a fatal protocol error.
 fn received_admit_progress(phase:&Phases,slot:usize,from:u8,to:u8)->Result<bool>{
+    if phase.source_send_restricted(slot,from)?{return Ok(false);}
     match phase.step(slot,from,to){
-        Ok(())=>Ok(!phase.revoked()),
-        Err(_) if phase.revoked()&&phase.phase(slot)==from=>Ok(false),
-        Err(error)=>Err(error),
+        Ok(())=>Ok(!phase.source_send_restricted(slot,to)?),
+        Err(error)=>{if phase.source_send_restricted(slot,from)?{Ok(false)}else{Err(error)}}
     }
 }
+
 impl HostFinancialWorkflowRelayV1 {
     pub(super) fn down_admit(&mut self,p:&Packet)->Result<()>{
         let role=p.target()?.ok_or_else(||rejected("Signer Admit relay target missing"))?;let slot=self.slots[role.index()].as_mut().ok_or_else(||rejected("Signer Admit relay slot missing"))?;
@@ -341,6 +344,15 @@ impl CAdmit { pub(super) fn observe_active(&self,phase:u8)->Result<()> {
         let p=Phases::new();p.step(0,0,ADMIT_ARMED).unwrap();
         assert!(received_admit_progress(&p,0,ADMIT_ARMED,ADMIT_READY).unwrap());
         assert!(received_admit_progress(&p,0,ADMIT_ARMED,ADMIT_READY).is_err());
+    }
+    #[test]
+    fn admit_receive_quiescence_wins_even_when_global_r_is_also_set(){
+        for from in [AWAITING_ADMISSION,ADMIT_ARMED]{
+            let p=Phases::new();p.step(0,0,from).unwrap();p.begin_quiescence(p.snapshot()).unwrap();p.revoke();
+            let to=if from==AWAITING_ADMISSION{ADMIT_REVIEW}else{ADMIT_READY};
+            assert!(received_admit_progress(&p,0,from,to).is_err());
+            assert_eq!(p.phase(0),from);assert!(p.quiescent());assert!(p.revoked());
+        }
     }
     #[test]
     fn restricted_admit_terminal_bookkeeping_does_not_manufacture_ready(){

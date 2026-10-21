@@ -54,7 +54,7 @@ impl EntryReviewed {
                 ||wall>=self.wire.presentation.facts.source_expires_at_ms{return Err(rejected("original financial custody expired"));}Ok(wall)
         })();if result.is_err(){self.core.phase.revoke();}result
     }
-    fn check_action_bounds(&self)->Result<()> {
+    pub(super) fn check_action_bounds(&self)->Result<()> {
         let result=(||{let wall=self.observe_custody()?;
             if Instant::now()>=self.original_entry||Instant::now()>=self.ceiling||wall>=self.wire.presentation.facts.expires_at_ms
             {return Err(rejected("SourceEntry original action bound elapsed"));}Ok(())})();

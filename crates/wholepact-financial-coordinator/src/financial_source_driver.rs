@@ -17,8 +17,13 @@ use std::{
 };
 use wholepact_financial_coordinator_origin::{
     CoordinatorFinancialEndpointV1, CoordinatorFinancialEventV1,
+    CoordinatorFinancialHistoryEventV1, CoordinatorFinancialSigningEventV1, FinancialHistoryInputsV1,
+    FinancialHistorySetupTicketV1, FinancialHistorySetupOutboundV1,
+    FinancialHistoryServeOutboundV1,
+    CoordinatorWitnessRetirementTicketV1, CoordinatorWitnessRetirementOutboundV1,
+    CoordinatorWitnessRetiredV1,
     CoordinatorFinancialWitnessEventV1, CoordinatorHostTerminalEndpointV1,
-    FinancialCancelProgressV1, FinancialContinueArmOutboundV1, FinancialContinueFinalOutboundV1,
+    FinancialCancelProgressV1, FinancialSendProgressV1, FinancialContinueArmOutboundV1, FinancialContinueFinalOutboundV1,
     FinancialWitnessArmOutboundV1, FinancialWitnessFinalOutboundV1, FinancialWitnessInputsV1,
     FinancialWitnessSetupOutboundV1, FinancialWitnessSetupTicketV1, SignerAdmitArmOutboundV1,
     SignerAdmitFinalOutboundV1, SignerContinueRoleV1 as Role, SignerFinancialReadOutboundV1,
@@ -27,8 +32,8 @@ use wholepact_financial_coordinator_origin::{
 
 use zeroize::Zeroizing;
 
-const COMMAND_SLOTS: usize = 24;
-const SECURITY_SLOTS: usize = 64;
+const COMMAND_SLOTS: usize = 32;
+const SECURITY_SLOTS: usize = 80;
 const HOST_OUTPUT_SLOTS: usize = 4;
 const HOST_STATUS_SLOTS: usize = 3;
 
@@ -46,6 +51,10 @@ enum Command {
     Begin(Role, Instant),
     Entry(SignerSourceEntryOutboundV1),
     Read(SignerFinancialReadOutboundV1),
+    PrepareHistory(Role, FinancialHistoryInputsV1, Instant),
+    SetupHistory(FinancialHistorySetupOutboundV1),
+    ServeHistory(FinancialHistoryServeOutboundV1),
+    RetireHistory(CoordinatorWitnessRetirementOutboundV1),
     BeginContinue(Role, Instant),
     ArmContinue(FinancialContinueArmOutboundV1),
     FinalContinue(FinancialContinueFinalOutboundV1),
@@ -58,6 +67,14 @@ enum Command {
 }
 pub(super) enum Outcome {
     Event(CoordinatorFinancialEventV1),
+    HistorySetup(Role, FinancialHistorySetupTicketV1),
+    History(CoordinatorFinancialHistoryEventV1),
+    HistoryRetirement(CoordinatorWitnessRetirementTicketV1),
+    HistoryRetired(CoordinatorWitnessRetiredV1),
+    HistoryResumed(Role),
+    SigningDisposed(Role),
+    SigningClosed(Role),
+    SigningFailed(Role),
     WitnessSetup(Role, FinancialWitnessSetupTicketV1),
     Witness(CoordinatorFinancialWitnessEventV1),
     DisposalStarted,
@@ -80,6 +97,10 @@ pub(super) struct Driver {
     begun: [bool; 2],
     entry_sent: [bool; 2],
     read_sent: [bool; 2],
+    history_prepared: [bool; 2],
+    history_setup: [bool; 2],
+    history_serve: [bool; 2],
+    history_retirement_sent: [bool; 2],
     continue_begun: [bool; 2],
     continue_armed: [bool; 2],
     continue_final: [bool; 2],
@@ -95,7 +116,7 @@ impl Driver {
         endpoint: CoordinatorFinancialEndpointV1,
         terminal: CoordinatorHostTerminalEndpointV1,
     ) -> Result<Self> {
-        // Twelve one-use commands per original role. No retries.
+        // Sixteen one-use commands per original role. No retries.
         let (input, receive) = mpsc::sync_channel(COMMAND_SLOTS);
         // Finite protocol events only, including two dispositions and finish.
         let (send, outcome) = mpsc::sync_channel(SECURITY_SLOTS);
@@ -131,6 +152,10 @@ impl Driver {
             begun: [false; 2],
             entry_sent: [false; 2],
             read_sent: [false; 2],
+            history_prepared: [false; 2],
+            history_setup: [false; 2],
+            history_serve: [false; 2],
+            history_retirement_sent: [false; 2],
             continue_begun: [false; 2],
             continue_armed: [false; 2],
             continue_final: [false; 2],
@@ -211,6 +236,7 @@ impl Driver {
         outbound: SignerFinancialReadOutboundV1,
     ) -> Result<()> {
         if !self.entry_sent[index(role)]
+            || !self.history_serve[index(role)]
             || !claim_once(
                 &mut self.read_sent,
                 role,
@@ -221,6 +247,50 @@ impl Driver {
             return Err(rejected("initial Read outbound consumed"));
         }
         self.queue(Command::Read(outbound))
+    }
+    pub(super) fn prepare_history(
+        &mut self, role: Role, inputs: FinancialHistoryInputsV1, ceiling: Instant,
+    ) -> Result<()> {
+        if !self.entry_sent[index(role)]
+            || !claim_once(&mut self.history_prepared, role, self.revoked.load(Ordering::Acquire))
+        {
+            self.revoke();
+            return Err(rejected("initial History Setup preparation consumed"));
+        }
+        self.queue(Command::PrepareHistory(role, inputs, ceiling))
+    }
+    pub(super) fn send_history_setup(
+        &mut self, role: Role, outbound: FinancialHistorySetupOutboundV1,
+    ) -> Result<()> {
+        if !self.history_prepared[index(role)]
+            || !claim_once(&mut self.history_setup, role, self.revoked.load(Ordering::Acquire))
+        {
+            self.revoke();
+            return Err(rejected("initial History Setup outbound consumed"));
+        }
+        self.queue(Command::SetupHistory(outbound))
+    }
+    pub(super) fn send_history_serve(
+        &mut self, role: Role, outbound: FinancialHistoryServeOutboundV1,
+    ) -> Result<()> {
+        if !self.history_setup[index(role)]
+            || !claim_once(&mut self.history_serve, role, self.revoked.load(Ordering::Acquire))
+        {
+            self.revoke();
+            return Err(rejected("initial History Serve outbound consumed"));
+        }
+        self.queue(Command::ServeHistory(outbound))
+    }
+    pub(super) fn send_history_retirement(
+        &mut self, role: Role, outbound: CoordinatorWitnessRetirementOutboundV1,
+    ) -> Result<()> {
+        if !self.read_sent[index(role)]
+            || !claim_once(&mut self.history_retirement_sent, role, self.revoked.load(Ordering::Acquire))
+        {
+            self.revoke();
+            return Err(rejected("initial History retirement outbound consumed"));
+        }
+        self.queue(Command::RetireHistory(outbound))
     }
     pub(super) fn begin_continue(&mut self, role: Role, retained_deadline: Instant) -> Result<()> {
         if !self.read_sent[index(role)]
@@ -418,6 +488,11 @@ fn drive(
     let session = endpoint.session_deadline();
     let mut cancel_sent = false;
     let mut cleanup = None;
+    let mut signing_disposed = [false; 2];
+    let mut signing_close_sent = [false; 2];
+    let mut history_retained = [false; 2];
+    let mut history_disposed = [false; 2];
+    let mut history_close_sent = [false; 2];
     let mut witness_disposed = [false; 2];
     let mut witness_close_sent = [false; 2];
     let mut host = HostTransport {
@@ -462,31 +537,30 @@ fn drive(
                     continue;
                 }
                 match command {
-                    Command::Begin(Role::Signer1, ceiling) => {
-                        endpoint.begin_source_entry_signer1(ceiling)?
+                    Command::Begin(role, ceiling) => record_send_progress(endpoint.try_begin_source_entry(role, ceiling)?, &revoked),
+                    Command::Entry(outbound) => record_send_progress(endpoint.try_send_source_entry(outbound)?, &revoked),
+                    Command::Read(outbound) => record_send_progress(endpoint.try_send_initial_read(outbound)?, &revoked),
+                    Command::PrepareHistory(role, inputs, ceiling) => {
+                        if let Some(ticket) = endpoint.try_prepare_history_setup(role, inputs, ceiling)? {
+                            output.try_send(Outcome::HistorySetup(role, ticket))
+                                .map_err(|_| rejected("History Setup receiver unavailable"))?;
+                        } else { revoked.store(true, Ordering::Release); }
                     }
-                    Command::Begin(Role::Signer2, ceiling) => {
-                        endpoint.begin_source_entry_signer2(ceiling)?
-                    }
-                    Command::Entry(outbound) => endpoint.send_source_entry(outbound)?,
-                    Command::Read(outbound) => endpoint.send_initial_read(outbound)?,
-                    Command::BeginContinue(Role::Signer1, ceiling) => {
-                        endpoint.begin_continue_signer1(ceiling)?
-                    }
-                    Command::BeginContinue(Role::Signer2, ceiling) => {
-                        endpoint.begin_continue_signer2(ceiling)?
-                    }
-                    Command::ArmContinue(outbound) => endpoint.send_continue_arm(outbound)?,
+                    Command::SetupHistory(outbound) => record_send_progress(endpoint.try_send_history_setup(outbound)?, &revoked),
+                    Command::ServeHistory(outbound) => record_send_progress(endpoint.try_send_history_serve(outbound)?, &revoked),
+                    Command::RetireHistory(_) => return Err(rejected("retirement outside its exclusive owner wait")),
+                    Command::BeginContinue(role, ceiling) => record_send_progress(endpoint.try_send_continue_prepare(role, ceiling)?, &revoked),
+                    Command::ArmContinue(outbound) => record_send_progress(endpoint.try_send_continue_arm(outbound)?, &revoked),
                     Command::PrepareWitness(role, inputs, ceiling) => {
-                        let ticket = endpoint.prepare_witness_setup(role, inputs, ceiling)?;
-                        output
-                            .try_send(Outcome::WitnessSetup(role, ticket))
-                            .map_err(|_| rejected("Witness Setup receiver unavailable"))?;
+                        if let Some(ticket) = endpoint.try_prepare_witness_setup(role, inputs, ceiling)? {
+                            output.try_send(Outcome::WitnessSetup(role, ticket))
+                                .map_err(|_| rejected("Witness Setup receiver unavailable"))?;
+                        } else { revoked.store(true, Ordering::Release); }
                     }
-                    Command::SetupWitness(outbound) => endpoint.send_witness_setup(outbound)?,
-                    Command::ArmWitness(outbound) => endpoint.send_witness_arm(outbound)?,
-                    Command::ArmAdmit(outbound) => endpoint.send_admit_arm(outbound)?,
-                    Command::FinalAdmit(outbound) => endpoint.send_admit_final(outbound)?,
+                    Command::SetupWitness(outbound) => record_send_progress(endpoint.try_send_witness_setup(outbound)?, &revoked),
+                    Command::ArmWitness(outbound) => record_send_progress(endpoint.try_send_witness_arm(outbound)?, &revoked),
+                    Command::ArmAdmit(outbound) => record_send_progress(endpoint.try_send_admit_arm(outbound)?, &revoked),
+                    Command::FinalAdmit(outbound) => record_send_progress(endpoint.try_send_admit_final(outbound)?, &revoked),
                     Command::FinalContinue(_) | Command::FinalWitness(_) => {
                         unreachable!("handled exact Finals above")
                     }
@@ -508,6 +582,12 @@ fn drive(
                 let Some(event) = endpoint.try_receive()? else {
                     break;
                 };
+                // The endpoint's authenticated receive has privately latched
+                // exact completion. No UI bit, queue order or DTO can do this.
+                if let CoordinatorFinancialEventV1::HistoryRetained { role, .. } = &event {
+                    history_retained[index(*role)] = true;
+                    record_send_progress(endpoint.try_finish_history_read(*role)?, &revoked);
+                }
                 if matches!(
                     &event,
                     CoordinatorFinancialEventV1::Failed { .. }
@@ -518,6 +598,37 @@ fn drive(
                 output
                     .try_send(Outcome::Event(event))
                     .map_err(|_| rejected("source-entry native receiver unavailable"))?;
+            }
+            // History service observations remain observable after R. Finish
+            // means the actual S retained its complete history/preparation; it
+            // never grants retirement or authorizes a later W purpose.
+            for _ in 0..16 {
+                let Some(event) = endpoint.try_receive_history()? else { break; };
+                match &event {
+                    CoordinatorFinancialHistoryEventV1::Disposed(role) => {
+                        history_disposed[index(*role)] = true;
+                    }
+                    CoordinatorFinancialHistoryEventV1::PreparationFailed(_)
+                    | CoordinatorFinancialHistoryEventV1::ServiceFailed(_)
+                    | CoordinatorFinancialHistoryEventV1::Restricted(_) => {
+                        revoked.store(true, Ordering::Release);
+                    }
+                    _ => {}
+                }
+                let normal_retirement = match &event {
+                    CoordinatorFinancialHistoryEventV1::Disposed(role)
+                        if !cancel_sent && !revoked.load(Ordering::Acquire) && history_retained[index(*role)] => Some(*role),
+                    _ => None,
+                };
+                output.try_send(Outcome::History(event))
+                    .map_err(|_| rejected("History native receiver unavailable"))?;
+                if let Some(role) = normal_retirement {
+                    let ticket = endpoint.prepare_history_retirement(role)?;
+                    retire_history_exclusively(&mut endpoint, &input, &output, &revoked, ticket)?;
+                    // The real retirement internally consumed exact PurposeClosed
+                    // and normal reap; do not send a second terminal request.
+                    history_close_sent[index(role)] = true;
+                }
             }
             // W outcomes remain observable after R. Disposal is not retirement.
             // Purpose-close is ONLY global cleanup grammar, never normal progress.
@@ -540,8 +651,40 @@ fn drive(
                     .try_send(Outcome::Witness(event))
                     .map_err(|_| rejected("Witness native receiver unavailable"))?;
             }
+            // The full original tree also owns not-yet-started Signing roles.
+            // Drain their actual cleanup grammar, but provide no positive UI or
+            // setup path here. Unexpected service readiness is never adopted.
+            for _ in 0..16 {
+                let Some(event) = endpoint.try_receive_signing()? else { break; };
+                let observation = match event {
+                    CoordinatorFinancialSigningEventV1::Disposed(role) => {
+                        signing_disposed[index(role)] = true;
+                        Outcome::SigningDisposed(role)
+                    }
+                    CoordinatorFinancialSigningEventV1::PurposeClosed(role) => Outcome::SigningClosed(role),
+                    CoordinatorFinancialSigningEventV1::PreparationFailed(role)
+                    | CoordinatorFinancialSigningEventV1::ServiceFailed(role)
+                    | CoordinatorFinancialSigningEventV1::Restricted(role) => {
+                        revoked.store(true, Ordering::Release);
+                        Outcome::SigningFailed(role)
+                    }
+                    CoordinatorFinancialSigningEventV1::Display(_)
+                    | CoordinatorFinancialSigningEventV1::Serving(_) => {
+                        return Err(rejected("unsolicited positive Signing service event"));
+                    }
+                };
+                output.try_send(observation).map_err(|_| rejected("Signing cleanup receiver unavailable"))?;
+            }
             for role in [Role::Signer1, Role::Signer2] {
                 let i = index(role);
+                if may_close_witness(cancel_sent, signing_disposed[i], signing_close_sent[i]) {
+                    endpoint.close_signing_purpose(role)?;
+                    signing_close_sent[i] = true;
+                }
+                if may_close_witness(cancel_sent, history_disposed[i], history_close_sent[i]) {
+                    endpoint.close_history_purpose(role)?;
+                    history_close_sent[i] = true;
+                }
                 if may_close_witness(cancel_sent, witness_disposed[i], witness_close_sent[i]) {
                     endpoint.close_witness_purpose(role)?;
                     witness_close_sent[i] = true;
@@ -592,6 +735,48 @@ fn drive(
     } else {
         Err(rejected("source-entry driver or disposal failed"))
     }
+}
+
+/// Actual fixed History retirement only. No ordinary queue, PTY, or positive
+/// source observer runs while the original W is expected to exit. The private
+/// endpoint completion record, never a UI acknowledgment, proves resume.
+fn retire_history_exclusively(
+    endpoint: &mut CoordinatorFinancialEndpointV1,
+    input: &mpsc::Receiver<Command>, output: &mpsc::SyncSender<Outcome>,
+    revoked: &AtomicBool, ticket: CoordinatorWitnessRetirementTicketV1,
+) -> Result<()> {
+    let role = ticket.role();
+    let original_cutoff = ticket.deadline();
+    output.try_send(Outcome::HistoryRetirement(ticket))
+        .map_err(|_| rejected("History retirement native receiver unavailable"))?;
+    let outbound = loop {
+        if revoked.load(Ordering::Acquire) || Instant::now() >= original_cutoff {
+            return Err(rejected("History retirement interrupted before native pause"));
+        }
+        // No reap can start until this sole owner receives the nominal pause
+        // outbound. Ordinary actor checks are still valid before that point.
+        endpoint.check_original_tree_alive()?;
+        match input.try_recv() {
+            Ok(Command::RetireHistory(outbound)) => break outbound,
+            Ok(_) => return Err(rejected("unexpected positive command during History retirement")),
+            Err(mpsc::TryRecvError::Disconnected) => return Err(rejected("History retirement native owner ended")),
+            Err(mpsc::TryRecvError::Empty) => thread::sleep(Duration::from_millis(1)),
+        }
+    };
+    let completion = endpoint.retire_witness(outbound)?;
+    if completion.role() != role { return Err(rejected("History retirement actual role changed")); }
+    output.try_send(Outcome::HistoryRetired(completion))
+        .map_err(|_| rejected("History retirement completion receiver unavailable"))?;
+    loop {
+        if revoked.load(Ordering::Acquire) || Instant::now() >= original_cutoff {
+            return Err(rejected("History retirement interrupted before native resume"));
+        }
+        if endpoint.finish_retirement_resume()? { break; }
+        thread::sleep(Duration::from_millis(1));
+    }
+    output.try_send(Outcome::HistoryResumed(role))
+        .map_err(|_| rejected("History resume receiver unavailable"))?;
+    Ok(())
 }
 
 /// One partial user write and at most ONE extra output chunk beyond the four
@@ -698,6 +883,13 @@ fn claim_once(slots: &mut [bool; 2], role: Role, revoked: bool) -> bool {
     slots[index(role)] = true;
     true
 }
+fn record_send_progress(progress: FinancialSendProgressV1, revoked: &AtomicBool) {
+    // Only Origin can classify a validated ordinary-R/no-attempt race. Any
+    // other error remains fatal at the concrete callsite; no retry is created.
+    if matches!(progress, FinancialSendProgressV1::Restricted) {
+        revoked.store(true, Ordering::Release);
+    }
+}
 fn record_cancel_progress(
     progress: FinancialCancelProgressV1,
     retained: Instant,
@@ -721,6 +913,16 @@ fn first_cleanup_ceiling(session: Instant, now: Instant) -> Instant {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn typed_nonfinal_restriction_latches_without_rearming_or_claiming_send() {
+        let revoked = AtomicBool::new(false);
+        record_send_progress(FinancialSendProgressV1::Sent, &revoked);
+        assert!(!revoked.load(Ordering::Acquire));
+        record_send_progress(FinancialSendProgressV1::Restricted, &revoked);
+        assert!(revoked.load(Ordering::Acquire));
+        record_send_progress(FinancialSendProgressV1::Sent, &revoked);
+        assert!(revoked.load(Ordering::Acquire));
+    }
     #[test]
     fn genuine_pending_final_defers_cancel_without_renewing_first_cleanup_bound() {
         // Only a data-result model; no endpoint, Final, thread, IPC or native A.
