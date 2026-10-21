@@ -46,6 +46,41 @@ class Caller(unittest.TestCase):
             request=opener.open.call_args.args[0]
             self.assertEqual(request.headers,{})
 
+    def test_late_api_eof_is_rejected(self):
+        response=mock.MagicMock();response.__enter__.return_value=response
+        response.status=200;response.geturl.return_value=U.API+'actions/jobs/1'
+        response.read1.return_value=b''
+        opener=mock.Mock();opener.open.return_value=response
+        with mock.patch.object(U.urllib.request,'build_opener',return_value=opener), \
+             mock.patch.object(U.time,'monotonic',side_effect=[0,0,61]):
+            with self.assertRaises(U.Rejected) as found:U.api('actions/jobs/1','')
+            self.assertEqual(str(found.exception),'api_deadline')
+
+    def test_late_download_eof_is_rejected(self):
+        response=mock.MagicMock();response.__enter__.return_value=response
+        response.status=200;response.geturl.return_value='https://x.blob.core.windows.net/a'
+        response.read1.return_value=b''
+        opener=mock.Mock();opener.open.return_value=response
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.object(U.urllib.request,'build_opener',return_value=opener), \
+             mock.patch.object(U.time,'monotonic',side_effect=[0,0,301]):
+            with self.assertRaises(U.Rejected) as found:
+                U.download_archive(response.geturl.return_value,pathlib.Path(directory)/'x','a'*64)
+            self.assertEqual(str(found.exception),'download_deadline')
+
+    def test_original_refusal_survives_cleanup_error(self):
+        pin=dict(version=1,repository=U.R.REPOSITORY,source='a'*40,source_tree='b'*40,
+                 run_id=10,attempt=1,job_id=20,artifact_id=30,archive_sha256='c'*64,bundle_sha256='d'*64)
+        with tempfile.TemporaryDirectory() as directory:
+            path=pathlib.Path(directory)/'pin.json';path.write_text(json.dumps(pin))
+            with mock.patch.object(U,'PIN',path),mock.patch.object(U.S,'context',return_value=('e'*40,'t')), \
+                 mock.patch.object(U.S,'exact_source'),mock.patch.object(U,'api',side_effect=U.Rejected('api_response')), \
+                 mock.patch.object(U.shutil,'rmtree',side_effect=OSError('PRIVATE')), \
+                 mock.patch.dict(U.os.environ,{'RUNNER_TEMP':directory}),mock.patch('builtins.print') as printed:
+                with self.assertRaises(U.Rejected) as found:U.run()
+                self.assertEqual(str(found.exception),'api_response')
+                printed.assert_called_once_with('CI_UI_REUSE_CLEANUP {"removed":false}',flush=True)
+
     def test_exact_single_bundle_and_restored_bytes(self):
         with tempfile.TemporaryDirectory() as directory:
             root=pathlib.Path(directory);inputs=root/'inputs';inputs.mkdir()

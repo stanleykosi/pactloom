@@ -70,6 +70,7 @@ def api(path, token, *, redirect=False):
         while True:
             need(time.monotonic() < deadline, 'api_deadline')
             chunk = response.read1(65536)
+            need(time.monotonic() < deadline, 'api_deadline')
             if not chunk:
                 break
             raw.extend(chunk); need(len(raw) <= 4 * 1024 * 1024, 'api_limit')
@@ -90,6 +91,8 @@ def storage_url(value):
 def download_archive(url, destination, expected_sha):
     # Never forward the API Authorization header to the signed storage URL.
     opener = urllib.request.build_opener(NoRedirect())
+    # Absolute acceptance deadline; a blocked read may return up to the fixed
+    # 20-second socket timeout later, but late bytes/EOF are never accepted.
     deadline, total, digest = time.monotonic() + 300, 0, hashlib.sha256()
     with opener.open(urllib.request.Request(storage_url(url)), timeout=20) as response:
         need(response.status == 200 and response.geturl() == url, 'download_response')
@@ -97,6 +100,7 @@ def download_archive(url, destination, expected_sha):
             while True:
                 need(time.monotonic() < deadline, 'download_deadline')
                 chunk = response.read1(1024 * 1024)
+                need(time.monotonic() < deadline, 'download_deadline')
                 if not chunk:
                     break
                 total += len(chunk); need(total <= R.MAX_ARCHIVE, 'download_limit')
@@ -185,6 +189,7 @@ def run():
         return S.main()
     R.validate_pin(pin)
     work = pathlib.Path(tempfile.mkdtemp(prefix='ui-reuse-', dir=os.environ['RUNNER_TEMP']))
+    first_error = None
     try:
         run_info = api(f"actions/runs/{pin['run_id']}/attempts/{pin['attempt']}", token)
         job = api(f"actions/jobs/{pin['job_id']}", token)
@@ -228,14 +233,22 @@ def run():
         # Never re-export old binaries as a freshly compiled current producer.
         S.export_compiled_artifacts = lambda *_: None
         return S.main()
+    except BaseException as error:
+        first_error = error
+        raise
     finally:
-        shutil.rmtree(work)
+        try:
+            shutil.rmtree(work)
+        except Exception:
+            print('CI_UI_REUSE_CLEANUP {"removed":false}', flush=True)
+            if first_error is None:
+                raise Rejected('reuse_cleanup') from None
 
 ERROR_CODES = frozenset('''api_path api_response api_limit api_deadline api_json storage_origin
 download_response download_deadline download_limit archive_digest zip_header
 zip_directory zip_set zip_entry bundle_limit bundle_digest source_entry
 source_path source_file manifest commit source_changed restored_digest pin_limit
-pin source identity digest records tree run repository job steps upload artifact
+reuse_cleanup pin source identity digest records tree run repository job steps upload artifact
 artifact_origin closure closure_entry compile_inputs_changed compile_inputs_missing
 manifest_size canonical provenance closure_mismatch recipe file_set file_pin
 total_size bundle_file archive_header archive_entry archive_pin archive_truncated
