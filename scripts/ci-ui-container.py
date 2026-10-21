@@ -677,6 +677,35 @@ class NativeSession:
         action = self.controller.terminal_click if terminal else self.controller.click
         return action(*center(b, self.widget(latest, name)))
 
+    def settled_form_snapshot(self):
+        """Choose form geometry only after two real stable render intervals.
+
+        Wheel ACK means injection, not the end of native smooth scrolling or
+        multiline reflow. Snapshots deduplicate equal geometry, so sequence
+        advancement alone cannot establish stability. No input is sent here.
+        The existing click revalidation remains the final fail-closed guard.
+        """
+        record = self.wait_snapshot(lambda s: s['phase'] == 'Selecting' and
+                                    s['focused'] and not s['revoked'])
+        baseline = record['detail']['facts']['presentation_digest']
+        stable = 0
+        for _ in range(64):
+            self.controller.wait_render_progress()
+            latest = self.snapshot()
+            require(latest is not None, 'input_phase')
+            facts = latest['detail']['facts']
+            require(facts['phase'] == 'Selecting' and facts['focused'] and
+                    not facts['revoked'] and not facts['raw_blur'] and
+                    facts['presentation_digest'] == baseline, 'input_phase')
+            # Native frame/pass counters are not layout or semantic state.
+            before = {k: v for k, v in record['detail']['facts'].items() if k not in ('frame', 'pass')}
+            after = {k: v for k, v in facts.items() if k not in ('frame', 'pass')}
+            stable = stable + 1 if before == after else 0
+            record = latest
+            if stable == 2:
+                return record
+        raise S.Rejected('input_phase')
+
     def fill(self, form):
         self.reporter.stage = 'input'
         # Preflight all values and aggregate event ceiling before any field input.
@@ -685,7 +714,7 @@ class NativeSession:
         for name, key in FIELDS:
             self.input_field = name
             for scroll in range(65):
-                record = self.wait_snapshot(lambda s: s['phase'] == 'Selecting' and s['focused'] and not s['revoked'])
+                record = self.settled_form_snapshot()
                 matches = [w for w in record['detail']['facts']['widgets'] if w['widget'] == name and w['enabled']]
                 if matches:
                     self.input_action = 'select'; self.click(record, name)
@@ -697,7 +726,6 @@ class NativeSession:
                 target = max(visible, key=lambda w: w['rect']['bottom'])
                 self.input_action = 'scroll'
                 self.controller.scroll_down(*center(record['detail']['facts'], target))
-                time.sleep(.03)  # scheduling only; next actual snapshot remains the input target
 
     def capture(self, record, prior_pixels=None, *, region=None, before_digest=None):
         self.input_action = 'capture'

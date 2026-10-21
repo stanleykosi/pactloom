@@ -496,3 +496,84 @@ class TerminalHelperPure(unittest.TestCase):
     def test_typed_failure_cr_is_not_normalized(self):
         with self.assertRaises(C.P.Rejected):
             self.helper(True).line(b'CI_UI_OWNER_CLIENT_FAILURE stage=Prepare cause=NotListening\r')
+
+
+class StableFormGeometry(unittest.TestCase):
+    def record(self, left=0, **changes):
+        facts = dict(frame=1, **{'pass':1}, phase='Selecting', focused=True,
+            revoked=False, raw_blur=False, presentation_digest=None,
+            widgets=[{'widget':'Request','enabled':True,
+                      'rect':dict(left=left,top=1,right=100,bottom=20)}])
+        return dict(sequence=1, detail=dict(facts=facts|changes))
+
+    def session(self, records):
+        from unittest import mock
+        session=C.NativeSession.__new__(C.NativeSession)
+        session.controller=mock.Mock()
+        session.wait_snapshot=mock.Mock(return_value=records[0])
+        session.snapshot=mock.Mock(side_effect=records[1:])
+        return session
+
+    def test_moving_multiline_scroll_geometry_settles_before_target_selection(self):
+        rows=[self.record(0),self.record(10),self.record(20),self.record(20),self.record(20)]
+        session=self.session(rows)
+        self.assertEqual(session.settled_form_snapshot(), rows[-1])
+        self.assertEqual(session.controller.wait_render_progress.call_count,4)
+        session.controller.click.assert_not_called()
+        session.controller.scroll_down.assert_not_called()
+
+    def test_deduplicated_equal_snapshot_requires_two_real_render_barriers(self):
+        row=self.record();session=self.session([row,row,row])
+        self.assertIs(session.settled_form_snapshot(),row)
+        self.assertEqual(session.controller.wait_render_progress.call_count,2)
+
+    def test_frame_counter_changes_are_not_geometry_changes(self):
+        session=self.session([self.record(),self.record(frame=2),self.record(frame=3)])
+        self.assertEqual(session.settled_form_snapshot()['detail']['facts']['frame'],3)
+
+    def test_focus_phase_revocation_blur_and_digest_cannot_be_retried(self):
+        for change in ({'focused':False},{'phase':'Revoked'},{'revoked':True},
+                       {'raw_blur':True},{'presentation_digest':'changed'}):
+            with self.subTest(change=change):
+                session=self.session([self.record(),self.record(**change),self.record()])
+                with self.assertRaises(C.S.Rejected) as found:session.settled_form_snapshot()
+                self.assertEqual(found.exception.code,'input_phase')
+                self.assertEqual(session.controller.wait_render_progress.call_count,1)
+                session.controller.click.assert_not_called()
+
+    def test_continuously_moving_geometry_exhausts_bound_without_click(self):
+        session=self.session([self.record(n) for n in range(65)])
+        with self.assertRaises(C.S.Rejected) as found:session.settled_form_snapshot()
+        self.assertEqual(found.exception.code,'input_phase')
+        self.assertEqual(session.controller.wait_render_progress.call_count,64)
+        session.controller.click.assert_not_called()
+
+    def test_progress_failure_propagates_without_retry_or_input(self):
+        session=self.session([self.record(),self.record()])
+        session.controller.wait_render_progress.side_effect=C.D.Rejected('deadline')
+        with self.assertRaises(C.D.Rejected) as found:session.settled_form_snapshot()
+        self.assertEqual(found.exception.code,'deadline')
+        self.assertEqual(session.controller.wait_render_progress.call_count,1)
+        session.snapshot.assert_not_called()
+        session.controller.click.assert_not_called()
+
+    def test_missing_snapshot_is_not_stable(self):
+        session=self.session([self.record(),None])
+        with self.assertRaises(C.S.Rejected):session.settled_form_snapshot()
+        session.controller.click.assert_not_called()
+
+    def test_click_still_rejects_geometry_change_after_settling(self):
+        from unittest import mock
+        session=self.session([self.record(),self.record(),self.record()])
+        record=session.settled_form_snapshot()
+        session.check=mock.Mock();session.records=[];session.product=mock.Mock()
+        with mock.patch.object(C.P,'latest_widget_snapshot',return_value=self.record(1)):
+            with self.assertRaises(C.S.Rejected) as found:session.click(record,'Request')
+        self.assertEqual(found.exception.code,'input_phase')
+        session.controller.click.assert_not_called()
+
+    def test_fill_uses_settled_geometry_without_wallclock_scroll_guess(self):
+        source=PATH.read_text();fill=source[source.index('    def fill('):source.index('    def capture(')]
+        self.assertIn('record = self.settled_form_snapshot()',fill)
+        self.assertNotIn('time.sleep',fill)
+        self.assertIn('self.click(record, name)',fill)
