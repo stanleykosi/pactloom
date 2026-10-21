@@ -131,7 +131,7 @@ class BuildSelection(unittest.TestCase):
         self.assertIn("args += ['--lib'] if setup", source)
         self.assertIn("'--locked', '--release', '--no-default-features'", source)
         self.assertIn("selected['RUSTFLAGS'] = '--cfg wholepact_delivery_ci'", source)
-        self.assertLess(source.index('shutil.copyfile(artifact'), source.index('pins[name] = pin(inputs / name)'))
+        self.assertLess(source.index('shutil.copyfile(artifact'), source.index('pins[name] = pin(inputs / name)', source.index('def build_inputs(')))
         self.assertIn("CARGO_TARGET_DIR=str(root / 'target')", source)
 
 
@@ -464,7 +464,9 @@ class RecordsAndCleanup(unittest.TestCase):
             if kind == 'CASE' or (kind == 'RESULT' and value['passed']): self.assertEqual(order, ['cleanup'])
         with tempfile.TemporaryDirectory() as directory, \
              mock.patch.object(S, 'context', return_value=('a' * 40, 'token')), \
-             mock.patch.object(S, 'exact_source'), mock.patch.object(S, 'build_inputs', return_value=(pathlib.Path(directory), {})), \
+             mock.patch.object(S, 'exact_source'), mock.patch.object(S, 'prepare_foundation_inputs', return_value=(pathlib.Path(directory), {})), \
+             mock.patch.object(S, 'build_inputs'), mock.patch.object(S, 'build_image', return_value={'id': 'sha256:' + 'a' * 64}), \
+             mock.patch.object(S, 'final_image', return_value='sha256:' + 'b' * 64), \
              mock.patch.object(S, 'docker', side_effect=[b'', b'', ('sha256:' + 'a' * 64).encode()]), \
              mock.patch.object(S, 'run_case', return_value=(result, True)), \
              mock.patch.object(S, 'cleanup', side_effect=clean), mock.patch.object(S, 'emit', side_effect=emit), \
@@ -479,6 +481,76 @@ class RecordsAndCleanup(unittest.TestCase):
             self.assertTrue(S.image_failure(good))
             self.assertFalse(S.image_failure(good.replace(b'tool_exit', b'PRIVATE_SENTINEL')))
         self.assertNotIn('PRIVATE_SENTINEL', output.getvalue())
+
+
+class FoundationOrdering(unittest.TestCase):
+    def test_foundation_failure_stops_before_toolchain_or_cargo(self):
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.object(S, 'context', return_value=('a' * 40, 'token')), \
+             mock.patch.object(S, 'exact_source'), \
+             mock.patch.object(S, 'prepare_foundation_inputs', return_value=(pathlib.Path(directory), {})), \
+             mock.patch.object(S, 'build_image', side_effect=S.Failure('image', 'command_failed')), \
+             mock.patch.object(S, 'build_inputs') as cargo, mock.patch.object(S, 'run_case') as runtime, \
+             mock.patch.object(S, 'docker', return_value=b''), \
+             mock.patch.object(S, 'cleanup', return_value=True), \
+             mock.patch.object(S.sys, 'argv', ['supervisor', 'run']), \
+             mock.patch.dict(S.os.environ, {'RUNNER_TEMP': directory}), contextlib.redirect_stdout(output):
+            self.assertEqual(S.main(), 1)
+        cargo.assert_not_called()
+        runtime.assert_not_called()
+        self.assertIn('"passed":false', output.getvalue())
+
+    def test_existing_context_files_cannot_be_rewritten_after_foundation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            S.write_context_files(root, {'metadata.json': b'original'})
+            S.write_context_files(root, {'metadata.json': b'original', 'new.json': b'final'})
+            with self.assertRaises(S.Failure):
+                S.write_context_files(root, {'metadata.json': b'changed'})
+            self.assertEqual((root / 'metadata.json').read_bytes(), b'original')
+
+    def test_only_same_job_foundation_can_finalize(self):
+        foundation = {'id': 'sha256:' + 'a' * 64, 'layers': ('sha256:' + '1' * 64,)}
+        final = {'id': 'sha256:' + 'b' * 64, 'layers': foundation['layers'] + ('sha256:' + '2' * 64,)}
+        with mock.patch.object(S, 'image_descriptor', return_value=foundation), \
+             mock.patch.object(S, 'build_image', return_value=final):
+            self.assertEqual(S.final_image(None, 'final', 'foundation', 'token', 'source', foundation), final['id'])
+        with mock.patch.object(S, 'image_descriptor', return_value=foundation), \
+             mock.patch.object(S, 'build_image', return_value=dict(final, layers=('sha256:' + '3' * 64,))):
+            with self.assertRaises(S.Failure):
+                S.final_image(None, 'final', 'foundation', 'token', 'source', foundation)
+        with mock.patch.object(S, 'image_descriptor', return_value=final), mock.patch.object(S, 'build_image') as build:
+            with self.assertRaises(S.Failure):
+                S.final_image(None, 'final', 'foundation', 'token', 'source', foundation)
+            build.assert_not_called()
+
+    def test_buildkit_error_without_installer_record_is_still_visible(self):
+        error = S.Failure('image', 'command_failed', b'package install failed: missing dependency', exit_status=1)
+        output = io.StringIO()
+        with mock.patch.object(S, 'docker', side_effect=error), contextlib.redirect_stdout(output):
+            with self.assertRaises(S.Failure):
+                S.build_image('/context', 'foundation', 'tag', 'token', 'a' * 40, fresh=True)
+        self.assertIn('package install failed: missing dependency', output.getvalue())
+        self.assertIn('CI_UI_IMAGE_BUILD_FAILURE ', output.getvalue())
+        self.assertIn('"exit_status":1', output.getvalue())
+
+    def test_installer_tail_closed_identity_bounded_scrubbed(self):
+        row = dict(schema_version=1, kind='pre_credential_tool', phase='install', code='tool_exit',
+            tool='apt-get', command=['apt-get', '--no-download', 'install', '/ci-packages/fake.deb', 'fixed\tformat\n'],
+            command_truncated=False, exit_status=100, output_bytes=45, tail_truncated=False,
+            tail='missing dependency password=example', tool_cleanup_failed=False)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertFalse(S.image_failure(b'#2 1.0 ' + json.dumps(row).encode()))
+        self.assertIn('missing dependency', output.getvalue())
+        self.assertNotIn('password=example', output.getvalue())
+        self.assertIn('"exit_status":100', output.getvalue())
+        row['tail'] = 'x' * 65537
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            S.image_failure(json.dumps(row).encode())
+        self.assertEqual(output.getvalue(), '')
 
 
 if __name__ == '__main__':

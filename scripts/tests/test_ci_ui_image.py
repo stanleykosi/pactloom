@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Pure fabricated/source tests. No download, package install, compile or Docker.
+"""Fabricated/source tests and bounded local Python subprocess checks.
 
-All network/process boundaries below are mocked; .deb-named test files contain
-only fabricated ASCII and are created solely in temporary directories. These
-checks do not establish actual package installation or libweston ABI behavior.
+No download, package install, compile, Docker or native product execution.
+Network boundaries are mocked; generated-checker tests run fixed Python children
+to check diagnostics, timeout and output bounds. The .deb-named test files contain
+only fabricated ASCII in temporary directories. These checks do not establish
+actual package installation or libweston ABI behavior.
 """
 import ast
 import copy
@@ -16,6 +18,7 @@ import os
 import pathlib
 import socket
 import subprocess
+import sys
 import tarfile
 import tempfile
 import time
@@ -418,7 +421,7 @@ class BuildSource(RejectionTests):
             self.assertNotIn('install.py', line)
             self.assertNotIn('*', line)
         for name in I.ARTIFACT_FILES:
-            self.assertIn('COPY --chown=0:0 --chmod=0555 inputs/' + name + ' /opt/ci-ui/' + name, copies)
+            self.assertIn('COPY --chown=0:0 --chmod=0555 artifacts/' + name + ' /opt/ci-ui/' + name, copies)
         self.assertIn('USER 0:0', docker)
         self.assertIn('"/opt/ci-ui/ci-ui-container.py"', docker)
 
@@ -439,12 +442,14 @@ class BuildSource(RejectionTests):
 
     def test_rendered_metadata_and_strict_input_pins(self):
         files = I.render_build_files(LOCK, input_pins())
-        self.assertEqual(set(files), {'Dockerfile', '.dockerignore', 'image-build/metadata.json', 'image-build/install.py'})
+        self.assertEqual(set(files), {'Dockerfile', '.dockerignore', 'image-build/metadata.json', 'image-build/install.py',
+                                      'final-build/metadata.json', 'final-build/install.py'})
         metadata = json.loads(files['image-build/metadata.json'])
         self.assertEqual(metadata['base'], I.expected_packages(LOCK, 'base'))
         self.assertEqual(len(metadata['packages']['runtime']), 215)
         self.assertEqual(len(metadata['packages']['build']), 256)
-        self.assertEqual(set(metadata['inputs']), set(input_pins()))
+        self.assertEqual(set(metadata['inputs']), set(I.RUNTIME_FILES) | {I.MODULE_SOURCE})
+        self.assertEqual(json.loads(files['final-build/metadata.json'])['inputs'], input_pins())
         self.assertEqual(set(metadata['headers']), set(I.PRIVATE_HEADERS))
         for alter in (lambda p: p.pop('pristine-setup'), lambda p: p.update({'unexpected': pin(b'x')})):
             pins = input_pins()
@@ -462,7 +467,9 @@ class BuildSource(RejectionTests):
         self.assertNotIn('.git', ignore)
         allowed = {line[1:] for line in ignore.splitlines() if line.startswith('!')}
         self.assertEqual({p for p in allowed if p.startswith('inputs/') and not p.endswith('/')},
-                         {'inputs/' + name for name in input_pins()})
+                         {'inputs/' + name for name in (*I.RUNTIME_FILES, I.MODULE_SOURCE)})
+        self.assertEqual({p for p in allowed if p.startswith('artifacts/') and not p.endswith('/')},
+                         {'artifacts/' + name for name in I.ARTIFACT_FILES})
         self.assertEqual(len({p for p in allowed if p.endswith('.deb')}), 258)
         self.assertEqual(len({p for p in allowed if p.endswith('.h')}), 5)
 
@@ -590,15 +597,21 @@ class FirstFailureEvidence(RejectionTests):
             self.assertEqual(json.loads(stderr.getvalue()), {'schema_version': 1, 'phase': phase,
                                                             'code': code, 'cleanup_failed': True})
 
-    def test_installer_tool_failures_never_emit_raw_output(self):
+    def test_installer_start_failure_keeps_finite_error_and_bounded_context(self):
         helper = installer_definitions()
-        for error, code in ((subprocess.TimeoutExpired('private', 180, output=b'secret'), 'tool_timeout'),
-                            (subprocess.CalledProcessError(1, 'private', output=b'secret'), 'tool_exit'),
-                            (OSError('private exec'), 'tool_start')):
-            with mock.patch.object(helper['subprocess'], 'run', side_effect=error):
-                with self.assertRaises(helper['Failed']) as found:
-                    helper['checked'](['fabricated-command'])
-            self.assertEqual(found.exception.code, code)
+        stderr = io.StringIO()
+        with mock.patch.object(helper['subprocess'], 'Popen', side_effect=OSError('PRIVATE_ERROR')), \
+             mock.patch.object(helper['sys'], 'stderr', stderr):
+            with self.assertRaises(helper['Failed']) as found:
+                helper['checked'](['apt-get', 'install'])
+        self.assertEqual(found.exception.code, 'tool_start')
+        row = json.loads(stderr.getvalue())
+        self.assertEqual(row['tool'], 'apt-get')
+        self.assertEqual(row['command'], ['apt-get', 'install'])
+        self.assertFalse(row['command_truncated'])
+        self.assertEqual(row['tail'], '')
+        self.assertIsNone(row['exit_status'])
+        self.assertNotIn('PRIVATE_ERROR', stderr.getvalue())
 
     def test_module_manifest_is_closed_deterministic_and_generated_after_compile(self):
         helper = installer_definitions()
@@ -628,11 +641,100 @@ class FirstFailureEvidence(RejectionTests):
             self.assertEqual(set(manifest), {'schema_version', 'package_lock_sha256', 'files'})
             self.assertEqual(manifest['schema_version'], 1)
             self.assertEqual(manifest['package_lock_sha256'], I.LOCK_SHA256)
-            self.assertEqual(set(manifest['files']), set(I.RUNTIME_FILES) | set(I.ARTIFACT_FILES) | {I.MODULE_BINARY})
+            self.assertEqual(set(manifest['files']), set(I.RUNTIME_FILES) | {I.MODULE_BINARY})
             self.assertEqual(manifest['files'][I.MODULE_BINARY], pin(b'not a compiled module'))
             self.assertEqual((output / 'manifest.json').stat().st_mode & 0o777, 0o444)
             self.assertNotIn(I.MODULE_SOURCE, manifest['files'])
             self.assertNotIn('source_commit', manifest)
+
+
+class FoundationAndDiagnosticTests(unittest.TestCase):
+    def test_foundation_has_no_artifact_dependency_and_stays_identical(self):
+        pins = input_pins()
+        foundation = I.render_foundation_files(LOCK, {n: pins[n] for n in (*I.RUNTIME_FILES, I.MODULE_SOURCE)})
+        final = I.render_build_files(LOCK, pins)
+        self.assertEqual({k: final[k] for k in foundation}, foundation)
+        altered = dict(pins)
+        altered['coordinator-production'] = pin(b'new real compiled bytes')
+        other = I.render_build_files(LOCK, altered)
+        self.assertEqual({k: other[k] for k in foundation}, foundation)
+        self.assertNotEqual(other['final-build/metadata.json'], final['final-build/metadata.json'])
+        docker = foundation['Dockerfile'].decode()
+        before, after = docker.split('FROM foundation AS runtime')
+        self.assertNotIn('COPY --chown=0:0 --chmod=0555 artifacts/', before)
+        self.assertIn('install.py finalize', after)
+        self.assertNotIn('final-build/metadata.json', foundation)
+
+    def test_final_manifest_requires_every_actual_file_and_original_script_pin(self):
+        helper = installer_definitions()
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            helper['ROOT'] = root
+            pins = input_pins()
+            for name in (*I.RUNTIME_FILES, *I.ARTIFACT_FILES):
+                (root / name).write_bytes(('fabricated ' + name).encode())
+            (root / I.MODULE_BINARY).write_bytes(b'not an ELF module')
+            foundation = {'schema_version': 1, 'package_lock_sha256': I.LOCK_SHA256,
+                'files': {**{n: pins[n] for n in I.RUNTIME_FILES}, I.MODULE_BINARY: pin(b'not an ELF module')}}
+            manifest_path = root / 'foundation-manifest.json'
+            manifest_path.write_text(json.dumps(foundation))
+            meta = {'runtime': {'fake': ['1', 'all']}, 'inputs': pins}
+            helper['installed'] = lambda: meta['runtime']
+            wrong = dict(meta, inputs=dict(pins))
+            wrong['inputs'][I.RUNTIME_FILES[0]] = pin(b'changed after foundation')
+            with self.assertRaises(helper['Failed']) as error:
+                helper['finalize'](wrong)
+            self.assertEqual(error.exception.code, 'input_digest')
+            self.assertFalse((root / 'manifest.json').exists())
+            helper['finalize'](meta)
+            result = json.loads((root / 'manifest.json').read_bytes())
+            self.assertEqual(set(result['files']), set(I.RUNTIME_FILES) | set(I.ARTIFACT_FILES) | {I.MODULE_BINARY})
+            self.assertFalse(manifest_path.exists())
+            self.assertEqual((root / 'manifest.json').stat().st_mode & 0o777, 0o444)
+
+    def test_diagnostic_preserves_fixed_dpkg_format_but_rejects_other_controls(self):
+        helper = installer_definitions()
+        command = ['dpkg-query', '-W', '-f=${Package}\t${Version}\n']
+        for actual, expected in ((command, command), (['dpkg-query', 'bad\x00arg'], [])):
+            output = io.StringIO()
+            with mock.patch.object(helper['sys'], 'stderr', output):
+                helper['diagnostic'](actual, 'tool_exit', 1, b'error', 5, False)
+            row = json.loads(output.getvalue())
+            self.assertEqual(row['command'], expected)
+            self.assertEqual(row['command_truncated'], not bool(expected))
+            self.assertEqual(len(output.getvalue().splitlines()), 1)
+
+    def test_generated_checker_retains_real_subprocess_stderr_and_status(self):
+        helper = installer_definitions()
+        stderr = io.StringIO()
+        # Harmless Python child only: no package installation, Docker or native app.
+        with mock.patch.object(helper['sys'], 'stderr', stderr):
+            with self.assertRaises(helper['Failed']) as error:
+                helper['checked']([sys.executable, '-c',
+                    "import sys;print('package dependency missing',file=sys.stderr);print('password=example');sys.exit(7)"])
+        row = json.loads(stderr.getvalue())
+        self.assertEqual(error.exception.code, 'tool_exit')
+        self.assertEqual(row['exit_status'], 7)
+        self.assertIn('package dependency missing', row['tail'])
+        self.assertNotIn('password=example', row['tail'])
+        self.assertIn('[REDACTED]', row['tail'])
+        self.assertFalse(row['tool_cleanup_failed'])
+
+    def test_generated_checker_bounds_output_and_timeout(self):
+        for code, expression, timeout in (
+            ('tool_output_limit', "import sys;sys.stdout.write('x'*200000)", 5),
+            ('tool_timeout', "import time;time.sleep(5)", .1)):
+            helper = installer_definitions()
+            helper['TOOL_TIMEOUT'] = timeout
+            stderr = io.StringIO()
+            with mock.patch.object(helper['sys'], 'stderr', stderr):
+                with self.assertRaises(helper['Failed']) as error:
+                    helper['checked']([sys.executable, '-c', expression], capture=True)
+            row = json.loads(stderr.getvalue())
+            self.assertEqual(error.exception.code, code)
+            self.assertLessEqual(len(row['tail'].encode()), 65536)
+            self.assertFalse(row['tool_cleanup_failed'])
+            self.assertIsInstance(row['exit_status'], int)
 
 
 if __name__ == '__main__':

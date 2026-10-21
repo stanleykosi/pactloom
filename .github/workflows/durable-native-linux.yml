@@ -58,13 +58,13 @@ jobs:
           WHOLEPACT_BUILD_JOBS: '3'
         run: bash scripts/ci-durable-native-linux.sh
       - name: Isolated bootstrap profile (UI uses seven reap/lifetime prerequisites)
-        if: steps.mode.outputs.gate == 'bootstrap' || steps.mode.outputs.gate == 'ui'
+        if: steps.mode.outputs.gate == 'bootstrap'
         timeout-minutes: 45
         shell: bash
         working-directory: source
         run: bash scripts/ci-bootstrap-linux.sh
       - name: Verify bootstrap containers and temporary image removed
-        if: always() && (steps.mode.outputs.gate == 'bootstrap' || steps.mode.outputs.gate == 'ui')
+        if: always() && steps.mode.outputs.gate == 'bootstrap'
         timeout-minutes: 5
         shell: bash
         working-directory: source
@@ -74,6 +74,19 @@ jobs:
         shell: bash
         run: |
           echo 'Bootstrap-only qualification passed. Origin and financial suites were intentionally not rerun. Historical CI64 financial evidence is unchanged, not revalidated. No financial authority, settlement, deployment or full-product acceptance is claimed.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Verify exact historical CI70 bootstrap prerequisite (not a current run)
+        if: steps.mode.outputs.gate == 'ui'
+        timeout-minutes: 3
+        shell: bash
+        working-directory: source
+        env:
+          GIT_TERMINAL_PROMPT: '0'
+          GIT_CONFIG_NOSYSTEM: '1'
+          GIT_CONFIG_GLOBAL: /dev/null
+        run: |
+          set -euo pipefail
+          git -c credential.helper= -c http.extraheader= fetch --no-tags --depth=1 https://github.com/stanleykosi/pactloom.git e2ad650efe7d9a5db94662e6713b7447fc4f6f81
+          python3 -I -B scripts/ci-ui-prerequisite.py
       - name: Actual isolated UI smoke and one reused synthetic fixture
         if: steps.mode.outputs.gate == 'ui'
         timeout-minutes: 100
@@ -90,4 +103,4 @@ jobs:
         if: success() && steps.mode.outputs.gate == 'ui'
         shell: bash
         run: |
-          echo 'Seven current-image bootstrap reap/lifetime prerequisites and isolated actual UI gate passed. The eight packet/credential fault results are historical individual CI69 evidence, not rerun or current-image qualification; CI69 remains failed. One unfunded synthetic fixture was reused for cancel, blur/refocus and at most one authenticated synthetic journal append. Historical CI64 financial evidence is unchanged, not revalidated. No public-chain settlement, deployment, funded wallet or full-product acceptance is claimed.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Historical CI70 seven bootstrap reap/lifetime prerequisites were reused only after exact source/Cargo/script closure and original job checks. They were not rerun on this image. The new foundation and isolated actual UI gate passed. CI70 remains failed at image installation. The eight packet/credential fault results are historical individual CI69 evidence, not rerun or current-image qualification; CI69 remains failed. One unfunded synthetic fixture was reused for cancel, blur/refocus and at most one authenticated synthetic journal append. Historical CI64 financial evidence is unchanged, not revalidated. No public-chain settlement, deployment, funded wallet or full-product acceptance is claimed.' >> "$GITHUB_STEP_SUMMARY"

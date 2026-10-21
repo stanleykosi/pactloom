@@ -546,8 +546,10 @@ def stage_private_headers(target, *, deadline):
         _raise_first(error, _cleanup_staging(directory, created), 'staging_cleanup')
 
 
-def _pins(pins):
-    expected = set(RUNTIME_FILES) | set(ARTIFACT_FILES) | {MODULE_SOURCE}
+def _pins(pins, *, artifacts=True):
+    expected = set(RUNTIME_FILES) | {MODULE_SOURCE}
+    if artifacts:
+        expected |= set(ARTIFACT_FILES)
     _require(type(pins) is dict and set(pins) == expected, 'input_allowlist')
     for row in pins.values():
         _keys(row, 'size sha256', 'input_pin')
@@ -556,17 +558,17 @@ def _pins(pins):
     return pins
 
 
-def render_build_files(manifest, input_pins):
+def render_foundation_files(manifest, input_pins):
     """Return closed build-context metadata as bytes, without writing/running it.
 
-    Parent supplies reviewed size/hash pins for exactly the module source, four
-    runtime scripts, and three independently built executables. No source tree,
+    Parent supplies reviewed size/hash pins for exactly the module source and
+    four runtime scripts. This stage has no Rust artifacts. No source tree,
     Cargo cache, credentials or fixture contents belong in this build context.
     Expected layout: packages/*.deb, headers/libweston/**, inputs/<allowlist>,
     plus returned Dockerfile/.dockerignore/image-build/* files.
     """
     _reviewed(manifest)
-    _pins(input_pins)
+    _pins(input_pins, artifacts=False)
     package_rows = {row['name']: row for row in manifest['packages']}
     metadata = {
         'base': expected_packages(manifest, 'base'),
@@ -583,33 +585,55 @@ def render_build_files(manifest, input_pins):
             'image-build/install.py': _INSTALL_SCRIPT.encode('ascii')}
 
 
+def render_build_files(manifest, input_pins):
+    """Finalize the SAME job's foundation with genuine compiled artifacts.
+
+    Foundation files remain byte-identical before/after Cargo. No placeholder
+    binary or artifact hash is ever provided to the package/module build.
+    """
+    _reviewed(manifest)
+    _pins(input_pins)
+    foundation = {name: input_pins[name] for name in (*RUNTIME_FILES, MODULE_SOURCE)}
+    files = render_foundation_files(manifest, foundation)
+    metadata = {'runtime': expected_packages(manifest, 'runtime'), 'inputs': input_pins}
+    files['final-build/metadata.json'] = _canonical(metadata) + b'\n'
+    files['final-build/install.py'] = _INSTALL_SCRIPT.encode('ascii')
+    return files
+
+
 def _dockerignore(manifest):
     allowed = ['Dockerfile', '.dockerignore', 'image-build/', 'image-build/metadata.json',
-               'image-build/install.py', 'packages/', 'headers/', 'headers/libweston/',
-               'headers/libweston/backend-drm/', 'inputs/']
+               'image-build/install.py', 'final-build/', 'final-build/metadata.json',
+               'final-build/install.py', 'artifacts/', 'packages/', 'headers/',
+               'headers/libweston/', 'headers/libweston/backend-drm/', 'inputs/']
     allowed += ['packages/' + row['filename'] for row in download_plan(manifest)]
     allowed += ['headers/' + name for name in PRIVATE_HEADERS]
-    allowed += ['inputs/' + name for name in (*RUNTIME_FILES, *ARTIFACT_FILES, MODULE_SOURCE)]
+    allowed += ['inputs/' + name for name in (*RUNTIME_FILES, MODULE_SOURCE)]
+    allowed += ['artifacts/' + name for name in ARTIFACT_FILES]
     return '**\n' + ''.join('!' + path + '\n' for path in allowed)
 
 
 def render_dockerfile(manifest):
     """Two fresh pinned-base stages. Build-time mounts are NOT runtime host mounts."""
     _reviewed(manifest)
-    copies = '\n'.join('COPY --chown=0:0 --chmod=' + ('0555' if name in ARTIFACT_FILES else '0444')
-                       + ' inputs/' + name + ' ' + ROOT + '/' + name
-                       for name in (*RUNTIME_FILES, *ARTIFACT_FILES))
+    scripts = '\n'.join('COPY --chown=0:0 --chmod=0444 inputs/' + name + ' ' + ROOT + '/' + name
+                        for name in RUNTIME_FILES)
+    artifacts = '\n'.join('COPY --chown=0:0 --chmod=0555 artifacts/' + name + ' ' + ROOT + '/' + name
+                          for name in ARTIFACT_FILES)
     return f'''# No external/floating Dockerfile frontend, remote ADD, or runtime host mount.
 # Requires the reviewed supervisor to build with --network=none, without secrets.
 FROM --platform=linux/amd64 {BASE_IMAGE} AS module-build
 RUN --network=none --mount=type=bind,source=packages,target=/ci-packages,readonly --mount=type=bind,source=image-build,target=/ci-build,readonly --mount=type=bind,source=headers,target=/ci-headers,readonly --mount=type=bind,source=inputs,target=/ci-inputs,readonly python3 -I -B /ci-build/install.py build
 RUN --network=none --mount=type=bind,source=inputs,target=/ci-inputs,readonly --mount=type=bind,source=headers,target=/ci-headers,readonly --mount=type=bind,source=image-build,target=/ci-build,readonly python3 -I -B /ci-build/install.py module
-FROM --platform=linux/amd64 {BASE_IMAGE} AS runtime
+FROM --platform=linux/amd64 {BASE_IMAGE} AS foundation
 # seatd is package-present only. policy-rc.d denies service starts; no daemon is launched.
 RUN --network=none --mount=type=bind,source=packages,target=/ci-packages,readonly --mount=type=bind,source=image-build,target=/ci-build,readonly --mount=type=bind,source=headers,target=/ci-headers,readonly --mount=type=bind,source=inputs,target=/ci-inputs,readonly python3 -I -B /ci-build/install.py runtime
 COPY --from=module-build --chown=0:0 --chmod=0444 /ci-output/{MODULE_BINARY} {ROOT}/{MODULE_BINARY}
-COPY --from=module-build --chown=0:0 --chmod=0444 /ci-output/manifest.json {ROOT}/manifest.json
-{copies}
+COPY --from=module-build --chown=0:0 --chmod=0444 /ci-output/manifest.json {ROOT}/foundation-manifest.json
+{scripts}
+FROM foundation AS runtime
+{artifacts}
+RUN --network=none --mount=type=bind,source=final-build,target=/ci-build,readonly python3 -I -B /ci-build/install.py finalize
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1
 WORKDIR {ROOT}
 USER 0:0
@@ -623,6 +647,10 @@ ENTRYPOINT ["/usr/local/bin/python3", "-I", "-B", "/opt/ci-ui/ci-ui-container.py
 _INSTALL_SCRIPT = r'''import hashlib
 import json
 import os
+import re
+import selectors
+import signal
+import time
 import pathlib
 import shlex
 import shutil
@@ -647,20 +675,103 @@ def need(condition, code):
     if not condition:
         raise Failed(code)
 
+TOOL_TIMEOUT = 180
+TOOL_TAIL = 65536
+TOOL_CAPTURE = 131072
+TOOL_OUTPUT = 8 * 1024 * 1024
+
+def diagnostic(args, code, status, tail, total, cleanup_failed):
+    # This code executes only before credential/fixture setup with fixed ENV.
+    # Package/build-script output is necessary evidence, never runtime output.
+    text = bytes(tail).decode('utf-8', errors='replace')
+    text = re.sub(r'github_pat_[A-Za-z0-9_]+|gh[pousr]_[A-Za-z0-9_]+', '[REDACTED]', text)
+    text = re.sub(r'(?i)\b(?:bearer|basic)\s+[A-Za-z0-9+/_.=-]+', '[REDACTED]', text)
+    text = re.sub(r'(https?://)[^\s/@]+(?::[^\s/@]*)?@', r'\1[REDACTED]@', text)
+    text = re.sub(r'(?i)\b([A-Za-z0-9_]*(?:token|password|secret|api_key))\s*[=:]\s*[^\s,;]+', r'\1=[REDACTED]', text)
+    text = ''.join(c if c in '\n\t' or (ord(c) >= 32 and ord(c) != 127) else '?' for c in text)
+    text = text.encode('utf-8')[-TOOL_TAIL:].decode('utf-8', errors='ignore')
+    command_ok = (type(args) in (list, tuple) and 0 < len(args) <= 512
+        and all(type(arg) is str and 0 < len(arg.encode('utf-8')) <= 2048
+                and all(c in '\t\n' or 32 <= ord(c) < 127 for c in arg) for arg in args)
+        and sum(len(arg.encode('utf-8')) for arg in args) <= 65536)
+    command = list(args) if command_ok else []
+    tool = pathlib.PurePath(args[0]).name
+    if not re.fullmatch(r'[A-Za-z0-9_.+-]{1,64}', tool):
+        tool = 'unknown'
+    print(json.dumps({'schema_version': 1, 'kind': 'pre_credential_tool', 'phase': PHASE,
+        'code': code, 'tool': tool, 'command': command, 'command_truncated': not command_ok,
+        'exit_status': status, 'output_bytes': total,
+        'tail_truncated': total > len(text.encode('utf-8')), 'tail': text,
+        'tool_cleanup_failed': cleanup_failed}, sort_keys=True, separators=(',', ':')),
+        file=sys.stderr, flush=True)
+
 def checked(args, capture=False):
+    process, selector, first, status = None, None, None, None
+    tail, output, total = bytearray(), bytearray(), 0
+    cleanup_failed = False
+    deadline = time.monotonic() + TOOL_TIMEOUT
     try:
-        result = subprocess.run(args, env=ENV, check=True,
-                                stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL, timeout=180)
+        process = subprocess.Popen(args, env=ENV, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, close_fds=True,
+            start_new_session=True)
+        selector = selectors.DefaultSelector()
+        selector.register(process.stdout, selectors.EVENT_READ)
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            need(remaining > 0, 'tool_timeout')
+            for key, _ in selector.select(min(remaining, .1)):
+                chunk = os.read(key.fileobj.fileno(), 16384)
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                total += len(chunk)
+                tail.extend(chunk)
+                del tail[:-TOOL_TAIL]
+                if capture:
+                    output.extend(chunk[:max(0, TOOL_CAPTURE + 1 - len(output))])
+                need(total <= TOOL_OUTPUT and (not capture or len(output) <= TOOL_CAPTURE),
+                     'tool_output_limit')
+        need(time.monotonic() < deadline, 'tool_timeout')
+        status = process.wait(timeout=max(.001, deadline - time.monotonic()))
+        need(time.monotonic() < deadline, 'tool_timeout')
+        need(status == 0, 'tool_exit')
     except subprocess.TimeoutExpired:
-        raise Failed('tool_timeout') from None
-    except subprocess.CalledProcessError:
-        raise Failed('tool_exit') from None
+        first = 'tool_timeout'
+    except Failed as error:
+        first = error.code
     except OSError:
-        raise Failed('tool_start') from None
-    if capture:
-        need(len(result.stdout) <= 131072, 'tool_output_limit')
-    return result.stdout
+        first = 'tool_start' if process is None else 'tool_io'
+    finally:
+        # On a read/deadline failure the direct child has not been reaped: its
+        # process group is still ours. Never signal a reaped/recycled PID.
+        if process is not None and status is None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except OSError:
+                cleanup_failed = True
+            try:
+                status = process.wait(timeout=5)
+            except Exception:
+                cleanup_failed = True
+        if selector is not None:
+            try:
+                selector.close()
+            except Exception:
+                cleanup_failed = True
+        if process is not None and process.stdout is not None:
+            try:
+                process.stdout.close()
+            except Exception:
+                cleanup_failed = True
+    if first is None and cleanup_failed:
+        first = 'tool_cleanup'
+    if first is not None:
+        diagnostic(args, first, status, tail, total, cleanup_failed)
+        raise Failed(first)
+    return bytes(output) if capture else None
+
 
 def installed():
     raw = checked(['dpkg-query', '-W', '-f=${Package}\t${Version}\t${Architecture}\t${db:Status-Status}\n'], capture=True)
@@ -753,17 +864,45 @@ def build_module(meta):
     module.chmod(0o444)
     with module.open('rb') as stream:
         module_pin = {'size': size, 'sha256': hashlib.file_digest(stream, 'sha256').hexdigest()}
-    files = {name: meta['inputs'][name] for name in (*RUNTIME_FILES, *ARTIFACT_FILES)}
+    files = {name: meta['inputs'][name] for name in RUNTIME_FILES}
     files['ci-ui-weston-module.so'] = module_pin
     manifest = {'schema_version': 1, 'package_lock_sha256': LOCK_SHA256, 'files': files}
     (out / 'manifest.json').write_text(json.dumps(manifest, sort_keys=True, separators=(',', ':')) + '\n')
     (out / 'manifest.json').chmod(0o444)
 
+def finalize(meta):
+    global PHASE
+    PHASE = 'manifest'
+    need(installed() == meta['runtime'], 'installed_package_set')
+    need(set(meta['inputs']) == set(RUNTIME_FILES) | set(ARTIFACT_FILES) | {'ci-ui-weston-module.c'}, 'input_set')
+    path = ROOT / 'foundation-manifest.json'
+    need(path.is_file() and not path.is_symlink(), 'input_file')
+    manifest = json.loads(path.read_bytes())
+    need(set(manifest) == {'schema_version', 'package_lock_sha256', 'files'} and
+         manifest['schema_version'] == 1 and manifest['package_lock_sha256'] == LOCK_SHA256 and
+         set(manifest['files']) == set(RUNTIME_FILES) | {'ci-ui-weston-module.so'}, 'manifest')
+    for name, pin in manifest['files'].items():
+        verify(ROOT / name, pin)
+        if name in RUNTIME_FILES:
+            need(pin == meta['inputs'][name], 'input_digest')
+    for name in ARTIFACT_FILES:
+        verify(ROOT / name, meta['inputs'][name])
+        manifest['files'][name] = meta['inputs'][name]
+    target = ROOT / 'manifest.json'
+    need(not target.exists(), 'manifest')
+    target.write_text(json.dumps(manifest, sort_keys=True, separators=(',', ':')) + '\n')
+    target.chmod(0o444)
+    path.unlink()
+
+
 def main():
     global PHASE, CLEANUP
-    need(len(sys.argv) == 2 and sys.argv[1] in ('build', 'runtime', 'module'), 'arguments')
+    need(len(sys.argv) == 2 and sys.argv[1] in ('build', 'runtime', 'module', 'finalize'), 'arguments')
     mode = sys.argv[1]
     meta = json.loads(pathlib.Path('/ci-build/metadata.json').read_bytes())
+    if mode == 'finalize':
+        finalize(meta)
+        return
     PHASE = 'inputs'
     verify_inputs(meta)
     if mode == 'module':
@@ -823,8 +962,8 @@ def main():
         need(installed() == meta['runtime'], 'installed_package_set')
 
 def execute():
-    # Only finite phase/check codes are emitted, never native output, exception
-    # text, source paths, metadata contents or credentials. Cleanup cannot replace
+    # Tool failures emit a bounded scrubbed pre-credential diagnostic above.
+    # The terminal first-failure record stays finite. Cleanup cannot replace
     # the first failed phase/check. A failed RUN layer is never used as runtime.
     first, cleanup_failed = None, False
     try:
