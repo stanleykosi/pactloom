@@ -707,3 +707,71 @@ class NativeFieldFocusOrdering(unittest.TestCase):
             with mock.patch.object(C,'FIELDS',(('Request','request_json'),)):
                 with self.assertRaises(C.S.Rejected):session.fill({'request_json':'{}'})
             session.controller.clear_field.assert_not_called();session.controller.type_ascii.assert_not_called()
+
+
+class OriginalPublicationDrain(unittest.TestCase):
+    def run_wait(self, elapsed=0, wall_step=1, mono_step=1, cutoff=900, end=900, mutate=None):
+        from unittest import mock
+        import json
+        start=1_000_000
+        scope={'authorization':{'valid_from_ms':start,'valid_until_ms':start+end*1000},
+               'delivery':{'valid_from_ms':start,'valid_until_ms':start+end*1000},
+               'original_ceilings':{'payment_valid_from_ms':start,'payment_valid_until_ms':start+end*1000}}
+        if mutate: mutate(scope)
+        req={'control':{'action':'admit_durable_payment_with_delivery_v2','record':{'scope':scope}}}
+        value={'fixture':{'form':{'request_json':json.dumps(req)}}}
+        clock={'wall':(start+elapsed*1000)*1_000_000,'mono':elapsed*1_000_000_000,'sleeps':0}
+        def sleep(seconds):
+            self.assertLessEqual(seconds,0.1)
+            clock['wall']+=int(wall_step*1_000_000_000)
+            clock['mono']+=int(mono_step*1_000_000_000)
+            clock['sleeps']+=1
+        with mock.patch.object(C,'original_facts',return_value=(value,{})), \
+             mock.patch.object(C.time,'time_ns',side_effect=lambda:clock['wall']), \
+             mock.patch.object(C.time,'monotonic_ns',side_effect=lambda:clock['mono']), \
+             mock.patch.object(C.time,'sleep',side_effect=sleep):
+            C.wait_original_publication_drain(b'private-unmodified',cutoff*1_000_000_000)
+        return clock
+
+    def test_waits_original_bound_not_new_120_second_lifetime(self):
+        self.assertEqual(self.run_wait(elapsed=60)['sleeps'],60)
+        self.assertEqual(self.run_wait(elapsed=125)['sleeps'],0)
+
+    def test_forward_wall_jump_cannot_bypass_monotonic_wait(self):
+        self.assertEqual(self.run_wait(elapsed=100,wall_step=10)['sleeps'],20)
+
+    def test_slow_wall_must_reach_original_fence(self):
+        self.assertEqual(self.run_wait(elapsed=100,wall_step=0.5)['sleeps'],40)
+
+    def test_regressing_clocks_fail_closed(self):
+        for changes in ({'wall_step':-1},{'mono_step':-1}):
+            with self.subTest(changes=changes),self.assertRaises(C.S.Rejected):self.run_wait(**changes)
+
+    def test_no_extension_of_original_cutoff_or_request(self):
+        for changes in ({'cutoff':119},{'end':120},{'wall_step':0,'cutoff':125},{'elapsed':901}):
+            with self.subTest(changes=changes),self.assertRaises(C.S.Rejected):self.run_wait(**changes)
+
+    def test_mismatched_original_intervals_fail_closed(self):
+        with self.assertRaises(C.S.Rejected):
+            self.run_wait(mutate=lambda scope:scope['delivery'].update(valid_from_ms=1))
+
+    def test_wait_once_before_cases_not_inside_case_deadline(self):
+        s=PATH.read_text(); main=s[s.index('def reviewed_runtime_main'):]
+        self.assertEqual(main.count('wait_original_publication_drain(raw, original)'),1)
+        self.assertLess(main.index('wait_original_publication_drain'),main.index('for case in P.CASES'))
+        self.assertIn('self.deadline',s)
+
+    def test_source_proof_is_frozen_with_original_publication_constant(self):
+        root=PATH.parents[1]
+        auth=root/'crates/wholepact-authority/src'
+        self.assertIn('MANUAL_ENROLLMENT_PUBLICATION_MS: u64 = 120_000',(auth/'manual_enrollment.rs').read_text())
+        policy=(auth/'manual_roster_policy_v2.rs').read_text()
+        self.assertIn('.checked_add(crate::manual_enrollment::MANUAL_ENROLLMENT_PUBLICATION_MS)',policy)
+        self.assertIn('.min(session.expires_at_ms)',policy)
+        producer=next((root/'crates/wholepact-native-host/src').rglob('pristine_coordinator_v1.rs')).read_text()
+        self.assertLess(producer.index('let initial = initial::prepare_pristine_coordinator_v1'),producer.index('let from_ms: u64'))
+        self.assertLess(producer.index('let other_history ='),producer.index('let from_ms: u64'))
+        self.assertIn('valid_from_ms: from_ms, valid_until_ms: until_ms',producer)
+        validator=(auth/'durable_delivery_admission_policy_v2.rs').read_text()
+        self.assertIn('record.require_live(now)?',validator)
+        self.assertIn('.is_some_and(|deadline| now < deadline)',validator)

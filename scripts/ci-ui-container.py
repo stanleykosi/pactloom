@@ -309,6 +309,42 @@ def original_facts(raw, original):
     return value, facts
 
 
+
+def wait_original_publication_drain(raw, original):
+    """Wait, never renew, the pristine fixture's original roster fence.
+
+    The exact source-verified producer samples valid_from_ms AFTER both original
+    roster admissions and history reads. Each publication deadline is at most
+    admission witness time + MANUAL_ENROLLMENT_PUBLICATION_MS (120000). This
+    route creates no construction records. Therefore from + 120000 is a
+    conservative upper bound, not a new authority lifetime. Owner admission
+    still independently verifies original history and all live scope bounds.
+    """
+    value, _ = original_facts(raw, original)
+    request = S.loads(value['fixture']['form']['request_json'].encode('ascii'), 65536)
+    require(request['control']['action'] == 'admit_durable_payment_with_delivery_v2', 'original_request')
+    scope = request['control']['record']['scope']
+    start = scope['authorization']['valid_from_ms']
+    end = scope['authorization']['valid_until_ms']
+    require(type(start) is int and type(end) is int and 0 < start < end < 2**64, 'original_request')
+    require(scope['delivery']['valid_from_ms'] == start and scope['delivery']['valid_until_ms'] == end
+            and scope['original_ceilings']['payment_valid_from_ms'] == start
+            and scope['original_ceilings']['payment_valid_until_ms'] == end, 'original_request')
+    target = start + 120_000
+    wall = time.time_ns(); mono = time.monotonic_ns()
+    require(start * 1_000_000 <= wall < end * 1_000_000 and target < end, 'original_request')
+    ready = mono + max(0, target * 1_000_000 - wall)
+    require(ready < original and mono < original, 'original_deadline')
+    while True:
+        next_wall = time.time_ns(); next_mono = time.monotonic_ns()
+        require(next_wall >= wall and next_mono >= mono, 'original_deadline')
+        wall, mono = next_wall, next_mono
+        require(mono < original and wall < end * 1_000_000, 'original_deadline')
+        if mono >= ready and wall >= target * 1_000_000:
+            return
+        time.sleep(min(0.1, (original - mono) / 1_000_000_000))
+
+
 def physical_region(snapshot, widget):
     r = widget['rect']; scale = snapshot['pixels_per_point']
     region = {k: (math.floor(v * scale) if k in ('left', 'top') else math.ceil(v * scale)) for k, v in r.items()}
@@ -898,6 +934,7 @@ def reviewed_runtime_main(mode):
                 for fd in fds: os.close(fd)
             raw = S.read_private(S.BASE / 'handoff.json', S.MAX_HANDOFF)
             _, retained = original_facts(raw, original)
+            wait_original_publication_drain(raw, original)
             with (ROOT / 'coordinator-observed').open('rb') as image:
                 digest = hashlib.file_digest(image, 'sha256').hexdigest()
             for case in P.CASES:
