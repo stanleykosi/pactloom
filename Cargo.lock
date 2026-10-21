@@ -5640,6 +5640,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "wholepact-financial-review-model"
+version = "0.1.0"
+
+[[package]]
 name = "wholepact-native-host"
 version = "0.1.0"
 dependencies = [

@@ -19,6 +19,7 @@ members = [
   "crates/wholepact-native-host",
   "crates/wholepact-authority",
   "crates/wholepact-offline-bridge",
+  "crates/wholepact-financial-review-model",
 ]
 
 [workspace.package]
