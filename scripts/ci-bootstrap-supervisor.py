@@ -376,7 +376,8 @@ def run_case(case, tag, token):
         result = P.result(case, 'error', 'projection', 'internal')
     finally:
         if result['outcome'] != 'passed':
-            emit('CASE_FAILURE', dict(case=case, stage=result['stage'], code=result['code'], cleanup_pending=True))
+            emit('CASE_FAILURE', dict(case=case, stage=result['stage'], code=result['code'], cleanup_pending=True,
+                                      **{key: result[key] for key in P.OBSERVATION_FIELDS}))
         try:
             remove_container(name, token)
             # A timed-out create might still be pending in the daemon. A later

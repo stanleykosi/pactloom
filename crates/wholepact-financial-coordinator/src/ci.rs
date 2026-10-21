@@ -147,12 +147,31 @@ pub(super) fn reject_boundary(
     sender_pid: Option<libc::pid_t>, peer_alive: Option<bool>,
     control_truncated: bool, fd_inventory_restored: Option<bool>,
 ) {
+    record_rejection(boundary, reason, peer, sender_pid, peer_alive,
+                     control_truncated, fd_inventory_restored, None);
+}
+
+/// Observe the actual socket poll bits, never infer them from a later reap.
+pub(super) fn reject_poll_loss(peer: &PeerLifetime, hup: bool, error: bool, invalid: bool) {
+    record_rejection("channel", "lost", Some(peer), None, None, false, None,
+                     Some((hup, error, invalid)));
+}
+
+fn record_rejection(
+    boundary: &'static str, reason: &'static str, peer: Option<&PeerLifetime>,
+    sender_pid: Option<libc::pid_t>, peer_alive: Option<bool>,
+    control_truncated: bool, fd_inventory_restored: Option<bool>,
+    socket_poll: Option<(bool, bool, bool)>,
+) {
     if REJECTION_RECORDED.swap(true, Ordering::SeqCst) { return; }
     let _ = record("reject", json!({
         "boundary": boundary, "reason": reason,
         "peer_role": peer.map(|p| role_name(p.role())), "peer_pid": peer.map(|p| p.pid()),
         "sender_pid": sender_pid, "peer_alive": peer_alive,
         "control_truncated": control_truncated, "fd_inventory_restored": fd_inventory_restored,
+        "socket_hup": socket_poll.map(|p| p.0),
+        "socket_error": socket_poll.map(|p| p.1),
+        "socket_invalid": socket_poll.map(|p| p.2),
     }));
 }
 
