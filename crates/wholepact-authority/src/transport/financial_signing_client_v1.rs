@@ -445,7 +445,7 @@ impl AuthorityClient {
             disclosure: self.disclosure_descriptor(),
             history_digest: observed_history_result!(
                 observer,
-                Ok(history.history_digest().to_owned())
+                Ok::<_, AuthorityError>(history.history_digest().to_owned())
             )?,
         };
         observed_flow_result!(

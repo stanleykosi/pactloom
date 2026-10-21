@@ -1,0 +1,9 @@
+[package]
+name = "wholepact-financial-review-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Inert, dependency-free observations of exact financial review effect ordering"
+
+# Deliberately no dependencies, features, executable target, or live integration.
+[dependencies]

@@ -500,6 +500,8 @@ pub(crate) mod durable_delivery_v3;
 mod durable_witness_v1;
 #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
 pub(crate) mod financial_v1;
+#[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
+mod financial_handoff_v1;
 
 #[cfg(feature = "pending-birth-owner-signing")]
 #[path = "qualification/born_common_context_entry_v3.rs"]
@@ -6221,6 +6223,7 @@ impl NativeRuntime {
             self.poll_financial_v1(epoch);
             if let Ok(endpoint)=self.financial_result_endpoint_v1() { ui.label(format!("Exact financial result endpoint: {}",endpoint.display())); }
             self.exact_review_ui(ui,focused,epoch);ui.label(self.message);
+            self.financial_handoff_ui_v1(ui, focused);
             if self.financial_phase_v1()==Some(financial_v1::FinancialPhaseV1::AwaitingAdmission) && ui.button("Review admission of the saved continuation after Witness approval").clicked_by(egui::PointerButton::Primary) && self.send_financial_continuation_v1().is_err() {self.message="Original continuation was not sent or is uncertain. Do not replace it.";}
             if ui.button("Lock original financial workflow").clicked_by(egui::PointerButton::Primary) {self.lock();}
             return;

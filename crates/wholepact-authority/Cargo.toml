@@ -8,6 +8,7 @@ description = "Owner-operated independent per-account reservation witness"
 [features]
 default = []
 born-offline-witness-owner = ["native-witness-owner", "offline-witness-owner"]
+financial-witness-launcher = ["native-witness-owner"]
 synthetic-qualification = ["wholepact-storage-security/synthetic-qualification"]
 offline-witness-owner = ["dep:hpke", "dep:rand", "dep:getrandom", "dep:base64", "dep:chrono"]
 pending-birth-foundation = ["dep:webpki"]
@@ -51,3 +52,8 @@ required-features = ["native-witness-owner"]
 name = "wholepact-born-offline-witness"
 path = "src/born_offline_server_main.rs"
 required-features = ["born-offline-witness-owner"]
+
+[[bin]]
+name = "wholepact-financial-witness"
+path = "src/financial_server_main.rs"
+required-features = ["financial-witness-launcher"]

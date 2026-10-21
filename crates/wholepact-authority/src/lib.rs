@@ -325,4 +325,7 @@ pub use construction_history_v2::{
 #[cfg(all(feature = "born-offline-witness-owner", target_os = "linux"))]
 pub mod born_offline_server_launcher_v1;
 
+#[cfg(all(feature = "financial-witness-launcher", target_os = "linux"))]
+pub mod financial_server_launcher_v1;
+
 pub use transport::AuthenticatedBornOfflineDispatchV1;

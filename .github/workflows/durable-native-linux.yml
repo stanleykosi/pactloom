@@ -1,4 +1,4 @@
-name: Origin integration then explicit native lifecycle (Linux)
+name: Explicit isolated qualification gates (Linux)
 on:
   push:
     branches: [qualification/durable-proposal-v1]
@@ -35,10 +35,11 @@ jobs:
         run: |
           set -euo pipefail
           mode="$(cat scripts/qualification-gate-mode)"
-          [[ "$mode" == origin || "$mode" == full || "$mode" == financial ]]
+          [[ "$mode" == origin || "$mode" == full || "$mode" == financial || "$mode" == bootstrap ]]
           [[ "$(wc -l < scripts/qualification-gate-mode)" -eq 1 ]]
           printf 'gate=%s\n' "$mode" >> "$GITHUB_OUTPUT"
       - name: Minimal real production origin integration (not full qualification)
+        if: steps.mode.outputs.gate != 'bootstrap'
         shell: bash
         working-directory: source
         run: bash scripts/ci-origin-integration-linux.sh
@@ -56,3 +57,20 @@ jobs:
           CARGO_INCREMENTAL: '0'
           WHOLEPACT_BUILD_JOBS: '3'
         run: bash scripts/ci-durable-native-linux.sh
+      - name: Isolated fixed-fork bootstrap only (no financial authority)
+        if: steps.mode.outputs.gate == 'bootstrap'
+        timeout-minutes: 45
+        shell: bash
+        working-directory: source
+        run: bash scripts/ci-bootstrap-linux.sh
+      - name: Verify bootstrap containers and temporary image removed
+        if: always() && steps.mode.outputs.gate == 'bootstrap'
+        timeout-minutes: 5
+        shell: bash
+        working-directory: source
+        run: python3 -I -B scripts/ci-bootstrap-supervisor.py cleanup
+      - name: Bootstrap-only evidence boundary
+        if: success() && steps.mode.outputs.gate == 'bootstrap'
+        shell: bash
+        run: |
+          echo 'Bootstrap-only qualification passed. Origin and financial suites were intentionally not rerun. Historical CI64 financial evidence is unchanged, not revalidated. No financial authority, settlement, deployment or full-product acceptance is claimed.' >> "$GITHUB_STEP_SUMMARY"
