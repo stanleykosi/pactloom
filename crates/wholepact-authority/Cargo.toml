@@ -62,3 +62,6 @@ required-features = ["born-offline-witness-owner"]
 name = "wholepact-financial-witness"
 path = "src/financial_server_main.rs"
 required-features = ["financial-witness-launcher"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(wholepact_delivery_ci)'] }

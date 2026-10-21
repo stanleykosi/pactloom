@@ -149,6 +149,12 @@ fn run(origin: &mut WitnessDeliveryOriginV1) -> io::Result<()> {
                     return Err(failure());
                 }
             };
+            #[cfg(wholepact_delivery_ci)]
+            wholepact_financial_coordinator_origin::record_delivery_observation_for_ci(
+                wholepact_financial_coordinator_origin::DeliveryObservationV1::WorkerJoined {
+                    presentation_digest: displayed.clone(),
+                },
+            );
             if communication_failed { return Err(failure()); }
             if let Some(first) = result.first_failure { origin.send_first_failure(first)?; }
             if displayed.is_some() {
