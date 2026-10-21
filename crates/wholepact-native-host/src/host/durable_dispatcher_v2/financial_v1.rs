@@ -272,7 +272,7 @@ impl OriginalFinancialOwnerV1<'_> {
         let stored = self.host.dispatcher.as_ref().ok_or(Error::Authentication)?;
         let client = &stored.destinations[selected];
         let deadline = native.deadline()?;
-        client.authorize_completed_dispatch_v1_checked_until(request, deadline, || {
+        let current = || {
             self.check_effect_source().map_err(|_| wholepact_authority::AuthorityError::Permission)?;
             native.check_current().map_err(|_| wholepact_authority::AuthorityError::Permission)?;
             intent.check_current_v1(access, source, proof, material).map_err(|error| {
@@ -280,7 +280,30 @@ impl OriginalFinancialOwnerV1<'_> {
                 crate::host::financial_diagnostics_v1::engine_current(&error);
                 wholepact_authority::AuthorityError::Permission
             })
-        }).map_err(|error| {
+        };
+        let result = if crate::terminal::coordinated_restriction_required() {
+            let fast = || {
+                // Existing restriction-only callback, not permits_source or a
+                // full intent/DB check. Actual source/read owners remain borrowed.
+                if !source.check_final_effect_restriction_v1() {
+                    return Err(wholepact_authority::AuthorityError::Permission);
+                }
+                self.check_transport_material_clocks_v1()
+                    .map_err(|_| wholepact_authority::AuthorityError::Permission)?;
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                    .ok().and_then(|time| u64::try_from(time.as_millis()).ok())
+                    .ok_or(wholepact_authority::AuthorityError::Permission)?;
+                if now < request.context.delivery.valid_from_ms || now >= request.context.delivery.valid_until_ms {
+                    return Err(wholepact_authority::AuthorityError::Permission);
+                }
+                native.check_final_effect_restriction()
+                    .map_err(|_| wholepact_authority::AuthorityError::Permission)
+            };
+            client.authorize_completed_dispatch_v1_restricted_checked_until(request, deadline, current, &fast)
+        } else {
+            client.authorize_completed_dispatch_v1_checked_until(request, deadline, current)
+        };
+        result.map_err(|error| {
             #[cfg(all(test,feature="synthetic-born-joined-qualification",feature="durable-proposal"))]
             crate::host::financial_diagnostics_v1::authority_current(&error);
             #[cfg(all(test, feature = "synthetic-born-joined-qualification"))]
@@ -291,7 +314,20 @@ impl OriginalFinancialOwnerV1<'_> {
     }
 }
 
+fn transport_material_bounds_current_v1(bounds: [(u64, u64); 2], now: u64) -> bool {
+    bounds.into_iter().all(|(from, until)| from <= now && now < until)
+}
 impl OriginalFinancialOwnerV1<'_> {
+    fn check_transport_material_clocks_v1(&self) -> Result<()> {
+        let materials = self.initial_metadata.materials();
+        if materials.len() != 2 { return Err(Error::Authentication); }
+        let bounds = [0, 1].map(|index| {
+            let scope = materials[index].scope();
+            (scope.valid_from_unix_seconds, scope.valid_until_unix_seconds)
+        });
+        if transport_material_bounds_current_v1(bounds, crate::now()?) { Ok(()) }
+        else { Err(Error::Permission) }
+    }
     /// Read-only authenticated reconciliation through the planned dispatcher.
     /// No mutation request, live admission, raw client or key escapes this method.
     pub(in crate::host) fn financial_history_v1(
@@ -310,10 +346,22 @@ impl OriginalFinancialOwnerV1<'_> {
             .ok_or(Error::Authentication)?;
         let stored = self.host.dispatcher.as_ref().ok_or(Error::Authentication)?;
         let client = &stored.destinations[selected];
-        let history = client.financial_continuation_history_v1_checked_until(continuation_operation, approval.deadline(), || {
+        let current = || {
             self.check_read_source().map_err(|_| wholepact_authority::AuthorityError::Permission)?;
             approval.check().map_err(|_| wholepact_authority::AuthorityError::Permission)
-        }).map_err(|error| {
+        };
+        let result = if crate::terminal::coordinated_restriction_required() {
+            // Historical reconciliation has its own fresh read grant. It must
+            // not acquire a new material-use policy or revive signing authority.
+            let fast = || approval.check()
+                .map_err(|_| wholepact_authority::AuthorityError::Permission);
+            client.financial_continuation_history_v1_restricted_checked_until(
+                continuation_operation, approval.deadline(), current, &fast)
+        } else {
+            client.financial_continuation_history_v1_checked_until(
+                continuation_operation, approval.deadline(), current)
+        };
+        let history = result.map_err(|error| {
             #[cfg(all(test,feature="synthetic-born-joined-qualification",feature="durable-proposal"))]
             crate::host::financial_diagnostics_v1::authority_current(&error);
             #[cfg(all(test, feature = "synthetic-born-joined-qualification"))]
@@ -471,4 +519,18 @@ fn report_financial_authority_failure_v1(history: bool, error: &wholepact_author
     };
     let boundary = if history { "DeliveryHistoricalRead" } else { "DeliveryNativeAdmission" };
     let _ = writeln!(std::io::stderr().lock(), "\n[JOINED_DIAGNOSTIC {boundary} {outcome}]");
+}
+
+#[cfg(test)]
+mod transport_material_clock_tests_v1 {
+    use super::transport_material_bounds_current_v1;
+    #[test]
+    fn both_original_material_windows_are_required_without_renewal() {
+        let bounds = [(100, 200), (120, 180)];
+        assert!(!transport_material_bounds_current_v1(bounds, 119));
+        assert!(transport_material_bounds_current_v1(bounds, 120));
+        assert!(transport_material_bounds_current_v1(bounds, 179));
+        assert!(!transport_material_bounds_current_v1(bounds, 180));
+        assert!(!transport_material_bounds_current_v1([(200, 100), (120, 180)], 150));
+    }
 }

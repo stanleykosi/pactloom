@@ -215,7 +215,27 @@ impl AuthorityClient {
         &self,
         request: &AuthorizeCompletedDispatchV1,
         deadline: Instant,
+        check_current: impl FnMut() -> Result<()>,
+    ) -> Result<AuthenticatedCompletedDispatchAdmissionV1> {
+        self.authorize_completed_dispatch_v1_restricted_kernel(request, deadline, check_current, None)
+    }
+    /// Additional borrowed denial-only gate for every physical TLS I/O. The
+    /// callback must be zero-wait and must not read sources or acquire DB locks.
+    pub fn authorize_completed_dispatch_v1_restricted_checked_until(
+        &self,
+        request: &AuthorizeCompletedDispatchV1,
+        deadline: Instant,
+        check_current: impl FnMut() -> Result<()>,
+        io_restriction: &dyn Fn() -> Result<()>,
+    ) -> Result<AuthenticatedCompletedDispatchAdmissionV1> {
+        self.authorize_completed_dispatch_v1_restricted_kernel(request, deadline, check_current, Some(io_restriction))
+    }
+    fn authorize_completed_dispatch_v1_restricted_kernel(
+        &self,
+        request: &AuthorizeCompletedDispatchV1,
+        deadline: Instant,
         mut check_current: impl FnMut() -> Result<()>,
+        io_restriction: Option<&dyn Fn() -> Result<()>>,
     ) -> Result<AuthenticatedCompletedDispatchAdmissionV1> {
         request.validate()?;
         if request.account_id != self.account
@@ -231,7 +251,7 @@ impl AuthorityClient {
         }
         check_current()?;
         require_before_caller_deadline(deadline)?;
-        let response = self.call_with_inner_checked_observed(
+        let response = self.call_with_inner_checked_restricted_observed(
             |_| {
                 Ok(WireRequest::Mutate {
                     mutation: Box::new(AuthorityMutation::AuthorizeCompletedDispatchV1(
@@ -242,6 +262,7 @@ impl AuthorityClient {
             },
             Some(deadline),
             &mut check_current,
+            io_restriction,
             #[cfg(feature = "synthetic-qualification")]
             None,
         )?;

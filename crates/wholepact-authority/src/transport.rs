@@ -19,11 +19,11 @@ mod durable_delivery_admission_v2;
 mod financial_continuation_v1;
 mod financial_signing_server_v1;
 mod financial_signing_client_v1;
+#[cfg(all(any(feature = "coordinated-witness-financial-history", feature = "coordinated-witness-financial-signing"), target_os = "linux"))]
+mod coordinated_service_worker_v1;
 mod completed_dispatch_v1;
 #[cfg(all(feature = "coordinated-witness-financial-continuation", target_os = "linux"))]
 pub(crate) mod coordinated_financial_continuation_v1;
-#[cfg(all(any(feature = "coordinated-witness-financial-history", feature = "coordinated-witness-financial-signing"), target_os = "linux"))]
-mod coordinated_service_worker_v1;
 #[cfg(all(feature = "coordinated-witness-financial-history", target_os = "linux"))]
 mod coordinated_initial_history_v1;
 #[cfg(all(feature = "coordinated-witness-financial-history", target_os = "linux"))]
@@ -608,6 +608,18 @@ impl AuthorityClient {
         #[cfg(feature = "synthetic-qualification")] observer: Option<&HistoryObserverV1>,
         profile: crate::journal::OriginalHistoryProfileV1,
     ) -> Result<ReconciledAuthorityHistory> {
+        self.reconcile_history_profile_restricted_v1(check_current, bounded, caller_deadline,
+            #[cfg(feature = "synthetic-qualification")] observer, profile, None)
+    }
+    fn reconcile_history_profile_restricted_v1(
+        &self,
+        check_current: &mut dyn FnMut() -> Result<()>,
+        bounded: bool,
+        caller_deadline: Option<Instant>,
+        #[cfg(feature = "synthetic-qualification")] observer: Option<&HistoryObserverV1>,
+        profile: crate::journal::OriginalHistoryProfileV1,
+        call_restriction: Option<&dyn Fn() -> Result<()>>,
+    ) -> Result<ReconciledAuthorityHistory> {
         let started = std::time::Instant::now();
         let check = |check_current: &mut dyn FnMut() -> Result<()>| -> Result<()> {
             if let Some(deadline) = caller_deadline {
@@ -657,7 +669,7 @@ impl AuthorityClient {
             observer.replay_check(HistoryCheckSiteV1::ReplayInitial);
         }
         check(check_current)?;
-        let snapshot_response = self.call_with_inner_checked_observed(
+        let snapshot_response = self.call_with_inner_checked_restricted_observed(
             |_| {
                 Ok(WireRequest::Snapshot {
                     account_id: self.account.clone(),
@@ -666,6 +678,7 @@ impl AuthorityClient {
             },
             caller_deadline,
             &mut *check_current,
+            call_restriction,
             #[cfg(feature = "synthetic-qualification")]
             observer.map(|observer| (observer, HistoryPhaseV1::Snapshot)),
         )?;
@@ -726,10 +739,11 @@ impl AuthorityClient {
                 after_sequence: after,
                 maximum_entries: 16,
             };
-            let response = self.call_with_inner_checked_observed(
+            let response = self.call_with_inner_checked_restricted_observed(
                 |_| Ok(request),
                 caller_deadline,
                 &mut *check_current,
+                call_restriction,
                 #[cfg(feature = "synthetic-qualification")]
                 observer.map(|observer| (observer, HistoryPhaseV1::Page)),
             )?;
@@ -1819,6 +1833,35 @@ impl AuthorityClient {
         connect_failure: Option<&mut Option<std::io::ErrorKind>>,
         #[cfg(feature = "synthetic-qualification")] observation: Option<(&HistoryObserverV1, HistoryPhaseV1)>,
     ) -> Result<(ClientConnection, CallerDeadlineSocket, Zeroizing<[u8; 32]>)> {
+        self.open_authenticated_stream_checked_with_socket(deadline, caller_deadline, check,
+            connect_failure, None, |socket| socket, #[cfg(feature = "synthetic-qualification")] observation)
+    }
+    // The per-call restriction borrows the actual action owner. It never enters
+    // client/session storage and cannot outlive or renew the original approval.
+    fn open_authenticated_stream_checked_restricted<'call>(
+        &self,
+        deadline: Instant,
+        caller_deadline: Option<Instant>,
+        check: &mut impl FnMut() -> Result<()>,
+        connect_failure: Option<&mut Option<std::io::ErrorKind>>,
+        call_restriction: Option<&'call dyn Fn() -> Result<()>>,
+        #[cfg(feature = "synthetic-qualification")] observation: Option<(&HistoryObserverV1, HistoryPhaseV1)>,
+    ) -> Result<(ClientConnection, BorrowedCallerDeadlineSocket<'call>, Zeroizing<[u8; 32]>)> {
+        self.open_authenticated_stream_checked_with_socket(deadline, caller_deadline, check,
+            connect_failure, call_restriction,
+            |inner| BorrowedCallerDeadlineSocket { inner, call_restriction },
+            #[cfg(feature = "synthetic-qualification")] observation)
+    }
+    fn open_authenticated_stream_checked_with_socket<Socket: Read + Write>(
+        &self,
+        deadline: Instant,
+        caller_deadline: Option<Instant>,
+        check: &mut impl FnMut() -> Result<()>,
+        connect_failure: Option<&mut Option<std::io::ErrorKind>>,
+        call_restriction: Option<&dyn Fn() -> Result<()>>,
+        wrap: impl FnOnce(CallerDeadlineSocket) -> Socket,
+        #[cfg(feature = "synthetic-qualification")] observation: Option<(&HistoryObserverV1, HistoryPhaseV1)>,
+    ) -> Result<(ClientConnection, Socket, Zeroizing<[u8; 32]>)> {
         #[cfg(feature = "synthetic-qualification")]
         let observer = observation.map(|(observer, _)| observer);
         #[cfg(feature = "synthetic-qualification")]
@@ -1850,10 +1893,18 @@ impl AuthorityClient {
         #[cfg(feature = "synthetic-qualification")]
         let connect_token =
             observer.map(|observer| observer.start_operation(HistoryOperationV1::Connect));
-        if let Some(restriction) = &self.restriction {
-            restriction.check_before_io()?;
-        }
+        let restricted = self.restriction.is_some() || call_restriction.is_some();
+        // Heavy source checks above may consume time. A restricted call uses
+        // the SAME absolute deadline, resampled immediately before connect.
+        let connect_timeout = if restricted {
+            caller_remaining_at(deadline, Instant::now())?
+        } else { connect_timeout };
+        check_transport_restrictions_v2(self.restriction.as_deref(), call_restriction)?;
         let connected = TcpStream::connect_timeout(&self.endpoint, connect_timeout);
+        let post_connect = if restricted {
+            check_transport_restrictions_v2(self.restriction.as_deref(), call_restriction)
+                .and_then(|()| require_before_caller_deadline(deadline))
+        } else { Ok(()) };
         // V3 discovery may distinguish only an actual failure of this original
         // preconnection operation. No TLS, framing or later failure updates it.
         // Legacy callers pass None and retain their original result mapping.
@@ -1870,16 +1921,19 @@ impl AuthorityClient {
         let connected =
             history_diagnostics_v1::finish_operation_observed(observer, connect_token, connected);
         let socket = connected?;
+        // Preserve an actual failed connect above (and its V3 classification).
+        // Only a successful socket can be refused by the later restriction.
+        observed_history_result!(observer, post_connect)?;
         #[cfg(feature = "synthetic-qualification")]
         if let Some(observer) = observer {
             observer.exchange_check(HistoryCheckSiteV1::AfterConnect);
         }
         check()?;
-        let mut socket = CallerDeadlineSocket {
+        let mut socket = wrap(CallerDeadlineSocket {
             inner: DeadlineSocket { socket, deadline },
             check_after_io: caller_deadline.is_some(),
             restriction: self.restriction.clone(),
-        };
+        });
         #[cfg(feature = "synthetic-qualification")]
         if let Some((observer, phase)) = observation {
             observer.enter(phase.stage(HistoryCallStepV1::Handshake));
@@ -1956,11 +2010,19 @@ impl AuthorityClient {
         &self,
         build: impl FnOnce(&[u8; 32]) -> Result<WireRequest>,
         caller_deadline: Option<Instant>,
+        current: impl FnMut() -> Result<()>,
+        #[cfg(feature = "synthetic-qualification")] observation: Option<(&HistoryObserverV1, HistoryPhaseV1)>,
+    ) -> Result<WireResponse> {
+        self.call_with_inner_checked_restricted_observed(build, caller_deadline, current, None,
+            #[cfg(feature = "synthetic-qualification")] observation)
+    }
+    fn call_with_inner_checked_restricted_observed(
+        &self,
+        build: impl FnOnce(&[u8; 32]) -> Result<WireRequest>,
+        caller_deadline: Option<Instant>,
         mut current: impl FnMut() -> Result<()>,
-        #[cfg(feature = "synthetic-qualification")] observation: Option<(
-            &HistoryObserverV1,
-            HistoryPhaseV1,
-        )>,
+        call_restriction: Option<&dyn Fn() -> Result<()>>,
+        #[cfg(feature = "synthetic-qualification")] observation: Option<(&HistoryObserverV1, HistoryPhaseV1)>,
     ) -> Result<WireResponse> {
         #[cfg(feature = "synthetic-qualification")]
         let observer = observation.map(|(observer, _)| observer);
@@ -2039,8 +2101,8 @@ impl AuthorityClient {
             }
             Ok(())
         };
-        let (connection, socket, exporter) = self.open_authenticated_stream_checked(
-            deadline, caller_deadline, &mut check, None,
+        let (connection, socket, exporter) = self.open_authenticated_stream_checked_restricted(
+            deadline, caller_deadline, &mut check, None, call_restriction,
             #[cfg(feature = "synthetic-qualification")]
             observation,
         )?;
@@ -2668,9 +2730,14 @@ struct CallerDeadlineSocket {
     check_after_io: bool,
     restriction: Option<std::sync::Arc<dyn AuthorityTransportRestrictionV1>>,
 }
+struct BorrowedCallerDeadlineSocket<'call> {
+    inner: CallerDeadlineSocket,
+    call_restriction: Option<&'call dyn Fn() -> Result<()>>,
+}
 // The timeout is installed by the caller before this zero-wait final sample.
 // This orders the one attempt against restriction; it does not make a syscall
 // atomic with cancellation or retract bytes from an already-admitted attempt.
+#[cfg(test)]
 fn restricted_transport_io_v1<T>(
     restriction: &dyn AuthorityTransportRestrictionV1,
     attempt: impl FnOnce() -> std::io::Result<T>,
@@ -2679,39 +2746,90 @@ fn restricted_transport_io_v1<T>(
         std::io::ErrorKind::PermissionDenied, "original transport restriction"))?;
     attempt()
 }
-impl Read for CallerDeadlineSocket {
-    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
-        let result = if let Some(restriction) = &self.restriction {
+fn check_transport_restrictions_v2(
+    original: Option<&dyn AuthorityTransportRestrictionV1>,
+    call: Option<&dyn Fn() -> Result<()>>,
+) -> Result<()> {
+    if let Some(call) = call { call()?; }
+    if let Some(original) = original { original.check_before_io()?; }
+    Ok(())
+}
+fn borrowed_restricted_transport_io_v2<T>(
+    original: Option<&dyn AuthorityTransportRestrictionV1>,
+    call: Option<&dyn Fn() -> Result<()>>,
+    attempt: impl FnOnce() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    let check = || check_transport_restrictions_v2(original, call).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::PermissionDenied, "original transport restriction")
+    });
+    check()?;
+    let result = attempt();
+    let after = check();
+    // An admitted syscall may already have sent bytes. A later denial cannot
+    // roll that back; callers retain their existing uncertain-outcome contract.
+    match result { Err(error) => Err(error), Ok(value) => { after?; Ok(value) } }
+}
+fn finish_caller_io_v2<T>(
+    result: std::io::Result<T>,
+    remaining: std::io::Result<Duration>,
+    restricted: bool,
+) -> std::io::Result<T> {
+    // Original unrestricted callers retain their exact deadline/error order.
+    if !restricted { remaining?; return result; }
+    match result { Err(error) => Err(error), Ok(value) => { remaining?; Ok(value) } }
+}
+impl CallerDeadlineSocket {
+    fn read_restricted(&mut self, bytes: &mut [u8], call: Option<&dyn Fn() -> Result<()>>) -> std::io::Result<usize> {
+        let restricted = self.restriction.is_some() || call.is_some();
+        let result = if restricted {
             self.inner.socket.set_read_timeout(Some(self.inner.remaining()?))?;
-            restricted_transport_io_v1(restriction.as_ref(), || self.inner.socket.read(bytes))
+            borrowed_restricted_transport_io_v2(self.restriction.as_deref(), call,
+                || self.inner.socket.read(bytes))
         } else { self.inner.read(bytes) };
         if self.check_after_io {
-            self.inner.remaining()?;
-        }
-        result
+            finish_caller_io_v2(result, self.inner.remaining(), restricted)
+        } else { result }
     }
-}
-impl Write for CallerDeadlineSocket {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        let result = if let Some(restriction) = &self.restriction {
+    fn write_restricted(&mut self, bytes: &[u8], call: Option<&dyn Fn() -> Result<()>>) -> std::io::Result<usize> {
+        let restricted = self.restriction.is_some() || call.is_some();
+        let result = if restricted {
             self.inner.socket.set_write_timeout(Some(self.inner.remaining()?))?;
-            restricted_transport_io_v1(restriction.as_ref(), || self.inner.socket.write(bytes))
+            borrowed_restricted_transport_io_v2(self.restriction.as_deref(), call,
+                || self.inner.socket.write(bytes))
         } else { self.inner.write(bytes) };
         if self.check_after_io {
-            self.inner.remaining()?;
-        }
-        result
+            finish_caller_io_v2(result, self.inner.remaining(), restricted)
+        } else { result }
     }
-    fn flush(&mut self) -> std::io::Result<()> {
-        let result = if let Some(restriction) = &self.restriction {
+    fn flush_restricted(&mut self, call: Option<&dyn Fn() -> Result<()>>) -> std::io::Result<()> {
+        let restricted = self.restriction.is_some() || call.is_some();
+        let result = if restricted {
             self.inner.socket.set_write_timeout(Some(self.inner.remaining()?))?;
-            restricted_transport_io_v1(restriction.as_ref(), || self.inner.socket.flush())
+            borrowed_restricted_transport_io_v2(self.restriction.as_deref(), call,
+                || self.inner.socket.flush())
         } else { self.inner.flush() };
         if self.check_after_io {
-            self.inner.remaining()?;
-        }
-        result
+            finish_caller_io_v2(result, self.inner.remaining(), restricted)
+        } else { result }
     }
+}
+impl Read for CallerDeadlineSocket {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> { self.read_restricted(bytes, None) }
+}
+impl Write for CallerDeadlineSocket {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> { self.write_restricted(bytes, None) }
+    fn flush(&mut self) -> std::io::Result<()> { self.flush_restricted(None) }
+}
+impl Read for BorrowedCallerDeadlineSocket<'_> {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        self.inner.read_restricted(bytes, self.call_restriction)
+    }
+}
+impl Write for BorrowedCallerDeadlineSocket<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.inner.write_restricted(bytes, self.call_restriction)
+    }
+    fn flush(&mut self) -> std::io::Result<()> { self.inner.flush_restricted(self.call_restriction) }
 }
 
 fn read_frame<T: serde::de::DeserializeOwned>(reader: &mut impl Read) -> Result<T> {
@@ -3427,5 +3545,90 @@ mod transport_restriction_tests {
         assert!(restricted_transport_io_v1(&r, || { calls.fetch_add(1,Ordering::SeqCst); Ok(4) }).is_err());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(r.samples.load(Ordering::SeqCst), 2);
+    }
+}
+
+#[cfg(test)]
+mod borrowed_transport_restriction_tests_v2 {
+    use super::*;
+    use std::cell::Cell;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    struct Original { denied: AtomicBool, samples: AtomicUsize }
+    impl AuthorityTransportRestrictionV1 for Original {
+        fn check_before_io(&self) -> Result<()> {
+            self.samples.fetch_add(1, Ordering::SeqCst);
+            if self.denied.load(Ordering::SeqCst) { Err(AuthorityError::Permission) }
+            else { Ok(()) }
+        }
+    }
+    #[test]
+    fn borrowed_denial_prevents_attempt_without_storing_or_copying_grant() {
+        let calls = Cell::new(0);
+        let denied = || Err(AuthorityError::Permission);
+        let result = borrowed_restricted_transport_io_v2(None, Some(&denied), || {
+            calls.set(calls.get() + 1); Ok(())
+        });
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(calls.get(), 0);
+    }
+    #[test]
+    fn original_denial_cannot_be_overridden_by_call_check() {
+        let original = Original { denied: AtomicBool::new(true), samples: AtomicUsize::new(0) };
+        let calls = Cell::new(0);
+        let current = || Ok(());
+        assert!(borrowed_restricted_transport_io_v2(Some(&original), Some(&current), || {
+            calls.set(calls.get() + 1); Ok(())
+        }).is_err());
+        assert_eq!(calls.get(), 0);
+        assert_eq!(original.samples.load(Ordering::SeqCst), 1);
+    }
+    #[test]
+    fn revoke_during_admitted_attempt_denies_result_not_claimed_rollback() {
+        let expired = Cell::new(false);
+        let calls = Cell::new(0);
+        let current = || if expired.get() { Err(AuthorityError::Expired) } else { Ok(()) };
+        assert!(borrowed_restricted_transport_io_v2(None, Some(&current), || {
+            calls.set(calls.get() + 1); expired.set(true); Ok(4)
+        }).is_err());
+        assert_eq!(calls.get(), 1); // already-admitted effect really occurred
+        assert!(borrowed_restricted_transport_io_v2(None, Some(&current), || {
+            calls.set(calls.get() + 1); Ok(4)
+        }).is_err());
+        assert_eq!(calls.get(), 1);
+    }
+    #[test]
+    fn original_observer_is_last_before_attempt_and_repeated_after() {
+        let original = Original { denied: AtomicBool::new(false), samples: AtomicUsize::new(0) };
+        let samples = Cell::new(0);
+        let current = || { samples.set(samples.get() + 1); Ok(()) };
+        assert_eq!(borrowed_restricted_transport_io_v2(Some(&original), Some(&current), || {
+            assert_eq!(samples.get(), 1);
+            assert_eq!(original.samples.load(Ordering::SeqCst), 1);
+            Ok(9)
+        }).unwrap(), 9);
+        assert_eq!(samples.get(), 2);
+        assert_eq!(original.samples.load(Ordering::SeqCst), 2);
+    }
+    #[test]
+    fn actual_io_error_survives_later_restriction_failure() {
+        let expired = Cell::new(false);
+        let current = || if expired.get() { Err(AuthorityError::Expired) } else { Ok(()) };
+        let result = borrowed_restricted_transport_io_v2::<()>(None, Some(&current), || {
+            expired.set(true); Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+        });
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::BrokenPipe);
+    }
+    #[test]
+    fn restricted_io_error_survives_deadline_but_legacy_order_is_unchanged() {
+        let expired = || Err(std::io::Error::from(std::io::ErrorKind::TimedOut));
+        let broken = || Err::<(), _>(std::io::Error::from(std::io::ErrorKind::BrokenPipe));
+        assert_eq!(finish_caller_io_v2(broken(), expired(), true).unwrap_err().kind(), std::io::ErrorKind::BrokenPipe);
+        assert_eq!(finish_caller_io_v2(broken(), expired(), false).unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+        assert_eq!(finish_caller_io_v2(Ok(()), expired(), true).unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+    }
+    #[test]
+    fn original_owned_socket_remains_send_without_action_reference() {
+        fn assert_send<T: Send>() {}
+        assert_send::<CallerDeadlineSocket>();
     }
 }
