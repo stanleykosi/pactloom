@@ -333,8 +333,21 @@ def pixel_digest(pixels, region):
 class FirstRuntimeFailure:
     def __init__(self, mode):
         self.mode, self.value, self.stage, self.case = mode, None, 'root', None
+        self.runtime_context = None
+        self._context_active = False
 
     def note(self, value):
+        if self._context_active: return
+        if self.value is None and self.runtime_context is not None:
+            try:
+                self._context_active = True
+                enriched = dict(value, runtime_observation=self.runtime_context())
+                P.validate_failure(enriched, self.mode)
+                value = enriched
+            except Exception:
+                pass  # original first failure remains authoritative
+            finally:
+                self._context_active = False
         P.validate_failure(value, self.mode)
         if self.value is None:
             self.value = value
@@ -494,6 +507,8 @@ class NativeSession:
         self.deadline = min(original, time.monotonic_ns() + D.SESSION_NS)
         self.records, self.owner, self.collector = [], None, ObserverFiles() if source_backed else None
         self.controller = self.weston = self.product = None
+        self.input_field = None; self.input_action = 'other'
+        reporter.runtime_context = self.failure_context
         reporter.stage = 'display'
         S.namespace_empty_except((1,))
         require(not list(EVIDENCE.iterdir()), 'record_file')
@@ -514,6 +529,34 @@ class NativeSession:
             close_fds=True, pass_fds=(), env=environment, start_new_session=True)
         require(os.getpgid(self.product.pid) == self.product.pid, 'product_status')
         self.controller.bind_process(self.product); self.controller.focus(True)
+
+    def failure_context(self):
+        def status(process):
+            if process is None: return None
+            value = process.poll()
+            return value if P.number(value, -64, 255) else None
+        records = self.records
+        collector_code = None
+        if self.collector is not None:
+            try: records = self.collector.read(); self.records = records
+            except Exception as error:
+                code = getattr(error, 'code', None)
+                collector_code = code if code in P.CODES else 'internal'
+        terminal = []; phase = None
+        for record in records:
+            P.validate_record(record)
+            if record['event'] == 'RoleFinished':
+                terminal.append(dict(role=record['role'], exit_status=record['detail']['exit_code']))
+            if record['role'] == 'Coordinator' and record['event'] == 'Observation' and record['detail'].get('kind') == 'WidgetSnapshot':
+                phase = record['detail']['facts']['phase']
+        require(len(terminal) <= 17, 'record_count')
+        detail = P.delivery_first_failure(records) if records else None
+        return dict(product_status=status(self.product), compositor_status=status(self.weston),
+            field=self.input_field, action=self.input_action, collector_code=collector_code,
+            record_count=len(records), phase=phase, terminal_roles=terminal,
+            delivery_stage=None if detail is None else detail['stage'],
+            delivery_class=None if detail is None else detail['class'],
+            controller=None if self.controller is None else self.controller.failure_snapshot())
 
     def related_delivery_failure(self):
         collector = getattr(self, 'collector', None)
@@ -603,19 +646,24 @@ class NativeSession:
         cost = sum(len(D._ascii_events(form[key])) + 9 for _, key in FIELDS)
         require(cost < D.MAX_COMMANDS - 2048, 'input_budget')
         for name, key in FIELDS:
+            self.input_field = name
             for scroll in range(65):
                 record = self.wait_snapshot(lambda s: s['phase'] == 'Selecting' and s['focused'] and not s['revoked'])
                 matches = [w for w in record['detail']['facts']['widgets'] if w['widget'] == name and w['enabled']]
                 if matches:
-                    self.click(record, name); self.controller.clear_field(); self.controller.type_ascii(form[key]); break
+                    self.input_action = 'select'; self.click(record, name)
+                    self.input_action = 'clear'; self.controller.clear_field()
+                    self.input_action = 'type'; self.controller.type_ascii(form[key]); break
                 require(scroll < 64, 'input_widget')
                 visible = [w for w in record['detail']['facts']['widgets'] if w['widget'] in dict(FIELDS)]
                 require(visible, 'input_widget')
                 target = max(visible, key=lambda w: w['rect']['bottom'])
+                self.input_action = 'scroll'
                 self.controller.scroll_down(*center(record['detail']['facts'], target))
                 time.sleep(.03)  # scheduling only; next actual snapshot remains the input target
 
     def capture(self, record, prior_pixels=None, *, region=None, before_digest=None):
+        self.input_action = 'capture'
         self.check()
         read_ns = time.monotonic_ns(); facts = record['detail']['facts']
         if region is None: region = physical_region(facts, self.widget(record, 'Review', enabled=False))
@@ -683,7 +731,7 @@ def source_case(case, original, handoff_raw, original_metadata, artifact_digest,
         prepare = session.wait_snapshot(lambda s: s['phase'] == 'Selecting' and s['focused'] and
             any(w['widget'] == 'Prepare' and w['enabled'] for w in s['widgets']))
         with session.controller.observe() as frame: baseline = bytearray(frame.bgra())
-        reporter.stage = 'prepare'; session.click(prepare, 'Prepare')
+        reporter.stage = 'prepare'; session.input_field = None; session.input_action = 'prepare'; session.click(prepare, 'Prepare')
         source = session.wait_snapshot(lambda s: s['phase'] == 'Reading' and s['focused'] and
             not s['revoked'] and s['presentation_digest'] is not None, code='source_prepare', after=prepare['sequence'])
         source_paint = session.capture(source, baseline); D._wipe(baseline); baseline = None

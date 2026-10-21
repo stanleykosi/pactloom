@@ -151,6 +151,67 @@ class DisplayFailureObservation(unittest.TestCase):
             C.P.failure('fixture', 'prepare', 'internal', 'cancel', display_observation=good)
 
 
+class CommonFailureContext(unittest.TestCase):
+    def context(self):
+        return dict(product_status=1, compositor_status=None, field='Request', action='type',
+            collector_code=None, record_count=0, phase=None, terminal_roles=[], delivery_stage=None, delivery_class=None,
+            controller=dict(origin='product_exit', module_error='target', target_reason='unmapped',
+                sequence=12, operation=5, commit=3, frame=4, input_sequence=11))
+
+    def test_actual_context_reads_one_bounded_snapshot_without_commands(self):
+        from unittest import mock
+        session=C.NativeSession.__new__(C.NativeSession)
+        session.records=[]; session.collector=mock.Mock(); session.collector.read.return_value=[]
+        session.product=mock.Mock(); session.product.poll.return_value=-9
+        session.weston=mock.Mock(); session.weston.poll.return_value=None
+        session.controller=mock.Mock(); session.controller.failure_snapshot.return_value=self.context()['controller']
+        session.input_field='Request'; session.input_action='type'
+        context=session.failure_context()
+        value=C.P.failure('fixture','input','display_binding')|{'runtime_observation':context}
+        C.P.validate_failure(value,'fixture')
+        self.assertEqual(context['product_status'],-9)
+        session.collector.read.assert_called_once_with()
+        session.controller.failure_snapshot.assert_called_once_with()
+        self.assertEqual(len(session.controller.mock_calls),1)
+
+    def test_every_primary_failure_gets_same_closed_context(self):
+        from unittest import mock
+        import contextlib, io
+        for code in ('display_binding', 'display_status', 'product_status', 'input_phase'):
+            first = C.FirstRuntimeFailure('fixture'); first.stage='input'; first.case='cancel'
+            first.runtime_context = mock.Mock(return_value=self.context())
+            with contextlib.redirect_stdout(io.StringIO()): first.note(C.P.failure('fixture','input',code,'cancel'))
+            self.assertEqual(first.value['code'],code)
+            self.assertEqual(first.value['runtime_observation'],self.context())
+            first.runtime_context.assert_called_once()
+
+    def test_hook_failure_and_reentrancy_cannot_replace_primary(self):
+        import contextlib, io
+        for behavior in ('raise','reenter'):
+            first = C.FirstRuntimeFailure('fixture')
+            def hook():
+                if behavior == 'raise': raise ValueError('private payload')
+                first.note(C.P.failure('fixture','input','internal'))
+                return self.context()
+            first.runtime_context=hook
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                first.note(C.P.failure('fixture','input','display_binding'))
+                first.note(C.P.failure('fixture','input','internal'))
+            self.assertEqual(first.value['code'],'display_binding')
+            self.assertEqual(output.getvalue().count('CI_UI_FAILURE'),1)
+            self.assertNotIn('private payload',output.getvalue())
+
+    def test_arbitrary_callback_data_is_not_public(self):
+        import contextlib, io
+        for bad in (self.context()|{'field':'private/path'}, self.context()|{'secret':'private'},
+                    self.context()|{'product_status':True}, self.context()|{'record_count':999999}):
+            first=C.FirstRuntimeFailure('fixture'); first.runtime_context=lambda:bad
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                first.note(C.P.failure('fixture','input','display_binding'))
+            self.assertNotIn('runtime_observation',first.value)
+            self.assertNotIn('private',output.getvalue())
+
+
 class RootSetup(unittest.TestCase):
     def test_exact_unrelated_passwd_preservation(self):
         result = C.passwd_bytes(BASE, '/ci-fixture/ui-original/home')

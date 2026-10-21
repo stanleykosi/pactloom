@@ -212,6 +212,8 @@ class Controller:
         self._original = original_deadline_ns
         self._session = session_deadline_ns
         self._sequence = self._captures = 0
+        self._failure_origin = self._module_error = self._target_reason = None
+        self._last_op = 0
         self._ready = self._bound = self._closed = False
         self._bind_attempted = False
         self._terminal_close = False
@@ -239,9 +241,27 @@ class Controller:
     def receipt(self):
         return self._receipt
 
-    def _reject(self, code):
+    def _reject(self, code, origin='local_guard'):
+        if self._failure_origin is None: self._failure_origin = origin
         self.close()
         raise Rejected(code)
+
+    def _remember_module_error(self, raw, ancillary, flags):
+        # Observation only, before a competing liveness check can close the edge.
+        if ancillary or flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC) or len(raw) != HEADER.size:
+            return
+        h = HEADER.unpack(raw)
+        if (h[:2] == (MAGIC, VERSION) and h[2] in (0, self._sequence) and
+                h[3] == ERROR and 0 < h[4] < len(ERRORS) and h[6:] == (0,) * 6 and
+                (h[5] == 0 or (ERRORS[h[4]] == 'target' and 0 < h[5] < len(TARGET_REASONS)))):
+            self._module_error = ERRORS[h[4]]
+            self._target_reason = TARGET_REASONS[h[5]] if h[5] else None
+
+    def failure_snapshot(self):
+        return dict(origin=self._failure_origin, module_error=self._module_error,
+            target_reason=self._target_reason, sequence=self._sequence, operation=self._last_op,
+            commit=self._receipt.commit, frame=self._receipt.frame,
+            input_sequence=self._receipt.input_sequence)
 
     def _remaining(self):
         if self._closed:
@@ -250,8 +270,10 @@ class Controller:
         if left <= 0:
             self._reject('deadline')
         if self._process is not None:
-            if self._process.pid != self._bound_pid or (not self._terminal_close and self._process.poll() is not None):
-                self._reject('target')
+            if self._process.pid != self._bound_pid:
+                self._reject('target', 'pid_changed')
+            if not self._terminal_close and self._process.poll() is not None:
+                self._reject('target', 'product_exit')
         return left / 1_000_000_000
 
     def _read(self):
@@ -264,6 +286,7 @@ class Controller:
                 continue
             except OSError:
                 self._reject('disconnected')
+            self._remember_module_error(packet, ancillary, flags)
             self._remaining()
             if ancillary or flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC):
                 self._reject('protocol')
@@ -275,7 +298,7 @@ class Controller:
             if h[3] == ERROR:
                 if len(packet) != HEADER.size or not 0 < h[4] < len(ERRORS):
                     self._reject('protocol')
-                self._reject(ERRORS[h[4]])
+                self._reject(ERRORS[h[4]], 'module_error')
             if h[2] != self._sequence or h[4] != 0:
                 self._reject('protocol')
             if (not 0 <= h[5] <= MAX_COMMITS or not 0 <= h[6] <= MAX_COMMITS or
@@ -297,6 +320,7 @@ class Controller:
             self._reject('limit')
         self._remaining()
         self._sequence += 1
+        self._last_op = op
         packet = COMMAND.pack(MAGIC, VERSION, self._sequence, op, a, b, 0, 0)
         self._socket.settimeout(self._remaining())
         try:
@@ -448,6 +472,7 @@ class Controller:
             self._socket.settimeout(0.0)
             raw, ancillary, flags, _ = self._socket.recvmsg(
                 HEADER.size, 0, socket.MSG_CMSG_CLOEXEC)
+            self._remember_module_error(raw, ancillary, flags)
             if ancillary or flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC):
                 result['packet'] = 'malformed'
             elif not raw:

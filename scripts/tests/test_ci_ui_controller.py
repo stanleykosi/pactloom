@@ -162,6 +162,31 @@ class Protocol(unittest.TestCase):
         self.assertEqual(self.controller.observe_exited_compositor(compositor),
                          dict(exit_status=-9, packet='eof', module_error=None))
 
+    def test_product_exit_before_receive_retains_origin_after_close(self):
+        self.bind(); self.process.poll.return_value = 1
+        self.rejected('target', lambda: self.controller._read())
+        self.assertEqual(self.controller.failure_snapshot()['origin'], 'product_exit')
+        self.assertIsNone(self.controller.failure_snapshot()['module_error'])
+
+    def test_module_target_retains_reason_after_close(self):
+        self.bind(); self.transport.incoming = [packet(C.ERROR, status=4, commit=7)]
+        self.rejected('target', lambda: self.controller._read())
+        state = self.controller.failure_snapshot()
+        self.assertEqual((state['origin'], state['module_error'], state['target_reason']), ('module_error', 'target', 'destroyed'))
+
+    def test_product_exit_after_receive_does_not_erase_module_observation(self):
+        self.bind(); self.process.poll.side_effect = [None, 1]
+        self.transport.incoming = [packet(C.ERROR, status=4, commit=6)]
+        self.rejected('target', lambda: self.controller._read())
+        state = self.controller.failure_snapshot()
+        self.assertEqual((state['origin'], state['module_error'], state['target_reason']), ('product_exit', 'target', 'unmapped'))
+
+    def test_malformed_module_observation_is_never_retained(self):
+        self.controller._remember_module_error(packet(C.ERROR, status=4, commit=99), [], 0)
+        self.assertIsNone(self.controller.failure_snapshot()['module_error'])
+        self.controller._remember_module_error(packet(C.ERROR, status=4, commit=6), [], socket.MSG_CTRUNC)
+        self.assertIsNone(self.controller.failure_snapshot()['module_error'])
+
     def test_bind_requires_ready_and_real_popen_shape(self):
         self.rejected('target', lambda: self.controller.bind_process(self.process))
         self.assertFalse(self.transport.sent)

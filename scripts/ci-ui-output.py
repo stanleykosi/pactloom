@@ -1128,7 +1128,7 @@ def loads(raw, limit=8192):
 
 def validate_failure(value, mode):
     require(mode in MODES and type(value) is dict and
-            set(value) in (FAILURE_KEYS, FAILURE_KEYS | {'setup_observation'}, FAILURE_KEYS | {'display_observation'}, FAILURE_KEYS | {'product_observation'}))
+            set(value) - {'runtime_observation'} in (FAILURE_KEYS, FAILURE_KEYS | {'setup_observation'}, FAILURE_KEYS | {'display_observation'}, FAILURE_KEYS | {'product_observation'}))
     require(type(value['schema_version']) is int and value['schema_version'] == 1 and
             value['mode'] == mode and type(value['stage']) is str and value['stage'] in STAGES and
             type(value['code']) is str and value['code'] in CODES)
@@ -1160,6 +1160,39 @@ def validate_failure(value, mode):
         observation = value['product_observation']
         require(value['code'] == 'product_status' and type(observation) is dict and
                 set(observation) == {'exit_status'} and number(observation['exit_status'], -64, 255))
+    if 'runtime_observation' in value:
+        o = value['runtime_observation']
+        require(type(o) is dict and set(o) == {'product_status', 'compositor_status', 'field', 'action',
+            'collector_code', 'record_count', 'phase', 'terminal_roles', 'controller', 'delivery_stage', 'delivery_class'})
+        require(all(o[k] is None or number(o[k], -64, 255) for k in ('product_status', 'compositor_status')))
+        require(o['field'] is None or o['field'] in ('Endpoint', 'ServerName', 'WitnessId',
+            'ServerCertificateDigest', 'NetworkProfile', 'AccountId', 'StorageKeyPath',
+            'ServerCertificatePath', 'ServerPrivateKeyPath', 'ClientRootPath', 'OwnerCertificate', 'Request'))
+        require(o['action'] in ('other', 'select', 'clear', 'type', 'scroll', 'prepare', 'capture'))
+        require(o['collector_code'] is None or (type(o['collector_code']) is str and o['collector_code'] in CODES))
+        require(number(o['record_count'], 0, 16384) and (o['phase'] is None or o['phase'] in _OBSERVER_PHASES))
+        require((o['delivery_stage'] is None and o['delivery_class'] is None) or
+            (type(o['delivery_stage']) is str and o['delivery_stage'] in DELIVERY_STAGES and
+             type(o['delivery_class']) is str and o['delivery_class'] in DELIVERY_CLASSES))
+        require(type(o['terminal_roles']) is list and len(o['terminal_roles']) <= 17)
+        roles = set()
+        for row in o['terminal_roles']:
+            require(type(row) is dict and set(row) == {'role', 'exit_status'} and
+                type(row['role']) is str and row['role'] in _OBSERVER_ROLES and row['role'] not in roles and
+                number(row['exit_status'], -(1 << 31), (1 << 31) - 1))
+            roles.add(row['role'])
+        c = o['controller']
+        if c is not None:
+            require(type(c) is dict and set(c) == {'origin', 'module_error', 'target_reason',
+                'sequence', 'operation', 'commit', 'frame', 'input_sequence'})
+            require(c['origin'] in (None, 'local_guard', 'product_exit', 'pid_changed', 'module_error'))
+            require(c['module_error'] in (None, 'protocol', 'deadline', 'limit', 'target', 'input', 'output', 'readback', 'disconnected', 'internal'))
+            require(c['target_reason'] is None or (c['module_error'] == 'target' and c['target_reason'] in
+                ('parent_or_resource', 'credentials', 'duplicate_app_id', 'other_desktop', 'retained_identity',
+                'unmapped', 'destroyed', 'bind_arguments', 'command_precondition', 'close_desktop')))
+            require(number(c['sequence'], 0, 65536) and number(c['operation'], 0, 9) and
+                number(c['input_sequence'], 0, c['sequence']) and
+                all(number(c[k], 0, 262144) for k in ('commit', 'frame')))
     boundary, outcome = value['source_boundary'], value['source_outcome']
     require((boundary is None and outcome is None) or
             (type(boundary) is str and boundary in SETUP_BOUNDARIES and
@@ -1171,7 +1204,7 @@ def validate_failure(value, mode):
     # An exact setup operation and an exact product operation are different
     # causal observations. Never merge unrelated pairs into one first failure.
     require(boundary is None or stage is None)
-    require(len(json.dumps(value, separators=(',', ':')).encode('ascii')) <= 1024)
+    require(len(json.dumps(value, separators=(',', ':')).encode('ascii')) <= (4096 if 'runtime_observation' in value else 1024))
     return value
 
 
