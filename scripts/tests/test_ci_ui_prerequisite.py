@@ -21,6 +21,26 @@ class PrerequisiteTests(unittest.TestCase):
             M.verify_paths(paths|{'crates/wholepact-authority/src/lib.rs'}, diagnostic_hashes=M.CI_DIAGNOSTIC_HASHES)
         self.assertFalse(paths & M.ALLOWED)
 
+    def test_birth_envelope_exception_is_exact_complete_and_test_only(self):
+        paths = set(M.BIRTH_ENVELOPE_HASHES)
+        self.assertEqual(len(paths), 2)
+        self.assertFalse(paths & M.ALLOWED)
+        M.verify_paths(paths, birth_hashes=M.BIRTH_ENVELOPE_HASHES)
+        for hashes in (None, {}, {**M.BIRTH_ENVELOPE_HASHES, next(iter(paths)): ('0'*64, '0'*64)}):
+            with self.assertRaisesRegex(ValueError, 'birth_envelope_delta'):
+                M.verify_paths(paths, birth_hashes=hashes)
+        with self.assertRaisesRegex(ValueError, 'birth_envelope_delta'):
+            M.verify_paths(paths - {next(iter(paths))}, birth_hashes=M.BIRTH_ENVELOPE_HASHES)
+        with self.assertRaisesRegex(ValueError, 'source_closure_changed'):
+            M.verify_paths(paths | {'crates/wholepact-native-host/src/lib.rs'}, birth_hashes=M.BIRTH_ENVELOPE_HASHES)
+        root = Path(M.__file__).resolve().parents[1]
+        source = (root / 'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3.rs').read_text()
+        self.assertIn('#[cfg(test)]\n#[path = "sequential_construction_v3_qualification.rs"]\nmod qualification;', source)
+        import hashlib
+        for path, (_, expected) in M.BIRTH_ENVELOPE_HASHES.items():
+            self.assertEqual(hashlib.sha256((root / path).read_bytes()).hexdigest(), expected)
+        self.assertEqual((root / 'scripts/ci-ui-reuse-pin.json').read_text().strip(), 'null')
+
     def record(self):
         return {'jobs': [{'id': M.JOB, 'run_id': M.RUN, 'run_attempt': 1,
                          'head_sha': M.BASE, 'head_branch': 'qualification/durable-proposal-v1',
@@ -56,7 +76,7 @@ class PrerequisiteTests(unittest.TestCase):
         additions = {'scripts/ci-ui-setup-wrapper.py', 'scripts/ci-ui-output.py',
                      'scripts/ci-ui-container.py', 'scripts/tests/test_ci_ui_setup.py'}
         self.assertTrue(additions <= M.ALLOWED)
-        self.assertEqual(len(M.ALLOWED), 23)
+        self.assertEqual(len(M.ALLOWED), 24)
         M.verify_paths(additions)
         for path in ('scripts/ci-bootstrap-output.py', 'scripts/build-encrypted-storage-deps.sh',
                      'crates/wholepact-native-host/src/lib.rs'):
