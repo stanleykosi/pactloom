@@ -52,6 +52,18 @@ impl DurableDeliveryAdmissionProposalV2 {
             "notice": "This records the whole exact prospective delivery scope against the original account and bootstrap. The independent signer must derive the original fixed PCZT/material and Host lineage. This witness does not attest the remote Host filesystem or possess those materials. Original owner mTLS must submit this identical request. Cancel or focus loss before publication prevents commitment; an uncertain result must be audited with the exact same operation. No Acquire, Activate, Reserve, signature, extraction, release, final-byte delivery, dispatcher authentication or dispatch is supported. Historical reading does not establish current material availability.",
         })).map_err(|_| AuthorityError::InvalidBinding)
     }
+    /// Separate cancel-only presentation. Legacy display/digest remain unchanged.
+    /// This returns inert facts only and never a source, approval or decision.
+    #[cfg(feature = "coordinated-witness-cancel-review")]
+    pub(crate) fn cancel_only_display_v1(&self) -> Result<String> {
+        self.check_current()?;
+        serde_json::to_string_pretty(&serde_json::json!({
+            "operation": "Review ONE exact prospective delivery scope; approval unavailable",
+            "request": self.expected,
+            "actual_original_witness": self.disclosure,
+            "notice": "Approval is unavailable in this review-only slice. No append can be admitted. Cancel, close, Escape, or focus loss requests disposal of this review. The independent signer must derive the original fixed PCZT/material and Host lineage. This witness does not attest the remote Host filesystem or possess those materials. No Acquire, Activate, Reserve, signature, extraction, release, final-byte delivery, dispatcher authentication or dispatch is supported. Historical reading does not establish current material availability.",
+        })).map_err(|_| AuthorityError::InvalidBinding)
+    }
     pub(crate) fn check_current(&self) -> Result<()> {
         self.journal
             .born_owner

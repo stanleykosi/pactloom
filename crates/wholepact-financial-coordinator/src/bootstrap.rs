@@ -1,5 +1,7 @@
-//! Fixed actual process tree, inert global barrier and orderly teardown only.
-//! No role opens a namespace, source owner, key, GUI, runtime or service.
+//! Fixed actual process tree and inert global barrier. The bootstrap-only profile
+//! opens no role namespace, source, key, GUI or service. The separate cancel-only
+//! profile may hand the retained tree to C and one genuine W preparation after
+//! the barrier; this never enables financial approval or a serving role.
 use crate::{
     channel::{require_time, Message},
     image::PinnedCommonImageV1,
@@ -12,6 +14,47 @@ const ROOT_CHILDREN: usize = 14; // H plus the 13 fixed Witness purposes.
 const ALL_ROOT_CHILDREN: u16 = (1 << ROOT_CHILDREN) - 1;
 const BOOTSTRAP_BUDGET: Duration = Duration::from_secs(30);
 
+#[derive(Clone, Copy)]
+pub(super) struct PhaseDeadlinesV1 { startup: Instant, pub(super) session: Instant }
+impl PhaseDeadlinesV1 {
+    fn stop(self) -> Instant {
+        if cfg!(feature = "cancel-only-witness-review") { self.session + Duration::from_secs(5) } else { self.startup }
+    }
+    fn drain(self) -> Instant {
+        // Called once after this role's one STOP. This is a subordinate local
+        // bound, never a renewal of C's separately retained root cleanup budget.
+        if cfg!(feature = "cancel-only-witness-review") { (Instant::now() + Duration::from_secs(5)).min(self.stop()) } else { self.startup }
+    }
+}
+
+/// Sole C-owned original tree. A GUI driver may move this owner after the
+/// complete inert barrier; it cannot clone/reconstruct children or their origin.
+pub(super) struct InertTreeV1 {
+    children: [Option<DirectChild>; ROOT_CHILDREN],
+    _image: PinnedCommonImageV1,
+}
+impl InertTreeV1 {
+    #[cfg(feature = "cancel-only-witness-review")]
+    pub(super) fn check_alive(&self) -> Result<()> {
+        for child in self.children.iter().flatten() { child.check_alive()?; }
+        Ok(())
+    }
+    #[cfg(feature = "cancel-only-witness-review")]
+    pub(super) fn witness(&self) -> Result<&DirectChild> {
+        self.children.iter().flatten().find(|c| c.role() == crate::review_channel::WITNESS)
+            .ok_or_else(|| rejected("original review witness missing"))
+    }
+    pub(super) fn stop_and_reap(mut self, deadline: Instant) -> Result<()> {
+        for child in self.children.iter().flatten() { child.send(Message::Stop, deadline)?; }
+        for child in self.children.iter().flatten() { child.receive(Message::Stopped, deadline)?; }
+        for child in self.children.iter().flatten() { child.send(Message::Exit, deadline)?; }
+        for child in &mut self.children {
+            child.take().ok_or_else(|| rejected("fixed child missing"))?.finish(deadline)?;
+        }
+        Ok(())
+    }
+}
+
 pub(super) fn run_before_runtime() -> Result<()> {
     harden_first()?;
     process::require_single_thread()?;
@@ -19,6 +62,8 @@ pub(super) fn run_before_runtime() -> Result<()> {
         return Err(rejected("set-id coordinator launch unsupported"));
     }
     if std::env::args_os().count() != 1 { return Err(rejected("no external worker entry")); }
+    #[cfg(feature = "cancel-only-witness-review")]
+    let display = crate::desktop_launch::DesktopLaunchV1::capture()?;
     discard_ambient_descriptors()?;
     // Trusted launch is still required: this cannot undo already-run loader
     // injection, imported memory, or a malicious initial native launcher.
@@ -30,7 +75,12 @@ pub(super) fn run_before_runtime() -> Result<()> {
     crate::ci::initialize()?;
     let image = PinnedCommonImageV1::load_running_image()?;
     process::require_single_thread()?;
-    let deadline = Instant::now() + BOOTSTRAP_BUDGET;
+    let phase_start = Instant::now();
+    let deadline = phase_start + BOOTSTRAP_BUDGET;
+    let clocks = PhaseDeadlinesV1 {
+        startup: deadline,
+        session: if cfg!(feature = "cancel-only-witness-review") { phase_start + Duration::from_secs(300) } else { deadline },
+    };
     #[cfg(wholepact_bootstrap_ci)]
     crate::ci::deadline(deadline)?;
     let mut children: [Option<DirectChild>; ROOT_CHILDREN] = std::array::from_fn(|_| None);
@@ -39,7 +89,9 @@ pub(super) fn run_before_runtime() -> Result<()> {
         Forked::Child(origin) => {
             drop(children);
             drop(image);
-            child_exit(run_host(origin, deadline));
+            #[cfg(feature = "cancel-only-witness-review")]
+            drop(display);
+            child_exit(run_host(origin, clocks));
         }
     }
     for (index, role) in WITNESS_ROLES.into_iter().enumerate() {
@@ -51,7 +103,9 @@ pub(super) fn run_before_runtime() -> Result<()> {
                 // DirectChild drops disarm reapers before closing their FDs.
                 drop(children);
                 drop(image);
-                child_exit(run_leaf(origin, deadline));
+                #[cfg(feature = "cancel-only-witness-review")]
+                drop(display);
+                child_exit(run_leaf(origin, clocks));
             }
         }
     }
@@ -78,17 +132,20 @@ pub(super) fn run_before_runtime() -> Result<()> {
         barrier.released(index)?;
     }
     barrier.finish_inert_release()?;
-    for child in children.iter().flatten() { child.send(Message::Stop, deadline)?; }
-    for child in children.iter().flatten() { child.receive(Message::Stopped, deadline)?; }
-    for child in children.iter().flatten() { child.send(Message::Exit, deadline)?; }
-    for child in &mut children {
-        child.take().ok_or_else(|| rejected("fixed child missing"))?.finish(deadline)?;
+    let tree = InertTreeV1 { children, _image: image };
+    #[cfg(feature = "cancel-only-witness-review")]
+    {
+        display.restore_in_coordinator()?;
+        crate::native_ui::run(tree, clocks.session)
     }
-    drop(image);
-    Ok(())
+    #[cfg(not(feature = "cancel-only-witness-review"))]
+    {
+        tree.stop_and_reap(deadline)
+    }
 }
 
-fn run_host(origin: ForkOriginV1, deadline: Instant) -> Result<()> {
+fn run_host(origin: ForkOriginV1, clocks: PhaseDeadlinesV1) -> Result<()> {
+    let deadline = clocks.startup;
     #[cfg(wholepact_bootstrap_ci)]
     crate::ci::enter_role(Role::Host);
     if origin.role() != Role::Host { return Err(rejected("wrong host birth")); }
@@ -103,7 +160,7 @@ fn run_host(origin: ForkOriginV1, deadline: Instant) -> Result<()> {
                 // close H's C-facing channel. No signer can send directly to C.
                 drop(signers);
                 drop(origin);
-                child_exit(run_leaf(signer_origin, deadline));
+                child_exit(run_leaf(signer_origin, clocks));
             }
         }
     }
@@ -122,7 +179,11 @@ fn run_host(origin: ForkOriginV1, deadline: Instant) -> Result<()> {
     for signer in signers.iter().flatten() { signer.send(Message::Release, deadline)?; }
     for signer in signers.iter().flatten() { signer.receive(Message::Released, deadline)?; }
     origin.send(Message::Released, deadline)?;
+    #[cfg(feature = "cancel-only-witness-review")]
+    origin.wait_host_stop(&signers, clocks.stop())?;
+    #[cfg(not(feature = "cancel-only-witness-review"))]
     origin.receive(Message::Stop, deadline)?;
+    let deadline = clocks.drain();
     for signer in signers.iter().flatten() { signer.send(Message::Stop, deadline)?; }
     for signer in signers.iter().flatten() { signer.receive(Message::Stopped, deadline)?; }
     origin.send(Message::Stopped, deadline)?;
@@ -134,7 +195,8 @@ fn run_host(origin: ForkOriginV1, deadline: Instant) -> Result<()> {
     Ok(())
 }
 
-fn run_leaf(origin: ForkOriginV1, deadline: Instant) -> Result<()> {
+fn run_leaf(origin: ForkOriginV1, clocks: PhaseDeadlinesV1) -> Result<()> {
+    let deadline = clocks.startup;
     #[cfg(wholepact_bootstrap_ci)]
     crate::ci::enter_role(origin.role());
     if !matches!(origin.role(), Role::Signer1 | Role::Signer2) && !WITNESS_ROLES.contains(&origin.role()) {
@@ -150,7 +212,14 @@ fn run_leaf(origin: ForkOriginV1, deadline: Instant) -> Result<()> {
     origin.send(Message::Prepared, deadline)?;
     origin.receive(Message::Release, deadline)?;
     origin.send(Message::Released, deadline)?;
-    origin.receive(Message::Stop, deadline)?;
+    #[cfg(feature = "cancel-only-witness-review")]
+    if origin.role() == crate::review_channel::WITNESS {
+        // This actual private fork branch, not Authority's data preparation API,
+        // enforces the selected W's construction lineage and original C edge.
+        crate::witness_role::run_cancel_only(&origin, clocks.session)?;
+    }
+    origin.receive(Message::Stop, clocks.stop())?;
+    let deadline = clocks.drain();
     origin.send(Message::Stopped, deadline)?;
     origin.receive(Message::Exit, deadline)
 }

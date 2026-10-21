@@ -1,7 +1,11 @@
-//! Source-only bootstrap milestone. This binary has no public role entry and no
-//! financial adapter. The initial native launch must already be trusted, credential-free and
-//! uninjected; checking the running image cannot undo earlier loader injection.
+//! Private fixed-fork entry: the bootstrap profile is inert; the separate opt-in
+//! profile adds actual Witness preparation and C-only display/disposal, never
+//! financial approval. Neither has a public worker entry. Initial native launch
+//! must be trusted, credential-free and uninjected; image checks cannot undo
+//! earlier loader injection.
 #![deny(unsafe_op_in_unsafe_fn)]
+#[cfg(all(wholepact_bootstrap_ci, feature = "cancel-only-witness-review"))]
+compile_error!("Bootstrap-only CI instrumentation cannot select the source-opening UI profile");
 
 #[cfg(all(target_os = "linux", wholepact_bootstrap_ci))]
 mod ci;
@@ -13,6 +17,16 @@ mod channel;
 mod image;
 #[cfg(target_os = "linux")]
 mod process;
+#[cfg(all(target_os = "linux", feature = "cancel-only-witness-review"))]
+mod desktop_launch;
+#[cfg(all(target_os = "linux", feature = "cancel-only-witness-review"))]
+mod native_ui;
+#[cfg(all(target_os = "linux", feature = "cancel-only-witness-review"))]
+mod review_channel;
+#[cfg(all(target_os = "linux", feature = "cancel-only-witness-review"))]
+mod review_driver;
+#[cfg(all(target_os = "linux", feature = "cancel-only-witness-review"))]
+mod witness_role;
 
 #[cfg(target_os = "linux")]
 type Result<T> = std::io::Result<T>;

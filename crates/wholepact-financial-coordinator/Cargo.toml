@@ -3,11 +3,12 @@ name = "wholepact-financial-coordinator"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Inert fixed-fork common-image coordinator bootstrap; no financial adapters"
+description = "Fixed-fork coordinator with inert bootstrap and opt-in source-backed cancel-only Witness review"
 
 [features]
 default = []
 common-image-bootstrap = []
+cancel-only-witness-review = ["common-image-bootstrap", "dep:wholepact-authority", "dep:eframe", "dep:winit", "dep:zeroize"]
 
 [[bin]]
 name = "wholepact-financial-coordinator"
@@ -20,6 +21,12 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 hex.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+wholepact-authority = { path = "../wholepact-authority", optional = true, default-features = false, features = ["coordinated-witness-cancel-review"] }
+eframe = { version = "=0.36.2", optional = true, default-features = false, features = ["default_fonts", "glow", "wayland"] }
+winit = { version = "=0.30.13", optional = true, default-features = false, features = ["wayland", "rwh_06"] }
+zeroize = { version = "=1.9.1", optional = true }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(wholepact_bootstrap_ci)'] }

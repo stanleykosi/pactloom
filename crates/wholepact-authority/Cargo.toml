@@ -13,6 +13,8 @@ synthetic-qualification = ["wholepact-storage-security/synthetic-qualification"]
 offline-witness-owner = ["dep:hpke", "dep:rand", "dep:getrandom", "dep:base64", "dep:chrono"]
 pending-birth-foundation = ["dep:webpki"]
 native-witness-owner = ["pending-birth-foundation", "dep:eframe", "dep:winit"]
+# Non-authorizing actual-source prepare/display/dispose only; no positive bridge.
+coordinated-witness-cancel-review = ["native-witness-owner"]
 
 [dependencies]
 wholepact-core = { path = "../wholepact-core" }
