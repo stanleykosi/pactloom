@@ -515,6 +515,61 @@ class BuildSource(RejectionTests):
         self.assertNotIn('assert ', source)
 
 
+class OfflineArchiveCache(unittest.TestCase):
+    def test_apt_303_names_preserve_epoch_and_escape_exactly(self):
+        ns = installer_definitions()
+        name = ns['apt_archive_name']
+        self.assertEqual(name({'name': 'libexpat1', 'version': '2.8.3-1~deb13u1', 'architecture': 'amd64'}),
+                         'libexpat1_2.8.3-1~deb13u1_amd64.deb')
+        self.assertEqual(name({'name': 'libavcodec61', 'version': '7:7.1.5-0+deb13u1', 'architecture': 'amd64'}),
+                         'libavcodec61_7%3a7.1.5-0+deb13u1_amd64.deb')
+        self.assertEqual(name({'name': 'a_b', 'version': '1%2', 'architecture': 'a.b'}),
+                         'a%5fb_1%252_a%2eb.deb')
+        names = [name(row) for row in LOCK['packages'] if row['origin'] != 'pinned-base']
+        self.assertEqual(len(names), len(set(names)))
+        self.assertTrue(all('/' not in value and value.endswith('.deb') for value in names))
+
+    def test_verified_copies_are_fresh_exact_and_not_linked(self):
+        ns = installer_definitions()
+        data = b'fabricated deb bytes'
+        row = dict(pin(data), name='example', version='2:1.0-1', architecture='all', path='pool/example.deb')
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source = root / 'source'; source.mkdir()
+            (source / 'example.deb').write_bytes(data)
+            ns['ARCHIVES'] = root / 'archives'
+            ns['stage_archives']([row], source)
+            target = ns['ARCHIVES'] / 'example_2%3a1.0-1_all.deb'
+            self.assertEqual(target.read_bytes(), data)
+            self.assertEqual(target.stat().st_nlink, 1)
+            self.assertNotEqual(target.stat().st_ino, (source / 'example.deb').stat().st_ino)
+            self.assertEqual(target.stat().st_mode & 0o777, 0o444)
+            self.assertEqual({p.name for p in ns['ARCHIVES'].iterdir()}, {target.name, 'partial'})
+            with self.assertRaises(FileExistsError):
+                ns['stage_archives']([row], source)
+
+    def test_bad_digest_and_duplicate_identity_fail_before_apt(self):
+        for duplicate in (False, True):
+            ns = installer_definitions()
+            data = b'fabricated'
+            row = dict(pin(data), name='example', version='1', architecture='all', path='example.deb')
+            with tempfile.TemporaryDirectory() as directory:
+                source = pathlib.Path(directory) / 'source'; source.mkdir()
+                (source / 'example.deb').write_bytes(data if duplicate else b'xxxxxxxxxx')
+                ns['ARCHIVES'] = pathlib.Path(directory) / 'cache'
+                with self.assertRaises(ns['Failed']):
+                    ns['stage_archives']([row, row] if duplicate else [row], source)
+
+    def test_offline_policy_cache_staging_and_cleanup_are_wired(self):
+        source = I._INSTALL_SCRIPT
+        self.assertLess(source.index("stage_archives(meta['packages'][mode]"), source.index("checked(['apt-get'"))
+        self.assertIn("'Dir::Cache::Archives=' + str(ARCHIVES)", source)
+        self.assertIn("'--no-download'", source)
+        self.assertIn('shutil.rmtree(ARCHIVES)', source)
+        self.assertIn("ARCHIVES.mkdir(mode=0o755, exist_ok=False)", source)
+        self.assertIn('verify(target, row)', source)
+
+
 class FirstFailureEvidence(RejectionTests):
     def test_downloader_original_error_survives_all_cleanup_failures(self):
         record = fabricated_record(b'fake')

@@ -659,6 +659,7 @@ import subprocess
 import sys
 
 ROOT = pathlib.Path('/opt/ci-ui')
+ARCHIVES = pathlib.Path('/ci-apt-archives')
 LOCK_SHA256 = '2c86592b3b931cb88024205be851caafaa2845f4620d6a950d43d760d94e8127'
 RUNTIME_FILES = ('ci-ui-container.py', 'ci-ui-setup-wrapper.py', 'ci-ui-controller.py', 'ci-ui-output.py')
 ARTIFACT_FILES = ('coordinator-production', 'coordinator-observed', 'pristine-setup')
@@ -788,6 +789,38 @@ def verify(path, pin):
     with path.open('rb') as stream:
         need(hashlib.file_digest(stream, 'sha256').hexdigest() == pin['sha256'], 'input_digest')
 
+def apt_archive_name(row):
+    # Match pinned APT 3.0.3 pkgAcqArchive / QuoteString, including epochs.
+    # https://github.com/Debian/apt/blob/3.0.3/apt-pkg/acquire-item.cc
+    # --no-download requires this cache hit even for absolute local deb inputs.
+    def quoted(value, bad):
+        need(type(value) is str and value and '/' not in value and '\\' not in value,
+             'archive_identity')
+        return ''.join('%%%02x' % ord(c) if c in bad or c == '%' or ord(c) <= 32 or ord(c) >= 127
+                       else c for c in value)
+    return (quoted(row['name'], '_:') + '_' + quoted(row['version'], '_:') + '_'
+            + quoted(row['architecture'], '_:.') + '.deb')
+
+
+def stage_archives(rows, source):
+    # Fresh, job-private, hash-verified copies; never consume an inherited cache.
+    ARCHIVES.mkdir(mode=0o755, exist_ok=False)
+    (ARCHIVES / 'partial').mkdir(mode=0o700)
+    names = set()
+    for row in rows:
+        name = apt_archive_name(row)
+        need(name not in names, 'archive_duplicate')
+        names.add(name)
+        original = source / pathlib.PurePosixPath(row['path']).name
+        verify(original, row)
+        target = ARCHIVES / name
+        with original.open('rb') as reader, target.open('xb') as writer:
+            shutil.copyfileobj(reader, writer, 1024 * 1024)
+        target.chmod(0o444)
+        verify(target, row)
+    need({p.name for p in ARCHIVES.iterdir()} == names | {'partial'}, 'archive_set')
+
+
 def processes():
     result = set()
     for path in pathlib.Path('/proc').glob('[0-9]*/stat'):
@@ -818,6 +851,9 @@ def strip_file_privileges():
             need('security.capability' not in os.listxattr(path, follow_symlinks=False), 'file_privilege')
 
 def cleanup():
+    if ARCHIVES.exists():
+        need(ARCHIVES.is_dir() and not ARCHIVES.is_symlink(), 'archive_directory')
+        shutil.rmtree(ARCHIVES)
     for directory in ('/var/lib/apt/lists', '/var/cache/apt', '/var/log/apt', '/tmp', '/var/tmp'):
         if pathlib.Path(directory).exists():
             shutil.rmtree(directory)
@@ -931,10 +967,11 @@ def main():
     paths = ['/ci-packages/' + pathlib.PurePosixPath(row['path']).name for row in meta['packages'][mode]]
     PHASE = 'install'
     CLEANUP = True
+    stage_archives(meta['packages'][mode], pathlib.Path('/ci-packages'))
     checked(['apt-get', '--yes', '--no-download', '--no-install-recommends', '--no-install-suggests',
              '--no-remove', '--no-upgrade', '-o', 'Dir::Etc::sourcelist=/dev/null',
              '-o', 'Dir::Etc::sourceparts=-', '-o', 'APT::Get::List-Cleanup=0',
-             '-o', 'Dpkg::Use-Pty=0', 'install', *paths])
+             '-o', 'Dpkg::Use-Pty=0', '-o', 'Dir::Cache::Archives=' + str(ARCHIVES), 'install', *paths])
     PHASE = 'installed'
     need(processes() <= before_processes, 'service_process')
     need(installed() == meta[mode], 'installed_package_set')
