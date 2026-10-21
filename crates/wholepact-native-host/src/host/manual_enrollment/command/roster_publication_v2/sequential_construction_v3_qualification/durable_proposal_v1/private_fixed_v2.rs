@@ -896,11 +896,20 @@ fn produce_fixed_inner(
     let birthday = blocks.trees()[0].clone();
     let anchor_height = blocks.fabricated_context().anchor_height;
     let expiry_height = anchor_height.checked_add(40).ok_or(Error::Invalid)?;
-    let provider = runtime.block_on(synthetic_born_provider_v1::SyntheticBornProviderV1::start(
-        blocks,
-        synthetic_provider_tls_v1::child_server_config()?,
-        child_original_cutoff()?,
-    ))?;
+    let tls = synthetic_provider_tls_v1::child_server_config()?;
+    let cutoff = child_original_cutoff()?;
+    let provider = match std::env::var("WHOLEPACT_TEST_ONLY_FINANCIAL_PROFILE") {
+        Ok(profile) if profile == super::super::financial_progress_v1::FINANCIAL_PROFILE => runtime
+            .block_on(
+                synthetic_born_provider_v1::SyntheticBornProviderV1::start_financial_v2(
+                    blocks, tls, cutoff,
+                ),
+            )?,
+        Err(std::env::VarError::NotPresent) => runtime.block_on(
+            synthetic_born_provider_v1::SyntheticBornProviderV1::start(blocks, tls, cutoff),
+        )?,
+        _ => return Err(Error::Invalid),
+    };
     let source = wholepact_chain::ChainAdapter::testnet(
         "synthetic-private-original-blocks",
         provider.endpoint(),

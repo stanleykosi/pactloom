@@ -1,8 +1,19 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-20, 23:18 UTC.
+Updated: 2026-10-21, 04:10 UTC.
 
 **CI44 passed the genuine two-owner delivery/admission, original-producer SIGKILL and fresh-process read-only original-history verification route. Financial signing/dispatch and public testnet settlement remain unqualified. This is a bounded admission/restart milestone, not a production release.**
+
+
+## CI63 retained the final transaction and killed the original producer; new financial fixture contract
+
+[Run39534445472](https://github.com/stanleykosi/pactloom/actions/runs/39534445472), qualification `7d05dd675363472bc34d9c3cfa81385dfd1022f3`, implementation `64bb8b8f3d7dee783f9963333249b51174c0a161`, passed the build (13m25s), early gates and encrypted bootstrap. The synthetic lifecycle reached its shared 900-second limit during fresh-reader setup, with 10/58 reader inputs completed. Both processes were reaped, their original groups were absent, and root cleanup was verified. No returned source error established a production expiry or permission failure.
+
+Ordered source checks before reader launch establish both protected signature intakes and Finish acknowledgements, one retained final transaction, exact completed-summary verification, worker shutdown, and the original producer's controlled SIGKILL/reap/group absence. The first financial-owner review in the reader had not yet been supplied. Reopened verification, actual saved-byte dispatch and public settlement remain unqualified. Boolean completion fields in the failed all-or-nothing report must not be read as disproving these earlier ordered milestones.
+
+The new explicitly versioned `durable_financial_1800_v2` fixture has an aggregate 1800-second resource budget fixed before setup. Legacy 900-second fixtures remain unchanged. This changes the qualification performance contract, not production authority: existing action, exchange, material, original transaction and block-expiry checks remain independent. The same original absolute fixture cutoff is retained through process restart, and the saved provider wall expiry is not renewed. Reader phases retain nonrenewing 120-second liveness supervision. The external runner has a separate 1860-second fail-closed envelope for teardown/reporting; it does not extend the fixture cutoff or guarantee cleanup. A successful future run would establish functionality under this larger synthetic contract, not 15-minute performance or public-chain payment.
+
+Measured CI62 setup was 500.767 seconds; CI63 did not retain the successful producer's timing distribution on reader failure. The updated closed report therefore keeps separate parent-measured producer and reader timing, including reader setup phases, after verified process/root cleanup. No historical failed run is reclassified. Independent source review cleared the exact fixture revision. The fresh whole-Host release build passed in 10m09s; nine exact pure Rust checks and 22 closed-schema/controlled-subprocess Python checks passed. These establish compile, lifetime arithmetic and supervision/projection mechanics only. The new isolated lifecycle remains required.
 
 ## CI62 completed both authenticated Host intakes; prepared callback repair qualified locally
 

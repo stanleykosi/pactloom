@@ -24,7 +24,7 @@ TEST = (
     "host::manual_enrollment::command::roster_publication_v2::"
     "sequential_construction_v3::qualification::durable_proposal_v1::"
     "delivery_admission_v2::durable_financial_dispatch_v1::"
-    "original_two_owner_financial_continuation_survives_process_death"
+    "original_two_owner_financial_continuation_survives_process_death_v2"
 )
 PREFIX = b"CI_SYNTHETIC_DURABLE_FINANCIAL "
 BOUNDARIES = frozenset(
@@ -42,6 +42,7 @@ PROOFS = frozenset(
 )
 FIELDS = PROOFS | {
     "schema", "result", "first_failure", "boundary_outcome", "root_cleanup",
+    "fixture_profile", "producer_timing", "reader_timing",
     "completed_extraction_checkpoint_count", "dedicated_dispatch_admissions",
     "synthetic_backend_only", "public_chain_verified",
     "source_failure_boundary", "source_failure_outcome",
@@ -95,27 +96,32 @@ PROGRESS_WINDOWS = [(owner, phase) for owner in (1, 2) for phase in PROGRESS_PHA
 PROGRESS_CALLS = frozenset("Begin BeginFinancial ReadRequest WitnessStart ReadHistory BindHistory AwaitReturn WaitPhase Approve SendAdmission WitnessFinish StartServer DropServer ReadPeer Intake Preserve Complete Shutdown".split())
 # These are last-observed native stages, never a claim of current execution or cause.
 PROGRESS_NATIVE_STAGES = frozenset("SourceOpen HistoryRead Continue Admit Acquire Activate WalletPrepare WalletObserve SignPrepare Sign ReturnPrepare HostPreparedWait ReturnApprove ReturnServe ReviewStage ResultRequest AuthorityHistoryRead FinancialHistoryRead AuthorityAdmit AuthorityAcquire AuthorityActivate AuthorityVerifyActive WalletChain WalletBirthday WalletInitialize WalletImport WalletController WalletVerify WalletStatus WalletMaterial WalletSynchronize WalletTicket WalletReconcile".split())
-def validate_progress_failure(record):
+READER_PROGRESS_WINDOWS = [(0, name) for name in "ReaderHostOpen ReaderWitnessReopen ReaderProviderReopen ReaderFirstSummary ReaderInitialHistoryA ReaderInitialHistoryB ReaderPartialDispatch ReaderReconcileHistoryA ReaderReconcileHistoryB ReaderPartialSummary ReaderStaleProbe ReaderFinalDispatch ReaderFinalSummary ReaderFinalHistoryA ReaderFinalHistoryB ReaderShutdown".split()]
+
+def validate_progress_failure(record, reader=False):
+    windows = READER_PROGRESS_WINDOWS if reader else PROGRESS_WINDOWS
     if type(record) is not dict or set(record) != {"reason","last"}:
         raise ValueError()
     if type(record["reason"]) is not str or record["reason"] not in {"PhaseDeadline","InvalidProgress","GlobalDeadline"}:
         raise ValueError()
     last = record["last"]
     if last is None:
-        if record["reason"] == "PhaseDeadline":
+        if reader or record["reason"] == "PhaseDeadline":
             raise ValueError()
         return
     if type(last) is not dict or set(last) != {"window","owner","phase","call","last_native"}:
         raise ValueError()
     window = last["window"]
-    if type(window) is not int or not 0 <= window < len(PROGRESS_WINDOWS):
+    if type(window) is not int or not 0 <= window < len(windows):
         raise ValueError()
-    if type(last["owner"]) is not int or type(last["phase"]) is not str or (last["owner"],last["phase"]) != PROGRESS_WINDOWS[window]:
+    if type(last["owner"]) is not int or type(last["phase"]) is not str or (last["owner"],last["phase"]) != windows[window]:
         raise ValueError()
     if type(last["call"]) is not str or last["call"] not in PROGRESS_CALLS:
         raise ValueError()
     job = last["last_native"]
     if job is not None:
+        if reader:
+            raise ValueError()
         if type(job) is not dict or set(job) != {"owner","job_id","sequence","stage"}:
             raise ValueError()
         if type(job["owner"]) is not int or job["owner"] not in (1,2):
@@ -126,17 +132,21 @@ def validate_progress_failure(record):
         if type(job["stage"]) is not str or job["stage"] not in PROGRESS_NATIVE_STAGES:
             raise ValueError()
 
-def validate_progress_timing(record, progress):
-    keys = {"elapsed_before_first_window_ms", "completed_window_elapsed_ms", "current_window_elapsed_ms", "total_elapsed_ms", "clamped"}
+def validate_progress_timing(record, progress=None, reader=False):
+    keys = {"budget_ms", "elapsed_before_first_window_ms", "completed_window_elapsed_ms", "current_window_elapsed_ms", "total_elapsed_ms", "clamped"}
     if type(record) is not dict or set(record) != keys or type(record["clamped"]) is not bool:
         raise ValueError()
+    if type(record["budget_ms"]) is not int or record["budget_ms"] != 1_800_000:
+        raise ValueError()
     def bounded(value):
-        return type(value) is int and 0 <= value <= 900_000
+        return type(value) is int and 0 <= value <= record["budget_ms"]
     before, current = record["elapsed_before_first_window_ms"], record["current_window_elapsed_ms"]
     completed, total = record["completed_window_elapsed_ms"], record["total_elapsed_ms"]
-    if not bounded(total) or type(completed) is not list or len(completed) > 26 or not all(bounded(v) for v in completed):
+    if reader and (type(before) is not int or before != 0):
         raise ValueError()
-    if record["clamped"] and total != 900_000:
+    if not bounded(total) or type(completed) is not list or len(completed) > (15 if reader else 26) or not all(bounded(v) for v in completed):
+        raise ValueError()
+    if record["clamped"] and total != record["budget_ms"]:
         raise ValueError()
     if before is None and current is None:
         if completed:
@@ -191,7 +201,9 @@ def unique_object(pairs):
 def validate(row):
     if not isinstance(row, dict) or set(row) != FIELDS:
         raise ValueError()
-    if type(row["schema"]) is not int or row["schema"] != 4:
+    if type(row["schema"]) is not int or row["schema"] != 5:
+        raise ValueError()
+    if row["fixture_profile"] != "durable_financial_1800_v2":
         raise ValueError()
     if row["result"] not in ("passed", "failed"):
         raise ValueError()
@@ -255,16 +267,24 @@ def validate(row):
     financial = row["financial_diagnostic"]
     if financial is not None:
         validate_financial_diagnostic(financial)
+    reader_failure = row["first_failure"] in READER_BOUNDARIES
     progress = row["progress_failure"]
     if progress is not None:
-        validate_progress_failure(progress)
-        if row["first_failure"] in READER_BOUNDARIES:
-            raise ValueError()
+        validate_progress_failure(progress, reader_failure)
     timing = row["progress_timing"]
     if timing is not None:
-        validate_progress_timing(timing, progress)
-        if row["first_failure"] in READER_BOUNDARIES:
+        validate_progress_timing(timing, progress, reader_failure)
+    producer_timing, reader_timing = row["producer_timing"], row["reader_timing"]
+    for value, reader in ((producer_timing, False), (reader_timing, True)):
+        if value is None:
+            continue
+        validate_progress_timing(value, reader=reader)
+        if row["root_cleanup"] != "closed_absent" or not row["producer_reaped"] or not row["producer_group_absent"]:
             raise ValueError()
+        if reader and (not row["reader_reaped"] or not row["reader_group_absent"]):
+            raise ValueError()
+    if timing is not None and timing != (reader_timing if reader_failure else producer_timing):
+        raise ValueError()
     observed = any(value is not None for value in (boundary, outcome, completed, expected, primary, transport, financial, progress, timing))
     if observed and (
         row["result"] != "failed" or row["first_failure"] is None
@@ -281,6 +301,9 @@ def validate(row):
             or row["root_cleanup"] != "closed_absent"
             or row["completed_extraction_checkpoint_count"] != 1
             or row["dedicated_dispatch_admissions"] != 2
+            or producer_timing is None or reader_timing is None
+            or len(producer_timing["completed_window_elapsed_ms"]) != 26
+            or len(reader_timing["completed_window_elapsed_ms"]) != 15
             or observed or row["source_diagnostic_withheld"]
         ):
             raise ValueError()
@@ -298,7 +321,10 @@ def run(executable):
     row = None
     pending = bytearray()
     overlong = False
-    deadline = time.monotonic() + 1800
+    # Runner envelope only: the fixture retains its original 1800s cutoff.
+    # Extra time permits bounded teardown/reporting, never authority renewal.
+    # Recursive root cleanup is not guaranteed; timeout remains unverified.
+    deadline = time.monotonic() + 1860
     status = None
     try:
         with selectors.DefaultSelector() as selected:
@@ -340,6 +366,7 @@ def run(executable):
             process.kill()
             process.wait(timeout=10)
             print("CI_FINANCIAL_RESULT cleanup_unverified=true passed=false", flush=True)
+        process.stdout.close()
     if row is not None and (status == 0 or row["result"] != "passed"):
         print(PREFIX.decode() + json.dumps(row, sort_keys=True, separators=(",", ":")), flush=True)
     if status != 0 or row is None or row["result"] != "passed":
