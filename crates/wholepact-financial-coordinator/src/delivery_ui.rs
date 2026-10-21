@@ -7,6 +7,8 @@ use wholepact_financial_coordinator_origin::{CoordinatorDeliveryNativeV1, Coordi
 use wholepact_authority::native_witness_owner::coordinated_delivery_append_v1::{validate_delivery_review_inputs, validate_delivery_review_presentation};
 use winit::platform::wayland::EventLoopBuilderExtWayland;
 use zeroize::Zeroize;
+#[cfg(wholepact_delivery_ci)]
+use wholepact_financial_coordinator_origin::{record_delivery_observation_for_ci as observe, DeliveryObservationV1 as Observation, DeliveryWidgetSnapshotV1 as Snapshot, DeliveryWidgetRectV1 as WidgetRect, DeliveryWidgetIdV1 as WidgetId, DeliveryRectV1 as Rect, DeliveryUiPhaseV1 as UiPhase};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Phase { Selecting, Preparing, Reading, Acknowledging, Armed, InFlight, Revoked, Finished }
@@ -22,6 +24,10 @@ pub(super) fn run(native: CoordinatorDeliveryNativeV1, endpoint: CoordinatorDeli
         focused_last: false, focus_seen: false, close_when_done: false, prepare_intent: false, arm_intent: false, continue_intent: false,
         session_deadline, review_ceiling: None, last_wall: 0, read_to_end: false, acknowledged: false,
         phase_frame: 0, last_tail_frame: None,
+        #[cfg(wholepact_delivery_ci)] observed_widgets: Vec::new(),
+        #[cfg(wholepact_delivery_ci)] observed_last: None,
+        #[cfg(wholepact_delivery_ci)] observed_clear: false,
+        #[cfg(wholepact_delivery_ci)] observed_raw_blur: false,
         message: "Select existing original Witness inputs. This profile can admit at most one exact delivery append.",
     };
     let options = eframe::NativeOptions {
@@ -35,6 +41,8 @@ pub(super) fn run(native: CoordinatorDeliveryNativeV1, endpoint: CoordinatorDeli
     driver.borrow().revoke();
     // Outside the event loop: retain and join the only tree owner, never detach.
     let cleanup = driver.borrow_mut().join();
+    #[cfg(wholepact_delivery_ci)]
+    observe(Observation::DriverJoined { clean: cleanup.is_ok() });
     if window.is_err() { return Err(rejected("coordinator Wayland window unavailable")); }
     cleanup
 }
@@ -46,6 +54,10 @@ struct Window {
     prepare_intent: bool, arm_intent: bool, continue_intent: bool, session_deadline: Instant, review_ceiling: Option<Instant>,
     last_wall: u64, read_to_end: bool, acknowledged: bool, phase_frame: u64, last_tail_frame: Option<u64>,
     message: &'static str,
+    #[cfg(wholepact_delivery_ci)] observed_widgets: Vec<WidgetRect>,
+    #[cfg(wholepact_delivery_ci)] observed_last: Option<Snapshot>,
+    #[cfg(wholepact_delivery_ci)] observed_clear: bool,
+    #[cfg(wholepact_delivery_ci)] observed_raw_blur: bool,
 }
 impl Window {
     fn clear(&mut self) {
@@ -66,7 +78,15 @@ impl Window {
         self.native.revoke();
         if self.native.was_admitted() && self.effect == Effect::NotAdmitted { self.effect = Effect::Pending; }
         self.phase = if self.effect == Effect::Pending { Phase::InFlight } else { Phase::Revoked };
-        self.clear(); self.message = message; self.driver.borrow().revoke();
+        #[cfg(wholepact_delivery_ci)]
+        let cleared_digest = self.presentation.as_ref().map(|p| p.presentation_digest.clone());
+        self.clear();
+        #[cfg(wholepact_delivery_ci)]
+        if !self.observed_clear {
+            self.observed_clear = true;
+            observe(Observation::PresentationCleared { presentation_digest: cleared_digest, admitted: self.native.was_admitted() });
+        }
+        self.message = message; self.driver.borrow().revoke();
     }
     fn check_local_liveness(&mut self) {
         if self.phase == Phase::Finished { return; }
@@ -140,11 +160,16 @@ impl Window {
     }
     fn draw(&mut self, ui: &mut egui::Ui) {
         let frame = ui.ctx().cumulative_frame_nr();
+        #[cfg(wholepact_delivery_ci)] self.observed_widgets.clear();
         let (focused, blur, close, escape) = ui.ctx().input(|i| (i.focused && i.viewport().focused == Some(true),
             i.events.iter().any(|e| matches!(e, egui::Event::WindowFocused(false))), i.viewport().close_requested(), i.key_pressed(egui::Key::Escape)));
         self.interrupt(focused, blur, close, escape, ui.ctx());
         self.check_local_liveness(); self.poll_driver(focused, frame);
         ui.ctx().request_repaint_after(Duration::from_millis(20));
+        #[cfg(wholepact_delivery_ci)]
+        let painted_phase = self.phase;
+        #[cfg(wholepact_delivery_ci)]
+        let painted_digest = if focused { self.presentation.as_ref().map(|p| p.presentation_digest.clone()) } else { None };
         let acknowledged_before_pass = self.acknowledged;
         let mut painted_to_end = false;
         egui::CentralPanel::default().show(ui, |ui| {
@@ -161,26 +186,43 @@ impl Window {
                 Phase::Reading | Phase::Acknowledging => {
                     if let Some(p) = &self.presentation {
                         let shown = egui::ScrollArea::vertical().id_salt("exact-delivery-review").max_height(440.0)
-                            .show(ui, |ui| { ui.monospace(&p.display); });
+                            .show(ui, |ui| {
+                                let _response = ui.monospace(&p.display);
+                                #[cfg(wholepact_delivery_ci)]
+                                observe_widget(&mut self.observed_widgets, WidgetId::Review, &_response, ui.clip_rect());
+                            });
                         if shown.state.offset.y + shown.inner_rect.height() + 1.0 >= shown.content_size.y { painted_to_end = true; }
                         ui.label(format!("Exact presentation digest: {}", p.presentation_digest));
                     }
                     if self.phase == Phase::Reading {
-                        if ui.add_enabled(self.read_to_end && frame > self.phase_frame, egui::Button::new("Continue to exact conditional append")).clicked_by(egui::PointerButton::Primary) {
+                        let response = ui.add_enabled(self.read_to_end && frame > self.phase_frame, egui::Button::new("Continue to exact conditional append"));
+                        #[cfg(wholepact_delivery_ci)] observe_widget(&mut self.observed_widgets, WidgetId::Continue, &response, ui.clip_rect());
+                        if response.clicked_by(egui::PointerButton::Primary) {
                             self.continue_intent = true;
                         }
                     } else {
-                        ui.checkbox(&mut self.acknowledged, "I reviewed the complete exact source, account, head, request and terms. I understand the conditional admission and later-completion notice.");
-                        if ui.add_enabled(self.acknowledged && frame > self.phase_frame, egui::Button::new("Arm this exact conditional append")).clicked_by(egui::PointerButton::Primary) { self.arm_intent = true; }
+                        let _response = ui.checkbox(&mut self.acknowledged, "I reviewed the complete exact source, account, head, request and terms. I understand the conditional admission and later-completion notice.");
+                        #[cfg(wholepact_delivery_ci)] observe_widget(&mut self.observed_widgets, WidgetId::Acknowledge, &_response, ui.clip_rect());
+                        let response = ui.add_enabled(self.acknowledged && frame > self.phase_frame, egui::Button::new("Arm this exact conditional append"));
+                        #[cfg(wholepact_delivery_ci)] observe_widget(&mut self.observed_widgets, WidgetId::Arm, &response, ui.clip_rect());
+                        if response.clicked_by(egui::PointerButton::Primary) { self.arm_intent = true; }
                     }
                 }
                 Phase::Armed => { ui.label("One exact append is armed, not yet admitted. Its authenticated Ready can be admitted only at a visible, still-current native event-loop tail. There is no second click or renewed timeout."); }
                 Phase::InFlight => { ui.label("An exact append was admitted and may be in flight. A later blur or cancel cannot promise rollback."); }
                 Phase::Revoked => { ui.label("This one slot is permanently restricted. Refocus cannot rearm or reprepare it."); }
-                Phase::Finished => { if ui.button("Close").clicked_by(egui::PointerButton::Primary) { ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close); } }
+                Phase::Finished => {
+                    let response = ui.button("Close");
+                    #[cfg(wholepact_delivery_ci)] observe_widget(&mut self.observed_widgets, WidgetId::Close, &response, ui.clip_rect());
+                    if response.clicked_by(egui::PointerButton::Primary) { ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close); }
+                }
             }
-            if self.phase != Phase::Finished && ui.button("Cancel and dispose").clicked_by(egui::PointerButton::Primary) {
-                self.revoke("Cancelled locally. Any admission that already occurred remains potentially in flight until its exact outcome is known.");
+            if self.phase != Phase::Finished {
+                let response = ui.button("Cancel and dispose");
+                #[cfg(wholepact_delivery_ci)] observe_widget(&mut self.observed_widgets, WidgetId::Cancel, &response, ui.clip_rect());
+                if response.clicked_by(egui::PointerButton::Primary) {
+                    self.revoke("Cancelled locally. Any admission that already occurred remains potentially in flight until its exact outcome is known.");
+                }
             }
         });
         // Every native widget/cancel action has now run. Multipass replay cannot
@@ -191,6 +233,8 @@ impl Window {
             if !self.native.is_revoked() { self.acknowledged = acknowledged_before_pass; }
         }
         if tail_eligible(frame, self.last_tail_frame, discarded) {
+            #[cfg(wholepact_delivery_ci)]
+            self.observe_snapshot(ui, painted_phase, painted_digest, focused, painted_to_end);
             self.last_tail_frame = Some(frame);
             self.read_to_end |= painted_to_end;
             self.check_local_liveness();
@@ -220,6 +264,10 @@ impl Window {
         if self.close_when_done && self.phase == Phase::Finished { ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close); }
     }
     fn interrupt(&mut self, focused: bool, blur: bool, close: bool, escape: bool, ctx: &egui::Context) {
+        #[cfg(wholepact_delivery_ci)]
+        if must_revoke(self.focus_seen, self.focused_last, focused, blur, escape) || close {
+            observe(Observation::RawInterruption { blur, focused, escape, close });
+        }
         if must_revoke(self.focus_seen, self.focused_last, focused, blur, escape) { self.revoke("Native interruption permanently restricted this slot before admission processing."); }
         self.focus_seen |= focused; self.focused_last = focused;
         if close && self.phase != Phase::Finished {
@@ -229,20 +277,28 @@ impl Window {
     }
     fn form(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().max_height(520.0).show(ui, |ui| {
-            for (label, value, limit) in [
+            for (_index, (label, value, limit)) in [
                 ("Exact existing endpoint", &mut self.input.endpoint, 256), ("TLS server name", &mut self.input.server_name, 253),
                 ("Original Witness ID", &mut self.input.witness_id, 128), ("Pinned server certificate digest", &mut self.input.pinned_server_certificate_digest, 64),
                 ("Network profile", &mut self.input.network_profile_id, 128), ("Original expected account ID", &mut self.input.expected_account_id, 64),
                 ("Existing namespace storage key file (path only)", &mut self.input.storage_key_file, 4096), ("Existing server certificate DER file", &mut self.input.server_certificate_der, 4096),
                 ("Existing server private key PKCS8 DER file (path only)", &mut self.input.server_private_key_pkcs8_der, 4096), ("Existing trusted client root DER file", &mut self.input.trusted_client_root_der, 4096),
-            ] { ui.label(label); ui.add(egui::TextEdit::singleline(value).char_limit(limit)); }
+            ].into_iter().enumerate() {
+                ui.label(label); let _response = ui.add(egui::TextEdit::singleline(value).char_limit(limit));
+                #[cfg(wholepact_delivery_ci)]
+                observe_widget(&mut self.observed_widgets, [WidgetId::Endpoint, WidgetId::ServerName, WidgetId::WitnessId, WidgetId::ServerCertificateDigest, WidgetId::NetworkProfile, WidgetId::AccountId, WidgetId::StorageKeyPath, WidgetId::ServerCertificatePath, WidgetId::ServerPrivateKeyPath, WidgetId::ClientRootPath][_index], &_response, ui.clip_rect());
+            }
             ui.label("Independently selected PUBLIC owner certificate DER, hex");
-            ui.add(egui::TextEdit::multiline(&mut self.input.owner_certificate_der_hex).desired_rows(3).char_limit(32768));
+            let _response = ui.add(egui::TextEdit::multiline(&mut self.input.owner_certificate_der_hex).desired_rows(3).char_limit(32768));
+            #[cfg(wholepact_delivery_ci)] observe_widget(&mut self.observed_widgets, WidgetId::OwnerCertificate, &_response, ui.clip_rect());
             ui.label("Exact original durable-delivery request JSON, no private signer material");
-            ui.add(egui::TextEdit::multiline(&mut self.input.request_json).desired_rows(6).char_limit(65536));
+            let _response = ui.add(egui::TextEdit::multiline(&mut self.input.request_json).desired_rows(6).char_limit(65536));
+            #[cfg(wholepact_delivery_ci)] observe_widget(&mut self.observed_widgets, WidgetId::Request, &_response, ui.clip_rect());
             ui.label("Complete packets and complete display must fit 64 KiB. Oversize data is rejected, never truncated.");
         });
-        if ui.button("Prepare this exact Witness review once").clicked_by(egui::PointerButton::Primary) { self.prepare_intent = true; }
+        let response = ui.button("Prepare this exact Witness review once");
+        #[cfg(wholepact_delivery_ci)] observe_widget(&mut self.observed_widgets, WidgetId::Prepare, &response, ui.clip_rect());
+        if response.clicked_by(egui::PointerButton::Primary) { self.prepare_intent = true; }
     }
     fn prepare_once(&mut self) {
         self.phase = Phase::Preparing;
@@ -265,9 +321,39 @@ impl Window {
         }
     }
 }
+#[cfg(wholepact_delivery_ci)]
+impl Window {
+    fn observe_snapshot(&mut self, ui: &egui::Ui, painted: Phase, presentation_digest: Option<String>, focused: bool, painted_to_end: bool) {
+        let phase = match painted { Phase::Selecting => UiPhase::Selecting, Phase::Preparing => UiPhase::Preparing,
+            Phase::Reading => UiPhase::Reading, Phase::Acknowledging => UiPhase::Acknowledging, Phase::Armed => UiPhase::Armed,
+            Phase::InFlight => UiPhase::InFlight, Phase::Revoked => UiPhase::Revoked, Phase::Finished => UiPhase::Finished };
+        let mut snapshot = Snapshot { frame: ui.ctx().cumulative_frame_nr(), pass: ui.ctx().cumulative_pass_nr(), pixels_per_point: ui.ctx().pixels_per_point(),
+            phase, viewport: observed_rect(ui.ctx().content_rect()), presentation_digest, focused, raw_blur: self.observed_raw_blur,
+            revoked: self.native.is_revoked(), read_to_end: self.read_to_end || painted_to_end,
+            continued: matches!(painted, Phase::Acknowledging | Phase::Armed | Phase::InFlight), acknowledged: self.acknowledged,
+            widgets: self.observed_widgets.clone() };
+        // Compare actual geometry/state, not ever-changing frame counters.
+        if let Some(old) = &self.observed_last {
+            let (frame, pass) = (snapshot.frame, snapshot.pass); snapshot.frame = old.frame; snapshot.pass = old.pass;
+            let same = &snapshot == old; snapshot.frame = frame; snapshot.pass = pass;
+            if same { return; }
+        }
+        self.observed_last = Some(snapshot.clone());
+        observe(Observation::WidgetSnapshot(snapshot));
+    }
+}
+#[cfg(wholepact_delivery_ci)]
+fn observed_rect(rect: egui::Rect) -> Rect { Rect { left: rect.left(), top: rect.top(), right: rect.right(), bottom: rect.bottom() } }
+#[cfg(wholepact_delivery_ci)]
+fn observe_widget(widgets: &mut Vec<WidgetRect>, widget: WidgetId, response: &egui::Response, clip: egui::Rect) {
+    let rect = response.rect.intersect(clip);
+    if rect.is_positive() { widgets.push(WidgetRect { widget, rect: observed_rect(rect), enabled: response.enabled() }); }
+}
+
 impl eframe::App for Window {
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
         let Some(facts) = raw_facts(raw) else { self.revoke("The original native viewport is unavailable."); return; };
+        #[cfg(wholepact_delivery_ci)] { self.observed_raw_blur = facts.blur; }
         self.interrupt(facts.focused, facts.blur, facts.close, facts.escape, ctx);
         self.check_local_liveness();
         self.poll_driver(facts.focused, ctx.cumulative_frame_nr());

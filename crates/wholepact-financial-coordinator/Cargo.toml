@@ -28,4 +28,4 @@ winit = { version = "=0.30.13", optional = true, default-features = false, featu
 zeroize = { version = "=1.9.1", optional = true }
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(wholepact_bootstrap_ci)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(wholepact_bootstrap_ci)', 'cfg(wholepact_delivery_ci)'] }

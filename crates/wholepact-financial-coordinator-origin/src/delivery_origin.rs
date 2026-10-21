@@ -205,6 +205,8 @@ pub enum CoordinatorDeliveryEventV1 {
 }
 
 pub(super) fn split_coordinator(tree: InertTreeV1, session_deadline: Instant) -> Result<(CoordinatorDeliveryNativeV1, CoordinatorDeliveryEndpointV1)> {
+    #[cfg(wholepact_delivery_ci)]
+    crate::delivery_observer::initialize(crate::process::Role::Coordinator, unsafe { libc::getppid() }, session_deadline, tree.observed_bindings());
     let peer = tree.witness()?.delivery_observer()?;
     let roots = Vec::from(tree.observation_pidfds()?);
     let core = Arc::new(Core { phase: Phase::new(), peer, roots, session_deadline,
@@ -234,6 +236,8 @@ impl CoordinatorDeliveryNativeV1 {
         self.core.phase.step(REVIEW, ARMED)?;
         ticket.consumed = true;
         self.armed = Some(Arc::clone(&ticket.binding));
+        #[cfg(wholepact_delivery_ci)]
+        crate::delivery_observer::record(crate::delivery_observer::Event::Arm { direction: crate::delivery_observer::Direction::Native, presentation_digest: ticket.binding.data.presentation_digest.clone() });
         Ok(DeliveryArmOutboundV1 { binding: Arc::clone(&ticket.binding), consumed: false })
     }
     /// A occurs HERE, at visible native-loop tail after its complete immutable
@@ -247,6 +251,9 @@ impl CoordinatorDeliveryNativeV1 {
         self.core.phase.step(READY, ADMITTED)?;
         self.core.admitted.store(true, Ordering::Release);
         ticket.consumed = true;
+        #[cfg(wholepact_delivery_ci)]
+        crate::delivery_observer::record(crate::delivery_observer::Event::Admit { direction: crate::delivery_observer::Direction::Native,
+            presentation_digest: ticket.binding.review.data.presentation_digest.clone(), effect_commitment: ticket.binding.data.effect_commitment.clone() });
         Ok(grant)
     }
 }
@@ -257,6 +264,8 @@ impl CoordinatorDeliveryEndpointV1 {
         self.core.check_alive()?;
         let result = self.tree()?.witness()?.delivery_send(packet);
         if result.is_err() { self.core.phase.revoke(); }
+        #[cfg(wholepact_delivery_ci)]
+        if result.is_ok() { observe_packet(crate::delivery_observer::Direction::Sent, packet, self.review.as_deref(), self.ready.as_deref(), self.prepare_deadline); }
         result
     }
     pub fn session_deadline(&self) -> Instant { self.core.session_deadline }
@@ -322,6 +331,10 @@ impl CoordinatorDeliveryEndpointV1 {
                 let binding = Arc::new(ReviewBinding { core: Arc::clone(&self.core), session, nonce: review_nonce, data, deadline, last_wall: AtomicU64::new(now) });
                 binding.check()?;
                 self.review = Some(Arc::clone(&binding));
+                #[cfg(wholepact_delivery_ci)]
+                crate::delivery_observer::record(crate::delivery_observer::Event::Review { direction: crate::delivery_observer::Direction::Received,
+                    presentation_digest: binding.data.presentation_digest.clone(), prepared_at_ms: binding.data.prepared_at_ms, expires_at_ms: binding.data.expires_at_ms,
+                    monotonic_deadline_ms: crate::delivery_observer::deadline_ms(binding.deadline) });
                 if self.core.phase.step(PREPARING, REVIEW).is_err() { return Ok(None); }
                 Ok(Some(CoordinatorDeliveryEventV1::Prepared(DeliveryReviewTicketV1 { binding, consumed: false })))
             }
@@ -333,6 +346,9 @@ impl CoordinatorDeliveryEndpointV1 {
                 let binding = Arc::new(ReadyBinding { review: Arc::clone(review), nonce: ready_nonce, deadline: review.deadline.min(Instant::now() + Duration::from_millis(remaining)), data });
                 binding.check()?;
                 self.ready = Some(Arc::clone(&binding));
+                #[cfg(wholepact_delivery_ci)]
+                crate::delivery_observer::record(crate::delivery_observer::Event::Ready { direction: crate::delivery_observer::Direction::Received,
+                    data: binding.data.clone(), monotonic_deadline_ms: crate::delivery_observer::deadline_ms(binding.deadline) });
                 if self.core.phase.step(ARMED, READY).is_err() { return Ok(None); }
                 Ok(Some(CoordinatorDeliveryEventV1::Ready(DeliveryReadyTicketV1 { binding, consumed: false })))
             }
@@ -340,17 +356,25 @@ impl CoordinatorDeliveryEndpointV1 {
                 let review = self.review.as_ref().ok_or_else(|| rejected("outcome before original review"))?;
                 if review_nonce != review.nonce { return Err(rejected("outcome review challenge mismatch")); }
                 validate_outcome(&review.data, self.ready.as_ref().map(|ready| &ready.data), &data, self.was_admitted())?;
+                #[cfg(wholepact_delivery_ci)]
+                crate::delivery_observer::record(crate::delivery_observer::Event::Outcome { direction: crate::delivery_observer::Direction::Received, data: data.clone() });
                 self.outcome_seen = true;
                 self.revoke();
                 Ok(Some(CoordinatorDeliveryEventV1::Outcome(data)))
             }
             Packet::FirstFailure { session, data } if session == self.session && !self.first_failure_seen && !self.disposed && !self.outcome_seen && !self.failed && self.prepare_deadline.is_some() => {
+                #[cfg(wholepact_delivery_ci)]
+                crate::delivery_observer::record(crate::delivery_observer::Event::FirstFailure { direction: crate::delivery_observer::Direction::Received, data });
                 self.first_failure_seen = true; Ok(Some(CoordinatorDeliveryEventV1::FirstFailure(data)))
             }
             Packet::PreparationFailed { session } if session == self.session && !self.failed && self.review.is_none() && self.prepare_deadline.is_some() => {
+                #[cfg(wholepact_delivery_ci)]
+                crate::delivery_observer::record(crate::delivery_observer::Event::PreparationFailed { direction: crate::delivery_observer::Direction::Received });
                 self.failed = true; self.revoke(); Ok(Some(CoordinatorDeliveryEventV1::PreparationFailed))
             }
             Packet::Disposed { session } if session == self.session && !self.disposed && (self.cancel_sent || self.outcome_seen || self.failed) => {
+                #[cfg(wholepact_delivery_ci)]
+                crate::delivery_observer::record(crate::delivery_observer::Event::Disposed { direction: crate::delivery_observer::Direction::Received });
                 self.disposed = true; self.revoke(); Ok(Some(CoordinatorDeliveryEventV1::Disposed))
             }
             _ => Err(rejected("duplicate or out-of-phase delivery response")),
@@ -404,6 +428,8 @@ impl WitnessDeliveryOriginV1 {
         self.core.check_alive()?;
         let result = self.leaf()?.origin.delivery_send(packet);
         if result.is_err() { self.core.phase.revoke(); }
+        #[cfg(wholepact_delivery_ci)]
+        if result.is_ok() { observe_packet(crate::delivery_observer::Direction::Sent, packet, self.review.as_deref(), self.ready.as_deref(), None); }
         result
     }
     pub fn session_deadline(&self) -> Instant { self.core.session_deadline }
@@ -419,13 +445,18 @@ impl WitnessDeliveryOriginV1 {
         match packet {
             Packet::PrepareOnce { session, input } if self.session.is_none() && hash(&session) => {
                 self.core.phase.step(NEW, PREPARING)?;
-                self.session = Some(session); Ok(Some(WitnessDeliveryRequestV1::PrepareOnce(input)))
+                self.session = Some(session);
+                #[cfg(wholepact_delivery_ci)]
+                crate::delivery_observer::record(crate::delivery_observer::Event::Prepare { direction: crate::delivery_observer::Direction::Received, original_ceiling_ms: None });
+                Ok(Some(WitnessDeliveryRequestV1::PrepareOnce(input)))
             }
             Packet::Arm { session, review_nonce, presentation_digest } if Some(&session) == self.session.as_ref() => {
                 let review = self.review.as_ref().ok_or_else(|| rejected("Arm before W display"))?;
                 if review_nonce != review.nonce || presentation_digest != review.data.presentation_digest { return Err(rejected("W Arm binding mismatch")); }
                 review.check()?;
                 self.core.phase.step(REVIEW, ARMED)?;
+                #[cfg(wholepact_delivery_ci)]
+                crate::delivery_observer::record(crate::delivery_observer::Event::Arm { direction: crate::delivery_observer::Direction::Received, presentation_digest: review.data.presentation_digest.clone() });
                 Ok(Some(WitnessDeliveryRequestV1::Arm(WitnessDeliveryArmV1 { review: Arc::clone(review) })))
             }
             Packet::FinalAdmit { session, review_nonce, ready_nonce, effect_commitment } if Some(&session) == self.session.as_ref() => {
@@ -434,10 +465,15 @@ impl WitnessDeliveryOriginV1 {
                 ready.check()?;
                 self.core.phase.step(READY, ADMITTED)?;
                 self.core.admitted.store(true, Ordering::Release);
+                #[cfg(wholepact_delivery_ci)]
+                crate::delivery_observer::record(crate::delivery_observer::Event::Admit { direction: crate::delivery_observer::Direction::Received,
+                    presentation_digest: ready.review.data.presentation_digest.clone(), effect_commitment: ready.data.effect_commitment.clone() });
                 Ok(Some(WitnessDeliveryRequestV1::FinalAdmit(WitnessDeliveryFinalAdmitV1 { ready: Arc::clone(ready) })))
             }
             Packet::Cancel { session } if !self.cancel_seen && hash(&session) && self.session.as_ref().is_none_or(|old| old == &session) => {
                 self.session = Some(session); self.cancel_seen = true; self.core.phase.revoke();
+                #[cfg(wholepact_delivery_ci)]
+                crate::delivery_observer::record(crate::delivery_observer::Event::Cancel { direction: crate::delivery_observer::Direction::Received });
                 Ok(Some(WitnessDeliveryRequestV1::Cancel))
             }
             _ => Err(rejected("duplicate or out-of-phase W delivery input")),
@@ -495,6 +531,24 @@ impl WitnessDeliveryOriginV1 {
     }
 }
 impl Drop for WitnessDeliveryOriginV1 { fn drop(&mut self) { self.core.close(); } }
+
+#[cfg(wholepact_delivery_ci)]
+fn observe_packet(direction: crate::delivery_observer::Direction, packet: &Packet, review: Option<&ReviewBinding>, ready: Option<&ReadyBinding>, prepare: Option<Instant>) {
+    use crate::delivery_observer::{record, deadline_ms, Event};
+    let event = match packet {
+        Packet::PrepareOnce { .. } => Event::Prepare { direction, original_ceiling_ms: prepare.map(deadline_ms) },
+        Packet::PreparedDisplay { data, .. } => Event::Review { direction, presentation_digest: data.presentation_digest.clone(), prepared_at_ms: data.prepared_at_ms, expires_at_ms: data.expires_at_ms, monotonic_deadline_ms: review.map_or(0, |r| deadline_ms(r.deadline)) },
+        Packet::Ready { data, .. } => Event::Ready { direction, data: data.clone(), monotonic_deadline_ms: ready.map_or(0, |r| deadline_ms(r.deadline)) },
+        Packet::Arm { presentation_digest, .. } => Event::Arm { direction, presentation_digest: presentation_digest.clone() },
+        Packet::FinalAdmit { effect_commitment, .. } => Event::Admit { direction, presentation_digest: review.map_or_else(String::new, |r| r.data.presentation_digest.clone()), effect_commitment: effect_commitment.clone() },
+        Packet::Cancel { .. } => Event::Cancel { direction },
+        Packet::Outcome { data, .. } => Event::Outcome { direction, data: data.clone() },
+        Packet::FirstFailure { data, .. } => Event::FirstFailure { direction, data: *data },
+        Packet::PreparationFailed { .. } => Event::PreparationFailed { direction },
+        Packet::Disposed { .. } => Event::Disposed { direction },
+    };
+    record(event);
+}
 
 #[cfg(test)]
 mod tests {

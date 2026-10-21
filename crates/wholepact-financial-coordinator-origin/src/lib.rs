@@ -11,6 +11,14 @@ compile_error!("Bootstrap-only CI instrumentation cannot select the source-openi
 #[cfg(all(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append"))]
 compile_error!("Cancel-only and one-exact-append are separate common-image profiles");
 
+#[cfg(all(wholepact_delivery_ci, not(feature = "coordinated-witness-delivery-append")))]
+compile_error!("Delivery evidence requires the exact positive profile");
+#[cfg(all(wholepact_delivery_ci, wholepact_bootstrap_ci))]
+compile_error!("Delivery and bootstrap evidence are separate images");
+#[cfg(wholepact_delivery_ci)]
+mod delivery_observer;
+#[cfg(wholepact_delivery_ci)]
+pub use delivery_observer::{record_delivery_observation_for_ci, finish_delivery_observation_for_ci, DeliveryObservationV1, DeliveryUiPhaseV1, DeliveryWidgetIdV1, DeliveryRectV1, DeliveryWidgetRectV1, DeliveryWidgetSnapshotV1};
 mod bootstrap;
 mod channel;
 mod image;

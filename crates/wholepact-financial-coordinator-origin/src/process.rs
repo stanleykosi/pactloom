@@ -75,6 +75,9 @@ pub(super) struct ForkOriginV1 {
     channel: Channel,
 }
 impl ForkOriginV1 {
+    #[cfg(wholepact_delivery_ci)]
+    pub(super) fn observed_original_parent(&self) -> i32 { self.parent.pid }
+
     #[cfg(feature = "coordinated-witness-delivery-append")]
     pub(super) fn delivery_observer(&self) -> Result<crate::delivery_origin::ObservedPeer> {
         if self.local_role != Role::Owner1V3DeliveryAdmission { return Err(rejected("wrong positive witness")); }
@@ -142,6 +145,11 @@ pub(super) struct DirectChild {
     reaped: bool,
 }
 impl DirectChild {
+    #[cfg(wholepact_delivery_ci)]
+    pub(super) fn observed_binding(&self) -> crate::delivery_observer::ChildBinding {
+        crate::delivery_observer::ChildBinding { role: format!("{:?}", self.peer.role), pid: self.peer.pid }
+    }
+
     #[cfg(feature = "coordinated-witness-delivery-append")]
     pub(super) fn duplicate_lifetime_for_delivery(&self) -> Result<OwnedFd> {
         self.require_owner()?;
@@ -200,6 +208,12 @@ impl DirectChild {
                 self.reaped = true;
                 #[cfg(wholepact_bootstrap_ci)]
                 crate::ci::reaped(self.peer.role, self.peer.pid, status);
+                #[cfg(wholepact_delivery_ci)]
+                crate::delivery_observer::record(crate::delivery_observer::Event::OwnedReap {
+                    child_role: format!("{:?}", self.peer.role), child_pid: self.peer.pid,
+                    exit_code: libc::WIFEXITED(status).then(|| libc::WEXITSTATUS(status)),
+                    signal: libc::WIFSIGNALED(status).then(|| libc::WTERMSIG(status)), forced: false,
+                });
                 break status;
             }
             if rc < 0 {
@@ -237,6 +251,12 @@ impl DirectChild {
                 self.reaped = true;
                 #[cfg(wholepact_bootstrap_ci)]
                 crate::ci::reaped(self.peer.role, self.peer.pid, status);
+                #[cfg(wholepact_delivery_ci)]
+                crate::delivery_observer::record(crate::delivery_observer::Event::OwnedReap {
+                    child_role: format!("{:?}", self.peer.role), child_pid: self.peer.pid,
+                    exit_code: libc::WIFEXITED(status).then(|| libc::WEXITSTATUS(status)),
+                    signal: libc::WIFSIGNALED(status).then(|| libc::WTERMSIG(status)), forced: true,
+                });
                 return Ok(status);
             }
             let error = std::io::Error::last_os_error();

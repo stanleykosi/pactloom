@@ -45,5 +45,7 @@ fn main() {
     let code = 78;
     #[cfg(all(target_os = "linux", wholepact_bootstrap_ci))]
     wholepact_financial_coordinator_origin::record_process_exit_for_ci(code);
+    #[cfg(all(target_os = "linux", wholepact_delivery_ci))]
+    wholepact_financial_coordinator_origin::finish_delivery_observation_for_ci(code);
     std::process::exit(code);
 }

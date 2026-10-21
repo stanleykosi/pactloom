@@ -158,6 +158,11 @@ pub(super) struct InertTreeV1 {
     _image: PinnedCommonImageV1,
 }
 impl InertTreeV1 {
+    #[cfg(wholepact_delivery_ci)]
+    pub(super) fn observed_bindings(&self) -> Vec<crate::delivery_observer::ChildBinding> {
+        self.children.iter().flatten().map(DirectChild::observed_binding).collect()
+    }
+
     #[cfg(feature = "coordinated-witness-delivery-append")]
     pub(super) fn observation_pidfds(&self) -> Result<[OwnedFd; ROOT_CHILDREN]> {
         let mut descriptors = Vec::with_capacity(ROOT_CHILDREN);
@@ -314,6 +319,9 @@ fn prepare_host(origin: ForkOriginV1, clocks: PhaseDeadlinesV1) -> Result<Bootst
     for signer in signers.iter().flatten() { signer.send(Message::Release, deadline)?; }
     for signer in signers.iter().flatten() { signer.receive(Message::Released, deadline)?; }
     origin.send(Message::Released, deadline)?;
+    #[cfg(wholepact_delivery_ci)]
+    crate::delivery_observer::initialize(Role::Host, origin.observed_original_parent(), clocks.session,
+        signers.iter().flatten().map(DirectChild::observed_binding).collect());
     Ok(BootstrappedRoleV1::Host(HostOriginV1 { origin, signers, clocks }))
 }
 
@@ -352,6 +360,8 @@ fn prepare_leaf(origin: ForkOriginV1, clocks: PhaseDeadlinesV1) -> Result<Bootst
     origin.send(Message::Prepared, deadline)?;
     origin.receive(Message::Release, deadline)?;
     origin.send(Message::Released, deadline)?;
+    #[cfg(wholepact_delivery_ci)]
+    crate::delivery_observer::initialize(origin.role(), origin.observed_original_parent(), clocks.session, Vec::new());
     let leaf = LeafCustody { origin, clocks };
     if matches!(leaf.origin.role(), Role::Signer1 | Role::Signer2) {
         return Ok(BootstrappedRoleV1::Signer(SignerOriginV1 { leaf }));
@@ -399,6 +409,8 @@ pub(super) fn child_exit(result: Result<()>) -> ! {
     let code = if result.is_ok() { 0 } else { 1 };
     #[cfg(wholepact_bootstrap_ci)]
     crate::ci::finished(code);
+    #[cfg(wholepact_delivery_ci)]
+    crate::delivery_observer::finish_delivery_observation_for_ci(code);
     unsafe { libc::_exit(code) }
 }
 

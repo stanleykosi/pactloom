@@ -19,4 +19,4 @@ hex.workspace = true
 zeroize = { version = "=1.9.1", optional = true }
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(wholepact_bootstrap_ci)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(wholepact_bootstrap_ci)', 'cfg(wholepact_delivery_ci)'] }
