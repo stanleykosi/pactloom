@@ -146,7 +146,10 @@ impl Channel {
                     if polls[1].revents != 0 {
                         crate::ci::reject_boundary("peer_lifetime", "dead_or_poll_error", Some(peer), None, Some(false), false, None);
                     } else {
-                        crate::ci::reject_boundary("channel", "lost", Some(peer), None, None, false, None);
+                        crate::ci::reject_poll_loss(peer,
+                            polls[0].revents & libc::POLLHUP != 0,
+                            polls[0].revents & libc::POLLERR != 0,
+                            polls[0].revents & libc::POLLNVAL != 0);
                     }
                 }
                 return Err(rejected("original bootstrap channel lost"));

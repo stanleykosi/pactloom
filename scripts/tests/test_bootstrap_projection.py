@@ -190,6 +190,7 @@ def packet_failure():
     root.update(event='reject', detail=dict(boundary='packet', reason='shape', peer_role=target['role'],
                 peer_pid=target['pid'], sender_pid=target['pid'], peer_alive=None,
                 control_truncated=False, fd_inventory_restored=None))
+    root['detail'].update(socket_hup=None, socket_error=None, socket_invalid=None)
     rows.append(root)
     fault = copy.deepcopy(target); fault.update(event='fault', detail=dict(name='wrong_role', phase='send_prepared'))
     rows.append(fault)
@@ -199,6 +200,174 @@ def packet_failure():
     end = copy.deepcopy(rows[0]); end.update(event='finished', detail=dict(exit_code=1)); rows.append(end)
     for row in rows: row['case'] = 'wrong_role'
     return renumber(rows), [(4, 9), (5, 9)]
+
+
+def lifecycle_failure(case, channel_loss=False):
+    """Fabricated local causal prefixes, not captured runtime evidence."""
+    original = fixture()
+    target = 'Owner1BootstrapHistory'
+    fault_role, phase = {
+        'child_exit_after_released': (target, 'after_released'),
+        'host_death': ('Host', 'after_signers_prepared'),
+        'coordinator_death': ('Coordinator', 'after_all_prepared'),
+        'timeout_before_prepared': ('CompletedPair', 'before_prepared'),
+        'stall_after_stopped': (target, 'after_stopped'),
+    }[case]
+    rows = []
+    for role in P.ROLES:
+        own = [copy.deepcopy(row) for row in original if row['role'] == role]
+        if case == 'stall_after_stopped':
+            if role == 'Coordinator': own = [row for row in own if row['event'] not in ('reaped', 'finished')]
+            elif role == target: own = own[:3]  # READY, Release, Stop.
+        else:
+            last = ('ready',)
+            if role == 'Coordinator':
+                last = {'child_exit_after_released': ('received', 'Released', 'Host'),
+                        'host_death': ('ready',), 'coordinator_death': ('release_decision',),
+                        'timeout_before_prepared': ('received', 'Prepared', 'Owner2FinancialSigning')}[case]
+            elif case == 'child_exit_after_released':
+                last = ('received', 'Released', 'Signer2') if role == 'Host' else ('received', 'Release', 'Host' if role.startswith('Signer') else 'Coordinator')
+            own = own[:1 + next(i for i, row in enumerate(own) if P.event_key(row) == last)]
+        rows.extend(own)
+    fault = copy.deepcopy(next(row for row in rows if row['role'] == fault_role))
+    fault.update(event='fault', detail=dict(name=case, phase=phase))
+    rows.append(fault)
+    emitter = 'Host' if case == 'coordinator_death' else 'Coordinator'
+    reject = copy.deepcopy(next(row for row in rows if row['role'] == emitter))
+    peer = next(row for row in rows if row['role'] == fault_role)
+    timeout = case in ('timeout_before_prepared', 'stall_after_stopped')
+    reject.update(event='reject', detail=dict(
+        boundary='deadline' if timeout else 'channel' if channel_loss else 'peer_lifetime',
+        reason='original_deadline_expired' if timeout else 'lost' if channel_loss else 'dead_or_poll_error',
+        peer_role=None if timeout else fault_role, peer_pid=None if timeout else peer['pid'], sender_pid=None,
+        peer_alive=None if timeout or channel_loss else False, control_truncated=False, fd_inventory_restored=None,
+        socket_hup=True if channel_loss else None, socket_error=False if channel_loss else None,
+        socket_invalid=False if channel_loss else None))
+    if timeout: reject['elapsed_ms'] = 30000
+    rows.append(reject)
+    if case != 'coordinator_death':
+        for row in original:
+            if row['role'] == 'Coordinator' and row['event'] == 'reaped':
+                reap = copy.deepcopy(row)
+                if case != 'stall_after_stopped' or reap['detail']['child_role'] == target:
+                    reap['detail'].update(kind='signal', code=9)
+                if timeout: reap['elapsed_ms'] = 30000
+                rows.append(reap)
+        finish = copy.deepcopy(original[0]); finish.update(event='finished', detail=dict(exit_code=1))
+        if timeout: finish['elapsed_ms'] = 30000
+        rows.append(finish)
+    for row in rows: row['case'] = case
+    adopted = [(4, 9), (5, 9)]
+    if case == 'coordinator_death': adopted = [(pid, 256) for pid in range(3, 19)]
+    if case == 'stall_after_stopped': adopted = []
+    return renumber(rows), adopted, -9 if case == 'coordinator_death' else 1
+
+
+class LifecycleProjection(unittest.TestCase):
+    def check(self, case, rows, adopted, status):
+        return P.validate_case(case, rows, status, adopted, 2)
+
+    def test_exact_death_boundaries_both_kernel_observations(self):
+        for case in ('child_exit_after_released', 'host_death', 'coordinator_death'):
+            for channel in (False, True):
+                with self.subTest(case=case, channel=channel):
+                    rows, adopted, status = lifecycle_failure(case, channel)
+                    self.assertEqual(self.check(case, rows, adopted, status)['outcome'], 'passed')
+
+    def test_channel_alternate_requires_observed_hup_or_error_not_invalid(self):
+        for case in ('child_exit_after_released', 'host_death', 'coordinator_death'):
+            for flags in ((None, None, None), (False, False, False), (True, False, True), (False, True, True)):
+                rows, adopted, status = lifecycle_failure(case, True)
+                reject = next(row for row in rows if row['event'] == 'reject')
+                reject['detail'].update(zip(('socket_hup', 'socket_error', 'socket_invalid'), flags))
+                with self.assertRaises(P.Rejected): self.check(case, rows, adopted, status)
+            rows, adopted, status = lifecycle_failure(case, True)
+            next(row for row in rows if row['event'] == 'reject')['detail'].update(socket_hup=False, socket_error=True)
+            self.assertEqual(self.check(case, rows, adopted, status)['outcome'], 'passed')
+
+    def test_generic_channel_error_and_wrong_rejecting_role_cannot_qualify(self):
+        for case in ('child_exit_after_released', 'host_death', 'coordinator_death'):
+            for mutation in ('generic', 'wrong_role', 'wrong_peer'):
+                rows, adopted, status = lifecycle_failure(case, True)
+                reject = next(row for row in rows if row['event'] == 'reject')
+                if mutation == 'generic': reject['detail'].update(reason='receive_failed', socket_hup=None, socket_error=None, socket_invalid=None)
+                elif mutation == 'wrong_role': reject.update(role='Signer1', pid=4, ppid=3)
+                else: reject['detail'].update(peer_role='Owner2FinancialSigning', peer_pid=17)
+                with self.assertRaises(P.Rejected): self.check(case, renumber(rows), adopted, status)
+
+    def test_dead_target_requires_exact_coordinator_sigkill_reap(self):
+        for case in ('child_exit_after_released', 'host_death'):
+            for kind, code in (('exit', 0), ('signal', 15)):
+                rows, adopted, status = lifecycle_failure(case, True)
+                target = next(row for row in rows if row['event'] == 'fault')['role']
+                next(row for row in rows if row['event'] == 'reaped' and row['detail']['child_role'] == target)['detail'].update(kind=kind, code=code)
+                with self.assertRaises(P.Rejected): self.check(case, rows, adopted, status)
+
+    def test_child_death_requires_prior_prepared_and_no_stop_acceptance(self):
+        case = 'child_exit_after_released'
+        for mutation in ('missing_prepared', 'received_stop'):
+            rows, adopted, status = lifecycle_failure(case, True)
+            if mutation == 'missing_prepared':
+                rows = [row for row in rows if not (row['role'] == 'Coordinator' and row['event'] == 'received'
+                        and row['detail']['kind'] == 'Prepared' and row['detail']['peer_role'] == 'Owner1BootstrapHistory')]
+            else:
+                stop = copy.deepcopy(next(row for row in fixture() if row['role'] == 'Owner1BootstrapHistory'
+                                          and row['event'] == 'received' and row['detail']['kind'] == 'Stop'))
+                stop['case'] = case; rows.append(stop)
+            with self.assertRaises(P.Rejected): self.check(case, renumber(rows), adopted, status)
+
+    def test_timeout_original_deadline_and_exact_packet_prerequisites(self):
+        for case in ('timeout_before_prepared', 'stall_after_stopped'):
+            rows, adopted, status = lifecycle_failure(case)
+            self.assertEqual(self.check(case, rows, adopted, status)['outcome'], 'passed')
+            next(row for row in rows if row['event'] == 'reject')['elapsed_ms'] = 29900
+            with self.assertRaises(P.Rejected): self.check(case, rows, adopted, status)
+            rows, adopted, status = lifecycle_failure(case)
+            if case == 'stall_after_stopped':
+                rows = [row for row in rows if not (row['role'] == 'Coordinator' and row['event'] == 'received'
+                        and row['detail']['kind'] == 'Stopped' and row['detail']['peer_role'] == 'Owner1BootstrapHistory')]
+            else:
+                prepared = copy.deepcopy(next(row for row in fixture() if row['role'] == 'Coordinator'
+                        and row['event'] == 'received' and row['detail']['kind'] == 'Prepared' and row['detail']['peer_role'] == 'CompletedPair'))
+                prepared['case'] = case
+                rows.insert(next(i for i, row in enumerate(rows) if row['event'] == 'reject'), prepared)
+            with self.assertRaises(P.Rejected): self.check(case, renumber(rows), adopted, status)
+
+    def test_failure_observations_are_finite_and_preserve_original_boundary(self):
+        rows, adopted, status = lifecycle_failure('child_exit_after_released', True)
+        reject = next(row for row in rows if row['event'] == 'reject')
+        reject['detail']['socket_invalid'] = True
+        with self.assertRaises(P.Rejected) as failed: self.check('child_exit_after_released', rows, adopted, status)
+        value = P.result('child_exit_after_released', 'error', 'evidence', failed.exception.code)
+        value.update(P.observed_counts(rows, 'child_exit_after_released', adopted))
+        P.validate_result(value, 'child_exit_after_released')
+        self.assertEqual(value['code'], 'fault_boundary')
+        self.assertTrue(value['rejection_observations'][0]['socket_invalid'])
+        self.assertEqual(value['fault_observation'], dict(role='Owner1BootstrapHistory', phase='after_released'))
+        self.assertEqual(value['fault_reap_observation'], dict(owner_role='Coordinator', child_role='Owner1BootstrapHistory', kind='signal', code=9))
+        self.assertNotIn('pid', json.dumps(value))
+        value['rejection_observations'][0]['raw_error'] = 'PRIVATE_SENTINEL'
+        with self.assertRaises(P.Rejected): P.validate_result(value, 'child_exit_after_released')
+
+    def test_duplicate_rejection_observations_are_explicitly_bounded(self):
+        rows, adopted, _ = lifecycle_failure('child_exit_after_released', True)
+        reject = next(row for row in rows if row['event'] == 'reject')
+        rows = [copy.deepcopy(reject) for _ in range(256)]
+        value = P.result('child_exit_after_released', 'error', 'evidence', 'sequence')
+        value.update(P.observed_counts(rows, 'child_exit_after_released', adopted))
+        self.assertEqual(P.validate_result(value, 'child_exit_after_released')['code'], 'sequence')
+        self.assertEqual((len(value['rejection_observations']), value['rejection_observations_omitted']), (17, 239))
+        self.assertLess(len(json.dumps(value).encode()), 8192)
+        rows, adopted, status = lifecycle_failure('child_exit_after_released', True)
+        value = self.check('child_exit_after_released', rows, adopted, status)
+        value['rejection_observations_omitted'] = 1
+        with self.assertRaises(P.Rejected): P.validate_result(value, 'child_exit_after_released')
+
+    def test_public_result_schema_explicitly_excludes_historical_version(self):
+        value = P.result('production', 'error', 'evidence', 'production_status')
+        self.assertEqual(P.validate_result(value, 'production')['schema_version'], 2)
+        value['schema_version'] = 1
+        with self.assertRaises(P.Rejected): P.validate_result(value, 'production')
 
 
 class Projection(unittest.TestCase):
@@ -371,6 +540,26 @@ class Projection(unittest.TestCase):
 
 
 class Supervisor(unittest.TestCase):
+    def test_actual_finite_reject_is_emitted_before_cleanup_and_retained(self):
+        rows, adopted, _ = lifecycle_failure('child_exit_after_released', True)
+        value = S.P.result('child_exit_after_released', 'error', 'evidence', 'fault_boundary')
+        value.update(S.P.observed_counts(rows, 'child_exit_after_released', adopted))
+        output = io.StringIO()
+        def remove(*_args):
+            self.assertIn('CI_BOOTSTRAP_CASE_FAILURE ', output.getvalue())
+            self.assertIn('"socket_hup":true', output.getvalue())
+            raise S.Failure('cleanup', 'container_remaining')
+        with mock.patch.object(S, 'owned_names', return_value=[]), mock.patch.object(S, 'docker', return_value=b'id'), \
+             mock.patch.object(S, 'inspect_isolation'), mock.patch.object(S, 'command', return_value=(1, json.dumps(value).encode())), \
+             mock.patch.object(S, 'remove_container', side_effect=remove), \
+             mock.patch.dict(S.os.environ, {'BOOTSTRAP_DOCKER_CONFIG': '/unused'}), contextlib.redirect_stdout(output):
+            self.assertFalse(S.run_case('child_exit_after_released', 'tag', 'token'))
+        self.assertNotIn('container_remaining', output.getvalue())
+        lines = [json.loads(line.split(' ', 1)[1]) for line in output.getvalue().splitlines()]
+        self.assertEqual([line['code'] for line in lines], ['fault_boundary', 'fault_boundary'])
+        self.assertEqual(lines[0]['rejection_observations'], lines[1]['rejection_observations'])
+        self.assertFalse(lines[1]['container_removed'])
+
     def test_client_timeout_still_removes_container_and_exposes_first_error(self):
         calls = []
         def remove(name, token):

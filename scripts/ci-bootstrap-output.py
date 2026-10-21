@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
-"""Pure finite bootstrap evidence validation. Private PID/FD facts never escape."""
+"""Pure finite bootstrap evidence validation. Private PID/FD facts never escape.
+
+Public result schema 2 adds finite rejection/fault/reap observations. Historical
+schema 1 results are not reinterpreted. Private record schema 1 remains an exact
+source-pinned CI contract, not a public or backwards-compatible input format.
+"""
 import collections
 import json
 import re
 
 SHA = re.compile(r'[0-9a-f]{40}')
+RESULT_SCHEMA_VERSION = 2
 PID_FILE = re.compile(r'[1-9][0-9]{0,9}\.jsonl')
 CASES = ('production', 'observed_success', 'wrong_role', 'wrong_version', 'oversized_packet',
          'duplicate_prepared', 'rights', 'rights_truncated', 'later_wrong_sender', 'missing_credentials',
@@ -38,6 +44,10 @@ STAGES = {'complete', 'setup', 'runtime', 'evidence', 'projection', 'container',
 RESULT_FIELDS = {'schema_version', 'case', 'outcome', 'stage', 'code', 'records', 'roles_ready',
                  'birth_edges', 'authenticated_receives', 'owned_reaps', 'adopted_reaped', 'natural_empty',
                  'elapsed_ms', 'financial_authority', 'ci_instrumented'}
+OBSERVATION_FIELDS = ('rejection_observations', 'rejection_observations_omitted', 'fault_observation', 'fault_reap_observation')
+RESULT_FIELDS.update(OBSERVATION_FIELDS)
+REJECTION_PUBLIC = {'role', 'boundary', 'reason', 'peer_role', 'peer_alive', 'control_truncated',
+                    'fd_inventory_restored', 'socket_hup', 'socket_error', 'socket_invalid'}
 COMMON = {'schema_version', 'case', 'event', 'role', 'pid', 'ppid', 'sequence', 'elapsed_ms', 'detail'}
 DETAIL = {
     'started': {'uid', 'euid'},
@@ -46,7 +56,7 @@ DETAIL = {
     'ready': {'fds', 'expected_fds', 'fd_inventory_ok', 'parent_pid', 'remaining_ms', 'core_zero', 'dumpable_zero'},
     'received': {'kind', 'peer_role', 'peer_pid', 'sender_pid', 'sender_uid', 'peer_alive', 'remaining_ms'},
     'release_decision': {'prepared'},
-    'reject': {'boundary', 'reason', 'peer_role', 'peer_pid', 'sender_pid', 'peer_alive', 'control_truncated', 'fd_inventory_restored'},
+    'reject': (REJECTION_PUBLIC - {'role'}) | {'peer_pid', 'sender_pid'},
     'fault': {'name', 'phase'},
     'reaped': {'child_role', 'child_pid', 'kind', 'code'},
     'finished': {'exit_code'},
@@ -93,27 +103,44 @@ def loads(raw):
 
 def result(case, outcome, stage, code):
     need(case in CASES and outcome in ('passed', 'failed', 'error') and stage in STAGES and code in CODES)
-    return dict(schema_version=1, case=case, outcome=outcome, stage=stage, code=code,
+    return dict(schema_version=RESULT_SCHEMA_VERSION, case=case, outcome=outcome, stage=stage, code=code,
                 records=0, roles_ready=0, birth_edges=0, authenticated_receives=0, owned_reaps=0,
                 adopted_reaped=0, natural_empty=False, elapsed_ms=0, financial_authority=False,
-                ci_instrumented=case != 'production')
+                ci_instrumented=case != 'production', rejection_observations=[], rejection_observations_omitted=0,
+                fault_observation=None, fault_reap_observation=None)
 
 
 def validate_result(row, case):
     need(type(row) is dict and set(row) == RESULT_FIELDS and type(row['schema_version']) is int
-         and row['schema_version'] == 1 and row['case'] == case and case in CASES)
+         and row['schema_version'] == RESULT_SCHEMA_VERSION and row['case'] == case and case in CASES)
     need(row['outcome'] in ('passed', 'failed', 'error') and row['stage'] in STAGES and row['code'] in CODES)
     for field, maximum in (('records', 256), ('roles_ready', 256), ('birth_edges', 256),
                            ('authenticated_receives', 256), ('owned_reaps', 256), ('adopted_reaped', 32), ('elapsed_ms', 60000)):
         need(number(row[field], 0, maximum))
     need(type(row['natural_empty']) is bool and row['financial_authority'] is False
          and row['ci_instrumented'] is (case != 'production'))
+    observations = row['rejection_observations']
+    observation_roles = ROLES + (('Attacker',) if case == 'later_wrong_sender' else ())
+    need(type(observations) is list and len(observations) <= 17 and number(row['rejection_observations_omitted'], 0, 256))
+    for observation in observations:
+        need(type(observation) is dict and set(observation) == REJECTION_PUBLIC
+             and observation['role'] in observation_roles)
+        validate_rejection(observation)
+    fault, reap = row['fault_observation'], row['fault_reap_observation']
+    need(fault is None or (type(fault) is dict and set(fault) == {'role', 'phase'}
+                          and fault['role'] in observation_roles and fault['phase'] in PHASES))
+    need(reap is None or (type(reap) is dict and set(reap) == {'owner_role', 'child_role', 'kind', 'code'}
+                         and reap['owner_role'] in observation_roles and reap['child_role'] in ROLES
+                         and reap['kind'] in ('exit', 'signal') and number(reap['code'], 0, 127)))
+    if row['outcome'] == 'passed' and case in ('production', 'observed_success'):
+        need(not observations and row['rejection_observations_omitted'] == 0 and fault is None and reap is None)
     if row['outcome'] == 'passed':
         # Error rows contain exact observed counts (including malformed duplicate
         # observations) up to the record bound. Passing rows must satisfy the
         # much smaller fixed-graph limits and cannot exploit those error bounds.
         need(row['roles_ready'] <= 17 and row['birth_edges'] <= 16
              and row['authenticated_receives'] <= 96 and row['owned_reaps'] <= 16)
+        need(row['rejection_observations_omitted'] == 0)
         need(row['stage'] == 'complete' and row['code'] == 'none' and row['natural_empty'] is True)
         if case in ('production', 'observed_success'):
             need(row['adopted_reaped'] == 0)
@@ -124,6 +151,17 @@ def validate_result(row, case):
     else:
         need(row['stage'] != 'complete' and row['code'] != 'none')
     return row
+
+
+def validate_rejection(d):
+    need(d['boundary'] in REASONS and d['reason'] in REASONS[d['boundary']])
+    need(d['peer_role'] is None or d['peer_role'] in ROLES)
+    need(d['peer_alive'] is None or type(d['peer_alive']) is bool)
+    need(type(d['control_truncated']) is bool)
+    need(d['fd_inventory_restored'] is None or type(d['fd_inventory_restored']) is bool)
+    flags = [d[key] for key in ('socket_hup', 'socket_error', 'socket_invalid')]
+    need(all(flag is None for flag in flags) or
+         (d['boundary'] == 'channel' and d['reason'] == 'lost' and all(type(flag) is bool for flag in flags)))
 
 
 def validate_record(row, case):
@@ -159,13 +197,9 @@ def validate_record(row, case):
     elif event == 'release_decision':
         need(row['role'] == 'Coordinator' and type(d['prepared']) is int and d['prepared'] == 14)
     elif event == 'reject':
-        need(d['boundary'] in REASONS and d['reason'] in REASONS[d['boundary']])
-        need(d['peer_role'] is None or d['peer_role'] in ROLES)
+        validate_rejection(d)
         need(d['peer_pid'] is None or pid(d['peer_pid']))
         need(d['sender_pid'] is None or pid(d['sender_pid']))
-        need(d['peer_alive'] is None or type(d['peer_alive']) is bool)
-        need(type(d['control_truncated']) is bool)
-        need(d['fd_inventory_restored'] is None or type(d['fd_inventory_restored']) is bool)
     elif event == 'fault':
         need(case not in ('production', 'observed_success') and d['name'] == case and d['phase'] in PHASES)
     elif event == 'finished':
@@ -183,11 +217,24 @@ def observed_counts(rows, case, adopted):
     need(type(rows) is list and len(rows) <= 256 and type(adopted) is list and len(adopted) <= 32, 'evidence_limit')
     for row in rows:
         validate_record(row, case)
+    rejects = [row for row in rows if row['event'] == 'reject']
+    rejects.sort(key=lambda row: ((ROLES + ('Attacker',)).index(row['role']), row['sequence']))
+    observations = [dict(role=row['role'], **{key: row['detail'][key] for key in REJECTION_PUBLIC - {'role'}})
+                    for row in rejects[:17]]
+    faults = [row for row in rows if row['event'] == 'fault']
+    fault = faults[0] if len(faults) == 1 else None
+    reaps = [row for row in rows if row['event'] == 'reaped' and fault is not None
+             and row['detail']['child_pid'] == fault['pid'] and row['detail']['child_role'] == fault['role']]
+    reap = reaps[0] if len(reaps) == 1 else None
     return dict(records=len(rows), roles_ready=sum(row['event'] == 'ready' for row in rows),
                 birth_edges=sum(row['event'] == 'birth' for row in rows),
                 authenticated_receives=sum(row['event'] == 'received' for row in rows),
                 owned_reaps=sum(row['event'] == 'reaped' for row in rows),
-                adopted_reaped=len(adopted), natural_empty=True)
+                adopted_reaped=len(adopted), natural_empty=True,
+                rejection_observations=observations, rejection_observations_omitted=max(0, len(rejects) - 17),
+                fault_observation=None if fault is None else dict(role=fault['role'], phase=fault['detail']['phase']),
+                fault_reap_observation=None if reap is None else dict(owner_role=reap['role'],
+                    **{key: reap['detail'][key] for key in ('child_role', 'kind', 'code')}))
 
 
 def successful_order(role):
@@ -258,6 +305,9 @@ def validate_case(case, rows, status, adopted, root_pid):
     need(len({row['detail']['child_pid'] for row in by['birth']}) == len(by['birth']), 'graph_identity')
     need(len({(row['pid'], row['detail']['kind'], row['detail']['peer_pid']) for row in by['received']})
          == len(by['received']), 'receive_identity')
+    # The source records only the first rejection in each process. A second
+    # convenient boundary cannot hide an earlier unrelated failure.
+    need(len({row['pid'] for row in by['reject']}) == len(by['reject']), 'sequence')
     for row in by['birth'] + by['reaped']:
         d = row['detail']
         need(parent(d['child_role']) == row['role'] and roles.get(d['child_role']) == d['child_pid'], 'graph_identity')
@@ -335,6 +385,17 @@ def validate_case(case, rows, status, adopted, root_pid):
                     and row['detail']['boundary'] == boundary
                     and (reason is None or row['detail']['reason'] == reason)
                     and all(row['detail'].get(k) == v for k, v in fields.items())]
+        def original_loss(peer_role, rejecting_roles):
+            # Socket closure may precede pidfd readability. Only actual HUP/ERR
+            # is accepted; NVAL, generic I/O failure and a later inferred death
+            # cannot stand in for this maintained boundary.
+            found = match('peer_lifetime', 'dead_or_poll_error', peer_role=peer_role, peer_alive=False)
+            found += [row for row in match('channel', 'lost', peer_role=peer_role, socket_invalid=False)
+                      if row['detail']['socket_hup'] is True or row['detail']['socket_error'] is True]
+            return [row for row in found if row['role'] in rejecting_roles]
+        def coordinator_reaped_sigkill(role):
+            return any(row['role'] == 'Coordinator' and row['detail']['child_role'] == role
+                       and row['detail']['kind'] == 'signal' and row['detail']['code'] == 9 for row in by['reaped'])
         if case in ('wrong_role', 'wrong_version', 'oversized_packet', 'duplicate_prepared'):
             need(match('packet', 'shape', peer_role=target), 'fault_boundary')
         elif case in ('rights', 'rights_truncated'):
@@ -350,21 +411,32 @@ def validate_case(case, rows, status, adopted, root_pid):
         elif case == 'missing_credentials':
             need(match('credentials', 'missing', peer_role=target), 'fault_boundary')
         elif case == 'coordinator_death':
-            need(match('peer_lifetime', peer_role='Coordinator') or match('channel', peer_role='Coordinator'), 'fault_boundary')
+            need(original_loss('Coordinator', ('Host',) + WITNESSES), 'fault_boundary')
         elif case == 'host_death':
-            need(match('peer_lifetime', peer_role='Host'), 'fault_boundary')
+            need(original_loss('Host', ('Coordinator',)) and coordinator_reaped_sigkill('Host'), 'fault_boundary')
         elif case == 'child_exit_after_released':
             target = by['fault'][0]['role']
-            need(target in WITNESSES and match('peer_lifetime', peer_role=target), 'fault_boundary')
+            losses = original_loss(target, ('Coordinator',))
+            need(target in WITNESSES and losses and coordinator_reaped_sigkill(target), 'fault_boundary')
+            prepared = [row for row in by['received'] if row['role'] == 'Coordinator'
+                        and row['detail']['kind'] == 'Prepared' and row['detail']['peer_role'] == target]
+            need(len(prepared) == len(by['release_decision']) == 1
+                 and prepared[0]['sequence'] < by['release_decision'][0]['sequence'] < losses[0]['sequence'], 'fault_boundary')
             need(any(row['role'] == target and row['detail']['kind'] == 'Release' for row in by['received'])
                  and not any(row['role'] == target and row['detail']['kind'] == 'Stop' for row in by['received']), 'fault_boundary')
         elif case in ('timeout_before_prepared', 'stall_after_stopped'):
-            need(any(row['role'] == 'Coordinator' and row['elapsed_ms'] >= deadline - 10
-                     for row in match('deadline', 'original_deadline_expired')), 'fault_boundary')
+            root_deadlines = [row for row in match('deadline', 'original_deadline_expired')
+                              if row['role'] == 'Coordinator' and row['elapsed_ms'] >= deadline - 10]
+            need(len(root_deadlines) == 1, 'fault_boundary')
             if case == 'stall_after_stopped':
                 target = by['fault'][0]['role']
-                need(target in WITNESSES and any(row['detail']['child_role'] == target
-                     and row['detail']['kind'] == 'signal' and row['detail']['code'] == 9 for row in by['reaped']), 'fault_boundary')
+                need(target in WITNESSES and coordinator_reaped_sigkill(target)
+                     and any(row['role'] == 'Coordinator' and row['detail']['kind'] == 'Stopped'
+                             and row['detail']['peer_role'] == target
+                             and row['sequence'] < root_deadlines[0]['sequence'] for row in by['received']), 'fault_boundary')
+            else:
+                need(not any(row['role'] == 'Coordinator' and row['detail']['kind'] == 'Prepared'
+                             and row['detail']['peer_role'] == 'CompletedPair' for row in by['received']), 'fault_boundary')
         # Orphans are accepted only for explicit error/death fixtures and always
         # shown distinctly from the product's original-owner reaps.
         need(all(type(item) is tuple and len(item) == 2 and pid(item[0]) and type(item[1]) is int
@@ -378,7 +450,5 @@ def validate_case(case, rows, status, adopted, root_pid):
         need(not (attackers & (adopted_ids | set(direct))), 'adoption_identity')
         need(set(process_roles) - {root_pid} == set(direct) | adopted_ids | attackers, 'adoption_identity')
     out = result(case, 'passed', 'complete', 'none')
-    out.update(records=len(rows), roles_ready=len(by['ready']), birth_edges=len(by['birth']),
-               authenticated_receives=len(by['received']), owned_reaps=len(by['reaped']),
-               adopted_reaped=len(adopted), natural_empty=True)
+    out.update(observed_counts(rows, case, adopted))
     return validate_result(out, case)
