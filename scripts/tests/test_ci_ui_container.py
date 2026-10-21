@@ -45,6 +45,45 @@ class ImageOwnership(unittest.TestCase):
         self.assertIn('os.statvfs(ROOT).f_flag & os.ST_RDONLY', container)
 
 
+class DisplayFailureObservation(unittest.TestCase):
+    def test_confirmed_exit_preserves_display_failure_and_queued_error(self):
+        from unittest import mock
+        import contextlib, io
+        session = C.NativeSession.__new__(C.NativeSession)
+        session.weston = mock.Mock()
+        session.weston.poll.return_value = 1
+        session.controller = mock.Mock()
+        observation = dict(exit_status=1, packet='error', module_error='input')
+        session.controller.observe_exited_compositor.return_value = observation
+        session.reporter = C.FirstRuntimeFailure('fixture')
+        session.reporter.case = 'cancel'; session.reporter.stage = 'prepare'
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(C.S.Rejected) as found: session.require_display_live()
+            session.reporter.error(found.exception)
+        self.assertEqual(found.exception.code, 'display_status')
+        self.assertEqual(session.reporter.value['code'], 'display_status')
+        self.assertEqual(session.reporter.value['display_observation'], observation)
+        session.controller.observe_exited_compositor.assert_called_once_with(session.weston)
+
+    def test_live_display_never_consumes_controller(self):
+        from unittest import mock
+        session = C.NativeSession.__new__(C.NativeSession)
+        session.weston = mock.Mock(); session.weston.poll.return_value = None
+        session.controller = mock.Mock()
+        session.require_display_live()
+        session.controller.observe_exited_compositor.assert_not_called()
+
+    def test_display_observation_schema_is_closed(self):
+        good = dict(exit_status=-11, packet='eof', module_error=None)
+        C.P.failure('fixture', 'prepare', 'display_status', 'cancel', display_observation=good)
+        for change in ({'exit_status':True}, {'exit_status':-65}, {'packet':'private'},
+                       {'module_error':'private'}, {'extra':'private'}):
+            with self.assertRaises(C.P.Rejected):
+                C.P.failure('fixture', 'prepare', 'display_status', 'cancel', display_observation=good|change)
+        with self.assertRaises(C.P.Rejected):
+            C.P.failure('fixture', 'prepare', 'internal', 'cancel', display_observation=good)
+
+
 class RootSetup(unittest.TestCase):
     def test_exact_unrelated_passwd_preservation(self):
         result = C.passwd_bytes(BASE, '/ci-fixture/ui-original/home')

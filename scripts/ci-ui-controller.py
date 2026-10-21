@@ -427,6 +427,42 @@ class Controller:
         finally:
             self.close()
 
+    def observe_exited_compositor(self, process):
+        """One nonblocking diagnostic read after actual compositor exit; never success.
+
+        No command, retry, timeout renewal, pixels or arbitrary text is returned.
+        This observation cannot replace the caller's original display_status failure.
+        """
+        if not isinstance(process, subprocess.Popen):
+            self._reject('target')
+        status = process.poll()
+        if type(status) is not int or not -64 <= status <= 255:
+            self._reject('target')
+        result = dict(exit_status=status, packet='unavailable', module_error=None)
+        try:
+            self._socket.settimeout(0.0)
+            raw, ancillary, flags, _ = self._socket.recvmsg(
+                HEADER.size, 0, socket.MSG_CMSG_CLOEXEC)
+            if ancillary or flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC):
+                result['packet'] = 'malformed'
+            elif not raw:
+                result['packet'] = 'eof'
+            elif len(raw) != HEADER.size:
+                result['packet'] = 'malformed'
+            else:
+                h = HEADER.unpack(raw)
+                if (h[:2] == (MAGIC, VERSION) and h[2] in (0, self._sequence) and
+                        h[3] == ERROR and 0 < h[4] < len(ERRORS) and
+                        h[5:] == (0,) * 7):
+                    result.update(packet='error', module_error=ERRORS[h[4]])
+                else:
+                    result['packet'] = 'malformed'
+        except OSError:
+            pass
+        finally:
+            self.close()
+        return result
+
     def _budget(self, count):
         if self._sequence + count > MAX_COMMANDS:
             self._reject('limit')

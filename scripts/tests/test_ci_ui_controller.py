@@ -68,7 +68,7 @@ class FakeTransport:
         return len(raw)
 
     def recvmsg(self, count, ancbuf, flags):
-        assert count == C.HEADER.size + C.CHUNK_BYTES
+        assert count in (C.HEADER.size, C.HEADER.size + C.CHUNK_BYTES)
         assert ancbuf == 0
         if not self.incoming:
             raise AssertionError('fabricated response missing')
@@ -98,6 +98,41 @@ class Protocol(unittest.TestCase):
         self.assertEqual(found.exception.code, code)
         self.assertEqual(str(found.exception), code)
         self.assertTrue(self.transport.closed)
+
+    def test_exited_compositor_observation_is_bounded_and_never_sends(self):
+        self.bind()
+        compositor = mock.Mock(spec=subprocess.Popen)
+        compositor.poll.return_value = 1
+        self.transport.incoming = [packet(C.ERROR, status=4)]
+        before = list(self.transport.sent)
+        original = self.controller.original_deadline_ns
+        self.assertEqual(self.controller.observe_exited_compositor(compositor),
+                         dict(exit_status=1, packet='error', module_error='target'))
+        self.assertEqual(self.transport.sent, before)
+        self.assertEqual(self.controller.original_deadline_ns, original)
+        self.assertTrue(self.transport.closed)
+        self.assertEqual(self.transport.timeouts[-1], 0.0)
+
+    def test_live_compositor_cannot_be_diagnostically_consumed(self):
+        compositor = mock.Mock(spec=subprocess.Popen)
+        compositor.poll.return_value = None
+        self.rejected('target', lambda: self.controller.observe_exited_compositor(compositor))
+        self.assertEqual(self.transport.incoming, [packet(C.READY)])
+
+    def test_exited_compositor_rejects_unbounded_or_nonerror_packet(self):
+        compositor = mock.Mock(spec=subprocess.Popen)
+        compositor.poll.return_value = -11
+        self.transport.incoming = [packet(C.ERROR, status=4, payload=b'private')]
+        self.assertEqual(self.controller.observe_exited_compositor(compositor),
+                         dict(exit_status=-11, packet='malformed', module_error=None))
+        self.assertTrue(self.transport.closed)
+
+    def test_exited_compositor_eof_retains_signal_without_invented_cause(self):
+        compositor = mock.Mock(spec=subprocess.Popen)
+        compositor.poll.return_value = -9
+        self.transport.incoming = [b'']
+        self.assertEqual(self.controller.observe_exited_compositor(compositor),
+                         dict(exit_status=-9, packet='eof', module_error=None))
 
     def test_bind_requires_ready_and_real_popen_shape(self):
         self.rejected('target', lambda: self.controller.bind_process(self.process))

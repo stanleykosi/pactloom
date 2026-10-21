@@ -44,7 +44,7 @@ class PrerequisiteTests(unittest.TestCase):
         additions = {'scripts/ci-ui-setup-wrapper.py', 'scripts/ci-ui-output.py',
                      'scripts/ci-ui-container.py', 'scripts/tests/test_ci_ui_setup.py'}
         self.assertTrue(additions <= M.ALLOWED)
-        self.assertEqual(len(M.ALLOWED), 20)
+        self.assertEqual(len(M.ALLOWED), 22)
         M.verify_paths(additions)
         for path in ('scripts/ci-bootstrap-output.py', 'scripts/build-encrypted-storage-deps.sh',
                      'crates/wholepact-native-host/src/lib.rs'):

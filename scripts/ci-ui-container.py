@@ -506,7 +506,7 @@ class NativeSession:
                      'XDG_RUNTIME_DIR': str(WAYLAND), **additions})
         finally: edge.close()
         self.controller.wait_ready()
-        require(self.weston.poll() is None, 'display_status')
+        self.require_display_live()
         environment = {'XDG_RUNTIME_DIR': str(WAYLAND), 'WAYLAND_DISPLAY': 'wayland-ui'}
         D.check_product_environment(environment)
         self.product = subprocess.Popen([str(ROOT / ('coordinator-observed' if source_backed else 'coordinator-production'))],
@@ -515,10 +515,17 @@ class NativeSession:
         require(os.getpgid(self.product.pid) == self.product.pid, 'product_status')
         self.controller.bind_process(self.product); self.controller.focus(True)
 
+    def require_display_live(self):
+        if self.weston.poll() is not None:
+            observation = self.controller.observe_exited_compositor(self.weston)
+            self.reporter.note(P.failure(self.reporter.mode, self.reporter.stage,
+                'display_status', self.reporter.case, display_observation=observation))
+            raise S.Rejected('display_status')
+
     def check(self):
         require(time.monotonic_ns() < self.original, 'original_deadline')
         require(time.monotonic_ns() < self.deadline, 'phase_deadline')
-        require(self.weston.poll() is None, 'display_status')
+        self.require_display_live()
         require(self.product.poll() is None, 'product_status')
         if self.owner: self.owner.pump()
         if self.collector: self.records = self.collector.read()
