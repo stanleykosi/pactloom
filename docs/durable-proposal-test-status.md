@@ -1,8 +1,20 @@
 # Durable proposal qualification status
 
-Updated: 2026-10-20, 22:17 UTC.
+Updated: 2026-10-20, 23:18 UTC.
 
 **CI44 passed the genuine two-owner delivery/admission, original-producer SIGKILL and fresh-process read-only original-history verification route. Financial signing/dispatch and public testnet settlement remain unqualified. This is a bounded admission/restart milestone, not a production release.**
+
+## CI62 completed both authenticated Host intakes; prepared callback repair qualified locally
+
+[Run39507271298](https://github.com/stanleykosi/pactloom/actions/runs/39507271298), qualification `1a7c9d29a8e1392da2c20101c7362142c8d00ec8`, implementation `1fc984a55c8fe276e0061cbe343abc5c9b4d84ef`, passed early gates, Host build (12m45s) and encrypted bootstrap. At 22:51:34 UTC the FinalRetention/Complete supervision window reached 120 seconds, input 143/151. Producer/group/root cleanup was verified; reader had not started.
+
+Entering window25 establishes that both actual authenticated Host intakes committed, both Finish acknowledgements and Signer worker completions succeeded, and both preservation replies matched. This is a genuine protected-result milestone. Extraction approval had not yet been sent; no completed transaction, restart dispatch or public settlement is established.
+
+Measured parent timing totals 868.982 seconds: initial setup 500.767, both signing sequences 72.925, paired history 27.835, both Return/intake windows 147.453 and current finalization 120.002. Initial setup contains genuine births, viewing/capture, one proving pipeline and two original V3 admission/import paths; no duplicate proof generation was found. No deadline was extended.
+
+Source audit found nested retention callbacks repeatedly replaying unchanged full metadata/material history. The prepared-only financial live gate now uses the same exact metadata/root/proof revision checks already held by the fully audited Prepared owner, plus exact principal/scope and current source/proof/material permissions and time. It checks permissions around callbacks and refuses any revision drift. Initial full preparation, full post-union reprepare, every proof/signature verification, transaction extraction fences and protected signing remain unchanged. Audited dispatch successors must preserve the exact held roster.
+
+Independent review cleared this one-file Engine repair and its real encrypted shared-checker regression. An environment interruption left the first compile unverified; the resumed Engine/Host build completed successfully in 2m58s. The exact encrypted test passed once, covering unchanged state, wrong scope/principal/action, callback revocation/expiry, independent metadata/source/proof mutation and repeated refusal without refresh. Its proof job is queued and it does not construct native authority or claim full-profile issuance. Actual finalization and saved-byte dispatch require the next isolated qualification.
 
 ## CI61 reached both signatures and original Return preparation; aggregate-cost repair prepared
 

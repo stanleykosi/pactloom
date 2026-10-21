@@ -446,6 +446,126 @@ impl LocalProofConsent for FinancialProofGate<'_, '_> {
         self.check().is_ok() && self.proof.permits(scope, action) && self.check().is_ok()
     }
 }
+// Operation-local mathematical/history custody, never cached permission. The
+// slow preparation gate remains responsible for the complete original audit.
+// Never use this gate while loading proof rows: that loader may hold its mutex.
+// Retention invokes us under its own journal lock; only the separate metadata,
+// source and proof stores may be checked here, never signed/transaction journals.
+struct PreparedFinancialProofGate<'a, 'owner, 'source> {
+    prepared: &'a PreparedPrivateFinancialV1<'owner, 'source>,
+    access: &'a Access,
+    consent: &'a dyn LocalPrivateDurableFinancialConsentV1,
+    proof: &'a dyn LocalProofConsent,
+    material: &'a dyn LocalDurableMaterialConsentV1,
+}
+type FinancialMaterialScopeV1 =
+    wholepact_signer::authority_bridge::durable_construction_v1::DurableConstructionScopeV1;
+fn financial_now_v1() -> Result<u64> {
+    Ok(std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| denied())?
+        .as_secs())
+}
+// Shared private live-check kernel. Its borrowed inputs are not an issuer or a
+// serializable capability; only the fully audited Prepared owner calls it in production.
+#[allow(clippy::too_many_arguments)]
+fn check_prepared_financial_live_v1(
+    metadata: &OriginalPrivateRevisionPinV3<'_>,
+    root: &OriginalSourceReadRevisionPinV3<'_>,
+    proof_pin: &OriginalProofReadRevisionV3<'_>,
+    workspace: &PrivateWorkspaceScopeV1,
+    expected: &CheckpointScope,
+    materials: &[(&FinancialMaterialScopeV1, &str)],
+    access: &Access,
+    consent: &dyn LocalPrivateDurableFinancialConsentV1,
+    proof: &dyn LocalProofConsent,
+    material: &dyn LocalDurableMaterialConsentV1,
+    scope: &CheckpointScope,
+    action: LocalAction,
+    now: &dyn Fn() -> Result<u64>,
+) -> Result<()> {
+    let pins = || -> Result<()> {
+        metadata.check_current_v3().map_err(crate::store_error)?;
+        root.check_current_v3().map_err(crate::store_error)?;
+        proof_pin.check_current_v3().map_err(original_job_error_v2)
+    };
+    let times = || -> Result<()> {
+        let now = now()?;
+        for (scope, _) in materials {
+            scope.check_valid_at(now).map_err(|_| denied())?;
+        }
+        Ok(())
+    };
+    let permissions = || -> Result<()> {
+        if !consent.permits_source(workspace) || !proof.permits(scope, action) {
+            return Err(denied());
+        }
+        Ok(())
+    };
+    pins()?;
+    if scope != expected
+        || !matches!(action, LocalAction::ReadPrivateArtifact)
+        || access.principal_id != workspace.principal_id
+        || !access.permits_agreement(&workspace.agreement_id, &workspace.principal_id)
+    {
+        return Err(denied());
+    }
+    times()?;
+    permissions()?;
+    // A later callback can revoke an earlier owner's permission. Sample both
+    // material passes and final source/proof freshness, never an atomic grant.
+    for _ in 0..2 {
+        for (scope, digest) in materials {
+            if !material.permits(
+                scope,
+                digest,
+                DurableMaterialActionV1::ReadForExactConstruction,
+            ) {
+                return Err(denied());
+            }
+        }
+        times()?;
+        permissions()?;
+    }
+    times()?;
+    pins()
+}
+impl PreparedFinancialProofGate<'_, '_, '_> {
+    fn check(&self, scope: &CheckpointScope, action: LocalAction) -> Result<()> {
+        let materials: Vec<_> = self
+            .prepared
+            .roster
+            .owners
+            .values()
+            .map(|intake| {
+                (
+                    &intake.outbox.request().scope,
+                    intake.outbox.material_digest(),
+                )
+            })
+            .collect();
+        check_prepared_financial_live_v1(
+            &self.prepared.metadata,
+            &self.prepared.root,
+            &self.prepared.proof,
+            self.prepared.owner.workspace_scope(),
+            self.prepared.kernel.checkpoint_scope(),
+            &materials,
+            self.access,
+            self.consent,
+            self.proof,
+            self.material,
+            scope,
+            action,
+            &financial_now_v1,
+        )
+    }
+}
+impl LocalProofConsent for PreparedFinancialProofGate<'_, '_, '_> {
+    fn permits(&self, scope: &CheckpointScope, action: LocalAction) -> bool {
+        self.check(scope, action).is_ok()
+    }
+}
 struct PreparedRawFinancialV1<'owner, 'source> {
     owner: &'owner PrivateDurableFinancialCoordinatorV1<'source>,
     history: FinancialHistory,
@@ -455,6 +575,7 @@ struct PreparedRawFinancialV1<'owner, 'source> {
     proof: OriginalProofReadRevisionV3<'source>,
 }
 pub struct PreparedPrivateFinancialV1<'owner, 'source> {
+    roster: crate::durable_construction_v1::Roster,
     owner: &'owner PrivateDurableFinancialCoordinatorV1<'source>,
     history: FinancialHistory,
     kernel: kernel::PreparedFinancialKernelV1,
@@ -569,12 +690,15 @@ impl<'source> PrivateDurableFinancialCoordinatorV1<'source> {
         material: &dyn LocalDurableMaterialConsentV1,
     ) -> Result<PreparedPrivateFinancialV1<'owner, 'source>> {
         let raw = self.prepare_raw(access, consent, proof, material)?;
+        // Parse only the exact history audited under these still-held pins.
+        let roster = original_roster_v2(&raw.history.current)?;
         let kernel = kernel::PreparedFinancialKernelV1::new(
             raw.history.current.clone(),
             access,
             raw.checkpoint,
         )?;
         let result = PreparedPrivateFinancialV1 {
+            roster,
             owner: self,
             history: raw.history,
             kernel,
@@ -722,31 +846,17 @@ impl<'owner, 'source> PreparedPrivateFinancialV1<'owner, 'source> {
         proof: &dyn LocalProofConsent,
         material: &dyn LocalDurableMaterialConsentV1,
     ) -> Result<()> {
-        self.metadata
-            .check_current_v3()
-            .map_err(crate::store_error)?;
-        self.root.check_current_v3().map_err(crate::store_error)?;
-        self.proof
-            .check_current_v3()
-            .map_err(original_job_error_v2)?;
-        let gate = FinancialProofGate {
-            owner: self.owner,
+        PreparedFinancialProofGate {
+            prepared: &self,
             access,
             consent,
             proof,
             material,
-        };
-        if !gate.permits(
+        }
+        .check(
             self.kernel.checkpoint_scope(),
             LocalAction::ReadPrivateArtifact,
-        ) {
-            return Err(denied());
-        }
-        self.metadata
-            .check_current_v3()
-            .map_err(crate::store_error)?;
-        self.root.check_current_v3().map_err(crate::store_error)?;
-        self.proof.check_current_v3().map_err(original_job_error_v2)
+        )
     }
     #[allow(clippy::too_many_arguments)]
     pub fn intake_original_signature_v1(
@@ -761,8 +871,8 @@ impl<'owner, 'source> PreparedPrivateFinancialV1<'owner, 'source> {
         material: &dyn LocalDurableMaterialConsentV1,
     ) -> Result<u64> {
         self.check_current_v1(access, consent, proof, material)?;
-        let gate = FinancialProofGate {
-            owner: self.owner,
+        let gate = PreparedFinancialProofGate {
+            prepared: &self,
             access,
             consent,
             proof,
@@ -798,8 +908,8 @@ impl<'owner, 'source> PreparedPrivateFinancialV1<'owner, 'source> {
         material: &dyn LocalDurableMaterialConsentV1,
     ) -> Result<u64> {
         self.check_current_v1(access, consent, proof, material)?;
-        let gate = FinancialProofGate {
-            owner: self.owner,
+        let gate = PreparedFinancialProofGate {
+            prepared: &self,
             access,
             consent,
             proof,
@@ -832,8 +942,8 @@ impl<'owner, 'source> PreparedPrivateFinancialV1<'owner, 'source> {
         material: &dyn LocalDurableMaterialConsentV1,
     ) -> Result<u64> {
         self.check_current_v1(access, consent, proof, material)?;
-        let gate = FinancialProofGate {
-            owner: self.owner,
+        let gate = PreparedFinancialProofGate {
+            prepared: &self,
             access,
             consent,
             proof,
@@ -864,8 +974,8 @@ impl<'owner, 'source> PreparedPrivateFinancialV1<'owner, 'source> {
         material: &dyn LocalDurableMaterialConsentV1,
     ) -> Result<TransactionCheckpointSummary> {
         self.check_current_v1(access, consent, proof, material)?;
-        let gate = FinancialProofGate {
-            owner: self.owner,
+        let gate = PreparedFinancialProofGate {
+            prepared: &self,
             access,
             consent,
             proof,
@@ -897,8 +1007,8 @@ impl<'owner, 'source> PreparedPrivateFinancialV1<'owner, 'source> {
         {
             return Err(denied());
         }
-        let gate = FinancialProofGate {
-            owner: self.owner,
+        let gate = PreparedFinancialProofGate {
+            prepared: &self,
             access,
             consent,
             proof,
@@ -1244,6 +1354,14 @@ impl<'owner, 'source> PreparedPrivateFinancialV1<'owner, 'source> {
             .insert(saved.operation_id, command);
         self.metadata = next;
         self.history = self.owner.check(access, consent)?;
+        // Only this known own commit supplies a successor pin. Its fully
+        // re-audited history must preserve the exact held material roster.
+        let successor_roster = original_roster_v2(&self.history.current)?;
+        if serde_json::to_vec(&successor_roster).map_err(|_| damaged())?
+            != serde_json::to_vec(&self.roster).map_err(|_| damaged())?
+        {
+            return Err(damaged());
+        }
         self.kernel = self
             .kernel
             .advance_after_own_commit(self.history.current.clone())?;
@@ -1291,8 +1409,8 @@ impl PreparedPrivateFinancialV1<'_, '_> {
         {
             return Err(denied());
         }
-        let gate = FinancialProofGate {
-            owner: self.owner,
+        let gate = PreparedFinancialProofGate {
+            prepared: &self,
             access,
             consent,
             proof,
@@ -1344,8 +1462,8 @@ impl PreparedPrivateFinancialV1<'_, '_> {
         {
             return Err(denied());
         }
-        let gate = FinancialProofGate {
-            owner: self.owner,
+        let gate = PreparedFinancialProofGate {
+            prepared: &self,
             access,
             consent,
             proof,
@@ -1380,5 +1498,444 @@ impl PreparedPrivateFinancialV1<'_, '_> {
         let scope = self.kernel.preview_retention_scope(preview)?;
         self.check_current_v1(access, consent, proof, material)?;
         Ok(scope)
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod prepared_live_gate_tests {
+    //! Actual encrypted revision-object composition only. The proof job remains
+    //! queued: this fixture does not prove mathematical verification, authenticate
+    //! native material, or construct a production PreparedFinancial owner.
+    use super::*;
+    use crate::CandidateRequest;
+    use std::{cell::Cell, os::unix::fs::PermissionsExt};
+    use wholepact_core::*;
+    use wholepact_proof_jobs::{JobState, ProofJobStore};
+    use wholepact_protocol::{
+        proving::ProvingLimits, review::verify_review, synthetic::review_fixture,
+    };
+    use wholepact_storage_security::{create_encrypted, open_encrypted, DatabaseKey};
+    use wholepact_wallet::wallet::protected_sync::durable_construction_v1::{
+        ConstructionRecipientV1, ConstructionReviewerV1, ExactTransportConstructionReviewerV1,
+        PURPOSE,
+    };
+    struct EnqueueConsent;
+    impl LocalProofConsent for EnqueueConsent {
+        fn permits(&self, scope: &CheckpointScope, _: LocalAction) -> bool {
+            scope.principal_id == "synthetic-live-owner"
+        }
+    }
+    struct Fixture {
+        _dir: tempfile::TempDir,
+        paths: [std::path::PathBuf; 3],
+        metadata: wholepact_store::Store,
+        root: wholepact_store::Store,
+        proof: ProofJobStore,
+        scope: CheckpointScope,
+        job: String,
+        workspace: PrivateWorkspaceScopeV1,
+        materials: [FinancialMaterialScopeV1; 2],
+        access: Access,
+    }
+    fn fixture() -> Fixture {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let paths = [
+            dir.path().join("metadata.sqlite"),
+            dir.path().join("root.sqlite"),
+            dir.path().join("proof.sqlite"),
+        ];
+        let metadata =
+            wholepact_store::Store::create_encrypted(&paths[0], &DatabaseKey::from_bytes([91; 32]))
+                .unwrap();
+        let root =
+            wholepact_store::Store::create_encrypted(&paths[1], &DatabaseKey::from_bytes([92; 32]))
+                .unwrap();
+        for store in [&metadata, &root] {
+            let command = CommandContext::for_request(
+                "synthetic-live-owner",
+                "create-live-fixture",
+                &serde_json::json!({"synthetic":true}),
+            )
+            .unwrap();
+            store
+                .create_agreement(&command, "agreement", serde_json::json!({"synthetic":true}))
+                .unwrap();
+        }
+        let proof = ProofJobStore::from_original_encrypted_connection_v1(
+            create_encrypted(&paths[2], &DatabaseKey::from_bytes([93; 32])).unwrap(),
+        )
+        .unwrap();
+        let upstream = review_fixture().unwrap();
+        let review = verify_review(&upstream.pczt_bytes, &upstream.policy).unwrap();
+        let scope = CheckpointScope {
+            principal_id: "synthetic-live-owner".into(),
+            candidate_id: "synthetic-live-candidate".into(),
+            manifest_digest: hex::encode(upstream.policy.manifest_digest),
+            artifact_digest: hex::encode(Sha256::digest(&upstream.pczt_bytes)),
+            effects_commitment: review.shielded_sighash().into(),
+            coordination_request_digest: "32".repeat(32),
+            review_binding: review.review_binding().into(),
+            account_ids: upstream
+                .policy
+                .participants
+                .iter()
+                .map(|p| p.account_id.clone())
+                .collect(),
+            local_operator: "synthetic-local-prover".into(),
+            purpose: "change detection only".into(),
+            retention_policy: "temporary synthetic checkpoint".into(),
+        };
+        let source = proof.original_source_v1().unwrap();
+        let (summary, fresh) = source
+            .enqueue_original_once_v1(
+                &scope,
+                "synthetic-live-enqueue",
+                &upstream.pczt_bytes,
+                &upstream.policy,
+                ProvingLimits { maximum_actions: 8 },
+                &EnqueueConsent,
+            )
+            .unwrap()
+            .into_parts();
+        drop(fresh);
+        assert_eq!(summary.state, JobState::Queued);
+        let proposal = crate::candidates::build_exact_candidate_v2(request())
+            .unwrap()
+            .proposal;
+        let workspace = PrivateWorkspaceScopeV1 {
+            source_digest: "synthetic-live-source".into(),
+            principal_id: scope.principal_id.clone(),
+            agreement_id: "agreement".into(),
+            obligation_id: "synthetic-obligation".into(),
+            reviewer_account_ids: vec!["account-a".into(), "account-b".into()],
+            protected_destination: paths[0].clone(),
+            retention_policy: "synthetic-live-retention".into(),
+        };
+        let materials = std::array::from_fn(|index| {
+            let participant = &proposal.manifest.participants[index];
+            FinancialMaterialScopeV1 {
+                version: 1,
+                purpose: PURPOSE.into(),
+                proposal: proposal.clone(),
+                account_id: participant.account_id.clone(),
+                participant_id: participant.participant_id.clone(),
+                privacy_domain: "synthetic-live".into(),
+                constructor: ConstructionRecipientV1 {
+                    principal_id: scope.principal_id.clone(),
+                    authenticated_local_grant_digest: "ab".repeat(32),
+                },
+                prover: ConstructionRecipientV1 {
+                    principal_id: scope.principal_id.clone(),
+                    authenticated_local_grant_digest: "ab".repeat(32),
+                },
+                reviewers: proposal
+                    .manifest
+                    .participants
+                    .iter()
+                    .map(|p| {
+                        ConstructionReviewerV1::ExactTransport(
+                            ExactTransportConstructionReviewerV1 {
+                                account_id: p.account_id.clone(),
+                                transport_key_digest: "cd".repeat(32),
+                            },
+                        )
+                    })
+                    .collect(),
+                protected_destination: paths[0].to_str().unwrap().into(),
+                retention_policy: workspace.retention_policy.clone(),
+                valid_from_unix_seconds: 100,
+                valid_until_unix_seconds: 200,
+                minimum_confirmations: 1,
+                maximum_scan_blocks: 1,
+            }
+        });
+        for scope in &materials {
+            scope.check_valid_at(150).unwrap();
+        }
+        let access = Access {
+            principal_id: scope.principal_id.clone(),
+            all_agreements: true,
+            ..Access::default()
+        };
+        Fixture {
+            _dir: dir,
+            paths,
+            metadata,
+            root,
+            proof,
+            scope,
+            job: summary.job_id,
+            workspace,
+            materials,
+            access,
+        }
+    }
+    struct Controls<'a> {
+        fixture: &'a Fixture,
+        source: Cell<bool>,
+        proof: Cell<bool>,
+        first_material: Cell<bool>,
+        now: Cell<u64>,
+        effect: Cell<u8>,
+        mutation: Option<&'a dyn Fn()>,
+    }
+    impl<'a> Controls<'a> {
+        fn new(fixture: &'a Fixture) -> Self {
+            Self {
+                fixture,
+                source: Cell::new(true),
+                proof: Cell::new(true),
+                first_material: Cell::new(true),
+                now: Cell::new(150),
+                effect: Cell::new(0),
+                mutation: None,
+            }
+        }
+    }
+    impl LocalPrivateDurableFinancialConsentV1 for Controls<'_> {
+        fn permits_source(&self, scope: &PrivateWorkspaceScopeV1) -> bool {
+            self.source.get()
+                && serde_json::to_value(scope).unwrap()
+                    == serde_json::to_value(&self.fixture.workspace).unwrap()
+        }
+    }
+    impl LocalProofConsent for Controls<'_> {
+        fn permits(&self, scope: &CheckpointScope, action: LocalAction) -> bool {
+            self.proof.get()
+                && scope == &self.fixture.scope
+                && action == LocalAction::ReadPrivateArtifact
+        }
+    }
+    impl LocalDurableMaterialConsentV1 for Controls<'_> {
+        fn permits(
+            &self,
+            scope: &FinancialMaterialScopeV1,
+            digest: &str,
+            action: DurableMaterialActionV1,
+        ) -> bool {
+            if !matches!(action, DurableMaterialActionV1::ReadForExactConstruction) {
+                return false;
+            }
+            let Some(index) = self
+                .fixture
+                .materials
+                .iter()
+                .position(|original| original == scope)
+            else {
+                return false;
+            };
+            if digest != ["first-material", "second-material"][index]
+                || (index == 0 && !self.first_material.get())
+            {
+                return false;
+            }
+            if index == 1 {
+                match self.effect.replace(0) {
+                    1 => self.source.set(false),
+                    2 => self.proof.set(false),
+                    3 => self.first_material.set(false),
+                    4 => self.now.set(200),
+                    5 => {
+                        if let Some(mutate) = self.mutation {
+                            mutate();
+                        }
+                    }
+                    _ => (),
+                }
+            }
+            true
+        }
+    }
+    #[test]
+    fn encrypted_prepared_live_kernel_refuses_changes_revocation_and_expiry_without_refresh() {
+        let f = fixture();
+        let metadata = f.metadata.pin_original_revision_v3("agreement").unwrap();
+        let root = f
+            .root
+            .pin_original_source_read_revision_v3("agreement")
+            .unwrap();
+        let source = f.proof.original_source_v1().unwrap();
+        let proof = source
+            .pin_original_read_revision_v3(&f.scope.principal_id, &f.job, &f.scope)
+            .unwrap();
+        let materials = [
+            (&f.materials[0], "first-material"),
+            (&f.materials[1], "second-material"),
+        ];
+        let controls = Controls::new(&f);
+        let run = |access: &Access, scope: &CheckpointScope, action| {
+            check_prepared_financial_live_v1(
+                &metadata,
+                &root,
+                &proof,
+                &f.workspace,
+                &f.scope,
+                &materials,
+                access,
+                &controls,
+                &controls,
+                &controls,
+                scope,
+                action,
+                &|| Ok(controls.now.get()),
+            )
+        };
+        let before = serde_json::to_value(f.metadata.events_after(0, 100).unwrap()).unwrap();
+        run(&f.access, &f.scope, LocalAction::ReadPrivateArtifact).unwrap();
+        let mut wrong = f.access.clone();
+        wrong.principal_id = "other-owner".into();
+        assert!(run(&wrong, &f.scope, LocalAction::ReadPrivateArtifact).is_err());
+        let mut wrong_scope = f.scope.clone();
+        wrong_scope.purpose = "changed".into();
+        assert!(run(&f.access, &wrong_scope, LocalAction::ReadPrivateArtifact).is_err());
+        assert!(run(&f.access, &f.scope, LocalAction::ProveLocally).is_err());
+        for effect in 1..=4 {
+            controls.source.set(true);
+            controls.proof.set(true);
+            controls.first_material.set(true);
+            controls.now.set(150);
+            controls.effect.set(effect);
+            assert!(run(&f.access, &f.scope, LocalAction::ReadPrivateArtifact).is_err());
+        }
+        controls.source.set(true);
+        controls.proof.set(true);
+        controls.first_material.set(true);
+        controls.now.set(150);
+        run(&f.access, &f.scope, LocalAction::ReadPrivateArtifact).unwrap();
+        assert_eq!(
+            before,
+            serde_json::to_value(f.metadata.events_after(0, 100).unwrap()).unwrap()
+        );
+        // Neither successful nor refusing checks changed the original observations.
+        metadata.check_current_v3().unwrap();
+        root.check_current_v3().unwrap();
+        proof.check_current_v3().unwrap();
+        for target in 0..3 {
+            let f = fixture();
+            let metadata = f.metadata.pin_original_revision_v3("agreement").unwrap();
+            let root = f
+                .root
+                .pin_original_source_read_revision_v3("agreement")
+                .unwrap();
+            let source = f.proof.original_source_v1().unwrap();
+            let proof = source
+                .pin_original_read_revision_v3(&f.scope.principal_id, &f.job, &f.scope)
+                .unwrap();
+            let external = open_encrypted(
+                &f.paths[target],
+                &DatabaseKey::from_bytes([91 + target as u8; 32]),
+            )
+            .unwrap();
+            let mutate = || {
+                external
+                    .connection()
+                    .execute_batch("PRAGMA user_version=777")
+                    .unwrap();
+            };
+            let mut controls = Controls::new(&f);
+            controls.mutation = Some(&mutate);
+            controls.effect.set(5);
+            let materials = [
+                (&f.materials[0], "first-material"),
+                (&f.materials[1], "second-material"),
+            ];
+            let run = || {
+                check_prepared_financial_live_v1(
+                    &metadata,
+                    &root,
+                    &proof,
+                    &f.workspace,
+                    &f.scope,
+                    &materials,
+                    &f.access,
+                    &controls,
+                    &controls,
+                    &controls,
+                    &f.scope,
+                    LocalAction::ReadPrivateArtifact,
+                    &|| Ok(150),
+                )
+            };
+            assert!(run().is_err());
+            assert!(run().is_err()); // No automatic new pin or revision refresh.
+        }
+    }
+    fn amount(n: u64) -> Amount {
+        Amount::from_zatoshis(n).unwrap()
+    }
+    fn request() -> CandidateRequest {
+        let mut agreement: AgreementDraft = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../wholepact-core/tests/fixtures/agreement.json"
+        )))
+        .unwrap();
+        agreement.network_profile_id = "ironwood-testnet-nu7-candidate".into();
+        agreement.recipients[0].amount = amount(300_000);
+        agreement.funding_policy = FundingPolicy::Exact {
+            target: amount(300_000),
+        };
+        let participants = vec![
+            ParticipantAllocation {
+                participant_id: "alice".into(),
+                account_id: "account-a".into(),
+                contribution: amount(100_000),
+                fee_share: amount(5_000),
+                fee_cap: amount(5_000),
+                maximum_net_debit: amount(105_000),
+                charges: vec![],
+            },
+            ParticipantAllocation {
+                participant_id: "bob".into(),
+                account_id: "account-b".into(),
+                contribution: amount(200_000),
+                fee_share: amount(10_000),
+                fee_cap: amount(10_000),
+                maximum_net_debit: amount(210_000),
+                charges: vec![],
+            },
+        ];
+        let inputs = participants
+            .iter()
+            .enumerate()
+            .map(|(i, p)| ClaimedInput {
+                input_id: format!("input-{i}"),
+                participant_id: p.participant_id.clone(),
+                account_id: p.account_id.clone(),
+                amount: amount(if i == 0 { 200_000 } else { 300_000 }),
+                ownership_evidence_ref: None,
+            })
+            .collect();
+        let mut outputs = vec![ClaimedOutput {
+            output_id: "recipient-output".into(),
+            address: agreement.recipients[0].address.clone(),
+            amount: amount(300_000),
+            allocation: OutputAllocation::Recipient {
+                recipient_id: agreement.recipients[0].recipient_id.clone(),
+            },
+        }];
+        for (i, p) in participants.iter().enumerate() {
+            outputs.push(ClaimedOutput {
+                output_id: format!("change-{i}"),
+                address: format!("utestsyntheticchange{i}"),
+                amount: amount(if i == 0 { 95_000 } else { 90_000 }),
+                allocation: OutputAllocation::Return {
+                    participant_id: p.participant_id.clone(),
+                    account_id: p.account_id.clone(),
+                    ownership_evidence_ref: None,
+                },
+            });
+        }
+        CandidateRequest {
+            manifest: ProposalManifest {
+                agreement,
+                participants,
+                inputs,
+                outputs,
+                transaction_fee: amount(15_000),
+                expiry_height: 4_465_070,
+            },
+            previous_candidate_id: None,
+        }
     }
 }
