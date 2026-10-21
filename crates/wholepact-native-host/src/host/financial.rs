@@ -23,6 +23,8 @@ pub(in crate::host) mod private_financial_v1;
 pub(in crate::host) mod durable_financial_commands_v1;
 #[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
 mod coordinated_session_v1;
+#[cfg(all(feature = "coordinated-financial-workflow-v1", target_os = "linux"))]
+mod owned_relay_monitor_v1;
 mod proof_delivery;
 mod proof_execution_request;
 mod proof_request;

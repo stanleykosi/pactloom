@@ -20,6 +20,9 @@ use crate::signer_continue_state::SENT;
 mod admit;
 #[path="financial_witness_coordinator.rs"]
 mod witness;
+#[path="witness_retirement.rs"]
+mod retirement;
+pub use retirement::{CoordinatorWitnessRetirementTicketV1,CoordinatorWitnessRetirementOutboundV1,CoordinatorWitnessRetiredV1};
 pub use witness::{FinancialWitnessSetupTicketV1,FinancialWitnessSetupOutboundV1,FinancialWitnessReviewTicketV1,
     FinancialWitnessArmOutboundV1,FinancialWitnessArmedV1,FinancialWitnessReadyTicketV1,FinancialWitnessFinalOutboundV1,CoordinatorFinancialWitnessEventV1};
 pub use admit::{SignerAdmitArmV1,SignerAdmitFinalV1,SignerAdmitReviewTicketV1,SignerAdmitReadyTicketV1,
@@ -41,7 +44,7 @@ pub struct SignerFinancialWorkflowOriginV1 {
 impl SignerFinancialWorkflowOriginV1 {
     pub(super) fn from_signer(leaf:LeafCustody,birth:SignerBirthContext)->Result<Self>{
         let target=Target::from_role(leaf.origin.role())?;let clocks=leaf.clocks.workflow();
-        let core=Arc::new(Core{witness_outbound:[AtomicU8::new(PENDING),AtomicU8::new(PENDING)],phase:Phases::new(),signer_restriction:Some(birth.restriction),peer:leaf.origin.continue_observer()?,roots:Vec::new(),coordinator:Some(birth.coordinator),
+        let core=Arc::new(Core{retired_roots:std::sync::atomic::AtomicU32::new(0),witness_outbound:[AtomicU8::new(PENDING),AtomicU8::new(PENDING)],phase:Phases::new(),signer_restriction:Some(birth.restriction),peer:leaf.origin.continue_observer()?,roots:Vec::new(),coordinator:Some(birth.coordinator),
             owner_pid:unsafe{libc::getpid()},owner_uid:unsafe{libc::geteuid()},epoch:clocks.epoch(),session:clocks.supervision(),
             alive:AtomicBool::new(true),outbound:[AtomicU8::new(PENDING),AtomicU8::new(PENDING)]});
         core.check()?;crate::channel::require_time(clocks.supervision())?;
@@ -51,6 +54,16 @@ impl SignerFinancialWorkflowOriginV1 {
     }
     pub fn session_deadline(&self)->Instant{self.clocks.supervision()}
     pub fn check_original_actors_alive(&self)->Result<()>{self.core.check()}
+    /// Restricts the original terminal cleanup only; no action clock changes.
+    pub fn retain_cleanup_deadline(&mut self,original:Instant)->Result<Instant>{
+        let retained=self.clocks.retain_cleanup(self.cleanup,original,Instant::now())?;
+        self.cleanup=Some(retained);Ok(retained)
+    }
+    /// No actor check and no initialization: failure cleanup may still read it.
+    pub fn original_cleanup_deadline(&self)->Result<Instant>{
+        self.cleanup.ok_or_else(||rejected("Signer original cleanup not started"))
+    }
+
     fn transport_check(&self)->Result<()>{crate::channel::require_time(self.cleanup.unwrap_or(self.clocks.hard_cleanup()))?;self.core.check()}
     fn send(&self,packet:&Packet)->Result<()>{self.transport_check()?;let r=self.leaf.as_ref().ok_or_else(||rejected("workflow Signer consumed"))?.origin.workflow_send(packet);if r.is_err(){self.core.close();}r}
     fn restrict(&mut self)->Result<()> {
@@ -353,7 +366,7 @@ pub(super) fn split_coordinator(tree:InertTreeV1,phases:PhaseDeadlinesV1,
     // Drop then publishes R before the tree parameter can enter a reaper.
     let phase=Phases::coordinator(host_restriction);
     let clocks=phases.workflow();let image=tree.workflow_image();
-    let core=Arc::new(Core{witness_outbound:[AtomicU8::new(PENDING),AtomicU8::new(PENDING)],phase,signer_restriction:None,peer:tree.continue_host()?.continue_observer()?,roots:tree.continue_pidfds()?,coordinator:None,
+    let core=Arc::new(Core{retired_roots:std::sync::atomic::AtomicU32::new(0),witness_outbound:[AtomicU8::new(PENDING),AtomicU8::new(PENDING)],phase,signer_restriction:None,peer:tree.continue_host()?.continue_observer()?,roots:tree.continue_pidfds()?,coordinator:None,
         owner_pid:unsafe{libc::getpid()},owner_uid:unsafe{libc::geteuid()},epoch:clocks.epoch(),session:clocks.supervision(),
         alive:AtomicBool::new(true),outbound:[AtomicU8::new(PENDING),AtomicU8::new(PENDING)]});
     core.check()?;crate::channel::require_time(clocks.supervision())?;
@@ -626,28 +639,32 @@ struct HSlot{start:Start,phase:u8,entry:Option<EntryOffer>,read:Option<SignerFin
 /// Exact original H is a trusted finite relay, not a direct-C authentication
 /// proof at S. It retains sole S reapers, no plaintext/private keys or issuer.
 pub struct HostFinancialWorkflowRelayV1{
+    lifecycle:Arc<crate::host_interstage::HostLifecycle>,
+    retirement:Option<crate::host_interstage::RetirementRequest>,quiescent_sent:bool,retired:[bool;2],
     host:Option<HostOriginV1>,clocks:FullWorkflowClocksV1,image:String,coordinator:Option<String>,session:Option<String>,
     slots:[Option<HSlot>;2],restricted:bool,cancel_seen:bool,disposed:[bool;2],cleanup:Option<Instant>,
 }
 impl HostFinancialWorkflowRelayV1 {
     pub(super) fn from_host(host:HostOriginV1)->Result<Self>{
         host.continue_check()?;let clocks=host.continue_clocks().workflow();let image=host.workflow_image()?;
-        Ok(Self{host:Some(host),clocks,image,coordinator:None,session:None,slots:[None,None],restricted:false,cancel_seen:false,disposed:[false;2],cleanup:None})
+        Ok(Self{lifecycle:host.workflow_lifecycle(),retirement:None,quiescent_sent:false,retired:[false;2],host:Some(host),clocks,image,coordinator:None,session:None,slots:[None,None],restricted:false,cancel_seen:false,disposed:[false;2],cleanup:None})
     }
     pub fn session_deadline(&self)->Instant{self.clocks.supervision()}
     fn restrict(&mut self)->Result<()>{self.restricted=true;if self.cleanup.is_none(){self.cleanup=Some(self.clocks.first_cleanup_ceiling(Instant::now())?);}Ok(())}
-    pub fn pump(&mut self)->Result<bool>{let result=self.pump_inner();if result.is_err(){drop(self.host.take());}result}
+    pub fn pump(&mut self)->Result<bool>{let result=self.pump_inner();if result.is_err(){self.lifecycle.poison();drop(self.host.take());}result}
     fn pump_inner(&mut self)->Result<bool>{
         crate::channel::require_time(self.cleanup.unwrap_or(self.clocks.hard_cleanup()))?;
         self.host.as_ref().ok_or_else(||rejected("workflow Host consumed"))?.continue_check_lifetimes()?;
         let mut progress=false;
         if let Some(packet)=self.host.as_ref().unwrap().workflow_receive_c()?{
+            if self.retirement_control(&packet)?{progress=true;}else{
             self.down(&packet)?;let host=self.host.as_ref().unwrap();
             if matches!(packet,Packet::Cancel{..}){
                 host.continue_child(Target::Signer1)?.workflow_send(&packet)?;host.continue_child(Target::Signer2)?.workflow_send(&packet)?;
             }else{host.continue_child(packet.target()?.ok_or_else(||rejected("workflow target missing"))?)?.workflow_send(&packet)?;}
-            progress=true;
+            progress=true;}
         }
+        progress|=self.retirement_observation()?;
         for target in [Target::Signer1,Target::Signer2]{
             if self.disposed[target.index()]{continue;}
             if let Some(packet)=self.host.as_ref().unwrap().continue_child(target)?.workflow_receive()?{
@@ -656,6 +673,37 @@ impl HostFinancialWorkflowRelayV1 {
             }
         }
         self.host.as_ref().unwrap().continue_check_lifetimes()?;Ok(progress)
+    }
+    fn retirement_control(&mut self,packet:&Packet)->Result<bool>{
+        match packet{
+            Packet::RetireRequest{request}=>{
+                request.validate(self.clocks)?;
+                if self.restricted||self.cancel_seen||self.retirement.is_some()||self.retired[request.target.index()]
+                    ||self.coordinator.as_deref()!=Some(request.coordinator.as_str())||self.session.as_deref()!=Some(request.session.as_str()){
+                    return Err(rejected("Host retirement request binding"));}
+                let slot=self.slots[request.target.index()].as_ref().ok_or_else(||rejected("Host retirement before actual owner"))?;
+                if slot.phase!=admit::AWAITING_NEXT_READ||slot.admission.retained_result().is_err(){return Err(rejected("Host retirement before actual admitted response"));}
+                self.lifecycle.request(request.clone())?;self.retirement=Some(request.clone());self.quiescent_sent=false;Ok(true)
+            }
+            Packet::RetireResume{request}=>{
+                if !self.quiescent_sent||self.retirement.as_ref()!=Some(request){return Err(rejected("Host Resume without exact quiescence"));}
+                self.lifecycle.receive_resume(request)?;Ok(true)
+            }
+            _=>Ok(false),
+        }
+    }
+    fn retirement_observation(&mut self)->Result<bool>{
+        let Some(request)=self.retirement.as_ref() else{return Ok(false)};
+        if !self.quiescent_sent{
+            if self.lifecycle.quiescent()?.as_ref()==Some(request){
+                self.host.as_ref().ok_or_else(||rejected("Host consumed"))?.workflow_send_c(&Packet::RetireQuiescent{request:request.clone()})?;
+                self.quiescent_sent=true;return Ok(true);
+            }
+        }else if self.lifecycle.resumed()?.as_ref()==Some(request){
+            self.host.as_ref().ok_or_else(||rejected("Host consumed"))?.workflow_send_c(&Packet::RetireResumed{request:request.clone()})?;
+            self.lifecycle.acknowledge_resumed(request)?;self.retired[request.target.index()]=true;self.retirement=None;return Ok(true);
+        }
+        Ok(false)
     }
     fn down(&mut self,packet:&Packet)->Result<()>{
         if let Packet::Cancel{coordinator,session}=packet{
@@ -793,6 +841,7 @@ impl HostFinancialWorkflowRelayV1 {
     /// joins this result and drops its actual authority before final branch exit.
     /// This method neither exits the process nor transfers/replaces the S reapers.
     pub fn finish(mut self,work:Result<()>)->Result<()>{
+        self.lifecycle.poison();
         let result=work.and_then(|()|if self.cancel_seen&&self.is_disposed(){Ok(())}else{Err(rejected("workflow relay actual disposal missing"))})
             .and_then(|()|bootstrap::finish_host_capped(self.host.take().ok_or_else(||rejected("workflow Host consumed"))?,self.cleanup));
         drop(self.host.take());result
@@ -862,3 +911,5 @@ fn received_workflow_progress(phase:&Phases,slot:usize,from:u8,to:u8)->Result<bo
         assert!(p.step(1,READ_REVIEW,READ_ADMITTED).is_err());
     }
 }
+
+impl Drop for HostFinancialWorkflowRelayV1{fn drop(&mut self){self.lifecycle.poison();}}

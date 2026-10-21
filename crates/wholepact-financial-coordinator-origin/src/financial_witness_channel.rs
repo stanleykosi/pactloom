@@ -139,7 +139,7 @@ pub(super) enum Packet {
     Outcome{setup_challenge:String,witness_instance:String,data:FinancialWitnessOutcomeV1},
     FirstFailure{setup_challenge:String,data:DeliveryFailureV1},
     PreparationFailed{setup_challenge:String},
-    Disposed{coordinator:String,session:String},
+    Disposed{coordinator:String,session:String,cleanup_ceiling_ms:u64},
     ClosePurpose{coordinator:String,session:String},
     PurposeClosed{coordinator:String,session:String},
 }

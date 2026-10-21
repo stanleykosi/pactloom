@@ -13,7 +13,7 @@ use crate::{
 };
 use std::{
     ptr::NonNull,
-    sync::atomic::{AtomicU32, Ordering},
+    sync::{Arc, atomic::{AtomicU32, Ordering}},
     time::Instant,
 };
 
@@ -148,7 +148,7 @@ impl CreatedHostRestrictionV1 {
         result.check_current()?;
         Ok(result)
     }
-    pub(super) fn into_host(mut self, origin: &ForkOriginV1) -> Result<HostOriginalRestrictionV1> {
+    pub(super) fn into_host(mut self, origin: &ForkOriginV1) -> Result<(HostOriginalRestrictionV1, crate::host_interstage::HostLifecycleOwner)> {
         let coordinator = origin.retain_host_coordinator_lifetime()?;
         let owner_pid = unsafe { libc::getpid() };
         if coordinator.pid() != self.creator_pid
@@ -160,15 +160,16 @@ impl CreatedHostRestrictionV1 {
         }
         require_time(self.clocks.workflow().startup())?;
         let peer = origin.continue_observer()?;
-        let observer = HostOriginalRestrictionV1 {
+        let checks = Arc::new(HostRestrictionChecks {
             cell: self.cell.take().ok_or_else(|| rejected("shared restriction consumed"))?,
             peer,
             owner_pid,
             owner_uid: self.creator_uid,
             deadline: self.clocks.session,
-        };
-        observer.check_current()?;
-        Ok(observer)
+        });
+        checks.check_current()?;
+        let (owner,lifecycle)=crate::host_interstage::HostLifecycle::create(Arc::clone(&checks),self.clocks.workflow());
+        Ok((HostOriginalRestrictionV1{checks,lifecycle},owner))
     }
 }
 impl Drop for CreatedHostRestrictionV1 {
@@ -196,32 +197,26 @@ impl Drop for CoordinatorHostRestrictionV1 {
 /// Sealed check-only custody from the actual original Host/C edge. It cannot
 /// approve a TTY challenge, read a source, construct a permit, or renew a clock.
 pub struct HostOriginalRestrictionV1 {
-    cell: SharedCell,
-    peer: CheckedPeer,
-    owner_pid: libc::pid_t,
-    owner_uid: libc::uid_t,
-    deadline: Instant,
+    checks:Arc<HostRestrictionChecks>,
+    lifecycle:Arc<crate::host_interstage::HostLifecycle>,
+}
+pub(super) struct HostRestrictionChecks {
+    cell:SharedCell,peer:CheckedPeer,owner_pid:libc::pid_t,owner_uid:libc::uid_t,deadline:Instant,
+}
+impl HostRestrictionChecks {
+    pub(super) fn check_current(&self)->Result<()>{
+        if unsafe{libc::getpid()}!=self.owner_pid||unsafe{libc::geteuid()}!=self.owner_uid{
+            return Err(rejected("shared Host restriction outside original actor"));}
+        self.peer.check()?;require_time(self.deadline)?;
+        if self.cell.sample()!=CURRENT{return Err(rejected("original C restricted Host"));}Ok(())
+    }
 }
 impl HostOriginalRestrictionV1 {
-    pub fn deadline(&self) -> Instant { self.deadline }
-
-    /// Zero-wait observation only: no mutex, source/DB re-entry, packet wait or
-    /// caller callback. The FINAL SeqCst sample is the restriction linearization
-    /// point for ONE already TTY-authorized physical attempt. A-before-R may
-    /// finish or become uncertain; R-before-A denies. Never cache its success,
-    /// infer no effect from later refusal, or automatically retry an operation.
-    pub fn check_current(&self) -> Result<()> {
-        if unsafe { libc::getpid() } != self.owner_pid
-            || unsafe { libc::geteuid() } != self.owner_uid
-        {
-            return Err(rejected("shared Host restriction used outside original actor"));
-        }
-        self.peer.check()?;
-        require_time(self.deadline)?;
-        if self.cell.sample() != CURRENT {
-            return Err(rejected("original Coordinator restricted Host operation"));
-        }
-        Ok(())
+    pub fn deadline(&self)->Instant{self.checks.deadline}
+    /// Zero-wait restriction sample. Same-H park/poison is checked before the
+    /// final shared C-R SeqCst load; neither observation creates consent.
+    pub fn check_current(&self)->Result<()>{
+        self.lifecycle.check_foreground()?;self.checks.check_current()
     }
 }
 

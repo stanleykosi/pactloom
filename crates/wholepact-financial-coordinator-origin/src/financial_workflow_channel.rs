@@ -230,6 +230,10 @@ pub enum FinancialWorkflowStageV1 { SourceEntry, InitialRead, Continue }
 #[derive(Serialize,Deserialize)]
 #[serde(tag="kind",deny_unknown_fields)]
 pub(super) enum Packet {
+    RetireRequest{request:crate::host_interstage::RetirementRequest},
+    RetireQuiescent{request:crate::host_interstage::RetirementRequest},
+    RetireResume{request:crate::host_interstage::RetirementRequest},
+    RetireResumed{request:crate::host_interstage::RetirementRequest},
     StartEntry{start:Start}, EntryOffer{offer:EntryOffer},
     EntryCipher{envelope:String},
     SourceRetained{start:Start,presentation_digest:String},
@@ -255,6 +259,7 @@ pub(super) enum Packet {
 }
 impl Packet {
     pub(super) fn target(&self)->Result<Option<Target>> {Ok(match self {
+        Self::RetireRequest{..}|Self::RetireQuiescent{..}|Self::RetireResume{..}|Self::RetireResumed{..}=>None,
         Self::StartEntry{start}|Self::SourceRetained{start,..}|Self::ReadOffer{start,..}|Self::ReadFinal{start,..}|Self::HistoryRetained{start,..}|Self::Failed{start,..}=>Some(start.role),
         Self::ContinuePrepare{context}|Self::ContinueArm{context,..}|Self::ContinueReady{context,..}|Self::ContinueFinal{context,..}
             |Self::ContinuationSaved{context,..}|Self::ContinueOutcome{context,..}=>Some(context.start.role),
@@ -300,6 +305,13 @@ pub(super) fn try_receive(fd:RawFd,local:Role,peer:&PeerLifetime)->Result<Option
     check_direction(peer.role(),local,&packet)?;peer.check_alive()?;Ok(Some(packet))
 }
 fn check_direction(sender:Role,recipient:Role,packet:&Packet)->Result<()> {
+    if matches!(packet,Packet::RetireRequest{..}|Packet::RetireResume{..}){
+        return if sender==Role::Coordinator&&recipient==Role::Host{Ok(())}else{Err(rejected("retirement control not original C/H"))};
+    }
+    if matches!(packet,Packet::RetireQuiescent{..}|Packet::RetireResumed{..}){
+        return if sender==Role::Host&&recipient==Role::Coordinator{Ok(())}else{Err(rejected("retirement observation not original H/C"))};
+    }
+
     let down=matches!(packet,Packet::StartEntry{..}|Packet::EntryCipher{..}|Packet::ReadFinal{..}|Packet::ContinuePrepare{..}|Packet::ContinueArm{..}|Packet::ContinueFinal{..}|Packet::AdmitArm{..}|Packet::AdmitFinal{..}|Packet::Cancel{..});
     let edge=if down{sender==Role::Coordinator&&recipient==Role::Host||sender==Role::Host&&matches!(recipient,Role::Signer1|Role::Signer2)}
         else{recipient==Role::Coordinator&&sender==Role::Host||recipient==Role::Host&&matches!(sender,Role::Signer1|Role::Signer2)};

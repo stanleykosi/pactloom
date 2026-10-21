@@ -91,7 +91,7 @@ pub enum CoordinatorFinancialWitnessEventV1{
 #[derive(Default)]
 pub(super) struct CWSlot{
     setup:Option<Arc<SetupReview>>,display:Option<FinancialWitnessPresentationV1>,identity:Option<(String,String)>,observed_ready:Option<FinancialWitnessReadyV1>,review:Option<Arc<WReview>>,ready:Option<Arc<WReady>>,wire_phase:u8,
-    armed_ack:bool,outcome:bool,first_failure:bool,failed:bool,disposed:bool,cancel_sent:bool,close_sent:bool,closed:bool,cleanup:Option<Instant>,
+    committed_outcome:Option<FinancialWitnessOutcomeV1>,retired:bool,armed_ack:bool,outcome:bool,first_failure:bool,failed:bool,disposed:bool,cancel_sent:bool,close_sent:bool,closed:bool,cleanup:Option<Instant>,
 }
 impl CoordinatorFinancialNativeV1{
     /// Called only on the separate focused primary Setup gesture after complete
@@ -137,6 +137,7 @@ impl CoordinatorFinancialEndpointV1{
         Ok(FinancialWitnessSetupTicketV1{binding:b,consumed:false})
     }
     fn send_witness(&self,role:Target,p:&WP)->Result<()>{self.transport_check()?;
+        if let Some(deadline)=self.witnesses[role.index()].cleanup{crate::channel::require_time(deadline)?;}
         self.tree.as_ref().ok_or_else(||rejected("financial Witness tree consumed"))?.financial_witness(role)?.financial_witness_send(p)}
     pub fn send_witness_setup(&mut self,mut outbound:FinancialWitnessSetupOutboundV1)->Result<()>{
         let b=&outbound.binding;let i=b.slot();if !Arc::ptr_eq(&self.core,b.core()){return Err(rejected("foreign financial Witness Setup outbound"));}
@@ -167,6 +168,7 @@ impl CoordinatorFinancialEndpointV1{
         for role in [Target::Signer1,Target::Signer2]{let i=role.index();if self.witnesses[i].closed{continue;}
             let Some(p)=self.tree.as_ref().ok_or_else(||rejected("financial Witness tree consumed"))?.financial_witness(role)?.financial_witness_receive()? else{continue};
             let slot=&mut self.witnesses[i];
+            if slot.retired{continue;}
             if let Some(deadline)=slot.cleanup { crate::channel::require_time(deadline)?; }
             let event=match p{
                 WP::Display{setup_challenge,witness_instance,review_challenge,review_ceiling_ms,data}=>{
@@ -207,7 +209,7 @@ impl CoordinatorFinancialEndpointV1{
                     if slot.outcome||slot.setup.as_ref().is_none_or(|b|setup_challenge!=b.wire.setup_challenge)
                         ||slot.identity.as_ref().is_none_or(|b|witness_instance!=b.0)||!data.matches(p,slot.observed_ready.as_ref())
                         ||matches!(data,FinancialWitnessOutcomeV1::Committed{..})&&slot.wire_phase!=W_ADMITTED{return Err(rejected("financial Witness outcome binding"));}
-                    slot.outcome=true;CoordinatorFinancialWitnessEventV1::Outcome{role,data}
+                    slot.committed_outcome=Some(data.clone());slot.outcome=true;CoordinatorFinancialWitnessEventV1::Outcome{role,data}
                 }
                 WP::FirstFailure{setup_challenge,data}=>{
                     if slot.first_failure||slot.outcome||slot.disposed||slot.setup.as_ref().is_none_or(|b|b.wire.setup_challenge!=setup_challenge){return Err(rejected("financial Witness first failure binding"));}
@@ -217,9 +219,11 @@ impl CoordinatorFinancialEndpointV1{
                     if slot.failed||slot.display.is_some()||slot.disposed||slot.setup.as_ref().is_none_or(|b|b.wire.setup_challenge!=setup_challenge){return Err(rejected("financial Witness preparation failure binding"));}
                     slot.failed=true;CoordinatorFinancialWitnessEventV1::PreparationFailed(role)
                 }
-                WP::Disposed{coordinator,session}=>{
+                WP::Disposed{coordinator,session,cleanup_ceiling_ms}=>{
                     if slot.disposed||coordinator!=self.coordinator||session!=self.session||slot.display.is_some()&&!slot.outcome
                         ||slot.display.is_none()&&!slot.failed&&!slot.cancel_sent{return Err(rejected("financial Witness disposal binding"));}
+                    let now=Instant::now();let original=self.clocks.received_cleanup(cleanup_ceiling_ms,now)?;
+                    slot.cleanup=Some(self.clocks.retain_cleanup(slot.cleanup,original,now)?);
                     slot.disposed=true;CoordinatorFinancialWitnessEventV1::Disposed(role)
                 }
                 WP::PurposeClosed{coordinator,session}=>{
@@ -235,7 +239,8 @@ impl CoordinatorFinancialEndpointV1{
     pub fn close_witness_purpose(&mut self,role:Target)->Result<()>{
         let slot=&mut self.witnesses[role.index()];
         if !slot.disposed||slot.close_sent{return Err(rejected("financial Witness close before actual disposal"));}
-        slot.cleanup=Some(self.clocks.first_cleanup_ceiling(Instant::now())?);
+        let original=slot.cleanup.ok_or_else(||rejected("financial Witness disposal cutoff missing"))?;
+        slot.cleanup=Some(self.clocks.retain_cleanup(slot.cleanup,original,Instant::now())?);
         slot.close_sent=true;self.send_witness(role,&WP::ClosePurpose{coordinator:self.coordinator.clone(),session:self.session.clone()})
     }
     pub(super) fn cancel_witnesses(&mut self)->Result<()>{
@@ -260,6 +265,24 @@ pub(super) fn witness_pending(core:&Core)->bool{(0..2).any(|i|witness_pending_ph
 fn witness_pending_phase(phase:u8,status:u8)->bool{phase==W_ADMITTED&&status==PENDING}
 
 impl CWSlot {
+    pub(super) fn retirement_idle(&self)->bool{self.setup.is_none()||self.disposed}
+    pub(super) fn retirement_record(&self)->Result<(&str,Instant,&FinancialWitnessOutcomeV1)>{
+        if !self.disposed||self.cancel_sent||self.close_sent||self.retired{return Err(rejected("W not normally disposable"));}
+        Ok((&self.identity.as_ref().ok_or_else(||rejected("W identity missing"))?.0,
+            self.cleanup.ok_or_else(||rejected("W original disposal cutoff missing"))?,
+            self.committed_outcome.as_ref().ok_or_else(||rejected("W exact outcome missing"))?))
+    }
+    pub(super) fn retirement_matches_admit(&self,p:&crate::SignerAdmitPresentationV1)->Result<()>{
+        let w=self.display.as_ref().ok_or_else(||rejected("W displayed binding missing"))?;
+        if !admit_witness_binding_matches(p,w){return Err(rejected("W retirement changed Admit binding"));}Ok(())
+    }
+    pub(super) fn retirement_closed(&mut self)->Result<()>{
+        if !self.disposed||!self.close_sent||self.closed{return Err(rejected("retirement grammar close reordered"));}self.closed=true;Ok(())
+    }
+    pub(super) fn retirement_reaped(&mut self)->Result<()>{
+        if !self.closed||self.retired{return Err(rejected("retirement reap observation reordered"));}self.retired=true;Ok(())
+    }
+
     pub(super) fn closed(&self)->bool { self.closed }
     pub(super) fn observe_active(&self,core:&Core,i:usize)->Result<()> {
         match core.phase.witness_phase(i) {

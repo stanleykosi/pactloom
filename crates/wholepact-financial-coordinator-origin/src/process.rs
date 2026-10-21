@@ -299,6 +299,39 @@ impl DirectChild {
         self.require_owner()?;
         self.peer.check_alive()
     }
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn retirement_send(&self,message:Message,deadline:Instant)->Result<bool>{
+        self.require_owner()?;
+        if !matches!(message,Message::Stop|Message::Exit){return Err(rejected("not retirement terminal command"));}
+        if !self.channel.retirement_ready_now(libc::POLLOUT,&self.peer,deadline)?{return Ok(false);}
+        self.send(message,deadline)?;Ok(true)
+    }
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn retirement_stopped(&self,deadline:Instant)->Result<bool>{
+        self.require_owner()?;
+        if !self.channel.retirement_ready_now(libc::POLLIN,&self.peer,deadline)?{return Ok(false);}
+        self.receive(Message::Stopped,deadline)?;Ok(true)
+    }
+    /// Normal, nonblocking exact-child reap. It alone sets reaped=true, preserving
+    /// cfg-only WNOWAIT evidence ordering before consuming the actual status.
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn retirement_try_reap(&mut self,deadline:Instant)->Result<bool>{
+        self.require_owner()?;crate::channel::require_time(deadline)?;let mut status=0;
+        #[cfg(wholepact_bootstrap_ci)]
+        let rc=match self.observe_terminal(libc::WNOHANG){Ok(true)=>unsafe{libc::waitpid(self.peer.pid,&mut status,libc::WNOHANG)},Ok(false)=>0,Err(e)=>return Err(e)};
+        #[cfg(not(wholepact_bootstrap_ci))]
+        let rc=unsafe{libc::waitpid(self.peer.pid,&mut status,libc::WNOHANG)};
+        if rc==0{return Ok(false);}
+        if rc<0{let e=std::io::Error::last_os_error();return if e.kind()==std::io::ErrorKind::Interrupted{Ok(false)}else{Err(e)};}
+        if rc!=self.peer.pid{return Err(rejected("wrong retirement reap"));}
+        self.reaped=true;
+        #[cfg(wholepact_bootstrap_ci)]
+        crate::ci::reaped(self.peer.role,self.peer.pid,status);
+        #[cfg(wholepact_delivery_ci)]
+        crate::delivery_observer::record(crate::delivery_observer::Event::OwnedReap{child_role:format!("{:?}",self.peer.role),child_pid:self.peer.pid,
+            exit_code:libc::WIFEXITED(status).then(||libc::WEXITSTATUS(status)),signal:libc::WIFSIGNALED(status).then(||libc::WTERMSIG(status)),forced:false});
+        if !libc::WIFEXITED(status)||libc::WEXITSTATUS(status)!=0{return Err(rejected("retired Witness did not exit normally"));}Ok(true)
+    }
     pub(super) fn finish(mut self, deadline: Instant) -> Result<()> {
         self.require_owner()?;
         let status = loop {

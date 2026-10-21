@@ -39,6 +39,13 @@ impl EntryReviewed {
     }
     pub(super) fn slot(&self)->usize{self.wire.start.role.index()}
     pub(super) fn check_custody(&self)->Result<()> { self.observe_custody().map(|_|()) }
+    /// Private retirement only. The sole driver separately checks every
+    /// original actor except its owned exiting target. This grants no action.
+    pub(super) fn retirement_clock_bounds(&self)->Result<()>{
+        let now=Instant::now();let wall=state::wall_ms()?;let prior=self.last_wall.fetch_max(wall,Ordering::AcqRel);
+        if now>=self.original_source||now>=self.clocks.supervision()||wall<prior||wall<self.wire.presentation.facts.reviewed_at_ms
+            ||wall>=self.wire.presentation.facts.source_expires_at_ms{return Err(rejected("retirement original source clock elapsed"));}Ok(())
+    }
     fn observe_custody(&self)->Result<u64> {
         let result=(||{
             self.core.check()?;let now=Instant::now();let wall=state::wall_ms()?;

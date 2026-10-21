@@ -87,7 +87,7 @@ pub struct CoordinatorSignerContinueEndpointV1 {
     slots: [Option<CSlot>; 2], disposed: [bool; 2], cancel_sent: bool, cleanup: Option<Instant>,
 }
 pub(super) fn split_coordinator(tree: InertTreeV1, clocks: PhaseDeadlinesV1) -> Result<(CoordinatorSignerContinueNativeV1, CoordinatorSignerContinueEndpointV1)> {
-    let core = Arc::new(Core { phase: Phases::new(),
+    let core = Arc::new(Core {retired_roots:std::sync::atomic::AtomicU32::new(0), phase: Phases::new(),
         #[cfg(feature="coordinated-financial-workflow-v1")]
         witness_outbound: [AtomicU8::new(PENDING),AtomicU8::new(PENDING)],
         #[cfg(feature = "coordinated-financial-workflow-v1")]
@@ -264,7 +264,7 @@ pub struct SignerFinancialOriginV1 {
 impl SignerFinancialOriginV1 {
     pub(super) fn from_signer(leaf: LeafCustody, birth: SignerBirthContext) -> Result<Self> {
         let target=Target::from_role(leaf.origin.role())?;
-        let core=Arc::new(Core {phase:Phases::new(),
+        let core=Arc::new(Core {retired_roots:std::sync::atomic::AtomicU32::new(0),phase:Phases::new(),
             #[cfg(feature="coordinated-financial-workflow-v1")]
             witness_outbound: [AtomicU8::new(PENDING),AtomicU8::new(PENDING)],
             #[cfg(feature = "coordinated-financial-workflow-v1")]

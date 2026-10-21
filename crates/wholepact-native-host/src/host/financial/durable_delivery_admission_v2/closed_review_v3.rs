@@ -9,6 +9,9 @@ use wholepact_signer::authority_bridge::durable_review_ipc_v3::{PreparedDurableR
 #[cfg(feature = "coordinated-financial-workflow-v1")]
 #[path = "closed_review_v3/retained_result_v1.rs"]
 mod retained_result_v1;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+#[path = "closed_review_v3/owner_workflow_wait_v1.rs"]
+mod owner_workflow_wait_v1;
 
 #[derive(Serialize)]
 pub(in crate::host) struct OriginalDeliveryExportV3 {

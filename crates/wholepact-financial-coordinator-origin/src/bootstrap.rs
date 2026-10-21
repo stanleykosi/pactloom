@@ -105,6 +105,10 @@ impl CoordinatorOriginV1 {
 }
 
 pub struct HostOriginV1 {
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    lifecycle_owner:crate::host_interstage::HostLifecycleOwner,
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    foreground_issued:bool,
     // Declaration order is intentional: invalidate before child/channel drops.
     #[cfg(feature = "common-image-fork-provider")]
     verifier_custody: Option<crate::fork_signer::HostVerifierCustody>,
@@ -121,6 +125,18 @@ pub struct HostOriginV1 {
     clocks: PhaseDeadlinesV1,
 }
 impl HostOriginV1 {
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub fn take_financial_foreground(&mut self)->Result<crate::HostFinancialForegroundV1>{
+        if self.foreground_issued{return Err(rejected("original Host foreground already claimed"));}
+        self.foreground_issued=true;
+        let controller=crate::HostFinancialForegroundV1::from_actual_host(self.workflow_lifecycle());
+        self.continue_check()?;Ok(controller)
+    }
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn workflow_lifecycle(&self)->std::sync::Arc<crate::host_interstage::HostLifecycle>{
+        std::sync::Arc::clone(&self.lifecycle_owner.0)
+    }
+
     /// One actual H-only handoff. These owners add restrictions to real TTY
     /// consent; neither is a native decision or a source/effect capability.
     #[cfg(feature = "coordinated-financial-workflow-v1")]
@@ -299,10 +315,26 @@ impl CancelOnlyWitnessOriginV1 {
 /// Sole C-owned original tree. A GUI driver may move this owner after the
 /// complete inert barrier; it cannot clone/reconstruct children or their origin.
 pub(super) struct InertTreeV1 {
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    retired:[bool;ROOT_CHILDREN],
     children: [Option<DirectChild>; ROOT_CHILDREN],
     _image: PinnedCommonImageV1,
 }
 impl InertTreeV1 {
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn take_witness_retirement(&mut self,target:crate::SignerContinueRoleV1,instance:String,core:std::sync::Arc<crate::signer_continue_state::Core>)->Result<OwnedWitnessRetirement>{
+        let role=crate::financial_witness_channel::role_for(target);
+        let index=self.children.iter().position(|c|c.as_ref().is_some_and(|c|c.role()==role)).ok_or_else(||rejected("retirement original child missing"))?;
+        if self.retired[index]||!crate::signer_continue_state::hash(&instance){return Err(rejected("retirement reused"));}
+        let child=self.children[index].take().ok_or_else(||rejected("retirement child consumed"))?;
+        Ok(OwnedWitnessRetirement{core,child:Some(child),index,instance,phase:0})
+    }
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn install_retirement(&mut self,proof:&RetiredWitness)->Result<()>{
+        if proof.index==0||proof.index>=ROOT_CHILDREN||self.children[proof.index].is_some()||self.retired[proof.index]{return Err(rejected("retirement tree proof mismatch"));}
+        self.retired[proof.index]=true;Ok(())
+    }
+
     #[cfg(feature="coordinated-financial-workflow-v1")]
     pub(super) fn financial_witness(&self,target:crate::SignerContinueRoleV1)->Result<&DirectChild>{
         let role=crate::financial_witness_channel::role_for(target);
@@ -344,7 +376,11 @@ impl InertTreeV1 {
         for child in self.children.iter().flatten() { child.send(Message::Stop, deadline)?; }
         for child in self.children.iter().flatten() { child.receive(Message::Stopped, deadline)?; }
         for child in self.children.iter().flatten() { child.send(Message::Exit, deadline)?; }
-        for child in &mut self.children {
+        for (index,child) in self.children.iter_mut().enumerate() {
+            #[cfg(feature="coordinated-financial-workflow-v1")]
+            if child.is_none()&&self.retired[index]{continue;}
+            #[cfg(not(feature="coordinated-financial-workflow-v1"))]
+            let _=index;
             child.take().ok_or_else(|| rejected("fixed child missing"))?.finish(deadline)?;
         }
         Ok(())
@@ -476,7 +512,9 @@ pub fn bootstrap_common_image_v1() -> Result<BootstrappedRoleV1> {
         barrier.released(index)?;
     }
     barrier.finish_inert_release()?;
-    let tree = InertTreeV1 { children, _image: image };
+    let tree = InertTreeV1 { children, _image: image,
+        #[cfg(feature="coordinated-financial-workflow-v1")] retired:[false;ROOT_CHILDREN],
+    };
     Ok(BootstrappedRoleV1::Coordinator(CoordinatorOriginV1 {
         #[cfg(feature = "coordinated-financial-workflow-v1")]
         host_restriction,
@@ -542,7 +580,7 @@ fn prepare_host(origin: ForkOriginV1, clocks: PhaseDeadlinesV1,
     #[cfg(feature = "coordinated-financial-workflow-v1")]
     let host_terminal = host_terminal.into_host_after_signer_forks(&origin, &signers)?;
     #[cfg(feature = "coordinated-financial-workflow-v1")]
-    let host_restriction = host_restriction.into_host(&origin)?;
+    let (host_restriction,lifecycle_owner) = host_restriction.into_host(&origin)?;
     for signer in signers.iter().flatten() { signer.receive(Message::Prepared, deadline)?; }
     for signer in signers.iter().flatten() { signer.check_alive()?; }
     #[cfg(wholepact_bootstrap_ci)]
@@ -562,6 +600,10 @@ fn prepare_host(origin: ForkOriginV1, clocks: PhaseDeadlinesV1,
     crate::delivery_observer::initialize(Role::Host, origin.observed_original_parent(), clocks.session,
         signers.iter().flatten().map(DirectChild::observed_binding).collect());
     Ok(BootstrappedRoleV1::Host(HostOriginV1 {
+        #[cfg(feature="coordinated-financial-workflow-v1")]
+        lifecycle_owner,
+        #[cfg(feature="coordinated-financial-workflow-v1")]
+        foreground_issued:false,
         #[cfg(feature = "common-image-fork-provider")]
         verifier_custody: None,
         #[cfg(feature = "common-image-fork-provider")]
@@ -579,6 +621,8 @@ fn prepare_host(origin: ForkOriginV1, clocks: PhaseDeadlinesV1,
 pub(super) fn finish_host(host: HostOriginV1) -> Result<()> { finish_host_capped(host, None) }
 
 pub(super) fn finish_host_capped(host: HostOriginV1, retained_cleanup: Option<Instant>) -> Result<()> {
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    host.lifecycle_owner.0.poison();
     #[cfg(feature = "common-image-fork-provider")]
     let mut host = host;
     // This terminal role method is not a concurrent provider-service monitor.
@@ -821,3 +865,34 @@ mod tests {
         assert!(gate.decide_release().is_err());
     }
 }
+
+#[cfg(feature="coordinated-financial-workflow-v1")]
+pub(super) struct RetiredWitness{index:usize,instance:String}
+#[cfg(feature="coordinated-financial-workflow-v1")]
+impl RetiredWitness{pub(super) fn index(&self)->usize{self.index} pub(super) fn instance(&self)->&str{&self.instance}}
+#[cfg(feature="coordinated-financial-workflow-v1")]
+pub(super) struct OwnedWitnessRetirement{core:std::sync::Arc<crate::signer_continue_state::Core>,child:Option<DirectChild>,index:usize,instance:String,phase:u8}
+#[cfg(feature="coordinated-financial-workflow-v1")]
+impl OwnedWitnessRetirement{
+    pub(super) fn index(&self)->usize{self.index}
+    pub(super) fn advance(&mut self,deadline:Instant)->Result<Option<RetiredWitness>>{
+        let child=self.child.as_mut().ok_or_else(||rejected("retirement owner consumed"))?;
+        match self.phase{
+            0=>if child.retirement_send(Message::Stop,deadline)?{self.phase=1;},
+            1=>if child.retirement_stopped(deadline)?{self.phase=2;},
+            2=>if child.retirement_send(Message::Exit,deadline)?{self.phase=3;},
+            3=>if child.retirement_try_reap(deadline)?{
+                // Actual endpoint and sole reaper descriptor close BEFORE proof.
+                drop(self.child.take());self.phase=4;return Ok(Some(RetiredWitness{index:self.index,instance:self.instance.clone()}));
+            },
+            _=>return Err(rejected("retirement proof already consumed")),
+        }Ok(None)
+    }
+}
+
+#[cfg(feature="coordinated-financial-workflow-v1")]
+impl Drop for OwnedWitnessRetirement{fn drop(&mut self){
+    // Error propagation must publish shared-first R BEFORE DirectChild Drop
+    // can enter its honest potentially blocking kill/reap fallback.
+    if self.child.is_some(){self.core.phase.revoke();}
+}}

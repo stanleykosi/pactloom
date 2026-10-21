@@ -113,7 +113,17 @@ impl WitnessFinancialContinuationOriginV1 {
     fn send(&self,p:&Packet)->Result<()>{self.transport()?;
         self.leaf.as_ref().ok_or_else(||rejected("financial Witness custody consumed"))?.origin.financial_witness_send(p)}
     fn identity(&self,c:&str,s:&str)->bool{self.coordinator.as_ref().is_some_and(|(a,b)|a==c&&b==s)}
-    fn first_cleanup(&mut self)->Result<()>{if self.cleanup.is_none(){self.cleanup=Some(self.core.clocks.first_cleanup_ceiling(Instant::now())?);}Ok(())}
+    pub fn retain_cleanup_deadline(&mut self, original:Instant)->Result<Instant>{
+        let retained=self.core.clocks.retain_cleanup(self.cleanup,original,Instant::now())?;
+        self.cleanup=Some(retained);Ok(retained)
+    }
+    /// Reads only the already established cutoff, even after actor/channel loss.
+    pub fn original_cleanup_deadline(&self)->Result<Instant>{
+        self.cleanup.ok_or_else(||rejected("financial Witness cleanup not started"))
+    }
+    fn first_cleanup(&mut self)->Result<()>{
+        self.retain_cleanup_deadline(self.core.clocks.hard_cleanup())?;Ok(())
+    }
     pub fn try_receive(&mut self)->Result<Option<FinancialWitnessRequestV1>>{
         let result=self.receive_inner();if result.is_err(){self.core.close();}result
     }
@@ -215,8 +225,10 @@ impl WitnessFinancialContinuationOriginV1 {
     /// namespace, TLS and listener custody. This observation itself proves none.
     pub fn send_disposed(&mut self)->Result<()>{
         if self.disposed||self.review.is_some()&&!self.outcome||self.review.is_none()&&!self.failed&&!self.cancel_seen{return Err(rejected("financial Witness disposal phase"));}
+        self.first_cleanup()?;
+        let cleanup_ceiling_ms=self.core.clocks.cleanup_offset(self.original_cleanup_deadline()?)?;
         let(c,s)=self.coordinator.as_ref().ok_or_else(||rejected("financial Witness disposal identity"))?;
-        self.send(&Packet::Disposed{coordinator:c.clone(),session:s.clone()})?;self.disposed=true;Ok(())
+        self.send(&Packet::Disposed{coordinator:c.clone(),session:s.clone(),cleanup_ceiling_ms})?;self.disposed=true;Ok(())
     }
     pub fn send_purpose_closed(&mut self)->Result<()>{
         if !self.close_seen||self.closed||!self.disposed{return Err(rejected("financial Witness grammar not closed"));}

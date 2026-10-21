@@ -292,6 +292,11 @@ pub(crate) fn original_coordinated_session_ceiling() -> Result<std::time::Instan
     coordinated_host_v1::original_session_ceiling()
 }
 
+#[cfg(all(feature = "coordinated-financial-workflow-v1", target_os = "linux"))]
+pub(crate) fn fail_original_coordinator_restriction() {
+    coordinated_host_v1::fail_closed();
+}
+
 pub(crate) fn coordinated_restriction_required() -> bool {
     #[cfg(all(feature = "coordinated-financial-workflow-v1", target_os = "linux"))]
     return coordinated_host_v1::required();

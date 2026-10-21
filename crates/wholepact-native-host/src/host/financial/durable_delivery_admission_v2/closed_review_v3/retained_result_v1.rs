@@ -12,6 +12,12 @@ pub(super) struct HostMaterialDeliveryRestrictionV1 {
     bounds: crate::terminal::OriginalPromptBoundsV1,
 }
 impl HostMaterialDeliveryRestrictionV1 {
+    /// Only for the sealed no-effect interstage wait. This cached clock check
+    /// cannot authorize source/TTY/network work or bypass ordinary park denial.
+    pub(super) fn check_parked_wait_bounds(&self) -> Result<()> {
+        self.bounds.check()
+    }
+
     // Called once only from actual source-backed V3 recipient preparation,
     // before any pairing prompt/provider IPC. Never accepts a caller duration.
     pub(super) fn capture(

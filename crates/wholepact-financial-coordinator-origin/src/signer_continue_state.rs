@@ -10,6 +10,7 @@ pub(super) const ARMED: u8 = 3;
 pub(super) const READY: u8 = 4;
 pub(super) const ADMITTED: u8 = 5;
 const REVOKED: u32 = 1 << 31;
+const QUIESCENT:u32=1<<30;
 pub(super) const PENDING: u8 = 0;
 pub(super) const SENT: u8 = 1;
 pub(super) const ABANDONED: u8 = 2;
@@ -35,6 +36,23 @@ impl Phases {
     }
     pub(super) fn phase(&self, slot: usize) -> u8 { ((self.word.load(Ordering::Acquire) >> (slot * 8)) & 0xff) as u8 }
     pub(super) fn revoked(&self) -> bool { self.word.load(Ordering::Acquire) & REVOKED != 0 }
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn quiescent(&self)->bool{self.word.load(Ordering::Acquire)&QUIESCENT!=0}
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn begin_quiescence(&self,signers:[u8;2],witnesses:[u8;2])->Result<()>{
+        let mut old=self.word.load(Ordering::Acquire);
+        loop{
+            if old&(REVOKED|QUIESCENT)!=0||(0..2).any(|i|((old>>(i*8))&255)!=signers[i] as u32||((old>>(16+i*4))&15)!=witnesses[i] as u32){
+                return Err(rejected("retirement quiescence state changed"));}
+            match self.word.compare_exchange_weak(old,old|QUIESCENT,Ordering::AcqRel,Ordering::Acquire){Ok(_)=>return Ok(()),Err(actual)=>old=actual}
+        }
+    }
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn finish_quiescence(&self)->Result<()>{
+        let mut old=self.word.load(Ordering::Acquire);
+        loop{if old&REVOKED!=0||old&QUIESCENT==0{return Err(rejected("retirement cannot resume restricted workflow"));}
+            match self.word.compare_exchange_weak(old,old&!QUIESCENT,Ordering::AcqRel,Ordering::Acquire){Ok(_)=>return Ok(()),Err(actual)=>old=actual}}
+    }
     pub(super) fn revoke(&self) {
         // EVERY local C restriction path, including errors and Drop, reaches
         // this ordering. Host observes R before local admission can observe R.
@@ -86,7 +104,7 @@ impl Phases {
         if slot>1||from>15||to>15{return Err(rejected("not a fixed financial Witness phase"));}
         let shift=16+slot*4;let mut old=self.word.load(Ordering::Acquire);
         loop{
-            if old&REVOKED!=0||((old>>shift)&0xf)!=from as u32{return Err(rejected("financial Witness phase consumed or restricted"));}
+            if old&(REVOKED|QUIESCENT)!=0||((old>>shift)&0xf)!=from as u32{return Err(rejected("financial Witness phase consumed or restricted"));}
             let new=(old&!(0xf<<shift))|((to as u32)<<shift);
             match self.word.compare_exchange_weak(old,new,Ordering::AcqRel,Ordering::Acquire){Ok(_)=>return Ok(()),Err(actual)=>old=actual}
         }
@@ -96,7 +114,7 @@ impl Phases {
         let shift = slot * 8;
         let mut old = self.word.load(Ordering::Acquire);
         loop {
-            if old & REVOKED != 0 || ((old >> shift) & 0xff) != from as u32 {
+            if old & (REVOKED|QUIESCENT) != 0 || ((old >> shift) & 0xff) != from as u32 {
                 return Err(rejected("Continue slot consumed or revoked"));
             }
             let new = (old & !(0xff << shift)) | ((to as u32) << shift);
@@ -144,6 +162,7 @@ pub(super) struct Core {
     pub(super) signer_restriction: Option<crate::host_restriction::SignerSharedRestrictionV1>,
     pub(super) peer: CheckedPeer,
     pub(super) roots: Vec<OwnedFd>,
+    pub(super) retired_roots:AtomicU32,
     pub(super) coordinator: Option<PeerLifetime>,
     pub(super) owner_pid: libc::pid_t,
     pub(super) owner_uid: libc::uid_t,
@@ -161,7 +180,9 @@ impl Core {
                 || unsafe { libc::geteuid() } != self.owner_uid
             { return Err(rejected("original Continue actor custody lost")); }
             self.peer.check()?;
-            for fd in &self.roots { check_pidfd(fd)?; }
+            for (i,fd) in self.roots.iter().enumerate() {
+                if self.retired_roots.load(Ordering::Acquire)&(1<<i)==0{check_pidfd(fd)?;}
+            }
             if let Some(c) = &self.coordinator { c.check_alive()?; }
             Ok(())
         })();
@@ -175,13 +196,29 @@ impl Core {
         let result = (|| {
             self.check()?;
             crate::channel::require_time(self.session)?;
-            if self.phase.revoked() { return Err(rejected("original workflow restricted")); }
+            if self.phase.revoked()||self.phase.quiescent() { return Err(rejected("original workflow restricted or quiescent")); }
             // Last sample uses the original shared cell, not a queued Cancel.
             if let Some(reader) = &self.signer_restriction { reader.check_current()?; }
             Ok(())
         })();
         if result.is_err() { self.phase.revoke(); }
         result
+    }
+    /// Only the exclusive private retirement owner calls this while target
+    /// exit is expected. Ordinary Core.check NEVER consults an in-flight skip.
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn check_retirement_other_roots(&self,index:usize)->Result<()>{
+        if index==0||index>=self.roots.len()||!self.alive.load(Ordering::Acquire)
+            ||unsafe{libc::getpid()}!=self.owner_pid||unsafe{libc::geteuid()}!=self.owner_uid
+            ||!self.phase.quiescent()||self.phase.revoked(){return Err(rejected("invalid exclusive retirement custody"));}
+        self.peer.check()?;crate::channel::require_time(self.session)?;
+        for(i,fd)in self.roots.iter().enumerate(){if i!=index&&self.retired_roots.load(Ordering::Acquire)&(1<<i)==0{check_pidfd(fd)?;}}
+        if let Some(c)=&self.coordinator{c.check_alive()?;}Ok(())
+    }
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn install_retired(&self,proof:&crate::bootstrap::RetiredWitness)->Result<()>{
+        let index=proof.index();self.check_retirement_other_roots(index)?;
+        if self.retired_roots.fetch_or(1<<index,Ordering::AcqRel)&(1<<index)!=0{return Err(rejected("retirement tombstone duplicated"));}Ok(())
     }
     pub(super) fn close(&self) {
         self.phase.revoke();
@@ -221,6 +258,25 @@ pub(super) fn original_deadline(epoch: Instant, ms: u64, ceiling: Instant, now: 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    #[test]
+    fn retirement_quiescence_blocks_all_native_admission_and_never_clears_revoke(){
+        let phase=Phases::new();phase.step(0,0,36).unwrap();phase.step(1,0,22).unwrap();phase.witness_step(0,0,6).unwrap();
+        phase.begin_quiescence([36,22],[6,0]).unwrap();assert!(phase.quiescent());
+        assert!(phase.step(1,22,23).is_err());assert!(phase.witness_step(1,0,1).is_err());
+        phase.revoke();assert!(phase.finish_quiescence().is_err());assert!(phase.revoked());assert!(phase.quiescent());
+        assert_eq!(phase.phase(0),36);assert_eq!(phase.witness_phase(0),6);
+    }
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    #[test]
+    fn retirement_pause_requires_exact_snapshot_and_successful_resume_preserves_phases(){
+        let phase=Phases::new();phase.step(0,0,36).unwrap();
+        assert!(phase.begin_quiescence([35,0],[0,0]).is_err());assert!(!phase.quiescent());
+        phase.begin_quiescence([36,0],[0,0]).unwrap();assert!(phase.begin_quiescence([36,0],[0,0]).is_err());
+        phase.finish_quiescence().unwrap();assert_eq!(phase.phase(0),36);assert!(!phase.quiescent());assert!(!phase.revoked());
+        assert!(phase.finish_quiescence().is_err());
+    }
+
     #[test]
     fn global_revoke_and_either_final_admission_share_one_atomic_order() {
         let state = Phases::new();

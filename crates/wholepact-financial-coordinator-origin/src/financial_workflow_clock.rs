@@ -49,6 +49,29 @@ impl FullWorkflowClocksV1 {
         if deadline <= now { return Err(rejected("workflow original ceiling elapsed")); }
         Ok(deadline)
     }
+    /// Restriction-only retention. FIRST capture is also capped by the fixed
+    /// local cleanup budget; repeated calls can only shorten the same cutoff.
+    pub(super) fn retain_cleanup(self, retained: Option<Instant>, supplied: Instant, now: Instant) -> Result<Instant> {
+        let initial = match retained { Some(old) => old, None => self.first_cleanup_ceiling(now)? };
+        let result = initial.min(supplied).min(self.hard_cleanup);
+        if result <= now { return Err(rejected("original workflow cleanup elapsed")); }
+        Ok(result)
+    }
+    pub(super) fn cleanup_offset(self, original: Instant) -> Result<u64> {
+        let ceiling = original.min(self.hard_cleanup);
+        let ms = u64::try_from(ceiling.checked_duration_since(self.epoch)
+            .ok_or_else(|| rejected("cleanup offset underflow"))?.as_millis())
+            .map_err(|_| rejected("cleanup offset overflow"))?;
+        if ms == 0 || ms > SUPERVISION_MS + 5_000 { return Err(rejected("invalid cleanup offset")); }
+        Ok(ms)
+    }
+    pub(super) fn received_cleanup(self, millis: u64, now: Instant) -> Result<Instant> {
+        if millis == 0 || millis > SUPERVISION_MS + 5_000 { return Err(rejected("invalid original cleanup offset")); }
+        let cutoff = self.epoch.checked_add(Duration::from_millis(millis))
+            .ok_or_else(|| rejected("cleanup offset overflow"))?.min(self.hard_cleanup);
+        if cutoff <= now { return Err(rejected("received original cleanup elapsed")); }
+        Ok(cutoff)
+    }
     /// A cleanup attempt may only shorten the original hard ceiling. The caller
     /// stores its FIRST returned cutoff; repeated traffic must not call again.
     pub(super) fn first_cleanup_ceiling(self, now: Instant) -> Result<Instant> {
@@ -104,4 +127,21 @@ mod tests {
         assert!(clocks.restrict_received(PROFILE, 21000, action, action).is_err());
         assert!(first > action); // Disposal time is not a surviving action lease.
     }
+    #[test]
+    fn original_cleanup_retention_never_renews_and_floor_only_crosses_edges() {
+        let epoch=Instant::now(); let c=FullWorkflowClocksV1::from_initial_epoch(epoch).unwrap();
+        let now=epoch+Duration::from_secs(20);
+        let first=c.retain_cleanup(None,c.hard_cleanup(),now).unwrap();
+        assert_eq!(first,now+Duration::from_secs(5));
+        let later=now+Duration::from_secs(2);
+        assert_eq!(c.retain_cleanup(Some(first),c.hard_cleanup(),later).unwrap(),first);
+        let shorter=first-Duration::from_micros(1);
+        let retained=c.retain_cleanup(Some(first),shorter,later).unwrap();
+        let wire=c.cleanup_offset(retained).unwrap();
+        assert!(c.received_cleanup(wire,later).unwrap()<=retained);
+        assert!(c.retain_cleanup(Some(first),c.hard_cleanup(),first).is_err());
+        assert!(c.received_cleanup(SUPERVISION_MS+5_001,epoch).is_err());
+        assert!(c.received_cleanup(0,epoch).is_err());
+    }
+
 }

@@ -78,8 +78,7 @@ fn run(origin: &mut WitnessFinancialContinuationOriginV1) -> io::Result<()> {
             interrupted = true;
         }
         if interrupted {
-            cleanup_deadline
-                .get_or_insert_with(|| (Instant::now() + Duration::from_secs(5)).min(hard_cleanup));
+            retain_original_cleanup(origin, &mut cleanup_deadline, hard_cleanup)?;
         }
         if Instant::now() >= hard_cleanup
             || cleanup_deadline.is_some_and(|end| Instant::now() >= end)
@@ -148,8 +147,7 @@ fn run(origin: &mut WitnessFinancialContinuationOriginV1) -> io::Result<()> {
             return Err(failure());
         }
         if interrupted {
-            cleanup_deadline
-                .get_or_insert_with(|| (Instant::now() + Duration::from_secs(5)).min(hard_cleanup));
+            retain_original_cleanup(origin, &mut cleanup_deadline, hard_cleanup)?;
         }
         // Transport only. Actual C A was already ordered in its native loop;
         // neither this monitor nor its dequeue/send manufactures approval.
@@ -191,6 +189,7 @@ fn run(origin: &mut WitnessFinancialContinuationOriginV1) -> io::Result<()> {
         }
         if !disposed && worker.as_ref().is_some_and(|worker| worker.is_finished()) {
             let result = worker.take().expect("finished sole worker").join();
+            retain_original_cleanup(origin, &mut cleanup_deadline, hard_cleanup)?;
             // Actual successful join, after all owned fields drop, is required
             // for the normal disposal acknowledgement. A panic never gets one.
             let result = match result {
@@ -223,10 +222,9 @@ fn run(origin: &mut WitnessFinancialContinuationOriginV1) -> io::Result<()> {
             }
             origin.send_disposed()?;
             disposed = true;
-            cleanup_deadline
-                .get_or_insert_with(|| (Instant::now() + Duration::from_secs(5)).min(hard_cleanup));
         }
         if !disposed && cancel_seen && !consumed {
+            retain_original_cleanup(origin, &mut cleanup_deadline, hard_cleanup)?;
             if communication_failed {
                 return Err(failure());
             }
@@ -238,6 +236,19 @@ fn run(origin: &mut WitnessFinancialContinuationOriginV1) -> io::Result<()> {
         thread::sleep(Duration::from_millis(5));
     }
 }
+// Only narrows the one actual role's original cleanup cutoff. This is not a
+// successful worker-disposal claim and cannot refresh an expired action.
+fn retain_original_cleanup(
+    origin: &mut WitnessFinancialContinuationOriginV1,
+    retained: &mut Option<Instant>,
+    hard_cleanup: Instant,
+) -> io::Result<()> {
+    let proposed = retained
+        .unwrap_or_else(|| (Instant::now() + Duration::from_secs(5)).min(hard_cleanup));
+    *retained = Some(origin.retain_cleanup_deadline(proposed)?);
+    Ok(())
+}
+
 /// Omit a private un-published ticket's correlation only. Never change the
 /// recorded effect classification or erase a committed outcome.
 fn outcome_for_original_wire(

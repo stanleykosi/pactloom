@@ -69,6 +69,10 @@ pub use financial_witness_origin::{WitnessFinancialContinuationOriginV1,Financia
 
 #[cfg(feature = "coordinated-financial-workflow-v1")]
 mod host_restriction;
+#[cfg(feature="coordinated-financial-workflow-v1")]
+mod host_interstage;
+#[cfg(feature="coordinated-financial-workflow-v1")]
+pub use host_interstage::{HostFinancialForegroundV1,HostFinancialInterstageWaitV1,HostWitnessRetirementGuardV1};
 #[cfg(feature = "coordinated-financial-workflow-v1")]
 mod host_terminal;
 #[cfg(feature = "coordinated-financial-workflow-v1")]
@@ -137,3 +141,6 @@ fn rejected(message: &'static str) -> std::io::Error {
 // It is never an origin, financial capability or production API.
 #[cfg(wholepact_bootstrap_ci)]
 pub fn record_process_exit_for_ci(code: i32) { ci::finished(code); }
+
+#[cfg(feature="coordinated-financial-workflow-v1")]
+pub use financial_workflow_origin::{CoordinatorWitnessRetirementTicketV1,CoordinatorWitnessRetirementOutboundV1,CoordinatorWitnessRetiredV1};
