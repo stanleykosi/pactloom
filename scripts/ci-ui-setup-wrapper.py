@@ -184,8 +184,9 @@ class FirstFailure:
     def __init__(self):
         self.value = None
 
-    def note(self, stage, code, boundary=None, outcome=None):
-        candidate = P.failure('fixture', stage, code, source_boundary=boundary, source_outcome=outcome)
+    def note(self, stage, code, boundary=None, outcome=None, observation=None):
+        candidate = P.failure('fixture', stage, code, source_boundary=boundary, source_outcome=outcome,
+                              setup_observation=observation)
         if self.value is None:
             self.value = candidate
         return self.value
@@ -212,6 +213,17 @@ def setup_line(line, first):
         require(re.fullmatch(rb'test result: ok\. 1 passed; 0 failed; 0 ignored; [0-9]+ measured; [0-9]+ filtered out; finished in [0-9.]+s', line) is not None, 'setup_count')
         return 'result'
     return None
+
+
+def validate_setup_result(status, counts, first):
+    # Closed numeric supervision evidence only. Never expose arbitrary child
+    # stdout, paths, panic text, keys or fixture data.
+    require(type(counts) is dict and set(counts) == {'ready', 'running', 'result'} and
+            all(number(counts[key], 0, 1) for key in counts) and
+            number(status, -64, 255), 'setup_output')
+    if status != 0 or counts != {'ready': 1, 'running': 1, 'result': 1}:
+        first.note('setup', 'setup_status', observation=dict(exit_status=status, **counts))
+        raise Rejected('setup_status')
 
 
 def run_setup(original, first):
@@ -244,7 +256,7 @@ def run_setup(original, first):
                         require(counts[kind] == 1, 'setup_count')
         require(not pending or setup_line(bytes(pending), first) is None, 'setup_output')
         status = process.wait(timeout=max(.001, (original - time.monotonic_ns()) / 1e9))
-        require(status == 0 and counts == {'ready': 1, 'running': 1, 'result': 1}, 'setup_status')
+        validate_setup_result(status, counts, first)
         namespace_empty_except((1, os.getpid()))
     except BaseException as error:
         first.note('setup', error.code if isinstance(error, (Rejected, P.Rejected)) else 'internal')
@@ -287,6 +299,26 @@ def validate_received(value, fds, original):
     return value
 
 
+def validate_error_packet(value):
+    require(type(value) is dict and set(value) in (ERROR_KEYS, ERROR_KEYS | {'setup_observation'}) and
+            number(value['version'], 1, 1) and value['kind'] == 'error', 'custody_packet')
+    projected = P.failure('fixture', value['stage'], value['code'],
+        source_boundary=value['source_boundary'], source_outcome=value['source_outcome'])
+    if 'setup_observation' in value:
+        projected['setup_observation'] = value['setup_observation']
+    return P.validate_failure(projected, 'fixture')
+
+
+def error_packet(value):
+    P.validate_failure(value, 'fixture')
+    packet = dict(version=1, kind='error', stage=value['stage'], code=value['code'],
+        source_boundary=value['source_boundary'], source_outcome=value['source_outcome'])
+    if 'setup_observation' in value:
+        packet['setup_observation'] = value['setup_observation']
+    validate_error_packet(packet)
+    return packet
+
+
 def receive_custody(edge, wrapper, original):
     # Root must also set PASSCRED before spawn, before a packet can queue.
     edge.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
@@ -319,10 +351,8 @@ def receive_custody(edge, wrapper, original):
                 'custody_credentials')
         value = loads(data)
         if type(value) is dict and value.get('kind') == 'error':
-            require(not fds and rights_records == 0 and set(value) == ERROR_KEYS and
-                    number(value['version'], 1, 1), 'custody_packet')
-            P.failure('fixture', value['stage'], value['code'],
-                source_boundary=value['source_boundary'], source_outcome=value['source_outcome'])
+            require(not fds and rights_records == 0, 'custody_packet')
+            validate_error_packet(value)
             return value, []
         require(rights_records == 1, 'custody_rights')
         validate_received(value, fds, original)
@@ -364,8 +394,7 @@ def wrapper_main(fd, original, started):
         first.note('identity' if code.startswith('runtime_') else 'setup', code)
         if not attempted:
             value = first.value
-            packet = dict(version=1, kind='error', stage=value['stage'], code=value['code'],
-                source_boundary=value['source_boundary'], source_outcome=value['source_outcome'])
+            packet = error_packet(value)
             attempted = True
             try:
                 # A short supervision-only ACK grace keeps this exact sender

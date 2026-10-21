@@ -1127,11 +1127,18 @@ def loads(raw, limit=8192):
 
 
 def validate_failure(value, mode):
-    require(mode in MODES and type(value) is dict and set(value) == FAILURE_KEYS)
+    require(mode in MODES and type(value) is dict and
+            set(value) in (FAILURE_KEYS, FAILURE_KEYS | {'setup_observation'}))
     require(type(value['schema_version']) is int and value['schema_version'] == 1 and
             value['mode'] == mode and type(value['stage']) is str and value['stage'] in STAGES and
             type(value['code']) is str and value['code'] in CODES)
     require(value['case'] in ((None, 'smoke') if mode == 'smoke' else (None, *CASES)))
+    observation = value.get('setup_observation')
+    if 'setup_observation' in value:
+        require(mode == 'fixture' and value['stage'] == 'setup' and value['code'] == 'setup_status')
+        require(type(observation) is dict and set(observation) == {'exit_status', 'ready', 'running', 'result'})
+        require(number(observation['exit_status'], -64, 255) and
+                all(number(observation[key], 0, 1) for key in ('ready', 'running', 'result')))
     boundary, outcome = value['source_boundary'], value['source_outcome']
     require((boundary is None and outcome is None) or
             (type(boundary) is str and boundary in SETUP_BOUNDARIES and
@@ -1148,10 +1155,12 @@ def validate_failure(value, mode):
 
 
 def failure(mode, stage, code, case=None, *, source_boundary=None,
-            source_outcome=None, delivery_stage=None, delivery_class=None):
+            source_outcome=None, delivery_stage=None, delivery_class=None, setup_observation=None):
     value = dict(schema_version=1, mode=mode, case=case, stage=stage, code=code,
                  source_boundary=source_boundary, source_outcome=source_outcome,
                  delivery_stage=delivery_stage, delivery_class=delivery_class)
+    if setup_observation is not None:
+        value['setup_observation'] = setup_observation
     return validate_failure(value, mode)
 
 

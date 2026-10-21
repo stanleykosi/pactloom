@@ -40,6 +40,16 @@ class PrerequisiteTests(unittest.TestCase):
         source = Path(M.__file__).read_text()
         self.assertIn('git("diff", "--no-renames", "--name-only", "-z", BASE, "HEAD")', source)
 
+    def test_setup_diagnostics_only_add_exact_nonbootstrap_paths(self):
+        additions = {'scripts/ci-ui-setup-wrapper.py', 'scripts/ci-ui-output.py',
+                     'scripts/ci-ui-container.py', 'scripts/tests/test_ci_ui_setup.py'}
+        self.assertTrue(additions <= M.ALLOWED)
+        self.assertEqual(len(M.ALLOWED), 11)
+        M.verify_paths(additions)
+        for path in ('scripts/ci-bootstrap-output.py', 'scripts/build-encrypted-storage-deps.sh',
+                     'crates/wholepact-native-host/src/lib.rs'):
+            with self.assertRaises(ValueError): M.verify_paths(additions | {path})
+
     def test_complete_nonallowlisted_tree_is_frozen(self):
         M.verify_paths(M.ALLOWED)
         for path in ('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml', 'scripts/ci-bootstrap-linux.sh',

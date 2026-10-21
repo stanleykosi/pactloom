@@ -141,6 +141,50 @@ class Custody(unittest.TestCase):
             S.setup_line(b'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s', S.FirstFailure())
         self.assertEqual(S.setup_line(('test ' + S.SETUP_SELECTOR + ' ... ').encode() + S.READY, S.FirstFailure()), 'ready')
 
+    def test_setup_status_preserves_exact_closed_exit_and_counts(self):
+        for status in (-9, -6, 101, 127, 0):
+            first = S.FirstFailure()
+            counts = dict(ready=0, running=int(status != 127), result=0)
+            with self.assertRaises(S.Rejected):
+                S.validate_setup_result(status, counts, first)
+            self.assertEqual(first.value['setup_observation'], dict(exit_status=status, **counts))
+            first.note('drain', 'cleanup_failed')
+            self.assertEqual(first.value['setup_observation']['exit_status'], status)
+
+    def test_setup_success_requires_all_markers_and_zero_exit(self):
+        first = S.FirstFailure()
+        S.validate_setup_result(0, dict(ready=1, running=1, result=1), first)
+        self.assertIsNone(first.value)
+        with self.assertRaises(S.Rejected):
+            S.validate_setup_result(101, dict(ready=1, running=1, result=1), first)
+
+    def test_setup_observation_rejects_private_text_and_invalid_ranges(self):
+        valid = dict(exit_status=101, ready=0, running=1, result=0)
+        for key, value in (('exit_status', 'private text'), ('exit_status', True),
+                           ('exit_status', -65), ('exit_status', 256), ('ready', 2), ('running', False)):
+            bad = dict(valid); bad[key] = value
+            with self.assertRaises(S.P.Rejected):
+                S.P.failure('fixture', 'setup', 'setup_status', setup_observation=bad)
+        for extra in ('path', 'stderr', 'secret'):
+            with self.assertRaises(S.P.Rejected):
+                S.P.failure('fixture', 'setup', 'setup_status', setup_observation={**valid, extra: 'private'})
+        with self.assertRaises(S.P.Rejected):
+            S.P.failure('fixture', 'append', 'setup_status', setup_observation=valid)
+
+    def test_setup_error_wire_preserves_absence_and_rejects_null(self):
+        value = S.P.failure('fixture', 'setup', 'internal')
+        packet = S.error_packet(value)
+        self.assertNotIn('setup_observation', packet)
+        self.assertEqual(S.validate_error_packet(packet), value)
+        with self.assertRaises(S.P.Rejected):
+            S.validate_error_packet({**packet, 'setup_observation': None})
+        value = S.P.failure('fixture', 'setup', 'setup_status',
+            setup_observation=dict(exit_status=-9, ready=0, running=1, result=0))
+        self.assertEqual(S.validate_error_packet(S.error_packet(value)), value)
+        packet = S.error_packet(value); packet['setup_observation'] = None
+        with self.assertRaises(S.P.Rejected):
+            S.validate_error_packet(packet)
+
     def test_source_enum_allowlists_exact(self):
         root = pathlib.Path(__file__).parents[2]
         path = root / 'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3_qualification/safe_diagnostics_v1.rs'
