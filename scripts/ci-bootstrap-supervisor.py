@@ -114,7 +114,9 @@ def exact_source(sha):
             'source', 'source_commit')
     require(checked(['git', 'status', '--porcelain', '--untracked-files=all'], 'source', limit=65536) == b'',
             'source', 'dirty_source')
-    require((HERE / 'qualification-gate-mode').read_bytes() == b'bootstrap\n', 'source', 'gate_mode')
+    # UI qualification runs this exact bootstrap prerequisite before its own gate.
+    require((HERE / 'qualification-gate-mode').read_bytes() in (b'bootstrap\n', b'ui\n'),
+            'source', 'gate_mode')
 
 
 def emit(kind, value):
@@ -122,7 +124,8 @@ def emit(kind, value):
 
 
 def compile_errors(raw):
-    sources = set(checked(['git', 'ls-files', '--', 'crates/wholepact-financial-coordinator'],
+    sources = set(checked(['git', 'ls-files', '--', 'crates/wholepact-financial-coordinator',
+                          'crates/wholepact-financial-coordinator-origin'],
                           'source', limit=65536).decode('ascii').splitlines())
     seen = set()
     for line in raw.splitlines():
