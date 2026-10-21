@@ -26,9 +26,13 @@ pub(super) fn run_before_runtime() -> Result<()> {
     // The trusted initial launcher must already provide a credential-free
     // environment/address space with no secret inherited input.
     if unsafe { libc::clearenv() } != 0 { return Err(std::io::Error::last_os_error()); }
+    #[cfg(wholepact_bootstrap_ci)]
+    crate::ci::initialize()?;
     let image = PinnedCommonImageV1::load_running_image()?;
     process::require_single_thread()?;
     let deadline = Instant::now() + BOOTSTRAP_BUDGET;
+    #[cfg(wholepact_bootstrap_ci)]
+    crate::ci::deadline(deadline)?;
     let mut children: [Option<DirectChild>; ROOT_CHILDREN] = std::array::from_fn(|_| None);
     match process::fork_edge(Role::Coordinator, Role::Host)? {
         Forked::Parent(host) => children[0] = Some(host),
@@ -51,6 +55,12 @@ pub(super) fn run_before_runtime() -> Result<()> {
             }
         }
     }
+    #[cfg(wholepact_bootstrap_ci)]
+    {
+        let mut fds = vec![0, 1, 2, image.ci_fd()];
+        for child in children.iter().flatten() { fds.extend(child.ci_descriptors()); }
+        crate::ci::ready(Role::Coordinator, fds, unsafe { libc::getppid() }, deadline)?;
+    }
     let mut barrier = InertBarrier::new();
     for (index, child) in children.iter().enumerate() {
         child.as_ref().ok_or_else(|| rejected("fixed child missing"))?.receive(Message::Prepared, deadline)?;
@@ -58,6 +68,8 @@ pub(super) fn run_before_runtime() -> Result<()> {
     }
     for child in children.iter().flatten() { child.check_alive()?; }
     barrier.decide_release()?;
+    #[cfg(wholepact_bootstrap_ci)]
+    crate::ci::release_decision()?;
     // Delivery is NOT atomic. Some inert children may ACK while a different
     // edge fails. Any error drops owned children; no successor authority exists.
     for child in children.iter().flatten() { child.send(Message::Release, deadline)?; }
@@ -77,6 +89,8 @@ pub(super) fn run_before_runtime() -> Result<()> {
 }
 
 fn run_host(origin: ForkOriginV1, deadline: Instant) -> Result<()> {
+    #[cfg(wholepact_bootstrap_ci)]
+    crate::ci::enter_role(Role::Host);
     if origin.role() != Role::Host { return Err(rejected("wrong host birth")); }
     verify_child_start(&origin)?;
     let mut signers: [Option<DirectChild>; 2] = std::array::from_fn(|_| None);
@@ -95,6 +109,13 @@ fn run_host(origin: ForkOriginV1, deadline: Instant) -> Result<()> {
     }
     for signer in signers.iter().flatten() { signer.receive(Message::Prepared, deadline)?; }
     for signer in signers.iter().flatten() { signer.check_alive()?; }
+    #[cfg(wholepact_bootstrap_ci)]
+    {
+        let mut fds = vec![0, 1, 2];
+        fds.extend(origin.ci_descriptors());
+        for signer in signers.iter().flatten() { fds.extend(signer.ci_descriptors()); }
+        crate::ci::ready(Role::Host, fds, origin.ci_parent_pid(), deadline)?;
+    }
     // This is subtree closure/preparedness, NOT readiness of any live service.
     origin.send(Message::Prepared, deadline)?;
     origin.receive(Message::Release, deadline)?;
@@ -114,10 +135,18 @@ fn run_host(origin: ForkOriginV1, deadline: Instant) -> Result<()> {
 }
 
 fn run_leaf(origin: ForkOriginV1, deadline: Instant) -> Result<()> {
+    #[cfg(wholepact_bootstrap_ci)]
+    crate::ci::enter_role(origin.role());
     if !matches!(origin.role(), Role::Signer1 | Role::Signer2) && !WITNESS_ROLES.contains(&origin.role()) {
         return Err(rejected("wrong leaf birth"));
     }
     verify_child_start(&origin)?;
+    #[cfg(wholepact_bootstrap_ci)]
+    {
+        let mut fds = vec![0, 1, 2];
+        fds.extend(origin.ci_descriptors());
+        crate::ci::ready(origin.role(), fds, origin.ci_parent_pid(), deadline)?;
+    }
     origin.send(Message::Prepared, deadline)?;
     origin.receive(Message::Release, deadline)?;
     origin.send(Message::Released, deadline)?;
@@ -138,7 +167,10 @@ fn verify_child_start(origin: &ForkOriginV1) -> Result<()> {
 fn child_exit(result: Result<()>) -> ! {
     // No unwinding/fallthrough into a copied parent spawn loop or main. Role
     // function locals already dropped (including H-owned signer reapers).
-    unsafe { libc::_exit(if result.is_ok() { 0 } else { 1 }) }
+    let code = if result.is_ok() { 0 } else { 1 };
+    #[cfg(wholepact_bootstrap_ci)]
+    crate::ci::finished(code);
+    unsafe { libc::_exit(code) }
 }
 
 fn harden_first() -> Result<()> {

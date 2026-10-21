@@ -151,3 +151,77 @@ work needs a reviewed minimal display allowlist and fresh genuine PTY ownership,
 not restored arbitrary ambient FDs/environment. The current all-env clearing and
 null stdio are intentionally only suitable for this inert milestone. Later live
 integration and installation remain distinct reviewed/authorized work.
+
+## Bootstrap-only disposable CI contract
+
+The production executable, built with the CI cfg entirely absent, must first
+independently complete its actual private startup and return 78. The fixed
+nonsecret pin is generated only in a disposable container against that runtime
+filesystem's actual executable metadata and digest. It is not a user or persistent
+installation. Product processes run with ordinary numeric UID, cleared effective,
+permitted, inheritable and ambient capabilities, no-new-privileges and no network.
+The setup harness's narrowly retained capabilities and exact bounding-set policy
+must be reported independently; setup privileges are not product privileges.
+
+Additional artifacts compile the same main/private fork path with only the
+`wholepact_bootstrap_ci` rustc cfg and a fixed compile-time
+`WHOLEPACT_BOOTSTRAP_CI_CASE`. They are never launched through the Rust test
+harness. The product build contains neither that module nor its diagnostic and
+fault hooks. No runtime argument, environment value or imported FD selects a
+role, origin or scenario. The CI module cannot construct ForkOriginV1 or
+DirectChild. This suite has no financial dependency, credential, source storage,
+service, GUI, PTY or live adapter.
+
+The fourteen finite variants are observed_success, wrong_role, wrong_version,
+oversized_packet, duplicate_prepared, rights, rights_truncated,
+later_wrong_sender, missing_credentials, coordinator_death, host_death,
+child_exit_after_released, timeout_before_prepared and stall_after_stopped.
+Wire faults replace one actual packet on Owner1BootstrapHistory's actual channel.
+The missing-credentials variant disables PASSCRED on that selected receiving
+endpoint only in its compiled negative image. The unchanged actual receiver must
+report missing credentials; a nonzero exit alone cannot pass any negative case.
+Rights variants compare the receiver's actual FD inventory immediately before
+recvmsg and after the real ancillary-rejection path. The truncated variant needs
+actual MSG_CTRUNC plus matching inventory, not a fabricated later truncation
+branch. CI's descriptor resource limit must accommodate temporary received rights
+above the normal 33-FD construction bound.
+
+The late-wrong-sender variant adds one explicitly adversarial test-only process,
+not an eighteenth role and not a new origin. After a genuine first exchange, it
+writes a Released packet through an inherited channel and exits. The original W
+records and reaps that exact attacker. A bounded cfg-only observation wait lets C
+wait for that reaping record before its unchanged recvmsg; this is negative-fixture
+scheduling, never origin or permission input. The real credentials comparison must
+then reject the attacker while the intended W's retained pidfd is still live.
+The child-exit-after-released variant proves eventual retained-peer death after
+prior valid exchange; scheduling does not guarantee that queued bytes were
+rejected before delivery, and no such stronger claim is made.
+
+Private bounded diagnostic records are written to per-PID files in the disposable
+evidence tmpfs. Each open closes before returning; no logger FD, mutex or thread
+survives a fork. Records have a monotonically increasing per-process sequence,
+finite event/role/case fields and a per-file 64-KiB cap. The verifier enforces at
+most 32 files, 256 records and 512 KiB total, rejecting malformed, missing,
+duplicate, out-of-order or unrecognized evidence. Actual PID/FD observations stay
+inside the container; only finite validated counts/phases/results are projected.
+Current PPID may become PID1 after parent death; the original parent binding is
+kept separately in birth/readiness/peer observations and is not reconstructed from
+that changed PPID.
+
+The observed-success variant requires the real 17-process graph, 16 parent birth
+records, the actual original H-to-S edges, exact C/H/leaf FD sets, all 96 real
+validated packet receives, one inert release decision, clean direct-child reaping
+and no adopted descendants. Negative cases require their exact injected fault
+and actual first rejecting boundary. Timeout and clean-drain failure use the same
+original 30-second ceiling, not a test-only deadline extension. An ordinary-UID
+PID1 test harness may collect normally adopted children after parent-death
+fixtures, but must distinguish that from product-owned reaping. No remaining
+live/zombie descendant is allowed before cleanup. Forced whole-container cleanup
+is an error, never a passing product-reap result. Kernel-uninterruptible tasks
+remain an external supervisor limit, not a claimed process-control guarantee.
+
+All native execution is restricted to the separately approved isolated CI run.
+Local work for this increment is source inspection, compilation and reviewed
+pure data tests only. Passing this gate would establish bootstrap/kernel facts,
+not installed-launch provenance against a hostile launcher, financial authority,
+human review, source readiness or normal-desktop payment readiness.

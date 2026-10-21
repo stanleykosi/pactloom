@@ -12,6 +12,8 @@ const PACKET_BYTES: usize = 8;
 
 pub(super) struct Channel(OwnedFd);
 impl Channel {
+    #[cfg(wholepact_bootstrap_ci)]
+    pub(super) fn ci_fd(&self) -> libc::c_int { self.0.as_raw_fd() }
     pub(super) fn pair() -> Result<(Self, Self)> {
         let mut pair = [-1; 2];
         if unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK, 0, pair.as_mut_ptr()) } != 0 {
@@ -30,8 +32,20 @@ impl Channel {
     pub(super) fn send(&self, message: Message, local_role: Role, peer: &PeerLifetime, deadline: Instant) -> Result<()> {
         self.wait_ready(libc::POLLOUT, peer, deadline)?;
         let bytes = packet(message, local_role);
-        let written = unsafe { libc::send(self.0.as_raw_fd(), bytes.as_ptr().cast(), bytes.len(), libc::MSG_NOSIGNAL | libc::MSG_DONTWAIT) };
-        if written != bytes.len() as isize { return Err(rejected("bootstrap packet send failed")); }
+        #[cfg(wholepact_bootstrap_ci)]
+        let injected = crate::ci::send_override(self.0.as_raw_fd(), message, local_role, &bytes, deadline)?;
+        #[cfg(not(wholepact_bootstrap_ci))]
+        let injected = false;
+        let written = if injected { bytes.len() as isize } else {
+            unsafe { libc::send(self.0.as_raw_fd(), bytes.as_ptr().cast(), bytes.len(), libc::MSG_NOSIGNAL | libc::MSG_DONTWAIT) }
+        };
+        if written != bytes.len() as isize {
+            #[cfg(wholepact_bootstrap_ci)]
+            crate::ci::reject_boundary("channel", "send_failed", Some(peer), None, None, false, None);
+            return Err(rejected("bootstrap packet send failed"));
+        }
+        #[cfg(wholepact_bootstrap_ci)]
+        crate::ci::after_send(message, local_role)?;
         require_time(deadline)?;
         // Exit is the sole terminal instruction. Its recipient may immediately
         // exit; we subsequently wait/reap that exact child rather than reject a
@@ -40,7 +54,11 @@ impl Channel {
         Ok(())
     }
     pub(super) fn receive(&self, expected: Message, peer: &PeerLifetime, deadline: Instant) -> Result<()> {
+        #[cfg(wholepact_bootstrap_ci)]
+        crate::ci::before_receive(expected, peer, deadline)?;
         self.wait_ready(libc::POLLIN, peer, deadline)?;
+        #[cfg(wholepact_bootstrap_ci)]
+        let fd_inventory_before = crate::ci::fd_inventory()?;
         let mut bytes = [0u8; PACKET_BYTES];
         let mut iov = libc::iovec { iov_base: bytes.as_mut_ptr().cast(), iov_len: bytes.len() };
         // usize alignment is sufficient for cmsghdr on supported Linux targets.
@@ -51,19 +69,55 @@ impl Channel {
         header.msg_control = control.as_mut_ptr().cast();
         header.msg_controllen = std::mem::size_of_val(&control);
         let read = unsafe { libc::recvmsg(self.0.as_raw_fd(), &mut header, libc::MSG_CMSG_CLOEXEC | libc::MSG_DONTWAIT) };
-        if read < 0 { return Err(std::io::Error::last_os_error()); }
+        if read < 0 {
+            let error = std::io::Error::last_os_error();
+            #[cfg(wholepact_bootstrap_ci)]
+            crate::ci::reject_boundary("channel", "receive_failed", Some(peer), None, None, false, None);
+            return Err(error);
+        }
         // Always inspect and close received rights, even if flags/length/payload
         // will fail. Rights cannot leak on the rejection path.
-        let credentials = inspect_ancillary(&header, &control)?;
+        let credentials = match inspect_ancillary(&header, &control) {
+            Ok(credentials) => credentials,
+            Err(error) => {
+                #[cfg(wholepact_bootstrap_ci)]
+                {
+                    let restored = crate::ci::fd_inventory().map(|fds| fds == fd_inventory_before).unwrap_or(false);
+                    crate::ci::reject_boundary("ancillary", "unexpected_control", Some(peer), None, None,
+                        header.msg_flags & libc::MSG_CTRUNC != 0, Some(restored));
+                }
+                return Err(error);
+            }
+        };
         if read != PACKET_BYTES as isize || header.msg_flags & (libc::MSG_TRUNC | libc::MSG_CTRUNC) != 0
             || bytes != packet(expected, peer.role())
-        { return Err(rejected("invalid bootstrap packet")); }
-        let credentials = credentials.ok_or_else(|| rejected("missing bootstrap sender credentials"))?;
+        {
+            #[cfg(wholepact_bootstrap_ci)]
+            crate::ci::reject_boundary("packet", "shape", Some(peer), credentials.as_ref().map(|c| c.pid), None,
+                header.msg_flags & libc::MSG_CTRUNC != 0, None);
+            return Err(rejected("invalid bootstrap packet"));
+        }
+        let credentials = match credentials {
+            Some(credentials) => credentials,
+            None => {
+                #[cfg(wholepact_bootstrap_ci)]
+                crate::ci::reject_boundary("credentials", "missing", Some(peer), None, None, false, None);
+                return Err(rejected("missing bootstrap sender credentials"));
+            }
+        };
         if credentials.pid != peer.pid() || credentials.uid != peer.uid() {
+            #[cfg(wholepact_bootstrap_ci)]
+            {
+                let alive = peer.check_alive().is_ok();
+                crate::ci::reject_boundary("credentials", "sender_mismatch", Some(peer), Some(credentials.pid), Some(alive), false, None);
+            }
             return Err(rejected("bootstrap sender is not original fork peer"));
         }
         require_time(deadline)?;
-        peer.check_alive()
+        peer.check_alive()?;
+        #[cfg(wholepact_bootstrap_ci)]
+        crate::ci::received(expected, peer, &credentials, deadline)?;
+        Ok(())
     }
     pub(super) fn shut_down(&self) {
         // Restriction only; caller owns this original edge. No copied sibling
@@ -87,6 +141,14 @@ impl Channel {
             }
             require_time(deadline)?;
             if polls[1].revents != 0 || polls[0].revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+                #[cfg(wholepact_bootstrap_ci)]
+                {
+                    if polls[1].revents != 0 {
+                        crate::ci::reject_boundary("peer_lifetime", "dead_or_poll_error", Some(peer), None, Some(false), false, None);
+                    } else {
+                        crate::ci::reject_boundary("channel", "lost", Some(peer), None, None, false, None);
+                    }
+                }
                 return Err(rejected("original bootstrap channel lost"));
             }
             if polls[0].revents & events != 0 { return peer.check_alive(); }
@@ -139,7 +201,11 @@ fn inspect_ancillary(header: &libc::msghdr, control: &[usize; 64]) -> Result<Opt
 }
 
 pub(super) fn require_time(deadline: Instant) -> Result<()> {
-    if Instant::now() >= deadline { return Err(rejected("original bootstrap deadline expired")); }
+    if Instant::now() >= deadline {
+        #[cfg(wholepact_bootstrap_ci)]
+        crate::ci::reject_boundary("deadline", "original_deadline_expired", None, None, None, false, None);
+        return Err(rejected("original bootstrap deadline expired"));
+    }
     Ok(())
 }
 

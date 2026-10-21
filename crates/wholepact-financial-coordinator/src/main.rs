@@ -3,6 +3,8 @@
 //! uninjected; checking the running image cannot undo earlier loader injection.
 #![deny(unsafe_op_in_unsafe_fn)]
 
+#[cfg(all(target_os = "linux", wholepact_bootstrap_ci))]
+mod ci;
 #[cfg(target_os = "linux")]
 mod bootstrap;
 #[cfg(target_os = "linux")]
@@ -29,5 +31,7 @@ fn main() {
     };
     #[cfg(not(target_os = "linux"))]
     let code = 78;
+    #[cfg(all(target_os = "linux", wholepact_bootstrap_ci))]
+    ci::finished(code);
     std::process::exit(code);
 }

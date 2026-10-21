@@ -31,6 +31,8 @@ pub(super) struct PinnedCommonImageV1 {
 }
 
 impl PinnedCommonImageV1 {
+    #[cfg(wholepact_bootstrap_ci)]
+    pub(super) fn ci_fd(&self) -> libc::c_int { self._image.as_raw_fd() }
     pub(super) fn load_running_image() -> Result<Self> {
         // Descriptor-relative traversal avoids checking one directory and then
         // opening an attacker-replaced different pathname component.

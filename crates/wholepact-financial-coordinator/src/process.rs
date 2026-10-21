@@ -58,7 +58,11 @@ impl PeerLifetime {
     pub(super) fn check_alive(&self) -> Result<()> {
         let mut poll = libc::pollfd { fd: self.fd(), events: libc::POLLIN, revents: 0 };
         let rc = unsafe { libc::poll(&mut poll, 1, 0) };
-        if rc != 0 || poll.revents != 0 { return Err(rejected("original process not live")); }
+        if rc != 0 || poll.revents != 0 {
+            #[cfg(wholepact_bootstrap_ci)]
+            crate::ci::reject_boundary("peer_lifetime", "dead_or_poll_error", Some(self), None, Some(false), false, None);
+            return Err(rejected("original process not live"));
+        }
         Ok(())
     }
 }
@@ -71,6 +75,10 @@ pub(super) struct ForkOriginV1 {
     channel: Channel,
 }
 impl ForkOriginV1 {
+    #[cfg(wholepact_bootstrap_ci)]
+    pub(super) fn ci_descriptors(&self) -> [libc::c_int; 2] { [self.channel.ci_fd(), self.parent.fd()] }
+    #[cfg(wholepact_bootstrap_ci)]
+    pub(super) fn ci_parent_pid(&self) -> libc::pid_t { self.parent.pid() }
     pub(super) fn role(&self) -> Role { self.local_role }
     pub(super) fn check_parent_alive(&self) -> Result<()> { self.parent.check_alive() }
     pub(super) fn send(&self, message: Message, deadline: Instant) -> Result<()> {
@@ -91,6 +99,8 @@ pub(super) struct DirectChild {
     reaped: bool,
 }
 impl DirectChild {
+    #[cfg(wholepact_bootstrap_ci)]
+    pub(super) fn ci_descriptors(&self) -> [libc::c_int; 2] { [self.channel.ci_fd(), self.peer.fd()] }
     pub(super) fn send(&self, message: Message, deadline: Instant) -> Result<()> {
         self.require_owner()?;
         self.channel.send(message, self.local_role, &self.peer, deadline)
@@ -108,7 +118,12 @@ impl DirectChild {
         let status = loop {
             let mut status = 0;
             let rc = unsafe { libc::waitpid(self.peer.pid, &mut status, libc::WNOHANG) };
-            if rc == self.peer.pid { self.reaped = true; break status; }
+            if rc == self.peer.pid {
+                self.reaped = true;
+                #[cfg(wholepact_bootstrap_ci)]
+                crate::ci::reaped(self.peer.role, self.peer.pid, status);
+                break status;
+            }
             if rc < 0 {
                 let error = std::io::Error::last_os_error();
                 if error.kind() == std::io::ErrorKind::Interrupted {
@@ -140,7 +155,12 @@ impl DirectChild {
         let mut status = 0;
         loop {
             let rc = unsafe { libc::waitpid(self.peer.pid, &mut status, 0) };
-            if rc == self.peer.pid { self.reaped = true; return Ok(status); }
+            if rc == self.peer.pid {
+                self.reaped = true;
+                #[cfg(wholepact_bootstrap_ci)]
+                crate::ci::reaped(self.peer.role, self.peer.pid, status);
+                return Ok(status);
+            }
             let error = std::io::Error::last_os_error();
             if error.kind() != std::io::ErrorKind::Interrupted { return Err(error); }
         }
@@ -176,6 +196,8 @@ pub(super) fn fork_edge(parent: Role, child: Role) -> Result<Forked> {
     // actual lifetime inherited by its child, not a peer-supplied PID.
     let parent_lifetime = PeerLifetime { pid: parent_pid, uid, pidfd: open_pidfd(parent_pid)?, role: parent };
     let (parent_channel, child_channel) = Channel::pair()?;
+    #[cfg(wholepact_bootstrap_ci)]
+    crate::ci::configure_pair(parent, child, parent_channel.ci_fd())?;
     // SAFETY: reachable only from private main's fixed, single-threaded startup
     // and its equally early H branch, before runtime/GUI/keys. No library caller.
     let pid = unsafe { libc::fork() };
@@ -207,6 +229,8 @@ pub(super) fn fork_edge(parent: Role, child: Role) -> Result<Forked> {
         channel: parent_channel, reaped: false,
     };
     owned.peer.check_alive()?;
+    #[cfg(wholepact_bootstrap_ci)]
+    crate::ci::birth(child, pid)?;
     Ok(Forked::Parent(owned))
 }
 
