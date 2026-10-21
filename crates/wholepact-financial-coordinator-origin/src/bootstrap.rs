@@ -240,6 +240,16 @@ pub struct InertWitnessOriginV1 {
     financial_restriction: Option<crate::host_restriction::WitnessSharedRestrictionV1>,
 }
 impl InertWitnessOriginV1 {
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub fn into_financial_history(self)->Result<crate::WitnessFinancialHistoryOriginV1>{
+        crate::WitnessFinancialHistoryOriginV1::from_leaf(self.leaf,self.financial_restriction.ok_or_else(||rejected("not original financial history custody"))?)
+    }
+
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub fn into_financial_signing(self)->Result<crate::WitnessFinancialSigningOriginV1>{
+        crate::WitnessFinancialSigningOriginV1::from_leaf(self.leaf,self.financial_restriction.ok_or_else(||rejected("not original financial signing custody"))?)
+    }
+
     #[cfg(feature = "coordinated-financial-workflow-v1")]
     pub fn into_financial_continuation(self) -> Result<crate::WitnessFinancialContinuationOriginV1> {
         crate::WitnessFinancialContinuationOriginV1::from_leaf(self.leaf,
@@ -322,8 +332,20 @@ pub(super) struct InertTreeV1 {
 }
 impl InertTreeV1 {
     #[cfg(feature="coordinated-financial-workflow-v1")]
-    pub(super) fn take_witness_retirement(&mut self,target:crate::SignerContinueRoleV1,instance:String,core:std::sync::Arc<crate::signer_continue_state::Core>)->Result<OwnedWitnessRetirement>{
-        let role=crate::financial_witness_channel::role_for(target);
+    pub(super) fn financial_history(&self,target:crate::SignerContinueRoleV1)->Result<&DirectChild>{
+        let role=crate::financial_history_channel::role_for(target);
+        self.children.iter().flatten().find(|c|c.role()==role).ok_or_else(||rejected("original financial history child missing"))
+    }
+
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn financial_signing(&self,target:crate::SignerContinueRoleV1)->Result<&DirectChild>{
+        let role=crate::financial_signing_channel::role_for(target);
+        self.children.iter().flatten().find(|c|c.role()==role).ok_or_else(||rejected("original financial signing child missing"))
+    }
+
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn take_witness_retirement(&mut self,target:crate::SignerContinueRoleV1,purpose:crate::host_interstage::RetirementPurpose,instance:String,core:std::sync::Arc<crate::signer_continue_state::Core>)->Result<OwnedWitnessRetirement>{
+        let role=purpose.role(target);
         let index=self.children.iter().position(|c|c.as_ref().is_some_and(|c|c.role()==role)).ok_or_else(||rejected("retirement original child missing"))?;
         if self.retired[index]||!crate::signer_continue_state::hash(&instance){return Err(rejected("retirement reused"));}
         let child=self.children[index].take().ok_or_else(||rejected("retirement child consumed"))?;
@@ -468,7 +490,8 @@ pub fn bootstrap_common_image_v1() -> Result<BootstrappedRoleV1> {
                 #[cfg(feature = "coordinated-financial-workflow-v1")]
                 drop(host_terminal);
                 #[cfg(feature = "coordinated-financial-workflow-v1")]
-                let financial_restriction = if crate::financial_witness_channel::is_financial_witness(origin.role()) {
+                let financial_restriction = if crate::financial_witness_channel::is_financial_witness(origin.role())
+                    ||crate::financial_history_channel::is_history_witness(origin.role())||crate::financial_signing_channel::is_signing_witness(origin.role()) {
                     Some(match host_restriction.into_financial_witness(&origin) { Ok(reader)=>reader, Err(error)=>child_exit(Err(error)) })
                 } else { drop(host_restriction); None };
                 drop(image);

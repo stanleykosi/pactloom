@@ -68,35 +68,68 @@ pub(crate) fn namespace_account_stamp(
 ) -> Result<(NamespaceJournalStamp, PendingBirthCommitRecord)> {
     namespace_account_stamp_profile(c, expected, OriginalHistoryProfileV1::Legacy)
 }
-pub(crate) fn namespace_financial_account_stamp_v1(c: &Connection, expected: &AccountPolicy) -> Result<(NamespaceJournalStamp, PendingBirthCommitRecord)> {
+pub(crate) fn namespace_financial_account_stamp_v1(
+    c: &Connection,
+    expected: &AccountPolicy,
+) -> Result<(NamespaceJournalStamp, PendingBirthCommitRecord)> {
     namespace_account_stamp_profile(c, expected, OriginalHistoryProfileV1::FinancialContinuation)
 }
-fn namespace_account_stamp_profile(c: &Connection, expected: &AccountPolicy, profile: OriginalHistoryProfileV1) -> Result<(NamespaceJournalStamp, PendingBirthCommitRecord)> {
-    let app: i64 = c.pragma_query_value(None, "application_id", |r| r.get(0))?;
-    let version: i64 = c.pragma_query_value(None, "user_version", |r| r.get(0))?;
+fn namespace_account_stamp_profile(
+    c: &Connection,
+    expected: &AccountPolicy,
+    profile: OriginalHistoryProfileV1,
+) -> Result<(NamespaceJournalStamp, PendingBirthCommitRecord)> {
+    namespace_account_stamp_profile_guarded(
+        c,
+        expected,
+        profile,
+        crate::journal::ReadGuardV1::legacy(),
+    )
+}
+
+fn namespace_account_stamp_profile_guarded(
+    c: &Connection,
+    expected: &AccountPolicy,
+    profile: OriginalHistoryProfileV1,
+    guard: crate::journal::ReadGuardV1<'_>,
+) -> Result<(NamespaceJournalStamp, PendingBirthCommitRecord)> {
+    let app: i64 = crate::journal::guarded_read!(
+        guard,
+        c.pragma_query_value(None, "application_id", |r| r.get(0))
+    )?;
+    let version: i64 = crate::journal::guarded_read!(
+        guard,
+        c.pragma_query_value(None, "user_version", |r| r.get(0))
+    )?;
     if app != APPLICATION_ID || !matches!(version, 5..=7) {
         return Err(AuthorityError::UnsupportedVersion);
     }
-    verify_schema(c)?;
+    verify_schema_guarded(c, guard)?;
     // Literal sqlite_ prefix; LIKE's underscore wildcard would hide sqliteX...
     // user tables. Bound schema work before the compiled-template comparison.
-    let count: u64 = c.query_row(
-        "SELECT count(*) FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*'",
-        [],
-        |r| r.get(0),
+    let count: u64 = crate::journal::guarded_read!(
+        guard,
+        c.query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*'",
+            [],
+            |r| r.get(0),
+        )
     )?;
     let schema_template = Connection::open_in_memory()?;
     schema_template.execute_batch(schema_for_version(version)?)?;
-    let wanted: u64 = schema_template.query_row(
-        "SELECT count(*) FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*'",
-        [],
-        |r| r.get(0),
+    let wanted: u64 = crate::journal::guarded_read!(
+        guard,
+        schema_template.query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*'",
+            [],
+            |r| r.get(0),
+        )
     )?;
     if count != wanted {
         return Err(AuthorityError::CorruptHistory);
     }
-    let ledger = load_profile(c, profile)?;
-    let birth = crate::pending_birth_storage::read(c, &ledger.policy)?
+    let ledger = load_profile_guarded(c, profile, guard)?;
+    let birth = crate::pending_birth_storage::read_guarded(c, &ledger.policy, guard)?
         .ok_or(AuthorityError::CorruptHistory)?;
     if &ledger.policy != expected
         || &birth.request.policy != expected
@@ -119,8 +152,8 @@ fn namespace_account_stamp_profile(c: &Connection, expected: &AccountPolicy, pro
                 "wholepact:namespace-archive-account-snapshot:v1",
                 &ledger.snapshot,
             )?,
-            quarantined: is_quarantined(c)?,
-            retained_state_digest: retained_state_digest(c)?,
+            quarantined: is_quarantined_guarded(c, guard)?,
+            retained_state_digest: retained_state_digest_guarded(c, guard)?,
         },
         birth,
     ))
@@ -227,15 +260,26 @@ pub(crate) fn open_namespace_archive_account(
 /// Only a domain-separated digest leaves this function; private cells are never
 /// serialized, logged or returned as historical presentation data.
 fn retained_state_digest(c: &Connection) -> Result<String> {
+    retained_state_digest_guarded(c, crate::journal::ReadGuardV1::legacy())
+}
+
+fn retained_state_digest_guarded(
+    c: &Connection,
+    guard: crate::journal::ReadGuardV1<'_>,
+) -> Result<String> {
     use rusqlite::types::ValueRef;
     let mut h = Sha256::new();
     h.update(b"wholepact:namespace-retained-state:v1\0");
-    let version: i64 = c.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    let version: i64 = crate::journal::guarded_read!(
+        guard,
+        c.pragma_query_value(None, "user_version", |r| r.get(0))
+    )?;
     h.update(version.to_be_bytes());
-    let mut tables = c.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT GLOB 'sqlite_*' ORDER BY name")?;
-    let names = tables
-        .query_map([], |r| r.get::<_, String>(0))?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut tables = crate::journal::guarded_read!(guard, c.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT GLOB 'sqlite_*' ORDER BY name"))?;
+    let names: Vec<_> = crate::journal::collect_guarded(
+        crate::journal::guarded_read!(guard, tables.query_map([], |r| r.get::<_, String>(0)))?,
+        guard,
+    )?;
     let mut total = 0u64;
     let mut row_count = 0u64;
     for name in names {
@@ -245,16 +289,21 @@ fn retained_state_digest(c: &Connection) -> Result<String> {
         h.update([0]);
         h.update((name.len() as u64).to_be_bytes());
         h.update(name.as_bytes());
-        let count = c
-            .prepare(&format!("SELECT * FROM {name} LIMIT 0"))?
-            .column_count();
+        let count = crate::journal::guarded_read!(
+            guard,
+            c.prepare(&format!("SELECT * FROM {name} LIMIT 0"))
+        )?
+        .column_count();
         let order = (1..=count)
             .map(|n| n.to_string())
             .collect::<Vec<_>>()
             .join(",");
-        let mut q = c.prepare(&format!("SELECT * FROM {name} ORDER BY {order}"))?;
-        let mut rows = q.query([])?;
-        while let Some(row) = rows.next()? {
+        let mut q = crate::journal::guarded_read!(
+            guard,
+            c.prepare(&format!("SELECT * FROM {name} ORDER BY {order}"))
+        )?;
+        let mut rows = crate::journal::guarded_read!(guard, q.query([]))?;
+        while let Some(row) = crate::journal::guarded_read!(guard, rows.next())? {
             row_count += 1;
             if row_count > 262_144 {
                 return Err(AuthorityError::Limit);
@@ -336,4 +385,24 @@ mod retained_stamp_tests {
             .unwrap();
         assert_eq!(events, 0);
     }
+}
+
+pub(crate) fn namespace_account_stamp_guarded(
+    c: &Connection,
+    expected: &AccountPolicy,
+    guard: ReadGuardV1<'_>,
+) -> Result<(NamespaceJournalStamp, PendingBirthCommitRecord)> {
+    namespace_account_stamp_profile_guarded(c, expected, OriginalHistoryProfileV1::Legacy, guard)
+}
+pub(crate) fn namespace_financial_account_stamp_guarded_v1(
+    c: &Connection,
+    expected: &AccountPolicy,
+    guard: ReadGuardV1<'_>,
+) -> Result<(NamespaceJournalStamp, PendingBirthCommitRecord)> {
+    namespace_account_stamp_profile_guarded(
+        c,
+        expected,
+        OriginalHistoryProfileV1::FinancialContinuation,
+        guard,
+    )
 }

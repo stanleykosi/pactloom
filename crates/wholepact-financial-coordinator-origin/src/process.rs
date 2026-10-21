@@ -85,6 +85,26 @@ pub(super) struct ForkOriginV1 {
     channel: Channel,
 }
 impl ForkOriginV1 {
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn financial_history_send(&self, packet: &crate::financial_history_channel::Packet)->Result<()>{
+        crate::financial_history_channel::send(self.channel.review_fd(), self.local_role, &self.parent, packet)
+    }
+
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn financial_history_receive(&self)->Result<Option<crate::financial_history_channel::Packet>>{
+        crate::financial_history_channel::try_receive(self.channel.review_fd(), self.local_role, &self.parent)
+    }
+
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn financial_signing_send(&self, packet: &crate::financial_signing_channel::Packet)->Result<()>{
+        crate::financial_signing_channel::send(self.channel.review_fd(), self.local_role, &self.parent, packet)
+    }
+
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn financial_signing_receive(&self)->Result<Option<crate::financial_signing_channel::Packet>>{
+        crate::financial_signing_channel::try_receive(self.channel.review_fd(), self.local_role, &self.parent)
+    }
+
     #[cfg(feature = "coordinated-financial-workflow-v1")]
     pub(super) fn financial_witness_send(&self, packet: &crate::financial_witness_channel::Packet) -> Result<()> {
         crate::financial_witness_channel::send(self.channel.review_fd(), self.local_role, &self.parent, packet)
@@ -196,6 +216,30 @@ pub(super) struct DirectChild {
     terminal_observed: bool,
 }
 impl DirectChild {
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn financial_history_send(&self, packet: &crate::financial_history_channel::Packet)->Result<()>{
+        self.require_owner()?;
+        crate::financial_history_channel::send(self.channel.review_fd(), self.local_role, &self.peer, packet)
+    }
+
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn financial_history_receive(&self)->Result<Option<crate::financial_history_channel::Packet>>{
+        self.require_owner()?;
+        crate::financial_history_channel::try_receive(self.channel.review_fd(), self.local_role, &self.peer)
+    }
+
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn financial_signing_send(&self, packet: &crate::financial_signing_channel::Packet)->Result<()>{
+        self.require_owner()?;
+        crate::financial_signing_channel::send(self.channel.review_fd(), self.local_role, &self.peer, packet)
+    }
+
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn financial_signing_receive(&self)->Result<Option<crate::financial_signing_channel::Packet>>{
+        self.require_owner()?;
+        crate::financial_signing_channel::try_receive(self.channel.review_fd(), self.local_role, &self.peer)
+    }
+
     #[cfg(feature = "coordinated-financial-workflow-v1")]
     pub(super) fn financial_witness_send(&self, packet: &crate::financial_witness_channel::Packet) -> Result<()> {
         self.require_owner()?;

@@ -20,6 +20,13 @@ use crate::signer_continue_state::SENT;
 mod admit;
 #[path="financial_witness_coordinator.rs"]
 mod witness;
+#[path="financial_history_coordinator.rs"]
+mod history;
+pub(super) use history::HistoryServiceLease;
+pub use history::{FinancialHistorySetupTicketV1,FinancialHistorySetupOutboundV1,FinancialHistoryReviewTicketV1,FinancialHistoryServeOutboundV1,FinancialHistoryServingV1,CoordinatorFinancialHistoryEventV1};
+#[path="financial_signing_coordinator.rs"]
+mod signing;
+pub use signing::{FinancialSigningSetupTicketV1,FinancialSigningSetupOutboundV1,FinancialSigningReviewTicketV1,FinancialSigningServeOutboundV1,FinancialSigningServingV1,CoordinatorFinancialSigningEventV1};
 #[path="witness_retirement.rs"]
 mod retirement;
 pub use retirement::{CoordinatorWitnessRetirementTicketV1,CoordinatorWitnessRetirementOutboundV1,CoordinatorWitnessRetiredV1};
@@ -337,11 +344,11 @@ impl CoordinatorFinancialNativeV1 {
         ticket.check_current()?;self.core.phase.step(b.slot(),CONT_READY,CONT_ADMITTED)?;
         ticket.consumed=true;Ok(FinancialContinueFinalOutboundV1{binding:Arc::clone(&ticket.binding),consumed:false})
     }
-    pub fn admit_initial_read(&self,mut ticket:SignerFinancialReadTicketV1)->Result<SignerFinancialReadOutboundV1>{
+    pub fn admit_initial_read(&self,mut ticket:SignerFinancialReadTicketV1,serving:&FinancialHistoryServingV1)->Result<SignerFinancialReadOutboundV1>{
         let read=&ticket.read;
         if !Arc::ptr_eq(&self.core,&read.entry.core){self.revoke();return Err(rejected("foreign initial Read ticket"));}
-        read.check()?;self.core.phase.step(read.entry.slot(),READ_REVIEW,READ_ADMITTED)?;
-        ticket.consumed=true;Ok(SignerFinancialReadOutboundV1{read:Arc::clone(read),consumed:false})
+        read.check()?;serving.matches_read(&self.core,read)?;let service=serving.retain()?;self.core.phase.step(read.entry.slot(),READ_REVIEW,READ_ADMITTED)?;
+        ticket.consumed=true;Ok(SignerFinancialReadOutboundV1{read:Arc::clone(read),service,consumed:false})
     }
 }
 impl Drop for CoordinatorFinancialNativeV1{fn drop(&mut self){self.revoke();}}
@@ -355,8 +362,8 @@ pub enum CoordinatorFinancialEventV1 {
 struct CSlot{start:Start,sender:Option<crypto::SenderKey>,entry:Option<Arc<EntryReviewed>>,read:Option<Arc<ReadReviewed>>,wire_phase:u8,continue_deadline:Option<Instant>,continue_review_ms:Option<u64>,continuation:Option<CContinue>,admission:CAdmit,failed:bool}
 pub struct CoordinatorFinancialEndpointV1{
     core:Arc<Core>,clocks:FullWorkflowClocksV1,tree:Option<InertTreeV1>,coordinator:String,session:String,image:String,
-    host_terminal:Option<crate::CoordinatorHostTerminalEndpointV1>,
-    witnesses:[witness::CWSlot;2],slots:[Option<CSlot>;2],cancel_sent:bool,disposed:[bool;2],cleanup:Option<Instant>,
+    host_terminal:Option<crate::CoordinatorHostTerminalEndpointV1>,retirement_resume:Option<Instant>,
+    witnesses:[witness::CWSlot;2],histories:[history::CHSlot;2],signing_services:[signing::CGSlot;2],slots:[Option<CSlot>;2],cancel_sent:bool,disposed:[bool;2],cleanup:Option<Instant>,
 }
 pub(super) fn split_coordinator(tree:InertTreeV1,phases:PhaseDeadlinesV1,
     host_restriction:crate::host_restriction::CoordinatorHostRestrictionV1,
@@ -374,7 +381,7 @@ pub(super) fn split_coordinator(tree:InertTreeV1,phases:PhaseDeadlinesV1,
     // On error the local Core/writer drops before the tree parameter's reapers.
     let coordinator=state::nonce()?;let session=state::nonce()?;
     Ok((CoordinatorFinancialNativeV1{core:Arc::clone(&core),_thread:PhantomData},CoordinatorFinancialEndpointV1{
-        core,clocks,tree:Some(tree),coordinator,session,image,host_terminal:Some(host_terminal),witnesses:std::array::from_fn(|_|witness::CWSlot::default()),slots:[None,None],cancel_sent:false,disposed:[false;2],cleanup:None}))
+        core,clocks,tree:Some(tree),coordinator,session,image,host_terminal:Some(host_terminal),retirement_resume:None,witnesses:std::array::from_fn(|_|witness::CWSlot::default()),histories:std::array::from_fn(|_|history::CHSlot::default()),signing_services:std::array::from_fn(|_|signing::CGSlot::default()),slots:[None,None],cancel_sent:false,disposed:[false;2],cleanup:None}))
 }
 impl CoordinatorFinancialEndpointV1 {
     /// One C-only transport handoff to the sole owned driver, never authority.
@@ -418,6 +425,8 @@ impl CoordinatorFinancialEndpointV1 {
                 slot.admission.observe_active(phase)?;
             }
             for (i,w) in self.witnesses.iter().enumerate(){w.observe_active(&self.core,i)?;}
+            for(i,h)in self.histories.iter().enumerate(){h.observe_active(&self.core,i)?;}
+            for(i,g)in self.signing_services.iter().enumerate(){g.observe_active(&self.core,i)?;}
             Ok(())
         })();if result.is_err(){self.core.phase.revoke();}result
     }
@@ -460,7 +469,7 @@ impl CoordinatorFinancialEndpointV1 {
         let read=&outbound.read;let i=read.entry.slot();
         if !Arc::ptr_eq(&self.core,&read.entry.core)||self.slots[i].as_ref().and_then(|s|s.read.as_ref()).is_none_or(|r|!Arc::ptr_eq(r,read))
             ||self.core.phase.phase(i)!=READ_ADMITTED||self.slots[i].as_ref().is_none_or(|s|s.wire_phase!=READ_REVIEW){self.core.phase.revoke();return Err(rejected("foreign or repeated Read outbound"));}
-        read.check()?;self.slots[i].as_mut().unwrap().wire_phase=READ_ADMITTED;
+        read.check()?;outbound.service.check()?;self.slots[i].as_mut().unwrap().wire_phase=READ_ADMITTED;
         self.send(&Packet::ReadFinal{start:read.entry.wire.start.clone(),presentation_digest:read.wire.presentation_digest.clone(),read_digest:read.wire.facts.read_digest.clone(),read_challenge:read.wire.read_challenge.clone()})?;
         outbound.consumed=true;Ok(())
     }
@@ -468,7 +477,8 @@ impl CoordinatorFinancialEndpointV1 {
     pub fn begin_continue_signer2(&mut self,original_native_ceiling:Instant)->Result<()>{self.begin_continue(Target::Signer2,original_native_ceiling)}
     fn begin_continue(&mut self,target:Target,original:Instant)->Result<()>{
         let result=(||{
-            self.core.check()?;self.core.phase.step(target.index(),HISTORY_RETAINED,CONT_PREPARING)?;
+            self.core.check()?;if !self.histories[target.index()].retirement_completed(){return Err(rejected("Continue before actual History retirement"));}
+            self.core.phase.step(target.index(),HISTORY_RETAINED,CONT_PREPARING)?;
             let slot=self.slots[target.index()].as_mut().ok_or_else(||rejected("Continue original slot missing"))?;
             if slot.wire_phase!=HISTORY_RETAINED||slot.continuation.is_some(){return Err(rejected("full Continue already attempted"));}
             let read=slot.read.as_ref().ok_or_else(||rejected("Continue completed Read missing"))?;read.entry.check_custody()?;
@@ -518,7 +528,7 @@ impl CoordinatorFinancialEndpointV1 {
         for slot in self.slots.iter_mut().flatten(){slot.sender.take();}
         if self.cancel_sent{return Err(rejected("workflow Cancel consumed"));}self.cancel_sent=true;
         if self.cleanup.is_none(){self.cleanup=Some(self.clocks.first_cleanup_ceiling(Instant::now())?);}
-        self.cancel_witnesses()?;
+        self.cancel_witnesses()?;self.cancel_histories()?;self.cancel_signing_services()?;
         self.send(&Packet::Cancel{coordinator:self.coordinator.clone(),session:self.session.clone()})
     }
     pub fn try_receive(&mut self)->Result<Option<CoordinatorFinancialEventV1>>{
@@ -534,6 +544,7 @@ impl CoordinatorFinancialEndpointV1 {
             self.disposed[i]=true;return Ok(Some(CoordinatorFinancialEventV1::Disposed(role)));
         }
         if matches!(packet,Packet::AdmitDisplay{..}|Packet::AdmitReady{..}|Packet::Admitted{..}|Packet::AdmitOutcome{..}) { return self.receive_admit_event(packet).map(Some); }
+        let mut retained_history=None;
         let slot=self.slots[i].as_mut().ok_or_else(||rejected("workflow unsolicited response"))?;
         if slot.failed{return Err(rejected("workflow response after failure"));}
         let event=match packet{
@@ -569,6 +580,7 @@ impl CoordinatorFinancialEndpointV1 {
             Packet::HistoryRetained{start,presentation_digest,read_digest,continue_review_ceiling_ms}=>{
                 let read=slot.read.as_ref().ok_or_else(||rejected("history retention before Read"))?;
                 if start!=slot.start||slot.wire_phase!=READ_ADMITTED||presentation_digest!=read.wire.presentation_digest||read_digest!=read.wire.facts.read_digest{return Err(rejected("history retention binding"));}
+                retained_history=Some(Arc::clone(read));
                 slot.wire_phase=HISTORY_RETAINED;
                 if self.core.phase.revoked(){CoordinatorFinancialEventV1::Restricted(role)}else{
                     read.entry.check_custody()?;
@@ -617,9 +629,9 @@ impl CoordinatorFinancialEndpointV1 {
                 CoordinatorFinancialEventV1::Failed{role,stage}
             }
             _=>return Err(rejected("wrong coordinator workflow response")),
-        };Ok(Some(event))
+        };if let Some(read)=retained_history{self.note_history_retained(role,&read)?;}Ok(Some(event))
     }
-    pub fn is_disposed(&self)->bool{self.disposed==[true;2]&&self.witnesses.iter().all(witness::CWSlot::closed)}
+    pub fn is_disposed(&self)->bool{self.disposed==[true;2]&&self.witnesses.iter().all(witness::CWSlot::closed)&&self.histories.iter().all(history::CHSlot::closed)&&self.signing_services.iter().all(signing::CGSlot::closed)}
     pub fn stop_and_reap(mut self)->Result<()>{
         if !self.cancel_sent||!self.is_disposed(){return Err(rejected("workflow actual source disposal unconfirmed"));}
         let cutoff=self.cleanup.ok_or_else(||rejected("workflow cleanup missing"))?;
@@ -640,19 +652,20 @@ struct HSlot{start:Start,phase:u8,entry:Option<EntryOffer>,read:Option<SignerFin
 /// proof at S. It retains sole S reapers, no plaintext/private keys or issuer.
 pub struct HostFinancialWorkflowRelayV1{
     lifecycle:Arc<crate::host_interstage::HostLifecycle>,
-    retirement:Option<crate::host_interstage::RetirementRequest>,quiescent_sent:bool,retired:[bool;2],
+    retirement:Option<crate::host_interstage::RetirementRequest>,quiescent_sent:bool,retired:[[bool;2];2],
     host:Option<HostOriginV1>,clocks:FullWorkflowClocksV1,image:String,coordinator:Option<String>,session:Option<String>,
     slots:[Option<HSlot>;2],restricted:bool,cancel_seen:bool,disposed:[bool;2],cleanup:Option<Instant>,
 }
 impl HostFinancialWorkflowRelayV1 {
     pub(super) fn from_host(host:HostOriginV1)->Result<Self>{
         host.continue_check()?;let clocks=host.continue_clocks().workflow();let image=host.workflow_image()?;
-        Ok(Self{lifecycle:host.workflow_lifecycle(),retirement:None,quiescent_sent:false,retired:[false;2],host:Some(host),clocks,image,coordinator:None,session:None,slots:[None,None],restricted:false,cancel_seen:false,disposed:[false;2],cleanup:None})
+        Ok(Self{lifecycle:host.workflow_lifecycle(),retirement:None,quiescent_sent:false,retired:[[false;2];2],host:Some(host),clocks,image,coordinator:None,session:None,slots:[None,None],restricted:false,cancel_seen:false,disposed:[false;2],cleanup:None})
     }
     pub fn session_deadline(&self)->Instant{self.clocks.supervision()}
     fn restrict(&mut self)->Result<()>{self.restricted=true;if self.cleanup.is_none(){self.cleanup=Some(self.clocks.first_cleanup_ceiling(Instant::now())?);}Ok(())}
     pub fn pump(&mut self)->Result<bool>{let result=self.pump_inner();if result.is_err(){self.lifecycle.poison();drop(self.host.take());}result}
     fn pump_inner(&mut self)->Result<bool>{
+        self.lifecycle.check_not_poisoned()?;
         crate::channel::require_time(self.cleanup.unwrap_or(self.clocks.hard_cleanup()))?;
         self.host.as_ref().ok_or_else(||rejected("workflow Host consumed"))?.continue_check_lifetimes()?;
         let mut progress=false;
@@ -672,17 +685,26 @@ impl HostFinancialWorkflowRelayV1 {
                 if forward{self.host.as_ref().unwrap().workflow_send_c(&packet)?;}progress=true;
             }
         }
-        self.host.as_ref().unwrap().continue_check_lifetimes()?;Ok(progress)
+        self.host.as_ref().unwrap().continue_check_lifetimes()?;self.lifecycle.check_not_poisoned()?;Ok(progress)
     }
     fn retirement_control(&mut self,packet:&Packet)->Result<bool>{
         match packet{
             Packet::RetireRequest{request}=>{
                 request.validate(self.clocks)?;
-                if self.restricted||self.cancel_seen||self.retirement.is_some()||self.retired[request.target.index()]
+                if self.restricted||self.cancel_seen||self.retirement.is_some()||self.retired[request.purpose.index()][request.target.index()]
                     ||self.coordinator.as_deref()!=Some(request.coordinator.as_str())||self.session.as_deref()!=Some(request.session.as_str()){
                     return Err(rejected("Host retirement request binding"));}
                 let slot=self.slots[request.target.index()].as_ref().ok_or_else(||rejected("Host retirement before actual owner"))?;
-                if slot.phase!=admit::AWAITING_NEXT_READ||slot.admission.retained_result().is_err(){return Err(rejected("Host retirement before actual admitted response"));}
+                match request.purpose{
+                    crate::host_interstage::RetirementPurpose::InitialHistory=>{
+                        let read=slot.read.as_ref().ok_or_else(||rejected("Host history retirement before actual Read"))?;
+                        if slot.phase!=HISTORY_RETAINED||slot.continue_review_ms.is_none()||request.binding_digest!=read.presentation_digest{return Err(rejected("Host retirement before actual history retention"));}
+                    },
+                    crate::host_interstage::RetirementPurpose::FinancialContinuation=>{
+                        let(p,_)=slot.admission.retained_result()?;
+                        if slot.phase!=admit::AWAITING_NEXT_READ||request.binding_digest!=p.presentation_digest{return Err(rejected("Host retirement before actual admitted response"));}
+                    }
+                }
                 self.lifecycle.request(request.clone())?;self.retirement=Some(request.clone());self.quiescent_sent=false;Ok(true)
             }
             Packet::RetireResume{request}=>{
@@ -701,7 +723,7 @@ impl HostFinancialWorkflowRelayV1 {
             }
         }else if self.lifecycle.resumed()?.as_ref()==Some(request){
             self.host.as_ref().ok_or_else(||rejected("Host consumed"))?.workflow_send_c(&Packet::RetireResumed{request:request.clone()})?;
-            self.lifecycle.acknowledge_resumed(request)?;self.retired[request.target.index()]=true;self.retirement=None;return Ok(true);
+            self.lifecycle.acknowledge_resumed(request)?;self.retired[request.purpose.index()][request.target.index()]=true;self.retirement=None;return Ok(true);
         }
         Ok(false)
     }
@@ -737,7 +759,8 @@ impl HostFinancialWorkflowRelayV1 {
                 read_current(slot,self.clocks)?;slot.phase=READ_ADMITTED;Ok(())
             }
             Packet::ContinuePrepare{context}=>{
-                context.validate()?;let slot=self.slots[context.start.role.index()].as_mut().ok_or_else(||rejected("Continue relay before original source"))?;
+                context.validate()?;if !self.retired[crate::host_interstage::RetirementPurpose::InitialHistory.index()][context.start.role.index()]{return Err(rejected("Continue relay before actual History Resume"));}
+                let slot=self.slots[context.start.role.index()].as_mut().ok_or_else(||rejected("Continue relay before original source"))?;
                 let read=slot.read.as_ref().ok_or_else(||rejected("Continue relay before original Read"))?;
                 if slot.phase!=HISTORY_RETAINED||slot.continuation.is_some()||slot.failed||!context.matches_read(&slot.start,read){return Err(rejected("Continue relay changed original Read"));}
                 let retained=slot.continue_review_ms.ok_or_else(||rejected("relay cached Continue ceiling missing"))?;

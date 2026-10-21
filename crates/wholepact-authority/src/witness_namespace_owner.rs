@@ -2,9 +2,9 @@
 //! installation is supported; no arbitrary root, implicit install, reset, legacy
 //! adoption or restored activation exists. All setup/enrollment mutation consumes
 //! the real native module's private one-shot decision and retained publication.
-use crate::native_witness_owner::financial_setup_guard_v1::FinancialSetupGuardV1;
 use super::*;
 use crate::journal::PendingBirthTargetInspection;
+use crate::native_witness_owner::financial_setup_guard_v1::FinancialSetupGuardV1;
 use crate::native_witness_owner::{
     NativeEnrollmentDecision, NativePublicationLease, NativeSetupDecision,
 };
@@ -298,18 +298,25 @@ struct NamespaceCore {
 }
 impl NamespaceCore {
     fn check_current_guarded(&self, guard: FinancialSetupGuardV1<'_>) -> Result<()> {
-        guard.check()?;
+        self.check_current_read_guarded(crate::journal::ReadGuardV1::coordinated(guard))
+    }
+    fn check_current_read_guarded(
+        &self,
+        read_guard: crate::journal::ReadGuardV1<'_>,
+    ) -> Result<()> {
+        read_guard.check()?;
         self.files.check_current()?;
+        read_guard.check()?;
         let c = self.registry.lock().map_err(|_| AuthorityError::Storage)?;
-        guard.check()?;
+        read_guard.check()?;
         self.registry_identity.check_current(c.connection())?;
-        require_runtime(c.connection())?;
+        require_runtime_guarded(c.connection(), read_guard)?;
         let tx = Transaction::new_unchecked(c.connection(), TransactionBehavior::Deferred)?;
-        guard.check()?;
-        let history = storage::load_exact(&tx, &self.namespace)?;
-        guard.check()?;
-        check_inventory(&self.files, &history)?;
-        guard.check()
+        read_guard.check()?;
+        let history = storage::load_exact_guarded(&tx, &self.namespace, read_guard)?;
+        read_guard.check()?;
+        check_inventory_guarded(&self.files, &history, read_guard)?;
+        read_guard.check()
     }
     fn check_current(&self) -> Result<()> {
         self.files.check_current()?;
@@ -321,7 +328,10 @@ impl NamespaceCore {
     // checked again afterwards. This is source continuity, not consent.
     fn check_current_without_mutex_wait(&self) -> Result<()> {
         self.files.check_current()?;
-        let c = self.registry.try_lock().map_err(|_| AuthorityError::Permission)?;
+        let c = self
+            .registry
+            .try_lock()
+            .map_err(|_| AuthorityError::Permission)?;
         self.check_registry_locked(&c)
     }
     fn check_registry_locked(&self, c: &EncryptedConnection) -> Result<()> {
@@ -351,22 +361,58 @@ fn open_namespace(input: &NamespaceOpenInput) -> Result<Arc<NamespaceCore>> {
 // Shared concrete opener: identity-only backup needs no invented account ID.
 // Still the same fixed installation, held locks, immutable preflight, exact
 // original owner/origin/root binding and missing-history denial.
-fn open_namespace_identity(input: &NamespaceSetupInput) -> Result<Arc<NamespaceCore>> { open_namespace_identity_guarded(input, FinancialSetupGuardV1::legacy()) }
-fn open_namespace_identity_guarded(input: &NamespaceSetupInput, guard: FinancialSetupGuardV1<'_>) -> Result<Arc<NamespaceCore>> {
+fn open_namespace_identity(input: &NamespaceSetupInput) -> Result<Arc<NamespaceCore>> {
+    open_namespace_identity_guarded(input, FinancialSetupGuardV1::legacy())
+}
+fn open_namespace_identity_guarded(
+    input: &NamespaceSetupInput,
+    guard: FinancialSetupGuardV1<'_>,
+) -> Result<Arc<NamespaceCore>> {
+    let read_guard = crate::journal::ReadGuardV1::coordinated(guard);
     let setup = input;
     setup.validate()?;
     guard.check()?;
     let files = input.installation_probe()?.open_existing()?;
     guard.check()?;
     let master = match guard {
-        FinancialSetupGuardV1::Legacy(_) => read_existing_storage_key(Path::new(&input.storage_key_file))?,
+        FinancialSetupGuardV1::Legacy(_) => {
+            read_existing_storage_key(Path::new(&input.storage_key_file))?
+        }
+        #[cfg(feature = "coordinated-witness-financial-signing")]
+        FinancialSetupGuardV1::SigningServe(_) => return Err(AuthorityError::Permission),
+        #[cfg(feature = "coordinated-witness-financial-signing")]
+        FinancialSetupGuardV1::SigningSetup(_) => {
+            let bytes = guard.read(Path::new(&input.storage_key_file), 32)?;
+            if bytes.len() != 32 || bytes.iter().all(|b| *b == 0) {
+                return Err(AuthorityError::Authentication);
+            }
+            let mut key = Zeroizing::new([0u8; 32]);
+            key.copy_from_slice(&bytes);
+            key
+        }
+        #[cfg(feature = "coordinated-witness-financial-history")]
+        FinancialSetupGuardV1::HistoryServe(_) => return Err(AuthorityError::Permission),
+        #[cfg(feature = "coordinated-witness-financial-history")]
+        FinancialSetupGuardV1::HistorySetup(_) => {
+            let bytes = guard.read(Path::new(&input.storage_key_file), 32)?;
+            if bytes.len() != 32 || bytes.iter().all(|b| *b == 0) {
+                return Err(AuthorityError::Authentication);
+            }
+            let mut key = Zeroizing::new([0u8; 32]);
+            key.copy_from_slice(&bytes);
+            key
+        }
         #[cfg(feature = "coordinated-witness-financial-continuation")]
         FinancialSetupGuardV1::Final(_) => return Err(AuthorityError::Permission),
         #[cfg(feature = "coordinated-witness-financial-continuation")]
         FinancialSetupGuardV1::Coordinated(_) | FinancialSetupGuardV1::Arm(_) => {
             let bytes = guard.read(Path::new(&input.storage_key_file), 32)?;
-            if bytes.len() != 32 || bytes.iter().all(|b| *b == 0) { return Err(AuthorityError::Authentication); }
-            let mut key = Zeroizing::new([0u8; 32]); key.copy_from_slice(&bytes); key
+            if bytes.len() != 32 || bytes.iter().all(|b| *b == 0) {
+                return Err(AuthorityError::Authentication);
+            }
+            let mut key = Zeroizing::new([0u8; 32]);
+            key.copy_from_slice(&bytes);
+            key
         }
     };
     let key = derive_key(
@@ -391,22 +437,22 @@ fn open_namespace_identity_guarded(input: &NamespaceSetupInput, guard: Financial
     {
         return Err(AuthorityError::InvalidBinding);
     }
-    check_inventory(&files, &prior)?;
+    check_inventory_guarded(&files, &prior, read_guard)?;
     files.check_current()?;
     guard.check()?;
     let registry =
         wholepact_storage_security::open_encrypted_quiescent(files.registry_path(), &key)?;
     guard.check()?;
-    require_runtime(registry.connection())?;
+    require_runtime_guarded(registry.connection(), read_guard)?;
     guard.check()?;
-    let current = storage::load_exact(registry.connection(), &namespace)?;
+    let current = storage::load_exact_guarded(registry.connection(), &namespace, read_guard)?;
     if prior.prepared != current.prepared
         || prior.completed != current.completed
         || prior.exclusions != current.exclusions
     {
         return Err(AuthorityError::CorruptHistory);
     }
-    check_inventory(&files, &current)?;
+    check_inventory_guarded(&files, &current, read_guard)?;
     let registry_identity = registry.database_identity()?;
     let core = Arc::new(NamespaceCore {
         files,
@@ -425,11 +471,19 @@ fn open_namespace_identity_guarded(input: &NamespaceSetupInput, guard: Financial
 fn read_registry_preflight(
     path: &Path,
     key: &DatabaseKey,
-) -> Result<(WitnessNamespaceBinding, LocatorHistory)> { read_registry_preflight_guarded(path, key, FinancialSetupGuardV1::legacy()) }
-fn read_registry_preflight_guarded(path: &Path, key: &DatabaseKey, guard: FinancialSetupGuardV1<'_>) -> Result<(WitnessNamespaceBinding, LocatorHistory)> {
+) -> Result<(WitnessNamespaceBinding, LocatorHistory)> {
+    read_registry_preflight_guarded(path, key, FinancialSetupGuardV1::legacy())
+}
+fn read_registry_preflight_guarded(
+    path: &Path,
+    key: &DatabaseKey,
+    guard: FinancialSetupGuardV1<'_>,
+) -> Result<(WitnessNamespaceBinding, LocatorHistory)> {
+    let read_guard = crate::journal::ReadGuardV1::coordinated(guard);
+    guard.check()?;
     let preflight = wholepact_storage_security::open_encrypted_read_snapshot(path, key)?;
     guard.check()?;
-    storage::verify_schema(preflight.connection())?;
+    storage::verify_schema_guarded(preflight.connection(), read_guard)?;
     guard.check()?;
     let payload: Option<Vec<u8>> = preflight
         .connection()
@@ -439,19 +493,36 @@ fn read_registry_preflight_guarded(path: &Path, key: &DatabaseKey, guard: Financ
             |r| r.get(0),
         )
         .optional()?;
+    guard.check()?;
     let namespace: WitnessNamespaceBinding =
         crate::decode(&payload.ok_or(AuthorityError::RecoveryRequired)?)?;
     namespace.validate()?;
     guard.check()?;
-    let history = storage::load_exact(preflight.connection(), &namespace)?;
+    let history = storage::load_exact_guarded(preflight.connection(), &namespace, read_guard)?;
     guard.check()?;
     Ok((namespace, history))
 }
 
 fn require_runtime(c: &rusqlite::Connection) -> Result<()> {
-    let mode: String = c.pragma_query_value(None, "journal_mode", |r| r.get(0))?;
-    let sync: i64 = c.pragma_query_value(None, "synchronous", |r| r.get(0))?;
-    let foreign: i64 = c.pragma_query_value(None, "foreign_keys", |r| r.get(0))?;
+    require_runtime_guarded(c, crate::journal::ReadGuardV1::legacy())
+}
+
+fn require_runtime_guarded(
+    c: &rusqlite::Connection,
+    guard: crate::journal::ReadGuardV1<'_>,
+) -> Result<()> {
+    let mode: String = crate::journal::guarded_read!(
+        guard,
+        c.pragma_query_value(None, "journal_mode", |r| r.get(0))
+    )?;
+    let sync: i64 = crate::journal::guarded_read!(
+        guard,
+        c.pragma_query_value(None, "synchronous", |r| r.get(0))
+    )?;
+    let foreign: i64 = crate::journal::guarded_read!(
+        guard,
+        c.pragma_query_value(None, "foreign_keys", |r| r.get(0))
+    )?;
     if mode != "wal" || sync != 2 || foreign != 1 {
         return Err(AuthorityError::Storage);
     }
@@ -692,7 +763,11 @@ impl BornJournalOwner {
     /// This does NOT bound SQL/filesystem latency or grant publication authority.
     pub(crate) fn check_mutation_current_without_mutex_wait(&self) -> Result<()> {
         self.core.check_current_without_mutex_wait()?;
-        let c = self.core.registry.try_lock().map_err(|_| AuthorityError::Permission)?;
+        let c = self
+            .core
+            .registry
+            .try_lock()
+            .map_err(|_| AuthorityError::Permission)?;
         self.check_registry_locked(true, &c)
     }
     /// Retained same-owner account identity, not a caller-selected path/open.
@@ -709,19 +784,67 @@ impl BornJournalOwner {
         }
         validate_record_against_intent(&self.core, &self.intent, birth)
     }
-    pub(crate) fn check_setup_current(&self, guard: FinancialSetupGuardV1<'_>, mutation: bool) -> Result<()> {
-        self.core.check_current_guarded(guard)?;
-        let c = self.core.registry.lock().map_err(|_| AuthorityError::Storage)?;
-        guard.check()?;
-        self.check_registry_locked_guarded(mutation, &c, guard)
+    pub(crate) fn check_setup_current(
+        &self,
+        guard: FinancialSetupGuardV1<'_>,
+        mutation: bool,
+    ) -> Result<()> {
+        self.check_setup_current_read_guarded(
+            crate::journal::ReadGuardV1::coordinated(guard),
+            mutation,
+        )
+    }
+    /// Restricts the same owner audit to the actual accepted connection ceiling.
+    /// This cannot replace an action guard or mint a renewed deadline.
+    pub(crate) fn check_setup_current_until(
+        &self,
+        guard: FinancialSetupGuardV1<'_>,
+        mutation: bool,
+        original_deadline: std::time::Instant,
+    ) -> Result<()> {
+        self.check_setup_current_read_guarded(
+            crate::journal::ReadGuardV1::coordinated_until(guard, original_deadline),
+            mutation,
+        )
+    }
+    fn check_setup_current_read_guarded(
+        &self,
+        read_guard: crate::journal::ReadGuardV1<'_>,
+        mutation: bool,
+    ) -> Result<()> {
+        self.core.check_current_read_guarded(read_guard)?;
+        let c = self
+            .core
+            .registry
+            .lock()
+            .map_err(|_| AuthorityError::Storage)?;
+        read_guard.check()?;
+        self.check_registry_locked_read_guarded(mutation, &c, read_guard)
     }
     fn check_registry_locked(&self, mutation: bool, c: &EncryptedConnection) -> Result<()> {
         self.check_registry_locked_guarded(mutation, c, FinancialSetupGuardV1::legacy())
     }
-    fn check_registry_locked_guarded(&self, mutation: bool, c: &EncryptedConnection, guard: FinancialSetupGuardV1<'_>) -> Result<()> {
+    fn check_registry_locked_guarded(
+        &self,
+        mutation: bool,
+        c: &EncryptedConnection,
+        guard: FinancialSetupGuardV1<'_>,
+    ) -> Result<()> {
+        self.check_registry_locked_read_guarded(
+            mutation,
+            c,
+            crate::journal::ReadGuardV1::coordinated(guard),
+        )
+    }
+    fn check_registry_locked_read_guarded(
+        &self,
+        mutation: bool,
+        c: &EncryptedConnection,
+        read_guard: crate::journal::ReadGuardV1<'_>,
+    ) -> Result<()> {
         let tx = Transaction::new_unchecked(c.connection(), TransactionBehavior::Deferred)?;
-        guard.check()?;
-        let history = storage::load_exact(&tx, &self.core.namespace)?;
+        read_guard.check()?;
+        let history = storage::load_exact_guarded(&tx, &self.core.namespace, read_guard)?;
         let prepared = history
             .prepared
             .get(&self.intent_digest)
@@ -737,7 +860,7 @@ impl BornJournalOwner {
         {
             return Err(AuthorityError::PolicyDenied);
         }
-        guard.check()?;
+        read_guard.check()?;
         Ok(())
     }
 }
@@ -977,7 +1100,17 @@ fn validate_record_against_intent(
     Ok(())
 }
 fn actual_journal_identity(path: &Path) -> Result<JournalIdentity> {
-    let m = fs::symlink_metadata(path).map_err(|_| AuthorityError::Storage)?;
+    actual_journal_identity_guarded(path, crate::journal::ReadGuardV1::legacy())
+}
+
+fn actual_journal_identity_guarded(
+    path: &Path,
+    guard: crate::journal::ReadGuardV1<'_>,
+) -> Result<JournalIdentity> {
+    let m = crate::journal::guarded_read!(
+        guard,
+        fs::symlink_metadata(path).map_err(|_| AuthorityError::Storage)
+    )?;
     if !m.is_file() || m.nlink() != 1 || m.mode() & 0o7777 != 0o600 {
         return Err(AuthorityError::Storage);
     }
@@ -989,10 +1122,21 @@ fn actual_journal_identity(path: &Path) -> Result<JournalIdentity> {
 }
 
 fn check_inventory(files: &InstallationFiles, history: &LocatorHistory) -> Result<()> {
+    check_inventory_guarded(files, history, crate::journal::ReadGuardV1::legacy())
+}
+
+fn check_inventory_guarded(
+    files: &InstallationFiles,
+    history: &LocatorHistory,
+    guard: crate::journal::ReadGuardV1<'_>,
+) -> Result<()> {
     let mut bytes = 0u64;
     let mut count = 0usize;
-    for e in fs::read_dir(files.root_path()).map_err(|_| AuthorityError::Storage)? {
-        let e = e.map_err(|_| AuthorityError::Storage)?;
+    let mut directory = crate::journal::guarded_read!(
+        guard,
+        fs::read_dir(files.root_path()).map_err(|_| AuthorityError::Storage)
+    )?;
+    while let Some(e) = next_inventory_entry(&mut directory, guard)? {
         let name = e.file_name();
         let name = name.to_str().ok_or(AuthorityError::CorruptHistory)?;
         if name == "journals" {
@@ -1009,7 +1153,7 @@ fn check_inventory(files: &InstallationFiles, history: &LocatorHistory) -> Resul
         {
             return Err(AuthorityError::RecoveryRequired);
         }
-        inventory_file(&e.path(), &mut bytes, &mut count)?;
+        inventory_file_guarded(&e.path(), &mut bytes, &mut count, guard)?;
     }
     let names: BTreeSet<String> = history
         .prepared
@@ -1021,10 +1165,11 @@ fn check_inventory(files: &InstallationFiles, history: &LocatorHistory) -> Resul
                 .to_owned()
         })
         .collect();
-    for e in
-        fs::read_dir(files.root_path().join("journals")).map_err(|_| AuthorityError::Storage)?
-    {
-        let e = e.map_err(|_| AuthorityError::Storage)?;
+    let mut directory = crate::journal::guarded_read!(
+        guard,
+        fs::read_dir(files.root_path().join("journals")).map_err(|_| AuthorityError::Storage)
+    )?;
+    while let Some(e) = next_inventory_entry(&mut directory, guard)? {
         let name = e.file_name();
         let name = name.to_str().ok_or(AuthorityError::CorruptHistory)?;
         let main = name
@@ -1035,18 +1180,22 @@ fn check_inventory(files: &InstallationFiles, history: &LocatorHistory) -> Resul
         if !names.contains(main) {
             return Err(AuthorityError::RecoveryRequired);
         }
-        if main != name && !files.root_path().join("journals").join(main).is_file() {
+        if main != name
+            && !inventory_is_file(&files.root_path().join("journals").join(main), guard)?
+        {
             return Err(AuthorityError::CorruptHistory);
         }
-        inventory_file(&e.path(), &mut bytes, &mut count)?;
+        inventory_file_guarded(&e.path(), &mut bytes, &mut count, guard)?;
     }
     for (key, completed) in &history.completed {
         let prepared = history
             .prepared
             .get(key)
             .ok_or(AuthorityError::CorruptHistory)?;
-        let identity =
-            actual_journal_identity(&files.root_path().join(&prepared.intent.derived_child))?;
+        let identity = actual_journal_identity_guarded(
+            &files.root_path().join(&prepared.intent.derived_child),
+            guard,
+        )?;
         if identity != completed.evidence.journal_identity {
             return Err(AuthorityError::RecoveryRequired);
         }
@@ -1054,7 +1203,19 @@ fn check_inventory(files: &InstallationFiles, history: &LocatorHistory) -> Resul
     Ok(())
 }
 fn inventory_file(path: &Path, bytes: &mut u64, count: &mut usize) -> Result<()> {
-    let m = fs::symlink_metadata(path).map_err(|_| AuthorityError::Storage)?;
+    inventory_file_guarded(path, bytes, count, crate::journal::ReadGuardV1::legacy())
+}
+
+fn inventory_file_guarded(
+    path: &Path,
+    bytes: &mut u64,
+    count: &mut usize,
+    guard: crate::journal::ReadGuardV1<'_>,
+) -> Result<()> {
+    let m = crate::journal::guarded_read!(
+        guard,
+        fs::symlink_metadata(path).map_err(|_| AuthorityError::Storage)
+    )?;
     if !m.is_file() || m.nlink() != 1 || m.mode() & 0o7777 != 0o600 {
         return Err(AuthorityError::Storage);
     }
@@ -1172,8 +1333,14 @@ mod owner_model_tests {
 
 /// Historical server opener for a fully completed canonical birth. No native
 /// enrollment or first-write fallback is possible through this read-only route.
-pub(crate) fn open_born_history(input: NamespaceOpenInput) -> Result<AuthorityJournal> { open_born_history_guarded(input, FinancialSetupGuardV1::legacy()) }
-pub(crate) fn open_born_history_guarded(input: NamespaceOpenInput, guard: FinancialSetupGuardV1<'_>) -> Result<AuthorityJournal> {
+pub(crate) fn open_born_history(input: NamespaceOpenInput) -> Result<AuthorityJournal> {
+    open_born_history_guarded(input, FinancialSetupGuardV1::legacy())
+}
+pub(crate) fn open_born_history_guarded(
+    input: NamespaceOpenInput,
+    guard: FinancialSetupGuardV1<'_>,
+) -> Result<AuthorityJournal> {
+    let read_guard = crate::journal::ReadGuardV1::coordinated(guard);
     hash(&input.expected_account_id)?;
     let core = open_namespace_identity_guarded(&input.setup(), guard)?;
     let (intent, expected_record) = {
@@ -1181,7 +1348,7 @@ pub(crate) fn open_born_history_guarded(input: NamespaceOpenInput, guard: Financ
         guard.check()?;
         let tx = Transaction::new_unchecked(c.connection(), TransactionBehavior::Deferred)?;
         guard.check()?;
-        let history = storage::load_exact(&tx, &core.namespace)?;
+        let history = storage::load_exact_guarded(&tx, &core.namespace, read_guard)?;
         let mut selected = history
             .prepared
             .values()
@@ -1214,6 +1381,62 @@ pub(crate) fn open_born_history_guarded(input: NamespaceOpenInput, guard: Financ
     });
     owner.check_setup_current(guard, false)?;
     AuthorityJournal::open_born_history_only_guarded(
+        owner.clone(),
+        &owner.path,
+        &owner.key,
+        &owner.intent.request.policy,
+        &expected_record,
+        guard,
+    )
+}
+
+/// Original completed account with the financial profile and a live setup gate.
+#[cfg(feature = "coordinated-witness-financial-signing")]
+pub(crate) fn open_born_financial_history_guarded_v1(
+    input: NamespaceOpenInput,
+    guard: FinancialSetupGuardV1<'_>,
+) -> Result<AuthorityJournal> {
+    let read_guard = crate::journal::ReadGuardV1::coordinated(guard);
+    hash(&input.expected_account_id)?;
+    let core = open_namespace_identity_guarded(&input.setup(), guard)?;
+    let (intent, expected_record) = {
+        let c = core.registry.lock().map_err(|_| AuthorityError::Storage)?;
+        guard.check()?;
+        let tx = Transaction::new_unchecked(c.connection(), TransactionBehavior::Deferred)?;
+        guard.check()?;
+        let history = storage::load_exact_guarded(&tx, &core.namespace, read_guard)?;
+        let mut selected = history
+            .prepared
+            .values()
+            .filter(|p| p.intent.identity().account_id == input.expected_account_id);
+        let prepared = selected.next().ok_or(AuthorityError::RecoveryRequired)?;
+        if selected.next().is_some() {
+            return Err(AuthorityError::CorruptHistory);
+        }
+        let digest = prepared.intent.digest(&core.namespace)?;
+        let completed = history
+            .completed
+            .get(&digest)
+            .ok_or(AuthorityError::RecoveryRequired)?;
+        (
+            prepared.intent.clone(),
+            completed.evidence.birth_commit.clone(),
+        )
+    };
+    guard.check()?;
+    let path = core.path_for(&intent)?;
+    let key = core.key_for(&intent)?;
+    guard.check()?;
+    let intent_digest = intent.digest(&core.namespace)?;
+    let owner = Arc::new(BornJournalOwner {
+        core,
+        intent,
+        path,
+        key,
+        intent_digest,
+    });
+    owner.check_setup_current(guard, false)?;
+    AuthorityJournal::open_born_financial_history_only_guarded_v1(
         owner.clone(),
         &owner.path,
         &owner.key,
@@ -1587,4 +1810,25 @@ mod shared_financial_namespace_lock_tests {
             assert_eq!(sequence, 1);
         }
     }
+}
+
+// Filesystem iteration is separately sampled. This does not interrupt an
+// in-flight metadata operation or turn metadata into original authority.
+fn next_inventory_entry(
+    directory: &mut fs::ReadDir,
+    guard: crate::journal::ReadGuardV1<'_>,
+) -> Result<Option<fs::DirEntry>> {
+    guard.check()?;
+    let next = directory
+        .next()
+        .transpose()
+        .map_err(|_| AuthorityError::Storage)?;
+    guard.check()?;
+    Ok(next)
+}
+fn inventory_is_file(path: &Path, guard: crate::journal::ReadGuardV1<'_>) -> Result<bool> {
+    guard.check()?;
+    let value = path.is_file();
+    guard.check()?;
+    Ok(value)
 }

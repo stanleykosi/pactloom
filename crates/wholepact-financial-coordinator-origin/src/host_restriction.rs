@@ -131,10 +131,11 @@ impl CreatedHostRestrictionV1 {
         observer.check_current()?;
         Ok(observer)
     }
-    /// Exactly the two original financial-continuation Witness branches retain
-    /// this same cell. No other W gains a mapping, writer or imported identity.
+    /// Exactly the six fixed original History/Continuation/Signing W branches
+    /// retain this same prefork cell. No other W gains a mapping or writer.
     pub(super) fn into_financial_witness(mut self, origin: &ForkOriginV1) -> Result<WitnessSharedRestrictionV1> {
-        if !crate::financial_witness_channel::is_financial_witness(origin.role())
+        if !(crate::financial_witness_channel::is_financial_witness(origin.role())
+            ||crate::financial_history_channel::is_history_witness(origin.role())||crate::financial_signing_channel::is_signing_witness(origin.role()))
             || !origin.has_original_coordinator(self.creator_pid, self.creator_uid)
             || unsafe { libc::geteuid() } != self.creator_uid
         { return Err(rejected("shared restriction requires original financial Witness birth")); }

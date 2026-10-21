@@ -7,15 +7,22 @@ use serde::{Deserialize,Serialize};
 use std::{marker::PhantomData,rc::Rc,sync::{Arc,Mutex,atomic::{AtomicU8,AtomicBool,Ordering}},time::Instant};
 const RUNNING:u8=0;const PARKED:u8=1;const REQUESTED:u8=2;const GUARDED:u8=3;
 const RESUME:u8=4;const RESUMED:u8=5;const POISON:u8=255;
+#[derive(Clone,Copy,Debug,PartialEq,Eq,Serialize,Deserialize)]
+pub(super) enum RetirementPurpose{InitialHistory,FinancialContinuation}
+impl RetirementPurpose{
+    pub(super) fn index(self)->usize{match self{Self::InitialHistory=>0,Self::FinancialContinuation=>1}}
+    pub(super) fn role(self,target:SignerContinueRoleV1)->crate::process::Role{match self{
+        Self::InitialHistory=>crate::financial_history_channel::role_for(target),Self::FinancialContinuation=>crate::financial_witness_channel::role_for(target)}}
+}
 #[derive(Clone,Debug,PartialEq,Eq,Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RetirementRequest {
-    pub profile:String,pub coordinator:String,pub session:String,pub target:SignerContinueRoleV1,
+    pub profile:String,pub coordinator:String,pub session:String,pub target:SignerContinueRoleV1,pub purpose:RetirementPurpose,pub binding_digest:String,
     pub witness_instance:String,pub challenge:String,pub cleanup_ceiling_ms:u64,
 }
 impl RetirementRequest {
     pub(super) fn validate(&self,clocks:FullWorkflowClocksV1)->Result<Instant>{
-        if self.profile!=PROFILE||![&self.coordinator,&self.session,&self.witness_instance,&self.challenge].iter().all(|v|hash(v)){
+        if self.profile!=PROFILE||![&self.coordinator,&self.session,&self.witness_instance,&self.challenge,&self.binding_digest].iter().all(|v|hash(v)){
             return Err(rejected("original retirement identity rejected"));}
         clocks.received_cleanup(self.cleanup_ceiling_ms,Instant::now())
     }
@@ -33,6 +40,7 @@ impl HostLifecycle {
         (HostLifecycleOwner(Arc::clone(&state)),state)
     }
     pub(super) fn poison(&self){self.state.store(POISON,Ordering::SeqCst);}
+    pub(super) fn check_not_poisoned(&self)->Result<()>{if self.state.load(Ordering::SeqCst)==POISON{return Err(rejected("original Host foreground permanently poisoned"));}Ok(())}
     pub(super) fn check_foreground(&self)->Result<()>{
         if self.state.load(Ordering::SeqCst)!=RUNNING{return Err(rejected("original Host foreground parked or poisoned"));}Ok(())
     }
@@ -143,9 +151,17 @@ impl Drop for HostWitnessRetirementGuardV1<'_>{fn drop(&mut self){if !self.consu
 mod tests{
     use super::*;
     #[test]
+    fn retirement_purposes_map_only_fixed_distinct_original_slots(){
+        use crate::process::Role;
+        assert_eq!(RetirementPurpose::InitialHistory.role(SignerContinueRoleV1::Signer1),Role::Owner1FinancialReadHistory);
+        assert_eq!(RetirementPurpose::FinancialContinuation.role(SignerContinueRoleV1::Signer1),Role::Owner1FinancialContinuationAdmission);
+        assert_ne!(RetirementPurpose::InitialHistory.index(),RetirementPurpose::FinancialContinuation.index());
+        assert!(serde_json::from_str::<RetirementPurpose>("\"FinancialSigning\"").is_err());
+    }
+    #[test]
     fn retirement_request_is_fixed_profile_identity_and_original_cleanup_data(){
         let clocks=FullWorkflowClocksV1::from_initial_epoch(Instant::now()).unwrap();let h="a".repeat(64);
-        let r=RetirementRequest{profile:PROFILE.into(),coordinator:h.clone(),session:h.clone(),target:SignerContinueRoleV1::Signer1,
+        let r=RetirementRequest{profile:PROFILE.into(),coordinator:h.clone(),session:h.clone(),target:SignerContinueRoleV1::Signer1,purpose:RetirementPurpose::FinancialContinuation,binding_digest:h.clone(),
             witness_instance:h.clone(),challenge:h,cleanup_ceiling_ms:5_000};
         r.validate(clocks).unwrap();let mut bad=r.clone();bad.profile="another-profile".into();assert!(bad.validate(clocks).is_err());
         bad=r.clone();bad.challenge="".into();assert!(bad.validate(clocks).is_err());

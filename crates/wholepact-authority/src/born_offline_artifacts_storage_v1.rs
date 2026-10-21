@@ -17,29 +17,51 @@ pub(crate) fn verify_born_artifact_schema_v1(c: &Connection) -> Result<()> {
 }
 
 fn retained(c: &Connection) -> Result<Option<(BornOfflineArtifactRecordV1, Zeroizing<[u8; 32]>)>> {
-    let raw: Option<(Vec<u8>, Vec<u8>)> = c
-        .query_row(
+    retained_guarded(c, crate::journal::ReadGuardV1::legacy())
+}
+
+fn retained_guarded(
+    c: &Connection,
+    guard: crate::journal::ReadGuardV1<'_>,
+) -> Result<Option<(BornOfflineArtifactRecordV1, Zeroizing<[u8; 32]>)>> {
+    let raw: Option<(Zeroizing<Vec<u8>>, Zeroizing<Vec<u8>>)> = crate::journal::guarded_read!(
+        guard,
+        c.query_row(
             "SELECT payload,secret FROM authority_born_offline_artifacts WHERE singleton=1",
             [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((
+                Zeroizing::new(r.get::<_, Vec<u8>>(0)?),
+                Zeroizing::new(r.get::<_, Vec<u8>>(1)?)
+            )),
         )
-        .optional()?;
+        .optional()
+    )?;
     raw.map(|(payload, key)| {
-        let payload = Zeroizing::new(payload);
-        let key = Zeroizing::new(key);
-        let secret: [u8; 32] = key
-            .as_slice()
-            .try_into()
-            .map_err(|_| AuthorityError::CorruptHistory)?;
+        let secret: Zeroizing<[u8; 32]> = Zeroizing::new(
+            key.as_slice()
+                .try_into()
+                .map_err(|_| AuthorityError::CorruptHistory)?,
+        );
         let record: BornOfflineArtifactRecordV1 = decode(&payload)?;
         record.validate()?;
-        Ok((record, Zeroizing::new(secret)))
+        Ok((record, secret))
     })
     .transpose()
 }
 
 pub(super) fn verify_artifact_tables(c: &Connection, ledger: &Ledger) -> Result<()> {
-    let version: i64 = c.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    verify_artifact_tables_guarded(c, ledger, crate::journal::ReadGuardV1::legacy())
+}
+
+pub(super) fn verify_artifact_tables_guarded(
+    c: &Connection,
+    ledger: &Ledger,
+    guard: crate::journal::ReadGuardV1<'_>,
+) -> Result<()> {
+    let version: i64 = crate::journal::guarded_read!(
+        guard,
+        c.pragma_query_value(None, "user_version", |r| r.get(0))
+    )?;
     let event_record = ledger.born_offline_artifacts_v1()?;
     if version != BORN_ARTIFACT_SCHEMA_VERSION {
         return if event_record.is_none() {
@@ -48,7 +70,7 @@ pub(super) fn verify_artifact_tables(c: &Connection, ledger: &Ledger) -> Result<
             Err(AuthorityError::CorruptHistory)
         };
     }
-    let (record, secret) = retained(c)?.ok_or(AuthorityError::CorruptHistory)?;
+    let (record, secret) = retained_guarded(c, guard)?.ok_or(AuthorityError::CorruptHistory)?;
     if event_record != Some(&record) || ledger.policy.account_use_genesis.is_none() {
         return Err(AuthorityError::CorruptHistory);
     }
@@ -57,7 +79,7 @@ pub(super) fn verify_artifact_tables(c: &Connection, ledger: &Ledger) -> Result<
         .ok_or(AuthorityError::CorruptHistory)?
         .enrollment;
     record.binding.validate_enrollment(enrollment)?;
-    let birth = crate::pending_birth_storage::read(c, &ledger.policy)?
+    let birth = crate::pending_birth_storage::read_guarded(c, &ledger.policy, guard)?
         .ok_or(AuthorityError::CorruptHistory)?;
     enrollment.validate_original_birth(&birth)?;
     #[cfg(all(feature = "born-offline-witness-owner", target_os = "linux"))]
@@ -66,16 +88,18 @@ pub(super) fn verify_artifact_tables(c: &Connection, ledger: &Ledger) -> Result<
     drop(secret);
     // Bounded original ciphertext/replay retention. No schema owner may evict,
     // normalize, reset or silently reconstruct these records during opening.
-    let (inbox_count, inbox_bytes, streams): (u64, u64, u64) = c.query_row(
+    let (inbox_count, inbox_bytes, streams): (u64, u64, u64) =
+        crate::journal::guarded_read!(guard, c.query_row(
         "SELECT count(*),coalesce(sum(length(envelope)),0),count(DISTINCT stream) FROM receipts",
         [],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    )?;
-    let (outbox_count, outbox_bytes, outbox_streams): (u64, u64, u64) = c.query_row(
+    ))?;
+    let (outbox_count, outbox_bytes, outbox_streams): (u64, u64, u64) =
+        crate::journal::guarded_read!(guard, c.query_row(
         "SELECT count(*),coalesce(sum(length(envelope)),0),count(DISTINCT stream) FROM outbox",
         [],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    )?;
+    ))?;
     if inbox_count > 8192
         || outbox_count > 8192
         || streams > 512
@@ -95,9 +119,9 @@ pub(super) fn verify_artifact_tables(c: &Connection, ledger: &Ledger) -> Result<
             "stream,sequence,message_digest,preview_digest,context_digest,sender_fingerprint,recipient_fingerprint,payload_digest,slot,envelope_digest,issued_at,expires_at,envelope,acknowledged",
         ),
     ] {
-        let mut q = c.prepare(&format!("SELECT {columns} FROM {table}"))?;
-        let mut rows = q.query([])?;
-        while let Some(row) = rows.next()? {
+        let mut q = crate::journal::guarded_read!(guard, c.prepare(&format!("SELECT {columns} FROM {table}")))?;
+        let mut rows = crate::journal::guarded_read!(guard, q.query([]))?;
+        while let Some(row) = crate::journal::guarded_read!(guard, rows.next())? {
             hash(&row.get::<_, String>(0)?)?;
             if row.get::<_, i64>(1)? <= 0 {
                 return Err(AuthorityError::CorruptHistory);
@@ -140,16 +164,21 @@ pub(super) fn verify_artifact_tables(c: &Connection, ledger: &Ledger) -> Result<
         }
     }
     for table in ["domain_imports", "offline_control_outcomes"] {
-        let orphan: u64 = c.query_row(&format!("SELECT count(*) FROM {table} d LEFT JOIN receipts r ON d.stream=r.stream AND d.sequence=r.sequence WHERE r.stream IS NULL OR d.content_digest!=r.content_digest"), [], |r| r.get(0))?;
-        let count: u64 = c.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))?;
+        let orphan: u64 = crate::journal::guarded_read!(guard, c.query_row(&format!("SELECT count(*) FROM {table} d LEFT JOIN receipts r ON d.stream=r.stream AND d.sequence=r.sequence WHERE r.stream IS NULL OR d.content_digest!=r.content_digest"), [], |r| r.get(0)))?;
+        let count: u64 = crate::journal::guarded_read!(
+            guard,
+            c.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+        )?;
         if orphan != 0 || count > 8192 {
             return Err(AuthorityError::CorruptHistory);
         }
     }
-    let mut q =
-        c.prepare("SELECT stream,content_digest,processor,result_digest FROM domain_imports")?;
-    let mut rows = q.query([])?;
-    while let Some(row) = rows.next()? {
+    let mut q = crate::journal::guarded_read!(
+        guard,
+        c.prepare("SELECT stream,content_digest,processor,result_digest FROM domain_imports")
+    )?;
+    let mut rows = crate::journal::guarded_read!(guard, q.query([]))?;
+    while let Some(row) = crate::journal::guarded_read!(guard, rows.next())? {
         for i in [0, 1, 3] {
             hash(&row.get::<_, String>(i)?)?;
         }
@@ -158,9 +187,9 @@ pub(super) fn verify_artifact_tables(c: &Connection, ledger: &Ledger) -> Result<
             return Err(AuthorityError::CorruptHistory);
         }
     }
-    let mut q=c.prepare("SELECT stream,content_digest,control_digest,admission_digest FROM offline_control_outcomes")?;
-    let mut rows = q.query([])?;
-    while let Some(row) = rows.next()? {
+    let mut q=crate::journal::guarded_read!(guard, c.prepare("SELECT stream,content_digest,control_digest,admission_digest FROM offline_control_outcomes"))?;
+    let mut rows = crate::journal::guarded_read!(guard, q.query([]))?;
+    while let Some(row) = crate::journal::guarded_read!(guard, rows.next())? {
         for i in [0, 1, 2] {
             hash(&row.get::<_, String>(i)?)?;
         }
@@ -293,24 +322,21 @@ mod schema_tests {
                 params![b"synthetic-inert-record".as_slice(), [7u8; 32].as_slice()],
             )
             .unwrap();
-            assert!(
-                tx.execute(
+            assert!(tx
+                .execute(
                     "UPDATE authority_born_offline_artifacts SET secret=?1",
                     [[8u8; 32].as_slice()]
                 )
-                .is_err()
-            );
-            assert!(
-                tx.execute("DELETE FROM authority_born_offline_artifacts", [])
-                    .is_err()
-            );
-            assert!(
-                tx.execute(
+                .is_err());
+            assert!(tx
+                .execute("DELETE FROM authority_born_offline_artifacts", [])
+                .is_err());
+            assert!(tx
+                .execute(
                     "INSERT OR REPLACE INTO authority_born_offline_artifacts VALUES(1,?1,?2)",
                     params![b"replacement".as_slice(), [8u8; 32].as_slice()]
                 )
-                .is_err()
-            );
+                .is_err());
             // Simulated cancellation rolls back key, mailbox schema and version.
         }
         verify_schema_against(&c, SCHEMA).unwrap();

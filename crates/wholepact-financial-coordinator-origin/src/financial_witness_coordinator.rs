@@ -118,6 +118,7 @@ impl CoordinatorFinancialEndpointV1{
     /// These ordinary paths do not open or inspect the selected role's source.
     pub fn prepare_witness_setup(&mut self,role:Target,inputs:FinancialWitnessInputsV1,original_native_ceiling:Instant)->Result<FinancialWitnessSetupTicketV1>{
         self.core.check_action_restrictions()?;inputs.validate()?;let i=role.index();
+        if !self.histories[i].retirement_completed(){return Err(rejected("append Setup before actual History retirement"));}
         let slot=self.slots[i].as_ref().ok_or_else(||rejected("financial Witness before original Signer"))?;
         if slot.wire_phase!=AWAITING_ADMISSION&&slot.wire_phase!=admit::ADMIT_REVIEW&&slot.wire_phase!=admit::ADMIT_ARMED&&slot.wire_phase!=admit::ADMIT_READY{return Err(rejected("financial Witness before saved continuation"));}
         let entry=slot.entry.as_ref().ok_or_else(||rejected("financial Witness Entry missing"))?;
@@ -265,6 +266,8 @@ pub(super) fn witness_pending(core:&Core)->bool{(0..2).any(|i|witness_pending_ph
 fn witness_pending_phase(phase:u8,status:u8)->bool{phase==W_ADMITTED&&status==PENDING}
 
 impl CWSlot {
+    pub(super) fn retirement_completed(&self)->bool{self.retired}
+
     pub(super) fn retirement_idle(&self)->bool{self.setup.is_none()||self.disposed}
     pub(super) fn retirement_record(&self)->Result<(&str,Instant,&FinancialWitnessOutcomeV1)>{
         if !self.disposed||self.cancel_sent||self.close_sent||self.retired{return Err(rejected("W not normally disposable"));}

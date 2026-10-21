@@ -68,6 +68,31 @@ pub use financial_witness_origin::{WitnessFinancialContinuationOriginV1,Financia
     WitnessFinancialContinuationSetupV1,WitnessFinancialContinuationArmV1,WitnessFinancialContinuationFinalV1};
 
 #[cfg(feature = "coordinated-financial-workflow-v1")]
+mod financial_history_data;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+mod financial_history_channel;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+mod financial_history_origin;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+mod financial_signing_data;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+mod financial_signing_channel;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+mod financial_signing_origin;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+mod signer_writer_read_acquire_data;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub use financial_history_data::{FinancialHistoryInputsV1,FinancialHistoryReadBindingV1,FinancialHistoryPresentationV1,FINANCIAL_HISTORY_PURPOSE,FINANCIAL_HISTORY_MODE};
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub use financial_history_origin::{WitnessFinancialHistoryOriginV1,WitnessFinancialHistorySetupV1,WitnessFinancialHistoryServeV1,FinancialHistoryRequestV1};
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub use financial_signing_data::{FinancialSigningInputsV1,FinancialSigningOriginalV1,FinancialSigningPresentationV1,FinancialSigningServiceV1,FINANCIAL_SIGNING_PURPOSE,FINANCIAL_SIGNING_MODE};
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub use financial_signing_origin::{WitnessFinancialSigningOriginV1,WitnessFinancialSigningSetupV1,WitnessFinancialSigningServeV1,FinancialSigningRequestV1};
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub use financial_workflow_origin::{FinancialHistorySetupTicketV1,FinancialHistorySetupOutboundV1,FinancialHistoryReviewTicketV1,FinancialHistoryServeOutboundV1,FinancialHistoryServingV1,CoordinatorFinancialHistoryEventV1,FinancialSigningSetupTicketV1,FinancialSigningSetupOutboundV1,FinancialSigningReviewTicketV1,FinancialSigningServeOutboundV1,FinancialSigningServingV1,CoordinatorFinancialSigningEventV1};
+
+#[cfg(feature = "coordinated-financial-workflow-v1")]
 mod host_restriction;
 #[cfg(feature="coordinated-financial-workflow-v1")]
 mod host_interstage;

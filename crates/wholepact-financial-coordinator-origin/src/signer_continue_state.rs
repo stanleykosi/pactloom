@@ -1,7 +1,7 @@
 //! Private lock-free two-slot restriction state and check-only actual lifetimes.
 use crate::{process::PeerLifetime, rejected, Result};
 use std::{os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
-    sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering}, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
+    sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering}, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
 
 pub(super) const NEW: u8 = 0;
 pub(super) const PREPARING: u8 = 1;
@@ -9,8 +9,8 @@ pub(super) const REVIEW: u8 = 2;
 pub(super) const ARMED: u8 = 3;
 pub(super) const READY: u8 = 4;
 pub(super) const ADMITTED: u8 = 5;
-const REVOKED: u32 = 1 << 31;
-const QUIESCENT:u32=1<<30;
+const REVOKED: u64 = 1 << 31;
+const QUIESCENT:u64=1<<30;
 pub(super) const PENDING: u8 = 0;
 pub(super) const SENT: u8 = 1;
 pub(super) const ABANDONED: u8 = 2;
@@ -18,13 +18,13 @@ pub(super) const ABANDONED: u8 = 2;
 /// Both target slots and global R share one atomic word. Native A is precisely
 /// the successful READY->ADMITTED CAS, never a later driver/relay dequeue.
 pub(super) struct Phases {
-    word: AtomicU32,
+    word: AtomicU64,
     #[cfg(feature = "coordinated-financial-workflow-v1")]
     host_restriction: Option<crate::host_restriction::CoordinatorHostRestrictionV1>,
 }
 impl Phases {
     pub(super) fn new() -> Self { Self {
-        word: AtomicU32::new(0),
+        word: AtomicU64::new(0),
         #[cfg(feature = "coordinated-financial-workflow-v1")]
         host_restriction: None,
     } }
@@ -32,20 +32,19 @@ impl Phases {
     /// S and narrow-profile constructors have no shared-memory write owner.
     #[cfg(feature = "coordinated-financial-workflow-v1")]
     pub(super) fn coordinator(writer: crate::host_restriction::CoordinatorHostRestrictionV1) -> Self {
-        Self { word: AtomicU32::new(0), host_restriction: Some(writer) }
+        Self { word: AtomicU64::new(0), host_restriction: Some(writer) }
     }
     pub(super) fn phase(&self, slot: usize) -> u8 { ((self.word.load(Ordering::Acquire) >> (slot * 8)) & 0xff) as u8 }
     pub(super) fn revoked(&self) -> bool { self.word.load(Ordering::Acquire) & REVOKED != 0 }
     #[cfg(feature="coordinated-financial-workflow-v1")]
     pub(super) fn quiescent(&self)->bool{self.word.load(Ordering::Acquire)&QUIESCENT!=0}
     #[cfg(feature="coordinated-financial-workflow-v1")]
-    pub(super) fn begin_quiescence(&self,signers:[u8;2],witnesses:[u8;2])->Result<()>{
-        let mut old=self.word.load(Ordering::Acquire);
-        loop{
-            if old&(REVOKED|QUIESCENT)!=0||(0..2).any(|i|((old>>(i*8))&255)!=signers[i] as u32||((old>>(16+i*4))&15)!=witnesses[i] as u32){
-                return Err(rejected("retirement quiescence state changed"));}
-            match self.word.compare_exchange_weak(old,old|QUIESCENT,Ordering::AcqRel,Ordering::Acquire){Ok(_)=>return Ok(()),Err(actual)=>old=actual}
-        }
+    pub(super) fn snapshot(&self)->u64{self.word.load(Ordering::Acquire)}
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn begin_quiescence(&self,expected:u64)->Result<()>{
+        if expected&(REVOKED|QUIESCENT)!=0{return Err(rejected("retirement snapshot already restricted"));}
+        self.word.compare_exchange(expected,expected|QUIESCENT,Ordering::AcqRel,Ordering::Acquire)
+            .map(|_|()).map_err(|_|rejected("retirement complete phase snapshot changed"))
     }
     #[cfg(feature="coordinated-financial-workflow-v1")]
     pub(super) fn finish_quiescence(&self)->Result<()>{
@@ -67,8 +66,8 @@ impl Phases {
         if slot>1{return Err(rejected("not a fixed workflow slot"));}
         let shift=slot*8;let mut old=self.word.load(Ordering::Acquire);
         loop{
-            if ((old>>shift)&0xff)!=CONT_ADMITTED as u32{return Err(rejected("Continue completion was not admitted"));}
-            let new=(old&!(0xff<<shift))|((AWAITING_ADMISSION as u32)<<shift);
+            if ((old>>shift)&0xff)!=CONT_ADMITTED as u64{return Err(rejected("Continue completion was not admitted"));}
+            let new=(old&!(0xff<<shift))|((AWAITING_ADMISSION as u64)<<shift);
             match self.word.compare_exchange_weak(old,new,Ordering::AcqRel,Ordering::Acquire){Ok(_)=>return Ok(()),Err(actual)=>old=actual}
         }
     }
@@ -80,8 +79,8 @@ impl Phases {
         if slot>1{return Err(rejected("not a fixed received Continue slot"));}
         let shift=slot*8;let mut old=self.word.load(Ordering::Acquire);
         loop{
-            if ((old>>shift)&0xff)!=CONT_READY as u32{return Err(rejected("received Continue Final was not Ready"));}
-            let new=(old&!(0xff<<shift))|((CONT_ADMITTED as u32)<<shift);
+            if ((old>>shift)&0xff)!=CONT_READY as u64{return Err(rejected("received Continue Final was not Ready"));}
+            let new=(old&!(0xff<<shift))|((CONT_ADMITTED as u64)<<shift);
             match self.word.compare_exchange_weak(old,new,Ordering::AcqRel,Ordering::Acquire){Ok(_)=>return Ok(()),Err(actual)=>old=actual}
         }
     }
@@ -104,20 +103,50 @@ impl Phases {
         if slot>1||from>15||to>15{return Err(rejected("not a fixed financial Witness phase"));}
         let shift=16+slot*4;let mut old=self.word.load(Ordering::Acquire);
         loop{
-            if old&(REVOKED|QUIESCENT)!=0||((old>>shift)&0xf)!=from as u32{return Err(rejected("financial Witness phase consumed or restricted"));}
-            let new=(old&!(0xf<<shift))|((to as u32)<<shift);
+            if old&(REVOKED|QUIESCENT)!=0||((old>>shift)&0xf)!=from as u64{return Err(rejected("financial Witness phase consumed or restricted"));}
+            let new=(old&!(0xf<<shift))|((to as u64)<<shift);
             match self.word.compare_exchange_weak(old,new,Ordering::AcqRel,Ordering::Acquire){Ok(_)=>return Ok(()),Err(actual)=>old=actual}
         }
+    }
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn history_phase(&self,slot:usize)->u8{((self.word.load(Ordering::Acquire)>>(24+slot*3))&7)as u8}
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn history_step(&self,slot:usize,from:u8,to:u8)->Result<()>{
+        if slot>1||from>7||to>7{return Err(rejected("invalid fixed history phase"));}
+        let shift=24+slot*3;let mut old=self.word.load(Ordering::Acquire);
+        loop{if old&(REVOKED|QUIESCENT)!=0||((old>>shift)&7)!=from as u64{return Err(rejected("history phase consumed or restricted"));}
+            let new=(old&!(7<<shift))|((to as u64)<<shift);
+            match self.word.compare_exchange_weak(old,new,Ordering::AcqRel,Ordering::Acquire){Ok(_)=>return Ok(()),Err(actual)=>old=actual}}
+    }
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn signing_phase(&self,slot:usize)->u8{((self.word.load(Ordering::Acquire)>>(32+slot*4))&15)as u8}
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn signing_step(&self,slot:usize,from:u8,to:u8)->Result<()>{
+        if slot>1||from>15||to>15{return Err(rejected("invalid fixed signing phase"));}
+        let shift=32+slot*4;let mut old=self.word.load(Ordering::Acquire);
+        loop{if old&(REVOKED|QUIESCENT)!=0||((old>>shift)&15)!=from as u64{return Err(rejected("signing phase consumed or restricted"));}
+            let new=(old&!(15<<shift))|((to as u64)<<shift);
+            match self.word.compare_exchange_weak(old,new,Ordering::AcqRel,Ordering::Acquire){Ok(_)=>return Ok(()),Err(actual)=>old=actual}}
+    }
+    /// Only after actual normal owned History reap. This observation keeps
+    /// QUIESCENT and R, and cannot create any native admission or reset a slot.
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn observe_history_retired(&self,slot:usize)->Result<()>{
+        if slot>1{return Err(rejected("invalid retired History slot"));}
+        let shift=24+slot*3;let mut old=self.word.load(Ordering::Acquire);
+        loop{if old&QUIESCENT==0||((old>>shift)&7)!=5{return Err(rejected("History retirement observation phase"));}
+            let new=(old&!(7<<shift))|(6u64<<shift);
+            match self.word.compare_exchange_weak(old,new,Ordering::AcqRel,Ordering::Acquire){Ok(_)=>return Ok(()),Err(actual)=>old=actual}}
     }
     pub(super) fn step(&self, slot: usize, from: u8, to: u8) -> Result<()> {
         if slot > 1 { return Err(rejected("not a fixed Continue slot")); }
         let shift = slot * 8;
         let mut old = self.word.load(Ordering::Acquire);
         loop {
-            if old & (REVOKED|QUIESCENT) != 0 || ((old >> shift) & 0xff) != from as u32 {
+            if old & (REVOKED|QUIESCENT) != 0 || ((old >> shift) & 0xff) != from as u64 {
                 return Err(rejected("Continue slot consumed or revoked"));
             }
-            let new = (old & !(0xff << shift)) | ((to as u32) << shift);
+            let new = (old & !(0xff << shift)) | ((to as u64) << shift);
             match self.word.compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Acquire) {
                 Ok(_) => return Ok(()), Err(actual) => old = actual,
             }
@@ -260,9 +289,30 @@ mod tests {
     use super::*;
     #[cfg(feature="coordinated-financial-workflow-v1")]
     #[test]
+    fn signing_history_and_old_slots_share_one_full_width_admission_word(){
+        let p=Phases::new();p.step(0,0,36).unwrap();p.witness_step(0,0,6).unwrap();p.history_step(1,0,4).unwrap();
+        p.signing_step(0,0,3).unwrap();p.signing_step(1,0,3).unwrap();
+        assert_eq!(p.phase(0),36);assert_eq!(p.witness_phase(0),6);assert_eq!(p.history_phase(1),4);
+        let snapshot=p.snapshot();p.signing_step(0,3,4).unwrap();assert!(p.begin_quiescence(snapshot).is_err());
+        p.begin_quiescence(p.snapshot()).unwrap();assert!(p.signing_step(1,3,4).is_err());assert!(p.history_step(1,4,5).is_err());
+        p.revoke();assert!(p.finish_quiescence().is_err());assert!(p.signing_step(1,3,4).is_err());
+        assert_eq!(p.signing_phase(0),4);assert_eq!(p.signing_phase(1),3);assert_eq!(p.phase(0),36);
+    }
+
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    #[test]
+    fn history_reap_observation_preserves_pause_and_revoke_without_new_authority(){
+        let phase=Phases::new();phase.history_step(0,0,5).unwrap();
+        assert!(phase.observe_history_retired(0).is_err());
+        phase.begin_quiescence(phase.snapshot()).unwrap();phase.revoke();
+        phase.observe_history_retired(0).unwrap();assert_eq!(phase.history_phase(0),6);
+        assert!(phase.quiescent());assert!(phase.revoked());assert!(phase.history_step(1,0,1).is_err());
+        assert!(phase.observe_history_retired(0).is_err());assert!(phase.finish_quiescence().is_err());
+    }
+    #[test]
     fn retirement_quiescence_blocks_all_native_admission_and_never_clears_revoke(){
         let phase=Phases::new();phase.step(0,0,36).unwrap();phase.step(1,0,22).unwrap();phase.witness_step(0,0,6).unwrap();
-        phase.begin_quiescence([36,22],[6,0]).unwrap();assert!(phase.quiescent());
+        phase.begin_quiescence(phase.snapshot()).unwrap();assert!(phase.quiescent());
         assert!(phase.step(1,22,23).is_err());assert!(phase.witness_step(1,0,1).is_err());
         phase.revoke();assert!(phase.finish_quiescence().is_err());assert!(phase.revoked());assert!(phase.quiescent());
         assert_eq!(phase.phase(0),36);assert_eq!(phase.witness_phase(0),6);
@@ -271,8 +321,8 @@ mod tests {
     #[test]
     fn retirement_pause_requires_exact_snapshot_and_successful_resume_preserves_phases(){
         let phase=Phases::new();phase.step(0,0,36).unwrap();
-        assert!(phase.begin_quiescence([35,0],[0,0]).is_err());assert!(!phase.quiescent());
-        phase.begin_quiescence([36,0],[0,0]).unwrap();assert!(phase.begin_quiescence([36,0],[0,0]).is_err());
+        assert!(phase.begin_quiescence(35).is_err());assert!(!phase.quiescent());
+        phase.begin_quiescence(phase.snapshot()).unwrap();assert!(phase.begin_quiescence(phase.snapshot()).is_err());
         phase.finish_quiescence().unwrap();assert_eq!(phase.phase(0),36);assert!(!phase.quiescent());assert!(!phase.revoked());
         assert!(phase.finish_quiescence().is_err());
     }

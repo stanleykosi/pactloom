@@ -7,7 +7,7 @@
 //! the optional configured legacy owner alone constructs the production bridge.
 //! Retained bytes and their checksums are evidence, never authentication authority.
 use crate::{offline::*, offline_export::OfflineAdmissionExportPlan, *};
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 
 pub(crate) const OFFLINE_RETRY_SCHEMA: &str = include_str!("offline_retry_schema.sql");
@@ -448,20 +448,35 @@ pub(crate) fn require_inbox_acceptance(
     c: &Connection,
     original: &RetainedOfflineOriginal,
 ) -> Result<OriginalInboxAcceptance> {
-    read_inbox_acceptance(c, original)?.ok_or(AuthorityError::Authentication)
+    require_inbox_acceptance_guarded(c, original, crate::journal::ReadGuardV1::legacy())
+}
+
+pub(crate) fn require_inbox_acceptance_guarded(
+    c: &Connection,
+    original: &RetainedOfflineOriginal,
+    guard: crate::journal::ReadGuardV1<'_>,
+) -> Result<OriginalInboxAcceptance> {
+    read_inbox_acceptance_guarded(c, original, guard)?.ok_or(AuthorityError::Authentication)
 }
 fn read_inbox_acceptance(
     c: &Connection,
     original: &RetainedOfflineOriginal,
 ) -> Result<Option<OriginalInboxAcceptance>> {
+    read_inbox_acceptance_guarded(c, original, crate::journal::ReadGuardV1::legacy())
+}
+
+fn read_inbox_acceptance_guarded(
+    c: &Connection,
+    original: &RetainedOfflineOriginal,
+    guard: crate::journal::ReadGuardV1<'_>,
+) -> Result<Option<OriginalInboxAcceptance>> {
     let prepared = original.prepared_record_digest()?;
-    let raw: Option<(String,Vec<u8>)> = c.query_row(
+    let raw: Option<(String,Zeroizing<Vec<u8>>)> = crate::journal::guarded_read!(guard, c.query_row(
         "SELECT acceptance_digest,CASE WHEN length(payload)<=16384 THEN payload ELSE NULL END FROM authority_offline_inbox_acceptances WHERE prepared_digest=?1",
-        [&prepared], |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
+        [&prepared], |r| Ok((r.get(0)?,Zeroizing::new(r.get::<_,Vec<u8>>(1)?)))).optional())?;
     let Some((expected, payload)) = raw else {
         return Ok(None);
     };
-    let payload = Zeroizing::new(payload);
     let record: OriginalInboxAcceptance = decode(&payload)?;
     let receipt = original
         .receipt
@@ -778,14 +793,34 @@ pub(crate) fn verify_original_event_link(
     session_id: &str,
     reserved_at: u64,
 ) -> Result<()> {
-    let retained =
-        read_original(c, &record.request.operation_id)?.ok_or(AuthorityError::CorruptHistory)?;
+    verify_original_event_link_guarded(
+        c,
+        record,
+        link,
+        policy,
+        session_id,
+        reserved_at,
+        crate::journal::ReadGuardV1::legacy(),
+    )
+}
+
+pub(crate) fn verify_original_event_link_guarded(
+    c: &Connection,
+    record: &OfflineReservationRecord,
+    link: &OriginalCommitLink,
+    policy: &OfflineEnrollmentPolicy,
+    session_id: &str,
+    reserved_at: u64,
+    guard: crate::journal::ReadGuardV1<'_>,
+) -> Result<()> {
+    let retained = read_original_guarded(c, &record.request.operation_id, guard)?
+        .ok_or(AuthorityError::CorruptHistory)?;
     verify_retained(&retained, policy)?;
     let receipt = retained
         .receipt
         .as_ref()
         .ok_or(AuthorityError::CorruptHistory)?;
-    let acceptance = require_inbox_acceptance(c, &retained)?;
+    let acceptance = require_inbox_acceptance_guarded(c, &retained, guard)?;
     record.authentication.matches(&record.request, policy)?;
     let (issued, expires) = window(
         receipt.export_plan.issued_at_unix_seconds,
@@ -803,7 +838,11 @@ pub(crate) fn verify_original_event_link(
     {
         return Err(AuthorityError::CorruptHistory);
     }
-    crate::offline_outcome::verify_no_admission_not_selected(c, &link.prepared_record_digest)?;
+    crate::offline_outcome::verify_no_admission_not_selected_guarded(
+        c,
+        &link.prepared_record_digest,
+        guard,
+    )?;
     Ok(())
 }
 fn retained_link(
@@ -946,6 +985,14 @@ pub(crate) fn read_original(
     c: &Connection,
     operation_id: &str,
 ) -> Result<Option<RetainedOfflineOriginal>> {
+    read_original_guarded(c, operation_id, crate::journal::ReadGuardV1::legacy())
+}
+
+pub(crate) fn read_original_guarded(
+    c: &Connection,
+    operation_id: &str,
+    guard: crate::journal::ReadGuardV1<'_>,
+) -> Result<Option<RetainedOfflineOriginal>> {
     // Check BLOB lengths before materialization; all duplicated indexes are
     // compared to their canonical payload, never treated as independent truth.
     type Raw = (
@@ -955,13 +1002,13 @@ pub(crate) fn read_original(
         String,
         String,
         String,
-        Vec<u8>,
-        Vec<u8>,
+        Zeroizing<Vec<u8>>,
+        Zeroizing<Vec<u8>>,
     );
-    let raw: Option<Raw> = c.query_row(
+    let raw: Option<Raw> = crate::journal::guarded_read!(guard, c.query_row(
         "SELECT prepared_digest,request_digest,envelope_digest,intent_id,intent_digest,authorization_id,CASE WHEN length(payload)<=262144 THEN payload ELSE NULL END,CASE WHEN length(envelope)<=1048576 THEN envelope ELSE NULL END FROM authority_offline_originals WHERE operation_id=?1",
-        [operation_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?)))
-        .optional()?;
+        [operation_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,Zeroizing::new(r.get::<_,Vec<u8>>(6)?),Zeroizing::new(r.get::<_,Vec<u8>>(7)?))))
+        .optional())?;
     let Some((
         prepared,
         request,
@@ -975,7 +1022,6 @@ pub(crate) fn read_original(
     else {
         return Ok(None);
     };
-    let payload = Zeroizing::new(payload);
     let original: OriginalPreparation = decode(&payload)?;
     original.validate()?;
     if encode(&original)?.as_slice() != payload.as_slice()
@@ -990,10 +1036,19 @@ pub(crate) fn read_original(
     {
         return Err(AuthorityError::CorruptHistory);
     }
-    type ReceiptRaw = (String, String, u64, String, String, u64, String, Vec<u8>);
-    let raw_receipt: Option<ReceiptRaw> = c.query_row(
+    type ReceiptRaw = (
+        String,
+        String,
+        u64,
+        String,
+        String,
+        u64,
+        String,
+        Zeroizing<Vec<u8>>,
+    );
+    let raw_receipt: Option<ReceiptRaw> = crate::journal::guarded_read!(guard, c.query_row(
         "SELECT receipt_digest,original_stream,original_sequence,original_message_id,export_stream,export_sequence,export_message_id,CASE WHEN length(payload)<=16384 THEN payload ELSE NULL END FROM authority_offline_original_receipts WHERE prepared_digest=?1",
-        [&prepared], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?))).optional()?;
+        [&prepared], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,Zeroizing::new(r.get::<_,Vec<u8>>(7)?)))).optional())?;
     let receipt = match raw_receipt {
         None => None,
         Some((
@@ -1006,7 +1061,6 @@ pub(crate) fn read_original(
             export_message,
             payload,
         )) => {
-            let payload = Zeroizing::new(payload);
             let record: OriginalReceiptRecord = decode(&payload)?;
             if encode(&record)?.as_slice() != payload.as_slice()
                 || record.prepared_record_digest != prepared
@@ -1025,7 +1079,7 @@ pub(crate) fn read_original(
     };
     Ok(Some(RetainedOfflineOriginal {
         original,
-        envelope: Zeroizing::new(envelope),
+        envelope,
         receipt,
     }))
 }
@@ -1051,9 +1105,25 @@ pub(crate) fn ensure_capacity(
     envelope: usize,
     new_row: bool,
 ) -> Result<()> {
-    let (count, bytes): (u64,u64) = c.query_row(
+    ensure_capacity_guarded(
+        c,
+        metadata,
+        envelope,
+        new_row,
+        crate::journal::ReadGuardV1::legacy(),
+    )
+}
+
+pub(crate) fn ensure_capacity_guarded(
+    c: &Connection,
+    metadata: usize,
+    envelope: usize,
+    new_row: bool,
+    guard: crate::journal::ReadGuardV1<'_>,
+) -> Result<()> {
+    let (count, bytes): (u64,u64) = crate::journal::guarded_read!(guard, c.query_row(
         "SELECT count(*),coalesce(sum(length(payload)+length(envelope)),0)+(SELECT coalesce(sum(length(payload)),0) FROM authority_offline_original_receipts)+(SELECT coalesce(sum(length(payload)),0) FROM authority_offline_inbox_acceptances)+(SELECT coalesce(sum(length(payload)),0) FROM authority_offline_outcomes) FROM authority_offline_originals",
-        [], |r| Ok((r.get(0)?,r.get(1)?)))?;
+        [], |r| Ok((r.get(0)?,r.get(1)?))))?;
     check_capacity(count, bytes, metadata, envelope, new_row)
 }
 fn check_capacity(
@@ -1266,29 +1336,44 @@ pub(crate) fn copy_offline_state(source: &Connection, destination: &Connection) 
 /// Full version-4 reopen/backup verification. Parent calls only after ordinary
 /// authority history is reconstructed; never recursively invokes journal::load.
 pub(crate) fn verify_offline_state(c: &Connection, ledger: &policy::Ledger) -> Result<()> {
-    ensure_capacity(c, 0, 0, false)?;
+    verify_offline_state_guarded(c, ledger, crate::journal::ReadGuardV1::legacy())
+}
+
+pub(crate) fn verify_offline_state_guarded(
+    c: &Connection,
+    ledger: &policy::Ledger,
+    guard: crate::journal::ReadGuardV1<'_>,
+) -> Result<()> {
+    ensure_capacity_guarded(c, 0, 0, false, guard)?;
     for table in [
         "authority_offline_originals",
         "authority_offline_original_receipts",
         "authority_offline_inbox_acceptances",
         "authority_offline_outcomes",
     ] {
-        let count: u64 = c.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))?;
+        let count: u64 = crate::journal::guarded_read!(
+            guard,
+            c.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+        )?;
         if count > MAX_ORIGINAL_ROWS {
             return Err(AuthorityError::Limit);
         }
     }
-    let mut foreign = c.prepare("PRAGMA foreign_key_check")?;
-    if foreign.query([])?.next()?.is_some() {
+    let mut foreign = crate::journal::guarded_read!(guard, c.prepare("PRAGMA foreign_key_check"))?;
+    let mut foreign_rows = crate::journal::guarded_read!(guard, foreign.query([]))?;
+    if crate::journal::guarded_read!(guard, foreign_rows.next())?.is_some() {
         return Err(AuthorityError::CorruptHistory);
     }
-    let mut rows =
-        c.prepare("SELECT operation_id FROM authority_offline_originals ORDER BY operation_id")?;
-    let mut rows = rows.query([])?;
-    while let Some(row) = rows.next()? {
+    let mut rows = crate::journal::guarded_read!(
+        guard,
+        c.prepare("SELECT operation_id FROM authority_offline_originals ORDER BY operation_id")
+    )?;
+    let mut rows = crate::journal::guarded_read!(guard, rows.query([]))?;
+    while let Some(row) = crate::journal::guarded_read!(guard, rows.next())? {
         let operation: String = row.get(0)?;
         id(&operation)?;
-        let retained = read_original(c, &operation)?.ok_or(AuthorityError::CorruptHistory)?;
+        let retained =
+            read_original_guarded(c, &operation, guard)?.ok_or(AuthorityError::CorruptHistory)?;
         let policy = policy_for(ledger, retained.request())?;
         verify_retained(&retained, policy)?;
         retained.request().validate_policy_bounds(
@@ -1313,12 +1398,12 @@ pub(crate) fn verify_offline_state(c: &Connection, ledger: &policy::Ledger) -> R
         {
             return Err(AuthorityError::CorruptHistory);
         }
-        read_inbox_acceptance(c, &retained)?;
-        crate::offline_outcome::verify_retained_outcome(c, ledger, &retained)?;
+        read_inbox_acceptance_guarded(c, &retained, guard)?;
+        crate::offline_outcome::verify_retained_outcome_guarded(c, ledger, &retained, guard)?;
     }
-    let mut streams = c.prepare("SELECT export_stream,max(export_sequence),count(*) FROM authority_offline_original_receipts GROUP BY export_stream")?;
-    let mut rows = streams.query([])?;
-    while let Some(row) = rows.next()? {
+    let mut streams = crate::journal::guarded_read!(guard, c.prepare("SELECT export_stream,max(export_sequence),count(*) FROM authority_offline_original_receipts GROUP BY export_stream"))?;
+    let mut rows = crate::journal::guarded_read!(guard, streams.query([]))?;
+    while let Some(row) = crate::journal::guarded_read!(guard, rows.next())? {
         hash(&row.get::<_, String>(0)?)?;
         if row.get::<_, u64>(1)? != row.get::<_, u64>(2)? {
             return Err(AuthorityError::CorruptHistory);

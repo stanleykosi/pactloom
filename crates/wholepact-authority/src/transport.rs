@@ -22,6 +22,16 @@ mod financial_signing_client_v1;
 mod completed_dispatch_v1;
 #[cfg(all(feature = "coordinated-witness-financial-continuation", target_os = "linux"))]
 pub(crate) mod coordinated_financial_continuation_v1;
+#[cfg(all(any(feature = "coordinated-witness-financial-history", feature = "coordinated-witness-financial-signing"), target_os = "linux"))]
+mod coordinated_service_worker_v1;
+#[cfg(all(feature = "coordinated-witness-financial-history", target_os = "linux"))]
+mod coordinated_initial_history_v1;
+#[cfg(all(feature = "coordinated-witness-financial-history", target_os = "linux"))]
+pub use coordinated_initial_history_v1::run_coordinated_initial_history_v1;
+#[cfg(all(feature = "coordinated-witness-financial-signing", target_os = "linux"))]
+mod coordinated_financial_signing_v1;
+#[cfg(all(feature = "coordinated-witness-financial-signing", target_os = "linux"))]
+pub use coordinated_financial_signing_v1::run_coordinated_financial_signing_v1;
 #[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
 mod finite_witness_service_v1;
 #[cfg(all(feature = "native-witness-owner", target_os = "linux"))]

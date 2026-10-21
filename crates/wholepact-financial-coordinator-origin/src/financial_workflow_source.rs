@@ -166,7 +166,7 @@ impl ReadReviewed {
         let ceiling=bound.min(entry.original_source).min(wall_ceiling(now,wall,wire.facts.reviewed_at_ms,wire.facts.expires_at_ms)?);
         let read=Arc::new(Self{entry,wire,original_read,ceiling,last_wall:AtomicU64::new(wall)});read.check_bounds()?;Ok(read)
     }
-    fn check_bounds(&self)->Result<()> {
+    pub(super) fn check_bounds(&self)->Result<()> {
         let result=(||{let wall=self.entry.observe_custody()?;let prior=self.last_wall.fetch_max(wall,Ordering::AcqRel);
             if Instant::now()>=self.original_read||Instant::now()>=self.ceiling
                 ||wall<prior||wall<self.wire.facts.reviewed_at_ms||wall>=self.wire.facts.expires_at_ms
@@ -188,7 +188,7 @@ impl SignerFinancialReadTicketV1{
     }
 }
 impl Drop for SignerFinancialReadTicketV1{fn drop(&mut self){if !self.consumed{self.read.entry.core.phase.revoke();}}}
-pub struct SignerFinancialReadOutboundV1{pub(super) read:Arc<ReadReviewed>,pub(super) consumed:bool}
+pub struct SignerFinancialReadOutboundV1{pub(super) read:Arc<ReadReviewed>,pub(super) service:crate::financial_workflow_origin::HistoryServiceLease,pub(super) consumed:bool}
 impl Drop for SignerFinancialReadOutboundV1{fn drop(&mut self){if !self.consumed{self.read.entry.core.phase.revoke();}}}
 pub struct SignerFinancialReadFinalV1{pub(super) read:Arc<ReadReviewed>,pub(super) consumed:bool}
 impl SignerFinancialReadFinalV1 {
