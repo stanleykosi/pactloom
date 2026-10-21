@@ -1668,6 +1668,11 @@ def _validate_delivery_path(groups, case):
                 admit_native[0]['elapsed_ms'] < ready_c['detail']['monotonic_deadline_ms'] and
                 arm_w['elapsed_ms'] < review_w['detail']['monotonic_deadline_ms'] and
                 admit_w['elapsed_ms'] < ready_w['detail']['monotonic_deadline_ms'], 'record_deadline')
+        # Unlike the rejected cross-thread clear-before-Cancel claim, these
+        # are actual local guarantees: A sets admitted before revoke can report
+        # it, and the endpoint sends the retained Final before its one Cancel.
+        _local_before(admit_native[0], cleared, code='native_admit')
+        _local_before(admit_c, cancel_c)
         _local_before(review_c, arm_native[0], arm_c, ready_c, admit_native[0], admit_c, outcome_c)
         _local_before(review_w, arm_w, ready_w, admit_w, joined)
         acknowledgments = [r for r in source if r['sequence'] < arm_native[0]['sequence'] and
@@ -1945,3 +1950,67 @@ def project_case(records, case, *, root_pid, root_status, audit, paint, owner_cl
         if type(case) is str and case in CASES:
             error.failure = observer_failure(error, case, records=records)
         raise
+
+
+# Exact finite Debug enums from the maintained owner-TLS transport. A wrapper
+# is causal information: Source(Expired) is not Authority(Expired), and an IO
+# error is never reduced to the resulting AuthorityError::Uncertain. Source
+# equality tests guard this vocabulary against transport drift.
+OWNER_CLIENT_STAGES = frozenset('''
+RetainedBinding BeforeSendChannel BeforeSendSource BeforeWriteChannel WriteFrame
+WritePrecheck WriteIo WritePostcheck FlushPrecheck FlushIo FlushPostcheck
+AfterWriteSource AfterWriteChannel ReadFrame ReadPrecheck ReadIo ReadPostcheck
+AfterReadSource AfterReadChannel ResponseRejected ResponseVariant Snapshot CommittedHead
+'''.split())
+OWNER_CLIENT_IO = frozenset('''
+TimedOut WouldBlock Interrupted UnexpectedEof WriteZero ConnectionAborted
+ConnectionRefused ConnectionReset BrokenPipe NotConnected PermissionDenied
+InvalidData InvalidInput Other
+'''.split())
+OWNER_CLIENT_ERRORS = DELIVERY_CLASSES
+_OWNER_CLIENT_CAUSES = {
+    **{f'{wrapper}({error})': f'{wrapper}_{error}'
+       for wrapper in ('Authority', 'Source') for error in OWNER_CLIENT_ERRORS},
+    **{f'Io({kind})': f'Io_{kind}' for kind in OWNER_CLIENT_IO},
+    'PredicateDenied': 'PredicateDenied',
+}
+_OWNER_CLIENT_PREPARE = {
+    'NotListening': 'NotListening',
+    **{f'Aborted({error})': f'Aborted_{error}' for error in OWNER_CLIENT_ERRORS},
+}
+OWNER_CLIENT_CODES = frozenset(
+    [f'owner_client_{stage}_{cause}' for stage in OWNER_CLIENT_STAGES
+     for cause in _OWNER_CLIENT_CAUSES.values()] +
+    [f'owner_client_Prepare_{cause}' for cause in _OWNER_CLIENT_PREPARE.values()])
+CODES = CODES | OWNER_CLIENT_CODES
+
+
+def parse_owner_client_failure(line):
+    """Parse one entire canonical diagnostic line into one bounded code.
+
+    The caller must retain the first actual failure, enforce exactly one
+    diagnostic, and keep success/failure status consistent. This pure parser
+    never interprets arbitrary child text or upgrades an uncertain outcome.
+    A single terminal LF is permitted for an unstripped pipe line; CR, extra
+    whitespace, alternate Debug layouts, suffixes and unknown enums are not.
+    """
+    require(type(line) in (str, bytes), 'owner_response')
+    try:
+        raw = line.encode('ascii') if type(line) is str else line
+        require(0 < len(raw) <= 256, 'owner_response')
+        text = raw.decode('ascii')
+    except (UnicodeError, ValueError):
+        raise Rejected('owner_response') from None
+    if text.endswith('\n'): text = text[:-1]
+    prefix = 'CI_UI_OWNER_CLIENT_FAILURE stage='
+    require(text.startswith(prefix), 'owner_response')
+    stage, separator, cause = text[len(prefix):].partition(' cause=')
+    require(separator == ' cause=', 'owner_response')
+    if stage == 'Prepare':
+        require(cause in _OWNER_CLIENT_PREPARE, 'owner_response')
+        code = 'owner_client_Prepare_' + _OWNER_CLIENT_PREPARE[cause]
+    else:
+        require(stage in OWNER_CLIENT_STAGES and cause in _OWNER_CLIENT_CAUSES, 'owner_response')
+        code = 'owner_client_' + stage + '_' + _OWNER_CLIENT_CAUSES[cause]
+    require(code in OWNER_CLIENT_CODES, 'owner_response')
+    return code

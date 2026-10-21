@@ -237,10 +237,11 @@ def base_passwd():
     return data
 
 
-def prepare_runtime(source_backed, report_failure):
+def prepare_runtime(source_backed, report_failure, timing=None):
     root_context(); manifest = image_manifest(); fixture_tmpfs()
     base = base_passwd(); write_passwd(base, '/nonexistent', final=False)
     started = time.monotonic_ns(); original = started + 900_000_000_000
+    if timing is not None: timing['started'] = started
     custody = None
     if source_backed:
         custody = setup_one_fixture(original, started, report_failure)
@@ -250,6 +251,490 @@ def prepare_runtime(source_backed, report_failure):
     os.setgroups([]); os.setresgid(S.UID, S.UID, S.UID); os.setresuid(S.UID, S.UID, S.UID)
     S.identity()
     return original, started, custody
+
+
+# New integrated source revision. Runtime activation remains a separate review.
+import dataclasses
+import math
+import selectors
+
+CSPEC = importlib.util.spec_from_file_location('ci_ui_controller', ROOT / 'ci-ui-controller.py')
+D = importlib.util.module_from_spec(CSPEC); sys.modules[CSPEC.name] = D; CSPEC.loader.exec_module(D)
+EVIDENCE = pathlib.Path('/run/wholepact-delivery-evidence')
+WAYLAND = pathlib.Path('/run/ci-wayland')
+FIELDS = (('Endpoint', 'endpoint'), ('ServerName', 'server_name'), ('WitnessId', 'witness_id'),
+    ('ServerCertificateDigest', 'pinned_server_certificate_digest'), ('NetworkProfile', 'network_profile_id'),
+    ('AccountId', 'expected_account_id'), ('StorageKeyPath', 'storage_key_file'),
+    ('ServerCertificatePath', 'server_certificate_der'), ('ServerPrivateKeyPath', 'server_private_key_pkcs8_der'),
+    ('ClientRootPath', 'trusted_client_root_der'), ('OwnerCertificate', 'owner_certificate_der_hex'),
+    ('Request', 'request_json'))
+OWNER_SELECTOR = S.SELECTOR_PREFIX.rsplit('pristine_coordinator_v1::', 1)[0] + \
+    'pristine_owner_client_v1::coordinator_pristine_owner_same_stream_one_append'
+WESTON = ('/usr/bin/weston', '--backend=headless', '--renderer=pixman', '--shell=kiosk-shell.so',
+    '--width=1280', '--height=800', '--scale=1', '--transform=normal', '--socket=wayland-ui',
+    '--idle-time=0', '--no-config', '--modules=/opt/ci-ui/ci-ui-weston-module.so')
+
+
+def original_facts(raw, original):
+    """The retained serde_json bytes are hashed, never reserialized as a request.
+
+    Authority lib.rs::digest uses SHA256(domain || NUL || serde_json bytes), and
+    the maintained custody exporter writes this exact serde_json request once.
+    No field value here grants source/append authority; actual W opens originals.
+    """
+    value = S.loads(raw, S.MAX_HANDOFF)
+    require(value['original_monotonic_cutoff_ns'] == original, 'original_deadline')
+    form = value['fixture']['form']
+    request_bytes = form['request_json'].encode('ascii')
+    request = S.loads(request_bytes, 65536)
+    owner = bytes.fromhex(form['owner_certificate_der_hex'])
+    facts = dict(descriptor_digest=hashlib.sha256(raw).hexdigest(),
+        request_commitment=hashlib.sha256(b'wholepact:durable-delivery-admission-preparation:v3\0' + request_bytes).hexdigest(),
+        cutoff_ns=original, account_id=request['account_id'], operation_id=request['operation_id'],
+        expected_head=request['expected_head'], owner_certificate_digest=hashlib.sha256(owner).hexdigest())
+    require(request['account_id'] == form['expected_account_id'] and request['expected_head']['sequence'] == 4,
+            'original_request')
+    return value, facts
+
+
+def physical_region(snapshot, widget):
+    r = widget['rect']; scale = snapshot['pixels_per_point']
+    region = {k: (math.floor(v * scale) if k in ('left', 'top') else math.ceil(v * scale)) for k, v in r.items()}
+    require(0 <= region['left'] < region['right'] <= D.WIDTH and
+            0 <= region['top'] < region['bottom'] <= D.HEIGHT, 'display_geometry')
+    return region
+
+
+def center(snapshot, widget):
+    r = physical_region(snapshot, widget)
+    return ((r['left'] + r['right']) // 2, (r['top'] + r['bottom']) // 2)
+
+
+def pixel_digest(pixels, region):
+    require(len(pixels) == D.FRAME_BYTES, 'source_paint')
+    digest = hashlib.sha256()
+    for y in range(region['top'], region['bottom']):
+        digest.update(pixels[(y * D.WIDTH + region['left']) * 4:(y * D.WIDTH + region['right']) * 4])
+    return digest.hexdigest()
+
+
+class FirstRuntimeFailure:
+    def __init__(self, mode):
+        self.mode, self.value, self.stage, self.case = mode, None, 'root', None
+
+    def note(self, value):
+        P.validate_failure(value, self.mode)
+        if self.value is None:
+            self.value = value
+            print('CI_UI_FAILURE ' + json.dumps(value, separators=(',', ':')), flush=True)
+
+    def error(self, error, records=()):
+        candidate = getattr(error, 'failure', None)
+        if candidate is None:
+            code = getattr(error, 'code', 'internal')
+            if isinstance(error, D.Rejected):
+                code = {'deadline': 'display_deadline', 'target': 'display_binding', 'input': 'input_bounds',
+                    'limit': 'input_budget', 'output': 'display_geometry', 'readback': 'display_frame'}.get(code, 'display_protocol')
+            code = code if code in P.CODES else 'internal'
+            detail = None
+            if code in ('source_failure', 'uncertain_effect') and records:
+                try: detail = P.delivery_first_failure(records)
+                except P.Rejected: pass
+            candidate = P.failure(self.mode, self.stage, code, self.case,
+                delivery_stage=None if detail is None else detail['stage'],
+                delivery_class=None if detail is None else detail['class'])
+        self.note(candidate)
+
+
+class ObserverFiles:
+    """Secure append-only private collection. Live incomplete suffixes wait only.
+
+    Final evidence never omits a suffix, file, or closure. Polling an incomplete
+    observation does not repeat input, preparation, TLS, or any product action.
+    """
+    def __init__(self):
+        self.prefixes, self.identities = {}, {}
+
+    def read(self, *, final=False):
+        entries = list(EVIDENCE.iterdir())
+        require(len(entries) <= 32, 'record_count')
+        require(set(self.prefixes) <= {p.name for p in entries}, 'record_file')
+        files, total = {}, 0
+        for path in sorted(entries):
+            require(re.fullmatch(r'[1-9][0-9]{0,9}\.jsonl', path.name) is not None, 'record_file')
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            with os.fdopen(fd, 'rb') as stream:
+                before = os.fstat(stream.fileno())
+                require(stat.S_ISREG(before.st_mode) and before.st_uid == S.UID and before.st_gid == S.UID and
+                    before.st_nlink == 1 and stat.S_IMODE(before.st_mode) == 0o600 and
+                    0 <= before.st_size <= 256 * 1024, 'record_file')
+                raw = stream.read(256 * 1024 + 1)
+                after = os.fstat(stream.fileno())
+            require(len(raw) <= 256 * 1024 and after.st_nlink == 1, 'record_overflow')
+            identity = (before.st_dev, before.st_ino)
+            require(self.identities.get(path.name, identity) == identity, 'record_file')
+            self.identities[path.name] = identity
+            previous = self.prefixes.get(path.name, b'')
+            require(raw.startswith(previous), 'record_sequence')
+            if final:
+                require(before.st_size == after.st_size == len(raw) and raw.endswith(b'\n'), 'record_incomplete')
+                complete = raw
+            else:
+                complete = raw[:raw.rfind(b'\n') + 1]
+            self.prefixes[path.name] = complete
+            total += len(raw); require(total <= 4 * 1024 * 1024, 'record_overflow')
+            if complete: files[path.name] = complete
+        if not files:
+            require(not final, 'record_incomplete'); return []
+        return P.load_observer_files(files)
+
+    def erase_after_case(self):
+        # Only called after natural product drain, completed audit and oracle.
+        for name, identity in self.identities.items():
+            path = EVIDENCE / name; meta = path.stat(follow_symlinks=False)
+            require((meta.st_dev, meta.st_ino) == identity, 'record_file')
+            path.unlink()
+        require(not list(EVIDENCE.iterdir()), 'record_file')
+
+
+class LibSelector:
+    """One fixed ignored real LIB test; never retries and never exports raw PTY."""
+    def __init__(self, selector, original, reporter, *, owner=False):
+        allowed = (OWNER_SELECTOR, S.SELECTOR_PREFIX + 'coordinator_pristine_originals_after_cancel_or_blur',
+                   S.SELECTOR_PREFIX + 'coordinator_originals_after_one_exact_append')
+        require(selector in allowed and (selector == OWNER_SELECTOR) is owner, 'setup_process')
+        self.selector, self.original, self.reporter, self.owner = selector, original, reporter, owner
+        self.pending, self.total, self.counts, self.result = bytearray(), 0, {'running': 0, 'result': 0, 'marker': 0}, None
+        self.failure_seen = False
+        self.process = subprocess.Popen([str(ROOT / 'pristine-setup'), '--exact', selector,
+            '--ignored', '--nocapture', '--test-threads=1'], stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env={'PATH': '/usr/bin:/bin',
+            'TMPDIR': '/ci-fixture', 'RUST_BACKTRACE': '0',
+            'WHOLEPACT_TEST_ONLY_PRIVATE_WORKFLOW_CUTOFF_NS': str(original)},
+            close_fds=True, pass_fds=(), start_new_session=True)
+        self.poller = selectors.DefaultSelector(); self.poller.register(self.process.stdout, selectors.EVENT_READ)
+
+    def line(self, line):
+        prefix = ('test ' + self.selector + ' ... ').encode('ascii')
+        if line.startswith(prefix): line = line[len(prefix):]
+        line = line.removesuffix(b'\r')
+        kind = None
+        if line.startswith(b'CI_UI_OWNER_CLIENT_FAILURE'):
+            require(self.owner and not self.failure_seen, 'setup_output')
+            self.failure_seen = True
+            code = P.parse_owner_client_failure(line)
+            self.reporter.note(P.failure('fixture', 'append', code, 'append'))
+            raise S.Rejected(code)
+        if line.startswith(b'CI_UI_SETUP_FAILURE'):
+            first = S.FirstFailure()
+            try: S.setup_line(line, first)
+            except S.Rejected:
+                if first.value:
+                    failure = dict(first.value); failure['case'] = self.reporter.case; failure['stage'] = 'audit'
+                    self.reporter.note(failure)
+                raise
+        marker = b'CI_UI_OWNER_CLIENT ' if self.owner else b'CI_UI_FIXTURE_AUDIT '
+        if line.startswith(marker):
+            require(self.result is None, 'setup_output')
+            self.result = P.loads(line[len(marker):], limit=4096); kind = 'marker'
+        elif line.startswith(b'CI_UI_'):
+            raise S.Rejected('setup_output')
+        elif line == b'running 1 test': kind = 'running'
+        elif line.startswith(b'test result:'):
+            require(re.fullmatch(rb'test result: ok\. 1 passed; 0 failed; 0 ignored; [0-9]+ measured; [0-9]+ filtered out; finished in [0-9.]+s', line) is not None,
+                    'setup_count'); kind = 'result'
+        if kind:
+            self.counts[kind] += 1; require(self.counts[kind] == 1, 'setup_count')
+
+    def pump(self):
+        require(time.monotonic_ns() < self.original, 'original_deadline')
+        for key, _ in self.poller.select(0):
+            chunk = os.read(key.fileobj.fileno(), 16384)
+            if not chunk:
+                self.poller.unregister(key.fileobj); continue
+            self.total += len(chunk); require(self.total <= S.MAX_OUTPUT, 'output_limit')
+            self.pending.extend(chunk)
+            while b'\n' in self.pending:
+                line, _, rest = self.pending.partition(b'\n'); self.pending[:] = rest; self.line(bytes(line))
+        return not self.poller.get_map()
+
+    def finish(self, allowed, deadline):
+        while not self.pump():
+            require(time.monotonic_ns() < deadline, 'phase_deadline'); time.sleep(.01)
+        require(not self.pending, 'setup_output')
+        status = self.process.wait(timeout=max(.001, (deadline - time.monotonic_ns()) / 1e9))
+        require(status == 0 and self.counts == {'running': 1, 'result': 1, 'marker': 1},
+                'owner_response' if self.owner else 'history_audit')
+        S.namespace_empty_except(allowed)
+        self.poller.close(); self.process.stdout.close()
+        return self.result
+
+
+class NativeSession:
+    def __init__(self, original, source_backed, reporter):
+        self.original, self.reporter, self.observed = original, reporter, source_backed
+        self.deadline = min(original, time.monotonic_ns() + D.SESSION_NS)
+        self.records, self.owner, self.collector = [], None, ObserverFiles() if source_backed else None
+        self.controller = self.weston = self.product = None
+        reporter.stage = 'display'
+        S.namespace_empty_except((1,))
+        require(not list(EVIDENCE.iterdir()), 'record_file')
+        require(not list(WAYLAND.iterdir()), 'display_start')
+        self.controller, edge, additions = D.make_channel(original, self.deadline)
+        try:
+            self.weston = subprocess.Popen(WESTON, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, close_fds=True, pass_fds=(edge.fileno(),), start_new_session=True,
+                env={'PATH': '/usr/bin:/bin', 'HOME': '/nonexistent', 'LANG': 'C.UTF-8',
+                     'XDG_RUNTIME_DIR': str(WAYLAND), **additions})
+        finally: edge.close()
+        self.controller.wait_ready()
+        require(self.weston.poll() is None, 'display_status')
+        environment = {'XDG_RUNTIME_DIR': str(WAYLAND), 'WAYLAND_DISPLAY': 'wayland-ui'}
+        D.check_product_environment(environment)
+        self.product = subprocess.Popen([str(ROOT / ('coordinator-observed' if source_backed else 'coordinator-production'))],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            close_fds=True, pass_fds=(), env=environment, start_new_session=True)
+        require(os.getpgid(self.product.pid) == self.product.pid, 'product_status')
+        self.controller.bind_process(self.product); self.controller.focus(True)
+
+    def check(self):
+        require(time.monotonic_ns() < self.original, 'original_deadline')
+        require(time.monotonic_ns() < self.deadline, 'phase_deadline')
+        require(self.weston.poll() is None, 'display_status')
+        require(self.product.poll() is None, 'product_status')
+        if self.owner: self.owner.pump()
+        if self.collector: self.records = self.collector.read()
+
+    def snapshot(self):
+        self.check()
+        if len({r['role'] for r in self.records}) != 17: return None
+        try: return P.latest_widget_snapshot(self.records, root_pid=self.product.pid)
+        except P.Rejected as error:
+            if error.code == 'input_widget': return None
+            raise
+
+    def wait_snapshot(self, predicate, *, code='input_phase', after=0, allow_revoked=False):
+        while True:
+            record = self.snapshot()
+            if record:
+                facts = record['detail']['facts']
+                if record['sequence'] > after and predicate(facts): return record
+                if facts['phase'] in ('Revoked', 'Finished') and not allow_revoked:
+                    raise S.Rejected('source_failure')
+            require(time.monotonic_ns() < self.deadline, code); time.sleep(.01)
+
+    @staticmethod
+    def widget(record, name, *, enabled=True):
+        facts = record['detail']['facts']
+        found = [w for w in facts['widgets'] if w['widget'] == name]
+        require(len(found) == 1, 'input_widget')
+        require(not enabled or found[0]['enabled'], 'input_disabled')
+        return found[0]
+
+    def click(self, record, name):
+        self.check()
+        latest = P.latest_widget_snapshot(self.records, root_pid=self.product.pid)
+        a, b = record['detail']['facts'], latest['detail']['facts']
+        require(a['phase'] == b['phase'] and a['presentation_digest'] == b['presentation_digest'] and
+                b['focused'] and self.widget(record, name) == self.widget(latest, name), 'input_phase')
+        return self.controller.click(*center(b, self.widget(latest, name)))
+
+    def fill(self, form):
+        self.reporter.stage = 'input'
+        # Preflight all values and aggregate event ceiling before any field input.
+        cost = sum(len(D._ascii_events(form[key])) + 9 for _, key in FIELDS)
+        require(cost < D.MAX_COMMANDS - 2048, 'input_budget')
+        for name, key in FIELDS:
+            for scroll in range(65):
+                record = self.wait_snapshot(lambda s: s['phase'] == 'Selecting' and s['focused'] and not s['revoked'])
+                matches = [w for w in record['detail']['facts']['widgets'] if w['widget'] == name and w['enabled']]
+                if matches:
+                    self.click(record, name); self.controller.clear_field(); self.controller.type_ascii(form[key]); break
+                require(scroll < 64, 'input_widget')
+                visible = [w for w in record['detail']['facts']['widgets'] if w['widget'] in dict(FIELDS)]
+                require(visible, 'input_widget')
+                target = max(visible, key=lambda w: w['rect']['bottom'])
+                self.controller.scroll_down(*center(record['detail']['facts'], target))
+                time.sleep(.03)  # scheduling only; next actual snapshot remains the input target
+
+    def capture(self, record, prior_pixels=None, *, region=None, before_digest=None):
+        self.check()
+        read_ns = time.monotonic_ns(); facts = record['detail']['facts']
+        if region is None: region = physical_region(facts, self.widget(record, 'Review', enabled=False))
+        requested = time.monotonic_ns()
+        frame = self.controller.observe()
+        try:
+            after_digest = pixel_digest(frame.bgra(), region)
+            if before_digest is None: before_digest = pixel_digest(prior_pixels, region)
+            latest = self.snapshot()
+            require(latest is not None, 'source_paint')
+            current = latest['detail']['facts']
+            require(current['phase'] == facts['phase'] and current['presentation_digest'] == facts['presentation_digest'] and
+                    current['focused'] == facts['focused'] and current['revoked'] == facts['revoked'], 'source_paint')
+            if 'Review' in {w['widget'] for w in facts['widgets']}:
+                require(self.widget(latest, 'Review', enabled=False) == self.widget(record, 'Review', enabled=False), 'source_paint')
+            result = dict(snapshot_sequence=record['sequence'], frame=facts['frame'], **{'pass': facts['pass']},
+                presentation_digest=facts['presentation_digest'], snapshot_read_ns=read_ns,
+                requested_ns=requested, completed_ns=time.monotonic_ns(), request_receipt=dataclasses.asdict(frame.barrier),
+                observed_receipt=dataclasses.asdict(frame.receipt), region=region,
+                region_before_digest=before_digest, region_after_digest=after_digest)
+            require(before_digest != after_digest, 'source_paint')
+            return result
+        finally: frame.wipe()
+
+    def drain_product(self):
+        self.reporter.stage = 'drain'
+        status = self.product.wait(timeout=max(.001, (self.deadline - time.monotonic_ns()) / 1e9))
+        require(status == 0, 'product_status')
+        # Includes adopted live children AND zombies. No rescue/reap substitutes
+        # for the fixed product owners' actual natural cleanup.
+        S.namespace_empty_except((1, self.weston.pid))
+        observed = time.monotonic_ns()
+        require(observed < self.original, 'original_deadline')
+        return dict(root_pid=self.product.pid, exit_status=status, remaining_pids=[],
+                    remaining_process_groups=[], observed_ns=observed)
+
+    def end_display(self):
+        # Product must already be independently exited/reaped and namespace empty.
+        require(self.product.returncode == 0, 'product_status')
+        S.namespace_empty_except((1, self.weston.pid))
+        self.controller.close()
+        if self.weston.poll() is None: self.weston.terminate()
+        self.weston.wait(timeout=max(.001, min(5., (self.original - time.monotonic_ns()) / 1e9)))
+        S.namespace_empty_except((1,))
+        # Only stale private compositor socket/lock, never source custody.
+        for path in WAYLAND.iterdir():
+            require(path.name in ('wayland-ui', 'wayland-ui.lock'), 'display_status')
+            meta = path.stat(follow_symlinks=False)
+            require(meta.st_uid == S.UID and meta.st_gid == S.UID and
+                    (stat.S_ISSOCK(meta.st_mode) or stat.S_ISREG(meta.st_mode)), 'display_status')
+            path.unlink()
+
+
+def source_case(case, original, handoff_raw, original_metadata, artifact_digest, reporter):
+    reporter.case = case
+    session = NativeSession(original, True, reporter)
+    baseline = None
+    try:
+        handoff, current = original_facts(S.read_private(S.BASE / 'handoff.json', S.MAX_HANDOFF), original)
+        require(current == original_metadata, 'original_request')
+        session.fill(handoff['fixture']['form'])
+        prepare = session.wait_snapshot(lambda s: s['phase'] == 'Selecting' and s['focused'] and
+            any(w['widget'] == 'Prepare' and w['enabled'] for w in s['widgets']))
+        with session.controller.observe() as frame: baseline = bytearray(frame.bgra())
+        reporter.stage = 'prepare'; session.click(prepare, 'Prepare')
+        source = session.wait_snapshot(lambda s: s['phase'] == 'Reading' and s['focused'] and
+            not s['revoked'] and s['presentation_digest'] is not None, code='source_prepare', after=prepare['sequence'])
+        source_paint = session.capture(source, baseline); D._wipe(baseline); baseline = None
+        action = focus_out = refocus = None
+        if case == 'cancel':
+            reporter.stage = 'cancel'; action = session.click(source, 'Cancel')
+        elif case == 'blur':
+            reporter.stage = 'blur'; action = focus_out = session.controller.focus(False)
+            session.wait_snapshot(lambda s: s['revoked'] and not s['focused'] and s['presentation_digest'] is None,
+                                  after=source['sequence'], allow_revoked=True)
+            refocus = session.controller.focus(True)
+        else:
+            reporter.stage = 'append'
+            for scroll in range(129):
+                record = session.wait_snapshot(lambda s: s['phase'] == 'Reading' and s['focused'] and not s['revoked'])
+                if any(w['widget'] == 'Continue' and w['enabled'] for w in record['detail']['facts']['widgets']): break
+                require(scroll < 128, 'input_widget')
+                session.controller.scroll_down(*center(record['detail']['facts'], session.widget(record, 'Review', enabled=False)))
+                time.sleep(.03)  # fixed real wheel; unchanged clipped geometry need not emit a snapshot
+            session.click(record, 'Continue')
+            ack = session.wait_snapshot(lambda s: s['phase'] == 'Acknowledging' and s['focused'], after=record['sequence'])
+            session.click(ack, 'Acknowledge')
+            armed = session.wait_snapshot(lambda s: s['phase'] == 'Acknowledging' and s['acknowledged'] and
+                any(w['widget'] == 'Arm' and w['enabled'] for w in s['widgets']), after=ack['sequence'])
+            action = session.click(armed, 'Arm')
+            while True:
+                session.check()
+                native = [r for r in session.records if r['role'] == 'Coordinator' and r['event'] == 'Arm' and r['detail']['direction'] == 'Native']
+                if native: require(len(native) == 1, 'native_arm'); break
+                time.sleep(.01)
+            session.owner = LibSelector(OWNER_SELECTOR, original, reporter, owner=True)
+        cleared = session.wait_snapshot(lambda s: s['phase'] == 'Finished' and s['focused'] and s['revoked'] and
+            s['presentation_digest'] is None, code='source_clear', after=source['sequence'], allow_revoked=True)
+        cleared_paint = session.capture(cleared, region=source_paint['region'], before_digest=source_paint['region_after_digest'])
+        if session.owner:
+            owner = session.owner.finish((1, session.weston.pid, session.product.pid), session.deadline)
+        else: owner = None
+        session.click(cleared, 'Close')
+        drain = session.drain_product(); records = session.collector.read(final=True)
+        P.validate_trace(records, root_pid=session.product.pid, root_status=0)
+        reporter.stage = 'audit'
+        selector = S.SELECTOR_PREFIX + ('coordinator_originals_after_one_exact_append' if case == 'append'
+            else 'coordinator_pristine_originals_after_cancel_or_blur')
+        audit = LibSelector(selector, original, reporter).finish((1, session.weston.pid), original)
+        _, current = original_facts(S.read_private(S.BASE / 'handoff.json', S.MAX_HANDOFF), original)
+        facts = dict(result=audit, original=original_metadata, current=current, drain=drain, audited_ns=time.monotonic_ns())
+        paint = dict(root_pid=session.product.pid, app_id=D.APP_ID, artifact_digest=artifact_digest,
+            original_artifact_digest=artifact_digest, source=source_paint, cleared=cleared_paint,
+            action=dataclasses.asdict(action), focus_out=None if focus_out is None else dataclasses.asdict(focus_out),
+            refocus=None if refocus is None else dataclasses.asdict(refocus))
+        result = P.project_case(records, case, root_pid=session.product.pid, root_status=0,
+            audit=facts, paint=paint, owner_client=owner)
+        session.end_display(); session.collector.erase_after_case()
+        return result
+    except BaseException as error:
+        reporter.error(error, session.records)
+        raise
+    finally:
+        if baseline is not None: D._wipe(baseline)
+        # On any failure PID1 returns error; the outer owns whole-container kill,
+        # removal and disappearance verification. Never turn forced cleanup into pass.
+        if session.controller: session.controller.close()
+
+
+def smoke_case(original, reporter):
+    reporter.case = 'smoke'; session = NativeSession(original, False, reporter)
+    try:
+        with session.controller.observe(): pass
+        session.controller.close_window()
+        session.drain_product(); session.end_display()
+        return dict(name='smoke', product_exit=0, surface_bound=True, frame_observed=True, natural_tree_drain=True)
+    except BaseException as error:
+        reporter.error(error); raise
+    finally:
+        if session.controller: session.controller.close()
+
+
+def reviewed_runtime_main(mode):
+    """Not selected by __main__ until the combined final source gate clears."""
+    reporter = FirstRuntimeFailure(mode); cases = []; setup_ms = None; timing = {}
+    try:
+        require(mode in P.MODES, 'invalid_record')
+        original, started, custody = prepare_runtime(mode == 'fixture', reporter.note, timing)
+        setup_ms = (time.monotonic_ns() - started) // 1_000_000
+        if mode == 'fixture':
+            reporter.stage = 'custody'
+            metadata, fds = S.private_handoff(original)
+            try: require(metadata == custody, 'custody_identity')
+            finally:
+                for fd in fds: os.close(fd)
+            raw = S.read_private(S.BASE / 'handoff.json', S.MAX_HANDOFF)
+            _, retained = original_facts(raw, original)
+            with (ROOT / 'coordinator-observed').open('rb') as image:
+                digest = hashlib.file_digest(image, 'sha256').hexdigest()
+            for case in P.CASES:
+                cases.append(source_case(case, original, raw, retained, digest, reporter))
+        else: cases.append(smoke_case(original, reporter))
+        S.namespace_empty_except((1,)); require(time.monotonic_ns() < original, 'original_deadline')
+        result = dict(schema_version=1, mode=mode, outcome='passed', first_failure=None,
+                      setup_elapsed_ms=setup_ms, cases=cases, natural_empty=True)
+        P.validate_runtime_result(result, mode)
+        print(json.dumps(result, separators=(',', ':')), flush=True)
+        return 0
+    except BaseException as error:
+        reporter.error(error)
+        if setup_ms is None and 'started' in timing:
+            setup_ms = (time.monotonic_ns() - timing['started']) // 1_000_000
+        result = dict(schema_version=1, mode=mode, outcome='error', first_failure=reporter.value,
+                      setup_elapsed_ms=setup_ms, cases=cases, natural_empty=False)
+        P.validate_runtime_result(result, mode)
+        print(json.dumps(result, separators=(',', ':')), flush=True)
+        return 1
 
 
 def disabled_main():

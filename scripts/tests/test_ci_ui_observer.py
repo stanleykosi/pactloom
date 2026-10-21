@@ -425,4 +425,77 @@ class Observer(unittest.TestCase):
         self.reject(records,args,'source_paint')
 
 
+    def test_positive_admit_precedes_clear_and_final_send_precedes_cancel(self):
+        records,args=fabricated('append')
+        clear=next(r for r in records if P._is_observation(r,'PresentationCleared'))
+        records.remove(clear)
+        records.insert(records.index(find(records,'Admit',direction='Native')),clear)
+        resequence(records)
+        self.reject(records,args,'native_admit','append')
+        records,args=fabricated('append')
+        final=find(records,'Admit',direction='Sent'); cancel=find(records,'Cancel')
+        a,b=records.index(final),records.index(cancel)
+        records[a],records[b]=records[b],records[a]
+        resequence(records)
+        self.reject(records,args,'evidence_order','append')
+
+    def test_owner_failure_parser_preserves_every_finite_cause(self):
+        found=set()
+        for stage in P.OWNER_CLIENT_STAGES:
+            for wrapper, errors in (('Authority',P.OWNER_CLIENT_ERRORS),
+                                    ('Source',P.OWNER_CLIENT_ERRORS),('Io',P.OWNER_CLIENT_IO)):
+                for error in errors:
+                    raw=f'CI_UI_OWNER_CLIENT_FAILURE stage={stage} cause={wrapper}({error})'
+                    code=P.parse_owner_client_failure(raw)
+                    self.assertEqual(code,f'owner_client_{stage}_{wrapper}_{error}')
+                    self.assertEqual(P.parse_owner_client_failure((raw+'\n').encode()),code)
+                    P.failure('fixture','append',code,'append')
+                    found.add(code)
+            code=P.parse_owner_client_failure(f'CI_UI_OWNER_CLIENT_FAILURE stage={stage} cause=PredicateDenied')
+            self.assertEqual(code,f'owner_client_{stage}_PredicateDenied');found.add(code)
+        for error in P.OWNER_CLIENT_ERRORS:
+            code=P.parse_owner_client_failure(f'CI_UI_OWNER_CLIENT_FAILURE stage=Prepare cause=Aborted({error})')
+            self.assertEqual(code,f'owner_client_Prepare_Aborted_{error}');found.add(code)
+        code=P.parse_owner_client_failure('CI_UI_OWNER_CLIENT_FAILURE stage=Prepare cause=NotListening')
+        self.assertEqual(code,'owner_client_Prepare_NotListening');found.add(code)
+        self.assertEqual(found,P.OWNER_CLIENT_CODES)
+        self.assertTrue(found<=P.CODES)
+
+    def test_owner_failure_parser_rejects_noncanonical_or_arbitrary_text(self):
+        good='CI_UI_OWNER_CLIENT_FAILURE stage=ReadIo cause=Io(TimedOut)'
+        bad=[None,1,True,good+' private',good+'\r\n',good+'\n\n',good+'\x00',
+             ' '+good,good.replace(' cause=', '  cause='),good.replace('ReadIo','Unknown'),
+             good.replace('Io(TimedOut)','Io(Unknown)'),good.replace('Io(TimedOut)','TimedOut'),
+             good.replace('Io(TimedOut)','Authority(TimedOut)'),good.replace('ReadIo','Prepare'),
+             good.replace('Io(TimedOut)','Source( Expired )'),good.replace('Io(TimedOut)','Io(TimedOut, path)'),
+             'CI_UI_OWNER_CLIENT_FAILURE stage=Prepare cause=Aborted(Uncertain) suffix',
+             'CI_UI_OWNER_CLIENT_FAILURE stage=Prepare cause=Authority(Expired)',
+             'CI_UI_OWNER_CLIENT_FAILURE stage=ReadIo cause=NotListening',
+             'CI_UI_OWNER_CLIENT_FAILURE stage=ReadIo cause=PredicateDenied()',
+             b'CI_UI_OWNER_CLIENT_FAILURE stage=ReadIo cause=Io(\xff)',b'x'*257,
+             'CI_UI_OWNER_CLIENT_FAILURE stage=ReadIo cause=Source(é)']
+        for line in bad:
+            with self.assertRaises(P.Rejected) as got: P.parse_owner_client_failure(line)
+            self.assertEqual(got.exception.code,'owner_response')
+
+    def test_owner_failure_static_enums_equal_actual_rust_source(self):
+        import re
+        root=pathlib.Path(__file__).parents[2]
+        transport=(root/'crates/wholepact-authority/src/transport/durable_delivery_admission_v3.rs').read_text()
+        authority=(root/'crates/wholepact-authority/src/lib.rs').read_text()
+        def variants(source,name):
+            body=source.split('pub enum '+name+' {',1)[1].split('}',1)[0]
+            return frozenset(re.findall(r'^    ([A-Z][A-Za-z0-9_]*)\s*,',body,re.M))
+        self.assertEqual(P.OWNER_CLIENT_STAGES,variants(transport,'AdmissionFailureStageV3'))
+        self.assertEqual(P.OWNER_CLIENT_IO,variants(transport,'AdmissionIoKindV3'))
+        self.assertEqual(P.OWNER_CLIENT_ERRORS,variants(authority,'AuthorityError'))
+        self.assertEqual(P.OWNER_CLIENT_ERRORS,P.DELIVERY_CLASSES)
+        cause=transport.split('pub enum AdmissionFailureCauseV3 {',1)[1].split('}',1)[0]
+        self.assertEqual(frozenset(re.findall(r'^    ([A-Z][A-Za-z0-9_]*)',cause,re.M)),
+                         frozenset(('Authority','Source','Io','PredicateDenied')))
+        prepare=transport.split('pub enum PrepareDurableAdmissionErrorV3 {',1)[1].split('}',1)[0]
+        self.assertEqual(frozenset(re.findall(r'^    ([A-Z][A-Za-z0-9_]*)',prepare,re.M)),
+                         frozenset(('NotListening','Aborted')))
+
+
 if __name__ == '__main__': unittest.main()
