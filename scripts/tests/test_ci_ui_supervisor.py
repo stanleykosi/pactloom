@@ -126,6 +126,14 @@ class BuildSelection(unittest.TestCase):
             row = json.dumps(artifact_row(artifact)).encode()
             with self.assertRaises(S.Failure): S.select_artifact(row + b'\n' + row, 'pristine-setup', target)
 
+    def test_fresh_build_runs_only_one_exact_pure_input_shape_test(self):
+        source=(ROOT/'ci-ui-supervisor.py').read_text()
+        self.assertIn('delivery_ui::ci_input_diagnostic_tests::closed_shape_classification_preserves_production_rejection',source)
+        self.assertIn("'--', '--exact', '--test-threads=1'",source)
+        self.assertIn("b'test result: ok. 1 passed; 0 failed;'",source)
+        self.assertIn("emit('INPUT_SHAPE_TEST'",source)
+        self.assertEqual((ROOT/'ci-ui-reuse-pin.json').read_text().strip(),'null')
+
     def test_build_commands_are_serial_positive_feature_and_host_lib_test(self):
         source = (ROOT / 'ci-ui-supervisor.py').read_text()
         self.assertIn("args += ['--lib'] if setup", source)

@@ -154,7 +154,7 @@ class DisplayFailureObservation(unittest.TestCase):
 class CommonFailureContext(unittest.TestCase):
     def context(self):
         return dict(product_status=1, compositor_status=None, field='Request', action='type',
-            collector_code=None, record_count=0, phase=None, terminal_roles=[], delivery_stage=None, delivery_class=None, memory_before=None, memory_after=None,
+            collector_code=None, record_count=0, phase=None, terminal_roles=[], delivery_stage=None, delivery_class=None, memory_before=None, memory_after=None, input_observation=None,
             controller=dict(origin='product_exit', module_error='target', target_reason='unmapped',
                 sequence=12, operation=5, commit=3, frame=4, input_sequence=11))
 
@@ -577,3 +577,61 @@ class StableFormGeometry(unittest.TestCase):
         self.assertIn('record = self.settled_form_snapshot()',fill)
         self.assertNotIn('time.sleep',fill)
         self.assertIn('self.click(record, name)',fill)
+
+
+class ClosedInputDiagnostics(unittest.TestCase):
+    def record(self, kind='InputValidation', facts=None, role='Coordinator', event='Observation', sequence=1):
+        return dict(version=1,sequence=sequence,role=role,pid=100,ppid=1,
+                    original_parent_pid=1,elapsed_ms=1,event=event,
+                    detail=dict(observation=kind,facts=facts or {'field':'Request','class':'RequestJson'}) if event=='Observation' else facts)
+
+    def test_every_closed_validation_class_and_field_roundtrips_without_bytes(self):
+        for cls, fields in C.P._INPUT_CLASSES.items():
+            for field in fields:
+                row=self.record(facts=dict(field=field,**{'class':cls}))
+                C.P.validate_record(row)
+                self.assertEqual(C.P.input_observation([row])['validation'],row['detail']['facts'])
+
+    def test_invalid_field_class_cross_product_and_extra_bytes_refused(self):
+        for facts in ({'field':'Request','class':'Endpoint'}, {'field':'private','class':'Empty'},
+                      {'field':'Request','class':'private'}, {'field':'Request','class':'RequestJson','value':'private'},
+                      {'field':None,'class':'RequestShape'}):
+            with self.assertRaises(C.P.Rejected):C.P.validate_record(self.record(facts=facts))
+
+    def test_prepare_summary_preserves_distinct_sent_and_received(self):
+        sent=self.record(role='Coordinator',event='Prepare',facts={'direction':'Sent','original_ceiling_ms':1000})
+        received=self.record(role=C.P._OBSERVER_W,event='Prepare',facts={'direction':'Received','original_ceiling_ms':None})
+        self.assertEqual(C.P.input_observation([sent]),dict(validation=None,prepare_sent=True,prepare_received=False,interruption=None))
+        self.assertTrue(C.P.input_observation([sent,received])['prepare_received'])
+
+    def test_first_actual_raw_interruption_preserved_without_inferred_cause(self):
+        facts=dict(blur=True,focused=False,escape=False,close=False)
+        first=self.record(kind='RawInterruption',facts=facts)
+        later=self.record(kind='RawInterruption',facts=facts|{'close':True})
+        self.assertEqual(C.P.input_observation([first,later])['interruption'],facts)
+
+    def test_duplicate_validation_or_wrong_role_is_refused(self):
+        with self.assertRaises(C.P.Rejected):C.P.input_observation([self.record(),self.record(sequence=2)])
+        with self.assertRaises(C.P.Rejected):C.P.validate_record(self.record(role=C.P._OBSERVER_W))
+
+    def test_failure_projection_keeps_primary_and_closed_observation(self):
+        context=CommonFailureContext().context()
+        context['input_observation']=C.P.input_observation([self.record()])
+        value=C.P.failure('fixture','prepare','source_failure')|{'runtime_observation':context}
+        C.P.validate_failure(value,'fixture')
+        self.assertEqual(value['code'],'source_failure')
+        for bad in ({'validation':{'field':'Request','class':'RequestJson','value':'private'}},
+                    {'prepare_sent':1}, {'interruption':{'blur':True,'focused':False,'escape':False,'close':False,'raw':'private'}}):
+            context['input_observation']=C.P.input_observation([])|bad
+            with self.assertRaises(C.P.Rejected):C.P.validate_failure(value,'fixture')
+
+    def test_rust_diagnostic_is_cfg_only_and_original_rejection_remains(self):
+        root=PATH.parent.parent
+        ui=(root/'crates/wholepact-financial-coordinator/src/delivery_ui.rs').read_text()
+        self.assertIn('if validate_delivery_review_inputs(&self.input).is_err() { self.revoke("Input validation rejected this one slot."); return; }',ui)
+        self.assertIn('#[cfg(wholepact_delivery_ci)]\n        {\n            let (field, class)',ui)
+        helper=(root/'crates/wholepact-authority/src/native_witness_owner/coordinated_delivery_append_v1/presentation.rs').read_text()
+        self.assertIn('#[cfg(wholepact_delivery_ci)]\npub fn diagnose_delivery_review_inputs_for_ci',helper)
+        helper=helper[helper.index('pub fn diagnose_delivery_review_inputs_for_ci'):]
+        for forbidden in ('File::','OpenOptions','TcpStream','println!','eprintln!','std::env'):
+            self.assertNotIn(forbidden,helper)

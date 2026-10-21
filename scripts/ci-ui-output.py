@@ -1163,7 +1163,15 @@ def validate_failure(value, mode):
     if 'runtime_observation' in value:
         o = value['runtime_observation']
         require(type(o) is dict and set(o) == {'product_status', 'compositor_status', 'field', 'action',
-            'collector_code', 'record_count', 'phase', 'terminal_roles', 'controller', 'delivery_stage', 'delivery_class', 'memory_before', 'memory_after'})
+            'collector_code', 'record_count', 'phase', 'terminal_roles', 'controller', 'delivery_stage', 'delivery_class', 'memory_before', 'memory_after', 'input_observation'})
+        item = o['input_observation']
+        if item is not None:
+            _closed(item, ('validation', 'prepare_sent', 'prepare_received', 'interruption'))
+            _boolean(item['prepare_sent']); _boolean(item['prepare_received'])
+            if item['validation'] is not None: _input_validation(item['validation'])
+            if item['interruption'] is not None:
+                _closed(item['interruption'], ('blur', 'focused', 'escape', 'close'))
+                for flag in item['interruption'].values(): _boolean(flag)
         for name in ('memory_before', 'memory_after'):
             sample = o[name]
             if sample is not None:
@@ -1306,6 +1314,43 @@ _OBSERVER_READY = frozenset(('presentation_digest', 'effect_commitment', 'reques
     'expected_head_digest', 'preparation_nonce', 'accepted_at_ms', 'accepted_tls_expires_at_ms'))
 _OBSERVER_DIGEST_READY = _OBSERVER_READY - {'expected_head_sequence', 'accepted_at_ms',
                                           'accepted_tls_expires_at_ms'}
+_INPUT_CLASSES = {
+    'Valid': (None,), 'PacketEncoding': (None,), 'PacketLimit': (None,), 'Unclassified': (None,),
+    'Empty': tuple('Endpoint ServerName WitnessId ServerCertificateDigest NetworkProfile AccountId OwnerCertificate StorageKeyPath ServerCertificatePath ServerPrivateKeyPath ClientRootPath Request'.split()),
+    'Length': tuple('Endpoint ServerName WitnessId ServerCertificateDigest NetworkProfile AccountId OwnerCertificate StorageKeyPath ServerCertificatePath ServerPrivateKeyPath ClientRootPath Request'.split()),
+    'Endpoint': ('Endpoint',), 'ServerName': ('ServerName',),
+    'Identifier': ('WitnessId', 'NetworkProfile'), 'Hash': ('ServerCertificateDigest', 'AccountId'),
+    'Path': ('StorageKeyPath', 'ServerCertificatePath', 'ServerPrivateKeyPath', 'ClientRootPath'),
+    'CertificateHex': ('OwnerCertificate',), 'CertificateDer': ('OwnerCertificate',),
+    'RequestJson': ('Request',), 'RequestVariant': ('Request',),
+    'RequestBinding': ('Request',), 'RequestShape': ('Request',),
+}
+
+def _input_validation(value):
+    _closed(value, ('field', 'class'))
+    require(type(value['class']) is str and value['class'] in _INPUT_CLASSES and
+            value['field'] in _INPUT_CLASSES[value['class']], 'record_schema')
+
+def input_observation(records):
+    """Closed context only; never input bytes, hashes, lengths or new authority."""
+    result = dict(validation=None, prepare_sent=False, prepare_received=False,
+                  interruption=None)
+    for record in records:
+        validate_record(record)
+        detail = record['detail']
+        if record['event'] == 'Prepare':
+            if record['role'] == _OBSERVER_C and detail['direction'] == 'Sent': result['prepare_sent'] = True
+            if record['role'] == _OBSERVER_W and detail['direction'] == 'Received': result['prepare_received'] = True
+        if record['role'] != _OBSERVER_C or record['event'] != 'Observation': continue
+        kind, facts = detail['observation'], detail['facts']
+        if kind == 'InputValidation':
+            require(result['validation'] is None, 'record_schema')
+            result['validation'] = dict(facts)
+        elif kind == 'RawInterruption':
+            # Retain the first actual native interruption, not an inferred cause.
+            if result['interruption'] is None: result['interruption'] = dict(facts)
+    return result
+
 _OBSERVER_C_TO_W = frozenset(('Prepare', 'Arm', 'Admit', 'Cancel'))
 _OBSERVER_W_TO_C = frozenset(('Review', 'Ready', 'Outcome', 'FirstFailure',
                              'PreparationFailed', 'Disposed'))
@@ -1424,6 +1469,8 @@ def validate_record(value):
         require(role == (_OBSERVER_W if kind == 'WorkerJoined' else _OBSERVER_C), 'record_role')
         if kind == 'WidgetSnapshot':
             _snapshot(facts)
+        elif kind == 'InputValidation':
+            _input_validation(facts)
         elif kind == 'RawInterruption':
             _closed(facts, ('blur', 'focused', 'escape', 'close'))
             for item in facts.values(): _boolean(item)

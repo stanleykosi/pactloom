@@ -275,3 +275,67 @@ mod tests {
         }
     }
 }
+
+/// CI-only bounded, pure classification. Never replaces production validation,
+/// opens resources, authenticates data or emits any user-selected bytes.
+#[cfg(wholepact_delivery_ci)]
+pub fn diagnose_delivery_review_inputs_for_ci(data: &DeliveryReviewInputsV1)
+    -> (Option<wholepact_financial_coordinator_origin::DeliveryWidgetIdV1>,
+        wholepact_financial_coordinator_origin::DeliveryInputClassV1)
+{
+    use wholepact_financial_coordinator_origin::{DeliveryWidgetIdV1 as F, DeliveryInputClassV1 as C};
+    let packet = match serde_json::to_vec(data) {
+        Ok(packet) => Zeroizing::new(packet), Err(_) => return (None, C::PacketEncoding),
+    };
+    if packet.len() > 60 * 1024 { return (None, C::PacketLimit); }
+    for (field, value, max) in [
+        (F::Endpoint, &data.endpoint, 256), (F::ServerName, &data.server_name, 253),
+        (F::WitnessId, &data.witness_id, 128),
+        (F::ServerCertificateDigest, &data.pinned_server_certificate_digest, 64),
+        (F::NetworkProfile, &data.network_profile_id, 128),
+        (F::AccountId, &data.expected_account_id, 64),
+        (F::OwnerCertificate, &data.owner_certificate_der_hex, 2 * MAX_CERTIFICATE_BYTES),
+        (F::StorageKeyPath, &data.storage_key_file, 4096),
+        (F::ServerCertificatePath, &data.server_certificate_der, 4096),
+        (F::ServerPrivateKeyPath, &data.server_private_key_pkcs8_der, 4096),
+        (F::ClientRootPath, &data.trusted_client_root_der, 4096),
+        (F::Request, &data.request_json, crate::MAX_FRAME_BYTES),
+    ] {
+        if value.is_empty() { return (Some(field), C::Empty); }
+        if value.len() > max { return (Some(field), C::Length); }
+    }
+    let address: SocketAddr = match data.endpoint.parse() {
+        Ok(address) => address, Err(_) => return (Some(F::Endpoint), C::Endpoint),
+    };
+    if address.to_string() != data.endpoint || address.port() == 0 ||
+        address.ip().is_unspecified() || address.ip().is_multicast()
+    { return (Some(F::Endpoint), C::Endpoint); }
+    if rustls::pki_types::ServerName::try_from(data.server_name.clone()).is_err()
+    { return (Some(F::ServerName), C::ServerName); }
+    for (field, value) in [(F::WitnessId, &data.witness_id), (F::NetworkProfile, &data.network_profile_id)] {
+        if crate::id(value).is_err() { return (Some(field), C::Identifier); }
+    }
+    for (field, value) in [(F::ServerCertificateDigest, &data.pinned_server_certificate_digest), (F::AccountId, &data.expected_account_id)] {
+        if crate::hash(value).is_err() { return (Some(field), C::Hash); }
+    }
+    for (field, value) in [(F::StorageKeyPath, &data.storage_key_file), (F::ServerCertificatePath, &data.server_certificate_der),
+        (F::ServerPrivateKeyPath, &data.server_private_key_pkcs8_der), (F::ClientRootPath, &data.trusted_client_root_der)] {
+        if validate_path(value).is_err() { return (Some(field), C::Path); }
+    }
+    let der = match hex::decode(&data.owner_certificate_der_hex) {
+        Ok(der) => Zeroizing::new(der), Err(_) => return (Some(F::OwnerCertificate), C::CertificateHex),
+    };
+    let certificate = rustls::pki_types::CertificateDer::from(der.as_slice());
+    if der.is_empty() || der.len() > MAX_CERTIFICATE_BYTES || webpki::EndEntityCert::try_from(&certificate).is_err()
+    { return (Some(F::OwnerCertificate), C::CertificateDer); }
+    let request: OwnerControlRequest = match wholepact_core::parse_typed_json(data.request_json.as_bytes()) {
+        Ok(request) => request, Err(_) => return (Some(F::Request), C::RequestJson),
+    };
+    let OwnerControl::AdmitDurablePaymentWithDeliveryV2 { record } = &request.control
+    else { return (Some(F::Request), C::RequestVariant); };
+    if request.account_id != data.expected_account_id || request.network_profile_id != data.network_profile_id
+    { return (Some(F::Request), C::RequestBinding); }
+    if record.validate_request_shape(&request).is_err() { return (Some(F::Request), C::RequestShape); }
+    if validate_delivery_review_inputs(data).is_err() { return (None, C::Unclassified); }
+    (None, C::Valid)
+}

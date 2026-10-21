@@ -513,6 +513,17 @@ def build_inputs(root, sha, build_context, foundation_pins):
         pins[name] = pin(inputs / name)
         emit('ARTIFACT', dict(artifact=name, source=sha, sha256=pins[name]['sha256'],
                               ci_instrumented=name == 'coordinator-observed', setup_test=setup))
+        if name == 'coordinator-observed':
+            # One pure shape-classification test, using the same cfg/dependency
+            # build. No broad test suite, fixture, role startup or native UI.
+            args = ['rustup', 'run', '1.99.0', 'cargo', 'test', '--locked', '--release',
+                '--no-default-features', '-p', 'wholepact-financial-coordinator',
+                '--bin', 'wholepact-financial-coordinator', '--features', FEATURE,
+                'delivery_ui::ci_input_diagnostic_tests::closed_shape_classification_preserves_production_rejection',
+                '--', '--exact', '--test-threads=1']
+            raw = build_command(name, args, 'compile', selected, seconds=1800, limit=32 * 1024 * 1024)
+            require(b'test result: ok. 1 passed; 0 failed;' in raw, 'compile', 'artifact')
+            emit('INPUT_SHAPE_TEST', dict(passed=1, failed=0, source=sha, ci_instrumented=True))
     try:
         lock = I.validate_manifest((HERE / 'ci-ui-packages.json').read_bytes())
         write_context_files(build_context, I.render_build_files(lock, pins))

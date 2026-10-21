@@ -9,6 +9,18 @@ M = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(M)
 
 class PrerequisiteTests(unittest.TestCase):
+    def test_exact_ci_diagnostic_delta_is_not_a_general_rust_exception(self):
+        paths=set(M.CI_DIAGNOSTIC_HASHES)
+        M.verify_paths(paths, diagnostic_hashes=M.CI_DIAGNOSTIC_HASHES)
+        for hashes in (None, {}, {**M.CI_DIAGNOSTIC_HASHES, next(iter(paths)): ('0'*64,'0'*64)}):
+            with self.assertRaisesRegex(ValueError,'ci_diagnostic_delta'):
+                M.verify_paths(paths, diagnostic_hashes=hashes)
+        with self.assertRaisesRegex(ValueError,'ci_diagnostic_delta'):
+            M.verify_paths(paths-{next(iter(paths))}, diagnostic_hashes=M.CI_DIAGNOSTIC_HASHES)
+        with self.assertRaisesRegex(ValueError,'source_closure_changed'):
+            M.verify_paths(paths|{'crates/wholepact-authority/src/lib.rs'}, diagnostic_hashes=M.CI_DIAGNOSTIC_HASHES)
+        self.assertFalse(paths & M.ALLOWED)
+
     def record(self):
         return {'jobs': [{'id': M.JOB, 'run_id': M.RUN, 'run_attempt': 1,
                          'head_sha': M.BASE, 'head_branch': 'qualification/durable-proposal-v1',

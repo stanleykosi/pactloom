@@ -23,10 +23,18 @@ pub struct DeliveryWidgetSnapshotV1 {
     pub raw_blur: bool, pub revoked: bool, pub read_to_end: bool, pub continued: bool, pub acknowledged: bool,
     pub widgets: Vec<DeliveryWidgetRectV1>,
 }
+// CI-only closed shape classes: no input bytes, lengths, hashes or paths.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum DeliveryInputClassV1 {
+    Valid, PacketEncoding, PacketLimit, Empty, Length, Endpoint, ServerName,
+    Identifier, Hash, Path, CertificateHex, CertificateDer, RequestJson,
+    RequestVariant, RequestBinding, RequestShape, Unclassified,
+}
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "observation", content = "facts")]
 pub enum DeliveryObservationV1 {
     WidgetSnapshot(DeliveryWidgetSnapshotV1),
+    InputValidation { field: Option<DeliveryWidgetIdV1>, class: DeliveryInputClassV1 },
     RawInterruption { blur: bool, focused: bool, escape: bool, close: bool },
     PresentationCleared { presentation_digest: Option<String>, admitted: bool },
     WorkerJoined { presentation_digest: Option<String> },

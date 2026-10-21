@@ -34,6 +34,9 @@ ALLOWED = frozenset((
 FIXTURE = "crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3_qualification.rs"
 FIXTURE_BEFORE = "cb895f688b0060d858d0a61fe1958ac105a0ebb877a613dd035157ba3d73d34c"
 FIXTURE_AFTER = "74024b0ab7fd7d1931d3fbd369598290b481ace0346baf5498b08f96bb79117c"
+# Exact reviewed CI-only diagnostic delta. Bootstrap excludes wholepact_delivery_ci.
+# This is NOT permission for other Rust changes or reuse of the old UI binaries.
+CI_DIAGNOSTIC_HASHES = {'crates/wholepact-authority/src/native_witness_owner/coordinated_delivery_append_v1.rs': ('b8c51672832e8c3530ee1fad1b1b2abd7cad41e5aaf9a1874c4b5c6804c447fb', '83ba6e5d2a759598156a2b1958bb8ed81ce3c97e4da0a22c99749f94f86ebb79'), 'crates/wholepact-authority/src/native_witness_owner/coordinated_delivery_append_v1/presentation.rs': ('d864faba68c3c3c775f4faa50944d5ad22a6b822a8f28e3c40daba391849e58a', 'c5b43800450c1c7d1a5251a695ac36f19310cd017b448a2a25f175b144ac5106'), 'crates/wholepact-financial-coordinator-origin/src/delivery_observer.rs': ('99a7bb782a7da4e8d6a9a8ff01e9fac00110dbe6174528bfd1f1e4d50e4a63b3', 'fe5e2b316d72caca19d32d5b8dac155dec99fec1a0a327fefc233d414b8dcc8d'), 'crates/wholepact-financial-coordinator-origin/src/lib.rs': ('9d2500892dfebce39a66dfbe998b1664e68b20cc64fe003a9d6797e74b0b7e31', '81a48e3d5837a9bdd3eb90e90df0bdcf2d8132c0fe60462a7784b56e50f7d9b1'), 'crates/wholepact-financial-coordinator/src/delivery_ui.rs': ('01e07c4dbcc9da938e67a12bb9d059b25350b4f592516603a512799227c7c1e8', 'e5dbb8f321689b51b9e3ab97f70f80e42921eca7b368345a2aa2e693209efd00')}
 STEPS = (
     "Isolated bootstrap profile (UI uses seven reap/lifetime prerequisites)",
     "Verify bootstrap containers and temporary image removed",
@@ -54,18 +57,23 @@ def verify_jobs(value):
         if len(rows) != 1 or rows[0].get("status") != "completed" or rows[0].get("conclusion") != "success":
             raise ValueError("historical_prerequisite")
 
-def verify_paths(paths, fixture_hashes=None):
+def verify_paths(paths, fixture_hashes=None, diagnostic_hashes=None):
     changed = set(paths)
     if FIXTURE in changed:
         if fixture_hashes != (FIXTURE_BEFORE, FIXTURE_AFTER):
             raise ValueError("test_fixture_delta")
         changed.remove(FIXTURE)
+    diagnostic_paths = changed & CI_DIAGNOSTIC_HASHES.keys()
+    if diagnostic_paths:
+        if diagnostic_paths != CI_DIAGNOSTIC_HASHES.keys() or diagnostic_hashes != CI_DIAGNOSTIC_HASHES:
+            raise ValueError("ci_diagnostic_delta")
+        changed -= diagnostic_paths
     if not changed <= ALLOWED:
         raise ValueError("source_closure_changed")
 
 # Fixed public reason codes only. Never emit exception text, response bodies or paths.
 FAILURE_CODES = frozenset(("job_identity", "run_identity", "historical_prerequisite",
-    "test_fixture_delta", "source_closure_changed", "baseline_tree", "working_tree",
+    "test_fixture_delta", "ci_diagnostic_delta", "source_closure_changed", "baseline_tree", "working_tree",
     "evidence_size"))
 def failure_code(error):
     if type(error) is ValueError and len(error.args) == 1 and type(error.args[0]) is str and error.args[0] in FAILURE_CODES:
@@ -125,7 +133,10 @@ def main():
         fixture_hashes = None
         if FIXTURE in paths:
             fixture_hashes = tuple(hashlib.sha256(git("show", rev + ":" + FIXTURE)).hexdigest() for rev in (BASE, "HEAD"))
-        verify_paths(paths, fixture_hashes)
+        diagnostic_hashes = {
+            path: tuple(hashlib.sha256(git("show", rev + ":" + path)).hexdigest() for rev in (BASE, "HEAD"))
+            for path in paths if path in CI_DIAGNOSTIC_HASHES}
+        verify_paths(paths, fixture_hashes, diagnostic_hashes)
         request = urllib.request.Request(
             "https://api.github.com/repos/stanleykosi/pactloom/actions/runs/39604966999/jobs?per_page=100",
             headers={"Accept": "application/vnd.github+json", "User-Agent": "pactloom-public-prerequisite"})

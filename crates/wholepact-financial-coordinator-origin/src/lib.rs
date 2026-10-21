@@ -19,7 +19,7 @@ compile_error!("Delivery and bootstrap evidence are separate images");
 #[cfg(wholepact_delivery_ci)]
 mod delivery_observer;
 #[cfg(wholepact_delivery_ci)]
-pub use delivery_observer::{record_delivery_observation_for_ci, finish_delivery_observation_for_ci, DeliveryObservationV1, DeliveryUiPhaseV1, DeliveryWidgetIdV1, DeliveryRectV1, DeliveryWidgetRectV1, DeliveryWidgetSnapshotV1};
+pub use delivery_observer::{record_delivery_observation_for_ci, finish_delivery_observation_for_ci, DeliveryObservationV1, DeliveryInputClassV1, DeliveryUiPhaseV1, DeliveryWidgetIdV1, DeliveryRectV1, DeliveryWidgetRectV1, DeliveryWidgetSnapshotV1};
 #[cfg(all(feature = "coordinated-signer-continue", any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append")))]
 compile_error!("Continue is a separate typechecked-only custody profile, not a conversion from a Witness profile");
 #[cfg(all(feature = "coordinated-signer-continue", any(wholepact_bootstrap_ci, wholepact_delivery_ci)))]

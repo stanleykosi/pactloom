@@ -589,6 +589,7 @@ class NativeSession:
         detail = P.delivery_first_failure(records) if records else None
         return dict(product_status=status(self.product), compositor_status=status(self.weston),
             memory_before=getattr(self, 'memory_before', None), memory_after=cgroup_memory_observation(),
+            input_observation=P.input_observation(records),
             field=self.input_field, action=self.input_action, collector_code=collector_code,
             record_count=len(records), phase=phase, terminal_roles=terminal,
             delivery_stage=None if detail is None else detail['stage'],
