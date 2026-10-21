@@ -1320,6 +1320,18 @@ impl SignerFinancialWorkflowOriginV1 {
     }
 }
 impl ReturnSlots {
+    /// Immutable outcome of the actual original exact Return. No data setter,
+    /// permission constructor, or failed/queued result can satisfy this join.
+    pub(super) fn actual_completed(&self) -> Result<&SignerReturnCompletedV1> {
+        if self.terminal || !self.exact.reported || self.exact.phase != 73 {
+            return Err(rejected("normal Finish before actual completed Return"));
+        }
+        let result=self.exact.result.as_ref().ok_or_else(||rejected("normal Finish Return result missing"))?;
+        let presentation=self.exact.wire.as_ref().ok_or_else(||rejected("normal Finish Return presentation missing"))?;
+        result.validate()?;
+        if !completed_matches(result,presentation){return Err(rejected("normal Finish Return original changed"));}
+        Ok(result)
+    }
     pub(super) fn observe_active(&self, phase: u8) -> Result<()> {
         if self.terminal {
             return Err(rejected("sign terminal"));

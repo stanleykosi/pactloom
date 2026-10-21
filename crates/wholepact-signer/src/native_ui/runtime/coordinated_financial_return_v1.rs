@@ -280,7 +280,7 @@ impl CompletedCoordinatedReturnV1 {
     pub(in crate::native_ui::runtime) fn report(
         self,
         origin: &mut SignerFinancialWorkflowOriginV1,
-    ) -> std::result::Result<(), FailedCoordinatedReturnV1> {
+    ) -> std::result::Result<Self, FailedCoordinatedReturnV1> {
         if let Err(error) = origin.report_return_completed(self.report.clone()) {
             return Err(FailedCoordinatedReturnV1 {
                 retained:self.retained,prepared:None,error:error.into(),
@@ -290,7 +290,7 @@ impl CompletedCoordinatedReturnV1 {
                 },
             });
         }
-        Ok(())
+        Ok(self)
     }
 }
 impl FailedCoordinatedReturnV1 {

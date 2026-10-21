@@ -115,3 +115,9 @@ impl HostFinancialInterstageWaitV1 {
     #[test]fn host_pair_observer_is_send_sync_without_constructing_any_custody(){fn require<T:Send+Sync>(){} require::<HostCompletedPairServiceV1>();}
     #[test]fn pair_receive_state_has_no_default_signing_retirement_proof(){let state=HostPairReceiveState::default();assert!(state.signing_retired.iter().all(Option::is_none));assert!(!state.received);}
 }
+
+impl HostLifecycle {
+ pub(crate) fn normal_pair_presentation(&self)->Result<CompletedPairPresentationV1>{
+  let record=self.pair_service.get().ok_or_else(||rejected("normal completion before actual Pair"))?;record.check(self)?;Ok(record.data.clone())
+ }
+}

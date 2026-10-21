@@ -1,7 +1,7 @@
-//! Private failure-only owner for the actual original H relay; no caller yet.
+//! Private joined owner for the actual original H relay.
 //! No Host, source, TTY approval or native permission crosses into this worker.
 //! Joining is mandatory, but kernel-blocked owned child reap is not promised a
-//! wall-clock bound. Successful coordinated shutdown is deliberately absent.
+//! wall-clock bound. Normal success requires the actual Origin close protocol.
 use crate::{Error, Result};
 use std::{
     io,
@@ -40,7 +40,7 @@ impl OwnedHostRelayMonitorV1 {
         let (abort, receive_abort) = mpsc::sync_channel(1);
         let worker = thread::Builder::new()
             .name("original-host-relay".into())
-            .spawn(move || run_failed_relay(relay, receive_abort))
+            .spawn(move || run_owned_relay(relay, receive_abort))
             .map_err(|error| {
                 // Spawn failure also drops the real relay closure. Its sealed
                 // origin owner poisons before any potentially blocking reap.
@@ -57,6 +57,15 @@ impl OwnedHostRelayMonitorV1 {
         let _ = self.abort.try_send(());
         let relay = self.join_worker();
         HostRelayFailureV1 { foreground, relay }
+    }
+
+    /// The worker can return Ok only from Origin's actual normal close path.
+    /// Keeping the abort sender alive while joining is essential: a disconnected
+    /// control mailbox is a failure, not a normal-completion request.
+    pub(super) fn complete_and_join(mut self) -> io::Result<()> {
+        let result = self.join_worker();
+        if result.is_err() { crate::terminal::fail_original_coordinator_restriction(); }
+        result
     }
 
     fn join_worker(&mut self) -> io::Result<()> {
@@ -79,7 +88,7 @@ impl Drop for OwnedHostRelayMonitorV1 {
     }
 }
 
-fn run_failed_relay(
+fn run_owned_relay(
     mut relay: HostFinancialWorkflowRelayV1,
     receive_abort: Receiver<()>,
 ) -> io::Result<()> {
@@ -94,8 +103,12 @@ fn run_failed_relay(
         }
         match relay.pump() {
             Err(error) => break error,
-            Ok(true) => continue,
+            Ok(_) => {},
+        }
+        match relay.normal_close_ready() {
+            Ok(true) => return relay.finish_normal(),
             Ok(false) => {},
+            Err(error) => break error,
         }
         // This is only an idle responsiveness cap, not a new session/cleanup
         // clock or a promise that owned teardown returns within ten ms.

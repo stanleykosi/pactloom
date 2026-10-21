@@ -31,7 +31,7 @@ use crate::ipc::{
 use crate::native_peer::PeerProcess;
 use wholepact_financial_coordinator_origin::{
     SignerFinancialWorkflowOriginV1, SignerFinancialWorkflowRequestV1 as Request, SignerOriginV1,
-    SignerV3PairEndpointV1, SignerV3PairedV1,
+    SignerV3PairEndpointV1, SignerV3PairedV1, SignerNormalCloseV1,
 };
 
 struct Opening {
@@ -216,6 +216,7 @@ impl State {
 // and closes control) before State joins an outstanding private worker.
 struct Driver {
     origin: SignerFinancialWorkflowOriginV1,
+    normal_close: Option<SignerNormalCloseV1>,
     state: State,
     entry_opened_reported: bool,
     owner_selection: Option<(String, String)>,
@@ -701,6 +702,20 @@ impl Driver {
         Ok(())
     }
     fn handle(&mut self, request: Request) -> Result<bool> {
+        // This is an original typed close action, never a DTO/phase boolean.
+        // It cannot queue behind any private worker or skip actual Return.
+        let request = match request {
+            Request::NormalClose { action } => {
+                if !matches!(&self.state, State::Financial(FinancialState::ReturnReported(_)))
+                    || self.pending_status_control.is_some() || self.normal_close.is_some() {
+                    return Err(Error::ReviewMismatch);
+                }
+                action.check_current()?;
+                self.normal_close = Some(action);
+                return Ok(false);
+            }
+            other => other,
+        };
         // A real native action may arrive while a denial-only status send owns
         // custody. Keep its one-use token inert until that exact worker joins.
         // Cancel never queues and always publishes restriction immediately.
@@ -966,7 +981,9 @@ impl Driver {
                 self.poll_status()?;
                 self.poll_delivery()?;
                 self.poll_financial()?;
-                if matches!(&self.state,State::Financial(FinancialState::Complete)){return Ok(())}
+                // ReturnReported retains the actual completed private owner.
+                // Only the original typed NormalClose may end this wait; a
+                // completed result is not a cancellation or disposal proof.
                 if let Some(transport)=&self.financial_transport {transport.check_current()?;}
                 if let State::Opened(source) = &self.state {
                     source.check_retained_restriction()?;
@@ -998,6 +1015,14 @@ impl Driver {
             }
             Ok(())
         });
+        if let Some(action) = self.normal_close.take() {
+            let result = match (work, cleanup) {
+                (Ok(()), Ok(())) => self.origin.send_normal_disposed(action),
+                _ => Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied,
+                    "original Signer normal close failed; no normal disposal claim")),
+            };
+            self.origin.complete_normal(result)
+        }
         let result = match (work, cleanup) {
             (Ok(()), Ok(())) => self.origin.send_disposed(),
             _ => Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied,
@@ -1013,6 +1038,7 @@ pub fn run_coordinated_financial_signer_v1(origin: SignerOriginV1) -> ! {
     match origin.into_financial_workflow() {
         Ok(origin) => Driver {
             origin,
+            normal_close: None,
             state: State::AwaitingPeer,
             entry_opened_reported: false,
             owner_selection: None,

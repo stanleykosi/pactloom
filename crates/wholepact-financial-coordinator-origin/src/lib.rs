@@ -263,3 +263,8 @@ pub use financial_workflow_origin::{SignerV3PairTicketV1,SignerV3PairOutboundV1,
 mod financial_selector_data;
 #[cfg(feature="coordinated-financial-workflow-v1")]
 pub use financial_selector_data::SignerFinancialResultSelectorV1;
+
+#[cfg(feature="coordinated-financial-workflow-v1")] mod financial_normal_completion_data;
+#[cfg(feature="coordinated-financial-workflow-v1")] pub use financial_normal_completion_data::{FinancialSavedSummaryV1,FinancialNormalCompletionNoticeV1};
+#[cfg(feature="coordinated-financial-workflow-v1")] pub use host_interstage::{HostNormalFinishWaitV1,HostNormalCloseV1};
+#[cfg(feature="coordinated-financial-workflow-v1")] pub use financial_workflow_origin::{FinancialNormalFinishTicketV1,FinancialNormalFinishOutboundV1,FinancialNormalCompletionV1,SignerNormalCloseV1};

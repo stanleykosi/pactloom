@@ -32,7 +32,7 @@ pub(super) enum FinancialState {
     SignExact(PresentedCoordinatedSignExactV1), SignCommit(CoordinatedSignCommitV1),
     SignFailed(FailedCoordinatedSignV1), AwaitingReturn(AwaitingCoordinatedReturnReadV1),
     ReturnRead(PresentedCoordinatedReturnReadV1), ReturnPrepared(UnreportedCoordinatedReturnPreparedV1),
-    ReturnExact(PresentedCoordinatedReturnExactV1), Returned(CompletedCoordinatedReturnV1), ReturnFailed(FailedCoordinatedReturnV1), ReturnOfferFailed(FailedCoordinatedReturnOfferV1), Complete,
+    ReturnExact(PresentedCoordinatedReturnExactV1), Returned(CompletedCoordinatedReturnV1), ReturnFailed(FailedCoordinatedReturnV1), ReturnOfferFailed(FailedCoordinatedReturnOfferV1), ReturnReported(CompletedCoordinatedReturnV1),
     Working(FinancialWorker), Taken,
 }
 pub(super) struct FinancialWorker { handle:Option<std::thread::JoinHandle<Result<FinancialState>>> }
@@ -132,7 +132,7 @@ impl Driver {
             FinancialState::SignPrepared(v)=>FinancialState::SignExact(v.offer_sign_exact(&mut self.origin)?),
             FinancialState::SignCommit(v)=>FinancialState::AwaitingReturn(v.into_result().map_err(|_|Error::Uncertain)?),
             FinancialState::ReturnPrepared(v)=>match v.offer_return_exact(&mut self.origin){Ok(actual)=>FinancialState::ReturnExact(actual),Err(failed)=>FinancialState::ReturnFailed(failed)},
-            FinancialState::Returned(v)=>match v.report(&mut self.origin){Ok(())=>FinancialState::Complete,Err(failed)=>FinancialState::ReturnFailed(failed)},
+            FinancialState::Returned(v)=>match v.report(&mut self.origin){Ok(actual)=>FinancialState::ReturnReported(actual),Err(failed)=>FinancialState::ReturnFailed(failed)},
             other=>other,
         };
         self.state=State::Financial(next);Ok(())

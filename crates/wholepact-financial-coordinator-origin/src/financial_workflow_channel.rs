@@ -230,6 +230,10 @@ pub enum FinancialWorkflowStageV1 { SourceEntry, InitialRead, Continue }
 #[derive(Serialize,Deserialize)]
 #[serde(tag="kind",deny_unknown_fields)]
 pub(super) enum Packet {
+    NormalCompletionNotice{notice:crate::FinancialNormalCompletionNoticeV1},
+    NormalClose{context:crate::financial_normal_completion_data::FinancialNormalCloseContextV1},
+    NormalDisposed{role:Target,challenge:String,notice_digest:String},
+    NormalReady{challenge:String,notice_digest:String},
     FinancialResultSelector{role:Target,data:crate::SignerFinancialResultSelectorV1},
     CompletedPairServing{data:crate::CompletedPairPresentationV1,witness_instance:String,serve_challenge:String,service_ceiling_ms:u64},
     RetireRequest{request:crate::host_interstage::RetirementRequest},
@@ -347,6 +351,10 @@ impl Packet {
         Self::V3AdmitReadRetained{role,data}=>{data.validate()?;Some(*role)},
         Self::V3AdmitReadFinal{role,presentation_digest}=>{if !hash(presentation_digest){return Err(rejected("AdmitRead Final digest"));}Some(*role)},
         Self::ReturnReadDisplay{presentation}=>{presentation.validate()?;Some(presentation.actor.signer_role)},Self::ReturnExactDisplay{presentation}=>{presentation.validate()?;Some(presentation.actor.signer_role)},Self::ReturnReadFinal{role,presentation_digest}|Self::ReturnExactFinal{role,presentation_digest}=>{if !hash(presentation_digest){return Err(rejected("Return Final digest"));}Some(*role)},Self::ReturnPrepared{role,data}=>{data.validate()?;Some(*role)},Self::ReturnCompleted{role,data}=>{data.validate()?;Some(*role)},Self::ReturnFailed{role,data}=>{data.validate()?;Some(*role)},
+        Self::NormalCompletionNotice{notice}=>{notice.validate()?;None},
+        Self::NormalClose{context}=>{context.validate()?;None},
+        Self::NormalDisposed{role,challenge,notice_digest}=>{if !hash(challenge)||!hash(notice_digest){return Err(rejected("normal disposal metadata"));}Some(*role)},
+        Self::NormalReady{challenge,notice_digest}=>{if !hash(challenge)||!hash(notice_digest){return Err(rejected("normal ready metadata"));}None},
         Self::FinancialResultSelector{role,data}=>{data.validate()?;if data.actor.signer_role!=*role{return Err(rejected("selector actor role"));}Some(*role)},
         Self::SignReadDisplay{presentation}=>{presentation.validate()?;Some(presentation.actor.signer_role)},Self::SignExactDisplay{presentation}=>{presentation.validate()?;Some(presentation.actor.signer_role)},Self::SignReadFinal{role,presentation_digest}|Self::SignExactFinal{role,presentation_digest}=>{if !hash(presentation_digest){return Err(rejected("sign Final digest"));}Some(*role)},Self::SignPrepared{role,data}=>{data.validate()?;Some(*role)},Self::SignCommitted{role,data}=>{data.validate()?;Some(*role)},Self::SignFailed{role,data}=>{data.validate()?;Some(*role)},
         Self::WalletPrepareDisplay{presentation}=>{presentation.validate()?;Some(presentation.actor.signer_role)},
@@ -478,6 +486,9 @@ fn check_direction(sender:Role,recipient:Role,packet:&Packet)->Result<()> {
         packet.target()?;
         return if sender==Role::Coordinator&&recipient==Role::Host{Ok(())}else{Err(rejected("Pair service observation not original C/H"))};
     }
+    if matches!(packet,Packet::NormalCompletionNotice{..}|Packet::NormalReady{..}){return if sender==Role::Host&&recipient==Role::Coordinator{Ok(())}else{Err(rejected("normal observation direction"))};}
+    if matches!(packet,Packet::NormalClose{..}){return if (sender==Role::Coordinator&&recipient==Role::Host)||(sender==Role::Host&&matches!(recipient,Role::Signer1|Role::Signer2)){Ok(())}else{Err(rejected("normal close direction"))};}
+    if let Packet::NormalDisposed{role,..}=packet{return if (sender==role.role()&&recipient==Role::Host)||(sender==Role::Host&&recipient==Role::Coordinator){Ok(())}else{Err(rejected("normal disposal direction"))};}
     if matches!(packet,Packet::RetireRequest{..}|Packet::RetireResume{..}){
         return if sender==Role::Coordinator&&recipient==Role::Host{Ok(())}else{Err(rejected("retirement control not original C/H"))};
     }

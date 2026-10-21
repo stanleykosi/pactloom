@@ -19,7 +19,7 @@ use crate::{
 };
 use eframe::egui;
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     rc::Rc,
     time::{Duration, Instant},
 };
@@ -27,6 +27,7 @@ use wholepact_financial_coordinator_origin::SignerFinancialWalletSetupSelectionV
 use wholepact_financial_coordinator_origin::{
     CoordinatorFinancialEndpointV1, CoordinatorFinancialEventV1 as Event,
     CompletedPairInputsV1, CompletedPairOriginalV1, CoordinatorCompletedPairEventV1,
+    FinancialNormalFinishTicketV1, FinancialNormalCompletionNoticeV1, FinancialNormalCompletionV1,
     CoordinatorFinancialHistoryEventV1 as HistoryEvent, CoordinatorFinancialNativeV1,
     CoordinatorFinancialWitnessEventV1 as WitnessEvent, CoordinatorWitnessRetiredV1,
     CoordinatorWitnessRetirementTicketV1, DeliveryFailureV1, FinancialContinueReadyTicketV1,
@@ -188,6 +189,8 @@ const READ_PURPOSE: &str = "original-history-and-one-local-continue-preparation-
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase {
+    NormalFinishReview,
+    NormalClosing,
     CompletedPairFlow,
     ReturnReadReview,
     ReturnReading,
@@ -324,6 +327,7 @@ struct PairedConsent {
     acknowledged: [bool; 2],
 }
 enum Intent {
+    NormalFinish,
     PrepareCompletedPair,
     CompletedPairAction,
     ShowContinuationSelector(Role),
@@ -404,7 +408,7 @@ enum HostEntry {
 pub(super) fn run(
     native: CoordinatorFinancialNativeV1,
     mut endpoint: CoordinatorFinancialEndpointV1,
-) -> Result<()> {
+) -> Result<bool> {
     let session_deadline = native.session_deadline();
     if session_deadline != endpoint.session_deadline() {
         return Err(rejected("workflow original session mismatch"));
@@ -413,7 +417,11 @@ pub(super) fn run(
     // No descriptor/path importer or terminal I/O occurs in the native tail.
     let terminal = endpoint.take_host_terminal()?;
     let driver = Rc::new(RefCell::new(Driver::spawn(endpoint, terminal)?));
+    let normal_observed = Rc::new(Cell::new(false));
     let app = Window { native, driver: Rc::clone(&driver), session_deadline,
+        normal_observed: Rc::clone(&normal_observed), normal_ticket: None,
+        normal_notice: None, normal_completion: None, normal_cleanup_deadline: None,
+        normal_finish_attempted: false,
         financial_loaded:None, financial_parked:[None,None], continuation_selector_visible:[false;2],
         continuation_save_paths: std::array::from_fn(|_| String::new()),
         result_save_paths: std::array::from_fn(|_| String::new()),
@@ -488,12 +496,16 @@ pub(super) fn run(
         options,
         Box::new(move |_cc| Ok(Box::new(app))),
     );
-    driver.borrow().revoke();
+    if !normal_observed.get() { driver.borrow().revoke(); }
     let cleanup = driver.borrow_mut().join();
     if window.is_err() {
         return Err(rejected("source-entry native window unavailable"));
     }
-    cleanup
+    let completed = cleanup?;
+    if completed != normal_observed.get() {
+        return Err(rejected("normal completion proof and owned join disagree"));
+    }
+    Ok(completed)
 }
 
 // Each original financial owner is moved, never cloned or recreated, when
@@ -617,6 +629,12 @@ impl RetainedFinancialRole {
 }
 
 struct Window {
+    normal_observed: Rc<Cell<bool>>,
+    normal_ticket: Option<FinancialNormalFinishTicketV1>,
+    normal_notice: Option<FinancialNormalCompletionNoticeV1>,
+    normal_completion: Option<FinancialNormalCompletionV1>,
+    normal_cleanup_deadline: Option<Instant>,
+    normal_finish_attempted: bool,
     pair_flow: PairFlow,
     continuation_save_paths: [String; 2],
     result_save_paths: [String; 2],
@@ -1683,6 +1701,31 @@ impl Window {
     fn writer_transition(&mut self, stage: WriterStage, frame: u64) {
         self.writer_flow.stage = stage;
         self.transition(Phase::WriterFlow, frame);
+    }
+    fn retained_return(&self, role: Role) -> Result<&SignerReturnCompletedV1> {
+        let flow = if self.financial_loaded == Some(role) { &self.return_flow }
+            else { &self.financial_parked[index(role)].as_ref().ok_or_else(|| rejected("normal completion original role absent"))?.return_flow };
+        flow.completed.as_ref().ok_or_else(|| rejected("normal completion actual Return absent"))
+    }
+    fn accept_normal_review(&mut self, ticket: FinancialNormalFinishTicketV1, frame: u64) -> Result<()> {
+        if self.terminal() || self.normal_ticket.is_some() || self.normal_notice.is_some()
+            || self.normal_finish_attempted { return Err(rejected("normal completion review consumed or restricted")); }
+        ticket.check_current()?;
+        let notice = ticket.presentation();
+        for role in [Role::Signer1, Role::Signer2] {
+            if self.retained_return(role)? != &notice.returned[index(role)] {
+                return Err(rejected("normal completion original Return mismatch"));
+            }
+        }
+        let pair = self.pair_flow.serving().ok_or_else(|| rejected("normal completion actual Pair absent"))?;
+        pair.check_current()?;
+        if notice.pair_presentation_digest != pair.presentation().presentation_digest {
+            return Err(rejected("normal completion Pair changed"));
+        }
+        self.normal_notice = Some(notice.clone());
+        self.normal_ticket = Some(ticket);
+        self.transition(Phase::NormalFinishReview, frame);
+        Ok(())
     }
     fn retained_signing_inputs(&self, role: Role) -> Result<FinancialSigningInputsV1> {
         let p = self.signer_display[index(role)].as_ref().ok_or_else(|| rejected("original actual Admit missing"))?;
@@ -2842,6 +2885,7 @@ impl Window {
     fn clear_review(&mut self) {
         // Ordinary stage cleanup must never discard another original service.
         if self.native.is_revoked() || self.terminal() {
+            self.normal_ticket.take();
             self.pair_flow.clear_actions();
             for parked in &mut self.financial_parked {
                 if let Some(p) = parked {
@@ -2951,6 +2995,16 @@ impl Window {
             return;
         }
         let driver_revoked = self.driver.borrow().is_revoked();
+        if self.phase == Phase::NormalClosing {
+            // Only reached after actual native Finish admission. The exact
+            // typed endpoint owns expected exits/reaps; ordinary live-root and
+            // Pair checks would reject the intentional teardown. Raw R remains.
+            if driver_revoked || self.native.is_revoked()
+                || self.normal_cleanup_deadline.is_none_or(|d| Instant::now() >= d) {
+                self.revoke("Normal close was restricted or exceeded its original cleanup deadline. No successful completion is inferred.");
+            }
+            return;
+        }
         if let Some((_, cutoff)) = self.retirement_paused {
             // Ordinary Core root checks would falsely reject the actual target
             // during its exclusive normal reap. Raw interruption still runs,
@@ -3002,6 +3056,7 @@ impl Window {
             return;
         }
         if driver_revoked
+            || self.normal_ticket.as_ref().is_some_and(|t| t.check_current().is_err())
             || self.pair_flow.current().is_err()
             || self.sign_flow.retired.as_ref().is_some_and(|s| s.check_current().is_err())
             || self
@@ -3222,6 +3277,30 @@ impl Window {
         for _ in 0..32 {
             let outcome = self.driver.borrow().outcome.try_recv();
             match outcome {
+                Ok(Outcome::Event(Event::NormalCompletionReview(ticket))) => {
+                    if self.terminal() { drop(ticket); }
+                    else if self.accept_normal_review(ticket, ctx.cumulative_frame_nr()).is_err() {
+                        self.revoke("Normal Finish review does not match both actual Return outcomes and the original Pair.");
+                    }
+                }
+                Ok(Outcome::NormalFinished(completion)) => {
+                    if self.phase != Phase::NormalClosing || !self.normal_finish_attempted
+                        || self.normal_observed.get() || completion.check_completed().is_err()
+                        || self.normal_notice.as_ref().is_none_or(|n| &n.summary != completion.summary()) {
+                        self.native.revoke(); self.driver.borrow().revoke();
+                        self.normal_observed.set(false);
+                        self.phase = Phase::Revoked;
+                        self.message = "Normal completion proof was missing, restricted or changed. Do not infer successful reaping.";
+                    } else {
+                        self.normal_completion = Some(completion);
+                        self.normal_observed.set(true);
+                        self.normal_cleanup_deadline = None;
+                        self.host_entry = HostEntry::Closed;
+                        self.host_incomplete = true; // Origin privately drains teardown output.
+                        self.phase = Phase::Finished;
+                        self.message = "Both original Returns and the verified saved transaction completed. Normal disposal and every owned reap are confirmed. No transaction was dispatched. The terminal view is only a retained prefix, not the completion proof.";
+                    }
+                }
                 Ok(Outcome::CompletedPairSetup(ticket)) => {
                     if self.terminal() { drop(ticket); }
                     else if self.phase != Phase::CompletedPairFlow
@@ -5051,6 +5130,24 @@ impl Window {
                     }
                 }
                 Phase::ContinuePreparing => { ui.label("Retrieving the already-prepared immutable Continue. No fresh Read, source or review deadline is created."); }
+                Phase::NormalFinishReview => {
+                    ui.heading("Finish the verified saved transaction and close original resources");
+                    if let Some(notice) = &self.normal_notice {
+                        match serde_json::to_string_pretty(notice) {
+                            Ok(text) if text.len() <= 64 * 1024 => {
+                                if review_display(ui, &text, visible) { painted_to_end = true; }
+                            }
+                            _ => self.revoke("Normal Finish exact notice cannot be shown within its bound."),
+                        }
+                    }
+                    ui.checkbox(&mut acknowledged_in_pass, "I reviewed both actual Return outcomes and the saved transaction. Finish closes original resources only; it does not dispatch a transaction.");
+                    if ui.add_enabled(visible && later_frame && self.read_to_end && self.acknowledged
+                        && self.password.is_none() && !host_entry_blocks_source(self.host_entry),
+                        egui::Button::new("Finish and normally close all original resources")).clicked_by(egui::PointerButton::Primary) {
+                        self.intent = Some(Intent::NormalFinish);
+                    }
+                }
+                Phase::NormalClosing => { ui.label("Actual native Finish admitted. Waiting for original normal disposal, every owned process reap, and the final restriction check. Cancellation remains restrictive; waiting is not success."); }
                 Phase::CompletedPairFlow => {
                     ui.heading("Separate original CompletedPair resource");
                     match self.pair_flow.display() {
@@ -6143,6 +6240,18 @@ impl Window {
                 self.active = None;
                 self.transition(Phase::Selecting, frame);
             }
+            Intent::NormalFinish if normal_finish_tail_eligible(self.phase, self.read_to_end,
+                self.acknowledged, self.focused_last, self.native.is_revoked(), frame > self.phase_frame,
+                self.normal_finish_attempted, self.password.is_some(), host_entry_blocks_source(self.host_entry)) =>
+            {
+                let ticket = self.normal_ticket.take().ok_or_else(|| rejected("normal Finish ticket consumed"))?;
+                let pair = self.pair_flow.serving().ok_or_else(|| rejected("normal Finish actual Pair absent"))?;
+                let outbound = self.native.admit_normal_finish(ticket, pair)?;
+                self.normal_cleanup_deadline = Some(outbound.original_cleanup_deadline());
+                self.normal_finish_attempted = true;
+                self.transition(Phase::NormalClosing, frame);
+                self.driver.borrow_mut().send_normal_finish(outbound)?;
+            }
             Intent::PrepareCompletedPair if self.phase == Phase::Selecting
                 && !self.pair_flow.is_started() && self.financial_loaded.is_none()
                 && self.password.is_none() && !host_entry_blocks_source(self.host_entry) =>
@@ -6675,6 +6784,15 @@ impl eframe::App for Window {
 }
 impl Drop for Window {
     fn drop(&mut self) {
+        // Only the retained, unforgeable original all-reaps proof can bypass
+        // restrictive teardown. A UI bool, phase label or channel EOF cannot.
+        if self.phase == Phase::Finished && self.normal_observed.get()
+            && self.normal_completion.as_ref().is_some_and(|proof| proof.check_completed().is_ok())
+            && self.host_input.is_none() && self.password.is_none() {
+            self.host_output.clear_and_close();
+            return;
+        }
+        self.normal_observed.set(false);
         self.native.revoke();
         self.driver.borrow().revoke();
         if let Some(input) = &mut self.host_input {
@@ -9042,5 +9160,26 @@ mod actual_selector_save_tests {
         assert!(selector_path_valid("/tmp/explicit-selector.json"));
         for p in ["", "relative.json", "/tmp/bad\0name"] { assert!(!selector_path_valid(p)); }
         assert!(!selector_path_valid(&format!("/{}", "x".repeat(4096))));
+    }
+}
+
+fn normal_finish_tail_eligible(phase: Phase, read: bool, acknowledged: bool, focused: bool,
+    revoked: bool, later_frame: bool, attempted: bool, password: bool, host_editing: bool) -> bool {
+    phase == Phase::NormalFinishReview && read && acknowledged && focused && !revoked
+        && later_frame && !attempted && !password && !host_editing
+}
+#[cfg(test)]
+mod normal_finish_tail_tests {
+    use super::*;
+    #[test]
+    fn normal_finish_has_distinct_fresh_review_and_no_cancel_substitute() {
+        assert!(normal_finish_tail_eligible(Phase::NormalFinishReview,true,true,true,false,true,false,false,false));
+        for phase in [Phase::ReturnCompleted,Phase::SignedRetired,Phase::NormalClosing,Phase::Revoked,Phase::Finished] {
+            assert!(!normal_finish_tail_eligible(phase,true,true,true,false,true,false,false,false));
+        }
+        for i in 0..8 {
+            let mut flags = [true,true,true,false,true,false,false,false]; flags[i] = !flags[i];
+            assert!(!normal_finish_tail_eligible(Phase::NormalFinishReview,flags[0],flags[1],flags[2],flags[3],flags[4],flags[5],flags[6],flags[7]));
+        }
     }
 }

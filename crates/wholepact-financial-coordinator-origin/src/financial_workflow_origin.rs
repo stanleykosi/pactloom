@@ -17,6 +17,9 @@ use crate::{SignerContinueArmV1,SignerContinueFinalV1,SignerContinueSourceFactsV
     SignerContinuePresentationV1,SignerContinueOutcomeV1};
 use crate::signer_continue_state::SENT;
 
+#[path="financial_normal_completion_origin.rs"]
+mod normal_completion;
+pub use normal_completion::{FinancialNormalFinishTicketV1,FinancialNormalFinishOutboundV1,FinancialNormalCompletionV1,SignerNormalCloseV1};
 #[path="financial_selector_origin.rs"]
 mod financial_selector;
 
@@ -76,6 +79,7 @@ pub use admit::{SignerAdmitArmV1,SignerAdmitFinalV1,SignerAdmitReviewTicketV1,Si
 use admit::{SAdmit,CAdmit,HAdmit};
 
 pub enum SignerFinancialWorkflowRequestV1 {
+    NormalClose{action:SignerNormalCloseV1},
     V3Enrollment{final_action:SignerV3EnrollmentFinalV1},
     V3Manifest{final_action:SignerV3ManifestFinalV1},
     V3RedisclosureRead{final_action:SignerV3RedisclosureReadFinalV1},
@@ -103,6 +107,7 @@ pub enum SignerFinancialWorkflowRequestV1 {
     ContinueArm(SignerContinueArmV1), ContinueFinal(SignerContinueFinalV1), AdmitArm(SignerAdmitArmV1), AdmitFinal(SignerAdmitFinalV1), Cancel,
 }
 pub struct SignerFinancialWorkflowOriginV1 {
+    normal:normal_completion::NormalSState,
     core:Arc<Core>,clocks:FullWorkflowClocksV1,leaf:Option<LeafCustody>,target:Target,instance:String,image:String,
     host_peer_seen:bool,host_peer_deadline:Instant,host_peer_instance:Option<String>,v3_entry:SV3Entry,
     start:Option<Start>,entry:Option<Arc<EntryReviewed>>,recipient:Option<crypto::RecipientKey>,
@@ -116,7 +121,7 @@ impl SignerFinancialWorkflowOriginV1 {
             owner_pid:unsafe{libc::getpid()},owner_uid:unsafe{libc::geteuid()},epoch:clocks.epoch(),session:clocks.supervision(),
             alive:AtomicBool::new(true),outbound:[AtomicU8::new(PENDING),AtomicU8::new(PENDING)]});
         core.check()?;crate::channel::require_time(clocks.supervision())?;
-        Ok(Self{v3_entry:SV3Entry::default(),host_peer_instance:None,host_peer_seen:false,host_peer_deadline:(Instant::now()+std::time::Duration::from_secs(120)).min(clocks.supervision()),core,clocks,leaf:Some(leaf),target,instance:state::nonce()?,image:birth.image.measurement().to_owned(),start:None,entry:None,
+        Ok(Self{normal:normal_completion::NormalSState::default(),v3_entry:SV3Entry::default(),host_peer_instance:None,host_peer_seen:false,host_peer_deadline:(Instant::now()+std::time::Duration::from_secs(120)).min(clocks.supervision()),core,clocks,leaf:Some(leaf),target,instance:state::nonce()?,image:birth.image.measurement().to_owned(),start:None,entry:None,
             recipient:None,read:None,offer_started:false,read_started:false,source_reported:false,history_reported:false,
             continuation:SContinue::default(),admission:SAdmit::default(),writer_acquire:SWritAcquire::default(),activate:SActivate::default(),failed:false,cancel_seen:false,disposed:false,cleanup:None})
     }
@@ -154,6 +159,8 @@ impl SignerFinancialWorkflowOriginV1 {
         self.transport_check()?;
         if !self.host_peer_seen {crate::channel::require_time(self.host_peer_deadline)?;}
         let Some(packet)=self.leaf.as_ref().ok_or_else(||rejected("workflow Signer consumed"))?.origin.workflow_receive()? else{return Ok(None)};
+        if let Packet::NormalClose{context}=packet{return self.receive_normal_close(context).map(Some);}
+        if self.normal.context.is_some()&&!matches!(packet,Packet::Cancel{..}){return Err(rejected("new Source command during normal close"));}
         if let Packet::OriginalHostPeer{role,host_instance} = &packet {
             crate::channel::require_time(self.host_peer_deadline)?;
             if !original_host_peer::first_handshake_allowed(self.host_peer_seen,self.start.is_some(),self.target,*role) {return Err(rejected("original H handshake repeated or reordered"));}
@@ -448,8 +455,9 @@ impl CoordinatorFinancialNativeV1 {
         ticket.consumed=true;Ok(SignerFinancialReadOutboundV1{read:Arc::clone(read),service,consumed:false})
     }
 }
-impl Drop for CoordinatorFinancialNativeV1{fn drop(&mut self){self.revoke();}}
+impl Drop for CoordinatorFinancialNativeV1{fn drop(&mut self){if self.core.phase.normal_phase()!=5{self.revoke();}}}
 pub enum CoordinatorFinancialEventV1 {
+    NormalCompletionReview(FinancialNormalFinishTicketV1),
     FinancialResultSelector{role:Target,data:crate::SignerFinancialResultSelectorV1},
     V3PairEndpoint{role:Target,data:crate::SignerV3PairEndpointV1},
     V3PairDisplay(SignerV3PairTicketV1),
@@ -493,6 +501,7 @@ pub enum CoordinatorFinancialEventV1 {
 }
 struct CSlot{start:Start,sender:Option<crypto::SenderKey>,entry:Option<Arc<EntryReviewed>>,read:Option<Arc<ReadReviewed>>,wire_phase:u8,continue_deadline:Option<Instant>,continue_review_ms:Option<u64>,continuation:Option<CContinue>,admission:CAdmit,writer_acquire:CWritAcquire,activate:CActivate,failed:bool}
 pub struct CoordinatorFinancialEndpointV1{
+    normal:normal_completion::NormalCState,
     v3_entries:[CV3Entry;2],
     core:Arc<Core>,clocks:FullWorkflowClocksV1,tree:Option<InertTreeV1>,coordinator:String,session:String,image:String,
     host_terminal:Option<crate::CoordinatorHostTerminalEndpointV1>,retirement_resume:Option<Instant>,
@@ -514,7 +523,7 @@ pub(super) fn split_coordinator(tree:InertTreeV1,phases:PhaseDeadlinesV1,
     // On error the local Core/writer drops before the tree parameter's reapers.
     let coordinator=state::nonce()?;let session=state::nonce()?;
     Ok((CoordinatorFinancialNativeV1{core:Arc::clone(&core),_thread:PhantomData},CoordinatorFinancialEndpointV1{
-        v3_entries:std::array::from_fn(|_|CV3Entry::default()),core,clocks,tree:Some(tree),coordinator,session,image,host_terminal:Some(host_terminal),retirement_resume:None,witnesses:std::array::from_fn(|_|witness::CWSlot::default()),histories:std::array::from_fn(|_|history::CHSlot::default()),signing_services:std::array::from_fn(|_|signing::CGSlot::default()),pair_service:completed_pair::CPState::default(),slots:[None,None],cancel_sent:false,disposed:[false;2],cleanup:None}))
+        normal:normal_completion::NormalCState::default(),v3_entries:std::array::from_fn(|_|CV3Entry::default()),core,clocks,tree:Some(tree),coordinator,session,image,host_terminal:Some(host_terminal),retirement_resume:None,witnesses:std::array::from_fn(|_|witness::CWSlot::default()),histories:std::array::from_fn(|_|history::CHSlot::default()),signing_services:std::array::from_fn(|_|signing::CGSlot::default()),pair_service:completed_pair::CPState::default(),slots:[None,None],cancel_sent:false,disposed:[false;2],cleanup:None}))
 }
 impl CoordinatorFinancialEndpointV1 {
     /// One C-only transport handoff to the sole owned driver, never authority.
@@ -692,6 +701,7 @@ impl CoordinatorFinancialEndpointV1 {
     }
     fn receive_inner(&mut self)->Result<Option<CoordinatorFinancialEventV1>>{
         self.transport_check()?;let Some(packet)=self.tree.as_ref().ok_or_else(||rejected("workflow tree consumed"))?.continue_host()?.workflow_receive()? else{return Ok(None)};
+        if let Packet::NormalCompletionNotice{notice}=packet{return self.receive_normal_notice(notice).map(Some);}
         let role=packet.target()?.ok_or_else(||rejected("workflow response without role"))?;let i=role.index();
         if let Packet::Disposed{coordinator,session,..}=&packet{
             if !self.cancel_sent||self.disposed[i]||coordinator!=&self.coordinator||session!=&self.session{return Err(rejected("workflow disposal mismatch"));}
@@ -813,7 +823,7 @@ impl CoordinatorFinancialEndpointV1 {
         self.core.close();result
     }
 }
-impl Drop for CoordinatorFinancialEndpointV1{fn drop(&mut self){self.core.close();}}
+impl Drop for CoordinatorFinancialEndpointV1{fn drop(&mut self){if self.core.phase.normal_phase()!=5{self.core.close();}}}
 fn failure_phase(stage:FinancialWorkflowStageV1,phase:u8)->bool{match stage{
     FinancialWorkflowStageV1::SourceEntry=>matches!(phase,ENTRY_PREPARING|ENTRY_REVIEW|ENTRY_ADMITTED),
     FinancialWorkflowStageV1::InitialRead=>matches!(phase,SOURCE_RETAINED|READ_REVIEW|READ_ADMITTED),
@@ -824,6 +834,7 @@ struct HSlot{start:Start,phase:u8,entry:Option<EntryOffer>,read:Option<SignerFin
 /// Exact original H is a trusted finite relay, not a direct-C authentication
 /// proof at S. It retains sole S reapers, no plaintext/private keys or issuer.
 pub struct HostFinancialWorkflowRelayV1{
+    normal:normal_completion::NormalHState,
     v3_entries:[HV3Entry;2],host_peer_instance:String,
     lifecycle:Arc<crate::host_interstage::HostLifecycle>,
     pair:crate::host_interstage::HostPairReceiveState,
@@ -842,7 +853,7 @@ impl HostFinancialWorkflowRelayV1 {
             host.continue_check()?;
             host.continue_child(role)?.workflow_send(&Packet::OriginalHostPeer{role,host_instance:host_instance.clone()})?;
         }
-        Ok(Self{v3_entries:std::array::from_fn(|_|HV3Entry::default()),host_peer_instance:host_instance,lifecycle:host.workflow_lifecycle(),pair:crate::host_interstage::HostPairReceiveState::default(),retirement:None,quiescent_sent:false,retired:[[false;2];3],host:Some(host),clocks,image,coordinator:None,session:None,slots:[None,None],restricted:false,cancel_seen:false,disposed:[false;2],cleanup:None})
+        Ok(Self{normal:normal_completion::NormalHState::default(),v3_entries:std::array::from_fn(|_|HV3Entry::default()),host_peer_instance:host_instance,lifecycle:host.workflow_lifecycle(),pair:crate::host_interstage::HostPairReceiveState::default(),retirement:None,quiescent_sent:false,retired:[[false;2];3],host:Some(host),clocks,image,coordinator:None,session:None,slots:[None,None],restricted:false,cancel_seen:false,disposed:[false;2],cleanup:None})
     }
     pub fn session_deadline(&self)->Instant{self.clocks.supervision()}
     fn restrict(&mut self)->Result<()>{self.restricted=true;if self.cleanup.is_none(){self.cleanup=Some(self.clocks.first_cleanup_ceiling(Instant::now())?);}Ok(())}
@@ -853,7 +864,7 @@ impl HostFinancialWorkflowRelayV1 {
         self.host.as_ref().ok_or_else(||rejected("workflow Host consumed"))?.continue_check_lifetimes()?;
         let mut progress=false;
         if let Some(packet)=self.host.as_ref().unwrap().workflow_receive_c()?{
-            if self.completed_pair_control(&packet)?||self.retirement_control(&packet)?{progress=true;}else{
+            if self.normal_control(&packet)?||self.completed_pair_control(&packet)?||self.retirement_control(&packet)?{progress=true;}else{
             self.down(&packet)?;let host=self.host.as_ref().unwrap();
             if matches!(packet,Packet::Cancel{..}){
                 host.continue_child(Target::Signer1)?.workflow_send(&packet)?;host.continue_child(Target::Signer2)?.workflow_send(&packet)?;
@@ -861,6 +872,7 @@ impl HostFinancialWorkflowRelayV1 {
             progress=true;}
         }
         progress|=self.retirement_observation()?;
+        progress|=self.normal_observation()?;
         for target in [Target::Signer1,Target::Signer2]{
             if self.disposed[target.index()]{continue;}
             if let Some(packet)=self.host.as_ref().unwrap().continue_child(target)?.workflow_receive()?{
@@ -1012,6 +1024,7 @@ impl HostFinancialWorkflowRelayV1 {
         }
     }
     fn up(&mut self,target:Target,packet:&Packet)->Result<bool>{
+        if matches!(packet,Packet::NormalDisposed{..}){return self.up_normal_disposed(target,packet);}
         if packet.target()?!=Some(target){return Err(rejected("workflow actual Signer target mismatch"));}
         let i=target.index();
         if let Packet::Disposed{coordinator,session,..}=packet{

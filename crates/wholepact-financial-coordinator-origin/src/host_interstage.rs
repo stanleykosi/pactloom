@@ -9,6 +9,9 @@ use std::{marker::PhantomData,rc::Rc,sync::{Arc,Mutex,atomic::{AtomicU8,AtomicBo
 mod completed_pair;
 pub use completed_pair::HostCompletedPairServiceV1;
 pub(crate) use completed_pair::HostPairReceiveState;
+#[path="host_normal_completion.rs"]
+mod normal_completion;
+pub use normal_completion::{HostNormalFinishWaitV1,HostNormalCloseV1};
 const RUNNING:u8=0;const PARKED:u8=1;const REQUESTED:u8=2;const GUARDED:u8=3;
 const RESUME:u8=4;const RESUMED:u8=5;const POISON:u8=255;
 #[derive(Clone,Copy,Debug,PartialEq,Eq,Serialize,Deserialize)]
@@ -54,6 +57,7 @@ impl SigningRetirementBindingV1 {
 enum V3DisclosureSlot { Unseen, Ready(crate::SignerV3CurrentDisclosureV1), Taken }
 enum V3EndpointSlot { Unseen, Ready(crate::SignerV3PairEndpointV1), Taken(crate::SignerV3PairEndpointV1) }
 pub(super) struct HostLifecycle {
+    pub(crate) normal:normal_completion::HostNormalState,
     state:AtomicU8,acknowledged:AtomicBool,request:Mutex<Option<(RetirementRequest,Instant)>>,
     v3_pair_endpoints:Mutex<[V3EndpointSlot;2]>,
     v3_current_disclosures:Mutex<[V3DisclosureSlot;2]>,
@@ -63,7 +67,7 @@ pub(super) struct HostLifecycle {
 impl HostLifecycle {
     pub(super) fn create(checks:Arc<HostRestrictionChecks>,clocks:FullWorkflowClocksV1)
         ->(HostLifecycleOwner,Arc<Self>){
-        let state=Arc::new(Self{state:AtomicU8::new(RUNNING),acknowledged:AtomicBool::new(false),request:Mutex::new(None),v3_pair_endpoints:Mutex::new([V3EndpointSlot::Unseen,V3EndpointSlot::Unseen]),v3_current_disclosures:Mutex::new([V3DisclosureSlot::Unseen,V3DisclosureSlot::Unseen]),checks,clocks,pair_service:std::sync::OnceLock::new(),pair_handoff:AtomicBool::new(false)});
+        let state=Arc::new(Self{normal:normal_completion::HostNormalState::default(),state:AtomicU8::new(RUNNING),acknowledged:AtomicBool::new(false),request:Mutex::new(None),v3_pair_endpoints:Mutex::new([V3EndpointSlot::Unseen,V3EndpointSlot::Unseen]),v3_current_disclosures:Mutex::new([V3DisclosureSlot::Unseen,V3DisclosureSlot::Unseen]),checks,clocks,pair_service:std::sync::OnceLock::new(),pair_handoff:AtomicBool::new(false)});
         (HostLifecycleOwner(Arc::clone(&state)),state)
     }
     /// Inert location metadata from the authenticated original S relay. This
@@ -109,12 +113,13 @@ impl HostLifecycle {
         let V3DisclosureSlot::Ready(data)=std::mem::replace(&mut slots[target.index()],V3DisclosureSlot::Taken) else{return Err(rejected("Host V3 disclosure invalid state"));};
         Ok(Some(data))
     }
+    pub(crate) fn normal_reap_check(&self,cutoff:Instant)->Result<()>{require_time(cutoff)?;self.checks.check_current()}
     pub(super) fn poison(&self){self.state.store(POISON,Ordering::SeqCst);}
     pub(super) fn check_not_poisoned(&self)->Result<()>{if self.state.load(Ordering::SeqCst)==POISON{return Err(rejected("original Host foreground permanently poisoned"));}Ok(())}
     pub(super) fn check_foreground(&self)->Result<()>{
         if self.state.load(Ordering::SeqCst)!=RUNNING{return Err(rejected("original Host foreground parked or poisoned"));}Ok(())
     }
-    fn check_wait(&self)->Result<()>{self.checks.check_current()?;
+    pub(crate) fn check_wait(&self)->Result<()>{self.checks.check_current()?;
         if self.state.load(Ordering::SeqCst)==POISON{return Err(rejected("original Host interstage poisoned"));}
         require_time(self.clocks.supervision())?;
         if let Some((_,cutoff))=self.request.lock().map_err(|_|rejected("Host interstage record poisoned"))?.as_ref(){require_time(*cutoff)?;}Ok(())}

@@ -262,6 +262,15 @@ impl Phases {
         let word=self.word.load(Ordering::Acquire);if ((word>>40)&15)!=expected as u64{return Err(rejected("Pair send phase mismatch"));}
         if word&QUIESCENT!=0{return Err(rejected("Pair send during retirement"));}Ok(word&REVOKED!=0)
     }
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn normal_phase(&self)->u8{((self.word.load(Ordering::Acquire)>>44)&15)as u8}
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn normal_step(&self,from:u8,to:u8)->Result<()> {
+        if !matches!((from,to),(0,1)|(1,2)|(2,3)|(3,4)|(4,5)){return Err(rejected("normal completion step skipped"));}
+        let mut old=self.word.load(Ordering::Acquire);
+        loop{if old&(REVOKED|QUIESCENT)!=0||((old>>44)&15)!=from as u64{return Err(rejected("normal completion restricted or consumed"));}
+            let new=(old&!(15<<44))|((to as u64)<<44);match self.word.compare_exchange_weak(old,new,Ordering::AcqRel,Ordering::Acquire){Ok(_)=>return Ok(()),Err(actual)=>old=actual}}
+    }
     /// Only after actual normal owned History reap. This observation keeps
     /// QUIESCENT and R, and cannot create any native admission or reset a slot.
     #[cfg(feature="coordinated-financial-workflow-v1")]
@@ -359,7 +368,7 @@ impl Core {
         let result = (|| {
             self.check()?;
             crate::channel::require_time(self.session)?;
-            if self.phase.revoked()||self.phase.quiescent() { return Err(rejected("original workflow restricted or quiescent")); }
+            if self.phase.revoked()||self.phase.quiescent()||self.phase.normal_phase()>=2 { return Err(rejected("original workflow restricted, quiescent or closing")); }
             // Last sample uses the original shared cell, not a queued Cancel.
             if let Some(reader) = &self.signer_restriction { reader.check_current()?; }
             Ok(())
@@ -555,4 +564,13 @@ mod signing_retirement_pair_tests {
  #[test]fn signing_normal_retirement_requires_exclusive_exact_transition(){let p=Phases::new();p.signing_step(0,0,4).unwrap();assert!(p.signing_retirement_step(0,4,5).is_err());p.begin_quiescence(p.snapshot()).unwrap();assert!(p.signing_retirement_step(0,4,6).is_err());p.signing_retirement_step(0,4,5).unwrap();p.signing_retirement_step(0,5,6).unwrap();assert!(p.signing_retirement_step(0,5,6).is_err());assert!(p.quiescent());}
  #[test]fn revoke_during_normal_reap_cannot_create_retired_phase(){let p=Phases::new();p.signing_step(0,0,4).unwrap();p.begin_quiescence(p.snapshot()).unwrap();p.signing_retirement_step(0,4,5).unwrap();p.revoke();assert!(p.signing_retirement_step(0,5,6).is_err());assert!(p.finish_quiescence().is_err());}
  #[test]fn pair_bits_do_not_alias_signing_history_or_source(){let p=Phases::new();p.step(0,0,67).unwrap();p.signing_step(0,0,6).unwrap();p.history_step(1,0,6).unwrap();p.pair_step(0,1).unwrap();assert_eq!(p.phase(0),67);assert_eq!(p.signing_phase(0),6);assert_eq!(p.history_phase(1),6);assert_eq!(p.pair_phase(),1);p.revoke();assert!(p.pair_send_restricted(1).unwrap());assert!(p.pair_step(1,2).is_err());}
+}
+
+#[cfg(all(test,feature="coordinated-financial-workflow-v1"))]
+mod normal_completion_tests {
+ use super::*;
+ #[test]fn normal_finish_never_skips_review_or_duplicates_admission(){let p=Phases::new();assert!(p.normal_step(0,2).is_err());p.normal_step(0,1).unwrap();p.normal_step(1,2).unwrap();assert!(p.normal_step(1,2).is_err());assert_eq!(p.normal_phase(),2);assert_eq!(p.pair_phase(),0);assert_eq!(p.phase(0),0);}
+ #[test]fn normal_finish_during_exclusive_retirement_is_rejected(){let p=Phases::new();p.normal_step(0,1).unwrap();p.begin_quiescence(p.snapshot()).unwrap();assert!(p.normal_step(1,2).is_err());}
+ #[test]fn revoke_during_actual_root_reaps_prevents_normal_completion(){let p=Phases::new();for i in 0..4{p.normal_step(i,i+1).unwrap();}p.revoke();assert!(p.normal_step(4,5).is_err());assert_eq!(p.normal_phase(),4);}
+ #[test]fn normal_state_is_independent_of_pair_and_signed_bits(){let p=Phases::new();p.step(0,0,73).unwrap();p.step(1,0,73).unwrap();p.signing_step(0,0,6).unwrap();p.signing_step(1,0,6).unwrap();p.pair_step(0,4).unwrap();for i in 0..5{p.normal_step(i,i+1).unwrap();}assert_eq!(p.phase(0),73);assert_eq!(p.signing_phase(1),6);assert_eq!(p.pair_phase(),4);assert_eq!(p.normal_phase(),5);}
 }

@@ -453,3 +453,25 @@ mod tests {
         assert!(!raw_no_echo_mode(&mode));
     }
 }
+
+impl CoordinatorHostTerminalEndpointV1 {
+ pub(crate) fn begin_normal_hold(&mut self,core:&Arc<crate::signer_continue_state::Core>)->Result<()> {
+  self.check_or_close()?;
+  if self.input.is_some()||self.io.is_none()||self.workflow.as_ref().is_none_or(|actual|!Arc::ptr_eq(actual,core))||core.phase.normal_phase()!=2{return Err(rejected("normal completion lacks exact idle original PTY"));}Ok(())
+ }
+ pub(crate) fn drain_normal_output(&mut self,core:&Arc<crate::signer_continue_state::Core>,cutoff:Instant,expected_exit:bool)->Result<()> {
+  require_local(self.owner_pid,self.owner_uid,cutoff)?;
+  if self.workflow.as_ref().is_none_or(|actual|!Arc::ptr_eq(actual,core))||core.phase.revoked()||self.input.is_some()||!matches!(core.phase.normal_phase(),3|4){return Err(rejected("normal PTY hold changed"));}
+  if expected_exit&&core.phase.normal_phase()!=4{return Err(rejected("normal PTY expected exit before owned reaps"));}
+  let mut bytes=Zeroizing::new(vec![0u8;OUTPUT_CHUNK]);
+  match self.io.as_mut().ok_or_else(||rejected("normal PTY lost"))?.master.read(&mut bytes) {
+   Ok(0) if expected_exit=>Ok(()),Ok(0)=>Err(rejected("normal PTY ended before Stop")),Ok(_)=>Ok(()),
+   Err(e) if matches!(e.kind(),std::io::ErrorKind::WouldBlock|std::io::ErrorKind::Interrupted)=>Ok(()),
+   Err(e) if expected_exit&&e.raw_os_error()==Some(libc::EIO)=>Ok(()),Err(e)=>Err(e),
+  }
+ }
+ pub(crate) fn release_after_normal_reaps(&mut self,core:&Arc<crate::signer_continue_state::Core>)->Result<()> {
+  if self.workflow.as_ref().is_none_or(|actual|!Arc::ptr_eq(actual,core))||core.phase.normal_phase()!=5||core.phase.revoked()||self.input.is_some()||self.io.is_none(){return Err(rejected("normal PTY release lacks actual all-reap proof"));}
+  self.workflow.take();self.io.take();Ok(())
+ }
+}

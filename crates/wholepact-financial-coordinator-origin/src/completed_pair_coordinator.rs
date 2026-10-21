@@ -97,6 +97,7 @@ impl FinancialCompletedPairServingV1 {
 }
 pub(super) struct CompletedPairServiceLease { binding: Arc<Review> }
 impl CompletedPairServiceLease {
+    pub(super) fn presentation(&self) -> &CompletedPairPresentationV1 { &self.binding.data }
     pub(super) fn check(&self) -> Result<()> {
         self.binding.current()?;
         if self.binding.setup.core.phase.pair_phase() != CP_SERVING { return Err(rejected("completed pair outbound service ended")); } Ok(())
@@ -251,6 +252,35 @@ impl CoordinatorFinancialEndpointV1 {
             }
             _=>return Err(rejected("unexpected completed pair observation")),
         };Ok(Some(event))
+    }
+    /// Normal-close restriction only, from an actual acknowledged original
+    /// Pair service already reported to H; never from caller presentation data.
+    pub(super) fn normal_pair_lease(&self)->Result<CompletedPairServiceLease> {
+        let slot=&self.pair_service;
+        if !slot.serving_ack || !slot.host_notified || slot.finish_sent || slot.failed
+            || slot.cancel_sent || slot.disposed || slot.closed || slot.wire_phase!=CP_SERVING {
+            return Err(rejected("normal Finish requires actual current Pair service"));
+        }
+        let binding=Arc::clone(slot.review.as_ref().ok_or_else(||rejected("normal Finish Pair review missing"))?);
+        let lease=CompletedPairServiceLease{binding};lease.check()?;Ok(lease)
+    }
+    /// Exclusive admitted normal-close owner only. This can stop the actual
+    /// existing resource service, never admit another financial operation.
+    pub(super) fn finish_completed_pair_for_normal(&mut self)->Result<()> {
+        self.core.check()?;
+        if self.core.phase.normal_phase()!=3 || self.core.phase.revoked() || self.core.phase.quiescent() {
+            return Err(rejected("Pair normal finish outside admitted close"));
+        }
+        crate::channel::require_time(self.cleanup.ok_or_else(||rejected("Pair normal cleanup missing"))?)?;
+        let slot=&mut self.pair_service;
+        if !slot.serving_ack||!slot.host_notified||slot.finish_sent||slot.failed||slot.cancel_sent||slot.disposed||slot.closed||slot.wire_phase!=CP_SERVING {
+            return Err(rejected("Pair normal finish without actual service"));
+        }
+        let b=slot.review.as_ref().ok_or_else(||rejected("Pair normal finish review missing"))?;
+        self.core.phase.pair_step(CP_SERVING,CP_DONE)?;
+        slot.finish_sent=true;slot.wire_phase=CP_DONE;
+        let packet=CP::FinishService{setup_challenge:b.setup.wire.setup_challenge.clone(),witness_instance:b.instance.clone(),presentation_digest:b.data.presentation_digest.clone()};
+        self.send_pair(&packet)
     }
     pub fn finish_completed_pair_service(&mut self)->Result<()> {
         self.core.check_action_restrictions()?;

@@ -49,6 +49,11 @@ fn main() {
     // any thread-capable initialization. No public worker/role entry exists.
     #[cfg(target_os = "linux")]
     let code = match bootstrap::run_before_runtime() {
+        #[cfg(feature = "coordinated-financial-runtime")]
+        Ok(true) => 0,
+        #[cfg(feature = "coordinated-financial-runtime")]
+        Ok(false) => 78,
+        #[cfg(not(feature = "coordinated-financial-runtime"))]
         Ok(()) => {
             #[cfg(feature = "coordinated-witness-delivery-append")] { 0 }
             #[cfg(not(feature = "coordinated-witness-delivery-append"))] { 78 }

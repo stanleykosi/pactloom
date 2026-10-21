@@ -21,6 +21,7 @@ use std::{path::{Path, PathBuf}, sync::Arc};
 use wholepact_financial_coordinator_origin::{
     HostFinancialForegroundV1, HostFinancialInterstageWaitV1, HostCompletedPairServiceV1,
     HostOriginV1, OriginalForkSignerVerifier, SignerContinueRoleV1,
+    FinancialSavedSummaryV1, HostNormalCloseV1,
 };
 
 pub(super) enum OriginalForegroundOpenFailureV1 {
@@ -118,6 +119,18 @@ fn open_original_financial_foreground_selected_v1(
 impl OpenedOriginalFinancialHostV1 {
     /// The actual foreground error remains distinct from owned relay cleanup.
     /// Call only after all borrowing admission/wait owners have been dropped.
+    /// All borrowing completed/foreground holders have ended. Drop actual
+    /// private Host authority before acknowledging normal foreground disposal;
+    /// the original relay still owns both S reapers until its real join.
+    fn complete_and_join(self, close: HostNormalCloseV1, operation: &str) -> std::io::Result<()> {
+        let Self { monitor, host, workspace: _, commands: _ } = self;
+        drop(host);
+        if let Err(error) = close.acknowledge_disposed() {
+            return Err(joined_runner_failure(monitor.abort_and_join(error.into()), Some(operation)));
+        }
+        monitor.complete_and_join()
+    }
+
     pub(super) fn abort_and_join(self, error: Error) -> HostRelayFailureV1 {
         let Self { monitor, host, workspace: _, commands: _ } = self;
         let result = monitor.abort_and_join(error);
@@ -579,7 +592,24 @@ impl RetainedCompletedOriginalFinancialV1<'_> {
             Err(error) => CompletedSummaryDisclosureV1::Refused(error),
         }
     }
-    // No dispatch, successful-close or authority-release shortcut exists here.
+    /// This consumes the actual completed owner. The summary is ordinary
+    /// metadata; the original foreground and SAME installed Pair supply the
+    /// non-importable custody. No dispatch or new financial effect occurs.
+    fn wait_for_normal_close(self) -> Result<HostNormalCloseV1> {
+        let summary = FinancialSavedSummaryV1 {
+            checkpoint_id: self.summary.checkpoint_id.clone(),
+            transaction_digest: self.summary.transaction_digest.clone(),
+            transaction_id: self.summary.transaction_id.clone(),
+            operation_id: self.operation.clone(),
+            original_valid_until_ms: self.summary.original_valid_until_ms,
+        };
+        let wait = self.foreground.begin_normal_completion(&self.service, summary)?;
+        // Drop the actual completed holder's observation/selections before
+        // waiting; the original Host itself remains owned until close arrives.
+        drop(self.service);
+        drop(self.selections);
+        wait.wait_for_close().map_err(Into::into)
+    }
 }
 
 /// Concrete original-H runner for the explicitly enabled common image. It
@@ -602,26 +632,19 @@ pub fn run_coordinated_financial_host_v1(origin: HostOriginV1) -> std::io::Resul
         second.select_original_handoffs()?.park_for_completed_pair_service()?
             .wait_completed_pair_service()?.complete()
     })();
-    let (error, completed_operation) = match outcome {
-        Err(error) => (restrict_failed_foreground(error), None),
+    match outcome {
+        Err(error) => Err(joined_runner_failure(owner.abort_and_join(restrict_failed_foreground(error)), None)),
         Ok(completed) => {
-            // Disclosure remains a separate real Read; refusal cannot undo a
-            // committed completion or authorize replacement work.
+            // Disclosure is a separate real Read. Its refusal cannot undo the
+            // committed transaction or manufacture a successful shutdown.
             let _disclosure = completed.display_summary();
             let operation = completed.operation.clone();
-            let error = loop {
-                if let Err(error) = completed.service.check_current() { break Error::from(error); }
-                if let Err(error) = crate::terminal::check_original_coordinator_restriction() { break error; }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            };
-            let error = restrict_failed_foreground(error);
-            drop(completed);
-            (error, Some(operation))
+            match completed.wait_for_normal_close() {
+                Ok(close) => owner.complete_and_join(close, &operation),
+                Err(error) => Err(joined_runner_failure(owner.abort_and_join(restrict_failed_foreground(error)), Some(&operation))),
+            }
         }
-    };
-    // All borrowing admissions/foreground holders have ended before joining
-    // the original relay. Neither cleanup nor its failure rewrites effects.
-    Err(joined_runner_failure(owner.abort_and_join(error), completed_operation.as_deref()))
+    }
 }
 fn joined_runner_failure(failure: HostRelayFailureV1, completed: Option<&str>) -> std::io::Error {
     let effect = match completed {

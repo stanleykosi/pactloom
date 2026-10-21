@@ -18,6 +18,7 @@ use std::{
 use wholepact_financial_coordinator_origin::{
     CoordinatorFinancialEndpointV1, CoordinatorFinancialEventV1,
     CompletedPairInputsV1, CoordinatorCompletedPairEventV1,
+    FinancialNormalFinishOutboundV1, FinancialNormalCompletionV1,
     FinancialCompletedPairSetupTicketV1, FinancialCompletedPairSetupOutboundV1,
     FinancialCompletedPairServeOutboundV1,
     CoordinatorFinancialHistoryEventV1, CoordinatorFinancialSigningEventV1,
@@ -66,6 +67,7 @@ pub(super) enum HostStatus {
 }
 
 enum Command {
+    NormalFinish(FinancialNormalFinishOutboundV1),
     PrepareCompletedPair(CompletedPairInputsV1, Instant),
     SetupCompletedPair(FinancialCompletedPairSetupOutboundV1),
     ServeCompletedPair(FinancialCompletedPairServeOutboundV1),
@@ -120,6 +122,7 @@ enum Command {
     FinalAcquire(SignerAcquireFinalOutboundV1),
 }
 pub(super) enum Outcome {
+    NormalFinished(FinancialNormalCompletionV1),
     CompletedPairSetup(FinancialCompletedPairSetupTicketV1),
     CompletedPair(CoordinatorCompletedPairEventV1),
     Event(CoordinatorFinancialEventV1),
@@ -149,6 +152,8 @@ pub(super) enum Outcome {
 }
 
 pub(super) struct Driver {
+    normal_finish_sent: bool,
+    normal_finished: Arc<AtomicBool>,
     completed_pair_prepared: bool,
     completed_pair_setup: bool,
     completed_pair_serve: bool,
@@ -160,7 +165,7 @@ pub(super) struct Driver {
     host_status: mpsc::Receiver<HostStatus>,
     host_pending: Option<u64>,
     host_last: u64,
-    worker: Option<thread::JoinHandle<Result<()>>>,
+    worker: Option<thread::JoinHandle<Result<bool>>>,
     v3_begun: [bool; 2],
     v3_entry_sent: [bool; 2],
     v3_pair_sent: [bool; 2],
@@ -225,6 +230,8 @@ impl Driver {
         let (host_status_send, host_status) = mpsc::sync_channel(HOST_STATUS_SLOTS);
         let revoked = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&revoked);
+        let normal_finished = Arc::new(AtomicBool::new(false));
+        let normal_flag = Arc::clone(&normal_finished);
         let worker = thread::Builder::new()
             .name("coordinator-source-entry".into())
             .spawn(move || {
@@ -233,6 +240,7 @@ impl Driver {
                     receive,
                     send,
                     flag,
+                    normal_flag,
                     terminal,
                     host_receive,
                     host_send,
@@ -240,6 +248,8 @@ impl Driver {
                 )
             })?;
         Ok(Self {
+            normal_finish_sent: false,
+            normal_finished,
             input,
             outcome,
             revoked,
@@ -784,6 +794,18 @@ impl Driver {
         }
         self.queue(Command::RetireSigningPredecessor(outbound))
     }
+    pub(super) fn send_normal_finish(&mut self, outbound: FinancialNormalFinishOutboundV1) -> Result<()> {
+        if self.normal_finish_sent || self.host_pending.is_some() || self.is_revoked() {
+            return Err(rejected("normal Finish consumed or transport busy"));
+        }
+        self.normal_finish_sent = true;
+        self.queue(Command::NormalFinish(outbound))
+    }
+    pub(super) fn finished_normally(&self) -> bool {
+        // Private observation is set only after the original endpoint returns
+        // its actual all-reaps proof; never a setter or financial admission.
+        self.normal_finished.load(Ordering::Acquire)
+    }
     pub(super) fn prepare_completed_pair(&mut self, inputs: CompletedPairInputsV1, deadline: Instant) -> Result<()> {
         if self.completed_pair_prepared || self.revoked.load(Ordering::Acquire) {
             return Err(rejected("CompletedPair preparation consumed or restricted"));
@@ -1214,8 +1236,8 @@ impl Driver {
     }
     /// Called only outside the native event loop, by the externally retained
     /// owner. No detach and no claim of wall-bounded kernel termination/reap.
-    pub(super) fn join(&mut self) -> Result<()> {
-        self.revoke();
+    pub(super) fn join(&mut self) -> Result<bool> {
+        if !self.finished_normally() { self.revoke(); }
         self.worker
             .take()
             .ok_or_else(|| rejected("source-entry driver already joined"))?
@@ -1225,7 +1247,7 @@ impl Driver {
 }
 impl Drop for Driver {
     fn drop(&mut self) {
-        self.revoke();
+        if !self.finished_normally() { self.revoke(); }
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -1237,18 +1259,19 @@ fn drive(
     input: mpsc::Receiver<Command>,
     output: mpsc::SyncSender<Outcome>,
     revoked: Arc<AtomicBool>,
+    normal_finished: Arc<AtomicBool>,
     terminal: CoordinatorHostTerminalEndpointV1,
     host_input: mpsc::Receiver<HostLine>,
     host_output: mpsc::SyncSender<Zeroizing<Vec<u8>>>,
     host_status: mpsc::SyncSender<HostStatus>,
-) -> Result<()> {
-    struct RevokeOnExit(Arc<AtomicBool>);
+) -> Result<bool> {
+    struct RevokeOnExit { revoked: Arc<AtomicBool>, normal_proven: bool }
     impl Drop for RevokeOnExit {
         fn drop(&mut self) {
-            self.0.store(true, Ordering::Release);
+            if !self.normal_proven { self.revoked.store(true, Ordering::Release); }
         }
     }
-    let _on_exit = RevokeOnExit(Arc::clone(&revoked));
+    let mut on_exit = RevokeOnExit { revoked: Arc::clone(&revoked), normal_proven: false };
     let session = endpoint.session_deadline();
     let mut cancel_sent = false;
     let mut cleanup = None;
@@ -1269,7 +1292,7 @@ fn drive(
         pending_output: None,
         closed_reported: false,
     };
-    let work = (|| -> Result<()> {
+    let work = (|| -> Result<Option<FinancialNormalFinishOutboundV1>> {
         loop {
             endpoint.check_original_tree_alive()?;
             if Instant::now() >= session {
@@ -1440,6 +1463,11 @@ fn drive(
                     }
                     Command::FinalAdmit(outbound) => {
                         record_send_progress(endpoint.try_send_admit_final(outbound)?, &revoked)
+                    }
+                    Command::NormalFinish(outbound) => {
+                        // Leave all ordinary live-actor polling before expected
+                        // exits. Only the original typed close owner may reap.
+                        return Ok(Some(outbound));
                     }
                     Command::PrepareCompletedPair(inputs, deadline) => {
                         let ticket = endpoint.prepare_completed_pair_setup(inputs, deadline)?;
@@ -1685,8 +1713,34 @@ fn drive(
             }
             thread::sleep(Duration::from_millis(10));
         }
-        Ok(())
+        Ok(None)
     })();
+    let work = match work {
+        Ok(Some(outbound)) => {
+            // No queued positive command or unconsumed one-use outbound may
+            // survive into normal completion and revoke only after its proof.
+            match input.try_recv() {
+                Err(mpsc::TryRecvError::Empty) => {},
+                _ => return Err(rejected("normal close has queued or lost security input")),
+            }
+            let deadline = outbound.original_cleanup_deadline();
+            let terminal = host.take_for_normal(&host_input, &host_output, &revoked, deadline)?;
+            // The original endpoint owns this exact master across Pair disposal,
+            // H/S normal ACKs, all owned reaps and the final R-rejecting CAS.
+            let completion = endpoint.finish_normal(outbound, terminal)?;
+            completion.check_completed()?;
+            normal_finished.store(true, Ordering::Release);
+            output.try_send(Outcome::NormalFinished(completion))
+                .map_err(|_| rejected("normal completion proof receiver unavailable"))?;
+            on_exit.normal_proven = true;
+            // Any remaining transcript was privately drained by Origin. Channel
+            // EOF is not used as evidence; only the proof above is success.
+            drop(host_input); drop(host); drop(host_output); drop(host_status); drop(input);
+            return Ok(true);
+        }
+        Ok(None) => Ok(()),
+        Err(error) => Err(error),
+    };
     revoked.store(true, Ordering::Release);
     // Close publishes actual shared R before pending input is dropped. A
     // terminal failure never skipped the security drain above. Any retained
@@ -1712,7 +1766,7 @@ fn drive(
         clean,
     });
     if clean && work.is_ok() {
-        Ok(())
+        Ok(false) // Clean cancellation is never normal financial completion.
     } else {
         Err(rejected("source-entry driver or disposal failed"))
     }
@@ -1917,6 +1971,34 @@ struct HostTransport {
     closed_reported: bool,
 }
 impl HostTransport {
+    fn take_for_normal(&mut self, input: &mpsc::Receiver<HostLine>,
+        output: &mpsc::SyncSender<Zeroizing<Vec<u8>>>, revoked: &AtomicBool,
+        deadline: Instant) -> Result<CoordinatorHostTerminalEndpointV1> {
+        if self.pending_line.is_some() || self.closed_reported || revoked.load(Ordering::Acquire) {
+            return Err(rejected("normal close has pending or closed Host transport"));
+        }
+        match input.try_recv() {
+            Err(mpsc::TryRecvError::Empty) => {},
+            _ => return Err(rejected("normal close has queued or lost Host input")),
+        }
+        while let Some(chunk) = self.pending_output.take() {
+            if revoked.load(Ordering::Acquire) || Instant::now() >= deadline {
+                return Err(rejected("normal close output drain expired or restricted"));
+            }
+            match output.try_send(chunk) {
+                Ok(()) => {},
+                Err(mpsc::TrySendError::Full(chunk)) => {
+                    self.pending_output = Some(chunk);
+                    thread::sleep(Duration::from_millis(1));
+                }
+                Err(mpsc::TrySendError::Disconnected(_)) => return Err(rejected("normal close output receiver ended")),
+            }
+        }
+        if revoked.load(Ordering::Acquire) || Instant::now() >= deadline {
+            return Err(rejected("normal close handoff expired or restricted"));
+        }
+        self.terminal.take().ok_or_else(|| rejected("normal close original PTY absent"))
+    }
     fn close(&mut self, revoked: &AtomicBool) {
         if let Some(mut terminal) = self.terminal.take() {
             terminal.close(); // Genuine same-Core shared R first.
