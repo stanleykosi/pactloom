@@ -5,6 +5,9 @@ import json
 import subprocess
 import sys
 import urllib.request
+import urllib.error
+import time
+import socket
 
 BASE = "e2ad650efe7d9a5db94662e6713b7447fc4f6f81"
 TREE = "2233fea29dd353be0b47fd71d107fac5106df68c"
@@ -71,7 +74,42 @@ def failure_code(error):
         return "git_timeout"
     if isinstance(error, subprocess.CalledProcessError):
         return "git_command"
+    if isinstance(error, urllib.error.HTTPError):
+        return "evidence_http"
+    if isinstance(error, (TimeoutError, socket.timeout)):
+        return "evidence_timeout"
+    if isinstance(error, urllib.error.URLError):
+        return "evidence_timeout" if isinstance(error.reason, (TimeoutError, socket.timeout)) else "evidence_network"
+    if isinstance(error, (json.JSONDecodeError, UnicodeDecodeError)):
+        return "evidence_json"
     return "evidence_or_internal"
+
+def fetch_evidence(request):
+    """Same exact public GET, at most two attempts; no credentials or fallback.
+
+    Only explicit gateway/service transient failures retry. Authorization,
+    rate-limit, missing evidence and invalid evidence always fail immediately.
+    Each request retains the original 20-second socket timeout and byte ceiling.
+    """
+    for attempt in range(2):
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                raw = response.read(262145)
+            if len(raw) > 262144:
+                raise ValueError("evidence_size")
+            return json.loads(raw)
+        except urllib.error.HTTPError as error:
+            retry = attempt == 0 and error.code in (502, 503, 504)
+            error.close()  # body is neither read nor emitted
+            if not retry: raise
+            time.sleep(0.25)
+    raise AssertionError("unreachable")
+
+def failure_suffix(error):
+    # A numeric HTTP status is safe; URLs, bodies, headers and exception text are not.
+    if isinstance(error, urllib.error.HTTPError) and type(error.code) is int and 100 <= error.code <= 599:
+        return " http_status=" + str(error.code)
+    return ""
 
 def git(*args):
     return subprocess.check_output(["git", *args], timeout=30, stderr=subprocess.DEVNULL)
@@ -91,13 +129,9 @@ def main():
         request = urllib.request.Request(
             "https://api.github.com/repos/stanleykosi/pactloom/actions/runs/39604966999/jobs?per_page=100",
             headers={"Accept": "application/vnd.github+json", "User-Agent": "pactloom-public-prerequisite"})
-        with urllib.request.urlopen(request, timeout=20) as response:
-            raw = response.read(262145)
-        if len(raw) > 262144:
-            raise ValueError("evidence_size")
-        verify_jobs(json.loads(raw))
+        verify_jobs(fetch_evidence(request))
     except Exception as error:
-        print("CI_UI_PREREQUISITE historical_reuse=false verified=false code=" + failure_code(error), flush=True)
+        print("CI_UI_PREREQUISITE historical_reuse=false verified=false code=" + failure_code(error) + failure_suffix(error), flush=True)
         return 1
     print("CI_UI_PREREQUISITE historical_reuse=true verified=true run=39604966999 job=119238687858 source=" + BASE + " current_bootstrap_executed=false", flush=True)
     return 0

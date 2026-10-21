@@ -96,6 +96,51 @@ class PrerequisiteTests(unittest.TestCase):
             network.assert_not_called()
         self.assertEqual(captured.getvalue(), "CI_UI_PREREQUISITE historical_reuse=false verified=false code=source_closure_changed\n")
 
+    def test_only_gateway_transients_receive_one_readonly_retry(self):
+        from unittest.mock import patch
+        import io, json
+        for status in (502,503,504):
+            error=M.urllib.error.HTTPError('https://private',status,'private',{},io.BytesIO(b'private'))
+            request=M.urllib.request.Request('https://api.github.com/exact')
+            with patch.object(M.urllib.request,'urlopen',side_effect=[error,io.BytesIO(json.dumps(self.record()).encode())]) as get, patch.object(M.time,'sleep') as sleep:
+                M.verify_jobs(M.fetch_evidence(request))
+            self.assertEqual(get.call_count,2)
+            self.assertTrue(all(call.args==(request,) and call.kwargs=={'timeout':20} for call in get.call_args_list))
+            self.assertEqual(request.get_method(),'GET')
+            self.assertNotIn('Authorization',request.headers)
+            sleep.assert_called_once_with(0.25)
+
+    def test_auth_missing_rate_limit_and_repeated_transient_fail_closed(self):
+        from unittest.mock import patch
+        import io
+        for status in (401,403,404,429,500,502):
+            errors=[M.urllib.error.HTTPError('https://private',status,'private',{},io.BytesIO()) for _ in range(2)]
+            with patch.object(M.urllib.request,'urlopen',side_effect=errors) as get, patch.object(M.time,'sleep'):
+                with self.assertRaises(M.urllib.error.HTTPError): M.fetch_evidence(M.urllib.request.Request('https://api.github.com/exact'))
+            self.assertEqual(get.call_count,2 if status==502 else 1)
+
+    def test_parse_size_network_and_timeout_are_never_retried(self):
+        from unittest.mock import patch
+        import io
+        for response in (io.BytesIO(b'private invalid JSON'),io.BytesIO(b'x'*262145),
+                         M.urllib.error.URLError('private'),TimeoutError('private')):
+            with patch.object(M.urllib.request,'urlopen',side_effect=[response] if isinstance(response,Exception) else None,return_value=response) as get, patch.object(M.time,'sleep') as sleep:
+                with self.assertRaises(Exception): M.fetch_evidence(M.urllib.request.Request('https://api.github.com/exact'))
+            self.assertEqual(get.call_count,1);sleep.assert_not_called()
+
+    def test_closed_http_diagnostic_contains_no_exception_body_or_url(self):
+        import io, contextlib
+        from unittest.mock import patch
+        error=M.urllib.error.HTTPError('https://private-path',403,'private-message',{'private':'header'},io.BytesIO(b'private body'))
+        output=io.StringIO()
+        with patch.object(M,'git',side_effect=[M.TREE.encode(),b'',b'']),patch.object(M.urllib.request,'urlopen',side_effect=error),contextlib.redirect_stdout(output):
+            self.assertEqual(M.main(),1)
+        self.assertEqual(output.getvalue(),'CI_UI_PREREQUISITE historical_reuse=false verified=false code=evidence_http http_status=403\n')
+        self.assertNotIn('private',output.getvalue())
+        self.assertEqual(M.failure_code(M.urllib.error.URLError('private')),'evidence_network')
+        self.assertEqual(M.failure_code(M.urllib.error.URLError(TimeoutError('private'))),'evidence_timeout')
+        self.assertEqual(M.failure_code(M.json.JSONDecodeError('private','private',0)),'evidence_json')
+
     def test_complete_nonallowlisted_tree_is_frozen(self):
         M.verify_paths(M.ALLOWED)
         for path in ('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml', 'scripts/ci-bootstrap-linux.sh',
