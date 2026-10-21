@@ -214,8 +214,17 @@ pub(crate) fn reserve_financial_authorization_v1<'a>(
 
 /// No constructor outside this module. It is created only after the newly
 /// committed Started row, never from reopening that row after an interruption.
+enum FinancialKeyUseSourceV1<'a> {
+    Native(&'a PreparedOriginalFinancialSourceV1),
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    Coordinated {
+        source: &'a PreparedOriginalFinancialSourceV1,
+        host: &'a crate::native_peer::PeerProcess,
+        approved: &'a crate::consent_journal::ApprovedCoordinatedFinancialSpendConsentV1,
+    },
+}
 pub(crate) struct FinancialKeyUseFenceV1<'a> {
-    source: &'a PreparedOriginalFinancialSourceV1,
+    source: FinancialKeyUseSourceV1<'a>,
     account: &'a crate::account::DedicatedAccount,
     check: &'a dyn Fn() -> Result<()>,
 }
@@ -224,10 +233,15 @@ impl FinancialKeyUseFenceV1<'_> {
         &self,
         account: &crate::account::DedicatedAccount,
     ) -> crate::Result<()> {
-        if !std::ptr::eq(account, self.account)
-            || !std::ptr::eq(account, self.source.financial_account()?)
-        {
-            return Err(crate::Error::Authentication);
+        if !std::ptr::eq(account, self.account) { return Err(crate::Error::Authentication); }
+        match &self.source {
+            FinancialKeyUseSourceV1::Native(source) => {
+                if !std::ptr::eq(account, source.financial_account()?) { return Err(crate::Error::Authentication); }
+            }
+            #[cfg(feature = "coordinated-financial-workflow-v1")]
+            FinancialKeyUseSourceV1::Coordinated { source, host, approved } => {
+                source.check_coordinated_sign_key_use_v1(host, approved)?;
+            }
         }
         (self.check)().map_err(|_| crate::Error::ReviewMismatch)
     }
@@ -237,9 +251,13 @@ mod result_ipc;
 #[path = "financial_signing_v1.rs"]
 mod signing;
 pub(crate) use result_ipc::{ApprovedFinancialReturnV1, PreparedFinancialReturnV1};
+#[cfg(feature="coordinated-financial-workflow-v1")]
+pub(crate) use result_ipc::PreparedCoordinatedFinancialReturnV1;
+#[cfg(feature="coordinated-financial-workflow-v1")]
+pub use result_ipc::PreparedCoordinatedFinancialResultReceiverV1;
 pub use result_ipc::{
     AuthenticatedFinancialResultLeaseV1, AuthenticatedFinancialResultPreviewV1,
-    FinancialResultRequestV1, PreparedFinancialResultReceiverV1,
+    FinancialResultRequestV1, PreparedFinancialResultReceiverV1, FinancialResultRestrictionV1,
 };
 pub use wholepact_authority::completed_dispatch_v1::{
     AuthenticatedCompletedDispatchAdmissionV1, AuthorizeCompletedDispatchV1,
@@ -251,3 +269,9 @@ pub use result_ipc::{
     FinancialResultCurrentTimingV1, FinancialResultDiagnosticV1, FinancialResultErrorClassV1,
     FinancialResultObservedErrorV1, FinancialResultStageV1,
 };
+
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+#[path = "coordinated_financial_signing_v1.rs"]
+mod coordinated_signing;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub(crate) use coordinated_signing::{reserve_coordinated_financial_authorization_v1, CoordinatedFinancialSignFailureV1};

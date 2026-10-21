@@ -7,6 +7,24 @@ use wholepact_financial_coordinator_origin::{
     SignerContinueReviewDataV1, SignerContinueRoleV1,
 };
 
+// Closed genuine-token observation only. No ordinary-data constructor can
+// supply either branch. Legacy narrow entries pass no workflow guard.
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+enum WorkflowPrivateReadV2<'a> {
+    Arm(&'a SignerContinueArmV1),
+    Final(&'a SignerContinueFinalV1),
+}
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+impl WorkflowPrivateReadV2<'_> {
+    fn check(&self) -> Result<()> {
+        match self {
+            Self::Arm(value) => value.check_current(),
+            Self::Final(value) => value.check_current(),
+        }
+        .map_err(|_| JournalError::Permission)
+    }
+}
+
 /// Frozen presentation and inert exact preparation, not effect authority.
 /// The actual source owner must remain separately retained. No Clone or serde.
 pub(crate) struct PresentedCoordinatedFinancialContinuationV1 {
@@ -133,6 +151,32 @@ impl PreparedCoordinatedFinancialContinuationV1 {
         source: &FinancialSourceBindingV1,
         c: &Connection,
     ) -> Result<()> {
+        self.check_frozen_inner_v2(
+            journal,
+            source,
+            c,
+            #[cfg(feature = "coordinated-financial-workflow-v1")]
+            None,
+        )
+    }
+    fn check_frozen_inner_v2(
+        &self,
+        journal: &SignerConsentJournal,
+        source: &FinancialSourceBindingV1,
+        c: &Connection,
+        #[cfg(feature = "coordinated-financial-workflow-v1")] workflow: Option<
+            &WorkflowPrivateReadV2<'_>,
+        >,
+    ) -> Result<()> {
+        macro_rules! check_workflow {
+            () => {
+                #[cfg(feature = "coordinated-financial-workflow-v1")]
+                if let Some(guard) = workflow {
+                    guard.check()?;
+                }
+            };
+        }
+        check_workflow!();
         self.check_retained_preparation()?;
         if self.journal != journal.binding()
             || self.source_identity != source.source_digest
@@ -155,9 +199,11 @@ impl PreparedCoordinatedFinancialContinuationV1 {
             return Err(JournalError::Permission);
         }
         source.require(journal, c)?;
+        check_workflow!();
         if original_rows_digest(c)? != self.original_rows_digest {
             return Err(JournalError::Conflict);
         }
+        check_workflow!();
         let record = self.intent.record()?;
         record
             .terms
@@ -175,7 +221,9 @@ impl PreparedCoordinatedFinancialContinuationV1 {
         {
             return Err(JournalError::InvalidBinding);
         }
+        check_workflow!();
         self.intent.validate_original(c)?;
+        check_workflow!();
         self.check_retained_preparation()
     }
 }
@@ -258,6 +306,32 @@ impl SignerConsentJournal {
         presented: &PresentedCoordinatedFinancialContinuationV1,
         arm: &SignerContinueArmV1,
     ) -> Result<()> {
+        self.check_coordinated_financial_preparation_inner_v2(source, presented, arm, false)
+    }
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    pub(crate) fn check_coordinated_financial_preparation_workflow_v2(
+        &self,
+        source: &FinancialSourceBindingV1,
+        presented: &PresentedCoordinatedFinancialContinuationV1,
+        arm: &SignerContinueArmV1,
+    ) -> Result<()> {
+        self.check_coordinated_financial_preparation_inner_v2(source, presented, arm, true)
+    }
+    fn check_coordinated_financial_preparation_inner_v2(
+        &self,
+        source: &FinancialSourceBindingV1,
+        presented: &PresentedCoordinatedFinancialContinuationV1,
+        arm: &SignerContinueArmV1,
+        workflow: bool,
+    ) -> Result<()> {
+        macro_rules! check_workflow {
+            () => {
+                if workflow {
+                    presented.check_arm(arm)?;
+                }
+            };
+        }
+        check_workflow!();
         let _fence = self
             .authority_fence
             .read()
@@ -266,14 +340,31 @@ impl SignerConsentJournal {
         let mut c = self.connection.lock().map_err(|_| JournalError::Database)?;
         presented.check_arm(arm)?;
         source.require(self, &c)?;
+        check_workflow!();
         source.require_pin(&c)?;
+        check_workflow!();
         let tx = c.transaction_with_behavior(TransactionBehavior::Deferred)?;
         presented.check_arm(arm)?;
-        durable_born_entry_v1::validate_delivery_v3(&tx, &source.genesis, self.capacity_limits())?;
-        presented.prepared.check_frozen(self, source, &tx)?;
+        original_delivery::validate(&tx, &source.genesis, self.capacity_limits())?;
+        check_workflow!();
+        if workflow {
+            #[cfg(feature = "coordinated-financial-workflow-v1")]
+            presented.prepared.check_frozen_inner_v2(
+                self,
+                source,
+                &tx,
+                Some(&WorkflowPrivateReadV2::Arm(arm)),
+            )?;
+            #[cfg(not(feature = "coordinated-financial-workflow-v1"))]
+            return Err(JournalError::Permission);
+        } else {
+            presented.prepared.check_frozen(self, source, &tx)?;
+        }
+        check_workflow!();
         source.require_pin(&tx)?;
         presented.check_arm(arm)?;
         tx.commit()?;
+        check_workflow!();
         source.require_pin(&c)?;
         presented.check_arm(arm)?;
         Ok(())
@@ -285,13 +376,56 @@ impl FinancialConsentJournalV1 {
     /// report whether commit was attempted, without enabling any implicit retry.
     pub(crate) fn transition_coordinated_original_v1(
         journal: SignerConsentJournal,
-        mut source: FinancialSourceBindingV1,
+        source: FinancialSourceBindingV1,
         presented: PresentedCoordinatedFinancialContinuationV1,
         final_admission: SignerContinueFinalV1,
     ) -> std::result::Result<
         (Self, PendingFinancialContinuationAdmissionV1),
         CoordinatedContinuationCommitFailureV1,
     > {
+        Self::transition_coordinated_original_inner_v2(
+            journal,
+            source,
+            presented,
+            final_admission,
+            false,
+        )
+    }
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    pub(crate) fn transition_coordinated_original_workflow_v2(
+        journal: SignerConsentJournal,
+        source: FinancialSourceBindingV1,
+        presented: PresentedCoordinatedFinancialContinuationV1,
+        final_admission: SignerContinueFinalV1,
+    ) -> std::result::Result<
+        (Self, PendingFinancialContinuationAdmissionV1),
+        CoordinatedContinuationCommitFailureV1,
+    > {
+        Self::transition_coordinated_original_inner_v2(
+            journal,
+            source,
+            presented,
+            final_admission,
+            true,
+        )
+    }
+    fn transition_coordinated_original_inner_v2(
+        journal: SignerConsentJournal,
+        mut source: FinancialSourceBindingV1,
+        presented: PresentedCoordinatedFinancialContinuationV1,
+        final_admission: SignerContinueFinalV1,
+        workflow: bool,
+    ) -> std::result::Result<
+        (Self, PendingFinancialContinuationAdmissionV1),
+        CoordinatedContinuationCommitFailureV1,
+    > {
+        macro_rules! check_workflow {
+            () => {
+                if workflow {
+                    presented.check_final(&final_admission)?;
+                }
+            };
+        }
         let mut commit_attempted = false;
         let mut rollback_uncertain = false;
         let result: Result<RetainedFinancialContinuationIntentV1> = (|| {
@@ -312,33 +446,68 @@ impl FinancialConsentJournalV1 {
                     .map_err(|_| JournalError::Database)?;
                 presented.check_final(&final_admission)?;
                 source.require(&journal, &c)?;
+                check_workflow!();
                 source.require_pin(&c)?;
+                check_workflow!();
                 let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
                 let staged: Result<RetainedFinancialContinuationIntentV1> = (|| {
                     presented.check_final(&final_admission)?;
                     source.require_pin(&tx)?;
-                    durable_born_entry_v1::validate_delivery_v3(
+                    check_workflow!();
+                    original_delivery::validate(
                         &tx,
                         &source.genesis,
                         journal.capacity_limits(),
                     )?;
-                    presented.prepared.check_frozen(&journal, &source, &tx)?;
+                    check_workflow!();
+                    if workflow {
+                        #[cfg(feature = "coordinated-financial-workflow-v1")]
+                        presented.prepared.check_frozen_inner_v2(
+                            &journal,
+                            &source,
+                            &tx,
+                            Some(&WorkflowPrivateReadV2::Final(&final_admission)),
+                        )?;
+                        #[cfg(not(feature = "coordinated-financial-workflow-v1"))]
+                        return Err(JournalError::Permission);
+                    } else {
+                        presented.prepared.check_frozen(&journal, &source, &tx)?;
+                    }
                     presented.check_final(&final_admission)?;
                     // One exact local profile19->20 transaction, not a network
                     // send or permission for Witness Admit, acquisition or keys.
                     tx.execute_batch(EXTENSION)?;
+                    check_workflow!();
                     let i = &presented.prepared.intent;
                     i.validate_original(&tx)?;
+                    check_workflow!();
                     let r = i.record()?;
                     let payload = encode(i)?;
                     tx.execute("INSERT INTO signer_financial_continuation_intents(operation_id,authorization_id,original_admission_operation_id,request_digest,enrollment_ref,manifest_ref,payload) VALUES(?1,?2,?3,?4,?5,?6,?7)",
                         params![i.request.operation_id, r.terms.scope.authorization.authorization_id, r.terms.original_delivery_operation_id,
                             r.request_digest(&i.request).map_err(|_| JournalError::InvalidBinding)?, r.terms.original_recipient_enrollment_ref,
                             r.terms.original_recipient_manifest_ref, payload.as_str()])?;
+                    check_workflow!();
                     tx.pragma_update(None, "user_version", VERSION)?;
+                    check_workflow!();
                     validate(&tx, &source.genesis)?;
-                    presented.prepared.check_frozen(&journal, &source, &tx)?;
+                    check_workflow!();
+                    if workflow {
+                        #[cfg(feature = "coordinated-financial-workflow-v1")]
+                        presented.prepared.check_frozen_inner_v2(
+                            &journal,
+                            &source,
+                            &tx,
+                            Some(&WorkflowPrivateReadV2::Final(&final_admission)),
+                        )?;
+                        #[cfg(not(feature = "coordinated-financial-workflow-v1"))]
+                        return Err(JournalError::Permission);
+                    } else {
+                        presented.prepared.check_frozen(&journal, &source, &tx)?;
+                    }
+                    check_workflow!();
                     let retained = intent::read(&tx)?;
+                    check_workflow!();
                     source.continuation_digest = Some(retained.history_digest()?);
                     source.revision = revision(&tx)?;
                     presented.check_final(&final_admission)?;
@@ -357,7 +526,19 @@ impl FinancialConsentJournalV1 {
                 // result cannot be classified safely from the error alone.
                 commit_attempted = true;
                 tx.commit()?;
-                source.require_pin(&c)?;
+                if workflow {
+                    // Final remains retained here. Metadata/revision is enough:
+                    // the exact committed intent/rows were read inside this tx.
+                    presented.check_final(&final_admission)?;
+                    source.require(&journal, &c)?;
+                    presented.check_final(&final_admission)?;
+                    if source.revision != revision(&c)? {
+                        return Err(JournalError::Conflict);
+                    }
+                    presented.check_final(&final_admission)?;
+                } else {
+                    source.require_pin(&c)?;
+                }
             }
             Ok(retained)
         })();

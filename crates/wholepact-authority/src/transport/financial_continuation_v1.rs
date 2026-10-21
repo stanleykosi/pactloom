@@ -323,19 +323,40 @@ impl AuthorityClient {
         &self,
         continuation_operation_id: &str,
         deadline: Instant,
+        check_current: impl FnMut() -> Result<()>,
+    ) -> Result<crate::durable_financial_continuation_v1::AuthenticatedFinancialContinuationHistoryV1> {
+        self.financial_continuation_history_v1_restricted_kernel(continuation_operation_id, deadline, check_current, None)
+    }
+    /// Keep the same action owner/absolute deadline through all pages. This
+    /// extra borrowed callback denies physical I/O; it cannot issue authority.
+    pub fn financial_continuation_history_v1_restricted_checked_until(
+        &self,
+        continuation_operation_id: &str,
+        deadline: Instant,
+        check_current: impl FnMut() -> Result<()>,
+        io_restriction: &dyn Fn() -> Result<()>,
+    ) -> Result<crate::durable_financial_continuation_v1::AuthenticatedFinancialContinuationHistoryV1> {
+        self.financial_continuation_history_v1_restricted_kernel(continuation_operation_id, deadline, check_current, Some(io_restriction))
+    }
+    fn financial_continuation_history_v1_restricted_kernel(
+        &self,
+        continuation_operation_id: &str,
+        deadline: Instant,
         mut check_current: impl FnMut() -> Result<()>,
+        io_restriction: Option<&dyn Fn() -> Result<()>>,
     ) -> Result<crate::durable_financial_continuation_v1::AuthenticatedFinancialContinuationHistoryV1>
     {
         use crate::durable_financial_continuation_v1::AuthenticatedFinancialContinuationHistoryV1;
         id(continuation_operation_id)?;
         require_before_caller_deadline(deadline)?;
-        let history = self.reconcile_history_profile_v1(
+        let history = self.reconcile_history_profile_restricted_v1(
             &mut check_current,
             true,
             Some(deadline),
             #[cfg(feature = "synthetic-qualification")]
             None,
             crate::journal::OriginalHistoryProfileV1::FinancialContinuation,
+            io_restriction,
         )?;
         let continuation = history
             .owner_controls

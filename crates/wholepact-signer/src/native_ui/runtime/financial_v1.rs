@@ -1,9 +1,20 @@
 //! Closed original financial runtime. Every effect receives a different final
 //! native decision; immutable retained data is never converted into authority.
 use super::*;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+#[path = "coordinated_financial_driver_v1.rs"]
+mod coordinated_driver;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub use coordinated_driver::run_coordinated_financial_signer_v1;
 #[path = "financial_role_state_v1.rs"]
 mod role_state;
 use role_state::{Context, Next, Outcome};
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+#[path = "coordinated_financial_continue_v1.rs"]
+mod coordinated_continue;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+#[path = "coordinated_financial_admit_v1.rs"]
+mod coordinated_admit;
 pub(super) use role_state::FinancialRuntimeV1;
 #[path = "financial_diagnostics_v1.rs"]
 pub(in crate::native_ui) mod diagnostics;
@@ -627,3 +638,7 @@ impl NativeRuntime {
         self.stage_financial_v1(c, FinancialDecisionV1::Admit, digest, display, epoch)
     }
 }
+
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+#[path = "coordinated_v3_delivery_v1.rs"]
+mod coordinated_v3_delivery;

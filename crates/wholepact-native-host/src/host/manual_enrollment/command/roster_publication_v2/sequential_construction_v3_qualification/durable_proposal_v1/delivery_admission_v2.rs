@@ -1218,6 +1218,8 @@ pub(super) fn continue_completed_original(
     disclosures: Vec<OriginalDisclosureV2>,
     provider_identity: wholepact_chain::BackendIdentity,
     financial_wallet_setup: Option<String>,
+    coordinated_pre_v3_fixture: bool,
+    live_external_witness: bool,
 ) -> Result<()> {
     crate::host::financial::durable_delivery_admission_v2::with_delivery_observer_v2(
         observe_delivery,
@@ -1329,6 +1331,14 @@ pub(super) fn continue_completed_original(
             route:wholepact_authority::durable_delivery_scope_v2::DurableDeliveryRouteV2::Direct {},
             minimum_expiry_margin_blocks:1,maximum_fresh_admission_lifetime_ms:120_000,maximum_explicitly_approved_attempts:if financial_wallet_setup.is_some(){3}else{1},
         };
+            if coordinated_pre_v3_fixture {
+                let (runtime, provider) = retained_provider.ok_or(Error::Authentication)?;
+                return super::coordinated_full_fixture_v1::preserve_completed_originals(
+                    terminal, host, original, proposal, runtime, provider, profile, workspace,
+                    financial, disclosures, identity, choices,
+                    financial_wallet_setup.ok_or(Error::Authentication)?, live_external_witness,
+                );
+            }
             let mut admissions = Vec::with_capacity(2);
             let mut preserved = Vec::with_capacity(2);
             let mut recipient_intents = Vec::with_capacity(2);
@@ -1981,6 +1991,7 @@ mod tests {
         transcript.enable_delivery_first_failure();
         transcript.append(marker, Path::new("/tmp/owned")).unwrap();
         PrivateWorkspaceStageResultV1 {
+            child_pid: 0, // Failed-child pure-test sentinel, never a runtime cleanup proof.
             pristine_first_failure: None,
             financial_progress_failure: None,
                 financial_progress_timing: None,

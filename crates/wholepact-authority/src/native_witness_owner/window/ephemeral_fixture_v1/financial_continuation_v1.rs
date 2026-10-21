@@ -9,6 +9,11 @@ pub(super) struct FixtureFinancialPhaseV1 {
     pending: Option<OwnerControlRequest>,
     committed: std::collections::BTreeMap<String, OwnerControlRequest>,
 }
+impl FixtureFinancialPhaseV1 {
+    pub(super) fn is_idle_for_original_transport_v1(&self) -> bool {
+        self.pending.is_none() && self.committed.is_empty()
+    }
+}
 impl EphemeralNativeWitnessV1 {
     pub fn start_exact_financial_continuation_v1(
         &mut self,
@@ -498,6 +503,7 @@ impl EphemeralNativeWitnessV1 {
                 bound: None,
                 address,
                 server_handles: Arc::new(AtomicUsize::new(0)),
+                server_join_failed: Arc::new(AtomicBool::new(false)),
             },
             durable_payment: durable_payment_v1::FixturePhaseV1::Idle,
             financial_continuation: financial_continuation_v1::FixtureFinancialPhaseV1::default(),

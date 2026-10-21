@@ -26,7 +26,7 @@ use zcash_protocol::memo::MemoBytes;
 /// Owned immutable mathematics only, deliberately not a saved review approval.
 /// Static proof verification is performed once, before the short immediate
 /// native/wallet/key-use interval. Real source and permission checks are separate.
-pub(super) struct VerifiedDurableEconomicsV1 {
+pub(crate) struct VerifiedDurableEconomicsV1 {
     proposal: Proposal,
     verified: Arc<VerifiedFixedProposal>,
     context: ConstructionContext,
@@ -111,19 +111,19 @@ impl VerifiedDurableEconomicsV1 {
         })
     }
 
-    pub(super) fn proposal(&self) -> &Proposal {
+    pub(crate) fn proposal(&self) -> &Proposal {
         &self.proposal
     }
-    pub(super) fn verified(&self) -> &Arc<VerifiedFixedProposal> {
+    pub(crate) fn verified(&self) -> &Arc<VerifiedFixedProposal> {
         &self.verified
     }
     pub(super) fn fixed_context(&self) -> ConstructionContext {
         self.context
     }
-    pub(super) fn input_actions(&self) -> &[InputActionMapping] {
+    pub(crate) fn input_actions(&self) -> &[InputActionMapping] {
         &self.input_actions
     }
-    pub(super) fn output_actions(&self) -> &[OutputActionMapping] {
+    pub(crate) fn output_actions(&self) -> &[OutputActionMapping] {
         &self.output_actions
     }
 
@@ -353,3 +353,6 @@ fn derive_policy(
         input_actions,
     ))
 }
+
+#[path = "durable_proposal_v1/admission_scope_data_v1.rs"]
+pub(crate) mod admission_scope_data_v1;

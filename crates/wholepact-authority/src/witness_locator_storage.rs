@@ -2,7 +2,7 @@
 //! invokes mutations in supported source. Data-only helpers never mint authority.
 use super::*;
 use crate::decode;
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 pub(super) const SCHEMA: &str = include_str!("witness_locator_schema.sql");
 // Dedicated candidate locator identity, not an allocation in the live graph.
@@ -107,35 +107,47 @@ pub(super) fn load_exact(
     tx: &Connection,
     expected: &WitnessNamespaceBinding,
 ) -> Result<LocatorHistory> {
+    load_exact_guarded(tx, expected, crate::journal::ReadGuardV1::legacy())
+}
+
+pub(super) fn load_exact_guarded(
+    tx: &Connection,
+    expected: &WitnessNamespaceBinding,
+    guard: crate::journal::ReadGuardV1<'_>,
+) -> Result<LocatorHistory> {
     expected.validate()?;
-    verify_schema(tx)?;
-    require_bounds(tx)?;
-    let quarantine: Option<i64> = tx
-        .query_row(
+    verify_schema_guarded(tx, guard)?;
+    require_bounds_guarded(tx, guard)?;
+    let quarantine: Option<i64> = crate::journal::guarded_read!(
+        guard,
+        tx.query_row(
             "SELECT quarantined FROM witness_locator_quarantine WHERE singleton=1",
             [],
             |r| r.get(0),
         )
-        .optional()?;
+        .optional()
+    )?;
     if quarantine != Some(0) {
         return Err(AuthorityError::RecoveryRequired);
     }
-    let namespace: Option<(String, Vec<u8>)> = tx
-        .query_row(
+    let namespace: Option<(String, Vec<u8>)> = crate::journal::guarded_read!(
+        guard,
+        tx.query_row(
             "SELECT binding_digest,payload FROM witness_locator_namespace WHERE singleton=1",
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
-        .optional()?;
+        .optional()
+    )?;
     let (namespace_digest, payload) = namespace.ok_or(AuthorityError::RecoveryRequired)?;
     let namespace: WitnessNamespaceBinding = decode(&payload)?;
     if &namespace != expected || namespace.digest()? != namespace_digest {
         return Err(AuthorityError::InvalidBinding);
     }
     let mut prepared = Vec::new();
-    let mut q = tx.prepare("SELECT intent_digest,namespace_digest,account_id,full_viewing_key_digest,network_profile_id,derivation_domain,generation_instance_id,operation_id,request_digest,derived_child,local_target_digest,payload FROM witness_locator_intents ORDER BY intent_digest")?;
-    let mut rows = q.query([])?;
-    while let Some(row) = rows.next()? {
+    let mut q = crate::journal::guarded_read!(guard, tx.prepare("SELECT intent_digest,namespace_digest,account_id,full_viewing_key_digest,network_profile_id,derivation_domain,generation_instance_id,operation_id,request_digest,derived_child,local_target_digest,payload FROM witness_locator_intents ORDER BY intent_digest"))?;
+    let mut rows = crate::journal::guarded_read!(guard, q.query([]))?;
+    while let Some(row) = crate::journal::guarded_read!(guard, rows.next())? {
         if prepared.len() >= MAX_INTENTS {
             return Err(AuthorityError::Limit);
         }
@@ -164,9 +176,9 @@ pub(super) fn load_exact(
         prepared.push(p);
     }
     let mut completed = Vec::new();
-    let mut q = tx.prepare("SELECT intent_digest,genesis_commitment,payload FROM witness_locator_completions ORDER BY intent_digest")?;
-    let mut rows = q.query([])?;
-    while let Some(row) = rows.next()? {
+    let mut q = crate::journal::guarded_read!(guard, tx.prepare("SELECT intent_digest,genesis_commitment,payload FROM witness_locator_completions ORDER BY intent_digest"))?;
+    let mut rows = crate::journal::guarded_read!(guard, q.query([]))?;
+    while let Some(row) = crate::journal::guarded_read!(guard, rows.next())? {
         if completed.len() >= MAX_INTENTS {
             return Err(AuthorityError::Limit);
         }
@@ -179,9 +191,9 @@ pub(super) fn load_exact(
         completed.push(c);
     }
     let mut exclusions = Vec::new();
-    let mut q = tx.prepare("SELECT exclusion_digest,account_id,full_viewing_key_digest,payload FROM witness_locator_exclusions ORDER BY exclusion_digest")?;
-    let mut rows = q.query([])?;
-    while let Some(row) = rows.next()? {
+    let mut q = crate::journal::guarded_read!(guard, tx.prepare("SELECT exclusion_digest,account_id,full_viewing_key_digest,payload FROM witness_locator_exclusions ORDER BY exclusion_digest"))?;
+    let mut rows = crate::journal::guarded_read!(guard, q.query([]))?;
+    while let Some(row) = crate::journal::guarded_read!(guard, rows.next())? {
         if exclusions.len() >= MAX_EXCLUSIONS {
             return Err(AuthorityError::Limit);
         }
@@ -197,7 +209,11 @@ pub(super) fn load_exact(
     LocatorHistory::from_records(namespace, prepared, completed, exclusions)
 }
 fn require_bounds(c: &Connection) -> Result<()> {
-    let (namespaces, intents, completions, exclusions, bytes): (u64, u64, u64, u64, u64) = c.query_row(
+    require_bounds_guarded(c, crate::journal::ReadGuardV1::legacy())
+}
+
+fn require_bounds_guarded(c: &Connection, guard: crate::journal::ReadGuardV1<'_>) -> Result<()> {
+    let (namespaces, intents, completions, exclusions, bytes): (u64, u64, u64, u64, u64) = crate::journal::guarded_read!(guard, c.query_row(
         "SELECT (SELECT count(*) FROM witness_locator_namespace),\
         (SELECT count(*) FROM witness_locator_intents),(SELECT count(*) FROM witness_locator_completions),\
         (SELECT count(*) FROM witness_locator_exclusions),\
@@ -205,7 +221,7 @@ fn require_bounds(c: &Connection) -> Result<()> {
         (SELECT coalesce(sum(length(payload)),0) FROM witness_locator_intents)+\
         (SELECT coalesce(sum(length(payload)),0) FROM witness_locator_completions)+\
         (SELECT coalesce(sum(length(payload)),0) FROM witness_locator_exclusions)", [],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?;
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))))?;
     if namespaces != 1 {
         return Err(AuthorityError::RecoveryRequired);
     }
@@ -219,8 +235,21 @@ fn require_bounds(c: &Connection) -> Result<()> {
     Ok(())
 }
 pub(super) fn verify_schema(c: &Connection) -> Result<()> {
-    let app: i64 = c.pragma_query_value(None, "application_id", |r| r.get(0))?;
-    let version: i64 = c.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    verify_schema_guarded(c, crate::journal::ReadGuardV1::legacy())
+}
+
+pub(super) fn verify_schema_guarded(
+    c: &Connection,
+    guard: crate::journal::ReadGuardV1<'_>,
+) -> Result<()> {
+    let app: i64 = crate::journal::guarded_read!(
+        guard,
+        c.pragma_query_value(None, "application_id", |r| r.get(0))
+    )?;
+    let version: i64 = crate::journal::guarded_read!(
+        guard,
+        c.pragma_query_value(None, "user_version", |r| r.get(0))
+    )?;
     if app != LOCATOR_APPLICATION_ID || version != LOCATOR_SCHEMA_VERSION {
         return Err(AuthorityError::UnsupportedVersion);
     }
@@ -228,26 +257,37 @@ pub(super) fn verify_schema(c: &Connection) -> Result<()> {
     // witness data is never copied out of the encrypted connection for SQL use.
     let template = Connection::open_in_memory()?;
     template.execute_batch(SCHEMA)?;
-    if schema_objects(c)? != schema_objects(&template)? {
+    if schema_objects_guarded(c, guard)? != schema_objects_guarded(&template, guard)? {
         return Err(AuthorityError::CorruptHistory);
     }
-    let fk_error: Option<String> = c
-        .query_row("PRAGMA foreign_key_check", [], |r| r.get(0))
-        .optional()?;
+    let fk_error: Option<String> = crate::journal::guarded_read!(
+        guard,
+        c.query_row("PRAGMA foreign_key_check", [], |r| r.get(0))
+            .optional()
+    )?;
     if fk_error.is_some() {
         return Err(AuthorityError::CorruptHistory);
     }
     Ok(())
 }
 fn schema_objects(c: &Connection) -> Result<Vec<(String, String, String, String)>> {
-    let (count, bytes): (u64, u64) = c.query_row("SELECT count(*),coalesce(sum(length(sql)),0) FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*'", [], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    schema_objects_guarded(c, crate::journal::ReadGuardV1::legacy())
+}
+
+fn schema_objects_guarded(
+    c: &Connection,
+    guard: crate::journal::ReadGuardV1<'_>,
+) -> Result<Vec<(String, String, String, String)>> {
+    let (count, bytes): (u64, u64) = crate::journal::guarded_read!(guard, c.query_row("SELECT count(*),coalesce(sum(length(sql)),0) FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*'", [], |r| Ok((r.get(0)?, r.get(1)?))))?;
     if count > 128 || bytes > 131_072 {
         return Err(AuthorityError::Limit);
     }
-    let mut q = c.prepare("SELECT type,name,tbl_name,coalesce(sql,'') FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' ORDER BY type,name")?;
-    let rows = q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
-    rows.collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(Into::into)
+    let mut q = crate::journal::guarded_read!(guard, c.prepare("SELECT type,name,tbl_name,coalesce(sql,'') FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' ORDER BY type,name"))?;
+    let rows = crate::journal::guarded_read!(
+        guard,
+        q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+    )?;
+    crate::journal::collect_guarded(rows, guard)
 }
 
 #[cfg(test)]

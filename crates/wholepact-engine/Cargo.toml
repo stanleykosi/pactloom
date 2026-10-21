@@ -6,6 +6,7 @@ license.workspace = true
 
 [features]
 default = []
+coordinated-financial-workflow-v1 = ["durable-proposal", "manual-admission", "wholepact-signer/coordinated-financial-workflow-v1"]
 durable-proposal = ["submission-handoff", "wholepact-protocol/durable-proposal", "wallet-sync", "signer-authority-bridge", "wholepact-signer/durable-proposal"]
 manual-admission = ["wholepact-store/manual-admission", "dep:wholepact-signer-origin", "wholepact-signer?/manual-inventory-client"]
 offline-return-foundation = ["signature-intake", "wholepact-transport/offline-admission-export"]

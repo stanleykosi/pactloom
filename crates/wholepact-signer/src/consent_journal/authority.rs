@@ -131,6 +131,8 @@ struct SessionInner {
     native_origin: Option<crate::native_ui::NativeAuthorityBinding>,
     #[cfg(all(feature = "native-ui", target_os = "linux"))]
     native_peer: Option<crate::ipc::AuthenticatedPeer>,
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    coordinated_peer: Option<crate::ipc::CoordinatedPairPeerV1>,
     state: RwLock<SessionState>,
 }
 /// Opaque owner/principal/source-bound native session. Revocation is serialized
@@ -170,6 +172,8 @@ impl SignerConsentSession {
                 native_origin: launch.native_origin,
                 #[cfg(all(feature = "native-ui", target_os = "linux"))]
                 native_peer: launch.native_peer,
+                #[cfg(feature = "coordinated-financial-workflow-v1")]
+                coordinated_peer: None,
                 state: RwLock::new(SessionState {
                     current: true,
                     generation: 1,
@@ -542,6 +546,10 @@ impl SessionInner {
         if let Some(peer) = &self.native_peer {
             peer.check_current().map_err(|_| JournalError::Permission)?;
         }
+        #[cfg(feature = "coordinated-financial-workflow-v1")]
+        if let Some(peer) = &self.coordinated_peer {
+            peer.check_current().map_err(|_| JournalError::Permission)?;
+        }
         if !state.current || self.created.elapsed() >= Duration::from_secs(15 * 60) {
             return Err(JournalError::Permission);
         }
@@ -566,6 +574,10 @@ impl ReadLease<'_> {
         }
         #[cfg(all(feature = "native-ui", target_os = "linux"))]
         if let Some(peer) = &self.session.native_peer {
+            peer.check_current().map_err(|_| JournalError::Permission)?;
+        }
+        #[cfg(feature = "coordinated-financial-workflow-v1")]
+        if let Some(peer) = &self.session.coordinated_peer {
             peer.check_current().map_err(|_| JournalError::Permission)?;
         }
         Ok(())
@@ -980,3 +992,9 @@ pub(crate) mod durable_delivery_admission_intent_v3;
 pub(crate) use durable_delivery_admission_intent_v3::{
     PreparedDurableDeliveryAdmissionIntentV3, RetainedDurableDeliveryAdmissionIntentV3,
 };
+
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+#[path = "authority/coordinated_preconstruction_v1.rs"]
+mod coordinated_preconstruction_v1;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub(crate) use coordinated_preconstruction_v1::{CoordinatedPreconstructionSessionV1, PreparedCoordinatedEnrollmentV1, PreparedCoordinatedManifestV1};

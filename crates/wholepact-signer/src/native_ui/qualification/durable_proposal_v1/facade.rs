@@ -405,6 +405,9 @@ impl EphemeralDurableDeliveryNativeV2 {
     pub fn original_root(&self) -> Result<PathBuf> {
         self.inner.original_root()
     }
+    pub fn coordinated_pre_v3_metadata(&self) -> Result<String> {
+        self.inner.coordinated_pre_v3_metadata()
+    }
     pub fn owner_configuration_for_reopen(&self) -> Result<String> {
         self.inner.owner_setup_for_reopen()
     }

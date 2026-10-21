@@ -7,7 +7,7 @@ use crate::{
     offline_retry::{self, OfflineOriginalBridge, RetainedOfflineOriginal},
     *,
 };
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 
 pub(crate) const OFFLINE_OUTCOME_SCHEMA: &str = include_str!("offline_outcome_schema.sql");
@@ -470,7 +470,15 @@ pub(crate) fn ensure_admission_allowed(c: &Connection, prepared: &str) -> Result
     Ok(())
 }
 pub(crate) fn verify_no_admission_not_selected(c: &Connection, prepared: &str) -> Result<()> {
-    if let Some(record) = read_outcome(c, prepared)? {
+    verify_no_admission_not_selected_guarded(c, prepared, crate::journal::ReadGuardV1::legacy())
+}
+
+pub(crate) fn verify_no_admission_not_selected_guarded(
+    c: &Connection,
+    prepared: &str,
+    guard: crate::journal::ReadGuardV1<'_>,
+) -> Result<()> {
+    if let Some(record) = read_outcome_guarded(c, prepared, guard)? {
         if matches!(
             record.artifact,
             OutcomeArtifact::Control(OfflineAdmissionControl {
@@ -506,14 +514,21 @@ fn persist_outcome(tx: &Transaction<'_>, record: &OutcomeRecord) -> Result<()> {
     Ok(())
 }
 fn read_outcome(c: &Connection, prepared: &str) -> Result<Option<OutcomeRecord>> {
+    read_outcome_guarded(c, prepared, crate::journal::ReadGuardV1::legacy())
+}
+
+fn read_outcome_guarded(
+    c: &Connection,
+    prepared: &str,
+    guard: crate::journal::ReadGuardV1<'_>,
+) -> Result<Option<OutcomeRecord>> {
     hash(prepared)?;
-    let raw: Option<(String,String,i64,Vec<u8>)> = c.query_row(
+    let raw: Option<(String,String,i64,Zeroizing<Vec<u8>>)> = crate::journal::guarded_read!(guard, c.query_row(
         "SELECT outcome_kind,decision_digest,emission_may_have_started,CASE WHEN length(payload)<=262144 THEN payload ELSE NULL END FROM authority_offline_outcomes WHERE prepared_digest=?1",
-        [prepared], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
+        [prepared], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,Zeroizing::new(r.get::<_,Vec<u8>>(3)?)))).optional())?;
     let Some((kind, expected, emitted, payload)) = raw else {
         return Ok(None);
     };
-    let payload = Zeroizing::new(payload);
     let record: OutcomeRecord = decode(&payload)?;
     if emitted != 1
         || record.prepared_record_digest != prepared
@@ -596,7 +611,16 @@ pub(crate) fn verify_retained_outcome(
     ledger: &policy::Ledger,
     original: &RetainedOfflineOriginal,
 ) -> Result<()> {
-    let Some(record) = read_outcome(c, &original.prepared_record_digest()?)? else {
+    verify_retained_outcome_guarded(c, ledger, original, crate::journal::ReadGuardV1::legacy())
+}
+
+pub(crate) fn verify_retained_outcome_guarded(
+    c: &Connection,
+    ledger: &policy::Ledger,
+    original: &RetainedOfflineOriginal,
+    guard: crate::journal::ReadGuardV1<'_>,
+) -> Result<()> {
+    let Some(record) = read_outcome_guarded(c, &original.prepared_record_digest()?, guard)? else {
         return Ok(());
     };
     let receipt = original
@@ -614,10 +638,9 @@ pub(crate) fn verify_retained_outcome(
     let (head, time) = if record.selected_head.sequence == 0 {
         (ledger.policy.policy_digest()?, 0)
     } else {
-        let (head, bytes): (String,Vec<u8>) = c.query_row(
+        let (head, bytes): (String,Zeroizing<Vec<u8>>) = crate::journal::guarded_read!(guard, c.query_row(
             "SELECT head,CASE WHEN length(payload)<=262144 THEN payload ELSE NULL END FROM authority_events WHERE sequence=?1",
-            [record.selected_head.sequence], |r| Ok((r.get(0)?,r.get(1)?)))?;
-        let bytes = Zeroizing::new(bytes);
+            [record.selected_head.sequence], |r| Ok((r.get(0)?,Zeroizing::new(r.get::<_,Vec<u8>>(1)?)))))?;
         let event: policy::Event = decode(&bytes)?;
         (head, event.witness_time_ms)
     };
@@ -626,7 +649,7 @@ pub(crate) fn verify_retained_outcome(
     }
     match &record.artifact {
         OutcomeArtifact::Admission(admission) => {
-            offline_retry::require_inbox_acceptance(c, original)?;
+            offline_retry::require_inbox_acceptance_guarded(c, original, guard)?;
             if record.plan != receipt.export_plan {
                 return Err(AuthorityError::CorruptHistory);
             }
@@ -644,9 +667,9 @@ pub(crate) fn verify_retained_outcome(
             {
                 return Err(AuthorityError::CorruptHistory);
             }
-            let bytes = Zeroizing::new(c.query_row(
+            let bytes = crate::journal::guarded_read!(guard, (c.query_row(
                 "SELECT CASE WHEN length(payload)<=262144 THEN payload ELSE NULL END FROM authority_events WHERE operation_id=?1",
-                [&original.request().operation_id], |r| r.get::<_,Vec<u8>>(0))?);
+                [&original.request().operation_id], |r| r.get::<_,Vec<u8>>(0))).map(Zeroizing::new))?;
             let event: policy::Event = decode(&bytes)?;
             if event.original_request_link.is_none() {
                 return Err(AuthorityError::CorruptHistory);

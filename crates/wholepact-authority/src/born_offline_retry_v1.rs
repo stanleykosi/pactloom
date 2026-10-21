@@ -1,7 +1,7 @@
 //! Exact original born input retention. Parsing these records authenticates no
 //! ciphertext and cannot construct the private post-HPKE input capability.
 use crate::{born_offline_admission_v1::*, offline_retry::OriginalPreparation, *};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 #[cfg(all(feature = "born-offline-witness-owner", target_os = "linux"))]
@@ -113,11 +113,19 @@ pub(crate) fn read_original(
     c: &Connection,
     operation: &str,
 ) -> Result<Option<RetainedBornOfflineOriginalV1>> {
+    read_original_guarded(c, operation, crate::journal::ReadGuardV1::legacy())
+}
+
+pub(crate) fn read_original_guarded(
+    c: &Connection,
+    operation: &str,
+    guard: crate::journal::ReadGuardV1<'_>,
+) -> Result<Option<RetainedBornOfflineOriginalV1>> {
     id(operation)?;
     type OriginalRow = (String, String, String, u64, Vec<u8>, Vec<u8>, String);
-    let raw: Option<OriginalRow> = c.query_row(
+    let raw: Option<OriginalRow> = crate::journal::guarded_read!(guard, c.query_row(
         "SELECT request_digest,envelope_digest,export_stream,export_sequence,payload,envelope,construction_reservation_id FROM authority_born_offline_originals WHERE operation_id=?1 AND length(payload)<=262144 AND length(envelope)<=1048576", [operation],
-        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional()?;
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional())?;
     let Some((request, envelope, stream, sequence, payload, bytes, construction)) = raw else {
         return Ok(None);
     };
@@ -134,7 +142,7 @@ pub(crate) fn read_original(
     {
         return Err(AuthorityError::CorruptHistory);
     }
-    let receipt:Option<Vec<u8>>=c.query_row("SELECT payload FROM authority_born_offline_receipts WHERE operation_id=?1 AND length(payload)<=16384",[operation],|r|r.get(0)).optional()?;
+    let receipt:Option<Vec<u8>>=crate::journal::guarded_read!(guard, c.query_row("SELECT payload FROM authority_born_offline_receipts WHERE operation_id=?1 AND length(payload)<=16384",[operation],|r|r.get(0)).optional())?;
     let receipt = receipt
         .map(|v| {
             let r: OriginalTransportReceipt = decode(&v)?;
@@ -156,10 +164,19 @@ pub(crate) fn require_actual_inbox(
     original: &RetainedBornOfflineOriginalV1,
     receipt: &OriginalTransportReceipt,
 ) -> Result<()> {
+    require_actual_inbox_guarded(c, original, receipt, crate::journal::ReadGuardV1::legacy())
+}
+
+pub(crate) fn require_actual_inbox_guarded(
+    c: &Connection,
+    original: &RetainedBornOfflineOriginalV1,
+    receipt: &OriginalTransportReceipt,
+    guard: crate::journal::ReadGuardV1<'_>,
+) -> Result<()> {
     type InboxRow = (String, String, String, Vec<u8>, Option<String>);
-    let actual: Option<InboxRow> =c.query_row(
+    let actual: Option<InboxRow> =crate::journal::guarded_read!(guard, c.query_row(
         "SELECT message_id_digest,content_digest,payload_digest,envelope,slot FROM receipts WHERE stream=?1 AND sequence=?2 AND length(envelope)<=1048576",
-        params![receipt.stream_digest,receipt.sequence],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?;
+        params![receipt.stream_digest,receipt.sequence],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional())?;
     let Some((message, content, payload, envelope, slot)) = actual else {
         return Err(AuthorityError::Uncertain);
     };
@@ -194,24 +211,39 @@ pub(crate) fn verify_retained_born_offline_v1(
     c: &Connection,
     ledger: &policy::Ledger,
 ) -> Result<()> {
-    let (count,bytes):(u64,u64)=c.query_row("SELECT count(*),coalesce(sum(length(payload)+length(envelope)),0) FROM authority_born_offline_originals",[],|r|Ok((r.get(0)?,r.get(1)?)))?;
+    verify_retained_born_offline_v1_guarded(c, ledger, crate::journal::ReadGuardV1::legacy())
+}
+
+pub(crate) fn verify_retained_born_offline_v1_guarded(
+    c: &Connection,
+    ledger: &policy::Ledger,
+    guard: crate::journal::ReadGuardV1<'_>,
+) -> Result<()> {
+    let (count,bytes):(u64,u64)=crate::journal::guarded_read!(guard, c.query_row("SELECT count(*),coalesce(sum(length(payload)+length(envelope)),0) FROM authority_born_offline_originals",[],|r|Ok((r.get(0)?,r.get(1)?))))?;
     if count > 1024 || bytes > 64 * 1024 * 1024 {
         return Err(AuthorityError::Limit);
     }
-    let orphans:u64=c.query_row("SELECT count(*) FROM authority_born_offline_receipts r LEFT JOIN authority_born_offline_originals o USING(operation_id) WHERE o.operation_id IS NULL",[],|r|r.get(0))?;
+    let orphans:u64=crate::journal::guarded_read!(guard, c.query_row("SELECT count(*) FROM authority_born_offline_receipts r LEFT JOIN authority_born_offline_originals o USING(operation_id) WHERE o.operation_id IS NULL",[],|r|r.get(0)))?;
     if orphans != 0 {
         return Err(AuthorityError::CorruptHistory);
     }
-    let mut q = c.prepare(
-        "SELECT operation_id FROM authority_born_offline_originals ORDER BY operation_id",
+    let mut q = crate::journal::guarded_read!(
+        guard,
+        c.prepare(
+            "SELECT operation_id FROM authority_born_offline_originals ORDER BY operation_id",
+        )
     )?;
-    let operations = q
-        .query_map([], |r| r.get::<_, String>(0))?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let operations: Vec<_> = crate::journal::collect_guarded(
+        crate::journal::guarded_read!(guard, q.query_map([], |r| r.get::<_, String>(0)))?,
+        guard,
+    )?;
     // This purpose has no import processors, sequence-reset controls, delivery
     // acknowledgments or deletion path. Unknown auxiliary rows are not ignored.
     for table in ["domain_imports", "offline_control_outcomes"] {
-        let n: u64 = c.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))?;
+        let n: u64 = crate::journal::guarded_read!(
+            guard,
+            c.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+        )?;
         if n != 0 {
             return Err(AuthorityError::CorruptHistory);
         }
@@ -220,7 +252,8 @@ pub(crate) fn verify_retained_born_offline_v1(
     let mut inbox_seen = std::collections::BTreeSet::new();
     let mut outbox_seen = std::collections::BTreeSet::new();
     for operation in operations {
-        let retained = read_original(c, &operation)?.ok_or(AuthorityError::CorruptHistory)?;
+        let retained =
+            read_original_guarded(c, &operation, guard)?.ok_or(AuthorityError::CorruptHistory)?;
         let original = &retained.original;
         original.validate(ledger)?;
         let e = &ledger
@@ -229,7 +262,7 @@ pub(crate) fn verify_retained_born_offline_v1(
             .enrollment;
         if let Some(receipt) = &retained.receipt {
             receipt.matches_born(&original.original, &e.policy)?;
-            match require_actual_inbox(c, &retained, receipt) {
+            match require_actual_inbox_guarded(c, &retained, receipt, guard) {
                 Ok(()) => {
                     if !inbox_seen.insert((receipt.stream_digest.clone(), receipt.sequence)) {
                         return Err(AuthorityError::CorruptHistory);
@@ -265,26 +298,35 @@ pub(crate) fn verify_retained_born_offline_v1(
                 .receipt
                 .as_ref()
                 .ok_or(AuthorityError::CorruptHistory)?;
-            require_actual_inbox(c, &retained, receipt)?;
-            if verify_original_outbox(c, ledger, original, admission)?
+            require_actual_inbox_guarded(c, &retained, receipt, guard)?;
+            if verify_original_outbox_guarded(c, ledger, original, admission, guard)?
                 && !outbox_seen.insert((original.export_stream()?, original.export_plan.sequence))
             {
                 return Err(AuthorityError::CorruptHistory);
             }
             seen.insert(operation.clone());
         } else {
-            let emitted: bool = c.query_row(
-                "SELECT EXISTS(SELECT 1 FROM outbox WHERE stream=?1 AND sequence=?2)",
-                params![original.export_stream()?, original.export_plan.sequence],
-                |r| r.get(0),
+            let emitted: bool = crate::journal::guarded_read!(
+                guard,
+                c.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM outbox WHERE stream=?1 AND sequence=?2)",
+                    params![original.export_stream()?, original.export_plan.sequence],
+                    |r| r.get(0),
+                )
             )?;
             if emitted {
                 return Err(AuthorityError::CorruptHistory);
             }
         }
     }
-    let inbox_count: u64 = c.query_row("SELECT count(*) FROM receipts", [], |r| r.get(0))?;
-    let outbox_count: u64 = c.query_row("SELECT count(*) FROM outbox", [], |r| r.get(0))?;
+    let inbox_count: u64 = crate::journal::guarded_read!(
+        guard,
+        c.query_row("SELECT count(*) FROM receipts", [], |r| r.get(0))
+    )?;
+    let outbox_count: u64 = crate::journal::guarded_read!(
+        guard,
+        c.query_row("SELECT count(*) FROM outbox", [], |r| r.get(0))
+    )?;
     if inbox_count != inbox_seen.len() as u64 || outbox_count != outbox_seen.len() as u64 {
         return Err(AuthorityError::CorruptHistory);
     }
@@ -304,6 +346,22 @@ fn verify_original_outbox(
     original: &BornOriginalPreparationV1,
     admission: &BornOfflineAuthorizationAdmissionV1,
 ) -> Result<bool> {
+    verify_original_outbox_guarded(
+        c,
+        ledger,
+        original,
+        admission,
+        crate::journal::ReadGuardV1::legacy(),
+    )
+}
+
+fn verify_original_outbox_guarded(
+    c: &Connection,
+    ledger: &policy::Ledger,
+    original: &BornOriginalPreparationV1,
+    admission: &BornOfflineAuthorizationAdmissionV1,
+    guard: crate::journal::ReadGuardV1<'_>,
+) -> Result<bool> {
     type OutboxRow = (
         String,
         String,
@@ -314,10 +372,10 @@ fn verify_original_outbox(
         i64,
         i64,
     );
-    let row: Option<OutboxRow> = c.query_row(
+    let row: Option<OutboxRow> = crate::journal::guarded_read!(guard, c.query_row(
         "SELECT message_digest,preview_digest,context_digest,payload_digest,slot,issued_at,expires_at,acknowledged FROM outbox WHERE stream=?1 AND sequence=?2",
         params![original.export_stream()?, original.export_plan.sequence],
-        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?))).optional()?;
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?))).optional())?;
     let Some((message, preview, context, payload, slot, issued, expires, acknowledged)) = row
     else {
         return Ok(false);

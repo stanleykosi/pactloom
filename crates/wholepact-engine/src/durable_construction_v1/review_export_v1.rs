@@ -77,7 +77,7 @@ pub(crate) fn sources(roster: &Roster) -> Result<Vec<DurableReviewSourceV1>> {
 }
 
 pub(super) fn validate_exports(roster: &Roster, candidate: &crate::CandidateView) -> Result<()> {
-    if roster.review_exports.len() + roster.review_exports_v3.len() > MAX_EXPORT_INTENTS {
+    if roster.export_count() > MAX_EXPORT_INTENTS {
         return Err(damaged());
     }
     for (operation, intent) in &roster.review_exports {
@@ -213,7 +213,7 @@ impl Engine {
             .ok_or_else(damaged)?;
         let mut roster = self.durable_roster(&envelope, candidate_id)?;
         // A legacy writer cannot reinterpret or append to closed V3 history.
-        if !roster.review_exports_v3.is_empty() { return Err(denied()); }
+        if !roster.review_exports_v3.is_empty() || roster.coordinated_exports_present() { return Err(denied()); }
         if roster.owners.len() != 2 {
             return Err(damaged());
         }

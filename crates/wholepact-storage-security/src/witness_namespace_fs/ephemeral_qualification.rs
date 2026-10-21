@@ -84,6 +84,19 @@ impl EphemeralWitnessInstallation {
         Ok(this)
     }
 
+    /// Test-only inert inspection while the SAME original temporary owner
+    /// remains alive. This does not preserve, reopen, copy or grant authority.
+    /// The maintained original exclusion/identity probe is released before return.
+    pub fn describe_original_for_live_qualification_v1(self: &Arc<Self>) -> Result<Vec<u8>> {
+        let files = self.probe()?.open_existing()?;
+        let descriptor = preserved_descriptor(&files)?;
+        let bytes = serde_json::to_vec(&descriptor).map_err(|_| E::AuthenticationFailed)?;
+        if bytes.len() > 16 * 1024 { return Err(E::AuthenticationFailed); }
+        files.check_current()?;
+        drop(files);
+        Ok(bytes)
+    }
+
     /// Consumes the exclusive original synthetic owner only after every probe,
     /// native worker, credential-origin borrower and journal has drained. Returns
     /// bounded inert source comparison bytes, never a native or journal grant.

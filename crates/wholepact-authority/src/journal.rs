@@ -2,6 +2,10 @@ use crate::{
     policy::{Event, Ledger},
     *,
 };
+#[path = "journal_read_guard_v1.rs"]
+mod read_guard_v1;
+pub(crate) use read_guard_v1::{collect_guarded, guarded_read, ReadGuardV1};
+
 use rusqlite::{params, Connection, Transaction, TransactionBehavior};
 use std::{path::Path, sync::Mutex};
 use wholepact_storage_security::{DatabaseKey, EncryptedConnection};
@@ -30,20 +34,32 @@ mod born_offline_dispatch_journal_v1;
 mod born_offline_witness_journal_v1;
 
 #[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
-#[path = "durable_payment_journal_v1.rs"]
-mod durable_payment_journal_v1;
-#[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
 #[path = "durable_delivery_admission_journal_v2.rs"]
 mod durable_delivery_admission_journal_v2;
 #[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
 #[path = "durable_financial_continuation_journal_v1.rs"]
 mod durable_financial_continuation_journal_v1;
+#[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
+#[path = "durable_payment_journal_v1.rs"]
+mod durable_payment_journal_v1;
 
 #[cfg(all(feature = "coordinated-witness-delivery-append", target_os = "linux"))]
 #[path = "coordinated_delivery_append_journal_v1.rs"]
 mod coordinated_delivery_append_journal_v1;
 #[cfg(all(feature = "coordinated-witness-delivery-append", target_os = "linux"))]
 pub(crate) use coordinated_delivery_append_journal_v1::PreparedDeliveryAppendV1;
+
+#[cfg(all(
+    feature = "coordinated-witness-financial-continuation",
+    target_os = "linux"
+))]
+#[path = "coordinated_financial_continuation_journal_v1.rs"]
+mod coordinated_financial_continuation_journal_v1;
+#[cfg(all(
+    feature = "coordinated-witness-financial-continuation",
+    target_os = "linux"
+))]
+pub(crate) use coordinated_financial_continuation_journal_v1::PreparedFinancialContinuationAppendV1;
 
 const APPLICATION_ID: i64 = 0x57504157;
 const SCHEMA_VERSION: i64 = 6;
@@ -1010,13 +1026,32 @@ pub(crate) fn history_page_at(
     after: u64,
     maximum: u16,
 ) -> Result<HistoryPage> {
+    history_page_at_guarded(
+        c,
+        ledger,
+        expected,
+        after,
+        maximum,
+        crate::journal::ReadGuardV1::legacy(),
+    )
+}
+
+pub(crate) fn history_page_at_guarded(
+    c: &Connection,
+    ledger: Ledger,
+    expected: &AuthorityHead,
+    after: u64,
+    maximum: u16,
+    guard: crate::journal::ReadGuardV1<'_>,
+) -> Result<HistoryPage> {
     if maximum == 0 || maximum > 16 || after > expected.sequence {
         return Err(AuthorityError::Limit);
     }
     if &ledger.snapshot.head != expected {
         return Err(AuthorityError::StaleHead);
     }
-    let pending_birth_commit = crate::pending_birth_storage::read(c, &ledger.policy)?;
+    let pending_birth_commit =
+        crate::pending_birth_storage::read_guarded(c, &ledger.policy, guard)?;
     let mut page = HistoryPage {
         pending_birth_commit,
         policy: ledger.policy,
@@ -1024,9 +1059,9 @@ pub(crate) fn history_page_at(
         entries: Vec::new(),
         next_after_sequence: None,
     };
-    let mut q = c.prepare("SELECT sequence,previous_head,head,payload FROM authority_events WHERE sequence>?1 ORDER BY sequence LIMIT ?2")?;
-    let mut rows = q.query(params![after, maximum])?;
-    while let Some(row) = rows.next()? {
+    let mut q = crate::journal::guarded_read!(guard, c.prepare("SELECT sequence,previous_head,head,payload FROM authority_events WHERE sequence>?1 ORDER BY sequence LIMIT ?2"))?;
+    let mut rows = crate::journal::guarded_read!(guard, q.query(params![after, maximum]))?;
+    while let Some(row) = crate::journal::guarded_read!(guard, rows.next())? {
         let raw = Zeroizing::new(row.get::<_, Vec<u8>>(3)?);
         let event: Event = decode(&raw)?;
         page.entries.push(HistoryEntry {
@@ -1067,11 +1102,22 @@ fn configure(c: &Connection) -> Result<()> {
     Ok(())
 }
 pub(crate) fn authenticate_admission(c: &Connection, peer: &str) -> Result<()> {
+    authenticate_admission_guarded(c, peer, crate::journal::ReadGuardV1::legacy())
+}
+
+pub(crate) fn authenticate_admission_guarded(
+    c: &Connection,
+    peer: &str,
+    guard: crate::journal::ReadGuardV1<'_>,
+) -> Result<()> {
     // Admission only; current permissions and history are still checked in full.
-    let known: bool = c.query_row(
-        "SELECT EXISTS(SELECT 1 FROM authority_principals WHERE certificate_digest=?1)",
-        [peer],
-        |r| r.get(0),
+    let known: bool = crate::journal::guarded_read!(
+        guard,
+        c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM authority_principals WHERE certificate_digest=?1)",
+            [peer],
+            |r| r.get(0),
+        )
     )?;
     if !known {
         return Err(AuthorityError::Permission);
@@ -1079,27 +1125,53 @@ pub(crate) fn authenticate_admission(c: &Connection, peer: &str) -> Result<()> {
     Ok(())
 }
 fn is_quarantined(c: &Connection) -> Result<bool> {
-    Ok(c.query_row(
-        "SELECT quarantined FROM authority_quarantine WHERE singleton=1",
-        [],
-        |r| r.get(0),
+    is_quarantined_guarded(c, crate::journal::ReadGuardV1::legacy())
+}
+
+fn is_quarantined_guarded(c: &Connection, guard: crate::journal::ReadGuardV1<'_>) -> Result<bool> {
+    Ok(crate::journal::guarded_read!(
+        guard,
+        c.query_row(
+            "SELECT quarantined FROM authority_quarantine WHERE singleton=1",
+            [],
+            |r| r.get(0),
+        )
     )?)
 }
 #[derive(Clone, Copy)]
-pub(crate) enum OriginalHistoryProfileV1 { Legacy, FinancialContinuation }
-pub(crate) fn load(c: &Connection) -> Result<Ledger> { load_profile(c, OriginalHistoryProfileV1::Legacy) }
-pub(crate) fn load_financial_continuation_v1(c: &Connection) -> Result<Ledger> { load_profile(c, OriginalHistoryProfileV1::FinancialContinuation) }
+pub(crate) enum OriginalHistoryProfileV1 {
+    Legacy,
+    FinancialContinuation,
+}
+pub(crate) fn load(c: &Connection) -> Result<Ledger> {
+    load_profile(c, OriginalHistoryProfileV1::Legacy)
+}
+pub(crate) fn load_financial_continuation_v1(c: &Connection) -> Result<Ledger> {
+    load_profile(c, OriginalHistoryProfileV1::FinancialContinuation)
+}
 fn load_profile(c: &Connection, profile: OriginalHistoryProfileV1) -> Result<Ledger> {
-    let raw: Zeroizing<Vec<u8>> = Zeroizing::new(c.query_row(
-        "SELECT policy FROM authority_genesis WHERE singleton=1",
-        [],
-        |r| r.get(0),
-    )?);
+    load_profile_guarded(c, profile, crate::journal::ReadGuardV1::legacy())
+}
+
+fn load_profile_guarded(
+    c: &Connection,
+    profile: OriginalHistoryProfileV1,
+    guard: crate::journal::ReadGuardV1<'_>,
+) -> Result<Ledger> {
+    let raw: Zeroizing<Vec<u8>> = crate::journal::guarded_read!(
+        guard,
+        (c.query_row(
+            "SELECT policy FROM authority_genesis WHERE singleton=1",
+            [],
+            |r| r.get(0),
+        ))
+        .map(Zeroizing::new)
+    )?;
     let mut ledger = Ledger::new(decode(&raw)?)?;
-    let mut q = c.prepare("SELECT sequence,operation_id,previous_head,head,payload FROM authority_events ORDER BY sequence")?;
-    let mut rows = q.query([])?;
+    let mut q = crate::journal::guarded_read!(guard, c.prepare("SELECT sequence,operation_id,previous_head,head,payload FROM authority_events ORDER BY sequence"))?;
+    let mut rows = crate::journal::guarded_read!(guard, q.query([]))?;
     let mut total = 0_u64;
-    while let Some(row) = rows.next()? {
+    while let Some(row) = crate::journal::guarded_read!(guard, rows.next())? {
         let sequence: u64 = row.get(0)?;
         let operation: String = row.get(1)?;
         let previous: String = row.get(2)?;
@@ -1118,11 +1190,12 @@ fn load_profile(c: &Connection, profile: OriginalHistoryProfileV1) -> Result<Led
             return Err(AuthorityError::CorruptHistory);
         }
         if let AuthorityMutation::QualifiedResolution(record) = &event.mutation {
-            let payload = Zeroizing::new(c.query_row(
+            let payload =
+                crate::journal::guarded_read!(guard, (c.query_row(
                 "SELECT payload FROM authority_resolution_evidence WHERE evidence_digest=?1",
                 [&record.evidence_digest],
                 |r| r.get::<_, Vec<u8>>(0),
-            )?);
+            )).map(Zeroizing::new))?;
             if hex::encode(Sha256::digest(&*payload)) != record.evidence_digest {
                 return Err(AuthorityError::CorruptHistory);
             }
@@ -1131,7 +1204,7 @@ fn load_profile(c: &Connection, profile: OriginalHistoryProfileV1) -> Result<Led
             let AuthorityMutation::ReserveOfflineAuthorization(record) = &event.mutation else {
                 return Err(AuthorityError::CorruptHistory);
             };
-            crate::offline_retry::verify_original_event_link(
+            crate::offline_retry::verify_original_event_link_guarded(
                 c,
                 record,
                 link,
@@ -1144,25 +1217,33 @@ fn load_profile(c: &Connection, profile: OriginalHistoryProfileV1) -> Result<Led
                     .as_deref()
                     .ok_or(AuthorityError::CorruptHistory)?,
                 event.witness_time_ms,
+                guard,
             )?;
         }
         match profile {
             OriginalHistoryProfileV1::Legacy => ledger.apply(&event),
-            OriginalHistoryProfileV1::FinancialContinuation => ledger.apply_financial_continuation_v1(&event),
-        }.map_err(|_| AuthorityError::CorruptHistory)?;
+            OriginalHistoryProfileV1::FinancialContinuation => {
+                ledger.apply_financial_continuation_v1(&event)
+            }
+        }
+        .map_err(|_| AuthorityError::CorruptHistory)?;
         if ledger.snapshot.head.digest != head {
             return Err(AuthorityError::CorruptHistory);
         }
     }
-    if is_quarantined(c)? {
+    if is_quarantined_guarded(c, guard)? {
         ledger.snapshot.writer_status = WriterStatus::Quarantined;
     }
-    let mut query = c.prepare(
-        "SELECT certificate_digest FROM authority_principals ORDER BY certificate_digest",
+    let mut query = crate::journal::guarded_read!(
+        guard,
+        c.prepare(
+            "SELECT certificate_digest FROM authority_principals ORDER BY certificate_digest",
+        )
     )?;
-    let peers = query
-        .query_map([], |r| r.get::<_, String>(0))?
-        .collect::<std::result::Result<std::collections::BTreeSet<_>, _>>()?;
+    let peers: std::collections::BTreeSet<_> = crate::journal::collect_guarded(
+        crate::journal::guarded_read!(guard, query.query_map([], |r| r.get::<_, String>(0)))?,
+        guard,
+    )?;
     if peers
         .iter()
         .map(String::as_str)
@@ -1171,62 +1252,96 @@ fn load_profile(c: &Connection, profile: OriginalHistoryProfileV1) -> Result<Led
     {
         return Err(AuthorityError::CorruptHistory);
     }
-    let count: usize = c.query_row("SELECT count(*) FROM authority_session_keys", [], |r| {
-        r.get(0)
-    })?;
+    let count: usize = crate::journal::guarded_read!(
+        guard,
+        c.query_row("SELECT count(*) FROM authority_session_keys", [], |r| {
+            r.get(0)
+        })
+    )?;
     if count != ledger.sessions.len() {
         return Err(AuthorityError::CorruptHistory);
     }
     for id in ledger.sessions.keys() {
-        let key = read_session_key_retained(c, id)?;
+        let key = read_session_key_retained_guarded(c, id, guard)?;
         if crate::session::session_id(&key) != *id {
             return Err(AuthorityError::CorruptHistory);
         }
     }
-    let version: i64 = c.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    let version: i64 = crate::journal::guarded_read!(
+        guard,
+        c.pragma_query_value(None, "user_version", |r| r.get(0))
+    )?;
     if matches!(version, 4..=7) {
-        crate::offline_retry::verify_offline_state(c, &ledger)?;
+        crate::offline_retry::verify_offline_state_guarded(c, &ledger, guard)?;
     }
     if matches!(version, 5..=7) {
-        let birth = crate::pending_birth_storage::read(c, &ledger.policy)?;
+        let birth = crate::pending_birth_storage::read_guarded(c, &ledger.policy, guard)?;
         ledger.validate_manual_birth(birth.as_ref())?;
         ledger.validate_durable_payment_birth_v1(birth.as_ref())?;
         match profile {
-            OriginalHistoryProfileV1::Legacy => ledger.validate_durable_delivery_birth_v2(birth.as_ref())?,
-            OriginalHistoryProfileV1::FinancialContinuation => ledger.validate_financial_continuation_birth_v1(birth.as_ref())?,
+            OriginalHistoryProfileV1::Legacy => {
+                ledger.validate_durable_delivery_birth_v2(birth.as_ref())?
+            }
+            OriginalHistoryProfileV1::FinancialContinuation => {
+                ledger.validate_financial_continuation_birth_v1(birth.as_ref())?
+            }
         }
         ledger.validate_born_offline_birth_v1(birth.as_ref())?;
     } else if ledger.policy.account_use_genesis.is_some() {
         return Err(AuthorityError::CorruptHistory);
     }
     if matches!(version, 6 | 7) {
-        construction_transport_handoff_journal_v1::verify_handoff_tables(c, &ledger)?;
+        construction_transport_handoff_journal_v1::verify_handoff_tables_guarded(
+            c, &ledger, guard,
+        )?;
     } else if !ledger.construction_transport_history_v1().is_empty() {
         return Err(AuthorityError::CorruptHistory);
     }
-    born_offline_artifacts_storage_v1::verify_artifact_tables(c, &ledger)?;
+    born_offline_artifacts_storage_v1::verify_artifact_tables_guarded(c, &ledger, guard)?;
     if version == BORN_ARTIFACT_SCHEMA_VERSION {
-        crate::born_offline_retry_v1::verify_retained_born_offline_v1(c, &ledger)?;
+        crate::born_offline_retry_v1::verify_retained_born_offline_v1_guarded(c, &ledger, guard)?;
     }
     Ok(ledger)
 }
 fn verify_schema(c: &Connection) -> Result<()> {
-    let version: i64 = c.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    verify_schema_against(c, schema_for_version(version)?)
+    verify_schema_guarded(c, crate::journal::ReadGuardV1::legacy())
+}
+
+fn verify_schema_guarded(c: &Connection, guard: crate::journal::ReadGuardV1<'_>) -> Result<()> {
+    let version: i64 = crate::journal::guarded_read!(
+        guard,
+        c.pragma_query_value(None, "user_version", |r| r.get(0))
+    )?;
+    verify_schema_against_guarded(c, schema_for_version(version)?, guard)
 }
 fn verify_schema_against(c: &Connection, expected_sql: &str) -> Result<()> {
+    verify_schema_against_guarded(c, expected_sql, crate::journal::ReadGuardV1::legacy())
+}
+
+fn verify_schema_against_guarded(
+    c: &Connection,
+    expected_sql: &str,
+    guard: crate::journal::ReadGuardV1<'_>,
+) -> Result<()> {
     // Compare the exact compiled schema using a scratch in-memory schema only;
     // private account data never enters the unencrypted connection.
     let expected = Connection::open_in_memory()?;
     expected.execute_batch(expected_sql)?;
-    fn schema(c: &Connection) -> Result<Vec<(String, String, String)>> {
-        let mut q = c.prepare("SELECT type,name,sql FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' ORDER BY type,name")?;
-        let rows = q
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+    fn schema(
+        c: &Connection,
+        guard: crate::journal::ReadGuardV1<'_>,
+    ) -> Result<Vec<(String, String, String)>> {
+        let mut q = crate::journal::guarded_read!(guard, c.prepare("SELECT type,name,sql FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' ORDER BY type,name"))?;
+        let rows: Vec<_> = crate::journal::collect_guarded(
+            crate::journal::guarded_read!(
+                guard,
+                q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            )?,
+            guard,
+        )?;
         Ok(rows)
     }
-    if schema(c)? != schema(&expected)? {
+    if schema(c, guard)? != schema(&expected, guard)? {
         return Err(AuthorityError::CorruptHistory);
     }
     Ok(())
@@ -1249,11 +1364,23 @@ fn read_session_key(c: &Connection, id: &str) -> Result<Zeroizing<[u8; 32]>> {
     read_session_key_retained(c, id)
 }
 fn read_session_key_retained(c: &Connection, id: &str) -> Result<Zeroizing<[u8; 32]>> {
-    let raw = Zeroizing::new(c.query_row(
-        "SELECT secret FROM authority_session_keys WHERE session_id=?1",
-        [id],
-        |r| r.get::<_, Vec<u8>>(0),
-    )?);
+    read_session_key_retained_guarded(c, id, crate::journal::ReadGuardV1::legacy())
+}
+
+fn read_session_key_retained_guarded(
+    c: &Connection,
+    id: &str,
+    guard: crate::journal::ReadGuardV1<'_>,
+) -> Result<Zeroizing<[u8; 32]>> {
+    let raw = crate::journal::guarded_read!(
+        guard,
+        (c.query_row(
+            "SELECT secret FROM authority_session_keys WHERE session_id=?1",
+            [id],
+            |r| r.get::<_, Vec<u8>>(0),
+        ))
+        .map(Zeroizing::new)
+    )?;
     Ok(Zeroizing::new(
         raw.as_slice()
             .try_into()
@@ -1664,3 +1791,15 @@ mod manual_roster_construction_encrypted_tests_v3;
 #[cfg(test)]
 #[path = "durable_payment_encrypted_tests_v1.rs"]
 mod durable_payment_encrypted_tests_v1;
+
+// Coordinated callers select the retained profile explicitly; ordinary legacy
+// entrypoints above continue selecting their existing profile and inert guard.
+pub(crate) fn load_guarded(c: &Connection, guard: ReadGuardV1<'_>) -> Result<Ledger> {
+    load_profile_guarded(c, OriginalHistoryProfileV1::Legacy, guard)
+}
+pub(crate) fn load_financial_continuation_guarded_v1(
+    c: &Connection,
+    guard: ReadGuardV1<'_>,
+) -> Result<Ledger> {
+    load_profile_guarded(c, OriginalHistoryProfileV1::FinancialContinuation, guard)
+}

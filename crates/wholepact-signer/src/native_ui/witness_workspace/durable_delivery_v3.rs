@@ -1,6 +1,9 @@
 //! Closed custody of already reviewed original owner credentials. This owner
 //! cannot enter ordinary Witness, writer, reservation or financial routes.
 use super::*;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+#[path = "durable_delivery_v3/coordinated_v1.rs"]
+pub(in crate::native_ui) mod coordinated_v1;
 use crate::native_ui::PreparedReceiveAndViewAuthorityV3;
 use std::{sync::Arc, time::Instant};
 use wholepact_authority::{OwnerControlRequest, ReconciledAuthorityHistory};

@@ -39,6 +39,18 @@ impl Authority {
         journal: &str,
         backend: &BackendIdentity,
     ) -> Result<NativeDurableSubmissionConsentV1> {
+        self.approve_exact_durable_submission_kernel(verified, context, journal, backend, None)
+    }
+    pub(crate) fn approve_exact_durable_submission_original_v1(
+        &self, verified: &VerifiedDurableSubmissionV1, context: CompletedDispatchContextV1,
+        journal: &str, backend: &BackendIdentity, bounds: Option<&crate::terminal::OriginalPromptBoundsV1>,
+    ) -> Result<NativeDurableSubmissionConsentV1> {
+        self.approve_exact_durable_submission_kernel(verified, context, journal, backend, bounds)
+    }
+    fn approve_exact_durable_submission_kernel(
+        &self, verified: &VerifiedDurableSubmissionV1, context: CompletedDispatchContextV1,
+        journal: &str, backend: &BackendIdentity, bounds: Option<&crate::terminal::OriginalPromptBoundsV1>,
+    ) -> Result<NativeDurableSubmissionConsentV1> {
         self.principal(&verified.context().principal_id)?;
         context.validate().map_err(|_| Error::Authentication)?;
         let descriptor = verified.descriptor();
@@ -74,10 +86,11 @@ impl Authority {
             return Err(Error::Permission);
         }
         let digest = context.digest().map_err(|_| Error::Authentication)?;
-        self.terminal.confirm(&format!(
+        let bounds = bounds.map(|b| b.narrow_wall((context.delivery.valid_from_ms, context.delivery.valid_until_ms))).transpose()?;
+        self.terminal.confirm_original_optional(&format!(
             "DISPATCH EXACT SAVED TRANSACTION, attempt {} of {}.\n{}\nContext commitment: {}\nBoth owners previously approved this exact payment and bounded future dispatch. This fresh Host decision permits only the already saved bytes through the named dedicated dispatcher, even if an original signer has restarted. It cannot sign again, extract a replacement, change inputs, extend original expiry or reset attempts. The provider receives complete final transaction bytes and connection metadata and may relay/retain them. Later revocation cannot recall disclosed bytes. The original absolute expiry is {} ms; this immediate decision expires sooner, after at most two minutes. Any uncertain outcome preserves the original operation and exact bytes. No further human prompt may occur before this attempt.",
             context.attempt, context.delivery.maximum_explicitly_approved_attempts, serde_json::to_string_pretty(&context)?, digest, context.delivery.valid_until_ms,
-        ))?;
+        ), || Ok(()), bounds.as_ref(), None)?;
         let reviewed_at_ms = now()?.checked_mul(1000).ok_or(Error::Invalid)?;
         if reviewed_at_ms < context.delivery.valid_from_ms
             || reviewed_at_ms >= context.delivery.valid_until_ms
@@ -100,6 +113,9 @@ impl Authority {
     }
 }
 impl NativeDurableSubmissionConsentV1 {
+    pub(crate) fn check_final_effect_restriction(&self) -> Result<()> {
+        self.held.check_final_effect_restriction()
+    }
     pub(crate) fn check_current(&self) -> Result<()> {
         self.held.check()
     }

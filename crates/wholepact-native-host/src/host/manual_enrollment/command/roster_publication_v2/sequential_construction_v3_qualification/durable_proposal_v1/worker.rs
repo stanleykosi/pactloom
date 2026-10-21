@@ -344,6 +344,7 @@ pub(super) enum JoinedSignerCommandV1 {
     DropUnselectedAnchor(usize),
     OpenDelivery(usize, wholepact_core::ProposalInput),
     DeliveryPeer(usize),
+    ReadDeliverySourceMetadata(usize),
     PollDeliveryPair(usize),
     AcceptDelivery(usize),
     ConfigureDeliveryWitness(usize),
@@ -413,6 +414,7 @@ pub(super) enum JoinedSignerCommandV1 {
 }
 pub(super) use wholepact_signer::native_ui::synthetic_born_joined_qualification::DurableDeliveryReopenSelectorV2 as DeliveryReopenV2;
 pub(super) enum JoinedSignerReplyV1 {
+    DeliverySourceMetadata { index: usize, json: String },
     FinancialPhase { index: usize, phase: wholepact_signer::native_ui::synthetic_born_joined_qualification::FinancialQualificationPhaseV1 },
     FinancialRequest { index: usize, request: Option<OwnerControlRequest> },
     FinancialResultPeer { index: usize, peer: JoinedSignerPeerV1, request: wholepact_signer::authority_bridge::financial_continuation_v1::FinancialResultRequestV1 },
@@ -903,6 +905,7 @@ fn command_index(command: &JoinedSignerCommandV1) -> usize {
         | C::PreserveFinancialContinuation(i)
         | C::DropUnselectedAnchor(i)
         | C::OpenDelivery(i, _)
+        | C::ReadDeliverySourceMetadata(i)
         | C::DeliveryPeer(i)
         | C::PollDeliveryPair(i)
         | C::AcceptDelivery(i)
@@ -1086,6 +1089,10 @@ fn execute(
                 .map_err(durable_entry_error)?;
             let reply = delivery_peer(index, &entry)?;
             (State::Delivery(Box::new(entry)), reply)
+        }
+        (C::ReadDeliverySourceMetadata(_), State::Delivery(entry)) => {
+            let json = entry.coordinated_pre_v3_metadata().map_err(|error| signer_error(error, "original source metadata"))?;
+            (State::Delivery(entry), R::DeliverySourceMetadata { index, json })
         }
         (C::DeliveryPeer(_), State::Delivery(entry)) => {
             let reply = delivery_peer(index, &entry)?;

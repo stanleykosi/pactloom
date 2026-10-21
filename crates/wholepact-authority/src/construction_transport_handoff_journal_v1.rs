@@ -282,11 +282,19 @@ fn append_handoff_event(
     Ok(result)
 }
 fn read_construction_transport_key(c: &Connection, id: &str) -> Result<Zeroizing<[u8; 32]>> {
-    let raw = Zeroizing::new(c.query_row(
+    read_construction_transport_key_guarded(c, id, crate::journal::ReadGuardV1::legacy())
+}
+
+fn read_construction_transport_key_guarded(
+    c: &Connection,
+    id: &str,
+    guard: crate::journal::ReadGuardV1<'_>,
+) -> Result<Zeroizing<[u8; 32]>> {
+    let raw = crate::journal::guarded_read!(guard, (c.query_row(
         "SELECT secret FROM authority_construction_transport_credentials WHERE credential_id=?1",
         [id],
         |r| r.get::<_, Vec<u8>>(0),
-    )?);
+    )).map(Zeroizing::new))?;
     Ok(Zeroizing::new(
         raw.as_slice()
             .try_into()
@@ -294,6 +302,14 @@ fn read_construction_transport_key(c: &Connection, id: &str) -> Result<Zeroizing
     ))
 }
 pub(super) fn verify_handoff_tables(c: &Connection, l: &Ledger) -> Result<()> {
+    verify_handoff_tables_guarded(c, l, crate::journal::ReadGuardV1::legacy())
+}
+
+pub(super) fn verify_handoff_tables_guarded(
+    c: &Connection,
+    l: &Ledger,
+    guard: crate::journal::ReadGuardV1<'_>,
+) -> Result<()> {
     let h = l.construction_transport_history_v1();
     h.validate_for(&l.policy, &l.snapshot)?;
     if l.sessions
@@ -303,21 +319,24 @@ pub(super) fn verify_handoff_tables(c: &Connection, l: &Ledger) -> Result<()> {
     {
         return Err(AuthorityError::Limit);
     }
-    let retained:u64=c.query_row("SELECT (SELECT coalesce(sum(length(payload)),0) FROM authority_events)+(SELECT coalesce(sum(length(payload)),0) FROM authority_construction_transport_grants)+(SELECT coalesce(sum(length(payload)+length(secret)),0) FROM authority_construction_transport_credentials)+(SELECT count(*)*192 FROM authority_transport_fences)",[],|r|r.get(0))?;
+    let retained:u64=crate::journal::guarded_read!(guard, c.query_row("SELECT (SELECT coalesce(sum(length(payload)),0) FROM authority_events)+(SELECT coalesce(sum(length(payload)),0) FROM authority_construction_transport_grants)+(SELECT coalesce(sum(length(payload)+length(secret)),0) FROM authority_construction_transport_credentials)+(SELECT count(*)*192 FROM authority_transport_fences)",[],|r|r.get(0)))?;
     if retained > MAX_JOURNAL_BYTES {
         return Err(AuthorityError::Limit);
     }
 
-    let count: u64 = c.query_row(
-        "SELECT count(*) FROM authority_construction_transport_grants",
-        [],
-        |r| r.get(0),
+    let count: u64 = crate::journal::guarded_read!(
+        guard,
+        c.query_row(
+            "SELECT count(*) FROM authority_construction_transport_grants",
+            [],
+            |r| r.get(0),
+        )
     )?;
     if count != h.grants.len() as u64 {
         return Err(AuthorityError::CorruptHistory);
     }
     for g in &h.grants {
-        let row:(String,String,String,String,Vec<u8>)=c.query_row("SELECT session_id,invocation_digest,read_request_digest,nonce,payload FROM authority_construction_transport_grants WHERE grant_digest=?1",[g.digest()?],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
+        let row:(String,String,String,String,Vec<u8>)=crate::journal::guarded_read!(guard, c.query_row("SELECT session_id,invocation_digest,read_request_digest,nonce,payload FROM authority_construction_transport_grants WHERE grant_digest=?1",[g.digest()?],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))))?;
         let a = &g.grant.authorization.authorization;
         if row.0 != a.original_session.session_id
             || row.1 != a.invocation_digest
@@ -332,14 +351,17 @@ pub(super) fn verify_handoff_tables(c: &Connection, l: &Ledger) -> Result<()> {
         "authority_construction_transport_credentials",
         "authority_transport_fences",
     ] {
-        let count: u64 = c.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))?;
+        let count: u64 = crate::journal::guarded_read!(
+            guard,
+            c.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+        )?;
         if count != h.credentials.len() as u64 {
             return Err(AuthorityError::CorruptHistory);
         }
     }
     for v in &h.credentials {
-        let row:(String,Vec<u8>)=c.query_row("SELECT grant_digest,payload FROM authority_construction_transport_credentials WHERE credential_id=?1",[v.credential_id()],|r|Ok((r.get(0)?,r.get(1)?)))?;
-        let key = read_construction_transport_key(c, v.credential_id())?;
+        let row:(String,Vec<u8>)=crate::journal::guarded_read!(guard, c.query_row("SELECT grant_digest,payload FROM authority_construction_transport_credentials WHERE credential_id=?1",[v.credential_id()],|r|Ok((r.get(0)?,r.get(1)?))))?;
+        let key = read_construction_transport_key_guarded(c, v.credential_id(), guard)?;
         if row.0 != v.pending_grant.digest()?
             || decode::<ConstructionTransportCredentialV1>(&row.1)? != *v
             || credential_id(&key) != v.credential_id()
@@ -347,11 +369,11 @@ pub(super) fn verify_handoff_tables(c: &Connection, l: &Ledger) -> Result<()> {
         {
             return Err(AuthorityError::CorruptHistory);
         }
-        let fence: (String, String) = c.query_row(
+        let fence: (String, String) = crate::journal::guarded_read!(guard, c.query_row(
             "SELECT credential_id,fence_digest FROM authority_transport_fences WHERE session_id=?1",
             [&v.authorization().original_session.session_id],
             |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
+        ))?;
         if fence.0 != v.credential_id() || fence.1 != v.old_key_fence_digest {
             return Err(AuthorityError::CorruptHistory);
         }
@@ -433,7 +455,7 @@ fn ensure_handoff_schema(tx: &Transaction<'_>) -> Result<()> {
 #[cfg(all(test, feature = "pending-birth-foundation", target_os = "linux"))]
 mod tests {
     use super::*;
-    use crate::construction_transport_handoff_v1::tests::{Fixture, fixture};
+    use crate::construction_transport_handoff_v1::tests::{fixture, Fixture};
     use std::os::unix::fs::PermissionsExt;
     fn insert_claim_rows(tx: &Transaction<'_>, credential: &ConstructionTransportCredentialV1) {
         tx.execute(
@@ -598,11 +620,10 @@ mod tests {
         let reopened = wholepact_storage_security::open_encrypted(&path, &key).unwrap();
         let l = load(reopened.connection()).unwrap();
         assert_eq!(l.construction_transport_history_v1().credentials.len(), 1);
-        assert!(
-            l.construction_transport_history_v1()
-                .reservations
-                .is_empty()
-        );
+        assert!(l
+            .construction_transport_history_v1()
+            .reservations
+            .is_empty());
     }
     #[test]
     fn encrypted_handoff_tables_are_immutable_and_backup_copies_all_secrets_and_fences() {
@@ -689,15 +710,13 @@ mod tests {
         assert!(!complete.transport.reservations.is_empty());
         assert!(complete.retained_debit_zatoshis().unwrap() > 0);
         assert!(history.snapshot() == &before);
-        assert!(
-            crate::transport::synthetic::reconciled_session(
-                &journal,
-                peer,
-                &disclosure.account_id,
-                &disclosure.network_profile_id
-            )
-            .is_err()
-        );
+        assert!(crate::transport::synthetic::reconciled_session(
+            &journal,
+            peer,
+            &disclosure.account_id,
+            &disclosure.network_profile_id
+        )
+        .is_err());
         let mut changed = disclosure.clone();
         changed.pinned_server_certificate_digest = "ef".repeat(32);
         assert!(crate::transport::synthetic::reconciled_history(&journal, peer, &changed).is_err());

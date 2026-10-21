@@ -34,6 +34,25 @@ pub(crate) fn open_born_history_from_namespace(
     open_born_history(input)
 }
 
+/// Exact same maintained source opener with a genuine initial-history Setup
+/// restriction. It is private, never a factory for arbitrary imported authority.
+#[cfg(feature = "coordinated-witness-financial-history")]
+pub(crate) fn open_born_history_from_namespace_guarded(
+    input: NamespaceOpenInput,
+    actual_server_certificate_digest: &str,
+    actual_listen: &str,
+    setup: &wholepact_financial_coordinator_origin::WitnessFinancialHistorySetupV1,
+) -> Result<AuthorityJournal> {
+    let guard = crate::native_witness_owner::financial_setup_guard_v1::FinancialSetupGuardV1::HistorySetup(setup);
+    guard.check()?;
+    if input.pinned_server_certificate_digest != actual_server_certificate_digest || input.endpoint != actual_listen {
+        return Err(AuthorityError::InvalidBinding);
+    }
+    let journal = crate::witness_locator::open_born_history_guarded(input, guard)?;
+    guard.check()?;
+    Ok(journal)
+}
+
 /// Serve ONLY a previously native-published exact manual-enrollment extension.
 /// Configuration cannot create or replace a scope; the original fixed namespace
 /// is opened and authenticated, including all aliases, exclusions and intent.

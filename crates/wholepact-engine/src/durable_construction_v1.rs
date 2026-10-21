@@ -5,6 +5,9 @@
 pub mod review_export_v1;
 #[path = "durable_construction_v1/review_export_v3.rs"]
 pub mod review_export_v3;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+#[path = "durable_construction_v1/review_export_coordinated_v1.rs"]
+pub mod review_export_coordinated_v1;
 
 use crate::proof_jobs::LocalCheckpoint;
 use crate::{Access, ApiError, Engine, Envelope, Mutation, Result};
@@ -66,7 +69,33 @@ pub(crate) struct Roster {
     pub(crate) review_exports: BTreeMap<String, review_export_v1::ExportIntent>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) review_exports_v3: BTreeMap<String, review_export_v3::ExportIntentV3>,
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) coordinated_review_exports_v1: BTreeMap<String, review_export_coordinated_v1::CoordinatedExportIntentV1>,
 }
+impl Roster {
+    pub(crate) fn coordinated_exports_present(&self) -> bool {
+        #[cfg(feature = "coordinated-financial-workflow-v1")]
+        { !self.coordinated_review_exports_v1.is_empty() }
+        #[cfg(not(feature = "coordinated-financial-workflow-v1"))]
+        { false }
+    }
+    pub(crate) fn export_count(&self) -> usize {
+        let count = self.review_exports.len() + self.review_exports_v3.len();
+        #[cfg(feature = "coordinated-financial-workflow-v1")]
+        { count + self.coordinated_review_exports_v1.len() }
+        #[cfg(not(feature = "coordinated-financial-workflow-v1"))]
+        { count }
+    }
+    pub(crate) fn has_export_operation(&self, operation: &str) -> bool {
+        let present = self.review_exports.contains_key(operation) || self.review_exports_v3.contains_key(operation);
+        #[cfg(feature = "coordinated-financial-workflow-v1")]
+        { present || self.coordinated_review_exports_v1.contains_key(operation) }
+        #[cfg(not(feature = "coordinated-financial-workflow-v1"))]
+        { present }
+    }
+}
+
 fn damaged() -> ApiError {
     ApiError::new(
         "RECOVERY_REQUIRED",
@@ -112,6 +141,8 @@ pub(crate) fn validate_stored(envelope: &Envelope) -> Result<()> {
         }
         review_export_v1::validate_exports(&roster, candidate)?;
         review_export_v3::validate_exports(&roster, candidate, envelope.durable_proposals_v1.get(id))?;
+        #[cfg(feature = "coordinated-financial-workflow-v1")]
+        review_export_coordinated_v1::validate_exports(&roster, candidate, envelope.durable_proposals_v1.get(id))?;
         review_export_v1::validate_export_identity(&roster, envelope.durable_proposals_v1.get(id))?;
         for (account, intake) in roster.owners {
             intake.outbox.validate().map_err(|_| damaged())?;
@@ -557,7 +588,7 @@ pub(crate) fn validate_private_roster_v2(envelope: &Envelope) -> Result<()> {
     validate_stored(envelope)?;
     for value in envelope.durable_construction_v1.values() {
         let roster: Roster = serde_json::from_value(value.clone()).map_err(|_| damaged())?;
-        if !roster.review_exports.is_empty() || !roster.review_exports_v3.is_empty() {
+        if !roster.review_exports.is_empty() || !roster.review_exports_v3.is_empty() || roster.coordinated_exports_present() {
             return Err(damaged());
         }
     }
@@ -588,7 +619,7 @@ pub(crate) fn validate_private_intake_delta_v2(before: &Envelope, after: &Envelo
     if new.owners.len() != old.owners.len() + 1
         || new.owners.len() > 2
         || !new.review_exports.is_empty()
-        || !new.review_exports_v3.is_empty()
+        || !new.review_exports_v3.is_empty() || new.coordinated_exports_present()
     {
         return Err(damaged());
     }
@@ -601,4 +632,24 @@ pub(crate) fn validate_private_intake_delta_v2(before: &Envelope, after: &Envelo
         }
     }
     Ok(())
+}
+
+#[cfg(all(test, feature = "coordinated-financial-workflow-v1"))]
+mod coordinated_export_shape_tests {
+    use super::*;
+    #[test]
+    fn empty_coordinated_extension_preserves_legacy_serialization() {
+        let roster = Roster::default();
+        let encoded = serde_json::to_value(&roster).unwrap();
+        assert_eq!(encoded, serde_json::json!({"owners": {}, "review_exports": {}}));
+        assert!(!roster.coordinated_exports_present());
+        assert_eq!(roster.export_count(), 0);
+        assert!(!roster.has_export_operation("not-retained"));
+    }
+    #[test]
+    fn coordinated_extension_does_not_accept_an_untyped_intent() {
+        let encoded = serde_json::json!({"owners": {}, "review_exports": {},
+            "coordinated_review_exports_v1": {"operation": {"scope": {}, "exposure": "DisclosedOrUnknown"}}});
+        assert!(serde_json::from_value::<Roster>(encoded).is_err());
+    }
 }

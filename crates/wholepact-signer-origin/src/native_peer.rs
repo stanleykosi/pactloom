@@ -16,10 +16,37 @@ pub struct PeerProcess(Arc<PeerInner>);
 struct PeerInner {
     uid: u32,
     pid: u32,
-    pidfd: OwnedFd,
+    lifetime: PeerLifetime,
     instance: String,
 }
+// The coordinated variant retains the sealed original H proof itself, not an
+// imported descriptor or caller-supplied identity. Cloning PeerProcess shares
+// this same one-use-received lifetime; it never mints a new role or permission.
+enum PeerLifetime {
+    DirectPidfd(OwnedFd),
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    OriginalFinancialHost(wholepact_financial_coordinator_origin::OriginalSignerHostPeerV1),
+}
 impl PeerProcess {
+    /// Consume only the genuine SCM_CREDENTIALS-authenticated original H
+    /// handshake. This cannot accept an arbitrary PID, FD, DTO or legacy grant.
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    pub fn from_original_financial_host(
+        original: wholepact_financial_coordinator_origin::OriginalSignerHostPeerV1,
+    ) -> Result<Self> {
+        original
+            .check_current()
+            .map_err(|_| Error::Authentication)?;
+        let peer = Self(Arc::new(PeerInner {
+            uid: original.uid(),
+            pid: original.pid(),
+            instance: original.instance().to_owned(),
+            lifetime: PeerLifetime::OriginalFinancialHost(original),
+        }));
+        peer.check_alive()?;
+        Ok(peer)
+    }
+
     pub fn observe(stream: &UnixStream) -> Result<Self> {
         let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
         let mut len = std::mem::size_of_val(&cred) as libc::socklen_t;
@@ -71,7 +98,7 @@ impl PeerProcess {
         let peer = Self(Arc::new(PeerInner {
             uid: cred.uid,
             pid: cred.pid as u32,
-            pidfd,
+            lifetime: PeerLifetime::DirectPidfd(pidfd),
             instance: hex::encode(crate::random::<32>()?),
         }));
         peer.check_alive()?;
@@ -88,7 +115,7 @@ impl PeerProcess {
         let result = Self(Arc::new(PeerInner {
             uid: unsafe { libc::geteuid() },
             pid: child.id(),
-            pidfd,
+            lifetime: PeerLifetime::DirectPidfd(pidfd),
             instance: hex::encode(crate::random::<32>()?),
         }));
         result.check_alive()?;
@@ -104,8 +131,15 @@ impl PeerProcess {
         &self.0.instance
     }
     pub fn check_alive(&self) -> Result<()> {
+        let pidfd = match &self.0.lifetime {
+            PeerLifetime::DirectPidfd(pidfd) => pidfd,
+            #[cfg(feature = "coordinated-financial-workflow-v1")]
+            PeerLifetime::OriginalFinancialHost(original) => {
+                return original.check_current().map_err(|_| Error::Authentication);
+            }
+        };
         let mut poll = libc::pollfd {
-            fd: self.0.pidfd.as_raw_fd(),
+            fd: pidfd.as_raw_fd(),
             events: libc::POLLIN,
             revents: 0,
         };
@@ -130,6 +164,12 @@ impl PeerProcess {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn retained_peer_stays_send_sync_without_minting_original_host() {
+        fn require<T: Send + Sync>() {}
+        require::<super::PeerProcess>();
+    }
+
     use super::*;
     use std::io::{Read, Write};
     use std::os::unix::process::CommandExt;

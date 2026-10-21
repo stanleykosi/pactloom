@@ -69,6 +69,8 @@ pub(crate) mod durable_private_workspace_v1;
 pub(crate) mod durable_dispatcher_v2;
 #[cfg(feature = "financial-runtime")]
 mod financial;
+#[cfg(all(feature = "coordinated-financial-workflow-v1", target_os = "linux"))]
+pub use financial::run_coordinated_financial_host_v1;
 #[cfg(test)]
 mod receipt_fixture;
 mod receipts;

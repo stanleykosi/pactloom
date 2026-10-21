@@ -4,6 +4,9 @@
 //! Declaration order and the existing revoke/join paths are unchanged.
 use super::*;
 
+#[path = "durable_delivery_role_state_v3/authenticated_audit_v1.rs"]
+mod authenticated_audit_v1;
+
 pub(super) struct SetupV3 {
     pub(super) source: PreparedOriginalDeliverySourceV3,
     pub(super) witness: PreparedDeliveryWitnessV3,
@@ -13,6 +16,9 @@ pub(super) struct SetupV3 {
     pub(super) intent: RecipientIntentV3,
     pub(super) peer: Option<PeerProcess>,
     pub(super) material_deadline: Instant,
+    // Inert original producer bound, not the current Read permission.
+    // Fresh history-only entry cannot reconstruct this monotonic value.
+    pub(super) original_material_deadline: Option<Instant>,
 }
 pub(super) struct ActiveV3 {
     pub(super) history_only: bool,
@@ -23,6 +29,7 @@ pub(super) struct ActiveV3 {
     pub(super) manifest: AcceptedManifestRecord,
     pub(super) intent: RecipientIntentV3,
     pub(super) peer: Option<PeerProcess>,
+    pub(super) original_material_deadline: Option<Instant>,
 }
 impl ActiveV3 {
     pub(super) fn check(&self) -> Result<()> {
@@ -145,7 +152,7 @@ impl DurableDeliveryRuntimeV3 {
         let identity=setup.source.identity().to_owned();
         let source=setup.source.activate(read.clone())?;
         let witness=setup.witness.activate(read,&identity)?;
-        let active=Arc::new(ActiveV3 {history_only:false,source,witness,original:setup.original,enrollment:setup.enrollment,manifest:setup.manifest,intent,peer:setup.peer});
+        let active=Arc::new(ActiveV3 {history_only:false,source,witness,original:setup.original,enrollment:setup.enrollment,manifest:setup.manifest,intent,peer:setup.peer,original_material_deadline:setup.original_material_deadline});
         active.check()?; closed.active=Some(active); closed.phase=DurableDeliveryPhaseV3::Ready;
         Ok(())
     }
@@ -231,7 +238,7 @@ impl DurableDeliveryRuntimeV3 {
         let identity=setup.source.identity().to_owned();
         let source=setup.source.activate(read.clone())?;
         let witness=setup.witness.activate(read,&identity)?;
-        let active=Arc::new(ActiveV3 {history_only:true,source,witness,original:setup.original,enrollment:setup.enrollment,manifest:setup.manifest,intent:setup.intent,peer:setup.peer});
+        let active=Arc::new(ActiveV3 {history_only:true,source,witness,original:setup.original,enrollment:setup.enrollment,manifest:setup.manifest,intent:setup.intent,peer:setup.peer,original_material_deadline:setup.original_material_deadline});
         active.check()?;
         // Retained historical data stays in the controller even if this
         // read-only network audit fails. No action owner is cloned or revived.
@@ -247,9 +254,13 @@ impl DurableDeliveryRuntimeV3 {
             let original=active.source.journal()?.durable_delivery_admission_intent_v3(&selector.authorization_id,&active.source)?.ok_or(Error::RecoveryRequired)?;
             if original.recipient_intent()!=&expected_intent || original.recipient_intent_digest()?!=selector.intent_digest || awaiting.as_ref().is_some_and(|a|original!=a.0) {return Err(Error::ReviewMismatch);}
             let history=active.witness.history(HistoryReadPurposeV3::ReadOriginalHistory,active.deadline()?,||active.check())?;
-            let remote=history.durable_delivery_admission_v2(&original.request().operation_id).map_err(|_|Error::RecoveryRequired)?;
-            if remote!=Some(original.request()) || history.disclosure()!=original.disclosure() || history.account_policy().owner_certificate_digest!=original.owner_certificate_digest() {return Err(Error::Uncertain);}
-            if awaiting.as_ref().and_then(|a|a.1.as_ref()).is_some_and(|controlled|controlled!=history.snapshot()) {return Err(Error::Uncertain);}
+            authenticated_audit_v1::require_exact_original(
+                &history,
+                original.request(),
+                original.disclosure(),
+                original.owner_certificate_digest(),
+                awaiting.as_ref().and_then(|a| a.1.as_ref()),
+            )?;
             let OwnerControl::AdmitDurablePaymentWithDeliveryV2 {record}=&original.request().control else{return Err(Error::ReviewMismatch);};
             let audit=authority_bridge::durable_delivery_admission_ipc_v2::DurableDeliveryAdmissionStatusV2 {version:2,request:original.request().clone(),scope:record.scope.clone(),original_enrollment_ref:original.enrollment_ref().into(),original_accepted_manifest_ref:original.manifest_ref().into(),original_local_intent_digest:original.history_digest()?,authenticated_witness_history_digest:history.history_digest().map_err(|_|Error::ReviewMismatch)?,witness_committed:true,current_fixed_material_source:"unchecked".into()};
             let completed=DurableDeliveryAdmissionStatusV3 {version:3,intent_digest:selector.intent_digest,request:original.request().clone(),original_local_intent_digest:original.history_digest()?,state:DurableDeliveryAdmissionStateV3::Verified,audit:Some(audit)};
@@ -260,3 +271,5 @@ impl DurableDeliveryRuntimeV3 {
         Ok(())
     }
 }
+
+pub(in crate::native_ui::runtime) use authenticated_audit_v1::require_exact_original as require_exact_original_admission;

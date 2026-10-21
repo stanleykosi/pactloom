@@ -115,3 +115,8 @@ impl PreconstructionRecordLease<'_> {
 #[cfg(all(test, feature = "durable-proposal"))]
 #[path = "preconstruction_lease/durable_receipt_tests.rs"]
 mod durable_receipt_tests;
+
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+mod coordinated_v1;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub(crate) use coordinated_v1::CoordinatedConstructionActionV1;

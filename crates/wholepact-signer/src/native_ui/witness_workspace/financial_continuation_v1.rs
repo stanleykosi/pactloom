@@ -9,12 +9,41 @@ use crate::native_ui::financial_authority_v1::{FinancialAdmitActionV1, Financial
 use std::time::Instant;
 use wholepact_authority::{AccountSnapshot, ReconciledAuthorityHistory};
 
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub(in crate::native_ui) mod coordinated_initial_read_v1;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub(in crate::native_ui) mod coordinated_admit_v1;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub(in crate::native_ui) mod coordinated_writer_read_v1;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub(in crate::native_ui) mod coordinated_acquire_v1;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+mod coordinated_activate_v1;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub(in crate::native_ui) use coordinated_activate_v1::CoordinatedActivateFailureV1;
+
 pub(in crate::native_ui) struct FinancialWitnessCustodyV1 {
     client: AuthorityClient,
     certificate_digest: String,
     owner: bool,
 }
 impl FinancialWitnessCustodyV1 {
+    /// Read-only identity of the actual retained owner client. No client, key,
+    /// action or mutation permission is exposed to the coordinated adapter.
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    pub(in crate::native_ui) fn check_coordinated_continue_owner_v1(
+        &self,
+        source: &PreparedOriginalFinancialSourceV1,
+    ) -> Result<String> {
+        if !self.owner {
+            return Err(Error::Authentication);
+        }
+        source.require_coordinated_owner_metadata_v2(
+            &self.client.disclosure_descriptor(), &self.certificate_digest,
+        )?;
+        Ok(self.certificate_digest.clone())
+    }
+
     pub(in crate::native_ui) fn prepare_owner(
         json: &str,
         source: &PreparedOriginalFinancialSourceV1,
@@ -379,3 +408,6 @@ impl FinancialWitnessCustodyV1 {
         .sign_and_retain(wallet, ticket)
     }
 }
+
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+mod coordinated_sign_v1;

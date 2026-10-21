@@ -14,6 +14,7 @@ pub(crate) struct NativeFinancialRetentionConsentV1 {
     contexts: [SignedCandidateContext; 3],
     terminal: Terminal,
     held: Held,
+    prompt_bounds: Option<crate::terminal::OriginalPromptBoundsV1>,
     approved: Mutex<Approved>,
 }
 pub(crate) struct FrozenNativeFinancialRetentionConsentV1 {
@@ -48,14 +49,19 @@ impl Authority {
         let contexts=[sources[0].clone(),sources[1].clone(),pinned.union_context().clone()];
         if !distinct(&contexts) { return Err(Error::Invalid); }
         for context in &contexts { self.principal(&context.principal_id)?; }
-        Ok(NativeFinancialRetentionConsentV1 { contexts, terminal:self.terminal.clone(), held:self.fence.acquire(now()?.checked_add(900).ok_or(Error::Invalid)?)?, approved:Mutex::new(Approved::default()) })
+        Ok(NativeFinancialRetentionConsentV1 { contexts, terminal:self.terminal.clone(), held:self.fence.acquire(now()?.checked_add(900).ok_or(Error::Invalid)?)?, prompt_bounds:None, approved:Mutex::new(Approved::default()) })
     }
 }
 impl NativeFinancialRetentionConsentV1 {
+    pub(crate) fn bind_original_prompt_bounds(mut self, bounds: crate::terminal::OriginalPromptBoundsV1) -> Result<Self> {
+        if self.prompt_bounds.is_some() { return Err(Error::Permission); }
+        self.prompt_bounds = Some(bounds.narrow_until(self.held.expires.checked_mul(1000).ok_or(Error::Permission)?)?);
+        Ok(self)
+    }
     fn confirm(&self, action: &str, role: &str, detail: &impl serde::Serialize) -> bool {
         if self.held.check().is_err() { return false; }
         let Ok(encoded)=serde_json::to_string_pretty(detail) else { return false; };
-        self.terminal.confirm(&format!("Approve {action} for this EXACT scope?\nFinancial role: {role}\n{encoded}\nUsable spend signatures or transaction bytes remain in encrypted local journals. This is separate from original signer approval and does not itself authorize network submission. A failed or interrupted operation can leave durable intent; preserve the exact original keys and journals. Scope changes require a new command and approval. Permission ends with this command, lock/revoke or the original 15-minute ceiling; later prompts do not refresh it.")).is_ok() && self.held.check().is_ok()
+        self.terminal.confirm_original_optional(&format!("Approve {action} for this EXACT scope?\nFinancial role: {role}\n{encoded}\nUsable spend signatures or transaction bytes remain in encrypted local journals. This is separate from original signer approval and does not itself authorize network submission. A failed or interrupted operation can leave durable intent; preserve the exact original keys and journals. Scope changes require a new command and approval. Permission ends with this command, lock/revoke or the original 15-minute ceiling; later prompts do not refresh it."), || Ok(()), self.prompt_bounds.as_ref(), Some(&self.held)).is_ok() && self.held.check().is_ok()
     }
     pub(crate) fn freeze_for_dispatch(self) -> Result<FrozenNativeFinancialRetentionConsentV1> {
         self.held.check()?;
@@ -77,6 +83,9 @@ impl SignedRetentionConsent for NativeFinancialRetentionConsentV1 {
     }
 }
 impl TransactionRetentionConsent for NativeFinancialRetentionConsentV1 {
+    fn check_final_effect_restriction(&self) -> bool {
+        !crate::terminal::coordinated_restriction_required() || self.held.check_final_effect_restriction().is_ok()
+    }
     fn permits(&self, scope: &TransactionRetentionScope) -> bool {
         if self.held.check().is_err() || role(&self.contexts,&scope.signed_scope)!=Some(2) { return false; }
         let Ok(mut approved)=self.approved.lock() else { return false; };
@@ -108,6 +117,9 @@ impl SignedRetentionConsent for FrozenNativeFinancialRetentionConsentV1 {
     }
 }
 impl TransactionRetentionConsent for FrozenNativeFinancialRetentionConsentV1 {
+    fn check_final_effect_restriction(&self) -> bool {
+        !crate::terminal::coordinated_restriction_required() || self.held.check_final_effect_restriction().is_ok()
+    }
     fn permits(&self, scope: &TransactionRetentionScope) -> bool {
         role(&self.contexts,&scope.signed_scope)==Some(2) && SignedRetentionConsent::permits(self,&scope.signed_scope) && self.approved.transaction.as_ref().is_some_and(|prior|exact(prior,scope)) && self.held.check().is_ok()
     }
@@ -133,7 +145,7 @@ mod tests {
             SignedRetentionScope {context,signature_set_digest:format!("{:064x}",index+20)}
         });
         let contexts=std::array::from_fn(|index|scopes[index].context.clone());
-        let owner=NativeFinancialRetentionConsentV1 {contexts,terminal:Terminal::disconnected_for_test(),held:Arc::new(Fence::default()).acquire(now().unwrap()+900).unwrap(),approved:Mutex::new(Approved::default())};
+        let owner=NativeFinancialRetentionConsentV1 {prompt_bounds:None,contexts,terminal:Terminal::disconnected_for_test(),held:Arc::new(Fence::default()).acquire(now().unwrap()+900).unwrap(),approved:Mutex::new(Approved::default())};
         (owner,scopes)
     }
     #[test]

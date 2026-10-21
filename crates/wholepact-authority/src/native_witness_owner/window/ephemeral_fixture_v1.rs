@@ -137,6 +137,7 @@ struct OriginalListenerV1 {
     bound: Option<TcpListener>,
     address: std::net::SocketAddr,
     server_handles: Arc<AtomicUsize>,
+    server_join_failed: Arc<AtomicBool>,
 }
 impl OriginalListenerV1 {
     fn local_addr(&self) -> std::io::Result<std::net::SocketAddr> {
@@ -229,6 +230,7 @@ impl EphemeralNativeWitnessV1 {
                 address: listener.local_addr().map_err(|_| AuthorityError::Storage)?,
                 bound: Some(listener),
                 server_handles: Arc::new(AtomicUsize::new(0)),
+                server_join_failed: Arc::new(AtomicBool::new(false)),
             },
             durable_payment: durable_payment_v1::FixturePhaseV1::Idle,
             financial_continuation: financial_continuation_v1::FixtureFinancialPhaseV1::default(),
@@ -489,6 +491,7 @@ impl EphemeralNativeWitnessV1 {
             deadline,
             thread: Some(thread),
             listener_owner: self.listener.server_handles.clone(),
+            join_failed: self.listener.server_join_failed.clone(),
         })
     }
 
@@ -638,6 +641,7 @@ pub struct EphemeralHistoryServerV1 {
     deadline: Instant,
     thread: Option<std::thread::JoinHandle<()>>,
     listener_owner: Arc<AtomicUsize>,
+    join_failed: Arc<AtomicBool>,
 }
 impl EphemeralHistoryServerV1 {
     /// Independent synthetic handle observations, not a coherent readiness or
@@ -761,7 +765,11 @@ impl Drop for EphemeralHistoryServerV1 {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            if thread.join().is_err() {
+                // Monotone synthetic evidence only: zero live handles alone
+                // cannot turn a panicked worker into a successful drain.
+                self.join_failed.store(true, Ordering::Release);
+            }
         }
         self.listener_owner.fetch_sub(1, Ordering::AcqRel);
     }

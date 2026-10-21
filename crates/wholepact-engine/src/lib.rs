@@ -1133,3 +1133,6 @@ pub mod settlement_fanout;
 #[cfg(test)]
 #[path = "durable_discovery_registration_tests.rs"]
 mod durable_discovery_registration_tests;
+
+#[cfg(all(feature = "durable-proposal", feature = "manual-admission", feature = "coordinated-financial-workflow-v1", target_os = "linux"))]
+pub use durable_private_workspace_v1::{ClosedCoordinatedPrivateDurableAdmissionReviewV1, CoordinatedPrivateDurableAdmissionStatusV1};

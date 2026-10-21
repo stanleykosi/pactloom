@@ -3447,6 +3447,20 @@ impl DurableDeliveryNativeFixtureV2 {
         self.check()?;
         Ok(self.root.clone())
     }
+    /// Inert snapshot from this actual held source; never native authorization.
+    pub(in crate::native_ui) fn coordinated_pre_v3_metadata(&self) -> Result<String> {
+        self.check()?;
+        let source = self.runtime.open.as_ref().ok_or(Error::Locked)?
+            .durable_delivery_entry.as_ref().ok_or(Error::Unavailable)?;
+        let disclosure = source.original_witness_disclosure()?;
+        let value = serde_json::json!({
+            "version": 1, "witness": disclosure,
+            "owner_certificate_digest": source.record().account_record.terms.signer.owner_certificate_digest,
+            "native_entry_correlation": self.entry,
+        });
+        self.check()?;
+        serde_json::to_string(&value).map_err(|_| Error::InvalidData)
+    }
     pub(in crate::native_ui) fn owner_setup_for_reopen(&self) -> Result<String> {
         self.check()?;
         if self.owner_setup.is_empty() {

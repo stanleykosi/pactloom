@@ -8,18 +8,38 @@ compile_error!("Bootstrap-only CI instrumentation cannot select the source-openi
 
 #[cfg(all(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append"))]
 compile_error!("Cancel-only and one-exact-append are separate common-image profiles");
+#[cfg(all(feature = "coordinated-financial-runtime", any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append", wholepact_bootstrap_ci, wholepact_delivery_ci)))]
+compile_error!("Financial runtime is separate from narrow and instrumented qualification profiles");
+#[cfg(all(wholepact_financial_external_ci, not(wholepact_financial_ci)))]
+compile_error!("External Witness qualification requires financial observation");
+#[cfg(all(wholepact_financial_ci, not(feature = "coordinated-financial-runtime")))]
+compile_error!("Financial observation requires the full financial runtime profile");
+#[cfg(all(target_os = "linux", wholepact_financial_ci, feature = "coordinated-financial-runtime"))]
+mod financial_ci;
 #[cfg(target_os = "linux")]
 mod bootstrap;
 #[cfg(all(target_os = "linux", feature = "coordinated-witness-delivery-append"))]
 mod delivery_driver;
 #[cfg(all(target_os = "linux", feature = "coordinated-witness-delivery-append"))]
 mod delivery_ui;
+#[cfg(all(target_os = "linux", feature = "coordinated-financial-source-ui"))]
+mod financial_source_driver;
+#[cfg(all(target_os = "linux", feature = "coordinated-financial-source-ui"))]
+mod financial_source_ui;
+#[cfg(all(target_os = "linux", feature = "coordinated-financial-source-ui"))]
+mod financial_completed_pair_ui;
+#[cfg(all(target_os = "linux", feature = "coordinated-financial-source-ui"))]
+mod host_line_input;
+#[cfg(all(target_os = "linux", feature = "coordinated-financial-source-ui"))]
+mod host_output_text;
 #[cfg(all(target_os = "linux", feature = "cancel-only-witness-review"))]
 mod native_ui;
 #[cfg(all(target_os = "linux", feature = "cancel-only-witness-review"))]
 mod review_channel;
 #[cfg(all(target_os = "linux", feature = "cancel-only-witness-review"))]
 mod review_driver;
+#[cfg(all(target_os = "linux", feature = "coordinator-transient-password-input"))]
+mod secret_input;
 #[cfg(all(target_os = "linux", feature = "cancel-only-witness-review"))]
 mod witness_role;
 
@@ -35,6 +55,11 @@ fn main() {
     // any thread-capable initialization. No public worker/role entry exists.
     #[cfg(target_os = "linux")]
     let code = match bootstrap::run_before_runtime() {
+        #[cfg(feature = "coordinated-financial-runtime")]
+        Ok(true) => 0,
+        #[cfg(feature = "coordinated-financial-runtime")]
+        Ok(false) => 78,
+        #[cfg(not(feature = "coordinated-financial-runtime"))]
         Ok(()) => {
             #[cfg(feature = "coordinated-witness-delivery-append")] { 0 }
             #[cfg(not(feature = "coordinated-witness-delivery-append"))] { 78 }

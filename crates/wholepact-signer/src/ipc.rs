@@ -5,7 +5,9 @@
 #![cfg_attr(not(feature = "native-ui"), allow(dead_code))]
 #[cfg(feature = "authority-signing")]
 use crate::authority_bridge::host_recovery_ipc::v5::V5TransferDialect;
-use crate::{Error, Result, files::PrivateDirectory, native_peer::PeerProcess, review::validate_label};
+use crate::{
+    files::PrivateDirectory, native_peer::PeerProcess, review::validate_label, Error, Result,
+};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
@@ -21,17 +23,24 @@ use std::{
     },
     path::PathBuf,
     sync::{
-        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, SyncSender},
+        Arc, Mutex,
     },
     thread::JoinHandle,
     time::{Duration, Instant},
 };
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, Zeroizing};
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+mod coordinated_pair_v1;
 #[cfg(feature = "durable-proposal")]
 pub(crate) mod durable_receive_v3;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub(crate) use coordinated_pair_v1::{
+    CoordinatedFinancialResultEventV1, CoordinatedLocalEventV1, CoordinatedLocalIpcV1,
+    CoordinatedPairPeerV1, CoordinatedRequestV1, CoordinatedReturnTransportV1,
+};
 const MAX_GRANTS: usize = 16;
 /// Public location metadata only. Knowledge of this narrow endpoint grants no
 /// pairing, source disclosure, native approval or financial authority.
@@ -59,10 +68,20 @@ pub use wholepact_signer_origin::PairScope;
 #[derive(Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 enum Envelope {
-    #[cfg(all(feature="durable-proposal", feature="pending-birth-owner-signing", feature="native-ui"))]
-    FinancialResultV1 {schema_version:u32,request:crate::authority_bridge::financial_continuation_v1::FinancialResultRequestV1},
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "pending-birth-owner-signing",
+        feature = "native-ui"
+    ))]
+    FinancialResultV1 {
+        schema_version: u32,
+        request: crate::authority_bridge::financial_continuation_v1::FinancialResultRequestV1,
+    },
     #[cfg(feature = "durable-proposal")]
-    ClosedRecipientV3 { schema_version: u32, request: crate::authority_bridge::durable_review_ipc_v3::ClosedRecipientCommandV3 },
+    ClosedRecipientV3 {
+        schema_version: u32,
+        request: crate::authority_bridge::durable_review_ipc_v3::ClosedRecipientCommandV3,
+    },
     RequestPairing {
         schema_version: u32,
         application_label: String,
@@ -558,12 +577,20 @@ impl AppRequest {
             }
             #[cfg(feature = "durable-proposal")]
             Self::RequestDurableDeliveryHistoryV3 { request } => {
-                if !scope.history_read { return Err(Error::Authentication); }
+                if !scope.history_read {
+                    return Err(Error::Authentication);
+                }
                 request.validate().map_err(|_| Error::InvalidData)?;
             }
             #[cfg(feature = "durable-proposal")]
             Self::PrepareDurableRecipientV3 { request } => {
-                if !scope.history_read || !scope.preconstruction_export || request.fixed.agreement_id != scope.agreement_id || request.fixed.manifest_digest != scope.manifest_digest { return Err(Error::Authentication); }
+                if !scope.history_read
+                    || !scope.preconstruction_export
+                    || request.fixed.agreement_id != scope.agreement_id
+                    || request.fixed.manifest_digest != scope.manifest_digest
+                {
+                    return Err(Error::Authentication);
+                }
                 request.validate().map_err(|_| Error::InvalidData)?;
             }
             #[cfg(feature = "durable-proposal")]
@@ -849,6 +876,10 @@ pub(crate) struct PendingPairing {
     created: Instant,
 }
 impl PendingPairing {
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    pub(crate) fn original_deadline(&self) -> Instant {
+        self.created + Duration::from_secs(120)
+    }
     #[cfg(feature = "pending-birth-owner-signing")]
     pub(crate) fn same_live_peer(&self, peer: &AuthenticatedPeer) -> Result<()> {
         self.check_current()?;
@@ -1546,8 +1577,7 @@ fn issue_pairing_grant(
     generation: u64,
     ceiling: Option<Instant>,
 ) -> Result<(String, Zeroizing<[u8; 32]>, Grant)> {
-    let secret = Zeroizing::new(crate::vault::random::<32>()?);
-    let id = hex::encode(crate::vault::random::<32>()?);
+    let (id, secret) = fresh_pairing_secret()?;
     let channel_digest = pending.review_digest(generation)?;
     let grant = Grant {
         native_origin: authority.binding(),
@@ -1619,20 +1649,48 @@ fn serve(
                     #[cfg(feature = "synthetic-born-joined-qualification")]
                     let _scoped_admission = scoped_v3.begin_admission()?;
                     match &mut envelope {
-                        #[cfg(all(feature="durable-proposal",feature="pending-birth-owner-signing",feature="native-ui"))]
-                        Envelope::FinancialResultV1{schema_version,request}=>{
-                            if *schema_version!=1||!matches!(mode,IpcMode::Ordinary){return Err(Error::Authentication);}
-                            request.validate().map_err(|_|Error::InvalidData)?;
+                        #[cfg(all(
+                            feature = "durable-proposal",
+                            feature = "pending-birth-owner-signing",
+                            feature = "native-ui"
+                        ))]
+                        Envelope::FinancialResultV1 {
+                            schema_version,
+                            request,
+                        } => {
+                            if *schema_version != 1 || !matches!(mode, IpcMode::Ordinary) {
+                                return Err(Error::Authentication);
+                            }
+                            request.validate().map_err(|_| Error::InvalidData)?;
                             peer.check_alive()?;
-                            let actual=PeerProcess::observe(&stream)?;peer.same_live_process(&actual)?;
-                            sender.try_send(LocalEvent::FinancialResultV1{peer,stream:stream.try_clone()?,request:request.clone()}).map_err(|_|Error::Unavailable)?;
+                            let actual = PeerProcess::observe(&stream)?;
+                            peer.same_live_process(&actual)?;
+                            sender
+                                .try_send(LocalEvent::FinancialResultV1 {
+                                    peer,
+                                    stream: stream.try_clone()?,
+                                    request: request.clone(),
+                                })
+                                .map_err(|_| Error::Unavailable)?;
                         }
 
                         #[cfg(feature = "durable-proposal")]
-                        Envelope::ClosedRecipientV3 {schema_version, request} => {
-                            if *schema_version != 3 || !matches!(mode, IpcMode::Ordinary) { return Err(Error::Authentication); }
-                            let admitted = durable_receive_v3::AuthenticatedDurableReceiveRequestV3::admitted(stream.try_clone()?,peer,request.clone())?;
-                            sender.try_send(LocalEvent::DurableReceiveV3(admitted)).map_err(|_| Error::Unavailable)?;
+                        Envelope::ClosedRecipientV3 {
+                            schema_version,
+                            request,
+                        } => {
+                            if *schema_version != 3 || !matches!(mode, IpcMode::Ordinary) {
+                                return Err(Error::Authentication);
+                            }
+                            let admitted =
+                                durable_receive_v3::AuthenticatedDurableReceiveRequestV3::admitted(
+                                    stream.try_clone()?,
+                                    peer,
+                                    request.clone(),
+                                )?;
+                            sender
+                                .try_send(LocalEvent::DurableReceiveV3(admitted))
+                                .map_err(|_| Error::Unavailable)?;
                         }
                         Envelope::RequestPairing {
                             schema_version,
@@ -2147,9 +2205,7 @@ fn authenticate_grant(
     token: &str,
 ) -> Result<AuthenticatedPeer> {
     valid_hash(id)?;
-    valid_hash(token)?;
-    let token = Zeroizing::new(hex::decode(token).map_err(|_| Error::Authentication)?);
-    let digest: [u8; 32] = Sha256::digest(token.as_slice()).into();
+    let digest = pairing_token_digest(token)?;
     let grants = grants.lock().map_err(|_| Error::Authentication)?;
     let grant = grants.get(id).ok_or(Error::Authentication)?;
     grant.peer.same_live_process(&observed)?;
@@ -2171,6 +2227,19 @@ fn authenticate_grant(
     };
     peer.check_current()?;
     Ok(peer)
+}
+/// Pure fresh token material. Authority and registry admission remain in each
+/// closed nominal issuer; this function cannot approve a peer or a purpose.
+fn fresh_pairing_secret() -> Result<(String, Zeroizing<[u8; 32]>)> {
+    let secret = Zeroizing::new(crate::vault::random::<32>()?);
+    let id = hex::encode(crate::vault::random::<32>()?);
+    Ok((id, secret))
+}
+/// Pure wire-token validation shared by both disjoint grant registries.
+fn pairing_token_digest(token: &str) -> Result<[u8; 32]> {
+    valid_hash(token)?;
+    let token = Zeroizing::new(hex::decode(token).map_err(|_| Error::Authentication)?);
+    Ok(Sha256::digest(token.as_slice()).into())
 }
 fn valid_hash(value: &str) -> Result<()> {
     if value.len() != 64
@@ -2217,11 +2286,9 @@ mod tests {
         drop(held);
         worker.join().unwrap();
         assert!(immediate);
-        assert!(
-            revocation
-                .admission_closed
-                .load(std::sync::atomic::Ordering::Acquire)
-        );
+        assert!(revocation
+            .admission_closed
+            .load(std::sync::atomic::Ordering::Acquire));
         revocation.close();
     }
     use super::*;
@@ -2627,13 +2694,11 @@ mod transport_complete_host_routing_v5_tests {
             nested["request"]["transfer_dialect"] = "v5_bounded_transfer_v1".into();
             assert!(serde_json::from_value::<AppRequest>(nested).is_err());
         }
-        assert!(
-            serde_json::from_value::<AppRequest>(serde_json::json!({
-                "operation": "status",
-                "transfer_dialect": "v5_bounded_transfer_v1"
-            }))
-            .is_err()
-        );
+        assert!(serde_json::from_value::<AppRequest>(serde_json::json!({
+            "operation": "status",
+            "transfer_dialect": "v5_bounded_transfer_v1"
+        }))
+        .is_err());
         for operation in [
             "request_host_recovery_continuity_v3",
             "request_host_recovery_publication_v3",
@@ -2733,10 +2798,9 @@ mod born_host_scope_tests {
         let mode = IpcMode::QuarantinedV5 {
             account_id: "synthetic-account".into(),
         };
-        assert!(
-            mode.validate_authenticated_request(&dispatch, &scope)
-                .is_err()
-        );
+        assert!(mode
+            .validate_authenticated_request(&dispatch, &scope)
+            .is_err());
     }
 }
 

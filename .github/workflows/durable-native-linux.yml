@@ -12,7 +12,7 @@ jobs:
   synthetic-only:
     if: github.repository == 'stanleykosi/pactloom' && github.ref == 'refs/heads/qualification/durable-proposal-v1' && github.event_name == 'push'
     runs-on: ubuntu-24.04
-    timeout-minutes: 150
+    timeout-minutes: 210
     steps:
       - name: Fetch exact public event commit without credentials
         shell: bash
@@ -36,11 +36,11 @@ jobs:
         run: |
           set -euo pipefail
           mode="$(cat scripts/qualification-gate-mode)"
-          [[ "$mode" == origin || "$mode" == full || "$mode" == financial || "$mode" == bootstrap || "$mode" == ui ]]
+          [[ "$mode" == origin || "$mode" == full || "$mode" == financial || "$mode" == bootstrap || "$mode" == ui || "$mode" == financial-ui ]]
           [[ "$(wc -l < scripts/qualification-gate-mode)" -eq 1 ]]
           printf 'gate=%s\n' "$mode" >> "$GITHUB_OUTPUT"
       - name: Minimal real production origin integration (not full qualification)
-        if: steps.mode.outputs.gate != 'bootstrap' && steps.mode.outputs.gate != 'ui'
+        if: steps.mode.outputs.gate != 'bootstrap' && steps.mode.outputs.gate != 'ui' && steps.mode.outputs.gate != 'financial-ui'
         shell: bash
         working-directory: source
         run: bash scripts/ci-origin-integration-linux.sh
@@ -119,3 +119,20 @@ jobs:
         shell: bash
         run: |
           echo 'Historical CI70 seven bootstrap reap/lifetime prerequisites were reused only after exact source/Cargo/script closure and original job checks. They were not rerun on this image. The new foundation and isolated actual UI gate passed. CI70 remains failed at image installation. The eight packet/credential fault results are historical individual CI69 evidence, not rerun or current-image qualification; CI69 remains failed. One unfunded synthetic fixture was reused for cancel, blur/refocus and at most one authenticated synthetic journal append. Historical CI64 financial evidence is unchanged, not revalidated. No public-chain settlement, deployment, funded wallet or full-product acceptance is claimed.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Fresh isolated two-signer financial UI (external pre-V3 native Witness)
+        if: steps.mode.outputs.gate == 'financial-ui'
+        timeout-minutes: 200
+        shell: bash
+        working-directory: source
+        run: bash scripts/ci-financial-linux.sh
+      - name: Verify financial containers, temporary images and build cache removed
+        if: always() && steps.mode.outputs.gate == 'financial-ui'
+        timeout-minutes: 5
+        shell: bash
+        working-directory: source
+        run: python3 -I -B scripts/ci-financial-supervisor.py cleanup
+      - name: Distinct financial profile evidence boundary
+        if: success() && steps.mode.outputs.gate == 'financial-ui'
+        shell: bash
+        run: |
+          echo 'Fresh exact-source synthetic two-signer financial UI passed the external-pre-V3-native-Witness profile, including seven integrated financial Witness services, six retained-inert Witness roots and actual owned reaps. Early history, admission and audit used the actual external native Witness operator, not thirteen integrated service purposes. Both signing retirements, CompletedPair, separate Returns, normal close and container/image/cache cleanup were verified. No dispatch, public-chain settlement, deployment or full-product acceptance is claimed. Existing narrow CI evidence was not rerun or upgraded.' >> "$GITHUB_STEP_SUMMARY"

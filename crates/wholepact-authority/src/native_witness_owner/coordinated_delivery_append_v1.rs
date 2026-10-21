@@ -377,6 +377,3 @@ mod tests {
         assert!(matches!(outcome, OutcomeV1::KnownNoEffect(AuthorityError::Expired)));
     }
 }
-
-#[cfg(wholepact_delivery_ci)]
-pub use presentation::diagnose_delivery_review_inputs_for_ci;

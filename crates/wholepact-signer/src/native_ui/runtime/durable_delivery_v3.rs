@@ -1,8 +1,14 @@
 //! Closed B1 custody: setup is consumed before READ120; transfer and admission
 //! have separate one-use owners, and no OpenAccount survives this transition.
 use super::*;
+use crate::native_ui::durable_proposal_v1::admission_scope_data_v1 as exact_scope_data_v1;
 #[path = "durable_delivery_role_state_v3.rs"]
 mod role_state;
+#[cfg(feature = "coordinated-signer-continue")]
+#[path = "coordinated_financial_handoff_v1.rs"]
+mod coordinated_financial_handoff_v1;
+#[cfg(feature = "coordinated-signer-continue")]
+pub(super) use coordinated_financial_handoff_v1::{DetachedFinancialRoleV1, PreparedFinancialRoleHandoffV1};
 use role_state::{ActiveV3, OutcomeV3, PreparedAdmissionV3, SetupV3};
 pub(crate) use role_state::VerifiedImportV3;
 pub(super) use role_state::DurableDeliveryRuntimeV3;
@@ -81,7 +87,7 @@ impl NativeRuntime {
             let material_deadline=Instant::now()+Duration::from_millis(ceiling-now);
             let intent=RecipientIntentV3 {version:3,request:setup_request.request.clone(),fixed:setup_request.fixed.clone(),payload_digest:setup_request.payload_digest.clone(),payload_bytes:setup_request.payload_bytes,delivery:setup_request.delivery.clone(),material_scopes:setup_request.material_scopes.clone(),account_id:peer.scope.account_id.clone(),participant_id:peer.scope.participant_id.clone(),agreement_id:peer.scope.agreement_id.clone(),manifest_digest:peer.scope.manifest_digest.clone(),provider_enrollment_reference:setup_request.provider_enrollment_reference.clone(),signer_process_instance:setup_request.signer_process_instance.clone(),authorized_host_process_instance:original_peer.instance().into(),source_identity_digest:source.identity().into(),source_generation:generation,read_session_digest:"00".repeat(32),receive_decision_digest:"00".repeat(32),original_enrollment_ref:enrollment.reference().into(),original_manifest_ref:manifest.reference().into()};
             intent.validate().map_err(|_|Error::ReviewMismatch)?;
-            Ok(OutcomeV3::Setup(SetupV3 {source,witness:owner,original:Some(original),enrollment,manifest,intent,peer:Some(original_peer),material_deadline}))
+            Ok(OutcomeV3::Setup(SetupV3 {source,witness:owner,original:Some(original),enrollment,manifest,intent,peer:Some(original_peer),material_deadline,original_material_deadline:Some(material_deadline)}))
         })?;
         self.closed_delivery_v3=Some(closed);
         Ok(())
@@ -140,19 +146,14 @@ fn exact_scope(imported:&VerifiedImportV3,history:&ReconciledAuthorityHistory)->
     let fixed=economics.verified();
     let proposal=economics.proposal();
     let account=entry.account()?.account_id()?;
-    let owner=proposal.manifest().participants.iter().find(|p|p.account_id==account).ok_or(Error::ReviewMismatch)?;
+    let _owner=proposal.manifest().participants.iter().find(|p|p.account_id==account).ok_or(Error::ReviewMismatch)?;
     let recipient_policy_scope_digest=authority_bridge::validate_prepared_delivery_policy_v3(entry.record()?,entry.original_policy()?,entry.account()?,&active.enrollment,&active.manifest,fixed,economics.input_actions(),economics.output_actions()).map_err(|_|Error::ReviewMismatch)?;
-    let fixed_binding:DurableFixedCandidateBindingV1=wholepact_core::parse_typed_json(&serde_json::to_vec(fixed.identity()).map_err(|_|Error::InvalidData)?).map_err(|_|Error::InvalidData)?;
-    let inputs=economics.input_actions().iter().filter(|i|i.account_id==account).map(|map| {
-        let input=fixed.private_review_policy().inputs.iter().find(|i|i.action_index==map.action_index).ok_or(Error::ReviewMismatch)?;
-        Ok(wholepact_authority::InputReservation {input_id:map.input_id.clone(),nullifier:hex::encode(input.nullifier),action_index:map.action_index as u64,value_zatoshis:input.value_zatoshis})
-    }).collect::<Result<Vec<_>>>()?;
-    let terms=DurablePaymentAdmissionTermsV1 {version:1,identity:old.terms.identity.clone(),original_policy_digest:old.terms.original_policy_digest.clone(),original_genesis_digest:entry.record()?.account_record.genesis.digest().map_err(|_|Error::ReviewMismatch)?,original_birth_commit_digest:old.terms.birth_commit_digest.clone(),original_roster_extension_digest:extension.digest().map_err(|_|Error::ReviewMismatch)?,original_enrollment_ref:old.enrollment_ref.clone(),writer_certificate_digest:old.terms.signer.writer_certificate_digest.clone(),fixed:fixed_binding.clone(),authorization_id:authority_bridge::durable_proposal_v1::manual_authorization_id(fixed.identity(),&account).map_err(|_|Error::ReviewMismatch)?,recipient_policy_scope_digest,concrete_recipient_scope_digest:wholepact_core::manual_construction::construction_recipient_scope_digest(proposal).map_err(|_|Error::ReviewMismatch)?,inputs:inputs.clone(),maximum_debit_zatoshis:proposal.accounting().participant_net_debits.get(&owner.participant_id).ok_or(Error::ReviewMismatch)?.as_zatoshis(),fee_share_zatoshis:owner.fee_share.as_zatoshis(),transaction_fee_zatoshis:proposal.manifest().transaction_fee.as_zatoshis(),valid_from_ms:active.intent.delivery.valid_from_ms,valid_until_ms:active.intent.delivery.valid_until_ms};
-    terms.validate().map_err(|_|Error::ReviewMismatch)?;
+    let (fixed_binding,inputs)=exact_scope_data_v1::fixed_inputs(economics,&account)?;
+    let genesis_digest=entry.record()?.account_record.genesis.digest().map_err(|_|Error::ReviewMismatch)?;
+    let terms=exact_scope_data_v1::terms(&extension,economics,&account,genesis_digest,recipient_policy_scope_digest,&fixed_binding,&inputs,&active.intent.delivery)?;
     let witness=entry.witness()?.clone();
     if history.disclosure()!=&witness || history.account_policy().policy_digest().map_err(|_|Error::ReviewMismatch)?!=entry.record()?.account_record.terms.original_policy_digest {return Err(Error::Authentication);}
-    let scope=DurableDeliveryScopeV2 {version:2,accepted_manifest_ref:active.manifest.reference().into(),original_writer_epoch:old.terms.signer.writer_epoch,original_ceilings:DurableDeliveryOriginalCeilingsV2 {payment_valid_from_ms:terms.valid_from_ms,payment_valid_until_ms:terms.valid_until_ms,enrollment_expires_at_ms:old.terms.scope.expires_at_ms,policy_expires_at_ms:history.account_policy().policy_expires_at_ms,material_scopes:active.intent.material_scopes.clone()},authorization:terms,delivery:active.intent.delivery.clone(),witness:witness.clone(),disclosure_rule:DurableDeliveryDisclosureRuleV2::WholeTransactionAndConnectionMetadataToProviderCommitmentsAndLinkageToWitness};
-    scope.matches_original_claims(history.account_policy(),&extension,proposal,&fixed_binding,active.manifest.reference(),old.terms.signer.writer_epoch,&witness,&inputs,&active.intent.material_scopes).map_err(|_|Error::ReviewMismatch)?;
+    let scope=exact_scope_data_v1::scope(terms,&extension,history,economics,&fixed_binding,&inputs,active.manifest.reference(),&witness,&active.intent.delivery,&active.intent.material_scopes)?;
     active.check()?; Ok(scope)
 }
 fn prepare_admission(imported:Arc<VerifiedImportV3>)->Result<PreparedAdmissionV3> {
@@ -410,7 +411,7 @@ impl NativeRuntime {
         let witness=active.witness.into_history_preparation();
         let review=PreparedDeliveryReadReviewV3::enter(PendingBirthEntry {focus_epoch:epoch,parent_channel:self.parent_channel.clone()},source.identity(),&digest,material_deadline)?;
         self.pending=Some(PendingDecision {review:ExactNativeReview::stage(review.native(),&digest,format!("READ EXACT ORIGINAL ADMISSION HISTORY\n\nOperation: {}\nRetained intent: {}\n\nA fresh read-only session will authenticate complete history from the original Witness and compare this exact immutable operation. It will not resend admission, change the request/head, or acquire any financial permission. The prior action and transfer are closed.",awaiting.retained.request().operation_id,awaiting.retained.history_digest()?),epoch)?,operation:Operation::ClosedDeliveryV3(ClosedDeliveryDecisionV3::History)});
-        closed.setup=Some(SetupV3 {source,witness,original:active.original,enrollment:active.enrollment,manifest:active.manifest,intent:active.intent,peer:active.peer,material_deadline});
+        closed.setup=Some(SetupV3 {source,witness,original:active.original,enrollment:active.enrollment,manifest:active.manifest,intent:active.intent,peer:active.peer,material_deadline,original_material_deadline:active.original_material_deadline});
         closed.read_review=Some(review);closed.phase=DurableDeliveryPhaseV3::HistoryReview;
         Ok(())
     }
@@ -447,7 +448,7 @@ impl NativeRuntime {
             let ceiling=prior.material_scopes.iter().map(|s|s.valid_until_unix_seconds.saturating_mul(1000)).min().ok_or(Error::Locked)?;
             if now>=ceiling {return Err(Error::Locked);}
             source.check_custody()?;
-            Ok(OutcomeV3::HistorySetup(SetupV3 {source,witness,original:None,enrollment,manifest,intent:prior,peer:None,material_deadline:Instant::now()+Duration::from_millis(ceiling-now)}))
+            Ok(OutcomeV3::HistorySetup(SetupV3 {source,witness,original:None,enrollment,manifest,intent:prior,peer:None,material_deadline:Instant::now()+Duration::from_millis(ceiling-now),original_material_deadline:None}))
         })?;
         self.closed_delivery_v3=Some(closed);
         Ok(())
@@ -605,3 +606,5 @@ impl NativeRuntime {
         terms.validate().map_err(|_|Error::ReviewMismatch)?;Ok(terms)
     }
 }
+
+pub(super) use role_state::require_exact_original_admission;

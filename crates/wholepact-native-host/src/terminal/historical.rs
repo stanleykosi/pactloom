@@ -63,9 +63,31 @@ impl HistoricalOutput {
     /// restrictions at each write admission. The check must not relock Terminal.
     /// Bytes already accepted by a blocking OS write cannot be recalled.
     pub(crate) fn json_checked<T: serde::Serialize>(
-        &self,
-        value: &T,
-        mut check: impl FnMut() -> Result<()>,
+        &self, value: &T, check: impl FnMut() -> Result<()>,
+    ) -> Result<()> {
+        // Existing legacy callers have no typed original output ceiling.
+        if coordinated_restriction_required() { return Err(Error::Permission); }
+        self.json_kernel(value, check, None, None, None)
+    }
+    pub(crate) fn json_checked_under<T: serde::Serialize>(
+        &self, value: &T, check: impl FnMut() -> Result<()>,
+        approval: &HistoricalApproval, original_wall_bounds: (u64, u64),
+    ) -> Result<()> {
+        self.json_kernel(value, check, Some(approval.deadline()), Some(original_wall_bounds), None)
+    }
+    /// Actual original Read plus immutable millisecond source bounds. The DTO
+    /// is data only; this path is called before its genuine owner is dropped.
+    pub(crate) fn json_checked_original<T: serde::Serialize>(
+        &self, value: &T, check: impl FnMut() -> Result<()>,
+        approval: &HistoricalApproval, original: &OriginalPromptBoundsV1,
+    ) -> Result<()> {
+        let bounds = original.narrow_deadline(approval.deadline());
+        self.json_kernel(value, check, None, None, Some(&bounds))
+    }
+    fn json_kernel<T: serde::Serialize>(
+        &self, value: &T, mut check: impl FnMut() -> Result<()>,
+        deadline: Option<Instant>, wall_bounds: Option<(u64, u64)>,
+        original: Option<&OriginalPromptBoundsV1>,
     ) -> Result<()> {
         let bytes = Zeroizing::new(serde_json::to_string(value)?);
         if bytes.len() > wholepact_storage_security::bundle::recovery::evidence::history::MAX_HISTORICAL_METADATA_BYTES {
@@ -78,10 +100,16 @@ impl HistoricalOutput {
         let mut file = self.0.lock().map_err(|_| Error::Terminal)?;
         check()?;
         foreground(&file)?;
-        file.write_all(rendered.as_bytes())?;
+        match original {
+            Some(bounds) => write_prompt_current(&mut file, rendered.as_bytes(), Some(bounds), None)?,
+            None => write_current_until(&mut file, rendered.as_bytes(), deadline, wall_bounds)?,
+        }
         check()?;
         foreground(&file)?;
-        file.write_all(b"\n")?;
+        match original {
+            Some(bounds) => write_prompt_current(&mut file, b"\n", Some(bounds), None)?,
+            None => write_current_until(&mut file, b"\n", deadline, wall_bounds)?,
+        }
         check()?;
         foreground(&file)?;
         file.flush()?;
@@ -191,15 +219,31 @@ impl Terminal {
         before_disclosure: impl FnOnce() -> Result<()>,
         after_response: impl FnOnce() -> Result<()>,
     ) -> Result<HistoricalApproval> {
+        self.approve_durable_delivery_kernel(prior, detail, before_disclosure, after_response, None)
+    }
+    pub(crate) fn approve_durable_delivery_original_v3(
+        &self, prior: &HistoricalApproval, detail: &str,
+        before_disclosure: impl FnOnce() -> Result<()>, after_response: impl FnOnce() -> Result<()>,
+        bounds: Option<&OriginalPromptBoundsV1>,
+    ) -> Result<HistoricalApproval> {
+        self.approve_durable_delivery_kernel(prior, detail, before_disclosure, after_response, bounds)
+    }
+    fn approve_durable_delivery_kernel(
+        &self, prior: &HistoricalApproval, detail: &str,
+        before_disclosure: impl FnOnce() -> Result<()>, after_response: impl FnOnce() -> Result<()>,
+        bounds: Option<&OriginalPromptBoundsV1>,
+    ) -> Result<HistoricalApproval> {
+        let bounds = bounds.map(|b| b.narrow_deadline(prior.deadline()));
+        if coordinated_restriction_required() { bounds.as_ref().ok_or(Error::Permission)?.check()?; }
         if !Arc::ptr_eq(&self.0, &prior.terminal.0) {
             return Err(Error::Permission);
         }
         bound_durable_delivery_review_v2(detail)?;
         let (deadline, foreground_file) = durable_delivery_response_v2(
             || {
-                self.confirm_checked(detail, || {
+                self.confirm_original_optional(detail, || {
                     durable_delivery_disclosure_v2(|| prior.check(), before_disclosure)
-                })
+                }, bounds.as_ref(), None)
             },
             || {
                 let file = self.0.lock().map_err(|_| Error::Terminal)?;
@@ -229,6 +273,8 @@ impl Terminal {
         before_disclosure: impl FnOnce() -> Result<()>,
         after_response: impl FnOnce() -> Result<()>,
     ) -> Result<HistoricalApproval> {
+        // No actual cached source bounds are supplied by this unrelated path.
+        if coordinated_restriction_required() { return Err(Error::Permission); }
         if !Arc::ptr_eq(&self.0, &prior.terminal.0) {
             return Err(Error::Permission);
         }
@@ -271,6 +317,8 @@ impl Terminal {
         prior: &HistoricalApproval,
         detail: &str,
     ) -> Result<HistoricalApproval> {
+        // No actual cached source bounds are supplied by this unrelated path.
+        if coordinated_restriction_required() { return Err(Error::Permission); }
         if !Arc::ptr_eq(&self.0, &prior.terminal.0) {
             return Err(Error::Permission);
         }
@@ -294,6 +342,8 @@ impl Terminal {
         manifest_digest: &str,
         detail: &str,
     ) -> Result<PublicationApproval> {
+        // No actual cached source bounds are supplied by this unrelated path.
+        if coordinated_restriction_required() { return Err(Error::Permission); }
         if !Arc::ptr_eq(&self.0, &prior.terminal.0) {
             return Err(Error::Permission);
         }
@@ -313,6 +363,18 @@ impl Terminal {
             deadline: prior
                 .deadline
                 .min(Instant::now() + Duration::from_secs(300)),
+        })
+    }
+    pub(crate) fn approve_historical_original(
+        &self, detail: &str, bounds: Option<&OriginalPromptBoundsV1>,
+    ) -> Result<HistoricalApproval> {
+        if !coordinated_restriction_required() { return self.approve_historical(detail); }
+        self.confirm_original_optional(detail, || Ok(()), bounds, None)?;
+        let file = self.0.lock().map_err(|_| Error::Terminal)?;
+        foreground(&file)?;
+        Ok(HistoricalApproval {
+            terminal: self.clone(), foreground_file: file.try_clone()?,
+            deadline: Instant::now() + Duration::from_secs(120), spent: AtomicBool::new(false),
         })
     }
     pub(crate) fn approve_historical(&self, detail: &str) -> Result<HistoricalApproval> {
@@ -1004,6 +1066,13 @@ pub(crate) struct FinancialIntakeSetupApprovalV1 {
 }
 #[cfg(all(feature = "durable-proposal", target_os = "linux"))]
 impl FinancialIntakeSetupApprovalV1 {
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    pub(crate) fn original_restriction_bounds(&self, source: (u64, u64)) -> Result<OriginalPromptBoundsV1> {
+        self.check()?;
+        OriginalPromptBoundsV1::new(self.deadline, source)?.narrow_until(
+            self.wall_until.checked_mul(1000).ok_or(Error::Permission)?,
+        )
+    }
     pub(crate) fn require_scope(
         &self,
         scope: &wholepact_protocol::authorization::retention::SignedRetentionScope,
@@ -1027,7 +1096,19 @@ impl Terminal {
         scope: &wholepact_protocol::authorization::retention::SignedRetentionScope,
         original_until: u64,
     ) -> Result<FinancialIntakeSetupApprovalV1> {
-        self.confirm(&format!("Prepare this ONE EXACT local signature intake while the Signer independently reviews returning its saved result. Permit only original-source verification and retention matching this exact scope. No signing, reservation, union, extraction or dispatch is allowed. Setup expires after at most 15 minutes and never after the original source ceilings. No usable signature bytes may arrive without the Signer's fresh exact Return decision.\n{}", serde_json::to_string_pretty(scope)?))?;
+        self.approve_financial_intake_setup_kernel(scope, original_until, None)
+    }
+    pub(crate) fn approve_financial_intake_setup_original_v1(
+        &self, scope: &wholepact_protocol::authorization::retention::SignedRetentionScope,
+        original_until: u64, bounds: Option<&OriginalPromptBoundsV1>,
+    ) -> Result<FinancialIntakeSetupApprovalV1> {
+        self.approve_financial_intake_setup_kernel(scope, original_until, bounds)
+    }
+    fn approve_financial_intake_setup_kernel(
+        &self, scope: &wholepact_protocol::authorization::retention::SignedRetentionScope,
+        original_until: u64, bounds: Option<&OriginalPromptBoundsV1>,
+    ) -> Result<FinancialIntakeSetupApprovalV1> {
+        self.confirm_original_optional(&format!("Prepare this ONE EXACT local signature intake while the Signer independently reviews returning its saved result. Permit only original-source verification and retention matching this exact scope. No signing, reservation, union, extraction or dispatch is allowed. Setup expires after at most 15 minutes and never after the original source ceilings. No usable signature bytes may arrive without the Signer's fresh exact Return decision.\n{}", serde_json::to_string_pretty(scope)?), || Ok(()), bounds, None)?;
         let now = crate::now()?;
         let wall_until = original_until.min(now.checked_add(900).ok_or(Error::Permission)?);
         let remaining = wall_until

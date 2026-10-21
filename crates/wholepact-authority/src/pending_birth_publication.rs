@@ -85,20 +85,44 @@ impl AuthorityJournal {
         policy: &AccountPolicy,
         expected: &PendingBirthCommitRecord,
     ) -> Result<Self> {
-        owner.check_current()?;
+        Self::open_born_history_only_guarded(
+            owner,
+            path,
+            key,
+            policy,
+            expected,
+            crate::native_witness_owner::financial_setup_guard_v1::FinancialSetupGuardV1::legacy(),
+        )
+    }
+    pub(crate) fn open_born_history_only_guarded(
+        owner: std::sync::Arc<crate::witness_locator::BornJournalOwner>,
+        path: &Path,
+        key: &DatabaseKey,
+        policy: &AccountPolicy,
+        expected: &PendingBirthCommitRecord,
+        guard: crate::native_witness_owner::financial_setup_guard_v1::FinancialSetupGuardV1<'_>,
+    ) -> Result<Self> {
+        let read_guard = crate::journal::ReadGuardV1::coordinated(guard);
+        owner.check_setup_current(guard, false)?;
         // Exact namespace owner already holds writer/replacement exclusion.
+        guard.check()?;
         let snapshot = wholepact_storage_security::open_encrypted_read_snapshot(path, key)?;
-        let (stamp, record) = namespace_account_stamp(snapshot.connection(), policy)?;
+        guard.check()?;
+        let (stamp, record) =
+            namespace_account_stamp_guarded(snapshot.connection(), policy, read_guard)?;
         if record != *expected || stamp.quarantined {
             return Err(AuthorityError::CorruptHistory);
         }
         drop(snapshot);
+        guard.check()?;
         let connection = wholepact_storage_security::open_encrypted_quiescent(path, key)?;
-        let (actual, record) = namespace_account_stamp(connection.connection(), policy)?;
+        guard.check()?;
+        let (actual, record) =
+            namespace_account_stamp_guarded(connection.connection(), policy, read_guard)?;
         if record != *expected || actual != stamp || actual.quarantined {
             return Err(AuthorityError::CorruptHistory);
         }
-        owner.check_current()?;
+        owner.check_setup_current(guard, false)?;
         Ok(Self {
             connection: Mutex::new(connection),
             resolution_node: Mutex::new(None),
@@ -123,11 +147,61 @@ impl AuthorityJournal {
         }
         drop(snapshot);
         let connection = wholepact_storage_security::open_encrypted_quiescent(path, key)?;
-        let (actual, record) = namespace_financial_account_stamp_v1(connection.connection(), policy)?;
+        let (actual, record) =
+            namespace_financial_account_stamp_v1(connection.connection(), policy)?;
         if record != *expected || actual != stamp || actual.quarantined {
             return Err(AuthorityError::CorruptHistory);
         }
         owner.check_current()?;
+        Ok(Self {
+            connection: Mutex::new(connection),
+            resolution_node: Mutex::new(None),
+            born_owner: Some(owner),
+            born_manual_scope: None,
+        })
+    }
+
+    /// Same maintained original financial source audit with a live setup restriction.
+    #[cfg(any(
+        feature = "coordinated-witness-financial-signing",
+        feature = "coordinated-witness-completed-pair"
+    ))]
+    pub(crate) fn open_born_financial_history_only_guarded_v1(
+        owner: std::sync::Arc<crate::witness_locator::BornJournalOwner>,
+        path: &Path,
+        key: &DatabaseKey,
+        policy: &AccountPolicy,
+        expected: &PendingBirthCommitRecord,
+        guard: crate::native_witness_owner::financial_setup_guard_v1::FinancialSetupGuardV1<'_>,
+    ) -> Result<Self> {
+        let read_guard = crate::journal::ReadGuardV1::coordinated(guard);
+        owner.check_setup_current(guard, false)?;
+        // Exact namespace owner already holds writer/replacement exclusion.
+        guard.check()?;
+        let snapshot = wholepact_storage_security::open_encrypted_read_snapshot(path, key)?;
+        guard.check()?;
+        let (stamp, record) = namespace_financial_account_stamp_guarded_v1(
+            snapshot.connection(),
+            policy,
+            read_guard,
+        )?;
+        if record != *expected || stamp.quarantined {
+            return Err(AuthorityError::CorruptHistory);
+        }
+        guard.check()?;
+        drop(snapshot);
+        guard.check()?;
+        let connection = wholepact_storage_security::open_encrypted_quiescent(path, key)?;
+        guard.check()?;
+        let (actual, record) = namespace_financial_account_stamp_guarded_v1(
+            connection.connection(),
+            policy,
+            read_guard,
+        )?;
+        if record != *expected || actual != stamp || actual.quarantined {
+            return Err(AuthorityError::CorruptHistory);
+        }
+        owner.check_setup_current(guard, false)?;
         Ok(Self {
             connection: Mutex::new(connection),
             resolution_node: Mutex::new(None),

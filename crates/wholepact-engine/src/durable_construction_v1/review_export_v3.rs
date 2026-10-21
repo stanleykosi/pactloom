@@ -40,10 +40,13 @@ pub(crate) fn material_scopes(roster: &Roster) -> Result<Vec<DurableDeliveryMate
     }).collect()
 }
 pub(crate) fn validate_capacity(roster: &Roster) -> Result<()> {
-    if roster.review_exports.len().checked_add(roster.review_exports_v3.len())
-        .is_none_or(|n| n > MAX_EXPORT_INTENTS)
+    if roster.export_count() > MAX_EXPORT_INTENTS
         || roster.review_exports.keys().any(|id| roster.review_exports_v3.contains_key(id))
     { return Err(damaged()); }
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    if roster.coordinated_review_exports_v1.keys().any(|id| roster.review_exports.contains_key(id) || roster.review_exports_v3.contains_key(id)) {
+        return Err(damaged());
+    }
     Ok(())
 }
 pub(crate) fn validate_recipient(roster: &Roster, candidate: &crate::CandidateView, scope: &DurableReviewExportScopeV3) -> Result<()> {

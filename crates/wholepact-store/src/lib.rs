@@ -26,7 +26,7 @@ mod durable_input_projection_guard_v1;
 mod original_private_revision_v3;
 mod private_workspace_guard_v1;
 pub use original_private_revision_v3::{
-    OriginalPrivateRevisionPinV3, OriginalSourceReadRevisionPinV3,
+    OriginalCommitRestrictionV3, OriginalPrivateRevisionPinV3, OriginalSourceReadRevisionPinV3,
 };
 pub mod private_workspace_origin_v1;
 const MAX_JSON_BYTES: usize = 1_048_576;
@@ -479,7 +479,7 @@ impl Store {
         event_kind: &str,
     ) -> Result<MutationResult> {
         self.commit_record_kernel_v3(
-            context, aggregate_type, id, expected_revision, payload, event_kind, None,
+            context, aggregate_type, id, expected_revision, payload, event_kind, None, None,
         )
         .map(|(result, _)| result)
     }
@@ -492,6 +492,7 @@ impl Store {
         payload: Value,
         event_kind: &str,
         pin: Option<OriginalPrivateRevisionPinV3<'a>>,
+        restriction: Option<&dyn OriginalCommitRestrictionV3>,
     ) -> Result<(MutationResult, Option<OriginalPrivateRevisionPinV3<'a>>)> {
         // Automation lifecycle, budgets and authorization history are owned by
         // the trusted atomic runtime, never by generic client metadata writes.
@@ -660,6 +661,14 @@ impl Store {
         } else {
             None
         };
+        // This callback is restriction-only and cannot re-enter this Store.
+        // Sampling after all blocking/staging work admits only this one commit.
+        if let Some(restriction) = restriction {
+            if let Err(denied) = restriction.check_before_commit() {
+                tx.rollback().map_err(|_| StoreError::RecoveryRequired)?;
+                return Err(denied);
+            }
+        }
         tx.commit()?;
         #[cfg(test)]
         durable_input_projection_guard_v1::run_commit_hook(true);

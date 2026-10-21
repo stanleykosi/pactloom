@@ -241,6 +241,11 @@ impl AuthenticatedFinancialContinuationHistoryV1 {
     pub fn disclosure(&self) -> &WitnessDisclosureDescriptor {
         &self.history.disclosure
     }
+    /// Historical evidence only. Membership does not grant an action, prove a
+    /// current session, or permit replay of a previously committed operation.
+    pub fn contains_operation(&self, operation_id: &str) -> bool {
+        self.history.contains_operation(operation_id)
+    }
     pub fn contains_head(&self, head: &AuthorityHead) -> bool {
         self.history.contains_head(head)
     }
@@ -374,5 +379,16 @@ impl AuthenticatedFinancialContinuationHistoryV1 {
             return Err(AuthorityError::Conflict);
         }
         Ok(found)
+    }
+}
+
+#[cfg(test)]
+mod evidence_api_tests {
+    use super::AuthenticatedFinancialContinuationHistoryV1;
+    #[test]
+    fn operation_membership_is_borrowed_boolean_evidence_only() {
+        // API shape: cannot consume history or construct a grant/session/token.
+        let _: fn(&AuthenticatedFinancialContinuationHistoryV1, &str) -> bool =
+            AuthenticatedFinancialContinuationHistoryV1::contains_operation;
     }
 }

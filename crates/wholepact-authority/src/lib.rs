@@ -161,7 +161,7 @@ pub use protocol::*;
 pub use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 pub use transport::{
     AuthenticatedAutomaticKeyUseAdmission, AuthenticatedDispatchAdmission, AuthenticatedPermit,
-    AuthenticatedWriterSession, AuthorityClient, AuthorityServer, ClientTls, ServerTls,
+    AuthenticatedWriterSession, AuthorityClient, AuthorityServer, AuthorityTransportRestrictionV1, ClientTls, ServerTls,
 };
 
 use serde::{de::DeserializeOwned, Serialize};

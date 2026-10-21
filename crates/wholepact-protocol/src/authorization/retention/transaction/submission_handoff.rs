@@ -345,6 +345,9 @@ impl<'a, A: SubmissionAuthority> SubmissionAuthority for HandoffAuthority<'a, A>
     }
 }
 impl<P: SubmissionPermit> SubmissionPermit for HandoffPermit<'_, P> {
+    fn effect_restriction(&self) -> Option<&dyn wholepact_chain::SubmissionEffectRestriction> {
+        self.inner.effect_restriction()
+    }
     fn expected_attempt_number(&self) -> Option<u32> {
         self.inner.expected_attempt_number()
     }

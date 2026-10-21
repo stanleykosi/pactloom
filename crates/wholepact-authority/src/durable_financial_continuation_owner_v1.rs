@@ -22,6 +22,32 @@ pub(crate) struct NativeFinancialContinuationSourceV1 {
         Option<crate::transport::admission_diagnostics_v1::AdmissionWitnessObserverV1>,
 }
 impl FinancialContinuationProposalV1 {
+    // Crate-private retained facts for the separate nominal coordinated adapter.
+    // No consent, native lease, or effect can be constructed from these values.
+    #[cfg(feature = "coordinated-witness-financial-continuation")]
+    pub(crate) fn coordinated_journal_v1(&self) -> Arc<AuthorityJournal> {
+        self.journal.clone()
+    }
+    #[cfg(feature = "coordinated-witness-financial-continuation")]
+    pub(crate) fn coordinated_expected_v1(&self) -> &OwnerControlRequest {
+        &self.expected
+    }
+    #[cfg(feature = "coordinated-witness-financial-continuation")]
+    pub(crate) fn coordinated_display_v1(&self, setup: &wholepact_financial_coordinator_origin::WitnessFinancialContinuationSetupV1) -> Result<String> {
+        self.coordinated_setup_current_v1(setup)?;
+        serde_json::to_string_pretty(&serde_json::json!({
+            "operation": "Arm ONE exact original financial continuation append",
+            "request": self.expected,
+            "actual_original_witness": self.disclosure,
+            "notice": crate::native_witness_owner::coordinated_financial_continuation_v1::ADMISSION_NOTICE,
+            "limits": "Independent original owner mTLS must submit this identical request. Every later key-use requires its own fresh approval. Original payment, dispatcher, route, expiry and attempt bounds remain fixed. No signature, extraction or transaction dispatch occurs here.",
+        })).map_err(|_| AuthorityError::InvalidBinding)
+    }
+    #[cfg(feature = "coordinated-witness-financial-continuation")]
+    pub(crate) fn coordinated_setup_review_digest_v1(&self, setup: &wholepact_financial_coordinator_origin::WitnessFinancialContinuationSetupV1) -> Result<String> {
+        self.coordinated_setup_current_v1(setup)?;
+        crate::durable_financial_continuation_v1::request_native_review_digest_v1(&self.expected, &self.disclosure)
+    }
     /// Borrow retained request data for synthetic correlation only. This does
     /// not check freshness or provide native approval, a source or a grant.
     #[cfg(feature = "synthetic-qualification")]
@@ -51,6 +77,26 @@ impl FinancialContinuationProposalV1 {
             "actual_original_witness": self.disclosure,
             "notice": "This explicitly approves the exact financial continuation and bounded future dispatch in the displayed original delivery plan. Each key-use operation still requires its own fresh native action. After both signatures, a fresh Host decision may dispatch only the first retained verified transaction, even after signing process death. Original expiry, inputs, recipient, budget, exposure, dispatcher, route and attempt bounds cannot change. An uncertain operation must be reconciled with its exact original request. This is not approval of another transaction or replacement signing session.",
         })).map_err(|_| AuthorityError::InvalidBinding)
+    }
+    #[cfg(feature = "coordinated-witness-financial-continuation")]
+    pub(crate) fn coordinated_setup_current_v1(&self, setup: &wholepact_financial_coordinator_origin::WitnessFinancialContinuationSetupV1) -> Result<()> {
+        let guard = crate::native_witness_owner::financial_setup_guard_v1::FinancialSetupGuardV1::Coordinated(setup);
+        self.coordinated_audit_current_v1(guard)
+    }
+    #[cfg(feature = "coordinated-witness-financial-continuation")]
+    pub(crate) fn coordinated_arm_current_v1(&self, arm: &wholepact_financial_coordinator_origin::WitnessFinancialContinuationArmV1) -> Result<()> {
+        self.coordinated_audit_current_v1(crate::native_witness_owner::financial_setup_guard_v1::FinancialSetupGuardV1::Arm(arm))
+    }
+    #[cfg(feature = "coordinated-witness-financial-continuation")]
+    fn coordinated_audit_current_v1(&self, guard: crate::native_witness_owner::financial_setup_guard_v1::FinancialSetupGuardV1<'_>) -> Result<()> {
+        guard.check()?;
+        self.journal.born_owner.as_ref().ok_or(AuthorityError::Permission)?.check_setup_current(guard, true)?;
+        let c = self.journal.connection.lock().map_err(|_| AuthorityError::Storage)?;
+        guard.check()?;
+        let ledger = crate::journal::load(c.connection())?;
+        guard.check()?;
+        self.validate_locked(&ledger, now_ms()?)?;
+        guard.check()
     }
     pub(crate) fn check_current(&self) -> Result<()> {
         self.journal
@@ -125,6 +171,42 @@ pub(crate) fn prepare_financial_continuation_v1(
     proposal.check_current()?;
     Ok(proposal)
 }
+#[cfg(feature = "coordinated-witness-financial-continuation")]
+pub(crate) fn prepare_coordinated_financial_continuation_v1(input: NamespaceOpenInput, expected: OwnerControlRequest, setup: &wholepact_financial_coordinator_origin::WitnessFinancialContinuationSetupV1) -> Result<FinancialContinuationProposalV1> {
+    if !matches!(
+        expected.control,
+        OwnerControl::AdmitFinancialContinuationV1 { .. }
+    ) {
+        return Err(AuthorityError::Permission);
+    }
+    let input_owner = input.owner_certificate_digest.clone();
+    let guard = crate::native_witness_owner::financial_setup_guard_v1::FinancialSetupGuardV1::Coordinated(setup);
+    guard.check()?;
+    let journal = Arc::new(crate::witness_locator::open_born_history_guarded(input, guard)?);
+    let disclosure = {
+        let c = journal
+            .connection
+            .lock()
+            .map_err(|_| AuthorityError::Storage)?;
+        guard.check()?;
+        let ledger = crate::journal::load(c.connection())?;
+        if input_owner != ledger.policy.owner_certificate_digest {
+            return Err(AuthorityError::Authentication);
+        }
+        guard.check()?;
+        let birth = crate::pending_birth_storage::read(c.connection(), &ledger.policy)?
+            .ok_or(AuthorityError::CorruptHistory)?;
+        birth.request.disclosure
+    };
+    let proposal = FinancialContinuationProposalV1 {
+        journal,
+        expected,
+        disclosure,
+    };
+    proposal.coordinated_setup_current_v1(setup)?;
+    Ok(proposal)
+}
+
 pub(crate) fn arm_financial_continuation_v1(
     decision: NativeFinancialContinuationDecisionV1,
 ) -> Result<NativeFinancialContinuationSourceV1> {
@@ -258,6 +340,127 @@ impl ConfiguredFinancialWitnessV1 {
             admission,
             disclosure,
         })
+    }
+    /// Private original-service selection. The exact retained S request is
+    /// compared with the authenticated original journal; ordinary selectors
+    /// cannot admit, renew or replace its persisted delegation.
+    #[cfg(feature = "coordinated-witness-financial-signing")]
+    pub(crate) fn from_original_coordinated_v1(
+        journal: AuthorityJournal,
+        expected: &OwnerControlRequest,
+        setup: &wholepact_financial_coordinator_origin::WitnessFinancialSigningSetupV1,
+    ) -> Result<Self> {
+        let guard = crate::native_witness_owner::financial_setup_guard_v1::FinancialSetupGuardV1::SigningSetup(setup);
+        guard.check()?;
+        id(&expected.operation_id)?;
+        let owner = journal.born_owner.as_ref().ok_or(AuthorityError::Permission)?;
+        owner.check_setup_current(guard, false)?;
+        let (admission, disclosure) = {
+            let c = journal.connection.lock().map_err(|_| AuthorityError::Storage)?;
+            guard.check()?;
+            let read_guard = crate::journal::ReadGuardV1::coordinated(guard);
+            let ledger = crate::journal::load_financial_continuation_guarded_v1(c.connection(), read_guard)?;
+            guard.check()?;
+            ledger.require_financial_continuation_history_v1()?;
+            let admission = ledger.financial_continuation_v1(&expected.operation_id)?
+                .ok_or(AuthorityError::Permission)?.clone();
+            if admission != *expected { return Err(AuthorityError::InvalidBinding); }
+            let OwnerControl::AdmitFinancialContinuationV1 { record } = &admission.control else {
+                return Err(AuthorityError::Permission);
+            };
+            record.terms.require_live(now_ms()?)?;
+            guard.check()?;
+            let birth = crate::pending_birth_storage::read_guarded(c.connection(), &ledger.policy, read_guard)?
+                .ok_or(AuthorityError::CorruptHistory)?;
+            guard.check()?;
+            (admission, birth.request.disclosure)
+        };
+        owner.check_setup_current(guard, false)?;
+        guard.check()?;
+        Ok(Self { journal: Arc::new(journal), admission, disclosure })
+    }
+
+    /// Original two-account service selection only. The actual Pair Setup
+    /// retains both exact requests; neither this caller's expected value nor
+    /// the returned configured source creates new dispatch authority.
+    #[cfg(feature = "coordinated-witness-completed-pair")]
+    pub(crate) fn from_original_completed_pair_v1(
+        journal: AuthorityJournal,
+        expected: &OwnerControlRequest,
+        setup: &wholepact_financial_coordinator_origin::WitnessCompletedPairSetupV1,
+    ) -> Result<Self> {
+        let guard = crate::native_witness_owner::financial_setup_guard_v1::FinancialSetupGuardV1::CompletedPairSetup(setup);
+        guard.check()?;
+        id(&expected.operation_id)?;
+        let mut originals = setup.original_binding().owners.iter().filter(|original| {
+            original.account_id == expected.account_id
+                && original.operation_id == expected.operation_id
+                && original.network_profile_id == expected.network_profile_id
+        });
+        let original = originals.next().ok_or(AuthorityError::InvalidBinding)?;
+        if originals.next().is_some() {
+            return Err(AuthorityError::InvalidBinding);
+        }
+        let retained: OwnerControlRequest =
+            wholepact_core::parse_typed_json(original.request_json.as_bytes())
+                .map_err(|_| AuthorityError::InvalidBinding)?;
+        if retained != *expected {
+            return Err(AuthorityError::InvalidBinding);
+        }
+        guard.check()?;
+        let owner = journal
+            .born_owner
+            .as_ref()
+            .ok_or(AuthorityError::Permission)?;
+        owner.check_setup_current(guard, false)?;
+        let (admission, disclosure) = {
+            let c = journal
+                .connection
+                .lock()
+                .map_err(|_| AuthorityError::Storage)?;
+            guard.check()?;
+            let read_guard = crate::journal::ReadGuardV1::coordinated(guard);
+            let ledger =
+                crate::journal::load_financial_continuation_guarded_v1(c.connection(), read_guard)?;
+            guard.check()?;
+            ledger.require_financial_continuation_history_v1()?;
+            let admission = ledger
+                .financial_continuation_v1(&expected.operation_id)?
+                .ok_or(AuthorityError::Permission)?
+                .clone();
+            if admission != retained || admission != *expected {
+                return Err(AuthorityError::InvalidBinding);
+            }
+            let OwnerControl::AdmitFinancialContinuationV1 { record } = &admission.control else {
+                return Err(AuthorityError::Permission);
+            };
+            record.terms.require_live(now_ms()?)?;
+            guard.check()?;
+            let birth = crate::pending_birth_storage::read_guarded(
+                c.connection(),
+                &ledger.policy,
+                read_guard,
+            )?
+            .ok_or(AuthorityError::CorruptHistory)?;
+            guard.check()?;
+            (admission, birth.request.disclosure)
+        };
+        owner.check_setup_current(guard, false)?;
+        guard.check()?;
+        Ok(Self {
+            journal: Arc::new(journal),
+            admission,
+            disclosure,
+        })
+    }
+
+    #[cfg(any(feature = "coordinated-witness-financial-signing", feature = "coordinated-witness-completed-pair"))]
+    pub(crate) fn coordinated_original_admission_v1(&self) -> &OwnerControlRequest {
+        &self.admission
+    }
+    #[cfg(any(feature = "coordinated-witness-financial-signing", feature = "coordinated-witness-completed-pair"))]
+    pub(crate) fn coordinated_original_disclosure_v1(&self) -> &WitnessDisclosureDescriptor {
+        &self.disclosure
     }
     pub(crate) fn journal(&self) -> Arc<AuthorityJournal> {
         Arc::clone(&self.journal)

@@ -92,7 +92,19 @@ pub trait SubmissionAuthority {
     type Permit: SubmissionPermit;
     fn authorize(&mut self, review: &SubmissionReview<'_>) -> Result<Self::Permit, ChainError>;
 }
+/// Non-authorizing, nonblocking final-effect restriction. It must not acquire
+/// source locks, wait, perform remote operations, or mint/refresh any approval.
+/// Zero-time local actor/terminal liveness observations are permitted.
+pub trait SubmissionEffectRestriction: Send + Sync {
+    fn check_before_effect(&self) -> Result<(), ChainError>;
+}
 pub trait SubmissionPermit {
+    /// Legacy authorities have no additional restriction. Coordinated issuers
+    /// must require their original observer and may never fall back to None.
+    fn effect_restriction(&self) -> Option<&dyn SubmissionEffectRestriction> {
+        None
+    }
+
     /// Optional exact attempt number committed by a bounded original delegation.
     /// Compared inside the submission journal write transaction, not just before it.
     fn expected_attempt_number(&self) -> Option<u32> {
@@ -146,8 +158,17 @@ pub struct PreparedDispatch<'a> {
     plan: &'a SubmissionPlan,
     backend: &'a BackendIdentity,
     valid_until_unix_seconds: u64,
+    effect_restriction: Option<&'a dyn SubmissionEffectRestriction>,
 }
 impl PreparedDispatch<'_> {
+    /// Every adapter must sample this after readiness, immediately before its
+    /// one physical send. Success is not a reusable approval or a retry grant.
+    pub fn check_effect_restriction(&self) -> Result<(), ChainError> {
+        match self.effect_restriction {
+            Some(restriction) => restriction.check_before_effect(),
+            None => Ok(()),
+        }
+    }
     pub fn exact_bytes(&self) -> &[u8] {
         self.plan.intent.exact_bytes()
     }
@@ -316,7 +337,7 @@ pub fn retain_submission_plan<A: SubmissionAuthority, C: SubmissionClock>(
         now_unix_seconds: current,
         ..review
     })?;
-    journal.bind_submission_plan(plan)?;
+    journal.bind_submission_plan_restricted(plan, permit.effect_restriction())?;
     let current = clock
         .now_unix_seconds()
         .map_err(|_| ChainError::SubmissionRetentionUncertain)?;
@@ -368,9 +389,11 @@ pub async fn submit_plan<B: SubmissionBackend, A: SubmissionAuthority, C: Submis
         now_unix_seconds: before_commit,
         ..review
     })?;
-    journal.bind_submission_plan(plan)?;
+    journal.bind_submission_plan_restricted(plan, permit.effect_restriction())?;
     let mut attempt =
-        journal.begin_submission_attempt(plan, &identity.source_id, now, expected_attempt)?;
+        journal.begin_submission_attempt_restricted(
+            plan, &identity.source_id, now, expected_attempt, permit.effect_restriction(),
+        )?;
     // Disk commit and gate work can consume the context lifetime. Recheck after both.
     let current = clock.now_unix_seconds().and_then(|now| {
         if authority_until.is_some_and(|until| now > until) {
@@ -390,6 +413,7 @@ pub async fn submit_plan<B: SubmissionBackend, A: SubmissionAuthority, C: Submis
         return Err(error);
     }
     let dispatch = PreparedDispatch {
+        effect_restriction: permit.effect_restriction(),
         plan,
         backend: &identity,
         valid_until_unix_seconds: authority_until
@@ -470,7 +494,11 @@ impl SubmissionBackend for LightwalletSubmissionBackend {
             }
             self.adapter
                 .rpc
-                .submit_once(dispatch.exact_bytes(), dispatch.valid_until_unix_seconds())
+                .submit_once_restricted(
+                    dispatch.exact_bytes(),
+                    dispatch.valid_until_unix_seconds(),
+                    dispatch.effect_restriction,
+                )
                 .await
         })
     }

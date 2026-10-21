@@ -117,7 +117,7 @@ pub(crate) use storage::financial_profile_v1::{FinancialConsentJournalV1, Financ
 #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing", target_os = "linux"))]
 pub(crate) use storage::financial_profile_v1::{CoordinatedContinueReviewDataV1, CoordinatedContinueSignerRoleV1, PreparedCoordinatedFinancialContinuationV1};
 #[cfg(all(feature = "coordinated-signer-continue", target_os = "linux"))]
-pub(crate) use storage::financial_profile_v1::{PresentedCoordinatedFinancialContinuationV1, CoordinatedContinuationCommitFailureV1};
+pub(crate) use storage::financial_profile_v1::{PresentedCoordinatedFinancialContinuationV1, CoordinatedContinuationCommitFailureV1, OriginalFinancialJournalSelectionV1};
 pub use offline_history::{
     OfflineHistoryInventory, OfflineLocalAdmissionHistory, OfflineLocalKeyUseHistory,
     OfflineMinimalAdmissionHistoryStatement, OfflineNativeConsentHistoryReceipt,
@@ -437,3 +437,9 @@ pub(crate) fn validated_delivery_manifest_proposal_v3(
 ) -> Result<wholepact_core::Proposal> {
     manifest.proposal()
 }
+
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub(crate) use preconstruction_lease::CoordinatedConstructionActionV1;
+
+#[cfg(all(feature = "coordinated-financial-workflow-v1", feature = "durable-proposal", feature = "pending-birth-owner-signing", feature = "native-ui", target_os = "linux"))]
+pub(crate) use storage::financial_profile_v1::{PreparedCoordinatedFinancialSpendV1, PresentedCoordinatedFinancialSpendV1, ApprovedCoordinatedFinancialSpendConsentV1};

@@ -12,6 +12,10 @@ use super::*;
 mod fixed_signing;
 #[path = "durable_proposal_v1/delivery_admission_v2.rs"]
 pub(super) mod delivery_admission_v2;
+#[path = "durable_proposal_v1/coordinated_external_witness_v1.rs"]
+pub(super) mod coordinated_external_witness_v1;
+#[path = "durable_proposal_v1/coordinated_full_fixture_v1.rs"]
+pub(super) mod coordinated_full_fixture_v1;
 #[path = "durable_proposal_v1/private_fixed_v2.rs"]
 pub(super) mod private_fixed_v2;
 #[path = "durable_proposal_v1/initial.rs"]

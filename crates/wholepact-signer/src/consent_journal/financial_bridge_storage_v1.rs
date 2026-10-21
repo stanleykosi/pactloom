@@ -2,6 +2,9 @@
 //! receipts. A private transaction kernel retains the actual current native
 //! action through each effect and advances only its own source revision.
 use super::*;
+#[cfg(feature="coordinated-financial-workflow-v1")]
+#[path="financial_bridge_storage_v1/coordinated_return_v1.rs"]
+mod coordinated_return_v1;
 use crate::authority_bridge::{BridgeError, Result as BridgeResult};
 use crate::authority_bridge::protocol::{RetainedAuthorizationRequest, RetainedAuthorizationResult, RetainedWitnessPermit};
 use crate::authority_bridge::financial_continuation_v1::request_from_financial_original_v1;
@@ -65,44 +68,16 @@ impl FinancialConsentJournalV1 {
         Ok(result)
     }
     pub(crate) fn retain_financial_request_v1(&self,source:&mut FinancialSourceBindingV1,approved:&ApprovedFinancialSpendConsentV1,request:&RetainedAuthorizationRequest)->BridgeResult<()> {
-        self.financial_bridge_effect(source,approved,|c,id|{
-            if request.reservation.authorization_id!=id {return Err(BridgeError::Binding);}
-            validate_request(c,request)?;
-            if let Some(old)=read_request(c,id)? {return if old==*request {Ok(())} else {Err(BridgeError::Conflict)};}
-            let raw=encode(&(&request.reservation,&request.delivery,&request.disclosure))?;
-            c.execute("INSERT INTO signer_bridge_requests(authorization_id,original_consent_ref,request_payload,artifact_hex) VALUES(?1,?2,?3,?4)",params![id,request.reservation.original_consent_ref,raw.as_str(),request.artifact_hex]).map_err(JournalError::from)?;
-            Ok(())
-        })
+        self.financial_bridge_effect(source,approved,|c,id|retain_request_rows(c,id,request))
     }
     pub(crate) fn retain_financial_permit_v1(&self,source:&mut FinancialSourceBindingV1,approved:&ApprovedFinancialSpendConsentV1,permit:&AuthenticatedPermit)->BridgeResult<RetainedWitnessPermit> {
-        self.financial_bridge_effect(source,approved,|c,id|{
-            let request=read_request(c,id)?.ok_or(BridgeError::Missing)?;validate_request(c,&request)?;
-            let retained=RetainedWitnessPermit::from_authenticated(permit,&request.reservation)?;validate_permit(&request,&retained)?;
-            if let Some(old)=read_permit(c,id)? {return if old==retained {Ok(old)} else {Err(BridgeError::Conflict)};}
-            let raw=encode(&retained)?;
-            c.execute("INSERT INTO signer_bridge_permits(authorization_id,payload) VALUES(?1,?2)",params![id,raw.as_str()]).map_err(JournalError::from)?;
-            Ok(retained)
-        })
+        self.financial_bridge_effect(source,approved,|c,id|retain_permit_rows(c,id,permit))
     }
     pub(crate) fn begin_financial_key_use_v1(&self,source:&mut FinancialSourceBindingV1,approved:&ApprovedFinancialSpendConsentV1,permit:&AuthenticatedPermit)->BridgeResult<()> {
-        self.financial_bridge_effect(source,approved,|c,id|{
-            current_permit(c,id,permit)?;
-            let started:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM signer_bridge_keyuse WHERE authorization_id=?1)",[id],|r|r.get(0)).map_err(JournalError::from)?;
-            if started {return Err(BridgeError::Uncertain);}
-            c.execute("INSERT INTO signer_bridge_keyuse(authorization_id) VALUES(?1)",[id]).map_err(JournalError::from)?;
-            Ok(())
-        })
+        self.financial_bridge_effect(source,approved,|c,id|begin_key_use_rows(c,id,permit))
     }
     pub(crate) fn retain_financial_result_v1(&self,source:&mut FinancialSourceBindingV1,approved:&ApprovedFinancialSpendConsentV1,permit:&AuthenticatedPermit,result:&RetainedAuthorizationResult)->BridgeResult<()> {
-        self.financial_bridge_effect(source,approved,|c,id|{
-            current_permit(c,id,permit)?;
-            let request=read_request(c,id)?.ok_or(BridgeError::Missing)?;result.validate(&request)?;
-            if let Some(old)=read_result(c,id)? {return if old==*result {Ok(())} else {Err(BridgeError::Conflict)};}
-            // FK to Started establishes durable ordering. Failure leaves
-            // Started and conservative exposure intact, never another key use.
-            c.execute("INSERT INTO signer_bridge_results(authorization_id,result_digest,result_hex,outbox_payload) VALUES(?1,?2,?3,?4)",params![id,result.result_digest,result.signed_pczt_hex,result.outbox_payload]).map_err(JournalError::from)?;
-            Ok(())
-        })
+        self.financial_bridge_effect(source,approved,|c,id|retain_result_rows(c,id,permit,result))
     }
 }
 
@@ -145,11 +120,8 @@ impl FinancialConsentJournalV1 {
         source.require(&self.journal,&c)?;source.require_pin(&c)?;
         let tx=c.transaction_with_behavior(TransactionBehavior::Deferred).map_err(JournalError::from)?;
         validate(&tx,&self.genesis)?;
-        let retained=intent::read(&tx)?;let terms=retained.terms()?;let id=&terms.scope.authorization.authorization_id;
-        let original=read_financial_original_v1(&tx,id)?.ok_or(BridgeError::Missing)?;
-        let request=read_request(&tx,id)?.ok_or(BridgeError::Missing)?;validate_request(&tx,&request)?;
-        let permit=read_permit(&tx,id)?.ok_or(BridgeError::Missing)?;validate_permit(&request,&permit)?;
-        let result=read_result(&tx,id)?.ok_or(BridgeError::Uncertain)?;result.validate(&request)?;
+        let (original,request,permit,result,retained)=read_retained_result_rows(&tx)?;
+        let terms=retained.terms()?;let id=&terms.scope.authorization.authorization_id;
         source.require(&self.journal,&tx)?;source.require_pin(&tx)?;
         let original_delivery=authority::durable_delivery_admission_intent_v3::read(&tx,id)?.ok_or(BridgeError::Missing)?;
         let pin=FinancialReturnJournalPinV1::from_audited_result(self,source,&tx,original_delivery.recipient_intent().authorized_host_process_instance.clone(),result.result_digest.clone())?;
@@ -161,3 +133,68 @@ impl FinancialConsentJournalV1 {
         Ok((original,request,permit,result,pin,retained.request().clone()))
     }
 }
+
+// Exact rows only; current authority and transaction ownership stay in the
+// concrete caller. No caller can obtain a grant from this private function.
+fn retain_request_rows(c:&Connection,id:&str,request:&RetainedAuthorizationRequest)->BridgeResult<()>{
+            if request.reservation.authorization_id!=id {return Err(BridgeError::Binding);}
+            validate_request(c,request)?;
+            if let Some(old)=read_request(c,id)? {return if old==*request {Ok(())} else {Err(BridgeError::Conflict)};}
+            let raw=encode(&(&request.reservation,&request.delivery,&request.disclosure))?;
+            c.execute("INSERT INTO signer_bridge_requests(authorization_id,original_consent_ref,request_payload,artifact_hex) VALUES(?1,?2,?3,?4)",params![id,request.reservation.original_consent_ref,raw.as_str(),request.artifact_hex]).map_err(JournalError::from)?;
+            Ok(())
+}
+
+// Exact rows only; current authority and transaction ownership stay in the
+// concrete caller. No caller can obtain a grant from this private function.
+fn retain_permit_rows(c:&Connection,id:&str,permit:&AuthenticatedPermit)->BridgeResult<RetainedWitnessPermit>{
+            let request=read_request(c,id)?.ok_or(BridgeError::Missing)?;validate_request(c,&request)?;
+            let retained=RetainedWitnessPermit::from_authenticated(permit,&request.reservation)?;validate_permit(&request,&retained)?;
+            if let Some(old)=read_permit(c,id)? {return if old==retained {Ok(old)} else {Err(BridgeError::Conflict)};}
+            let raw=encode(&retained)?;
+            c.execute("INSERT INTO signer_bridge_permits(authorization_id,payload) VALUES(?1,?2)",params![id,raw.as_str()]).map_err(JournalError::from)?;
+            Ok(retained)
+}
+
+// Exact rows only; current authority and transaction ownership stay in the
+// concrete caller. No caller can obtain a grant from this private function.
+fn begin_key_use_rows(c:&Connection,id:&str,permit:&AuthenticatedPermit)->BridgeResult<()>{
+            current_permit(c,id,permit)?;
+            let started:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM signer_bridge_keyuse WHERE authorization_id=?1)",[id],|r|r.get(0)).map_err(JournalError::from)?;
+            if started {return Err(BridgeError::Uncertain);}
+            c.execute("INSERT INTO signer_bridge_keyuse(authorization_id) VALUES(?1)",[id]).map_err(JournalError::from)?;
+            Ok(())
+}
+
+// Exact rows only; current authority and transaction ownership stay in the
+// concrete caller. No caller can obtain a grant from this private function.
+fn retain_result_rows(c:&Connection,id:&str,permit:&AuthenticatedPermit,result:&RetainedAuthorizationResult)->BridgeResult<()>{
+            current_permit(c,id,permit)?;
+            let request=read_request(c,id)?.ok_or(BridgeError::Missing)?;result.validate(&request)?;
+            if let Some(old)=read_result(c,id)? {return if old==*result {Ok(())} else {Err(BridgeError::Conflict)};}
+            // FK to Started establishes durable ordering. Failure leaves
+            // Started and conservative exposure intact, never another key use.
+            c.execute("INSERT INTO signer_bridge_results(authorization_id,result_digest,result_hex,outbox_payload) VALUES(?1,?2,?3,?4)",params![id,result.result_digest,result.signed_pczt_hex,result.outbox_payload]).map_err(JournalError::from)?;
+            Ok(())
+}
+
+// Private row interpretation shared by concrete Read issuers. No permission,
+// lock, transaction, or source revision is manufactured by this kernel.
+fn read_retained_result_rows(c:&Connection)->BridgeResult<(
+    OriginalAuthorizationEvidence, RetainedAuthorizationRequest,
+    RetainedWitnessPermit, RetainedAuthorizationResult,
+    intent::RetainedFinancialContinuationIntentV1,
+)> {
+        let retained=intent::read(c)?;let terms=retained.terms()?;let id=&terms.scope.authorization.authorization_id;
+        let original=read_financial_original_v1(c,id)?.ok_or(BridgeError::Missing)?;
+        let request=read_request(c,id)?.ok_or(BridgeError::Missing)?;validate_request(c,&request)?;
+        let permit=read_permit(c,id)?.ok_or(BridgeError::Missing)?;validate_permit(&request,&permit)?;
+        let result=read_result(c,id)?.ok_or(BridgeError::Uncertain)?;result.validate(&request)?;
+    Ok((original,request,permit,result,retained))
+}
+
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+#[path = "financial_bridge_storage_v1/coordinated_sign_v1.rs"]
+mod coordinated_sign_v1;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub(crate) use coordinated_sign_v1::CoordinatedFinancialResultCommitV1;

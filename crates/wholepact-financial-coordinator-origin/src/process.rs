@@ -85,6 +85,60 @@ pub(super) struct ForkOriginV1 {
     channel: Channel,
 }
 impl ForkOriginV1 {
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn original_host_identity(&self)->Result<(u32,u32)>{
+        if !matches!(self.local_role,Role::Signer1|Role::Signer2)||self.parent.role!=Role::Host{return Err(rejected("not original S to H lineage"));}
+        self.parent.check_alive()?;Ok((self.parent.uid(),self.parent.pid() as u32))
+    }
+
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn completed_pair_send(&self,packet:&crate::completed_pair_channel::Packet)->Result<()>{
+        crate::completed_pair_channel::send(self.channel.review_fd(),self.local_role,&self.parent,packet)
+    }
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn completed_pair_receive(&self)->Result<Option<crate::completed_pair_channel::Packet>>{
+        crate::completed_pair_channel::try_receive(self.channel.review_fd(),self.local_role,&self.parent)
+    }
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn financial_history_send(&self, packet: &crate::financial_history_channel::Packet)->Result<()>{
+        crate::financial_history_channel::send(self.channel.review_fd(), self.local_role, &self.parent, packet)
+    }
+
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn financial_history_receive(&self)->Result<Option<crate::financial_history_channel::Packet>>{
+        crate::financial_history_channel::try_receive(self.channel.review_fd(), self.local_role, &self.parent)
+    }
+
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn financial_signing_send(&self, packet: &crate::financial_signing_channel::Packet)->Result<()>{
+        crate::financial_signing_channel::send(self.channel.review_fd(), self.local_role, &self.parent, packet)
+    }
+
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn financial_signing_receive(&self)->Result<Option<crate::financial_signing_channel::Packet>>{
+        crate::financial_signing_channel::try_receive(self.channel.review_fd(), self.local_role, &self.parent)
+    }
+
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    pub(super) fn financial_witness_send(&self, packet: &crate::financial_witness_channel::Packet) -> Result<()> {
+        crate::financial_witness_channel::send(self.channel.review_fd(), self.local_role, &self.parent, packet)
+    }
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    pub(super) fn financial_witness_receive(&self) -> Result<Option<crate::financial_witness_channel::Packet>> {
+        crate::financial_witness_channel::try_receive(self.channel.review_fd(), self.local_role, &self.parent)
+    }
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    pub(super) fn has_original_coordinator(&self, pid: libc::pid_t, uid: libc::uid_t) -> bool {
+        self.parent.role == Role::Coordinator && self.parent.pid == pid && self.parent.uid == uid
+    }
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    pub(super) fn workflow_send(&self, packet: &crate::financial_workflow_channel::Packet) -> Result<()> {
+        crate::financial_workflow_channel::send(self.channel.review_fd(), self.local_role, &self.parent, packet)
+    }
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    pub(super) fn workflow_receive(&self) -> Result<Option<crate::financial_workflow_channel::Packet>> {
+        crate::financial_workflow_channel::try_receive(self.channel.review_fd(), self.local_role, &self.parent)
+    }
     #[cfg(feature = "coordinated-signer-continue")]
     pub(super) fn continue_observer(&self) -> Result<crate::signer_continue_state::CheckedPeer> {
         crate::signer_continue_state::CheckedPeer::retain(&self.parent, self.channel.review_fd())
@@ -176,6 +230,89 @@ pub(super) struct DirectChild {
     terminal_observed: bool,
 }
 impl DirectChild {
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn completed_pair_send_positive(&self, packet:&crate::completed_pair_channel::Packet, phases:&crate::signer_continue_state::Phases, deadline:Instant)->Result<crate::FinancialSendProgressV1>{
+        self.require_owner()?;
+        crate::completed_pair_channel::send_positive(self.channel.review_fd(),self.local_role,&self.peer,packet,phases,deadline)
+    }
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn completed_pair_send(&self,packet:&crate::completed_pair_channel::Packet)->Result<()>{
+        self.require_owner()?;
+        crate::completed_pair_channel::send(self.channel.review_fd(),self.local_role,&self.peer,packet)
+    }
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn completed_pair_receive(&self)->Result<Option<crate::completed_pair_channel::Packet>>{
+        self.require_owner()?;
+        crate::completed_pair_channel::try_receive(self.channel.review_fd(),self.local_role,&self.peer)
+    }
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn workflow_send_positive(&self,packet:&crate::financial_workflow_channel::Packet,phases:&crate::signer_continue_state::Phases,deadline:Instant)->Result<crate::FinancialSendProgressV1>{
+        self.require_owner()?;
+        crate::financial_workflow_channel::send_positive(self.channel.review_fd(),self.local_role,&self.peer,packet,phases,deadline)
+    }
+
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn financial_witness_send_positive(&self,packet:&crate::financial_witness_channel::Packet,phases:&crate::signer_continue_state::Phases,deadline:Instant)->Result<crate::FinancialSendProgressV1>{
+        self.require_owner()?;
+        crate::financial_witness_channel::send_positive(self.channel.review_fd(),self.local_role,&self.peer,packet,phases,deadline)
+    }
+
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn financial_history_send_positive(&self,packet:&crate::financial_history_channel::Packet,phases:&crate::signer_continue_state::Phases,deadline:Instant)->Result<crate::FinancialSendProgressV1>{
+        self.require_owner()?;
+        crate::financial_history_channel::send_positive(self.channel.review_fd(),self.local_role,&self.peer,packet,phases,deadline)
+    }
+
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn financial_signing_send_positive(&self,packet:&crate::financial_signing_channel::Packet,phases:&crate::signer_continue_state::Phases,deadline:Instant)->Result<crate::FinancialSendProgressV1>{
+        self.require_owner()?;
+        crate::financial_signing_channel::send_positive(self.channel.review_fd(),self.local_role,&self.peer,packet,phases,deadline)
+    }
+
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn financial_history_send(&self, packet: &crate::financial_history_channel::Packet)->Result<()>{
+        self.require_owner()?;
+        crate::financial_history_channel::send(self.channel.review_fd(), self.local_role, &self.peer, packet)
+    }
+
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn financial_history_receive(&self)->Result<Option<crate::financial_history_channel::Packet>>{
+        self.require_owner()?;
+        crate::financial_history_channel::try_receive(self.channel.review_fd(), self.local_role, &self.peer)
+    }
+
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn financial_signing_send(&self, packet: &crate::financial_signing_channel::Packet)->Result<()>{
+        self.require_owner()?;
+        crate::financial_signing_channel::send(self.channel.review_fd(), self.local_role, &self.peer, packet)
+    }
+
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn financial_signing_receive(&self)->Result<Option<crate::financial_signing_channel::Packet>>{
+        self.require_owner()?;
+        crate::financial_signing_channel::try_receive(self.channel.review_fd(), self.local_role, &self.peer)
+    }
+
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    pub(super) fn financial_witness_send(&self, packet: &crate::financial_witness_channel::Packet) -> Result<()> {
+        self.require_owner()?;
+        crate::financial_witness_channel::send(self.channel.review_fd(), self.local_role, &self.peer, packet)
+    }
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    pub(super) fn financial_witness_receive(&self) -> Result<Option<crate::financial_witness_channel::Packet>> {
+        self.require_owner()?;
+        crate::financial_witness_channel::try_receive(self.channel.review_fd(), self.local_role, &self.peer)
+    }
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    pub(super) fn workflow_send(&self, packet: &crate::financial_workflow_channel::Packet) -> Result<()> {
+        self.require_owner()?;
+        crate::financial_workflow_channel::send(self.channel.review_fd(), self.local_role, &self.peer, packet)
+    }
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    pub(super) fn workflow_receive(&self) -> Result<Option<crate::financial_workflow_channel::Packet>> {
+        self.require_owner()?;
+        crate::financial_workflow_channel::try_receive(self.channel.review_fd(), self.local_role, &self.peer)
+    }
     #[cfg(feature = "coordinated-signer-continue")]
     pub(super) fn continue_observer(&self) -> Result<crate::signer_continue_state::CheckedPeer> {
         self.require_owner()?;
@@ -259,6 +396,41 @@ impl DirectChild {
         self.require_owner()?;
         self.peer.check_alive()
     }
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn retirement_send(&self,message:Message,deadline:Instant)->Result<bool>{
+        self.require_owner()?;
+        if !matches!(message,Message::Stop|Message::Exit){return Err(rejected("not retirement terminal command"));}
+        if !self.channel.retirement_ready_now(libc::POLLOUT,&self.peer,deadline)?{return Ok(false);}
+        self.send(message,deadline)?;Ok(true)
+    }
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn retirement_stopped(&self,deadline:Instant)->Result<bool>{
+        self.require_owner()?;
+        if !self.channel.retirement_ready_now(libc::POLLIN,&self.peer,deadline)?{return Ok(false);}
+        self.receive(Message::Stopped,deadline)?;Ok(true)
+    }
+    /// Normal, nonblocking exact-child reap. It alone sets reaped=true, preserving
+    /// cfg-only WNOWAIT evidence ordering before consuming the actual status.
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn retirement_try_reap(&mut self,deadline:Instant)->Result<bool>{
+        self.require_owner()?;crate::channel::require_time(deadline)?;let mut status=0;
+        #[cfg(wholepact_bootstrap_ci)]
+        let rc=match self.observe_terminal(libc::WNOHANG){Ok(true)=>unsafe{libc::waitpid(self.peer.pid,&mut status,libc::WNOHANG)},Ok(false)=>0,Err(e)=>return Err(e)};
+        #[cfg(not(wholepact_bootstrap_ci))]
+        let rc=unsafe{libc::waitpid(self.peer.pid,&mut status,libc::WNOHANG)};
+        if rc==0{return Ok(false);}
+        if rc<0{let e=std::io::Error::last_os_error();return if e.kind()==std::io::ErrorKind::Interrupted{Ok(false)}else{Err(e)};}
+        if rc!=self.peer.pid{return Err(rejected("wrong retirement reap"));}
+        self.reaped=true;
+        #[cfg(wholepact_financial_ci)]
+        crate::financial_observer::reaped(self.peer.role,self.peer.pid,status)?;
+        #[cfg(wholepact_bootstrap_ci)]
+        crate::ci::reaped(self.peer.role,self.peer.pid,status);
+        #[cfg(wholepact_delivery_ci)]
+        crate::delivery_observer::record(crate::delivery_observer::Event::OwnedReap{child_role:format!("{:?}",self.peer.role),child_pid:self.peer.pid,
+            exit_code:libc::WIFEXITED(status).then(||libc::WEXITSTATUS(status)),signal:libc::WIFSIGNALED(status).then(||libc::WTERMSIG(status)),forced:false});
+        if !libc::WIFEXITED(status)||libc::WEXITSTATUS(status)!=0{return Err(rejected("retired Witness did not exit normally"));}Ok(true)
+    }
     pub(super) fn finish(mut self, deadline: Instant) -> Result<()> {
         self.require_owner()?;
         let status = loop {
@@ -279,6 +451,8 @@ impl DirectChild {
             let rc = unsafe { libc::waitpid(self.peer.pid, &mut status, libc::WNOHANG) };
             if rc == self.peer.pid {
                 self.reaped = true;
+                #[cfg(wholepact_financial_ci)]
+                crate::financial_observer::reaped(self.peer.role,self.peer.pid,status)?;
                 #[cfg(wholepact_bootstrap_ci)]
                 crate::ci::reaped(self.peer.role, self.peer.pid, status);
                 #[cfg(wholepact_delivery_ci)]

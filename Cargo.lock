@@ -646,6 +646,7 @@ dependencies = [
  "cipher",
  "cpufeatures 0.3.1",
  "rand_core 0.10.1",
+ "zeroize",
 ]
 
 [[package]]
@@ -658,6 +659,7 @@ dependencies = [
  "chacha20",
  "cipher",
  "poly1305",
+ "zeroize",
 ]
 
 [[package]]
@@ -1990,6 +1992,7 @@ checksum = "a5324110b02044183df000f0bd7d2d7e61f1000631508627e77f63983b6fdffb"
 dependencies = [
  "aead",
  "chacha20poly1305",
+ "getrandom 0.4.3",
  "hkdf",
  "hybrid-array",
  "rand_core 0.10.1",
@@ -5645,9 +5648,12 @@ name = "wholepact-financial-coordinator"
 version = "0.1.0"
 dependencies = [
  "eframe",
+ "log",
  "serde_json",
  "wholepact-authority",
  "wholepact-financial-coordinator-origin",
+ "wholepact-native-host",
+ "wholepact-signer",
  "winit",
  "zeroize",
 ]
@@ -5656,7 +5662,10 @@ dependencies = [
 name = "wholepact-financial-coordinator-origin"
 version = "0.1.0"
 dependencies = [
+ "chacha20poly1305",
+ "getrandom 0.4.3",
  "hex",
+ "hpke",
  "libc",
  "serde",
  "serde_json",
@@ -5701,6 +5710,7 @@ dependencies = [
  "wholepact-chain",
  "wholepact-core",
  "wholepact-engine",
+ "wholepact-financial-coordinator-origin",
  "wholepact-proof-jobs",
  "wholepact-protocol",
  "wholepact-service",

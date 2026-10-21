@@ -925,3 +925,88 @@ async fn original_delegation_attempt_is_checked_inside_journal_transaction() {
         SubmissionAttemptOutcome::Unknown
     ));
 }
+
+/// Actual encrypted attempt journal and production token propagation, with a
+/// controlled readiness boundary. No sockets or claim of actual RPC coverage.
+#[tokio::test]
+async fn final_effect_restriction_survives_readiness_and_preserves_uncertainty() {
+    use std::sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering}};
+    struct Restriction { revoked: Arc<AtomicBool>, samples: Arc<AtomicUsize> }
+    impl SubmissionEffectRestriction for Restriction {
+        fn check_before_effect(&self) -> Result<(), ChainError> {
+            self.samples.fetch_add(1, Ordering::SeqCst);
+            if self.revoked.load(Ordering::SeqCst) { Err(ChainError::SubmissionNotAuthorized) }
+            else { Ok(()) }
+        }
+    }
+    struct RestrictedAuthority { revoked: Arc<AtomicBool>, samples: Arc<AtomicUsize> }
+    impl SubmissionAuthority for RestrictedAuthority {
+        type Permit = Restriction;
+        fn authorize(&mut self, _: &SubmissionReview<'_>) -> Result<Restriction, ChainError> {
+            Ok(Restriction { revoked:self.revoked.clone(), samples:self.samples.clone() })
+        }
+    }
+    impl SubmissionPermit for Restriction {
+        fn effect_restriction(&self) -> Option<&dyn SubmissionEffectRestriction> { Some(self) }
+        fn check_current(&mut self, _: &SubmissionReview<'_>) -> Result<(), ChainError> { Ok(()) }
+    }
+    struct ReadyBackend { context: ChainContext, revoked: Arc<AtomicBool>, sent: usize }
+    impl SubmissionBackend for ReadyBackend {
+        fn identity(&self) -> &BackendIdentity { self.context.source() }
+        fn fresh_context(&mut self) -> SubmissionFuture<'_, Result<ChainContext,ChainError>> {
+            Box::pin(async { Ok(self.context.clone()) })
+        }
+        fn submit_exact<'a>(&'a mut self, dispatch: PreparedDispatch<'a>) -> SubmissionFuture<'a,Result<BackendSubmissionResult,ChainError>> {
+            Box::pin(async move {
+                tokio::task::yield_now().await;
+                self.revoked.store(true, Ordering::SeqCst);
+                dispatch.check_effect_restriction()?;
+                self.sent += 1;
+                Ok(BackendSubmissionResult::Acknowledged)
+            })
+        }
+    }
+    let (_dir, _path, _key, mut journal) = setup();
+    let plan = plan();
+    let revoked = Arc::new(AtomicBool::new(false));
+    let samples = Arc::new(AtomicUsize::new(0));
+    let mut authority = RestrictedAuthority { revoked:revoked.clone(), samples:samples.clone() };
+    let mut backend = ReadyBackend { context:context(), revoked, sent:0 };
+    let report = submit_plan(&mut journal, &plan, &mut backend, &mut authority,
+        &Clock(NOW), SubmissionPolicy::default()).await.unwrap();
+    // Binding commit, attempt commit, then final-send readiness sample.
+    assert_eq!(samples.load(Ordering::SeqCst), 3);
+    assert_eq!(backend.sent, 0);
+    assert!(matches!(report.attempt.outcome, SubmissionAttemptOutcome::Indeterminate { .. }));
+    assert_eq!(report.attempt.number, 1);
+}
+
+#[test]
+fn initial_submission_restrictions_rollback_but_outcome_settlement_survives_revocation() {
+    struct Denied;
+    impl SubmissionEffectRestriction for Denied {
+        fn check_before_effect(&self) -> Result<(), ChainError> {
+            Err(ChainError::SubmissionNotAuthorized)
+        }
+    }
+    let (_dir, _path, _key, mut journal) = setup();
+    let plan = plan();
+    let operation = &plan.descriptor.operation_id;
+    assert!(matches!(journal.bind_submission_plan_restricted(&plan, Some(&Denied)),
+        Err(ChainError::SubmissionNotAuthorized)));
+    assert!(journal.retained_submission_descriptor(operation).unwrap().is_none());
+    assert!(journal.recover_intent_summary(operation).unwrap().is_none());
+    // Independently authorized setup, followed by refusal of the first attempt.
+    journal.bind_submission_plan(&plan).unwrap();
+    let source = context().source().source_id.clone();
+    assert!(matches!(journal.begin_submission_attempt_restricted(
+        &plan, &source, NOW, Some(1), Some(&Denied)), Err(ChainError::SubmissionNotAuthorized)));
+    assert!(journal.submission_attempts(operation).unwrap().is_empty());
+    let mut attempt = journal.begin_submission_attempt(&plan, &source, NOW, Some(1)).unwrap();
+    attempt.outcome = SubmissionAttemptOutcome::BlockedBeforeDispatch;
+    // Outcome settlement is not a new attempt and cannot be suppressed by R.
+    journal.finish_submission_attempt(operation, &attempt).unwrap();
+    let saved = journal.submission_attempts(operation).unwrap();
+    assert_eq!(saved.len(), 1);
+    assert!(matches!(saved[0].outcome, SubmissionAttemptOutcome::BlockedBeforeDispatch));
+}

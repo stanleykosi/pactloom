@@ -138,7 +138,38 @@ pub fn read_setup_frame_capped_checked_observed_until(
     peer: &PeerProcess,
     max_wire_bytes: usize,
     setup_deadline: Instant,
+    check_current: impl FnMut() -> Result<()>,
+) -> std::result::Result<Zeroizing<Vec<u8>>, ObservedFrameError> {
+    read_setup_frame_capped_observed_kernel(
+        stream, peer, max_wire_bytes, setup_deadline, check_current, None,
+    )
+}
+
+/// The maintained setup/read kernel with an additional denial-only check after
+/// receive setup and immediately before each recvmsg. The same check is moved
+/// into the transfer, without renewing the original setup/transfer ceiling.
+/// It supplies no peer, read permission, positive receipt or retry authority.
+pub fn read_setup_frame_capped_restricted_observed_until(
+    stream: &UnixStream,
+    peer: &PeerProcess,
+    max_wire_bytes: usize,
+    setup_deadline: Instant,
+    check_current: impl FnMut() -> Result<()>,
+    mut final_restriction: impl FnMut() -> Result<()>,
+) -> std::result::Result<Zeroizing<Vec<u8>>, ObservedFrameError> {
+    read_setup_frame_capped_observed_kernel(
+        stream, peer, max_wire_bytes, setup_deadline, check_current,
+        Some(&mut final_restriction),
+    )
+}
+
+fn read_setup_frame_capped_observed_kernel(
+    stream: &UnixStream,
+    peer: &PeerProcess,
+    max_wire_bytes: usize,
+    setup_deadline: Instant,
     mut check_current: impl FnMut() -> Result<()>,
+    final_restriction: Option<&mut dyn FnMut() -> Result<()>>,
 ) -> std::result::Result<Zeroizing<Vec<u8>>, ObservedFrameError> {
     let mut cause = FrameReadCause::Unclassified;
     let result = (|| {
@@ -203,12 +234,13 @@ pub fn read_setup_frame_capped_checked_observed_until(
                     FrameReadCause::Deadline,
                     &mut cause,
                 )?;
-                return read_frame_capped_checked_observed_until(
+                return read_frame_capped_observed_kernel(
                     stream,
                     peer,
                     max_wire_bytes,
                     transfer_deadline,
                     check_current,
+                    final_restriction,
                 )
                 .map_err(|failure| {
                     cause = failure.cause;
@@ -233,7 +265,38 @@ pub fn read_frame_capped_checked_observed_until(
     peer: &PeerProcess,
     max_wire_bytes: usize,
     deadline: Instant,
+    check_current: impl FnMut() -> Result<()>,
+) -> std::result::Result<Zeroizing<Vec<u8>>, ObservedFrameError> {
+    read_frame_capped_observed_kernel(
+        stream, peer, max_wire_bytes, deadline, check_current, None,
+    )
+}
+
+/// The exact authenticated frame parser with an additional denial-only final
+/// attempt check. After all timeout/ancillary setup, the original deadline is
+/// rechecked and this restriction is sampled immediately before each recvmsg.
+/// A later denial does not erase bytes consumed by an earlier admitted attempt.
+pub fn read_frame_capped_restricted_observed_until(
+    stream: &UnixStream,
+    peer: &PeerProcess,
+    max_wire_bytes: usize,
+    deadline: Instant,
+    check_current: impl FnMut() -> Result<()>,
+    mut final_restriction: impl FnMut() -> Result<()>,
+) -> std::result::Result<Zeroizing<Vec<u8>>, ObservedFrameError> {
+    read_frame_capped_observed_kernel(
+        stream, peer, max_wire_bytes, deadline, check_current,
+        Some(&mut final_restriction),
+    )
+}
+
+fn read_frame_capped_observed_kernel(
+    stream: &UnixStream,
+    peer: &PeerProcess,
+    max_wire_bytes: usize,
+    deadline: Instant,
     mut check_current: impl FnMut() -> Result<()>,
+    final_restriction: Option<&mut dyn FnMut() -> Result<()>>,
 ) -> std::result::Result<Zeroizing<Vec<u8>>, ObservedFrameError> {
     let mut cause = FrameReadCause::Unclassified;
     let result = (|| {
@@ -257,10 +320,30 @@ pub fn read_frame_capped_checked_observed_until(
             deadline,
             Some(max_wire_bytes),
             Some(&mut check_current),
+            final_restriction,
             &mut cause,
         )
     })();
     result.map_err(|error| ObservedFrameError { cause, error })
+}
+
+// None is deliberately inert: legacy callers keep their exact original check
+// and error sequence. This is an admitted-attempt ordering, not atomic syscall
+// cancellation; the callback must be zero-wait and must not re-enter source/DB.
+fn admit_restricted_receive(
+    deadline: Instant,
+    restriction: &mut Option<&mut dyn FnMut() -> Result<()>>,
+    observed: &mut FrameReadCause,
+) -> Result<()> {
+    if let Some(check) = restriction.as_mut() {
+        observe(
+            remaining_at(deadline, Instant::now()),
+            FrameReadCause::Deadline,
+            observed,
+        )?;
+        observe(check(), FrameReadCause::CurrentCheck, observed)?;
+    }
+    Ok(())
 }
 
 fn remaining_at(deadline: Instant, now: Instant) -> Result<Duration> {
@@ -308,6 +391,7 @@ fn read_frame_inner(
         deadline,
         max_wire_bytes,
         check_current,
+        None,
         &mut FrameReadCause::Unclassified,
     )
 }
@@ -317,6 +401,7 @@ fn read_frame_inner_observed(
     deadline: Instant,
     max_wire_bytes: Option<usize>,
     mut check_current: Option<&mut dyn FnMut() -> Result<()>>,
+    mut final_restriction: Option<&mut dyn FnMut() -> Result<()>>,
     observed: &mut FrameReadCause,
 ) -> Result<Zeroizing<Vec<u8>>> {
     let mut frame = Zeroizing::new(Vec::new());
@@ -370,6 +455,7 @@ fn read_frame_inner_observed(
         msg.msg_iovlen = 1;
         msg.msg_control = control.as_mut_ptr().cast();
         msg.msg_controllen = std::mem::size_of_val(&control);
+        admit_restricted_receive(deadline, &mut final_restriction, observed)?;
         // SAFETY: buffers remain live, disjoint and correctly sized for recvmsg.
         let got = unsafe { libc::recvmsg(stream.as_raw_fd(), &mut msg, libc::MSG_CMSG_CLOEXEC) };
         if got < 0 {
@@ -495,6 +581,47 @@ fn read_frame_inner_observed(
 #[cfg(test)]
 mod bounded_tests {
     use super::*;
+
+    #[test]
+    fn final_receive_restriction_preserves_none_and_denies_before_attempt() {
+        use std::cell::RefCell;
+        let expired = Instant::now() - Duration::from_secs(1);
+        let live = Instant::now() + Duration::from_secs(60);
+        let mut cause = FrameReadCause::Unclassified;
+        // Legacy None adds no deadline failure or changed classification.
+        admit_restricted_receive(expired, &mut None, &mut cause).unwrap();
+        assert_eq!(cause, FrameReadCause::Unclassified);
+
+        let trace = RefCell::new(vec!["timeout", "ancillary"]);
+        let mut deny = || {
+            trace.borrow_mut().push("restriction");
+            Err(Error::Authentication)
+        };
+        let mut restriction: Option<&mut dyn FnMut() -> Result<()>> = Some(&mut deny);
+        assert!(admit_restricted_receive(expired, &mut restriction, &mut cause).is_err());
+        assert_eq!(cause, FrameReadCause::Deadline);
+        assert_eq!(&*trace.borrow(), &["timeout", "ancillary"]);
+        let attempted = admit_restricted_receive(live, &mut restriction, &mut cause)
+            .map(|()| trace.borrow_mut().push("recvmsg"));
+        assert!(attempted.is_err());
+        assert_eq!(cause, FrameReadCause::CurrentCheck);
+        assert_eq!(&*trace.borrow(), &["timeout", "ancillary", "restriction"]);
+
+        let mut allow = || {
+            trace.borrow_mut().push("restriction");
+            Ok(())
+        };
+        let mut restriction: Option<&mut dyn FnMut() -> Result<()>> = Some(&mut allow);
+        for _ in 0..2 {
+            trace.borrow_mut().extend(["timeout", "ancillary"]);
+            admit_restricted_receive(live, &mut restriction, &mut cause).unwrap();
+            trace.borrow_mut().push("recvmsg");
+        }
+        assert_eq!(&trace.borrow()[3..], &[
+            "timeout", "ancillary", "restriction", "recvmsg",
+            "timeout", "ancillary", "restriction", "recvmsg",
+        ]);
+    }
 
     #[test]
     fn bounded_accumulation_counts_delimiter_and_rejects_before_growth() {

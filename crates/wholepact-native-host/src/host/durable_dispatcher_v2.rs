@@ -298,20 +298,33 @@ impl OriginalWorkspaceDispatcherFilesV4 {
 pub(crate) struct StoredDurableDispatcherV2 {
     destinations: [wholepact_authority::transport::AuthorityClient; 2],
 }
+struct OriginalHostDispatcherTransportRestrictionV1;
+impl wholepact_authority::transport::AuthorityTransportRestrictionV1 for OriginalHostDispatcherTransportRestrictionV1 {
+    fn check_before_io(&self) -> wholepact_authority::Result<()> {
+        crate::terminal::check_original_coordinator_restriction()
+            .map_err(|_| wholepact_authority::AuthorityError::Permission)
+    }
+}
 impl StoredDurableDispatcherV2 {
     fn open(files: &OriginalWorkspaceDispatcherFilesV4) -> Result<Self> {
         let tls = files.original.pending.validate()?;
         let mut clients = Vec::with_capacity(2);
         for (tls, destination) in tls.into_iter().zip(&files.original.pending.destinations) {
             let witness = &destination.witness;
-            clients.push(wholepact_authority::transport::AuthorityClient::new(
-                witness.endpoint.parse().map_err(|_| Error::Authentication)?,
-                tls,
-                witness.witness_id.clone(),
-                witness.account_id.clone(),
-                witness.network_profile_id.clone(),
-                witness.policy_digest.clone(),
-            ).map_err(|_| Error::Authentication)?);
+            let endpoint = witness.endpoint.parse().map_err(|_| Error::Authentication)?;
+            let client = if crate::terminal::coordinated_restriction_required() {
+                // Original lifetime/session only. No action grant or deadline
+                // is retained in this immutable denial observer.
+                wholepact_authority::transport::AuthorityClient::new_restricted_v1(
+                    endpoint, tls, witness.witness_id.clone(), witness.account_id.clone(),
+                    witness.network_profile_id.clone(), witness.policy_digest.clone(),
+                    std::sync::Arc::new(OriginalHostDispatcherTransportRestrictionV1))
+            } else {
+                wholepact_authority::transport::AuthorityClient::new(
+                    endpoint, tls, witness.witness_id.clone(), witness.account_id.clone(),
+                    witness.network_profile_id.clone(), witness.policy_digest.clone())
+            };
+            clients.push(client.map_err(|_| Error::Authentication)?);
         }
         Ok(Self { destinations: clients.try_into().map_err(|_| Error::Authentication)? })
     }
@@ -598,6 +611,12 @@ fn check_admission_originals(host:&Host,files:&OriginalWorkspaceDispatcherFilesV
     Ok(())
 }
 impl wholepact_engine::LocalPrivateDurableAdmissionConsentV2 for InitialAdmissionInspection<'_> {
+    fn check_final_effect_restriction_v1(&self, original_deadline: Option<std::time::Instant>) -> bool {
+        if crate::terminal::coordinated_restriction_required()
+            && original_deadline.is_some_and(|until| std::time::Instant::now() >= until)
+        { return false; }
+        !crate::terminal::coordinated_restriction_required() || self.approval.check().is_ok()
+    }
     fn permits_source(&self,scope:&wholepact_engine::PrivateWorkspaceScopeV1)->bool {
         scope_matches(scope,self.files) && self.approval.check().is_ok()
             && check_admission_originals(self.host,self.files,self.target).is_ok() && self.approval.check().is_ok()
@@ -707,6 +726,12 @@ impl<'host> OriginalDeliveryAdmissionOwnerV2<'host> {
     }
 }
 impl wholepact_engine::LocalPrivateDurableAdmissionConsentV2 for OriginalDeliveryAdmissionOwnerV2<'_> {
+    fn check_final_effect_restriction_v1(&self, original_deadline: Option<std::time::Instant>) -> bool {
+        if crate::terminal::coordinated_restriction_required()
+            && original_deadline.is_some_and(|until| std::time::Instant::now() >= until)
+        { return false; }
+        !crate::terminal::coordinated_restriction_required() || self.inspection.check().is_ok()
+    }
     fn permits_source(&self,scope:&wholepact_engine::PrivateWorkspaceScopeV1)->bool {
         scope_matches(scope,self.files) && self.inspection.check().is_ok() && self.check_current_without_proof_lock_v2().is_ok() && self.inspection.check().is_ok()
     }

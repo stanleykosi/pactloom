@@ -4,6 +4,8 @@ use super::*;
 use crate::{AuthorityHead, OwnerControl, OwnerControlRequest};
 #[path = "pristine_audit_v1.rs"]
 mod pristine_audit_v1;
+#[path = "coordinated_pre_v3_preserve_v1.rs"]
+mod coordinated_pre_v3_preserve_v1;
 const PREPARE: &str = "Prepare original TLS listener and exact delivery scope for review";
 #[derive(Default)]
 pub(super) struct FixturePhaseV2 {
@@ -877,6 +879,7 @@ impl EphemeralNativeWitnessV1 {
                 bound: None,
                 address,
                 server_handles: Arc::new(AtomicUsize::new(0)),
+                server_join_failed: Arc::new(AtomicBool::new(false)),
             },
             durable_payment: durable_payment_v1::FixturePhaseV1::Idle,
             financial_continuation: financial_continuation_v1::FixtureFinancialPhaseV1::default(),

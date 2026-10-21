@@ -1,7 +1,7 @@
 //! Source foundation: authority-local immutable birth metadata reader. There is no
 //! insertion API until genuine local owner approval/creation is connected.
 use crate::pending_birth::PendingBirthCommitRecord;
-use crate::{AccountPolicy, AuthorityError, Result, decode};
+use crate::{decode, AccountPolicy, AuthorityError, Result};
 use rusqlite::{Connection, OptionalExtension};
 
 /// Must run inside the same transaction as the genesis/history read. Absence
@@ -11,10 +11,18 @@ pub(crate) fn read(
     tx: &Connection,
     policy: &AccountPolicy,
 ) -> Result<Option<PendingBirthCommitRecord>> {
-    let row: Option<(String, String, String)> = tx.query_row(
+    read_guarded(tx, policy, crate::journal::ReadGuardV1::legacy())
+}
+
+pub(crate) fn read_guarded(
+    tx: &Connection,
+    policy: &AccountPolicy,
+    guard: crate::journal::ReadGuardV1<'_>,
+) -> Result<Option<PendingBirthCommitRecord>> {
+    let row: Option<(String, String, zeroize::Zeroizing<String>)> = crate::journal::guarded_read!(guard, tx.query_row(
         "SELECT operation_id,request_digest,CASE WHEN length(CAST(payload AS BLOB)) <= 262144 THEN payload ELSE NULL END FROM authority_pending_birth_commit WHERE singleton=1",
-        [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    ).optional()?;
+        [], |r| Ok((r.get(0)?, r.get(1)?, zeroize::Zeroizing::new(r.get::<_,String>(2)?))),
+    ).optional())?;
     let Some((operation_id, request_digest, payload)) = row else {
         return if policy.account_use_genesis.is_none() {
             Ok(None)
@@ -22,7 +30,6 @@ pub(crate) fn read(
             Err(AuthorityError::CorruptHistory)
         };
     };
-    let payload = zeroize::Zeroizing::new(payload);
     let record: PendingBirthCommitRecord = decode(payload.as_bytes())?;
     record.validate()?;
     if policy.account_use_genesis.is_none()
@@ -32,10 +39,13 @@ pub(crate) fn read(
     {
         return Err(AuthorityError::CorruptHistory);
     }
-    let count: u64 = tx.query_row(
-        "SELECT count(*) FROM authority_pending_birth_commit",
-        [],
-        |r| r.get(0),
+    let count: u64 = crate::journal::guarded_read!(
+        guard,
+        tx.query_row(
+            "SELECT count(*) FROM authority_pending_birth_commit",
+            [],
+            |r| r.get(0),
+        )
     )?;
     if count != 1 {
         return Err(AuthorityError::CorruptHistory);

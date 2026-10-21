@@ -8,7 +8,11 @@ use super::{signer_continue_channel::{Binding, Context, Packet, SignerContinueRo
     signer_continue_state::{self as state, Core, Phases, NEW, PREPARING, REVIEW, ARMED, READY, ADMITTED, PENDING, SENT, ABANDONED}};
 use std::{marker::PhantomData, rc::Rc, sync::{Arc, atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering}}, time::{Duration, Instant}};
 
-pub(super) struct SignerBirthContext { pub(super) coordinator: PeerLifetime, pub(super) image: VerifiedCommonImageIdentity }
+pub(super) struct SignerBirthContext {
+    pub(super) coordinator: PeerLifetime, pub(super) image: VerifiedCommonImageIdentity,
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    pub(super) restriction: crate::host_restriction::SignerSharedRestrictionV1,
+}
 struct Reviewed {
     core: Arc<Core>, wire: Binding,
     original_source: Instant, original_review: Instant, ceiling: Instant,
@@ -83,7 +87,12 @@ pub struct CoordinatorSignerContinueEndpointV1 {
     slots: [Option<CSlot>; 2], disposed: [bool; 2], cancel_sent: bool, cleanup: Option<Instant>,
 }
 pub(super) fn split_coordinator(tree: InertTreeV1, clocks: PhaseDeadlinesV1) -> Result<(CoordinatorSignerContinueNativeV1, CoordinatorSignerContinueEndpointV1)> {
-    let core = Arc::new(Core { phase: Phases::new(), peer: tree.continue_host()?.continue_observer()?, roots: tree.continue_pidfds()?,
+    let core = Arc::new(Core {retired_roots:std::sync::atomic::AtomicU32::new(0), phase: Phases::new(),
+        #[cfg(feature="coordinated-financial-workflow-v1")]
+        witness_outbound: [AtomicU8::new(PENDING),AtomicU8::new(PENDING)],
+        #[cfg(feature = "coordinated-financial-workflow-v1")]
+        signer_restriction: None,
+        peer: tree.continue_host()?.continue_observer()?, roots: tree.continue_pidfds()?,
         coordinator: None, owner_pid: unsafe {libc::getpid()}, owner_uid: unsafe {libc::geteuid()}, epoch: clocks.epoch(), session: clocks.session,
         alive: AtomicBool::new(true), outbound: [AtomicU8::new(PENDING), AtomicU8::new(PENDING)] });
     core.check()?;
@@ -192,30 +201,58 @@ impl Drop for CoordinatorSignerContinueEndpointV1 { fn drop(&mut self) { self.co
 
 pub enum SignerContinueRequestV1 { PrepareOnce, Arm(SignerContinueArmV1), Final(SignerContinueFinalV1), Cancel }
 /// Inert same-ticket recheck permission, not a mutation issuer.
-pub struct SignerContinueArmV1 { binding: Arc<Reviewed> }
+pub struct SignerContinueArmV1 { binding: TokenBinding }
 /// Single-use actual received final grant. Only this module's authenticated
 /// original H receive constructs it; the Signer effect entry must consume it.
-pub struct SignerContinueFinalV1 { binding: Arc<Reviewed>, ready_challenge: String }
+pub struct SignerContinueFinalV1 { binding: TokenBinding, ready_challenge: String }
+enum TokenBinding {
+    Narrow(Arc<Reviewed>),
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    RetainedWorkflow(Arc<crate::financial_workflow_continue::FullContinueReviewed>),
+}
+impl TokenBinding {
+    fn presentation(&self)->&SignerContinuePresentationV1{match self{Self::Narrow(b)=>&b.wire.presentation,
+        #[cfg(feature="coordinated-financial-workflow-v1")] Self::RetainedWorkflow(b)=>&b.wire.presentation}}
+    fn source(&self)->Instant{match self{Self::Narrow(b)=>b.original_source,
+        #[cfg(feature="coordinated-financial-workflow-v1")] Self::RetainedWorkflow(b)=>b.original_source()}}
+    fn review_deadline(&self)->Instant{match self{Self::Narrow(b)=>b.original_review,
+        #[cfg(feature="coordinated-financial-workflow-v1")] Self::RetainedWorkflow(b)=>b.original_review}}
+}
+
 macro_rules! token_readers {
     ($ty:ty) => { impl $ty {
-        pub fn review(&self) -> &SignerContinueReviewDataV1 { &self.binding.wire.presentation.review }
-        pub fn presentation_digest(&self) -> &str { &self.binding.wire.presentation.presentation_digest }
-        pub fn prepared_digest(&self) -> &str { &self.binding.wire.presentation.prepared_digest }
-        pub fn original_source_deadline(&self) -> Instant { self.binding.original_source }
-        pub fn original_review_deadline(&self) -> Instant { self.binding.original_review }
+        pub fn review(&self) -> &SignerContinueReviewDataV1 { &self.binding.presentation().review }
+        pub fn presentation_digest(&self) -> &str { &self.binding.presentation().presentation_digest }
+        pub fn prepared_digest(&self) -> &str { &self.binding.presentation().prepared_digest }
+        pub fn original_source_deadline(&self) -> Instant { self.binding.source() }
+        pub fn original_review_deadline(&self) -> Instant { self.binding.review_deadline() }
     } };
 }
 token_readers!(SignerContinueArmV1); token_readers!(SignerContinueFinalV1);
 impl SignerContinueArmV1 {
-    pub fn check_current(&self) -> Result<()> {
-        self.binding.check(false)?;
-        if self.binding.core.phase.phase(self.binding.slot()) != ARMED { return Err(rejected("Continue Arm consumed")); } Ok(())
+    pub fn check_current(&self)->Result<()>{match &self.binding{
+        TokenBinding::Narrow(b)=>{b.check(false)?;if b.core.phase.phase(b.slot())!=ARMED{return Err(rejected("Continue Arm consumed"));}Ok(())},
+        #[cfg(feature="coordinated-financial-workflow-v1")]
+        TokenBinding::RetainedWorkflow(b)=>b.check_arm(),
+    }}
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn from_retained_workflow(binding:Arc<crate::financial_workflow_continue::FullContinueReviewed>)->Self{Self{binding:TokenBinding::RetainedWorkflow(binding)}}
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn matches_retained_workflow(&self,b:&Arc<crate::financial_workflow_continue::FullContinueReviewed>)->bool{
+        matches!(&self.binding,TokenBinding::RetainedWorkflow(actual) if Arc::ptr_eq(actual,b))
     }
 }
 impl SignerContinueFinalV1 {
-    pub fn check_current(&self) -> Result<()> {
-        self.binding.check(true)?;
-        if self.binding.core.phase.phase(self.binding.slot()) != ADMITTED || !state::hash(&self.ready_challenge) { return Err(rejected("Continue final phase lost")); } Ok(())
+    pub fn check_current(&self)->Result<()>{
+        match &self.binding{
+            TokenBinding::Narrow(b)=>{b.check(true)?;if b.core.phase.phase(b.slot())!=ADMITTED||!state::hash(&self.ready_challenge){return Err(rejected("Continue final phase lost"));}Ok(())},
+            #[cfg(feature="coordinated-financial-workflow-v1")]
+            TokenBinding::RetainedWorkflow(b)=>{b.check_final()?;if !state::hash(&self.ready_challenge){return Err(rejected("full Continue final challenge lost"));}Ok(())},
+        }
+    }
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn from_retained_workflow(binding:Arc<crate::financial_workflow_continue::FullContinueReviewed>,ready_challenge:String)->Self{
+        Self{binding:TokenBinding::RetainedWorkflow(binding),ready_challenge}
     }
 }
 struct Draft { review: SignerContinueReviewDataV1, source: Instant, review_deadline: Instant, ceiling: Instant }
@@ -227,7 +264,12 @@ pub struct SignerFinancialOriginV1 {
 impl SignerFinancialOriginV1 {
     pub(super) fn from_signer(leaf: LeafCustody, birth: SignerBirthContext) -> Result<Self> {
         let target=Target::from_role(leaf.origin.role())?;
-        let core=Arc::new(Core {phase:Phases::new(),peer:leaf.origin.continue_observer()?,roots:Vec::new(),coordinator:Some(birth.coordinator),
+        let core=Arc::new(Core {retired_roots:std::sync::atomic::AtomicU32::new(0),phase:Phases::new(),
+            #[cfg(feature="coordinated-financial-workflow-v1")]
+            witness_outbound: [AtomicU8::new(PENDING),AtomicU8::new(PENDING)],
+            #[cfg(feature = "coordinated-financial-workflow-v1")]
+            signer_restriction: Some(birth.restriction),
+            peer:leaf.origin.continue_observer()?,roots:Vec::new(),coordinator:Some(birth.coordinator),
             owner_pid:unsafe{libc::getpid()},owner_uid:unsafe{libc::geteuid()},epoch:leaf.clocks.epoch(),session:leaf.clocks.session,
             alive:AtomicBool::new(true),outbound:[AtomicU8::new(PENDING),AtomicU8::new(PENDING)]});
         core.check()?;
@@ -259,13 +301,13 @@ impl SignerFinancialOriginV1 {
                 let b=self.reviewed.as_ref().ok_or_else(||rejected("Continue Arm before display"))?;
                 if !b.matches(&context,&presentation_digest,&prepared_digest) || self.terminal {return Err(rejected("Continue Arm mismatch"));}
                 b.check(false)?; self.core.phase.step(self.target.index(),REVIEW,ARMED)?;
-                SignerContinueRequestV1::Arm(SignerContinueArmV1{binding:Arc::clone(b)})
+                SignerContinueRequestV1::Arm(SignerContinueArmV1{binding:TokenBinding::Narrow(Arc::clone(b))})
             }
             Packet::Final{context,presentation_digest,prepared_digest,ready_challenge} => {
                 let b=self.reviewed.as_ref().ok_or_else(||rejected("Continue final before review"))?;
                 if !b.matches(&context,&presentation_digest,&prepared_digest) || self.ready.as_ref()!=Some(&ready_challenge) || self.terminal {return Err(rejected("Continue final mismatch"));}
                 b.check(false)?; self.core.phase.step(self.target.index(),READY,ADMITTED)?;
-                SignerContinueRequestV1::Final(SignerContinueFinalV1{binding:Arc::clone(b),ready_challenge})
+                SignerContinueRequestV1::Final(SignerContinueFinalV1{binding:TokenBinding::Narrow(Arc::clone(b)),ready_challenge})
             }
             Packet::Cancel{coordinator} => {
                 if !state::hash(&coordinator) || self.cancel_seen || self.context.as_ref().is_some_and(|c|c.coordinator!=coordinator) {return Err(rejected("Continue Cancel mismatch"));}
@@ -313,7 +355,7 @@ impl SignerFinancialOriginV1 {
     /// its same frozen ticket and dropped every source/journal guard.
     pub fn send_ready(&mut self, arm:SignerContinueArmV1) -> Result<()> {
         let b=self.reviewed.as_ref().ok_or_else(||rejected("Continue review missing"))?;
-        if !Arc::ptr_eq(b,&arm.binding) || self.ready.is_some() || self.terminal {return Err(rejected("foreign Continue Arm"));}
+        if !matches!(&arm.binding,TokenBinding::Narrow(actual) if Arc::ptr_eq(b,actual)) || self.ready.is_some() || self.terminal {return Err(rejected("foreign Continue Arm"));}
         arm.check_current()?; let challenge=state::nonce()?;
         self.core.phase.step(self.target.index(),ARMED,READY)?; self.ready=Some(challenge.clone());
         self.send(&Packet::Ready{context:b.wire.context.clone(),presentation_digest:b.wire.presentation.presentation_digest.clone(),prepared_digest:b.wire.presentation.prepared_digest.clone(),ready_challenge:challenge})

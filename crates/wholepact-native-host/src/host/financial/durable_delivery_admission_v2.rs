@@ -2,6 +2,11 @@
 //! from the fixed-workspace stage/compound permissions and never grants spend.
 mod closed_review_v3;
 pub(in crate::host) use closed_review_v3::{OriginalDeliveryExportV3, validate_admission_result_v3, admit_original_v3, admit_original_borrowed_v3, read_original_status_v3};
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub(in crate::host::financial) use closed_review_v3::{
+    begin_original_borrowed_fork_v3, RetainedCoordinatedAdmissionV1, RetainedOwnerWorkflowWaitV1,
+    begin_original_coordinated_admission_v1, RetainedOriginalCoordinatedAdmissionV1, RetainedCoordinatedOwnerWorkflowWaitV1,
+};
 use super::Host;
 use crate::{
     Error, Result,
@@ -498,6 +503,18 @@ fn now_seconds() -> Result<u64> {
 fn same<T: Serialize>(a: &T, b: &T) -> Result<bool> {
     Ok(serde_json::to_vec(a)? == serde_json::to_vec(b)?)
 }
+fn retained_material_clock_bounds(inspection: &PrivateDurableAdmissionInspectionV2) -> Result<(u64, u64)> {
+    if inspection.materials().len() != 2 { return Err(Error::Authentication); }
+    let from = inspection.materials().iter().map(|m| m.scope().valid_from_unix_seconds).max().ok_or(Error::Authentication)?;
+    let until = inspection.materials().iter().map(|m| m.scope().valid_until_unix_seconds).min().ok_or(Error::Authentication)?;
+    Ok((from, until))
+}
+fn original_material_clock_bounds(inspection: &PrivateDurableAdmissionInspectionV2) -> Result<(u64, u64)> {
+    let (from, until) = retained_material_clock_bounds(inspection)?;
+    let now = now_seconds()?;
+    if now < from || now >= until { return Err(Error::Permission); }
+    Ok((from, until))
+}
 fn current_materials(inspection: &PrivateDurableAdmissionInspectionV2) -> Result<()> {
     let now = now_seconds()?;
     if inspection.materials().len() != 2 {
@@ -602,6 +619,13 @@ impl InspectionReadV2<'_, '_> {
     }
 }
 impl LocalPrivateDurableAdmissionConsentV2 for InspectionReadV2<'_, '_> {
+    fn check_final_effect_restriction_v1(&self, original_deadline: Option<std::time::Instant>) -> bool {
+        if crate::terminal::coordinated_restriction_required()
+            && original_deadline.is_some_and(|until| std::time::Instant::now() >= until)
+        { return false; }
+        !crate::terminal::coordinated_restriction_required()
+            || (original_material_clock_bounds(self.inspection).is_ok() && self.approval.check().is_ok())
+    }
     fn permits_source(&self, s: &PrivateWorkspaceScopeV1) -> bool {
         export_source_scope_result(
             self.export_preview,
@@ -670,6 +694,13 @@ impl OwnedDeliveryConsentV2<'_, '_> {
     }
 }
 impl LocalPrivateDurableAdmissionConsentV2 for OwnedDeliveryConsentV2<'_, '_> {
+    fn check_final_effect_restriction_v1(&self, original_deadline: Option<std::time::Instant>) -> bool {
+        if crate::terminal::coordinated_restriction_required()
+            && original_deadline.is_some_and(|until| std::time::Instant::now() >= until)
+        { return false; }
+        !crate::terminal::coordinated_restriction_required()
+            || (original_material_clock_bounds(self.inspection).is_ok() && self.approval.check().is_ok())
+    }
     fn permits_source(&self, s: &PrivateWorkspaceScopeV1) -> bool {
         export_source_scope_result(
             self.export.is_some(),

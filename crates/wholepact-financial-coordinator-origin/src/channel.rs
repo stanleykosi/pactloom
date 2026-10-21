@@ -121,6 +121,14 @@ impl Channel {
         crate::ci::received(expected, peer, &credentials, deadline)?;
         Ok(())
     }
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn retirement_ready_now(&self,events:libc::c_short,peer:&PeerLifetime,deadline:Instant)->Result<bool>{
+        require_time(deadline)?;peer.check_alive()?;
+        let mut poll=libc::pollfd{fd:self.0.as_raw_fd(),events,revents:0};
+        if unsafe{libc::poll(&mut poll,1,0)}<0{return Err(std::io::Error::last_os_error());}
+        if poll.revents&(libc::POLLHUP|libc::POLLERR|libc::POLLNVAL)!=0{return Err(rejected("retirement original channel lost"));}
+        Ok(poll.revents&events!=0)
+    }
     pub(super) fn shut_down(&self) {
         // Restriction only; caller owns this original edge. No copied sibling
         // handle may call this during branch pruning.

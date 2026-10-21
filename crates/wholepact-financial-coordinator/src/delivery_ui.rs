@@ -304,11 +304,6 @@ impl Window {
         self.phase = Phase::Preparing;
         let ceiling = (Instant::now() + Duration::from_secs(120)).min(self.session_deadline);
         self.review_ceiling = Some(ceiling); // BEFORE queueing; never renewed at driver dequeue/Arm/Ready.
-        #[cfg(wholepact_delivery_ci)]
-        {
-            let (field, class) = wholepact_authority::native_witness_owner::coordinated_delivery_append_v1::diagnose_delivery_review_inputs_for_ci(&self.input);
-            observe(Observation::InputValidation { field, class });
-        }
         if validate_delivery_review_inputs(&self.input).is_err() { self.revoke("Input validation rejected this one slot."); return; }
         let data = std::mem::take(&mut self.input);
         let sent = self.driver.borrow_mut().prepare_once(data, ceiling);
@@ -425,22 +420,5 @@ mod tests {
         assert!(effect_text(Effect::Uncertain).contains("Do not retry"));
         assert!(effect_text(Effect::Pending).contains("in flight"));
         assert!(effect_text(Effect::Committed).contains("committed"));
-    }
-}
-
-#[cfg(all(test, wholepact_delivery_ci))]
-mod ci_input_diagnostic_tests {
-    use wholepact_authority::native_witness_owner::coordinated_delivery_append_v1::{diagnose_delivery_review_inputs_for_ci, validate_delivery_review_inputs};
-    use wholepact_financial_coordinator_origin::DeliveryReviewInputsV1;
-    use wholepact_financial_coordinator_origin::{DeliveryWidgetIdV1 as F, DeliveryInputClassV1 as C};
-    #[test]
-    fn closed_shape_classification_preserves_production_rejection() {
-        let mut input = DeliveryReviewInputsV1::default();
-        assert_eq!(diagnose_delivery_review_inputs_for_ci(&input), (Some(F::Endpoint), C::Empty));
-        input.endpoint = "x".repeat(257);
-        assert_eq!(diagnose_delivery_review_inputs_for_ci(&input), (Some(F::Endpoint), C::Length));
-        input.endpoint = "x".repeat(61 * 1024);
-        assert_eq!(diagnose_delivery_review_inputs_for_ci(&input), (None, C::PacketLimit));
-        assert!(validate_delivery_review_inputs(&input).is_err());
     }
 }

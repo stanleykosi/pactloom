@@ -866,6 +866,16 @@ fn synthetic_foreground_child() {
         durable_proposal_v1::private_fixed_v2::produce_financial_child(terminal).unwrap();
         return;
     }
+    #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+    if stage == "coordinated-financial-live-pre-v3-fixture-v1" {
+        durable_proposal_v1::private_fixed_v2::produce_coordinated_live_pre_v3_child(terminal).unwrap();
+        return;
+    }
+    #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+    if stage == "coordinated-financial-pre-v3-fixture-v1" {
+        durable_proposal_v1::private_fixed_v2::produce_coordinated_pre_v3_child(terminal).unwrap();
+        return;
+    }
     #[cfg(all(
         feature = "durable-proposal",
         feature = "synthetic-born-joined-qualification"
@@ -1214,6 +1224,8 @@ mod synthetic_born_submission_sink_v1;
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum PrivateWorkspaceStageV1 {
     PristineCoordinator,
+    CoordinatedFixture,
+    CoordinatedLiveFixture,
     Producer,
     Reader,
     DeliveryProducer,
@@ -1229,6 +1241,8 @@ impl PrivateWorkspaceStageV1 {
     fn label(self) -> &'static str {
         match self {
             Self::PristineCoordinator => "coordinator-pristine-source-v1",
+            Self::CoordinatedFixture => "coordinated-financial-pre-v3-fixture-v1",
+            Self::CoordinatedLiveFixture => "coordinated-financial-live-pre-v3-fixture-v1",
             Self::Producer => "private-workspace-produce-fixed-v1",
             Self::Reader => "private-workspace-read-fixed-v1",
             Self::DeliveryProducer => "durable-delivery-native-admission-v2",
@@ -1240,13 +1254,14 @@ impl PrivateWorkspaceStageV1 {
     fn producer(self) -> bool {
         matches!(
             self,
-            Self::Producer | Self::DeliveryProducer | Self::FinancialProducer
+            Self::Producer | Self::DeliveryProducer | Self::FinancialProducer | Self::CoordinatedFixture | Self::CoordinatedLiveFixture
         )
     }
     fn marker(self, tail: &str, complete: bool, terminal: bool) -> std::io::Result<bool> {
         match self {
             // Normal exact child exit, not a kill-marker custody transfer.
             Self::PristineCoordinator => Ok(false),
+            Self::CoordinatedFixture | Self::CoordinatedLiveFixture => durable_proposal_v1::coordinated_full_fixture_v1::ready_marker(tail, complete, terminal),
             Self::Producer | Self::Reader => {
                 durable_proposal_v1::private_fixed_v2::death_marker_v1(
                     tail,
@@ -1274,6 +1289,7 @@ impl PrivateWorkspaceStageV1 {
     feature = "synthetic-born-joined-qualification"
 ))]
 struct PrivateWorkspaceStageResultV1 {
+    child_pid: u32,
     pristine_first_failure: Option<pristine_diagnostics_v1::Failure>,
     financial_progress_failure: Option<financial_progress_v1::Failure>,
     financial_progress_timing: Option<financial_progress_v1::Timing>,
@@ -1470,6 +1486,7 @@ fn private_workspace_stage_v1(
     };
     // Close the parent's Command-owned slave handles before requiring PTY EOF.
     drop(command);
+    let child_pid = spawned.id();
     let mut child = owned_test_process_group_v1::OwnedTestProcessGroupV1::from_spawned_session(
         spawned,
         child_temporary_root.into_tempdir(),
@@ -1549,6 +1566,11 @@ fn private_workspace_stage_v1(
                         return Err(std::io::Error::other("original deadline expired"));
                     }
                     marker_seen = true;
+                    if matches!(stage, PrivateWorkspaceStageV1::CoordinatedFixture | PrivateWorkspaceStageV1::CoordinatedLiveFixture) {
+                        durable_proposal_v1::coordinated_full_fixture_v1::hold_ready_fixture(
+                            &mut child, deadline, monotonic_cutoff_ns,
+                        )?;
+                    }
                     break;
                 }
             }
@@ -1764,6 +1786,7 @@ fn private_workspace_stage_v1(
         None
     };
     Ok(PrivateWorkspaceStageResultV1 {
+        child_pid,
         // Preserve the original finite cause even when cleanup is uncertain.
         // It is not permission to transfer the retained root in that case.
         pristine_first_failure: transcript.pristine_first_failure(),

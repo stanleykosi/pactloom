@@ -1,6 +1,9 @@
 //! Operation-local read-only custody of one fully audited profile20 revision.
 //! This is inert change detection, not authority, a writer lock, or a refresh.
 use super::*;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+#[path = "financial_operation_pin_v1/coordinated_writer_read_acquire_v1.rs"]
+mod coordinated_writer_read_acquire_v1;
 
 #[derive(PartialEq, Eq)]
 struct OperationRevisionV1 {

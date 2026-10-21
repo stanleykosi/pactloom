@@ -522,6 +522,21 @@ pub(super) fn validate_delivery_v3(
     genesis: &AccountUseGenesis,
     limits: (u64, u64),
 ) -> Result<()> {
+    validate_delivery_profile_v1(c,genesis,limits,OriginalDeliveryProfileV1::NativeV3)
+}
+#[cfg(all(feature = "durable-proposal", target_os = "linux"))]
+#[derive(Clone,Copy,PartialEq,Eq)]
+pub(in crate::consent_journal) enum OriginalDeliveryProfileV1 {
+    NativeV3,
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    CoordinatedV3,
+}
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub(in crate::consent_journal) fn validate_coordinated_delivery_v1(c:&Connection,genesis:&AccountUseGenesis,limits:(u64,u64))->Result<()> {
+    validate_delivery_profile_v1(c,genesis,limits,OriginalDeliveryProfileV1::CoordinatedV3)
+}
+#[cfg(all(feature = "durable-proposal", target_os = "linux"))]
+fn validate_delivery_profile_v1(c:&Connection,genesis:&AccountUseGenesis,limits:(u64,u64),profile:OriginalDeliveryProfileV1)->Result<()> {
     let account = validate_durable_born_prefix_v1(c, genesis, limits)?;
     for (table, _) in CAPACITY_TABLES {
         if matches!(
@@ -543,12 +558,20 @@ pub(super) fn validate_delivery_v3(
             return Err(JournalError::RecoveryRequired);
         }
     }
-    validate_delivery_v3_original_cells(c, genesis, &account)
+    validate_delivery_original_cells_v1(c, genesis, &account,profile)
 }
 // Historical original cells only. The caller already validated its exact
 // executable schema and explicit allowed-table policy in this snapshot.
 #[cfg(all(feature = "durable-proposal", target_os = "linux"))]
 pub(super) fn validate_delivery_v3_original_cells(c: &Connection, genesis: &AccountUseGenesis, account: &SignerAccountState) -> Result<()> {
+    validate_delivery_original_cells_v1(c,genesis,account,OriginalDeliveryProfileV1::NativeV3)
+}
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub(in crate::consent_journal) fn validate_coordinated_delivery_original_cells_v1(c:&Connection,genesis:&AccountUseGenesis,account:&SignerAccountState)->Result<()> {
+    validate_delivery_original_cells_v1(c,genesis,account,OriginalDeliveryProfileV1::CoordinatedV3)
+}
+#[cfg(all(feature = "durable-proposal", target_os = "linux"))]
+fn validate_delivery_original_cells_v1(c:&Connection,genesis:&AccountUseGenesis,account:&SignerAccountState,profile:OriginalDeliveryProfileV1)->Result<()> {
     let mut foreign_keys = c.prepare("PRAGMA foreign_key_check")?;
     if foreign_keys.query([])?.next()?.is_some() {
         return Err(JournalError::InvalidBinding);
@@ -621,14 +644,14 @@ pub(super) fn validate_delivery_v3_original_cells(c: &Connection, genesis: &Acco
         return Err(JournalError::Conflict);
     }
     for intent in intents {
-        let financial_admission_intents::HistoricalFinancialAdmissionIntent::V3(intent) = intent
-        else {
-            return Err(JournalError::RecoveryRequired);
+        let (disclosure,owner)=match (profile,&intent) {
+            (OriginalDeliveryProfileV1::NativeV3,financial_admission_intents::HistoricalFinancialAdmissionIntent::V3(value))=>(value.disclosure(),value.owner_certificate_digest()),
+            #[cfg(feature = "coordinated-financial-workflow-v1")]
+            (OriginalDeliveryProfileV1::CoordinatedV3,financial_admission_intents::HistoricalFinancialAdmissionIntent::CoordinatedV3(value))=>(value.disclosure(),value.owner_certificate_digest()),
+            _=>return Err(JournalError::RecoveryRequired),
         };
-        require_witness(intent.disclosure(), genesis)?;
-        if intent.owner_certificate_digest() != genesis.owner_certificate_digest {
-            return Err(JournalError::InvalidBinding);
-        }
+        require_witness(disclosure,genesis)?;
+        if owner!=genesis.owner_certificate_digest{return Err(JournalError::InvalidBinding)}
     }
     Ok(())
 }

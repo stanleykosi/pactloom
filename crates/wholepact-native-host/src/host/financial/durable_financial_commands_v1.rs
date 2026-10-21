@@ -43,6 +43,9 @@ pub(super) struct ContinuationSelectionV1 {
     version: u16,
     continuation: OwnerControlRequest,
 }
+impl ContinuationSelectionV1 {
+    pub(super) fn original_request(&self) -> &OwnerControlRequest { &self.continuation }
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ResultSelectionV1 {
@@ -59,7 +62,7 @@ pub(super) struct SessionCommandsV1 {
     pub(super) completion_key: String,
 }
 impl SessionCommandsV1 {
-    fn check(&self) -> Result<()> {
+    pub(super) fn check(&self) -> Result<()> {
         require_version(self.version)?;
         let mut unique = BTreeSet::new();
         for key in [
@@ -87,12 +90,12 @@ fn parse_selection<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
     wholepact_core::strict_json::parse_typed_json_with_byte_limit(bytes, MAX_SELECTION_BYTES)
         .map_err(|_| Error::Invalid)
 }
-fn read_selection<T: DeserializeOwned>(host: &Host, prompt: &str) -> Result<T> {
+pub(super) fn read_selection<T: DeserializeOwned>(host: &Host, prompt: &str) -> Result<T> {
     let path = host.path(prompt)?;
     let bytes = Zeroizing::new(files::read_artifact(&path, MAX_SELECTION_BYTES)?);
     parse_selection(&bytes)
 }
-fn continuation_record(
+pub(super) fn continuation_record(
     selection: &ContinuationSelectionV1,
 ) -> Result<&FinancialContinuationRecordV1> {
     require_version(selection.version)?;
@@ -105,7 +108,7 @@ fn continuation_record(
         .map_err(|_| Error::Authentication)?;
     Ok(record)
 }
-fn require_admitted_selection(
+pub(super) fn require_admitted_selection(
     selection: &ContinuationSelectionV1,
     admitted: &DurableDeliveryAdmissionStatusV3,
 ) -> Result<()> {

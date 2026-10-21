@@ -26,6 +26,24 @@ use wholepact_signer::authority_bridge::{
 use wholepact_store::{CommandContext, MutationResult};
 
 mod closed_review_v3;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub use closed_review_v3::{ClosedCoordinatedPrivateDurableAdmissionReviewV1, CoordinatedPrivateDurableAdmissionStatusV1};
+fn is_coordinated_export_event_v1(kind: &str) -> bool {
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    { kind == closed_review_v3::COORDINATED_EXPORT_EVENT_V1 }
+    #[cfg(not(feature = "coordinated-financial-workflow-v1"))]
+    { let _ = kind; false }
+}
+fn audit_coordinated_export_v1(before: &Envelope, after: &Envelope, access: &Access) -> Result<(String, String, CommandContext)> {
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    {
+        let scope = closed_review_v3::validate_coordinated_export_delta_v1(before, after)?;
+        let command = closed_review_v3::coordinated_export_command_v1(access, before.view.revision, &scope)?;
+        Ok((scope.principal_id, scope.recipient.request.operation_id, command))
+    }
+    #[cfg(not(feature = "coordinated-financial-workflow-v1"))]
+    { let _ = (before, after, access); Err(damaged()) }
+}
 pub(super) mod financial_v1;
 pub use closed_review_v3::{
     ClosedPrivateDurableAdmissionReviewV3, PreparedPrivateDurableAdmissionDeliveryV3,
@@ -344,6 +362,16 @@ const PREFIX_KINDS: [&str; PREFIX_EVENTS] = [
 /// The trusted Host must retain its genuine native/source owner for every call.
 pub trait LocalPrivateDurableAdmissionConsentV2 {
     fn permits_source(&self, scope: &PrivateWorkspaceScopeV1) -> bool;
+    /// Denial-only zero-wait observer, not source/consent re-entry. The legacy
+    /// default adds no restriction; coordinated Host implementations override.
+    fn check_final_effect_restriction_v1(&self, _original_deadline: Option<std::time::Instant>) -> bool { true }
+}
+struct AdmissionCommitRestrictionV3<'a>(&'a dyn LocalPrivateDurableAdmissionConsentV2, std::time::Instant);
+impl wholepact_store::OriginalCommitRestrictionV3 for AdmissionCommitRestrictionV3<'_> {
+    fn check_before_commit(&self) -> wholepact_store::Result<()> {
+        if self.0.check_final_effect_restriction_v1(Some(self.1)) { Ok(()) }
+        else { Err(wholepact_store::StoreError::InvalidInput("original effect restriction denied")) }
+    }
 }
 
 /// Exclusive same-original owner. No Clone, serde, Deref or caller-data factory.
@@ -530,7 +558,7 @@ impl<'owner, 'source> PreparedPrivateDurableAdmissionDeliveryV2<'owner, 'source>
         check_recipient(recipient, cause)?;
         gate.check()?;
         let (current, history) = self.owner.check_observed(access, gate.consent, cause)?;
-        if !original_roster_v2(&current)?.review_exports_v3.is_empty() {
+        if (!original_roster_v2(&current)?.review_exports_v3.is_empty() || original_roster_v2(&current)?.coordinated_exports_present()) {
             return Err(denied());
         }
         let source = self
@@ -1032,7 +1060,7 @@ impl<'source> PrivateDurableAdmissionCoordinatorV2<'source> {
         delivery_gate.check(false)?;
         check_recipient(&recipient, cause)?;
         let mut roster = export_result(cause, S::ExportRoster, original_roster_v2(&before))?;
-        if !roster.review_exports_v3.is_empty() {
+        if !roster.review_exports_v3.is_empty() || roster.coordinated_exports_present() {
             return Err(denied());
         }
         let prior_revision = history
@@ -1439,7 +1467,7 @@ impl<'source> PrivateDurableAdmissionCoordinatorV2<'source> {
                 || if i < PREFIX_EVENTS {
                     event.kind != PREFIX_KINDS[i]
                 } else {
-                    event.kind != EXPORT_EVENT && event.kind != closed_review_v3::EXPORT_EVENT_V3
+                    event.kind != EXPORT_EVENT && event.kind != closed_review_v3::EXPORT_EVENT_V3 && !is_coordinated_export_event_v1(&event.kind)
                 }
             {
                 return export_predicate_error(cause, ExportCauseSite::ExportHistory, damaged());
@@ -1542,6 +1570,8 @@ impl<'source> PrivateDurableAdmissionCoordinatorV2<'source> {
                         scope.recipient.request.operation_id,
                         command,
                     )
+                } else if is_coordinated_export_event_v1(&event.kind) {
+                    audit_coordinated_export_v1(before, &envelope, access)?
                 } else {
                     let scope = closed_review_v3::validate_export_delta_v3(before, &envelope)?;
                     let command =
@@ -1663,7 +1693,7 @@ fn require_completed_prefix_observed(e: &Envelope, cause: ExportObservation<'_>)
     let c = &e.view.candidates[0];
     if roster.owners.len() != 2
         || !roster.review_exports.is_empty()
-        || !roster.review_exports_v3.is_empty()
+        || !roster.review_exports_v3.is_empty() || roster.coordinated_exports_present()
         || c.proof_jobs.len() != 1
         || c.proof_jobs[0].state != "succeeded"
         || c.proof_jobs[0].attempt != 1
@@ -1738,7 +1768,7 @@ fn validate_export_delta_kernel(
     }
     let old = original_roster_v2(before)?;
     let new = original_roster_v2(after)?;
-    if !old.review_exports_v3.is_empty() || !new.review_exports_v3.is_empty() {
+    if !old.review_exports_v3.is_empty() || !new.review_exports_v3.is_empty() || old.coordinated_exports_present() || new.coordinated_exports_present() {
         return Err(damaged());
     }
     if new.owners.len() != 2 {
@@ -4149,6 +4179,68 @@ mod request_history_tests {
             payload_length: recipient.payload_bytes,
             recipient,
         };
+        #[cfg(feature = "coordinated-financial-workflow-v1")]
+        {
+            use wholepact_signer::authority_bridge::durable_review_ipc_v3::coordinated_recipient_v1::CoordinatedRecipientIntentV1;
+            use crate::durable_construction_v1::review_export_coordinated_v1::{self, CoordinatedDurableReviewExportScopeV1, CoordinatedExportIntentV1};
+            // TEST DATA ONLY: independently construct inert coordinated history;
+            // no recipient transport/source/action owner is created or converted.
+            let r = &scope.recipient;
+            let coordinated = CoordinatedRecipientIntentV1 {
+                version: 1, request: r.request.clone(), fixed: r.fixed.clone(),
+                payload_digest: r.payload_digest.clone(), payload_bytes: r.payload_bytes,
+                delivery: r.delivery.clone(), material_scopes: r.material_scopes.clone(),
+                account_id: r.account_id.clone(), participant_id: r.participant_id.clone(),
+                agreement_id: r.agreement_id.clone(), manifest_digest: r.manifest_digest.clone(),
+                coordinated_provider_reference: hash(0xe1), signer_process_instance: r.signer_process_instance.clone(),
+                authorized_host_process_instance: r.authorized_host_process_instance.clone(),
+                source_identity_digest: r.source_identity_digest.clone(), source_generation: 1,
+                read_session_digest: r.read_session_digest.clone(), receive_decision_digest: r.receive_decision_digest.clone(),
+                original_enrollment_ref: r.original_enrollment_ref.clone(), original_manifest_ref: r.original_manifest_ref.clone(),
+            };
+            checked(coordinated.validate());
+            assert!(serde_json::from_value::<RecipientIntentV3>(checked(serde_json::to_value(&coordinated))).is_err());
+            assert!(serde_json::from_value::<CoordinatedRecipientIntentV1>(checked(serde_json::to_value(r))).is_err());
+            let export = CoordinatedDurableReviewExportScopeV1 {
+                schema_version: 1, principal_id: scope.principal_id.clone(), proposal: scope.proposal.clone(),
+                recipient: coordinated.clone(), sources: scope.sources.clone(),
+                payload_digest: scope.payload_digest.clone(), payload_length: scope.payload_length,
+            };
+            checked(review_export_coordinated_v1::validate_recipient(&roster, candidate, &export));
+            for field in 0..5 {
+                let mut wrong = export.clone();
+                match field {
+                    0 => wrong.payload_digest = hash(0xe2),
+                    1 => wrong.sources[0].request_digest = hash(0xe2),
+                    2 => wrong.recipient.request.own_disclosure.expected_request_digest = hash(0xe2),
+                    3 => wrong.proposal.proposal_digest = hash(0xe2),
+                    _ => wrong.recipient.material_scopes[0].original_scope_digest = hash(0xe2),
+                }
+                assert!(review_export_coordinated_v1::validate_recipient(&roster, candidate, &wrong).is_err());
+            }
+            let mut coordinated_roster = roster.clone();
+            let operation = coordinated.request.operation_id.clone();
+            coordinated_roster.coordinated_review_exports_v1.insert(operation.clone(), CoordinatedExportIntentV1 { scope: export.clone(), exposure: ExportExposure::DisclosedOrUnknown });
+            let digest = checked(coordinated.digest());
+            assert!(financial_v1::coordinated_financial_recipient_v1(&coordinated_roster, &coordinated.account_id, &digest).is_ok());
+            assert!(financial_v1::coordinated_financial_recipient_v1(&coordinated_roster, "other-account", &digest).is_err());
+            assert!(financial_v1::coordinated_financial_recipient_v1(&coordinated_roster, &coordinated.account_id, &hash(0xe3)).is_err());
+            let mut ambiguous = coordinated_roster.clone();
+            ambiguous.coordinated_review_exports_v1.insert("duplicate".into(), CoordinatedExportIntentV1 { scope: export.clone(), exposure: ExportExposure::DisclosedOrUnknown });
+            assert!(financial_v1::coordinated_financial_recipient_v1(&ambiguous, &coordinated.account_id, &digest).is_err());
+            let mut mixed = coordinated_roster.clone();
+            mixed.review_exports_v3.insert(operation, crate::durable_construction_v1::review_export_v3::ExportIntentV3 { scope: scope.clone(), exposure: ExportExposure::DisclosedOrUnknown });
+            assert!(financial_v1::coordinated_financial_recipient_v1(&mixed, &coordinated.account_id, &digest).is_err());
+            let mut after = before.clone();
+            after.view.revision += 1;
+            after.view.updated_at = crate::now();
+            after.durable_construction_v1.insert(identity.proposal_id.clone(), checked(serde_json::to_value(&coordinated_roster)));
+            assert!(checked(closed_review_v3::validate_coordinated_export_delta_v1(before, &after)) == export);
+            assert!(closed_review_v3::validate_export_delta_v3(before, &after).is_err());
+            let mut changed = after.clone();
+            changed.checkpoint_receipts.values_mut().next().unwrap().artifact_digest = hash(0xe4);
+            assert!(closed_review_v3::validate_coordinated_export_delta_v1(before, &changed).is_err());
+        }
         let snapshot = || {
             checked(
                 PrivateDurableAdmissionCoordinatorV2::check_initialized_admission_original_v2(
