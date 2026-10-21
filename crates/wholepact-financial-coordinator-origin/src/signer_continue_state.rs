@@ -54,6 +54,19 @@ impl Phases {
             match self.word.compare_exchange_weak(old,new,Ordering::AcqRel,Ordering::Acquire){Ok(_)=>return Ok(()),Err(actual)=>old=actual}
         }
     }
+    /// Only S's authenticated ordered Final receive may record this exact
+    /// transition after C already admitted it. Preserve R, never issue C's A.
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn observe_received_workflow_continue_final(&self,slot:usize)->Result<()>{
+        use crate::financial_workflow_continue::{CONT_READY,CONT_ADMITTED};
+        if slot>1{return Err(rejected("not a fixed received Continue slot"));}
+        let shift=slot*8;let mut old=self.word.load(Ordering::Acquire);
+        loop{
+            if ((old>>shift)&0xff)!=CONT_READY as u32{return Err(rejected("received Continue Final was not Ready"));}
+            let new=(old&!(0xff<<shift))|((CONT_ADMITTED as u32)<<shift);
+            match self.word.compare_exchange_weak(old,new,Ordering::AcqRel,Ordering::Acquire){Ok(_)=>return Ok(()),Err(actual)=>old=actual}
+        }
+    }
     pub(super) fn step(&self, slot: usize, from: u8, to: u8) -> Result<()> {
         if slot > 1 { return Err(rejected("not a fixed Continue slot")); }
         let shift = slot * 8;
@@ -103,6 +116,8 @@ fn check_pidfd(fd: &OwnedFd) -> Result<()> {
 
 pub(super) struct Core {
     pub(super) phase: Phases,
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    pub(super) signer_restriction: Option<crate::host_restriction::SignerSharedRestrictionV1>,
     pub(super) peer: CheckedPeer,
     pub(super) roots: Vec<OwnedFd>,
     pub(super) coordinator: Option<PeerLifetime>,
@@ -125,6 +140,21 @@ impl Core {
             Ok(())
         })();
         if result.is_err() { self.close(); }
+        result
+    }
+    /// Ordinary action restriction only. Never call this from the admitted
+    /// local Continue Final exception or from custody-only checks.
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    pub(super) fn check_action_restrictions(&self) -> Result<()> {
+        let result = (|| {
+            self.check()?;
+            crate::channel::require_time(self.session)?;
+            if self.phase.revoked() { return Err(rejected("original workflow restricted")); }
+            // Last sample uses the original shared cell, not a queued Cancel.
+            if let Some(reader) = &self.signer_restriction { reader.check_current()?; }
+            Ok(())
+        })();
+        if result.is_err() { self.phase.revoke(); }
         result
     }
     pub(super) fn close(&self) {

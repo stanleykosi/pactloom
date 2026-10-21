@@ -31,7 +31,7 @@ pub struct SignerFinancialWorkflowOriginV1 {
 impl SignerFinancialWorkflowOriginV1 {
     pub(super) fn from_signer(leaf:LeafCustody,birth:SignerBirthContext)->Result<Self>{
         let target=Target::from_role(leaf.origin.role())?;let clocks=leaf.clocks.workflow();
-        let core=Arc::new(Core{phase:Phases::new(),peer:leaf.origin.continue_observer()?,roots:Vec::new(),coordinator:Some(birth.coordinator),
+        let core=Arc::new(Core{phase:Phases::new(),signer_restriction:Some(birth.restriction),peer:leaf.origin.continue_observer()?,roots:Vec::new(),coordinator:Some(birth.coordinator),
             owner_pid:unsafe{libc::getpid()},owner_uid:unsafe{libc::geteuid()},epoch:clocks.epoch(),session:clocks.supervision(),
             alive:AtomicBool::new(true),outbound:[AtomicU8::new(PENDING),AtomicU8::new(PENDING)]});
         core.check()?;crate::channel::require_time(clocks.supervision())?;
@@ -53,7 +53,13 @@ impl SignerFinancialWorkflowOriginV1 {
     fn receive_inner(&mut self)->Result<Option<SignerFinancialWorkflowRequestV1>>{
         self.transport_check()?;
         let Some(packet)=self.leaf.as_ref().ok_or_else(||rejected("workflow Signer consumed"))?.origin.workflow_receive()? else{return Ok(None)};
-        if !matches!(packet,Packet::Cancel{..}) {crate::channel::require_time(self.clocks.supervision())?;if self.core.phase.revoked(){return Err(rejected("workflow command after restriction"));}}
+        if !matches!(packet,Packet::Cancel{..}) {
+            crate::channel::require_time(self.clocks.supervision())?;
+            if self.core.phase.revoked()&&!matches!(packet,Packet::ContinueFinal{..}){return Err(rejected("workflow command after restriction"));}
+            // An already C-admitted local Continue Final precedes ordered Cancel
+            // and retains its narrow exception. Every other new purpose denies R.
+            if !matches!(packet,Packet::ContinueFinal{..}) { self.core.check_action_restrictions()?; }
+        }
         let request=match packet {
             Packet::StartEntry{start}=>{
                 start.validate()?;if self.start.is_some()||start.role!=self.target{return Err(rejected("workflow source-entry start repeated or wrong role"));}
@@ -97,8 +103,14 @@ impl SignerFinancialWorkflowOriginV1 {
             }
             Packet::ContinueFinal{context,presentation_digest,prepared_digest,ready_challenge}=>{
                 let b=self.continuation.binding.as_ref().ok_or_else(||rejected("Continue Final before display"))?;
-                if self.continuation.outcome||!b.wire.matches(&context,&presentation_digest,&prepared_digest)||self.continuation.ready.as_ref()!=Some(&ready_challenge){return Err(rejected("full Continue Final mismatch"));}
-                b.check(false)?;self.core.phase.step(self.target.index(),CONT_READY,CONT_ADMITTED)?;
+                // Consume the actual retained Ready before any fallible final
+                // validation. Shared-R observation is not received Cancel.
+                let ready=self.continuation.ready.take();
+                if self.cancel_seen||self.failed||self.continuation.outcome
+                    ||!b.wire.matches(&context,&presentation_digest,&prepared_digest)
+                    ||ready.as_ref()!=Some(&ready_challenge){return Err(rejected("full Continue Final mismatch"));}
+                b.check(true)?;
+                self.core.phase.observe_received_workflow_continue_final(self.target.index())?;
                 SignerFinancialWorkflowRequestV1::ContinueFinal(SignerContinueFinalV1::from_retained_workflow(Arc::clone(b),ready_challenge))
             }
             Packet::Cancel{coordinator,session}=>{
@@ -121,7 +133,7 @@ impl SignerFinancialWorkflowOriginV1 {
         if result.is_err(){self.core.phase.revoke();self.recipient.take();}result
     }
     fn offer_entry_inner(&mut self,facts:SignerSourceEntryFactsV1,source:Instant,entry_deadline:Instant)->Result<SignerSourceEntryPresentationV1>{
-        self.core.check()?;facts.validate()?;
+        self.core.check_action_restrictions()?;facts.validate()?;
         if self.core.phase.revoked()||self.core.phase.phase(self.target.index())!=ENTRY_PREPARING{return Err(rejected("source-entry offer phase"));}
         let start=self.start.clone().ok_or_else(||rejected("source-entry request missing"))?;
         self.clocks.restrict_received(&start.profile,start.native_ceiling_ms,self.clocks.supervision(),Instant::now())?;
@@ -154,6 +166,7 @@ impl SignerFinancialWorkflowOriginV1 {
     /// After the actual worker has completed its full audit and consumed Final
     /// into original custody. No source lock may be held while sending.
     pub fn source_opened(&mut self)->Result<()> {
+        self.core.check_action_restrictions()?;
         if self.source_reported||self.core.phase.phase(self.target.index())!=SOURCE_RETAINED||self.core.phase.revoked(){return Err(rejected("source retention phase"));}
         let entry=self.entry.as_ref().ok_or_else(||rejected("source-entry missing"))?;entry.check_custody()?;
         self.source_reported=true;self.send(&Packet::SourceRetained{start:entry.wire.start.clone(),presentation_digest:entry.wire.presentation.presentation_digest.clone()})
@@ -176,6 +189,7 @@ impl SignerFinancialWorkflowOriginV1 {
         })();if result.is_err(){self.core.phase.revoke();}result
     }
     pub fn history_read(&mut self)->Result<()> {
+        self.core.check_action_restrictions()?;
         if self.history_reported||self.core.phase.phase(self.target.index())!=HISTORY_RETAINED||self.core.phase.revoked()||self.continuation.draft.is_none(){return Err(rejected("history and immutable preparation retention phase"));}
         let read=self.read.as_ref().ok_or_else(||rejected("Read missing"))?;read.entry.check_custody()?;
         let draft=self.continuation.draft.as_ref().ok_or_else(||rejected("frozen Continue draft missing"))?;
@@ -326,7 +340,7 @@ pub(super) fn split_coordinator(tree:InertTreeV1,phases:PhaseDeadlinesV1,
     // Drop then publishes R before the tree parameter can enter a reaper.
     let phase=Phases::coordinator(host_restriction);
     let clocks=phases.workflow();let image=tree.workflow_image();
-    let core=Arc::new(Core{phase,peer:tree.continue_host()?.continue_observer()?,roots:tree.continue_pidfds()?,coordinator:None,
+    let core=Arc::new(Core{phase,signer_restriction:None,peer:tree.continue_host()?.continue_observer()?,roots:tree.continue_pidfds()?,coordinator:None,
         owner_pid:unsafe{libc::getpid()},owner_uid:unsafe{libc::geteuid()},epoch:clocks.epoch(),session:clocks.supervision(),
         alive:AtomicBool::new(true),outbound:[AtomicU8::new(PENDING),AtomicU8::new(PENDING)]});
     core.check()?;crate::channel::require_time(clocks.supervision())?;
@@ -748,11 +762,15 @@ impl HostFinancialWorkflowRelayV1 {
         Ok(!self.restricted)
     }
     pub fn is_disposed(&self)->bool{self.disposed==[true;2]}
-    pub fn complete(mut self,work:Result<()>)->!{
+    /// Joinable terminal drain for the sole H relay owner. The foreground role
+    /// joins this result and drops its actual authority before final branch exit.
+    /// This method neither exits the process nor transfers/replaces the S reapers.
+    pub fn finish(mut self,work:Result<()>)->Result<()>{
         let result=work.and_then(|()|if self.cancel_seen&&self.is_disposed(){Ok(())}else{Err(rejected("workflow relay actual disposal missing"))})
             .and_then(|()|bootstrap::finish_host_capped(self.host.take().ok_or_else(||rejected("workflow Host consumed"))?,self.cleanup));
-        drop(self.host.take());bootstrap::child_exit(result)
+        drop(self.host.take());result
     }
+    pub fn complete(self,work:Result<()>)->!{bootstrap::child_exit(self.finish(work))}
 }
 fn entry_current(slot:&mut HSlot,clocks:FullWorkflowClocksV1)->Result<()>{
     let entry=slot.entry.as_ref().ok_or_else(||rejected("relay entry binding missing"))?;

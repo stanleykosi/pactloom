@@ -68,7 +68,7 @@ pub use financial_workflow_channel::{FinancialActorContextV1, SignerSourceEntryF
     SignerSourceEntryPresentationV1, SignerFinancialReadFactsV1, SignerFinancialReadPresentationV1, FinancialWorkflowStageV1};
 #[cfg(feature = "coordinated-financial-workflow-v1")]
 pub use financial_workflow_source::{SignerSourceEntryOfferV1, SignerSourceEntryOutboundV1,
-    SignerSourceEntryFinalV1, SignerSourceEntryInputV1, SignerOriginalCustodyLifetimeV1,
+    SignerSourceEntryFinalV1, SignerSourceEntryInputV1, SignerOriginalCustodyLifetimeV1, SignerOriginalRestrictionV1,
     SignerFinancialReadTicketV1, SignerFinancialReadOutboundV1, SignerFinancialReadFinalV1};
 #[cfg(feature = "coordinated-financial-workflow-v1")]
 pub use financial_workflow_origin::{CoordinatorFinancialNativeV1, CoordinatorFinancialEndpointV1,

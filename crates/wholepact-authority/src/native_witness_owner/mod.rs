@@ -4,6 +4,7 @@
 //! No signer dependency, no signer-key loader, no socket and no public approval factory.
 mod lifecycle;
 mod delivery_preparation_v2;
+mod financial_continuation_preparation_v1;
 #[cfg(feature = "coordinated-witness-cancel-review")]
 pub mod cancel_delivery_review_v1;
 #[cfg(feature = "coordinated-witness-delivery-append")]

@@ -1,12 +1,12 @@
-//! One original C/H monotone restriction cell, not a native approval issuer.
-//! The anonymous shared mapping is RW in the trusted whole-image C and H. H's
-//! sealed Rust API exposes loads only; this is NOT OS isolation from hostile H.
+//! One original C/H/S monotone restriction cell, not a native approval issuer.
+//! The mapping is RW in trusted whole-image C/H/S. H/S sealed APIs expose only
+//! checks; this is NOT OS isolation from hostile code in either trusted role.
 //! Bootstrap alone creates/prunes it. No pointer, FD, path, reset or importer
 //! escapes, and no successful observation may be cached as an effect permit.
 use crate::{
     bootstrap::PhaseDeadlinesV1,
     channel::require_time,
-    process::{DirectChild, ForkOriginV1, Role},
+    process::{DirectChild, ForkOriginV1, PeerLifetime, Role},
     rejected,
     signer_continue_state::CheckedPeer,
     Result,
@@ -111,6 +111,26 @@ impl CreatedHostRestrictionV1 {
             cell: self.cell.take().ok_or_else(|| rejected("shared restriction consumed"))?,
         })
     }
+    /// Only the real H->S child branch may retain this inherited mapping. No
+    /// extra FD is created: the full Core separately owns original C/H checks.
+    pub(super) fn into_signer(mut self, origin: &ForkOriginV1, coordinator: &PeerLifetime) -> Result<SignerSharedRestrictionV1> {
+        if !matches!(origin.role(), Role::Signer1 | Role::Signer2)
+            || coordinator.role() != Role::Coordinator
+            || coordinator.pid() != self.creator_pid || coordinator.uid() != self.creator_uid
+            || unsafe { libc::geteuid() } != self.creator_uid
+            || unsafe { libc::getpid() } == self.creator_pid
+        { return Err(rejected("shared restriction requires original Signer birth")); }
+        require_time(self.clocks.workflow().startup())?;
+        origin.check_parent_alive()?;
+        coordinator.check_alive()?;
+        let observer = SignerSharedRestrictionV1 {
+            cell: self.cell.take().ok_or_else(|| rejected("shared restriction consumed"))?,
+            owner_pid: unsafe { libc::getpid() }, owner_uid: self.creator_uid,
+            role: origin.role(), deadline: self.clocks.session,
+        };
+        observer.check_current()?;
+        Ok(observer)
+    }
     pub(super) fn into_host(mut self, origin: &ForkOriginV1) -> Result<HostOriginalRestrictionV1> {
         let coordinator = origin.retain_host_coordinator_lifetime()?;
         let owner_pid = unsafe { libc::getpid() };
@@ -183,6 +203,28 @@ impl HostOriginalRestrictionV1 {
         require_time(self.deadline)?;
         if self.cell.sample() != CURRENT {
             return Err(rejected("original Coordinator restricted Host operation"));
+        }
+        Ok(())
+    }
+}
+
+/// Private inherited mapping. Core calls only AFTER its actual C/H checks.
+/// No writer, clone, importer or reaper is available to S.
+pub(super) struct SignerSharedRestrictionV1 {
+    cell: SharedCell,
+    owner_pid: libc::pid_t,
+    owner_uid: libc::uid_t,
+    role: Role,
+    deadline: Instant,
+}
+impl SignerSharedRestrictionV1 {
+    pub(super) fn check_current(&self) -> Result<()> {
+        if unsafe { libc::getpid() } != self.owner_pid || unsafe { libc::geteuid() } != self.owner_uid
+            || !matches!(self.role, Role::Signer1 | Role::Signer2)
+        { return Err(rejected("shared restriction used outside original Signer")); }
+        require_time(self.deadline)?;
+        if self.cell.sample() != CURRENT {
+            return Err(rejected("original Coordinator restricted Signer operation"));
         }
         Ok(())
     }

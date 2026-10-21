@@ -492,15 +492,21 @@ fn prepare_host(origin: ForkOriginV1, clocks: PhaseDeadlinesV1,
                 // S2 must close its copied S1 owner/channel, and both signers
                 // close H's C-facing channel. No signer can send directly to C.
                 #[cfg(feature = "coordinated-signer-continue")]
-                let continuation = crate::signer_continue_origin::SignerBirthContext {
-                    coordinator: origin.retain_host_coordinator_lifetime()?,
-                    image: verified_image.clone(),
+                let continuation = {
+                    let coordinator = origin.retain_host_coordinator_lifetime()?;
+                    #[cfg(feature = "coordinated-financial-workflow-v1")]
+                    let restriction = host_restriction.into_signer(&signer_origin, &coordinator)?;
+                    crate::signer_continue_origin::SignerBirthContext {
+                        coordinator, image: verified_image.clone(),
+                        #[cfg(feature = "coordinated-financial-workflow-v1")]
+                        restriction,
+                    }
                 };
                 drop(signers);
                 #[cfg(feature = "coordinated-financial-workflow-v1")]
                 drop(host_terminal);
-                #[cfg(feature = "coordinated-financial-workflow-v1")]
-                drop(host_restriction);
+                // S retains only the sealed check-only mapping, never the
+                // C writer, H/C socket, PTY or any sibling owner.
                 drop(origin);
                 #[cfg(feature = "common-image-fork-provider")]
                 drop(verified_image);
@@ -512,7 +518,7 @@ fn prepare_host(origin: ForkOriginV1, clocks: PhaseDeadlinesV1,
         }
     }
     // H alone establishes its new controlling terminal AFTER both S forks.
-    // Neither S can retain this slave/master or the shared restriction mapping.
+    // Neither S can retain this slave/master; each retains only a sealed shared reader.
     #[cfg(feature = "coordinated-financial-workflow-v1")]
     let host_terminal = host_terminal.into_host_after_signer_forks(&origin, &signers)?;
     #[cfg(feature = "coordinated-financial-workflow-v1")]
@@ -588,7 +594,11 @@ fn prepare_leaf(origin: ForkOriginV1, clocks: PhaseDeadlinesV1,
     }
     verify_child_start(&origin)?;
     #[cfg(feature = "coordinated-signer-continue")]
-    if let Some(context) = &continuation { context.coordinator.check_alive()?; }
+    if let Some(context) = &continuation {
+        context.coordinator.check_alive()?;
+        #[cfg(feature = "coordinated-financial-workflow-v1")]
+        context.restriction.check_current()?;
+    }
     #[cfg(wholepact_bootstrap_ci)]
     {
         let mut fds = vec![0, 1, 2];

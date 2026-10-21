@@ -225,3 +225,35 @@ impl PreparedOriginalFinancialSourceV1 {
         check()
     }
 }
+
+/// Nominal, denial-only adapter. This object retains only the genuine original
+/// actor/source/session/shared-R observer, not the source owner or any Read,
+/// Continue, Admit or other action grant. No semantic audit runs under I/O.
+struct CoordinatedAuthorityTransportRestrictionV1 {
+    original: wholepact_financial_coordinator_origin::SignerOriginalRestrictionV1,
+}
+impl wholepact_authority::AuthorityTransportRestrictionV1
+    for CoordinatedAuthorityTransportRestrictionV1
+{
+    fn check_before_io(&self) -> wholepact_authority::Result<()> {
+        self.original
+            .check_current()
+            .map_err(|_| wholepact_authority::AuthorityError::Permission)
+    }
+}
+impl PreparedOriginalFinancialSourceV1 {
+    /// Only an actually retained coordinated source can supply this observer.
+    /// Native custody is refused, never converted or used as an unrestricted
+    /// fallback. The selected client's own checked action/deadline is separate.
+    pub(crate) fn coordinated_authority_transport_restriction_v1(
+        &self,
+    ) -> Result<std::sync::Arc<dyn wholepact_authority::AuthorityTransportRestrictionV1>> {
+        let OriginalFinancialCustodyLifetimeV1::Coordinated(lifetime) = &self.lifetime else {
+            return Err(Error::Unavailable);
+        };
+        let original = lifetime.original_restriction()?;
+        Ok(std::sync::Arc::new(
+            CoordinatedAuthorityTransportRestrictionV1 { original },
+        ))
+    }
+}

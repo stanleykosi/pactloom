@@ -3,7 +3,12 @@
 //! here. ALL lines are masked, regardless of prompt contents. Empty/short input
 //! is intentional; the sole added newline belongs to the genuine endpoint.
 //!
-//! The future same-App caller must latch shared/local R before scrub/close,
+//! The restriction callback must synchronously latch shared/local R before any
+//! restrictive cleanup. It returns no permission and is never invoked under an
+//! egui Context lock. The actual App passes its existing native.revoke directly.
+//! Successful submission does not revoke. Explicit owner teardown must revoke
+//! before cancel/drop; leaf Drop is best-effort scrubbing, not proof of global R.
+//! The future same-App caller must
 //! exclusively choose this editor OR the separate Signer credential editor,
 //! forward each original raw batch, process all cancel controls before the
 //! eligible final tail, and explicitly activate a later fresh line slot only
@@ -53,8 +58,13 @@ pub(super) struct SubmittedHostLine {
 
 impl SubmittedHostLine {
     /// Consuming a mismatched result drops/zeroizes it; no retry or retargeting.
-    pub(super) fn into_line_for(self, expected: u64) -> Option<Zeroizing<String>> {
+    pub(super) fn into_line_for(
+        self,
+        expected: u64,
+        restrict: &mut impl FnMut(),
+    ) -> Option<Zeroizing<String>> {
         if self.ordinal != expected || Instant::now() >= self.original_deadline {
+            restrict(); // Publish actual R before the rejected owned input drops.
             None
         } else {
             Some(self.line)
@@ -127,12 +137,12 @@ impl HostLineInput {
     /// Forward from App::raw_input_hook BEFORE any visible or hidden callback.
     /// Inspect the whole immutable interruption history before removing payloads.
     /// Closed/unfocused/expired requests never admit delayed text or IME input.
-    pub(super) fn raw_input_hook(&mut self, raw: &mut egui::RawInput) {
+    pub(super) fn raw_input_hook(&mut self, raw: &mut egui::RawInput, restrict: &mut impl FnMut()) {
         self.raw_input_allowed = false;
         self.submit_frame = None;
-        self.observe(raw_facts(raw));
+        self.observe(raw_facts(raw), restrict);
         if self.open() && !bounded_input_events(&raw.events) {
-            self.close(HostLineStatus::InvalidPayload);
+            self.close_restricted(HostLineStatus::InvalidPayload, restrict);
         }
         if self.open() && self.focused_last {
             self.raw_input_allowed = true;
@@ -145,12 +155,12 @@ impl HostLineInput {
 
     /// The local Cancel widget runs BEFORE TextEdit. This function returns no
     /// secret; even a primary-button submit is only an inert same-frame intent.
-    pub(super) fn show(&mut self, ui: &mut egui::Ui, expected: u64) {
+    pub(super) fn show(&mut self, ui: &mut egui::Ui, expected: u64, restrict: &mut impl FnMut()) {
         if ui.ctx() != &self.ctx || ui.ctx().viewport_id() != egui::ViewportId::ROOT {
-            self.close(HostLineStatus::InvalidViewport);
+            self.close_restricted(HostLineStatus::InvalidViewport, restrict);
             return;
         }
-        self.check_current(expected);
+        self.check_current(expected, restrict);
         if !self.open() {
             self.scrub_closed_frame();
             return;
@@ -158,14 +168,14 @@ impl HostLineInput {
         if !self.ctx.input(|input| {
             bounded_input_events(&input.events) && bounded_input_events(&input.raw.events)
         }) {
-            self.close(HostLineStatus::InvalidPayload);
+            self.close_restricted(HostLineStatus::InvalidPayload, restrict);
             return;
         }
         if ui
             .button("Cancel Host line entry")
             .clicked_by(egui::PointerButton::Primary)
         {
-            self.cancel();
+            self.cancel(restrict);
             return;
         }
         let admitted_batch = std::mem::take(&mut self.raw_input_allowed);
@@ -194,15 +204,15 @@ impl HostLineInput {
             // the authoritative local limit below is BYTES, without normalization.
             .char_limit(2 * MAX_LINE_BYTES)
             .show(ui);
+        if !valid_line(&self.line) {
+            self.close_restricted(HostLineStatus::InvalidPayload, restrict);
+            return; // Never store the old TextEdit output after terminal cleanup.
+        }
         output.state.clear_undoer();
         output.state.store(&self.ctx, output.response.id);
         // Do not store this old output again after any terminal cleanup.
         scrub_context_payloads(&self.ctx);
         clear_sensitive_output(&self.ctx, false);
-        if !valid_line(&self.line) {
-            self.close(HostLineStatus::InvalidPayload);
-            return;
-        }
         let submit = ui
             .add_enabled(eligible, egui::Button::new("Send this exact Host line"))
             .clicked_by(egui::PointerButton::Primary);
@@ -214,9 +224,17 @@ impl HostLineInput {
     /// Call at the visible frame tail, AFTER every remaining Cancel control.
     /// Hidden/discarded/repeated passes cannot submit, and no input caller can
     /// fabricate an intent through this API. The original deadline never renews.
-    pub(super) fn finish_frame(&mut self, expected: u64) -> Option<SubmittedHostLine> {
-        self.check_current(expected);
+    pub(super) fn finish_frame(
+        &mut self,
+        expected: u64,
+        restrict: &mut impl FnMut(),
+    ) -> Option<SubmittedHostLine> {
+        self.check_current(expected, restrict);
         let requested = self.submit_frame.take() == Some(self.ctx.cumulative_frame_nr());
+        if self.open() && requested && !valid_line(&self.line) {
+            self.close_restricted(HostLineStatus::InvalidLine, restrict);
+            return None;
+        }
         // The exclusive credential modal has now processed all controls. Clear
         // also key/modifier events, which can reveal the input sequence.
         self.ctx.input_mut(|input| {
@@ -227,10 +245,6 @@ impl HostLineInput {
         });
         clear_sensitive_output(&self.ctx, !self.open());
         if !self.open() || !self.focused_last || !requested || self.ctx.will_discard() {
-            return None;
-        }
-        if !valid_line(&self.line) {
-            self.close(HostLineStatus::InvalidLine);
             return None;
         }
         let line = std::mem::take(&mut self.line);
@@ -244,13 +258,13 @@ impl HostLineInput {
 
     /// Line/phase replacement, upstream cancellation and terminal failure MUST
     /// reach this before further widgets. A canceled slot cannot be reopened.
-    pub(super) fn cancel(&mut self) {
-        self.close(HostLineStatus::Cancelled);
+    pub(super) fn cancel(&mut self, restrict: &mut impl FnMut()) {
+        self.close_restricted(HostLineStatus::Cancelled, restrict);
     }
 
-    fn check_current(&mut self, expected: u64) {
+    fn check_current(&mut self, expected: u64, restrict: &mut impl FnMut()) {
         if self.ordinal != expected {
-            self.close(HostLineStatus::RequestChanged);
+            self.close_restricted(HostLineStatus::RequestChanged, restrict);
         }
         let facts = self.ctx.input(|input| {
             raw_facts(&input.raw).map(|mut facts| {
@@ -260,19 +274,19 @@ impl HostLineInput {
                 facts
             })
         });
-        self.observe(facts);
+        self.observe(facts, restrict);
     }
 
-    fn observe(&mut self, facts: Option<RawFacts>) {
+    fn observe(&mut self, facts: Option<RawFacts>, restrict: &mut impl FnMut()) {
         if !self.open() {
             return;
         }
         if Instant::now() >= self.original_deadline {
-            self.close(HostLineStatus::Expired);
+            self.close_restricted(HostLineStatus::Expired, restrict);
             return;
         }
         let Some(facts) = facts else {
-            self.close(HostLineStatus::InvalidViewport);
+            self.close_restricted(HostLineStatus::InvalidViewport, restrict);
             return;
         };
         if facts.blur
@@ -280,7 +294,7 @@ impl HostLineInput {
             || facts.close
             || (self.focus_seen && self.focused_last && !facts.focused)
         {
-            self.close(HostLineStatus::Interrupted);
+            self.close_restricted(HostLineStatus::Interrupted, restrict);
             return;
         }
         self.focus_seen |= facts.focused;
@@ -290,6 +304,15 @@ impl HostLineInput {
         } else {
             HostLineStatus::WaitingForFocus
         };
+    }
+
+    fn close_restricted(&mut self, status: HostLineStatus, restrict: &mut impl FnMut()) {
+        if self.open() {
+            // No egui lock is held here. This can only revoke, never grant or
+            // change eligibility. Closed slots do not repeatedly invoke it.
+            restrict();
+        }
+        self.close(status);
     }
 
     fn close(&mut self, status: HostLineStatus) {
@@ -311,6 +334,8 @@ impl HostLineInput {
 
 impl Drop for HostLineInput {
     fn drop(&mut self) {
+        // The App owner must publish native/shared R BEFORE explicit teardown
+        // of an open slot. This fallback cannot prove that global ordering.
         self.line.zeroize();
         self.scrub_closed_frame();
         self.ctx
@@ -517,10 +542,10 @@ mod tests {
             let mut slot = HostLineInput::new(&ctx, 1, deadline()).unwrap();
             slot.line.push_str(text);
             slot.submit_frame = Some(ctx.cumulative_frame_nr()); // Fabricated intent only.
-            let submitted = slot.finish_frame(1).unwrap();
-            assert_eq!(&*submitted.into_line_for(1).unwrap(), text);
+            let submitted = slot.finish_frame(1, &mut || {}).unwrap();
+            assert_eq!(&*submitted.into_line_for(1, &mut || {}).unwrap(), text);
             assert_eq!(slot.status(), HostLineStatus::Submitted);
-            assert!(slot.line.is_empty() && slot.finish_frame(1).is_none());
+            assert!(slot.line.is_empty() && slot.finish_frame(1, &mut || {}).is_none());
         }
         assert!(valid_line(&"é".repeat(4096)));
         assert!(!valid_line(&"é".repeat(4097)));
@@ -541,7 +566,7 @@ mod tests {
                 let mut slot = HostLineInput::new(&ctx, 1, deadline()).unwrap();
                 let mut raw = focused_raw();
                 raw.events.push(event);
-                slot.raw_input_hook(&mut raw);
+                slot.raw_input_hook(&mut raw, &mut || {});
                 assert_eq!(slot.status(), HostLineStatus::InvalidPayload);
                 assert!(raw.events.is_empty() && slot.line.is_empty());
             }
@@ -563,7 +588,7 @@ mod tests {
         let ctx = context();
         let mut slot = HostLineInput::new(&ctx, 1, deadline()).unwrap();
         assert!(HostLineInput::new(&ctx, 2, deadline()).is_none());
-        slot.cancel();
+        slot.cancel(&mut || {});
         assert!(HostLineInput::new(&ctx, 2, deadline()).is_none());
         drop(slot);
         assert!(HostLineInput::new(&ctx, 2, deadline()).is_some());
@@ -580,7 +605,7 @@ mod tests {
             egui::Event::WindowFocused(false),
             egui::Event::WindowFocused(true),
         ]);
-        slot.raw_input_hook(&mut raw);
+        slot.raw_input_hook(&mut raw, &mut || {});
         assert_eq!(slot.status(), HostLineStatus::Interrupted);
         assert!(slot.line.is_empty());
         assert_eq!(
@@ -591,7 +616,7 @@ mod tests {
             ]
         );
         raw.events = payloads();
-        slot.raw_input_hook(&mut raw);
+        slot.raw_input_hook(&mut raw, &mut || {});
         assert!(raw.events.is_empty() && slot.line.is_empty() && !slot.raw_input_allowed);
         assert_eq!(slot.status(), HostLineStatus::Interrupted);
     }
@@ -603,14 +628,14 @@ mod tests {
         let mut raw = focused_raw();
         raw.focused = false;
         raw.events = payloads();
-        slot.raw_input_hook(&mut raw);
+        slot.raw_input_hook(&mut raw, &mut || {});
         assert_eq!(slot.status(), HostLineStatus::WaitingForFocus);
         assert!(raw.events.is_empty() && !slot.raw_input_allowed);
         raw.focused = true;
-        slot.raw_input_hook(&mut raw);
+        slot.raw_input_hook(&mut raw, &mut || {});
         assert!(slot.raw_input_allowed);
         raw.focused = false;
-        slot.raw_input_hook(&mut raw);
+        slot.raw_input_hook(&mut raw, &mut || {});
         assert_eq!(slot.status(), HostLineStatus::Interrupted);
     }
 
@@ -637,7 +662,7 @@ mod tests {
                     .events
                     .push(egui::ViewportEvent::Close),
             }
-            slot.raw_input_hook(&mut raw);
+            slot.raw_input_hook(&mut raw, &mut || {});
             assert!(!slot.open() && !slot.raw_input_allowed);
             assert!(raw.events.iter().all(|event| matches!(
                 event,
@@ -692,7 +717,7 @@ mod tests {
             });
         });
         slot.line.push_str(MOCK);
-        slot.cancel();
+        slot.cancel(&mut || {});
         assert!(slot.line.is_empty());
         assert!(egui::TextEdit::load_state(&ctx, widget_id()).is_none());
         assert!(!ctx.memory(|memory| memory.has_focus(widget_id())));
@@ -741,7 +766,7 @@ mod tests {
         let mut raw = focused_raw();
         raw.events
             .push(egui::Event::Text("a".repeat(MAX_LINE_BYTES + 1)));
-        slot.raw_input_hook(&mut raw);
+        slot.raw_input_hook(&mut raw, &mut || {});
         assert_eq!(slot.status(), HostLineStatus::InvalidPayload);
         assert!(raw.events.is_empty());
     }
@@ -770,7 +795,7 @@ mod tests {
             let mut slot = HostLineInput::new(&ctx, 1, deadline()).unwrap();
             slot.line.push_str(MOCK);
             slot.submit_frame = Some(ctx.cumulative_frame_nr());
-            assert!(slot.finish_frame(expected).is_none());
+            assert!(slot.finish_frame(expected, &mut || {}).is_none());
             assert_eq!(slot.status(), HostLineStatus::RequestChanged);
             assert!(slot.line.is_empty());
         }
@@ -779,8 +804,8 @@ mod tests {
         let mut slot = HostLineInput::new(&ctx, expected, deadline()).unwrap();
         slot.line.push_str(MOCK);
         slot.submit_frame = Some(ctx.cumulative_frame_nr());
-        slot.cancel();
-        assert!(slot.finish_frame(expected).is_none() && slot.line.is_empty());
+        slot.cancel(&mut || {});
+        assert!(slot.finish_frame(expected, &mut || {}).is_none() && slot.line.is_empty());
     }
 
     #[test]
@@ -789,24 +814,24 @@ mod tests {
         let expected = 1;
         let mut slot = HostLineInput::new(&ctx, expected, deadline()).unwrap();
         slot.line.push_str(MOCK);
-        assert!(slot.finish_frame(expected).is_none()); // no native intent
+        assert!(slot.finish_frame(expected, &mut || {}).is_none()); // no native intent
         slot.submit_frame = Some(ctx.cumulative_frame_nr()); // pure test-state fixture
-        let result = slot.finish_frame(expected).unwrap();
+        let result = slot.finish_frame(expected, &mut || {}).unwrap();
         assert_eq!(slot.status(), HostLineStatus::Submitted);
-        assert!(slot.line.is_empty() && slot.finish_frame(expected).is_none());
-        assert_eq!(&*result.into_line_for(expected).unwrap(), MOCK);
+        assert!(slot.line.is_empty() && slot.finish_frame(expected, &mut || {}).is_none());
+        assert_eq!(&*result.into_line_for(expected, &mut || {}).unwrap(), MOCK);
         let wrong = SubmittedHostLine {
             ordinal: expected,
             original_deadline: deadline(),
             line: Zeroizing::new(MOCK.into()),
         };
-        assert!(wrong.into_line_for(2).is_none());
+        assert!(wrong.into_line_for(2, &mut || {}).is_none());
         let late = SubmittedHostLine {
             ordinal: expected,
             original_deadline: Instant::now(),
             line: Zeroizing::new(MOCK.into()),
         };
-        assert!(late.into_line_for(expected).is_none());
+        assert!(late.into_line_for(expected, &mut || {}).is_none());
     }
 
     #[test]
@@ -820,10 +845,12 @@ mod tests {
         slot.submit_frame = Some(ctx.cumulative_frame_nr());
         let mut raw = focused_raw();
         raw.events = payloads();
-        slot.raw_input_hook(&mut raw);
+        slot.raw_input_hook(&mut raw, &mut || {});
         assert_eq!(slot.status(), HostLineStatus::Expired);
         assert!(
-            raw.events.is_empty() && slot.line.is_empty() && slot.finish_frame(expected).is_none()
+            raw.events.is_empty()
+                && slot.line.is_empty()
+                && slot.finish_frame(expected, &mut || {}).is_none()
         );
     }
 
@@ -844,10 +871,99 @@ mod tests {
                 input.events = payloads();
                 input.raw.events = payloads();
             });
-            assert!(slot.finish_frame(expected).is_none());
+            assert!(slot.finish_frame(expected, &mut || {}).is_none());
             assert_eq!(slot.status(), HostLineStatus::InvalidLine);
             assert!(slot.line.is_empty());
             ctx.input(|input| assert!(input.events.is_empty() && input.raw.events.is_empty()));
         }
+    }
+    #[test]
+    fn restrictive_callback_precedes_cleanup_and_is_not_repeated() {
+        for case in 0..5 {
+            let ctx = context();
+            let mut slot = HostLineInput::new(&ctx, 1, deadline()).unwrap();
+            slot.line.push_str(MOCK);
+            seed_undo(&ctx);
+            ctx.input_mut(|input| {
+                input.events = payloads();
+                input.raw.events = payloads();
+            });
+            let calls = std::cell::Cell::new(0);
+            let mut restrict = || {
+                calls.set(calls.get() + 1);
+                // Accessing both stores also proves no egui lock is held at
+                // callback time. These fabricated payloads have not been wiped.
+                assert!(egui::TextEdit::load_state(&ctx, widget_id()).is_some());
+                ctx.input(|input| {
+                    assert!(!input.events.is_empty() && !input.raw.events.is_empty())
+                });
+            };
+            match case {
+                0 => slot.cancel(&mut restrict),
+                1 => slot.check_current(2, &mut restrict),
+                2 => {
+                    slot.original_deadline = Instant::now();
+                    slot.check_current(1, &mut restrict);
+                }
+                3 => {
+                    let mut raw = focused_raw();
+                    raw.events.push(egui::Event::Paste("invalid\nline".into()));
+                    slot.raw_input_hook(&mut raw, &mut restrict);
+                    assert!(raw.events.is_empty());
+                }
+                _ => {
+                    slot.line.push('\n');
+                    slot.submit_frame = Some(ctx.cumulative_frame_nr());
+                    assert!(slot.finish_frame(1, &mut restrict).is_none());
+                }
+            }
+            assert_eq!(calls.get(), 1);
+            assert!(slot.line.is_empty());
+            assert!(egui::TextEdit::load_state(&ctx, widget_id()).is_none());
+            ctx.input(|input| assert!(input.events.is_empty() && input.raw.events.is_empty()));
+            slot.cancel(&mut restrict);
+            assert_eq!(calls.get(), 1);
+        }
+    }
+
+    #[test]
+    fn successful_submission_moves_input_without_requesting_restriction() {
+        let ctx = context();
+        let mut slot = HostLineInput::new(&ctx, 1, deadline()).unwrap();
+        slot.line.push_str(MOCK);
+        slot.submit_frame = Some(ctx.cumulative_frame_nr());
+        let submitted = slot
+            .finish_frame(1, &mut || panic!("success must not revoke"))
+            .unwrap();
+        assert_eq!(&*submitted.into_line_for(1, &mut || {}).unwrap(), MOCK);
+        assert_eq!(slot.status(), HostLineStatus::Submitted);
+    }
+    #[test]
+    fn mismatched_or_expired_owned_result_restricts_before_rejection() {
+        for late in [false, true] {
+            let submitted = SubmittedHostLine {
+                ordinal: 1,
+                original_deadline: if late { Instant::now() } else { deadline() },
+                line: Zeroizing::new(MOCK.into()),
+            };
+            let mut called = false;
+            assert!(submitted
+                .into_line_for(if late { 1 } else { 2 }, &mut || {
+                    called = true;
+                })
+                .is_none());
+            assert!(called);
+        }
+        let submitted = SubmittedHostLine {
+            ordinal: 1,
+            original_deadline: deadline(),
+            line: Zeroizing::new(MOCK.into()),
+        };
+        assert_eq!(
+            &*submitted
+                .into_line_for(1, &mut || panic!("successful move must not revoke"))
+                .unwrap(),
+            MOCK
+        );
     }
 }

@@ -8,7 +8,9 @@
 //! stock GUI undo/input/backend/OS/IME temporaries are dropped, not guaranteed
 //! overwritten. Neither this controller nor its input leaf clears OS clipboard.
 use crate::{
-    financial_source_driver::{Driver, Outcome},
+    financial_source_driver::{Driver, HostStatus, Outcome},
+    host_line_input::{HostLineInput, HostLineStatus},
+    host_output_text::{HostOutputText, OutputState},
     rejected,
     secret_input::{BoundPassword, InputRole, InputStatus, PasswordInput, RequestBinding},
     Result,
@@ -79,19 +81,31 @@ enum Intent {
     BeginContinue,
     ContinueConfirm,
     ArmContinue,
+    BeginHostLine,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HostEntry {
+    Idle,
+    Editing(u64),
+    Writing(u64),
+    Closed,
 }
 
 /// Source-only actual App composition. Its one endpoint owner outlives the
 /// event loop and is joined after eframe returns, never from a native callback.
 pub(super) fn run(
     native: CoordinatorFinancialNativeV1,
-    endpoint: CoordinatorFinancialEndpointV1,
+    mut endpoint: CoordinatorFinancialEndpointV1,
 ) -> Result<()> {
     let session_deadline = native.session_deadline();
     if session_deadline != endpoint.session_deadline() {
         return Err(rejected("workflow original session mismatch"));
     }
-    let driver = Rc::new(RefCell::new(Driver::spawn(endpoint)?));
+    // One-shot genuine same-Core custody, before any endpoint thread or App.
+    // No descriptor/path importer or terminal I/O occurs in the native tail.
+    let terminal = endpoint.take_host_terminal()?;
+    let driver = Rc::new(RefCell::new(Driver::spawn(endpoint, terminal)?));
     let app = Window { native, driver: Rc::clone(&driver), session_deadline,
         phase: Phase::Selecting, active: None, progress: [Progress::NotStarted; 2],
         entry: None, read: None, continuation: None, continue_review: None, continue_ready: None,
@@ -99,6 +113,8 @@ pub(super) fn run(
         focus_seen: false, focused_last: false, close_when_done: false,
         read_to_end: false, acknowledged: false, phase_frame: 0, last_tail_frame: None,
         intent: None, first_failure: None, disposed: [false; 2],
+        host_input: None, host_entry: HostEntry::Idle, host_ordinal: 0,
+        host_output: HostOutputText::new(), host_incomplete: false, host_output_ended: false,
         message: "Review one original Signer source at a time. Unlock and the combined history Read / local preparation require separate approval." };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -158,6 +174,14 @@ struct Window {
     first_failure: Option<(Role, FinancialWorkflowStageV1)>,
     disposed: [bool; 2],
     message: &'static str,
+    // Drop explicitly publishes native/shared R before these input owners are
+    // canceled or automatically dropped. Leaf Drop is only best-effort cleanup.
+    host_input: Option<HostLineInput>,
+    host_entry: HostEntry,
+    host_ordinal: u64,
+    host_output: HostOutputText,
+    host_incomplete: bool,
+    host_output_ended: bool,
 }
 impl Window {
     fn terminal(&self) -> bool {
@@ -189,6 +213,11 @@ impl Window {
         }
         self.native.revoke();
         self.driver.borrow().revoke();
+        if let Some(input) = &mut self.host_input {
+            input.cancel(&mut || self.native.revoke());
+        }
+        self.host_entry = HostEntry::Closed;
+        self.host_incomplete = true;
         // Keep the closed input guard until raw_input_hook has also scrubbed
         // the ORIGINAL mutable raw batch. Dropping it first would miss that copy.
         if let Some(input) = &mut self.password {
@@ -245,9 +274,13 @@ impl Window {
         }
         self.focus_seen |= facts.focused;
         self.focused_last = facts.focused;
-        if facts.close && self.phase != Phase::Finished {
+        if facts.close && (self.phase != Phase::Finished || !self.host_output_ended) {
             self.close_when_done = true;
-            self.revoke("Close requested. Waiting for actual source disposal and owned cleanup.");
+            if self.phase != Phase::Finished {
+                self.revoke(
+                    "Close requested. Waiting for actual source disposal and owned cleanup.",
+                );
+            }
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
     }
@@ -261,6 +294,11 @@ impl Window {
                     clean,
                 }) => {
                     self.native.revoke();
+                    if let Some(input) = &mut self.host_input {
+                        input.cancel(&mut || self.native.revoke());
+                    }
+                    self.host_entry = HostEntry::Closed;
+                    self.host_incomplete = true;
                     if let Some(input) = &mut self.password {
                         input.cancel();
                     }
@@ -366,8 +404,117 @@ impl Window {
                 }
             }
         }
-        if self.close_when_done && self.phase == Phase::Finished {
+        self.poll_host();
+        if self.close_when_done && self.phase == Phase::Finished && self.host_output_ended {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+    fn poll_host(&mut self) {
+        // The security channel was processed first. Hidden Host observations
+        // remain bounded/retained; no review phase discards them as success.
+        if !self.host_output_ended {
+            for _ in 0..4 {
+                let chunk = self.driver.borrow().host_output.try_recv();
+                match chunk {
+                    Ok(chunk) => {
+                        if self.host_output.state() == OutputState::Open {
+                            if self.host_output.push_chunk(chunk).is_err() {
+                                self.revoke("Host output exceeded its fixed safe bounds. The retained prefix is incomplete; no Host effect is established.");
+                                self.host_incomplete = true;
+                            }
+                        } else {
+                            drop(chunk);
+                        } // Already visibly failed, never a complete stream.
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        self.host_output_ended = true;
+                        if self.host_output.state() == OutputState::Open
+                            && self.host_output.finish_eof().is_err()
+                        {
+                            self.host_incomplete = true;
+                        }
+                        if !self.terminal() {
+                            self.revoke("Host transport ended. Its output is incomplete observation, not an action result; original security cleanup remains separate.");
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        for _ in 0..3 {
+            let status = self.driver.borrow_mut().try_host_status();
+            match status {
+                Ok(Some(HostStatus::LineWritten(ordinal))) => {
+                    if self.host_entry == HostEntry::Writing(ordinal) && !self.terminal() {
+                        // Completion only means bytes were accepted by the
+                        // genuine PTY. It is NOT a Host effect/approval outcome.
+                        self.host_entry = HostEntry::Idle;
+                        self.host_input.take(); // Already submitted/empty; no live editor.
+                    } else if !self.terminal() {
+                        self.revoke("Unexpected Host write observation. No new input or approval is possible.");
+                    }
+                }
+                Ok(Some(HostStatus::Closed)) => {
+                    self.host_incomplete = true;
+                    if !self.terminal() {
+                        self.revoke("Host terminal closed or failed. The security driver is still responsible for admitted outcomes and bounded disposal.");
+                    }
+                    self.host_entry = HostEntry::Closed;
+                    break;
+                }
+                Ok(None) => break,
+                Err(_) => {
+                    if !self.terminal() {
+                        self.revoke("Host transport status ended. Do not infer success, rollback or retry from its retained output.");
+                    }
+                    self.host_entry = HostEntry::Closed;
+                    break;
+                }
+            }
+        }
+    }
+    fn draw_host(&mut self, ui: &mut egui::Ui) {
+        ui.separator();
+        ui.heading("Actual Host terminal · observation only");
+        ui.label("Host text cannot approve a coordinator review. Controls, invalid bytes and literal backslashes are shown as escapes; no terminal sequences are executed.");
+        if self.host_incomplete {
+            ui.strong("INCOMPLETE HOST OUTPUT: this prefix is not proof of an effect, rollback, disposal or successful completion.");
+        }
+        egui::ScrollArea::vertical()
+            .id_salt("original-host-output")
+            .max_height(240.0)
+            .show(ui, |ui| {
+                ui.monospace(self.host_output.text());
+            });
+        match self.host_entry {
+            HostEntry::Idle if host_phase_allows_input(self.phase) => {
+                ui.label("Enter only your own next Host line. Every line is protected, including empty/short replies; there is no prompt inference, history, automatic answer or local echo.");
+                if ui
+                    .button("Enter one Host line")
+                    .clicked_by(egui::PointerButton::Primary)
+                {
+                    self.intent = Some(Intent::BeginHostLine);
+                }
+            }
+            HostEntry::Editing(ordinal) => {
+                ui.label("The coordinator briefly sees this line. Owned input is zeroized; complete GUI/OS/IME/clipboard erasure is not guaranteed. Source controls are unavailable until this line ends.");
+                if let Some(input) = &mut self.host_input {
+                    input.show(ui, ordinal, &mut || self.native.revoke());
+                }
+                if self.host_input.as_ref().is_none_or(|input| {
+                    !matches!(
+                        input.status(),
+                        HostLineStatus::WaitingForFocus | HostLineStatus::Editing
+                    )
+                }) {
+                    self.revoke("Host line entry was interrupted or invalid. The original workflow is restricted; there is no resubmission.");
+                }
+            }
+            HostEntry::Writing(_) => {
+                ui.label("One exact user line is still being written. Source controls and another line remain unavailable; already accepted bytes cannot be recalled.");
+            }
+            _ => {}
         }
     }
     fn accept_entry(&mut self, offer: SignerSourceEntryOfferV1, frame: u64) -> Result<()> {
@@ -567,6 +714,8 @@ impl Window {
                 self.revoke("Cancelled locally. Waiting for actual role disposal and original-tree cleanup.");
             }
             if !self.focused_last { ui.label("Private source and review details are hidden while unfocused."); return; }
+            if host_phase_allows_input(self.phase) || self.terminal() { self.draw_host(ui); }
+            if host_entry_blocks_source(self.host_entry) { return; }
             let later_frame = frame > self.phase_frame;
             match self.phase {
                 Phase::Selecting => {
@@ -662,12 +811,19 @@ impl Window {
                 Phase::Reading => { ui.label("The approved owner history Read and one immutable local Continue preparation are in progress. Continue, Admit and mutation remain unapproved."); }
                 Phase::Waiting => { ui.label("Both original Signers report saved continuations and await separate financial Admit. No Admit action or payment is enabled by this slice."); }
                 Phase::Revoked => { ui.label("This workflow is permanently restricted. Owned cleanup is pending; no automatic retry or role replacement is allowed."); }
-                Phase::Finished => { if ui.button("Close").clicked_by(egui::PointerButton::Primary) { ctx.send_viewport_cmd(egui::ViewportCommand::Close); } }
+                Phase::Finished => { if ui.add_enabled(self.host_output_ended, egui::Button::new("Close")).clicked_by(egui::PointerButton::Primary) { ctx.send_viewport_cmd(egui::ViewportCommand::Close); } }
             }
         });
         // This is the ONLY SourceEntry/Read/Continue native Arm/A site. Every original raw
         // event and every Cancel widget has been processed before this tail.
         self.check_current();
+        let host_line = match (&mut self.host_input, self.host_entry) {
+            (Some(input), HostEntry::Editing(ordinal)) => {
+                input.finish_frame(ordinal, &mut || self.native.revoke())
+            }
+            _ => None,
+        };
+        self.check_current(); // Internal terminal validation may have revoked.
         let intent = self.intent.take();
         let eligible = tail_eligible(frame, self.last_tail_frame, visible, ctx.will_discard())
             && self.focused_last
@@ -683,11 +839,35 @@ impl Window {
             _ => None,
         };
         if !eligible {
+            if host_line.is_some() {
+                self.revoke("Host submission did not reach an eligible visible final tail. The one-use line is discarded, never retried.");
+            }
+            drop(host_line);
             drop(password);
             return;
         }
         self.last_tail_frame = Some(frame);
-        if let Some(password) = password {
+        if let Some(submitted) = host_line {
+            let ordinal = match self.host_entry {
+                HostEntry::Editing(ordinal) => ordinal,
+                _ => {
+                    self.revoke("Host input phase changed.");
+                    return;
+                }
+            };
+            if let Some(line) = submitted.into_line_for(ordinal, &mut || self.native.revoke()) {
+                self.host_entry = HostEntry::Writing(ordinal);
+                let queued = self.driver.borrow_mut().send_host_line(ordinal, line);
+                if let Err(unsent) = queued {
+                    self.revoke("The one-use Host line could not be queued. Do not resubmit; accepted input or effects may be unconfirmed.");
+                    drop(unsent); // Actual native/shared R preceded owned cleanup.
+                }
+            } else {
+                self.revoke("The original Host line expired or changed before its final tail.");
+            }
+        } else if host_entry_blocks_source(self.host_entry) {
+            // No source native Arm/A or Begin while editing/partially writing.
+        } else if let Some(password) = password {
             if self.submit_password(password, frame).is_err() {
                 self.revoke("The exact source-entry input could not be admitted or queued. No retry is allowed.");
             }
@@ -698,13 +878,15 @@ impl Window {
         }
         // The real Arm click is already committed. A newly received exact
         // Ready needs no second click, but may only reach A at this visible tail.
-        if may_admit_continue(
-            self.phase,
-            self.continue_ready.is_some(),
-            self.focused_last,
-            self.native.is_revoked(),
-            frame > self.phase_frame,
-        ) {
+        if !host_entry_blocks_source(self.host_entry)
+            && may_admit_continue(
+                self.phase,
+                self.continue_ready.is_some(),
+                self.focused_last,
+                self.native.is_revoked(),
+                frame > self.phase_frame,
+            )
+        {
             if let Some(ticket) = self.continue_ready.take() {
                 let result = (|| -> Result<()> {
                     let role = self
@@ -725,7 +907,26 @@ impl Window {
         ctx.request_repaint_after(Duration::from_millis(20));
     }
     fn apply_intent(&mut self, intent: Intent, frame: u64, ctx: &egui::Context) -> Result<()> {
+        if host_entry_blocks_source(self.host_entry) {
+            return Err(rejected("protected Host input owns this phase"));
+        }
         match intent {
+            Intent::BeginHostLine
+                if host_phase_allows_input(self.phase)
+                    && self.host_entry == HostEntry::Idle
+                    && self.password.is_none() =>
+            {
+                let ordinal = self
+                    .host_ordinal
+                    .checked_add(1)
+                    .ok_or_else(|| rejected("Host line ordinal exhausted"))?;
+                self.host_input = Some(
+                    HostLineInput::new(ctx, ordinal, self.session_deadline)
+                        .ok_or_else(|| rejected("protected Host line unavailable"))?,
+                );
+                self.host_ordinal = ordinal;
+                self.host_entry = HostEntry::Editing(ordinal);
+            }
             Intent::Begin(role, ceiling)
                 if self.phase == Phase::Selecting
                     && self.progress[index(role)] == Progress::NotStarted =>
@@ -839,11 +1040,17 @@ impl eframe::App for Window {
         self.interrupt(raw_facts(raw), ctx);
         self.check_current();
         self.poll_driver(ctx);
-        if let Some(input) = &mut self.password {
+        if self.host_input.is_some() && self.password.is_some() {
+            self.revoke("Protected Host and Signer input cannot share an event batch.");
+        }
+        if let Some(input) = &mut self.host_input {
+            input.raw_input_hook(raw, &mut || self.native.revoke());
+        } else if let Some(input) = &mut self.password {
             input.raw_input_hook(raw);
         } else {
             scrub_unrequested_payloads(&mut raw.events);
         }
+        self.check_current();
         ctx.request_repaint_after(Duration::from_millis(20));
     }
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -854,13 +1061,26 @@ impl Drop for Window {
     fn drop(&mut self) {
         self.native.revoke();
         self.driver.borrow().revoke();
+        if let Some(input) = &mut self.host_input {
+            input.cancel(&mut || self.native.revoke());
+        }
         if let Some(input) = &mut self.password {
             input.cancel();
         }
         self.clear_review();
+        self.host_output.clear_and_close();
     }
 }
 
+fn host_phase_allows_input(phase: Phase) -> bool {
+    matches!(
+        phase,
+        Phase::Selecting | Phase::HistoryReady | Phase::Waiting
+    )
+}
+fn host_entry_blocks_source(entry: HostEntry) -> bool {
+    matches!(entry, HostEntry::Editing(_) | HostEntry::Writing(_))
+}
 fn review_display(ui: &mut egui::Ui, display: &str, eligible: bool) -> bool {
     let mut end_visible = false;
     egui::ScrollArea::vertical()
@@ -1175,5 +1395,33 @@ mod tests {
             Default::default(),
         );
         assert!(raw_facts(&raw).is_none());
+    }
+    #[test]
+    fn protected_host_editor_and_partial_write_exclude_source_controls() {
+        assert!(host_entry_blocks_source(HostEntry::Editing(1)));
+        assert!(host_entry_blocks_source(HostEntry::Writing(1)));
+        assert!(!host_entry_blocks_source(HostEntry::Idle));
+        for phase in [Phase::Selecting, Phase::HistoryReady, Phase::Waiting] {
+            assert!(host_phase_allows_input(phase));
+        }
+        for phase in [
+            Phase::Password,
+            Phase::Preparing,
+            Phase::EntryReview,
+            Phase::EntryConfirm,
+            Phase::Opening,
+            Phase::ReadReview,
+            Phase::ReadConfirm,
+            Phase::Reading,
+            Phase::ContinuePreparing,
+            Phase::ContinueReview,
+            Phase::ContinueConfirm,
+            Phase::ContinueArmed,
+            Phase::Continuing,
+            Phase::Revoked,
+            Phase::Finished,
+        ] {
+            assert!(!host_phase_allows_input(phase));
+        }
     }
 }

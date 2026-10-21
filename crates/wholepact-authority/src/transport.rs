@@ -352,6 +352,14 @@ impl AuthenticatedWriterSession {
     }
 }
 
+/// Purpose-independent, denial-only observation for an original client role.
+/// It may sample original actors/session and monotone restriction only. It must
+/// not retain an action grant, refresh a deadline, read private sources, wait,
+/// or issue authority. Individual checked calls still own their action/deadline.
+pub trait AuthorityTransportRestrictionV1: Send + Sync {
+    fn check_before_io(&self) -> Result<()>;
+}
+
 pub struct AuthorityClient {
     endpoint: SocketAddr,
     tls: ClientTls,
@@ -360,6 +368,7 @@ pub struct AuthorityClient {
     network: String,
     policy_digest: String,
     session: std::sync::Mutex<Option<ClientWriterSession>>,
+    restriction: Option<std::sync::Arc<dyn AuthorityTransportRestrictionV1>>,
 }
 struct ClientWriterSession {
     request: AcquireWriterRequest,
@@ -405,7 +414,25 @@ impl AuthorityClient {
             network: expected_network_profile_id,
             policy_digest: expected_policy_digest,
             session: std::sync::Mutex::new(None),
+            restriction: None,
         })
+    }
+    /// Construct an original restricted client. There is no detach/reset API.
+    /// Cloning the observer retains only a denial mechanism, never an approval.
+    pub fn new_restricted_v1(
+        endpoint: SocketAddr,
+        tls: ClientTls,
+        expected_witness_id: String,
+        expected_account_id: String,
+        expected_network_profile_id: String,
+        expected_policy_digest: String,
+        restriction: std::sync::Arc<dyn AuthorityTransportRestrictionV1>,
+    ) -> Result<Self> {
+        let mut client = Self::new(endpoint, tls, expected_witness_id,
+            expected_account_id, expected_network_profile_id, expected_policy_digest)?;
+        restriction.check_before_io()?;
+        client.restriction = Some(restriction);
+        Ok(client)
     }
     /// Requests an independent live witness node check. No observation, approval
     /// Boolean or signer-supplied canonical evidence is accepted on the wire.
@@ -1811,6 +1838,9 @@ impl AuthorityClient {
         #[cfg(feature = "synthetic-qualification")]
         let connect_token =
             observer.map(|observer| observer.start_operation(HistoryOperationV1::Connect));
+        if let Some(restriction) = &self.restriction {
+            restriction.check_before_io()?;
+        }
         let connected = TcpStream::connect_timeout(&self.endpoint, connect_timeout);
         // V3 discovery may distinguish only an actual failure of this original
         // preconnection operation. No TLS, framing or later failure updates it.
@@ -1836,6 +1866,7 @@ impl AuthorityClient {
         let mut socket = CallerDeadlineSocket {
             inner: DeadlineSocket { socket, deadline },
             check_after_io: caller_deadline.is_some(),
+            restriction: self.restriction.clone(),
         };
         #[cfg(feature = "synthetic-qualification")]
         if let Some((observer, phase)) = observation {
@@ -2623,10 +2654,25 @@ impl Write for DeadlineSocket {
 struct CallerDeadlineSocket {
     inner: DeadlineSocket,
     check_after_io: bool,
+    restriction: Option<std::sync::Arc<dyn AuthorityTransportRestrictionV1>>,
+}
+// The timeout is installed by the caller before this zero-wait final sample.
+// This orders the one attempt against restriction; it does not make a syscall
+// atomic with cancellation or retract bytes from an already-admitted attempt.
+fn restricted_transport_io_v1<T>(
+    restriction: &dyn AuthorityTransportRestrictionV1,
+    attempt: impl FnOnce() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    restriction.check_before_io().map_err(|_| std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied, "original transport restriction"))?;
+    attempt()
 }
 impl Read for CallerDeadlineSocket {
     fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
-        let result = self.inner.read(bytes);
+        let result = if let Some(restriction) = &self.restriction {
+            self.inner.socket.set_read_timeout(Some(self.inner.remaining()?))?;
+            restricted_transport_io_v1(restriction.as_ref(), || self.inner.socket.read(bytes))
+        } else { self.inner.read(bytes) };
         if self.check_after_io {
             self.inner.remaining()?;
         }
@@ -2635,14 +2681,20 @@ impl Read for CallerDeadlineSocket {
 }
 impl Write for CallerDeadlineSocket {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        let result = self.inner.write(bytes);
+        let result = if let Some(restriction) = &self.restriction {
+            self.inner.socket.set_write_timeout(Some(self.inner.remaining()?))?;
+            restricted_transport_io_v1(restriction.as_ref(), || self.inner.socket.write(bytes))
+        } else { self.inner.write(bytes) };
         if self.check_after_io {
             self.inner.remaining()?;
         }
         result
     }
     fn flush(&mut self) -> std::io::Result<()> {
-        let result = self.inner.flush();
+        let result = if let Some(restriction) = &self.restriction {
+            self.inner.socket.set_write_timeout(Some(self.inner.remaining()?))?;
+            restricted_transport_io_v1(restriction.as_ref(), || self.inner.socket.flush())
+        } else { self.inner.flush() };
         if self.check_after_io {
             self.inner.remaining()?;
         }
@@ -3324,5 +3376,44 @@ mod caller_deadline_tests {
         );
         assert!(caller_remaining_at(deadline, deadline).is_err());
         assert!(caller_remaining_at(deadline, deadline + Duration::from_nanos(1)).is_err());
+    }
+}
+
+#[cfg(test)]
+mod transport_restriction_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    struct Restriction { revoked: AtomicBool, samples: AtomicUsize }
+    impl AuthorityTransportRestrictionV1 for Restriction {
+        fn check_before_io(&self) -> Result<()> {
+            self.samples.fetch_add(1, Ordering::SeqCst);
+            if self.revoked.load(Ordering::SeqCst) { Err(AuthorityError::Permission) }
+            else { Ok(()) }
+        }
+    }
+    #[test]
+    fn final_transport_sample_refuses_unsent_attempt_and_preserves_io_error() {
+        let r = Restriction { revoked:AtomicBool::new(true), samples:AtomicUsize::new(0) };
+        let calls = AtomicUsize::new(0);
+        let err = restricted_transport_io_v1(&r, || { calls.fetch_add(1,Ordering::SeqCst); Ok(1) }).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let fresh = Restriction { revoked:AtomicBool::new(false), samples:AtomicUsize::new(0) };
+        let err = restricted_transport_io_v1::<()>(&fresh, || Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::BrokenPipe);
+        assert_eq!(fresh.samples.load(Ordering::SeqCst), 1);
+    }
+    #[test]
+    fn each_transport_attempt_resamples_without_renewing_or_retracting_prior_effect() {
+        let r = Restriction { revoked:AtomicBool::new(false), samples:AtomicUsize::new(0) };
+        let calls = AtomicUsize::new(0);
+        assert_eq!(restricted_transport_io_v1(&r, || {
+            calls.fetch_add(1,Ordering::SeqCst);
+            r.revoked.store(true,Ordering::SeqCst);
+            Ok(3)
+        }).unwrap(), 3);
+        assert!(restricted_transport_io_v1(&r, || { calls.fetch_add(1,Ordering::SeqCst); Ok(4) }).is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(r.samples.load(Ordering::SeqCst), 2);
     }
 }

@@ -45,7 +45,7 @@ impl EntryReviewed {
         let result=(||{let wall=self.observe_custody()?;
             if self.core.phase.revoked()||Instant::now()>=self.original_entry||Instant::now()>=self.ceiling
                 ||wall>=self.wire.presentation.facts.expires_at_ms
-            {return Err(rejected("SourceEntry restriction observed"));}Ok(())})();
+            {return Err(rejected("SourceEntry restriction observed"));}self.core.check_action_restrictions()})();
         if result.is_err(){self.core.phase.revoke();}result
     }
 }
@@ -114,7 +114,24 @@ impl Drop for SignerSourceEntryInputV1{fn drop(&mut self){if !self.consumed{self
 /// Ordinary R alone does not recall an already-admitted later Continue effect.
 /// All new purpose issuers and Entry/Read Final still check R independently.
 pub struct SignerOriginalCustodyLifetimeV1 {entry:Arc<EntryReviewed>}
-impl SignerOriginalCustodyLifetimeV1 {pub fn check_current(&self)->Result<()>{self.entry.check_custody()}}
+impl SignerOriginalCustodyLifetimeV1 {
+    pub fn check_current(&self)->Result<()>{self.entry.check_custody()}
+    /// A check-only observer for the already selected original client. This
+    /// duplicates no grant, descriptor, source, Read scope or action deadline.
+    pub fn original_restriction(&self)->Result<SignerOriginalRestrictionV1>{
+        let observer=SignerOriginalRestrictionV1{entry:Arc::clone(&self.entry)};
+        observer.check_current()?;Ok(observer)
+    }
+}
+/// Purpose-independent restrictive lifetime of actual Entry-held source/client.
+/// No success may be cached as permission; each physical attempt checks again.
+pub struct SignerOriginalRestrictionV1 {entry:Arc<EntryReviewed>}
+impl SignerOriginalRestrictionV1 {
+    pub fn check_current(&self)->Result<()>{
+        self.entry.check_custody()?;
+        self.entry.core.check_action_restrictions()
+    }
+}
 
 pub(super) struct ReadReviewed {
     pub entry:Arc<EntryReviewed>,pub wire:SignerFinancialReadPresentationV1,
@@ -135,7 +152,7 @@ impl ReadReviewed {
             let prior=self.last_wall.fetch_max(wall,Ordering::AcqRel);
             if self.entry.core.phase.revoked()||Instant::now()>=self.original_read||Instant::now()>=self.ceiling
                 ||wall<prior||wall<self.wire.facts.reviewed_at_ms||wall>=self.wire.facts.expires_at_ms
-            {return Err(rejected("initial Read restriction observed"));}Ok(())})();
+            {return Err(rejected("initial Read restriction observed"));}self.entry.core.check_action_restrictions()})();
         if result.is_err(){self.entry.core.phase.revoke();}result
     }
 }

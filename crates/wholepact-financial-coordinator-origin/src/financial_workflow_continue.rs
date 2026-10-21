@@ -100,7 +100,8 @@ impl FullContinueReviewed {
             let prior=self.last_wall.fetch_max(wall,Ordering::AcqRel);let r=self.review();
             if (!allow_revoked&&self.core().phase.revoked())||now>=self.original_review||now>=self.ceiling
                 ||wall<prior||wall<r.reviewed_at_ms||wall>=r.expires_at_ms||wall>=r.session_expires_at_ms{
-                return Err(rejected("retained Continue restriction observed"));}Ok(())
+                return Err(rejected("retained Continue restriction observed"));}
+            if !allow_revoked { self.core().check_action_restrictions()?; } Ok(())
         })();if result.is_err(){self.core().phase.revoke();}result
     }
     pub(super) fn check_arm(&self)->Result<()>{self.check(false)?;if self.core().phase.phase(self.slot())!=CONT_ARMED{return Err(rejected("full Continue Arm consumed"));}Ok(())}
@@ -185,6 +186,24 @@ pub(super) fn same_original_source(retained:Instant,supplied:Instant)->bool{reta
         assert!(p.observe_workflow_continue_saved(0).is_err());assert!(p.step(0,AWAITING_ADMISSION,0).is_err());
         let p=Phases::new();p.step(1,0,CONT_READY).unwrap();p.revoke();assert!(p.step(1,CONT_READY,CONT_ADMITTED).is_err());
         assert!(p.observe_workflow_continue_saved(1).is_err());
+    }
+    #[test]
+    fn received_prior_continue_final_preserves_r_without_new_native_admission(){
+        let p=Phases::new();p.step(0,0,CONT_READY).unwrap();p.revoke();
+        // Ordinary native C A is still forbidden after R.
+        assert!(p.step(0,CONT_READY,CONT_ADMITTED).is_err());
+        // Only the genuine receiver calls this after exact ordered frame/Ready
+        // validation. The pure state test creates no origin, peer or Final.
+        p.observe_received_workflow_continue_final(0).unwrap();
+        assert!(p.revoked());assert_eq!(p.phase(0),CONT_ADMITTED);
+        assert!(p.observe_received_workflow_continue_final(0).is_err());
+        assert!(p.observe_received_workflow_continue_final(1).is_err());
+        assert!(p.observe_received_workflow_continue_final(2).is_err());
+        for phase in [ENTRY_ADMITTED,READ_ADMITTED,CONT_ARMED,AWAITING_ADMISSION]{
+            let p=Phases::new();p.step(1,0,phase).unwrap();p.revoke();
+            assert!(p.observe_received_workflow_continue_final(1).is_err());
+            assert!(p.revoked());assert_eq!(p.phase(1),phase);
+        }
     }
     #[test]
     fn final_before_cancel_pending_is_specific_to_full_continue_not_entry_or_read(){

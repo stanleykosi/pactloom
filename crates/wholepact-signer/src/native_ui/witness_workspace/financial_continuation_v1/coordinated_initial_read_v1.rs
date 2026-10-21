@@ -392,13 +392,14 @@ impl PresentedCoordinatedInitialReadV1 {
         .map_err(|_| Error::Authentication)?;
         drop(key);
         self.check(&source, original_host, &final_read)?;
-        let client = AuthorityClient::new(
+        let client = AuthorityClient::new_restricted_v1(
             setup.endpoint,
             tls,
             setup.witness_id.clone(),
             setup.account_id.clone(),
             setup.network_profile_id.clone(),
             setup.policy_digest.clone(),
+            source.coordinated_authority_transport_restriction_v1()?,
         )
         .map_err(|_| Error::InvalidData)?;
         self.check(&source, original_host, &final_read)?;

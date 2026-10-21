@@ -8,7 +8,11 @@ use super::{signer_continue_channel::{Binding, Context, Packet, SignerContinueRo
     signer_continue_state::{self as state, Core, Phases, NEW, PREPARING, REVIEW, ARMED, READY, ADMITTED, PENDING, SENT, ABANDONED}};
 use std::{marker::PhantomData, rc::Rc, sync::{Arc, atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering}}, time::{Duration, Instant}};
 
-pub(super) struct SignerBirthContext { pub(super) coordinator: PeerLifetime, pub(super) image: VerifiedCommonImageIdentity }
+pub(super) struct SignerBirthContext {
+    pub(super) coordinator: PeerLifetime, pub(super) image: VerifiedCommonImageIdentity,
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    pub(super) restriction: crate::host_restriction::SignerSharedRestrictionV1,
+}
 struct Reviewed {
     core: Arc<Core>, wire: Binding,
     original_source: Instant, original_review: Instant, ceiling: Instant,
@@ -83,7 +87,10 @@ pub struct CoordinatorSignerContinueEndpointV1 {
     slots: [Option<CSlot>; 2], disposed: [bool; 2], cancel_sent: bool, cleanup: Option<Instant>,
 }
 pub(super) fn split_coordinator(tree: InertTreeV1, clocks: PhaseDeadlinesV1) -> Result<(CoordinatorSignerContinueNativeV1, CoordinatorSignerContinueEndpointV1)> {
-    let core = Arc::new(Core { phase: Phases::new(), peer: tree.continue_host()?.continue_observer()?, roots: tree.continue_pidfds()?,
+    let core = Arc::new(Core { phase: Phases::new(),
+        #[cfg(feature = "coordinated-financial-workflow-v1")]
+        signer_restriction: None,
+        peer: tree.continue_host()?.continue_observer()?, roots: tree.continue_pidfds()?,
         coordinator: None, owner_pid: unsafe {libc::getpid()}, owner_uid: unsafe {libc::geteuid()}, epoch: clocks.epoch(), session: clocks.session,
         alive: AtomicBool::new(true), outbound: [AtomicU8::new(PENDING), AtomicU8::new(PENDING)] });
     core.check()?;
@@ -255,7 +262,10 @@ pub struct SignerFinancialOriginV1 {
 impl SignerFinancialOriginV1 {
     pub(super) fn from_signer(leaf: LeafCustody, birth: SignerBirthContext) -> Result<Self> {
         let target=Target::from_role(leaf.origin.role())?;
-        let core=Arc::new(Core {phase:Phases::new(),peer:leaf.origin.continue_observer()?,roots:Vec::new(),coordinator:Some(birth.coordinator),
+        let core=Arc::new(Core {phase:Phases::new(),
+            #[cfg(feature = "coordinated-financial-workflow-v1")]
+            signer_restriction: Some(birth.restriction),
+            peer:leaf.origin.continue_observer()?,roots:Vec::new(),coordinator:Some(birth.coordinator),
             owner_pid:unsafe{libc::getpid()},owner_uid:unsafe{libc::geteuid()},epoch:leaf.clocks.epoch(),session:leaf.clocks.session,
             alive:AtomicBool::new(true),outbound:[AtomicU8::new(PENDING),AtomicU8::new(PENDING)]});
         core.check()?;
