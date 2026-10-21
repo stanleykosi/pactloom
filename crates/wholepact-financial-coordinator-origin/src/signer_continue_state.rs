@@ -67,6 +67,30 @@ impl Phases {
             match self.word.compare_exchange_weak(old,new,Ordering::AcqRel,Ordering::Acquire){Ok(_)=>return Ok(()),Err(actual)=>old=actual}
         }
     }
+    /// Fixed post-response observation only, never a fresh Read/key-use grant.
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn observe_workflow_admit_saved(&self,slot:usize)->Result<()>{
+        if slot>1{return Err(rejected("not a fixed Admit slot"));}
+        let shift=slot*8;let mut old=self.word.load(Ordering::Acquire);
+        loop{
+            if ((old>>shift)&0xff)!=35{return Err(rejected("Admit completion without admitted attempt"));}
+            let new=(old&!(0xff<<shift))|(36<<shift);
+            match self.word.compare_exchange_weak(old,new,Ordering::AcqRel,Ordering::Acquire){Ok(_)=>return Ok(()),Err(actual)=>old=actual}
+        }
+    }
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn witness_phase(&self,slot:usize)->u8 { ((self.word.load(Ordering::Acquire)>>(16+slot*4))&0xf) as u8 }
+    /// Two fixed W nibbles share the SAME native A/R CAS word as both S slots.
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn witness_step(&self,slot:usize,from:u8,to:u8)->Result<()>{
+        if slot>1||from>15||to>15{return Err(rejected("not a fixed financial Witness phase"));}
+        let shift=16+slot*4;let mut old=self.word.load(Ordering::Acquire);
+        loop{
+            if old&REVOKED!=0||((old>>shift)&0xf)!=from as u32{return Err(rejected("financial Witness phase consumed or restricted"));}
+            let new=(old&!(0xf<<shift))|((to as u32)<<shift);
+            match self.word.compare_exchange_weak(old,new,Ordering::AcqRel,Ordering::Acquire){Ok(_)=>return Ok(()),Err(actual)=>old=actual}
+        }
+    }
     pub(super) fn step(&self, slot: usize, from: u8, to: u8) -> Result<()> {
         if slot > 1 { return Err(rejected("not a fixed Continue slot")); }
         let shift = slot * 8;
@@ -127,6 +151,8 @@ pub(super) struct Core {
     pub(super) session: Instant,
     pub(super) alive: AtomicBool,
     pub(super) outbound: [AtomicU8; 2],
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) witness_outbound: [AtomicU8; 2],
 }
 impl Core {
     pub(super) fn check(&self) -> Result<()> {

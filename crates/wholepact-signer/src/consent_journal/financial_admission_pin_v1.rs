@@ -2,6 +2,10 @@
 //! Not permission, an external writer lock, a refresh, or a retry signal.
 use super::*;
 
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+#[path = "financial_admission_pin_v1/coordinated_admit_v1.rs"]
+mod coordinated_admit;
+
 #[derive(PartialEq, Eq)]
 struct AdmissionRevisionV1 {
     application_id: i64,

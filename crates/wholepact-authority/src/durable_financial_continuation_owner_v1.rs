@@ -22,6 +22,32 @@ pub(crate) struct NativeFinancialContinuationSourceV1 {
         Option<crate::transport::admission_diagnostics_v1::AdmissionWitnessObserverV1>,
 }
 impl FinancialContinuationProposalV1 {
+    // Crate-private retained facts for the separate nominal coordinated adapter.
+    // No consent, native lease, or effect can be constructed from these values.
+    #[cfg(feature = "coordinated-witness-financial-continuation")]
+    pub(crate) fn coordinated_journal_v1(&self) -> Arc<AuthorityJournal> {
+        self.journal.clone()
+    }
+    #[cfg(feature = "coordinated-witness-financial-continuation")]
+    pub(crate) fn coordinated_expected_v1(&self) -> &OwnerControlRequest {
+        &self.expected
+    }
+    #[cfg(feature = "coordinated-witness-financial-continuation")]
+    pub(crate) fn coordinated_display_v1(&self, setup: &wholepact_financial_coordinator_origin::WitnessFinancialContinuationSetupV1) -> Result<String> {
+        self.coordinated_setup_current_v1(setup)?;
+        serde_json::to_string_pretty(&serde_json::json!({
+            "operation": "Arm ONE exact original financial continuation append",
+            "request": self.expected,
+            "actual_original_witness": self.disclosure,
+            "notice": crate::native_witness_owner::coordinated_financial_continuation_v1::ADMISSION_NOTICE,
+            "limits": "Independent original owner mTLS must submit this identical request. Every later key-use requires its own fresh approval. Original payment, dispatcher, route, expiry and attempt bounds remain fixed. No signature, extraction or transaction dispatch occurs here.",
+        })).map_err(|_| AuthorityError::InvalidBinding)
+    }
+    #[cfg(feature = "coordinated-witness-financial-continuation")]
+    pub(crate) fn coordinated_setup_review_digest_v1(&self, setup: &wholepact_financial_coordinator_origin::WitnessFinancialContinuationSetupV1) -> Result<String> {
+        self.coordinated_setup_current_v1(setup)?;
+        crate::durable_financial_continuation_v1::request_native_review_digest_v1(&self.expected, &self.disclosure)
+    }
     /// Borrow retained request data for synthetic correlation only. This does
     /// not check freshness or provide native approval, a source or a grant.
     #[cfg(feature = "synthetic-qualification")]
@@ -51,6 +77,26 @@ impl FinancialContinuationProposalV1 {
             "actual_original_witness": self.disclosure,
             "notice": "This explicitly approves the exact financial continuation and bounded future dispatch in the displayed original delivery plan. Each key-use operation still requires its own fresh native action. After both signatures, a fresh Host decision may dispatch only the first retained verified transaction, even after signing process death. Original expiry, inputs, recipient, budget, exposure, dispatcher, route and attempt bounds cannot change. An uncertain operation must be reconciled with its exact original request. This is not approval of another transaction or replacement signing session.",
         })).map_err(|_| AuthorityError::InvalidBinding)
+    }
+    #[cfg(feature = "coordinated-witness-financial-continuation")]
+    pub(crate) fn coordinated_setup_current_v1(&self, setup: &wholepact_financial_coordinator_origin::WitnessFinancialContinuationSetupV1) -> Result<()> {
+        let guard = crate::native_witness_owner::financial_setup_guard_v1::FinancialSetupGuardV1::Coordinated(setup);
+        self.coordinated_audit_current_v1(guard)
+    }
+    #[cfg(feature = "coordinated-witness-financial-continuation")]
+    pub(crate) fn coordinated_arm_current_v1(&self, arm: &wholepact_financial_coordinator_origin::WitnessFinancialContinuationArmV1) -> Result<()> {
+        self.coordinated_audit_current_v1(crate::native_witness_owner::financial_setup_guard_v1::FinancialSetupGuardV1::Arm(arm))
+    }
+    #[cfg(feature = "coordinated-witness-financial-continuation")]
+    fn coordinated_audit_current_v1(&self, guard: crate::native_witness_owner::financial_setup_guard_v1::FinancialSetupGuardV1<'_>) -> Result<()> {
+        guard.check()?;
+        self.journal.born_owner.as_ref().ok_or(AuthorityError::Permission)?.check_setup_current(guard, true)?;
+        let c = self.journal.connection.lock().map_err(|_| AuthorityError::Storage)?;
+        guard.check()?;
+        let ledger = crate::journal::load(c.connection())?;
+        guard.check()?;
+        self.validate_locked(&ledger, now_ms()?)?;
+        guard.check()
     }
     pub(crate) fn check_current(&self) -> Result<()> {
         self.journal
@@ -125,6 +171,42 @@ pub(crate) fn prepare_financial_continuation_v1(
     proposal.check_current()?;
     Ok(proposal)
 }
+#[cfg(feature = "coordinated-witness-financial-continuation")]
+pub(crate) fn prepare_coordinated_financial_continuation_v1(input: NamespaceOpenInput, expected: OwnerControlRequest, setup: &wholepact_financial_coordinator_origin::WitnessFinancialContinuationSetupV1) -> Result<FinancialContinuationProposalV1> {
+    if !matches!(
+        expected.control,
+        OwnerControl::AdmitFinancialContinuationV1 { .. }
+    ) {
+        return Err(AuthorityError::Permission);
+    }
+    let input_owner = input.owner_certificate_digest.clone();
+    let guard = crate::native_witness_owner::financial_setup_guard_v1::FinancialSetupGuardV1::Coordinated(setup);
+    guard.check()?;
+    let journal = Arc::new(crate::witness_locator::open_born_history_guarded(input, guard)?);
+    let disclosure = {
+        let c = journal
+            .connection
+            .lock()
+            .map_err(|_| AuthorityError::Storage)?;
+        guard.check()?;
+        let ledger = crate::journal::load(c.connection())?;
+        if input_owner != ledger.policy.owner_certificate_digest {
+            return Err(AuthorityError::Authentication);
+        }
+        guard.check()?;
+        let birth = crate::pending_birth_storage::read(c.connection(), &ledger.policy)?
+            .ok_or(AuthorityError::CorruptHistory)?;
+        birth.request.disclosure
+    };
+    let proposal = FinancialContinuationProposalV1 {
+        journal,
+        expected,
+        disclosure,
+    };
+    proposal.coordinated_setup_current_v1(setup)?;
+    Ok(proposal)
+}
+
 pub(crate) fn arm_financial_continuation_v1(
     decision: NativeFinancialContinuationDecisionV1,
 ) -> Result<NativeFinancialContinuationSourceV1> {

@@ -88,6 +88,8 @@ pub struct CoordinatorSignerContinueEndpointV1 {
 }
 pub(super) fn split_coordinator(tree: InertTreeV1, clocks: PhaseDeadlinesV1) -> Result<(CoordinatorSignerContinueNativeV1, CoordinatorSignerContinueEndpointV1)> {
     let core = Arc::new(Core { phase: Phases::new(),
+        #[cfg(feature="coordinated-financial-workflow-v1")]
+        witness_outbound: [AtomicU8::new(PENDING),AtomicU8::new(PENDING)],
         #[cfg(feature = "coordinated-financial-workflow-v1")]
         signer_restriction: None,
         peer: tree.continue_host()?.continue_observer()?, roots: tree.continue_pidfds()?,
@@ -263,6 +265,8 @@ impl SignerFinancialOriginV1 {
     pub(super) fn from_signer(leaf: LeafCustody, birth: SignerBirthContext) -> Result<Self> {
         let target=Target::from_role(leaf.origin.role())?;
         let core=Arc::new(Core {phase:Phases::new(),
+            #[cfg(feature="coordinated-financial-workflow-v1")]
+            witness_outbound: [AtomicU8::new(PENDING),AtomicU8::new(PENDING)],
             #[cfg(feature = "coordinated-financial-workflow-v1")]
             signer_restriction: Some(birth.restriction),
             peer:leaf.origin.continue_observer()?,roots:Vec::new(),coordinator:Some(birth.coordinator),

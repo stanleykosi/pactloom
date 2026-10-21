@@ -53,6 +53,21 @@ mod financial_workflow_origin;
 #[cfg(feature = "coordinated-financial-workflow-v1")]
 mod financial_workflow_continue;
 #[cfg(feature = "coordinated-financial-workflow-v1")]
+mod financial_witness_channel;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+mod financial_witness_origin;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+mod signer_admit_data;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub use signer_admit_data::{SignerAdmitFactsV1,SignerAdmitPresentationV1,SignerAdmitCommittedV1,SignerAdmitOutcomeV1};
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub use financial_witness_channel::{FinancialWitnessInputsV1,FinancialWitnessContinuationV1,FinancialWitnessPresentationV1,
+    FinancialWitnessReadyV1,FinancialWitnessOutcomeV1,FINANCIAL_WITNESS_PURPOSE,FINANCIAL_WITNESS_MODE};
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub use financial_witness_origin::{WitnessFinancialContinuationOriginV1,FinancialWitnessRequestV1,
+    WitnessFinancialContinuationSetupV1,WitnessFinancialContinuationArmV1,WitnessFinancialContinuationFinalV1};
+
+#[cfg(feature = "coordinated-financial-workflow-v1")]
 mod host_restriction;
 #[cfg(feature = "coordinated-financial-workflow-v1")]
 mod host_terminal;
@@ -73,7 +88,10 @@ pub use financial_workflow_source::{SignerSourceEntryOfferV1, SignerSourceEntryO
 #[cfg(feature = "coordinated-financial-workflow-v1")]
 pub use financial_workflow_origin::{CoordinatorFinancialNativeV1, CoordinatorFinancialEndpointV1,
     CoordinatorFinancialEventV1, HostFinancialWorkflowRelayV1, SignerFinancialWorkflowOriginV1,
-    SignerFinancialWorkflowRequestV1};
+    SignerFinancialWorkflowRequestV1,SignerAdmitArmV1,SignerAdmitFinalV1,SignerAdmitReviewTicketV1,SignerAdmitReadyTicketV1,
+    SignerAdmitArmOutboundV1,SignerAdmitFinalOutboundV1,
+    FinancialWitnessSetupTicketV1,FinancialWitnessSetupOutboundV1,FinancialWitnessReviewTicketV1,
+    FinancialWitnessArmOutboundV1,FinancialWitnessArmedV1,FinancialWitnessReadyTicketV1,FinancialWitnessFinalOutboundV1,CoordinatorFinancialWitnessEventV1};
 mod bootstrap;
 mod channel;
 mod image;

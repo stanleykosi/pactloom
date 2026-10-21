@@ -2,6 +2,9 @@
 //! under the trusted owner process / OS / compositor assumption. Source review,
 //! native consent, existing-key authentication and journal creation are distinct.
 //! No signer dependency, no signer-key loader, no socket and no public approval factory.
+pub(crate) mod financial_setup_guard_v1;
+#[cfg(feature = "coordinated-witness-financial-continuation")]
+pub mod coordinated_financial_continuation_v1;
 mod lifecycle;
 mod delivery_preparation_v2;
 mod financial_continuation_preparation_v1;

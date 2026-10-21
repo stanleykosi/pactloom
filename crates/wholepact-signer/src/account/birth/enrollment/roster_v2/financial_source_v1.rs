@@ -26,6 +26,8 @@ mod coordinated_continue_role_v1;
 #[cfg(feature = "coordinated-financial-workflow-v1")]
 mod coordinated_public_custody_v2;
 #[cfg(feature = "coordinated-financial-workflow-v1")]
+mod coordinated_admit_v1;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
 pub(crate) use coordinated_public_custody_v2::OpenedCoordinatedOriginalFinancialSourceV2;
 #[cfg(feature = "coordinated-financial-workflow-v1")]
 pub(crate) use coordinated_source_entry_v1::{

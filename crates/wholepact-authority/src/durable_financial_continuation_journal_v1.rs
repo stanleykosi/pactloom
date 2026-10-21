@@ -239,7 +239,7 @@ impl AuthorityJournal {
         Ok(result)
     }
 }
-fn append_exact(
+pub(super) fn append_exact(
     tx: &Transaction<'_>,
     ledger: &Ledger,
     event: &Event,

@@ -16,28 +16,38 @@ use crate::{SignerContinueArmV1,SignerContinueFinalV1,SignerContinueSourceFactsV
     SignerContinuePresentationV1,SignerContinueOutcomeV1};
 use crate::signer_continue_state::SENT;
 
+#[path="signer_admit_origin.rs"]
+mod admit;
+#[path="financial_witness_coordinator.rs"]
+mod witness;
+pub use witness::{FinancialWitnessSetupTicketV1,FinancialWitnessSetupOutboundV1,FinancialWitnessReviewTicketV1,
+    FinancialWitnessArmOutboundV1,FinancialWitnessArmedV1,FinancialWitnessReadyTicketV1,FinancialWitnessFinalOutboundV1,CoordinatorFinancialWitnessEventV1};
+pub use admit::{SignerAdmitArmV1,SignerAdmitFinalV1,SignerAdmitReviewTicketV1,SignerAdmitReadyTicketV1,
+    SignerAdmitArmOutboundV1,SignerAdmitFinalOutboundV1};
+use admit::{SAdmit,CAdmit,HAdmit};
+
 pub enum SignerFinancialWorkflowRequestV1 {
     SourceEntryRequested,
     SourceEntry { input:SignerSourceEntryInputV1, final_action:SignerSourceEntryFinalV1 },
     InitialRead(SignerFinancialReadFinalV1), ContinueRequested,
-    ContinueArm(SignerContinueArmV1), ContinueFinal(SignerContinueFinalV1), Cancel,
+    ContinueArm(SignerContinueArmV1), ContinueFinal(SignerContinueFinalV1), AdmitArm(SignerAdmitArmV1), AdmitFinal(SignerAdmitFinalV1), Cancel,
 }
 pub struct SignerFinancialWorkflowOriginV1 {
     core:Arc<Core>,clocks:FullWorkflowClocksV1,leaf:Option<LeafCustody>,target:Target,instance:String,image:String,
     start:Option<Start>,entry:Option<Arc<EntryReviewed>>,recipient:Option<crypto::RecipientKey>,
     read:Option<Arc<ReadReviewed>>,offer_started:bool,read_started:bool,source_reported:bool,history_reported:bool,
-    continuation:SContinue,failed:bool,cancel_seen:bool,disposed:bool,cleanup:Option<Instant>,
+    continuation:SContinue,admission:SAdmit,failed:bool,cancel_seen:bool,disposed:bool,cleanup:Option<Instant>,
 }
 impl SignerFinancialWorkflowOriginV1 {
     pub(super) fn from_signer(leaf:LeafCustody,birth:SignerBirthContext)->Result<Self>{
         let target=Target::from_role(leaf.origin.role())?;let clocks=leaf.clocks.workflow();
-        let core=Arc::new(Core{phase:Phases::new(),signer_restriction:Some(birth.restriction),peer:leaf.origin.continue_observer()?,roots:Vec::new(),coordinator:Some(birth.coordinator),
+        let core=Arc::new(Core{witness_outbound:[AtomicU8::new(PENDING),AtomicU8::new(PENDING)],phase:Phases::new(),signer_restriction:Some(birth.restriction),peer:leaf.origin.continue_observer()?,roots:Vec::new(),coordinator:Some(birth.coordinator),
             owner_pid:unsafe{libc::getpid()},owner_uid:unsafe{libc::geteuid()},epoch:clocks.epoch(),session:clocks.supervision(),
             alive:AtomicBool::new(true),outbound:[AtomicU8::new(PENDING),AtomicU8::new(PENDING)]});
         core.check()?;crate::channel::require_time(clocks.supervision())?;
         Ok(Self{core,clocks,leaf:Some(leaf),target,instance:state::nonce()?,image:birth.image.measurement().to_owned(),start:None,entry:None,
             recipient:None,read:None,offer_started:false,read_started:false,source_reported:false,history_reported:false,
-            continuation:SContinue::default(),failed:false,cancel_seen:false,disposed:false,cleanup:None})
+            continuation:SContinue::default(),admission:SAdmit::default(),failed:false,cancel_seen:false,disposed:false,cleanup:None})
     }
     pub fn session_deadline(&self)->Instant{self.clocks.supervision()}
     pub fn check_original_actors_alive(&self)->Result<()>{self.core.check()}
@@ -60,6 +70,7 @@ impl SignerFinancialWorkflowOriginV1 {
             // and retains its narrow exception. Every other new purpose denies R.
             if !matches!(packet,Packet::ContinueFinal{..}) { self.core.check_action_restrictions()?; }
         }
+        if matches!(packet,Packet::AdmitArm{..}|Packet::AdmitFinal{..}) { return self.receive_admit(packet).map(Some); }
         let request=match packet {
             Packet::StartEntry{start}=>{
                 start.validate()?;if self.start.is_some()||start.role!=self.target{return Err(rejected("workflow source-entry start repeated or wrong role"));}
@@ -270,7 +281,7 @@ impl SignerFinancialWorkflowOriginV1 {
     }
     /// Observation only, after actual worker join and source/key/input drop.
     pub fn send_disposed(&mut self)->Result<()> {
-        if self.disposed||!self.cancel_seen||(self.continuation.binding.is_some()&&!self.continuation.outcome){return Err(rejected("workflow disposal before Cancel/outcome"));}
+        if self.disposed||!self.cancel_seen||!self.admission.disposal_allowed()||(self.continuation.binding.is_some()&&!self.continuation.outcome){return Err(rejected("workflow disposal before Cancel/outcome"));}
         let start=self.start.as_ref().ok_or_else(||rejected("workflow disposal context missing"))?;
         self.disposed=true;self.send(&Packet::Disposed{coordinator:start.coordinator.clone(),session:start.session.clone(),role:self.target})
     }
@@ -322,15 +333,17 @@ impl CoordinatorFinancialNativeV1 {
 }
 impl Drop for CoordinatorFinancialNativeV1{fn drop(&mut self){self.revoke();}}
 pub enum CoordinatorFinancialEventV1 {
+    AdmitDisplay(SignerAdmitReviewTicketV1), AdmitReady(SignerAdmitReadyTicketV1),
+    AwaitingNextRead{role:Target,data:crate::SignerAdmitCommittedV1}, AdmitOutcome{role:Target,data:crate::SignerAdmitOutcomeV1},
     SourceEntryOffer(SignerSourceEntryOfferV1), SourceRetained(Target), InitialReadOffer(SignerFinancialReadTicketV1),
     HistoryRetained{role:Target,continue_deadline:Instant}, ContinueDisplay(FinancialContinueReviewTicketV1), ContinueReady(FinancialContinueReadyTicketV1),
     AwaitingAdmission{role:Target,data:SignerContinuationSavedV1}, ContinueOutcome{role:Target,data:SignerContinueOutcomeV1}, Failed{role:Target,stage:FinancialWorkflowStageV1}, Disposed(Target), Restricted(Target),
 }
-struct CSlot{start:Start,sender:Option<crypto::SenderKey>,entry:Option<Arc<EntryReviewed>>,read:Option<Arc<ReadReviewed>>,wire_phase:u8,continue_deadline:Option<Instant>,continue_review_ms:Option<u64>,continuation:Option<CContinue>,failed:bool}
+struct CSlot{start:Start,sender:Option<crypto::SenderKey>,entry:Option<Arc<EntryReviewed>>,read:Option<Arc<ReadReviewed>>,wire_phase:u8,continue_deadline:Option<Instant>,continue_review_ms:Option<u64>,continuation:Option<CContinue>,admission:CAdmit,failed:bool}
 pub struct CoordinatorFinancialEndpointV1{
     core:Arc<Core>,clocks:FullWorkflowClocksV1,tree:Option<InertTreeV1>,coordinator:String,session:String,image:String,
     host_terminal:Option<crate::CoordinatorHostTerminalEndpointV1>,
-    slots:[Option<CSlot>;2],cancel_sent:bool,disposed:[bool;2],cleanup:Option<Instant>,
+    witnesses:[witness::CWSlot;2],slots:[Option<CSlot>;2],cancel_sent:bool,disposed:[bool;2],cleanup:Option<Instant>,
 }
 pub(super) fn split_coordinator(tree:InertTreeV1,phases:PhaseDeadlinesV1,
     host_restriction:crate::host_restriction::CoordinatorHostRestrictionV1,
@@ -340,7 +353,7 @@ pub(super) fn split_coordinator(tree:InertTreeV1,phases:PhaseDeadlinesV1,
     // Drop then publishes R before the tree parameter can enter a reaper.
     let phase=Phases::coordinator(host_restriction);
     let clocks=phases.workflow();let image=tree.workflow_image();
-    let core=Arc::new(Core{phase,signer_restriction:None,peer:tree.continue_host()?.continue_observer()?,roots:tree.continue_pidfds()?,coordinator:None,
+    let core=Arc::new(Core{witness_outbound:[AtomicU8::new(PENDING),AtomicU8::new(PENDING)],phase,signer_restriction:None,peer:tree.continue_host()?.continue_observer()?,roots:tree.continue_pidfds()?,coordinator:None,
         owner_pid:unsafe{libc::getpid()},owner_uid:unsafe{libc::geteuid()},epoch:clocks.epoch(),session:clocks.supervision(),
         alive:AtomicBool::new(true),outbound:[AtomicU8::new(PENDING),AtomicU8::new(PENDING)]});
     core.check()?;crate::channel::require_time(clocks.supervision())?;
@@ -348,7 +361,7 @@ pub(super) fn split_coordinator(tree:InertTreeV1,phases:PhaseDeadlinesV1,
     // On error the local Core/writer drops before the tree parameter's reapers.
     let coordinator=state::nonce()?;let session=state::nonce()?;
     Ok((CoordinatorFinancialNativeV1{core:Arc::clone(&core),_thread:PhantomData},CoordinatorFinancialEndpointV1{
-        core,clocks,tree:Some(tree),coordinator,session,image,host_terminal:Some(host_terminal),slots:[None,None],cancel_sent:false,disposed:[false;2],cleanup:None}))
+        core,clocks,tree:Some(tree),coordinator,session,image,host_terminal:Some(host_terminal),witnesses:std::array::from_fn(|_|witness::CWSlot::default()),slots:[None,None],cancel_sent:false,disposed:[false;2],cleanup:None}))
 }
 impl CoordinatorFinancialEndpointV1 {
     /// One C-only transport handoff to the sole owned driver, never authority.
@@ -389,7 +402,10 @@ impl CoordinatorFinancialEndpointV1 {
                 if matches!(phase,READ_REVIEW|READ_ADMITTED){
                     slot.read.as_ref().ok_or_else(||rejected("active Read binding missing"))?.check()?;
                 }
-            }Ok(())
+                slot.admission.observe_active(phase)?;
+            }
+            for (i,w) in self.witnesses.iter().enumerate(){w.observe_active(&self.core,i)?;}
+            Ok(())
         })();if result.is_err(){self.core.phase.revoke();}result
     }
     fn transport_check(&self)->Result<()>{crate::channel::require_time(self.cleanup.unwrap_or(self.clocks.hard_cleanup()))?;self.core.check()}
@@ -406,7 +422,7 @@ impl CoordinatorFinancialEndpointV1 {
             let sender=crypto::SenderKey::generate()?;
             let start=Start{profile:PROFILE.into(),coordinator:self.coordinator.clone(),session:self.session.clone(),role:target,
                 request_challenge:state::nonce()?,native_ceiling_ms:self.clocks.restrictive_offset(ceiling,original)?,sender_public_key:hex::encode(sender.public_key())};
-            self.slots[target.index()]=Some(CSlot{start:start.clone(),sender:Some(sender),entry:None,read:None,wire_phase:ENTRY_PREPARING,continue_deadline:None,continue_review_ms:None,continuation:None,failed:false});
+            self.slots[target.index()]=Some(CSlot{start:start.clone(),sender:Some(sender),entry:None,read:None,wire_phase:ENTRY_PREPARING,continue_deadline:None,continue_review_ms:None,continuation:None,admission:CAdmit::default(),failed:false});
             if self.core.phase.revoked(){return Err(rejected("source-entry preparation restricted"));}
             self.clocks.restrict_received(&start.profile,start.native_ceiling_ms,original,Instant::now())?;
             self.send(&Packet::StartEntry{start})
@@ -479,14 +495,17 @@ impl CoordinatorFinancialEndpointV1 {
         let deadline=self.cleanup.ok_or_else(||rejected("workflow cleanup missing"))?;
         crate::channel::require_time(deadline)?;self.core.check()?;
         if pending(&self.core){return Ok(FinancialCancelProgressV1::DeferredForAdmittedContinue{deadline});}
+        if witness::witness_pending(&self.core){return Ok(FinancialCancelProgressV1::DeferredForAdmittedWitness{deadline});}
+        if self.cancel_sent { return Ok(FinancialCancelProgressV1::Sent); }
         self.send_cancel()?;Ok(FinancialCancelProgressV1::Sent)
     }
     pub fn send_cancel(&mut self)->Result<()>{
         self.core.phase.revoke();
-        if pending(&self.core){return Err(rejected("admitted full Continue Final must precede Cancel"));}
+        if pending(&self.core)||witness::witness_pending(&self.core){return Err(rejected("admitted exact Final must precede Cancel"));}
         for slot in self.slots.iter_mut().flatten(){slot.sender.take();}
         if self.cancel_sent{return Err(rejected("workflow Cancel consumed"));}self.cancel_sent=true;
         if self.cleanup.is_none(){self.cleanup=Some(self.clocks.first_cleanup_ceiling(Instant::now())?);}
+        self.cancel_witnesses()?;
         self.send(&Packet::Cancel{coordinator:self.coordinator.clone(),session:self.session.clone()})
     }
     pub fn try_receive(&mut self)->Result<Option<CoordinatorFinancialEventV1>>{
@@ -498,8 +517,10 @@ impl CoordinatorFinancialEndpointV1 {
         if let Packet::Disposed{coordinator,session,..}=&packet{
             if !self.cancel_sent||self.disposed[i]||coordinator!=&self.coordinator||session!=&self.session{return Err(rejected("workflow disposal mismatch"));}
             if self.slots[i].as_ref().and_then(|s|s.continuation.as_ref()).is_some_and(|c|c.wire.is_some()&&!c.outcome){return Err(rejected("Continue disposal before exact outcome"));}
+            if self.slots[i].as_ref().is_some_and(|s|!s.admission.disposal_allowed()){return Err(rejected("Signer Admit disposal before outcome"));}
             self.disposed[i]=true;return Ok(Some(CoordinatorFinancialEventV1::Disposed(role)));
         }
+        if matches!(packet,Packet::AdmitDisplay{..}|Packet::AdmitReady{..}|Packet::Admitted{..}|Packet::AdmitOutcome{..}) { return self.receive_admit_event(packet).map(Some); }
         let slot=self.slots[i].as_mut().ok_or_else(||rejected("workflow unsolicited response"))?;
         if slot.failed{return Err(rejected("workflow response after failure"));}
         let event=match packet{
@@ -510,15 +531,16 @@ impl CoordinatorFinancialEndpointV1 {
                 if self.core.phase.revoked(){CoordinatorFinancialEventV1::Restricted(role)}else{
                     let now=Instant::now();let source=self.clocks.restrict_received(PROFILE,offer.presentation.source_ceiling_ms,self.clocks.supervision(),now)?;
                     let entry=self.clocks.restrict_received(PROFILE,offer.presentation.entry_ceiling_ms,self.clocks.supervision(),now)?;
-                    let reviewed=EntryReviewed::new(Arc::clone(&self.core),self.clocks,offer,source,entry)?;
-                    self.core.phase.step(i,ENTRY_PREPARING,ENTRY_REVIEW)?;slot.entry=Some(Arc::clone(&reviewed));
+                    let reviewed=EntryReviewed::from_received_bounds(Arc::clone(&self.core),self.clocks,offer,source,entry)?;
+                    slot.entry=Some(Arc::clone(&reviewed));
+                    if !received_workflow_progress(&self.core.phase,i,ENTRY_PREPARING,ENTRY_REVIEW)?{return Ok(Some(CoordinatorFinancialEventV1::Restricted(role)));}
                     CoordinatorFinancialEventV1::SourceEntryOffer(SignerSourceEntryOfferV1{entry:reviewed,consumed:false})}
             }
             Packet::SourceRetained{start,presentation_digest}=>{
                 let entry=slot.entry.as_ref().ok_or_else(||rejected("source retention before offer"))?;
                 if start!=slot.start||slot.wire_phase!=ENTRY_ADMITTED||presentation_digest!=entry.wire.presentation.presentation_digest{return Err(rejected("source retention binding"));}
                 slot.wire_phase=SOURCE_RETAINED;
-                if self.core.phase.revoked(){CoordinatorFinancialEventV1::Restricted(role)}else{entry.check_custody()?;self.core.phase.step(i,ENTRY_ADMITTED,SOURCE_RETAINED)?;CoordinatorFinancialEventV1::SourceRetained(role)}
+                if self.core.phase.revoked(){CoordinatorFinancialEventV1::Restricted(role)}else{entry.check_custody()?;if !received_workflow_progress(&self.core.phase,i,ENTRY_ADMITTED,SOURCE_RETAINED)?{CoordinatorFinancialEventV1::Restricted(role)}else{CoordinatorFinancialEventV1::SourceRetained(role)}}
             }
             Packet::ReadOffer{start,presentation}=>{
                 let entry=slot.entry.as_ref().ok_or_else(||rejected("Read before source entry"))?;presentation.validate()?;
@@ -526,8 +548,9 @@ impl CoordinatorFinancialEndpointV1 {
                 slot.wire_phase=READ_REVIEW;
                 if self.core.phase.revoked(){CoordinatorFinancialEventV1::Restricted(role)}else{
                     let deadline=self.clocks.restrict_received(PROFILE,presentation.read_ceiling_ms,entry.original_source,Instant::now())?;
-                    let read=ReadReviewed::new(Arc::clone(entry),presentation,deadline,entry.original_source)?;
-                    self.core.phase.step(i,SOURCE_RETAINED,READ_REVIEW)?;slot.read=Some(Arc::clone(&read));
+                    let read=ReadReviewed::from_received_bounds(Arc::clone(entry),presentation,deadline,entry.original_source)?;
+                    slot.read=Some(Arc::clone(&read));
+                    if !received_workflow_progress(&self.core.phase,i,SOURCE_RETAINED,READ_REVIEW)?{return Ok(Some(CoordinatorFinancialEventV1::Restricted(role)));}
                     CoordinatorFinancialEventV1::InitialReadOffer(SignerFinancialReadTicketV1{read,consumed:false})}
             }
             Packet::HistoryRetained{start,presentation_digest,read_digest,continue_review_ceiling_ms}=>{
@@ -538,7 +561,7 @@ impl CoordinatorFinancialEndpointV1 {
                     read.entry.check_custody()?;
                     let continue_deadline=self.clocks.restrict_received(PROFILE,continue_review_ceiling_ms,read.entry.original_source,Instant::now())?;
                     slot.continue_deadline=Some(continue_deadline);slot.continue_review_ms=Some(continue_review_ceiling_ms);
-                    self.core.phase.step(i,READ_ADMITTED,HISTORY_RETAINED)?;CoordinatorFinancialEventV1::HistoryRetained{role,continue_deadline}}
+                    if !received_workflow_progress(&self.core.phase,i,READ_ADMITTED,HISTORY_RETAINED)?{CoordinatorFinancialEventV1::Restricted(role)}else{CoordinatorFinancialEventV1::HistoryRetained{role,continue_deadline}}}
 
             }
             Packet::ContinueDisplay{binding}=>{
@@ -548,8 +571,9 @@ impl CoordinatorFinancialEndpointV1 {
                 slot.wire_phase=CONT_REVIEW;c.wire=Some(binding.clone());
                 if self.core.phase.revoked(){CoordinatorFinancialEventV1::Restricted(role)}else{
                     let deadline=self.clocks.restrict_received(PROFILE,binding.review_ceiling_ms,read.entry.original_source,Instant::now())?;
-                    let b=FullContinueReviewed::new(Arc::clone(read),binding,read.entry.original_source,deadline)?;
-                    self.core.phase.step(i,CONT_PREPARING,CONT_REVIEW)?;c.binding=Some(Arc::clone(&b));
+                    let b=FullContinueReviewed::from_received_bounds(Arc::clone(read),binding,read.entry.original_source,deadline)?;
+                    c.binding=Some(Arc::clone(&b));
+                    if !received_workflow_progress(&self.core.phase,i,CONT_PREPARING,CONT_REVIEW)?{return Ok(Some(CoordinatorFinancialEventV1::Restricted(role)));}
                     CoordinatorFinancialEventV1::ContinueDisplay(FinancialContinueReviewTicketV1{binding:b,consumed:false})}
             }
             Packet::ContinueReady{context,presentation_digest,prepared_digest,ready_challenge}=>{
@@ -557,8 +581,8 @@ impl CoordinatorFinancialEndpointV1 {
                 let b=c.binding.as_ref().ok_or_else(||rejected("Continue Ready before display"))?;
                 if slot.wire_phase!=CONT_ARMED||c.ready.is_some()||!state::hash(&ready_challenge)||!b.wire.matches(&context,&presentation_digest,&prepared_digest){return Err(rejected("full Continue Ready mismatch"));}
                 slot.wire_phase=CONT_READY;let ready=Arc::new(FullReady{review:Arc::clone(b),challenge:ready_challenge});c.ready=Some(Arc::clone(&ready));
-                if self.core.phase.revoked(){CoordinatorFinancialEventV1::Restricted(role)}else{b.check(false)?;self.core.phase.step(i,CONT_ARMED,CONT_READY)?;
-                    CoordinatorFinancialEventV1::ContinueReady(FinancialContinueReadyTicketV1{binding:ready,consumed:false})}
+                if self.core.phase.revoked(){CoordinatorFinancialEventV1::Restricted(role)}else{b.check(true)?;if !received_workflow_progress(&self.core.phase,i,CONT_ARMED,CONT_READY)?{CoordinatorFinancialEventV1::Restricted(role)}else{
+                    CoordinatorFinancialEventV1::ContinueReady(FinancialContinueReadyTicketV1{binding:ready,consumed:false})}}
             }
             Packet::ContinuationSaved{context,data}=>{
                 data.validate()?;let c=slot.continuation.as_mut().ok_or_else(||rejected("saved Continue before prepare"))?;
@@ -582,7 +606,7 @@ impl CoordinatorFinancialEndpointV1 {
             _=>return Err(rejected("wrong coordinator workflow response")),
         };Ok(Some(event))
     }
-    pub fn is_disposed(&self)->bool{self.disposed==[true;2]}
+    pub fn is_disposed(&self)->bool{self.disposed==[true;2]&&self.witnesses.iter().all(witness::CWSlot::closed)}
     pub fn stop_and_reap(mut self)->Result<()>{
         if !self.cancel_sent||!self.is_disposed(){return Err(rejected("workflow actual source disposal unconfirmed"));}
         let cutoff=self.cleanup.ok_or_else(||rejected("workflow cleanup missing"))?;
@@ -598,7 +622,7 @@ fn failure_phase(stage:FinancialWorkflowStageV1,phase:u8)->bool{match stage{
     FinancialWorkflowStageV1::Continue=>phase==CONT_PREPARING,
 }}
 
-struct HSlot{start:Start,phase:u8,entry:Option<EntryOffer>,read:Option<SignerFinancialReadPresentationV1>,continue_review_ms:Option<u64>,continuation:Option<HContinue>,last_wall:u64,failed:bool}
+struct HSlot{start:Start,phase:u8,entry:Option<EntryOffer>,read:Option<SignerFinancialReadPresentationV1>,continue_review_ms:Option<u64>,continuation:Option<HContinue>,admission:HAdmit,last_wall:u64,failed:bool}
 /// Exact original H is a trusted finite relay, not a direct-C authentication
 /// proof at S. It retains sole S reapers, no plaintext/private keys or issuer.
 pub struct HostFinancialWorkflowRelayV1{
@@ -641,13 +665,14 @@ impl HostFinancialWorkflowRelayV1 {
         }
         if self.restricted{return Err(rejected("workflow command after relay restriction"));}
         crate::channel::require_time(self.clocks.supervision())?;
+        if matches!(packet,Packet::AdmitArm{..}|Packet::AdmitFinal{..}) { return self.down_admit(packet); }
         match packet{
             Packet::StartEntry{start}=>{
                 start.validate()?;let i=start.role.index();
                 if self.slots[i].is_some()||self.coordinator.as_ref().is_some_and(|s|s!=&start.coordinator)||self.session.as_ref().is_some_and(|s|s!=&start.session){return Err(rejected("workflow relay start replay"));}
                 self.clocks.restrict_received(&start.profile,start.native_ceiling_ms,self.clocks.supervision(),Instant::now())?;
                 self.coordinator=Some(start.coordinator.clone());self.session=Some(start.session.clone());
-                self.slots[i]=Some(HSlot{start:start.clone(),phase:ENTRY_PREPARING,entry:None,read:None,continue_review_ms:None,continuation:None,last_wall:0,failed:false});Ok(())
+                self.slots[i]=Some(HSlot{start:start.clone(),phase:ENTRY_PREPARING,entry:None,read:None,continue_review_ms:None,continuation:None,admission:HAdmit::default(),last_wall:0,failed:false});Ok(())
             }
             Packet::EntryCipher{envelope}=>{
                 let encrypted=crypto::Envelope::decode(envelope.as_bytes())?;
@@ -696,8 +721,10 @@ impl HostFinancialWorkflowRelayV1 {
         if let Packet::Disposed{coordinator,session,..}=packet{
             if !self.cancel_seen||self.disposed[i]||self.coordinator.as_ref()!=Some(coordinator)||self.session.as_ref()!=Some(session){return Err(rejected("workflow relay disposal mismatch"));}
             if self.slots[i].as_ref().and_then(|s|s.continuation.as_ref()).is_some_and(|c|c.binding.is_some()&&!c.outcome){return Err(rejected("Continue relay disposal before outcome"));}
+            if self.slots[i].as_ref().is_some_and(|s|!s.admission.disposal_allowed()){return Err(rejected("Signer Admit relay disposal before outcome"));}
             self.disposed[i]=true;return Ok(true);
         }
+        if matches!(packet,Packet::AdmitDisplay{..}|Packet::AdmitReady{..}|Packet::Admitted{..}|Packet::AdmitOutcome{..}) { return self.up_admit(target,packet); }
         let slot=self.slots[i].as_mut().ok_or_else(||rejected("workflow unsolicited Signer response"))?;
         if slot.failed{return Err(rejected("workflow response after recorded failure"));}
         let terminal=matches!(packet,Packet::Failed{..}|Packet::ContinuationSaved{..}|Packet::ContinueOutcome{..});
@@ -798,4 +825,40 @@ fn full_continue_current(slot:&mut HSlot,clocks:FullWorkflowClocksV1)->Result<()
     let b=slot.continuation.as_ref().and_then(|c|c.binding.as_ref()).ok_or_else(||rejected("relay full Continue binding missing"))?;
     let now=Instant::now();for offset in [b.context.native_ceiling_ms,b.source_ceiling_ms,b.review_ceiling_ms]{clocks.restrict_received(PROFILE,offset,clocks.supervision(),now)?;}
     let r=&b.presentation.review;relay_wall(&mut slot.last_wall,r.reviewed_at_ms,r.expires_at_ms,r.session_expires_at_ms)
+}
+
+// C receive progress is not native admission. Exact immutable/actor/clock
+// validation precedes this call; only the expected phase losing to ordinary R
+// is a restrictive observation rather than a fatal endpoint failure.
+fn received_workflow_progress(phase:&Phases,slot:usize,from:u8,to:u8)->Result<bool>{
+    match phase.step(slot,from,to){
+        Ok(())=>Ok(!phase.revoked()),
+        Err(_) if phase.revoked()&&phase.phase(slot)==from=>Ok(false),
+        Err(error)=>Err(error),
+    }
+}
+#[cfg(test)] mod receive_race_tests{
+    use super::*;
+    #[test]
+    fn exact_older_receive_races_restrict_without_advancing_or_masking_protocol_errors(){
+        for (from,to) in [(ENTRY_PREPARING,ENTRY_REVIEW),(ENTRY_ADMITTED,SOURCE_RETAINED),
+            (SOURCE_RETAINED,READ_REVIEW),(READ_ADMITTED,HISTORY_RETAINED),
+            (CONT_PREPARING,CONT_REVIEW),(CONT_ARMED,CONT_READY)]{
+            let p=Phases::new();p.step(0,0,from).unwrap();p.revoke();
+            assert!(!received_workflow_progress(&p,0,from,to).unwrap());
+            assert_eq!(p.phase(0),from);assert!(p.revoked());
+            assert!(received_workflow_progress(&p,0,to,from).is_err());
+            let p=Phases::new();p.step(1,0,from).unwrap();
+            assert!(received_workflow_progress(&p,1,from,to).unwrap());
+            assert!(received_workflow_progress(&p,1,from,to).is_err());
+        }
+    }
+    #[test]
+    fn unrelated_admitted_continue_and_witness_survive_ordinary_receive_restriction(){
+        let p=Phases::new();p.step(0,0,CONT_ADMITTED).unwrap();p.step(1,0,READ_REVIEW).unwrap();
+        p.witness_step(0,0,witness::W_ADMITTED).unwrap();p.revoke();
+        assert!(!received_workflow_progress(&p,1,READ_REVIEW,READ_ADMITTED).unwrap());
+        assert_eq!(p.phase(0),CONT_ADMITTED);assert_eq!(p.witness_phase(0),witness::W_ADMITTED);
+        assert!(p.step(1,READ_REVIEW,READ_ADMITTED).is_err());
+    }
 }

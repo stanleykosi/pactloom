@@ -84,21 +84,31 @@ impl AuthorityJournal {
         key: &DatabaseKey,
         policy: &AccountPolicy,
         expected: &PendingBirthCommitRecord,
+    ) -> Result<Self> { Self::open_born_history_only_guarded(owner, path, key, policy, expected, crate::native_witness_owner::financial_setup_guard_v1::FinancialSetupGuardV1::legacy()) }
+    pub(crate) fn open_born_history_only_guarded(
+        owner: std::sync::Arc<crate::witness_locator::BornJournalOwner>,
+        path: &Path, key: &DatabaseKey, policy: &AccountPolicy,
+        expected: &PendingBirthCommitRecord,
+        guard: crate::native_witness_owner::financial_setup_guard_v1::FinancialSetupGuardV1<'_>,
     ) -> Result<Self> {
-        owner.check_current()?;
+        owner.check_setup_current(guard, false)?;
         // Exact namespace owner already holds writer/replacement exclusion.
+        guard.check()?;
         let snapshot = wholepact_storage_security::open_encrypted_read_snapshot(path, key)?;
+        guard.check()?;
         let (stamp, record) = namespace_account_stamp(snapshot.connection(), policy)?;
         if record != *expected || stamp.quarantined {
             return Err(AuthorityError::CorruptHistory);
         }
         drop(snapshot);
+        guard.check()?;
         let connection = wholepact_storage_security::open_encrypted_quiescent(path, key)?;
+        guard.check()?;
         let (actual, record) = namespace_account_stamp(connection.connection(), policy)?;
         if record != *expected || actual != stamp || actual.quarantined {
             return Err(AuthorityError::CorruptHistory);
         }
-        owner.check_current()?;
+        owner.check_setup_current(guard, false)?;
         Ok(Self {
             connection: Mutex::new(connection),
             resolution_node: Mutex::new(None),
@@ -106,6 +116,7 @@ impl AuthorityJournal {
             born_manual_scope: None,
         })
     }
+
 
     pub(crate) fn open_born_financial_history_only_v1(
         owner: std::sync::Arc<crate::witness_locator::BornJournalOwner>,

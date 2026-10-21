@@ -218,8 +218,17 @@ impl SignerOriginV1 {
     }
     pub fn run_until_stop(self) -> ! { child_exit(finish_leaf(self.leaf, Ok(()))) }
 }
-pub struct InertWitnessOriginV1 { leaf: LeafCustody }
+pub struct InertWitnessOriginV1 {
+    leaf: LeafCustody,
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    financial_restriction: Option<crate::host_restriction::WitnessSharedRestrictionV1>,
+}
 impl InertWitnessOriginV1 {
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    pub fn into_financial_continuation(self) -> Result<crate::WitnessFinancialContinuationOriginV1> {
+        crate::WitnessFinancialContinuationOriginV1::from_leaf(self.leaf,
+            self.financial_restriction.ok_or_else(|| rejected("not an original financial-continuation Witness"))?)
+    }
     pub fn run_until_stop(self) -> ! { child_exit(finish_leaf(self.leaf, Ok(()))) }
 }
 
@@ -294,6 +303,11 @@ pub(super) struct InertTreeV1 {
     _image: PinnedCommonImageV1,
 }
 impl InertTreeV1 {
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn financial_witness(&self,target:crate::SignerContinueRoleV1)->Result<&DirectChild>{
+        let role=crate::financial_witness_channel::role_for(target);
+        self.children.iter().flatten().find(|c|c.role()==role).ok_or_else(||rejected("original financial Witness missing"))
+    }
     #[cfg(feature = "coordinated-financial-workflow-v1")]
     pub(super) fn workflow_image(&self) -> String { self._image.retain_verified_identity().measurement().to_owned() }
     #[cfg(feature = "coordinated-signer-continue")]
@@ -418,13 +432,17 @@ pub fn bootstrap_common_image_v1() -> Result<BootstrappedRoleV1> {
                 #[cfg(feature = "coordinated-financial-workflow-v1")]
                 drop(host_terminal);
                 #[cfg(feature = "coordinated-financial-workflow-v1")]
-                drop(host_restriction);
+                let financial_restriction = if crate::financial_witness_channel::is_financial_witness(origin.role()) {
+                    Some(match host_restriction.into_financial_witness(&origin) { Ok(reader)=>reader, Err(error)=>child_exit(Err(error)) })
+                } else { drop(host_restriction); None };
                 drop(image);
                 #[cfg(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append", feature = "coordinated-signer-continue"))]
                 drop(display);
                 return child_branch(prepare_leaf(origin, clocks,
                     #[cfg(feature = "coordinated-signer-continue")]
                     None,
+                    #[cfg(feature = "coordinated-financial-workflow-v1")]
+                    financial_restriction,
                 ));
             }
         }
@@ -513,6 +531,8 @@ fn prepare_host(origin: ForkOriginV1, clocks: PhaseDeadlinesV1,
                 return child_branch(prepare_leaf(signer_origin, clocks,
                     #[cfg(feature = "coordinated-signer-continue")]
                     Some(continuation),
+                    #[cfg(feature = "coordinated-financial-workflow-v1")]
+                    None,
                 ));
             }
         }
@@ -585,6 +605,8 @@ pub(super) fn finish_host_capped(host: HostOriginV1, retained_cleanup: Option<In
 fn prepare_leaf(origin: ForkOriginV1, clocks: PhaseDeadlinesV1,
     #[cfg(feature = "coordinated-signer-continue")]
     continuation: Option<crate::signer_continue_origin::SignerBirthContext>,
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    financial_restriction: Option<crate::host_restriction::WitnessSharedRestrictionV1>,
 ) -> Result<BootstrappedRoleV1> {
     let deadline = clocks.startup;
     #[cfg(wholepact_bootstrap_ci)]
@@ -593,6 +615,8 @@ fn prepare_leaf(origin: ForkOriginV1, clocks: PhaseDeadlinesV1,
         return Err(rejected("wrong leaf birth"));
     }
     verify_child_start(&origin)?;
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    if let Some(reader) = &financial_restriction { reader.check_current()?; }
     #[cfg(feature = "coordinated-signer-continue")]
     if let Some(context) = &continuation {
         context.coordinator.check_alive()?;
@@ -626,7 +650,10 @@ fn prepare_leaf(origin: ForkOriginV1, clocks: PhaseDeadlinesV1,
     if leaf.origin.role() == Role::Owner1V3DeliveryAdmission {
         return Ok(BootstrappedRoleV1::WitnessDelivery(crate::delivery_origin::WitnessDeliveryOriginV1::from_leaf(leaf)?));
     }
-    Ok(BootstrappedRoleV1::InertWitness(InertWitnessOriginV1 { leaf }))
+    Ok(BootstrappedRoleV1::InertWitness(InertWitnessOriginV1 { leaf,
+        #[cfg(feature = "coordinated-financial-workflow-v1")]
+        financial_restriction,
+    }))
 }
 
 fn child_branch(result: Result<BootstrappedRoleV1>) -> Result<BootstrappedRoleV1> {

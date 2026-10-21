@@ -131,6 +131,23 @@ impl CreatedHostRestrictionV1 {
         observer.check_current()?;
         Ok(observer)
     }
+    /// Exactly the two original financial-continuation Witness branches retain
+    /// this same cell. No other W gains a mapping, writer or imported identity.
+    pub(super) fn into_financial_witness(mut self, origin: &ForkOriginV1) -> Result<WitnessSharedRestrictionV1> {
+        if !crate::financial_witness_channel::is_financial_witness(origin.role())
+            || !origin.has_original_coordinator(self.creator_pid, self.creator_uid)
+            || unsafe { libc::geteuid() } != self.creator_uid
+        { return Err(rejected("shared restriction requires original financial Witness birth")); }
+        require_time(self.clocks.workflow().startup())?;
+        origin.check_parent_alive()?;
+        let result = WitnessSharedRestrictionV1 {
+            cell: self.cell.take().ok_or_else(|| rejected("shared restriction consumed"))?,
+            owner_pid: unsafe { libc::getpid() }, owner_uid: self.creator_uid,
+            deadline: self.clocks.session,
+        };
+        result.check_current()?;
+        Ok(result)
+    }
     pub(super) fn into_host(mut self, origin: &ForkOriginV1) -> Result<HostOriginalRestrictionV1> {
         let coordinator = origin.retain_host_coordinator_lifetime()?;
         let owner_pid = unsafe { libc::getpid() };
@@ -226,6 +243,22 @@ impl SignerSharedRestrictionV1 {
         if self.cell.sample() != CURRENT {
             return Err(rejected("original Coordinator restricted Signer operation"));
         }
+        Ok(())
+    }
+}
+
+/// Private actual C->fixed-W inherited check-only map. Trusted W still has a RW
+/// virtual mapping; the API is not hostile-W OS isolation.
+pub(super) struct WitnessSharedRestrictionV1 {
+    cell: SharedCell, owner_pid: libc::pid_t, owner_uid: libc::uid_t, deadline: Instant,
+}
+impl WitnessSharedRestrictionV1 {
+    pub(super) fn check_current(&self) -> Result<()> {
+        if unsafe { libc::getpid() } != self.owner_pid || unsafe { libc::geteuid() } != self.owner_uid {
+            return Err(rejected("financial Witness restriction actor mismatch"));
+        }
+        require_time(self.deadline)?;
+        if self.cell.sample() != CURRENT { return Err(rejected("original C restricted financial Witness")); }
         Ok(())
     }
 }

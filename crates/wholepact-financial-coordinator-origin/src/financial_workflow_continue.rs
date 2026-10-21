@@ -8,7 +8,7 @@ use serde::{Serialize,Deserialize};
 use std::{sync::{Arc,atomic::{AtomicU64,Ordering}},time::Instant};
 /// Restriction/cleanup observation only; never an outbound grant.
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
-pub enum FinancialCancelProgressV1{DeferredForAdmittedContinue{deadline:Instant},Sent}
+pub enum FinancialCancelProgressV1{DeferredForAdmittedContinue{deadline:Instant},DeferredForAdmittedWitness{deadline:Instant},Sent}
 pub(super) const CONT_PREPARING:u8=24;
 pub(super) const CONT_REVIEW:u8=25;
 pub(super) const CONT_ARMED:u8=26;
@@ -81,6 +81,10 @@ pub(super) struct FullContinueReviewed {
 }
 impl FullContinueReviewed {
     pub(super) fn new(read:Arc<ReadReviewed>,wire:ContinueWire,original_source:Instant,original_review:Instant)->Result<Arc<Self>>{
+        let binding=Self::from_received_bounds(read,wire,original_source,original_review)?;
+        binding.check(false)?;Ok(binding)
+    }
+    pub(super) fn from_received_bounds(read:Arc<ReadReviewed>,wire:ContinueWire,original_source:Instant,original_review:Instant)->Result<Arc<Self>>{
         wire.validate()?;
         if !same_original_source(read.entry.original_source,original_source)||!wire.matches_read(&read.entry.wire.start,&read.wire){return Err(rejected("Continue changed retained original source"));}
         let clocks=read.entry.clocks;let now=Instant::now();let wall=state::wall_ms()?;let r=&wire.presentation.review;
@@ -88,7 +92,7 @@ impl FullContinueReviewed {
         let review=clocks.restrict_received(PROFILE,wire.review_ceiling_ms,original_review,now)?;
         let source=clocks.restrict_received(PROFILE,wire.source_ceiling_ms,original_source,now)?;
         let ceiling=native.min(review).min(source).min(wall_ceiling(now,wall,r.reviewed_at_ms,r.expires_at_ms)?);
-        let b=Arc::new(Self{read,wire,original_review,ceiling,last_wall:AtomicU64::new(wall)});b.check(false)?;Ok(b)
+        let b=Arc::new(Self{read,wire,original_review,ceiling,last_wall:AtomicU64::new(wall)});b.check(true)?;Ok(b)
     }
     pub(super) fn core(&self)->&Arc<Core>{&self.read.entry.core}
     pub(super) fn slot(&self)->usize{self.read.entry.slot()}

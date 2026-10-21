@@ -2,6 +2,7 @@
 //! installation is supported; no arbitrary root, implicit install, reset, legacy
 //! adoption or restored activation exists. All setup/enrollment mutation consumes
 //! the real native module's private one-shot decision and retained publication.
+use crate::native_witness_owner::financial_setup_guard_v1::FinancialSetupGuardV1;
 use super::*;
 use crate::journal::PendingBirthTargetInspection;
 use crate::native_witness_owner::{
@@ -296,6 +297,20 @@ struct NamespaceCore {
     registry_identity: DatabaseFileIdentity,
 }
 impl NamespaceCore {
+    fn check_current_guarded(&self, guard: FinancialSetupGuardV1<'_>) -> Result<()> {
+        guard.check()?;
+        self.files.check_current()?;
+        let c = self.registry.lock().map_err(|_| AuthorityError::Storage)?;
+        guard.check()?;
+        self.registry_identity.check_current(c.connection())?;
+        require_runtime(c.connection())?;
+        let tx = Transaction::new_unchecked(c.connection(), TransactionBehavior::Deferred)?;
+        guard.check()?;
+        let history = storage::load_exact(&tx, &self.namespace)?;
+        guard.check()?;
+        check_inventory(&self.files, &history)?;
+        guard.check()
+    }
     fn check_current(&self) -> Result<()> {
         self.files.check_current()?;
         let c = self.registry.lock().map_err(|_| AuthorityError::Storage)?;
@@ -336,11 +351,24 @@ fn open_namespace(input: &NamespaceOpenInput) -> Result<Arc<NamespaceCore>> {
 // Shared concrete opener: identity-only backup needs no invented account ID.
 // Still the same fixed installation, held locks, immutable preflight, exact
 // original owner/origin/root binding and missing-history denial.
-fn open_namespace_identity(input: &NamespaceSetupInput) -> Result<Arc<NamespaceCore>> {
+fn open_namespace_identity(input: &NamespaceSetupInput) -> Result<Arc<NamespaceCore>> { open_namespace_identity_guarded(input, FinancialSetupGuardV1::legacy()) }
+fn open_namespace_identity_guarded(input: &NamespaceSetupInput, guard: FinancialSetupGuardV1<'_>) -> Result<Arc<NamespaceCore>> {
     let setup = input;
     setup.validate()?;
+    guard.check()?;
     let files = input.installation_probe()?.open_existing()?;
-    let master = read_existing_storage_key(Path::new(&input.storage_key_file))?;
+    guard.check()?;
+    let master = match guard {
+        FinancialSetupGuardV1::Legacy(_) => read_existing_storage_key(Path::new(&input.storage_key_file))?,
+        #[cfg(feature = "coordinated-witness-financial-continuation")]
+        FinancialSetupGuardV1::Final(_) => return Err(AuthorityError::Permission),
+        #[cfg(feature = "coordinated-witness-financial-continuation")]
+        FinancialSetupGuardV1::Coordinated(_) | FinancialSetupGuardV1::Arm(_) => {
+            let bytes = guard.read(Path::new(&input.storage_key_file), 32)?;
+            if bytes.len() != 32 || bytes.iter().all(|b| *b == 0) { return Err(AuthorityError::Authentication); }
+            let mut key = Zeroizing::new([0u8; 32]); key.copy_from_slice(&bytes); key
+        }
+    };
     let key = derive_key(
         &master,
         files.instance_id(),
@@ -348,7 +376,8 @@ fn open_namespace_identity(input: &NamespaceSetupInput) -> Result<Arc<NamespaceC
     )?;
     // No writable registry handle exists until the complete immutable preflight
     // and actual canonical namespace/inventory comparisons below have succeeded.
-    let (namespace, prior) = read_registry_preflight(&files.registry_path(), &key)?;
+    guard.check()?;
+    let (namespace, prior) = read_registry_preflight_guarded(&files.registry_path(), &key, guard)?;
     if namespace.namespace_instance_id != files.instance_id()
         || Path::new(&namespace.canonical_private_root) != files.root_path()
         || namespace.root_identity != directory_identity(files.root_stamp())
@@ -364,9 +393,12 @@ fn open_namespace_identity(input: &NamespaceSetupInput) -> Result<Arc<NamespaceC
     }
     check_inventory(&files, &prior)?;
     files.check_current()?;
+    guard.check()?;
     let registry =
         wholepact_storage_security::open_encrypted_quiescent(files.registry_path(), &key)?;
+    guard.check()?;
     require_runtime(registry.connection())?;
+    guard.check()?;
     let current = storage::load_exact(registry.connection(), &namespace)?;
     if prior.prepared != current.prepared
         || prior.completed != current.completed
@@ -383,7 +415,8 @@ fn open_namespace_identity(input: &NamespaceSetupInput) -> Result<Arc<NamespaceC
         registry: Mutex::new(registry),
         registry_identity,
     });
-    core.check_current()?;
+    core.check_current_guarded(guard)?;
+    guard.check()?;
     Ok(core)
 }
 /// Audit data only. The caller holds the canonical namespace locks. All source
@@ -392,9 +425,12 @@ fn open_namespace_identity(input: &NamespaceSetupInput) -> Result<Arc<NamespaceC
 fn read_registry_preflight(
     path: &Path,
     key: &DatabaseKey,
-) -> Result<(WitnessNamespaceBinding, LocatorHistory)> {
+) -> Result<(WitnessNamespaceBinding, LocatorHistory)> { read_registry_preflight_guarded(path, key, FinancialSetupGuardV1::legacy()) }
+fn read_registry_preflight_guarded(path: &Path, key: &DatabaseKey, guard: FinancialSetupGuardV1<'_>) -> Result<(WitnessNamespaceBinding, LocatorHistory)> {
     let preflight = wholepact_storage_security::open_encrypted_read_snapshot(path, key)?;
+    guard.check()?;
     storage::verify_schema(preflight.connection())?;
+    guard.check()?;
     let payload: Option<Vec<u8>> = preflight
         .connection()
         .query_row(
@@ -406,7 +442,9 @@ fn read_registry_preflight(
     let namespace: WitnessNamespaceBinding =
         crate::decode(&payload.ok_or(AuthorityError::RecoveryRequired)?)?;
     namespace.validate()?;
+    guard.check()?;
     let history = storage::load_exact(preflight.connection(), &namespace)?;
+    guard.check()?;
     Ok((namespace, history))
 }
 
@@ -671,8 +709,18 @@ impl BornJournalOwner {
         }
         validate_record_against_intent(&self.core, &self.intent, birth)
     }
+    pub(crate) fn check_setup_current(&self, guard: FinancialSetupGuardV1<'_>, mutation: bool) -> Result<()> {
+        self.core.check_current_guarded(guard)?;
+        let c = self.core.registry.lock().map_err(|_| AuthorityError::Storage)?;
+        guard.check()?;
+        self.check_registry_locked_guarded(mutation, &c, guard)
+    }
     fn check_registry_locked(&self, mutation: bool, c: &EncryptedConnection) -> Result<()> {
+        self.check_registry_locked_guarded(mutation, c, FinancialSetupGuardV1::legacy())
+    }
+    fn check_registry_locked_guarded(&self, mutation: bool, c: &EncryptedConnection, guard: FinancialSetupGuardV1<'_>) -> Result<()> {
         let tx = Transaction::new_unchecked(c.connection(), TransactionBehavior::Deferred)?;
+        guard.check()?;
         let history = storage::load_exact(&tx, &self.core.namespace)?;
         let prepared = history
             .prepared
@@ -689,6 +737,7 @@ impl BornJournalOwner {
         {
             return Err(AuthorityError::PolicyDenied);
         }
+        guard.check()?;
         Ok(())
     }
 }
@@ -1123,11 +1172,15 @@ mod owner_model_tests {
 
 /// Historical server opener for a fully completed canonical birth. No native
 /// enrollment or first-write fallback is possible through this read-only route.
-pub(crate) fn open_born_history(input: NamespaceOpenInput) -> Result<AuthorityJournal> {
-    let core = open_namespace(&input)?;
+pub(crate) fn open_born_history(input: NamespaceOpenInput) -> Result<AuthorityJournal> { open_born_history_guarded(input, FinancialSetupGuardV1::legacy()) }
+pub(crate) fn open_born_history_guarded(input: NamespaceOpenInput, guard: FinancialSetupGuardV1<'_>) -> Result<AuthorityJournal> {
+    hash(&input.expected_account_id)?;
+    let core = open_namespace_identity_guarded(&input.setup(), guard)?;
     let (intent, expected_record) = {
         let c = core.registry.lock().map_err(|_| AuthorityError::Storage)?;
+        guard.check()?;
         let tx = Transaction::new_unchecked(c.connection(), TransactionBehavior::Deferred)?;
+        guard.check()?;
         let history = storage::load_exact(&tx, &core.namespace)?;
         let mut selected = history
             .prepared
@@ -1147,8 +1200,10 @@ pub(crate) fn open_born_history(input: NamespaceOpenInput) -> Result<AuthorityJo
             completed.evidence.birth_commit.clone(),
         )
     };
+    guard.check()?;
     let path = core.path_for(&intent)?;
     let key = core.key_for(&intent)?;
+    guard.check()?;
     let intent_digest = intent.digest(&core.namespace)?;
     let owner = Arc::new(BornJournalOwner {
         core,
@@ -1157,13 +1212,14 @@ pub(crate) fn open_born_history(input: NamespaceOpenInput) -> Result<AuthorityJo
         key,
         intent_digest,
     });
-    owner.check_current()?;
-    AuthorityJournal::open_born_history_only(
+    owner.check_setup_current(guard, false)?;
+    AuthorityJournal::open_born_history_only_guarded(
         owner.clone(),
         &owner.path,
         &owner.key,
         &owner.intent.request.policy,
         &expected_record,
+        guard,
     )
 }
 

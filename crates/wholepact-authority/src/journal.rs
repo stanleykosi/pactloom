@@ -45,6 +45,12 @@ mod coordinated_delivery_append_journal_v1;
 #[cfg(all(feature = "coordinated-witness-delivery-append", target_os = "linux"))]
 pub(crate) use coordinated_delivery_append_journal_v1::PreparedDeliveryAppendV1;
 
+#[cfg(all(feature = "coordinated-witness-financial-continuation", target_os = "linux"))]
+#[path = "coordinated_financial_continuation_journal_v1.rs"]
+mod coordinated_financial_continuation_journal_v1;
+#[cfg(all(feature = "coordinated-witness-financial-continuation", target_os = "linux"))]
+pub(crate) use coordinated_financial_continuation_journal_v1::PreparedFinancialContinuationAppendV1;
+
 const APPLICATION_ID: i64 = 0x57504157;
 const SCHEMA_VERSION: i64 = 6;
 const BORN_ARTIFACT_SCHEMA_VERSION: i64 = 7;

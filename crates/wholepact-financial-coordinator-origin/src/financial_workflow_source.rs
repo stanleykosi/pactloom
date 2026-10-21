@@ -22,6 +22,12 @@ pub(super) struct EntryReviewed {
 }
 impl EntryReviewed {
     pub(super) fn new(core:Arc<Core>,clocks:FullWorkflowClocksV1,wire:EntryOffer,source:Instant,entry:Instant)->Result<Arc<Self>> {
+        let reviewed=Self::from_received_bounds(core,clocks,wire,source,entry)?;
+        reviewed.check_action()?;Ok(reviewed)
+    }
+    // C's authenticated receive still needs exact actor/clock validation when
+    // native R races it. This creates no public ticket or phase transition.
+    pub(super) fn from_received_bounds(core:Arc<Core>,clocks:FullWorkflowClocksV1,wire:EntryOffer,source:Instant,entry:Instant)->Result<Arc<Self>> {
         wire.validate()?;let now=Instant::now();let wall=state::wall_ms()?;
         let p=&wire.presentation;
         let native=clocks.restrict_received(&wire.start.profile,wire.start.native_ceiling_ms,clocks.supervision(),now)?;
@@ -29,7 +35,7 @@ impl EntryReviewed {
         let encoded_entry=clocks.restrict_received(&wire.start.profile,p.entry_ceiling_ms,entry,now)?;
         let ceiling=native.min(encoded_source).min(encoded_entry).min(wall_ceiling(now,wall,p.facts.reviewed_at_ms,p.facts.expires_at_ms)?);
         let reviewed=Arc::new(Self{core,clocks,wire,original_source:source,original_entry:entry,ceiling,last_wall:AtomicU64::new(wall)});
-        reviewed.check_action()?;Ok(reviewed)
+        reviewed.check_action_bounds()?;Ok(reviewed)
     }
     pub(super) fn slot(&self)->usize{self.wire.start.role.index()}
     pub(super) fn check_custody(&self)->Result<()> { self.observe_custody().map(|_|()) }
@@ -41,11 +47,14 @@ impl EntryReviewed {
                 ||wall>=self.wire.presentation.facts.source_expires_at_ms{return Err(rejected("original financial custody expired"));}Ok(wall)
         })();if result.is_err(){self.core.phase.revoke();}result
     }
-    pub(super) fn check_action(&self)->Result<()> {
+    fn check_action_bounds(&self)->Result<()> {
         let result=(||{let wall=self.observe_custody()?;
-            if self.core.phase.revoked()||Instant::now()>=self.original_entry||Instant::now()>=self.ceiling
-                ||wall>=self.wire.presentation.facts.expires_at_ms
-            {return Err(rejected("SourceEntry restriction observed"));}self.core.check_action_restrictions()})();
+            if Instant::now()>=self.original_entry||Instant::now()>=self.ceiling||wall>=self.wire.presentation.facts.expires_at_ms
+            {return Err(rejected("SourceEntry original action bound elapsed"));}Ok(())})();
+        if result.is_err(){self.core.phase.revoke();}result
+    }
+    pub(super) fn check_action(&self)->Result<()> {
+        let result=self.check_action_bounds().and_then(|()|self.core.check_action_restrictions());
         if result.is_err(){self.core.phase.revoke();}result
     }
 }
@@ -139,20 +148,26 @@ pub(super) struct ReadReviewed {
 }
 impl ReadReviewed {
     pub(super) fn new(entry:Arc<EntryReviewed>,wire:SignerFinancialReadPresentationV1,original_read:Instant,original_source:Instant)->Result<Arc<Self>> {
+        let read=Self::from_received_bounds(entry,wire,original_read,original_source)?;
+        read.check()?;Ok(read)
+    }
+    pub(super) fn from_received_bounds(entry:Arc<EntryReviewed>,wire:SignerFinancialReadPresentationV1,original_read:Instant,original_source:Instant)->Result<Arc<Self>> {
         wire.validate()?;
         if original_source!=entry.original_source||!wire.matches_entry(&entry.wire.presentation){return Err(rejected("Read substituted original source"));}
         let now=Instant::now();let wall=state::wall_ms()?;
         let bound=entry.clocks.restrict_received(&wire.actor.profile,wire.read_ceiling_ms,original_read,now)?;
         let ceiling=bound.min(entry.original_source).min(wall_ceiling(now,wall,wire.facts.reviewed_at_ms,wire.facts.expires_at_ms)?);
-        let read=Arc::new(Self{entry,wire,original_read,ceiling,last_wall:AtomicU64::new(wall)});read.check()?;Ok(read)
+        let read=Arc::new(Self{entry,wire,original_read,ceiling,last_wall:AtomicU64::new(wall)});read.check_bounds()?;Ok(read)
+    }
+    fn check_bounds(&self)->Result<()> {
+        let result=(||{let wall=self.entry.observe_custody()?;let prior=self.last_wall.fetch_max(wall,Ordering::AcqRel);
+            if Instant::now()>=self.original_read||Instant::now()>=self.ceiling
+                ||wall<prior||wall<self.wire.facts.reviewed_at_ms||wall>=self.wire.facts.expires_at_ms
+            {return Err(rejected("initial Read original action bound elapsed"));}Ok(())})();
+        if result.is_err(){self.entry.core.phase.revoke();}result
     }
     pub(super) fn check(&self)->Result<()> {
-        let result=(||{
-            let wall=self.entry.observe_custody()?;
-            let prior=self.last_wall.fetch_max(wall,Ordering::AcqRel);
-            if self.entry.core.phase.revoked()||Instant::now()>=self.original_read||Instant::now()>=self.ceiling
-                ||wall<prior||wall<self.wire.facts.reviewed_at_ms||wall>=self.wire.facts.expires_at_ms
-            {return Err(rejected("initial Read restriction observed"));}self.entry.core.check_action_restrictions()})();
+        let result=self.check_bounds().and_then(|()|self.entry.core.check_action_restrictions());
         if result.is_err(){self.entry.core.phase.revoke();}result
     }
 }

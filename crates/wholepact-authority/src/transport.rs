@@ -20,6 +20,8 @@ mod financial_continuation_v1;
 mod financial_signing_server_v1;
 mod financial_signing_client_v1;
 mod completed_dispatch_v1;
+#[cfg(all(feature = "coordinated-witness-financial-continuation", target_os = "linux"))]
+pub(crate) mod coordinated_financial_continuation_v1;
 #[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
 mod finite_witness_service_v1;
 #[cfg(all(feature = "native-witness-owner", target_os = "linux"))]

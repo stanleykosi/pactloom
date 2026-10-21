@@ -86,6 +86,18 @@ pub(super) struct ForkOriginV1 {
 }
 impl ForkOriginV1 {
     #[cfg(feature = "coordinated-financial-workflow-v1")]
+    pub(super) fn financial_witness_send(&self, packet: &crate::financial_witness_channel::Packet) -> Result<()> {
+        crate::financial_witness_channel::send(self.channel.review_fd(), self.local_role, &self.parent, packet)
+    }
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    pub(super) fn financial_witness_receive(&self) -> Result<Option<crate::financial_witness_channel::Packet>> {
+        crate::financial_witness_channel::try_receive(self.channel.review_fd(), self.local_role, &self.parent)
+    }
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    pub(super) fn has_original_coordinator(&self, pid: libc::pid_t, uid: libc::uid_t) -> bool {
+        self.parent.role == Role::Coordinator && self.parent.pid == pid && self.parent.uid == uid
+    }
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
     pub(super) fn workflow_send(&self, packet: &crate::financial_workflow_channel::Packet) -> Result<()> {
         crate::financial_workflow_channel::send(self.channel.review_fd(), self.local_role, &self.parent, packet)
     }
@@ -184,6 +196,16 @@ pub(super) struct DirectChild {
     terminal_observed: bool,
 }
 impl DirectChild {
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    pub(super) fn financial_witness_send(&self, packet: &crate::financial_witness_channel::Packet) -> Result<()> {
+        self.require_owner()?;
+        crate::financial_witness_channel::send(self.channel.review_fd(), self.local_role, &self.peer, packet)
+    }
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    pub(super) fn financial_witness_receive(&self) -> Result<Option<crate::financial_witness_channel::Packet>> {
+        self.require_owner()?;
+        crate::financial_witness_channel::try_receive(self.channel.review_fd(), self.local_role, &self.peer)
+    }
     #[cfg(feature = "coordinated-financial-workflow-v1")]
     pub(super) fn workflow_send(&self, packet: &crate::financial_workflow_channel::Packet) -> Result<()> {
         self.require_owner()?;

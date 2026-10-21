@@ -233,6 +233,16 @@ pub fn read_existing_storage_key(path: &Path) -> Result<Zeroizing<[u8; 32]>> {
 /// Intended for operator-selected protected config and TLS inputs as well as
 /// the original fixed-width namespace key. Plain bytes are wiped on normal drop.
 pub fn read_existing_private_file(path: &Path, maximum_bytes: usize) -> Result<Zeroizing<Vec<u8>>> {
+    read_existing_private_file_restricted(path, maximum_bytes, None)
+}
+
+/// Additional denial-only observation. This cannot replace file custody or any
+/// embedding permission; the ordinary reader retains its original None path.
+pub fn read_existing_private_file_restricted(
+    path: &Path,
+    maximum_bytes: usize,
+    restriction: Option<&dyn Fn() -> Result<()>>,
+) -> Result<Zeroizing<Vec<u8>>> {
     if maximum_bytes == 0 || maximum_bytes > 1_048_576 {
         return Err(E::UnsafePath);
     }
@@ -249,10 +259,14 @@ pub fn read_existing_private_file(path: &Path, maximum_bytes: usize) -> Result<Z
         return Err(E::AuthenticationFailed);
     }
     let mut bytes = Zeroizing::new(Vec::with_capacity(before.len() as usize));
-    (&mut file)
-        .take(maximum_bytes as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| E::Io)?;
+    if let Some(check) = restriction {
+        read_private_restricted(&mut file, maximum_bytes, &mut bytes, check)?;
+    } else {
+        (&mut file)
+            .take(maximum_bytes as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| E::Io)?;
+    }
     let after = private_file(&file)?;
     let reopened_parent = open_directory_walk(parent)?;
     same(&parent_before, &private_directory(&reopened_parent)?)?;
@@ -275,6 +289,51 @@ pub fn read_existing_private_file(path: &Path, maximum_bytes: usize) -> Result<Z
         return Err(E::AuthenticationFailed);
     }
     Ok(bytes)
+}
+
+fn read_private_restricted(reader: &mut dyn Read, maximum_bytes: usize, bytes: &mut Vec<u8>, check: &dyn Fn() -> Result<()>) -> Result<()> {
+    let mut remaining = maximum_bytes + 1;
+    let mut buffer = Zeroizing::new([0u8; 8192]);
+    while remaining > 0 {
+        check()?;
+        let n = reader.read(&mut buffer[..remaining.min(8192)]).map_err(|_| E::Io)?;
+        check()?;
+        if n == 0 { break; }
+        bytes.extend_from_slice(&buffer[..n]);
+        remaining -= n;
+    }
+    Ok(())
+}
+#[cfg(test)]
+mod restricted_private_read_tests {
+    use super::*;
+    use std::cell::Cell;
+    struct OneByte<'a> { calls: &'a Cell<usize> }
+    impl Read for OneByte<'_> {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            self.calls.set(self.calls.get()+1); out[0]=42; Ok(1)
+        }
+    }
+    #[test]
+    fn each_physical_private_read_resamples_and_never_restarts() {
+        let calls=Cell::new(0); let checks=Cell::new(0); let mut bytes=Vec::new();
+        let check=|| { checks.set(checks.get()+1); if checks.get()==3 {Err(E::SourceChanged)} else {Ok(())} };
+        assert!(read_private_restricted(&mut OneByte{calls:&calls}, 8, &mut bytes, &check).is_err());
+        assert_eq!(calls.get(),1); assert_eq!(bytes,vec![42]);
+        let calls=Cell::new(0); let mut bytes=Vec::new();
+        assert!(read_private_restricted(&mut OneByte{calls:&calls},8,&mut bytes,&||Err(E::SourceChanged)).is_err());
+        assert_eq!(calls.get(),0); assert!(bytes.is_empty());
+    }
+    #[test]
+    fn private_read_postcheck_rejects_unaccepted_bytes_and_keeps_bound() {
+        let calls=Cell::new(0); let checks=Cell::new(0); let mut bytes=Vec::new();
+        let check=|| { checks.set(checks.get()+1); if checks.get()==2 {Err(E::SourceChanged)} else {Ok(())} };
+        assert!(read_private_restricted(&mut OneByte{calls:&calls},8,&mut bytes,&check).is_err());
+        assert_eq!(calls.get(),1); assert!(bytes.is_empty());
+        let calls=Cell::new(0); let mut bytes=Vec::new();
+        read_private_restricted(&mut OneByte{calls:&calls},8,&mut bytes,&||Ok(())).unwrap();
+        assert_eq!(calls.get(),9); assert_eq!(bytes.len(),9);
+    }
 }
 
 fn os_home() -> Result<PathBuf> {

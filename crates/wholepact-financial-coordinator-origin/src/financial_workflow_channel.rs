@@ -243,6 +243,12 @@ pub(super) enum Packet {
     ContinueFinal{context:ContinueStart,presentation_digest:String,prepared_digest:String,ready_challenge:String},
     ContinuationSaved{context:ContinueStart,data:SignerContinuationSavedV1},
     ContinueOutcome{context:ContinueStart,data:SignerContinueOutcomeV1},
+    AdmitDisplay{data:crate::SignerAdmitPresentationV1},
+    AdmitArm{actor:FinancialActorContextV1,presentation_digest:String},
+    AdmitReady{actor:FinancialActorContextV1,presentation_digest:String,ready_challenge:String,admission_ready_digest:String},
+    AdmitFinal{actor:FinancialActorContextV1,presentation_digest:String,ready_challenge:String,admission_ready_digest:String,witness_presentation_digest:String},
+    Admitted{actor:FinancialActorContextV1,data:crate::SignerAdmitCommittedV1},
+    AdmitOutcome{actor:FinancialActorContextV1,data:crate::SignerAdmitOutcomeV1},
     Failed{start:Start,stage:FinancialWorkflowStageV1},
     Cancel{coordinator:String,session:String},
     Disposed{coordinator:String,session:String,role:Target},
@@ -253,6 +259,8 @@ impl Packet {
         Self::ContinuePrepare{context}|Self::ContinueArm{context,..}|Self::ContinueReady{context,..}|Self::ContinueFinal{context,..}
             |Self::ContinuationSaved{context,..}|Self::ContinueOutcome{context,..}=>Some(context.start.role),
         Self::ContinueDisplay{binding}=>Some(binding.context.start.role),
+        Self::AdmitDisplay{data}=>Some(data.actor.signer_role),
+        Self::AdmitArm{actor,..}|Self::AdmitReady{actor,..}|Self::AdmitFinal{actor,..}|Self::Admitted{actor,..}|Self::AdmitOutcome{actor,..}=>Some(actor.signer_role),
         Self::EntryOffer{offer}=>Some(offer.start.role), Self::Disposed{role,..}=>Some(*role),Self::Cancel{..}=>None,
         Self::EntryCipher{envelope}=>Some(match crate::source_entry_envelope::Envelope::decode(envelope.as_bytes())?.binding().signer_role {
             crate::source_entry_envelope::SourceEntryRole::Signer1=>Target::Signer1,
@@ -292,7 +300,7 @@ pub(super) fn try_receive(fd:RawFd,local:Role,peer:&PeerLifetime)->Result<Option
     check_direction(peer.role(),local,&packet)?;peer.check_alive()?;Ok(Some(packet))
 }
 fn check_direction(sender:Role,recipient:Role,packet:&Packet)->Result<()> {
-    let down=matches!(packet,Packet::StartEntry{..}|Packet::EntryCipher{..}|Packet::ReadFinal{..}|Packet::ContinuePrepare{..}|Packet::ContinueArm{..}|Packet::ContinueFinal{..}|Packet::Cancel{..});
+    let down=matches!(packet,Packet::StartEntry{..}|Packet::EntryCipher{..}|Packet::ReadFinal{..}|Packet::ContinuePrepare{..}|Packet::ContinueArm{..}|Packet::ContinueFinal{..}|Packet::AdmitArm{..}|Packet::AdmitFinal{..}|Packet::Cancel{..});
     let edge=if down{sender==Role::Coordinator&&recipient==Role::Host||sender==Role::Host&&matches!(recipient,Role::Signer1|Role::Signer2)}
         else{recipient==Role::Coordinator&&sender==Role::Host||recipient==Role::Host&&matches!(sender,Role::Signer1|Role::Signer2)};
     let actual=if matches!(sender,Role::Signer1|Role::Signer2){Some(sender)}else if matches!(recipient,Role::Signer1|Role::Signer2){Some(recipient)}else{None};

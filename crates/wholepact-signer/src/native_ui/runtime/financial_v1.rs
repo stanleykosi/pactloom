@@ -7,6 +7,9 @@ use role_state::{Context, Next, Outcome};
 #[cfg(feature = "coordinated-financial-workflow-v1")]
 #[path = "coordinated_financial_continue_v1.rs"]
 mod coordinated_continue;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+#[path = "coordinated_financial_admit_v1.rs"]
+mod coordinated_admit;
 pub(super) use role_state::FinancialRuntimeV1;
 #[path = "financial_diagnostics_v1.rs"]
 pub(in crate::native_ui) mod diagnostics;
