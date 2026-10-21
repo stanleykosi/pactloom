@@ -5645,6 +5645,7 @@ name = "wholepact-financial-coordinator"
 version = "0.1.0"
 dependencies = [
  "eframe",
+ "log",
  "serde_json",
  "wholepact-authority",
  "wholepact-financial-coordinator-origin",

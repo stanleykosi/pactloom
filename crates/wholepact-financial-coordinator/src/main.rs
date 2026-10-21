@@ -20,6 +20,8 @@ mod native_ui;
 mod review_channel;
 #[cfg(all(target_os = "linux", feature = "cancel-only-witness-review"))]
 mod review_driver;
+#[cfg(all(target_os = "linux", feature = "coordinator-transient-password-input"))]
+mod secret_input;
 #[cfg(all(target_os = "linux", feature = "cancel-only-witness-review"))]
 mod witness_role;
 

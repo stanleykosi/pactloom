@@ -12,6 +12,11 @@ cancel-only-witness-review = ["common-image-bootstrap", "wholepact-financial-coo
 
 coordinated-witness-delivery-append = ["common-image-bootstrap", "wholepact-financial-coordinator-origin/coordinated-witness-delivery-append", "dep:wholepact-authority", "wholepact-authority/coordinated-witness-delivery-append", "dep:eframe", "dep:winit", "dep:zeroize"]
 
+# Source-only private input leaf, with no runtime callsite. Pinned egui-winit can
+# log logical keys and malformed IME text, so this profile statically disables
+# the log facade in debug AND release builds. Typed product diagnostics remain.
+coordinator-transient-password-input = ["common-image-bootstrap", "dep:eframe", "dep:zeroize", "dep:log", "log/max_level_off"]
+
 [[bin]]
 name = "wholepact-financial-coordinator"
 path = "src/main.rs"
@@ -26,6 +31,7 @@ wholepact-authority = { path = "../wholepact-authority", optional = true, defaul
 eframe = { version = "=0.36.2", optional = true, default-features = false, features = ["default_fonts", "glow", "wayland"] }
 winit = { version = "=0.30.13", optional = true, default-features = false, features = ["wayland", "rwh_06"] }
 zeroize = { version = "=1.9.1", optional = true }
+log = { version = "=0.4.34", optional = true }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(wholepact_bootstrap_ci)', 'cfg(wholepact_delivery_ci)'] }
