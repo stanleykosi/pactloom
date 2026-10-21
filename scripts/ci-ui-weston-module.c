@@ -77,8 +77,8 @@
 #define SESSION_NS (120ull * 1000000000ull)
 #define APP_ID "org.wholepact.CoordinatorDelivery"
 
-enum operation { BIND = 1, FOCUS, MOVE, BUTTON, KEY, FRAME, STOP };
-enum reply_kind { ACK = 1, IMAGE, CHUNK, ERROR, READY };
+enum operation { BIND = 1, FOCUS, MOVE, BUTTON, KEY, FRAME, STOP, SCROLL_DOWN, CLOSE_WINDOW };
+enum reply_kind { ACK = 1, IMAGE, CHUNK, ERROR, READY, FRAME_BARRIER };
 enum failure { OK = 0, PROTOCOL = 1, DEADLINE, LIMIT, TARGET, INPUT,
                OUTPUT, READBACK, DISCONNECTED, INTERNAL };
 
@@ -383,6 +383,28 @@ flush_image(struct control *c)
     return !c->dead;
 }
 
+/* Exact current surface-to-output correspondence, not shell intention. The
+ * API and coordinate-space constructor are Weston 14.0.2 libweston.h. */
+static bool
+view_covers_output(struct weston_paint_node *node)
+{
+    const int xs[4] = { 0, WIDTH, 0, WIDTH };
+    const int ys[4] = { 0, 0, HEIGHT, HEIGHT };
+    pixman_box32_t box = { 0, 0, WIDTH, HEIGHT };
+    if (node->view->transform.dirty ||
+        pixman_region32_contains_rectangle(&node->visible, &box) != PIXMAN_REGION_IN)
+        return false;
+    for (unsigned i = 0; i < 4; ++i) {
+        struct weston_coord_surface local =
+            weston_coord_surface(xs[i], ys[i], node->surface);
+        struct weston_coord_global global =
+            weston_coord_surface_to_global(node->view, local);
+        if (global.c.x != xs[i] || global.c.y != ys[i])
+            return false;
+    }
+    return true;
+}
+
 static void
 frame_rendered(struct wl_listener *listener, void *data)
 {
@@ -403,7 +425,7 @@ frame_rendered(struct wl_listener *listener, void *data)
             node->surf_xform_valid && weston_surface_has_content(node->surface) &&
             node->plane == &c->output->primary_plane &&
             node->view->output == c->output &&
-            node->view->alpha == 1.0f) {
+            node->view->alpha == 1.0f && view_covers_output(node)) {
             pixman_region32_t repainted;
             pixman_region32_init(&repainted);
             pixman_region32_intersect(&repainted, &node->visible, data);
@@ -539,8 +561,18 @@ dispatch(struct control *c, const uint32_t *v)
             fail(c, LIMIT);
             return;
         }
-        c->minimum_commit = a;
-        c->minimum_frame = b;
+        /* Clamp at this actual request receipt, after the caller consumed its
+         * source snapshot. An older buffer plus damage_all is not sufficient. */
+        c->minimum_commit = a > c->target->commits ? a : c->target->commits;
+        c->minimum_frame = b > c->frames ? b : c->frames;
+        uint32_t h[12];
+        header(c, h, FRAME_BARRIER, OK, c->minimum_commit, c->minimum_frame,
+               0, 0, c->input_sequence);
+        if (send(c->fd, h, sizeof h, MSG_DONTWAIT | MSG_NOSIGNAL) != sizeof h) {
+            fail(c, DISCONNECTED);
+            return;
+        }
+        /* This one distinct observation does not clear the pending FRAME. */
         weston_compositor_damage_all(c->compositor);
         return;
     }
@@ -578,6 +610,25 @@ dispatch(struct control *c, const uint32_t *v)
             fail(c, INPUT);
             return;
         }
+    } else if (op == SCROLL_DOWN && !a && !b && c->focused &&
+               !c->held_keys && !c->button_down &&
+               keyboard->focus == c->target->surface && pointer->focus &&
+               pointer->focus->surface == c->target->surface) {
+        struct weston_pointer_axis_event event = {
+            .axis = WL_POINTER_AXIS_VERTICAL_SCROLL,
+            .value = 120.0, .has_discrete = false, .discrete = 0,
+        };
+        notify_axis(&c->seat, &t, &event);
+        notify_pointer_frame(&c->seat);
+    } else if (op == CLOSE_WINDOW && !a && !b && !c->held_keys && !c->button_down) {
+        struct weston_desktop_surface *desktop =
+            weston_surface_get_desktop_surface(c->target->surface);
+        if (!desktop) {
+            fail(c, TARGET);
+            return;
+        }
+        /* Genuine compositor close request, credential-free smoke only. */
+        weston_desktop_surface_close(desktop);
     } else if (op == BUTTON && a <= 1 && !b && c->focused && !c->held_keys &&
                keyboard->focus == c->target->surface && pointer->focus &&
                pointer->focus->surface == c->target->surface &&

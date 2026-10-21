@@ -45,9 +45,11 @@ class FakeTransport:
         self.sent.append(raw)
         _, _, seq, op, a, b, reserved1, reserved2 = C.COMMAND.unpack(raw)
         assert reserved1 == reserved2 == 0
-        if op in (C.FOCUS, C.MOVE, C.BUTTON, C.KEY):
+        if op in (C.FOCUS, C.MOVE, C.BUTTON, C.KEY, C.SCROLL_DOWN, C.CLOSE_WINDOW):
             self.input_sequence = seq
         if op == C.FRAME:
+            self.incoming.append(packet(C.FRAME_BARRIER, seq, self.commit, self.frame,
+                                        input_sequence=self.input_sequence))
             self.commit += 1
             self.frame += 1
             self.incoming.append(packet(C.IMAGE, seq, self.commit, self.frame,
@@ -269,18 +271,18 @@ class Protocol(unittest.TestCase):
         self.bind()
         self.controller.focus(True)
         def stale(rows):
-            old = list(C.HEADER.unpack(rows[0]))
+            old = list(C.HEADER.unpack(rows[1]))
             old[5] = 1
-            rows[0] = C.HEADER.pack(*old)
+            rows[1] = C.HEADER.pack(*old)
         self.transport.corrupt = stale
         self.rejected('protocol', self.controller.observe)
 
     def test_frame_snapshot_rejects_midstream_counter_change(self):
         self.bind()
         def changed(rows):
-            h = list(C.HEADER.unpack(rows[1][:C.HEADER.size]))
+            h = list(C.HEADER.unpack(rows[2][:C.HEADER.size]))
             h[5] += 1
-            rows[1] = C.HEADER.pack(*h) + rows[1][C.HEADER.size:]
+            rows[2] = C.HEADER.pack(*h) + rows[2][C.HEADER.size:]
         self.transport.corrupt = changed
         self.rejected('protocol', lambda: self.controller.observe(after_commit=0))
 
@@ -302,6 +304,61 @@ class Protocol(unittest.TestCase):
         self.assertEqual(len(self.transport.sent), 1)
         self.process.terminate.assert_not_called()
         self.process.kill.assert_not_called()
+
+
+class ReceiptBarrier(unittest.TestCase):
+    setUp = Protocol.setUp
+    bind = Protocol.bind
+    rejected = Protocol.rejected
+    # In-memory transport only. These additions exercise the closed new ops.
+    def test_frame_uses_actual_receipt_barrier(self):
+        self.bind()
+        self.transport.commit, self.transport.frame = 10, 20
+        frame = self.controller.observe(after_commit=0)
+        self.assertEqual((frame.barrier.commit, frame.barrier.frame), (10, 20))
+        self.assertEqual((frame.receipt.commit, frame.receipt.frame), (11, 21))
+
+    def test_duplicate_frame_barrier_is_not_an_image(self):
+        self.bind()
+        self.transport.corrupt = lambda rows: rows.insert(1, rows[0])
+        self.rejected('protocol', self.controller.observe)
+
+    def test_ordinary_ack_cannot_replace_frame_barrier(self):
+        self.bind()
+        def wrong(rows):
+            header = list(C.HEADER.unpack(rows[0])); header[3] = C.ACK
+            rows[0] = C.HEADER.pack(*header)
+        self.transport.corrupt = wrong
+        self.rejected('protocol', self.controller.observe)
+
+    def test_same_frame_as_actual_barrier_refused(self):
+        self.bind()
+        def stale(rows):
+            barrier = C.HEADER.unpack(rows[0]); header = list(C.HEADER.unpack(rows[1]))
+            header[6] = barrier[6]; rows[1] = C.HEADER.pack(*header)
+        self.transport.corrupt = stale
+        self.rejected('protocol', self.controller.observe)
+
+    def test_fixed_scroll_operation(self):
+        self.bind(); self.controller.focus(True)
+        self.controller.scroll_down(100, 200)
+        operations = [C.COMMAND.unpack(raw)[3:6] for raw in self.transport.sent[-2:]]
+        self.assertEqual(operations, [(C.MOVE, 100, 200), (C.SCROLL_DOWN, 0, 0)])
+
+    def test_scroll_coordinates_are_closed(self):
+        self.bind()
+        self.rejected('input', lambda: self.controller.scroll_down(-1, 0))
+
+    def test_terminal_close_does_not_reap_or_allow_later_input(self):
+        self.bind()
+        def exited_after_send(rows):
+            self.process.poll.return_value = 0
+        self.transport.corrupt = exited_after_send
+        self.controller.close_window()
+        self.assertTrue(self.transport.closed)
+        self.assertEqual(C.COMMAND.unpack(self.transport.sent[-1])[3], C.CLOSE_WINDOW)
+        self.process.wait.assert_not_called()
+        self.rejected('target', lambda: self.controller.focus(True))
 
 
 class SourceBoundary(unittest.TestCase):
@@ -344,6 +401,19 @@ class SourceBoundary(unittest.TestCase):
         self.assertIn('weston_compositor_exit_with_code', text)
         self.assertIn('PR_SET_DUMPABLE', text)
         self.assertIn('kind == IMAGE || kind == CHUNK', text)
+
+    def test_actual_geometry_and_receipt_barrier_are_source_bound(self):
+        text = (ROOT / 'ci-ui-weston-module.c').read_text()
+        for token in ('weston_coord_surface_to_global', 'view->transform.dirty',
+                      'pixman_region32_contains_rectangle', 'PIXMAN_REGION_IN',
+                      'const int xs[4]', 'const int ys[4]', 'view_covers_output(node)',
+                      'FRAME_BARRIER', 'a > c->target->commits ? a : c->target->commits',
+                      'b > c->frames ? b : c->frames', 'notify_axis(',
+                      'weston_desktop_surface_close('):
+            self.assertIn(token, text)
+        frame = text[text.index('if (op == FRAME)'):text.index('if (op == FOCUS')]
+        self.assertNotIn('ack(c)', frame)
+        self.assertNotIn('c->pending = c->pending_op = 0', frame)
 
     def test_cross_language_protocol_constants_and_memory_ceiling(self):
         text = (ROOT / 'ci-ui-weston-module.c').read_text()

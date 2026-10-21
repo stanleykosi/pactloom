@@ -47,8 +47,8 @@ SESSION_NS = 120_000_000_000
 APP_ID = 'org.wholepact.CoordinatorDelivery'
 COMMAND = struct.Struct('<8I')
 HEADER = struct.Struct('<12I')
-BIND, FOCUS, MOVE, BUTTON, KEY, FRAME, STOP = range(1, 8)
-ACK, IMAGE, CHUNK, ERROR, READY = range(1, 6)
+BIND, FOCUS, MOVE, BUTTON, KEY, FRAME, STOP, SCROLL_DOWN, CLOSE_WINDOW = range(1, 10)
+ACK, IMAGE, CHUNK, ERROR, READY, FRAME_BARRIER = range(1, 7)
 ERRORS = ('ok', 'protocol', 'deadline', 'limit', 'target', 'input',
           'output', 'readback', 'disconnected', 'internal')
 CONTROL_ENV = ('CI_UI_CONTROL_FD', 'CI_UI_ORIGINAL_DEADLINE_NS',
@@ -77,10 +77,11 @@ class PrivateFrame:
     actual pixels for its private source-backed UI checks; counters alone are
     NOT evidence of any presented string, phase, approval, or financial effect.
     """
-    __slots__ = ('receipt', 'width', 'height', '_pixels', '_valid')
+    __slots__ = ('receipt', 'barrier', 'width', 'height', '_pixels', '_valid')
 
-    def __init__(self, receipt, pixels):
+    def __init__(self, receipt, pixels, barrier):
         self.receipt = receipt
+        self.barrier = barrier
         self.width, self.height = WIDTH, HEIGHT
         self._pixels = pixels
         self._valid = True
@@ -209,6 +210,7 @@ class Controller:
         self._sequence = self._captures = 0
         self._ready = self._bound = self._closed = False
         self._bind_attempted = False
+        self._terminal_close = False
         self._process = None
         self._bound_pid = None
         self._receipt = Receipt(0, 0, 0, 0)
@@ -244,7 +246,7 @@ class Controller:
         if left <= 0:
             self._reject('deadline')
         if self._process is not None:
-            if self._process.pid != self._bound_pid or self._process.poll() is not None:
+            if self._process.pid != self._bound_pid or (not self._terminal_close and self._process.poll() is not None):
                 self._reject('target')
         return left / 1_000_000_000
 
@@ -302,18 +304,18 @@ class Controller:
 
     def _ack(self, op):
         h, payload = self._read()
-        expected_input = self._sequence if op in (FOCUS, MOVE, BUTTON, KEY) else self._receipt.input_sequence
+        expected_input = self._sequence if op in (FOCUS, MOVE, BUTTON, KEY, SCROLL_DOWN, CLOSE_WINDOW) else self._receipt.input_sequence
         if (h[3] != ACK or payload or h[7:11] != (0, 0, 0, 0) or
                 h[5] < self._receipt.commit or h[6] < self._receipt.frame or
                 h[11] != expected_input):
             self._reject('protocol')
         self._receipt = Receipt(h[2], h[5], h[6], h[11])
-        if op in (FOCUS, MOVE, BUTTON, KEY):
+        if op in (FOCUS, MOVE, BUTTON, KEY, SCROLL_DOWN, CLOSE_WINDOW):
             self._last_input_commit = h[5]
         return self._receipt
 
     def _command(self, op, a=0, b=0):
-        if not self._bound:
+        if not self._bound or self._terminal_close:
             self._reject('target')
         self._send(op, a, b)
         return self._ack(op)
@@ -350,6 +352,29 @@ class Controller:
         self._command(BUTTON, 1)
         return self._command(BUTTON, 0)
 
+    def scroll_down(self, x, y):
+        """One fixed real wheel event, never an arbitrary axis value."""
+        if type(x) is not int or type(y) is not int or not (0 <= x < WIDTH and 0 <= y < HEIGHT):
+            self._reject('input')
+        self._budget(2)
+        self._command(MOVE, x, y)
+        return self._command(SCROLL_DOWN)
+
+    def close_window(self):
+        """One terminal compositor-close request for credential-free smoke.
+
+        Keep the actual child UNREAPED after sending the close. It can naturally
+        exit before its ACK arrives, but its retained PID cannot be recycled.
+        No subsequent input/capture is allowed on this permanently closed edge.
+        """
+        if not self._bound or self._terminal_close:
+            self._reject('target')
+        self._send(CLOSE_WINDOW)
+        self._terminal_close = True
+        receipt = self._ack(CLOSE_WINDOW)
+        self.close()
+        return receipt
+
     def _budget(self, count):
         if self._sequence + count > MAX_COMMANDS:
             self._reject('limit')
@@ -379,6 +404,8 @@ class Controller:
     def observe(self, *, after_commit=None):
         """Require a newer bound-surface commit AND a newer rendered frame.
 
+        The distinct FRAME_BARRIER reply records the actual request-receipt
+        counters. A later repaint of an already committed buffer cannot pass.
         Initial capture may explicitly use after_commit=0. After input the
         default is the commit counter acknowledged at its last event. Callers
         may demand a stricter counter but cannot relax that input barrier.
@@ -394,8 +421,15 @@ class Controller:
         self._captures += 1
         self._send(FRAME, minimum, self._last_observed_frame)
         h, payload = self._read()
+        if (h[3] != FRAME_BARRIER or payload or h[7:11] != (0, 0, 0, 0) or
+                h[5] < minimum or h[6] < self._last_observed_frame or
+                h[5] < self._receipt.commit or h[6] < self._receipt.frame or
+                h[11] != self._receipt.input_sequence):
+            self._reject('protocol')
+        barrier = Receipt(h[2], h[5], h[6], h[11])
+        h, payload = self._read()
         if (h[3] != IMAGE or payload or h[7:11] != (WIDTH, HEIGHT, 0, FRAME_BYTES) or
-                h[5] <= minimum or h[6] <= self._last_observed_frame or
+                h[5] <= barrier.commit or h[6] <= barrier.frame or
                 h[5] < self._receipt.commit or h[6] < self._receipt.frame or
                 h[11] != self._receipt.input_sequence):
             self._reject('protocol')
@@ -413,7 +447,7 @@ class Controller:
         self._receipt = Receipt(image_header[2], image_header[5], image_header[6], image_header[11])
         self._last_observed_frame = self._receipt.frame
         self._last_observed_commit = self._receipt.commit
-        self._frame = PrivateFrame(self._receipt, self._pixels)
+        self._frame = PrivateFrame(self._receipt, self._pixels, barrier)
         return self._frame
 
     def stop(self):
