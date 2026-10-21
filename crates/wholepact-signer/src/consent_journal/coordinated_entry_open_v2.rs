@@ -4,10 +4,23 @@
 //! blocking database acquisition and before every private audit.
 use super::*;
 use wholepact_authority::account_use::AccountUseGenesis;
-use wholepact_financial_coordinator_origin::SignerSourceEntryFinalV1;
+use wholepact_financial_coordinator_origin::{
+    SignerSourceEntryFinalV1, SignerV3SourceEntryFinalV1,
+};
 
-fn current(entry: &SignerSourceEntryFinalV1) -> Result<()> {
-    entry.check_current().map_err(|_| JournalError::Permission)
+// Closed genuine-purpose choice, private to the maintained original19 opener.
+// Neither variant accepts a boolean, caller callback, or reconstructed grant.
+enum EntryPermit<'a> {
+    Financial(&'a SignerSourceEntryFinalV1),
+    V3(&'a SignerV3SourceEntryFinalV1),
+}
+
+fn current(entry: &EntryPermit<'_>) -> Result<()> {
+    match entry {
+        EntryPermit::Financial(entry) => entry.check_current(),
+        EntryPermit::V3(entry) => entry.check_current(),
+    }
+    .map_err(|_| JournalError::Permission)
 }
 
 impl SignerConsentJournal {
@@ -17,6 +30,28 @@ impl SignerConsentJournal {
         genesis: &AccountUseGenesis,
         source: &Arc<SignerJournalSourceOwner>,
         entry: &SignerSourceEntryFinalV1,
+    ) -> Result<Self> {
+        let permit = EntryPermit::Financial(entry);
+        Self::open_original19_with_entry(path, key, genesis, source, &permit)
+    }
+
+    pub(crate) fn open_coordinated_v3_source_entry_v1(
+        path: &Path,
+        key: &DatabaseKey,
+        genesis: &AccountUseGenesis,
+        source: &Arc<SignerJournalSourceOwner>,
+        entry: &SignerV3SourceEntryFinalV1,
+    ) -> Result<Self> {
+        let permit = EntryPermit::V3(entry);
+        Self::open_original19_with_entry(path, key, genesis, source, &permit)
+    }
+
+    fn open_original19_with_entry(
+        path: &Path,
+        key: &DatabaseKey,
+        genesis: &AccountUseGenesis,
+        source: &Arc<SignerJournalSourceOwner>,
+        entry: &EntryPermit<'_>,
     ) -> Result<Self> {
         current(entry)?;
         let mut owner = source.begin(path)?;
@@ -30,7 +65,7 @@ impl SignerConsentJournal {
 fn validate_original19(
     c: &Connection,
     genesis: &AccountUseGenesis,
-    entry: &SignerSourceEntryFinalV1,
+    entry: &EntryPermit<'_>,
 ) -> Result<()> {
     current(entry)?;
     if preflight_original(c, &genesis.identity.account_id, Some(genesis))? != SCHEMA_VERSION {
@@ -50,7 +85,7 @@ fn open_original19(
     path: &Path,
     key: &DatabaseKey,
     genesis: &AccountUseGenesis,
-    entry: &SignerSourceEntryFinalV1,
+    entry: &EntryPermit<'_>,
 ) -> Result<OpenedSignerSource> {
     let account_id = &genesis.identity.account_id;
     id(account_id)?;
@@ -166,7 +201,7 @@ impl OriginalSourceOpen<'_> {
         connection: &Connection,
         identity: &wholepact_storage_security::DatabaseFileIdentity,
         account_id: &str,
-        entry: &SignerSourceEntryFinalV1,
+        entry: &EntryPermit<'_>,
     ) -> Result<Arc<LiveCurrent19Source>> {
         current(entry)?;
         self.owner

@@ -141,6 +141,33 @@ mod retained_original_v3;
 pub use retained_original_v3::FinancialResultRestrictionV1;
 use retained_original_v3::{OriginalResultRestrictionsV1, read_restricted_observed, read_setup_restricted_observed, write_restricted};
 
+/// Closed transport provenance. Coordinated custody can only arrive through
+/// the consuming original pending admission, never through an installed-pin DTO.
+enum ResultPeerOriginV1 {
+    Installed(crate::authority_bridge::provider::InstalledSignerProvider),
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    Coordinated(crate::authority_bridge::durable_review_ipc_v3::coordinated_v1::CoordinatedOriginalClientV1),
+}
+impl ResultPeerOriginV1 {
+    fn verify_server(&self,stream:&UnixStream)->Result<PeerProcess>{
+        match self {
+            Self::Installed(provider)=>Ok(provider.verify_server(stream)?),
+            #[cfg(feature="coordinated-financial-workflow-v1")]
+            Self::Coordinated(client)=>{client.check_stream(stream)?;PeerProcess::observe(stream).map_err(|_|BridgeError::Permission)},
+        }
+    }
+    fn check_retained(&self)->Result<()>{match self{
+        Self::Installed(_)=>Ok(()),
+        #[cfg(feature="coordinated-financial-workflow-v1")]
+        Self::Coordinated(client)=>client.check_current(),
+    }}
+}
+#[cfg(feature="coordinated-financial-workflow-v1")]
+#[path="financial_result_ipc_v1/coordinated_original_v1.rs"]
+mod coordinated_original_v1;
+#[cfg(feature="coordinated-financial-workflow-v1")]
+pub use coordinated_original_v1::PreparedCoordinatedFinancialResultReceiverV1;
+
 const MAX_FRAME: usize = 512 * 1024;
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -554,7 +581,7 @@ impl ApprovedFinancialReturnV1 {
 pub struct AuthenticatedFinancialResultLeaseV1 {
     original_restrictions: Option<OriginalResultRestrictionsV1>,
     diagnostic: Mutex<Option<FinancialResultDiagnosticV1>>,
-    provider: crate::authority_bridge::provider::InstalledSignerProvider,
+    provider: ResultPeerOriginV1,
     peer: PeerProcess,
     stream: Mutex<UnixStream>,
     failed: AtomicBool,
@@ -588,9 +615,10 @@ impl AuthenticatedFinancialResultLeaseV1 {
                 return Err(BridgeError::Permission);
             }
             self.peer.check_alive().map_err(|_| BridgeError::Permission)?;
+            self.provider.check_retained()?;
             self.original_restrictions.as_ref().map_or(Ok(()), |r| r.check())
         };
-        let restriction = || self.original_restrictions.as_ref().map_or(Ok(()), |r| r.check());
+        let restriction = || { self.provider.check_retained()?; self.original_restrictions.as_ref().map_or(Ok(()), |r| r.check()) };
         let final_check = self.original_restrictions.as_ref().map(|_| &restriction as &dyn Fn() -> Result<()>);
         let result = (|| {
             restriction()?;
@@ -682,9 +710,10 @@ impl AuthenticatedFinancialResultLeaseV1 {
                 return Err(BridgeError::Permission);
             }
             self.peer.check_alive().map_err(|_| BridgeError::Permission)?;
+            self.provider.check_retained()?;
             self.original_restrictions.as_ref().map_or(Ok(()), |r| r.check())
         };
-        let restriction = || self.original_restrictions.as_ref().map_or(Ok(()), |r| r.check());
+        let restriction = || { self.provider.check_retained()?; self.original_restrictions.as_ref().map_or(Ok(()), |r| r.check()) };
         let final_check = self.original_restrictions.as_ref().map(|_| &restriction as &dyn Fn() -> Result<()>);
         observer.at(FinancialResultStageV1::FinishWrite);
         write_restricted(&mut stream, &Command::Finish, deadline, &current, final_check)?;
@@ -818,7 +847,7 @@ impl AuthenticatedFinancialResultPreviewV1 {
 pub struct PreparedFinancialResultReceiverV1 {
     original_restrictions: Option<OriginalResultRestrictionsV1>,
     setup_deadline: Instant,
-    provider: crate::authority_bridge::provider::InstalledSignerProvider,
+    provider: ResultPeerOriginV1,
     peer: PeerProcess,
     stream: UnixStream,
     preview: AuthenticatedFinancialResultPreviewV1,
@@ -860,7 +889,7 @@ impl PreparedFinancialResultReceiverV1 {
         Ok(Self {
             original_restrictions: None,
             setup_deadline: deadline,
-            provider,
+            provider: ResultPeerOriginV1::Installed(provider),
             peer,
             stream,
             preview: AuthenticatedFinancialResultPreviewV1 { data: preview },
@@ -894,9 +923,10 @@ impl PreparedFinancialResultReceiverV1 {
         let deadline = self.setup_deadline.min(self.original_deadline);
         let current = || {
             self.peer.check_alive().map_err(|_| BridgeError::Permission)?;
+            self.provider.check_retained()?;
             self.original_restrictions.as_ref().map_or(Ok(()), |r| r.check())
         };
-        let restriction = || self.original_restrictions.as_ref().map_or(Ok(()), |r| r.check());
+        let restriction = || { self.provider.check_retained()?; self.original_restrictions.as_ref().map_or(Ok(()), |r| r.check()) };
         let final_check = self.original_restrictions.as_ref().map(|_| &restriction as &dyn Fn() -> Result<()>);
         restriction()?;
         observer.at(FinancialResultStageV1::InstalledProviderVerification);

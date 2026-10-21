@@ -2235,3 +2235,11 @@ impl CWritAcquire {
         && self.review.is_none() && self.ready.is_none()
     }
 }
+
+impl HWritAcquire {
+    pub(super) fn signing_setup_pending(&self,phase:u8)->bool {
+        phase==WRITER_READ_REVIEW && self.read.is_some() && self.read_forwarded
+        && self.service.is_none() && self.wire.is_none() && self.ready.is_none()
+        && !self.terminal && self.committed.is_none()
+    }
+}

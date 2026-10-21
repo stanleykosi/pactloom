@@ -2363,3 +2363,6 @@ mod expected_schema_cache_tests_v1 {
         println!("SCHEMA_REFERENCE_COMPONENT profile=19 iterations=16 uncached_us={} cached_us={} full_profile_proven=false",uncached,cached_us);
     }
 }
+
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub(in crate::consent_journal) use prepared_delivery_v3::CoordinatedReceiptActionV1;

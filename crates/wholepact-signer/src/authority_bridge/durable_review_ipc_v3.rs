@@ -7,6 +7,11 @@ use std::{os::{fd::AsRawFd, unix::net::UnixStream}, path::PathBuf, time::{Durati
 pub use wholepact_authority::durable_delivery_scope_v2::{DurableDeliveryMaterialScopeRefV2, DurableDeliveryPlanV2};
 use wholepact_protocol::durable_proposal_v1::FixedProposalIdentityV1;
 
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub mod coordinated_v1;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub mod coordinated_recipient_v1;
+
 pub(crate) const MAX_METADATA_V3: usize = 512 * 1024;
 
 // Diagnostic data only. Every observer sees the original result once and
@@ -76,23 +81,11 @@ pub struct PrepareClosedRecipientRequestV3 {
 }
 impl PrepareClosedRecipientRequestV3 {
     pub fn validate(&self) -> Result<()> {
-        self.request.validate()?;
-        self.delivery.validate_origins().map_err(|_| BridgeError::Binding)?;
-        fixed_binding_v3(&self.fixed)?.validate().map_err(|_| BridgeError::Binding)?;
-        for value in [&self.payload_digest, &self.provider_enrollment_reference, &self.signer_process_instance] { super::durable_construction_v1::hash(value)?; }
-        if self.version != 3 || self.fixed.schema_version != 1 || self.fixed.proposal_binding != self.request.proposal_binding
-            || self.payload_bytes == 0 || self.payload_bytes > v1::MAX_PAYLOAD as u64
-            || self.material_scopes.len() != 2 || self.delivery.owners.len() != 2
-            || self.material_scopes[0].account_id >= self.material_scopes[1].account_id
-            || serde_json::to_vec(self).map_err(|_| BridgeError::Binding)?.len() > 128 * 1024 {
+        if self.version != 3 || serde_json::to_vec(self).map_err(|_| BridgeError::Binding)?.len() > 128 * 1024 {
             return Err(BridgeError::Binding);
         }
-        for scope in &self.material_scopes {
-            super::durable_construction_v1::hash(&scope.account_id)?;
-            super::durable_construction_v1::hash(&scope.original_scope_digest)?;
-            if scope.account_id.is_empty() || scope.valid_from_unix_seconds == 0 || scope.valid_until_unix_seconds <= scope.valid_from_unix_seconds || scope.valid_until_unix_seconds > i64::MAX as u64 / 1000 { return Err(BridgeError::Binding); }
-        }
-        if self.material_scopes.iter().map(|scope| &scope.account_id).ne(self.delivery.owners.iter().map(|owner| &owner.account_id)) { return Err(BridgeError::Binding); }
+        validate_preparation_body(&self.request, &self.fixed, &self.payload_digest, self.payload_bytes,
+            &self.delivery, &self.material_scopes, &self.provider_enrollment_reference, &self.signer_process_instance)?;
         Ok(())
     }
     pub fn digest(&self) -> Result<String> {
@@ -100,6 +93,34 @@ impl PrepareClosedRecipientRequestV3 {
         wholepact_core::proposal::canonical_digest("wholepact:closed-recipient-preparation:v3", self).map_err(|_| BridgeError::Binding)
     }
 }
+/// Shared pure body validation only. Profile/version and provider provenance
+/// remain distinct; this helper creates neither recipient nor transport owner.
+fn validate_preparation_body(
+    request: &DurableReviewDeliveryRequestV1, fixed: &FixedProposalIdentityV1,
+    payload_digest: &str, payload_bytes: u64, delivery: &DurableDeliveryPlanV2,
+    material_scopes: &[DurableDeliveryMaterialScopeRefV2],
+    provider_enrollment_reference: &str, signer_process_instance: &str,
+) -> Result<()> {
+        request.validate()?;
+        delivery.validate_origins().map_err(|_| BridgeError::Binding)?;
+        fixed_binding_v3(fixed)?.validate().map_err(|_| BridgeError::Binding)?;
+        for value in [payload_digest, provider_enrollment_reference, signer_process_instance] { super::durable_construction_v1::hash(value)?; }
+        if fixed.schema_version != 1 || fixed.proposal_binding != request.proposal_binding
+            || payload_bytes == 0 || payload_bytes > v1::MAX_PAYLOAD as u64
+            || material_scopes.len() != 2 || delivery.owners.len() != 2
+            || material_scopes[0].account_id >= material_scopes[1].account_id
+ {
+            return Err(BridgeError::Binding);
+        }
+        for scope in material_scopes {
+            super::durable_construction_v1::hash(&scope.account_id)?;
+            super::durable_construction_v1::hash(&scope.original_scope_digest)?;
+            if scope.account_id.is_empty() || scope.valid_from_unix_seconds == 0 || scope.valid_until_unix_seconds <= scope.valid_from_unix_seconds || scope.valid_until_unix_seconds > i64::MAX as u64 / 1000 { return Err(BridgeError::Binding); }
+        }
+        if material_scopes.iter().map(|scope| &scope.account_id).ne(delivery.owners.iter().map(|owner| &owner.account_id)) { return Err(BridgeError::Binding); }
+        Ok(())
+}
+
 pub(crate) fn fixed_binding_v3(fixed:&FixedProposalIdentityV1)->Result<wholepact_authority::durable_payment_v1::DurableFixedCandidateBindingV1> {
     wholepact_core::parse_typed_json(&serde_json::to_vec(fixed).map_err(|_| BridgeError::Binding)?).map_err(|_| BridgeError::Binding)
 }

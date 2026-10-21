@@ -43,6 +43,10 @@ impl HostMaterialDeliveryRestrictionV1 {
         crate::terminal::check_original_coordinator_restriction()?;
         Ok(Self { original_deadline, bounds })
     }
+    pub(super) fn into_narrowed_original_restriction_v1(self, history: &AuthenticatedFinancialContinuationHistoryV1) -> Result<(Instant, Box<dyn FinancialResultRestrictionV1>)> {
+        let restriction = self.narrow_history(history)?;
+        Ok((restriction.original_deadline, Box::new(restriction)))
+    }
     fn narrow_history(mut self, history: &AuthenticatedFinancialContinuationHistoryV1) -> Result<Self> {
         let terms = &history.continuation_record().terms;
         self.bounds = self.bounds.narrow_wall((

@@ -6,7 +6,7 @@ use crate::{rejected, Result, financial_workflow_channel::{EntryOffer, SignerFin
 use std::{sync::{Arc,atomic::{AtomicU64,Ordering}},time::{Duration,Instant}};
 use zeroize::Zeroizing;
 
-pub(super) const V3_HELD:u8=0;
+pub(super) const V3_HELD:u8=15;
 pub(super) const ENTRY_PREPARING:u8=16;
 pub(super) const ENTRY_REVIEW:u8=17;
 pub(super) const ENTRY_ADMITTED:u8=18;
@@ -216,15 +216,15 @@ impl Drop for SignerFinancialReadFinalV1{fn drop(&mut self){if !self.consumed{se
     use super::*;use crate::signer_continue_state::Phases;
     #[test]
     fn entry_and_read_completion_stay_interruptible_after_native_admission(){
-        let phases=Phases::new();phases.step(0,V3_HELD,ENTRY_PREPARING).unwrap();phases.step(0,ENTRY_PREPARING,ENTRY_REVIEW).unwrap();
+        let phases=Phases::new();phases.step(0,0,V3_HELD).unwrap();phases.step(0,V3_HELD,ENTRY_PREPARING).unwrap();phases.step(0,ENTRY_PREPARING,ENTRY_REVIEW).unwrap();
         phases.step(0,ENTRY_REVIEW,ENTRY_ADMITTED).unwrap();phases.revoke();
         assert!(phases.step(0,ENTRY_ADMITTED,SOURCE_RETAINED).is_err());
-        let phases=Phases::new();phases.step(1,V3_HELD,SOURCE_RETAINED).unwrap();phases.step(1,SOURCE_RETAINED,READ_REVIEW).unwrap();
+        let phases=Phases::new();phases.step(1,0,V3_HELD).unwrap();phases.step(1,V3_HELD,SOURCE_RETAINED).unwrap();phases.step(1,SOURCE_RETAINED,READ_REVIEW).unwrap();
         phases.step(1,READ_REVIEW,READ_ADMITTED).unwrap();phases.revoke();assert!(phases.step(1,READ_ADMITTED,HISTORY_RETAINED).is_err());
     }
     #[test]
     fn one_way_full_phases_do_not_rearm_a_consumed_entry_or_read(){
-        let phases=Phases::new();for(from,to)in[(V3_HELD,ENTRY_PREPARING),(ENTRY_PREPARING,ENTRY_REVIEW),(ENTRY_REVIEW,ENTRY_ADMITTED),
+        let phases=Phases::new();phases.step(0,0,V3_HELD).unwrap();for(from,to)in[(V3_HELD,ENTRY_PREPARING),(ENTRY_PREPARING,ENTRY_REVIEW),(ENTRY_REVIEW,ENTRY_ADMITTED),
             (ENTRY_ADMITTED,SOURCE_RETAINED),(SOURCE_RETAINED,READ_REVIEW),(READ_REVIEW,READ_ADMITTED),(READ_ADMITTED,HISTORY_RETAINED)]{
             phases.step(0,from,to).unwrap();assert!(phases.step(0,from,to).is_err());}
         assert_eq!(phases.phase(0),HISTORY_RETAINED);

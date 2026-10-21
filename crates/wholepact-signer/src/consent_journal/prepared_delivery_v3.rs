@@ -2,6 +2,9 @@
 //! mutation permission. SQLite revision values are compared only on the SAME
 //! held connection. This is sampled change detection, not writer exclusion.
 use super::*;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+#[path = "prepared_delivery_v3/coordinated_entry_v1.rs"]
+mod coordinated_entry_v1;
 use wholepact_authority::account_use::AccountUseGenesis;
 
 #[derive(PartialEq, Eq)]
@@ -259,3 +262,13 @@ impl SignerConsentJournal {
         Ok((result, prepared))
     }
 }
+
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+#[path = "prepared_delivery_v3/coordinated_receipt_v1.rs"]
+mod coordinated_receipt_v1;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub(in crate::consent_journal) use coordinated_receipt_v1::CoordinatedReceiptActionV1;
+
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+#[path = "prepared_delivery_v3/coordinated_redisclosure_v1.rs"]
+mod coordinated_redisclosure_v1;

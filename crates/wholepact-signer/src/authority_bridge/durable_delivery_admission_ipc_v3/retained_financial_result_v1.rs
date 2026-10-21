@@ -21,50 +21,113 @@ impl PendingDurableDeliveryAdmissionV3 {
         let status = self.status.as_ref().ok_or(BridgeError::Permission)?;
         self.check_status(status)?;
         let audit = status.verified_audit()?;
+        let intent_digest = self.intent.digest()?;
+        let deadline = checked_retained_result_deadline_v1(
+            RetainedFinancialResultJoinV1 {
+                intent_digest: &intent_digest,
+                account_id: &self.intent.account_id,
+                fixed: &self.intent.fixed,
+                original_enrollment_ref: &self.intent.original_enrollment_ref,
+                original_manifest_ref: &self.intent.original_manifest_ref,
+                admission_request: &status.request,
+                original_local_intent_digest: &status.original_local_intent_digest,
+                audit,
+            },
+            request,
+            history,
+            original_host_material_delivery_ceiling,
+        )?;
         let record = history.continuation_record();
-        record.validate_request(history.continuation_request(), history.disclosure())?;
-        let terms = &record.terms;
-        let original_digest = wholepact_authority::durable_financial_continuation_v1::original_delivery_request_digest_v1(&status.request)?;
-        history.financial_continuation_online_permits_v1(&history.continuation_request().operation_id)?;
-        let permit = history.reservation()?.ok_or(BridgeError::Missing)?;
-        if terms.scope != audit.scope
-            || terms.original_delivery_operation_id != status.request.operation_id
-            || terms.original_delivery_request_digest != original_digest
-            || terms.original_local_intent_digest != status.original_local_intent_digest
-            || terms.original_recipient_intent_digest != self.intent.digest()?
-            || terms.original_recipient_enrollment_ref != self.intent.original_enrollment_ref
-            || terms.original_recipient_manifest_ref != self.intent.original_manifest_ref
-            || terms.original_recipient_enrollment_ref != audit.original_enrollment_ref
-            || terms.original_recipient_manifest_ref != audit.original_accepted_manifest_ref
-            || !history.contains_head(&terms.original_delivery_committed_head)
-            || request.account_id != self.intent.account_id
-            || request.fixed != self.intent.fixed
-            || request.authorization_id != terms.scope.authorization.authorization_id
-            || request.original_consent_ref != permit.request.original_consent_ref
-            || request.authorization_id != permit.request.authorization_id
-            || request.account_id != permit.request.account_id
-        { return Err(BridgeError::Binding); }
-        // Only shorten a retained genuine Host ceiling. This is not the old V3
-        // read deadline and is not described as the Signer's source Instant.
-        let monotonic = Instant::now();
-        let wall_floor_ms = u64::try_from(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| BridgeError::Permission)?.as_millis()).map_err(|_| BridgeError::Permission)?;
-        // Ceiling conversion rounds wall time upward; millisecond truncation
-        // must never lengthen the retained absolute monotonic restriction.
-        let wall_ms = wall_floor_ms.checked_add(1).ok_or(BridgeError::Permission)?;
-        let from = terms.valid_from_ms.max(terms.scope.authorization.valid_from_ms);
-        let until = terms.valid_until_ms.min(terms.scope.authorization.valid_until_ms);
-        if wall_floor_ms < from || wall_ms >= until { return Err(BridgeError::Permission); }
-        let deadline = original_host_material_delivery_ceiling.min(monotonic
-            .checked_add(Duration::from_millis(until - wall_ms)).ok_or(BridgeError::Permission)?);
         original.check_before_io()?;
         preview_read.check_before_io()?;
         let receiver = PreparedFinancialResultReceiverV1::prepare_retained_original_v3(
-            self.origin.provider, self.origin.peer, socket, request, deadline, original, preview_read,
+            self.origin.provider,
+            self.origin.peer,
+            socket,
+            request,
+            deadline,
+            original,
+            preview_read,
         )?;
         if receiver.preview().continuation_request() != history.continuation_request()
             || receiver.preview().continuation_record() != record
-        { return Err(BridgeError::Binding); }
+        {
+            return Err(BridgeError::Binding);
+        }
         Ok(receiver)
     }
+}
+
+/// Common data-only exact join. It does not accept a reconstructed provider or
+/// create any result authority; each caller still consumes its nominal owner.
+pub(crate) struct RetainedFinancialResultJoinV1<'a> {
+    pub intent_digest:&'a str,pub account_id:&'a str,
+    pub fixed:&'a wholepact_protocol::durable_proposal_v1::FixedProposalIdentityV1,
+    pub original_enrollment_ref:&'a str,pub original_manifest_ref:&'a str,
+    pub admission_request:&'a wholepact_authority::OwnerControlRequest,
+    pub original_local_intent_digest:&'a str,
+    pub audit:&'a crate::authority_bridge::durable_delivery_admission_ipc_v2::DurableDeliveryAdmissionStatusV2,
+}
+pub(crate) fn checked_retained_result_deadline_v1(
+    data: RetainedFinancialResultJoinV1<'_>,
+    request: &FinancialResultRequestV1,
+    history: &AuthenticatedFinancialContinuationHistoryV1,
+    original_host_material_delivery_ceiling: Instant,
+) -> Result<Instant> {
+    let record = history.continuation_record();
+    record.validate_request(history.continuation_request(), history.disclosure())?;
+    let terms = &record.terms;
+    let original_digest = wholepact_authority::durable_financial_continuation_v1::original_delivery_request_digest_v1(data.admission_request)?;
+    history
+        .financial_continuation_online_permits_v1(&history.continuation_request().operation_id)?;
+    let permit = history.reservation()?.ok_or(BridgeError::Missing)?;
+    if terms.scope != data.audit.scope
+        || terms.original_delivery_operation_id != data.admission_request.operation_id
+        || terms.original_delivery_request_digest != original_digest
+        || terms.original_local_intent_digest != data.original_local_intent_digest
+        || terms.original_recipient_intent_digest != data.intent_digest
+        || terms.original_recipient_enrollment_ref != data.original_enrollment_ref
+        || terms.original_recipient_manifest_ref != data.original_manifest_ref
+        || terms.original_recipient_enrollment_ref != data.audit.original_enrollment_ref
+        || terms.original_recipient_manifest_ref != data.audit.original_accepted_manifest_ref
+        || !history.contains_head(&terms.original_delivery_committed_head)
+        || request.account_id != data.account_id
+        || request.fixed != *data.fixed
+        || request.authorization_id != terms.scope.authorization.authorization_id
+        || request.original_consent_ref != permit.request.original_consent_ref
+        || request.authorization_id != permit.request.authorization_id
+        || request.account_id != permit.request.account_id
+    {
+        return Err(BridgeError::Binding);
+    }
+    // Only shorten a retained genuine Host ceiling. This is not the old V3
+    // read deadline and is not described as the Signer's source Instant.
+    let monotonic = Instant::now();
+    let wall_floor_ms = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| BridgeError::Permission)?
+            .as_millis(),
+    )
+    .map_err(|_| BridgeError::Permission)?;
+    // Ceiling conversion rounds wall time upward; millisecond truncation
+    // must never lengthen the retained absolute monotonic restriction.
+    let wall_ms = wall_floor_ms
+        .checked_add(1)
+        .ok_or(BridgeError::Permission)?;
+    let from = terms
+        .valid_from_ms
+        .max(terms.scope.authorization.valid_from_ms);
+    let until = terms
+        .valid_until_ms
+        .min(terms.scope.authorization.valid_until_ms);
+    if wall_floor_ms < from || wall_ms >= until {
+        return Err(BridgeError::Permission);
+    }
+    let deadline = original_host_material_delivery_ceiling.min(
+        monotonic
+            .checked_add(Duration::from_millis(until - wall_ms))
+            .ok_or(BridgeError::Permission)?,
+    );
+    Ok(deadline)
 }

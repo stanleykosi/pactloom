@@ -295,7 +295,7 @@ impl AcceptedManifestRecord {
         record.proposal()?;
         Ok(record)
     }
-    pub(super) fn proposal(&self) -> Result<Proposal> {
+    pub(crate) fn proposal(&self) -> Result<Proposal> {
         hash(&self.terms.enrollment_ref)?;
         id(&self.terms.account_id)?;
         id(&self.terms.principal_id)?;

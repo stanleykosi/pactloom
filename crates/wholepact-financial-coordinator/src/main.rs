@@ -8,6 +8,8 @@ compile_error!("Bootstrap-only CI instrumentation cannot select the source-openi
 
 #[cfg(all(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append"))]
 compile_error!("Cancel-only and one-exact-append are separate common-image profiles");
+#[cfg(all(feature = "coordinated-financial-runtime", any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append", wholepact_bootstrap_ci, wholepact_delivery_ci)))]
+compile_error!("Financial runtime is separate from narrow and instrumented qualification profiles");
 #[cfg(target_os = "linux")]
 mod bootstrap;
 #[cfg(all(target_os = "linux", feature = "coordinated-witness-delivery-append"))]

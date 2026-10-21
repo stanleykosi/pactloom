@@ -437,3 +437,6 @@ pub(crate) fn validated_delivery_manifest_proposal_v3(
 ) -> Result<wholepact_core::Proposal> {
     manifest.proposal()
 }
+
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub(crate) use preconstruction_lease::CoordinatedConstructionActionV1;

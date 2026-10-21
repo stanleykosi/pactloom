@@ -155,6 +155,36 @@ impl Phases {
             match self.word.compare_exchange_weak(old,new,Ordering::AcqRel,Ordering::Acquire){Ok(_)=>return Ok(()),Err(actual)=>old=actual}
         }
     }
+    /// Completion observation of this already-entered purpose, preserving R.
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn observe_v3_enrollment_published(&self,slot:usize)->Result<()>{
+        if slot>1{return Err(rejected("not a fixed fresh receipt slot"));}
+        let shift=slot*8;let mut old=self.word.load(Ordering::Acquire);
+        loop{if old&QUIESCENT!=0||((old>>shift)&0xff)!=133{return Err(rejected("fresh receipt completion without exact admitted effect"));}
+            let new=(old&!(0xff<<shift))|(134u64<<shift);
+            match self.word.compare_exchange_weak(old,new,Ordering::AcqRel,Ordering::Acquire){Ok(_)=>return Ok(()),Err(actual)=>old=actual}
+        }
+    }
+    /// Completion observation of this already-entered purpose, preserving R.
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn observe_v3_manifest_published(&self,slot:usize)->Result<()>{
+        if slot>1{return Err(rejected("not a fixed fresh receipt slot"));}
+        let shift=slot*8;let mut old=self.word.load(Ordering::Acquire);
+        loop{if old&QUIESCENT!=0||((old>>shift)&0xff)!=136{return Err(rejected("fresh receipt completion without exact admitted effect"));}
+            let new=(old&!(0xff<<shift))|(137u64<<shift);
+            match self.word.compare_exchange_weak(old,new,Ordering::AcqRel,Ordering::Acquire){Ok(_)=>return Ok(()),Err(actual)=>old=actual}
+        }
+    }
+    /// Observation after the one entered redisclosure publication and actual response.
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn observe_v3_redisclosure_published(&self,slot:usize)->Result<()>{
+        if slot>1{return Err(rejected("not a fixed redisclosure slot"));}
+        let shift=slot*8;let mut old=self.word.load(Ordering::Acquire);
+        loop{if old&QUIESCENT!=0||((old>>shift)&0xff)!=142{return Err(rejected("redisclosure completion without exact admitted effect"));}
+            let new=(old&!(0xff<<shift))|(143u64<<shift);
+            match self.word.compare_exchange_weak(old,new,Ordering::AcqRel,Ordering::Acquire){Ok(_)=>return Ok(()),Err(actual)=>old=actual}
+        }
+    }
     #[cfg(feature="coordinated-financial-workflow-v1")]
     pub(super) fn witness_phase(&self,slot:usize)->u8 { ((self.word.load(Ordering::Acquire)>>(16+slot*4))&0xf) as u8 }
     /// Two fixed W nibbles share the SAME native A/R CAS word as both S slots.
@@ -467,4 +497,10 @@ mod activated_observation_tests{
         let old=p.snapshot();assert!(p.observe_workflow_activated_saved(0).is_err());assert_eq!(p.snapshot(),old);
         let p=Phases::new();p.step(0,0,53).unwrap();p.revoke();assert!(p.observe_workflow_activated_saved(0).is_err());assert!(p.observe_workflow_activated_saved(2).is_err());
     }
+}
+#[cfg(all(test,feature="coordinated-financial-workflow-v1"))]
+mod fresh_receipt_observation_tests {
+ use super::*;
+ #[test]fn fresh_record_completion_preserves_r_without_issuing_next_purpose(){let p=Phases::new();p.step(0,0,133).unwrap();p.revoke();p.observe_v3_enrollment_published(0).unwrap();assert!(p.revoked());assert_eq!(p.phase(0),134);assert!(p.step(0,134,135).is_err());assert!(p.observe_v3_enrollment_published(0).is_err());let p=Phases::new();p.step(1,0,136).unwrap();p.revoke();p.observe_v3_manifest_published(1).unwrap();assert!(p.revoked());assert_eq!(p.phase(1),137);assert!(p.step(1,137,138).is_err());}
+ #[test]fn fresh_record_observation_rejects_wrong_slot_phase_and_quiescence(){let p=Phases::new();assert!(p.observe_v3_enrollment_published(2).is_err());assert!(p.observe_v3_manifest_published(0).is_err());p.step(0,0,133).unwrap();p.word.fetch_or(QUIESCENT,Ordering::AcqRel);assert!(p.observe_v3_enrollment_published(0).is_err());}
 }

@@ -331,6 +331,20 @@ impl<'source> PrivateDurableFinancialCoordinatorV1<'source> {
         let roster = original_roster_v2(frozen)?;
         for (account, reference) in &binding.continuations {
             let terms = &reference.record.terms;
+            #[cfg(feature = "coordinated-financial-workflow-v1")]
+            if roster.coordinated_exports_present() {
+                let recipient = coordinated_financial_recipient_v1(&roster, account, &terms.original_recipient_intent_digest)?;
+                if account != &terms.scope.authorization.identity.account_id
+                    || terms.scope.delivery != recipient.delivery
+                    || terms.scope.original_ceilings.material_scopes != recipient.material_scopes
+                    || terms.original_recipient_enrollment_ref != recipient.original_enrollment_ref
+                    || terms.original_recipient_manifest_ref != recipient.original_manifest_ref
+                    || terms.scope.accepted_manifest_ref != recipient.original_manifest_ref
+                    || serde_json::to_value(&terms.scope.authorization.fixed).map_err(|_| damaged())?
+                        != serde_json::to_value(&recipient.fixed).map_err(|_| damaged())?
+                { return Err(damaged()); }
+                continue;
+            }
             let matches: Vec<_> = roster
                 .review_exports_v3
                 .values()
@@ -1962,4 +1976,21 @@ mod prepared_live_gate_tests {
             previous_candidate_id: None,
         }
     }
+}
+
+/// Inert history join only: caller still independently authenticates the actual
+/// continuation/result owner. A row, digest, or selected profile grants nothing.
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub(super) fn coordinated_financial_recipient_v1<'a>(
+    roster: &'a crate::durable_construction_v1::Roster, account: &str, intent_digest: &str,
+) -> Result<&'a wholepact_signer::authority_bridge::durable_review_ipc_v3::coordinated_recipient_v1::CoordinatedRecipientIntentV1> {
+    if !roster.review_exports.is_empty() || !roster.review_exports_v3.is_empty() { return Err(damaged()); }
+    crate::durable_construction_v1::review_export_v3::validate_capacity(roster)?;
+    let mut matches = roster.coordinated_review_exports_v1.values().filter(|export| {
+        export.scope.recipient.account_id == account
+            && export.scope.recipient.digest().ok().as_deref() == Some(intent_digest)
+    });
+    let recipient = &matches.next().ok_or_else(damaged)?.scope.recipient;
+    if matches.next().is_some() { return Err(damaged()); }
+    Ok(recipient)
 }

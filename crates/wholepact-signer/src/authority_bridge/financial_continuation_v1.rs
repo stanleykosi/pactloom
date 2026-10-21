@@ -237,6 +237,8 @@ mod result_ipc;
 #[path = "financial_signing_v1.rs"]
 mod signing;
 pub(crate) use result_ipc::{ApprovedFinancialReturnV1, PreparedFinancialReturnV1};
+#[cfg(feature="coordinated-financial-workflow-v1")]
+pub use result_ipc::PreparedCoordinatedFinancialResultReceiverV1;
 pub use result_ipc::{
     AuthenticatedFinancialResultLeaseV1, AuthenticatedFinancialResultPreviewV1,
     FinancialResultRequestV1, PreparedFinancialResultReceiverV1, FinancialResultRestrictionV1,

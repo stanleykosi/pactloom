@@ -33,16 +33,63 @@ impl RetirementRequest {
 }
 /// Created only in actual H after both S forks. Physical-effect paths sample
 /// only this atomic; the tiny inert control-record mutex never covers I/O.
+enum V3DisclosureSlot { Unseen, Ready(crate::SignerV3CurrentDisclosureV1), Taken }
+enum V3EndpointSlot { Unseen, Ready(crate::SignerV3PairEndpointV1), Taken(crate::SignerV3PairEndpointV1) }
 pub(super) struct HostLifecycle {
     state:AtomicU8,acknowledged:AtomicBool,request:Mutex<Option<(RetirementRequest,Instant)>>,
+    v3_pair_endpoints:Mutex<[V3EndpointSlot;2]>,
+    v3_current_disclosures:Mutex<[V3DisclosureSlot;2]>,
     checks:Arc<HostRestrictionChecks>,clocks:FullWorkflowClocksV1,
     pair_service:std::sync::OnceLock<Arc<completed_pair::PairServiceRecord>>,pair_handoff:AtomicBool,
 }
 impl HostLifecycle {
     pub(super) fn create(checks:Arc<HostRestrictionChecks>,clocks:FullWorkflowClocksV1)
         ->(HostLifecycleOwner,Arc<Self>){
-        let state=Arc::new(Self{state:AtomicU8::new(RUNNING),acknowledged:AtomicBool::new(false),request:Mutex::new(None),checks,clocks,pair_service:std::sync::OnceLock::new(),pair_handoff:AtomicBool::new(false)});
+        let state=Arc::new(Self{state:AtomicU8::new(RUNNING),acknowledged:AtomicBool::new(false),request:Mutex::new(None),v3_pair_endpoints:Mutex::new([V3EndpointSlot::Unseen,V3EndpointSlot::Unseen]),v3_current_disclosures:Mutex::new([V3DisclosureSlot::Unseen,V3DisclosureSlot::Unseen]),checks,clocks,pair_service:std::sync::OnceLock::new(),pair_handoff:AtomicBool::new(false)});
         (HostLifecycleOwner(Arc::clone(&state)),state)
+    }
+    /// Inert location metadata from the authenticated original S relay. This
+    /// neither grants pairing nor changes foreground/parked state.
+    pub(super) fn publish_v3_pair_endpoint(&self,target:SignerContinueRoleV1,endpoint:crate::SignerV3PairEndpointV1)->Result<()> {
+        self.check_wait()?;endpoint.validate()?;
+        let mut slots=self.v3_pair_endpoints.lock().map_err(|_|rejected("Host V3 endpoint mailbox poisoned"))?;
+        if !matches!(slots[target.index()],V3EndpointSlot::Unseen){return Err(rejected("Host V3 endpoint repeated"));}
+        slots[target.index()]=V3EndpointSlot::Ready(endpoint);Ok(())
+    }
+    fn take_v3_pair_endpoint(&self,target:SignerContinueRoleV1)->Result<Option<crate::SignerV3PairEndpointV1>> {
+        self.check_wait()?;self.check_foreground()?;
+        let mut slots=self.v3_pair_endpoints.lock().map_err(|_|rejected("Host V3 endpoint mailbox poisoned"))?;
+        match &slots[target.index()] {
+            V3EndpointSlot::Unseen=>return Ok(None),
+            V3EndpointSlot::Taken(_)=>return Err(rejected("Host V3 endpoint already consumed")),
+            V3EndpointSlot::Ready(_)=>{},
+        }
+        let V3EndpointSlot::Ready(endpoint)=&slots[target.index()] else{return Err(rejected("Host V3 endpoint invalid state"));};
+        let endpoint=endpoint.clone();slots[target.index()]=V3EndpointSlot::Taken(endpoint.clone());
+        Ok(Some(endpoint))
+    }
+    /// Authenticated committed observations only. A racing R drops positive H
+    /// metadata, not the receipt result being forwarded to C.
+    pub(super) fn publish_v3_current_disclosure(&self,target:SignerContinueRoleV1,data:crate::SignerV3CurrentDisclosureV1)->Result<()> {
+        data.validate()?;self.check_not_poisoned()?;
+        let mut slots=self.v3_current_disclosures.lock().map_err(|_|rejected("Host V3 disclosure mailbox poisoned"))?;
+        if !matches!(slots[target.index()],V3DisclosureSlot::Unseen){return Err(rejected("Host V3 disclosure repeated"));}
+        let endpoints=self.v3_pair_endpoints.lock().map_err(|_|rejected("Host V3 endpoint mailbox poisoned"))?;
+        if matches!(endpoints[target.index()],V3EndpointSlot::Unseen){return Err(rejected("Host V3 disclosure before endpoint"));}
+        if let V3EndpointSlot::Ready(endpoint)|V3EndpointSlot::Taken(endpoint)=&endpoints[target.index()] {
+            if endpoint.source_identity_digest!=data.source_identity_digest || endpoint.entry_presentation_digest!=data.entry_presentation_digest {return Err(rejected("Host V3 disclosure endpoint mismatch"));}
+        }
+        drop(endpoints);
+        require_time(self.clocks.supervision())?;
+        if !self.checks.check_current_or_restricted()? {slots[target.index()]=V3DisclosureSlot::Taken;return Ok(());}
+        slots[target.index()]=V3DisclosureSlot::Ready(data);Ok(())
+    }
+    fn take_v3_current_disclosure(&self,target:SignerContinueRoleV1)->Result<Option<crate::SignerV3CurrentDisclosureV1>> {
+        self.check_wait()?;self.check_foreground()?;
+        let mut slots=self.v3_current_disclosures.lock().map_err(|_|rejected("Host V3 disclosure mailbox poisoned"))?;
+        match &slots[target.index()] { V3DisclosureSlot::Unseen=>return Ok(None),V3DisclosureSlot::Taken=>return Err(rejected("Host V3 disclosure already consumed")),V3DisclosureSlot::Ready(_)=>{} }
+        let V3DisclosureSlot::Ready(data)=std::mem::replace(&mut slots[target.index()],V3DisclosureSlot::Taken) else{return Err(rejected("Host V3 disclosure invalid state"));};
+        Ok(Some(data))
     }
     pub(super) fn poison(&self){self.state.store(POISON,Ordering::SeqCst);}
     pub(super) fn check_not_poisoned(&self)->Result<()>{if self.state.load(Ordering::SeqCst)==POISON{return Err(rejected("original Host foreground permanently poisoned"));}Ok(())}
@@ -92,6 +139,14 @@ impl Drop for HostLifecycleOwner{fn drop(&mut self){self.0.poison();}}
 pub struct HostFinancialForegroundV1{state:Arc<HostLifecycle>,consumed:bool,_thread:PhantomData<Rc<()>>}
 impl HostFinancialForegroundV1{
     pub(super) fn from_actual_host(state:Arc<HostLifecycle>)->Self{Self{state,consumed:false,_thread:PhantomData}}
+    pub fn take_v3_pair_endpoint_signer1(&self)->Result<Option<crate::SignerV3PairEndpointV1>> {
+        self.state.take_v3_pair_endpoint(SignerContinueRoleV1::Signer1)
+    }
+    pub fn take_v3_pair_endpoint_signer2(&self)->Result<Option<crate::SignerV3PairEndpointV1>> {
+        self.state.take_v3_pair_endpoint(SignerContinueRoleV1::Signer2)
+    }
+    pub fn take_v3_current_disclosure_signer1(&self)->Result<Option<crate::SignerV3CurrentDisclosureV1>> {self.state.take_v3_current_disclosure(SignerContinueRoleV1::Signer1)}
+    pub fn take_v3_current_disclosure_signer2(&self)->Result<Option<crate::SignerV3CurrentDisclosureV1>> {self.state.take_v3_current_disclosure(SignerContinueRoleV1::Signer2)}
     /// Called only by the pinned Host completed-boundary holder after all
     /// function-local source/network/TTY attempts and locks have ended.
     pub fn enter_owner_workflow_wait(mut self)->Result<HostFinancialInterstageWaitV1>{

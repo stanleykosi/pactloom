@@ -898,6 +898,28 @@ impl Host {
         receiver: wholepact_signer::authority_bridge::financial_continuation_v1::PreparedFinancialResultReceiverV1,
         history: &wholepact_signer::authority_bridge::financial_continuation_v1::AuthenticatedFinancialContinuationHistoryV1,
     ) -> Result<u64> {
+        self.intake_original_financial_result_kernel_v1(root, key, receiver, history)
+    }
+
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    pub(in crate::host) fn intake_original_coordinated_financial_result_v1(
+        &self,
+        root: &std::path::Path,
+        key: &str,
+        receiver: wholepact_signer::authority_bridge::financial_continuation_v1::PreparedCoordinatedFinancialResultReceiverV1,
+        history: &wholepact_signer::authority_bridge::financial_continuation_v1::AuthenticatedFinancialContinuationHistoryV1,
+    ) -> Result<u64> {
+        if !crate::terminal::coordinated_restriction_required() { return Err(Error::Permission); }
+        self.intake_original_financial_result_kernel_v1(root, key, receiver, history)
+    }
+
+    fn intake_original_financial_result_kernel_v1<R: OriginalFinancialResultReceiverV1>(
+        &self,
+        root: &std::path::Path,
+        key: &str,
+        receiver: R,
+        history: &wholepact_signer::authority_bridge::financial_continuation_v1::AuthenticatedFinancialContinuationHistoryV1,
+    ) -> Result<u64> {
         financial_step!(InputValidation, NotEstablished);
         let result = (|| -> Result<_> {
             use wholepact_engine::signature_intake::LocalSignedRetention;
@@ -1016,16 +1038,7 @@ impl Host {
             // Only now may the independently approved Signer ReturnExact begin.
             // All later gates are closed; no Host human wait consumes its lease.
             financial_step!(ResultReceive, NotEstablished);
-            let delivery = {
-                #[cfg(all(test,feature="synthetic-born-joined-qualification",feature="durable-proposal"))]
-                let result=receiver.receive_observed_v1().map_err(|observed| {
-                    if let Some(detail)=observed.diagnostic {crate::host::financial_diagnostics_v1::signer_result(detail,crate::host::financial_diagnostics_v1::FinancialCommitStateV1::NotEstablished);}
-                    observed.error
-                });
-                #[cfg(not(all(test,feature="synthetic-born-joined-qualification",feature="durable-proposal")))]
-                let result=receiver.receive();
-                result
-            }.map_err(|error| {
+            let delivery = receiver.receive_host().map_err(|error| {
                 financial_record!(bridge, ResultReceive, NotEstablished, &error);
                 financial_failure("RESULT_RECEIVE")
             })?;
@@ -1594,4 +1607,79 @@ impl Host {
         // into the separately reviewed intake or replaced with a new deadline.
         Ok(receiver)
     }
+}
+
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+impl Host {
+    pub(in crate::host::financial) fn prepare_retained_original_coordinated_financial_preview_v1(
+        &self,
+        root: &std::path::Path,
+        pending: wholepact_signer::authority_bridge::durable_review_ipc_v3::coordinated_v1::PendingCoordinatedDurableDeliveryAdmissionV1,
+        socket: &std::path::Path,
+        request: &wholepact_signer::authority_bridge::financial_continuation_v1::FinancialResultRequestV1,
+        history: &wholepact_signer::authority_bridge::financial_continuation_v1::AuthenticatedFinancialContinuationHistoryV1,
+        original_host_material_delivery_ceiling: std::time::Instant,
+        original: Box<dyn wholepact_signer::authority_bridge::financial_continuation_v1::FinancialResultRestrictionV1>,
+    ) -> Result<wholepact_signer::authority_bridge::financial_continuation_v1::PreparedCoordinatedFinancialResultReceiverV1> {
+        if !crate::terminal::coordinated_restriction_required() { return Err(Error::Permission); }
+        let owner = self.original_financial_owner_v1(root)?;
+        let inspection = owner.initial_inspection();
+        let terms = &history.continuation_record().terms;
+        let source = original_result_material_bounds(inspection, (
+            terms.valid_from_ms.max(terms.scope.authorization.valid_from_ms),
+            terms.valid_until_ms.min(terms.scope.authorization.valid_until_ms),
+        ))?;
+        if inspection.fixed_identity() != &request.fixed { return Err(Error::Authentication); }
+        let prompt_bounds = crate::terminal::OriginalPromptBoundsV1::new(
+            original_host_material_delivery_ceiling.min(crate::terminal::original_coordinated_session_ceiling()?), source,
+        )?;
+        // Static text discloses no saved DTO. The cached original inspection
+        // material/source clocks still bound each prompt write/response read.
+        let approval = self.terminal.approve_historical_original(
+            "Read ONLY the exact protected original financial result-preview metadata from the SAME retained original Signer process for this original fixed source. Independently match its complete continuation and result commitments. No signature bytes, ReturnExact, retention, signing, extraction or dispatch is authorized by this Read.",
+            Some(&prompt_bounds),
+        )?;
+        let read = ClosedFinancialReadConsentV1 { owner: &owner, inspection, approval: &approval };
+        read.check()?;
+        let preview_read = OriginalResultIoRestrictionV1 {
+            bounds: prompt_bounds.narrow_deadline(approval.deadline()),
+        };
+        let receiver = pending.prepare_retained_financial_result_v1(
+            socket, request, history, original_host_material_delivery_ceiling, original, &preview_read,
+        ).map_err(|_| Error::Permission)?;
+        read.check()?;
+        // The fresh preview Read ends here. It is never carried as authority
+        // into the separately reviewed intake or replaced with a new deadline.
+        Ok(receiver)
+    }
+}
+
+/// Private concrete adapter only; callers cannot supply a transport or create
+/// an authenticated lease from metadata. The actual original-origin variant
+/// remains inside the Signer's sealed receiver and resulting lease.
+trait OriginalFinancialResultReceiverV1: Sized {
+    fn preview(&self) -> &wholepact_signer::authority_bridge::financial_continuation_v1::AuthenticatedFinancialResultPreviewV1;
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    fn bind_original_intake_restriction_v1(self, restriction: Box<dyn wholepact_signer::authority_bridge::financial_continuation_v1::FinancialResultRestrictionV1>) -> wholepact_signer::authority_bridge::Result<Self>;
+    fn receive_host(self) -> wholepact_signer::authority_bridge::Result<wholepact_signer::authority_bridge::financial_continuation_v1::AuthenticatedFinancialResultLeaseV1>;
+}
+impl OriginalFinancialResultReceiverV1 for wholepact_signer::authority_bridge::financial_continuation_v1::PreparedFinancialResultReceiverV1 {
+    fn preview(&self) -> &wholepact_signer::authority_bridge::financial_continuation_v1::AuthenticatedFinancialResultPreviewV1 { self.preview() }
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    fn bind_original_intake_restriction_v1(self, restriction: Box<dyn wholepact_signer::authority_bridge::financial_continuation_v1::FinancialResultRestrictionV1>) -> wholepact_signer::authority_bridge::Result<Self> { self.bind_original_intake_restriction_v1(restriction) }
+    fn receive_host(self) -> wholepact_signer::authority_bridge::Result<wholepact_signer::authority_bridge::financial_continuation_v1::AuthenticatedFinancialResultLeaseV1> {
+        #[cfg(all(test,feature="synthetic-born-joined-qualification",feature="durable-proposal"))]
+        { self.receive_observed_v1().map_err(|observed| {
+            if let Some(detail)=observed.diagnostic {crate::host::financial_diagnostics_v1::signer_result(detail,crate::host::financial_diagnostics_v1::FinancialCommitStateV1::NotEstablished);}
+            observed.error
+        }) }
+        #[cfg(not(all(test,feature="synthetic-born-joined-qualification",feature="durable-proposal")))]
+        { self.receive() }
+    }
+}
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+impl OriginalFinancialResultReceiverV1 for wholepact_signer::authority_bridge::financial_continuation_v1::PreparedCoordinatedFinancialResultReceiverV1 {
+    fn preview(&self) -> &wholepact_signer::authority_bridge::financial_continuation_v1::AuthenticatedFinancialResultPreviewV1 { self.preview() }
+    fn bind_original_intake_restriction_v1(self, restriction: Box<dyn wholepact_signer::authority_bridge::financial_continuation_v1::FinancialResultRestrictionV1>) -> wholepact_signer::authority_bridge::Result<Self> { self.bind_original_intake_restriction_v1(restriction) }
+    fn receive_host(self) -> wholepact_signer::authority_bridge::Result<wholepact_signer::authority_bridge::financial_continuation_v1::AuthenticatedFinancialResultLeaseV1> { self.receive() }
 }

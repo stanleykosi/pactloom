@@ -12,6 +12,13 @@ use wholepact_authority::account_use::AccountUseGenesis;
 #[path = "prepared_delivery_v3.rs"]
 mod prepared_delivery_v3;
 pub(crate) use prepared_delivery_v3::{ActivePreparedDeliverySourceV3, PreparedOriginalDeliverySourceV3};
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub(crate) use prepared_delivery_v3::{
+    PreparedCoordinatedV3SourceEntryV1, PresentedCoordinatedV3SourceEntryV1,
+    CoordinatedPreparingDeliverySourceV1,CoordinatedPreparedDeliverySourceV1,
+    CoordinatedRedisclosureReadV1,CoordinatedRediscloseV1,CoordinatedRedisclosedSourceV1,
+    CoordinatedOriginalDeliverySourceV1, CoordinatedSourcePairingV1, CoordinatedSourceReceiptBindingV1, CoordinatedEnrollmentReviewV1, CoordinatedManifestReviewV1, CoordinatedPreconstructionReadyV1,
+};
 #[cfg(feature = "coordinated-signer-continue")]
 pub(crate) use prepared_delivery_v3::OriginalFinancialReentrySelectionV1;
 

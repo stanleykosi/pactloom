@@ -1,6 +1,16 @@
 //! Actual original file/journal custody after setup drains. Neither this source
 //! nor its immutable commitments grants read, receive, disclosure or key use.
 use super::*;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+#[path = "prepared_delivery_v3/coordinated_source_entry_v1.rs"]
+mod coordinated_source_entry_v1;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub(crate) use coordinated_source_entry_v1::{
+    PreparedCoordinatedV3SourceEntryV1, PresentedCoordinatedV3SourceEntryV1,
+    CoordinatedPreparingDeliverySourceV1,CoordinatedPreparedDeliverySourceV1,
+    CoordinatedRedisclosureReadV1,CoordinatedRediscloseV1,CoordinatedRedisclosedSourceV1,
+    CoordinatedOriginalDeliverySourceV1, CoordinatedSourcePairingV1, CoordinatedSourceReceiptBindingV1, CoordinatedEnrollmentReviewV1, CoordinatedManifestReviewV1, CoordinatedPreconstructionReadyV1,
+};
 use crate::consent_journal::PreparedDeliveryJournalRevisionV3;
 use crate::native_ui::PreparedReceiveAndViewAuthorityV3;
 use std::{collections::BTreeMap, os::unix::fs::MetadataExt, sync::Mutex};

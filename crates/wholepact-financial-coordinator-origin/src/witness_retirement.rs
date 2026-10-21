@@ -44,7 +44,7 @@ impl CoordinatorFinancialEndpointV1{
     pub fn prepare_witness_retirement(&mut self,role:Target)->Result<CoordinatorWitnessRetirementTicketV1>{
         self.core.check_action_restrictions()?;let phases=self.core.phase.snapshot();self.retirement_idle(phases,RetirementPurpose::FinancialContinuation,role)?;
         let slot=self.slots[role.index()].as_ref().ok_or_else(||rejected("retirement Signer missing"))?;
-        if slot.wire_phase!=admit::AWAITING_NEXT_READ{return Err(rejected("retirement before exact S response"));}
+        if slot.wire_phase!=admit::AWAITING_NEXT_READ&&!slot.writer_acquire.signing_setup_pending(slot.wire_phase){return Err(rejected("retirement before exact S response"));}
         let(p,committed)=slot.admission.retained_result()?;
         let(instance,cutoff,outcome)=self.witnesses[role.index()].retirement_record()?;
         match outcome{
@@ -74,6 +74,7 @@ impl CoordinatorFinancialEndpointV1{
         if !idle_phase_snapshot(phases,purpose,target.index()){return Err(rejected("active purpose in original retirement snapshot"));}
         if self.retirement_resume.is_some()||self.cancel_sent||pending(&self.core)||witness::witness_pending(&self.core){return Err(rejected("retirement has admitted outbound"));}
         for i in 0..2{
+            if self.core.phase.phase(i)==writer_acquire::WRITER_READ_REVIEW && self.slots[i].as_ref().is_none_or(|s|!s.writer_acquire.signing_setup_pending(s.wire_phase)){return Err(rejected("retirement pending Writer Read provenance missing"));}
             let target_history=purpose==RetirementPurpose::InitialHistory&&target.index()==i;
             if !self.histories[i].retirement_idle(target_history){return Err(rejected("History service custody not quiescent"));}
             if !self.signing_services[i].retirement_idle(){return Err(rejected("Signing service custody not quiescent"));}
@@ -172,7 +173,7 @@ impl CoordinatorFinancialEndpointV1{
 // still has no retirement join here and must be never-started zero.
 fn idle_phase_snapshot(word:u64,purpose:RetirementPurpose,target:usize)->bool{
     if word&((1u64<<30)|(1u64<<31))!=0{return false;}
-    (0..2).all(|i|matches!(((word>>(i*8))&255)as u8,V3_HELD|SOURCE_RETAINED|HISTORY_RETAINED|AWAITING_ADMISSION|admit::AWAITING_NEXT_READ)
+    (0..2).all(|i|matches!(((word>>(i*8))&255)as u8,0|V3_HELD|SOURCE_RETAINED|HISTORY_RETAINED|AWAITING_ADMISSION|admit::AWAITING_NEXT_READ|writer_acquire::WRITER_READ_REVIEW)
         &&matches!(((word>>(16+i*4))&15)as u8,0|witness::W_ADMITTED)
         &&(match ((word>>(24+i*3))&7)as u8{0|history::H_RETIRED=>true,history::H_DONE=>purpose==RetirementPurpose::InitialHistory&&i==target,_=>false})
         &&((word>>(32+i*4))&15)==0)
@@ -188,4 +189,11 @@ fn idle_phase_snapshot(word:u64,purpose:RetirementPurpose,target:usize)->bool{
     assert!(!idle_phase_snapshot(before|(5u64<<24),RetirementPurpose::InitialHistory,1));
     assert!(!idle_phase_snapshot(before|(6u64<<32),RetirementPurpose::FinancialContinuation,0));
 }
+}
+
+#[cfg(test)]mod writer_read_retirement_tests {use super::*;
+ #[test]fn only_unadmitted_writer_review_can_pause_for_predecessor_retirement(){
+  let p=Phases::new();p.step(0,0,writer_acquire::WRITER_READ_REVIEW).unwrap();assert!(idle_phase_snapshot(p.snapshot(),RetirementPurpose::FinancialContinuation,0));
+  p.step(0,writer_acquire::WRITER_READ_REVIEW,writer_acquire::WRITER_READ_ADMITTED).unwrap();assert!(!idle_phase_snapshot(p.snapshot(),RetirementPurpose::FinancialContinuation,0));
+ }
 }

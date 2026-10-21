@@ -210,3 +210,12 @@ pub(super) fn validate_rows(c: &Connection) -> Result<()> {
     }
     Ok(())
 }
+
+
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+#[path = "durable_construction_v1/coordinated_redisclosure_v1.rs"]
+mod coordinated_redisclosure_v1;
+
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+#[path = "durable_construction_v1/coordinated_delivery_source_v1.rs"]
+mod coordinated_delivery_source_v1;

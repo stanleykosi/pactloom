@@ -5652,6 +5652,8 @@ dependencies = [
  "serde_json",
  "wholepact-authority",
  "wholepact-financial-coordinator-origin",
+ "wholepact-native-host",
+ "wholepact-signer",
  "winit",
  "zeroize",
 ]

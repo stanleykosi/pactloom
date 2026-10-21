@@ -19,7 +19,11 @@ coordinator-transient-password-input = ["common-image-bootstrap", "dep:eframe", 
 
 # Concrete C source-entry/initial-Read App composition, still without a
 # bootstrap/binary callsite. The password feature is a mandatory log-off edge.
-coordinated-financial-source-ui = ["coordinator-transient-password-input", "wholepact-financial-coordinator-origin/coordinated-financial-workflow-v1", "dep:winit"]
+coordinated-financial-source-ui = ["coordinator-transient-password-input", "wholepact-financial-coordinator-origin/coordinated-financial-workflow-v1", "dep:winit", "dep:serde_json"]
+
+# Explicit integration-only runtime entry. This selects genuine fixed-fork
+# consumers; it is not a claim that all later workflow stages are qualified.
+coordinated-financial-runtime = ["coordinated-financial-source-ui", "dep:wholepact-native-host", "wholepact-native-host/coordinated-financial-workflow-v1", "dep:wholepact-signer", "wholepact-signer/coordinated-financial-workflow-v1", "dep:wholepact-authority", "wholepact-authority/coordinated-witness-financial-history", "wholepact-authority/coordinated-witness-financial-continuation", "wholepact-authority/coordinated-witness-financial-signing", "wholepact-authority/coordinated-witness-completed-pair"]
 
 [[bin]]
 name = "wholepact-financial-coordinator"
@@ -30,6 +34,9 @@ required-features = ["common-image-bootstrap"]
 serde_json.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
+wholepact-native-host = { path = "../wholepact-native-host", optional = true, default-features = false }
+wholepact-signer = { path = "../wholepact-signer", optional = true, default-features = false }
+serde_json = { workspace = true, optional = true }
 wholepact-financial-coordinator-origin = { path = "../wholepact-financial-coordinator-origin" }
 wholepact-authority = { path = "../wholepact-authority", optional = true, default-features = false }
 eframe = { version = "=0.36.2", optional = true, default-features = false, features = ["default_fonts", "glow", "wayland"] }

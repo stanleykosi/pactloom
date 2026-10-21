@@ -3,13 +3,15 @@
 //! approval file. A failed coordinated installation can never become legacy.
 use super::*;
 use std::{sync::{OnceLock, atomic::{AtomicBool, AtomicU8, Ordering}}, time::Duration};
-use wholepact_financial_coordinator_origin::{HostControllingTerminalV1, HostOriginalRestrictionV1};
+use wholepact_financial_coordinator_origin::{HostControllingTerminalV1, HostOriginalRestrictionV1, HostCompletedPairServiceV1};
 
 const LEGACY: u8 = 0;
 const REQUIRED: u8 = 1;
 const FAILED: u8 = 2;
 static STATE: AtomicU8 = AtomicU8::new(LEGACY);
 static INSTALL_ATTEMPTED: AtomicBool = AtomicBool::new(false);
+static PAIR_REQUIRED: AtomicBool = AtomicBool::new(false);
+static PAIR: OnceLock<Arc<HostCompletedPairServiceV1>> = OnceLock::new();
 static ORIGINAL: OnceLock<Original> = OnceLock::new();
 struct Original {
     terminal: HostControllingTerminalV1,
@@ -41,6 +43,24 @@ pub(super) fn install(terminal: HostControllingTerminalV1, restriction: HostOrig
     { return deny(); }
     check(None)
 }
+/// Consume only genuine Origin custody. Obligation is irreversible even on
+/// duplicate/failed install; the exact same Arc is returned to the owner.
+pub(super) fn install_pair(service: HostCompletedPairServiceV1) -> Result<Arc<HostCompletedPairServiceV1>> {
+    if PAIR_REQUIRED.swap(true, Ordering::SeqCst) { return deny(); }
+    if STATE.load(Ordering::SeqCst) != REQUIRED || ORIGINAL.get().is_none()
+        || service.check_current().is_err() { return deny(); }
+    let service = Arc::new(service);
+    if PAIR.set(Arc::clone(&service)).is_err() { return deny(); }
+    // Installation occurs while genuinely PARKED. The ordinary physical
+    // effect check requires RUNNING and must not be used to release this park.
+    // Origin compares this sealed observer against the installed SAME Host
+    // lifecycle, then samples original shared R without minting permission.
+    let Some(original) = ORIGINAL.get() else { return deny(); };
+    if original.terminal.check_current().is_err()
+        || original.restriction.check_completed_pair_service(&service).is_err()
+        || STATE.load(Ordering::SeqCst) != REQUIRED { return deny(); }
+    Ok(service)
+}
 /// Zero-wait restriction check. No source, DB, Terminal mutex or remote call.
 /// The observer's SeqCst zero sample is last after the original TTY/lifetime/
 /// session checks, and is never returned as a reusable positive permit.
@@ -55,7 +75,13 @@ pub(super) fn check(file: Option<&File>) -> Result<()> {
         Some(file) => original.terminal.check_controlling_file(file),
         None => original.terminal.check_current(),
     };
-    if tty.is_err() || original.restriction.check_current().is_err() { return deny(); }
+    if tty.is_err() { return deny(); }
+    if PAIR_REQUIRED.load(Ordering::SeqCst) {
+        let Some(pair) = PAIR.get() else { return deny(); };
+        if pair.check_current().is_err() { return deny(); }
+    }
+    // Preserve original shared-R sample last, after Pair cached restriction.
+    if original.restriction.check_current().is_err() { return deny(); }
     Ok(())
 }
 /// Original installed H session ceiling, exposed only as an additional cached

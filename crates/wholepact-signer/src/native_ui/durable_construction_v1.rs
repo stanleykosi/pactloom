@@ -120,7 +120,7 @@ fn validate_peer(
     }
     Ok(())
 }
-fn validate_original(
+pub(crate) fn validate_original(
     request: &DurableConstructionRequestV1,
     lease: &crate::consent_journal::PreconstructionRecordLease<'_>,
 ) -> authority_bridge::Result<()> {

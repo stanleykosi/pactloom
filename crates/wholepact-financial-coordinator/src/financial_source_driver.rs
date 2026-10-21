@@ -17,23 +17,29 @@ use std::{
 };
 use wholepact_financial_coordinator_origin::{
     CoordinatorFinancialEndpointV1, CoordinatorFinancialEventV1,
-    CoordinatorFinancialHistoryEventV1, CoordinatorFinancialSigningEventV1, FinancialHistoryInputsV1,
-    FinancialHistorySetupTicketV1, FinancialHistorySetupOutboundV1,
-    FinancialHistoryServeOutboundV1,
-    CoordinatorWitnessRetirementTicketV1, CoordinatorWitnessRetirementOutboundV1,
-    CoordinatorWitnessRetiredV1,
+    CoordinatorFinancialHistoryEventV1, CoordinatorFinancialSigningEventV1,
     CoordinatorFinancialWitnessEventV1, CoordinatorHostTerminalEndpointV1,
-    FinancialCancelProgressV1, FinancialSendProgressV1, FinancialContinueArmOutboundV1, FinancialContinueFinalOutboundV1,
-    FinancialWitnessArmOutboundV1, FinancialWitnessFinalOutboundV1, FinancialWitnessInputsV1,
-    FinancialWitnessSetupOutboundV1, FinancialWitnessSetupTicketV1, SignerAdmitArmOutboundV1,
+    CoordinatorWitnessRetiredV1, CoordinatorWitnessRetirementOutboundV1,
+    CoordinatorWitnessRetirementTicketV1, FinancialCancelProgressV1,
+    FinancialContinueArmOutboundV1, FinancialContinueFinalOutboundV1, FinancialHistoryInputsV1,
+    FinancialHistoryServeOutboundV1, FinancialHistorySetupOutboundV1,
+    FinancialHistorySetupTicketV1, FinancialSendProgressV1, FinancialSigningInputsV1,
+    FinancialSigningServeOutboundV1, FinancialSigningSetupOutboundV1,
+    FinancialSigningSetupTicketV1, FinancialWitnessArmOutboundV1, FinancialWitnessFinalOutboundV1,
+    FinancialWitnessInputsV1, FinancialWitnessSetupOutboundV1, FinancialWitnessSetupTicketV1,
+    SignerAcquireArmOutboundV1, SignerAcquireFinalOutboundV1, SignerActivateArmOutboundV1,
+    SignerActivateFinalOutboundV1, SignerActivateReadOutboundV1, SignerAdmitArmOutboundV1,
     SignerAdmitFinalOutboundV1, SignerContinueRoleV1 as Role, SignerFinancialReadOutboundV1,
-    SignerSourceEntryOutboundV1,
+    SignerFinancialWriterReadOutboundV1, SignerSourceEntryOutboundV1, SignerV3EnrollmentOutboundV1,
+    SignerV3ManifestOutboundV1, SignerV3PairOutboundV1, SignerV3PrepareReadOutboundV1,
+    SignerV3ReceiveOutboundV1, SignerV3RediscloseOutboundV1, SignerV3RedisclosureReadOutboundV1,
+    SignerV3SourceEntryOutboundV1, SignerV3SourceEntrySelectionV1,
 };
 
 use zeroize::Zeroizing;
 
-const COMMAND_SLOTS: usize = 32;
-const SECURITY_SLOTS: usize = 80;
+const COMMAND_SLOTS: usize = 74;
+const SECURITY_SLOTS: usize = 128;
 const HOST_OUTPUT_SLOTS: usize = 4;
 const HOST_STATUS_SLOTS: usize = 3;
 
@@ -48,6 +54,19 @@ pub(super) enum HostStatus {
 }
 
 enum Command {
+    BeginV3(Role, SignerV3SourceEntrySelectionV1, Instant),
+    V3Entry(SignerV3SourceEntryOutboundV1),
+    V3Pair(SignerV3PairOutboundV1),
+    ActivateFinal(SignerActivateFinalOutboundV1),
+    ActivateArm(SignerActivateArmOutboundV1),
+    ActivateRead(SignerActivateReadOutboundV1),
+    V3Receive(SignerV3ReceiveOutboundV1),
+    V3PrepareRead(SignerV3PrepareReadOutboundV1),
+    V3OwnerSetup(Role, String),
+    V3Redisclose(SignerV3RediscloseOutboundV1),
+    V3RedisclosureRead(SignerV3RedisclosureReadOutboundV1),
+    V3Manifest(SignerV3ManifestOutboundV1),
+    V3Enrollment(SignerV3EnrollmentOutboundV1),
     Begin(Role, Instant),
     Entry(SignerSourceEntryOutboundV1),
     Read(SignerFinancialReadOutboundV1),
@@ -55,6 +74,7 @@ enum Command {
     SetupHistory(FinancialHistorySetupOutboundV1),
     ServeHistory(FinancialHistoryServeOutboundV1),
     RetireHistory(CoordinatorWitnessRetirementOutboundV1),
+    RetireSigningPredecessor(CoordinatorWitnessRetirementOutboundV1),
     BeginContinue(Role, Instant),
     ArmContinue(FinancialContinueArmOutboundV1),
     FinalContinue(FinancialContinueFinalOutboundV1),
@@ -64,6 +84,12 @@ enum Command {
     FinalWitness(FinancialWitnessFinalOutboundV1),
     ArmAdmit(SignerAdmitArmOutboundV1),
     FinalAdmit(SignerAdmitFinalOutboundV1),
+    PrepareSigning(Role, FinancialSigningInputsV1, Instant),
+    SetupSigning(FinancialSigningSetupOutboundV1),
+    ServeSigning(FinancialSigningServeOutboundV1),
+    WriterRead(SignerFinancialWriterReadOutboundV1),
+    ArmAcquire(SignerAcquireArmOutboundV1),
+    FinalAcquire(SignerAcquireFinalOutboundV1),
 }
 pub(super) enum Outcome {
     Event(CoordinatorFinancialEventV1),
@@ -72,6 +98,11 @@ pub(super) enum Outcome {
     HistoryRetirement(CoordinatorWitnessRetirementTicketV1),
     HistoryRetired(CoordinatorWitnessRetiredV1),
     HistoryResumed(Role),
+    SigningPredecessorRetirement(CoordinatorWitnessRetirementTicketV1),
+    SigningPredecessorRetired(CoordinatorWitnessRetiredV1),
+    SigningPredecessorResumed(Role),
+    SigningSetup(Role, FinancialSigningSetupTicketV1),
+    Signing(CoordinatorFinancialSigningEventV1),
     SigningDisposed(Role),
     SigningClosed(Role),
     SigningFailed(Role),
@@ -94,6 +125,16 @@ pub(super) struct Driver {
     host_pending: Option<u64>,
     host_last: u64,
     worker: Option<thread::JoinHandle<Result<()>>>,
+    v3_begun: [bool; 2],
+    v3_entry_sent: [bool; 2],
+    v3_pair_sent: [bool; 2],
+    v3_receive_sent: [bool; 2],
+    v3_prepare_read_sent: [bool; 2],
+    v3_owner_selected: [bool; 2],
+    v3_redisclose_sent: [bool; 2],
+    v3_redisclosure_read_sent: [bool; 2],
+    v3_manifest_sent: [bool; 2],
+    v3_enrollment_sent: [bool; 2],
     begun: [bool; 2],
     entry_sent: [bool; 2],
     read_sent: [bool; 2],
@@ -110,13 +151,23 @@ pub(super) struct Driver {
     witness_final: [bool; 2],
     admit_armed: [bool; 2],
     admit_final: [bool; 2],
+    signing_predecessor_retirement_sent: [bool; 2],
+    signing_prepared: [bool; 2],
+    signing_setup: [bool; 2],
+    signing_serve: [bool; 2],
+    writer_read_sent: [bool; 2],
+    acquire_armed: [bool; 2],
+    acquire_final: [bool; 2],
+    activate_final: [bool; 2],
+    activate_arm: [bool; 2],
+    activate_read: [bool; 2],
 }
 impl Driver {
     pub(super) fn spawn(
         endpoint: CoordinatorFinancialEndpointV1,
         terminal: CoordinatorHostTerminalEndpointV1,
     ) -> Result<Self> {
-        // Sixteen one-use commands per original role. No retries.
+        // At most twenty-six one-use commands per original role. No retries.
         let (input, receive) = mpsc::sync_channel(COMMAND_SLOTS);
         // Finite protocol events only, including two dispositions and finish.
         let (send, outcome) = mpsc::sync_channel(SECURITY_SLOTS);
@@ -149,6 +200,16 @@ impl Driver {
             host_pending: None,
             host_last: 0,
             worker: Some(worker),
+            v3_begun: [false; 2],
+            v3_entry_sent: [false; 2],
+            v3_pair_sent: [false; 2],
+            v3_receive_sent: [false; 2],
+            v3_prepare_read_sent: [false; 2],
+            v3_owner_selected: [false; 2],
+            v3_redisclose_sent: [false; 2],
+            v3_redisclosure_read_sent: [false; 2],
+            v3_manifest_sent: [false; 2],
+            v3_enrollment_sent: [false; 2],
             begun: [false; 2],
             entry_sent: [false; 2],
             read_sent: [false; 2],
@@ -165,6 +226,16 @@ impl Driver {
             witness_final: [false; 2],
             admit_armed: [false; 2],
             admit_final: [false; 2],
+            signing_predecessor_retirement_sent: [false; 2],
+            signing_prepared: [false; 2],
+            signing_setup: [false; 2],
+            signing_serve: [false; 2],
+            writer_read_sent: [false; 2],
+            acquire_armed: [false; 2],
+            acquire_final: [false; 2],
+            activate_final: [false; 2],
+            activate_arm: [false; 2],
+            activate_read: [false; 2],
         })
     }
 
@@ -204,8 +275,194 @@ impl Driver {
         }
     }
 
+    pub(super) fn begin_v3(
+        &mut self,
+        role: Role,
+        selection: SignerV3SourceEntrySelectionV1,
+        deadline: Instant,
+    ) -> Result<()> {
+        if self.begun[index(role)]
+            || !claim_once(
+                &mut self.v3_begun,
+                role,
+                self.revoked.load(Ordering::Acquire),
+            )
+        {
+            self.revoke();
+            return Err(rejected("V3 initial source entry consumed or out of order"));
+        }
+        self.queue(Command::BeginV3(role, selection, deadline))
+    }
+    pub(super) fn send_v3_entry(
+        &mut self,
+        role: Role,
+        outbound: SignerV3SourceEntryOutboundV1,
+    ) -> Result<()> {
+        if !self.v3_begun[index(role)]
+            || self.begun[index(role)]
+            || !claim_once(
+                &mut self.v3_entry_sent,
+                role,
+                self.revoked.load(Ordering::Acquire),
+            )
+        {
+            self.revoke();
+            return Err(rejected(
+                "V3 initial source entry outbound consumed or out of order",
+            ));
+        }
+        // This genuine V3 outbound owns its own protected input. No legacy
+        // source-entry capability or plaintext adapter is accepted here.
+        self.queue(Command::V3Entry(outbound))
+    }
+    pub(super) fn send_v3_enrollment(
+        &mut self,
+        role: Role,
+        outbound: SignerV3EnrollmentOutboundV1,
+    ) -> Result<()> {
+        if !self.v3_pair_sent[index(role)]
+            || !claim_once(
+                &mut self.v3_enrollment_sent,
+                role,
+                self.revoked.load(Ordering::Acquire),
+            )
+        {
+            self.revoke();
+            return Err(rejected("fresh enrollment outbound consumed or restricted"));
+        }
+        // Ordering is bookkeeping only; Origin authenticates actual predecessor and same Core.
+        self.queue(Command::V3Enrollment(outbound))
+    }
+    pub(super) fn send_v3_manifest(
+        &mut self,
+        role: Role,
+        outbound: SignerV3ManifestOutboundV1,
+    ) -> Result<()> {
+        if !self.v3_enrollment_sent[index(role)]
+            || !claim_once(
+                &mut self.v3_manifest_sent,
+                role,
+                self.revoked.load(Ordering::Acquire),
+            )
+        {
+            self.revoke();
+            return Err(rejected("fresh manifest outbound consumed or restricted"));
+        }
+        // Ordering is bookkeeping only; Origin authenticates actual predecessor and same Core.
+        self.queue(Command::V3Manifest(outbound))
+    }
+    pub(super) fn send_v3_redisclosure_read(
+        &mut self,
+        role: Role,
+        outbound: SignerV3RedisclosureReadOutboundV1,
+    ) -> Result<()> {
+        if !self.v3_manifest_sent[index(role)]
+            || !claim_once(
+                &mut self.v3_redisclosure_read_sent,
+                role,
+                self.revoked.load(Ordering::Acquire),
+            )
+        {
+            self.revoke();
+            return Err(rejected(
+                "redisclosure_read outbound consumed or restricted",
+            ));
+        }
+        // Bookkeeping only: Origin authenticates actual source/predecessor and same Core.
+        self.queue(Command::V3RedisclosureRead(outbound))
+    }
+    pub(super) fn send_v3_redisclose(
+        &mut self,
+        role: Role,
+        outbound: SignerV3RediscloseOutboundV1,
+    ) -> Result<()> {
+        if !self.v3_redisclosure_read_sent[index(role)]
+            || !claim_once(
+                &mut self.v3_redisclose_sent,
+                role,
+                self.revoked.load(Ordering::Acquire),
+            )
+        {
+            self.revoke();
+            return Err(rejected("redisclose outbound consumed or restricted"));
+        }
+        // Bookkeeping only: Origin authenticates actual source/predecessor and same Core.
+        self.queue(Command::V3Redisclose(outbound))
+    }
+    pub(super) fn select_v3_owner_setup(&mut self, role: Role, json: String) -> Result<()> {
+        wholepact_financial_coordinator_origin::SignerV3OwnerSetupSelectionV1::parse_json(&json)?;
+        if !self.v3_redisclose_sent[index(role)]
+            || !claim_once(
+                &mut self.v3_owner_selected,
+                role,
+                self.revoked.load(Ordering::Acquire),
+            )
+        {
+            self.revoke();
+            return Err(rejected("owner selection consumed or restricted"));
+        }
+        // Ordinary bytes only. Endpoint binds actual completed source/export and fresh selection challenge.
+        self.queue(Command::V3OwnerSetup(role, json))
+    }
+    pub(super) fn send_v3_prepare_read(
+        &mut self,
+        role: Role,
+        outbound: SignerV3PrepareReadOutboundV1,
+    ) -> Result<()> {
+        if !self.v3_owner_selected[index(role)]
+            || !claim_once(
+                &mut self.v3_prepare_read_sent,
+                role,
+                self.revoked.load(Ordering::Acquire),
+            )
+        {
+            self.revoke();
+            return Err(rejected("delivery outbound consumed or restricted"));
+        }
+        self.queue(Command::V3PrepareRead(outbound))
+    }
+    pub(super) fn send_v3_receive(
+        &mut self,
+        role: Role,
+        outbound: SignerV3ReceiveOutboundV1,
+    ) -> Result<()> {
+        if !self.v3_prepare_read_sent[index(role)]
+            || !claim_once(
+                &mut self.v3_receive_sent,
+                role,
+                self.revoked.load(Ordering::Acquire),
+            )
+        {
+            self.revoke();
+            return Err(rejected("delivery outbound consumed or restricted"));
+        }
+        self.queue(Command::V3Receive(outbound))
+    }
+    pub(super) fn send_v3_pair(
+        &mut self,
+        role: Role,
+        outbound: SignerV3PairOutboundV1,
+    ) -> Result<()> {
+        if !self.v3_entry_sent[index(role)]
+            || !claim_once(
+                &mut self.v3_pair_sent,
+                role,
+                self.revoked.load(Ordering::Acquire),
+            )
+        {
+            self.revoke();
+            return Err(rejected("V3 Pair outbound consumed or restricted"));
+        }
+        // Bookkeeping is not pairing authority. Only the original endpoint
+        // checks the genuine outbound's same-source and same-Core binding.
+        self.queue(Command::V3Pair(outbound))
+    }
     pub(super) fn begin(&mut self, role: Role, original_prequeue_ceiling: Instant) -> Result<()> {
-        if !claim_once(&mut self.begun, role, self.revoked.load(Ordering::Acquire)) {
+        // Queue ordering is necessary, not proof of Opened. The endpoint
+        // independently requires the actual authenticated V3 predecessor state.
+        if !self.v3_entry_sent[index(role)]
+            || !claim_once(&mut self.begun, role, self.revoked.load(Ordering::Acquire))
+        {
             self.revoke();
             return Err(rejected("source-entry preparation consumed"));
         }
@@ -249,10 +506,17 @@ impl Driver {
         self.queue(Command::Read(outbound))
     }
     pub(super) fn prepare_history(
-        &mut self, role: Role, inputs: FinancialHistoryInputsV1, ceiling: Instant,
+        &mut self,
+        role: Role,
+        inputs: FinancialHistoryInputsV1,
+        ceiling: Instant,
     ) -> Result<()> {
         if !self.entry_sent[index(role)]
-            || !claim_once(&mut self.history_prepared, role, self.revoked.load(Ordering::Acquire))
+            || !claim_once(
+                &mut self.history_prepared,
+                role,
+                self.revoked.load(Ordering::Acquire),
+            )
         {
             self.revoke();
             return Err(rejected("initial History Setup preparation consumed"));
@@ -260,10 +524,16 @@ impl Driver {
         self.queue(Command::PrepareHistory(role, inputs, ceiling))
     }
     pub(super) fn send_history_setup(
-        &mut self, role: Role, outbound: FinancialHistorySetupOutboundV1,
+        &mut self,
+        role: Role,
+        outbound: FinancialHistorySetupOutboundV1,
     ) -> Result<()> {
         if !self.history_prepared[index(role)]
-            || !claim_once(&mut self.history_setup, role, self.revoked.load(Ordering::Acquire))
+            || !claim_once(
+                &mut self.history_setup,
+                role,
+                self.revoked.load(Ordering::Acquire),
+            )
         {
             self.revoke();
             return Err(rejected("initial History Setup outbound consumed"));
@@ -271,10 +541,16 @@ impl Driver {
         self.queue(Command::SetupHistory(outbound))
     }
     pub(super) fn send_history_serve(
-        &mut self, role: Role, outbound: FinancialHistoryServeOutboundV1,
+        &mut self,
+        role: Role,
+        outbound: FinancialHistoryServeOutboundV1,
     ) -> Result<()> {
         if !self.history_setup[index(role)]
-            || !claim_once(&mut self.history_serve, role, self.revoked.load(Ordering::Acquire))
+            || !claim_once(
+                &mut self.history_serve,
+                role,
+                self.revoked.load(Ordering::Acquire),
+            )
         {
             self.revoke();
             return Err(rejected("initial History Serve outbound consumed"));
@@ -282,10 +558,16 @@ impl Driver {
         self.queue(Command::ServeHistory(outbound))
     }
     pub(super) fn send_history_retirement(
-        &mut self, role: Role, outbound: CoordinatorWitnessRetirementOutboundV1,
+        &mut self,
+        role: Role,
+        outbound: CoordinatorWitnessRetirementOutboundV1,
     ) -> Result<()> {
         if !self.read_sent[index(role)]
-            || !claim_once(&mut self.history_retirement_sent, role, self.revoked.load(Ordering::Acquire))
+            || !claim_once(
+                &mut self.history_retirement_sent,
+                role,
+                self.revoked.load(Ordering::Acquire),
+            )
         {
             self.revoke();
             return Err(rejected("initial History retirement outbound consumed"));
@@ -400,6 +682,191 @@ impl Driver {
         }
         self.queue(Command::FinalWitness(outbound))
     }
+    pub(super) fn send_signing_predecessor_retirement(
+        &mut self,
+        role: Role,
+        outbound: CoordinatorWitnessRetirementOutboundV1,
+    ) -> Result<()> {
+        if !self.admit_final[index(role)]
+            || !claim_once(
+                &mut self.signing_predecessor_retirement_sent,
+                role,
+                self.revoked.load(Ordering::Acquire),
+            )
+        {
+            self.revoke();
+            return Err(rejected(
+                "Signing predecessor retirement consumed or restricted",
+            ));
+        }
+        self.queue(Command::RetireSigningPredecessor(outbound))
+    }
+    pub(super) fn prepare_signing(
+        &mut self,
+        role: Role,
+        inputs: FinancialSigningInputsV1,
+        ceiling: Instant,
+    ) -> Result<()> {
+        if !self.signing_predecessor_retirement_sent[index(role)]
+            || !claim_once(
+                &mut self.signing_prepared,
+                role,
+                self.revoked.load(Ordering::Acquire),
+            )
+        {
+            self.revoke();
+            return Err(rejected(
+                "Signing original Setup preparation consumed or restricted",
+            ));
+        }
+        self.queue(Command::PrepareSigning(role, inputs, ceiling))
+    }
+    pub(super) fn send_signing_setup(
+        &mut self,
+        role: Role,
+        outbound: FinancialSigningSetupOutboundV1,
+    ) -> Result<()> {
+        if !self.signing_prepared[index(role)]
+            || !claim_once(
+                &mut self.signing_setup,
+                role,
+                self.revoked.load(Ordering::Acquire),
+            )
+        {
+            self.revoke();
+            return Err(rejected(
+                "send_signing_setup original outbound consumed or restricted",
+            ));
+        }
+        self.queue(Command::SetupSigning(outbound))
+    }
+    pub(super) fn send_signing_serve(
+        &mut self,
+        role: Role,
+        outbound: FinancialSigningServeOutboundV1,
+    ) -> Result<()> {
+        if !self.signing_setup[index(role)]
+            || !claim_once(
+                &mut self.signing_serve,
+                role,
+                self.revoked.load(Ordering::Acquire),
+            )
+        {
+            self.revoke();
+            return Err(rejected(
+                "send_signing_serve original outbound consumed or restricted",
+            ));
+        }
+        self.queue(Command::ServeSigning(outbound))
+    }
+    pub(super) fn send_writer_read(
+        &mut self,
+        role: Role,
+        outbound: SignerFinancialWriterReadOutboundV1,
+    ) -> Result<()> {
+        if !self.signing_serve[index(role)]
+            || !claim_once(
+                &mut self.writer_read_sent,
+                role,
+                self.revoked.load(Ordering::Acquire),
+            )
+        {
+            self.revoke();
+            return Err(rejected(
+                "send_writer_read original outbound consumed or restricted",
+            ));
+        }
+        self.queue(Command::WriterRead(outbound))
+    }
+    pub(super) fn send_activate_read(
+        &mut self,
+        role: Role,
+        outbound: SignerActivateReadOutboundV1,
+    ) -> Result<()> {
+        if !self.acquire_final[index(role)]
+            || !claim_once(
+                &mut self.activate_read,
+                role,
+                self.revoked.load(Ordering::Acquire),
+            )
+        {
+            self.revoke();
+            return Err(rejected("Activate outbound consumed or restricted"));
+        }
+        self.queue(Command::ActivateRead(outbound))
+    }
+    pub(super) fn send_activate_arm(
+        &mut self,
+        role: Role,
+        outbound: SignerActivateArmOutboundV1,
+    ) -> Result<()> {
+        if !self.activate_read[index(role)]
+            || !claim_once(
+                &mut self.activate_arm,
+                role,
+                self.revoked.load(Ordering::Acquire),
+            )
+        {
+            self.revoke();
+            return Err(rejected("Activate outbound consumed or restricted"));
+        }
+        self.queue(Command::ActivateArm(outbound))
+    }
+    pub(super) fn send_activate_final(
+        &mut self,
+        role: Role,
+        outbound: SignerActivateFinalOutboundV1,
+    ) -> Result<()> {
+        if !self.activate_arm[index(role)]
+            || !claim_once(
+                &mut self.activate_final,
+                role,
+                self.revoked.load(Ordering::Acquire),
+            )
+        {
+            self.revoke();
+            return Err(rejected("Activate outbound consumed or restricted"));
+        }
+        self.queue(Command::ActivateFinal(outbound))
+    }
+    pub(super) fn send_acquire_arm(
+        &mut self,
+        role: Role,
+        outbound: SignerAcquireArmOutboundV1,
+    ) -> Result<()> {
+        if !self.writer_read_sent[index(role)]
+            || !claim_once(
+                &mut self.acquire_armed,
+                role,
+                self.revoked.load(Ordering::Acquire),
+            )
+        {
+            self.revoke();
+            return Err(rejected(
+                "send_acquire_arm original outbound consumed or restricted",
+            ));
+        }
+        self.queue(Command::ArmAcquire(outbound))
+    }
+    pub(super) fn send_acquire_final(
+        &mut self,
+        role: Role,
+        outbound: SignerAcquireFinalOutboundV1,
+    ) -> Result<()> {
+        if !self.acquire_armed[index(role)]
+            || !claim_once(
+                &mut self.acquire_final,
+                role,
+                self.revoked.load(Ordering::Acquire),
+            )
+        {
+            self.revoke();
+            return Err(rejected(
+                "send_acquire_final original outbound consumed or restricted",
+            ));
+        }
+        self.queue(Command::FinalAcquire(outbound))
+    }
     pub(super) fn send_admit_arm(
         &mut self,
         role: Role,
@@ -490,6 +957,8 @@ fn drive(
     let mut cleanup = None;
     let mut signing_disposed = [false; 2];
     let mut signing_close_sent = [false; 2];
+    let mut admission_retained = [false; 2];
+    let mut predecessor_retired = [false; 2];
     let mut history_retained = [false; 2];
     let mut history_disposed = [false; 2];
     let mut history_close_sent = [false; 2];
@@ -537,30 +1006,135 @@ fn drive(
                     continue;
                 }
                 match command {
-                    Command::Begin(role, ceiling) => record_send_progress(endpoint.try_begin_source_entry(role, ceiling)?, &revoked),
-                    Command::Entry(outbound) => record_send_progress(endpoint.try_send_source_entry(outbound)?, &revoked),
-                    Command::Read(outbound) => record_send_progress(endpoint.try_send_initial_read(outbound)?, &revoked),
+                    Command::BeginV3(role, selection, deadline) => record_send_progress(
+                        endpoint.try_begin_v3_source_entry(role, selection, deadline)?,
+                        &revoked,
+                    ),
+                    Command::V3Enrollment(outbound) => {
+                        record_send_progress(endpoint.try_send_v3_enrollment(outbound)?, &revoked)
+                    }
+                    Command::V3Manifest(outbound) => {
+                        record_send_progress(endpoint.try_send_v3_manifest(outbound)?, &revoked)
+                    }
+                    Command::V3RedisclosureRead(outbound) => record_send_progress(
+                        endpoint.try_send_v3_redisclosure_read(outbound)?,
+                        &revoked,
+                    ),
+                    Command::V3Redisclose(outbound) => {
+                        record_send_progress(endpoint.try_send_v3_redisclose(outbound)?, &revoked)
+                    }
+                    Command::V3OwnerSetup(role, json) => record_send_progress(
+                        endpoint.try_select_v3_owner_setup(role, json)?,
+                        &revoked,
+                    ),
+                    Command::V3PrepareRead(outbound) => {
+                        record_send_progress(endpoint.try_send_v3_prepare_read(outbound)?, &revoked)
+                    }
+                    Command::V3Receive(outbound) => {
+                        record_send_progress(endpoint.try_send_v3_receive(outbound)?, &revoked)
+                    }
+                    Command::ActivateRead(outbound) => {
+                        record_send_progress(endpoint.try_send_activate_read(outbound)?, &revoked)
+                    }
+                    Command::ActivateArm(outbound) => {
+                        record_send_progress(endpoint.try_send_activate_arm(outbound)?, &revoked)
+                    }
+                    Command::ActivateFinal(outbound) => {
+                        record_send_progress(endpoint.try_send_activate_final(outbound)?, &revoked)
+                    }
+                    Command::V3Pair(outbound) => {
+                        record_send_progress(endpoint.try_send_v3_pair(outbound)?, &revoked)
+                    }
+                    Command::V3Entry(outbound) => {
+                        record_send_progress(endpoint.try_send_v3_source_entry(outbound)?, &revoked)
+                    }
+                    Command::Begin(role, ceiling) => record_send_progress(
+                        endpoint.try_begin_source_entry(role, ceiling)?,
+                        &revoked,
+                    ),
+                    Command::Entry(outbound) => {
+                        record_send_progress(endpoint.try_send_source_entry(outbound)?, &revoked)
+                    }
+                    Command::Read(outbound) => {
+                        record_send_progress(endpoint.try_send_initial_read(outbound)?, &revoked)
+                    }
                     Command::PrepareHistory(role, inputs, ceiling) => {
-                        if let Some(ticket) = endpoint.try_prepare_history_setup(role, inputs, ceiling)? {
-                            output.try_send(Outcome::HistorySetup(role, ticket))
+                        if let Some(ticket) =
+                            endpoint.try_prepare_history_setup(role, inputs, ceiling)?
+                        {
+                            output
+                                .try_send(Outcome::HistorySetup(role, ticket))
                                 .map_err(|_| rejected("History Setup receiver unavailable"))?;
-                        } else { revoked.store(true, Ordering::Release); }
+                        } else {
+                            revoked.store(true, Ordering::Release);
+                        }
                     }
-                    Command::SetupHistory(outbound) => record_send_progress(endpoint.try_send_history_setup(outbound)?, &revoked),
-                    Command::ServeHistory(outbound) => record_send_progress(endpoint.try_send_history_serve(outbound)?, &revoked),
-                    Command::RetireHistory(_) => return Err(rejected("retirement outside its exclusive owner wait")),
-                    Command::BeginContinue(role, ceiling) => record_send_progress(endpoint.try_send_continue_prepare(role, ceiling)?, &revoked),
-                    Command::ArmContinue(outbound) => record_send_progress(endpoint.try_send_continue_arm(outbound)?, &revoked),
+                    Command::SetupHistory(outbound) => {
+                        record_send_progress(endpoint.try_send_history_setup(outbound)?, &revoked)
+                    }
+                    Command::ServeHistory(outbound) => {
+                        record_send_progress(endpoint.try_send_history_serve(outbound)?, &revoked)
+                    }
+                    Command::RetireHistory(_) | Command::RetireSigningPredecessor(_) => {
+                        return Err(rejected("retirement outside its exclusive owner wait"))
+                    }
+                    Command::BeginContinue(role, ceiling) => record_send_progress(
+                        endpoint.try_send_continue_prepare(role, ceiling)?,
+                        &revoked,
+                    ),
+                    Command::ArmContinue(outbound) => {
+                        record_send_progress(endpoint.try_send_continue_arm(outbound)?, &revoked)
+                    }
                     Command::PrepareWitness(role, inputs, ceiling) => {
-                        if let Some(ticket) = endpoint.try_prepare_witness_setup(role, inputs, ceiling)? {
-                            output.try_send(Outcome::WitnessSetup(role, ticket))
+                        if let Some(ticket) =
+                            endpoint.try_prepare_witness_setup(role, inputs, ceiling)?
+                        {
+                            output
+                                .try_send(Outcome::WitnessSetup(role, ticket))
                                 .map_err(|_| rejected("Witness Setup receiver unavailable"))?;
-                        } else { revoked.store(true, Ordering::Release); }
+                        } else {
+                            revoked.store(true, Ordering::Release);
+                        }
                     }
-                    Command::SetupWitness(outbound) => record_send_progress(endpoint.try_send_witness_setup(outbound)?, &revoked),
-                    Command::ArmWitness(outbound) => record_send_progress(endpoint.try_send_witness_arm(outbound)?, &revoked),
-                    Command::ArmAdmit(outbound) => record_send_progress(endpoint.try_send_admit_arm(outbound)?, &revoked),
-                    Command::FinalAdmit(outbound) => record_send_progress(endpoint.try_send_admit_final(outbound)?, &revoked),
+                    Command::SetupWitness(outbound) => {
+                        record_send_progress(endpoint.try_send_witness_setup(outbound)?, &revoked)
+                    }
+                    Command::ArmWitness(outbound) => {
+                        record_send_progress(endpoint.try_send_witness_arm(outbound)?, &revoked)
+                    }
+                    Command::ArmAdmit(outbound) => {
+                        record_send_progress(endpoint.try_send_admit_arm(outbound)?, &revoked)
+                    }
+                    Command::FinalAdmit(outbound) => {
+                        record_send_progress(endpoint.try_send_admit_final(outbound)?, &revoked)
+                    }
+                    Command::PrepareSigning(role, inputs, ceiling) => {
+                        if let Some(ticket) =
+                            endpoint.try_prepare_signing_setup(role, inputs, ceiling)?
+                        {
+                            output
+                                .try_send(Outcome::SigningSetup(role, ticket))
+                                .map_err(|_| rejected("Signing Setup receiver unavailable"))?;
+                        } else {
+                            revoked.store(true, Ordering::Release);
+                        }
+                    }
+                    Command::SetupSigning(outbound) => {
+                        record_send_progress(endpoint.try_send_signing_setup(outbound)?, &revoked)
+                    }
+                    Command::ServeSigning(outbound) => {
+                        record_send_progress(endpoint.try_send_signing_serve(outbound)?, &revoked)
+                    }
+                    Command::WriterRead(outbound) => record_send_progress(
+                        endpoint.try_send_writer_read_final(outbound)?,
+                        &revoked,
+                    ),
+                    Command::ArmAcquire(outbound) => {
+                        record_send_progress(endpoint.try_send_acquire_arm(outbound)?, &revoked)
+                    }
+                    Command::FinalAcquire(outbound) => {
+                        record_send_progress(endpoint.try_send_acquire_final(outbound)?, &revoked)
+                    }
                     Command::FinalContinue(_) | Command::FinalWitness(_) => {
                         unreachable!("handled exact Finals above")
                     }
@@ -584,6 +1158,9 @@ fn drive(
                 };
                 // The endpoint's authenticated receive has privately latched
                 // exact completion. No UI bit, queue order or DTO can do this.
+                if let CoordinatorFinancialEventV1::AwaitingNextRead { role, .. } = &event {
+                    admission_retained[index(*role)] = true;
+                }
                 if let CoordinatorFinancialEventV1::HistoryRetained { role, .. } = &event {
                     history_retained[index(*role)] = true;
                     record_send_progress(endpoint.try_finish_history_read(*role)?, &revoked);
@@ -603,7 +1180,9 @@ fn drive(
             // means the actual S retained its complete history/preparation; it
             // never grants retirement or authorizes a later W purpose.
             for _ in 0..16 {
-                let Some(event) = endpoint.try_receive_history()? else { break; };
+                let Some(event) = endpoint.try_receive_history()? else {
+                    break;
+                };
                 match &event {
                     CoordinatorFinancialHistoryEventV1::Disposed(role) => {
                         history_disposed[index(*role)] = true;
@@ -617,10 +1196,16 @@ fn drive(
                 }
                 let normal_retirement = match &event {
                     CoordinatorFinancialHistoryEventV1::Disposed(role)
-                        if !cancel_sent && !revoked.load(Ordering::Acquire) && history_retained[index(*role)] => Some(*role),
+                        if !cancel_sent
+                            && !revoked.load(Ordering::Acquire)
+                            && history_retained[index(*role)] =>
+                    {
+                        Some(*role)
+                    }
                     _ => None,
                 };
-                output.try_send(Outcome::History(event))
+                output
+                    .try_send(Outcome::History(event))
                     .map_err(|_| rejected("History native receiver unavailable"))?;
                 if let Some(role) = normal_retirement {
                     let ticket = endpoint.prepare_history_retirement(role)?;
@@ -651,29 +1236,56 @@ fn drive(
                     .try_send(Outcome::Witness(event))
                     .map_err(|_| rejected("Witness native receiver unavailable"))?;
             }
-            // The full original tree also owns not-yet-started Signing roles.
-            // Drain their actual cleanup grammar, but provide no positive UI or
-            // setup path here. Unexpected service readiness is never adopted.
+            // Both authenticated S completion and actual W disposal are necessary.
+            // Origin additionally verifies exact matching committed heads and the
+            // original fixed-purpose retirement custody, never an ordinary DTO.
+            for role in [Role::Signer1, Role::Signer2] {
+                let i = index(role);
+                if may_retire_signing_predecessor(
+                    cancel_sent,
+                    revoked.load(Ordering::Acquire),
+                    admission_retained[i],
+                    witness_disposed[i],
+                    predecessor_retired[i],
+                ) {
+                    let ticket = endpoint.prepare_witness_retirement(role)?;
+                    retire_signing_predecessor_exclusively(
+                        &mut endpoint,
+                        &input,
+                        &output,
+                        &revoked,
+                        ticket,
+                    )?;
+                    predecessor_retired[i] = true;
+                    witness_close_sent[i] = true;
+                }
+            }
+            // Genuine Signing tickets/Serving remain opaque through this driver.
+            // The UI alone admits them; cleanup grammar remains observable after R.
             for _ in 0..16 {
-                let Some(event) = endpoint.try_receive_signing()? else { break; };
+                let Some(event) = endpoint.try_receive_signing()? else {
+                    break;
+                };
                 let observation = match event {
                     CoordinatorFinancialSigningEventV1::Disposed(role) => {
                         signing_disposed[index(role)] = true;
                         Outcome::SigningDisposed(role)
                     }
-                    CoordinatorFinancialSigningEventV1::PurposeClosed(role) => Outcome::SigningClosed(role),
+                    CoordinatorFinancialSigningEventV1::PurposeClosed(role) => {
+                        Outcome::SigningClosed(role)
+                    }
                     CoordinatorFinancialSigningEventV1::PreparationFailed(role)
                     | CoordinatorFinancialSigningEventV1::ServiceFailed(role)
                     | CoordinatorFinancialSigningEventV1::Restricted(role) => {
                         revoked.store(true, Ordering::Release);
                         Outcome::SigningFailed(role)
                     }
-                    CoordinatorFinancialSigningEventV1::Display(_)
-                    | CoordinatorFinancialSigningEventV1::Serving(_) => {
-                        return Err(rejected("unsolicited positive Signing service event"));
-                    }
+                    event @ (CoordinatorFinancialSigningEventV1::Display(_)
+                    | CoordinatorFinancialSigningEventV1::Serving(_)) => Outcome::Signing(event),
                 };
-                output.try_send(observation).map_err(|_| rejected("Signing cleanup receiver unavailable"))?;
+                output
+                    .try_send(observation)
+                    .map_err(|_| rejected("Signing cleanup receiver unavailable"))?;
             }
             for role in [Role::Signer1, Role::Signer2] {
                 let i = index(role);
@@ -742,40 +1354,122 @@ fn drive(
 /// endpoint completion record, never a UI acknowledgment, proves resume.
 fn retire_history_exclusively(
     endpoint: &mut CoordinatorFinancialEndpointV1,
-    input: &mpsc::Receiver<Command>, output: &mpsc::SyncSender<Outcome>,
-    revoked: &AtomicBool, ticket: CoordinatorWitnessRetirementTicketV1,
+    input: &mpsc::Receiver<Command>,
+    output: &mpsc::SyncSender<Outcome>,
+    revoked: &AtomicBool,
+    ticket: CoordinatorWitnessRetirementTicketV1,
 ) -> Result<()> {
     let role = ticket.role();
     let original_cutoff = ticket.deadline();
-    output.try_send(Outcome::HistoryRetirement(ticket))
+    output
+        .try_send(Outcome::HistoryRetirement(ticket))
         .map_err(|_| rejected("History retirement native receiver unavailable"))?;
     let outbound = loop {
         if revoked.load(Ordering::Acquire) || Instant::now() >= original_cutoff {
-            return Err(rejected("History retirement interrupted before native pause"));
+            return Err(rejected(
+                "History retirement interrupted before native pause",
+            ));
         }
         // No reap can start until this sole owner receives the nominal pause
         // outbound. Ordinary actor checks are still valid before that point.
         endpoint.check_original_tree_alive()?;
         match input.try_recv() {
             Ok(Command::RetireHistory(outbound)) => break outbound,
-            Ok(_) => return Err(rejected("unexpected positive command during History retirement")),
-            Err(mpsc::TryRecvError::Disconnected) => return Err(rejected("History retirement native owner ended")),
+            Ok(_) => {
+                return Err(rejected(
+                    "unexpected positive command during History retirement",
+                ))
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                return Err(rejected("History retirement native owner ended"))
+            }
             Err(mpsc::TryRecvError::Empty) => thread::sleep(Duration::from_millis(1)),
         }
     };
     let completion = endpoint.retire_witness(outbound)?;
-    if completion.role() != role { return Err(rejected("History retirement actual role changed")); }
-    output.try_send(Outcome::HistoryRetired(completion))
+    if completion.role() != role {
+        return Err(rejected("History retirement actual role changed"));
+    }
+    output
+        .try_send(Outcome::HistoryRetired(completion))
         .map_err(|_| rejected("History retirement completion receiver unavailable"))?;
     loop {
         if revoked.load(Ordering::Acquire) || Instant::now() >= original_cutoff {
-            return Err(rejected("History retirement interrupted before native resume"));
+            return Err(rejected(
+                "History retirement interrupted before native resume",
+            ));
         }
-        if endpoint.finish_retirement_resume()? { break; }
+        if endpoint.finish_retirement_resume()? {
+            break;
+        }
         thread::sleep(Duration::from_millis(1));
     }
-    output.try_send(Outcome::HistoryResumed(role))
+    output
+        .try_send(Outcome::HistoryResumed(role))
         .map_err(|_| rejected("History resume receiver unavailable"))?;
+    Ok(())
+}
+
+// Fixed-purpose append retirement uses the same exclusive native pause/reap/resume.
+fn retire_signing_predecessor_exclusively(
+    endpoint: &mut CoordinatorFinancialEndpointV1,
+    input: &mpsc::Receiver<Command>,
+    output: &mpsc::SyncSender<Outcome>,
+    revoked: &AtomicBool,
+    ticket: CoordinatorWitnessRetirementTicketV1,
+) -> Result<()> {
+    let role = ticket.role();
+    let original_cutoff = ticket.deadline();
+    output
+        .try_send(Outcome::SigningPredecessorRetirement(ticket))
+        .map_err(|_| rejected("Signing predecessor retirement native receiver unavailable"))?;
+    let outbound = loop {
+        if revoked.load(Ordering::Acquire) || Instant::now() >= original_cutoff {
+            return Err(rejected(
+                "Signing predecessor retirement interrupted before native pause",
+            ));
+        }
+        // No reap can start until this sole owner receives the nominal pause
+        // outbound. Ordinary actor checks are still valid before that point.
+        endpoint.check_original_tree_alive()?;
+        match input.try_recv() {
+            Ok(Command::RetireSigningPredecessor(outbound)) => break outbound,
+            Ok(_) => {
+                return Err(rejected(
+                    "unexpected positive command during Signing predecessor retirement",
+                ))
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                return Err(rejected(
+                    "Signing predecessor retirement native owner ended",
+                ))
+            }
+            Err(mpsc::TryRecvError::Empty) => thread::sleep(Duration::from_millis(1)),
+        }
+    };
+    let completion = endpoint.retire_witness(outbound)?;
+    if completion.role() != role {
+        return Err(rejected(
+            "Signing predecessor retirement actual role changed",
+        ));
+    }
+    output
+        .try_send(Outcome::SigningPredecessorRetired(completion))
+        .map_err(|_| rejected("Signing predecessor retirement completion receiver unavailable"))?;
+    loop {
+        if revoked.load(Ordering::Acquire) || Instant::now() >= original_cutoff {
+            return Err(rejected(
+                "Signing predecessor retirement interrupted before native resume",
+            ));
+        }
+        if endpoint.finish_retirement_resume()? {
+            break;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    output
+        .try_send(Outcome::SigningPredecessorResumed(role))
+        .map_err(|_| rejected("Signing predecessor resume receiver unavailable"))?;
     Ok(())
 }
 
@@ -903,6 +1597,15 @@ fn record_cancel_progress(
         }
     }
 }
+fn may_retire_signing_predecessor(
+    cancel_sent: bool,
+    revoked: bool,
+    admitted: bool,
+    disposed: bool,
+    retired: bool,
+) -> bool {
+    !cancel_sent && !revoked && admitted && disposed && !retired
+}
 fn may_close_witness(global_cancel_sent: bool, actually_disposed: bool, close_sent: bool) -> bool {
     global_cancel_sent && actually_disposed && !close_sent
 }
@@ -913,6 +1616,64 @@ fn first_cleanup_ceiling(session: Instant, now: Instant) -> Instant {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn v3_pair_bookkeeping_is_independent_and_one_use() {
+        let entry = [true, false];
+        let mut pair = [false; 2];
+        assert!(entry[index(Role::Signer1)]);
+        assert!(!claim_once(&mut pair, Role::Signer1, true));
+        assert!(!pair[index(Role::Signer1)]);
+        assert!(claim_once(&mut pair, Role::Signer1, false));
+        assert!(!claim_once(&mut pair, Role::Signer1, false));
+        assert!(!pair[index(Role::Signer2)]);
+        assert_eq!(entry, [true, false]);
+    }
+    #[test]
+    fn v3_initial_entry_bookkeeping_is_distinct_one_use_and_restriction_sensitive() {
+        let mut v3_begin = [false; 2];
+        let mut v3_entry = [false; 2];
+        let mut financial_begin = [false; 2];
+        assert!(claim_once(&mut v3_begin, Role::Signer1, false));
+        assert_eq!(v3_entry, [false; 2]);
+        assert_eq!(financial_begin, [false; 2]);
+        assert!(!claim_once(&mut v3_begin, Role::Signer1, false));
+        assert!(!claim_once(&mut v3_entry, Role::Signer1, true));
+        assert!(claim_once(&mut v3_entry, Role::Signer1, false));
+        assert!(!claim_once(&mut v3_entry, Role::Signer1, false));
+        assert!(claim_once(&mut financial_begin, Role::Signer1, false));
+        assert!(!claim_once(&mut financial_begin, Role::Signer1, false));
+        assert!(!claim_once(&mut v3_begin, Role::Signer2, true));
+    }
+    #[test]
+    fn signing_predecessor_retirement_requires_both_actual_observations_and_no_restriction() {
+        assert!(may_retire_signing_predecessor(
+            false, false, true, true, false
+        ));
+        for (cancel, revoked, admitted, disposed, retired) in [
+            (true, false, true, true, false),
+            (false, true, true, true, false),
+            (false, false, false, true, false),
+            (false, false, true, false, false),
+            (false, false, true, true, true),
+        ] {
+            assert!(!may_retire_signing_predecessor(
+                cancel, revoked, admitted, disposed, retired
+            ));
+        }
+    }
+    #[test]
+    fn writer_and_acquire_commands_are_one_use_per_role_and_cannot_rearm_after_revoke() {
+        // Pure bookkeeping only: cannot construct any actual Origin capability.
+        let mut writer = [false; 2];
+        let mut arm = [false; 2];
+        let mut final_action = [false; 2];
+        for slots in [&mut writer, &mut arm, &mut final_action] {
+            assert!(claim_once(slots, Role::Signer1, false));
+            assert!(!claim_once(slots, Role::Signer1, false));
+            assert!(!claim_once(slots, Role::Signer2, true));
+            assert!(!slots[index(Role::Signer2)]);
+        }
+    }
     #[test]
     fn typed_nonfinal_restriction_latches_without_rearming_or_claiming_send() {
         let revoked = AtomicBool::new(false);
@@ -1043,5 +1804,73 @@ mod tests {
         restricted.set(true); // Model the App's immediate native.revoke.
         assert!(restricted.get());
         drop(unsent);
+    }
+}
+
+#[cfg(test)]
+mod fresh_receipt_driver_tests {
+    use super::*;
+    #[test]
+    fn fresh_purpose_once_bits_are_separate_and_restrictive() {
+        let mut enrollment = [false; 2];
+        let mut manifest = [false; 2];
+        assert!(claim_once(&mut enrollment, Role::Signer1, false));
+        assert!(!claim_once(&mut enrollment, Role::Signer1, false));
+        assert!(!manifest[0]);
+        assert!(!claim_once(&mut manifest, Role::Signer1, true));
+        assert!(claim_once(&mut manifest, Role::Signer2, false));
+        assert!(!enrollment[1]);
+    }
+}
+
+#[cfg(test)]
+mod redisclosure_driver_tests {
+    use super::*;
+    #[test]
+    fn read_and_export_bookkeeping_remain_distinct_one_use_and_restrictive() {
+        let mut read = [false; 2];
+        let mut export = [false; 2];
+        assert!(claim_once(&mut read, Role::Signer1, false));
+        assert!(!export[0]);
+        assert!(!claim_once(&mut read, Role::Signer1, false));
+        assert!(!claim_once(&mut export, Role::Signer1, true));
+        assert!(claim_once(&mut export, Role::Signer2, false));
+        assert!(!read[1]);
+    }
+}
+
+#[cfg(test)]
+mod delivery_driver_tests {
+    use super::*;
+    #[test]
+    fn preparation_and_receive_are_distinct_one_use_and_r_sensitive() {
+        let mut read = [false; 2];
+        let mut receive = [false; 2];
+        assert!(claim_once(&mut read, Role::Signer1, false));
+        assert!(!receive[0]);
+        assert!(!claim_once(&mut read, Role::Signer1, false));
+        assert!(!claim_once(&mut receive, Role::Signer1, true));
+        assert!(claim_once(&mut receive, Role::Signer2, false));
+        assert!(!read[1]);
+    }
+}
+
+#[cfg(test)]
+mod activate_driver_tests {
+    use super::*;
+    #[test]
+    fn activate_read_arm_and_final_are_separate_one_use_and_r_sensitive() {
+        let mut read = [false; 2];
+        let mut arm = [false; 2];
+        let mut final_once = [false; 2];
+        assert!(claim_once(&mut read, Role::Signer1, false));
+        assert!(!claim_once(&mut read, Role::Signer1, false));
+        assert!(!arm[0]);
+        assert!(!final_once[0]);
+        assert!(claim_once(&mut arm, Role::Signer1, false));
+        assert!(!claim_once(&mut final_once, Role::Signer1, true));
+        assert!(claim_once(&mut final_once, Role::Signer2, false));
+        assert!(!read[1]);
+        assert!(!arm[1]);
     }
 }

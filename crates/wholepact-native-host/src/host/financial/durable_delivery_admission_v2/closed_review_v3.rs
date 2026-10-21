@@ -5,6 +5,11 @@ use wholepact_engine::{PrivateDurableAdmissionDeliveryV3, PrivateDurableAdmissio
 use wholepact_signer::authority_bridge::durable_delivery_admission_ipc_v3::{DurableDeliveryAdmissionStatusV3, DurableDeliveryHistoryRequestV3, ReopenedDurableDeliveryHistoryClientV3};
 use wholepact_protocol::durable_proposal_v1::FixedProposalIdentityV1;
 use wholepact_signer::authority_bridge::durable_review_ipc_v3::{PreparedDurableReviewRecipientV3, VerifiedImportedDurableReviewSessionV3};
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+#[path = "closed_review_v3/coordinated_export_v1.rs"]
+mod coordinated_export_v1;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub(in crate::host::financial) use coordinated_export_v1::{begin_original_coordinated_admission_v1, RetainedOriginalCoordinatedAdmissionV1, RetainedCoordinatedOwnerWorkflowWaitV1};
 
 #[cfg(feature = "coordinated-financial-workflow-v1")]
 #[path = "closed_review_v3/retained_result_v1.rs"]
@@ -12,6 +17,8 @@ mod retained_result_v1;
 #[cfg(feature = "coordinated-financial-workflow-v1")]
 #[path = "closed_review_v3/owner_workflow_wait_v1.rs"]
 mod owner_workflow_wait_v1;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub(in crate::host::financial) use owner_workflow_wait_v1::RetainedOwnerWorkflowWaitV1;
 
 #[derive(Serialize)]
 pub(in crate::host) struct OriginalDeliveryExportV3 {
@@ -344,6 +351,13 @@ pub(in crate::host::financial) struct RetainedCoordinatedAdmissionV1<'host> {
 
 #[cfg(feature = "coordinated-financial-workflow-v1")]
 impl RetainedCoordinatedAdmissionV1<'_> {
+    /// Checked retained metadata only, never a recovered Read or new effect
+    /// permission. The actual Pending/provider/Peer stays owned by this value.
+    pub(in crate::host::financial) fn checked_admission_status(&self) -> Result<&DurableDeliveryAdmissionStatusV3> {
+        self.checked_export()?;
+        self.admitted.as_ref().ok_or(Error::Permission)
+    }
+
     pub(in crate::host::financial) fn verify_admission(&mut self) -> Result<()> {
         if self.verification_started {
             return Err(Error::Permission);

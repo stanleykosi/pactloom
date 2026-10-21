@@ -100,6 +100,13 @@ impl PublicationApproval {
 }
 impl Terminal {
     #[cfg(all(feature = "coordinated-financial-workflow-v1", target_os = "linux"))]
+    pub(crate) fn install_completed_pair_service(
+        service: wholepact_financial_coordinator_origin::HostCompletedPairServiceV1,
+    ) -> Result<Arc<wholepact_financial_coordinator_origin::HostCompletedPairServiceV1>> {
+        coordinated_host_v1::install_pair(service)
+    }
+
+    #[cfg(all(feature = "coordinated-financial-workflow-v1", target_os = "linux"))]
     pub(crate) fn require_coordinated_restriction() -> Result<()> {
         coordinated_host_v1::require()
     }

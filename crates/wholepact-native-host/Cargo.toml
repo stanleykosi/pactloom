@@ -9,7 +9,7 @@ description = "Explicit foreground non-signing protected Wholepact host"
 [features]
 default = []
 # Private source composition only; no command or common-image binary activation.
-coordinated-financial-workflow-v1 = ["durable-proposal", "dep:wholepact-financial-coordinator-origin", "wholepact-financial-coordinator-origin/coordinated-financial-workflow-v1", "wholepact-signer-origin/common-image-fork-provider"]
+coordinated-financial-workflow-v1 = ["durable-proposal", "wholepact-engine/coordinated-financial-workflow-v1", "dep:wholepact-financial-coordinator-origin", "wholepact-financial-coordinator-origin/coordinated-financial-workflow-v1", "wholepact-signer-origin/common-image-fork-provider"]
 # Explicit new-profile opt-in; default/legacy V3 activation is unchanged.
 durable-proposal = ["manual-admission", "wholepact-engine/durable-proposal", "wholepact-signer/durable-proposal"]
 manual-admission = ["wholepact-signer/manual-inventory-client", "wholepact-authority/pending-birth-foundation", "financial-runtime", "wholepact-engine/manual-admission", "dep:wholepact-signer-origin", "dep:hpke", "dep:rand", "dep:base64", "dep:chrono", "dep:rusqlite", "dep:pczt", "wholepact-transport/offline-admission-export"]

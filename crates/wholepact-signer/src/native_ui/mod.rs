@@ -55,6 +55,8 @@ mod retirement_source;
 #[cfg(feature = "authority-signing")]
 mod retirement_witness;
 mod runtime;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub use runtime::financial_v1::run_coordinated_financial_signer_v1;
 #[cfg(feature = "authority-signing")]
 mod wallet_workspace;
 #[cfg(feature = "authority-signing")]

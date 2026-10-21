@@ -170,6 +170,49 @@ pub(super) fn open_for_manual_roster_enrollment_v2(
     super::enrollment::roster_v2::roster_inventory(&directory)?;
     open_exact(directory, password, encrypted)
 }
+/// Original coordinated Entry only; the legacy native opener is unchanged.
+/// In particular a restriction received during the password KDF must prevent
+/// the subsequent private original-request read, not merely reject its result.
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub(super) fn open_for_coordinated_v3_source_entry_v1(
+    directory: PrivateDirectory,
+    password: &[u8],
+    encrypted: &[u8],
+    entry: &wholepact_financial_coordinator_origin::SignerV3SourceEntryFinalV1,
+) -> Result<AccountVault> {
+    entry.check_current()?;
+    super::enrollment::roster_v2::roster_inventory(&directory)?;
+    entry.check_current()?;
+    let (plain, encryption_key, salt) =
+        vault::open_password_envelope(MAGIC, password, encrypted, MAX_ACTIVE)?;
+    entry.check_current()?;
+    let (account, origin, authority_key) = decode(&plain)?;
+    entry.check_current()?;
+    let encrypted_request =
+        directory.read(super::request::REQUEST_FILE, super::request::MAX_REQUEST)?;
+    entry.check_current()?;
+    let mut domain = b"wholepact:pending-birth-owner-request-envelope:v1\0".to_vec();
+    domain.extend_from_slice(origin.anchor().birth_digest().as_bytes());
+    let request_plain = vault::decrypt(&encryption_key, &domain, &encrypted_request)?;
+    entry.check_current()?;
+    let request: wholepact_authority::pending_birth::PendingBirthRequest =
+        serde_json::from_slice(&request_plain).map_err(|_| Error::InvalidData)?;
+    if &request != origin.original_request() {
+        return Err(Error::ReviewMismatch);
+    }
+    entry.check_current()?;
+    Ok(AccountVault {
+        directory,
+        account,
+        encryption_key,
+        salt,
+        authority_key,
+        authority_initialized: false,
+        generation: None,
+        born_origin: Some(origin),
+    })
+}
+
 fn open_exact(
     directory: PrivateDirectory,
     password: &[u8],

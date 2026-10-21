@@ -8,6 +8,7 @@ use std::{os::fd::AsRawFd,path::Path};
 
 #[path = "durable_delivery_admission_ipc_v3/retained_financial_result_v1.rs"]
 mod retained_financial_result_v1;
+pub(crate) use retained_financial_result_v1::{RetainedFinancialResultJoinV1,checked_retained_result_deadline_v1};
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all="snake_case")]
@@ -24,19 +25,10 @@ pub struct DurableDeliveryAdmissionStatusV3 {
 }
 impl DurableDeliveryAdmissionStatusV3 {
     pub fn validate(&self) -> Result<()> {
-        super::durable_construction_v1::hash(&self.intent_digest)?;
-        super::durable_construction_v1::hash(&self.original_local_intent_digest)?;
-        let wholepact_authority::OwnerControl::AdmitDurablePaymentWithDeliveryV2 {record} = &self.request.control else {return Err(BridgeError::Binding)};
-        record.validate_request(&self.request,&record.scope.witness).map_err(|_| BridgeError::Binding)?;
         if self.version != 3 { return Err(BridgeError::Binding); }
-        match (&self.state,&self.audit) {
-            (DurableDeliveryAdmissionStateV3::Verified,Some(audit)) => {
-                audit.validate()?;
-                if !audit.witness_committed || audit.request != self.request || audit.original_local_intent_digest != self.original_local_intent_digest { return Err(BridgeError::Binding); }
-            }
-            (DurableDeliveryAdmissionStateV3::AwaitingAudit | DurableDeliveryAdmissionStateV3::Unknown,None) => {},
-            _ => return Err(BridgeError::Binding),
-        }
+        validate_admission_status_business_data(&self.intent_digest, &self.request,
+            &self.original_local_intent_digest,
+            self.state == DurableDeliveryAdmissionStateV3::Verified, self.audit.as_ref())?;
         Ok(())
     }
     /// Checked historical business-data projection, never a permission owner.
@@ -46,6 +38,27 @@ impl DurableDeliveryAdmissionStatusV3 {
         self.audit.as_ref().ok_or(BridgeError::Uncertain)
     }
 }
+/// Pure business-data validation shared by distinct transport profiles. This
+/// helper issues no peer, native action, history owner or admission authority.
+pub(crate) fn validate_admission_status_business_data(
+    intent_digest: &str, request: &OwnerControlRequest, original_local_intent_digest: &str,
+    verified: bool, audit: Option<&DurableDeliveryAdmissionStatusV2>,
+) -> Result<()> {
+    super::durable_construction_v1::hash(intent_digest)?;
+    super::durable_construction_v1::hash(original_local_intent_digest)?;
+    let wholepact_authority::OwnerControl::AdmitDurablePaymentWithDeliveryV2 {record} = &request.control else {return Err(BridgeError::Binding)};
+    record.validate_request(request,&record.scope.witness).map_err(|_| BridgeError::Binding)?;
+    match (verified,audit) {
+        (true,Some(audit)) => {
+            audit.validate()?;
+            if !audit.witness_committed || &audit.request != request || audit.original_local_intent_digest != original_local_intent_digest {return Err(BridgeError::Binding);}
+        }
+        (false,None) => {},
+        _ => return Err(BridgeError::Binding),
+    }
+    Ok(())
+}
+
 #[derive(Clone,PartialEq,Eq,Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DurableDeliveryHistoryRequestV3 { pub intent_digest:String, pub authorization_id:String }

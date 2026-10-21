@@ -31,6 +31,8 @@ mod terminal;
 mod vault;
 
 pub use host::run;
+#[cfg(all(feature = "coordinated-financial-workflow-v1", target_os = "linux"))]
+pub use host::run_coordinated_financial_host_v1;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

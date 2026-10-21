@@ -201,3 +201,29 @@ pub use financial_workflow_origin::{SignerActivateReadTicketV1,SignerActivateRea
 
 #[cfg(feature="coordinated-financial-workflow-v1")]
 pub use financial_workflow_origin::OriginalSignerHostPeerV1;
+
+#[cfg(feature="coordinated-financial-workflow-v1")]mod signer_v3_source_entry_data;
+#[cfg(feature="coordinated-financial-workflow-v1")]mod v3_source_entry_envelope;
+#[cfg(feature="coordinated-financial-workflow-v1")]
+pub use signer_v3_source_entry_data::{SignerV3SourceOpenedV1,SignerV3SourceEntrySelectionV1,SignerV3SourceEntryFactsV1,SignerV3SourceEntryPresentationV1};
+#[cfg(feature="coordinated-financial-workflow-v1")]
+pub use financial_workflow_origin::{SignerV3SourceEntryOfferV1,SignerV3SourceEntryOutboundV1,SignerV3SourceEntryFinalV1,SignerV3SourceEntryInputV1,SignerV3SourceLifetimeV1};
+
+#[cfg(feature="coordinated-financial-workflow-v1")]
+mod signer_v3_pair_data;
+#[cfg(feature="coordinated-financial-workflow-v1")]
+pub use signer_v3_pair_data::{SignerV3PairedV1,SignerV3PairEndpointV1,SignerV3PairFactsV1,SignerV3PairPresentationV1};
+#[cfg(feature="coordinated-financial-workflow-v1")]
+pub use financial_workflow_origin::{SignerV3PairTicketV1,SignerV3PairOutboundV1,SignerV3PairFinalV1,SignerV3PairLifetimeV1};
+
+#[cfg(feature="coordinated-financial-workflow-v1")]mod signer_v3_receipt_data;
+#[cfg(feature="coordinated-financial-workflow-v1")]pub use signer_v3_receipt_data::{SignerV3CurrentDisclosureV1,SignerV3EnrollmentFactsV1,SignerV3EnrollmentPresentationV1,SignerV3EnrollmentCommittedV1,SignerV3ManifestFactsV1,SignerV3ManifestPresentationV1,SignerV3ManifestCommittedV1};
+#[cfg(feature="coordinated-financial-workflow-v1")]pub use financial_workflow_origin::{SignerV3EnrollmentTicketV1,SignerV3EnrollmentOutboundV1,SignerV3EnrollmentFinalV1,SignerV3ManifestTicketV1,SignerV3ManifestOutboundV1,SignerV3ManifestFinalV1};
+
+#[cfg(feature="coordinated-financial-workflow-v1")]mod signer_v3_redisclosure_data;
+#[cfg(feature="coordinated-financial-workflow-v1")]pub use signer_v3_redisclosure_data::{SignerV3RedisclosureReadFactsV1,SignerV3RedisclosureReadPresentationV1,SignerV3RedisclosurePreparedV1,SignerV3RediscloseFactsV1,SignerV3RedisclosePresentationV1,SignerV3RedisclosedV1};
+#[cfg(feature="coordinated-financial-workflow-v1")]pub use financial_workflow_origin::{SignerV3RedisclosureReadTicketV1,SignerV3RedisclosureReadOutboundV1,SignerV3RedisclosureReadFinalV1,SignerV3RediscloseTicketV1,SignerV3RediscloseOutboundV1,SignerV3RediscloseFinalV1};
+
+#[cfg(feature="coordinated-financial-workflow-v1")]mod signer_v3_delivery_data;
+#[cfg(feature="coordinated-financial-workflow-v1")]pub use signer_v3_delivery_data::{SignerV3OwnerSetupSelectionV1,SignerV3PrepareReadFactsV1,SignerV3PrepareReadPresentationV1,SignerV3PreparedV1,SignerV3ReceiveFactsV1,SignerV3ReceivePresentationV1,SignerV3ReceivedV1};
+#[cfg(feature="coordinated-financial-workflow-v1")]pub use financial_workflow_origin::{SignerV3PrepareReadTicketV1,SignerV3PrepareReadOutboundV1,SignerV3PrepareReadFinalV1,SignerV3PreparedLifetimeV1,SignerV3ReceiveTicketV1,SignerV3ReceiveOutboundV1,SignerV3ReceiveFinalV1};

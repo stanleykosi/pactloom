@@ -1466,3 +1466,6 @@ fn original_job_error_v2(error: wholepact_proof_jobs::JobError) -> ApiError {
     result.details = Box::new(serde_json::json!({"private_original_job_error_v1":variant}));
     result
 }
+
+#[cfg(all(feature = "durable-proposal", feature = "coordinated-financial-workflow-v1"))]
+pub use delivery_admission_v2::{ClosedCoordinatedPrivateDurableAdmissionReviewV1, CoordinatedPrivateDurableAdmissionStatusV1};
