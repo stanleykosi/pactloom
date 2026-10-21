@@ -18,6 +18,8 @@ pub(super) mod private_fixed_v2;
 mod initial;
 #[path = "durable_proposal_v1/pristine_coordinator_v1.rs"]
 pub(super) mod pristine_coordinator_v1;
+#[path = "durable_proposal_v1/pristine_owner_client_v1.rs"]
+mod pristine_owner_client_v1;
 #[path = "durable_proposal_v1/preproof.rs"]
 mod preproof;
 #[path = "durable_proposal_v1/worker.rs"]
