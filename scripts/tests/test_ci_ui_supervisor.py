@@ -465,7 +465,7 @@ class RecordsAndCleanup(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, \
              mock.patch.object(S, 'context', return_value=('a' * 40, 'token')), \
              mock.patch.object(S, 'exact_source'), mock.patch.object(S, 'prepare_foundation_inputs', return_value=(pathlib.Path(directory), {})), \
-             mock.patch.object(S, 'build_inputs'), mock.patch.object(S, 'build_image', return_value={'id': 'sha256:' + 'a' * 64}), \
+             mock.patch.object(S, 'build_inputs'), mock.patch.object(S, 'export_compiled_artifacts'), mock.patch.object(S, 'build_image', return_value={'id': 'sha256:' + 'a' * 64}), \
              mock.patch.object(S, 'final_image', return_value='sha256:' + 'b' * 64), \
              mock.patch.object(S, 'docker', side_effect=[b'', b'', ('sha256:' + 'a' * 64).encode()]), \
              mock.patch.object(S, 'run_case', return_value=(result, True)), \
@@ -551,6 +551,44 @@ class FoundationOrdering(unittest.TestCase):
         with contextlib.redirect_stdout(output):
             S.image_failure(json.dumps(row).encode())
         self.assertEqual(output.getvalue(), '')
+
+
+class ArtifactExport(unittest.TestCase):
+    def test_fabricated_export_before_runtime_exact_allowlist(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory); repo = root / 'repo'; repo.mkdir()
+            (repo / 'Cargo.lock').write_bytes(b'fabricated source')
+            context = root / 'context'; (context / 'artifacts').mkdir(parents=True)
+            for name in S.A.NAMES:
+                (context / 'artifacts' / name).write_bytes(b'\x7fELFfabricated, never run')
+            output = root / 'github-output'; output.touch()
+            env = dict(RUNNER_TEMP=str(root), GITHUB_REPOSITORY='stanleykosi/pactloom',
+                       GITHUB_RUN_ID='123', GITHUB_RUN_ATTEMPT='1', GITHUB_OUTPUT=str(output))
+            git_rows = b'100644 blob ' + b'c'*40 + b'\tCargo.lock\0'
+            with mock.patch.object(S, 'REPO', repo), mock.patch.object(S, 'exact_source'), \
+                 mock.patch.object(S, 'checked', side_effect=[b'b'*40+b'\n', git_rows]), \
+                 mock.patch.dict(S.os.environ, env), mock.patch.object(S, 'emit') as emit:
+                S.export_compiled_artifacts(context, 'a'*40)
+            bundle = root / 'wholepact-ui-build-123-1' / 'build.tar'
+            self.assertTrue(bundle.is_file())
+            self.assertEqual(output.read_text(), 'artifact_bundle_ready=true\n')
+            record = emit.call_args.args[1]
+            self.assertFalse(record['uploaded']); self.assertFalse(record['reused'])
+            self.assertTrue(record['pre_credential'])
+            self.assertEqual(record['artifacts'], list(S.A.NAMES))
+
+    def test_export_is_before_image_and_runtime_and_upload_is_exact(self):
+        source = (ROOT / 'ci-ui-supervisor.py').read_text()
+        main = source[source.index('def main():'):]
+        self.assertLess(main.index('build_inputs('), main.index('export_compiled_artifacts('))
+        self.assertLess(main.index('export_compiled_artifacts('), main.index('final_image('))
+        self.assertLess(main.index('export_compiled_artifacts('), main.index('run_case('))
+        workflow = (ROOT.parent / '.github/workflows/durable-native-linux.yml').read_text()
+        self.assertIn('actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02', workflow)
+        self.assertIn('retention-days: 1', workflow)
+        self.assertIn('overwrite: false', workflow)
+        self.assertIn("steps.ui.outputs.artifact_bundle_ready == 'true'", workflow)
+        self.assertIn('/build.tar', workflow)
 
 
 if __name__ == '__main__':

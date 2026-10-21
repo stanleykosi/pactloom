@@ -38,6 +38,7 @@ def load(name, filename):
 B = load('ui_bootstrap_supervisor', 'ci-bootstrap-supervisor.py')
 I = load('ui_image', 'ci-ui-image.py')
 P = load('ui_output', 'ci-ui-output.py')
+A = load('ui_artifacts', 'ci-ui-artifacts.py')
 BASE = I.BASE_IMAGE
 LABEL = 'org.wholepact.ui-run'
 SOURCE_LABEL = 'org.wholepact.ui-source'
@@ -75,7 +76,7 @@ CHECKS = frozenset(('ci_context', 'architecture', 'arguments', 'source_commit', 
     'tmpfs_destinations', 'tmpfs_options', 'log_driver', 'restart_policy', 'ulimits',
     'entrypoint', 'command', 'auto_remove', 'runtime_mounts', 'build_environment',
     'prerequisite_files', 'prerequisite_prefix', 'prerequisite_link', 'prerequisite_versions',
-    'prerequisite_tool'))
+    'prerequisite_tool', 'artifact_bundle'))
 PACKAGE_CHECKS = frozenset(('duplicate_key', 'manifest', 'manifest_size', 'manifest_pin', 'manifest_shape',
     'manifest_version', 'manifest_origin', 'package_name', 'package_version', 'package_architecture',
     'roots', 'base_packages', 'packages', 'package_duplicate', 'package_size', 'dependency_grammar',
@@ -415,6 +416,58 @@ def prepare_foundation_inputs(root, sha):
         raise failure from None
     exact_source(sha)
     return build_context, pins
+
+
+def export_compiled_artifacts(build_context, sha):
+    # Host-only output established before any container/fixture starts. This
+    # directory is never mounted into a container. No environment dump or logs.
+    exact_source(sha)
+    require(A.RECIPE['rustc'] == B.RUSTC and A.RECIPE['coordinator_features'] == FEATURE,
+            'compile', 'artifact_bundle')
+    tree = checked(['git', 'rev-parse', 'HEAD^{tree}'], 'source', limit=128).strip().decode('ascii')
+    rows = checked(['git', 'ls-tree', '-rz', '--full-tree', 'HEAD'], 'source', limit=16 * 1024 * 1024)
+    inventory = {}
+    for row in rows.split(b'\0'):
+        if not row:
+            continue
+        fields, path = row.split(b'\t', 1)
+        mode, kind, oid = fields.split(b' ')
+        require(mode in (b'100644', b'100755') and kind == b'blob', 'compile', 'artifact_bundle')
+        name = path.decode('ascii')
+        require(name not in inventory and not name.startswith('/') and
+                all(part not in ('', '.', '..') for part in name.split('/')), 'compile', 'artifact_bundle')
+        file = REPO / name
+        meta = file.lstat()
+        require(stat.S_ISREG(meta.st_mode) and meta.st_nlink == 1 and meta.st_size <= 64 * 1024 * 1024,
+                'compile', 'artifact_bundle')
+        # Bind file mode as well as content. Tree/source IDs remain explicit.
+        digest = hashlib.sha256(mode + b'\0')
+        with file.open('rb') as stream:
+            while chunk := stream.read(1024 * 1024):
+                digest.update(chunk)
+        inventory[name] = digest.hexdigest()
+    producer = dict(repository=os.environ['GITHUB_REPOSITORY'], source=sha, source_tree=tree,
+                    run_id=int(os.environ['GITHUB_RUN_ID']), attempt=int(os.environ['GITHUB_RUN_ATTEMPT']))
+    destination = pathlib.Path(os.environ['RUNNER_TEMP']) / (
+        'wholepact-ui-build-' + str(producer['run_id']) + '-' + str(producer['attempt']))
+    destination.mkdir(mode=0o700, exist_ok=False)
+    bundle = destination / 'build.tar'
+    try:
+        A.export_bundle(build_context / 'artifacts', bundle, producer, inventory)
+        exact_source(sha)
+        digest = hashlib.sha256()
+        with bundle.open('rb') as stream:
+            digest = hashlib.file_digest(stream, 'sha256')
+        output = os.environ['GITHUB_OUTPUT']
+        with open(output, 'a', encoding='ascii') as stream:
+            stream.write('artifact_bundle_ready=true\n')
+        emit('BUILD_BUNDLE', dict(source=sha, source_tree=tree, run_id=producer['run_id'],
+            attempt=producer['attempt'], sha256=digest.hexdigest(), size=bundle.stat().st_size,
+            artifacts=list(A.NAMES), pre_credential=True, reused=False, uploaded=False))
+    except Exception:
+        # Never mark an incomplete bundle uploadable. Only this fresh directory.
+        shutil.rmtree(destination)
+        raise Failure('compile', 'artifact_bundle') from None
 
 
 def build_inputs(root, sha, build_context, foundation_pins):
@@ -856,6 +909,7 @@ def main():
             emit('FOUNDATION', dict(image_id=foundation['id'], source=sha, pre_credential=True,
                 package_lock_sha256=I.LOCK_SHA256, before_rust_compilation=True, cross_run_cache=False))
             build_inputs(root, sha, build_context, foundation_pins)
+            export_compiled_artifacts(build_context, sha)
             image_id = final_image(build_context, tag, foundation_tag, token, sha, foundation)
             exact_source(sha)
             passed = True
