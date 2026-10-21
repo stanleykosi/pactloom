@@ -14,6 +14,8 @@ mod intent;
 #[path = "financial_coordinated_continue_v1.rs"]
 mod coordinated_continue;
 pub(crate) use coordinated_continue::{CoordinatedContinueReviewDataV1, CoordinatedContinueSignerRoleV1, PreparedCoordinatedFinancialContinuationV1};
+#[cfg(feature = "coordinated-signer-continue")]
+pub(crate) use coordinated_continue::{PresentedCoordinatedFinancialContinuationV1, CoordinatedContinuationCommitFailureV1};
 #[path = "financial_bridge_storage_v1.rs"]
 mod bridge;
 #[path = "financial_return_pin_v1.rs"]

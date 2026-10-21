@@ -8,6 +8,7 @@ description = "Fixed whole-image fork origin, retained role custody and finite n
 [features]
 default = []
 common-image-fork-provider = []
+coordinated-signer-continue = ["common-image-fork-provider", "dep:zeroize"]
 cancel-only-witness-review = ["dep:zeroize"]
 coordinated-witness-delivery-append = ["dep:zeroize"]
 

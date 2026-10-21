@@ -12,7 +12,7 @@ const PACKET_BYTES: usize = 8;
 
 pub(super) struct Channel(OwnedFd);
 impl Channel {
-    #[cfg(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append"))]
+    #[cfg(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append", feature = "coordinated-signer-continue"))]
     pub(super) fn review_fd(&self) -> libc::c_int { self.0.as_raw_fd() }
     #[cfg(wholepact_bootstrap_ci)]
     pub(super) fn ci_fd(&self) -> libc::c_int { self.0.as_raw_fd() }

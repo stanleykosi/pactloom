@@ -16,6 +16,12 @@ use wholepact_authority::{
     },
 };
 
+#[cfg(feature = "coordinated-signer-continue")]
+#[path = "financial_coordinated_transition_v1.rs"]
+mod transition;
+#[cfg(feature = "coordinated-signer-continue")]
+pub(crate) use transition::{PresentedCoordinatedFinancialContinuationV1, CoordinatedContinuationCommitFailureV1};
+
 const INTENT_VERSION: u16 = 2;
 const INTENT_DOMAIN: &str =
     "wholepact:signer-coordinated-financial-continuation-intent-preimage:v2";
@@ -223,8 +229,9 @@ impl CoordinatedFinancialContinuationIntentV2 {
 /// never effect authority or ownership of the original journal/source itself.
 /// The caller must retain its actual PreparedOriginalFinancialSourceV1 through
 /// preparation and any later final-token join; this ticket cannot replace it.
-/// Deliberately no Clone, serde, public constructor, persistence, transition,
-/// NativeDecision conversion or conversion to the legacy prepared action type.
+/// Deliberately no Clone, serde, public constructor, NativeDecision conversion
+/// or conversion to the legacy prepared action type. The gated transition child
+/// consumes a separate genuine Final; this inert ticket is never sufficient.
 pub(crate) struct PreparedCoordinatedFinancialContinuationV1 {
     journal: SignerJournalBinding,
     source_identity: String,
@@ -235,6 +242,7 @@ pub(crate) struct PreparedCoordinatedFinancialContinuationV1 {
     intent: CoordinatedFinancialContinuationIntentV2,
     original_ceiling_ms: u64,
     original_deadline: Instant,
+    original_review_deadline: Instant,
     review_deadline: Instant,
     prepared_digest: String,
 }
@@ -410,6 +418,7 @@ impl SignerConsentJournal {
                 intent,
                 original_ceiling_ms,
                 original_deadline,
+                original_review_deadline: retained_review_deadline,
                 review_deadline,
                 prepared_digest,
             }
