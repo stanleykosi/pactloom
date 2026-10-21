@@ -8,6 +8,10 @@ description = "Fixed whole-image fork origin, retained role custody and finite n
 [features]
 default = []
 common-image-fork-provider = []
+# Private fixed-purpose crypto leaf only; no role conversion or binary activation.
+source-entry-envelope = ["dep:hpke", "dep:getrandom", "dep:chacha20poly1305", "dep:zeroize"]
+# From-outset profile; Continue is also its nominal capability dependency.
+coordinated-financial-workflow-v1 = ["coordinated-signer-continue", "source-entry-envelope"]
 coordinated-signer-continue = ["common-image-fork-provider", "dep:zeroize"]
 cancel-only-witness-review = ["dep:zeroize"]
 coordinated-witness-delivery-append = ["dep:zeroize"]
@@ -19,6 +23,10 @@ serde_json.workspace = true
 sha2.workspace = true
 hex.workspace = true
 zeroize = { version = "=1.9.1", optional = true }
+hpke = { version = "=0.14.1", default-features = false, features = ["alloc", "x25519", "chacha", "getrandom"], optional = true }
+getrandom = { version = "=0.4.3", optional = true }
+# hpke disables AEAD defaults; retained cipher-key drop needs this explicit edge.
+chacha20poly1305 = { version = "=0.11.0", default-features = false, features = ["zeroize"], optional = true }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(wholepact_bootstrap_ci)', 'cfg(wholepact_delivery_ci)'] }

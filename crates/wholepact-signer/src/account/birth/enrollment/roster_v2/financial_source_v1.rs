@@ -19,6 +19,40 @@ use std::{
 };
 use wholepact_authority::durable_financial_continuation_v1::FinancialContinuationTermsV1;
 
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+mod coordinated_source_entry_v1;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+mod coordinated_continue_role_v1;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+mod coordinated_public_custody_v2;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub(crate) use coordinated_public_custody_v2::OpenedCoordinatedOriginalFinancialSourceV2;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub(crate) use coordinated_source_entry_v1::{
+    PreparedCoordinatedSourceEntryV1, PresentedCoordinatedSourceEntryV1,
+};
+
+// Closed restriction-only custody. Native check/drop behavior stays in the
+// original field position. Neither branch grants any action; coordinated Entry
+// and Read independently retain their R-sensitive genuine Final until done.
+enum OriginalFinancialCustodyLifetimeV1 {
+    Native(DormantNativeLifetime),
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    Coordinated(wholepact_financial_coordinator_origin::SignerOriginalCustodyLifetimeV1),
+}
+impl OriginalFinancialCustodyLifetimeV1 {
+    fn check_connected(&self) -> Result<()> {
+        match self {
+            Self::Native(lifetime) => lifetime.check_connected(),
+            #[cfg(feature = "coordinated-financial-workflow-v1")]
+            Self::Coordinated(lifetime) => {
+                lifetime.check_current()?;
+                Ok(())
+            }
+        }
+    }
+}
+
 #[derive(PartialEq, Eq)]
 struct FileRevision {
     device: u64,
@@ -88,7 +122,7 @@ pub(crate) struct PreparedOriginalFinancialSourceV1 {
     identity: String,
     recipient: std::sync::Mutex<Option<crate::native_peer::PeerProcess>>,
     immutable: BTreeMap<String, FileRevision>,
-    lifetime: DormantNativeLifetime,
+    lifetime: OriginalFinancialCustodyLifetimeV1,
     original_ceiling_ms: u64,
     original_deadline: Instant,
 }
@@ -158,7 +192,7 @@ impl PreparedOriginalFinancialSourceV1 {
             binding: std::sync::Mutex::new(binding),
             recipient: std::sync::Mutex::new(None),
             immutable: snapshot,
-            lifetime,
+            lifetime: OriginalFinancialCustodyLifetimeV1::Native(lifetime),
             original_ceiling_ms,
             original_deadline,
         })
@@ -224,7 +258,7 @@ impl PreparedOriginalFinancialSourceV1 {
             binding: std::sync::Mutex::new(binding),
             recipient: std::sync::Mutex::new(None),
             immutable: snapshot,
-            lifetime,
+            lifetime: OriginalFinancialCustodyLifetimeV1::Native(lifetime),
             original_ceiling_ms,
             original_deadline,
         })

@@ -292,6 +292,99 @@ pub(in crate::host) fn admit_original_borrowed_v3(
     host.display_original_admission_status_v3(workspace, &exported.export_scope, &status)?;
     Ok((exported, status))
 }
+/// Actual retained original IPC custody, not an imported success flag. The
+/// caller retains this before awaiting status; both the exact original Host
+/// borrow and provider/peer continuation survive a refused or uncertain read.
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub(in crate::host::financial) struct RetainedCoordinatedAdmissionV1<'host> {
+    host: &'host Host,
+    workspace: &'host Path,
+    pending: wholepact_signer::authority_bridge::durable_delivery_admission_ipc_v3::PendingDurableDeliveryAdmissionV3,
+    exported: OriginalDeliveryExportV3,
+    admitted: Option<DurableDeliveryAdmissionStatusV3>,
+    verification_started: bool,
+}
+
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+impl RetainedCoordinatedAdmissionV1<'_> {
+    pub(in crate::host::financial) fn verify_admission(&mut self) -> Result<()> {
+        if self.verification_started {
+            return Err(Error::Permission);
+        }
+        self.verification_started = true;
+        let status = match self.pending.await_status_v3() {
+            Ok(status) if status.verified_audit().is_ok() => status,
+            _ => {
+                self.host.terminal.message("Admission is pending or uncertain. Request a separately approved read of complete original Witness history; the mutation will not be resent.\n")?;
+                self.pending.read_original_status_retained_v3().map_err(|_| Error::Receipt("The original V3 admission remains pending or unknown. Fresh history was unavailable or not approved; preserve the retained operation and use the V3 status command, never resend admission".into()))?
+            }
+        };
+        validate_closed_status_v3(&self.exported.export_scope, &status)?;
+        validate_admission_result_v3(
+            &self.exported,
+            status.verified_audit().map_err(|_| Error::Authentication)?,
+        )?;
+        self.host.display_original_admission_status_v3(self.workspace, &self.exported.export_scope, &status)?;
+        self.admitted = Some(status);
+        Ok(())
+    }
+
+    fn checked_export(&self) -> Result<&OriginalDeliveryExportV3> {
+        self.admitted
+            .as_ref()
+            .ok_or(Error::Permission)?
+            .verified_audit()
+            .map_err(|_| Error::Authentication)?;
+        Ok(&self.exported)
+    }
+}
+
+/// Separate concrete fixed-fork path. The legacy command above is unchanged.
+/// The verifier must come from the one original H; no fallback installation,
+/// endpoint discovery, replacement process or caller-claimed peer is accepted.
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub(in crate::host::financial) fn begin_original_borrowed_fork_v3<'host>(
+    host: &'host Host,
+    workspace: &'host Path,
+    previous: Option<&RetainedCoordinatedAdmissionV1<'_>>,
+    verifier: wholepact_financial_coordinator_origin::OriginalForkSignerVerifier,
+) -> Result<RetainedCoordinatedAdmissionV1<'host>> {
+    let previous = previous.map(|prior| {
+        if !std::ptr::eq(host, prior.host) || workspace != prior.workspace {
+            return Err(Error::Authentication);
+        }
+        // Exact selection equality is not filesystem custody. The maintained
+        // original source checks below still reopen and verify that custody.
+        prior.checked_export()
+    }).transpose()?;
+    let terminal = &host.terminal;
+    let selection: ReviewerRequestV2 = host.read_json("Exact original reviewer request and bounded prospective delivery choices JSON for CLOSED V3: ")?;
+    if previous.is_some_and(|prior| prior.export_scope.recipient.account_id == selection.account_id
+        || prior.export_scope.recipient.participant_id == selection.participant_id)
+    { return Err(Error::Authentication); }
+    if !selection.signer_socket.is_absolute() { return Err(Error::Authentication); }
+    let (verified, exported) = host.private_original_delivery_export_v3(workspace, &selection.choices, |fixed, digest, bytes, delivery, materials| {
+        if fixed.proposal_binding != selection.request.proposal_binding
+            || previous.is_some_and(|prior| prior.request.delivery != *delivery
+                || prior.export_scope.proposal != *fixed)
+        { return Err(Error::Authentication); }
+        let pair = PairScope { account_id: selection.account_id.clone(), participant_id: selection.participant_id.clone(), agreement_id: fixed.agreement_id.clone(), manifest_digest: fixed.manifest_digest.clone(), history_read: true, authorization_export: false, preconstruction_export: true };
+        terminal.confirm("Pair this installed original reviewer for original setup and independently approved closed V3 receive/view. No financial execution is enabled.")?;
+        let provider = InstalledSignerProvider::load_for_original_fork(verifier).map_err(|_| Error::Permission)?;
+        let client = OriginalHistoryClient::pair(provider, &selection.signer_socket, "wholepact-original-delivery-v3", pair).map_err(|_| Error::Permission)?;
+        client.prepare_closed_recipient_v3(selection.request.clone(), fixed.clone(), digest.into(), bytes, delivery.clone(), materials.to_vec()).map_err(|_| Error::Permission)
+    })?;
+    let pending = verified.request_admission_retained_v3().map_err(|_| Error::Receipt("No completed V3 admission status is available; preserve the original operation and use read-only history reconciliation".into()))?;
+    Ok(RetainedCoordinatedAdmissionV1 {
+        host,
+        workspace,
+        pending,
+        exported,
+        admitted: None,
+        verification_started: false,
+    })
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct OriginalHistorySelectionV3 {

@@ -13,6 +13,9 @@ const COLUMNS: &[&str] = &["operation_id", "authorization_id", "original_admissi
 mod intent;
 #[path = "financial_coordinated_continue_v1.rs"]
 mod coordinated_continue;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+#[path = "financial_coordinated_public_pin_v2.rs"]
+mod coordinated_public_pin;
 pub(crate) use coordinated_continue::{CoordinatedContinueReviewDataV1, CoordinatedContinueSignerRoleV1, PreparedCoordinatedFinancialContinuationV1};
 #[cfg(feature = "coordinated-signer-continue")]
 pub(crate) use coordinated_continue::{PresentedCoordinatedFinancialContinuationV1, CoordinatedContinuationCommitFailureV1};
@@ -43,6 +46,31 @@ pub(crate) struct FinancialSourceBindingV1 {
     continuation_digest: Option<String>,
     revision: FinancialJournalRevisionV1,
 }
+/// Stable inert originals only: no connection binding, source registration,
+/// revision tuple, random source identity, continuation or authority owner.
+#[cfg(feature = "coordinated-signer-continue")]
+pub(crate) struct OriginalFinancialJournalSelectionV1 {
+    identity: wholepact_storage_security::DatabaseFileIdentity,
+    genesis: AccountUseGenesis,
+    original_rows_digest: String,
+}
+#[cfg(feature = "coordinated-signer-continue")]
+impl OriginalFinancialJournalSelectionV1 {
+    pub(crate) fn digest(&self) -> Result<String> {
+        digest("wholepact:original-financial-reentry-journal:v1", &(
+            hex::encode(self.identity.origin_commitment()), &self.genesis, &self.original_rows_digest,
+        ))
+    }
+    /// New source authentication/currentness is the caller's prerequisite.
+    /// Do not compare connection-local revisions or random source identities.
+    pub(crate) fn require_reopened(&self, reopened: &FinancialSourceBindingV1) -> Result<()> {
+        if reopened.continuation_digest.is_some()
+            || self.identity != reopened.identity || self.genesis != reopened.genesis
+            || self.original_rows_digest != reopened.original_rows_digest
+        { return Err(JournalError::Conflict); }
+        Ok(())
+    }
+}
 #[derive(PartialEq, Eq)]
 struct FinancialJournalRevisionV1 { data_version: i64, total_changes: i64, schema_version: i64, user_version: i64 }
 fn revision(c: &Connection) -> Result<FinancialJournalRevisionV1> {
@@ -56,6 +84,16 @@ fn revision(c: &Connection) -> Result<FinancialJournalRevisionV1> {
 impl FinancialSourceBindingV1 {
     pub(crate) fn identity_digest(&self) -> &str { &self.source_digest }
     pub(crate) fn genesis(&self) -> &AccountUseGenesis { &self.genesis }
+    /// Stable selection evidence only. A fresh source still requires its own
+    /// full original-file audit and genuine source-entry permission.
+    #[cfg(feature = "coordinated-signer-continue")]
+    pub(crate) fn original_reentry_selection_v1(&self) -> Result<OriginalFinancialJournalSelectionV1> {
+        if self.continuation_digest.is_some() { return Err(JournalError::RecoveryRequired); }
+        Ok(OriginalFinancialJournalSelectionV1 {
+            identity: self.identity.clone(), genesis: self.genesis.clone(),
+            original_rows_digest: self.original_rows_digest.clone(),
+        })
+    }
     fn require_pin(&self, c: &Connection) -> Result<()> {
         if self.revision != revision(c)? { return Err(JournalError::Conflict); }
         if let Some(expected) = &self.continuation_digest {

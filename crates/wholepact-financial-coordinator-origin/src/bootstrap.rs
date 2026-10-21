@@ -15,8 +15,14 @@ const ALL_ROOT_CHILDREN: u16 = (1 << ROOT_CHILDREN) - 1;
 const BOOTSTRAP_BUDGET: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy)]
-pub(super) struct PhaseDeadlinesV1 { startup: Instant, pub(super) session: Instant }
+pub(super) struct PhaseDeadlinesV1 {
+    startup: Instant, pub(super) session: Instant,
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    workflow: crate::financial_workflow_clock::FullWorkflowClocksV1,
+}
 impl PhaseDeadlinesV1 {
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    pub(super) fn workflow(self) -> crate::financial_workflow_clock::FullWorkflowClocksV1 { self.workflow }
     #[cfg(feature = "coordinated-signer-continue")]
     pub(super) fn epoch(self) -> Instant { self.startup - BOOTSTRAP_BUDGET }
     fn stop(self) -> Instant {
@@ -43,15 +49,29 @@ pub enum BootstrappedRoleV1 {
 }
 
 pub struct CoordinatorOriginV1 {
+    // Publish shared restriction before any potentially blocking tree Drop.
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    host_restriction: crate::host_restriction::CoordinatorHostRestrictionV1,
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    host_terminal: crate::CoordinatorHostTerminalEndpointV1,
     tree: InertTreeV1,
     clocks: PhaseDeadlinesV1,
     #[cfg(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append", feature = "coordinated-signer-continue"))]
     display: crate::desktop_launch::DesktopLaunchV1,
 }
 impl CoordinatorOriginV1 {
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    pub fn into_financial_workflow(self) -> Result<(crate::CoordinatorFinancialNativeV1, crate::CoordinatorFinancialEndpointV1)> {
+        require_time(self.clocks.session)?;
+        self.tree.check_alive()?;
+        self.display.restore_in_coordinator()?;
+        crate::financial_workflow_origin::split_coordinator(
+            self.tree, self.clocks, self.host_restriction, self.host_terminal,
+        )
+    }
     /// Separate purpose-specific conversion. No existing W-positive driver is
     /// redirected, and no binary profile activates this typechecked-only seam.
-    #[cfg(feature = "coordinated-signer-continue")]
+    #[cfg(all(feature = "coordinated-signer-continue", not(feature = "coordinated-financial-workflow-v1")))]
     pub fn into_signer_continue(self) -> Result<(crate::CoordinatorSignerContinueNativeV1, crate::CoordinatorSignerContinueEndpointV1)> {
         require_time(self.clocks.session)?;
         self.tree.check_alive()?;
@@ -66,8 +86,12 @@ impl CoordinatorOriginV1 {
         crate::delivery_origin::split_coordinator(self.tree, self.clocks.session)
     }
 
-    #[cfg(not(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append", feature = "coordinated-signer-continue")))]
-    pub fn finish_inert(self) -> Result<()> { self.tree.stop_and_reap(self.clocks.startup) }
+    #[cfg(any(feature = "coordinated-financial-workflow-v1", not(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append", feature = "coordinated-signer-continue"))))]
+    pub fn finish_inert(self) -> Result<()> {
+        #[cfg(feature = "coordinated-financial-workflow-v1")]
+        self.host_restriction.revoke();
+        self.tree.stop_and_reap(self.clocks.startup)
+    }
 
     /// Consume C's opaque original coordinate record before the caller starts
     /// its sole driver or GUI. No coordinate data or imported display FD escapes.
@@ -88,12 +112,42 @@ pub struct HostOriginV1 {
     verifiers_issued: bool,
     #[cfg(feature = "common-image-fork-provider")]
     verified_image: Option<crate::image::VerifiedCommonImageIdentity>,
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    host_terminal: Option<crate::HostControllingTerminalV1>,
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    host_restriction: Option<crate::HostOriginalRestrictionV1>,
     origin: ForkOriginV1,
     signers: [Option<DirectChild>; 2],
     clocks: PhaseDeadlinesV1,
 }
 impl HostOriginV1 {
-    #[cfg(feature = "coordinated-signer-continue")]
+    /// One actual H-only handoff. These owners add restrictions to real TTY
+    /// consent; neither is a native decision or a source/effect capability.
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    pub fn take_host_terminal_custody(&mut self) -> Result<(crate::HostControllingTerminalV1, crate::HostOriginalRestrictionV1)> {
+        // Consume both slots before fallible checks. No replacement or retry.
+        let terminal = self.host_terminal.take();
+        let restriction = self.host_restriction.take();
+        self.continue_check()?;
+        let terminal = terminal.ok_or_else(|| rejected("original Host terminal already consumed"))?;
+        let restriction = restriction.ok_or_else(|| rejected("original Host restriction already consumed"))?;
+        terminal.check_current()?;
+        restriction.check_current()?;
+        Ok((terminal, restriction))
+    }
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    pub fn into_financial_workflow_relay(self) -> Result<crate::HostFinancialWorkflowRelayV1> {
+        crate::HostFinancialWorkflowRelayV1::from_host(self)
+    }
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    pub(super) fn workflow_image(&self) -> Result<String> {
+        Ok(self.verified_image.as_ref().ok_or_else(|| rejected("original image identity missing"))?.measurement().to_owned())
+    }
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    pub(super) fn workflow_send_c(&self, packet: &crate::financial_workflow_channel::Packet) -> Result<()> { self.origin.workflow_send(packet) }
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    pub(super) fn workflow_receive_c(&self) -> Result<Option<crate::financial_workflow_channel::Packet>> { self.origin.workflow_receive() }
+    #[cfg(all(feature = "coordinated-signer-continue", not(feature = "coordinated-financial-workflow-v1")))]
     pub fn into_signer_financial_relay(self) -> Result<crate::HostSignerFinancialRelayV1> {
         crate::signer_continue_origin::HostSignerFinancialRelayV1::from_host(self)
     }
@@ -125,7 +179,10 @@ impl HostOriginV1 {
         crate::fork_signer::claim_pair(&mut self.verifiers_issued)?;
         require_time(self.clocks.session)?;
         self.origin.check_parent_alive()?;
-        let image = self.verified_image.take().ok_or_else(|| rejected("verified common image missing"))?;
+        // Immutable verified image facts are not issuance authority. Retain them
+        // for the later same-custody workflow relay; claim_pair above remains
+        // the sole one-shot gate and is consumed before any fallible work.
+        let image = self.verified_image.as_ref().cloned().ok_or_else(|| rejected("verified common image missing"))?;
         let custody = crate::fork_signer::HostVerifierCustody::new();
         let first = crate::OriginalForkSignerVerifier::retain(
             self.signers[0].as_ref().ok_or_else(|| rejected("original S1 missing"))?
@@ -151,7 +208,11 @@ pub struct SignerOriginV1 {
     continuation: crate::signer_continue_origin::SignerBirthContext,
 }
 impl SignerOriginV1 {
-    #[cfg(feature = "coordinated-signer-continue")]
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    pub fn into_financial_workflow(self) -> Result<crate::SignerFinancialWorkflowOriginV1> {
+        crate::SignerFinancialWorkflowOriginV1::from_signer(self.leaf, self.continuation)
+    }
+    #[cfg(all(feature = "coordinated-signer-continue", not(feature = "coordinated-financial-workflow-v1")))]
     pub fn into_financial_continue(self) -> Result<crate::SignerFinancialOriginV1> {
         crate::signer_continue_origin::SignerFinancialOriginV1::from_signer(self.leaf, self.continuation)
     }
@@ -233,6 +294,8 @@ pub(super) struct InertTreeV1 {
     _image: PinnedCommonImageV1,
 }
 impl InertTreeV1 {
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    pub(super) fn workflow_image(&self) -> String { self._image.retain_verified_identity().measurement().to_owned() }
     #[cfg(feature = "coordinated-signer-continue")]
     pub(super) fn continue_host(&self) -> Result<&DirectChild> {
         self.children[0].as_ref().filter(|c| c.role() == Role::Host).ok_or_else(|| rejected("original Host missing"))
@@ -304,13 +367,27 @@ pub fn bootstrap_common_image_v1() -> Result<BootstrappedRoleV1> {
     process::require_single_thread()?;
     let phase_start = Instant::now();
     let deadline = phase_start + BOOTSTRAP_BUDGET;
+    #[cfg(not(feature = "coordinated-financial-workflow-v1"))]
     let clocks = PhaseDeadlinesV1 {
         startup: deadline,
         session: if cfg!(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append", feature = "coordinated-signer-continue")) { phase_start + Duration::from_secs(300) } else { deadline },
     };
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    let clocks = {
+        // Sole from-outset selection. No packet, phase change or role conversion
+        // can choose a new epoch, upgrade a narrow profile or renew supervision.
+        let workflow = crate::financial_workflow_clock::FullWorkflowClocksV1::from_initial_epoch(phase_start)?;
+        PhaseDeadlinesV1 { startup: workflow.startup(), session: workflow.supervision(), workflow }
+    };
     #[cfg(wholepact_bootstrap_ci)]
     crate::ci::deadline(deadline)?;
     let mut children: [Option<DirectChild>; ROOT_CHILDREN] = std::array::from_fn(|_| None);
+    // Declared AFTER children so C's guard publishes R before their reapers can
+    // block on any early return. Inherited S/W drops only close/unmap copies.
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    let host_terminal = crate::host_terminal::CreatedHostTerminalV1::create(clocks)?;
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    let host_restriction = crate::host_restriction::CreatedHostRestrictionV1::create(clocks)?;
     match process::fork_edge(Role::Coordinator, Role::Host)? {
         Forked::Parent(host) => children[0] = Some(host),
         Forked::Child(origin) => {
@@ -323,6 +400,10 @@ pub fn bootstrap_common_image_v1() -> Result<BootstrappedRoleV1> {
             return child_branch(prepare_host(origin, clocks,
                 #[cfg(feature = "common-image-fork-provider")]
                 verified_image,
+                #[cfg(feature = "coordinated-financial-workflow-v1")]
+                host_terminal,
+                #[cfg(feature = "coordinated-financial-workflow-v1")]
+                host_restriction,
             ));
         }
     }
@@ -334,6 +415,10 @@ pub fn bootstrap_common_image_v1() -> Result<BootstrappedRoleV1> {
                 // Includes H and EVERY earlier Witness channel/pidfd. Copied
                 // DirectChild drops disarm reapers before closing their FDs.
                 drop(children);
+                #[cfg(feature = "coordinated-financial-workflow-v1")]
+                drop(host_terminal);
+                #[cfg(feature = "coordinated-financial-workflow-v1")]
+                drop(host_restriction);
                 drop(image);
                 #[cfg(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append", feature = "coordinated-signer-continue"))]
                 drop(display);
@@ -344,6 +429,12 @@ pub fn bootstrap_common_image_v1() -> Result<BootstrappedRoleV1> {
             }
         }
     }
+    // All fixed forks are over. Prune C's slave before barrier observation and
+    // retain the private revoke-on-drop writer across all remaining failures.
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    let host_restriction = host_restriction.into_coordinator(children[0].as_ref().ok_or_else(|| rejected("fixed Host missing"))?)?;
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    let host_terminal = host_terminal.into_coordinator(children[0].as_ref().ok_or_else(|| rejected("fixed Host missing"))?)?;
     #[cfg(wholepact_bootstrap_ci)]
     {
         let mut fds = vec![0, 1, 2, image.ci_fd()];
@@ -369,6 +460,10 @@ pub fn bootstrap_common_image_v1() -> Result<BootstrappedRoleV1> {
     barrier.finish_inert_release()?;
     let tree = InertTreeV1 { children, _image: image };
     Ok(BootstrappedRoleV1::Coordinator(CoordinatorOriginV1 {
+        #[cfg(feature = "coordinated-financial-workflow-v1")]
+        host_restriction,
+        #[cfg(feature = "coordinated-financial-workflow-v1")]
+        host_terminal,
         tree, clocks,
         #[cfg(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append", feature = "coordinated-signer-continue"))]
         display,
@@ -378,6 +473,10 @@ pub fn bootstrap_common_image_v1() -> Result<BootstrappedRoleV1> {
 fn prepare_host(origin: ForkOriginV1, clocks: PhaseDeadlinesV1,
     #[cfg(feature = "common-image-fork-provider")]
     verified_image: crate::image::VerifiedCommonImageIdentity,
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    host_terminal: crate::host_terminal::CreatedHostTerminalV1,
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    host_restriction: crate::host_restriction::CreatedHostRestrictionV1,
 ) -> Result<BootstrappedRoleV1> {
     let deadline = clocks.startup;
     #[cfg(wholepact_bootstrap_ci)]
@@ -398,6 +497,10 @@ fn prepare_host(origin: ForkOriginV1, clocks: PhaseDeadlinesV1,
                     image: verified_image.clone(),
                 };
                 drop(signers);
+                #[cfg(feature = "coordinated-financial-workflow-v1")]
+                drop(host_terminal);
+                #[cfg(feature = "coordinated-financial-workflow-v1")]
+                drop(host_restriction);
                 drop(origin);
                 #[cfg(feature = "common-image-fork-provider")]
                 drop(verified_image);
@@ -408,6 +511,12 @@ fn prepare_host(origin: ForkOriginV1, clocks: PhaseDeadlinesV1,
             }
         }
     }
+    // H alone establishes its new controlling terminal AFTER both S forks.
+    // Neither S can retain this slave/master or the shared restriction mapping.
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    let host_terminal = host_terminal.into_host_after_signer_forks(&origin, &signers)?;
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    let host_restriction = host_restriction.into_host(&origin)?;
     for signer in signers.iter().flatten() { signer.receive(Message::Prepared, deadline)?; }
     for signer in signers.iter().flatten() { signer.check_alive()?; }
     #[cfg(wholepact_bootstrap_ci)]
@@ -433,6 +542,10 @@ fn prepare_host(origin: ForkOriginV1, clocks: PhaseDeadlinesV1,
         verifiers_issued: false,
         #[cfg(feature = "common-image-fork-provider")]
         verified_image: Some(verified_image),
+        #[cfg(feature = "coordinated-financial-workflow-v1")]
+        host_terminal: Some(host_terminal),
+        #[cfg(feature = "coordinated-financial-workflow-v1")]
+        host_restriction: Some(host_restriction),
         origin, signers, clocks,
     }))
 }

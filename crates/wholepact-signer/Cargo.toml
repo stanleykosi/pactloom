@@ -6,6 +6,8 @@ license.workspace = true
 description = "Isolated fail-closed signer companion and opt-in synthetic process qualification"
 
 [features]
+# Private original Entry/initial Read consumers; no runtime command is enabled.
+coordinated-financial-workflow-v1 = ["coordinated-signer-continue", "wholepact-financial-coordinator-origin/coordinated-financial-workflow-v1"]
 # Private consuming Continue boundary; no runtime command or source issuer is enabled.
 coordinated-signer-continue = ["durable-proposal", "dep:wholepact-financial-coordinator-origin", "wholepact-financial-coordinator-origin/coordinated-signer-continue"]
 # Ephemeral real-controller joined harness only; absent from production/default builds.

@@ -4,6 +4,11 @@ use super::*;
 use crate::consent_journal::PreparedDeliveryJournalRevisionV3;
 use crate::native_ui::PreparedReceiveAndViewAuthorityV3;
 use std::{collections::BTreeMap, os::unix::fs::MetadataExt, sync::Mutex};
+#[cfg(feature = "coordinated-signer-continue")]
+#[path = "coordinated_financial_selection_v1.rs"]
+mod coordinated_financial_selection_v1;
+#[cfg(feature = "coordinated-signer-continue")]
+pub(crate) use coordinated_financial_selection_v1::OriginalFinancialReentrySelectionV1;
 
 #[derive(PartialEq, Eq)]
 struct FileRevisionV3 {

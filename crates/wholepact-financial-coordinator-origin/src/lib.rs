@@ -7,6 +7,8 @@
 //! descriptor, claimed identity, callback or caller-provided pin.
 #![deny(unsafe_op_in_unsafe_fn)]
 #![cfg(target_os = "linux")]
+#[cfg(all(feature = "coordinated-financial-workflow-v1", not(target_arch = "x86_64")))]
+compile_error!("The full workflow shared-atomic/PTY profile is selected for Linux x86_64 only");
 #[cfg(all(wholepact_bootstrap_ci, any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append", feature = "coordinated-signer-continue")))]
 compile_error!("Bootstrap-only CI instrumentation cannot select the source-opening UI profile");
 #[cfg(all(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append"))]
@@ -38,6 +40,40 @@ pub use signer_continue_origin::{CoordinatorSignerContinueNativeV1, CoordinatorS
     CoordinatorSignerContinueEventV1, SignerContinueReviewTicketV1, SignerContinueReadyTicketV1,
     SignerContinueArmOutboundV1, SignerContinueFinalOutboundV1, HostSignerFinancialRelayV1,
     SignerFinancialOriginV1, SignerContinueRequestV1, SignerContinueArmV1, SignerContinueFinalV1};
+#[cfg(feature = "source-entry-envelope")]
+mod source_entry_envelope;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+mod financial_workflow_clock;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+mod financial_workflow_channel;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+mod financial_workflow_source;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+mod financial_workflow_origin;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+mod financial_workflow_continue;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+mod host_restriction;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+mod host_terminal;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub use host_restriction::HostOriginalRestrictionV1;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub use host_terminal::{CoordinatorHostTerminalEndpointV1, HostControllingTerminalV1};
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub use financial_workflow_continue::{SignerContinuationSavedV1, FinancialCancelProgressV1, FinancialContinueReviewTicketV1,
+    FinancialContinueReadyTicketV1, FinancialContinueArmOutboundV1, FinancialContinueFinalOutboundV1};
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub use financial_workflow_channel::{FinancialActorContextV1, SignerSourceEntryFactsV1,
+    SignerSourceEntryPresentationV1, SignerFinancialReadFactsV1, SignerFinancialReadPresentationV1, FinancialWorkflowStageV1};
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub use financial_workflow_source::{SignerSourceEntryOfferV1, SignerSourceEntryOutboundV1,
+    SignerSourceEntryFinalV1, SignerSourceEntryInputV1, SignerOriginalCustodyLifetimeV1,
+    SignerFinancialReadTicketV1, SignerFinancialReadOutboundV1, SignerFinancialReadFinalV1};
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub use financial_workflow_origin::{CoordinatorFinancialNativeV1, CoordinatorFinancialEndpointV1,
+    CoordinatorFinancialEventV1, HostFinancialWorkflowRelayV1, SignerFinancialWorkflowOriginV1,
+    SignerFinancialWorkflowRequestV1};
 mod bootstrap;
 mod channel;
 mod image;

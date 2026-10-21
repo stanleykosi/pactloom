@@ -273,7 +273,105 @@ impl PreparedCoordinatedFinancialContinuationV1 {
     }
 }
 
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+fn check_preparation_read_v2(
+    read: &wholepact_financial_coordinator_origin::SignerFinancialReadFinalV1,
+    source: &FinancialSourceBindingV1,
+    terms: &FinancialContinuationTermsV1,
+    original_host: &crate::native_peer::PeerProcess,
+) -> Result<()> {
+    read.check_current().map_err(|_| JournalError::Permission)?;
+    let facts = &read.presentation().facts;
+    if facts.source_identity_digest != source.identity_digest()
+        || facts.terms_digest != terms.intent_terms_digest().map_err(|_| JournalError::InvalidBinding)?
+        || facts.original_host_process_instance != original_host.instance()
+        || facts.source_expires_at_ms != terms.valid_until_ms
+    {
+        return Err(JournalError::Permission);
+    }
+    read.check_current().map_err(|_| JournalError::Permission)
+}
+
 impl SignerConsentJournal {
+    /// Read-only original enrollment identity, not a consent session or grant.
+    /// The actual source pin and complete original19 audit bracket this lookup;
+    /// no connection, fence or transaction guard escapes to a review IPC wait.
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    pub(crate) fn coordinated_continue_principal_v1(
+        &self,
+        source: &FinancialSourceBindingV1,
+        terms: &FinancialContinuationTermsV1,
+        original_host: &crate::native_peer::PeerProcess,
+        read: &wholepact_financial_coordinator_origin::SignerFinancialReadFinalV1,
+    ) -> Result<String> {
+        let check = || check_preparation_read_v2(read, source, terms, original_host);
+        check()?;
+        original_host.check_alive().map_err(|_| JournalError::Permission)?;
+        terms.require_live(now_ms()?).map_err(|_| JournalError::Expired)?;
+        let principal = {
+            let _fence = self.authority_fence.read().map_err(|_| JournalError::Permission)?;
+            check()?;
+            let mut c = self.connection.lock().map_err(|_| JournalError::Database)?;
+            check()?;
+            source.require(self, &c)?;
+            check()?;
+            source.require_pin(&c)?;
+            check()?;
+            if source.continuation_digest.is_some() {
+                return Err(JournalError::InvalidBinding);
+            }
+            let tx = c.transaction_with_behavior(TransactionBehavior::Deferred)?;
+            check()?;
+            durable_born_entry_v1::validate_delivery_v3(&tx, &source.genesis, self.capacity_limits())?;
+            check()?;
+            if original_rows_digest(&tx)? != source.original_rows_digest {
+                return Err(JournalError::Conflict);
+            }
+            check()?;
+            let original = authority::durable_delivery_admission_intent_v3::read(
+                &tx, &terms.scope.authorization.authorization_id,
+            )?.ok_or(JournalError::NotFound)?;
+            check()?;
+            let OwnerControl::AdmitDurablePaymentWithDeliveryV2 { record } = &original.request().control else {
+                return Err(JournalError::InvalidBinding);
+            };
+            if record.scope != terms.scope
+                || original.request().operation_id != terms.original_delivery_operation_id
+                || original_delivery_request_digest_v1(original.request()).map_err(|_| JournalError::InvalidBinding)? != terms.original_delivery_request_digest
+                || original.history_digest()? != terms.original_local_intent_digest
+                || original.recipient_intent_digest()? != terms.original_recipient_intent_digest
+                || original.enrollment_ref() != terms.original_recipient_enrollment_ref
+                || original.manifest_ref() != terms.original_recipient_manifest_ref
+                || original.disclosure() != &terms.scope.witness
+                || original.recipient_intent().authorized_host_process_instance != original_host.instance()
+            {
+                return Err(JournalError::InvalidBinding);
+            }
+            check()?;
+            let enrollment = read_enrollment(&tx, original.enrollment_ref())?.ok_or(JournalError::NotFound)?;
+            check()?;
+            let principal = enrollment.principal_id().to_owned();
+            id(&principal)?;
+            source.require(self, &tx)?;
+            check()?;
+            source.require_pin(&tx)?;
+            check()?;
+            terms.require_live(now_ms()?).map_err(|_| JournalError::Expired)?;
+            original_host.check_alive().map_err(|_| JournalError::Permission)?;
+            tx.commit()?;
+            check()?;
+            source.require(self, &c)?;
+            check()?;
+            source.require_pin(&c)?;
+            check()?;
+            principal
+        };
+        terms.require_live(now_ms()?).map_err(|_| JournalError::Expired)?;
+        original_host.check_alive().map_err(|_| JournalError::Permission)?;
+        check()?;
+        Ok(principal)
+    }
+
     /// Read-only original-row preparation. All guards are local to this call;
     /// none is returned in the inert ticket or retained for a coordinator wait.
     pub(crate) fn prepare_coordinated_financial_continuation_v1(
@@ -287,6 +385,61 @@ impl SignerConsentJournal {
         original_deadline: Instant,
         retained_review_deadline: Instant,
     ) -> Result<PreparedCoordinatedFinancialContinuationV1> {
+        self.prepare_coordinated_financial_continuation_inner_v1(
+            source, terms, history, original_host, review, original_ceiling_ms, original_deadline, retained_review_deadline,
+            #[cfg(feature = "coordinated-financial-workflow-v1")]
+            None,
+        )
+    }
+
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    pub(crate) fn prepare_coordinated_financial_continuation_from_read_v2(
+        &self,
+        source: &FinancialSourceBindingV1,
+        terms: FinancialContinuationTermsV1,
+        history: ReconciledAuthorityHistory,
+        original_host: crate::native_peer::PeerProcess,
+        review: CoordinatedContinueReviewDataV1,
+        original_ceiling_ms: u64,
+        original_deadline: Instant,
+        retained_review_deadline: Instant,
+        read: &wholepact_financial_coordinator_origin::SignerFinancialReadFinalV1,
+    ) -> Result<PreparedCoordinatedFinancialContinuationV1> {
+        self.prepare_coordinated_financial_continuation_inner_v1(
+            source, terms, history, original_host, review, original_ceiling_ms, original_deadline, retained_review_deadline, Some(read),
+        )
+    }
+
+    fn prepare_coordinated_financial_continuation_inner_v1(
+        &self,
+        source: &FinancialSourceBindingV1,
+        terms: FinancialContinuationTermsV1,
+        history: ReconciledAuthorityHistory,
+        original_host: crate::native_peer::PeerProcess,
+        review: CoordinatedContinueReviewDataV1,
+        original_ceiling_ms: u64,
+        original_deadline: Instant,
+        retained_review_deadline: Instant,
+        #[cfg(feature = "coordinated-financial-workflow-v1")]
+        read: Option<&wholepact_financial_coordinator_origin::SignerFinancialReadFinalV1>,
+    ) -> Result<PreparedCoordinatedFinancialContinuationV1> {
+        macro_rules! check_read {
+            () => {
+                #[cfg(feature = "coordinated-financial-workflow-v1")]
+                if let Some(read) = read {
+                    check_preparation_read_v2(read, source, &terms, &original_host)?;
+                }
+            };
+        }
+        macro_rules! check_read_current {
+            () => {
+                #[cfg(feature = "coordinated-financial-workflow-v1")]
+                if let Some(read) = read {
+                    read.check_current().map_err(|_| JournalError::Permission)?;
+                }
+            };
+        }
+        check_read!();
         original_host
             .check_alive()
             .map_err(|_| JournalError::Permission)?;
@@ -320,23 +473,31 @@ impl SignerConsentJournal {
                 .authority_fence
                 .read()
                 .map_err(|_| JournalError::Permission)?;
+            check_read!();
             let mut c = self.connection.lock().map_err(|_| JournalError::Database)?;
+            check_read!();
             source.require(self, &c)?;
+            check_read!();
             source.require_pin(&c)?;
+            check_read!();
             let tx = c.transaction_with_behavior(TransactionBehavior::Deferred)?;
+            check_read!();
             durable_born_entry_v1::validate_delivery_v3(
                 &tx,
                 &source.genesis,
                 self.capacity_limits(),
             )?;
+            check_read!();
             if original_rows_digest(&tx)? != source.original_rows_digest {
                 return Err(JournalError::Conflict);
             }
+            check_read!();
             let original = authority::durable_delivery_admission_intent_v3::read(
                 &tx,
                 &terms.scope.authorization.authorization_id,
             )?
             .ok_or(JournalError::NotFound)?;
+            check_read!();
             let OwnerControl::AdmitDurablePaymentWithDeliveryV2 { record } =
                 &original.request().control
             else {
@@ -357,8 +518,10 @@ impl SignerConsentJournal {
             {
                 return Err(JournalError::InvalidBinding);
             }
+            check_read!();
             let enrollment =
                 read_enrollment(&tx, original.enrollment_ref())?.ok_or(JournalError::NotFound)?;
+            check_read!();
             if enrollment.principal_id() != review.signer_principal_id {
                 return Err(JournalError::Permission);
             }
@@ -377,6 +540,7 @@ impl SignerConsentJournal {
                     &provenance,
                 ),
             )?;
+            check_read!();
             let request = prepare_financial_continuation_request_v1(terms, seed, &history)
                 .map_err(invalid)?;
             let intent = CoordinatedFinancialContinuationIntentV2 {
@@ -404,10 +568,15 @@ impl SignerConsentJournal {
                     original_ceiling_ms,
                 ),
             )?;
+            check_read_current!();
             source.require(self, &tx)?;
+            check_read_current!();
             source.require_pin(&tx)?;
+            check_read_current!();
             tx.commit()?;
+            check_read_current!();
             source.require_pin(&c)?;
+            check_read_current!();
             PreparedCoordinatedFinancialContinuationV1 {
                 journal: self.binding(),
                 source_identity: source.source_digest.clone(),
@@ -424,6 +593,7 @@ impl SignerConsentJournal {
             }
         };
         prepared.check_retained_preparation()?;
+        check_read_current!();
         Ok(prepared)
     }
 }

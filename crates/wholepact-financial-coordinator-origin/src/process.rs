@@ -85,6 +85,14 @@ pub(super) struct ForkOriginV1 {
     channel: Channel,
 }
 impl ForkOriginV1 {
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    pub(super) fn workflow_send(&self, packet: &crate::financial_workflow_channel::Packet) -> Result<()> {
+        crate::financial_workflow_channel::send(self.channel.review_fd(), self.local_role, &self.parent, packet)
+    }
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    pub(super) fn workflow_receive(&self) -> Result<Option<crate::financial_workflow_channel::Packet>> {
+        crate::financial_workflow_channel::try_receive(self.channel.review_fd(), self.local_role, &self.parent)
+    }
     #[cfg(feature = "coordinated-signer-continue")]
     pub(super) fn continue_observer(&self) -> Result<crate::signer_continue_state::CheckedPeer> {
         crate::signer_continue_state::CheckedPeer::retain(&self.parent, self.channel.review_fd())
@@ -176,6 +184,16 @@ pub(super) struct DirectChild {
     terminal_observed: bool,
 }
 impl DirectChild {
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    pub(super) fn workflow_send(&self, packet: &crate::financial_workflow_channel::Packet) -> Result<()> {
+        self.require_owner()?;
+        crate::financial_workflow_channel::send(self.channel.review_fd(), self.local_role, &self.peer, packet)
+    }
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    pub(super) fn workflow_receive(&self) -> Result<Option<crate::financial_workflow_channel::Packet>> {
+        self.require_owner()?;
+        crate::financial_workflow_channel::try_receive(self.channel.review_fd(), self.local_role, &self.peer)
+    }
     #[cfg(feature = "coordinated-signer-continue")]
     pub(super) fn continue_observer(&self) -> Result<crate::signer_continue_state::CheckedPeer> {
         self.require_owner()?;

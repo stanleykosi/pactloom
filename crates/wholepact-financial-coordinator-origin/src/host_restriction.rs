@@ -1,0 +1,189 @@
+//! One original C/H monotone restriction cell, not a native approval issuer.
+//! The anonymous shared mapping is RW in the trusted whole-image C and H. H's
+//! sealed Rust API exposes loads only; this is NOT OS isolation from hostile H.
+//! Bootstrap alone creates/prunes it. No pointer, FD, path, reset or importer
+//! escapes, and no successful observation may be cached as an effect permit.
+use crate::{
+    bootstrap::PhaseDeadlinesV1,
+    channel::require_time,
+    process::{DirectChild, ForkOriginV1, Role},
+    rejected,
+    signer_continue_state::CheckedPeer,
+    Result,
+};
+use std::{
+    ptr::NonNull,
+    sync::atomic::{AtomicU32, Ordering},
+    time::Instant,
+};
+
+const CURRENT: u32 = 0;
+const REVOKED: u32 = 1;
+
+/// Each process owns its inherited virtual mapping, not another process's
+/// mapping or child reaper. Anonymous MAP_SHARED keeps the atomic cell common.
+struct SharedCell {
+    word: NonNull<AtomicU32>,
+}
+// SAFETY: after the single prefork initialization, every access to the aligned
+// live cell is atomic. An owner is never unmapped while borrowed, and Send/Sync
+// do not expose its pointer or a non-atomic reference. Each fork unmaps only its
+// own address space. No process shares a Rust allocator/refcount allocation.
+unsafe impl Send for SharedCell {}
+unsafe impl Sync for SharedCell {}
+impl SharedCell {
+    fn create() -> Result<Self> {
+        let length = std::mem::size_of::<AtomicU32>();
+        let raw = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(), length,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED | libc::MAP_ANONYMOUS, -1, 0,
+            )
+        };
+        if raw == libc::MAP_FAILED {
+            return Err(std::io::Error::last_os_error());
+        }
+        let Some(word) = NonNull::new(raw.cast::<AtomicU32>()) else {
+            unsafe { libc::munmap(raw, length); }
+            return Err(rejected("shared Host restriction address unavailable"));
+        };
+        if word.as_ptr().align_offset(std::mem::align_of::<AtomicU32>()) != 0 {
+            unsafe { libc::munmap(raw, length); }
+            return Err(rejected("shared Host restriction alignment unavailable"));
+        }
+        // SAFETY: fresh writable, sufficiently sized/aligned mapping, before
+        // any fork or other reference exists. Initialization is exactly once.
+        unsafe { word.as_ptr().write(AtomicU32::new(CURRENT)); }
+        Ok(Self { word })
+    }
+    fn sample(&self) -> u32 {
+        // SAFETY: self owns this live RW mapping for the full shared borrow.
+        unsafe { self.word.as_ref() }.load(Ordering::SeqCst)
+    }
+    fn revoke(&self) {
+        // The sole value ever stored after birth is R. Never clear/reset it.
+        unsafe { self.word.as_ref() }.store(REVOKED, Ordering::SeqCst);
+    }
+}
+impl Drop for SharedCell {
+    fn drop(&mut self) {
+        // No owned FD, external named object or other actor's mapping is closed.
+        unsafe {
+            libc::munmap(self.word.as_ptr().cast(), std::mem::size_of::<AtomicU32>());
+        }
+    }
+}
+
+/// Created before the fixed forks. Every C failure/drop from this instant
+/// publishes R, including failures before a writer enters the full C Core.
+/// Inherited H/S/W copies only unmap on drop; they never gain a write API.
+pub(super) struct CreatedHostRestrictionV1 {
+    cell: Option<SharedCell>,
+    creator_pid: libc::pid_t,
+    creator_uid: libc::uid_t,
+    clocks: PhaseDeadlinesV1,
+}
+impl CreatedHostRestrictionV1 {
+    pub(super) fn create(clocks: PhaseDeadlinesV1) -> Result<Self> {
+        crate::process::require_single_thread()?;
+        require_time(clocks.workflow().startup())?;
+        Ok(Self {
+            cell: Some(SharedCell::create()?),
+            creator_pid: unsafe { libc::getpid() },
+            creator_uid: unsafe { libc::geteuid() },
+            clocks,
+        })
+    }
+    pub(super) fn into_coordinator(
+        mut self,
+        host: &DirectChild,
+    ) -> Result<CoordinatorHostRestrictionV1> {
+        if unsafe { libc::getpid() } != self.creator_pid
+            || unsafe { libc::geteuid() } != self.creator_uid
+            || host.role() != Role::Host
+        {
+            return Err(rejected("shared restriction requires original C/H birth"));
+        }
+        require_time(self.clocks.workflow().startup())?;
+        host.check_alive()?;
+        Ok(CoordinatorHostRestrictionV1 {
+            cell: self.cell.take().ok_or_else(|| rejected("shared restriction consumed"))?,
+        })
+    }
+    pub(super) fn into_host(mut self, origin: &ForkOriginV1) -> Result<HostOriginalRestrictionV1> {
+        let coordinator = origin.retain_host_coordinator_lifetime()?;
+        let owner_pid = unsafe { libc::getpid() };
+        if coordinator.pid() != self.creator_pid
+            || coordinator.uid() != self.creator_uid
+            || unsafe { libc::geteuid() } != self.creator_uid
+            || owner_pid == self.creator_pid
+        {
+            return Err(rejected("shared restriction not inherited by original Host"));
+        }
+        require_time(self.clocks.workflow().startup())?;
+        let peer = origin.continue_observer()?;
+        let observer = HostOriginalRestrictionV1 {
+            cell: self.cell.take().ok_or_else(|| rejected("shared restriction consumed"))?,
+            peer,
+            owner_pid,
+            owner_uid: self.creator_uid,
+            deadline: self.clocks.session,
+        };
+        observer.check_current()?;
+        Ok(observer)
+    }
+}
+impl Drop for CreatedHostRestrictionV1 {
+    fn drop(&mut self) {
+        if unsafe { libc::getpid() } == self.creator_pid {
+            if let Some(cell) = &self.cell {
+                cell.revoke();
+            }
+        }
+    }
+}
+
+/// Only the genuine C branch obtains this private writer. Phases::revoke must
+/// call this BEFORE publishing its local R; Drop covers construction/errors.
+pub(super) struct CoordinatorHostRestrictionV1 {
+    cell: SharedCell,
+}
+impl CoordinatorHostRestrictionV1 {
+    pub(super) fn revoke(&self) { self.cell.revoke(); }
+}
+impl Drop for CoordinatorHostRestrictionV1 {
+    fn drop(&mut self) { self.revoke(); }
+}
+
+/// Sealed check-only custody from the actual original Host/C edge. It cannot
+/// approve a TTY challenge, read a source, construct a permit, or renew a clock.
+pub struct HostOriginalRestrictionV1 {
+    cell: SharedCell,
+    peer: CheckedPeer,
+    owner_pid: libc::pid_t,
+    owner_uid: libc::uid_t,
+    deadline: Instant,
+}
+impl HostOriginalRestrictionV1 {
+    pub fn deadline(&self) -> Instant { self.deadline }
+
+    /// Zero-wait observation only: no mutex, source/DB re-entry, packet wait or
+    /// caller callback. The FINAL SeqCst sample is the restriction linearization
+    /// point for ONE already TTY-authorized physical attempt. A-before-R may
+    /// finish or become uncertain; R-before-A denies. Never cache its success,
+    /// infer no effect from later refusal, or automatically retry an operation.
+    pub fn check_current(&self) -> Result<()> {
+        if unsafe { libc::getpid() } != self.owner_pid
+            || unsafe { libc::geteuid() } != self.owner_uid
+        {
+            return Err(rejected("shared Host restriction used outside original actor"));
+        }
+        self.peer.check()?;
+        require_time(self.deadline)?;
+        if self.cell.sample() != CURRENT {
+            return Err(rejected("original Coordinator restricted Host operation"));
+        }
+        Ok(())
+    }
+}

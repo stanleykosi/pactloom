@@ -3,6 +3,11 @@
 use super::*;
 #[path = "durable_delivery_role_state_v3.rs"]
 mod role_state;
+#[cfg(feature = "coordinated-signer-continue")]
+#[path = "coordinated_financial_handoff_v1.rs"]
+mod coordinated_financial_handoff_v1;
+#[cfg(feature = "coordinated-signer-continue")]
+pub(super) use coordinated_financial_handoff_v1::{DetachedFinancialRoleV1, PreparedFinancialRoleHandoffV1};
 use role_state::{ActiveV3, OutcomeV3, PreparedAdmissionV3, SetupV3};
 pub(crate) use role_state::VerifiedImportV3;
 pub(super) use role_state::DurableDeliveryRuntimeV3;

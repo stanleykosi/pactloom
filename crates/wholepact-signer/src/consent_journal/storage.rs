@@ -1,4 +1,7 @@
 use super::*;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+#[path = "coordinated_entry_open_v2.rs"]
+mod coordinated_entry_open_v2;
 #[cfg(all(
     feature = "durable-proposal",
     feature = "pending-birth-owner-signing",

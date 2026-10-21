@@ -130,6 +130,12 @@ impl PendingDurableDeliveryAdmissionV3 {
     /// against the same retained original operation. No old READ120/action is
     /// consulted or reconstructed. Every socket closes between status polls.
     pub fn read_original_status_v3(mut self)->Result<DurableDeliveryAdmissionStatusV3> {
+        self.read_original_status_retained_v3()
+    }
+    /// The identical separately approved read while keeping actual original
+    /// peer/provider custody on return, including uncertainty or refusal. This
+    /// neither resends admission nor recovers or renews any prior permission.
+    pub fn read_original_status_retained_v3(&mut self)->Result<DurableDeliveryAdmissionStatusV3> {
         let intent_digest=self.intent.digest()?;
         let authorization_id=self.intent.delivery.owners.iter().find(|owner|owner.account_id==self.intent.account_id && owner.participant_id==self.intent.participant_id).ok_or(BridgeError::Binding)?.original_authorization_id.clone();
         let wait=Instant::now()+Duration::from_secs(120);

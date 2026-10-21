@@ -8,6 +8,8 @@ description = "Explicit foreground non-signing protected Wholepact host"
 
 [features]
 default = []
+# Private source composition only; no command or common-image binary activation.
+coordinated-financial-workflow-v1 = ["durable-proposal", "dep:wholepact-financial-coordinator-origin", "wholepact-financial-coordinator-origin/coordinated-financial-workflow-v1", "wholepact-signer-origin/common-image-fork-provider"]
 # Explicit new-profile opt-in; default/legacy V3 activation is unchanged.
 durable-proposal = ["manual-admission", "wholepact-engine/durable-proposal", "wholepact-signer/durable-proposal"]
 manual-admission = ["wholepact-signer/manual-inventory-client", "wholepact-authority/pending-birth-foundation", "financial-runtime", "wholepact-engine/manual-admission", "dep:wholepact-signer-origin", "dep:hpke", "dep:rand", "dep:base64", "dep:chrono", "dep:rusqlite", "dep:pczt", "wholepact-transport/offline-admission-export"]
@@ -60,4 +62,5 @@ prost = "=0.14.4"
 tokio-rustls = { version = "=0.26.6", default-features = false, features = ["ring"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+wholepact-financial-coordinator-origin = { path = "../wholepact-financial-coordinator-origin", optional = true }
 wholepact-signer-origin = { path = "../wholepact-signer-origin", optional = true }

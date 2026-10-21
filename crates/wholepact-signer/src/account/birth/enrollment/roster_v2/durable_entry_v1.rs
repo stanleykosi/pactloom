@@ -12,6 +12,8 @@ use wholepact_authority::account_use::AccountUseGenesis;
 #[path = "prepared_delivery_v3.rs"]
 mod prepared_delivery_v3;
 pub(crate) use prepared_delivery_v3::{ActivePreparedDeliverySourceV3, PreparedOriginalDeliverySourceV3};
+#[cfg(feature = "coordinated-signer-continue")]
+pub(crate) use prepared_delivery_v3::OriginalFinancialReentrySelectionV1;
 
 /// Finite failure locations only: no paths, private data or OS error strings.
 #[derive(Clone, Copy, PartialEq, Eq)]

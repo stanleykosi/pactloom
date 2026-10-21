@@ -14,6 +14,12 @@ mod bootstrap;
 mod delivery_driver;
 #[cfg(all(target_os = "linux", feature = "coordinated-witness-delivery-append"))]
 mod delivery_ui;
+#[cfg(all(target_os = "linux", feature = "coordinated-financial-source-ui"))]
+mod financial_source_driver;
+#[cfg(all(target_os = "linux", feature = "coordinated-financial-source-ui"))]
+mod financial_source_ui;
+#[cfg(all(target_os = "linux", feature = "coordinated-financial-source-ui"))]
+mod host_line_input;
 #[cfg(all(target_os = "linux", feature = "cancel-only-witness-review"))]
 mod native_ui;
 #[cfg(all(target_os = "linux", feature = "cancel-only-witness-review"))]

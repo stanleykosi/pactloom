@@ -16,22 +16,54 @@ pub(super) const ABANDONED: u8 = 2;
 
 /// Both target slots and global R share one atomic word. Native A is precisely
 /// the successful READY->ADMITTED CAS, never a later driver/relay dequeue.
-pub(super) struct Phases(AtomicU32);
+pub(super) struct Phases {
+    word: AtomicU32,
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    host_restriction: Option<crate::host_restriction::CoordinatorHostRestrictionV1>,
+}
 impl Phases {
-    pub(super) fn new() -> Self { Self(AtomicU32::new(0)) }
-    pub(super) fn phase(&self, slot: usize) -> u8 { ((self.0.load(Ordering::Acquire) >> (slot * 8)) & 0xff) as u8 }
-    pub(super) fn revoked(&self) -> bool { self.0.load(Ordering::Acquire) & REVOKED != 0 }
-    pub(super) fn revoke(&self) { self.0.fetch_or(REVOKED, Ordering::AcqRel); }
+    pub(super) fn new() -> Self { Self {
+        word: AtomicU32::new(0),
+        #[cfg(feature = "coordinated-financial-workflow-v1")]
+        host_restriction: None,
+    } }
+    /// Only the actual C branch can supply this private revoke-on-drop writer.
+    /// S and narrow-profile constructors have no shared-memory write owner.
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    pub(super) fn coordinator(writer: crate::host_restriction::CoordinatorHostRestrictionV1) -> Self {
+        Self { word: AtomicU32::new(0), host_restriction: Some(writer) }
+    }
+    pub(super) fn phase(&self, slot: usize) -> u8 { ((self.word.load(Ordering::Acquire) >> (slot * 8)) & 0xff) as u8 }
+    pub(super) fn revoked(&self) -> bool { self.word.load(Ordering::Acquire) & REVOKED != 0 }
+    pub(super) fn revoke(&self) {
+        // EVERY local C restriction path, including errors and Drop, reaches
+        // this ordering. Host observes R before local admission can observe R.
+        #[cfg(feature = "coordinated-financial-workflow-v1")]
+        if let Some(writer) = &self.host_restriction { writer.revoke(); }
+        self.word.fetch_or(REVOKED, Ordering::AcqRel);
+    }
+    /// Fixed observation-only completion. Preserves R and cannot issue a purpose.
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn observe_workflow_continue_saved(&self,slot:usize)->Result<()>{
+        use crate::financial_workflow_continue::{CONT_ADMITTED,AWAITING_ADMISSION};
+        if slot>1{return Err(rejected("not a fixed workflow slot"));}
+        let shift=slot*8;let mut old=self.word.load(Ordering::Acquire);
+        loop{
+            if ((old>>shift)&0xff)!=CONT_ADMITTED as u32{return Err(rejected("Continue completion was not admitted"));}
+            let new=(old&!(0xff<<shift))|((AWAITING_ADMISSION as u32)<<shift);
+            match self.word.compare_exchange_weak(old,new,Ordering::AcqRel,Ordering::Acquire){Ok(_)=>return Ok(()),Err(actual)=>old=actual}
+        }
+    }
     pub(super) fn step(&self, slot: usize, from: u8, to: u8) -> Result<()> {
         if slot > 1 { return Err(rejected("not a fixed Continue slot")); }
         let shift = slot * 8;
-        let mut old = self.0.load(Ordering::Acquire);
+        let mut old = self.word.load(Ordering::Acquire);
         loop {
             if old & REVOKED != 0 || ((old >> shift) & 0xff) != from as u32 {
                 return Err(rejected("Continue slot consumed or revoked"));
             }
             let new = (old & !(0xff << shift)) | ((to as u32) << shift);
-            match self.0.compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Acquire) {
+            match self.word.compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Acquire) {
                 Ok(_) => return Ok(()), Err(actual) => old = actual,
             }
         }

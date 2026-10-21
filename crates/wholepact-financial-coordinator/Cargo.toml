@@ -17,6 +17,10 @@ coordinated-witness-delivery-append = ["common-image-bootstrap", "wholepact-fina
 # the log facade in debug AND release builds. Typed product diagnostics remain.
 coordinator-transient-password-input = ["common-image-bootstrap", "dep:eframe", "dep:zeroize", "dep:log", "log/max_level_off"]
 
+# Concrete C source-entry/initial-Read App composition, still without a
+# bootstrap/binary callsite. The password feature is a mandatory log-off edge.
+coordinated-financial-source-ui = ["coordinator-transient-password-input", "wholepact-financial-coordinator-origin/coordinated-financial-workflow-v1", "dep:winit"]
+
 [[bin]]
 name = "wholepact-financial-coordinator"
 path = "src/main.rs"
