@@ -81,7 +81,7 @@ impl NativeRuntime {
             let material_deadline=Instant::now()+Duration::from_millis(ceiling-now);
             let intent=RecipientIntentV3 {version:3,request:setup_request.request.clone(),fixed:setup_request.fixed.clone(),payload_digest:setup_request.payload_digest.clone(),payload_bytes:setup_request.payload_bytes,delivery:setup_request.delivery.clone(),material_scopes:setup_request.material_scopes.clone(),account_id:peer.scope.account_id.clone(),participant_id:peer.scope.participant_id.clone(),agreement_id:peer.scope.agreement_id.clone(),manifest_digest:peer.scope.manifest_digest.clone(),provider_enrollment_reference:setup_request.provider_enrollment_reference.clone(),signer_process_instance:setup_request.signer_process_instance.clone(),authorized_host_process_instance:original_peer.instance().into(),source_identity_digest:source.identity().into(),source_generation:generation,read_session_digest:"00".repeat(32),receive_decision_digest:"00".repeat(32),original_enrollment_ref:enrollment.reference().into(),original_manifest_ref:manifest.reference().into()};
             intent.validate().map_err(|_|Error::ReviewMismatch)?;
-            Ok(OutcomeV3::Setup(SetupV3 {source,witness:owner,original:Some(original),enrollment,manifest,intent,peer:Some(original_peer),material_deadline}))
+            Ok(OutcomeV3::Setup(SetupV3 {source,witness:owner,original:Some(original),enrollment,manifest,intent,peer:Some(original_peer),material_deadline,original_material_deadline:Some(material_deadline)}))
         })?;
         self.closed_delivery_v3=Some(closed);
         Ok(())
@@ -410,7 +410,7 @@ impl NativeRuntime {
         let witness=active.witness.into_history_preparation();
         let review=PreparedDeliveryReadReviewV3::enter(PendingBirthEntry {focus_epoch:epoch,parent_channel:self.parent_channel.clone()},source.identity(),&digest,material_deadline)?;
         self.pending=Some(PendingDecision {review:ExactNativeReview::stage(review.native(),&digest,format!("READ EXACT ORIGINAL ADMISSION HISTORY\n\nOperation: {}\nRetained intent: {}\n\nA fresh read-only session will authenticate complete history from the original Witness and compare this exact immutable operation. It will not resend admission, change the request/head, or acquire any financial permission. The prior action and transfer are closed.",awaiting.retained.request().operation_id,awaiting.retained.history_digest()?),epoch)?,operation:Operation::ClosedDeliveryV3(ClosedDeliveryDecisionV3::History)});
-        closed.setup=Some(SetupV3 {source,witness,original:active.original,enrollment:active.enrollment,manifest:active.manifest,intent:active.intent,peer:active.peer,material_deadline});
+        closed.setup=Some(SetupV3 {source,witness,original:active.original,enrollment:active.enrollment,manifest:active.manifest,intent:active.intent,peer:active.peer,material_deadline,original_material_deadline:active.original_material_deadline});
         closed.read_review=Some(review);closed.phase=DurableDeliveryPhaseV3::HistoryReview;
         Ok(())
     }
@@ -447,7 +447,7 @@ impl NativeRuntime {
             let ceiling=prior.material_scopes.iter().map(|s|s.valid_until_unix_seconds.saturating_mul(1000)).min().ok_or(Error::Locked)?;
             if now>=ceiling {return Err(Error::Locked);}
             source.check_custody()?;
-            Ok(OutcomeV3::HistorySetup(SetupV3 {source,witness,original:None,enrollment,manifest,intent:prior,peer:None,material_deadline:Instant::now()+Duration::from_millis(ceiling-now)}))
+            Ok(OutcomeV3::HistorySetup(SetupV3 {source,witness,original:None,enrollment,manifest,intent:prior,peer:None,material_deadline:Instant::now()+Duration::from_millis(ceiling-now),original_material_deadline:None}))
         })?;
         self.closed_delivery_v3=Some(closed);
         Ok(())

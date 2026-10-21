@@ -13,6 +13,9 @@ pub(super) struct SetupV3 {
     pub(super) intent: RecipientIntentV3,
     pub(super) peer: Option<PeerProcess>,
     pub(super) material_deadline: Instant,
+    // Inert original producer bound, not the current Read permission.
+    // Fresh history-only entry cannot reconstruct this monotonic value.
+    pub(super) original_material_deadline: Option<Instant>,
 }
 pub(super) struct ActiveV3 {
     pub(super) history_only: bool,
@@ -23,6 +26,7 @@ pub(super) struct ActiveV3 {
     pub(super) manifest: AcceptedManifestRecord,
     pub(super) intent: RecipientIntentV3,
     pub(super) peer: Option<PeerProcess>,
+    pub(super) original_material_deadline: Option<Instant>,
 }
 impl ActiveV3 {
     pub(super) fn check(&self) -> Result<()> {
@@ -145,7 +149,7 @@ impl DurableDeliveryRuntimeV3 {
         let identity=setup.source.identity().to_owned();
         let source=setup.source.activate(read.clone())?;
         let witness=setup.witness.activate(read,&identity)?;
-        let active=Arc::new(ActiveV3 {history_only:false,source,witness,original:setup.original,enrollment:setup.enrollment,manifest:setup.manifest,intent,peer:setup.peer});
+        let active=Arc::new(ActiveV3 {history_only:false,source,witness,original:setup.original,enrollment:setup.enrollment,manifest:setup.manifest,intent,peer:setup.peer,original_material_deadline:setup.original_material_deadline});
         active.check()?; closed.active=Some(active); closed.phase=DurableDeliveryPhaseV3::Ready;
         Ok(())
     }
@@ -231,7 +235,7 @@ impl DurableDeliveryRuntimeV3 {
         let identity=setup.source.identity().to_owned();
         let source=setup.source.activate(read.clone())?;
         let witness=setup.witness.activate(read,&identity)?;
-        let active=Arc::new(ActiveV3 {history_only:true,source,witness,original:setup.original,enrollment:setup.enrollment,manifest:setup.manifest,intent:setup.intent,peer:setup.peer});
+        let active=Arc::new(ActiveV3 {history_only:true,source,witness,original:setup.original,enrollment:setup.enrollment,manifest:setup.manifest,intent:setup.intent,peer:setup.peer,original_material_deadline:setup.original_material_deadline});
         active.check()?;
         // Retained historical data stays in the controller even if this
         // read-only network audit fails. No action owner is cloned or revived.
