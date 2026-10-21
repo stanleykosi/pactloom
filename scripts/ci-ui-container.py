@@ -719,7 +719,13 @@ class NativeSession:
                 matches = [w for w in record['detail']['facts']['widgets'] if w['widget'] == name and w['enabled']]
                 if matches:
                     self.input_action = 'select'; self.click(record, name)
+                    # Native injection ACK is not application widget focus.
+                    # egui handles text events before applying this widget's
+                    # pointer focus; never coalesce a new click with Ctrl+A.
+                    self.widget(self.settled_form_snapshot(), name)
                     self.input_action = 'clear'; self.controller.clear_field()
+                    # Finish deletion/caret reflow before introducing text.
+                    self.widget(self.settled_form_snapshot(), name)
                     self.input_action = 'type'; self.controller.type_ascii(form[key]); break
                 require(scroll < 64, 'input_widget')
                 visible = [w for w in record['detail']['facts']['widgets'] if w['widget'] in dict(FIELDS)]

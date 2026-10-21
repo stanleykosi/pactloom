@@ -635,3 +635,75 @@ class ClosedInputDiagnostics(unittest.TestCase):
         helper=helper[helper.index('pub fn diagnose_delivery_review_inputs_for_ci'):]
         for forbidden in ('File::','OpenOptions','TcpStream','println!','eprintln!','std::env'):
             self.assertNotIn(forbidden,helper)
+
+
+class NativeFieldFocusOrdering(unittest.TestCase):
+    def session(self):
+        from unittest import mock
+        session=C.NativeSession.__new__(C.NativeSession)
+        session.reporter=SimpleNamespace(stage=None)
+        session.controller=mock.Mock(); session.click=mock.Mock()
+        row=StableFormGeometry().record()
+        session.settled_form_snapshot=mock.Mock(return_value=row)
+        return session
+
+    def test_click_focus_and_clear_each_finish_before_following_keyboard_input(self):
+        from unittest import mock
+        session=self.session();calls=[]
+        session.settled_form_snapshot.side_effect=lambda: calls.append('render') or StableFormGeometry().record()
+        session.click.side_effect=lambda *_:calls.append('click')
+        session.controller.clear_field.side_effect=lambda:calls.append('clear')
+        session.controller.type_ascii.side_effect=lambda _:calls.append('type')
+        with mock.patch.object(C,'FIELDS',(('Request','request_json'),)):
+            session.fill({'request_json':'{}'})
+        self.assertEqual(calls,['render','click','render','clear','render','type'])
+
+    def test_source_order_model_reproduces_old_field_edit_and_barrier_prevents_it(self):
+        from unittest import mock
+        # Pinned egui handles key events before applying pointer-requested focus.
+        class App:
+            def __init__(self):self.focus='previous';self.pending=None;self.keys=[];self.values={'previous':'retained','Request':''}
+            def click(self,*_):self.pending='Request'
+            def clear(self):self.keys.append(None)
+            def type(self,value):self.keys.append(value)
+            def render(self):
+                for value in self.keys:
+                    self.values[self.focus]='' if value is None else self.values[self.focus]+value
+                self.keys=[]
+                if self.pending:self.focus=self.pending;self.pending=None
+                return StableFormGeometry().record()
+        old=App();old.click();old.clear();old.type('{}');old.render()
+        self.assertEqual(old.values,{'previous':'{}','Request':''})
+        app=App();session=self.session()
+        session.click.side_effect=app.click
+        session.settled_form_snapshot.side_effect=app.render
+        session.controller.clear_field.side_effect=app.clear
+        session.controller.type_ascii.side_effect=lambda value:(app.type(value),app.render())
+        with mock.patch.object(C,'FIELDS',(('Request','request_json'),)):
+            session.fill({'request_json':'{}'})
+        self.assertEqual(app.values,{'previous':'retained','Request':'{}'})
+
+    def test_postclick_render_failure_never_clears_types_or_retries_click(self):
+        from unittest import mock
+        session=self.session()
+        session.settled_form_snapshot.side_effect=[StableFormGeometry().record(),C.D.Rejected('deadline')]
+        with mock.patch.object(C,'FIELDS',(('Request','request_json'),)):
+            with self.assertRaises(C.D.Rejected):session.fill({'request_json':'{}'})
+        session.click.assert_called_once();session.controller.clear_field.assert_not_called();session.controller.type_ascii.assert_not_called()
+
+    def test_postclear_restriction_never_types_or_retries(self):
+        from unittest import mock
+        session=self.session();row=StableFormGeometry().record()
+        session.settled_form_snapshot.side_effect=[row,row,C.S.Rejected('input_phase')]
+        with mock.patch.object(C,'FIELDS',(('Request','request_json'),)):
+            with self.assertRaises(C.S.Rejected):session.fill({'request_json':'{}'})
+        session.click.assert_called_once();session.controller.clear_field.assert_called_once();session.controller.type_ascii.assert_not_called()
+
+    def test_postclick_missing_or_disabled_target_never_sends_keys(self):
+        from unittest import mock
+        for widgets in ([],[{'widget':'Request','enabled':False,'rect':dict(left=0,top=1,right=100,bottom=20)}]):
+            session=self.session();before=StableFormGeometry().record();after=StableFormGeometry().record(widgets=widgets)
+            session.settled_form_snapshot.side_effect=[before,after]
+            with mock.patch.object(C,'FIELDS',(('Request','request_json'),)):
+                with self.assertRaises(C.S.Rejected):session.fill({'request_json':'{}'})
+            session.controller.clear_field.assert_not_called();session.controller.type_ascii.assert_not_called()
