@@ -260,7 +260,7 @@ impl ClosedPrivateDurableAdmissionReviewV3<'_, '_> {
         let encoded = crate::encode(&after)?;
         // Existing Store transaction checks this exact consumed pin before
         // replay/CAS/write and returns a new pin ONLY after known success.
-        let (saved, committed_pin) = owner.original.engine.store.update_original_agreement_pinned_v3(metadata_pin, &command, owner.original.source.agreement_id(), revision, encoded, EXPORT_EVENT_V3).map_err(|e| disclosure_unknown(crate::store_error(e)))?;
+        let (saved, committed_pin) = owner.original.engine.store.update_original_agreement_pinned_restricted_v3(metadata_pin, &command, owner.original.source.agreement_id(), revision, encoded, EXPORT_EVENT_V3, &AdmissionCommitRestrictionV3(consent, fresh.original_delivery_deadline_v3())).map_err(|e| disclosure_unknown(crate::store_error(e)))?;
         let result = (|| {
             let check = || -> wholepact_signer::authority_bridge::Result<()> {
                 check_live_v3(owner, access, consent, proof, material, DurableMaterialActionV1::ExportForLocalNativeReview, checkpoint.scope(), &roster, &committed_pin, &root_pin, &proof_pin).map_err(|_| BridgeError::Permission)?;
@@ -279,7 +279,11 @@ impl ClosedPrivateDurableAdmissionReviewV3<'_, '_> {
             history.rows.push((event.clone(), retained));
             let export_history_digest = digest("wholepact:private-admission-export-history:v2", &history.rows)?;
             check().map_err(|_| denied())?;
-            let imported = fresh.deliver_prepared_v3(payload, &check).map_err(|_| denied())?;
+            let final_restriction = || {
+                if consent.check_final_effect_restriction_v1(None) { Ok(()) }
+                else { Err(BridgeError::Permission) }
+            };
+            let imported = fresh.deliver_prepared_restricted_v3(payload, &check, &final_restriction).map_err(|_| denied())?;
             check().map_err(|_| denied())?;
             Ok((PrivateDurableAdmissionDeliveryV3 { revision: saved.record.revision, replayed: false, export_count: history.export_revisions.len() + 1, export_history_digest }, imported))
         })();

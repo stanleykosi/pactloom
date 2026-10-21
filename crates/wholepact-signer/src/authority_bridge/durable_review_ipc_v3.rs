@@ -310,6 +310,9 @@ impl PreparedDurableReviewRecipientV3 {
     }
 }
 impl FreshDurableReviewDeliveryV3 {
+    /// The already-retained original recipient/read/action minimum. This is
+    /// only an immutable ceiling observation, never consent or a new lifetime.
+    pub fn original_delivery_deadline_v3(&self) -> Instant { self.deadline }
     pub fn intent(&self) -> &RecipientIntentV3 { &self.intent }
     pub fn check_current(&self) -> Result<()> {
         require_before(self.deadline)?;
@@ -319,6 +322,11 @@ impl FreshDurableReviewDeliveryV3 {
         match self.origin.read(&stream, self.deadline)? { ClosedRecipientResponseV3::Current { intent_digest } if intent_digest == self.intent.digest()? => Ok(()), _ => Err(BridgeError::Permission) }
     }
     pub fn deliver_prepared_v3(self, payload: PreparedDurableReviewPayloadV2, check: &dyn Fn() -> Result<()>) -> Result<ImportedDurableReviewSessionV3> {
+        self.deliver_prepared_restricted_v3(payload, check, &|| Ok(()))
+    }
+    /// Adds only a zero-wait final restriction. The same real recipient and full
+    /// consent/source checks remain mandatory; no positive receipt is created.
+    pub fn deliver_prepared_restricted_v3(self, payload: PreparedDurableReviewPayloadV2, check: &dyn Fn() -> Result<()>, final_restriction: &dyn Fn() -> Result<()>) -> Result<ImportedDurableReviewSessionV3> {
         check()?;
         self.check_current()?;
         if payload.payload_digest() != self.intent.payload_digest || payload.payload_bytes() != self.intent.payload_bytes { return Err(BridgeError::Binding); }
@@ -326,14 +334,14 @@ impl FreshDurableReviewDeliveryV3 {
         let mut stream = self.stream.into_inner().map_err(|_| BridgeError::Ipc)?;
         let observer = stream.try_clone().map_err(|_| BridgeError::Ipc)?;
         let current = || { check()?; require_before(self.deadline)?; self.origin.check(Some(&observer)) };
-        v1::bounded_write(&mut stream, &v1::DeliveryCommandV1::Begin {payload_digest:digest.clone(),payload_bytes:raw.len() as u64}, self.deadline, current)?;
+        v1::bounded_write_restricted(&mut stream, &v1::DeliveryCommandV1::Begin {payload_digest:digest.clone(),payload_bytes:raw.len() as u64}, self.deadline, current, final_restriction)?;
         expect_receiving(&self.origin, &stream, self.deadline, 0, &current)?;
         for (index, bytes) in raw.chunks(v1::CHUNK_BYTES).enumerate() {
             let offset = index * v1::CHUNK_BYTES;
-            v1::bounded_write(&mut stream, &v1::DeliveryCommandV1::Chunk {offset:offset as u64,data_hex:hex::encode(bytes)}, self.deadline, current)?;
+            v1::bounded_write_restricted(&mut stream, &v1::DeliveryCommandV1::Chunk {offset:offset as u64,data_hex:hex::encode(bytes)}, self.deadline, current, final_restriction)?;
             expect_receiving(&self.origin, &stream, self.deadline, (offset + bytes.len()) as u64, &current)?;
         }
-        v1::bounded_write(&mut stream, &v1::DeliveryCommandV1::Finish, self.deadline, current)?;
+        v1::bounded_write_restricted(&mut stream, &v1::DeliveryCommandV1::Finish, self.deadline, current, final_restriction)?;
         let ClosedRecipientResponseV3::BytesReceived {receipt} = self.origin.read_checked(&stream, self.deadline, &current)? else { return Err(BridgeError::Permission); };
         current()?;
         if receipt.version != 3 || receipt.intent_digest != self.intent.digest()? || receipt.payload_digest != digest || receipt.payload_bytes != raw.len() as u64 || receipt.state != "bytes_received_unverified" { return Err(BridgeError::Binding); }

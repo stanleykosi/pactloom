@@ -25,8 +25,9 @@ impl BornSavedProofApprovalV1 {
     pub(crate) fn progress(&self, exact_digest: &str) -> Result<()> {
         self.check(exact_digest)?;
         let mut file = self.foreground_file.try_clone()?;
-        file.write_all(
+        write_current_until(&mut file,
             b"Original local proof work is active; no signing or dispatch is occurring.\n",
+            Some(self.deadline), None,
         )?;
         file.flush()?;
         self.check(exact_digest)

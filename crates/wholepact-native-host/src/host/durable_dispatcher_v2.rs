@@ -598,6 +598,12 @@ fn check_admission_originals(host:&Host,files:&OriginalWorkspaceDispatcherFilesV
     Ok(())
 }
 impl wholepact_engine::LocalPrivateDurableAdmissionConsentV2 for InitialAdmissionInspection<'_> {
+    fn check_final_effect_restriction_v1(&self, original_deadline: Option<std::time::Instant>) -> bool {
+        if crate::terminal::coordinated_restriction_required()
+            && original_deadline.is_some_and(|until| std::time::Instant::now() >= until)
+        { return false; }
+        !crate::terminal::coordinated_restriction_required() || self.approval.check().is_ok()
+    }
     fn permits_source(&self,scope:&wholepact_engine::PrivateWorkspaceScopeV1)->bool {
         scope_matches(scope,self.files) && self.approval.check().is_ok()
             && check_admission_originals(self.host,self.files,self.target).is_ok() && self.approval.check().is_ok()
@@ -707,6 +713,12 @@ impl<'host> OriginalDeliveryAdmissionOwnerV2<'host> {
     }
 }
 impl wholepact_engine::LocalPrivateDurableAdmissionConsentV2 for OriginalDeliveryAdmissionOwnerV2<'_> {
+    fn check_final_effect_restriction_v1(&self, original_deadline: Option<std::time::Instant>) -> bool {
+        if crate::terminal::coordinated_restriction_required()
+            && original_deadline.is_some_and(|until| std::time::Instant::now() >= until)
+        { return false; }
+        !crate::terminal::coordinated_restriction_required() || self.inspection.check().is_ok()
+    }
     fn permits_source(&self,scope:&wholepact_engine::PrivateWorkspaceScopeV1)->bool {
         scope_matches(scope,self.files) && self.inspection.check().is_ok() && self.check_current_without_proof_lock_v2().is_ok() && self.inspection.check().is_ok()
     }

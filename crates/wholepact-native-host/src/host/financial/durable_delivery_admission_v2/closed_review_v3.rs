@@ -34,6 +34,13 @@ impl ClosedConsentV3<'_, '_> {
     }
 }
 impl LocalPrivateDurableAdmissionConsentV2 for ClosedConsentV3<'_, '_> {
+    fn check_final_effect_restriction_v1(&self, original_deadline: Option<std::time::Instant>) -> bool {
+        if crate::terminal::coordinated_restriction_required()
+            && original_deadline.is_some_and(|until| std::time::Instant::now() >= until)
+        { return false; }
+        !crate::terminal::coordinated_restriction_required()
+            || (original_material_clock_bounds(self.inspection).is_ok() && self.approval.check().is_ok())
+    }
     fn permits_source(&self, scope: &PrivateWorkspaceScopeV1) -> bool {
         same(scope, self.inspection.workspace_scope()).unwrap_or(false) && self.check().is_ok()
     }
@@ -75,6 +82,13 @@ impl ClosedHistoricalReadConsentV3<'_, '_> {
     }
 }
 impl LocalPrivateDurableAdmissionConsentV2 for ClosedHistoricalReadConsentV3<'_, '_> {
+    fn check_final_effect_restriction_v1(&self, original_deadline: Option<std::time::Instant>) -> bool {
+        if crate::terminal::coordinated_restriction_required()
+            && original_deadline.is_some_and(|until| std::time::Instant::now() >= until)
+        { return false; }
+        !crate::terminal::coordinated_restriction_required()
+            || (original_material_clock_bounds(self.inspection).is_ok() && self.approval.check().is_ok())
+    }
     fn permits_source(&self, scope: &PrivateWorkspaceScopeV1) -> bool {
         same(scope, self.inspection.workspace_scope()).unwrap_or(false) && self.check().is_ok()
     }
@@ -93,6 +107,14 @@ impl LocalDurableMaterialConsentV1 for ClosedHistoricalReadConsentV3<'_, '_> {
 fn unknown() -> Error {
     Error::Receipt("DISCLOSURE_UNKNOWN: exact V3 export is retained as disclosed-or-unknown; preserve the original operation and do not resend private bytes".into())
 }
+fn original_review_prompt_bounds(prior: &HistoricalApproval, inspection: &PrivateDurableAdmissionInspectionV2) -> Result<Option<crate::terminal::OriginalPromptBoundsV1>> {
+    if !crate::terminal::coordinated_restriction_required() { return Ok(None); }
+    let (from, until) = retained_material_clock_bounds(inspection)?;
+    Ok(Some(crate::terminal::OriginalPromptBoundsV1::new(prior.deadline(), (
+        from.checked_mul(1000).ok_or(Error::Permission)?, until.checked_mul(1000).ok_or(Error::Permission)?,
+    ))?))
+}
+
 impl Host {
     pub(in crate::host) fn private_original_delivery_export_v3(
         &self, root: &Path, choices: &DeliveryChoicesV2,
@@ -132,10 +154,12 @@ impl Host {
             serde_json::to_string(&inspection)?, serde_json::to_string(&export_scope)?
         );
         bound_original_delivery_review_v2(&detail)?;
-        let approval = host_result(DeliveryObservationSiteV2::ExportApproval, self.terminal.approve_durable_delivery_v2(
+        let prompt_bounds = original_review_prompt_bounds(&final_inspection, &inspection)?;
+        let approval = host_result(DeliveryObservationSiteV2::ExportApproval, self.terminal.approve_durable_delivery_original_v3(
             &final_inspection, &detail,
             || { read.check()?; engine_result(DeliveryObservationSiteV2::ExportApproval, closed.check_current_v3(self.access()?, &read, &read, &read)) },
             || { owner.check_closed_source_v3()?; current_materials(&inspection) },
+            prompt_bounds.as_ref(),
         ))?;
         drop(read);
         drop(final_inspection);
@@ -163,12 +187,12 @@ impl Host {
     ) -> Result<PrivateDurableAdmissionStatusV3> {
         // This projection is inert. Callers needing a visible disclosure must
         // use the scoped checked path, never treat this DTO as read permission.
-        self.private_original_delivery_status_checked_v3(root, |_, _, _| Ok(()))
+        self.private_original_delivery_status_checked_v3(root, |_, _, _, _| Ok(()))
     }
     fn private_original_delivery_status_checked_v3(
         &self,
         root: &Path,
-        display: impl FnOnce(&PrivateDurableAdmissionStatusV3, &HistoricalApproval, &dyn Fn() -> Result<()>) -> Result<()>,
+        display: impl FnOnce(&PrivateDurableAdmissionStatusV3, &HistoricalApproval, &dyn Fn() -> Result<()>, (u64, u64)) -> Result<()>,
     ) -> Result<PrivateDurableAdmissionStatusV3> {
         self.require_private_workspace_read_session_v1()?;
         let owner = self.original_delivery_admission_owner_v2(root)?;
@@ -178,17 +202,22 @@ impl Host {
             "Read, independently verify, and locally display the exact saved ORIGINAL fixed proof summary, BOTH original material scope metadata, and strict V2/V3 append-only export history. If present, display only the separately authenticated prospective admission status linked to that exact retained export.\n{}\nNo export, receive, admission, construction, signing, submission or recovered native permission is authorized.",
             serde_json::to_string(&inspection)?,
         );
-        let approval = self.terminal.approve_durable_delivery_v2(
+        let prompt_bounds = original_review_prompt_bounds(owner.inspection_approval(), &inspection)?;
+        let approval = self.terminal.approve_durable_delivery_original_v3(
             owner.inspection_approval(), &detail,
             || { owner.inspection_approval().check()?; current_source(self, &owner, &inspection) },
             || { owner.check_closed_read_source_v3()?; current_materials(&inspection) },
+            prompt_bounds.as_ref(),
         )?;
         let read = ClosedHistoricalReadConsentV3 { host: self, owner: &owner, inspection: &inspection, approval: &approval };
         let mut display_error = None;
+        let material_clocks = if crate::terminal::coordinated_restriction_required() {
+            retained_material_clock_bounds(&inspection)?
+        } else { (0, u64::MAX) }; // Never-required legacy adds no new clock failure.
         let result = owner.coordinator().read_original_fixed_checked_v3(
             self.access()?, &read, &read, &read, |status, current| {
                 let check = || { read.check()?; current().map_err(Error::from)?; read.check() };
-                if let Err(error) = display(status, &approval, &check) {
+                if let Err(error) = display(status, &approval, &check, material_clocks) {
                     display_error = Some(error);
                     return Err(wholepact_engine::ApiError::new("DISCLOSURE_DENIED", "Current exact local display permission is unavailable"));
                 }
@@ -206,13 +235,13 @@ impl Host {
     ) -> Result<()> {
         // A new explicit read covers this local output after all remote/human
         // waits. The completed export action and old Signer read are not reused.
-        self.private_original_delivery_status_checked_v3(root, |source, approval, check| {
+        self.private_original_delivery_status_checked_v3(root, |source, approval, check, clocks| {
             if !source.review_exports.iter().any(|retained| retained == export) {
                 return Err(Error::Authentication);
             }
             validate_closed_status_v3(export, status)?;
             let output = self.terminal.historical_output()?;
-            approval.effect(&mut || output.json_checked(status, check))
+            approval.effect(&mut || output.json_checked_under(status, check, approval, clocks))
         })?;
         Ok(())
     }
@@ -395,9 +424,9 @@ pub(in crate::host) fn read_original_status_v3(terminal: Terminal, profile: &Pat
     // New real source opening and full proof/history verification. Only inert
     // original export metadata is selected; no prior native grant is recovered.
     let host = Host::open_workspace_dispatcher_registered_v4(terminal.clone(), profile, workspace, false)?;
-    let source = host.private_original_delivery_status_checked_v3(workspace, |source, approval, check| {
+    let source = host.private_original_delivery_status_checked_v3(workspace, |source, approval, check, clocks| {
         let output = terminal.historical_output()?;
-        approval.effect(&mut || output.json_checked(source, check))
+        approval.effect(&mut || output.json_checked_under(source, check, approval, clocks))
     })?;
     let selection: OriginalHistorySelectionV3 = host.read_json("Original Signer socket and retained V3 import_operation_id for fresh read-only reconciliation JSON: ")?;
     if !selection.signer_socket.is_absolute() { return Err(Error::Authentication); }

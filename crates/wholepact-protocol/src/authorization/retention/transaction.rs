@@ -37,6 +37,9 @@ pub struct TransactionRetentionScope {
 /// strict cross-store revocation requires an embedding-held authority lock/lease.
 pub trait TransactionRetentionConsent {
     fn permits(&self, scope: &TransactionRetentionScope) -> bool;
+    /// Denial-only, nonblocking final extraction restriction. Legacy remains
+    /// inert; this must never prompt or re-enter a source/journal.
+    fn check_final_effect_restriction(&self) -> bool { true }
 }
 
 pub struct LocalTransactionCheckpoint<'a> {
@@ -70,6 +73,9 @@ struct CombinedRetentionGate<'a> {
     transaction: &'a dyn TransactionRetentionConsent,
 }
 impl TransactionRetentionConsent for CombinedRetentionGate<'_> {
+    fn check_final_effect_restriction(&self) -> bool {
+        self.transaction.check_final_effect_restriction()
+    }
     fn permits(&self, scope: &TransactionRetentionScope) -> bool {
         self.signed.permits(&scope.signed_scope)
             && self.transaction.permits(scope)
@@ -322,11 +328,14 @@ impl TransactionCheckpointJournal {
             (bytes, digest, txid)
         } else {
             let parsed = Pczt::parse(signed).map_err(|_| RetentionError::VerificationFailed)?;
+            let extractor = TransactionExtractor::new(parsed);
+            // Parsing/setup cannot carry an earlier restriction sample across
+            // this one physical extraction attempt. Existing consent stays exact.
+            if !consent.check_final_effect_restriction() { return Err(RetentionError::ConsentDenied); }
             #[cfg(test)]
             self.extraction_invocations
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let transaction = TransactionExtractor::new(parsed)
-                .extract(UnwrapErr(SysRng))
+            let transaction = extractor.extract(UnwrapErr(SysRng))
                 .map_err(|_| RetentionError::VerificationFailed)?;
             let mut bytes = Zeroizing::new(Vec::new());
             transaction

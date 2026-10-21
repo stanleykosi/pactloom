@@ -344,6 +344,16 @@ const PREFIX_KINDS: [&str; PREFIX_EVENTS] = [
 /// The trusted Host must retain its genuine native/source owner for every call.
 pub trait LocalPrivateDurableAdmissionConsentV2 {
     fn permits_source(&self, scope: &PrivateWorkspaceScopeV1) -> bool;
+    /// Denial-only zero-wait observer, not source/consent re-entry. The legacy
+    /// default adds no restriction; coordinated Host implementations override.
+    fn check_final_effect_restriction_v1(&self, _original_deadline: Option<std::time::Instant>) -> bool { true }
+}
+struct AdmissionCommitRestrictionV3<'a>(&'a dyn LocalPrivateDurableAdmissionConsentV2, std::time::Instant);
+impl wholepact_store::OriginalCommitRestrictionV3 for AdmissionCommitRestrictionV3<'_> {
+    fn check_before_commit(&self) -> wholepact_store::Result<()> {
+        if self.0.check_final_effect_restriction_v1(Some(self.1)) { Ok(()) }
+        else { Err(wholepact_store::StoreError::InvalidInput("original effect restriction denied")) }
+    }
 }
 
 /// Exclusive same-original owner. No Clone, serde, Deref or caller-data factory.

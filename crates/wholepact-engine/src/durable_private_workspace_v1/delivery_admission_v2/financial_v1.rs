@@ -20,9 +20,23 @@ const DISPATCH_ADMISSION: &str = "private_financial_dispatch_admission_v1";
 
 pub trait LocalPrivateDurableFinancialConsentV1 {
     fn permits_source(&self, scope: &PrivateWorkspaceScopeV1) -> bool;
+    /// Check only the existing original restriction, never source/DB/consent
+    /// re-entry. Coordinated Host overrides; legacy remains unchanged.
+    fn check_final_effect_restriction_v1(&self) -> bool { true }
+}
+struct FinancialCommitRestrictionV3<'a>(&'a dyn LocalPrivateDurableFinancialConsentV1);
+impl wholepact_store::OriginalCommitRestrictionV3 for FinancialCommitRestrictionV3<'_> {
+    fn check_before_commit(&self) -> wholepact_store::Result<()> {
+        if self.0.check_final_effect_restriction_v1() { Ok(()) }
+        else { Err(wholepact_store::StoreError::InvalidInput("original effect restriction denied")) }
+    }
 }
 struct SourceConsent<'a>(&'a dyn LocalPrivateDurableFinancialConsentV1);
 impl LocalPrivateDurableAdmissionConsentV2 for SourceConsent<'_> {
+    fn check_final_effect_restriction_v1(&self, original_deadline: Option<std::time::Instant>) -> bool {
+        // This private adapter is inspection/preparation only, never ExportExact.
+        original_deadline.is_none() && self.0.check_final_effect_restriction_v1()
+    }
     fn permits_source(&self, scope: &PrivateWorkspaceScopeV1) -> bool {
         self.0.permits_source(scope)
     }
@@ -791,8 +805,8 @@ impl<'source> PrivateDurableFinancialCoordinatorV1<'source> {
         if !consent.permits_source(self.workspace_scope()) {
             return Err(denied());
         }
-        let (saved,_next)=self.source.original.engine.store.update_original_agreement_pinned_v3(pin,&command,
-            self.source.original.source.agreement_id(),before.view.revision,crate::encode(&after)?,kind).map_err(|e| {
+        let (saved,_next)=self.source.original.engine.store.update_original_agreement_pinned_restricted_v3(pin,&command,
+            self.source.original.source.agreement_id(),before.view.revision,crate::encode(&after)?,kind,&FinancialCommitRestrictionV3(consent)).map_err(|e| {
                 let mut error=crate::store_error(e);error.safe_actions=vec!["Preserve original retained financial results; reopen and reconcile the original operation without re-signing or re-extracting".into()];error
             })?;
         self.commands
@@ -819,6 +833,16 @@ impl<'owner, 'source> PreparedPrivateFinancialV1<'owner, 'source> {
         Ok(contexts)
     }
 
+    /// Inert bounds from the same already-verified original binding. These
+    /// cannot create or renew consent and never re-open a source.
+    pub fn original_financial_clock_bounds_ms_v1(&self) -> Result<(u64, u64)> {
+        let records = &self.kernel.binding().continuations;
+        if records.len() != 2 { return Err(damaged()); }
+        let from = records.values().map(|r| r.record.terms.valid_from_ms.max(r.record.terms.scope.authorization.valid_from_ms)).max().ok_or_else(damaged)?;
+        let until = records.values().map(|r| r.record.terms.valid_until_ms.min(r.record.terms.scope.authorization.valid_until_ms)).min().ok_or_else(damaged)?;
+        if from >= until { return Err(damaged()); }
+        Ok((from, until))
+    }
     pub fn original_financial_valid_until_ms_v1(&self) -> Result<u64> {
         let records = &self.kernel.binding().continuations;
         if records.len() != 2 {
@@ -1344,8 +1368,8 @@ impl<'owner, 'source> PreparedPrivateFinancialV1<'owner, 'source> {
         after.view.updated_at = crate::now();
         kernel::validate_delta(&self.history.current, &after, kind)?;
         let command = financial_command(access, key, &self.history.current, &after, kind)?;
-        let (saved,next)=self.owner.source.original.engine.store.update_original_agreement_pinned_v3(self.metadata,&command,
-            self.owner.source.original.source.agreement_id(),self.history.current.view.revision,crate::encode(&after)?,kind)
+        let (saved,next)=self.owner.source.original.engine.store.update_original_agreement_pinned_restricted_v3(self.metadata,&command,
+            self.owner.source.original.source.agreement_id(),self.history.current.view.revision,crate::encode(&after)?,kind,&FinancialCommitRestrictionV3(consent))
             .map_err(|error| {let mut e=crate::store_error(error);e.safe_actions=vec!["Preserve the exact original dispatch intent and reconcile the same operation; do not regenerate heads or timestamps".into()];e})?;
         self.owner
             .commands

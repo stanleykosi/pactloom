@@ -13,6 +13,9 @@ struct InitialFinancialInspectionV1<'a> {
     approval: &'a HistoricalApproval,
 }
 impl LocalPrivateDurableFinancialConsentV1 for InitialFinancialInspectionV1<'_> {
+    fn check_final_effect_restriction_v1(&self) -> bool {
+        !crate::terminal::coordinated_restriction_required() || self.approval.check().is_ok()
+    }
     fn permits_source(&self, scope: &wholepact_engine::PrivateWorkspaceScopeV1) -> bool {
         scope_matches(scope, self.files)
             && self.approval.check().is_ok()

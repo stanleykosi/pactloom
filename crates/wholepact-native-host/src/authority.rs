@@ -113,12 +113,19 @@ impl Fence {
     }
 }
 impl Held {
+    /// Final coordinated restriction only. Never wait while a downstream
+    /// transaction/transport owns its lock, and never re-enter source consent.
+    pub(crate) fn check_final_effect_restriction(&self) -> Result<()> {
+        let state = self.fence.state.try_lock().map_err(|_| Error::Permission)?;
+        if state.blocked || self.expires <= now()? { return Err(Error::Permission); }
+        crate::terminal::check_original_coordinator_restriction()
+    }
     pub(crate) fn check(&self) -> Result<()> {
         let s = self.fence.state.lock().map_err(|_| Error::Permission)?;
         if s.blocked || self.expires <= now()? {
             Err(Error::Permission)
         } else {
-            Ok(())
+            crate::terminal::check_original_coordinator_restriction()
         }
     }
 }

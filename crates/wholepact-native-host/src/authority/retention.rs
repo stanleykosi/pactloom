@@ -18,6 +18,7 @@ pub(crate) struct NativeRetentionConsent {
     accounts: std::collections::BTreeSet<String>,
     terminal: Terminal,
     held: Held,
+    prompt_bounds: Option<crate::terminal::OriginalPromptBoundsV1>,
     approved: Mutex<BTreeMap<&'static str, String>>,
 }
 impl Authority {
@@ -43,11 +44,17 @@ impl Authority {
             held: self
                 .fence
                 .acquire(now()?.checked_add(900).ok_or(Error::Invalid)?)?,
+            prompt_bounds: None,
             approved: Mutex::new(BTreeMap::new()),
         })
     }
 }
 impl NativeRetentionConsent {
+    pub(crate) fn bind_original_prompt_bounds(mut self, bounds: crate::terminal::OriginalPromptBoundsV1) -> Result<Self> {
+        if self.prompt_bounds.is_some() { return Err(Error::Permission); }
+        self.prompt_bounds = Some(bounds.narrow_until(self.held.expires.checked_mul(1000).ok_or(Error::Permission)?)?);
+        Ok(self)
+    }
     fn matches(&self, scope: &SignedRetentionScope) -> bool {
         let c = &scope.context;
         c.principal_id == self.principal
@@ -74,7 +81,7 @@ impl NativeRetentionConsent {
         if let Some(prior) = approved.get(action) {
             return prior == &encoded && self.held.check().is_ok();
         }
-        if self.terminal.confirm(&format!("Approve {action} for this EXACT scope?\n{encoded}\nUsable spend signatures or transaction bytes remain in encrypted local journals. This is separate from original signer approval and does not itself authorize network submission. A failed or interrupted operation can leave durable intent; preserve the exact original keys and journals. Scope changes require a new command and approval. Permission ends with this command, lock/revoke or 15 minutes.")).is_err() || self.held.check().is_err() { return false; }
+        if self.terminal.confirm_original_optional(&format!("Approve {action} for this EXACT scope?\n{encoded}\nUsable spend signatures or transaction bytes remain in encrypted local journals. This is separate from original signer approval and does not itself authorize network submission. A failed or interrupted operation can leave durable intent; preserve the exact original keys and journals. Scope changes require a new command and approval. Permission ends with this command, lock/revoke or 15 minutes."), || Ok(()), self.prompt_bounds.as_ref(), Some(&self.held)).is_err() || self.held.check().is_err() { return false; }
         approved.insert(action, encoded);
         true
     }
@@ -85,6 +92,9 @@ impl SignedRetentionConsent for NativeRetentionConsent {
     }
 }
 impl TransactionRetentionConsent for NativeRetentionConsent {
+    fn check_final_effect_restriction(&self) -> bool {
+        !crate::terminal::coordinated_restriction_required() || self.held.check_final_effect_restriction().is_ok()
+    }
     fn permits(&self, scope: &TransactionRetentionScope) -> bool {
         SignedRetentionConsent::permits(self, &scope.signed_scope)
             && self.approve("extract/read and retain exact complete transaction", scope)
@@ -173,6 +183,7 @@ mod tests {
             held: Arc::new(Fence::default())
                 .acquire(now().unwrap() + 900)
                 .unwrap(),
+            prompt_bounds: None,
             approved: Mutex::new(BTreeMap::new()),
         };
         (consent, scope)
@@ -343,6 +354,9 @@ impl SignedRetentionConsent for FrozenNativeRetentionConsentV1 {
     }
 }
 impl TransactionRetentionConsent for FrozenNativeRetentionConsentV1 {
+    fn check_final_effect_restriction(&self) -> bool {
+        !crate::terminal::coordinated_restriction_required() || self.held.check_final_effect_restriction().is_ok()
+    }
     fn permits(&self, scope: &TransactionRetentionScope) -> bool {
         SignedRetentionConsent::permits(self, &scope.signed_scope)
             && self.approved("extract/read and retain exact complete transaction", scope)

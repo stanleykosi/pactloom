@@ -727,6 +727,23 @@ pub(crate) fn bounded_write<T: Serialize>(
 ) -> Result<()> {
     bounded_write_kernel_v2(stream, value, deadline, check, None)
 }
+/// The final observer is denial-only and zero-wait. It must not re-enter
+/// source/consent or acquire transport/storage locks. It never replaces check.
+pub(crate) fn bounded_write_restricted<T: Serialize>(
+    stream: &mut UnixStream,
+    value: &T,
+    deadline: Instant,
+    check: impl Fn() -> Result<()>,
+    final_restriction: &dyn Fn() -> Result<()>,
+) -> Result<()> {
+    bounded_write_expressions_restricted_v2(stream, value, || {
+        deadline.checked_duration_since(Instant::now())
+            .filter(|d| !d.is_zero()).ok_or(BridgeError::Permission)
+    }, check, None, &|| {
+        if Instant::now() >= deadline { return Err(BridgeError::Permission); }
+        final_restriction()
+    })
+}
 fn bounded_write_kernel_v2<T: Serialize>(
     stream: &mut UnixStream,
     value: &T,
@@ -764,6 +781,16 @@ fn bounded_write_expressions_v2<T: Serialize>(
     check: impl Fn() -> Result<()>,
     collector: Option<&CurrentCollectorV2>,
 ) -> Result<()> {
+    bounded_write_expressions_restricted_v2(stream, value, remaining, check, collector, &|| Ok(()))
+}
+fn bounded_write_expressions_restricted_v2<T: Serialize>(
+    stream: &mut impl CurrentWriterV2,
+    value: &T,
+    remaining: impl Fn() -> Result<Duration>,
+    check: impl Fn() -> Result<()>,
+    collector: Option<&CurrentCollectorV2>,
+    final_restriction: &dyn Fn() -> Result<()>,
+) -> Result<()> {
     let mut raw = Zeroizing::new(
         observe_current_result_v2(
             collector,
@@ -798,6 +825,9 @@ fn bounded_write_expressions_v2<T: Serialize>(
             current_io_outcome_v2,
         )
         .map_err(|_| BridgeError::Ipc)?;
+        // Timeout/recipient setup has completed. A fresh original restriction
+        // sample admits only this physical write, never an entire chunk loop.
+        final_restriction()?;
         let written = observe_current_result_v2(
             collector,
             CurrentSiteV2::RecipientWriteIo,
@@ -966,6 +996,36 @@ mod current_diagnostics_v2_tests {
                 };
                 assert_eq!(labels(&collector), if observed { expected } else { None });
             }
+        }
+    }
+
+    #[test]
+    fn final_restriction_is_after_setup_before_each_write_and_keeps_accepted_prefix() {
+        // Pure byte adapter only. No socket, clock sleep, native custody or IO.
+        for admitted_writes in [0usize, 1] {
+            let trace = Trace::default();
+            let mut writer = FakeWriter::new(trace.clone());
+            writer.max_write = 5;
+            let samples = std::cell::Cell::new(0usize);
+            let result = bounded_write_expressions_restricted_v2(
+                &mut writer, &DeliveryCommandV1::CheckCurrent,
+                || { trace.borrow_mut().push("remaining"); Ok(Duration::from_secs(1)) },
+                || { trace.borrow_mut().push("check"); Ok(()) }, None,
+                &|| {
+                    trace.borrow_mut().push("restriction");
+                    let n = samples.get(); samples.set(n + 1);
+                    if n < admitted_writes { Ok(()) } else { Err(BridgeError::Permission) }
+                },
+            );
+            assert!(matches!(result, Err(BridgeError::Permission)));
+            let encoded = serde_json::to_vec(&DeliveryCommandV1::CheckCurrent).unwrap();
+            assert_eq!(writer.bytes, encoded[..admitted_writes * 5]);
+            let mut expected = Vec::new();
+            for _ in 0..admitted_writes {
+                expected.extend(["check", "remaining", "timeout", "restriction", "write", "check"]);
+            }
+            expected.extend(["check", "remaining", "timeout", "restriction"]);
+            assert_eq!(*trace.borrow(), expected);
         }
     }
 

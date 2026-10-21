@@ -8,6 +8,10 @@ pub(crate) mod born_offline_proof_v1;
 pub(crate) mod born_dispatch_v1;
 #[cfg(feature = "financial-runtime")]
 pub(crate) mod historical;
+#[cfg(all(feature = "coordinated-financial-workflow-v1", target_os = "linux"))]
+mod coordinated_host_v1;
+mod original_prompt_bounds_v1;
+pub(crate) use original_prompt_bounds_v1::OriginalPromptBoundsV1;
 use crate::{Error, Result, random};
 #[cfg(target_os = "linux")]
 use std::os::unix::{
@@ -95,6 +99,18 @@ impl PublicationApproval {
     }
 }
 impl Terminal {
+    #[cfg(all(feature = "coordinated-financial-workflow-v1", target_os = "linux"))]
+    pub(crate) fn require_coordinated_restriction() -> Result<()> {
+        coordinated_host_v1::require()
+    }
+    #[cfg(all(feature = "coordinated-financial-workflow-v1", target_os = "linux"))]
+    pub(crate) fn open_coordinated(
+        terminal: wholepact_financial_coordinator_origin::HostControllingTerminalV1,
+        restriction: wholepact_financial_coordinator_origin::HostOriginalRestrictionV1,
+    ) -> Result<Self> {
+        coordinated_host_v1::install(terminal, restriction)?;
+        Self::open().map_err(|error| { coordinated_host_v1::fail_closed(); error })
+    }
     #[cfg(test)]
     pub(crate) fn disconnected_for_test() -> Self {
         Self(Arc::new(Mutex::new(
@@ -147,23 +163,31 @@ impl Terminal {
     pub(crate) fn message(&self, text: &str) -> Result<()> {
         let mut f = self.0.lock().map_err(|_| Error::Terminal)?;
         foreground(&f)?;
-        f.write_all(sanitize(text).as_bytes())?;
+        write_current(&mut f, sanitize(text).as_bytes())?;
         f.flush()?;
         Ok(())
     }
     pub(crate) fn ask(&self, prompt: &str) -> Result<Zeroizing<String>> {
         let mut f = self.0.lock().map_err(|_| Error::Terminal)?;
         foreground(&f)?;
-        f.write_all(sanitize(prompt).as_bytes())?;
+        write_current(&mut f, sanitize(prompt).as_bytes())?;
         f.flush()?;
         line(&mut f)
     }
     pub(crate) fn secret(&self, prompt: &str) -> Result<Zeroizing<String>> {
         let mut f = self.0.lock().map_err(|_| Error::Terminal)?;
         foreground(&f)?;
-        f.write_all(sanitize(prompt).as_bytes())?;
+        write_current(&mut f, sanitize(prompt).as_bytes())?;
         f.flush()?;
-        // rpassword reads the controlling TTY directly, not piped stdin.
+        // The original private raw slave remains no-echo throughout, rather
+        // than inferring secret mode from text. Legacy rpassword is unchanged.
+        #[cfg(all(feature = "coordinated-financial-workflow-v1", target_os = "linux"))]
+        let secret = if coordinated_host_v1::required() {
+            coordinated_host_v1::read_line()?
+        } else {
+            Zeroizing::new(rpassword::read_password().map_err(|_| Error::Terminal)?)
+        };
+        #[cfg(not(all(feature = "coordinated-financial-workflow-v1", target_os = "linux")))]
         let secret = Zeroizing::new(rpassword::read_password().map_err(|_| Error::Terminal)?);
         foreground(&f)?;
         if secret.len() < 12 || secret.len() > 1024 {
@@ -181,6 +205,26 @@ impl Terminal {
         detail: &str,
         check: impl FnOnce() -> Result<()>,
     ) -> Result<()> {
+        self.confirm_kernel(detail, check, None, None)
+    }
+    pub(crate) fn confirm_original_bounded(
+        &self, detail: &str, check: impl FnOnce() -> Result<()>,
+        bounds: &OriginalPromptBoundsV1, held: Option<&crate::authority::Held>,
+    ) -> Result<()> {
+        self.confirm_kernel(detail, check, Some(bounds), held)
+    }
+    pub(crate) fn confirm_original_optional(
+        &self, detail: &str, check: impl FnOnce() -> Result<()>,
+        bounds: Option<&OriginalPromptBoundsV1>, held: Option<&crate::authority::Held>,
+    ) -> Result<()> {
+        if coordinated_restriction_required() {
+            self.confirm_original_bounded(detail, check, bounds.ok_or(Error::Permission)?, held)
+        } else { self.confirm_checked(detail, check) }
+    }
+    fn confirm_kernel(
+        &self, detail: &str, check: impl FnOnce() -> Result<()>,
+        bounds: Option<&OriginalPromptBoundsV1>, held: Option<&crate::authority::Held>,
+    ) -> Result<()> {
         let rendered = sanitize(detail);
         let challenge = format!("APPROVE {}", hex::encode(random::<8>()?));
         let prompt = format!(
@@ -191,10 +235,10 @@ impl Terminal {
         check()?;
         // Rendering and mutex waiting precede this exact disclosure admission.
         // Bytes already accepted by an OS write cannot be recalled.
-        f.write_all(rendered.as_bytes())?;
-        f.write_all(prompt.as_bytes())?;
+        write_prompt_current(&mut f, rendered.as_bytes(), bounds, held)?;
+        write_prompt_current(&mut f, prompt.as_bytes(), bounds, held)?;
         f.flush()?;
-        if line(&mut f)?.as_str() != challenge {
+        if prompt_line(&mut f, bounds, held)?.as_str() != challenge {
             return Err(Error::Permission);
         }
         Ok(())
@@ -230,12 +274,63 @@ fn foreground(f: &File) -> Result<()> {
     #[cfg(target_os = "linux")]
     // SAFETY: these calls inspect a live owned TTY descriptor/process group.
     if f.is_terminal() && unsafe { libc::tcgetpgrp(f.as_raw_fd()) == libc::getpgrp() } {
+        #[cfg(all(feature = "coordinated-financial-workflow-v1", target_os = "linux"))]
+        coordinated_host_v1::check(Some(f))?;
         return Ok(());
     }
     let _ = f;
     Err(Error::Terminal)
 }
+pub(crate) fn check_original_coordinator_restriction() -> Result<()> {
+    #[cfg(all(feature = "coordinated-financial-workflow-v1", target_os = "linux"))]
+    return coordinated_host_v1::check(None);
+    #[cfg(not(all(feature = "coordinated-financial-workflow-v1", target_os = "linux")))]
+    Ok(())
+}
+pub(crate) fn coordinated_restriction_required() -> bool {
+    #[cfg(all(feature = "coordinated-financial-workflow-v1", target_os = "linux"))]
+    return coordinated_host_v1::required();
+    #[cfg(not(all(feature = "coordinated-financial-workflow-v1", target_os = "linux")))]
+    false
+}
+fn write_current(f: &mut File, bytes: &[u8]) -> Result<()> {
+    write_current_until(f, bytes, None, None)
+}
+fn write_current_until(f: &mut File, bytes: &[u8], deadline: Option<std::time::Instant>, wall_bounds: Option<(u64, u64)>) -> Result<()> {
+    #[cfg(all(feature = "coordinated-financial-workflow-v1", target_os = "linux"))]
+    if coordinated_host_v1::required() {
+        coordinated_host_v1::check(Some(f))?;
+        return coordinated_host_v1::write_all(bytes, deadline, wall_bounds);
+    }
+    let _ = (deadline, wall_bounds); // Legacy write timing is unchanged.
+    f.write_all(bytes)?;
+    Ok(())
+}
+fn write_prompt_current(f: &mut File, bytes: &[u8], bounds: Option<&OriginalPromptBoundsV1>, held: Option<&crate::authority::Held>) -> Result<()> {
+    #[cfg(all(feature = "coordinated-financial-workflow-v1", target_os = "linux"))]
+    if coordinated_host_v1::required() {
+        coordinated_host_v1::check(Some(f))?;
+        return coordinated_host_v1::write_prompt(bytes, bounds, held);
+    }
+    let _ = (bounds, held);
+    f.write_all(bytes)?;
+    Ok(())
+}
+fn prompt_line(f: &mut File, bounds: Option<&OriginalPromptBoundsV1>, held: Option<&crate::authority::Held>) -> Result<Zeroizing<String>> {
+    #[cfg(all(feature = "coordinated-financial-workflow-v1", target_os = "linux"))]
+    if coordinated_host_v1::required() {
+        foreground(f)?;
+        return coordinated_host_v1::read_prompt(bounds, held);
+    }
+    let _ = (bounds, held);
+    line(f)
+}
 fn line(f: &mut File) -> Result<Zeroizing<String>> {
+    #[cfg(all(feature = "coordinated-financial-workflow-v1", target_os = "linux"))]
+    if coordinated_host_v1::required() {
+        foreground(f)?;
+        return coordinated_host_v1::read_line();
+    }
     let mut b = Zeroizing::new(Vec::new());
     loop {
         foreground(f)?;
