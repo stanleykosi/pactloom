@@ -18,12 +18,12 @@ const BOOTSTRAP_BUDGET: Duration = Duration::from_secs(30);
 pub(super) struct PhaseDeadlinesV1 { startup: Instant, pub(super) session: Instant }
 impl PhaseDeadlinesV1 {
     fn stop(self) -> Instant {
-        if cfg!(feature = "cancel-only-witness-review") { self.session + Duration::from_secs(5) } else { self.startup }
+        if cfg!(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append")) { self.session + Duration::from_secs(5) } else { self.startup }
     }
     fn drain(self) -> Instant {
         // Called once after this role's one STOP. This is a subordinate local
         // bound, never a renewal of C's separately retained root cleanup budget.
-        if cfg!(feature = "cancel-only-witness-review") { (Instant::now() + Duration::from_secs(5)).min(self.stop()) } else { self.startup }
+        if cfg!(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append")) { (Instant::now() + Duration::from_secs(5)).min(self.stop()) } else { self.startup }
     }
 }
 
@@ -31,6 +31,8 @@ impl PhaseDeadlinesV1 {
 /// payload can be constructed, cloned or reconstructed by a caller.
 pub enum BootstrappedRoleV1 {
     Coordinator(CoordinatorOriginV1),
+    #[cfg(feature = "coordinated-witness-delivery-append")]
+    WitnessDelivery(crate::delivery_origin::WitnessDeliveryOriginV1),
     Host(HostOriginV1),
     Signer(SignerOriginV1),
     InertWitness(InertWitnessOriginV1),
@@ -41,11 +43,19 @@ pub enum BootstrappedRoleV1 {
 pub struct CoordinatorOriginV1 {
     tree: InertTreeV1,
     clocks: PhaseDeadlinesV1,
-    #[cfg(feature = "cancel-only-witness-review")]
+    #[cfg(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append"))]
     display: crate::desktop_launch::DesktopLaunchV1,
 }
 impl CoordinatorOriginV1 {
-    #[cfg(not(feature = "cancel-only-witness-review"))]
+    #[cfg(feature = "coordinated-witness-delivery-append")]
+    pub fn into_delivery_review(self) -> Result<(crate::delivery_origin::CoordinatorDeliveryNativeV1, crate::delivery_origin::CoordinatorDeliveryEndpointV1)> {
+        require_time(self.clocks.session)?;
+        self.tree.check_alive()?;
+        self.display.restore_in_coordinator()?;
+        crate::delivery_origin::split_coordinator(self.tree, self.clocks.session)
+    }
+
+    #[cfg(not(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append")))]
     pub fn finish_inert(self) -> Result<()> { self.tree.stop_and_reap(self.clocks.startup) }
 
     /// Consume C's opaque original coordinate record before the caller starts
@@ -67,7 +77,7 @@ pub struct HostOriginV1 {
 impl HostOriginV1 {
     pub fn run_until_stop(self) -> ! { child_exit(finish_host(self)) }
 }
-struct LeafCustody { origin: ForkOriginV1, clocks: PhaseDeadlinesV1 }
+pub(super) struct LeafCustody { pub(super) origin: ForkOriginV1, pub(super) clocks: PhaseDeadlinesV1 }
 pub struct SignerOriginV1 { leaf: LeafCustody }
 impl SignerOriginV1 {
     pub fn run_until_stop(self) -> ! { child_exit(finish_leaf(self.leaf, Ok(()))) }
@@ -148,14 +158,21 @@ pub(super) struct InertTreeV1 {
     _image: PinnedCommonImageV1,
 }
 impl InertTreeV1 {
-    #[cfg(feature = "cancel-only-witness-review")]
+    #[cfg(feature = "coordinated-witness-delivery-append")]
+    pub(super) fn observation_pidfds(&self) -> Result<[OwnedFd; ROOT_CHILDREN]> {
+        let mut descriptors = Vec::with_capacity(ROOT_CHILDREN);
+        for child in self.children.iter().flatten() { descriptors.push(child.duplicate_lifetime_for_delivery()?); }
+        descriptors.try_into().map_err(|_| rejected("fixed observation inventory missing"))
+    }
+
+    #[cfg(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append"))]
     pub(super) fn check_alive(&self) -> Result<()> {
         for child in self.children.iter().flatten() { child.check_alive()?; }
         Ok(())
     }
-    #[cfg(feature = "cancel-only-witness-review")]
+    #[cfg(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append"))]
     pub(super) fn witness(&self) -> Result<&DirectChild> {
-        self.children.iter().flatten().find(|c| c.role() == crate::cancel_review::WITNESS)
+        self.children.iter().flatten().find(|c| c.role() == Role::Owner1V3DeliveryAdmission)
             .ok_or_else(|| rejected("original review witness missing"))
     }
     pub(super) fn stop_and_reap(mut self, deadline: Instant) -> Result<()> {
@@ -184,7 +201,7 @@ pub fn bootstrap_common_image_v1() -> Result<BootstrappedRoleV1> {
         return Err(rejected("set-id coordinator launch unsupported"));
     }
     if std::env::args_os().count() != 1 { return Err(rejected("no external worker entry")); }
-    #[cfg(feature = "cancel-only-witness-review")]
+    #[cfg(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append"))]
     let display = crate::desktop_launch::DesktopLaunchV1::capture()?;
     discard_ambient_descriptors()?;
     // Trusted launch is still required: this cannot undo already-run loader
@@ -201,7 +218,7 @@ pub fn bootstrap_common_image_v1() -> Result<BootstrappedRoleV1> {
     let deadline = phase_start + BOOTSTRAP_BUDGET;
     let clocks = PhaseDeadlinesV1 {
         startup: deadline,
-        session: if cfg!(feature = "cancel-only-witness-review") { phase_start + Duration::from_secs(300) } else { deadline },
+        session: if cfg!(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append")) { phase_start + Duration::from_secs(300) } else { deadline },
     };
     #[cfg(wholepact_bootstrap_ci)]
     crate::ci::deadline(deadline)?;
@@ -211,7 +228,7 @@ pub fn bootstrap_common_image_v1() -> Result<BootstrappedRoleV1> {
         Forked::Child(origin) => {
             drop(children);
             drop(image);
-            #[cfg(feature = "cancel-only-witness-review")]
+            #[cfg(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append"))]
             drop(display);
             return child_branch(prepare_host(origin, clocks));
         }
@@ -225,7 +242,7 @@ pub fn bootstrap_common_image_v1() -> Result<BootstrappedRoleV1> {
                 // DirectChild drops disarm reapers before closing their FDs.
                 drop(children);
                 drop(image);
-                #[cfg(feature = "cancel-only-witness-review")]
+                #[cfg(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append"))]
                 drop(display);
                 return child_branch(prepare_leaf(origin, clocks));
             }
@@ -257,7 +274,7 @@ pub fn bootstrap_common_image_v1() -> Result<BootstrappedRoleV1> {
     let tree = InertTreeV1 { children, _image: image };
     Ok(BootstrappedRoleV1::Coordinator(CoordinatorOriginV1 {
         tree, clocks,
-        #[cfg(feature = "cancel-only-witness-review")]
+        #[cfg(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append"))]
         display,
     }))
 }
@@ -302,9 +319,9 @@ fn prepare_host(origin: ForkOriginV1, clocks: PhaseDeadlinesV1) -> Result<Bootst
 
 fn finish_host(host: HostOriginV1) -> Result<()> {
     let HostOriginV1 { origin, mut signers, clocks } = host;
-    #[cfg(feature = "cancel-only-witness-review")]
+    #[cfg(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append"))]
     origin.wait_host_stop(&signers, clocks.stop())?;
-    #[cfg(not(feature = "cancel-only-witness-review"))]
+    #[cfg(not(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append")))]
     origin.receive(Message::Stop, clocks.startup)?;
     let deadline = clocks.drain();
     for signer in signers.iter().flatten() { signer.send(Message::Stop, deadline)?; }
@@ -343,6 +360,10 @@ fn prepare_leaf(origin: ForkOriginV1, clocks: PhaseDeadlinesV1) -> Result<Bootst
     if leaf.origin.role() == crate::cancel_review::WITNESS {
         return Ok(BootstrappedRoleV1::CancelOnlyWitness(CancelOnlyWitnessOriginV1 { leaf }));
     }
+    #[cfg(feature = "coordinated-witness-delivery-append")]
+    if leaf.origin.role() == Role::Owner1V3DeliveryAdmission {
+        return Ok(BootstrappedRoleV1::WitnessDelivery(crate::delivery_origin::WitnessDeliveryOriginV1::from_leaf(leaf)?));
+    }
     Ok(BootstrappedRoleV1::InertWitness(InertWitnessOriginV1 { leaf }))
 }
 
@@ -355,7 +376,7 @@ fn claim_entry(entered: &AtomicBool) -> Result<()> {
     Ok(())
 }
 
-fn finish_leaf(leaf: LeafCustody, work: Result<()>) -> Result<()> {
+pub(super) fn finish_leaf(leaf: LeafCustody, work: Result<()>) -> Result<()> {
     work?;
     leaf.origin.receive(Message::Stop, leaf.clocks.stop())?;
     let deadline = leaf.clocks.drain();
@@ -372,7 +393,7 @@ fn verify_child_start(origin: &ForkOriginV1) -> Result<()> {
     origin.check_parent_alive()
 }
 
-fn child_exit(result: Result<()>) -> ! {
+pub(super) fn child_exit(result: Result<()>) -> ! {
     // No unwinding/fallthrough into a copied parent spawn loop or main. Role
     // function locals already dropped (including H-owned signer reapers).
     let code = if result.is_ok() { 0 } else { 1 };

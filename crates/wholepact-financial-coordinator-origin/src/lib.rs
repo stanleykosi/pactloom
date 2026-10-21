@@ -6,19 +6,27 @@
 //! descriptor, claimed identity, callback or caller-provided pin.
 #![deny(unsafe_op_in_unsafe_fn)]
 #![cfg(target_os = "linux")]
-#[cfg(all(wholepact_bootstrap_ci, feature = "cancel-only-witness-review"))]
+#[cfg(all(wholepact_bootstrap_ci, any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append")))]
 compile_error!("Bootstrap-only CI instrumentation cannot select the source-opening UI profile");
+#[cfg(all(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append"))]
+compile_error!("Cancel-only and one-exact-append are separate common-image profiles");
 
 mod bootstrap;
 mod channel;
 mod image;
 mod process;
+mod delivery_failure;
+pub use delivery_failure::{DeliveryFailureV1, DeliveryFailureStageV1, DeliveryFailureClassV1};
 #[cfg(wholepact_bootstrap_ci)]
 mod ci;
-#[cfg(feature = "cancel-only-witness-review")]
+#[cfg(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append"))]
 mod desktop_launch;
 #[cfg(feature = "cancel-only-witness-review")]
 mod cancel_review;
+#[cfg(feature = "coordinated-witness-delivery-append")]
+mod delivery_channel;
+#[cfg(feature = "coordinated-witness-delivery-append")]
+mod delivery_origin;
 
 pub use bootstrap::{bootstrap_common_image_v1, BootstrappedRoleV1, CoordinatorOriginV1,
     HostOriginV1, SignerOriginV1, InertWitnessOriginV1};
@@ -27,6 +35,13 @@ pub use bootstrap::{CoordinatorCancelOriginV1, CancelOnlyWitnessOriginV1};
 #[cfg(feature = "cancel-only-witness-review")]
 pub use cancel_review::{CancelReviewInputsV1, CancelReviewPresentationV1,
     CancelReviewRequestV1, CancelReviewResponseV1};
+#[cfg(feature = "coordinated-witness-delivery-append")]
+pub use delivery_channel::{DeliveryReviewInputsV1, DeliveryReviewPresentationV1, DeliveryReadyV1, DeliveryOutcomeV1};
+#[cfg(feature = "coordinated-witness-delivery-append")]
+pub use delivery_origin::{CoordinatorDeliveryNativeV1, CoordinatorDeliveryEndpointV1,
+    DeliveryReviewTicketV1, DeliveryReadyTicketV1, DeliveryArmOutboundV1, DeliveryFinalOutboundV1,
+    CoordinatorDeliveryEventV1, WitnessDeliveryOriginV1, WitnessDeliveryRequestV1,
+    WitnessDeliveryArmV1, WitnessDeliveryFinalAdmitV1};
 
 type Result<T> = std::io::Result<T>;
 fn rejected(message: &'static str) -> std::io::Error {

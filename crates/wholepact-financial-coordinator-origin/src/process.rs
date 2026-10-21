@@ -75,6 +75,20 @@ pub(super) struct ForkOriginV1 {
     channel: Channel,
 }
 impl ForkOriginV1 {
+    #[cfg(feature = "coordinated-witness-delivery-append")]
+    pub(super) fn delivery_observer(&self) -> Result<crate::delivery_origin::ObservedPeer> {
+        if self.local_role != Role::Owner1V3DeliveryAdmission { return Err(rejected("wrong positive witness")); }
+        crate::delivery_origin::ObservedPeer::retain(&self.parent, self.channel.review_fd())
+    }
+    #[cfg(feature = "coordinated-witness-delivery-append")]
+    pub(super) fn delivery_send(&self, packet: &crate::delivery_channel::Packet) -> Result<()> {
+        crate::delivery_channel::send(self.channel.review_fd(), self.local_role, &self.parent, packet)
+    }
+    #[cfg(feature = "coordinated-witness-delivery-append")]
+    pub(super) fn delivery_receive(&self) -> Result<Option<crate::delivery_channel::Packet>> {
+        crate::delivery_channel::try_receive(self.channel.review_fd(), self.local_role, &self.parent)
+    }
+
     #[cfg(feature = "cancel-only-witness-review")]
     pub(super) fn review_send(&self, packet: &crate::cancel_review::Packet) -> Result<()> {
         if self.local_role != crate::cancel_review::WITNESS || self.parent.role != Role::Coordinator { return Err(rejected("not the original cancel-only witness")); }
@@ -85,7 +99,7 @@ impl ForkOriginV1 {
         if self.local_role != crate::cancel_review::WITNESS || self.parent.role != Role::Coordinator { return Err(rejected("not the original cancel-only witness")); }
         crate::cancel_review::try_receive(self.channel.review_fd(), self.local_role, &self.parent)
     }
-    #[cfg(feature = "cancel-only-witness-review")]
+    #[cfg(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append"))]
     pub(super) fn wait_host_stop(&self, signers: &[Option<DirectChild>; 2], deadline: Instant) -> Result<()> {
         if self.local_role != Role::Host { return Err(rejected("not original Host")); }
         loop {
@@ -128,7 +142,30 @@ pub(super) struct DirectChild {
     reaped: bool,
 }
 impl DirectChild {
-    #[cfg(feature = "cancel-only-witness-review")]
+    #[cfg(feature = "coordinated-witness-delivery-append")]
+    pub(super) fn duplicate_lifetime_for_delivery(&self) -> Result<OwnedFd> {
+        self.require_owner()?;
+        self.peer.check_alive()?;
+        self.peer.pidfd.try_clone()
+    }
+    #[cfg(feature = "coordinated-witness-delivery-append")]
+    pub(super) fn delivery_observer(&self) -> Result<crate::delivery_origin::ObservedPeer> {
+        self.require_owner()?;
+        if self.peer.role != Role::Owner1V3DeliveryAdmission { return Err(rejected("wrong positive witness")); }
+        crate::delivery_origin::ObservedPeer::retain(&self.peer, self.channel.review_fd())
+    }
+    #[cfg(feature = "coordinated-witness-delivery-append")]
+    pub(super) fn delivery_send(&self, packet: &crate::delivery_channel::Packet) -> Result<()> {
+        self.require_owner()?;
+        crate::delivery_channel::send(self.channel.review_fd(), self.local_role, &self.peer, packet)
+    }
+    #[cfg(feature = "coordinated-witness-delivery-append")]
+    pub(super) fn delivery_receive(&self) -> Result<Option<crate::delivery_channel::Packet>> {
+        self.require_owner()?;
+        crate::delivery_channel::try_receive(self.channel.review_fd(), self.local_role, &self.peer)
+    }
+
+    #[cfg(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append"))]
     pub(super) fn role(&self) -> Role { self.peer.role }
     #[cfg(feature = "cancel-only-witness-review")]
     pub(super) fn review_send(&self, packet: &crate::cancel_review::Packet) -> Result<()> {

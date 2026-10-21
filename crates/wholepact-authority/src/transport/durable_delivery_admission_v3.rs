@@ -24,7 +24,7 @@ impl DurableAdmissionPrepareV3 {
         Ok(())
     }
 }
-fn request_commitment_v3(request: &OwnerControlRequest) -> Result<String> {
+pub(crate) fn request_commitment_v3(request: &OwnerControlRequest) -> Result<String> {
     digest("wholepact:durable-delivery-admission-preparation:v3",request)
 }
 /// Only a refused connect before any connection exists permits discovery to
@@ -409,10 +409,10 @@ impl<T: Write, C: FnMut() -> Result<()>> Write for CurrentTransportV3<'_, T, C> 
         match result {Err(error)=>Err(error),Ok(())=>after}
     }
 }
-fn write_frame_checked_v3<T: Serialize>(writer: &mut impl Write, value: &T, check: &mut impl FnMut() -> Result<()>) -> Result<()> {
+pub(super) fn write_frame_checked_v3<T: Serialize>(writer: &mut impl Write, value: &T, check: &mut impl FnMut() -> Result<()>) -> Result<()> {
     write_frame_checked_observed_v3(writer, value, check, None)
 }
-fn read_frame_checked_v3<T: serde::de::DeserializeOwned>(reader: &mut impl Read, check: &mut impl FnMut() -> Result<()>) -> Result<T> {
+pub(super) fn read_frame_checked_v3<T: serde::de::DeserializeOwned>(reader: &mut impl Read, check: &mut impl FnMut() -> Result<()>) -> Result<T> {
     read_frame_checked_observed_v3(reader, check, None)
 }
 fn write_frame_checked_observed_v3<T: Serialize>(

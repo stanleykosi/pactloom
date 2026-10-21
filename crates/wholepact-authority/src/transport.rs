@@ -25,6 +25,8 @@ pub use completed_dispatch_v1::{open_born_completed_dispatch_v1_for_server, open
 #[cfg(all(feature = "native-witness-owner", target_os = "linux"))]
 pub use financial_signing_server_v1::open_born_financial_signing_v1_for_server;
 pub mod durable_delivery_admission_v3;
+#[cfg(all(feature = "coordinated-witness-delivery-append", target_os = "linux"))]
+pub(crate) mod coordinated_delivery_append_v1;
 pub use durable_delivery_admission_v3::AuthenticatedDurableAdmissionChannelV3;
 mod durable_payment_server_v1;
 #[cfg(all(

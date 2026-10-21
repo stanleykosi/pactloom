@@ -47,13 +47,40 @@ pub(super) struct PreparedNativeV2 {
     pub(super) tls: ServerTls,
     pub(super) listener: TcpListener,
 }
+/// Closed observation of the actual failed operation, never authority or a
+/// replacement return value. No raw error text, file path or credential leaves.
+#[derive(Clone, Copy)]
+pub(super) enum PreparationStageV1 {
+    InputValidation, RequestDecode, EndpointValidation, ServerCertificateRead,
+    ServerCertificateValidation, TrustedClientRootRead, ServerPrivateKeyRead,
+    TlsConfiguration, ProtectedNamespaceOpen, ListenerBind, ListenerConfiguration,
+    PreparedSourceCurrentness,
+}
+pub(super) struct PreparationFailureV1 {
+    pub(super) stage: PreparationStageV1,
+    pub(super) error: AuthorityError,
+}
+/// Maintained legacy entry preserves exactly the original AuthorityError.
 pub(super) fn prepare(input: NamespaceOpenInput, fields: InputsV2) -> Result<PreparedNativeV2> {
+    prepare_observed(input, fields).map_err(|failure| failure.error)
+}
+pub(super) fn prepare_observed(input: NamespaceOpenInput, fields: InputsV2)
+    -> std::result::Result<PreparedNativeV2, PreparationFailureV1>
+{
+    let mut stage = PreparationStageV1::InputValidation;
+    prepare_inner(input, fields, &mut stage).map_err(|error| PreparationFailureV1 { stage, error })
+}
+// Same exact ordered backend operations as the maintained preparation. Only
+// local finite stage assignments were added; no observer callback or effect.
+fn prepare_inner(input: NamespaceOpenInput, fields: InputsV2, stage: &mut PreparationStageV1) -> Result<PreparedNativeV2> {
     if fields.request_json.is_empty() || fields.request_json.len() > crate::MAX_FRAME_BYTES {
         return Err(AuthorityError::Limit);
     }
+    *stage = PreparationStageV1::RequestDecode;
     let expected: crate::OwnerControlRequest =
         wholepact_core::parse_typed_json(fields.request_json.as_bytes())
             .map_err(|_| AuthorityError::InvalidBinding)?;
+    *stage = PreparationStageV1::EndpointValidation;
     let address: SocketAddr = input
         .endpoint
         .parse()
@@ -74,7 +101,9 @@ pub(super) fn prepare(input: NamespaceOpenInput, fields: InputsV2) -> Result<Pre
     };
     // Existing protected DER inputs only, using the maintained nofollow/private
     // owner file reader. Key bytes never enter a DTO, native display or log.
+    *stage = PreparationStageV1::ServerCertificateRead;
     let certificate = CertificateDer::from(read(&fields.server_certificate_der)?.to_vec());
+    *stage = PreparationStageV1::ServerCertificateValidation;
     let name = rustls::pki_types::ServerName::try_from(input.server_name.clone())
         .map_err(|_| AuthorityError::InvalidBinding)?;
     webpki::EndEntityCert::try_from(&certificate)
@@ -82,22 +111,29 @@ pub(super) fn prepare(input: NamespaceOpenInput, fields: InputsV2) -> Result<Pre
         .verify_is_valid_for_subject_name(&name)
         .map_err(|_| AuthorityError::Authentication)?;
     let pin = crate::transport::certificate_digest(&certificate);
+    *stage = PreparationStageV1::TrustedClientRootRead;
     let root = CertificateDer::from(read(&fields.trusted_client_root_der)?.to_vec());
+    *stage = PreparationStageV1::ServerPrivateKeyRead;
     let key = read(&fields.server_private_key_pkcs8_der)?;
+    *stage = PreparationStageV1::TlsConfiguration;
     let tls = ServerTls::new(
         vec![root],
         vec![certificate],
         PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.to_vec())),
     )?;
+    *stage = PreparationStageV1::ProtectedNamespaceOpen;
     let proposal = prepare_durable_delivery_admission_v2(input, expected)?;
     proposal.require_endpoint(&pin, &address.to_string())?;
+    *stage = PreparationStageV1::ListenerBind;
     let listener = TcpListener::bind(address).map_err(|_| AuthorityError::Permission)?;
+    *stage = PreparationStageV1::ListenerConfiguration;
     if listener.local_addr().map_err(|_| AuthorityError::Storage)? != address {
         return Err(AuthorityError::Authentication);
     }
     listener
         .set_nonblocking(true)
         .map_err(|_| AuthorityError::Storage)?;
+    *stage = PreparationStageV1::PreparedSourceCurrentness;
     proposal.check_current()?;
     Ok(PreparedNativeV2 {
         proposal,

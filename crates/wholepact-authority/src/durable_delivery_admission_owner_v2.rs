@@ -22,6 +22,14 @@ pub(crate) struct NativeDurableDeliveryAdmissionSourceV2 {
         Option<crate::transport::admission_diagnostics_v1::AdmissionWitnessObserverV1>,
 }
 impl DurableDeliveryAdmissionProposalV2 {
+    // Source-only borrows for the private coordinated journal island. These do
+    // not expose a public preparation handle, native decision or permission.
+    pub(crate) fn coordinated_journal_v1(&self) -> Arc<AuthorityJournal> {
+        self.journal.clone()
+    }
+    pub(crate) fn coordinated_expected_v1(&self) -> &OwnerControlRequest {
+        &self.expected
+    }
     /// Borrow retained request data for synthetic correlation only. This does
     /// not check freshness or provide native approval, a source or a grant.
     #[cfg(feature = "synthetic-qualification")]
@@ -62,6 +70,19 @@ impl DurableDeliveryAdmissionProposalV2 {
             "request": self.expected,
             "actual_original_witness": self.disclosure,
             "notice": "Approval is unavailable in this review-only slice. No append can be admitted. Cancel, close, Escape, or focus loss requests disposal of this review. The independent signer must derive the original fixed PCZT/material and Host lineage. This witness does not attest the remote Host filesystem or possess those materials. No Acquire, Activate, Reserve, signature, extraction, release, final-byte delivery, dispatcher authentication or dispatch is supported. Historical reading does not establish current material availability.",
+        })).map_err(|_| AuthorityError::InvalidBinding)
+    }
+    /// Separate version-bound coordinated facts. Never changes the legacy
+    /// native text/digest or its independent approval path.
+    #[cfg(feature = "coordinated-witness-delivery-append")]
+    pub(crate) fn coordinated_display_v1(&self) -> Result<String> {
+        self.check_current()?;
+        serde_json::to_string_pretty(&serde_json::json!({
+            "operation": "Arm ONE exact conditional prospective delivery append",
+            "request": self.expected,
+            "actual_original_witness": self.disclosure,
+            "notice": crate::native_witness_owner::coordinated_delivery_append_v1::ADMISSION_NOTICE,
+            "limits": "Original owner mTLS must submit this identical request. This Witness does not attest remote Host files or possess Signer materials. No Acquire, Activate, Reserve, signature, extraction, release, final-byte delivery or dispatch is supported.",
         })).map_err(|_| AuthorityError::InvalidBinding)
     }
     pub(crate) fn check_current(&self) -> Result<()> {

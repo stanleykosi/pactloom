@@ -135,8 +135,11 @@ impl ReviewClock {
     pub(super) fn check(&self) -> Result<()> {
         self.check_at(crate::now_ms()?, self.started.elapsed())
     }
+    /// Original monotonic bound only; never reconstructed from wire timestamps.
+    #[cfg(feature = "coordinated-witness-delivery-append")]
+    pub(super) fn original_deadline(&self) -> Instant { self.started + self.lifetime }
     /// Inert display bounds only. This does not renew the retained local clock.
-    #[cfg(feature = "coordinated-witness-cancel-review")]
+    #[cfg(any(feature = "coordinated-witness-cancel-review", feature = "coordinated-witness-delivery-append"))]
     pub(super) fn display_bounds(&self) -> Result<(u64, u64)> {
         let lifetime = u64::try_from(self.lifetime.as_millis())
             .map_err(|_| AuthorityError::Limit)?;

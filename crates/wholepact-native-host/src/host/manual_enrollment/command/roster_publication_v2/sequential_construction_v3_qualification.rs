@@ -805,6 +805,14 @@ fn synthetic_foreground_child() {
     process_containment_v1::require_and_report_core_policy()
         .expect("inherited zero core limit and read-only collector classification");
     let stage = std::env::var(CHILD_ENV).expect("bounded synthetic parent stage");
+    #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+    if stage == "coordinator-pristine-source-v1" {
+        // Deliberately before provider TLS setup: this stage does no provider
+        // work and creates only the exact original Witness TLS credential set.
+        let terminal = crate::terminal::Terminal::open().expect("actual pristine setup TTY");
+        durable_proposal_v1::pristine_coordinator_v1::prepare_child(terminal).unwrap();
+        return;
+    }
     #[cfg(all(
         feature = "durable-proposal",
         feature = "synthetic-born-joined-qualification"
@@ -1198,6 +1206,7 @@ mod synthetic_born_submission_sink_v1;
 ))]
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum PrivateWorkspaceStageV1 {
+    PristineCoordinator,
     Producer,
     Reader,
     DeliveryProducer,
@@ -1212,6 +1221,7 @@ enum PrivateWorkspaceStageV1 {
 impl PrivateWorkspaceStageV1 {
     fn label(self) -> &'static str {
         match self {
+            Self::PristineCoordinator => "coordinator-pristine-source-v1",
             Self::Producer => "private-workspace-produce-fixed-v1",
             Self::Reader => "private-workspace-read-fixed-v1",
             Self::DeliveryProducer => "durable-delivery-native-admission-v2",
@@ -1228,6 +1238,8 @@ impl PrivateWorkspaceStageV1 {
     }
     fn marker(self, tail: &str, complete: bool, terminal: bool) -> std::io::Result<bool> {
         match self {
+            // Normal exact child exit, not a kill-marker custody transfer.
+            Self::PristineCoordinator => Ok(false),
             Self::Producer | Self::Reader => {
                 durable_proposal_v1::private_fixed_v2::death_marker_v1(
                     tail,

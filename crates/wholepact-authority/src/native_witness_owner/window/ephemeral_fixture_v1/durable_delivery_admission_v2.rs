@@ -327,6 +327,47 @@ struct PreservedAccountV2 {
 const MAX_PRESERVED_BYTES: usize = 2 * 1024 * 1024;
 const ENROLLED: &str = "The exact original witness enrollment and authenticated completion record agree. This is witness enrollment only; signer acknowledgement and active-vault publication remain separate gates.";
 
+// Private fixture handoff data, never a production importer, source constructor,
+// review state or authority. C receives only `form`; owner-client paths remain
+// with the independent bounded test runner. No credential bytes are serialized.
+#[derive(serde::Serialize)]
+struct PreservedPristineDeliveryV1 {
+    version: u16,
+    installation: Vec<u8>,
+    home_path: String,
+    form: PristineDeliveryFormV1,
+    owner_client: PristineOwnerClientPathsV1,
+    accounts: Vec<PristineAccountBaselineV1>,
+}
+#[derive(serde::Serialize)]
+struct PristineDeliveryFormV1 {
+    endpoint: String,
+    server_name: String,
+    witness_id: String,
+    pinned_server_certificate_digest: String,
+    network_profile_id: String,
+    expected_account_id: String,
+    owner_certificate_der_hex: String,
+    storage_key_file: String,
+    server_certificate_der: String,
+    server_private_key_pkcs8_der: String,
+    trusted_client_root_der: String,
+    request_json: String,
+}
+#[derive(serde::Serialize)]
+struct PristineOwnerClientPathsV1 {
+    certificate_der: String,
+    private_key_pkcs8_der: String,
+    trusted_server_root_der: String,
+}
+#[derive(serde::Serialize)]
+struct PristineAccountBaselineV1 {
+    account_id: String,
+    head: AuthorityHead,
+    original_signed_birth: String,
+    original_source_commitment: String,
+}
+
 // The actual original namespace opener authenticates the registry's complete
 // inventory, exact retained intent/completion and database identities first.
 // This comparison then covers its original registry namespace + birth target,
@@ -374,6 +415,187 @@ fn original_source_commitment(journal: &crate::AuthorityJournal) -> Result<Strin
 }
 
 impl EphemeralNativeWitnessV1 {
+    /// Read-only replay from the actual retained original namespace. This is
+    /// historical data for the synthetic scope builder, not mTLS, a native
+    /// decision or a replacement for the production source opener.
+    pub fn original_pristine_delivery_history_v1(
+        &mut self,
+        account_id: &str,
+    ) -> Result<crate::ReconciledAuthorityHistory> {
+        if self.durable_delivery.historical_only
+            || self.durable_delivery.pending.is_some()
+            || !self.durable_delivery.committed.is_empty()
+            || !matches!(&self.durable_payment, durable_payment_v1::FixturePhaseV1::Idle)
+            || !self.window.can_select()
+            || self.listener.server_handles.load(Ordering::Acquire) != 0
+        {
+            return Err(AuthorityError::Permission);
+        }
+        let journal = crate::witness_locator::open_born_history(
+            self.original_namespace_input(account_id)?,
+        )?;
+        let (birth, writer) = {
+            let connection = journal.connection.lock().map_err(|_| AuthorityError::Storage)?;
+            let ledger = crate::journal::load(connection.connection())?;
+            ledger.require_supported_durable_payment_history_v1()?;
+            if ledger.snapshot.head.sequence != 4
+                || ledger.operations.len() != 4
+                || ledger.selected_durable_payment_admission_v1()?.is_some()
+                || ledger.selected_durable_delivery_admission_v2()?.is_some()
+            {
+                return Err(AuthorityError::PolicyDenied);
+            }
+            let birth = crate::pending_birth_storage::read(connection.connection(), &ledger.policy)?
+                .ok_or(AuthorityError::RecoveryRequired)?;
+            (birth, ledger.snapshot.writer_certificate_digest.clone())
+        };
+        let disclosure = &birth.request.disclosure;
+        if disclosure.account_id != account_id
+            || disclosure.endpoint != self.window.input.endpoint
+            || disclosure.server_name != self.window.input.server_name
+            || disclosure.witness_id != self.window.input.witness_id
+            || disclosure.network_profile_id != self.window.input.network_profile_id
+            || disclosure.pinned_server_certificate_digest != self.server_certificate_digest
+        {
+            return Err(AuthorityError::InvalidBinding);
+        }
+        let history = crate::transport::synthetic::reconciled_history(&journal, &writer, disclosure)?;
+        history.require_original_roster_preconstruction_history()?;
+        journal.require_born_read_current()?;
+        Ok(history)
+    }
+
+    /// Consume one genuine three-account fixture BEFORE any target admission.
+    /// The same files survive; no account, row, credential, grant or clock is
+    /// created here. Every later actual UI session must independently reopen
+    /// those originals and remain bounded by this exact retained request.
+    pub fn preserve_pristine_delivery_originals_v1(
+        mut self,
+        request: &OwnerControlRequest,
+    ) -> Result<Vec<u8>> {
+        let OwnerControl::AdmitDurablePaymentWithDeliveryV2 { record } = &request.control else {
+            return Err(AuthorityError::Permission);
+        };
+        if self.durable_delivery.original_signed_births.len() != 3
+            || !self.durable_delivery.original_signed_births.contains_key(&request.account_id)
+            || !self.listener.address.ip().is_loopback()
+            || self.listener.address.port() == 0
+            || self.listener.local_addr().map_err(|_| AuthorityError::Permission)? != self.listener.address
+            || self.window.input.endpoint != self.listener.address.to_string()
+        {
+            return Err(AuthorityError::Permission);
+        }
+        let history = self.original_pristine_delivery_history_v1(&request.account_id)?;
+        let actual = crate::durable_delivery_admission_v2::prepare_durable_delivery_admission_request_v2(
+            record.scope.clone(), &history,
+        )?;
+        require_exact_retained_request(&actual, request)?;
+        record.require_live(crate::now_ms()?)?;
+        drop(history);
+
+        let owner_pin = crate::transport::certificate_digest(&CertificateDer::from(
+            self.owner_certificate.as_slice(),
+        ));
+        let signed_originals = self.durable_delivery.original_signed_births.clone();
+        let mut accounts = Vec::with_capacity(3);
+        for (account_id, envelope) in signed_originals {
+            if envelope.is_empty() || envelope.len() > crate::MAX_FRAME_BYTES {
+                return Err(AuthorityError::Limit);
+            }
+            let signed: crate::pending_birth_signature::PendingBirthOwnerSignature =
+                serde_json::from_slice(&envelope).map_err(|_| AuthorityError::InvalidBinding)?;
+            let verified = crate::pending_birth_signature::verify_pending_birth_owner_signature(
+                &signed, &owner_pin,
+            )?;
+            let journal = crate::witness_locator::open_born_history(
+                self.original_namespace_input(&account_id)?,
+            )?;
+            let head = {
+                let connection = journal.connection.lock().map_err(|_| AuthorityError::Storage)?;
+                let ledger = crate::journal::load(connection.connection())?;
+                let birth = crate::pending_birth_storage::read(connection.connection(), &ledger.policy)?
+                    .ok_or(AuthorityError::RecoveryRequired)?;
+                if verified.request() != &birth.request
+                    || verified.certificate_digest() != birth.authenticated_owner_certificate_digest
+                    || verified.evidence_digest() != birth.owner_approval_evidence_digest
+                    || ledger.snapshot.account_id != account_id
+                    || ledger.selected_durable_payment_admission_v1()?.is_some()
+                    || ledger.selected_durable_delivery_admission_v2()?.is_some()
+                {
+                    return Err(AuthorityError::CorruptHistory);
+                }
+                if account_id == request.account_id
+                    && (ledger.snapshot.head != request.expected_head
+                        || ledger.snapshot.head.sequence != 4
+                        || ledger.operations.len() != 4)
+                {
+                    return Err(AuthorityError::StaleHead);
+                }
+                ledger.snapshot.head
+            };
+            accounts.push(PristineAccountBaselineV1 {
+                account_id,
+                head,
+                original_signed_birth: String::from_utf8(envelope).map_err(|_| AuthorityError::InvalidBinding)?,
+                original_source_commitment: original_source_commitment(&journal)?,
+            });
+        }
+        let path = |name: &str| -> Result<String> {
+            let path = if name.is_empty() { self.root.clone() } else { self.root.join(name) };
+            let text = path.to_str().ok_or(AuthorityError::InvalidBinding)?;
+            if !path.is_absolute() || text.len() > 4096 {
+                return Err(AuthorityError::InvalidBinding);
+            }
+            Ok(text.to_owned())
+        };
+        let request_json = serde_json::to_string(request).map_err(|_| AuthorityError::InvalidBinding)?;
+        if request_json.len() > crate::MAX_FRAME_BYTES {
+            return Err(AuthorityError::Limit);
+        }
+        let mut descriptor = PreservedPristineDeliveryV1 {
+            version: 1,
+            installation: Vec::new(),
+            home_path: path("")?,
+            form: PristineDeliveryFormV1 {
+                endpoint: self.window.input.endpoint.clone(),
+                server_name: self.window.input.server_name.clone(),
+                witness_id: self.window.input.witness_id.clone(),
+                pinned_server_certificate_digest: self.server_certificate_digest.clone(),
+                network_profile_id: self.window.input.network_profile_id.clone(),
+                expected_account_id: request.account_id.clone(),
+                owner_certificate_der_hex: hex::encode(&self.owner_certificate),
+                storage_key_file: path("synthetic-namespace.key")?,
+                server_certificate_der: path("server.der")?,
+                server_private_key_pkcs8_der: path("server.pk8")?,
+                trusted_client_root_der: path("ca.der")?,
+                request_json,
+            },
+            owner_client: PristineOwnerClientPathsV1 {
+                certificate_der: path("owner.der")?,
+                private_key_pkcs8_der: path("owner.pk8")?,
+                trusted_server_root_der: path("ca.der")?,
+            },
+            accounts,
+        };
+        // Storage's <=16KiB byte descriptor expands to at most64KiB JSON. Size
+        // failure must happen before exclusive custody is irreversibly kept.
+        if serde_json::to_vec(&descriptor).map_err(|_| AuthorityError::InvalidBinding)?.len()
+            > MAX_PRESERVED_BYTES - 64 * 1024
+        {
+            return Err(AuthorityError::Limit);
+        }
+        record.require_live(crate::now_ms()?)?;
+        let installation = self.installation.clone();
+        self.window.input.synthetic_installation.take();
+        drop(self); // no job/pending source; closes the original listener/window
+        descriptor.installation = installation.preserve_original_for_process_exit_v2()?;
+        let bytes = serde_json::to_vec(&descriptor).map_err(|_| AuthorityError::InvalidBinding)?;
+        if bytes.len() > MAX_PRESERVED_BYTES {
+            return Err(AuthorityError::Limit);
+        }
+        Ok(bytes)
+    }
+
     /// Select and authenticate this SAME original account's pristine four-event
     /// bootstrap before the independent Signer prepares its prospective scope.
     /// This has no admission or mutation capability and never adopts DTO phase.

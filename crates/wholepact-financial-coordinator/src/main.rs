@@ -1,14 +1,19 @@
-//! Private fixed-fork entry: the bootstrap profile is inert; the separate opt-in
-//! profile adds actual Witness preparation and C-only display/disposal, never
-//! financial approval. Neither has a public worker entry. Initial native launch
-//! must be trusted, credential-free and uninjected; image checks cannot undo
-//! earlier loader injection.
+//! Private exact-image fixed-fork entry. Separate closed profiles provide inert
+//! bootstrap, cancel-only preparation, or one exact source-backed delivery append.
+//! Initial launch is trusted, credential-free and uninjected; no public worker
+//! entry, source factory or reusable financial approval is accepted.
 #![forbid(unsafe_code)]
-#[cfg(all(wholepact_bootstrap_ci, feature = "cancel-only-witness-review"))]
+#[cfg(all(wholepact_bootstrap_ci, any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append")))]
 compile_error!("Bootstrap-only CI instrumentation cannot select the source-opening UI profile");
 
+#[cfg(all(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append"))]
+compile_error!("Cancel-only and one-exact-append are separate common-image profiles");
 #[cfg(target_os = "linux")]
 mod bootstrap;
+#[cfg(all(target_os = "linux", feature = "coordinated-witness-delivery-append"))]
+mod delivery_driver;
+#[cfg(all(target_os = "linux", feature = "coordinated-witness-delivery-append"))]
+mod delivery_ui;
 #[cfg(all(target_os = "linux", feature = "cancel-only-witness-review"))]
 mod native_ui;
 #[cfg(all(target_os = "linux", feature = "cancel-only-witness-review"))]
@@ -30,7 +35,10 @@ fn main() {
     // any thread-capable initialization. No public worker/role entry exists.
     #[cfg(target_os = "linux")]
     let code = match bootstrap::run_before_runtime() {
-        Ok(()) => 78, // Bootstrap completed, but financial activation unavailable.
+        Ok(()) => {
+            #[cfg(feature = "coordinated-witness-delivery-append")] { 0 }
+            #[cfg(not(feature = "coordinated-witness-delivery-append"))] { 78 }
+        },
         Err(_) => 1,
     };
     #[cfg(not(target_os = "linux"))]

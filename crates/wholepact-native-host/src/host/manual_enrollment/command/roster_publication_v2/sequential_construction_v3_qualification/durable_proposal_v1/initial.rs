@@ -485,6 +485,21 @@ pub(super) struct PrivateWorkspaceInitialV1 {
 // Host remains in its move-safe slot through the mandatory consuming vault cut.
 
 pub(super) fn prepare_private_workspace_v1(terminal: crate::terminal::Terminal) -> Result<PrivateWorkspaceInitialV1> {
+    prepare_private_workspace_with_profile_v1(terminal, PrivateWorkspaceProfileV1::FullExisting)
+}
+
+/// The same genuine three-account predecessor, stopped before viewing-wallet,
+/// funding or fixed-candidate work, without an unused dispatcher credential.
+pub(super) fn prepare_pristine_coordinator_v1(terminal: crate::terminal::Terminal) -> Result<PrivateWorkspaceInitialV1> {
+    prepare_private_workspace_with_profile_v1(terminal, PrivateWorkspaceProfileV1::PristineCoordinator)
+}
+
+enum PrivateWorkspaceProfileV1 { FullExisting, PristineCoordinator }
+
+fn prepare_private_workspace_with_profile_v1(
+    terminal: crate::terminal::Terminal,
+    profile: PrivateWorkspaceProfileV1,
+) -> Result<PrivateWorkspaceInitialV1> {
     let (temporary, host) = diagnostic::host(B::PrivateWorkspaceBootstrap, || {
         crate::host::born_test_host_v1::create(terminal)
     })?;
@@ -504,7 +519,10 @@ pub(super) fn prepare_private_workspace_v1(terminal: crate::terminal::Terminal) 
         create_private_workspace_agreement_v1(&host, temporary.path(), &payment_receiver)
     })?;
     mark(B::WitnessSetup);
-    let mut witness = EphemeralNativeWitnessV1::new().map_err(|_| stage("witness native setup"))?;
+    let mut witness = match profile {
+        PrivateWorkspaceProfileV1::FullExisting => EphemeralNativeWitnessV1::new(),
+        PrivateWorkspaceProfileV1::PristineCoordinator => EphemeralNativeWitnessV1::new_for_pristine_delivery_review_v1(),
+    }.map_err(|_| stage("witness native setup"))?;
     mark(B::WitnessOrigin);
     let origin = witness
         .origin()

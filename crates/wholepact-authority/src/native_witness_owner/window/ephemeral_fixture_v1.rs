@@ -26,6 +26,20 @@ const UNDERSTOOD: &str = "I reviewed this complete exact operation and its perma
 const AUTHORIZE: &str = "Authorize this exact one-time owner operation";
 const PROFILE: &str = "ironwood-testnet-nu7-candidate";
 
+#[derive(Clone, Copy)]
+enum TlsFixtureProfileV1 {
+    FullExisting,
+    PristineDeliveryReview,
+}
+impl TlsFixtureProfileV1 {
+    fn leaves(self) -> &'static [&'static str] {
+        match self {
+            Self::FullExisting => &["owner", "writer", "server", "dispatcher"],
+            Self::PristineDeliveryReview => &["owner", "writer", "server"],
+        }
+    }
+}
+
 #[path = "ephemeral_fixture_v1/durable_delivery_admission_v2.rs"]
 mod durable_delivery_admission_v2;
 #[path = "ephemeral_fixture_v1/durable_payment_v1.rs"]
@@ -140,6 +154,17 @@ impl OriginalListenerV1 {
 }
 impl EphemeralNativeWitnessV1 {
     pub fn new() -> Result<Self> {
+        Self::new_with_tls_profile(TlsFixtureProfileV1::FullExisting)
+    }
+
+    /// The same genuine synthetic setup controller, with no unused dispatcher
+    /// credential. This does not create accounts or approve a delivery review.
+    /// The caller still needs separately approved disposable fixture execution.
+    pub fn new_for_pristine_delivery_review_v1() -> Result<Self> {
+        Self::new_with_tls_profile(TlsFixtureProfileV1::PristineDeliveryReview)
+    }
+
+    fn new_with_tls_profile(profile: TlsFixtureProfileV1) -> Result<Self> {
         let installation = EphemeralWitnessInstallation::new()?;
         let root = installation
             .probe()?
@@ -147,7 +172,7 @@ impl EphemeralNativeWitnessV1 {
             .parent()
             .ok_or(AuthorityError::Storage)?
             .to_path_buf();
-        create_tls_material(&root, &installation)?;
+        create_tls_material(&root, &installation, profile)?;
         let ca = CertificateDer::from(
             fs::read(root.join("ca.der")).map_err(|_| AuthorityError::Storage)?,
         );
@@ -772,6 +797,7 @@ fn text_position(shape: &egui::epaint::Shape, label: &str) -> Option<egui::Pos2>
 fn create_tls_material(
     root: &Path,
     installation: &Arc<EphemeralWitnessInstallation>,
+    profile: TlsFixtureProfileV1,
 ) -> Result<()> {
     // Fixed once before any birth/native financial approval, never per command.
     let deadline = Instant::now()
@@ -804,8 +830,10 @@ fn create_tls_material(
     ])?;
     run(&["x509", "-in", "ca.pem", "-outform", "DER", "-out", "ca.der"])?;
     fs::write(root.join("leaf.ext"), b"basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth,clientAuth\nsubjectAltName=DNS:localhost\n").map_err(|_| AuthorityError::Storage)?;
-    fs::write(root.join("dispatcher.ext"), b"basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=clientAuth\n").map_err(|_| AuthorityError::Storage)?;
-    for name in ["owner", "writer", "server", "dispatcher"] {
+    if matches!(profile, TlsFixtureProfileV1::FullExisting) {
+        fs::write(root.join("dispatcher.ext"), b"basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=clientAuth\n").map_err(|_| AuthorityError::Storage)?;
+    }
+    for &name in profile.leaves() {
         let key = format!("{name}.key");
         let csr = format!("{name}.csr");
         let der = format!("{name}.der");
@@ -872,6 +900,15 @@ fn create_tls_material(
 mod tests {
     use super::*;
     use std::net::ToSocketAddrs;
+
+    #[test]
+    fn pristine_tls_profile_omits_dispatcher_without_changing_existing_order() {
+        assert_eq!(TlsFixtureProfileV1::FullExisting.leaves(),
+            &["owner", "writer", "server", "dispatcher"]);
+        assert_eq!(TlsFixtureProfileV1::PristineDeliveryReview.leaves(),
+            &["owner", "writer", "server"]);
+    }
+
     /// No listener, GUI, owner decision or enrollment. The maintained bounded
     /// fixture subprocess creates only ephemeral filesystem TLS material.
     #[test]
@@ -884,7 +921,7 @@ mod tests {
             .parent()
             .unwrap()
             .to_path_buf();
-        create_tls_material(&root, &installation).unwrap();
+        create_tls_material(&root, &installation, TlsFixtureProfileV1::FullExisting).unwrap();
         let ca = CertificateDer::from(fs::read(root.join("ca.der")).unwrap());
         let dispatcher = CertificateDer::from(fs::read(root.join("dispatcher.der")).unwrap());
         let mut roots = rustls::RootCertStore::empty();
