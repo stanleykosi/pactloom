@@ -44,11 +44,30 @@ class PrerequisiteTests(unittest.TestCase):
         additions = {'scripts/ci-ui-setup-wrapper.py', 'scripts/ci-ui-output.py',
                      'scripts/ci-ui-container.py', 'scripts/tests/test_ci_ui_setup.py'}
         self.assertTrue(additions <= M.ALLOWED)
-        self.assertEqual(len(M.ALLOWED), 11)
+        self.assertEqual(len(M.ALLOWED), 19)
         M.verify_paths(additions)
         for path in ('scripts/ci-bootstrap-output.py', 'scripts/build-encrypted-storage-deps.sh',
                      'crates/wholepact-native-host/src/lib.rs'):
             with self.assertRaises(ValueError): M.verify_paths(additions | {path})
+
+    def test_export_helpers_are_not_a_rust_allowlist(self):
+        M.verify_paths(['scripts/ci-ui-artifacts.py', 'scripts/tests/test_ci_ui_artifacts.py'])
+        self.assertNotIn(M.FIXTURE, M.ALLOWED)
+        for pair in (None, (M.FIXTURE_BEFORE, '0'*64), ('0'*64, M.FIXTURE_AFTER),
+                     (M.FIXTURE_AFTER, M.FIXTURE_BEFORE)):
+            with self.assertRaises(ValueError): M.verify_paths([M.FIXTURE], pair)
+        M.verify_paths([M.FIXTURE], (M.FIXTURE_BEFORE, M.FIXTURE_AFTER))
+        with self.assertRaises(ValueError):
+            M.verify_paths([M.FIXTURE, 'crates/wholepact-native-host/src/lib.rs'],
+                           (M.FIXTURE_BEFORE, M.FIXTURE_AFTER))
+
+    def test_inactive_runner_paths_remain_ci_only(self):
+        M.verify_paths(["scripts/ci-ui-reuse.py", "scripts/tests/test_ci_ui_reuse.py",
+                        "scripts/ci-ui-reuse-runner.py", "scripts/tests/test_ci_ui_reuse_runner.py",
+                        "scripts/ci-ui-reuse-pin.json", "scripts/ci-ui-linux.sh"])
+        for path in ("scripts/ci-ui-reuse-other.py", "crates/wholepact-authority/Cargo.toml",
+                     "crates/wholepact-financial-coordinator-origin/src/ci.rs"):
+            with self.assertRaises(ValueError): M.verify_paths([path])
 
     def test_complete_nonallowlisted_tree_is_frozen(self):
         M.verify_paths(M.ALLOWED)

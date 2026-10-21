@@ -185,6 +185,18 @@ class Custody(unittest.TestCase):
         with self.assertRaises(S.P.Rejected):
             S.validate_error_packet(packet)
 
+    def test_both_parent_pty_opens_never_acquire_controlling_terminal(self):
+        # Source regression only: not proof of Linux PTY runtime behavior.
+        root = pathlib.Path(__file__).parents[2]
+        source = (root / 'crates/wholepact-native-host/src/host/manual_enrollment/command/'
+                  'roster_publication_v2/sequential_construction_v3_qualification.rs').read_text()
+        opens = re.findall(r'let slave = OpenOptions::new\(\)(.*?)\.open\(std::ffi::OsStr::from_bytes', source, re.S)
+        self.assertEqual(len(opens), 2)
+        self.assertTrue(all('.custom_flags(libc::O_NOCTTY)' in block for block in opens))
+        self.assertEqual(source.count('libc::ioctl(0, libc::TIOCSCTTY, 0)'), 2)
+        self.assertEqual(source.count('libc::setsid() < 0'), 2)
+        self.assertNotIn('libc::SIG_IGN', source)
+
     def test_source_enum_allowlists_exact(self):
         root = pathlib.Path(__file__).parents[2]
         path = root / 'crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3_qualification/safe_diagnostics_v1.rs'

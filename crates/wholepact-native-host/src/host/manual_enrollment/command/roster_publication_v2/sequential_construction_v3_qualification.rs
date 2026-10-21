@@ -15,7 +15,7 @@ use std::{
     fs::{File, OpenOptions},
     io::{Read, Write},
     os::unix::{
-        fs::PermissionsExt,
+        fs::{OpenOptionsExt, PermissionsExt},
         io::{AsRawFd, FromRawFd},
         process::{CommandExt, ExitStatusExt},
     },
@@ -297,9 +297,13 @@ fn foreground_child(stage: &str, inputs: &[Input<'_>]) -> std::io::Result<()> {
     }
     let slave_name = unsafe { std::ffi::CStr::from_ptr(slave_name.as_ptr()) };
     use std::os::unix::ffi::OsStrExt;
+    // A CI wrapper may make this parent a session leader. Never implicitly
+    // acquire the slave here: only the child's setsid/TIOCSCTTY owns it.
+    // Otherwise spawn refusal plus master close can SIGHUP the parent itself.
     let slave = OpenOptions::new()
         .read(true)
         .write(true)
+        .custom_flags(libc::O_NOCTTY)
         .open(std::ffi::OsStr::from_bytes(slave_name.to_bytes()))?;
     // Parent owns the exact synthetic root through process cleanup. It closes
     // and checks absence only after direct-child reap plus owned-group absence;
@@ -1373,9 +1377,13 @@ fn private_workspace_stage_v1(
     }
     let slave_name = unsafe { std::ffi::CStr::from_ptr(slave_name.as_ptr()) };
     use std::os::unix::ffi::OsStrExt;
+    // A CI wrapper may make this parent a session leader. Never implicitly
+    // acquire the slave here: only the child's setsid/TIOCSCTTY owns it.
+    // Otherwise spawn refusal plus master close can SIGHUP the parent itself.
     let slave = OpenOptions::new()
         .read(true)
         .write(true)
+        .custom_flags(libc::O_NOCTTY)
         .open(std::ffi::OsStr::from_bytes(slave_name.to_bytes()))?;
     let prepared_command = (|| -> std::io::Result<Command> {
         let mut command = Command::new(std::env::current_exe()?);

@@ -4,6 +4,7 @@ on:
     branches: [qualification/durable-proposal-v1]
 permissions:
   contents: read
+  actions: read
 concurrency:
   group: qualification-durable-proposal-v1
   cancel-in-progress: false
@@ -88,11 +89,25 @@ jobs:
           git -c credential.helper= -c http.extraheader= fetch --no-tags --depth=1 https://github.com/stanleykosi/pactloom.git e2ad650efe7d9a5db94662e6713b7447fc4f6f81
           python3 -I -B scripts/ci-ui-prerequisite.py
       - name: Actual isolated UI smoke and one reused synthetic fixture
+        id: ui
         if: steps.mode.outputs.gate == 'ui'
         timeout-minutes: 100
         shell: bash
         working-directory: source
+        env:
+          UI_ARTIFACT_READ_TOKEN: ${{ github.token }}
         run: bash scripts/ci-ui-linux.sh
+      - name: Preserve exact credential-free compiled UI bundle
+        if: always() && steps.mode.outputs.gate == 'ui' && steps.ui.outputs.artifact_bundle_ready == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ui-build-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          path: ${{ runner.temp }}/wholepact-ui-build-${{ github.run_id }}-${{ github.run_attempt }}/build.tar
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 1
+          overwrite: false
+          include-hidden-files: false
       - name: Verify UI containers, temporary image and build cache removed
         if: always() && steps.mode.outputs.gate == 'ui'
         timeout-minutes: 5
