@@ -8,6 +8,8 @@ description = "Standalone Wholepact native Wayland signer review window"
 [features]
 default = ["authority-signing"]
 authority-signing = ["wholepact-signer/authority-signing"]
+# Explicit production profile, including the existing original-source review surfaces.
+durable-proposal = ["wholepact-signer/durable-proposal", "wholepact-signer/offline-review-foundation"]
 synthetic-qualification = ["wholepact-signer/synthetic-qualification"]
 
 [dependencies]

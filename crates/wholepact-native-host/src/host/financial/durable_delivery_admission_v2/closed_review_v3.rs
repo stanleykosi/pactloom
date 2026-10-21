@@ -250,11 +250,28 @@ fn validate_closed_status_v3(scope: &DurableReviewExportScopeV3, status: &Durabl
 /// Explicit CLI purpose. Input selects the original reviewer, not a source,
 /// session or native issuer. All native decisions still occur in the real GUI.
 pub(in crate::host) fn admit_original_v3(terminal: Terminal, profile: &Path, workspace: &Path) -> Result<()> {
-    let host = Host::open_workspace_dispatcher_registered_v4(terminal.clone(), profile, workspace, false)?;
+    let host = Host::open_workspace_dispatcher_registered_v4(terminal, profile, workspace, false)?;
+    admit_original_borrowed_v3(&host, workspace, None).map(|_| ())
+}
+/// Same one-shot admission under a caller-owned original Host. Returned values
+/// are inert, already-checked history only, never native source or action owners.
+/// A foreground two-owner session keeps this Host process alive after return.
+pub(in crate::host) fn admit_original_borrowed_v3(
+    host: &Host,
+    workspace: &Path,
+    previous: Option<&OriginalDeliveryExportV3>,
+) -> Result<(OriginalDeliveryExportV3, DurableDeliveryAdmissionStatusV3)> {
+    let terminal = &host.terminal;
     let selection: ReviewerRequestV2 = host.read_json("Exact original reviewer request and bounded prospective delivery choices JSON for CLOSED V3: ")?;
+    if previous.is_some_and(|prior| prior.export_scope.recipient.account_id == selection.account_id
+        || prior.export_scope.recipient.participant_id == selection.participant_id)
+    { return Err(Error::Authentication); }
     if !selection.signer_socket.is_absolute() { return Err(Error::Authentication); }
     let (verified, exported) = host.private_original_delivery_export_v3(workspace, &selection.choices, |fixed, digest, bytes, delivery, materials| {
-        if fixed.proposal_binding != selection.request.proposal_binding { return Err(Error::Authentication); }
+        if fixed.proposal_binding != selection.request.proposal_binding
+            || previous.is_some_and(|prior| prior.request.delivery != *delivery
+                || prior.export_scope.proposal != *fixed)
+        { return Err(Error::Authentication); }
         let pair = PairScope { account_id: selection.account_id.clone(), participant_id: selection.participant_id.clone(), agreement_id: fixed.agreement_id.clone(), manifest_digest: fixed.manifest_digest.clone(), history_read: true, authorization_export: false, preconstruction_export: true };
         terminal.confirm("Pair this installed original reviewer for original setup and independently approved closed V3 receive/view. No financial execution is enabled.")?;
         let client = OriginalHistoryClient::pair(InstalledSignerProvider::load().map_err(|_| Error::Permission)?, &selection.signer_socket, "wholepact-original-delivery-v3", pair).map_err(|_| Error::Permission)?;
@@ -272,7 +289,8 @@ pub(in crate::host) fn admit_original_v3(terminal: Terminal, profile: &Path, wor
     };
     validate_closed_status_v3(&exported.export_scope, &status)?;
     validate_admission_result_v3(&exported, status.verified_audit().map_err(|_| Error::Authentication)?)?;
-    host.display_original_admission_status_v3(workspace, &exported.export_scope, &status)
+    host.display_original_admission_status_v3(workspace, &exported.export_scope, &status)?;
+    Ok((exported, status))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

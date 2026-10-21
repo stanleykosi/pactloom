@@ -209,6 +209,24 @@ enum Command {
         #[arg(long)] profile: PathBuf,
         #[arg(long)] workspace: PathBuf,
     },
+    /// Keep the original Host alive through two independent native financial continuations.
+    #[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
+    DurableFinancialSessionV1 {
+        #[arg(long)] profile: PathBuf,
+        #[arg(long)] workspace: PathBuf,
+    },
+    /// Inspect only an already completed original transaction; never sign, extract or repair.
+    #[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
+    DurableFinancialInspectV1 {
+        #[arg(long)] profile: PathBuf,
+        #[arg(long)] workspace: PathBuf,
+    },
+    /// Review one exact saved-byte dispatch from completed original custody.
+    #[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
+    DurableFinancialDispatchV1 {
+        #[arg(long)] profile: PathBuf,
+        #[arg(long)] workspace: PathBuf,
+    },
     /// Back up a closed restricted successor, preserving its complete ancestor graph.
     #[cfg(feature = "financial-runtime")]
     GenerationBackup {
@@ -439,6 +457,12 @@ pub fn run() -> Result<()> {
 }
 fn dispatch(terminal: Terminal, command: Command) -> Result<()> {
     match command {
+#[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
+        Command::DurableFinancialSessionV1 { profile, workspace } => financial::durable_financial_commands_v1::session_v1(terminal, &profile, &workspace),
+#[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
+        Command::DurableFinancialInspectV1 { profile, workspace } => financial::durable_financial_commands_v1::inspect_v1(terminal, &profile, &workspace),
+#[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
+        Command::DurableFinancialDispatchV1 { profile, workspace } => financial::durable_financial_commands_v1::dispatch_v1(terminal, &profile, &workspace),
 #[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
         Command::DurableDeliveryAdmitV2 {profile,workspace} => financial::durable_delivery_admission_v2::admit_original(terminal,&profile,&workspace),
 #[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
