@@ -47,7 +47,14 @@ class FakeTransport:
         assert reserved1 == reserved2 == 0
         if op in (C.FOCUS, C.MOVE, C.BUTTON, C.KEY, C.SCROLL_DOWN, C.CLOSE_WINDOW):
             self.input_sequence = seq
-        if op == C.FRAME:
+        if op == C.PROGRESS:
+            self.incoming.append(packet(C.FRAME_BARRIER, seq, self.commit, self.frame,
+                                        input_sequence=self.input_sequence))
+            self.commit += 1
+            self.frame += 1
+            self.incoming.append(packet(C.ACK, seq, self.commit, self.frame,
+                                        input_sequence=self.input_sequence))
+        elif op == C.FRAME:
             self.incoming.append(packet(C.FRAME_BARRIER, seq, self.commit, self.frame,
                                         input_sequence=self.input_sequence))
             self.commit += 1
@@ -98,6 +105,131 @@ class Protocol(unittest.TestCase):
         self.assertEqual(found.exception.code, code)
         self.assertEqual(str(found.exception), code)
         self.assertTrue(self.transport.closed)
+
+    def test_batched_ascii_preserves_exact_native_keys_and_releases_modifiers(self):
+        self.bind()
+        text = 'aA!' * 50
+        before = len(self.transport.sent)
+        self.controller.type_ascii(text)
+        commands = [C.COMMAND.unpack(raw) for raw in self.transport.sent[before:]]
+        actual = [(v[4], v[5]) for v in commands if v[3] == C.KEY]
+        self.assertEqual(tuple(actual), C._ascii_events(text))
+        held = set(); count = 0; batches = 0
+        for v in commands:
+            if v[3] == C.KEY:
+                count += 1
+                if v[5]: held.add(v[4])
+                else: held.remove(v[4])
+            else:
+                self.assertEqual(v[3], C.PROGRESS)
+                self.assertFalse(held)
+                self.assertLessEqual(count, 256)
+                self.assertGreater(count, 0)
+                count = 0; batches += 1
+        self.assertEqual(batches, 3)
+        self.assertEqual(count, 0)
+        self.assertEqual(self.controller._captures, 0)
+        self.assertEqual(self.controller._last_observed_commit, 0)
+        self.assertEqual(self.controller.original_deadline_ns, self.original)
+        self.assertEqual(self.controller.session_deadline_ns, self.session)
+
+    def test_progress_budget_and_command_budget_preflight_before_any_typing(self):
+        self.bind()
+        self.controller._progress = C.MAX_PROGRESS
+        before = list(self.transport.sent)
+        self.rejected('limit', lambda: self.controller.type_ascii('x'))
+        self.assertEqual(before, self.transport.sent)
+
+    def test_progress_command_included_in_full_text_budget(self):
+        self.bind()
+        self.controller._sequence = C.MAX_COMMANDS - 2
+        before = list(self.transport.sent)
+        self.rejected('limit', lambda: self.controller.type_ascii('x'))
+        self.assertEqual(before, self.transport.sent)
+
+    def test_no_input_or_progress_for_empty_value(self):
+        self.bind(); before = list(self.transport.sent)
+        self.controller.type_ascii('')
+        self.assertEqual(before, self.transport.sent)
+
+    def test_progress_rejects_old_commit_even_with_new_render(self):
+        self.bind()
+        def corrupt(queue):
+            h = list(C.HEADER.unpack(queue[-1])); h[5] -= 1
+            queue[-1] = C.HEADER.pack(*h)
+        self.transport.corrupt = corrupt
+        self.rejected('protocol', self.controller.wait_render_progress)
+
+    def test_progress_rejects_new_commit_without_new_render(self):
+        self.bind()
+        def corrupt(queue):
+            h = list(C.HEADER.unpack(queue[-1])); h[6] -= 1
+            queue[-1] = C.HEADER.pack(*h)
+        self.transport.corrupt = corrupt
+        self.rejected('protocol', self.controller.wait_render_progress)
+
+    def test_progress_rejects_changed_input_sequence(self):
+        self.bind()
+        def corrupt(queue):
+            h = list(C.HEADER.unpack(queue[-1])); h[11] = 1
+            queue[-1] = C.HEADER.pack(*h)
+        self.transport.corrupt = corrupt
+        self.rejected('protocol', self.controller.wait_render_progress)
+
+    def test_progress_requires_distinct_barrier_no_pixels_or_early_ack(self):
+        self.bind()
+        def corrupt(queue):
+            h = list(C.HEADER.unpack(queue[0])); h[3] = C.ACK
+            queue[0] = C.HEADER.pack(*h)
+        self.transport.corrupt = corrupt
+        self.rejected('protocol', self.controller.wait_render_progress)
+
+    def test_progress_deadline_stops_typing_before_next_batch(self):
+        self.bind()
+        original_read = self.transport.recvmsg
+        def read(*args):
+            if self.transport.sent and C.COMMAND.unpack(self.transport.sent[-1])[3] == C.PROGRESS:
+                self.now[0] += 60_000_000_000
+                raise socket.timeout()
+            return original_read(*args)
+        self.transport.recvmsg = read
+        self.rejected('deadline', lambda: self.controller.type_ascii('x' * 65))
+        commands = [C.COMMAND.unpack(v)[3] for v in self.transport.sent]
+        self.assertEqual(commands.count(C.KEY), 128)
+        self.assertEqual(commands.count(C.PROGRESS), 1)
+        self.assertEqual(self.controller.session_deadline_ns, self.session)
+
+    def test_progress_target_exit_cannot_unlock_next_batch(self):
+        self.bind()
+        def corrupt(queue):
+            if C.COMMAND.unpack(self.transport.sent[-1])[3] == C.PROGRESS:
+                self.process.poll.return_value = -9
+        self.transport.corrupt = corrupt
+        self.rejected('target', lambda: self.controller.type_ascii('A' * 65))
+        self.assertEqual(sum(C.COMMAND.unpack(v)[3] == C.KEY for v in self.transport.sent), 256)
+
+    def test_progress_unbound_and_terminal_are_rejected(self):
+        self.rejected('target', self.controller.wait_render_progress)
+
+    def test_progress_terminal_target_rejected(self):
+        self.bind(); self.controller._terminal_close = True
+        self.rejected('target', self.controller.wait_render_progress)
+
+    def test_module_progress_uses_same_real_target_paint_guards(self):
+        source = (ROOT / 'ci-ui-weston-module.c').read_text()
+        render = source[source.index('frame_rendered('):source.index('output_created(')]
+        progress = render.index('if (c->pending_op == PROGRESS)')
+        for guard in ('validate_target(c)', 'output_valid(c)',
+                      'c->target->commits <= c->minimum_commit',
+                      'c->frames <= c->minimum_frame', 'view_covers_output(node)',
+                      'if (!painted ||', 'c->target->surface->height != (int)HEIGHT'):
+            self.assertLess(render.index(guard), progress)
+        self.assertLess(progress, render.index('read_pixels('))
+        dispatch = source[source.index('if (op == FRAME || op == PROGRESS)'):source.index('if (op == FOCUS')]
+        self.assertIn('keyboard->focus != c->target->surface', dispatch)
+        self.assertIn('c->held_keys || c->button_down', dispatch)
+        self.assertIn('++c->progress > MAX_PROGRESS', dispatch)
+        self.assertNotIn('ack(c)', dispatch)
 
     def test_terminal_cleanup_accepts_only_closed_target_reason(self):
         self.bind()
@@ -567,7 +699,7 @@ class SourceBoundary(unittest.TestCase):
                       'b > c->frames ? b : c->frames', 'notify_axis(',
                       'weston_desktop_surface_close('):
             self.assertIn(token, text)
-        frame = text[text.index('if (op == FRAME)'):text.index('if (op == FOCUS')]
+        frame = text[text.index('if (op == FRAME || op == PROGRESS)'):text.index('if (op == FOCUS')]
         self.assertNotIn('ack(c)', frame)
         self.assertNotIn('c->pending = c->pending_op = 0', frame)
 
@@ -575,7 +707,7 @@ class SourceBoundary(unittest.TestCase):
         text = (ROOT / 'ci-ui-weston-module.c').read_text()
         for name, value in [('WIDTH', C.WIDTH), ('HEIGHT', C.HEIGHT),
                             ('MAX_COMMANDS', C.MAX_COMMANDS), ('MAX_FRAMES', C.MAX_FRAMES),
-                            ('MAX_COMMITS', C.MAX_COMMITS), ('CHUNK_BYTES', C.CHUNK_BYTES)]:
+                            ('MAX_COMMITS', C.MAX_COMMITS), ('MAX_PROGRESS', C.MAX_PROGRESS), ('CHUNK_BYTES', C.CHUNK_BYTES)]:
             self.assertIn(f'#define {name} {value}u', text)
         self.assertLessEqual(C.FRAME_BYTES, 4 * 1024 * 1024)
         self.assertEqual(C.COMMAND.size, 32)

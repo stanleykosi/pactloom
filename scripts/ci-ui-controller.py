@@ -43,11 +43,13 @@ MAX_COMMANDS = 65536
 MAX_FRAMES = 32
 MAX_COMMITS = 262144
 MAX_TEXT = 16384
+INPUT_BATCH_CHARS = 64
+MAX_PROGRESS = 1024
 SESSION_NS = 120_000_000_000
 APP_ID = 'org.wholepact.CoordinatorDelivery'
 COMMAND = struct.Struct('<8I')
 HEADER = struct.Struct('<12I')
-BIND, FOCUS, MOVE, BUTTON, KEY, FRAME, STOP, SCROLL_DOWN, CLOSE_WINDOW = range(1, 10)
+BIND, FOCUS, MOVE, BUTTON, KEY, FRAME, STOP, SCROLL_DOWN, CLOSE_WINDOW, PROGRESS = range(1, 11)
 ACK, IMAGE, CHUNK, ERROR, READY, FRAME_BARRIER = range(1, 7)
 ERRORS = ('ok', 'protocol', 'deadline', 'limit', 'target', 'input',
           'output', 'readback', 'disconnected', 'internal')
@@ -211,7 +213,7 @@ class Controller:
         self._clock = _clock
         self._original = original_deadline_ns
         self._session = session_deadline_ns
-        self._sequence = self._captures = 0
+        self._sequence = self._captures = self._progress = 0
         self._failure_origin = self._module_error = self._target_reason = None
         self._last_op = 0
         self._ready = self._bound = self._closed = False
@@ -505,10 +507,41 @@ class Controller:
             events = _ascii_events(public_value)
         except Rejected:
             self._reject('input')
-        self._budget(len(events))
-        for key, pressed in events:
-            self._command(KEY, key, pressed)
+        batches = (len(public_value) + INPUT_BATCH_CHARS - 1) // INPUT_BATCH_CHARS
+        self._budget(len(events) + batches)
+        if self._progress + batches > MAX_PROGRESS:
+            self._reject('limit')
+        # Whole-value preflight above precedes all input. Never split a held
+        # modifier/key across batches. Each batch is at most 256 native events.
+        for start in range(0, len(public_value), INPUT_BATCH_CHARS):
+            for key, pressed in _ascii_events(public_value[start:start + INPUT_BATCH_CHARS]):
+                self._command(KEY, key, pressed)
+            self.wait_render_progress()
         return self._receipt
+
+    def wait_render_progress(self):
+        """Backpressure, not screenshot or semantic UI evidence.
+
+        A real newer target buffer AND painted frame after receipt are required.
+        No sleep, synthesized progress, timeout reset, or pixel-budget increase.
+        """
+        if not self._bound or self._terminal_close:
+            self._reject('target')
+        if self._progress >= MAX_PROGRESS:
+            self._reject('limit')
+        self._progress += 1
+        before = self._receipt
+        self._send(PROGRESS, before.commit, before.frame)
+        h, payload = self._read()
+        if (h[3] != FRAME_BARRIER or payload or h[7:11] != (0, 0, 0, 0) or
+                h[5] < before.commit or h[6] < before.frame or
+                h[11] != before.input_sequence):
+            self._reject('protocol')
+        barrier = Receipt(h[2], h[5], h[6], h[11])
+        receipt = self._ack(PROGRESS)
+        if receipt.commit <= barrier.commit or receipt.frame <= barrier.frame:
+            self._reject('protocol')
+        return receipt
 
     def clear_field(self):
         self._budget(6)

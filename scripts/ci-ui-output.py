@@ -1198,7 +1198,7 @@ def validate_failure(value, mode):
             require(c['target_reason'] is None or (c['module_error'] == 'target' and c['target_reason'] in
                 ('parent_or_resource', 'credentials', 'duplicate_app_id', 'other_desktop', 'retained_identity',
                 'unmapped', 'destroyed', 'bind_arguments', 'command_precondition', 'close_desktop')))
-            require(number(c['sequence'], 0, 65536) and number(c['operation'], 0, 9) and
+            require(number(c['sequence'], 0, 65536) and number(c['operation'], 0, 10) and
                 number(c['input_sequence'], 0, c['sequence']) and
                 all(number(c[k], 0, 262144) for k in ('commit', 'frame')))
     boundary, outcome = value['source_boundary'], value['source_outcome']

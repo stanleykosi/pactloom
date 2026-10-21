@@ -72,12 +72,13 @@
 #define CHUNK_BYTES 32768u
 #define MAX_COMMANDS 65536u
 #define MAX_FRAMES 32u
+#define MAX_PROGRESS 1024u
 #define MAX_SURFACES 32u
 #define MAX_COMMITS 262144u
 #define SESSION_NS (120ull * 1000000000ull)
 #define APP_ID "org.wholepact.CoordinatorDelivery"
 
-enum operation { BIND = 1, FOCUS, MOVE, BUTTON, KEY, FRAME, STOP, SCROLL_DOWN, CLOSE_WINDOW };
+enum operation { BIND = 1, FOCUS, MOVE, BUTTON, KEY, FRAME, STOP, SCROLL_DOWN, CLOSE_WINDOW, PROGRESS };
 enum reply_kind { ACK = 1, IMAGE, CHUNK, ERROR, READY, FRAME_BARRIER };
 enum failure { OK = 0, PROTOCOL = 1, DEADLINE, LIMIT, TARGET, INPUT,
                OUTPUT, READBACK, DISCONNECTED, INTERNAL };
@@ -106,7 +107,7 @@ struct control {
     int fd;
     uint64_t original_deadline, session_deadline;
     uint32_t sequence, pending, pending_op, input_sequence;
-    uint32_t frames, captures, minimum_commit, minimum_frame;
+    uint32_t frames, captures, progress, minimum_commit, minimum_frame;
     uint32_t image_commit, image_frame, image_input, image_offset;
     bool image_header_pending, image_sending;
     pid_t expected_pid;
@@ -431,7 +432,7 @@ frame_rendered(struct wl_listener *listener, void *data)
         fail(c, OUTPUT);
         return;
     }
-    if (c->pending_op != FRAME || c->image_sending ||
+    if ((c->pending_op != FRAME && c->pending_op != PROGRESS) || c->image_sending ||
         c->target->commits <= c->minimum_commit || c->frames <= c->minimum_frame)
         return;
     wl_list_for_each(node, &c->output->paint_node_z_order_list, z_order_link) {
@@ -453,6 +454,12 @@ frame_rendered(struct wl_listener *listener, void *data)
         c->target->surface->width != (int)WIDTH ||
         c->target->surface->height != (int)HEIGHT) {
         fail(c, OUTPUT);
+        return;
+    }
+    /* Same actual target commit, output paint, mapping and identity guards as
+     * FRAME. This is backpressure only: no pixels or UI approval evidence. */
+    if (c->pending_op == PROGRESS) {
+        (void)ack(c);
         return;
     }
     const struct pixel_format_info *format =
@@ -569,10 +576,17 @@ dispatch(struct control *c, const uint32_t *v)
         fail_target(c, TARGET_COMMAND_PRECONDITION);
         return;
     }
-    if (op == FRAME) {
+    if (op == FRAME || op == PROGRESS) {
         if (a > c->target->commits || b > c->frames ||
-            ++c->captures > MAX_FRAMES || c->held_keys || c->button_down) {
+            (op == FRAME && ++c->captures > MAX_FRAMES) ||
+            (op == PROGRESS && ++c->progress > MAX_PROGRESS) ||
+            c->held_keys || c->button_down) {
             fail(c, LIMIT);
+            return;
+        }
+        if (op == PROGRESS && (!c->focused ||
+                keyboard->focus != c->target->surface)) {
+            fail(c, INPUT);
             return;
         }
         /* Clamp at this actual request receipt, after the caller consumed its
@@ -586,7 +600,7 @@ dispatch(struct control *c, const uint32_t *v)
             fail(c, DISCONNECTED);
             return;
         }
-        /* This one distinct observation does not clear the pending FRAME. */
+        /* This one distinct observation does not clear the pending FRAME/PROGRESS. */
         weston_compositor_damage_all(c->compositor);
         return;
     }
