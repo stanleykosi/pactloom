@@ -74,11 +74,14 @@ mod public_outcome_v1;
 #[path = "sequential_construction_v3_qualification/safe_diagnostics_v1.rs"]
 mod safe_diagnostics_v1;
 
-#[path = "sequential_construction_v3_qualification/rolling_transcript_v1.rs"]
-mod rolling_transcript_v1;
-#[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+#[cfg(all(
+    feature = "durable-proposal",
+    feature = "synthetic-born-joined-qualification"
+))]
 #[path = "sequential_construction_v3_qualification/financial_progress_v1.rs"]
 mod financial_progress_v1;
+#[path = "sequential_construction_v3_qualification/rolling_transcript_v1.rs"]
+mod rolling_transcript_v1;
 
 #[path = "sequential_construction_v3_qualification/owned_test_process_group_v1.rs"]
 mod owned_test_process_group_v1;
@@ -1324,7 +1327,17 @@ fn private_workspace_stage_v1(
     ) {
         transcript.enable_delivery_first_failure();
     }
-    if matches!(stage, PrivateWorkspaceStageV1::FinancialProducer) {transcript.enable_financial_progress_at(deadline.checked_sub(Duration::from_secs(900)).ok_or_else(||std::io::Error::other("financial workflow origin unavailable"))?);}
+    if matches!(stage, PrivateWorkspaceStageV1::FinancialProducer) {
+        transcript.enable_financial_v2(
+            deadline
+                .checked_sub(Duration::from_secs(1800))
+                .ok_or_else(|| std::io::Error::other("financial workflow origin unavailable"))?,
+            false,
+        );
+    }
+    if matches!(stage, PrivateWorkspaceStageV1::FinancialReader) {
+        transcript.enable_financial_v2(Instant::now(), true);
+    }
     // This creates a temporary terminal, not an OS trust root or permission
     // override. The child still passes the actual foreground() implementation.
     let master_fd = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC) };
@@ -1354,6 +1367,16 @@ fn private_workspace_stage_v1(
             command
                 .env_remove("SSL_CERT_FILE")
                 .env_remove("SSL_CERT_DIR");
+        }
+        command.env_remove("WHOLEPACT_TEST_ONLY_FINANCIAL_PROFILE");
+        if matches!(
+            stage,
+            PrivateWorkspaceStageV1::FinancialProducer | PrivateWorkspaceStageV1::FinancialReader
+        ) {
+            command.env(
+                "WHOLEPACT_TEST_ONLY_FINANCIAL_PROFILE",
+                financial_progress_v1::FINANCIAL_PROFILE,
+            );
         }
         command
             .args([
@@ -1430,8 +1453,16 @@ fn private_workspace_stage_v1(
     let mut outcome = (|| -> std::io::Result<()> {
         loop {
             if let Some(failure) = transcript.financial_progress_check(Instant::now()) {
-                failure_reason = match failure.reason {financial_progress_v1::Reason::PhaseDeadline=>HarnessFailureReason::FinancialPhaseDeadline,_=>HarnessFailureReason::FinancialProgressInvalid};
-                return Err(std::io::Error::new(std::io::ErrorKind::TimedOut,"financial qualification supervision stopped stalled phase"));
+                failure_reason = match failure.reason {
+                    financial_progress_v1::Reason::PhaseDeadline => {
+                        HarnessFailureReason::FinancialPhaseDeadline
+                    }
+                    _ => HarnessFailureReason::FinancialProgressInvalid,
+                };
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "financial qualification supervision stopped stalled phase",
+                ));
             }
             if Instant::now() >= deadline {
                 transcript.financial_progress_global_deadline();
@@ -1605,7 +1636,14 @@ fn private_workspace_stage_v1(
         }
         Ok(())
     })();
-    transcript.freeze_financial_progress_timing(Instant::now());
+    let terminal_observed_at = Instant::now();
+    let drain_reader_progress =
+        matches!(stage, PrivateWorkspaceStageV1::FinancialReader) && outcome.is_ok();
+    if drain_reader_progress {
+        transcript.observe_financial_reader_exit(terminal_observed_at);
+    } else {
+        transcript.freeze_financial_progress_timing(terminal_observed_at);
+    }
     // Producer marker recognition immediately takes the one owned SIGKILL path.
     // Cleanup grace does not replace or extend the workflow cutoff.
     let finished = child.finish();
@@ -1660,9 +1698,14 @@ fn private_workspace_stage_v1(
         ));
     }
     transcript.finish_financial_progress();
+    if drain_reader_progress {
+        transcript.freeze_financial_progress_timing(terminal_observed_at);
+    }
     if transcript.financial_progress_failure().is_some() && outcome.is_ok() {
-        failure_reason=HarnessFailureReason::FinancialProgressInvalid;
-        outcome=Err(std::io::Error::other("financial progress protocol incomplete"));
+        failure_reason = HarnessFailureReason::FinancialProgressInvalid;
+        outcome = Err(std::io::Error::other(
+            "financial progress protocol incomplete",
+        ));
     }
     transcript.finish_private_fixed_diagnostic();
     let private_fixed_diagnostic = if process.verified() {
@@ -1683,8 +1726,16 @@ fn private_workspace_stage_v1(
     } else {
         None
     };
-    let financial_progress_failure = if process.verified() && outcome.is_err() {transcript.financial_progress_failure()} else {None};
-    let financial_progress_timing=if process.verified(){transcript.financial_progress_timing()}else{None};
+    let financial_progress_failure = if process.verified() && outcome.is_err() {
+        transcript.financial_progress_failure()
+    } else {
+        None
+    };
+    let financial_progress_timing = if process.verified() {
+        transcript.financial_progress_timing()
+    } else {
+        None
+    };
     Ok(PrivateWorkspaceStageResultV1 {
         financial_progress_timing,
         financial_progress_failure,

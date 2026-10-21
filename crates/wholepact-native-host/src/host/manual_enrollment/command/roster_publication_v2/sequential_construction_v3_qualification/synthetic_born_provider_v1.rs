@@ -164,6 +164,7 @@ struct PublicState {
     denied: Arc<AtomicUsize>,
     deadline: Instant,
     expires_at_ms: u64,
+    financial_lifetime: Option<FinancialProviderLifetimeV2>,
     sink: SyntheticSinkControlV1,
     diagnostics: SyntheticProviderDiagnosticHandleV1,
 }
@@ -184,23 +185,28 @@ impl SyntheticBornProviderV1 {
         tls: ServerConfig,
         deadline: Instant,
     ) -> io::Result<Self> {
-        Self::start_at(material, tls, deadline, "127.0.0.1:0").await
+        Self::start_at(material, tls, deadline, "127.0.0.1:0", None, None).await
     }
     async fn start_at(
         material: SyntheticBornReceiverBlocksV1,
         mut tls: ServerConfig,
         deadline: Instant,
         address: &str,
+        saved_expiry: Option<u64>,
+        financial_lifetime: Option<FinancialProviderLifetimeV2>,
     ) -> io::Result<Self> {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() || remaining > Duration::from_secs(900) {
+        if remaining.is_zero() || remaining > Duration::from_secs(if financial_lifetime.is_some() { 1800 } else { 900 }) {
             return Err(io::Error::other("invalid synthetic provider lifetime"));
         }
         tls.alpn_protocols = vec![b"h2".to_vec()];
         let listener = TcpListener::bind(address).await?;
         let endpoint = format!("https://{}", listener.local_addr()?);
         let wall_now = fixture_now_ms()?;
-        let expires_at_ms = wall_now
+        let expires_at_ms = match saved_expiry {
+            Some(expiry) if expiry > wall_now => expiry,
+            Some(_) => return Err(io::Error::other("expired original fixture")),
+            None => wall_now
             .checked_add(
                 u64::try_from(
                     deadline
@@ -209,13 +215,15 @@ impl SyntheticBornProviderV1 {
                 )
                 .map_err(|_| io::Error::other("fixture bound"))?,
             )
-            .ok_or_else(|| io::Error::other("fixture bound"))?;
+            .ok_or_else(|| io::Error::other("fixture bound"))?,
+        };
         let state = PublicState {
             material: Arc::new(material),
             requests: Arc::new(AtomicUsize::new(0)),
             denied: Arc::new(AtomicUsize::new(0)),
             deadline,
             expires_at_ms,
+            financial_lifetime,
             sink: SyntheticSinkControlV1::default(),
             diagnostics: SyntheticProviderDiagnosticHandleV1 {
                 counters: Arc::new(ProviderCountersV1::default()),
@@ -569,6 +577,23 @@ struct PreservedPublicProviderV1 {
     material: Vec<u8>,
     expires_at_ms: u64,
 }
+fn parse_saved_public_v1(bytes: &[u8]) -> io::Result<(PreservedPublicProviderV1, std::net::SocketAddr)> {
+    if bytes.is_empty() || bytes.len() > 16 * 1024 * 1024 {
+        return Err(io::Error::other("fixture limit"));
+    }
+    let saved: PreservedPublicProviderV1 =
+        serde_json::from_slice(bytes).map_err(|_| io::Error::other("fixture encoding"))?;
+    let address: std::net::SocketAddr = saved
+        .endpoint
+        .strip_prefix("https://")
+        .ok_or_else(|| io::Error::other("fixture endpoint"))?
+        .parse()
+        .map_err(|_| io::Error::other("fixture endpoint"))?;
+    if saved.version != 1 || !address.ip().is_loopback() || address.port() == 0 {
+        return Err(io::Error::other("fixture endpoint"));
+    }
+    Ok((saved, address))
+}
 fn fixture_now_ms() -> io::Result<u64> {
     u64::try_from(
         std::time::SystemTime::now()
@@ -580,7 +605,8 @@ fn fixture_now_ms() -> io::Result<u64> {
 }
 impl SyntheticBornProviderV1 {
     pub(super) fn preserve_public_original_v1(&self) -> io::Result<Vec<u8>> {
-        if Instant::now() >= self.state.deadline || fixture_now_ms()? >= self.state.expires_at_ms {
+        if self.state.financial_lifetime.is_some()
+            || Instant::now() >= self.state.deadline || fixture_now_ms()? >= self.state.expires_at_ms {
             return Err(io::Error::other("expired original fixture"));
         }
         let expires_at_ms = self.state.expires_at_ms;
@@ -606,20 +632,7 @@ impl SyntheticBornProviderV1 {
         tls: ServerConfig,
         original_cutoff: Instant,
     ) -> io::Result<Self> {
-        if bytes.is_empty() || bytes.len() > 16 * 1024 * 1024 {
-            return Err(io::Error::other("fixture limit"));
-        }
-        let saved: PreservedPublicProviderV1 =
-            serde_json::from_slice(bytes).map_err(|_| io::Error::other("fixture encoding"))?;
-        let address: std::net::SocketAddr = saved
-            .endpoint
-            .strip_prefix("https://")
-            .ok_or_else(|| io::Error::other("fixture endpoint"))?
-            .parse()
-            .map_err(|_| io::Error::other("fixture endpoint"))?;
-        if saved.version != 1 || !address.ip().is_loopback() || address.port() == 0 {
-            return Err(io::Error::other("fixture endpoint"));
-        }
+        let (saved, address) = parse_saved_public_v1(bytes)?;
         let observed = Instant::now();
         let remaining = saved
             .expires_at_ms
@@ -633,7 +646,7 @@ impl SyntheticBornProviderV1 {
         );
         let material = SyntheticBornReceiverBlocksV1::reopen_public_original_v1(&saved.material)
             .map_err(|_| io::Error::other("fixture material"))?;
-        Self::start_at(material, tls, deadline, &address.to_string()).await
+        Self::start_at(material, tls, deadline, &address.to_string(), None, None).await
     }
 }
 
@@ -676,3 +689,7 @@ mod provider_diagnostic_tests {
         assert!(handle.snapshot().server_finished);
     }
 }
+
+#[path = "synthetic_born_provider_v1/financial_lifetime_v2.rs"]
+mod financial_lifetime_v2;
+use financial_lifetime_v2::FinancialProviderLifetimeV2;

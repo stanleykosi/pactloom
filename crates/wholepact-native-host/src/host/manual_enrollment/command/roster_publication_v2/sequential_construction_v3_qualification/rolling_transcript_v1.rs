@@ -26,7 +26,10 @@ struct CapturedPath {
 }
 
 pub(super) struct Transcript<'a> {
-    #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "synthetic-born-joined-qualification"
+    ))]
     financial_progress: Option<super::financial_progress_v1::Capture>,
     bytes: Zeroizing<Vec<u8>>,
     base: usize,
@@ -57,22 +60,102 @@ pub(super) struct Transcript<'a> {
 }
 
 impl<'a> Transcript<'a> {
-    #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
-    pub(super) fn finish_financial_progress(&mut self){if let Some(capture)=self.financial_progress.as_mut(){capture.finish_partial(&self.bytes[self.line_start..]);}}
-    #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
-    pub(super) fn enable_financial_progress(&mut self){self.enable_financial_progress_at(std::time::Instant::now());}
-    #[cfg(all(feature="durable-proposal",feature="synthetic-born-joined-qualification"))]
-    pub(super) fn enable_financial_progress_at(&mut self,start:std::time::Instant){self.financial_progress=Some(super::financial_progress_v1::Capture::with_workflow_start(start));}
-    #[cfg(all(feature="durable-proposal",feature="synthetic-born-joined-qualification"))]
-    pub(super) fn freeze_financial_progress_timing(&mut self,now:std::time::Instant){if let Some(capture)=self.financial_progress.as_mut(){capture.freeze_timing(now);}}
-    #[cfg(all(feature="durable-proposal",feature="synthetic-born-joined-qualification"))]
-    pub(super) fn financial_progress_timing(&self)->Option<super::financial_progress_v1::Timing>{self.financial_progress.as_ref().and_then(|capture|capture.timing())}
-    #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
-    pub(super) fn financial_progress_check(&mut self,now:std::time::Instant)->Option<super::financial_progress_v1::Failure>{self.financial_progress.as_mut().and_then(|capture|capture.failure_at(now))}
-    #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
-    pub(super) fn financial_progress_global_deadline(&mut self){if let Some(capture)=self.financial_progress.as_mut(){capture.global_deadline();}}
-    #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
-    pub(super) fn financial_progress_failure(&self)->Option<super::financial_progress_v1::Failure>{self.financial_progress.as_ref().and_then(|capture|capture.failure())}
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "synthetic-born-joined-qualification"
+    ))]
+    pub(super) fn finish_financial_progress(&mut self) {
+        if let Some(capture) = self.financial_progress.as_mut() {
+            capture.finish_partial(&self.bytes[self.line_start..]);
+        }
+    }
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "synthetic-born-joined-qualification"
+    ))]
+    pub(super) fn enable_financial_progress(&mut self) {
+        self.enable_financial_progress_at(std::time::Instant::now());
+    }
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "synthetic-born-joined-qualification"
+    ))]
+    pub(super) fn enable_financial_v2(&mut self, start: std::time::Instant, reader: bool) {
+        self.financial_progress = Some(if reader {
+            super::financial_progress_v1::Capture::financial_reader(start)
+        } else {
+            super::financial_progress_v1::Capture::financial_producer(start)
+        });
+    }
+
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "synthetic-born-joined-qualification"
+    ))]
+    pub(super) fn enable_financial_progress_at(&mut self, start: std::time::Instant) {
+        self.financial_progress = Some(super::financial_progress_v1::Capture::with_workflow_start(
+            start,
+        ));
+    }
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "synthetic-born-joined-qualification"
+    ))]
+    pub(super) fn observe_financial_reader_exit(&mut self, now: std::time::Instant) {
+        if let Some(capture) = self.financial_progress.as_mut() {
+            capture.observe_reader_exit(now);
+        }
+    }
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "synthetic-born-joined-qualification"
+    ))]
+    pub(super) fn freeze_financial_progress_timing(&mut self, now: std::time::Instant) {
+        if let Some(capture) = self.financial_progress.as_mut() {
+            capture.freeze_timing(now);
+        }
+    }
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "synthetic-born-joined-qualification"
+    ))]
+    pub(super) fn financial_progress_timing(&self) -> Option<super::financial_progress_v1::Timing> {
+        self.financial_progress
+            .as_ref()
+            .and_then(|capture| capture.timing())
+    }
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "synthetic-born-joined-qualification"
+    ))]
+    pub(super) fn financial_progress_check(
+        &mut self,
+        now: std::time::Instant,
+    ) -> Option<super::financial_progress_v1::Failure> {
+        self.financial_progress
+            .as_mut()
+            .and_then(|capture| capture.failure_at(now))
+    }
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "synthetic-born-joined-qualification"
+    ))]
+    pub(super) fn financial_progress_global_deadline(&mut self) {
+        if let Some(capture) = self.financial_progress.as_mut() {
+            capture.global_deadline();
+        }
+    }
+    #[cfg(all(
+        feature = "durable-proposal",
+        feature = "synthetic-born-joined-qualification"
+    ))]
+    pub(super) fn financial_progress_failure(
+        &self,
+    ) -> Option<super::financial_progress_v1::Failure> {
+        self.financial_progress
+            .as_ref()
+            .and_then(|capture| capture.failure())
+    }
 
     pub(super) fn new(markers: impl IntoIterator<Item = &'a str>) -> Result<Self, Failure> {
         let mut paths = BTreeMap::new();
@@ -92,7 +175,10 @@ impl<'a> Transcript<'a> {
             }
         }
         Ok(Self {
-            #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+            #[cfg(all(
+                feature = "durable-proposal",
+                feature = "synthetic-born-joined-qualification"
+            ))]
             financial_progress: None,
             // No reallocation can leave a discarded private transcript copy.
             // All populated bytes share the original aggregate content budget.
@@ -424,8 +510,13 @@ impl<'a> Transcript<'a> {
             ))]
             let private_fixed_line = line.strip_suffix('\r').unwrap_or(line);
             let line = line.trim_end_matches('\r');
-            #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
-            if let Some(capture)=self.financial_progress.as_mut(){capture.line(private_fixed_line,std::time::Instant::now());}
+            #[cfg(all(
+                feature = "durable-proposal",
+                feature = "synthetic-born-joined-qualification"
+            ))]
+            if let Some(capture) = self.financial_progress.as_mut() {
+                capture.line(private_fixed_line, std::time::Instant::now());
+            }
             #[cfg(all(
                 feature = "durable-proposal",
                 feature = "synthetic-born-joined-qualification"
@@ -1752,31 +1843,52 @@ fn financial_diagnostic_survives_all_fragment_boundaries() {
     let line = format!("[FINANCIAL_DIAGNOSTIC_V1 {json}]\r\n");
     for split in 0..line.len() {
         let mut transcript = Transcript::new([]).unwrap();
-        transcript.append(&line.as_bytes()[..split], Path::new("/tmp/owned")).unwrap();
+        transcript
+            .append(&line.as_bytes()[..split], Path::new("/tmp/owned"))
+            .unwrap();
         assert!(transcript.financial_diagnostic().is_none());
-        transcript.append(&line.as_bytes()[split..], Path::new("/tmp/owned")).unwrap();
+        transcript
+            .append(&line.as_bytes()[split..], Path::new("/tmp/owned"))
+            .unwrap();
         transcript.finish_private_fixed_diagnostic();
         assert_eq!(transcript.financial_diagnostic(), Some(&value));
         assert!(transcript.retained_bytes() <= MAX_BYTES);
     }
 }
 
-#[cfg(all(test, feature="durable-proposal",feature="synthetic-born-joined-qualification"))]
+#[cfg(all(
+    test,
+    feature = "durable-proposal",
+    feature = "synthetic-born-joined-qualification"
+))]
 #[test]
 fn financial_progress_fragmented_lines_and_legacy_disabled() {
-    use super::financial_progress_v1::{Phase,Reason};
-    let line=b"[FINANCIAL_PROGRESS_V1 {\"kind\":\"Begin\",\"owner\":1,\"phase\":\"SourceOpen\"}]\r\n";
+    use super::financial_progress_v1::{Phase, Reason};
+    let line =
+        b"[FINANCIAL_PROGRESS_V1 {\"kind\":\"Begin\",\"owner\":1,\"phase\":\"SourceOpen\"}]\r\n";
     for split in 0..line.len() {
-        let mut transcript=Transcript::new(std::iter::empty::<&str>()).unwrap();
+        let mut transcript = Transcript::new(std::iter::empty::<&str>()).unwrap();
         transcript.enable_financial_progress();
-        transcript.append(&line[..split],Path::new("/tmp/owned")).unwrap();
+        transcript
+            .append(&line[..split], Path::new("/tmp/owned"))
+            .unwrap();
         assert!(transcript.financial_progress_failure().is_none());
-        transcript.append(&line[split..],Path::new("/tmp/owned")).unwrap();
-        let failure=transcript.financial_progress_check(std::time::Instant::now()+std::time::Duration::from_secs(121)).unwrap();
-        assert_eq!(failure.reason,Reason::PhaseDeadline);assert_eq!(failure.last.unwrap().phase,Phase::SourceOpen);
+        transcript
+            .append(&line[split..], Path::new("/tmp/owned"))
+            .unwrap();
+        let failure = transcript
+            .financial_progress_check(
+                std::time::Instant::now() + std::time::Duration::from_secs(121),
+            )
+            .unwrap();
+        assert_eq!(failure.reason, Reason::PhaseDeadline);
+        assert_eq!(failure.last.unwrap().phase, Phase::SourceOpen);
     }
-    let mut transcript=Transcript::new(std::iter::empty::<&str>()).unwrap();
-    transcript.append(line,Path::new("/tmp/owned")).unwrap();
-    assert!(transcript.financial_progress_check(std::time::Instant::now()+std::time::Duration::from_secs(901)).is_none());
-    transcript.financial_progress_global_deadline();assert!(transcript.financial_progress_failure().is_none());
+    let mut transcript = Transcript::new(std::iter::empty::<&str>()).unwrap();
+    transcript.append(line, Path::new("/tmp/owned")).unwrap();
+    assert!(transcript
+        .financial_progress_check(std::time::Instant::now() + std::time::Duration::from_secs(901))
+        .is_none());
+    transcript.financial_progress_global_deadline();
+    assert!(transcript.financial_progress_failure().is_none());
 }
