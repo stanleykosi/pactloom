@@ -5,7 +5,8 @@ The workflow first runs the maintained fixed-origin bootstrap. This supervisor
 builds three serial artifacts, runs exactly two containers, and publishes no
 success before containers, temporary image and build cache are verified absent.
 No credentials, fixture bytes, frames or raw runtime logs leave the containers.
-Only pre-credential build failures publish a bounded, scrubbed compiler tail.
+Only pre-credential build/install failures publish bounded, scrubbed diagnostics.
+The pinned package/module foundation is validated before any Rust compilation.
 """
 import hashlib
 import importlib.util
@@ -90,7 +91,7 @@ IMAGE_CHECKS = frozenset(('arguments', 'manifest', 'input_file', 'input_digest',
     'installed_package_set', 'package_file_set', 'package_extra', 'package_status',
     'service_policy', 'service_process', 'module_file', 'weston_abi', 'account_collision',
     'account_file', 'account_tmpfs_target', 'file_privilege', 'tool_timeout', 'tool_exit',
-    'tool_start', 'tool_output_limit', 'cleanup_failed', 'internal'))
+    'tool_start', 'tool_output_limit', 'tool_io', 'tool_cleanup', 'cleanup_failed', 'internal'))
 
 
 class Failure(Exception):
@@ -261,7 +262,8 @@ def build_failure_tail(raw):
 
 def compile_failure(error, name, args, environment):
     # Only the pre-credential provider build/checks and three Cargo invocations
-    # use this output contract. Runtime/image/install logs remain closed.
+    # use this output contract. Runtime logs remain closed; pre-credential
+    # image/install failures use their separate bounded diagnostic contract.
     value = dict(schema_version=1, artifact=name, package=BUILD_PACKAGES[name], command=args,
         exit_status=error.exit_status, original_check=error.check, pre_credential=True,
         exit_signal=-error.exit_status if type(error.exit_status) is int and error.exit_status < 0 else None,
@@ -377,10 +379,49 @@ def pin(path):
         return dict(size=meta.st_size, sha256=hashlib.file_digest(stream, 'sha256').hexdigest())
 
 
-def build_inputs(root, sha):
+def write_context_files(build_context, files):
+    """Never mutate the bytes used by the already validated foundation."""
+    for relative, raw in files.items():
+        path = build_context / relative
+        if path.exists():
+            require(path.is_file() and not path.is_symlink() and path.read_bytes() == raw,
+                    'image', 'input_file')
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open('xb') as stream:
+            stream.write(raw)
+        path.chmod(0o444)
+
+
+def prepare_foundation_inputs(root, sha):
     build_context = root / 'context'
     inputs = build_context / 'inputs'
     inputs.mkdir(parents=True)
+    pins = {}
+    for name in (*I.RUNTIME_FILES, I.MODULE_SOURCE):
+        shutil.copyfile(HERE / name, inputs / name)
+        (inputs / name).chmod(0o444)
+        pins[name] = pin(inputs / name)
+    try:
+        lock = I.validate_manifest((HERE / 'ci-ui-packages.json').read_bytes())
+        deadline = time.monotonic() + 900
+        I.stage_packages(lock, build_context / 'packages', deadline=deadline)
+        I.stage_private_headers(build_context / 'headers', deadline=deadline)
+        write_context_files(build_context, I.render_foundation_files(lock, pins))
+    except I.Rejected as error:
+        failure = Failure('packages', 'staging_rejected')
+        failure.cause = error.code if error.code in PACKAGE_CHECKS else None
+        failure.cleanup_failed = bool(getattr(error, 'cleanup_failed', False))
+        raise failure from None
+    exact_source(sha)
+    return build_context, pins
+
+
+def build_inputs(root, sha, build_context, foundation_pins):
+    # Called only after the exact package/module foundation build passed.
+    # Artifact bytes have their own directory and cannot invalidate that stage.
+    inputs = build_context / 'artifacts'
+    inputs.mkdir()
     for folder in ('home', 'cargo', 'target'):
         (root / folder).mkdir()
     env = dict(PATH=os.environ['PATH'], HOME=str(root / 'home'), CARGO_HOME=str(root / 'cargo'),
@@ -393,7 +434,7 @@ def build_inputs(root, sha):
             'toolchain', 'toolchain_version')
     exact_source(sha)
     env = encrypted_build_environment(root, env)
-    pins = {}
+    pins = dict(foundation_pins)
     # Serial invocations only. Cargo fingerprints features/cfgs; snapshot each
     # current compiler-selected executable before any following build can run.
     for name in I.ARTIFACT_FILES:
@@ -419,24 +460,12 @@ def build_inputs(root, sha):
         pins[name] = pin(inputs / name)
         emit('ARTIFACT', dict(artifact=name, source=sha, sha256=pins[name]['sha256'],
                               ci_instrumented=name == 'coordinator-observed', setup_test=setup))
-    for name in (*I.RUNTIME_FILES, I.MODULE_SOURCE):
-        shutil.copyfile(HERE / name, inputs / name)
-        (inputs / name).chmod(0o444)
-        pins[name] = pin(inputs / name)
     try:
         lock = I.validate_manifest((HERE / 'ci-ui-packages.json').read_bytes())
-        deadline = time.monotonic() + 900
-        I.stage_packages(lock, build_context / 'packages', deadline=deadline)
-        I.stage_private_headers(build_context / 'headers', deadline=deadline)
-        for relative, raw in I.render_build_files(lock, pins).items():
-            path = build_context / relative
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(raw)
-            path.chmod(0o444)
+        write_context_files(build_context, I.render_build_files(lock, pins))
     except I.Rejected as error:
         failure = Failure('packages', 'staging_rejected')
         failure.cause = error.code if error.code in PACKAGE_CHECKS else None
-        failure.cleanup_failed = bool(getattr(error, 'cleanup_failed', False))
         raise failure from None
     exact_source(sha)
     return build_context, pins
@@ -643,8 +672,9 @@ def run_case(mode, image_id, token, sha):
 
 
 def image_failure(raw):
+    reported = False
     for line in raw.splitlines():
-        if len(line) > 8192:
+        if len(line) > 512 * 1024:
             continue
         start = line.find(b'{')
         if start < 0:
@@ -653,15 +683,91 @@ def image_failure(raw):
             value = loads(line[start:])
         except Failure:
             continue
-        if (type(value) is dict and set(value) == {'schema_version', 'phase', 'code', 'cleanup_failed'}
+        if type(value) is not dict:
+            continue
+        if (set(value) == {'schema_version', 'phase', 'code', 'cleanup_failed'}
                 and type(value['schema_version']) is int and value['schema_version'] == 1
                 and type(value['phase']) is str and value['phase'] in IMAGE_PHASES
                 and type(value['code']) is str and value['code'] in IMAGE_CHECKS
                 and type(value['cleanup_failed']) is bool):
             emit('FAILURE', dict(stage='image', check='image_build', phase=value['phase'],
                 code=value['code'], image_stage_cleanup_failed=value['cleanup_failed'], cleanup_pending=True))
-            return True
-    return False
+            reported = True
+        elif (set(value) == {'schema_version', 'kind', 'phase', 'code', 'tool', 'exit_status',
+                             'output_bytes', 'tail_truncated', 'tail', 'tool_cleanup_failed',
+                             'command', 'command_truncated'}
+                and type(value['schema_version']) is int and value['schema_version'] == 1
+                and value['kind'] == 'pre_credential_tool'
+                and type(value['phase']) is str and value['phase'] in IMAGE_PHASES
+                and type(value['code']) is str and value['code'] in IMAGE_CHECKS
+                and type(value['tool']) is str and re.fullmatch(r'[A-Za-z0-9_.+-]{1,64}', value['tool'])
+                and type(value['command']) is list and len(value['command']) <= 512
+                and all(type(arg) is str and 0 < len(arg.encode('utf-8')) <= 2048
+                        and all(c in '\t\n' or 32 <= ord(c) < 127 for c in arg) for arg in value['command'])
+                and sum(len(arg.encode('utf-8')) for arg in value['command']) <= 65536
+                and type(value['command_truncated']) is bool
+                and (bool(value['command']) or value['command_truncated'])
+                and (value['exit_status'] is None or (type(value['exit_status']) is int
+                                                    and -255 <= value['exit_status'] <= 255))
+                and type(value['output_bytes']) is int and 0 <= value['output_bytes'] <= 8 * 1024**2 + 16384
+                and type(value['tail']) is str and len(value['tail'].encode('utf-8')) <= BUILD_LOG_LIMIT
+                and type(value['tail_truncated']) is bool and type(value['tool_cleanup_failed']) is bool):
+            safe = build_failure_tail(value['tail'].encode('utf-8'))
+            safe['captured_output_bytes'] = value['output_bytes']
+            safe['tail_truncated'] |= value['tail_truncated']
+            emit('IMAGE_TOOL_FAILURE', dict(schema_version=1, pre_credential=True,
+                phase=value['phase'], check=value['code'], tool=value['tool'],
+                exit_status=value['exit_status'], command=value['command'],
+                command_truncated=value['command_truncated'],
+                tool_cleanup_failed=value['tool_cleanup_failed'], **safe))
+    return reported
+
+
+def image_descriptor(tag, token, sha):
+    row = loads(docker(['image', 'inspect', '--format', '{{json .}}', tag], 'image', limit=131072))
+    require(type(row) is dict and type(row.get('Id')) is str
+            and re.fullmatch('sha256:[0-9a-f]{64}', row['Id']) is not None,
+            'image', 'image_identity')
+    config, rootfs = row.get('Config'), row.get('RootFS')
+    require(type(config) is dict and type(config.get('Labels')) is dict
+            and config['Labels'].get(LABEL) == token and config['Labels'].get(SOURCE_LABEL) == sha,
+            'image', 'image_identity')
+    require(type(rootfs) is dict and rootfs.get('Type') == 'layers' and type(rootfs.get('Layers')) is list
+            and 0 < len(rootfs['Layers']) <= 128 and all(type(x) is str and
+                re.fullmatch('sha256:[0-9a-f]{64}', x) for x in rootfs['Layers']), 'image', 'image_identity')
+    return {'id': row['Id'], 'layers': tuple(rootfs['Layers'])}
+
+
+def build_image(build_context, target, tag, token, sha, *, fresh):
+    require(target in ('foundation', 'runtime') and fresh is (target == 'foundation'),
+            'image', 'arguments')
+    args = ['build', '--network', 'none', '--force-rm', '--progress', 'plain', '--target', target,
+            '--label', LABEL + '=' + token, '--label', SOURCE_LABEL + '=' + sha, '--tag', tag]
+    if fresh:
+        args.append('--no-cache')
+    try:
+        docker(args + [str(build_context)], 'image', seconds=900, limit=8 * 1024 * 1024)
+    except Failure as error:
+        error.published = image_failure(error.output)
+        # BuildKit/context errors may not originate inside install.py. Preserve
+        # those too; this entire boundary is before any fixture/credential setup.
+        emit('IMAGE_BUILD_FAILURE', dict(target=target, pre_credential=True,
+            check=error.check, exit_status=error.exit_status, **build_failure_tail(error.output)))
+        raise
+    return image_descriptor(tag, token, sha)
+
+
+def final_image(build_context, tag, foundation_tag, token, sha, foundation):
+    # Both builds occur on this job's fresh dedicated daemon. Exact source and
+    # immutable foundation files were checked; no cross-run cache is accepted.
+    require(image_descriptor(foundation_tag, token, sha) == foundation, 'image', 'image_identity')
+    final = build_image(build_context, 'runtime', tag, token, sha, fresh=False)
+    require(image_descriptor(foundation_tag, token, sha) == foundation
+            and final['id'] != foundation['id']
+            and len(final['layers']) > len(foundation['layers'])
+            and final['layers'][:len(foundation['layers'])] == foundation['layers'],
+            'image', 'image_identity')
+    return final['id']
 
 
 def cache_empty(raw):
@@ -689,16 +795,24 @@ def cleanup(token, tag):
     try:
         label_ids = docker(['image', 'ls', '--quiet', '--no-trunc', '--filter', 'label=' + LABEL + '=' + token],
                            'cleanup', limit=4096).splitlines()
-        tag_ids = docker(['image', 'ls', '--quiet', '--no-trunc', '--filter', 'reference=' + tag],
+        tags = (tag, 'wholepact-ui-foundation:' + token)
+        tag_ids = []
+        for owned_tag in tags:
+            ids = docker(['image', 'ls', '--quiet', '--no-trunc', '--filter', 'reference=' + owned_tag],
                          'cleanup', limit=4096).splitlines()
-        require(len(label_ids) <= 1 and len(tag_ids) <= 1 and label_ids == tag_ids,
+            require(len(ids) <= 1, 'cleanup', 'image_identity')
+            tag_ids.extend(ids)
+        require(len(label_ids) <= 2 and len(label_ids) == len(set(label_ids))
+                and set(label_ids) == set(tag_ids)
+                and all(re.fullmatch(b'sha256:[0-9a-f]{64}', x) for x in label_ids),
                 'cleanup', 'image_identity')
-        if label_ids:
-            require(re.fullmatch(b'sha256:[0-9a-f]{64}', label_ids[0]) is not None, 'cleanup', 'image_identity')
-            docker(['image', 'rm', '--force', tag], 'cleanup')
+        for owned_tag in tags:
+            if docker(['image', 'ls', '--quiet', '--filter', 'reference=' + owned_tag],
+                      'cleanup', limit=4096).strip():
+                docker(['image', 'rm', '--force', owned_tag], 'cleanup')
+            require(not docker(['image', 'ls', '--quiet', '--filter', 'reference=' + owned_tag],
+                               'cleanup', limit=4096).strip(), 'cleanup', 'image_remaining')
         require(not docker(['image', 'ls', '--quiet', '--filter', 'label=' + LABEL + '=' + token],
-                           'cleanup', limit=4096).strip(), 'cleanup', 'image_remaining')
-        require(not docker(['image', 'ls', '--quiet', '--filter', 'reference=' + tag],
                            'cleanup', limit=4096).strip(), 'cleanup', 'image_remaining')
     except Failure:
         image_absent = False
@@ -735,17 +849,14 @@ def main():
                     setup_caps=['SETUID', 'SETGID'], no_new_privileges=True),
                 resource_contract=dict(pids_including_threads=128, memory_bytes=2 * 1024**3, cpus=2),
                 financial_suite_rerun=False, public_chain_verified=False, user_installation=False))
-            build_context, _ = build_inputs(root, sha)
+            build_context, foundation_pins = prepare_foundation_inputs(root, sha)
             docker(['pull', '--platform', 'linux/amd64', BASE], 'image', seconds=300, limit=4 * 1024 * 1024)
-            try:
-                docker(['build', '--network', 'none', '--no-cache', '--force-rm', '--progress', 'plain',
-                    '--label', LABEL + '=' + token, '--label', SOURCE_LABEL + '=' + sha,
-                    '--tag', tag, str(build_context)], 'image', seconds=900, limit=8 * 1024 * 1024)
-            except Failure as error:
-                error.published = image_failure(error.output)
-                raise
-            image_id = docker(['image', 'inspect', '--format', '{{.Id}}', tag], 'image', limit=128).strip().decode('ascii')
-            require(re.fullmatch('sha256:[0-9a-f]{64}', image_id) is not None, 'image', 'image_identity')
+            foundation_tag = 'wholepact-ui-foundation:' + token
+            foundation = build_image(build_context, 'foundation', foundation_tag, token, sha, fresh=True)
+            emit('FOUNDATION', dict(image_id=foundation['id'], source=sha, pre_credential=True,
+                package_lock_sha256=I.LOCK_SHA256, before_rust_compilation=True, cross_run_cache=False))
+            build_inputs(root, sha, build_context, foundation_pins)
+            image_id = final_image(build_context, tag, foundation_tag, token, sha, foundation)
             exact_source(sha)
             passed = True
             for mode in MODES:
