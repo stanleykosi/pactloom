@@ -1,20 +1,31 @@
 #!/usr/bin/env python3
 """Pure finite bootstrap evidence validation. Private PID/FD facts never escape.
 
-Public result schema 2 adds finite rejection/fault/reap observations. Historical
-schema 1 results are not reinterpreted. Private record schema 1 remains an exact
+Public result schema 3 distinguishes pre-consumption terminal observations from
+actual owned/adopted reaps and interrupted-owner coverage. Historical schemas
+1 and 2 are not reinterpreted. Private record schema 1 remains an exact
 source-pinned CI contract, not a public or backwards-compatible input format.
 """
 import collections
 import json
+import os
 import re
 
 SHA = re.compile(r'[0-9a-f]{40}')
-RESULT_SCHEMA_VERSION = 2
+RESULT_SCHEMA_VERSION = 3
 PID_FILE = re.compile(r'[1-9][0-9]{0,9}\.jsonl')
 CASES = ('production', 'observed_success', 'wrong_role', 'wrong_version', 'oversized_packet',
          'duplicate_prepared', 'rights', 'rights_truncated', 'later_wrong_sender', 'missing_credentials',
          'coordinator_death', 'host_death', 'child_exit_after_released', 'timeout_before_prepared', 'stall_after_stopped')
+UI_REAP_CASES = ('production', 'observed_success', 'coordinator_death', 'host_death',
+                 'child_exit_after_released', 'timeout_before_prepared', 'stall_after_stopped')
+PROFILES = {'full-bootstrap-v1': CASES, 'ui-reap-prerequisite-v1': UI_REAP_CASES}
+# These are past individual packet/credential results, NOT current-image passes.
+# CI69 itself failed at timeout evidence accounting; that failure is retained.
+HISTORICAL_PACKET_EVIDENCE = dict(run=39594320001, job=119202745218,
+    source='5001ed1c97ada7e224a92bbed31bdeb0e0c542ef', run_outcome='failure',
+    log_sha256='911d3fe959171ae712cdebd926c350d6a32e366394ed6dfe4fd16110c1641ef0',
+    cases=[case for case in CASES if case not in UI_REAP_CASES], current_images_revalidated=False)
 WITNESSES = tuple('Owner' + str(owner) + suffix for owner in (1, 2) for suffix in (
     'BootstrapHistory', 'V3DeliveryAdmission', 'DeliveryAuditHistory', 'FinancialReadHistory',
     'FinancialContinuationAdmission', 'FinancialSigning')) + ('CompletedPair',)
@@ -34,7 +45,10 @@ CODES = {'none', 'arguments', 'container_context', 'single_thread', 'manifest', 
          'container_unverified', 'isolation', 'container_status', 'interrupted',
          'graph_identity', 'sequence', 'phase_order', 'deadline_binding', 'success_counts',
          'fault_identity', 'fault_boundary', 'root_finish', 'adoption_identity',
-         'fixture_status', 'started_deadline', 'receive_identity', 'reap_identity'}
+         'fixture_status', 'started_deadline', 'receive_identity', 'reap_identity',
+         'natural_empty_unverified', 'terminal_identity', 'terminal_status', 'terminal_order',
+         'terminal_coverage', 'adoption_unknown', 'adoption_duplicate', 'reap_duplicate',
+         'reap_adoption_overlap', 'attacker_reap_overlap', 'reap_accounting_missing'}
 CODES |= {'isolation_' + field for field in (
     'inspect_shape', 'config_shape', 'run_label', 'network', 'readonly_root', 'privileged',
     'cap_drop', 'cap_add', 'no_new_privileges', 'pids_limit', 'memory_limit', 'bind_mounts',
@@ -44,7 +58,9 @@ STAGES = {'complete', 'setup', 'runtime', 'evidence', 'projection', 'container',
 RESULT_FIELDS = {'schema_version', 'case', 'outcome', 'stage', 'code', 'records', 'roles_ready',
                  'birth_edges', 'authenticated_receives', 'owned_reaps', 'adopted_reaped', 'natural_empty',
                  'elapsed_ms', 'financial_authority', 'ci_instrumented'}
-OBSERVATION_FIELDS = ('rejection_observations', 'rejection_observations_omitted', 'fault_observation', 'fault_reap_observation')
+OBSERVATION_FIELDS = ('rejection_observations', 'rejection_observations_omitted', 'fault_observation', 'fault_reap_observation',
+    'terminal_observed', 'host_terminal_observations', 'host_terminal_observations_omitted',
+    'host_reap_observation', 'owner_interrupted_terminal_roles', 'reap_accounting')
 RESULT_FIELDS.update(OBSERVATION_FIELDS)
 REJECTION_PUBLIC = {'role', 'boundary', 'reason', 'peer_role', 'peer_alive', 'control_truncated',
                     'fd_inventory_restored', 'socket_hup', 'socket_error', 'socket_invalid'}
@@ -59,6 +75,7 @@ DETAIL = {
     'reject': (REJECTION_PUBLIC - {'role'}) | {'peer_pid', 'sender_pid'},
     'fault': {'name', 'phase'},
     'reaped': {'child_role', 'child_pid', 'kind', 'code'},
+    'terminal_observed': {'child_role', 'child_pid', 'kind', 'code'},
     'finished': {'exit_code'},
     'attacker_spawned': {'attacker_pid'},
     'attacker_sent': {'kind'},
@@ -101,13 +118,42 @@ def loads(raw):
         raise Rejected('invalid_json') from None
 
 
+def public_wait(row):
+    return dict(owner_role=row['role'], **{key: row['detail'][key] for key in ('child_role', 'kind', 'code')})
+
+
+def accounting_observation(rows, adopted):
+    """Finite diagnostics only; never supplies graph identity or cleanup proof."""
+    bindings = collections.defaultdict(set)
+    for row in rows:
+        bindings[row['pid']].add(row['role'])
+        if row['event'] == 'birth':
+            bindings[row['detail']['child_pid']].add(row['detail']['child_role'])
+    direct = [row['detail']['child_pid'] for row in rows if row['event'] == 'reaped']
+    adopted_ids = [item[0] for item in adopted if type(item) is tuple and len(item) == 2 and pid(item[0])]
+    attacker_ids = {row['detail']['attacker_pid'] for row in rows if row['event'] == 'attacker_reaped'}
+    def roles_for(ids):
+        return [role for role in ROLES + ('Attacker',)
+                if any(bindings.get(value, set()) == {role} for value in ids)]
+    missing = {value for value, roles in bindings.items() if roles != {'Coordinator'}}
+    missing -= set(direct) | set(adopted_ids) | attacker_ids
+    return dict(post_reap_missing_roles=roles_for(missing), adopted_roles=roles_for(adopted_ids),
+        duplicate_direct_count=len(direct) - len(set(direct)),
+        duplicate_adopted_count=len(adopted_ids) - len(set(adopted_ids)),
+        direct_adopted_overlap_count=len(set(direct) & set(adopted_ids)),
+        unknown_adopted_count=sum(value not in bindings for value in adopted_ids),
+        identity_ambiguous=any(len(roles) != 1 for roles in bindings.values()))
+
+
 def result(case, outcome, stage, code):
     need(case in CASES and outcome in ('passed', 'failed', 'error') and stage in STAGES and code in CODES)
     return dict(schema_version=RESULT_SCHEMA_VERSION, case=case, outcome=outcome, stage=stage, code=code,
                 records=0, roles_ready=0, birth_edges=0, authenticated_receives=0, owned_reaps=0,
                 adopted_reaped=0, natural_empty=False, elapsed_ms=0, financial_authority=False,
                 ci_instrumented=case != 'production', rejection_observations=[], rejection_observations_omitted=0,
-                fault_observation=None, fault_reap_observation=None)
+                fault_observation=None, fault_reap_observation=None, terminal_observed=0,
+                host_terminal_observations=[], host_terminal_observations_omitted=0, host_reap_observation=None,
+                owner_interrupted_terminal_roles=[], reap_accounting=accounting_observation([], []))
 
 
 def validate_result(row, case):
@@ -132,6 +178,28 @@ def validate_result(row, case):
     need(reap is None or (type(reap) is dict and set(reap) == {'owner_role', 'child_role', 'kind', 'code'}
                          and reap['owner_role'] in observation_roles and reap['child_role'] in ROLES
                          and reap['kind'] in ('exit', 'signal') and number(reap['code'], 0, 127)))
+    need(number(row['terminal_observed'], 0, 256)
+         and number(row['host_terminal_observations_omitted'], 0, 256))
+    need(type(row['host_terminal_observations']) is list and len(row['host_terminal_observations']) <= 2)
+    for terminal in row['host_terminal_observations']:
+        need(type(terminal) is dict and set(terminal) == {'owner_role', 'child_role', 'kind', 'code'}
+             and terminal['owner_role'] == 'Host' and terminal['child_role'] in ROLES
+             and terminal['kind'] in ('exit', 'signal') and number(terminal['code'], 0, 127))
+    host_reap = row['host_reap_observation']
+    need(host_reap is None or (type(host_reap) is dict
+         and set(host_reap) == {'owner_role', 'child_role', 'kind', 'code'}
+         and host_reap['owner_role'] in ROLES and host_reap['child_role'] == 'Host'
+         and host_reap['kind'] in ('exit', 'signal') and number(host_reap['code'], 0, 127)))
+    interrupted = row['owner_interrupted_terminal_roles']
+    need(type(interrupted) is list and interrupted == [role for role in ('Signer1', 'Signer2') if role in interrupted])
+    accounting = row['reap_accounting']
+    need(type(accounting) is dict and set(accounting) == set(accounting_observation([], [])))
+    for key in ('post_reap_missing_roles', 'adopted_roles'):
+        values = accounting[key]
+        need(type(values) is list and values == [role for role in ROLES + ('Attacker',) if role in values])
+    for key in ('duplicate_direct_count', 'duplicate_adopted_count', 'direct_adopted_overlap_count', 'unknown_adopted_count'):
+        need(number(accounting[key], 0, 256))
+    need(type(accounting['identity_ambiguous']) is bool)
     if row['outcome'] == 'passed' and case in ('production', 'observed_success'):
         need(not observations and row['rejection_observations_omitted'] == 0 and fault is None and reap is None)
     if row['outcome'] == 'passed':
@@ -141,13 +209,26 @@ def validate_result(row, case):
         need(row['roles_ready'] <= 17 and row['birth_edges'] <= 16
              and row['authenticated_receives'] <= 96 and row['owned_reaps'] <= 16)
         need(row['rejection_observations_omitted'] == 0)
+        need(row['terminal_observed'] <= 16 and row['host_terminal_observations_omitted'] == 0
+             and not accounting['identity_ambiguous']
+             and all(accounting[key] == 0 for key in ('duplicate_direct_count', 'duplicate_adopted_count',
+                 'direct_adopted_overlap_count', 'unknown_adopted_count'))
+             and accounting['post_reap_missing_roles'] == interrupted)
+        need(row['terminal_observed'] >= row['owned_reaps'])
+        host_terminal_roles = [item['child_role'] for item in row['host_terminal_observations']]
+        need(len(set(host_terminal_roles)) == len(host_terminal_roles)
+             and set(host_terminal_roles) <= {'Signer1', 'Signer2'})
+        if interrupted:
+            need(host_reap == dict(owner_role='Coordinator', child_role='Host', kind='signal', code=9)
+                 and set(interrupted) <= set(host_terminal_roles))
         need(row['stage'] == 'complete' and row['code'] == 'none' and row['natural_empty'] is True)
         if case in ('production', 'observed_success'):
             need(row['adopted_reaped'] == 0)
         if case == 'production':
-            need(all(row[field] == 0 for field in ('records', 'roles_ready', 'birth_edges', 'authenticated_receives', 'owned_reaps')))
+            need(all(row[field] == 0 for field in ('records', 'roles_ready', 'birth_edges', 'authenticated_receives', 'owned_reaps', 'terminal_observed')))
         if case == 'observed_success':
             need((row['roles_ready'], row['birth_edges'], row['authenticated_receives'], row['owned_reaps']) == (17, 16, 96, 16))
+            need(row['terminal_observed'] == 16 and not interrupted)
     else:
         need(row['stage'] != 'complete' and row['code'] != 'none')
     return row
@@ -177,9 +258,9 @@ def validate_record(row, case):
     elif event == 'deadline':
         need(row['role'] == 'Coordinator' and type(d['budget_ms']) is int and d['budget_ms'] == 30000
              and number(d['deadline_elapsed_ms'], 29990, 45000))
-    elif event in ('birth', 'reaped'):
+    elif event in ('birth', 'reaped', 'terminal_observed'):
         need(d['child_role'] in ROLES and d['child_role'] != 'Coordinator' and pid(d['child_pid']))
-        if event == 'reaped':
+        if event in ('reaped', 'terminal_observed'):
             need(d['kind'] in ('exit', 'signal') and number(d['code'], 0, 127))
     elif event == 'ready':
         for field in ('fds', 'expected_fds'):
@@ -213,7 +294,7 @@ def validate_record(row, case):
     return row
 
 
-def observed_counts(rows, case, adopted):
+def observed_counts(rows, case, adopted, *, empty_verified=False):
     need(type(rows) is list and len(rows) <= 256 and type(adopted) is list and len(adopted) <= 32, 'evidence_limit')
     for row in rows:
         validate_record(row, case)
@@ -226,11 +307,18 @@ def observed_counts(rows, case, adopted):
     reaps = [row for row in rows if row['event'] == 'reaped' and fault is not None
              and row['detail']['child_pid'] == fault['pid'] and row['detail']['child_role'] == fault['role']]
     reap = reaps[0] if len(reaps) == 1 else None
+    host_terminals = [row for row in rows if row['event'] == 'terminal_observed' and row['role'] == 'Host']
+    host_reaps = [row for row in rows if row['event'] == 'reaped' and row['detail']['child_role'] == 'Host']
     return dict(records=len(rows), roles_ready=sum(row['event'] == 'ready' for row in rows),
                 birth_edges=sum(row['event'] == 'birth' for row in rows),
                 authenticated_receives=sum(row['event'] == 'received' for row in rows),
                 owned_reaps=sum(row['event'] == 'reaped' for row in rows),
-                adopted_reaped=len(adopted), natural_empty=True,
+                adopted_reaped=len(adopted), natural_empty=empty_verified is True,
+                terminal_observed=sum(row['event'] == 'terminal_observed' for row in rows),
+                host_terminal_observations=[public_wait(row) for row in host_terminals[:2]],
+                host_terminal_observations_omitted=max(0, len(host_terminals) - 2),
+                host_reap_observation=public_wait(host_reaps[0]) if len(host_reaps) == 1 else None,
+                owner_interrupted_terminal_roles=[], reap_accounting=accounting_observation(rows, adopted),
                 rejection_observations=observations, rejection_observations_omitted=max(0, len(rejects) - 17),
                 fault_observation=None if fault is None else dict(role=fault['role'], phase=fault['detail']['phase']),
                 fault_reap_observation=None if reap is None else dict(owner_role=reap['role'],
@@ -244,13 +332,13 @@ def successful_order(role):
         return ([('started',), ('deadline',)] + [('birth', child) for child in children] + [('ready',)]
                 + [rec('Prepared', child) for child in children] + [('release_decision',)]
                 + [rec(kind, child) for kind in ('Released', 'Stopped') for child in children]
-                + [('reaped', child) for child in children] + [('finished',)])
+                + [item for child in children for item in (('terminal_observed', child), ('reaped', child))] + [('finished',)])
     if role == 'Host':
         children = ('Signer1', 'Signer2')
         return ([('birth', child) for child in children] + [rec('Prepared', child) for child in children]
                 + [('ready',), rec('Release', 'Coordinator')] + [rec('Released', child) for child in children]
                 + [rec('Stop', 'Coordinator')] + [rec('Stopped', child) for child in children]
-                + [rec('Exit', 'Coordinator')] + [('reaped', child) for child in children] + [('finished',)])
+                + [rec('Exit', 'Coordinator')] + [item for child in children for item in (('terminal_observed', child), ('reaped', child))] + [('finished',)])
     parent = 'Host' if role in ('Signer1', 'Signer2') else 'Coordinator'
     return [('ready',)] + [rec(kind, parent) for kind in ('Release', 'Stop', 'Exit')] + [('finished',)]
 
@@ -258,13 +346,17 @@ def successful_order(role):
 def event_key(row):
     event, d = row['event'], row['detail']
     if event == 'received': return (event, d['kind'], d['peer_role'])
-    if event in ('birth', 'reaped'): return (event, d['child_role'])
+    if event in ('birth', 'reaped', 'terminal_observed'): return (event, d['child_role'])
     return (event,)
 
 
-def validate_case(case, rows, status, adopted, root_pid):
+def validate_case(case, rows, status, adopted, root_pid, *, empty_verified=False):
     need(case in CASES and type(rows) is list and len(rows) <= 256 and number(status, -127, 255)
          and type(adopted) is list and len(adopted) <= 32 and pid(root_pid), 'arguments')
+    # Supplied only by PID1 drain's actual ECHILD after the root was waited.
+    # A result flag, missing record or inferred dead PID cannot establish this.
+    need(empty_verified is True, 'natural_empty_unverified')
+    interrupted_roles = []
     if case == 'production':
         need(status == 78 and not rows, 'production_status')
         need(not adopted, 'unexpected_adoption')
@@ -308,7 +400,7 @@ def validate_case(case, rows, status, adopted, root_pid):
     # The source records only the first rejection in each process. A second
     # convenient boundary cannot hide an earlier unrelated failure.
     need(len({row['pid'] for row in by['reject']}) == len(by['reject']), 'sequence')
-    for row in by['birth'] + by['reaped']:
+    for row in by['birth'] + by['reaped'] + by['terminal_observed']:
         d = row['detail']
         need(parent(d['child_role']) == row['role'] and roles.get(d['child_role']) == d['child_pid'], 'graph_identity')
     for row in by['reject']:
@@ -325,10 +417,22 @@ def validate_case(case, rows, status, adopted, root_pid):
         expected_parent = 1 if row['role'] == 'Coordinator' else roles.get(parent(row['role']))
         need(row['detail']['parent_pid'] == expected_parent, 'graph_identity')
     need(len({row['role'] for row in by['ready']}) == len(by['ready']), 'graph_identity')
+    terminals = {}
+    births = {row['detail']['child_pid']: row for row in by['birth']}
+    for row in by['terminal_observed']:
+        child = row['detail']['child_pid']
+        need(child not in terminals and child in births, 'terminal_identity')
+        need(births[child]['pid'] == row['pid'] and births[child]['sequence'] < row['sequence'], 'terminal_order')
+        terminals[child] = row
+    for row in by['reaped']:
+        observed = terminals.get(row['detail']['child_pid'])
+        need(observed is not None and observed['pid'] == row['pid'], 'terminal_identity')
+        need(observed['detail'] == row['detail'], 'terminal_status')
+        need(observed['sequence'] < row['sequence'], 'terminal_order')
     if case == 'observed_success':
         need(status == 78 and not adopted and not by['fault'] and not by['reject'], 'fixture_status')
         need(set(roles) == set(ROLES) and len(by['ready']) == 17 and len(by['birth']) == 16
-             and len(by['reaped']) == 16 and len(by['received']) == 96 and len(by['release_decision']) == 1
+             and len(by['reaped']) == 16 and len(by['terminal_observed']) == 16 and len(by['received']) == 96 and len(by['release_decision']) == 1
              and len(by['finished']) == 17, 'success_counts')
         for role in ROLES:
             need([event_key(row) for row in rows if row['role'] == role] == successful_order(role), 'phase_order')
@@ -440,15 +544,33 @@ def validate_case(case, rows, status, adopted, root_pid):
         # Orphans are accepted only for explicit error/death fixtures and always
         # shown distinctly from the product's original-owner reaps.
         need(all(type(item) is tuple and len(item) == 2 and pid(item[0]) and type(item[1]) is int
-                 and item[0] in process_roles and item[0] != root_pid for item in adopted), 'adoption_identity')
-        need(len({item[0] for item in adopted}) == len(adopted), 'adoption_identity')
+                 and item[0] in process_roles and item[0] != root_pid for item in adopted), 'adoption_unknown')
+        need(len({item[0] for item in adopted}) == len(adopted), 'adoption_duplicate')
         direct = [row['detail']['child_pid'] for row in by['reaped']]
-        need(len(set(direct)) == len(direct), 'adoption_identity')
+        need(len(set(direct)) == len(direct), 'reap_duplicate')
         adopted_ids = {item[0] for item in adopted}
-        need(not (adopted_ids & set(direct)), 'adoption_identity')
+        need(not (adopted_ids & set(direct)), 'reap_adoption_overlap')
         attackers = {row['detail']['attacker_pid'] for row in by['attacker_reaped']}
-        need(not (attackers & (adopted_ids | set(direct))), 'adoption_identity')
-        need(set(process_roles) - {root_pid} == set(direct) | adopted_ids | attackers, 'adoption_identity')
+        need(not (attackers & (adopted_ids | set(direct))), 'attacker_reap_overlap')
+        for child, wait_status in adopted:
+            need(os.WIFEXITED(wait_status) or os.WIFSIGNALED(wait_status), 'terminal_status')
+            if child in terminals:
+                observed = terminals[child]['detail']
+                actual = ('exit', os.WEXITSTATUS(wait_status)) if os.WIFEXITED(wait_status) else ('signal', os.WTERMSIG(wait_status))
+                need((observed['kind'], observed['code']) == actual, 'terminal_status')
+        missing = set(process_roles) - {root_pid} - set(direct) - adopted_ids - attackers
+        for child in missing:
+            observed = terminals.get(child)
+            # Never invent an owned reap: a real terminal WNOWAIT observation
+            # plus independently drained PID1 may cover the narrow interrupted
+            # H logger window only when C actually reaped that original H by KILL.
+            need(observed is not None and observed['role'] == 'Host'
+                 and observed['detail']['child_role'] in ('Signer1', 'Signer2')
+                 and observed['pid'] == roles.get('Host') and births[child]['pid'] == roles.get('Host')
+                 and coordinator_reaped_sigkill('Host'), 'terminal_coverage')
+        interrupted_roles = [role for role in ('Signer1', 'Signer2') if roles.get(role) in missing]
+        need(len(interrupted_roles) == len(missing), 'reap_accounting_missing')
     out = result(case, 'passed', 'complete', 'none')
-    out.update(observed_counts(rows, case, adopted))
+    out.update(observed_counts(rows, case, adopted, empty_verified=empty_verified))
+    out['owner_interrupted_terminal_roles'] = interrupted_roles
     return validate_result(out, case)

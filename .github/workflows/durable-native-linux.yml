@@ -57,7 +57,7 @@ jobs:
           CARGO_INCREMENTAL: '0'
           WHOLEPACT_BUILD_JOBS: '3'
         run: bash scripts/ci-durable-native-linux.sh
-      - name: Isolated fixed-fork bootstrap prerequisite (no financial authority)
+      - name: Isolated bootstrap profile (UI uses seven reap/lifetime prerequisites)
         if: steps.mode.outputs.gate == 'bootstrap' || steps.mode.outputs.gate == 'ui'
         timeout-minutes: 45
         shell: bash
@@ -90,4 +90,4 @@ jobs:
         if: success() && steps.mode.outputs.gate == 'ui'
         shell: bash
         run: |
-          echo 'Fixed-origin bootstrap and isolated actual UI gate passed. One unfunded synthetic fixture was reused for cancel, blur/refocus and at most one authenticated synthetic journal append. Historical CI64 financial evidence is unchanged, not revalidated. No public-chain settlement, deployment, funded wallet or full-product acceptance is claimed.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Seven current-image bootstrap reap/lifetime prerequisites and isolated actual UI gate passed. The eight packet/credential fault results are historical individual CI69 evidence, not rerun or current-image qualification; CI69 remains failed. One unfunded synthetic fixture was reused for cancel, blur/refocus and at most one authenticated synthetic journal append. Historical CI64 financial evidence is unchanged, not revalidated. No public-chain settlement, deployment, funded wallet or full-product acceptance is claimed.' >> "$GITHUB_STEP_SUMMARY"

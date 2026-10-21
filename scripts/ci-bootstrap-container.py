@@ -51,9 +51,12 @@ def prepare(case):
     os.umask(0o077)
     os.environ.clear()
     manifest = P.loads((ROOT / 'manifest.json').read_bytes())
-    require(set(manifest) == {'schema_version', 'source', 'images'} and manifest['schema_version'] == 1,
+    require(set(manifest) == {'schema_version', 'source', 'profile', 'images'} and manifest['schema_version'] == 2,
             'manifest')
-    require(P.SHA.fullmatch(manifest['source']) is not None and set(manifest['images']) == set(P.CASES), 'manifest')
+    require(type(manifest['profile']) is str and manifest['profile'] in P.PROFILES
+            and P.SHA.fullmatch(manifest['source']) is not None
+            and set(manifest['images']) == set(P.PROFILES[manifest['profile']])
+            and case in P.PROFILES[manifest['profile']], 'manifest')
     for directory in (pathlib.Path('/'), pathlib.Path('/opt'), ROOT, ROOT / 'images'):
         directory_meta = directory.stat(follow_symlinks=False)
         require(stat.S_ISDIR(directory_meta.st_mode) and directory_meta.st_uid == 0
@@ -155,8 +158,8 @@ def main():
         if not empty:
             return result
         rows = evidence()
-        observed_counts = P.observed_counts(rows, case, adopted)
-        result = P.validate_case(case, rows, status, adopted, child.pid)
+        observed_counts = P.observed_counts(rows, case, adopted, empty_verified=empty)
+        result = P.validate_case(case, rows, status, adopted, child.pid, empty_verified=empty)
         result['natural_empty'] = True
         return result
     except P.Rejected as error:

@@ -150,7 +150,8 @@ def compile_errors(raw):
             continue
 
 
-def build(root, sha):
+def build(root, sha, profile):
+    require(profile in P.PROFILES, 'source', 'gate_mode')
     images = root / 'context' / 'images'
     images.mkdir(parents=True)
     images.chmod(0o755)
@@ -167,7 +168,7 @@ def build(root, sha):
     require(checked(['rustup', 'run', '1.99.0', 'rustc', '--version'], 'toolchain', env=env).decode().strip() == RUSTC,
             'toolchain', 'toolchain_version')
     hashes = {}
-    for case in P.CASES:
+    for case in P.PROFILES[profile]:
         exact_source(sha)
         selected = dict(env)
         if case != 'production':
@@ -198,7 +199,7 @@ def build(root, sha):
         with (images / case).open('rb') as stream:
             hashes[case] = hashlib.file_digest(stream, 'sha256').hexdigest()
         emit('IMAGE', dict(case=case, sha256=hashes[case], source=sha, ci_instrumented=case != 'production'))
-    manifest = dict(schema_version=1, source=sha, images=hashes)
+    manifest = dict(schema_version=2, source=sha, profile=profile, images=hashes)
     (root / 'context' / 'manifest.json').write_text(json.dumps(manifest, separators=(',', ':'), sort_keys=True))
     for name in ('ci-bootstrap-container.py', 'ci-bootstrap-output.py'):
         shutil.copyfile(HERE / name, root / 'context' / name)
@@ -432,13 +433,17 @@ def main():
     passed = False
     first = None
     cleanup_only = len(sys.argv) == 2 and sys.argv[1] == 'cleanup'
+    profile = None
     try:
         require(len(sys.argv) == 2 and sys.argv[1] in ('run', 'cleanup'), 'preflight', 'arguments')
         if sys.argv[1] == 'cleanup':
             passed = True
         else:
             exact_source(sha)
+            profile = 'ui-reap-prerequisite-v1' if (HERE / 'qualification-gate-mode').read_bytes() == b'ui\n' else 'full-bootstrap-v1'
             emit('SOURCE', dict(source=sha, toolchain='1.99.0', container_base=BASE,
+                                qualification_profile=profile, current_image_cases=P.PROFILES[profile],
+                                historical_packet_evidence=P.HISTORICAL_PACKET_EVIDENCE if profile == 'ui-reap-prerequisite-v1' else None,
                                 cargo_lock_sha256=hashlib.sha256(pathlib.Path('Cargo.lock').read_bytes()).hexdigest(),
                                 financial_qualification_run=False, origin_qualification_run=False,
                                 runtime_identity_contract=dict(setup_caps=['SETUID', 'SETGID'],
@@ -446,12 +451,12 @@ def main():
                                     no_new_privileges=True, uid=10001, supplementary_groups=[])))
             # build() wants its own fresh empty Docker config directory.
             (root / 'docker').rmdir()
-            build_context = build(root, sha)
+            build_context = build(root, sha, profile)
             docker(['pull', '--platform', 'linux/amd64', BASE], 'image', seconds=300, limit=4 * 1024 * 1024)
             docker(['build', '--network', 'none', '--no-cache', '--force-rm', '--label', LABEL + '=' + token,
                     '--tag', tag, str(build_context)], 'image', seconds=300, limit=4 * 1024 * 1024)
             exact_source(sha)
-            passed = all(run_case(case, tag, token) for case in P.CASES)
+            passed = all(run_case(case, tag, token) for case in P.PROFILES[profile])
     except Failure as error:
         first = dict(stage=error.stage, code=error.code)
         emit('FAILURE', first)
@@ -467,6 +472,7 @@ def main():
                                         lifecycle_result='not_evaluated'))
         else:
             emit('RESULT', dict(passed=passed, source=sha, bootstrap_only=True,
+                                qualification_profile=profile, all_fifteen_current_images_verified=passed and profile == 'full-bootstrap-v1',
                                 financial_authority=False, native_payment_verified=False,
                                 public_chain_verified=False, full_product_verified=False))
     return 0 if passed else 1
