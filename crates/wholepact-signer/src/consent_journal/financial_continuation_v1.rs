@@ -257,7 +257,7 @@ mod history_payload_tests {
             coordinated.replacen("\"coordinated_provenance\":{", "\"coordinated_provenance\":{\"extra\":true,", 1),
             coordinated.replacen("\"review\":{", "\"review\":{\"permission_generation\":1,", 1),
             coordinated.replacen("\"coordinator_focus_epoch\":7", "\"coordinator_focus_epoch\":7,\"coordinator_focus_epoch\":7", 1),
-            format!(" {coordinated}"),
+            format!(" {}", coordinated.as_str()),
         ] { assert!(decode_payload(&bad).is_err()); }
     }
     #[test]
