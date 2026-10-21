@@ -154,7 +154,7 @@ class DisplayFailureObservation(unittest.TestCase):
 class CommonFailureContext(unittest.TestCase):
     def context(self):
         return dict(product_status=1, compositor_status=None, field='Request', action='type',
-            collector_code=None, record_count=0, phase=None, terminal_roles=[], delivery_stage=None, delivery_class=None,
+            collector_code=None, record_count=0, phase=None, terminal_roles=[], delivery_stage=None, delivery_class=None, memory_before=None, memory_after=None,
             controller=dict(origin='product_exit', module_error='target', target_reason='unmapped',
                 sequence=12, operation=5, commit=3, frame=4, input_sequence=11))
 
@@ -210,6 +210,43 @@ class CommonFailureContext(unittest.TestCase):
                 first.note(C.P.failure('fixture','input','display_binding'))
             self.assertNotIn('runtime_observation',first.value)
             self.assertNotIn('private',output.getvalue())
+
+
+class CgroupCounters(unittest.TestCase):
+    def sample(self, chunks):
+        from unittest import mock
+        with mock.patch.object(C.os,'open',return_value=9) as opened, mock.patch.object(C.os,'fstat',return_value=SimpleNamespace(st_mode=C.stat.S_IFREG)), mock.patch.object(C.os,'read',side_effect=chunks), mock.patch.object(C.os,'close'):
+            result=C.cgroup_memory_observation()
+        for call in opened.call_args_list:
+            self.assertIn(call.args[0],('/sys/fs/cgroup/memory.events','/sys/fs/cgroup/memory.peak'))
+            self.assertTrue(call.args[1]&C.os.O_NOFOLLOW)
+            self.assertTrue(call.args[1]&C.os.O_NONBLOCK)
+        return result
+
+    def test_exact_counters_and_peak(self):
+        self.assertEqual(self.sample([b'low 0\nhigh 0\nmax 12\noom 2\noom_kill 1\n',b'2147483648\n']),
+            dict(status='ok',oom=2,oom_kill=1,peak_bytes=2147483648))
+
+    def test_counter_failure_and_optional_peak_are_distinguished(self):
+        self.assertEqual(self.sample([PermissionError('private')]),dict(status='unavailable',oom=None,oom_kill=None,peak_bytes=None))
+        self.assertEqual(self.sample([b'oom 0\noom_kill 0\n',FileNotFoundError('private')]),dict(status='ok',oom=0,oom_kill=0,peak_bytes=None))
+        for raw in (b'oom 0\noom 1\noom_kill 1\n',b'oom -1\noom_kill 0\n',b'x'*4097,b'private data',b'oom 99999999999999999999\noom_kill 0\n'):
+            self.assertEqual(self.sample([raw]),dict(status='invalid',oom=None,oom_kill=None,peak_bytes=None))
+
+    def test_phase_and_baseline_capture_use_actual_closed_schema(self):
+        source=PATH.read_text()
+        self.assertIn("record['detail'].get('observation') == 'WidgetSnapshot'",source)
+        self.assertNotIn("record['detail'].get('kind') == 'WidgetSnapshot'",source)
+        self.assertIn("session.input_action = 'capture'\n        with session.controller.observe()",source)
+
+    def test_counter_schema_never_accepts_raw_or_negative_fields(self):
+        base=CommonFailureContext().context()
+        for bad in ({'status':'ok','oom':-1,'oom_kill':0,'peak_bytes':0},
+                    {'status':'ok','oom':True,'oom_kill':0,'peak_bytes':0},
+                    {'status':'unavailable','oom':1,'oom_kill':0,'peak_bytes':None},
+                    {'status':'ok','oom':0,'oom_kill':0,'peak_bytes':0,'raw':'private'}):
+            value=C.P.failure('fixture','input','display_binding')|{'runtime_observation':base|{'memory_after':bad}}
+            with self.assertRaises(C.P.Rejected):C.P.validate_failure(value,'fixture')
 
 
 class RootSetup(unittest.TestCase):

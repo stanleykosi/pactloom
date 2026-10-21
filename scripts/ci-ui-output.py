@@ -1163,7 +1163,15 @@ def validate_failure(value, mode):
     if 'runtime_observation' in value:
         o = value['runtime_observation']
         require(type(o) is dict and set(o) == {'product_status', 'compositor_status', 'field', 'action',
-            'collector_code', 'record_count', 'phase', 'terminal_roles', 'controller', 'delivery_stage', 'delivery_class'})
+            'collector_code', 'record_count', 'phase', 'terminal_roles', 'controller', 'delivery_stage', 'delivery_class', 'memory_before', 'memory_after'})
+        for name in ('memory_before', 'memory_after'):
+            sample = o[name]
+            if sample is not None:
+                require(type(sample) is dict and set(sample) == {'status', 'oom', 'oom_kill', 'peak_bytes'} and
+                    sample['status'] in ('ok', 'unavailable', 'invalid'))
+                require(all(sample[k] is None or number(sample[k], 0, (1 << 63) - 1) for k in ('oom', 'oom_kill', 'peak_bytes')))
+                require((sample['status'] == 'ok' and sample['oom'] is not None and sample['oom_kill'] is not None) or
+                    (sample['status'] != 'ok' and all(sample[k] is None for k in ('oom', 'oom_kill', 'peak_bytes'))))
         require(all(o[k] is None or number(o[k], -64, 255) for k in ('product_status', 'compositor_status')))
         require(o['field'] is None or o['field'] in ('Endpoint', 'ServerName', 'WitnessId',
             'ServerCertificateDigest', 'NetworkProfile', 'AccountId', 'StorageKeyPath',

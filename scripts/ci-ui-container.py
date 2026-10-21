@@ -501,6 +501,41 @@ class LibSelector:
         return self.result
 
 
+def cgroup_memory_observation():
+    """Fixed read-only private-cgroup counters; no raw text or errors escape."""
+    result = dict(status='unavailable', oom=None, oom_kill=None, peak_bytes=None)
+    def read(path, limit):
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+        try:
+            require(stat.S_ISREG(os.fstat(fd).st_mode), 'invalid_record')
+            raw = os.read(fd, limit + 1)
+            require(len(raw) <= limit, 'invalid_record')
+            return raw.decode('ascii')
+        finally: os.close(fd)
+    try:
+        rows = read('/sys/fs/cgroup/memory.events', 4096).splitlines()
+        values = {}
+        for row in rows:
+            key, value = row.split()
+            require(key not in values and value.isascii() and value.isdecimal() and
+                    len(value) <= 19 and int(value) <= (1 << 63) - 1, 'invalid_record')
+            values[key] = int(value)
+        require('oom' in values and 'oom_kill' in values, 'invalid_record')
+        result.update(status='ok', oom=values['oom'], oom_kill=values['oom_kill'])
+    except OSError:
+        return result
+    except Exception:
+        result['status'] = 'invalid'; return result
+    try:
+        peak = read('/sys/fs/cgroup/memory.peak', 64).strip()
+        require(peak.isascii() and peak.isdecimal() and len(peak) <= 19 and
+                int(peak) <= (1 << 63) - 1, 'invalid_record')
+        result['peak_bytes'] = int(peak)
+    except Exception:
+        pass  # older kernels may lack memory.peak; counters remain independent
+    return result
+
+
 class NativeSession:
     def __init__(self, original, source_backed, reporter):
         self.original, self.reporter, self.observed = original, reporter, source_backed
@@ -508,6 +543,7 @@ class NativeSession:
         self.records, self.owner, self.collector = [], None, ObserverFiles() if source_backed else None
         self.controller = self.weston = self.product = None
         self.input_field = None; self.input_action = 'other'
+        self.memory_before = cgroup_memory_observation()
         reporter.runtime_context = self.failure_context
         reporter.stage = 'display'
         S.namespace_empty_except((1,))
@@ -547,11 +583,12 @@ class NativeSession:
             P.validate_record(record)
             if record['event'] == 'RoleFinished':
                 terminal.append(dict(role=record['role'], exit_status=record['detail']['exit_code']))
-            if record['role'] == 'Coordinator' and record['event'] == 'Observation' and record['detail'].get('kind') == 'WidgetSnapshot':
+            if record['role'] == 'Coordinator' and record['event'] == 'Observation' and record['detail'].get('observation') == 'WidgetSnapshot':
                 phase = record['detail']['facts']['phase']
         require(len(terminal) <= 17, 'record_count')
         detail = P.delivery_first_failure(records) if records else None
         return dict(product_status=status(self.product), compositor_status=status(self.weston),
+            memory_before=getattr(self, 'memory_before', None), memory_after=cgroup_memory_observation(),
             field=self.input_field, action=self.input_action, collector_code=collector_code,
             record_count=len(records), phase=phase, terminal_roles=terminal,
             delivery_stage=None if detail is None else detail['stage'],
@@ -730,6 +767,7 @@ def source_case(case, original, handoff_raw, original_metadata, artifact_digest,
         session.fill(handoff['fixture']['form'])
         prepare = session.wait_snapshot(lambda s: s['phase'] == 'Selecting' and s['focused'] and
             any(w['widget'] == 'Prepare' and w['enabled'] for w in s['widgets']))
+        session.input_action = 'capture'
         with session.controller.observe() as frame: baseline = bytearray(frame.bgra())
         reporter.stage = 'prepare'; session.input_field = None; session.input_action = 'prepare'; session.click(prepare, 'Prepare')
         source = session.wait_snapshot(lambda s: s['phase'] == 'Reading' and s['focused'] and
