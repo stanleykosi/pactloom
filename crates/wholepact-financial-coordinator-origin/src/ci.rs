@@ -175,6 +175,21 @@ fn record_rejection(
     }));
 }
 
+/// Non-consuming kernel observation, never a claim that the child was reaped.
+pub(super) fn terminal_observed(peer: &PeerLifetime, info: &libc::siginfo_t) -> Result<()> {
+    let pid = unsafe { info.si_pid() };
+    if pid != peer.pid() || unsafe { info.si_uid() } != peer.uid() {
+        return Err(rejected("CI terminal child mismatch"));
+    }
+    let kind = match info.si_code {
+        libc::CLD_EXITED => "exit",
+        libc::CLD_KILLED | libc::CLD_DUMPED => "signal",
+        _ => return Err(rejected("CI child observation was not terminal")),
+    };
+    let code = unsafe { info.si_status() };
+    record("terminal_observed", json!({"child_role": role_name(peer.role()), "child_pid": pid, "kind": kind, "code": code}))
+}
+
 pub(super) fn reaped(role: Role, pid: libc::pid_t, status: libc::c_int) {
     let (kind, code) = if libc::WIFEXITED(status) {
         ("exit", libc::WEXITSTATUS(status))

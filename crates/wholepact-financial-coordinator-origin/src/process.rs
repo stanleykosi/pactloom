@@ -172,6 +172,8 @@ pub(super) struct DirectChild {
     peer: PeerLifetime,
     channel: Channel,
     reaped: bool,
+    #[cfg(wholepact_bootstrap_ci)]
+    terminal_observed: bool,
 }
 impl DirectChild {
     #[cfg(feature = "coordinated-signer-continue")]
@@ -261,6 +263,19 @@ impl DirectChild {
         self.require_owner()?;
         let status = loop {
             let mut status = 0;
+            #[cfg(wholepact_bootstrap_ci)]
+            let rc = match self.observe_terminal(libc::WNOHANG) {
+                Ok(true) => unsafe { libc::waitpid(self.peer.pid, &mut status, libc::WNOHANG) },
+                // A child can exit between probes. Do not consume its status
+                // until its retained pidfd has supplied logged WNOWAIT evidence.
+                Ok(false) => 0,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                    crate::channel::require_time(deadline)?;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            #[cfg(not(wholepact_bootstrap_ci))]
             let rc = unsafe { libc::waitpid(self.peer.pid, &mut status, libc::WNOHANG) };
             if rc == self.peer.pid {
                 self.reaped = true;
@@ -304,6 +319,12 @@ impl DirectChild {
     fn wait(&mut self) -> Result<libc::c_int> {
         let mut status = 0;
         loop {
+            #[cfg(wholepact_bootstrap_ci)]
+            if let Err(error) = self.observe_terminal(0) {
+                if error.kind() == std::io::ErrorKind::Interrupted { continue; }
+                // Logging/observation failure is not terminal evidence. Still
+                // perform the original genuine best-effort cleanup below.
+            }
             let rc = unsafe { libc::waitpid(self.peer.pid, &mut status, 0) };
             if rc == self.peer.pid {
                 self.reaped = true;
@@ -320,6 +341,24 @@ impl DirectChild {
             let error = std::io::Error::last_os_error();
             if error.kind() != std::io::ErrorKind::Interrupted { return Err(error); }
         }
+    }
+
+    #[cfg(wholepact_bootstrap_ci)]
+    fn observe_terminal(&mut self, options: libc::c_int) -> Result<bool> {
+        self.require_owner()?;
+        if self.terminal_observed { return Ok(true); }
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let rc = unsafe {
+            libc::waitid(libc::P_PIDFD, self.peer.fd() as libc::id_t, &mut info,
+                         libc::WEXITED | libc::WNOWAIT | options)
+        };
+        if rc < 0 { return Err(std::io::Error::last_os_error()); }
+        if unsafe { info.si_pid() } == 0 { return Ok(false); }
+        crate::ci::terminal_observed(&self.peer, &info)?;
+        // Set only after successful logging. No status was consumed and no new
+        // descriptor survives this observation of the original child lifetime.
+        self.terminal_observed = true;
+        Ok(true)
     }
 }
 impl Drop for DirectChild {
@@ -384,6 +423,8 @@ pub(super) fn fork_edge(parent: Role, child: Role) -> Result<Forked> {
         owner_pid: parent_pid, local_role: parent,
         peer: PeerLifetime { pid, uid, pidfd, role: child },
         channel: parent_channel, reaped: false,
+        #[cfg(wholepact_bootstrap_ci)]
+        terminal_observed: false,
     };
     owned.peer.check_alive()?;
     #[cfg(wholepact_bootstrap_ci)]

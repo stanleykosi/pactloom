@@ -156,9 +156,9 @@ def fixture():
                 count = 32 if role == 'Coordinator' else 9 if role == 'Host' else 5
                 add(role, event, fds=list(range(count)), expected_fds=list(range(count)), fd_inventory_ok=True,
                     parent_pid=1 if role == 'Coordinator' else ids[parent], remaining_ms=29999, core_zero=True, dumpable_zero=True)
-            elif event in ('birth', 'reaped'):
+            elif event in ('birth', 'reaped', 'terminal_observed'):
                 detail = dict(child_role=item[1], child_pid=ids[item[1]])
-                if event == 'reaped': detail.update(kind='exit', code=0)
+                if event in ('reaped', 'terminal_observed'): detail.update(kind='exit', code=0)
                 add(role, event, **detail)
             elif event == 'received':
                 add(role, event, kind=item[1], peer_role=item[2], peer_pid=ids[item[2]], sender_pid=ids[item[2]],
@@ -196,7 +196,7 @@ def packet_failure():
     rows.append(fault)
     for row in original:
         if row['role'] == 'Coordinator' and row['event'] == 'reaped':
-            new = copy.deepcopy(row); new['detail'].update(kind='signal', code=9); rows.append(new)
+            new = copy.deepcopy(row); new['detail'].update(kind='signal', code=9); terminal = copy.deepcopy(new); terminal['event'] = 'terminal_observed'; rows.extend((terminal, new))
     end = copy.deepcopy(rows[0]); end.update(event='finished', detail=dict(exit_code=1)); rows.append(end)
     for row in rows: row['case'] = 'wrong_role'
     return renumber(rows), [(4, 9), (5, 9)]
@@ -217,7 +217,7 @@ def lifecycle_failure(case, channel_loss=False):
     for role in P.ROLES:
         own = [copy.deepcopy(row) for row in original if row['role'] == role]
         if case == 'stall_after_stopped':
-            if role == 'Coordinator': own = [row for row in own if row['event'] not in ('reaped', 'finished')]
+            if role == 'Coordinator': own = [row for row in own if row['event'] not in ('terminal_observed', 'reaped', 'finished')]
             elif role == target: own = own[:3]  # READY, Release, Stop.
         else:
             last = ('ready',)
@@ -252,7 +252,8 @@ def lifecycle_failure(case, channel_loss=False):
                 if case != 'stall_after_stopped' or reap['detail']['child_role'] == target:
                     reap['detail'].update(kind='signal', code=9)
                 if timeout: reap['elapsed_ms'] = 30000
-                rows.append(reap)
+                terminal = copy.deepcopy(reap); terminal['event'] = 'terminal_observed'
+                rows.extend((terminal, reap))
         finish = copy.deepcopy(original[0]); finish.update(event='finished', detail=dict(exit_code=1))
         if timeout: finish['elapsed_ms'] = 30000
         rows.append(finish)
@@ -265,7 +266,7 @@ def lifecycle_failure(case, channel_loss=False):
 
 class LifecycleProjection(unittest.TestCase):
     def check(self, case, rows, adopted, status):
-        return P.validate_case(case, rows, status, adopted, 2)
+        return P.validate_case(case, rows, status, adopted, 2, empty_verified=True)
 
     def test_exact_death_boundaries_both_kernel_observations(self):
         for case in ('child_exit_after_released', 'host_death', 'coordinator_death'):
@@ -365,14 +366,143 @@ class LifecycleProjection(unittest.TestCase):
 
     def test_public_result_schema_explicitly_excludes_historical_version(self):
         value = P.result('production', 'error', 'evidence', 'production_status')
-        self.assertEqual(P.validate_result(value, 'production')['schema_version'], 2)
-        value['schema_version'] = 1
-        with self.assertRaises(P.Rejected): P.validate_result(value, 'production')
+        self.assertEqual(P.validate_result(value, 'production')['schema_version'], 3)
+        for old in (1, 2):
+            value['schema_version'] = old
+            with self.assertRaises(P.Rejected): P.validate_result(value, 'production')
+
+
+def interrupted_owner_fixture():
+    rows, adopted, status = lifecycle_failure('timeout_before_prepared')
+    host = copy.deepcopy(next(row for row in rows if row['role'] == 'Host'))
+    host.update(event='terminal_observed', elapsed_ms=30000,
+                detail=dict(child_role='Signer1', child_pid=4, kind='signal', code=9))
+    rows.append(host)
+    return renumber(rows), [(5, 9)], status
+
+
+class TerminalObservation(unittest.TestCase):
+    def check(self, rows, adopted, status=1, empty_verified=True):
+        return P.validate_case('timeout_before_prepared', rows, status, adopted, 2, empty_verified=empty_verified)
+
+    def test_interrupted_host_observation_is_not_an_owned_reap(self):
+        rows, adopted, status = interrupted_owner_fixture()
+        result = self.check(rows, adopted, status)
+        self.assertEqual(result['outcome'], 'passed')
+        self.assertEqual(result['owned_reaps'], 14)
+        self.assertEqual(result['adopted_reaped'], 1)
+        self.assertEqual(result['terminal_observed'], 15)
+        self.assertEqual(result['owner_interrupted_terminal_roles'], ['Signer1'])
+        self.assertEqual(result['reap_accounting']['post_reap_missing_roles'], ['Signer1'])
+        self.assertEqual(result['host_terminal_observations'], [dict(owner_role='Host', child_role='Signer1', kind='signal', code=9)])
+        self.assertNotIn('pid', json.dumps(result))
+
+    def test_actual_adoption_after_terminal_requires_matching_status(self):
+        rows, adopted, status = interrupted_owner_fixture()
+        result = self.check(rows, [(4, 9)] + adopted, status)
+        self.assertEqual(result['owner_interrupted_terminal_roles'], [])
+        for wrong in (0, 256, 15, 127):
+            with self.assertRaises(P.Rejected): self.check(rows, [(4, wrong)] + adopted)
+
+    def test_actual_host_post_reap_after_terminal_remains_exclusive(self):
+        rows, adopted, _ = interrupted_owner_fixture()
+        post = copy.deepcopy(rows[-1]); post['event'] = 'reaped'; rows.append(post)
+        result = self.check(renumber(rows), adopted)
+        self.assertEqual(result['owned_reaps'], 15)
+        self.assertEqual(result['owner_interrupted_terminal_roles'], [])
+        with self.assertRaises(P.Rejected): self.check(rows, [(4, 9)] + adopted)
+        rows[-1]['detail']['code'] = 15
+        with self.assertRaises(P.Rejected): self.check(rows, adopted)
+
+    def test_unexplained_missing_child_still_fails(self):
+        rows, adopted, _ = interrupted_owner_fixture()
+        rows.pop()
+        with self.assertRaises(P.Rejected) as caught: self.check(rows, adopted)
+        self.assertEqual(caught.exception.code, 'terminal_coverage')
+        observed = P.observed_counts(rows, 'timeout_before_prepared', adopted, empty_verified=True)
+        self.assertEqual(observed['reap_accounting']['post_reap_missing_roles'], ['Signer1'])
+        self.assertEqual(observed['owner_interrupted_terminal_roles'], [])
+
+    def test_missing_independent_echild_never_qualifies(self):
+        rows, adopted, _ = interrupted_owner_fixture()
+        for empty in (False, None, 1, 'true'):
+            with self.assertRaises(P.Rejected) as caught: self.check(rows, adopted, empty_verified=empty)
+            self.assertEqual(caught.exception.code, 'natural_empty_unverified')
+        with self.assertRaises(P.Rejected): P.validate_case('production', [], 78, [], 2)
+        source = (ROOT / 'ci-bootstrap-container.py').read_text()
+        self.assertIn('except ChildProcessError:\n            return adopted, True', source)
+        self.assertIn('child.pid, empty_verified=empty)', source)
+
+    def test_wrong_owner_role_or_original_birth_cannot_supply_coverage(self):
+        for mutation in ('owner', 'role', 'birth'):
+            rows, adopted, _ = interrupted_owner_fixture()
+            if mutation == 'owner': rows[-1].update(role='Coordinator', pid=2, ppid=1)
+            elif mutation == 'role': rows[-1]['detail'].update(child_role='CompletedPair', child_pid=18)
+            else:
+                birth = next(row for row in rows if row['event'] == 'birth' and row['detail']['child_role'] == 'Signer1')
+                birth.update(role='Coordinator', pid=2, ppid=1)
+            with self.assertRaises(P.Rejected): self.check(renumber(rows), adopted)
+
+    def test_missing_actual_host_sigkill_reap_cannot_supply_coverage(self):
+        for kind, code in (('exit', 0), ('signal', 15)):
+            rows, adopted, _ = interrupted_owner_fixture()
+            for row in rows:
+                if row['event'] in ('reaped', 'terminal_observed') and row['detail']['child_role'] == 'Host':
+                    row['detail'].update(kind=kind, code=code)
+            with self.assertRaises(P.Rejected) as caught: self.check(rows, adopted)
+            self.assertEqual(caught.exception.code, 'terminal_coverage')
+
+    def test_duplicates_unknown_adoptions_and_terminal_order_fail(self):
+        for mutation in ('terminal_duplicate', 'direct_duplicate', 'adopted_duplicate', 'unknown', 'order'):
+            rows, adopted, _ = interrupted_owner_fixture()
+            if mutation == 'terminal_duplicate': rows.append(copy.deepcopy(rows[-1]))
+            elif mutation == 'direct_duplicate': rows.append(copy.deepcopy(next(r for r in rows if r['event'] == 'reaped')))
+            elif mutation == 'adopted_duplicate': adopted += adopted
+            elif mutation == 'unknown': adopted.append((999, 0))
+            else:
+                first = next(i for i, r in enumerate(rows) if r['event'] == 'terminal_observed')
+                rows[first], rows[first + 1] = rows[first + 1], rows[first]
+            with self.assertRaises(P.Rejected): self.check(renumber(rows), adopted)
+
+    def test_original_fault_and_deadline_remain_required(self):
+        for mutation in ('renewed', 'wrong_fault', 'early'):
+            rows, adopted, _ = interrupted_owner_fixture()
+            if mutation == 'renewed': next(r for r in rows if r['event'] == 'deadline')['detail']['deadline_elapsed_ms'] = 45000
+            elif mutation == 'wrong_fault': next(r for r in rows if r['event'] == 'fault')['detail']['phase'] = 'after_stopped'
+            else: next(r for r in rows if r['event'] == 'reject')['elapsed_ms'] = 29900
+            with self.assertRaises(P.Rejected): self.check(rows, adopted)
+
+    def test_success_cannot_substitute_terminal_for_any_owned_reap(self):
+        rows = fixture()
+        rows = [row for row in rows if not (row['event'] == 'reaped' and row['detail']['child_role'] == 'Signer1')]
+        with self.assertRaises(P.Rejected):
+            P.validate_case('observed_success', renumber(rows), 78, [], 2, empty_verified=True)
+
+    def test_schema3_terminal_fields_are_strict_and_bounded(self):
+        rows, adopted, _ = interrupted_owner_fixture()
+        result = self.check(rows, adopted)
+        for field, bad in (('owner_interrupted_terminal_roles', ['Host']), ('terminal_observed', 257),
+                           ('host_terminal_observations_omitted', 1)):
+            changed = copy.deepcopy(result); changed[field] = bad
+            with self.assertRaises(P.Rejected): P.validate_result(changed, 'timeout_before_prepared')
+        self.assertLess(len(json.dumps(result).encode()), 8192)
+
+    def test_profiles_are_explicit_and_historical_failure_not_relabelled(self):
+        self.assertEqual(len(P.PROFILES['full-bootstrap-v1']), 15)
+        self.assertEqual(len(P.PROFILES['ui-reap-prerequisite-v1']), 7)
+        self.assertEqual(set(P.HISTORICAL_PACKET_EVIDENCE['cases']), set(P.CASES) - set(P.UI_REAP_CASES))
+        self.assertEqual(P.HISTORICAL_PACKET_EVIDENCE['run_outcome'], 'failure')
+        self.assertIs(P.HISTORICAL_PACKET_EVIDENCE['current_images_revalidated'], False)
+        source = (ROOT / 'ci-bootstrap-supervisor.py').read_text()
+        self.assertIn('for case in P.PROFILES[profile]:', source)
+        self.assertIn('for case in P.PROFILES[profile])', source)
+        self.assertIn("all_fifteen_current_images_verified=passed and profile == 'full-bootstrap-v1'", source)
+        self.assertIn("set(manifest['images']) == set(P.PROFILES[manifest['profile']])", (ROOT / 'ci-bootstrap-container.py').read_text())
 
 
 class Projection(unittest.TestCase):
     def check(self, rows):
-        return P.validate_case('observed_success', rows, 78, [], 2)
+        return P.validate_case('observed_success', rows, 78, [], 2, empty_verified=True)
 
     def refuse(self, rows):
         with self.assertRaises(P.Rejected):
@@ -385,10 +515,10 @@ class Projection(unittest.TestCase):
         self.assertNotIn('fds', json.dumps(value))
 
     def test_production_is_independent_and_silent(self):
-        self.assertEqual(P.validate_case('production', [], 78, [], 2)['outcome'], 'passed')
+        self.assertEqual(P.validate_case('production', [], 78, [], 2, empty_verified=True)['outcome'], 'passed')
         for rows, status, adopted in [(fixture(), 78, []), ([], 1, []), ([], 78, [(3, 0)])]:
             with self.assertRaises(P.Rejected):
-                P.validate_case('production', rows, status, adopted, 2)
+                P.validate_case('production', rows, status, adopted, 2, empty_verified=True)
 
     def test_duplicate_json_keys(self):
         for raw in ('{"x":1,"x":2}', '{"d":{"x":1,"x":2}}'):
@@ -442,7 +572,7 @@ class Projection(unittest.TestCase):
         rows = fixture(); row = next(r for r in rows if r['event'] == 'reaped'); row['detail'].update(kind='signal', code=9); self.refuse(rows)
 
     def test_no_success_after_adoption(self):
-        with self.assertRaises(P.Rejected): P.validate_case('observed_success', fixture(), 78, [(20, 0)], 2)
+        with self.assertRaises(P.Rejected): P.validate_case('observed_success', fixture(), 78, [(20, 0)], 2, empty_verified=True)
 
 
     def test_sequence_gaps_duplicates_and_reordering(self):
@@ -460,7 +590,7 @@ class Projection(unittest.TestCase):
     def test_failure_cannot_be_only_exit_code(self):
         rows = fixture()
         for row in rows: row['case'] = 'wrong_role'
-        with self.assertRaises(P.Rejected): P.validate_case('wrong_role', rows, 1, [], 2)
+        with self.assertRaises(P.Rejected): P.validate_case('wrong_role', rows, 1, [], 2, empty_verified=True)
 
     def test_closed_summary_no_cleanup_false_pass(self):
         value = self.check(fixture()); value['natural_empty'] = False
@@ -473,7 +603,7 @@ class Projection(unittest.TestCase):
 
     def test_valid_negative_exact_cleanup(self):
         rows, adopted = packet_failure()
-        value = P.validate_case('wrong_role', rows, 1, adopted, 2)
+        value = P.validate_case('wrong_role', rows, 1, adopted, 2, empty_verified=True)
         self.assertEqual(value['outcome'], 'passed')
         self.assertEqual(value['adopted_reaped'], 2)
 
@@ -486,12 +616,12 @@ class Projection(unittest.TestCase):
         rows, adopted = packet_failure()
         row = next(r for r in rows if r['event'] == 'reject')
         row.update(role='Host', pid=3, ppid=2)
-        with self.assertRaises(P.Rejected): P.validate_case('wrong_role', renumber(rows), 1, adopted, 2)
+        with self.assertRaises(P.Rejected): P.validate_case('wrong_role', renumber(rows), 1, adopted, 2, empty_verified=True)
 
     def test_negative_fault_phase_exact(self):
         rows, adopted = packet_failure()
         next(r for r in rows if r['event'] == 'fault')['detail']['phase'] = 'send_released'
-        with self.assertRaises(P.Rejected): P.validate_case('wrong_role', rows, 1, adopted, 2)
+        with self.assertRaises(P.Rejected): P.validate_case('wrong_role', rows, 1, adopted, 2, empty_verified=True)
 
     def test_negative_adoption_is_exact_known_accounting(self):
         for change in ('unknown', 'duplicate', 'direct_duplicate', 'missing'):
@@ -500,7 +630,7 @@ class Projection(unittest.TestCase):
             elif change == 'duplicate': adopted.append(adopted[0])
             elif change == 'direct_duplicate': adopted.append((3, 9))
             else: adopted.pop()
-            with self.assertRaises(P.Rejected): P.validate_case('wrong_role', rows, 1, adopted, 2)
+            with self.assertRaises(P.Rejected): P.validate_case('wrong_role', rows, 1, adopted, 2, empty_verified=True)
 
     def test_negative_direct_reap_cannot_duplicate_or_disappear(self):
         for change in ('missing', 'duplicate'):
@@ -508,7 +638,7 @@ class Projection(unittest.TestCase):
             index = next(i for i, r in enumerate(rows) if r['event'] == 'reaped')
             if change == 'missing': rows.pop(index)
             else: rows.insert(index, copy.deepcopy(rows[index]))
-            with self.assertRaises(P.Rejected): P.validate_case('wrong_role', renumber(rows), 1, adopted, 2)
+            with self.assertRaises(P.Rejected): P.validate_case('wrong_role', renumber(rows), 1, adopted, 2, empty_verified=True)
 
 
     def test_duplicate_observation_counts_preserve_original_failure(self):
@@ -536,7 +666,7 @@ class Projection(unittest.TestCase):
             with self.assertRaises(P.Rejected): P.validate_result(value, 'wrong_role')
 
     def test_bounded_records(self):
-        with self.assertRaises(P.Rejected): P.validate_case('observed_success', fixture() * 2, 78, [], 2)
+        with self.assertRaises(P.Rejected): P.validate_case('observed_success', fixture() * 2, 78, [], 2, empty_verified=True)
 
 
 class Supervisor(unittest.TestCase):
@@ -595,12 +725,14 @@ class Supervisor(unittest.TestCase):
             self.assertFalse(S.run_case('production', 'tag', 'token'))
         self.assertNotIn('"outcome":"passed"', output.getvalue())
 
-    def test_workflow_is_explicitly_bootstrap_only(self):
+    def test_workflow_has_explicit_full_or_ui_prerequisite_profiles(self):
         text = (ROOT.parent / '.github/workflows/durable-native-linux.yml').read_text()
         self.assertIn("if: steps.mode.outputs.gate != 'bootstrap'", text)
         self.assertIn("if: steps.mode.outputs.gate == 'full' || steps.mode.outputs.gate == 'financial'", text)
-        self.assertIn("if: always() && steps.mode.outputs.gate == 'bootstrap'", text)
-        self.assertEqual((ROOT / 'qualification-gate-mode').read_bytes(), b'bootstrap\n')
+        self.assertIn("if: always() && (steps.mode.outputs.gate == 'bootstrap' || steps.mode.outputs.gate == 'ui')", text)
+        self.assertIn('Seven current-image bootstrap reap/lifetime prerequisites', text)
+        self.assertIn('CI69 remains failed', text)
+        self.assertIn((ROOT / 'qualification-gate-mode').read_bytes(), (b'bootstrap\n', b'ui\n'))
 
 
 if __name__ == '__main__':
