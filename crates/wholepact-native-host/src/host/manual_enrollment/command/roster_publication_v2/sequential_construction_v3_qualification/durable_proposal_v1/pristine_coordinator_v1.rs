@@ -23,7 +23,10 @@ const MAX_HANDOFF: usize = 2 * 1024 * 1024;
 const LIMIT: Duration = Duration::from_secs(900);
 
 fn authority<T>(result: wholepact_authority::Result<T>) -> Result<T> {
-    result.map_err(|_| Error::Authentication)
+    result.map_err(|error| {
+        super::super::pristine_diagnostics_v1::source_authority_error(&error);
+        Error::Authentication
+    })
 }
 fn public_claim(label: &str) -> String {
     let mut h = Sha256::new();
@@ -128,6 +131,20 @@ fn prospective_scope(
 }
 
 pub(in super::super) fn prepare_child(terminal: crate::terminal::Terminal) -> Result<()> {
+    let _guard = super::super::pristine_diagnostics_v1::begin_source();
+    let result = prepare_child_inner(terminal);
+    if let Err(error) = &result {
+        super::super::pristine_diagnostics_v1::source_host_error(error);
+    }
+    result
+}
+
+fn source_stage(boundary: super::super::safe_diagnostics_v1::Boundary) {
+    super::super::safe_diagnostics_v1::emit(boundary, super::super::safe_diagnostics_v1::Outcome::Begin);
+}
+
+fn prepare_child_inner(terminal: crate::terminal::Terminal) -> Result<()> {
+    use super::super::safe_diagnostics_v1::Boundary;
     let cutoff = super::private_fixed_v2::child_original_cutoff()?;
     let initial = initial::prepare_pristine_coordinator_v1(terminal)?;
     let initial::PrivateWorkspaceInitialV1 { signers, mut witness, mut host, born, temporary,
@@ -135,6 +152,7 @@ pub(in super::super) fn prepare_child(terminal: crate::terminal::Terminal) -> Re
         payment_receiver, expiry_ms } = initial;
     // Both participants are the actual two maintained roster accounts; the
     // selected target is born[1], not an additional fourth account.
+    source_stage(Boundary::PristineOriginalHistory);
     let own = authority(witness.observe_original_roster_attempt_v2(&born[1].account_id))?;
     let other = authority(witness.observe_original_roster_attempt_v2(&born[2].account_id))?;
     let history = authority(witness.original_pristine_delivery_history_v1(&born[1].account_id))?;
@@ -151,21 +169,45 @@ pub(in super::super) fn prepare_child(terminal: crate::terminal::Terminal) -> Re
         .as_millis().try_into().map_err(|_| Error::Invalid)?;
     let until_ms = from_ms.checked_add(remaining).ok_or(Error::Invalid)? / 1000 * 1000;
     if until_ms <= from_ms || until_ms > expiry_ms { return Err(Error::Permission); }
+    source_stage(Boundary::PristineProspectiveScope);
     let scope = prospective_scope(&history, &own.extension, &other.extension, from_ms, until_ms)?;
     let request = authority(prepare_durable_delivery_admission_request_v2(scope, &history))?;
     drop((history, other_history, own, other, roster_intents, roster_requests,
         roster_signed_extension_files, roster_original_policy_files, payment_receiver, born));
+    source_stage(Boundary::PristineSignerDrain);
     signers.shutdown().map_err(|_| Error::Authentication)?;
+    source_stage(Boundary::PristineHostRevoke);
     let original_host = host.take().ok_or(Error::Authentication)?;
     original_host.authority.fence.revoke()?;
     drop(original_host);
     drop(temporary);
     if Instant::now() >= cutoff { return Err(Error::Permission); }
+    source_stage(Boundary::PristineOriginalPreservation);
     let bytes = authority(witness.preserve_pristine_delivery_originals_v1(&request))?;
     if bytes.is_empty() || bytes.len() > MAX_HANDOFF || Instant::now() >= cutoff { return Err(Error::Permission); }
+    source_stage(Boundary::PristineCustodyHandoff);
     let root = std::env::var_os("TMPDIR").ok_or(Error::Invalid)?;
     write_new_private(&std::path::PathBuf::from(root).join(CHILD_HANDOFF), &bytes)?;
     Ok(())
+}
+
+/// Consume the one original container-owned ceiling. Never mint a replacement
+/// deadline when setup is slow, and never accept an alternative textual value.
+fn original_cutoff_value(raw: &str, now_ns: u64) -> std::io::Result<u64> {
+    let refused = || std::io::Error::other("original cutoff refused");
+    let cutoff: u64 = raw.parse().map_err(|_| refused())?;
+    let maximum: u64 = LIMIT.as_nanos().try_into().map_err(|_| refused())?;
+    if cutoff.to_string() != raw || cutoff <= now_ns
+        || cutoff.checked_sub(now_ns).is_none_or(|remaining| remaining > maximum) {
+        return Err(refused());
+    }
+    Ok(cutoff)
+}
+
+fn original_cutoff_ns() -> std::io::Result<u64> {
+    let raw = std::env::var("WHOLEPACT_TEST_ONLY_PRIVATE_WORKFLOW_CUTOFF_NS")
+        .map_err(|_| std::io::Error::other("original cutoff unavailable"))?;
+    original_cutoff_value(&raw, monotonic_ns()?)
 }
 
 fn monotonic_ns() -> std::io::Result<u64> {
@@ -258,20 +300,27 @@ fn validate_custody(root: &std::path::Path, bytes: &[u8]) -> std::io::Result<Han
 #[test]
 #[ignore = "Approved disposable CI only; generates exactly three genuine unfunded accounts; never local native execution"]
 fn coordinator_pristine_three_account_source_for_ui() {
+    use super::super::safe_diagnostics_v1::Boundary;
+    let stage = std::cell::Cell::new(Boundary::PristineSetupRoot);
+    let nested_failure = std::cell::Cell::new(false);
     let result = (|| -> std::io::Result<()> {
         let base = std::path::Path::new(CONTAINER_ROOT);
         let base_file = private_directory(base)?;
         let root = tempfile::Builder::new().prefix("ui-").permissions(std::fs::Permissions::from_mode(0o700)).tempdir_in(base)?;
         let root_file = private_directory(root.path())?;
-        let deadline = Instant::now().checked_add(LIMIT).ok_or_else(|| std::io::Error::other("cutoff refused"))?;
-        let cutoff_ns = monotonic_ns()?.checked_add(LIMIT.as_nanos().try_into().map_err(|_| std::io::Error::other("cutoff refused"))?)
-            .ok_or_else(|| std::io::Error::other("cutoff refused"))?;
+        stage.set(Boundary::PristineOriginalCutoff);
+        let cutoff_ns = original_cutoff_ns()?;
+        let deadline = super::private_fixed_v2::child_original_cutoff()
+            .map_err(|_| std::io::Error::other("original cutoff refused"))?;
+        stage.set(Boundary::PristinePredecessorProcess);
         let mut result = private_workspace_stage_v1(root, None, PrivateWorkspaceStageV1::PristineCoordinator,
             &initial::inputs(), deadline, cutoff_ns)?;
+        nested_failure.set(result.pristine_first_failure.is_some());
         if result.outcome.is_err() || !result.process.verified() || result.next != result.expected
             || !result.process.status.as_ref().is_some_and(|s| s.success()) || Instant::now() >= deadline {
             return Err(std::io::Error::other("pristine predecessor or cleanup refused"));
         }
+        stage.set(Boundary::PristineCustodyValidation);
         let root = result.root.take().ok_or_else(|| std::io::Error::other("original root unavailable"))?;
         unchanged_directory(&root_file, root.path())?;
         let bytes = crate::files::read_private(&root.path().join(CHILD_HANDOFF), MAX_HANDOFF)
@@ -285,6 +334,7 @@ fn coordinator_pristine_three_account_source_for_ui() {
             "fixture": handoff});
         let encoded = serde_json::to_vec(&public_to_runner).map_err(|_| std::io::Error::other("handoff encoding refused"))?;
         if encoded.len() > MAX_HANDOFF || Instant::now() >= deadline { return Err(std::io::Error::other("handoff bound refused")); }
+        stage.set(Boundary::PristineCustodyHandoff);
         let kept = root.keep();
         unchanged_directory(&root_file, &kept)?;
         // Any error after keep is not a successful custody transfer. The outer
@@ -294,6 +344,9 @@ fn coordinator_pristine_three_account_source_for_ui() {
         println!("CI_UI_FIXTURE_READY version=1 accounts=3 target_head=4 process_cleanup=true");
         Ok(())
     })();
+    if result.is_err() && !nested_failure.get() {
+        super::super::pristine_diagnostics_v1::emit_outer_failure(stage.get());
+    }
     assert!(result.is_ok(), "bounded pristine fixture setup failed");
 }
 
@@ -318,4 +371,77 @@ fn pristine_handoff_fields_are_closed() {
     assert!(serde_json::from_str::<OwnerClient>(r#"{"certificate_der":"a","certificate_der":"b","private_key_pkcs8_der":"b","trusted_server_root_der":"c"}"#).is_err());
     assert_eq!(LIMIT.as_secs(), 900);
     assert_eq!(MAX_HANDOFF, 2 * 1024 * 1024);
+}
+
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunnerHandoff {
+    version: u16,
+    root_path: std::path::PathBuf,
+    root_device: u64,
+    root_inode: u64,
+    original_monotonic_cutoff_ns: u64,
+    fixture: Handoff,
+}
+
+/// No-journal-mutation audit only after the external supervisor has observed
+/// actual W disposal and the entire product tree/group drain. Existing opener
+/// locks/sidecars may be touched; no fixture is recreated, moved, or reset.
+fn audit_existing_originals(expected_one_exact_append: bool) -> std::io::Result<()> {
+    let refused = || std::io::Error::other("original audit refused");
+    let cutoff = original_cutoff_ns()?;
+    let base = std::path::Path::new(CONTAINER_ROOT);
+    let base_file = private_directory(base)?;
+    let bytes = crate::files::read_private(&base.join(PARENT_HANDOFF), MAX_HANDOFF)
+        .map_err(|_| refused())?;
+    let handoff: RunnerHandoff = serde_json::from_slice(&bytes).map_err(|_| refused())?;
+    if handoff.version != 1 || handoff.original_monotonic_cutoff_ns != cutoff
+        || handoff.root_path.parent() != Some(base) {
+        return Err(refused());
+    }
+    let root_file = private_directory(&handoff.root_path)?;
+    let meta = root_file.metadata()?;
+    if (meta.dev(), meta.ino()) != (handoff.root_device, handoff.root_inode) {
+        return Err(refused());
+    }
+    let fixture = serde_json::to_vec(&handoff.fixture).map_err(|_| refused())?;
+    if fixture.len() > MAX_HANDOFF { return Err(refused()); }
+    validate_custody(&handoff.root_path, &fixture)?;
+    let result = wholepact_authority::native_witness_owner::EphemeralNativeWitnessV1::audit_pristine_delivery_originals_v1(
+        &fixture, expected_one_exact_append).map_err(|_| refused())?;
+    unchanged_directory(&root_file, &handoff.root_path)?;
+    unchanged_directory(&base_file, base)?;
+    if monotonic_ns()? >= cutoff { return Err(refused()); }
+    let encoded = serde_json::to_string(&result).map_err(|_| refused())?;
+    if encoded.len() > 4096 { return Err(refused()); }
+    println!("CI_UI_FIXTURE_AUDIT {encoded}");
+    Ok(())
+}
+
+#[test]
+#[ignore = "Approved disposable CI only, after full product disposal and process drain"]
+fn coordinator_pristine_originals_after_cancel_or_blur() {
+    assert!(audit_existing_originals(false).is_ok(), "bounded original audit failed");
+}
+
+#[test]
+#[ignore = "Approved disposable CI only, after the sole exact append and full product drain"]
+fn coordinator_originals_after_one_exact_append() {
+    assert!(audit_existing_originals(true).is_ok(), "bounded original audit failed");
+}
+
+#[test]
+fn pristine_original_cutoff_is_consumed_not_renewed() {
+    // Pure arithmetic/parser cases only, no clock, account, process or file.
+    let now = 10_000_000_000;
+    let original = now + 900_000_000_000;
+    assert_eq!(original_cutoff_value(&original.to_string(), now).unwrap(), original);
+    assert_eq!(original_cutoff_value(&original.to_string(), now + 123).unwrap(), original);
+    for raw in ["".to_owned(), "0".to_owned(), "+10".to_owned(), "010".to_owned(),
+        format!("{original} "), (now - 1).to_string(), now.to_string(),
+        (original + 1).to_string(), "18446744073709551616".to_owned()] {
+        assert!(original_cutoff_value(&raw, now).is_err());
+    }
+    assert!(original_cutoff_value(&original.to_string(), original).is_err());
 }

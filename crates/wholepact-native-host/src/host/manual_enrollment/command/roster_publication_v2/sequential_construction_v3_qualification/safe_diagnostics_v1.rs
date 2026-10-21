@@ -14,6 +14,8 @@ macro_rules! labels {
     };
 }
 labels! { Boundary {
+    PristineOriginalHistory, PristineProspectiveScope, PristineSignerDrain, PristineHostRevoke, PristineOriginalPreservation, PristineCustodyHandoff,
+    PristineSetupRoot, PristineOriginalCutoff, PristinePredecessorProcess, PristineCustodyValidation, PristineOriginalAudit,
     DeliveryAdmissionRetainedBinding, DeliveryAdmissionBeforeSendChannel, DeliveryAdmissionBeforeSendSource, DeliveryAdmissionBeforeWriteChannel, DeliveryAdmissionWriteFrame, DeliveryAdmissionWritePrecheck, DeliveryAdmissionWriteIo, DeliveryAdmissionWritePostcheck, DeliveryAdmissionFlushPrecheck, DeliveryAdmissionFlushIo, DeliveryAdmissionFlushPostcheck, DeliveryAdmissionAfterWriteSource, DeliveryAdmissionAfterWriteChannel, DeliveryAdmissionReadFrame, DeliveryAdmissionReadPrecheck, DeliveryAdmissionReadIo, DeliveryAdmissionReadPostcheck, DeliveryAdmissionAfterReadSource, DeliveryAdmissionAfterReadChannel, DeliveryAdmissionResponseRejected, DeliveryAdmissionResponseVariant, DeliveryAdmissionSnapshot, DeliveryAdmissionCommittedHead,
     DeliveryReceiveNativeDeadline, DeliveryReceiveRequest, DeliveryReceiveSource, DeliveryReceiveOriginalHistory, DeliveryReceiveOriginalBinding, DeliveryReceiveCurrentHistory, DeliveryReceiveRedisclosureBinding, DeliveryReceiveRecipientBinding, DeliveryReceiveViewingKey, DeliveryReceiveMaterialOwner, DeliveryReceiveLease, DeliveryReceiveNativeOrigin, DeliveryReceiveSourceUnderLease, DeliveryReceiveReceipts, DeliveryReceiveProposal, DeliveryReceiveAccount, DeliveryReceiveAccountBinding, DeliveryReceiveReviewerScope, DeliveryReceiveDeadline, DeliveryReceiveOriginalSource, DeliveryReceivePeer, DeliveryReceiveMaterialClock, DeliveryReceiveMaterialScope, DeliveryReceiveRequestDigest, DeliveryReceiveReadyWrite, DeliveryReceiveFrame, DeliveryReceiveCommandParse, DeliveryReceiveCommandBinding, DeliveryReceivePayloadLimit, DeliveryReceiveChunkDecode, DeliveryReceiveCurrentWrite, DeliveryReceiveReceivingWrite, DeliveryReceivePayloadBinding, DeliveryReceivePayloadParse, DeliveryReceivePayloadCanonical, DeliveryReceiveContributionBinding, DeliveryReceiveUnsignedDecode, DeliveryReceiveProvedDecode, DeliveryReceiveEconomics, DeliveryReceiveFinalBinding, DeliveryReceiveFinalSource, DeliveryReceiveFinalPeer, DeliveryReceiveFinalDeadline, DeliveryReceiveFinalMaterialClock, DeliveryReceiveFinalMaterialScope, DeliveryReceiveImportedWrite, DeliveryReceiveTerminal,
     DeliveryExportProofCurrent, DeliveryExportProofOrigin, DeliveryExportSourceBefore, DeliveryExportSourceAfter, DeliveryExportMetadataOrigin, DeliveryExportMarker, DeliveryExportHistory, DeliveryExportMaterialCeilings, DeliveryExportIntake, DeliveryExportVerifiedProof, DeliveryExportRoster, DeliveryExportPayload, DeliveryExportOutputActions, DeliveryExportRecipientBinding, DeliveryExportSources, DeliveryExportCheckpointScope, DeliveryExportProofPermission, DeliveryExportPermission, DeliveryExportReplayScope, DeliveryExportCommand, DeliveryExportReplayLookup, DeliveryExportDelta, DeliveryExportEntry, DeliveryRecipientMutex, DeliveryRecipientDeadline, DeliveryRecipientOrigin, DeliveryRecipientObserverClone, DeliveryRecipientWriteSerialize, DeliveryRecipientWriteLimit, DeliveryRecipientWriteDeadline, DeliveryRecipientWriteTimeout, DeliveryRecipientWriteIo, DeliveryRecipientWriteEmpty, DeliveryRecipientFrame, DeliveryRecipientResponseDecode, DeliveryRecipientResponseDigest, DeliveryRecipientResponse, DeliverySourceScopePredicate, DeliveryProofRolePredicate, DeliveryMaterialActionPredicate, DeliveryMaterialScopePredicate, DeliveryExportScopePredicate,
@@ -71,11 +73,28 @@ pub(super) fn private_observation_labels(
 }
 
 pub(super) fn emit(boundary: Boundary, outcome: Outcome) {
+    #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+    super::pristine_diagnostics_v1::source_progress(boundary, outcome);
     eprintln!(
         "\n[JOINED_DIAGNOSTIC {} {}]",
         boundary.label(),
         outcome.label()
     );
+}
+
+#[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+pub(super) fn pristine_terminal_pair(line: &[u8]) -> Option<(&'static str, &'static str)> {
+    let line = std::str::from_utf8(line).ok()?;
+    let line = line.strip_suffix('\r').unwrap_or(line);
+    let inner = line.strip_prefix("[JOINED_DIAGNOSTIC ")?.strip_suffix(']')?;
+    let (boundary, outcome) = inner.split_once(' ')?;
+    let boundary = Boundary::parse(boundary)?;
+    let outcome = Outcome::parse(outcome)?;
+    // These three labels describe input size, not an operation Result. Even
+    // OverBound alone is not substituted for the subsequent real rejection.
+    if matches!(outcome, Outcome::Begin | Outcome::Complete | Outcome::AuthorityInputEmpty
+        | Outcome::AuthorityInputWithinBound | Outcome::AuthorityInputOverBound) { return None; }
+    Some((boundary.label(), outcome.label()))
 }
 
 // Delivery-only optional output must never replace an existing owned Result

@@ -73,6 +73,9 @@ mod public_outcome_v1;
 
 #[path = "sequential_construction_v3_qualification/safe_diagnostics_v1.rs"]
 mod safe_diagnostics_v1;
+#[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+#[path = "sequential_construction_v3_qualification/pristine_diagnostics_v1.rs"]
+mod pristine_diagnostics_v1;
 
 #[cfg(all(
     feature = "durable-proposal",
@@ -1267,6 +1270,7 @@ impl PrivateWorkspaceStageV1 {
     feature = "synthetic-born-joined-qualification"
 ))]
 struct PrivateWorkspaceStageResultV1 {
+    pristine_first_failure: Option<pristine_diagnostics_v1::Failure>,
     financial_progress_failure: Option<financial_progress_v1::Failure>,
     financial_progress_timing: Option<financial_progress_v1::Timing>,
     financial_diagnostic: Option<crate::host::financial_diagnostics_v1::FinancialDiagnosticV1>,
@@ -1330,6 +1334,9 @@ fn private_workspace_stage_v1(
             _ => None,
         })),
     )?;
+    if matches!(stage, PrivateWorkspaceStageV1::PristineCoordinator) {
+        transcript.enable_pristine_first_failure();
+    }
     if matches!(
         stage,
         PrivateWorkspaceStageV1::DeliveryProducer
@@ -1749,6 +1756,9 @@ fn private_workspace_stage_v1(
         None
     };
     Ok(PrivateWorkspaceStageResultV1 {
+        // Preserve the original finite cause even when cleanup is uncertain.
+        // It is not permission to transfer the retained root in that case.
+        pristine_first_failure: transcript.pristine_first_failure(),
         financial_progress_timing,
         financial_progress_failure,
         financial_diagnostic,

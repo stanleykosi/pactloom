@@ -26,6 +26,8 @@ struct CapturedPath {
 }
 
 pub(super) struct Transcript<'a> {
+    #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+    pristine_first_failure: Option<super::pristine_diagnostics_v1::Capture>,
     #[cfg(all(
         feature = "durable-proposal",
         feature = "synthetic-born-joined-qualification"
@@ -60,6 +62,19 @@ pub(super) struct Transcript<'a> {
 }
 
 impl<'a> Transcript<'a> {
+    #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+    pub(super) fn enable_pristine_first_failure(&mut self) {
+        self.pristine_first_failure = Some(Default::default());
+    }
+    #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+    pub(super) fn pristine_first_failure(&self) -> Option<super::pristine_diagnostics_v1::Failure> {
+        self.pristine_first_failure.as_ref().and_then(|capture| capture.first())
+    }
+    fn pristine_failure_reserved_bytes(&self) -> usize {
+        #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+        if self.pristine_first_failure.is_some() { return super::pristine_diagnostics_v1::Capture::RESERVED; }
+        0
+    }
     #[cfg(all(
         feature = "durable-proposal",
         feature = "synthetic-born-joined-qualification"
@@ -180,6 +195,8 @@ impl<'a> Transcript<'a> {
                 feature = "synthetic-born-joined-qualification"
             ))]
             financial_progress: None,
+            #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+            pristine_first_failure: None,
             // No reallocation can leave a discarded private transcript copy.
             // All populated bytes share the original aggregate content budget.
             bytes: Zeroizing::new(Vec::with_capacity(MAX_BYTES)),
@@ -213,6 +230,7 @@ impl<'a> Transcript<'a> {
 
     fn retained_bytes(&self) -> usize {
         self.bytes.len()
+            + self.pristine_failure_reserved_bytes()
             + self.delivery_first_failure_retained_bytes()
             + self.timing_retained_bytes()
             + self.history_measurement_retained_bytes()
@@ -447,6 +465,10 @@ impl<'a> Transcript<'a> {
         {
             let end = self.line_start + relative_end;
             let line = &self.bytes[self.line_start..end];
+            #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+            if let Some(capture) = &mut self.pristine_first_failure {
+                capture.observe(line);
+            }
             let summary = super::safe_diagnostics_v1::summary(line);
             if summary != "none" {
                 // The maintained parser currently emits at most one entry per

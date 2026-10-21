@@ -2,6 +2,8 @@
 //! No fixture manufactures a source, approval, request or immutable journal row.
 use super::*;
 use crate::{AuthorityHead, OwnerControl, OwnerControlRequest};
+#[path = "pristine_audit_v1.rs"]
+mod pristine_audit_v1;
 const PREPARE: &str = "Prepare original TLS listener and exact delivery scope for review";
 #[derive(Default)]
 pub(super) struct FixturePhaseV2 {
@@ -330,7 +332,8 @@ const ENROLLED: &str = "The exact original witness enrollment and authenticated 
 // Private fixture handoff data, never a production importer, source constructor,
 // review state or authority. C receives only `form`; owner-client paths remain
 // with the independent bounded test runner. No credential bytes are serialized.
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PreservedPristineDeliveryV1 {
     version: u16,
     installation: Vec<u8>,
@@ -339,7 +342,8 @@ struct PreservedPristineDeliveryV1 {
     owner_client: PristineOwnerClientPathsV1,
     accounts: Vec<PristineAccountBaselineV1>,
 }
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PristineDeliveryFormV1 {
     endpoint: String,
     server_name: String,
@@ -354,13 +358,15 @@ struct PristineDeliveryFormV1 {
     trusted_client_root_der: String,
     request_json: String,
 }
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PristineOwnerClientPathsV1 {
     certificate_der: String,
     private_key_pkcs8_der: String,
     trusted_server_root_der: String,
 }
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PristineAccountBaselineV1 {
     account_id: String,
     head: AuthorityHead,
@@ -415,6 +421,18 @@ fn original_source_commitment(journal: &crate::AuthorityJournal) -> Result<Strin
 }
 
 impl EphemeralNativeWitnessV1 {
+    /// Synthetic-only, no-journal-mutation audit AFTER the real product Window
+    /// is disposed and all original processes/workers/listeners have drained.
+    /// The bool selects only a closed historical expectation, NEVER permission
+    /// to append, recreate a source, renew a request or restore native approval.
+    /// Opens can touch maintained locks/sidecars. No Window is constructed here.
+    pub fn audit_pristine_delivery_originals_v1(
+        bytes: &[u8],
+        expected_one_exact_append: bool,
+    ) -> Result<serde_json::Value> {
+        pristine_audit_v1::audit(bytes, expected_one_exact_append)
+    }
+
     /// Read-only replay from the actual retained original namespace. This is
     /// historical data for the synthetic scope builder, not mTLS, a native
     /// decision or a replacement for the production source opener.
