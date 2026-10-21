@@ -14,6 +14,8 @@ ALLOWED = frozenset((
     "scripts/ci-ui-image.py", "scripts/ci-ui-supervisor.py",
     "scripts/tests/test_ci_ui_image.py", "scripts/tests/test_ci_ui_supervisor.py",
     "scripts/ci-ui-prerequisite.py", "scripts/tests/test_ci_ui_prerequisite.py",
+    "scripts/ci-ui-setup-wrapper.py", "scripts/ci-ui-output.py",
+    "scripts/ci-ui-container.py", "scripts/tests/test_ci_ui_setup.py",
 ))
 STEPS = (
     "Isolated bootstrap profile (UI uses seven reap/lifetime prerequisites)",

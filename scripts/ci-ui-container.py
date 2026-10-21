@@ -185,7 +185,8 @@ def setup_one_fixture(original, started, report_failure):
         if value['kind'] == 'error':
             # Retain the original observation before even ACK/reap can fail.
             report_failure(P.failure('fixture', value['stage'], value['code'],
-                source_boundary=value['source_boundary'], source_outcome=value['source_outcome']))
+                source_boundary=value['source_boundary'], source_outcome=value['source_outcome'],
+                setup_observation=value.get('setup_observation')))
             require(process.poll() is None, 'custody_credentials')
             left.settimeout(5.); require(left.send(b'ACK1') == 4, 'custody_ack')
             process.wait(timeout=5.)
