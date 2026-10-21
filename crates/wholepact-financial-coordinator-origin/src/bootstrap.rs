@@ -70,11 +70,42 @@ impl CoordinatorOriginV1 {
 }
 
 pub struct HostOriginV1 {
+    // Declaration order is intentional: invalidate before child/channel drops.
+    #[cfg(feature = "common-image-fork-provider")]
+    verifier_custody: Option<crate::fork_signer::HostVerifierCustody>,
+    #[cfg(feature = "common-image-fork-provider")]
+    verifiers_issued: bool,
+    #[cfg(feature = "common-image-fork-provider")]
+    verified_image: Option<crate::image::VerifiedCommonImageIdentity>,
     origin: ForkOriginV1,
     signers: [Option<DirectChild>; 2],
     clocks: PhaseDeadlinesV1,
 }
 impl HostOriginV1 {
+    /// Fixed S1/S2 order, one attempt only. These check-only handles cannot
+    /// launch, discover an endpoint, unlock a role or transfer H's reapers.
+    #[cfg(feature = "common-image-fork-provider")]
+    pub fn take_original_signer_verifiers(&mut self) -> Result<[crate::OriginalForkSignerVerifier; 2]> {
+        crate::fork_signer::claim_pair(&mut self.verifiers_issued)?;
+        require_time(self.clocks.session)?;
+        self.origin.check_parent_alive()?;
+        let image = self.verified_image.take().ok_or_else(|| rejected("verified common image missing"))?;
+        let custody = crate::fork_signer::HostVerifierCustody::new();
+        let first = crate::OriginalForkSignerVerifier::retain(
+            self.signers[0].as_ref().ok_or_else(|| rejected("original S1 missing"))?
+                .retain_original_signer_lifetime(Role::Signer1)?,
+            self.origin.retain_host_coordinator_lifetime()?, image.clone(), &custody, self.clocks.session,
+        )?;
+        let second = crate::OriginalForkSignerVerifier::retain(
+            self.signers[1].as_ref().ok_or_else(|| rejected("original S2 missing"))?
+                .retain_original_signer_lifetime(Role::Signer2)?,
+            self.origin.retain_host_coordinator_lifetime()?, image, &custody, self.clocks.session,
+        )?;
+        first.check_original_custody_alive()?;
+        second.check_original_custody_alive()?;
+        self.verifier_custody = Some(custody);
+        Ok([first, second])
+    }
     pub fn run_until_stop(self) -> ! { child_exit(finish_host(self)) }
 }
 pub(super) struct LeafCustody { pub(super) origin: ForkOriginV1, pub(super) clocks: PhaseDeadlinesV1 }
@@ -232,10 +263,15 @@ pub fn bootstrap_common_image_v1() -> Result<BootstrappedRoleV1> {
         Forked::Parent(host) => children[0] = Some(host),
         Forked::Child(origin) => {
             drop(children);
+            #[cfg(feature = "common-image-fork-provider")]
+            let verified_image = image.retain_verified_identity();
             drop(image);
             #[cfg(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append"))]
             drop(display);
-            return child_branch(prepare_host(origin, clocks));
+            return child_branch(prepare_host(origin, clocks,
+                #[cfg(feature = "common-image-fork-provider")]
+                verified_image,
+            ));
         }
     }
     for (index, role) in WITNESS_ROLES.into_iter().enumerate() {
@@ -284,7 +320,10 @@ pub fn bootstrap_common_image_v1() -> Result<BootstrappedRoleV1> {
     }))
 }
 
-fn prepare_host(origin: ForkOriginV1, clocks: PhaseDeadlinesV1) -> Result<BootstrappedRoleV1> {
+fn prepare_host(origin: ForkOriginV1, clocks: PhaseDeadlinesV1,
+    #[cfg(feature = "common-image-fork-provider")]
+    verified_image: crate::image::VerifiedCommonImageIdentity,
+) -> Result<BootstrappedRoleV1> {
     let deadline = clocks.startup;
     #[cfg(wholepact_bootstrap_ci)]
     crate::ci::enter_role(Role::Host);
@@ -300,6 +339,8 @@ fn prepare_host(origin: ForkOriginV1, clocks: PhaseDeadlinesV1) -> Result<Bootst
                 // close H's C-facing channel. No signer can send directly to C.
                 drop(signers);
                 drop(origin);
+                #[cfg(feature = "common-image-fork-provider")]
+                drop(verified_image);
                 return child_branch(prepare_leaf(signer_origin, clocks));
             }
         }
@@ -322,11 +363,25 @@ fn prepare_host(origin: ForkOriginV1, clocks: PhaseDeadlinesV1) -> Result<Bootst
     #[cfg(wholepact_delivery_ci)]
     crate::delivery_observer::initialize(Role::Host, origin.observed_original_parent(), clocks.session,
         signers.iter().flatten().map(DirectChild::observed_binding).collect());
-    Ok(BootstrappedRoleV1::Host(HostOriginV1 { origin, signers, clocks }))
+    Ok(BootstrappedRoleV1::Host(HostOriginV1 {
+        #[cfg(feature = "common-image-fork-provider")]
+        verifier_custody: None,
+        #[cfg(feature = "common-image-fork-provider")]
+        verifiers_issued: false,
+        #[cfg(feature = "common-image-fork-provider")]
+        verified_image: Some(verified_image),
+        origin, signers, clocks,
+    }))
 }
 
 fn finish_host(host: HostOriginV1) -> Result<()> {
-    let HostOriginV1 { origin, mut signers, clocks } = host;
+    #[cfg(feature = "common-image-fork-provider")]
+    let mut host = host;
+    // This terminal role method is not a concurrent provider-service monitor.
+    // Invalidate before any finish/error/reap path, including a blocked cleanup.
+    #[cfg(feature = "common-image-fork-provider")]
+    drop(host.verifier_custody.take());
+    let HostOriginV1 { origin, mut signers, clocks, .. } = host;
     #[cfg(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append"))]
     origin.wait_host_stop(&signers, clocks.stop())?;
     #[cfg(not(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append")))]

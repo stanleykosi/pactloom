@@ -5877,6 +5877,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "wholepact-core",
+ "wholepact-financial-coordinator-origin",
  "zeroize",
 ]
 

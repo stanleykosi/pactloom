@@ -22,6 +22,10 @@ pub use delivery_observer::{record_delivery_observation_for_ci, finish_delivery_
 mod bootstrap;
 mod channel;
 mod image;
+#[cfg(feature = "common-image-fork-provider")]
+mod fork_signer;
+#[cfg(feature = "common-image-fork-provider")]
+pub use fork_signer::OriginalForkSignerVerifier;
 mod process;
 mod delivery_failure;
 pub use delivery_failure::{DeliveryFailureV1, DeliveryFailureStageV1, DeliveryFailureClassV1};

@@ -7,12 +7,14 @@ description = "Installed signer process and bounded manual admission channel"
 
 [features]
 default = []
+common-image-fork-provider = ["dep:wholepact-financial-coordinator-origin", "wholepact-financial-coordinator-origin/common-image-fork-provider"]
 native-ui = []
 authority-signing = []
 synthetic-qualification = []
 retirement-evidence-client = []
 
 [dependencies]
+wholepact-financial-coordinator-origin = { path = "../wholepact-financial-coordinator-origin", optional = true }
 ring = "=0.17.14"
 wholepact-core = { path = "../wholepact-core" }
 serde.workspace = true

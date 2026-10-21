@@ -51,6 +51,16 @@ pub(super) struct PeerLifetime {
     role: Role,
 }
 impl PeerLifetime {
+    #[cfg(feature = "common-image-fork-provider")]
+    fn retain_check_only(&self) -> Result<Self> {
+        self.check_alive()?;
+        let raw = unsafe { libc::fcntl(self.fd(), libc::F_DUPFD_CLOEXEC, 3) };
+        if raw < 0 { return Err(std::io::Error::last_os_error()); }
+        let retained = Self { pid: self.pid, uid: self.uid, role: self.role,
+            pidfd: unsafe { OwnedFd::from_raw_fd(raw) } };
+        retained.check_alive()?;
+        Ok(retained)
+    }
     pub(super) fn pid(&self) -> libc::pid_t { self.pid }
     pub(super) fn uid(&self) -> libc::uid_t { self.uid }
     pub(super) fn role(&self) -> Role { self.role }
@@ -75,6 +85,13 @@ pub(super) struct ForkOriginV1 {
     channel: Channel,
 }
 impl ForkOriginV1 {
+    #[cfg(feature = "common-image-fork-provider")]
+    pub(super) fn retain_host_coordinator_lifetime(&self) -> Result<PeerLifetime> {
+        if self.local_role != Role::Host || self.parent.role != Role::Coordinator {
+            return Err(rejected("not the original Host branch"));
+        }
+        self.parent.retain_check_only()
+    }
     #[cfg(wholepact_delivery_ci)]
     pub(super) fn observed_original_parent(&self) -> i32 { self.parent.pid }
 
@@ -145,6 +162,14 @@ pub(super) struct DirectChild {
     reaped: bool,
 }
 impl DirectChild {
+    #[cfg(feature = "common-image-fork-provider")]
+    pub(super) fn retain_original_signer_lifetime(&self, expected: Role) -> Result<PeerLifetime> {
+        self.require_owner()?;
+        if self.local_role != Role::Host || self.peer.role != expected
+            || !matches!(expected, Role::Signer1 | Role::Signer2)
+        { return Err(rejected("not a fixed original Signer child")); }
+        self.peer.retain_check_only()
+    }
     #[cfg(wholepact_delivery_ci)]
     pub(super) fn observed_binding(&self) -> crate::delivery_observer::ChildBinding {
         crate::delivery_observer::ChildBinding { role: format!("{:?}", self.peer.role), pid: self.peer.pid }
