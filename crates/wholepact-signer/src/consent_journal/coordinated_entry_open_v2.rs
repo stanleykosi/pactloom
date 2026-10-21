@@ -72,11 +72,18 @@ fn validate_original19(
         return Err(JournalError::UnsupportedSchema);
     }
     current(entry)?;
-    durable_born_entry_v1::validate_delivery_v3(
-        c,
-        genesis,
-        (MAX_BACKUP_ROWS, MAX_BACKUP_ENCODED_BYTES),
-    )?;
+    match entry {
+        // Financial Entry must reopen one genuinely completed original. Its
+        // strict discriminator selects historical data, never authority.
+        EntryPermit::Financial(_) => financial_profile_v1::original_delivery::validate(
+            c, genesis, (MAX_BACKUP_ROWS, MAX_BACKUP_ENCODED_BYTES),
+        )?,
+        // Initial V3 Entry still accepts only its unchanged original profile;
+        // it cannot replay a completed coordinated admission as a fresh source.
+        EntryPermit::V3(_) => durable_born_entry_v1::validate_delivery_v3(
+            c, genesis, (MAX_BACKUP_ROWS, MAX_BACKUP_ENCODED_BYTES),
+        )?,
+    }
     current(entry)
 }
 

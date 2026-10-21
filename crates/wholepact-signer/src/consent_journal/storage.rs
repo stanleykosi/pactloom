@@ -2366,3 +2366,6 @@ mod expected_schema_cache_tests_v1 {
 
 #[cfg(feature = "coordinated-financial-workflow-v1")]
 pub(in crate::consent_journal) use prepared_delivery_v3::CoordinatedReceiptActionV1;
+
+#[cfg(all(feature = "coordinated-financial-workflow-v1", feature = "pending-birth-owner-signing", target_os = "linux"))]
+pub(in crate::consent_journal) use prepared_delivery_v3::CoordinatedAdmissionPublicationV1;

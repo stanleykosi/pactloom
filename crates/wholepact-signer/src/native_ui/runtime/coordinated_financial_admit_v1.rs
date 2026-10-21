@@ -5,7 +5,7 @@
 use super::*;
 #[cfg(feature = "coordinated-financial-workflow-v1")]
 #[path = "coordinated_financial_writer_read_v1.rs"]
-mod coordinated_writer_read;
+pub(in crate::native_ui::runtime) mod coordinated_writer_read;
 use crate::account::birth::enrollment::roster_v2::financial_source_v1::FinancialAdmissionSourcePinV1;
 use crate::consent_journal::PendingFinancialContinuationAdmissionV1;
 use crate::native_ui::witness_workspace::financial_continuation_v1::coordinated_admit_v1::CoordinatedAdmitFailureV1 as Failure;
@@ -81,13 +81,13 @@ fn check_context(
     Ok(certificate)
 }
 
-pub(super) struct PreparedCoordinatedAdmitRoleV1 {
+pub(in crate::native_ui::runtime) struct PreparedCoordinatedAdmitRoleV1 {
     context: Context,
     pending: PendingFinancialContinuationAdmissionV1,
     presentation: SignerAdmitPresentationV1,
     original_admit_deadline: Instant,
 }
-pub(super) struct ReadyCoordinatedAdmitRoleV1 {
+pub(in crate::native_ui::runtime) struct ReadyCoordinatedAdmitRoleV1 {
     prepared: PreparedCoordinatedAdmitRoleV1,
     pin: FinancialAdmissionSourcePinV1,
     admission_ready_digest: String,
@@ -96,7 +96,7 @@ pub(super) struct ReadyCoordinatedAdmitRoleV1 {
 /// Exact same Context after validated admission. There is deliberately no
 /// native ReadReady conversion or public field/constructor. The next explicit
 /// writer-Read must consume this owner and authorize its own key/setup work.
-pub(super) struct AwaitingCoordinatedWriterReadV1 {
+pub(in crate::native_ui::runtime) struct AwaitingCoordinatedWriterReadV1 {
     context: Context,
     authenticated_snapshot: AccountSnapshot,
     // Cached exact request/provenance only, never a surviving action grant.
@@ -106,10 +106,10 @@ pub(super) struct AwaitingCoordinatedWriterReadV1 {
 impl PreparedCoordinatedAdmitRoleV1 {
     /// Accept only the retained outcome path, never separately supplied owner,
     /// source or Host. Native outcomes fail the concrete source lifetime check.
-    pub(super) fn prepare(
+    pub(in crate::native_ui::runtime) fn inspect(
         outcome: Outcome,
-        origin: &mut SignerFinancialWorkflowOriginV1,
-    ) -> Result<Self> {
+        original_session_deadline: Instant,
+    ) -> Result<InspectedCoordinatedAdmitV1> {
         let Outcome::AwaitingAdmission(context, pending) = outcome else {
             return Err(Error::Unavailable);
         };
@@ -129,7 +129,7 @@ impl PreparedCoordinatedAdmitRoleV1 {
         let now = wall_now()?;
         let original_admit_deadline = source
             .original_deadline()
-            .min(origin.session_deadline())
+            .min(original_session_deadline)
             .min(
                 monotonic_now
                     .checked_add(Duration::from_secs(120))
@@ -190,7 +190,33 @@ impl PreparedCoordinatedAdmitRoleV1 {
         };
         facts.validate()?;
         check_context(&context, &pending)?;
-        // Every source/recipient/binding guard has dropped before original IPC.
+        Ok(InspectedCoordinatedAdmitV1 {
+            context,
+            pending,
+            facts,
+            original_admit_deadline,
+        })
+    }
+}
+pub(in crate::native_ui::runtime) struct InspectedCoordinatedAdmitV1 {
+    context: Context,
+    pending: PendingFinancialContinuationAdmissionV1,
+    facts: SignerAdmitFactsV1,
+    original_admit_deadline: Instant,
+}
+impl InspectedCoordinatedAdmitV1 {
+    /// Main actual Origin only; no private work or new deadline is introduced.
+    pub(in crate::native_ui::runtime) fn offer(
+        self,
+        origin: &mut SignerFinancialWorkflowOriginV1,
+    ) -> Result<PreparedCoordinatedAdmitRoleV1> {
+        let Self {
+            context,
+            pending,
+            facts,
+            original_admit_deadline,
+        } = self;
+        let source = &context.source;
         let presentation = origin.offer_admit_review(
             facts.clone(),
             source.original_deadline(),
@@ -201,19 +227,19 @@ impl PreparedCoordinatedAdmitRoleV1 {
             return Err(Error::ReviewMismatch);
         }
         check_context(&context, &pending)?;
-        Ok(Self {
+        Ok(PreparedCoordinatedAdmitRoleV1 {
             context,
             pending,
             presentation,
             original_admit_deadline,
         })
     }
-
-    pub(super) fn send_ready(
+}
+impl PreparedCoordinatedAdmitRoleV1 {
+    pub(in crate::native_ui::runtime) fn prepare_ready(
         self,
         arm: SignerAdmitArmV1,
-        origin: &mut SignerFinancialWorkflowOriginV1,
-    ) -> Result<ReadyCoordinatedAdmitRoleV1> {
+    ) -> Result<AdmitReadyToReportV1> {
         arm.check_current()?;
         if arm.presentation() != &self.presentation
             || arm.original_source_deadline() != self.context.source.original_deadline()
@@ -237,24 +263,26 @@ impl PreparedCoordinatedAdmitRoleV1 {
             pin.coordinated_admission_ready_digest_v1(&self.presentation.presentation_digest)?;
         arm.check_current()?;
         // Audit locks are gone; Arm is consumed once by the genuine Ready send.
-        origin.send_admit_ready(arm, admission_ready_digest.clone())?;
-        Ok(ReadyCoordinatedAdmitRoleV1 {
-            prepared: self,
-            pin,
-            admission_ready_digest,
+        Ok(AdmitReadyToReportV1 {
+            arm,
+            ready: ReadyCoordinatedAdmitRoleV1 {
+                prepared: self,
+                pin,
+                admission_ready_digest,
+            },
         })
     }
 }
 
 impl ReadyCoordinatedAdmitRoleV1 {
-    pub(super) fn consume_final(
+    pub(in crate::native_ui::runtime) fn commit_final(
         self,
         final_action: SignerAdmitFinalV1,
-        origin: &mut SignerFinancialWorkflowOriginV1,
-    ) -> std::result::Result<AwaitingCoordinatedWriterReadV1, Failure> {
+    ) -> CoordinatedAdmitCommitV1 {
         let presentation_digest = self.prepared.presentation.presentation_digest.clone();
         let ready_digest = self.admission_ready_digest.clone();
-        let result = (|| {
+        let mut retained = None;
+        let result: std::result::Result<SignerAdmitCommittedV1, Failure> = (|| {
             final_action
                 .check_current()
                 .map_err(|e| Failure::before_transport(e.into()))?;
@@ -295,6 +323,23 @@ impl ReadyCoordinatedAdmitRoleV1 {
                     .ok_or_else(|| Failure::before_transport(Error::Authentication))?,
                 final_action,
             )?;
+            context.next = Next::Acquire;
+            let committed = SignerAdmitCommittedV1 {
+                presentation_digest: presentation.presentation_digest.clone(),
+                admission_ready_digest,
+                request_digest: presentation.facts.request_digest.clone(),
+                head_sequence: snapshot.head.sequence,
+                head_digest: snapshot.head.digest.clone(),
+            };
+            retained = Some(AwaitingCoordinatedWriterReadV1 {
+                context,
+                authenticated_snapshot: snapshot,
+                admitted_presentation: presentation,
+            });
+            let context = &retained
+                .as_ref()
+                .ok_or_else(|| Failure::after_transport(Error::Unavailable))?
+                .context;
             // No new private audit or writer key opening after the action ends.
             context
                 .source
@@ -305,23 +350,9 @@ impl ReadyCoordinatedAdmitRoleV1 {
                         .ok_or_else(|| Failure::after_transport(Error::Authentication))?,
                 )
                 .map_err(Failure::after_transport)?;
-            origin
-                .report_admitted(SignerAdmitCommittedV1 {
-                    presentation_digest: presentation.presentation_digest.clone(),
-                    admission_ready_digest,
-                    request_digest: presentation.facts.request_digest.clone(),
-                    head_sequence: snapshot.head.sequence,
-                    head_digest: snapshot.head.digest.clone(),
-                })
-                .map_err(|e| Failure::after_transport(e.into()))?;
-            context.next = Next::Acquire;
-            Ok(AwaitingCoordinatedWriterReadV1 {
-                context,
-                authenticated_snapshot: snapshot,
-                admitted_presentation: presentation,
-            })
+            Ok(committed)
         })();
-        if let Err(failure) = &result {
+        let failure_report = if let Err(failure) = &result {
             let data = if failure.is_uncertain() {
                 SignerAdmitOutcomeV1::Uncertain {
                     presentation_digest,
@@ -334,8 +365,60 @@ impl ReadyCoordinatedAdmitRoleV1 {
                 }
             };
             // Reporting loss cannot reset the consumed attempt or uncertainty.
-            let _ = origin.send_admit_outcome(data);
+            Some(data)
+        } else {
+            None
+        };
+        CoordinatedAdmitCommitV1 {
+            retained,
+            result,
+            failure_report,
         }
-        result
+    }
+}
+pub(in crate::native_ui::runtime) struct AdmitReadyToReportV1 {
+    ready: ReadyCoordinatedAdmitRoleV1,
+    arm: SignerAdmitArmV1,
+}
+impl AdmitReadyToReportV1 {
+    pub(in crate::native_ui::runtime) fn send_ready(
+        self,
+        origin: &mut SignerFinancialWorkflowOriginV1,
+    ) -> Result<ReadyCoordinatedAdmitRoleV1> {
+        self.arm.check_current()?;
+        origin.send_admit_ready(self.arm, self.ready.admission_ready_digest.clone())?;
+        Ok(self.ready)
+    }
+}
+/// Retain actual authenticated result custody in main before reporting. Late
+/// source/R/report failure cannot become another owner mutation attempt.
+pub(in crate::native_ui::runtime) struct CoordinatedAdmitCommitV1 {
+    retained: Option<AwaitingCoordinatedWriterReadV1>,
+    result: std::result::Result<SignerAdmitCommittedV1, Failure>,
+    failure_report: Option<SignerAdmitOutcomeV1>,
+}
+impl CoordinatedAdmitCommitV1 {
+    pub(in crate::native_ui::runtime) fn report(
+        &self,
+        origin: &mut SignerFinancialWorkflowOriginV1,
+    ) -> Result<()> {
+        match &self.result {
+            Ok(committed) => origin.report_admitted(committed.clone())?,
+            Err(_) => {
+                origin.send_admit_outcome(self.failure_report.clone().ok_or(Error::Unavailable)?)?
+            }
+        }
+        Ok(())
+    }
+    pub(in crate::native_ui::runtime) fn succeeded(&self) -> bool {
+        self.result.is_ok()
+    }
+    pub(in crate::native_ui::runtime) fn into_result(
+        mut self,
+    ) -> std::result::Result<AwaitingCoordinatedWriterReadV1, Failure> {
+        self.result?;
+        self.retained
+            .take()
+            .ok_or_else(|| Failure::after_transport(Error::Unavailable))
     }
 }

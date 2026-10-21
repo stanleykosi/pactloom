@@ -187,7 +187,7 @@ impl CoordinatedFinancialContinuationIntentV2 {
     pub(super) fn validate_original(&self, c: &Connection) -> Result<()> {
         self.validate()?;
         let terms = &self.record()?.terms;
-        let original = authority::durable_delivery_admission_intent_v3::read(
+        let original = original_delivery::read(
             c,
             &terms.scope.authorization.authorization_id,
         )?
@@ -208,7 +208,7 @@ impl CoordinatedFinancialContinuationIntentV2 {
             || original.manifest_ref() != terms.original_recipient_manifest_ref
             || original.disclosure() != &terms.scope.witness
             || original.owner_certificate_digest() != self.owner_certificate_digest
-            || original.recipient_intent().authorized_host_process_instance
+            || original.original_host_process_instance()
                 != self
                     .coordinated_provenance
                     .review
@@ -322,13 +322,13 @@ impl SignerConsentJournal {
             }
             let tx = c.transaction_with_behavior(TransactionBehavior::Deferred)?;
             check()?;
-            durable_born_entry_v1::validate_delivery_v3(&tx, &source.genesis, self.capacity_limits())?;
+            original_delivery::validate(&tx, &source.genesis, self.capacity_limits())?;
             check()?;
             if original_rows_digest(&tx)? != source.original_rows_digest {
                 return Err(JournalError::Conflict);
             }
             check()?;
-            let original = authority::durable_delivery_admission_intent_v3::read(
+            let original = original_delivery::read(
                 &tx, &terms.scope.authorization.authorization_id,
             )?.ok_or(JournalError::NotFound)?;
             check()?;
@@ -343,7 +343,7 @@ impl SignerConsentJournal {
                 || original.enrollment_ref() != terms.original_recipient_enrollment_ref
                 || original.manifest_ref() != terms.original_recipient_manifest_ref
                 || original.disclosure() != &terms.scope.witness
-                || original.recipient_intent().authorized_host_process_instance != original_host.instance()
+                || original.original_host_process_instance() != original_host.instance()
             {
                 return Err(JournalError::InvalidBinding);
             }
@@ -482,7 +482,7 @@ impl SignerConsentJournal {
             check_read!();
             let tx = c.transaction_with_behavior(TransactionBehavior::Deferred)?;
             check_read!();
-            durable_born_entry_v1::validate_delivery_v3(
+            original_delivery::validate(
                 &tx,
                 &source.genesis,
                 self.capacity_limits(),
@@ -492,7 +492,7 @@ impl SignerConsentJournal {
                 return Err(JournalError::Conflict);
             }
             check_read!();
-            let original = authority::durable_delivery_admission_intent_v3::read(
+            let original = original_delivery::read(
                 &tx,
                 &terms.scope.authorization.authorization_id,
             )?
@@ -513,7 +513,7 @@ impl SignerConsentJournal {
                 || original.enrollment_ref() != terms.original_recipient_enrollment_ref
                 || original.manifest_ref() != terms.original_recipient_manifest_ref
                 || original.disclosure() != &terms.scope.witness
-                || original.recipient_intent().authorized_host_process_instance
+                || original.original_host_process_instance()
                     != original_host.instance()
             {
                 return Err(JournalError::InvalidBinding);

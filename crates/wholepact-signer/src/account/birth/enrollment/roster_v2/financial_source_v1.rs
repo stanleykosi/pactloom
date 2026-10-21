@@ -1,16 +1,20 @@
 //! Actual original custody for explicit financial continuation. No B1 active
 //! owner or historical receipt can be converted into this source.
 use super::*;
+#[cfg(feature="coordinated-financial-workflow-v1")]
+mod coordinated_return_v1;
+#[cfg(feature="coordinated-financial-workflow-v1")]
+pub(crate) use coordinated_return_v1::CoordinatedFinancialReturnSourcePinV1;
 use crate::consent_journal::{
     FinancialAdmissionJournalPinV1, FinancialConsentJournalV1, FinancialReturnJournalPinV1,
     FinancialSourceBindingV1, PendingFinancialContinuationAdmissionV1,
     PreparedFinancialContinuationIntentV1,
 };
 use crate::native_ui::{
-    DormantNativeLifetime,
     financial_authority_v1::{
         FinancialContinuationReviewV1, FinancialReadLeaseV1, FinancialSignActionV1,
     },
+    DormantNativeLifetime,
 };
 use std::{
     collections::BTreeMap,
@@ -20,23 +24,27 @@ use std::{
 use wholepact_authority::durable_financial_continuation_v1::FinancialContinuationTermsV1;
 
 #[cfg(feature = "coordinated-financial-workflow-v1")]
-mod coordinated_source_entry_v1;
+mod coordinated_activate_v1;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+mod coordinated_admit_v1;
 #[cfg(feature = "coordinated-financial-workflow-v1")]
 mod coordinated_continue_role_v1;
 #[cfg(feature = "coordinated-financial-workflow-v1")]
 mod coordinated_public_custody_v2;
 #[cfg(feature = "coordinated-financial-workflow-v1")]
-mod coordinated_admit_v1;
+mod coordinated_source_entry_v1;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+mod coordinated_wallet_v1;
 #[cfg(feature = "coordinated-financial-workflow-v1")]
 mod coordinated_writer_read_acquire_v1;
-#[cfg(feature = "coordinated-financial-workflow-v1")]
-mod coordinated_activate_v1;
 #[cfg(feature = "coordinated-financial-workflow-v1")]
 pub(crate) use coordinated_public_custody_v2::OpenedCoordinatedOriginalFinancialSourceV2;
 #[cfg(feature = "coordinated-financial-workflow-v1")]
 pub(crate) use coordinated_source_entry_v1::{
     PreparedCoordinatedSourceEntryV1, PresentedCoordinatedSourceEntryV1,
 };
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub(crate) use coordinated_wallet_v1::CoordinatedWalletSourcePinV1;
 
 // Closed restriction-only custody. Native check/drop behavior stays in the
 // original field position. Neither branch grants any action; coordinated Entry
@@ -75,6 +83,12 @@ fn immutable(
 ) -> Result<BTreeMap<String, FileRevision>> {
     let directory = &retained.account.directory;
     let _held = directory.signer_journal_source_owner()?;
+    immutable_file_revisions(directory)
+}
+/// Maintained file metadata loop, split from journal-source-owner acquisition so
+/// entered coordinated key-use can check the SAME original immutable baseline
+/// without waiting for a mutex, reading private content, or reentering SQL.
+fn immutable_file_revisions(directory: &crate::files::PrivateDirectory) -> Result<BTreeMap<String, FileRevision>> {
     super::roster_inventory(directory)?;
     let mut result = BTreeMap::new();
     for entry in std::fs::read_dir(directory.root())? {
@@ -393,14 +407,19 @@ impl PreparedOriginalFinancialSourceV1 {
         arm: &wholepact_financial_coordinator_origin::SignerContinueArmV1,
     ) -> Result<()> {
         self.check_custody()?;
-        presented.check_source(self.identity_digest(), self.original_deadline, self.original_ceiling_ms)?;
+        presented.check_source(
+            self.identity_digest(),
+            self.original_deadline,
+            self.original_ceiling_ms,
+        )?;
         presented.check_arm(arm)?;
         {
             let binding = self.binding.lock().map_err(|_| Error::Locked)?;
             presented.check_arm(arm)?;
             match &self.journal {
-                OriginalJournalV1::Before(journal) => journal
-                    .check_coordinated_financial_preparation_v1(&binding, presented, arm)?,
+                OriginalJournalV1::Before(journal) => {
+                    journal.check_coordinated_financial_preparation_v1(&binding, presented, arm)?
+                }
                 OriginalJournalV1::Financial(_) => return Err(Error::RecoveryRequired),
             }
         }
@@ -415,12 +434,22 @@ impl PreparedOriginalFinancialSourceV1 {
         self,
         presented: crate::consent_journal::PresentedCoordinatedFinancialContinuationV1,
         final_admission: wholepact_financial_coordinator_origin::SignerContinueFinalV1,
-    ) -> std::result::Result<(Self, PendingFinancialContinuationAdmissionV1), crate::consent_journal::CoordinatedContinuationCommitFailureV1> {
+    ) -> std::result::Result<
+        (Self, PendingFinancialContinuationAdmissionV1),
+        crate::consent_journal::CoordinatedContinuationCommitFailureV1,
+    > {
         use crate::consent_journal::CoordinatedContinuationCommitFailureV1 as Failure;
         self.check_custody().map_err(Failure::before_effect)?;
-        presented.check_source(self.identity_digest(), self.original_deadline, self.original_ceiling_ms)
+        presented
+            .check_source(
+                self.identity_digest(),
+                self.original_deadline,
+                self.original_ceiling_ms,
+            )
             .map_err(|error| Failure::before_effect(error.into()))?;
-        presented.check_final(&final_admission).map_err(|error| Failure::before_effect(error.into()))?;
+        presented
+            .check_final(&final_admission)
+            .map_err(|error| Failure::before_effect(error.into()))?;
         let Self {
             retained,
             original_commit,
@@ -439,11 +468,14 @@ impl PreparedOriginalFinancialSourceV1 {
         };
         let (journal, pending) = FinancialConsentJournalV1::transition_coordinated_original_v1(
             journal,
-            binding.into_inner().map_err(|_| Failure::before_effect(Error::Locked))?,
+            binding
+                .into_inner()
+                .map_err(|_| Failure::before_effect(Error::Locked))?,
             presented,
             final_admission,
         )?;
-        let binding = journal.prepare_financial_source_binding_v1()
+        let binding = journal
+            .prepare_financial_source_binding_v1()
             .map_err(|error| Failure::after_commit_attempt(error.into()))?;
         let result = Self {
             retained,
@@ -458,7 +490,9 @@ impl PreparedOriginalFinancialSourceV1 {
             original_ceiling_ms,
             original_deadline,
         };
-        result.check_custody().map_err(Failure::after_commit_attempt)?;
+        result
+            .check_custody()
+            .map_err(Failure::after_commit_attempt)?;
         Ok((result, pending))
     }
     pub(crate) fn commit_continuation(
@@ -995,3 +1029,8 @@ impl PreparedOriginalFinancialSourceV1 {
         self.check_immutable_original_v1()
     }
 }
+
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+mod coordinated_sign_v1;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub(crate) use coordinated_sign_v1::CoordinatedSignReadSourcePinV1;

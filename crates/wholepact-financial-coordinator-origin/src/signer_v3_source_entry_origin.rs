@@ -1,8 +1,18 @@
-//! Separate initial V3 SourceEntry protocol. No completed-V3 selector, legacy
-//! native grant conversion, private source read, or generic role importer.
+#[path="financial_setup_selection_origin.rs"]
+mod financial_setup;
+// Separate initial V3 SourceEntry protocol. No legacy grant conversion.
 #[path="signer_v3_delivery_origin.rs"]
 mod delivery;
 pub use delivery::{SignerV3PrepareReadTicketV1,SignerV3PrepareReadOutboundV1,SignerV3PrepareReadFinalV1,SignerV3PreparedLifetimeV1,SignerV3ReceiveTicketV1,SignerV3ReceiveOutboundV1,SignerV3ReceiveFinalV1};
+#[path="signer_v3_admit_read_origin.rs"]
+mod admit_read;
+pub use admit_read::{SignerV3AdmitReadTicketV1,SignerV3AdmitReadOutboundV1,SignerV3AdmitReadFinalV1};
+#[path="signer_v3_admission_origin.rs"]
+mod admission;
+pub use admission::{SignerV3AdmitTicketV1,SignerV3AdmitArmOutboundV1,SignerV3AdmitArmV1,SignerV3AdmitReadyTicketV1,SignerV3AdmitFinalOutboundV1,SignerV3AdmitFinalV1};
+#[path="signer_v3_audit_origin.rs"]
+mod audit;
+pub use audit::{SignerV3AuditTicketV1,SignerV3AuditOutboundV1,SignerV3AuditFinalV1,SignerV3CompletedLifetimeV1};
 use super::*;
 use crate::signer_v3_source_entry_data::*;
 use crate::v3_source_entry_envelope::{self as v3crypto, Envelope, RecipientKey};
@@ -347,6 +357,10 @@ impl SignerV3SourceLifetimeV1 {
 }
 #[derive(Default)]
 pub(super) struct SV3Entry {
+ admission:admission::AdmissionSlot,
+ admit_read:admit_read::AdmitReadSlot,
+ audit:audit::AuditSlot,
+ financial_setup:Option<crate::SignerFinancialSetupSelectionV1>,
  delivery:delivery::DeliverySlots,
  redisclosure:redisclosure::RedisclosureSlots,
  receipts:receipts::ReceiptSlots,
@@ -362,6 +376,10 @@ pub(super) struct SV3Entry {
 }
 #[derive(Default)]
 pub(super) struct CV3Entry {
+ admission:admission::AdmissionSlot,
+ admit_read:admit_read::AdmitReadSlot,
+ audit:audit::AuditSlot,
+ financial_setup:Option<crate::SignerFinancialSetupSelectionV1>,
  delivery:delivery::DeliverySlots,
  redisclosure:redisclosure::RedisclosureSlots,
  receipts:receipts::ReceiptSlots,
@@ -377,6 +395,10 @@ pub(super) struct CV3Entry {
 }
 #[derive(Default)]
 pub(super) struct HV3Entry {
+ admission:admission::AdmissionSlot,
+ admit_read:admit_read::AdmitReadSlot,
+ audit:audit::AuditSlot,
+ financial_setup:Option<crate::SignerFinancialSetupSelectionV1>,
  delivery:delivery::DeliverySlots,
  redisclosure:redisclosure::RedisclosureSlots,
  receipts:receipts::ReceiptSlots,
@@ -738,6 +760,10 @@ impl CoordinatorFinancialEndpointV1 {
                 sender_public_key: hex::encode(sender.public_key()),
             };
             self.v3_entries[i] = CV3Entry {
+                admission:admission::AdmissionSlot::default(),
+                admit_read:admit_read::AdmitReadSlot::default(),
+                audit:audit::AuditSlot::default(),
+ financial_setup:None,
                 delivery:delivery::DeliverySlots::default(),
                 redisclosure:redisclosure::RedisclosureSlots::default(),
                 pair:pair::PairSlot::default(),
@@ -1127,7 +1153,7 @@ impl CV3Entry {
 }
 impl HV3Entry {
     pub(super) fn allows_financial_entry(&self) -> bool {
-        self.phase == V3_HELD && self.opened && !self.terminal
+        self.phase == V3_HELD && self.opened && !self.terminal && self.financial_setup.is_some()
     }
 }
 #[cfg(test)]
@@ -1207,3 +1233,12 @@ mod failure_race_tests {
         ));
     }
 }
+
+impl SV3Entry { pub(super) fn has_financial_setup(&self)->bool{self.financial_setup.is_some()} }
+impl CV3Entry { pub(super) fn has_financial_setup(&self)->bool{self.financial_setup.is_some()} }
+/// Original transport/material ceilings observed from the actual completed V3
+/// custody. Private ordinary metadata only, never a transferable permission.
+#[derive(Clone,Copy)]pub(super) struct ReturnTransportBounds{pub(super) channel:Instant,pub(super) material:Instant,pub(super) channel_ceiling:u64,pub(super) material_ceiling:u64,pub(super) channel_wall:u64,pub(super) material_wall:u64}
+impl SV3Entry{pub(super) fn return_transport_bounds(&self)->Result<ReturnTransportBounds>{if !self.audit.reported{return Err(rejected("Return before actual V3 Audit"));}let b=self.audit.binding.as_ref().ok_or_else(||rejected("Return missing actual V3 custody"))?;b.owner.custody_bounds()?;Ok(ReturnTransportBounds{channel:b.owner.pair.channel_deadline,material:b.owner.material_deadline,channel_ceiling:b.owner.pair.p.channel_ceiling_ms,material_ceiling:b.owner.p.material_ceiling_ms,channel_wall:b.owner.pair.p.facts.channel_expires_at_ms,material_wall:b.owner.p.facts.material_expires_at_ms})}}
+impl CV3Entry{pub(super) fn return_transport_bounds(&self)->Result<ReturnTransportBounds>{if !self.audit.reported{return Err(rejected("Return before actual V3 Audit"));}let b=self.audit.binding.as_ref().ok_or_else(||rejected("Return missing actual V3 custody"))?;b.owner.custody_bounds()?;Ok(ReturnTransportBounds{channel:b.owner.pair.channel_deadline,material:b.owner.material_deadline,channel_ceiling:b.owner.pair.p.channel_ceiling_ms,material_ceiling:b.owner.p.material_ceiling_ms,channel_wall:b.owner.pair.p.facts.channel_expires_at_ms,material_wall:b.owner.p.facts.material_expires_at_ms})}}
+impl HV3Entry{pub(super) fn return_transport_bounds(&self,clocks:FullWorkflowClocksV1)->Result<ReturnTransportBounds>{if !self.audit.reported{return Err(rejected("Return relay before actual V3 Audit"));}let (p,_)=self.delivery.admission_wire()?;let pair=self.pair.wire.as_ref().ok_or_else(||rejected("Return missing original Pair"))?;let now=Instant::now();let wall=state::wall_ms()?;let channel=clocks.restrict_received(PROFILE,pair.channel_ceiling_ms,clocks.supervision(),now)?.min(wall_ceiling(now,wall,pair.facts.reviewed_at_ms,pair.facts.channel_expires_at_ms)?);let material=clocks.restrict_received(PROFILE,p.material_ceiling_ms,clocks.supervision(),now)?.min(wall_ceiling(now,wall,p.facts.reviewed_at_ms,p.facts.material_expires_at_ms)?);Ok(ReturnTransportBounds{channel,material,channel_ceiling:pair.channel_ceiling_ms,material_ceiling:p.material_ceiling_ms,channel_wall:pair.facts.channel_expires_at_ms,material_wall:p.facts.material_expires_at_ms})}}

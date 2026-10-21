@@ -144,7 +144,7 @@ fn check_completed_read(
 
 /// Non-cloneable actual role owner plus an inert frozen ticket. The ticket owns
 /// the moved authenticated history; no additional Arc of source is retained.
-pub(super) struct PreparedCoordinatedContinueRoleV1 {
+pub(in crate::native_ui::runtime) struct PreparedCoordinatedContinueRoleV1 {
     context: Context,
     presented: PresentedCoordinatedFinancialContinuationV1,
     display: Option<SignerContinuePresentationV1>,
@@ -154,15 +154,14 @@ impl PreparedCoordinatedContinueRoleV1 {
     /// Move the actual source and one-use Read owner state into the existing
     /// Context. Unopened writer/wallet strings grant nothing; their later native
     /// purposes remain separate. No substitute source or native owner is built.
-    pub(super) fn prepare_from_read_v2(
+    pub(in crate::native_ui::runtime) fn inspect_from_read_v2(
         original_peer: crate::native_peer::PeerProcess,
         terms: FinancialContinuationTermsV1,
         material: VerifiedDurableEconomicsV1,
         writer_setup: Zeroizing<String>,
         wallet_setup: Zeroizing<String>,
         read: ReadFinancialContinueInputsV2,
-        origin: &mut SignerFinancialWorkflowOriginV1,
-    ) -> Result<Self> {
+    ) -> Result<InspectedCoordinatedContinueReadV1> {
         let ReadFinancialContinueInputsV2 {
             source,
             owner,
@@ -189,14 +188,13 @@ impl PreparedCoordinatedContinueRoleV1 {
             result_request: None,
             next: Next::Continue,
         };
-        Self::prepare_continue_v1(context, final_read, origin)
+        Self::inspect_continue_v1(context, final_read)
     }
 
-    fn prepare_continue_v1(
+    fn inspect_continue_v1(
         mut context: Context,
         final_read: SignerFinancialReadFinalV1,
-        origin: &mut SignerFinancialWorkflowOriginV1,
-    ) -> Result<Self> {
+    ) -> Result<InspectedCoordinatedContinueReadV1> {
         final_read.check_current()?;
         let completed_read = final_read.presentation().clone();
         let certificate = check_context(&context, Some(&final_read))?;
@@ -276,13 +274,78 @@ impl PreparedCoordinatedContinueRoleV1 {
             // terms/source wall ceiling, not a newly reconstructed session.
             session_expires_at_ms: context.source.original_ceiling_ms(),
         };
-        // Every source/journal guard above has dropped before origin methods.
-        let review = origin.begin_continue_review(
-            &final_read,
+        Ok(InspectedCoordinatedContinueReadV1 {
+            context,
+            final_read,
+            completed_read,
+            certificate,
+            journal_digest,
+            history_digest,
+            history_snapshot,
             facts,
-            context.source.original_deadline(),
             original_review_deadline,
+        })
+    }
+}
+
+pub(in crate::native_ui::runtime) struct InspectedCoordinatedContinueReadV1 {
+    context: Context,
+    final_read: SignerFinancialReadFinalV1,
+    completed_read: SignerFinancialReadPresentationV1,
+    certificate: String,
+    journal_digest: String,
+    history_digest: String,
+    history_snapshot: serde_json::Value,
+    facts: SignerContinueSourceFactsV1,
+    original_review_deadline: Instant,
+}
+pub(in crate::native_ui::runtime) struct BoundCoordinatedContinueReviewV1 {
+    inspected: InspectedCoordinatedContinueReadV1,
+    review: SignerContinueReviewDataV1,
+}
+impl InspectedCoordinatedContinueReadV1 {
+    /// Main control owner only: binds the already captured actual source facts
+    /// to this genuine original Origin. No private I/O occurs here.
+    pub(in crate::native_ui::runtime) fn begin_review(
+        self,
+        origin: &mut SignerFinancialWorkflowOriginV1,
+    ) -> Result<BoundCoordinatedContinueReviewV1> {
+        self.final_read.check_current()?;
+        let review = origin.begin_continue_review(
+            &self.final_read,
+            self.facts.clone(),
+            self.context.source.original_deadline(),
+            self.original_review_deadline,
         )?;
+        Ok(BoundCoordinatedContinueReviewV1 {
+            inspected: self,
+            review,
+        })
+    }
+}
+impl BoundCoordinatedContinueReviewV1 {
+    /// Owned worker phase: genuine Read remains live through exact private
+    /// preparation. No Origin reference, proxy issuer or report callback exists.
+    pub(in crate::native_ui::runtime) fn prepare(
+        self,
+    ) -> Result<PreparedCoordinatedContinueRoleV1> {
+        let Self { inspected, review } = self;
+        let InspectedCoordinatedContinueReadV1 {
+            mut context,
+            final_read,
+            completed_read,
+            certificate,
+            journal_digest,
+            history_digest,
+            history_snapshot,
+            facts: _,
+            original_review_deadline,
+        } = inspected;
+        final_read.check_current()?;
+        let host = context
+            .original_peer
+            .as_ref()
+            .ok_or(Error::Authentication)?;
         let history = context.original_history.take().ok_or(Error::Unavailable)?;
         final_read.check_current()?;
         let prepared = context
@@ -329,18 +392,28 @@ impl PreparedCoordinatedContinueRoleV1 {
         // All private reads and complete immutable preparation are now done.
         // These two observations must precede the later genuine ContinueRequested.
         final_read.finish_read()?;
-        origin.history_read()?;
-        Ok(Self {
+        Ok(PreparedCoordinatedContinueRoleV1 {
             context,
             presented,
             display: Some(presentation),
         })
     }
+}
+impl PreparedCoordinatedContinueRoleV1 {
+    /// Main retains this actual prepared owner before reporting; report loss
+    /// cannot discard or replay the completed private Read/preparation.
+    pub(in crate::native_ui::runtime) fn report_read(
+        &self,
+        origin: &mut SignerFinancialWorkflowOriginV1,
+    ) -> Result<()> {
+        origin.history_read()?;
+        Ok(())
+    }
 
     /// Called only for the genuine same-Core ContinueRequested event. The Read
     /// has ended, so this operation sends cached immutable data and performs NO
     /// private source read or preparation and no review clock renewal.
-    pub(super) fn send_continue_display_v1(
+    pub(in crate::native_ui::runtime) fn send_continue_display_v1(
         mut self,
         origin: &mut SignerFinancialWorkflowOriginV1,
     ) -> Result<Self> {
@@ -351,11 +424,10 @@ impl PreparedCoordinatedContinueRoleV1 {
 
     /// A genuine matching Arm is consumed only after the unchanged source Ready
     /// guarded recheck. No source/journal guard remains across the Ready send.
-    pub(super) fn send_continue_ready_v1(
-        &self,
+    pub(in crate::native_ui::runtime) fn prepare_ready(
+        self,
         arm: SignerContinueArmV1,
-        origin: &mut SignerFinancialWorkflowOriginV1,
-    ) -> Result<()> {
+    ) -> Result<ContinueReadyToReportV1> {
         arm.check_current()?;
         if self.display.is_some() {
             return Err(Error::Unavailable);
@@ -373,21 +445,23 @@ impl PreparedCoordinatedContinueRoleV1 {
                 &arm,
             )?;
         arm.check_current()?;
-        origin.send_continue_ready(arm)?;
-        Ok(())
+        Ok(ContinueReadyToReportV1 {
+            prepared: self,
+            arm,
+        })
     }
 
     /// Consumes both actual role custody and the genuine one-use Final. No error
     /// returns the source, ticket or grant. Successful Context/Pending remain in
     /// this SAME role/session; no terminal disposal or owner network send occurs.
-    pub(super) fn consume_continue_final_v1(
+    pub(in crate::native_ui::runtime) fn commit_final(
         self,
         final_admission: SignerContinueFinalV1,
-        origin: &mut SignerFinancialWorkflowOriginV1,
-    ) -> std::result::Result<Outcome, Failure> {
+    ) -> CoordinatedContinueCommitV1 {
         let presentation_digest = self.presented.presentation_digest().to_owned();
         let prepared_digest = self.presented.prepared_digest().to_owned();
-        let result: std::result::Result<Outcome, Failure> = (|| {
+        let mut retained = None;
+        let result: std::result::Result<SignerContinuationSavedV1, Failure> = (|| {
             final_admission
                 .check_current()
                 .map_err(|e| Failure::before_effect(e.into()))?;
@@ -415,6 +489,12 @@ impl PreparedCoordinatedContinueRoleV1 {
                 final_admission,
             )?;
             context.source = Arc::new(source);
+            // Retain committed actual source/Pending before any post-effect
+            // check or reporting can fail, including ordinary R.
+            retained = Some(Outcome::AwaitingAdmission(context, pending));
+            let Some(Outcome::AwaitingAdmission(context, pending)) = retained.as_ref() else {
+                return Err(Failure::after_commit_attempt(Error::Unavailable));
+            };
             let host = context
                 .original_peer
                 .as_ref()
@@ -432,17 +512,14 @@ impl PreparedCoordinatedContinueRoleV1 {
             // An admitted Continue may finish after ordinary R. This observation
             // never overrides R or grants a usable next Admit slot. The control
             // owner must join/drop Context/Pending on cancellation.
-            origin
-                .continuation_saved(SignerContinuationSavedV1 {
-                    presentation_digest: presentation_digest.clone(),
-                    prepared_digest: prepared_digest.clone(),
-                    source_identity_digest: context.source.identity_digest().to_owned(),
-                    admission_terms_digest,
-                })
-                .map_err(|e| Failure::after_commit_attempt(e.into()))?;
-            Ok(Outcome::AwaitingAdmission(context, pending))
+            Ok(SignerContinuationSavedV1 {
+                presentation_digest: presentation_digest.clone(),
+                prepared_digest: prepared_digest.clone(),
+                source_identity_digest: context.source.identity_digest().to_owned(),
+                admission_terms_digest,
+            })
         })();
-        if let Err(failure) = &result {
+        let failure_report = if let Err(failure) = &result {
             // One best-effort terminal observation, not a retry of the effect.
             // Lost reporting cannot downgrade actual commit/rollback uncertainty.
             let data = if failure.is_uncertain() {
@@ -456,9 +533,61 @@ impl PreparedCoordinatedContinueRoleV1 {
                     prepared_digest,
                 }
             };
-            let _ = origin.send_continue_outcome(data);
+            Some(data)
+        } else {
+            None
+        };
+        CoordinatedContinueCommitV1 {
+            retained,
+            result,
+            failure_report,
         }
-        result
+    }
+}
+
+pub(in crate::native_ui::runtime) struct ContinueReadyToReportV1 {
+    prepared: PreparedCoordinatedContinueRoleV1,
+    arm: SignerContinueArmV1,
+}
+impl ContinueReadyToReportV1 {
+    pub(in crate::native_ui::runtime) fn send_ready(
+        self,
+        origin: &mut SignerFinancialWorkflowOriginV1,
+    ) -> Result<PreparedCoordinatedContinueRoleV1> {
+        self.arm.check_current()?;
+        origin.send_continue_ready(self.arm)?;
+        Ok(self.prepared)
+    }
+}
+/// Sealed actual worker result. Keep this owner in main state before reporting;
+/// after-effect failure retains its actual Context/Pending until cleanup.
+pub(in crate::native_ui::runtime) struct CoordinatedContinueCommitV1 {
+    retained: Option<Outcome>,
+    result: std::result::Result<SignerContinuationSavedV1, Failure>,
+    failure_report: Option<SignerContinueOutcomeV1>,
+}
+impl CoordinatedContinueCommitV1 {
+    pub(in crate::native_ui::runtime) fn report(
+        &self,
+        origin: &mut SignerFinancialWorkflowOriginV1,
+    ) -> Result<()> {
+        match &self.result {
+            Ok(saved) => origin.continuation_saved(saved.clone())?,
+            Err(_) => origin
+                .send_continue_outcome(self.failure_report.clone().ok_or(Error::Unavailable)?)?,
+        }
+        Ok(())
+    }
+    pub(in crate::native_ui::runtime) fn succeeded(&self) -> bool {
+        self.result.is_ok()
+    }
+    pub(in crate::native_ui::runtime) fn into_result(
+        mut self,
+    ) -> std::result::Result<Outcome, Failure> {
+        self.result?;
+        self.retained
+            .take()
+            .ok_or_else(|| Failure::after_commit_attempt(Error::Unavailable))
     }
 }
 

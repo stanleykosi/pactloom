@@ -272,3 +272,9 @@ pub(in crate::consent_journal) use coordinated_receipt_v1::CoordinatedReceiptAct
 #[cfg(feature = "coordinated-financial-workflow-v1")]
 #[path = "prepared_delivery_v3/coordinated_redisclosure_v1.rs"]
 mod coordinated_redisclosure_v1;
+
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+#[path = "prepared_delivery_v3/coordinated_admission_v1.rs"]
+mod coordinated_admission_v1;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub(in crate::consent_journal) use coordinated_admission_v1::CoordinatedAdmissionPublicationV1;

@@ -38,7 +38,8 @@ mod coordinated_pair_v1;
 pub(crate) mod durable_receive_v3;
 #[cfg(feature = "coordinated-financial-workflow-v1")]
 pub(crate) use coordinated_pair_v1::{
-    CoordinatedLocalEventV1, CoordinatedLocalIpcV1, CoordinatedPairPeerV1, CoordinatedRequestV1,
+    CoordinatedFinancialResultEventV1, CoordinatedLocalEventV1, CoordinatedLocalIpcV1,
+    CoordinatedPairPeerV1, CoordinatedRequestV1, CoordinatedReturnTransportV1,
 };
 const MAX_GRANTS: usize = 16;
 /// Public location metadata only. Knowledge of this narrow endpoint grants no

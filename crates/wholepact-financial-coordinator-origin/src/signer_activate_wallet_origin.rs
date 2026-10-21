@@ -17,16 +17,16 @@ pub(super) const ACTIVATE_READY: u8 = 53;
 pub(super) const ACTIVATE_ADMITTED: u8 = 54;
 pub(super) const AWAITING_WALLET_PREPARE: u8 = 55;
 
-struct ActivateRead {
-    entry: Arc<EntryReviewed>,
-    wire: SignerActivateReadPresentationV1,
+pub(super) struct ActivateRead {
+    pub(super) entry: Arc<EntryReviewed>,
+    pub(super) wire: SignerActivateReadPresentationV1,
     original_read: Instant,
     ceiling: Instant,
     last_wall: AtomicU64,
     prepared: AtomicBool,
-    acquired_presentation: SignerAcquirePresentationV1,
-    writer_deadline: Instant,
-    service: ReceivedSigning,
+    pub(super) acquired_presentation: SignerAcquirePresentationV1,
+    pub(super) writer_deadline: Instant,
+    pub(super) service: ReceivedSigning,
 }
 impl ActivateRead {
     fn from_bounds(
@@ -102,11 +102,11 @@ impl ActivateRead {
         Ok(&self.service)
     }
 }
-struct ActivateReview {
+pub(super) struct ActivateReview {
     // Retained provenance only. No completed Activate Read action clock is an
     // ancestor of Activate; only entry custody and this own frozen clock apply.
-    read: Arc<ActivateRead>,
-    wire: SignerActivatePresentationV1,
+    pub(super) read: Arc<ActivateRead>,
+    pub(super) wire: SignerActivatePresentationV1,
     original_activate: Instant,
     ceiling: Instant,
     last_wall: AtomicU64,
@@ -418,6 +418,7 @@ fn require_phase(core: &Core, slot: usize, phase: u8) -> Result<()> {
 }
 #[derive(Default)]
 pub(super) struct SActivate {
+    pub(super) wallet: super::wallet::WalletSlots,
     offered: bool,
     preparing: bool,
     read: Option<Arc<ActivateRead>>,
@@ -430,6 +431,7 @@ pub(super) struct SActivate {
 }
 #[derive(Default)]
 pub(super) struct CActivate {
+    pub(super) wallet: super::wallet::WalletSlots,
     read_wire: Option<SignerActivateReadPresentationV1>,
     read: Option<Arc<ActivateRead>>,
     wire: Option<SignerActivatePresentationV1>,
@@ -441,6 +443,7 @@ pub(super) struct CActivate {
 }
 #[derive(Default)]
 pub(super) struct HActivate {
+    pub(super) wallet: super::wallet::WalletSlots,
     read: Option<SignerActivateReadPresentationV1>,
     wire: Option<SignerActivatePresentationV1>,
     ready: Option<(String, String)>,
@@ -1662,6 +1665,7 @@ impl CActivate {
         self.read_wire.is_none() || self.terminal || self.committed.is_some()
     }
     pub(super) fn observe_active(&self, phase: u8) -> Result<()> {
+        self.wallet.observe_active(phase)?;
         if matches!(phase, ACTIVATE_READ_REVIEW | ACTIVATE_READ_ADMITTED) {
             self.read
                 .as_ref()
@@ -1831,5 +1835,80 @@ mod tests {
             true,
             &d
         ));
+    }
+}
+
+impl ActivateReview {
+    pub(super) fn wallet_bounds(&self) -> Result<()> {
+        self.read.entry.check_custody()?;
+        self.read.service.check()?;
+        crate::channel::require_time(self.read.writer_deadline)
+    }
+    pub(super) fn wallet_core(&self) -> &Arc<Core> {
+        self.core()
+    }
+    pub(super) fn wallet_slot(&self) -> usize {
+        self.slot()
+    }
+}
+impl SActivate {
+    pub(super) fn wallet_predecessor(
+        &self,
+    ) -> Result<(&Arc<ActivateReview>, &SignerActivateCommittedV1)> {
+        if self.terminal {
+            return Err(rejected("wallet after terminal Activate"));
+        }
+        Ok((
+            self.review
+                .as_ref()
+                .ok_or_else(|| rejected("wallet before genuine Activate"))?,
+            self.committed
+                .as_ref()
+                .ok_or_else(|| rejected("wallet before actual Activated"))?,
+        ))
+    }
+}
+impl CActivate {
+    pub(super) fn wallet_predecessor(
+        &self,
+    ) -> Result<(&Arc<ActivateReview>, &SignerActivateCommittedV1)> {
+        if self.terminal {
+            return Err(rejected("wallet after terminal Activate"));
+        }
+        Ok((
+            self.review
+                .as_ref()
+                .ok_or_else(|| rejected("wallet before genuine Activate"))?,
+            self.committed
+                .as_ref()
+                .ok_or_else(|| rejected("wallet before actual Activated"))?,
+        ))
+    }
+}
+impl HActivate {
+    pub(super) fn wallet_predecessor(
+        &self,
+    ) -> Result<(
+        &SignerActivatePresentationV1,
+        &SignerActivateCommittedV1,
+        &ReceivedSigning,
+        Instant,
+    )> {
+        if self.terminal {
+            return Err(rejected("wallet relay after terminal Activate"));
+        }
+        Ok((
+            self.wire
+                .as_ref()
+                .ok_or_else(|| rejected("wallet relay before Activate"))?,
+            self.committed
+                .as_ref()
+                .ok_or_else(|| rejected("wallet relay before actual Activated"))?,
+            self.service
+                .as_ref()
+                .ok_or_else(|| rejected("wallet relay missing original service"))?,
+            self.writer_deadline
+                .ok_or_else(|| rejected("wallet relay missing original writer ceiling"))?,
+        ))
     }
 }

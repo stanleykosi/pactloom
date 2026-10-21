@@ -344,7 +344,7 @@ impl CoordinatedPreconstructionSessionV1 {
         pin: PreparedDeliveryJournalRevisionV3,
         prepared: PreparedCoordinatedEnrollmentV1,
         action: SignerV3EnrollmentFinalV1,
-    ) -> Result<(AccountEnrollmentRecord, PreparedDeliveryJournalRevisionV3)> {
+    ) -> Result<(AccountEnrollmentRecord, Result<PreparedDeliveryJournalRevisionV3>)> {
         let ApprovedCoordinatedEnrollmentV1 {
             approval: a,
             action,
@@ -385,10 +385,12 @@ impl CoordinatedPreconstructionSessionV1 {
                 })
             },
         )?;
-        action
-            .finish_review()
-            .map_err(|_| JournalError::Permission)?;
-        Ok(result)
+        let (record, pin) = result;
+        let pin = pin.and_then(|pin| {
+            action.finish_review().map_err(|_| JournalError::Permission)?;
+            Ok(pin)
+        });
+        Ok((record, pin))
     }
     pub(crate) fn commit_manifest(
         &self,
@@ -396,7 +398,7 @@ impl CoordinatedPreconstructionSessionV1 {
         pin: PreparedDeliveryJournalRevisionV3,
         prepared: PreparedCoordinatedManifestV1,
         action: SignerV3ManifestFinalV1,
-    ) -> Result<(AcceptedManifestRecord, PreparedDeliveryJournalRevisionV3)> {
+    ) -> Result<(AcceptedManifestRecord, Result<PreparedDeliveryJournalRevisionV3>)> {
         let ApprovedCoordinatedManifestV1 {
             approval: a,
             enrollment: expected,
@@ -432,10 +434,12 @@ impl CoordinatedPreconstructionSessionV1 {
             Ok(a.record.clone())
             })
         })?;
-        action
-            .finish_review()
-            .map_err(|_| JournalError::Permission)?;
-        Ok(result)
+        let (record, pin) = result;
+        let pin = pin.and_then(|pin| {
+            action.finish_review().map_err(|_| JournalError::Permission)?;
+            Ok(pin)
+        });
+        Ok((record, pin))
     }
 }
 

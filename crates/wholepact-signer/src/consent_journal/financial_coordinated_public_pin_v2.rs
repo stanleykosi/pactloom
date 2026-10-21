@@ -56,7 +56,7 @@ impl SignerConsentJournal {
         check()?;
         let tx = c.transaction_with_behavior(TransactionBehavior::Deferred)?;
         check()?;
-        durable_born_entry_v1::validate_delivery_v3(&tx, &source.genesis, self.capacity_limits())?;
+        original_delivery::validate(&tx, &source.genesis, self.capacity_limits())?;
         check()?;
         if original_rows_digest(&tx)? != source.original_rows_digest {
             return Err(JournalError::Conflict);
@@ -197,7 +197,7 @@ impl SignerConsentJournal {
         check()?;
         let tx = c.transaction_with_behavior(TransactionBehavior::Deferred)?;
         check()?;
-        durable_born_entry_v1::validate_delivery_v3(&tx, genesis, self.capacity_limits())?;
+        original_delivery::validate(&tx, genesis, self.capacity_limits())?;
         check()?;
         if financial_admission_intents::read_all(&tx)?.len() != 1 {
             return Err(JournalError::RecoveryRequired);
@@ -250,7 +250,7 @@ impl SignerConsentJournal {
         check()?;
         let tx = c.transaction_with_behavior(TransactionBehavior::Deferred)?;
         check()?;
-        durable_born_entry_v1::validate_delivery_v3(&tx, &source.genesis, self.capacity_limits())?;
+        original_delivery::validate(&tx, &source.genesis, self.capacity_limits())?;
         check()?;
         if original_rows_digest(&tx)? != source.original_rows_digest {
             return Err(JournalError::Conflict);

@@ -30,15 +30,24 @@ use wholepact_financial_coordinator_origin::{
     SignerAcquireArmOutboundV1, SignerAcquireFinalOutboundV1, SignerActivateArmOutboundV1,
     SignerActivateFinalOutboundV1, SignerActivateReadOutboundV1, SignerAdmitArmOutboundV1,
     SignerAdmitFinalOutboundV1, SignerContinueRoleV1 as Role, SignerFinancialReadOutboundV1,
-    SignerFinancialWriterReadOutboundV1, SignerSourceEntryOutboundV1, SignerV3EnrollmentOutboundV1,
+    SignerFinancialWriterReadOutboundV1, SignerSourceEntryOutboundV1, SignerV3AdmitArmOutboundV1,
+    SignerV3AdmitFinalOutboundV1, SignerV3AdmitReadOutboundV1, SignerV3EnrollmentOutboundV1,
     SignerV3ManifestOutboundV1, SignerV3PairOutboundV1, SignerV3PrepareReadOutboundV1,
     SignerV3ReceiveOutboundV1, SignerV3RediscloseOutboundV1, SignerV3RedisclosureReadOutboundV1,
     SignerV3SourceEntryOutboundV1, SignerV3SourceEntrySelectionV1,
 };
+use wholepact_financial_coordinator_origin::{
+    SignerReturnExactOutboundV1, SignerReturnReadOutboundV1,
+};
+use wholepact_financial_coordinator_origin::{SignerSignExactOutboundV1, SignerSignReadOutboundV1};
+use wholepact_financial_coordinator_origin::{
+    SignerWalletObserveOutboundV1, SignerWalletPrepareOutboundV1,
+};
 
 use zeroize::Zeroizing;
 
-const COMMAND_SLOTS: usize = 74;
+use wholepact_financial_coordinator_origin::SignerV3AuditOutboundV1;
+const COMMAND_SLOTS: usize = 96;
 const SECURITY_SLOTS: usize = 128;
 const HOST_OUTPUT_SLOTS: usize = 4;
 const HOST_STATUS_SLOTS: usize = 3;
@@ -54,9 +63,20 @@ pub(super) enum HostStatus {
 }
 
 enum Command {
+    ReturnRead(SignerReturnReadOutboundV1),
+    ReturnExact(SignerReturnExactOutboundV1),
+    SignRead(SignerSignReadOutboundV1),
+    SignExact(SignerSignExactOutboundV1),
+    FinancialSetup(Role, String, String),
+    WalletPrepare(SignerWalletPrepareOutboundV1),
+    WalletObserve(SignerWalletObserveOutboundV1),
     BeginV3(Role, SignerV3SourceEntrySelectionV1, Instant),
     V3Entry(SignerV3SourceEntryOutboundV1),
     V3Pair(SignerV3PairOutboundV1),
+    V3Audit(SignerV3AuditOutboundV1),
+    V3AdmitFinal(SignerV3AdmitFinalOutboundV1),
+    V3AdmitArm(SignerV3AdmitArmOutboundV1),
+    V3AdmitRead(SignerV3AdmitReadOutboundV1),
     ActivateFinal(SignerActivateFinalOutboundV1),
     ActivateArm(SignerActivateArmOutboundV1),
     ActivateRead(SignerActivateReadOutboundV1),
@@ -158,6 +178,17 @@ pub(super) struct Driver {
     writer_read_sent: [bool; 2],
     acquire_armed: [bool; 2],
     acquire_final: [bool; 2],
+    v3_audit_sent: [bool; 2],
+    v3_admit_final: [bool; 2],
+    v3_admit_arm: [bool; 2],
+    v3_admit_read: [bool; 2],
+    return_read: [bool; 2],
+    return_exact: [bool; 2],
+    sign_read: [bool; 2],
+    sign_exact: [bool; 2],
+    financial_setup: [bool; 2],
+    wallet_prepare: [bool; 2],
+    wallet_observe: [bool; 2],
     activate_final: [bool; 2],
     activate_arm: [bool; 2],
     activate_read: [bool; 2],
@@ -233,6 +264,17 @@ impl Driver {
             writer_read_sent: [false; 2],
             acquire_armed: [false; 2],
             acquire_final: [false; 2],
+            v3_audit_sent: [false; 2],
+            v3_admit_final: [false; 2],
+            v3_admit_arm: [false; 2],
+            v3_admit_read: [false; 2],
+            return_read: [false; 2],
+            return_exact: [false; 2],
+            sign_read: [false; 2],
+            sign_exact: [false; 2],
+            financial_setup: [false; 2],
+            wallet_prepare: [false; 2],
+            wallet_observe: [false; 2],
             activate_final: [false; 2],
             activate_arm: [false; 2],
             activate_read: [false; 2],
@@ -457,10 +499,28 @@ impl Driver {
         // checks the genuine outbound's same-source and same-Core binding.
         self.queue(Command::V3Pair(outbound))
     }
+    pub(super) fn select_financial_setup(
+        &mut self,
+        role: Role,
+        writer: String,
+        wallet: String,
+    ) -> Result<()> {
+        if !self.v3_audit_sent[index(role)]
+            || !claim_once(
+                &mut self.financial_setup,
+                role,
+                self.revoked.load(Ordering::Acquire),
+            )
+        {
+            self.revoke();
+            return Err(rejected("financial setup repeated or restricted"));
+        }
+        self.queue(Command::FinancialSetup(role, writer, wallet))
+    }
     pub(super) fn begin(&mut self, role: Role, original_prequeue_ceiling: Instant) -> Result<()> {
         // Queue ordering is necessary, not proof of Opened. The endpoint
         // independently requires the actual authenticated V3 predecessor state.
-        if !self.v3_entry_sent[index(role)]
+        if !self.financial_setup[index(role)]
             || !claim_once(&mut self.begun, role, self.revoked.load(Ordering::Acquire))
         {
             self.revoke();
@@ -778,6 +838,114 @@ impl Driver {
         }
         self.queue(Command::WriterRead(outbound))
     }
+    pub(super) fn send_return_read(
+        &mut self,
+        role: Role,
+        outbound: SignerReturnReadOutboundV1,
+    ) -> Result<()> {
+        // Queue bookkeeping cannot establish actual Prepared or Finished custody.
+        if !self.sign_exact[index(role)]
+            || !claim_once(
+                &mut self.return_read,
+                role,
+                self.revoked.load(Ordering::Acquire),
+            )
+        {
+            self.revoke();
+            return Err(rejected("Return outbound consumed or restricted"));
+        }
+        self.queue(Command::ReturnRead(outbound))
+    }
+    pub(super) fn send_return_exact(
+        &mut self,
+        role: Role,
+        outbound: SignerReturnExactOutboundV1,
+    ) -> Result<()> {
+        // Queue bookkeeping cannot establish actual Prepared or Finished custody.
+        if !self.return_read[index(role)]
+            || !claim_once(
+                &mut self.return_exact,
+                role,
+                self.revoked.load(Ordering::Acquire),
+            )
+        {
+            self.revoke();
+            return Err(rejected("Return outbound consumed or restricted"));
+        }
+        self.queue(Command::ReturnExact(outbound))
+    }
+    pub(super) fn send_sign_read(
+        &mut self,
+        role: Role,
+        outbound: SignerSignReadOutboundV1,
+    ) -> Result<()> {
+        // Only queue bookkeeping; genuine Origin custody proves actual predecessor.
+        if !self.wallet_observe[index(role)]
+            || !claim_once(
+                &mut self.sign_read,
+                role,
+                self.revoked.load(Ordering::Acquire),
+            )
+        {
+            self.revoke();
+            return Err(rejected("Sign outbound consumed or restricted"));
+        }
+        self.queue(Command::SignRead(outbound))
+    }
+    pub(super) fn send_sign_exact(
+        &mut self,
+        role: Role,
+        outbound: SignerSignExactOutboundV1,
+    ) -> Result<()> {
+        // Only queue bookkeeping; genuine Origin custody proves actual predecessor.
+        if !self.sign_read[index(role)]
+            || !claim_once(
+                &mut self.sign_exact,
+                role,
+                self.revoked.load(Ordering::Acquire),
+            )
+        {
+            self.revoke();
+            return Err(rejected("Sign outbound consumed or restricted"));
+        }
+        self.queue(Command::SignExact(outbound))
+    }
+    pub(super) fn send_wallet_prepare(
+        &mut self,
+        role: Role,
+        outbound: SignerWalletPrepareOutboundV1,
+    ) -> Result<()> {
+        // Bookkeeping is not success: Origin checks genuine retained predecessor custody.
+        if !self.activate_final[index(role)]
+            || !claim_once(
+                &mut self.wallet_prepare,
+                role,
+                self.revoked.load(Ordering::Acquire),
+            )
+        {
+            self.revoke();
+            return Err(rejected("wallet outbound consumed or restricted"));
+        }
+        self.queue(Command::WalletPrepare(outbound))
+    }
+    pub(super) fn send_wallet_observe(
+        &mut self,
+        role: Role,
+        outbound: SignerWalletObserveOutboundV1,
+    ) -> Result<()> {
+        // Bookkeeping is not success: Origin checks genuine retained predecessor custody.
+        if !self.wallet_prepare[index(role)]
+            || !claim_once(
+                &mut self.wallet_observe,
+                role,
+                self.revoked.load(Ordering::Acquire),
+            )
+        {
+            self.revoke();
+            return Err(rejected("wallet outbound consumed or restricted"));
+        }
+        self.queue(Command::WalletObserve(outbound))
+    }
     pub(super) fn send_activate_read(
         &mut self,
         role: Role,
@@ -828,6 +996,74 @@ impl Driver {
             return Err(rejected("Activate outbound consumed or restricted"));
         }
         self.queue(Command::ActivateFinal(outbound))
+    }
+    pub(super) fn send_v3_admit_read(
+        &mut self,
+        role: Role,
+        outbound: SignerV3AdmitReadOutboundV1,
+    ) -> Result<()> {
+        if !self.v3_receive_sent[index(role)]
+            || !claim_once(
+                &mut self.v3_admit_read,
+                role,
+                self.revoked.load(Ordering::Acquire),
+            )
+        {
+            self.revoke();
+            return Err(rejected("V3 admission outbound consumed or restricted"));
+        }
+        self.queue(Command::V3AdmitRead(outbound))
+    }
+    pub(super) fn send_v3_admit_arm(
+        &mut self,
+        role: Role,
+        outbound: SignerV3AdmitArmOutboundV1,
+    ) -> Result<()> {
+        if !self.v3_admit_read[index(role)]
+            || !claim_once(
+                &mut self.v3_admit_arm,
+                role,
+                self.revoked.load(Ordering::Acquire),
+            )
+        {
+            self.revoke();
+            return Err(rejected("V3 admission outbound consumed or restricted"));
+        }
+        self.queue(Command::V3AdmitArm(outbound))
+    }
+    pub(super) fn send_v3_admit_final(
+        &mut self,
+        role: Role,
+        outbound: SignerV3AdmitFinalOutboundV1,
+    ) -> Result<()> {
+        if !self.v3_admit_arm[index(role)]
+            || !claim_once(
+                &mut self.v3_admit_final,
+                role,
+                self.revoked.load(Ordering::Acquire),
+            )
+        {
+            self.revoke();
+            return Err(rejected("V3 admission outbound consumed or restricted"));
+        }
+        self.queue(Command::V3AdmitFinal(outbound))
+    }
+    pub(super) fn send_v3_audit(
+        &mut self,
+        role: Role,
+        outbound: SignerV3AuditOutboundV1,
+    ) -> Result<()> {
+        if !self.v3_admit_final[index(role)]
+            || !claim_once(
+                &mut self.v3_audit_sent,
+                role,
+                self.revoked.load(Ordering::Acquire),
+            )
+        {
+            self.revoke();
+            return Err(rejected("Audit outbound consumed or restricted"));
+        }
+        self.queue(Command::V3Audit(outbound))
     }
     pub(super) fn send_acquire_arm(
         &mut self,
@@ -1033,6 +1269,24 @@ fn drive(
                     Command::V3Receive(outbound) => {
                         record_send_progress(endpoint.try_send_v3_receive(outbound)?, &revoked)
                     }
+                    Command::ReturnRead(outbound) => {
+                        record_send_progress(endpoint.try_send_return_read(outbound)?, &revoked)
+                    }
+                    Command::ReturnExact(outbound) => {
+                        record_send_progress(endpoint.try_send_return_exact(outbound)?, &revoked)
+                    }
+                    Command::SignRead(outbound) => {
+                        record_send_progress(endpoint.try_send_sign_read(outbound)?, &revoked)
+                    }
+                    Command::SignExact(outbound) => {
+                        record_send_progress(endpoint.try_send_sign_exact(outbound)?, &revoked)
+                    }
+                    Command::WalletPrepare(outbound) => {
+                        record_send_progress(endpoint.try_send_wallet_prepare(outbound)?, &revoked)
+                    }
+                    Command::WalletObserve(outbound) => {
+                        record_send_progress(endpoint.try_send_wallet_observe(outbound)?, &revoked)
+                    }
                     Command::ActivateRead(outbound) => {
                         record_send_progress(endpoint.try_send_activate_read(outbound)?, &revoked)
                     }
@@ -1042,12 +1296,28 @@ fn drive(
                     Command::ActivateFinal(outbound) => {
                         record_send_progress(endpoint.try_send_activate_final(outbound)?, &revoked)
                     }
+                    Command::V3AdmitRead(outbound) => {
+                        record_send_progress(endpoint.try_send_v3_admit_read(outbound)?, &revoked)
+                    }
+                    Command::V3AdmitArm(outbound) => {
+                        record_send_progress(endpoint.try_send_v3_admit_arm(outbound)?, &revoked)
+                    }
+                    Command::V3AdmitFinal(outbound) => {
+                        record_send_progress(endpoint.try_send_v3_admit_final(outbound)?, &revoked)
+                    }
+                    Command::V3Audit(outbound) => {
+                        record_send_progress(endpoint.try_send_v3_audit(outbound)?, &revoked)
+                    }
                     Command::V3Pair(outbound) => {
                         record_send_progress(endpoint.try_send_v3_pair(outbound)?, &revoked)
                     }
                     Command::V3Entry(outbound) => {
                         record_send_progress(endpoint.try_send_v3_source_entry(outbound)?, &revoked)
                     }
+                    Command::FinancialSetup(role, writer, wallet) => record_send_progress(
+                        endpoint.try_select_financial_setup(role, writer, wallet)?,
+                        &revoked,
+                    ),
                     Command::Begin(role, ceiling) => record_send_progress(
                         endpoint.try_begin_source_entry(role, ceiling)?,
                         &revoked,
@@ -1872,5 +2142,85 @@ mod activate_driver_tests {
         assert!(claim_once(&mut final_once, Role::Signer2, false));
         assert!(!read[1]);
         assert!(!arm[1]);
+    }
+}
+
+#[cfg(test)]
+mod v3_admission_driver_tests {
+    use super::*;
+    #[test]
+    fn v3_admission_read_arm_final_have_distinct_restrictive_once_bits() {
+        let mut read = [false; 2];
+        let mut arm = [false; 2];
+        let mut final_once = [false; 2];
+        assert!(claim_once(&mut read, Role::Signer1, false));
+        assert!(!claim_once(&mut read, Role::Signer1, false));
+        assert!(!arm[0]);
+        assert!(!final_once[0]);
+        assert!(claim_once(&mut arm, Role::Signer1, false));
+        assert!(!claim_once(&mut final_once, Role::Signer1, true));
+        assert!(claim_once(&mut final_once, Role::Signer2, false));
+        assert!(!read[1]);
+        assert!(!arm[1]);
+    }
+}
+
+#[cfg(test)]
+mod v3_audit_driver_tests {
+    use super::*;
+    #[test]
+    fn audit_is_separate_one_use_metadata_never_claims_completion() {
+        let mut audit = [false; 2];
+        assert!(!claim_once(&mut audit, Role::Signer1, true));
+        assert!(claim_once(&mut audit, Role::Signer2, false));
+        assert!(!claim_once(&mut audit, Role::Signer2, false));
+    }
+}
+
+#[cfg(test)]
+mod wallet_driver_tests {
+    use super::*;
+    #[test]
+    fn wallet_purposes_are_separate_once_and_revocation_sensitive() {
+        let mut prepare = [false; 2];
+        let mut observe = [false; 2];
+        assert!(claim_once(&mut prepare, Role::Signer1, false));
+        assert!(!observe[0]);
+        assert!(!claim_once(&mut prepare, Role::Signer1, false));
+        assert!(!claim_once(&mut observe, Role::Signer1, true));
+        assert!(claim_once(&mut observe, Role::Signer1, false));
+        assert!(!claim_once(&mut observe, Role::Signer1, false));
+    }
+}
+
+#[cfg(test)]
+mod sign_driver_tests {
+    use super::*;
+    #[test]
+    fn sign_read_and_exact_are_distinct_once_and_r_sensitive() {
+        let mut read = [false; 2];
+        let mut exact = [false; 2];
+        assert!(claim_once(&mut read, Role::Signer1, false));
+        assert!(!exact[0]);
+        assert!(!claim_once(&mut read, Role::Signer1, false));
+        assert!(!claim_once(&mut exact, Role::Signer1, true));
+        assert!(claim_once(&mut exact, Role::Signer1, false));
+        assert!(!claim_once(&mut exact, Role::Signer1, false));
+    }
+}
+
+#[cfg(test)]
+mod return_driver_tests {
+    use super::*;
+    #[test]
+    fn return_read_and_exact_are_distinct_once_and_r_sensitive() {
+        let mut read = [false; 2];
+        let mut exact = [false; 2];
+        assert!(claim_once(&mut read, Role::Signer1, false));
+        assert!(!exact[0]);
+        assert!(!claim_once(&mut read, Role::Signer1, false));
+        assert!(!claim_once(&mut exact, Role::Signer1, true));
+        assert!(claim_once(&mut exact, Role::Signer1, false));
+        assert!(!claim_once(&mut exact, Role::Signer1, false));
     }
 }

@@ -8,7 +8,6 @@
 //! C is a trusted transient password surface. Its owned storage is zeroized;
 //! stock GUI undo/input/backend/OS/IME temporaries are dropped, not guaranteed
 //! overwritten. Neither this controller nor its input leaf clears OS clipboard.
-use wholepact_financial_coordinator_origin::{SignerV3ReceiveTicketV1, SignerV3ReceivePresentationV1, SignerV3ReceivedV1, SignerV3PrepareReadTicketV1, SignerV3PrepareReadPresentationV1, SignerV3PreparedV1};
 use crate::{
     financial_source_driver::{Driver, HostStatus, Outcome},
     host_line_input::{HostLineInput, HostLineStatus},
@@ -23,6 +22,7 @@ use std::{
     rc::Rc,
     time::{Duration, Instant},
 };
+use wholepact_financial_coordinator_origin::SignerFinancialWalletSetupSelectionV1;
 use wholepact_financial_coordinator_origin::{
     CoordinatorFinancialEndpointV1, CoordinatorFinancialEventV1 as Event,
     CoordinatorFinancialHistoryEventV1 as HistoryEvent, CoordinatorFinancialNativeV1,
@@ -38,6 +38,10 @@ use wholepact_financial_coordinator_origin::{
     SignerContinueOutcomeV1, SignerContinuePresentationV1, SignerContinueRoleV1 as Role,
     SignerFinancialReadTicketV1, SignerSourceEntryOfferV1,
 };
+use wholepact_financial_coordinator_origin::{
+    SignerV3PrepareReadPresentationV1, SignerV3PrepareReadTicketV1, SignerV3PreparedV1,
+    SignerV3ReceivePresentationV1, SignerV3ReceiveTicketV1, SignerV3ReceivedV1,
+};
 use winit::platform::wayland::EventLoopBuilderExtWayland;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -51,6 +55,58 @@ use wholepact_financial_coordinator_origin::{
     SignerActivateReadyTicketV1, SignerActivateReviewTicketV1,
     SignerFinancialWriterReadPresentationV1, SignerFinancialWriterReadTicketV1,
 };
+
+use wholepact_financial_coordinator_origin::{
+    SignerReturnCompletedV1, SignerReturnExactPresentationV1, SignerReturnExactTicketV1,
+    SignerReturnFailureStageV1, SignerReturnFailureV1, SignerReturnPreparedV1,
+    SignerReturnReadPresentationV1, SignerReturnReadTicketV1,
+};
+use wholepact_financial_coordinator_origin::{
+    SignerSignCommittedV1, SignerSignExactPresentationV1, SignerSignExactTicketV1,
+    SignerSignFailureStageV1, SignerSignFailureV1, SignerSignPreparedV1,
+    SignerSignReadPresentationV1, SignerSignReadTicketV1,
+};
+use wholepact_financial_coordinator_origin::{
+    SignerWalletFailureStageV1, SignerWalletFailureV1, SignerWalletObservePresentationV1,
+    SignerWalletObserveTicketV1, SignerWalletObservedV1, SignerWalletPreparePresentationV1,
+    SignerWalletPrepareTicketV1, SignerWalletPreparedV1,
+};
+#[derive(Default)]
+struct ReturnFlow {
+    read: Option<SignerReturnReadTicketV1>,
+    read_display: Option<SignerReturnReadPresentationV1>,
+    read_attempted: bool,
+    prepared: Option<SignerReturnPreparedV1>,
+    exact: Option<SignerReturnExactTicketV1>,
+    exact_display: Option<SignerReturnExactPresentationV1>,
+    exact_attempted: bool,
+    completed: Option<SignerReturnCompletedV1>,
+    failure: Option<SignerReturnFailureV1>,
+}
+#[derive(Default)]
+struct SignFlow {
+    read: Option<SignerSignReadTicketV1>,
+    read_display: Option<SignerSignReadPresentationV1>,
+    read_attempted: bool,
+    prepared: Option<SignerSignPreparedV1>,
+    exact: Option<SignerSignExactTicketV1>,
+    exact_display: Option<SignerSignExactPresentationV1>,
+    exact_attempted: bool,
+    committed: Option<SignerSignCommittedV1>,
+    failure: Option<SignerSignFailureV1>,
+}
+#[derive(Default)]
+struct WalletFlow {
+    prepare: Option<SignerWalletPrepareTicketV1>,
+    prepare_display: Option<SignerWalletPreparePresentationV1>,
+    prepare_attempted: bool,
+    prepared: Option<SignerWalletPreparedV1>,
+    observe: Option<SignerWalletObserveTicketV1>,
+    observe_display: Option<SignerWalletObservePresentationV1>,
+    observe_attempted: bool,
+    observed: Option<SignerWalletObservedV1>,
+    failure: Option<SignerWalletFailureV1>,
+}
 
 #[derive(Default)]
 struct ActivateFlow {
@@ -113,11 +169,40 @@ use wholepact_financial_coordinator_origin::{
     SignerV3SourceOpenedV1,
 };
 
+use wholepact_financial_coordinator_origin::{
+    SignerV3AdmissionObservationV1, SignerV3AdmitPresentationV1, SignerV3AdmitReadPresentationV1,
+    SignerV3AdmitReadRetainedV1, SignerV3AdmitReadTicketV1, SignerV3AdmitReadyTicketV1,
+    SignerV3AdmitReadyV1, SignerV3AdmitTicketV1, SignerV3AdmittedV1,
+};
+
+use wholepact_financial_coordinator_origin::{
+    SignerV3AuditPresentationV1, SignerV3AuditTicketV1, SignerV3AuditedV1,
+};
 const _: () = assert!(matches!(log::STATIC_MAX_LEVEL, log::LevelFilter::Off));
 const READ_PURPOSE: &str = "original-history-and-one-local-continue-preparation-v2";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase {
+    ReturnReadReview,
+    ReturnReading,
+    ReturnPrepared,
+    ReturnExactReview,
+    ReturningExact,
+    ReturnCompleted,
+    SignReadReview,
+    SignReading,
+    SignPrepared,
+    SignExactReview,
+    SigningExact,
+    SignCommitted,
+    FinancialSetupConfiguring,
+    FinancialSetupSelected,
+    WalletPrepareReview,
+    WalletPreparing,
+    WalletPrepared,
+    WalletObserveReview,
+    WalletObserving,
+    WalletObserved,
     Selecting,
     ActivateReadReview,
     ActivateReading,
@@ -136,6 +221,17 @@ enum Phase {
     V3PairReview,
     V3Pairing,
     V3Paired,
+    V3AuditReview,
+    V3Auditing,
+    V3Audited,
+    V3AdmitReadReview,
+    V3AdmitReading,
+    V3AdmitReadRetained,
+    V3AdmitReview,
+    V3AdmitArmed,
+    V3AdmitReady,
+    V3Admitting,
+    V3AdmissionRetained,
     V3ReceiveReview,
     V3Receiving,
     V3Received,
@@ -220,6 +316,17 @@ struct PairedConsent {
     acknowledged: [bool; 2],
 }
 enum Intent {
+    ShowContinuationSelector(Role),
+    ParkFinancial,
+    ResumeFinancial(Role),
+    ReturnRead,
+    ReturnExact,
+    SignRead,
+    SignExact,
+    ConfigureFinancialSetup(Role),
+    SelectFinancialSetup,
+    WalletPrepare,
+    WalletObserve,
     ActivateRead,
     ActivateArm,
     ActivateFinal,
@@ -227,6 +334,13 @@ enum Intent {
     ConfigureV3(Role),
     ReviewV3Pair(Role),
     FinalV3Pair,
+    ReviewV3Audit(Role),
+    FinalV3Audit,
+    ReviewV3AdmitRead(Role),
+    FinalV3AdmitRead,
+    ReviewV3Admit(Role),
+    ArmV3Admit,
+    FinalV3Admit,
     ReviewV3Receive(Role),
     FinalV3Receive,
     ReviewV3PrepareRead(Role),
@@ -287,7 +401,14 @@ pub(super) fn run(
     let terminal = endpoint.take_host_terminal()?;
     let driver = Rc::new(RefCell::new(Driver::spawn(endpoint, terminal)?));
     let app = Window { native, driver: Rc::clone(&driver), session_deadline,
+        financial_loaded:None, financial_parked:[None,None], continuation_selector_visible:[false;2],
         writer_flow: WriterFlow::default(),
+        financial_writer_text: [String::new(),String::new()],
+        financial_wallet_text: [String::new(),String::new()],
+        financial_setup_selected: [false;2],
+        return_flow:ReturnFlow::default(),
+        sign_flow:SignFlow::default(),
+        wallet_flow: WalletFlow::default(),
         activate_flow: ActivateFlow::default(),
         v3_selection_text: [String::new(), String::new()], v3_selection: [None, None],
         v3_source_result: [None, None], v3_pair_endpoint: [None, None],
@@ -305,6 +426,9 @@ pub(super) fn run(
         v3_prepare_read_result: [None, None], v3_prepare_read_attempted: [false; 2],
         v3_receive_ticket: [None, None], v3_receive_display: [None, None],
         v3_receive_result: [None, None], v3_receive_attempted: [false; 2],
+        v3_admit_read_ticket:[None,None],v3_admit_read_display:[None,None],v3_admit_read_result:[None,None],v3_admit_read_attempted:[false;2],
+        v3_admit_ticket:[None,None],v3_admit_display:[None,None],v3_admit_ready:[None,None],v3_admit_ready_data:[None,None],v3_admit_result:[None,None],v3_admit_attempted:[false;2],
+        v3_audit_ticket:[None,None],v3_audit_display:[None,None],v3_audit_result:[None,None],v3_audit_attempted:[false;2],
         v3_pair_result: [None, None], v3_pair_attempted: [false; 2],
         v3_offer: None, v3_display: [None, None], v3_opened: [false; 2], v3_failed: [false; 2],
         phase: Phase::Selecting, active: None, progress: [Progress::NotStarted; 2],
@@ -355,13 +479,151 @@ pub(super) fn run(
     cleanup
 }
 
+// Each original financial owner is moved, never cloned or recreated, when
+// the user explicitly leaves a completed Sign/Return stage. Parked custody
+// has no visible approval progress and remains subject to original restriction.
+#[derive(Default)]
+struct RetainedFinancialRole {
+    phase: Option<Phase>,
+    writer_flow: WriterFlow,
+    return_flow: ReturnFlow,
+    sign_flow: SignFlow,
+    wallet_flow: WalletFlow,
+    activate_flow: ActivateFlow,
+    entry: Option<SignerSourceEntryOfferV1>,
+    read: Option<SignerFinancialReadTicketV1>,
+    history_setup: Option<FinancialHistorySetupTicketV1>,
+    history_review: Option<FinancialHistoryReviewTicketV1>,
+    history_serving: Option<FinancialHistoryServingV1>,
+    history_retirement: Option<CoordinatorWitnessRetirementTicketV1>,
+    history_retired: Option<CoordinatorWitnessRetiredV1>,
+    retirement_paused: Option<(Role, Instant)>,
+    history_resume_pending: Option<Role>,
+    continuation: Option<SignerContinuePresentationV1>,
+    continue_review: Option<FinancialContinueReviewTicketV1>,
+    continue_ready: Option<FinancialContinueReadyTicketV1>,
+    continue_deadline: Option<Instant>,
+    setup: Option<FinancialWitnessSetupTicketV1>,
+    signer_review: Option<SignerAdmitReviewTicketV1>,
+    signer_ready: Option<SignerAdmitReadyTicketV1>,
+    witness_review: Option<FinancialWitnessReviewTicketV1>,
+    witness_armed: Option<FinancialWitnessArmedV1>,
+    witness_ready: Option<FinancialWitnessReadyTicketV1>,
+    paired: PairedConsent,
+    signer_arm_sent: bool,
+    witness_arm_sent: bool,
+    binding: Option<RequestBinding>,
+    request_digest: String,
+}
+impl RetainedFinancialRole {
+    fn exchange(&mut self, w: &mut Window) {
+        std::mem::swap(&mut self.writer_flow, &mut w.writer_flow);
+        std::mem::swap(&mut self.return_flow, &mut w.return_flow);
+        std::mem::swap(&mut self.sign_flow, &mut w.sign_flow);
+        std::mem::swap(&mut self.wallet_flow, &mut w.wallet_flow);
+        std::mem::swap(&mut self.activate_flow, &mut w.activate_flow);
+        std::mem::swap(&mut self.entry, &mut w.entry);
+        std::mem::swap(&mut self.read, &mut w.read);
+        std::mem::swap(&mut self.history_setup, &mut w.history_setup);
+        std::mem::swap(&mut self.history_review, &mut w.history_review);
+        std::mem::swap(&mut self.history_serving, &mut w.history_serving);
+        std::mem::swap(&mut self.history_retirement, &mut w.history_retirement);
+        std::mem::swap(&mut self.history_retired, &mut w.history_retired);
+        std::mem::swap(&mut self.retirement_paused, &mut w.retirement_paused);
+        std::mem::swap(
+            &mut self.history_resume_pending,
+            &mut w.history_resume_pending,
+        );
+        std::mem::swap(&mut self.continuation, &mut w.continuation);
+        std::mem::swap(&mut self.continue_review, &mut w.continue_review);
+        std::mem::swap(&mut self.continue_ready, &mut w.continue_ready);
+        std::mem::swap(&mut self.continue_deadline, &mut w.continue_deadline);
+        std::mem::swap(&mut self.setup, &mut w.setup);
+        std::mem::swap(&mut self.signer_review, &mut w.signer_review);
+        std::mem::swap(&mut self.signer_ready, &mut w.signer_ready);
+        std::mem::swap(&mut self.witness_review, &mut w.witness_review);
+        std::mem::swap(&mut self.witness_armed, &mut w.witness_armed);
+        std::mem::swap(&mut self.witness_ready, &mut w.witness_ready);
+        std::mem::swap(&mut self.paired, &mut w.paired);
+        std::mem::swap(&mut self.signer_arm_sent, &mut w.signer_arm_sent);
+        std::mem::swap(&mut self.witness_arm_sent, &mut w.witness_arm_sent);
+        std::mem::swap(&mut self.binding, &mut w.binding);
+        std::mem::swap(&mut self.request_digest, &mut w.request_digest);
+    }
+    fn clear_actions(&mut self) {
+        self.return_flow.read.take();
+        self.return_flow.exact.take();
+        self.sign_flow.read.take();
+        self.sign_flow.exact.take();
+        self.wallet_flow.prepare.take();
+        self.wallet_flow.observe.take();
+        self.activate_flow.read.take();
+        self.activate_flow.review.take();
+        self.activate_flow.ready.take();
+        self.writer_flow.read.take();
+        self.writer_flow.setup.take();
+        self.writer_flow.review.take();
+        self.writer_flow.serving.take();
+        self.writer_flow.acquire.take();
+        self.writer_flow.ready.take();
+        self.entry.take();
+        self.read.take();
+        self.history_setup.take();
+        self.history_review.take();
+        self.history_serving.take();
+        self.history_retirement.take();
+        self.history_retired.take();
+        self.continue_review.take();
+        self.continue_ready.take();
+        self.setup.take();
+        self.signer_review.take();
+        self.signer_ready.take();
+        self.witness_review.take();
+        self.witness_armed.take();
+        self.witness_ready.take();
+    }
+    fn current(&self) -> bool {
+        self.writer_flow
+            .serving
+            .as_ref()
+            .is_none_or(|s| s.check_current().is_ok())
+            && self
+                .return_flow
+                .read
+                .as_ref()
+                .is_none_or(|t| t.check_current().is_ok())
+            && self
+                .return_flow
+                .exact
+                .as_ref()
+                .is_none_or(|t| t.check_current().is_ok())
+    }
+}
+
 struct Window {
+    continuation_selector_visible: [bool; 2],
+    financial_loaded: Option<Role>,
+    financial_parked: [Option<RetainedFinancialRole>; 2],
     v3_source_result: [Option<SignerV3SourceOpenedV1>; 2],
     v3_pair_endpoint: [Option<SignerV3PairEndpointV1>; 2],
     v3_pair_ticket: [Option<SignerV3PairTicketV1>; 2],
     v3_pair_display: [Option<SignerV3PairPresentationV1>; 2],
     v3_pair_result: [Option<SignerV3PairedV1>; 2],
     v3_pair_attempted: [bool; 2],
+    v3_audit_ticket: [Option<SignerV3AuditTicketV1>; 2],
+    v3_audit_display: [Option<SignerV3AuditPresentationV1>; 2],
+    v3_audit_result: [Option<SignerV3AuditedV1>; 2],
+    v3_audit_attempted: [bool; 2],
+    v3_admit_read_ticket: [Option<SignerV3AdmitReadTicketV1>; 2],
+    v3_admit_read_display: [Option<SignerV3AdmitReadPresentationV1>; 2],
+    v3_admit_read_result: [Option<SignerV3AdmitReadRetainedV1>; 2],
+    v3_admit_read_attempted: [bool; 2],
+    v3_admit_ticket: [Option<SignerV3AdmitTicketV1>; 2],
+    v3_admit_display: [Option<SignerV3AdmitPresentationV1>; 2],
+    v3_admit_ready: [Option<SignerV3AdmitReadyTicketV1>; 2],
+    v3_admit_ready_data: [Option<SignerV3AdmitReadyV1>; 2],
+    v3_admit_result: [Option<SignerV3AdmittedV1>; 2],
+    v3_admit_attempted: [bool; 2],
     v3_receive_ticket: [Option<SignerV3ReceiveTicketV1>; 2],
     v3_receive_display: [Option<SignerV3ReceivePresentationV1>; 2],
     v3_receive_result: [Option<SignerV3ReceivedV1>; 2],
@@ -395,6 +657,12 @@ struct Window {
     v3_opened: [bool; 2],
     v3_failed: [bool; 2],
     writer_flow: WriterFlow,
+    financial_writer_text: [String; 2],
+    financial_wallet_text: [String; 2],
+    financial_setup_selected: [bool; 2],
+    return_flow: ReturnFlow,
+    sign_flow: SignFlow,
+    wallet_flow: WalletFlow,
     activate_flow: ActivateFlow,
     native: CoordinatorFinancialNativeV1,
     driver: Rc<RefCell<Driver>>,
@@ -1056,6 +1324,196 @@ impl Window {
         Ok(())
     }
 
+    fn accept_v3_admission(&mut self, event: Event, frame: u64) -> Result<()> {
+        match event {
+            Event::V3AdmitReadDisplay(ticket) => {
+                let p = ticket.presentation();
+                p.validate()?;
+                let i = index(p.actor.signer_role);
+                let received = self.v3_receive_result[i]
+                    .as_ref()
+                    .ok_or_else(|| rejected("AdmitRead before actual Received"))?;
+                let prior = self.v3_receive_display[i]
+                    .as_ref()
+                    .ok_or_else(|| rejected("original Receive missing"))?;
+                if self.v3_admit_read_display[i].is_some()
+                    || &p.facts.received != received
+                    || !v3_admit_read_matches_receive(p, prior)
+                {
+                    return Err(rejected("AdmitRead original custody/window changed"));
+                }
+                self.v3_admit_read_display[i] = Some(p.clone());
+                if self.terminal() {
+                    drop(ticket);
+                    return Ok(());
+                }
+                ticket.check_current()?;
+                self.v3_admit_read_ticket[i] = Some(ticket);
+            }
+            Event::V3AdmitReadRetained { role, data } => {
+                data.validate()?;
+                let i = index(role);
+                let p = self.v3_admit_read_display[i]
+                    .as_ref()
+                    .ok_or_else(|| rejected("AdmitRead result without exact review"))?;
+                if !self.v3_admit_read_attempted[i]
+                    || self.v3_admit_read_result[i].is_some()
+                    || data.admit_read_presentation_digest != p.presentation_digest
+                    || data.source_identity_digest != p.facts.received.source_identity_digest
+                    || data.owner_service_digest != p.facts.received.owner_service_digest
+                    || data.recipient_intent_digest != p.facts.received.recipient_intent_digest
+                {
+                    return Err(rejected("AdmitRead actual retained preparation changed"));
+                }
+                self.v3_admit_read_result[i] = Some(data);
+                if !self.terminal() {
+                    if self.active != Some(role) || self.phase != Phase::V3AdmitReading {
+                        return Err(rejected("AdmitRead result outside original attempt"));
+                    }
+                    self.transition(Phase::V3AdmitReadRetained, frame);
+                }
+            }
+            Event::V3AdmitDisplay(ticket) => {
+                let p = ticket.presentation();
+                p.validate()?;
+                let i = index(p.actor.signer_role);
+                let read = self.v3_admit_read_display[i]
+                    .as_ref()
+                    .ok_or_else(|| rejected("Admit without original Read"))?;
+                let retained = self.v3_admit_read_result[i]
+                    .as_ref()
+                    .ok_or_else(|| rejected("Admit before actual retained Read"))?;
+                if self.v3_admit_display[i].is_some()
+                    || &p.facts.read != retained
+                    || !v3_admit_preserves_read(p, read)
+                {
+                    return Err(rejected("Admit immutable request/history/window changed"));
+                }
+                self.v3_admit_display[i] = Some(p.clone());
+                if self.terminal() {
+                    drop(ticket);
+                    return Ok(());
+                }
+                ticket.check_current()?;
+                self.v3_admit_ticket[i] = Some(ticket);
+            }
+            Event::V3AdmitReady(ticket) => {
+                let p = ticket.presentation();
+                p.validate()?;
+                let i = index(p.actor.signer_role);
+                let data = ticket.ready();
+                data.validate()?;
+                if self.v3_admit_display[i].as_ref() != Some(p)
+                    || self.v3_admit_ready_data[i].is_some()
+                    || !v3_admit_ready_matches(data, p)
+                {
+                    return Err(rejected("Admit actual READY changed"));
+                }
+                self.v3_admit_ready_data[i] = Some(data.clone());
+                if self.terminal() {
+                    drop(ticket);
+                    return Ok(());
+                }
+                if self.active != Some(p.actor.signer_role) || self.phase != Phase::V3AdmitArmed {
+                    return Err(rejected("Admit unsolicited READY"));
+                }
+                ticket.check_current()?;
+                self.v3_admit_ready[i] = Some(ticket);
+                self.transition(Phase::V3AdmitReady, frame);
+            }
+            Event::V3Admitted { role, data } => {
+                data.validate()?;
+                let i = index(role);
+                let p = self.v3_admit_display[i]
+                    .as_ref()
+                    .ok_or_else(|| rejected("Admit outcome without review"))?;
+                if !self.v3_admit_attempted[i]
+                    || self.v3_admit_result[i].is_some()
+                    || self.v3_admit_ready_data[i].is_none()
+                    || data.admit_presentation_digest != p.presentation_digest
+                    || data.admission_request_digest != p.facts.read.admission_request_digest
+                    || data.admission_review_digest != p.facts.read.admission_review_digest
+                    || data.owner_service_digest != p.facts.read.owner_service_digest
+                {
+                    return Err(rejected("Admit actual outcome binding changed"));
+                }
+                // Unknown is retained uncertainty, never success or retry permission. Neither result establishes completed V3.
+                self.v3_admit_result[i] = Some(data);
+                if !self.terminal() {
+                    if self.active != Some(role) || self.phase != Phase::V3Admitting {
+                        return Err(rejected("Admit outcome outside original Final"));
+                    }
+                    self.transition(Phase::V3AdmissionRetained, frame);
+                }
+            }
+            _ => return Err(rejected("wrong V3 admission event")),
+        }
+        Ok(())
+    }
+    fn accept_v3_audit(&mut self, event: Event, frame: u64) -> Result<()> {
+        match event {
+            Event::V3AuditDisplay(ticket) => {
+                let p = ticket.presentation();
+                p.validate()?;
+                let i = index(p.actor.signer_role);
+                let received = self.v3_receive_result[i]
+                    .as_ref()
+                    .ok_or_else(|| rejected("Audit without actual Received"))?;
+                let admitted = self.v3_admit_result[i]
+                    .as_ref()
+                    .ok_or_else(|| rejected("Audit without actual retained admission"))?;
+                let admission = self.v3_admit_display[i]
+                    .as_ref()
+                    .ok_or_else(|| rejected("Audit without exact admission review"))?;
+                let original = self.v3_prepare_read_display[i]
+                    .as_ref()
+                    .ok_or_else(|| rejected("Audit without original private preparation"))?;
+                let pair = self.v3_pair_display[i]
+                    .as_ref()
+                    .ok_or_else(|| rejected("Audit without original channel"))?;
+                if self.v3_audit_display[i].is_some()
+                    || &p.facts.received != received
+                    || &p.facts.admitted != admitted
+                    || p.facts.operation_id != admission.facts.read.operation_id
+                    || !v3_audit_preserves_original(p, original)
+                    || p.review_ceiling_ms > pair.channel_ceiling_ms
+                    || p.facts.expires_at_ms > pair.facts.channel_expires_at_ms
+                {
+                    return Err(rejected("Audit exact custody or original window changed"));
+                }
+                self.v3_audit_display[i] = Some(p.clone());
+                if self.terminal() {
+                    drop(ticket);
+                    return Ok(());
+                }
+                ticket.check_current()?;
+                self.v3_audit_ticket[i] = Some(ticket);
+            }
+            Event::V3Audited { role, data } => {
+                data.validate()?;
+                let i = index(role);
+                let p = self.v3_audit_display[i]
+                    .as_ref()
+                    .ok_or_else(|| rejected("Audit completion without exact review"))?;
+                if !self.v3_audit_attempted[i]
+                    || self.v3_audit_result[i].is_some()
+                    || !v3_audited_matches_review(&data, p)
+                {
+                    return Err(rejected("Audit actual verified completion changed"));
+                }
+                self.v3_audit_result[i] = Some(data);
+                if !self.terminal() {
+                    if self.active != Some(role) || self.phase != Phase::V3Auditing {
+                        return Err(rejected("Audit result outside original attempt"));
+                    }
+                    self.transition(Phase::V3Audited, frame);
+                }
+                // Origin alone authenticates completion15. This observation does not fabricate Source facts or a custody handoff.
+            }
+            _ => return Err(rejected("wrong Audit event")),
+        }
+        Ok(())
+    }
     fn accept_v3_pair(&mut self, event: Event, frame: u64) -> Result<()> {
         match event {
             Event::V3PairEndpoint { role, data } => {
@@ -1300,6 +1758,542 @@ impl Window {
                 self.writer_transition(WriterStage::ReadReview, frame);
             }
             _ => unreachable!("terminal observations handled"),
+        }
+        Ok(())
+    }
+    fn route_return(&mut self, event: Event, frame: u64) -> Result<()> {
+        let role = match &event {
+            Event::ReturnReadDisplay(t) => t.presentation().actor.signer_role,
+            Event::ReturnExactDisplay(t) => t.presentation().actor.signer_role,
+            Event::ReturnPrepared { role, .. }
+            | Event::ReturnCompleted { role, .. }
+            | Event::ReturnFailed { role, .. } => *role,
+            _ => return Err(rejected("wrong Return route")),
+        };
+        if self.financial_loaded == Some(role) {
+            return self.accept_return(event, frame);
+        }
+        let mut held = self.financial_parked[index(role)]
+            .take()
+            .ok_or_else(|| rejected("Return role has no retained owner"))?;
+        let old_active = self.active;
+        let old_phase = self.phase;
+        let old_frame = self.phase_frame;
+        let old_read = self.read_to_end;
+        let old_ack = self.acknowledged;
+        let old_intent = self.intent.take();
+        let terminal = self.terminal();
+        self.phase = if terminal {
+            old_phase
+        } else {
+            held.phase
+                .ok_or_else(|| rejected("retained Return phase absent"))?
+        };
+        self.active = Some(role);
+        held.exchange(self);
+        let result = self.accept_return(event, frame);
+        let restricted = self.native.is_revoked() || self.terminal();
+        held.phase = Some(self.phase);
+        held.exchange(self);
+        self.financial_parked[index(role)] = Some(held);
+        self.active = old_active;
+        self.phase = old_phase;
+        self.phase_frame = old_frame;
+        self.read_to_end = old_read;
+        self.acknowledged = old_ack;
+        self.intent = old_intent;
+        if restricted && !terminal {
+            self.revoke("Retained original Return was restricted or uncertain; no retry or background approval.");
+        }
+        result
+    }
+    fn accept_return(&mut self, event: Event, frame: u64) -> Result<()> {
+        match event {
+            Event::ReturnReadDisplay(ticket) => {
+                let p = ticket.presentation();
+                p.validate()?;
+                let i = index(p.actor.signer_role);
+                let sign = self
+                    .sign_flow
+                    .exact_display
+                    .as_ref()
+                    .ok_or_else(|| rejected("Return without exact Sign"))?;
+                let pair = self.v3_pair_display[i]
+                    .as_ref()
+                    .ok_or_else(|| rejected("Return original Pair missing"))?;
+                let receive = self.v3_receive_display[i]
+                    .as_ref()
+                    .ok_or_else(|| rejected("Return original material missing"))?;
+                if self.active != Some(p.actor.signer_role)
+                    || self.return_flow.read_display.is_some()
+                    || self.sign_flow.committed.as_ref() != Some(&p.facts.signed)
+                    || self.wallet_flow.observed.as_ref() != Some(&p.facts.observed)
+                    || p.actor != sign.actor
+                    || p.facts.original != sign.facts.original
+                    || p.source_ceiling_ms != sign.source_ceiling_ms
+                    || p.service_ceiling_ms != sign.service_ceiling_ms
+                    || p.writer_session_ceiling_ms != sign.writer_session_ceiling_ms
+                    || p.channel_ceiling_ms != pair.channel_ceiling_ms
+                    || p.channel_expires_at_ms != pair.facts.channel_expires_at_ms
+                    || p.material_ceiling_ms != receive.material_ceiling_ms
+                    || p.material_expires_at_ms != receive.facts.material_expires_at_ms
+                    || p.facts.reviewed_at_ms < sign.facts.reviewed_at_ms
+                    || self.v3_selection[i].as_ref().is_none_or(|original| {
+                        !return_request_matches_actual(
+                            &p.facts.request_json,
+                            &original.account_id,
+                            &p.facts.signed,
+                        )
+                    })
+                {
+                    return Err(rejected(
+                        "Return actual result/original source/Pair/material changed",
+                    ));
+                }
+                self.return_flow.read_display = Some(p.clone());
+                if self.terminal() {
+                    drop(ticket);
+                    return Ok(());
+                }
+                if self.phase != Phase::SignCommitted {
+                    return Err(rejected("Return Read without actual committed Sign"));
+                }
+                ticket.check_current()?;
+                self.writer_flow
+                    .serving
+                    .as_ref()
+                    .ok_or_else(|| rejected("same Signing service missing"))?
+                    .check_current()?;
+                self.return_flow.read = Some(ticket);
+                self.transition(Phase::ReturnReadReview, frame);
+            }
+            Event::ReturnPrepared { role, data } => {
+                data.validate()?;
+                let p = self
+                    .return_flow
+                    .read_display
+                    .as_ref()
+                    .ok_or_else(|| rejected("Return prepared without Read"))?;
+                if self.active != Some(role)
+                    || !self.return_flow.read_attempted
+                    || self.return_flow.prepared.is_some()
+                    || self.return_flow.failure.is_some()
+                    || data.read_presentation_digest != p.presentation_digest
+                {
+                    return Err(rejected("Return actual prepared original Read changed"));
+                }
+                self.return_flow.prepared = Some(data);
+                if !self.terminal() {
+                    if self.phase != Phase::ReturnReading {
+                        return Err(rejected("Return Prepared outside Read attempt"));
+                    }
+                    self.transition(Phase::ReturnPrepared, frame);
+                }
+            }
+            Event::ReturnExactDisplay(ticket) => {
+                let p = ticket.presentation();
+                p.validate()?;
+                let read = self
+                    .return_flow
+                    .read_display
+                    .as_ref()
+                    .ok_or_else(|| rejected("Return Exact missing original Read"))?;
+                let prepared = self
+                    .return_flow
+                    .prepared
+                    .as_ref()
+                    .ok_or_else(|| rejected("Return Exact missing actual Prepared"))?;
+                if self.active != Some(p.actor.signer_role)
+                    || self.return_flow.exact_display.is_some()
+                    || !return_exact_matches_retained(p, read, prepared)
+                {
+                    return Err(rejected(
+                        "Return exact prepared preview/result/clocks changed",
+                    ));
+                }
+                self.return_flow.exact_display = Some(p.clone());
+                if self.terminal() {
+                    drop(ticket);
+                    return Ok(());
+                }
+                if self.phase != Phase::ReturnPrepared {
+                    return Err(rejected("Return Exact before actual Prepared"));
+                }
+                ticket.check_current()?;
+                self.return_flow.exact = Some(ticket);
+                self.transition(Phase::ReturnExactReview, frame);
+            }
+            Event::ReturnCompleted { role, data } => {
+                data.validate()?;
+                let p = self
+                    .return_flow
+                    .exact_display
+                    .as_ref()
+                    .ok_or_else(|| rejected("Return result without exact review"))?;
+                if self.active != Some(role)
+                    || !self.return_flow.exact_attempted
+                    || self.return_flow.completed.is_some()
+                    || self.return_flow.failure.is_some()
+                    || data.return_presentation_digest != p.presentation_digest
+                    || data.preview_digest != p.facts.preview_digest
+                    || data.result_digest != p.facts.read.facts.signed.result_digest
+                    || data.outbox_digest != p.facts.read.facts.signed.outbox_digest
+                {
+                    return Err(rejected("Return actual Finished/result/outbox changed"));
+                }
+                self.return_flow.completed = Some(data);
+                if !self.terminal() {
+                    if self.phase != Phase::ReturningExact {
+                        return Err(rejected("Return Finished outside exact Final"));
+                    }
+                    self.transition(Phase::ReturnCompleted, frame);
+                }
+            }
+            Event::ReturnFailed { role, data } => {
+                data.validate()?;
+                let digest = match data.stage {
+                    SignerReturnFailureStageV1::ReadFailed => self
+                        .return_flow
+                        .read_display
+                        .as_ref()
+                        .map(|p| p.presentation_digest.as_str()),
+                    SignerReturnFailureStageV1::ReturnUncertain => self
+                        .return_flow
+                        .exact_display
+                        .as_ref()
+                        .map(|p| p.presentation_digest.as_str()),
+                };
+                if self.active != Some(role)
+                    || self.return_flow.failure.is_some()
+                    || self.return_flow.completed.is_some()
+                    || digest != Some(data.presentation_digest.as_str())
+                {
+                    return Err(rejected("Return failure changed"));
+                }
+                self.return_flow.failure = Some(data);
+                self.revoke("Original Return failed or is uncertain. Retain original result, stream and outcome metadata; no retry, replacement channel or implicit completion. Cancel is not rollback.");
+            }
+            _ => return Err(rejected("wrong Return event")),
+        }
+        Ok(())
+    }
+    fn accept_sign(&mut self, event: Event, frame: u64) -> Result<()> {
+        match event {
+            Event::SignReadDisplay(ticket) => {
+                let p = ticket.presentation();
+                p.validate()?;
+                let wallet = self
+                    .wallet_flow
+                    .observe_display
+                    .as_ref()
+                    .ok_or_else(|| rejected("Sign Read without original wallet review"))?;
+                if self.active != Some(p.actor.signer_role)
+                    || self.sign_flow.read_display.is_some()
+                    || self.wallet_flow.observed.as_ref() != Some(&p.facts.observed)
+                    || p.actor != wallet.actor
+                    || p.facts.original != wallet.facts.original
+                    || p.source_ceiling_ms != wallet.source_ceiling_ms
+                    || p.service_ceiling_ms != wallet.service_ceiling_ms
+                    || p.writer_session_ceiling_ms != wallet.writer_session_ceiling_ms
+                    || p.facts.reviewed_at_ms < wallet.facts.reviewed_at_ms
+                {
+                    return Err(rejected(
+                        "Sign Read actual wallet/source/configuration/clocks changed",
+                    ));
+                }
+                self.sign_flow.read_display = Some(p.clone());
+                if self.terminal() {
+                    drop(ticket);
+                    return Ok(());
+                }
+                if self.phase != Phase::WalletObserved {
+                    return Err(rejected("Sign Read without actual WalletObserved"));
+                }
+                ticket.check_current()?;
+                self.writer_flow
+                    .serving
+                    .as_ref()
+                    .ok_or_else(|| rejected("same Signing service missing"))?
+                    .check_current()?;
+                self.sign_flow.read = Some(ticket);
+                self.transition(Phase::SignReadReview, frame);
+            }
+            Event::SignPrepared { role, data } => {
+                data.validate()?;
+                let p = self
+                    .sign_flow
+                    .read_display
+                    .as_ref()
+                    .ok_or_else(|| rejected("prepared Sign without Read"))?;
+                if self.active != Some(role)
+                    || !self.sign_flow.read_attempted
+                    || self.sign_flow.prepared.is_some()
+                    || self.sign_flow.failure.is_some()
+                    || data.read_presentation_digest != p.presentation_digest
+                {
+                    return Err(rejected("actual Sign prepared Read changed"));
+                }
+                self.sign_flow.prepared = Some(data);
+                if !self.terminal() {
+                    if self.phase != Phase::SignReading {
+                        return Err(rejected("Sign Prepared outside actual Read"));
+                    }
+                    self.transition(Phase::SignPrepared, frame);
+                }
+            }
+            Event::SignExactDisplay(ticket) => {
+                let p = ticket.presentation();
+                p.validate()?;
+                let read = self
+                    .sign_flow
+                    .read_display
+                    .as_ref()
+                    .ok_or_else(|| rejected("exact Sign missing Read"))?;
+                let prepared = self
+                    .sign_flow
+                    .prepared
+                    .as_ref()
+                    .ok_or_else(|| rejected("exact Sign missing actual Prepared"))?;
+                if self.active != Some(p.actor.signer_role)
+                    || self.sign_flow.exact_display.is_some()
+                    || !sign_exact_matches_retained(p, read, prepared)
+                {
+                    return Err(rejected(
+                        "exact Sign prepared terms/receipt/original clocks changed",
+                    ));
+                }
+                self.sign_flow.exact_display = Some(p.clone());
+                if self.terminal() {
+                    drop(ticket);
+                    return Ok(());
+                }
+                if self.phase != Phase::SignPrepared {
+                    return Err(rejected("Exact Sign without actual Prepared"));
+                }
+                ticket.check_current()?;
+                self.sign_flow.exact = Some(ticket);
+                self.transition(Phase::SignExactReview, frame);
+            }
+            Event::SignCommitted { role, data } => {
+                data.validate()?;
+                let p = self
+                    .sign_flow
+                    .exact_display
+                    .as_ref()
+                    .ok_or_else(|| rejected("Sign result without exact review"))?;
+                if self.active != Some(role)
+                    || !self.sign_flow.exact_attempted
+                    || self.sign_flow.committed.is_some()
+                    || self.sign_flow.failure.is_some()
+                    || data.sign_presentation_digest != p.presentation_digest
+                    || data.authorization_id != p.facts.expected_authorization_id()?
+                    || data.fixed_identity_digest != p.facts.original.fixed_identity_digest
+                {
+                    return Err(rejected("actual Sign result changed"));
+                }
+                // Consent reference, authorization and outbox are actual result observations,
+                // not fabricated aliases of a presentation digest or permission to Return.
+                self.sign_flow.committed = Some(data);
+                if !self.terminal() {
+                    if self.phase != Phase::SigningExact {
+                        return Err(rejected("Sign result outside exact Final"));
+                    }
+                    self.transition(Phase::SignCommitted, frame);
+                }
+            }
+            Event::SignFailed { role, data } => {
+                data.validate()?;
+                let digest = match data.stage {
+                    SignerSignFailureStageV1::ReadFailed => self
+                        .sign_flow
+                        .read_display
+                        .as_ref()
+                        .map(|p| p.presentation_digest.as_str()),
+                    SignerSignFailureStageV1::SignUncertain => self
+                        .sign_flow
+                        .exact_display
+                        .as_ref()
+                        .map(|p| p.presentation_digest.as_str()),
+                };
+                if self.active != Some(role)
+                    || self.sign_flow.failure.is_some()
+                    || self.sign_flow.committed.is_some()
+                    || digest != Some(data.presentation_digest.as_str())
+                {
+                    return Err(rejected("Sign failure changed"));
+                }
+                self.sign_flow.failure = Some(data);
+                self.revoke("Original Sign failed or is uncertain. Retain original source, prepared/actual receipts and terminal outcome. No retry, replacement session, rollback inference or Return permission.");
+            }
+            _ => return Err(rejected("wrong Sign event")),
+        }
+        Ok(())
+    }
+    fn accept_wallet(&mut self, event: Event, frame: u64) -> Result<()> {
+        match event {
+            Event::WalletPrepareDisplay(ticket) => {
+                let p = ticket.presentation();
+                p.validate()?;
+                if self.active != Some(p.actor.signer_role)
+                    || self.wallet_flow.prepare_display.is_some()
+                    || self.activate_flow.display.as_ref() != Some(&p.facts.original.activation)
+                    || self.activate_flow.committed.as_ref() != Some(&p.facts.original.activated)
+                    || !self.financial_setup_selected[index(p.actor.signer_role)]
+                    || !wallet_selected_configuration_matches(
+                        &self.financial_wallet_text[index(p.actor.signer_role)],
+                        &p.facts.original.configuration_json,
+                    )
+                    || self.v3_receive_result[index(p.actor.signer_role)]
+                        .as_ref()
+                        .is_none_or(|r| {
+                            r.fixed_identity_digest != p.facts.original.fixed_identity_digest
+                        })
+                {
+                    return Err(rejected("wallet Prepare original Activate changed"));
+                }
+                self.wallet_flow.prepare_display = Some(p.clone());
+                if self.terminal() {
+                    drop(ticket);
+                    return Ok(());
+                }
+                if self.phase != Phase::Activated {
+                    return Err(rejected("wallet Prepare without actual Activated"));
+                }
+                ticket.check_current()?;
+                self.writer_flow
+                    .serving
+                    .as_ref()
+                    .ok_or_else(|| rejected("original Signing service missing"))?
+                    .check_current()?;
+                self.wallet_flow.prepare = Some(ticket);
+                self.transition(Phase::WalletPrepareReview, frame);
+            }
+            Event::WalletPrepared { role, data } => {
+                data.validate()?;
+                let p = self
+                    .wallet_flow
+                    .prepare_display
+                    .as_ref()
+                    .ok_or_else(|| rejected("wallet result without Prepare"))?;
+                if self.active != Some(role)
+                    || !self.wallet_flow.prepare_attempted
+                    || self.wallet_flow.prepared.is_some()
+                    || self.wallet_flow.failure.is_some()
+                    || data.prepare_presentation_digest != p.presentation_digest
+                    || data.activation_presentation_digest
+                        != p.facts.original.activation.presentation_digest
+                    || data.fixed_identity_digest != p.facts.original.fixed_identity_digest
+                    || data.configuration_digest != p.facts.original.configuration_digest
+                {
+                    return Err(rejected("wallet prepared result changed"));
+                }
+                self.wallet_flow.prepared = Some(data);
+                if !self.terminal() {
+                    if self.phase != Phase::WalletPreparing {
+                        return Err(rejected("wallet result outside Prepare Final"));
+                    }
+                    self.transition(Phase::WalletPrepared, frame);
+                }
+            }
+            Event::WalletObserveDisplay(ticket) => {
+                let p = ticket.presentation();
+                p.validate()?;
+                let prior = self
+                    .wallet_flow
+                    .prepare_display
+                    .as_ref()
+                    .ok_or_else(|| rejected("Observe missing Prepare"))?;
+                let prepared = self
+                    .wallet_flow
+                    .prepared
+                    .as_ref()
+                    .ok_or_else(|| rejected("Observe missing actual Prepared"))?;
+                if self.active != Some(p.actor.signer_role)
+                    || self.wallet_flow.observe_display.is_some()
+                    || p.actor != prior.actor
+                    || p.facts.original != prior.facts.original
+                    || p.facts.prepare_presentation_digest != prepared.prepare_presentation_digest
+                    || p.facts.wallet_review_digest != prepared.wallet_review_digest
+                    || p.source_ceiling_ms != prior.source_ceiling_ms
+                    || p.service_ceiling_ms != prior.service_ceiling_ms
+                    || p.writer_session_ceiling_ms != prior.writer_session_ceiling_ms
+                    || p.facts.reviewed_at_ms < prior.facts.reviewed_at_ms
+                {
+                    return Err(rejected(
+                        "Observe same prepared source/configuration or original ceilings changed",
+                    ));
+                }
+                self.wallet_flow.observe_display = Some(p.clone());
+                if self.terminal() {
+                    drop(ticket);
+                    return Ok(());
+                }
+                if self.phase != Phase::WalletPrepared {
+                    return Err(rejected("Observe without actual Prepared"));
+                }
+                ticket.check_current()?;
+                self.wallet_flow.observe = Some(ticket);
+                self.transition(Phase::WalletObserveReview, frame);
+            }
+            Event::WalletObserved { role, data } => {
+                data.validate()?;
+                let p = self
+                    .wallet_flow
+                    .observe_display
+                    .as_ref()
+                    .ok_or_else(|| rejected("wallet result without Observe"))?;
+                let prepared = self
+                    .wallet_flow
+                    .prepared
+                    .as_ref()
+                    .ok_or_else(|| rejected("wallet result without Prepared"))?;
+                if self.active != Some(role)
+                    || !self.wallet_flow.observe_attempted
+                    || self.wallet_flow.observed.is_some()
+                    || self.wallet_flow.failure.is_some()
+                    || data.observe_presentation_digest != p.presentation_digest
+                    || data.prepare_presentation_digest != prepared.prepare_presentation_digest
+                    || data.activation_presentation_digest
+                        != prepared.activation_presentation_digest
+                    || data.fixed_identity_digest != prepared.fixed_identity_digest
+                    || data.configuration_digest != prepared.configuration_digest
+                    || data.wallet_review_digest != prepared.wallet_review_digest
+                {
+                    return Err(rejected("wallet observed actual result changed"));
+                }
+                self.wallet_flow.observed = Some(data);
+                if !self.terminal() {
+                    if self.phase != Phase::WalletObserving {
+                        return Err(rejected("wallet result outside Observe Final"));
+                    }
+                    self.transition(Phase::WalletObserved, frame);
+                }
+            }
+            Event::WalletFailed { role, data } => {
+                data.validate()?;
+                let exact = match data.stage {
+                    SignerWalletFailureStageV1::PrepareFailed => self
+                        .wallet_flow
+                        .prepare_display
+                        .as_ref()
+                        .map(|p| p.presentation_digest.as_str()),
+                    SignerWalletFailureStageV1::ObserveUncertain => self
+                        .wallet_flow
+                        .observe_display
+                        .as_ref()
+                        .map(|p| p.presentation_digest.as_str()),
+                };
+                if self.active != Some(role)
+                    || self.wallet_flow.failure.is_some()
+                    || exact != Some(data.presentation_digest.as_str())
+                    || self.wallet_flow.observed.is_some()
+                {
+                    return Err(rejected("wallet failure changed"));
+                }
+                self.wallet_flow.failure = Some(data);
+                self.revoke("Wallet failed or Observe is uncertain. Retain original receipt and outcome; no retry, rollback inference, replacement source or Sign permission.");
+            }
+            _ => return Err(rejected("wrong wallet event")),
         }
         Ok(())
     }
@@ -1794,6 +2788,15 @@ impl Window {
         self.acknowledged = false;
     }
     fn clear_review(&mut self) {
+        // Ordinary stage cleanup must never discard another original service.
+        if self.native.is_revoked() || self.terminal() {
+            for parked in &mut self.financial_parked {
+                if let Some(p) = parked {
+                    p.clear_actions();
+                }
+            }
+        }
+
         for ticket in &mut self.v3_enrollment_ticket {
             ticket.take();
         }
@@ -1812,11 +2815,29 @@ impl Window {
         for ticket in &mut self.v3_receive_ticket {
             ticket.take();
         }
+        for t in &mut self.v3_admit_read_ticket {
+            t.take();
+        }
+        for t in &mut self.v3_admit_ticket {
+            t.take();
+        }
+        for t in &mut self.v3_admit_ready {
+            t.take();
+        }
+        for t in &mut self.v3_audit_ticket {
+            t.take();
+        }
         self.v3_offer.take();
         for ticket in &mut self.v3_pair_ticket {
             ticket.take();
         }
         // Ordinary result evidence survives R; only genuine unconsumed grants drop.
+        self.return_flow.read.take();
+        self.return_flow.exact.take();
+        self.sign_flow.read.take();
+        self.sign_flow.exact.take();
+        self.wallet_flow.prepare.take();
+        self.wallet_flow.observe.take();
         self.activate_flow.read.take();
         self.activate_flow.review.take();
         self.activate_flow.ready.take();
@@ -1882,6 +2903,40 @@ impl Window {
             // during its exclusive normal reap. Raw interruption still runs,
             // and the nominal retirement owner checks all other original actors.
             if driver_revoked
+                || self
+                    .financial_parked
+                    .iter()
+                    .any(|p| p.as_ref().is_some_and(|p| !p.current()))
+                || self
+                    .return_flow
+                    .read
+                    .as_ref()
+                    .is_some_and(|t| t.check_current().is_err())
+                || self
+                    .return_flow
+                    .exact
+                    .as_ref()
+                    .is_some_and(|t| t.check_current().is_err())
+                || self
+                    .sign_flow
+                    .read
+                    .as_ref()
+                    .is_some_and(|t| t.check_current().is_err())
+                || self
+                    .sign_flow
+                    .exact
+                    .as_ref()
+                    .is_some_and(|t| t.check_current().is_err())
+                || self
+                    .wallet_flow
+                    .prepare
+                    .as_ref()
+                    .is_some_and(|t| t.check_current().is_err())
+                || self
+                    .wallet_flow
+                    .observe
+                    .as_ref()
+                    .is_some_and(|t| t.check_current().is_err())
                 || self.native.is_revoked()
                 || Instant::now() >= cutoff
                 || Instant::now() >= self.session_deadline
@@ -1894,6 +2949,40 @@ impl Window {
             return;
         }
         if driver_revoked
+            || self
+                .financial_parked
+                .iter()
+                .any(|p| p.as_ref().is_some_and(|p| !p.current()))
+            || self
+                .return_flow
+                .read
+                .as_ref()
+                .is_some_and(|t| t.check_current().is_err())
+            || self
+                .return_flow
+                .exact
+                .as_ref()
+                .is_some_and(|t| t.check_current().is_err())
+            || self
+                .sign_flow
+                .read
+                .as_ref()
+                .is_some_and(|t| t.check_current().is_err())
+            || self
+                .sign_flow
+                .exact
+                .as_ref()
+                .is_some_and(|t| t.check_current().is_err())
+            || self
+                .wallet_flow
+                .prepare
+                .as_ref()
+                .is_some_and(|t| t.check_current().is_err())
+            || self
+                .wallet_flow
+                .observe
+                .as_ref()
+                .is_some_and(|t| t.check_current().is_err())
             || self
                 .v3_enrollment_ticket
                 .iter()
@@ -1933,6 +3022,22 @@ impl Window {
                 .ready
                 .as_ref()
                 .is_some_and(|t| t.check_current().is_err())
+            || self
+                .v3_admit_read_ticket
+                .iter()
+                .any(|t| t.as_ref().is_some_and(|t| t.check_current().is_err()))
+            || self
+                .v3_admit_ticket
+                .iter()
+                .any(|t| t.as_ref().is_some_and(|t| t.check_current().is_err()))
+            || self
+                .v3_admit_ready
+                .iter()
+                .any(|t| t.as_ref().is_some_and(|t| t.check_current().is_err()))
+            || self
+                .v3_audit_ticket
+                .iter()
+                .any(|t| t.as_ref().is_some_and(|t| t.check_current().is_err()))
             || self.native.check_current().is_err()
             || self
                 .v3_pair_ticket
@@ -2289,6 +3394,21 @@ impl Window {
                 }
                 Ok(Outcome::Event(event @ (Event::ActivateReadDisplay(_) | Event::ActivateReadFailed { .. } | Event::ActivateDisplay(_) | Event::ActivateReady(_) | Event::ActivateOutcome { .. } | Event::AwaitingWalletPrepare { .. }))) => {
                     if self.accept_activate(event,ctx.cumulative_frame_nr()).is_err() { self.revoke("Original Activate custody/binding changed; no retry or wallet grant."); }
+                }
+                Ok(Outcome::Event(event @ (Event::V3AdmitReadDisplay(_)|Event::V3AdmitReadRetained{..}|Event::V3AdmitDisplay(_)|Event::V3AdmitReady(_)|Event::V3Admitted{..})))=>{
+                    if self.accept_v3_admission(event,ctx.cumulative_frame_nr()).is_err(){self.revoke("Original V3 admission binding changed; no retry or completed V3 inferred.");}
+                }
+                Ok(Outcome::Event(event @ (Event::V3AuditDisplay(_)|Event::V3Audited{..})))=>{
+                    if self.accept_v3_audit(event,ctx.cumulative_frame_nr()).is_err(){self.revoke("Original Audit verification binding changed; no completed custody or new source authority inferred.");}
+                }
+                Ok(Outcome::Event(event @ (Event::WalletPrepareDisplay(_) | Event::WalletObserveDisplay(_) | Event::WalletPrepared{..} | Event::WalletObserved{..} | Event::WalletFailed{..}))) => {
+                    if self.accept_wallet(event,ctx.cumulative_frame_nr()).is_err(){self.revoke("Original wallet custody changed; no retry, source substitution or Sign permission.");}
+                }
+                Ok(Outcome::Event(event @ (Event::SignReadDisplay(_)|Event::SignExactDisplay(_)|Event::SignPrepared{..}|Event::SignCommitted{..}|Event::SignFailed{..})))=>{
+                    if self.accept_sign(event,ctx.cumulative_frame_nr()).is_err(){self.revoke("Original Sign source/receipt binding changed; no retry, rollback or Return permission.");}
+                }
+                Ok(Outcome::Event(event @ (Event::ReturnReadDisplay(_)|Event::ReturnExactDisplay(_)|Event::ReturnPrepared{..}|Event::ReturnCompleted{..}|Event::ReturnFailed{..})))=>{
+                    if self.route_return(event,ctx.cumulative_frame_nr()).is_err(){self.revoke("Original Return source/result/stream binding changed; no retry or implicit completion.");}
                 }
                 Ok(Outcome::Event(event)) if self.terminal() => {
                     drop(event);
@@ -3214,6 +4334,16 @@ impl Window {
         let mut painted_to_end = self.read_to_end;
         let mut acknowledged_in_pass = self.acknowledged;
         let mut paired_in_pass = self.paired;
+        let mut financial_in_pass = if self.phase == Phase::FinancialSetupConfiguring {
+            self.active.map(|r| {
+                (
+                    self.financial_writer_text[index(r)].clone(),
+                    self.financial_wallet_text[index(r)].clone(),
+                )
+            })
+        } else {
+            None
+        };
         let mut owner_in_pass = if self.phase == Phase::V3OwnerConfiguring {
             self.active
                 .map(|role| self.v3_owner_text[index(role)].clone())
@@ -3247,6 +4377,9 @@ impl Window {
                 if self.v3_redisclose_result[i].is_some() { ui.label("Redisclose: actual bound result retained; no later permission."); } else if self.v3_redisclose_attempted[i] { ui.label("Redisclose: Final admitted, result unconfirmed; no retry or rollback inferred."); }
                 if self.v3_prepare_read_result[i].is_some() { ui.label("PrepareRead: actual bound result retained; no later permission."); } else if self.v3_prepare_read_attempted[i] { ui.label("PrepareRead: admitted once, effect unconfirmed; no retry or rollback."); }
                 if self.v3_receive_result[i].is_some() { ui.label("Receive: actual bound result retained; no later permission."); } else if self.v3_receive_attempted[i] { ui.label("Receive: admitted once, effect unconfirmed; no retry or rollback."); }
+                if let Some(d)=&self.v3_admit_result[i] {ui.label(match &d.observation {SignerV3AdmissionObservationV1::Unknown=>"V3 admission outcome unknown: retained, no retry or completion claim.",SignerV3AdmissionObservationV1::Controlled{..}=>"V3 admission controlled observation retained; fresh Audit still required."});}
+                else if self.v3_admit_attempted[i]{ui.label("V3 admission Final admitted once; outcome unconfirmed, no retry or rollback.");}
+                if self.v3_audit_result[i].is_some(){ui.label("Actual audited V3 completion retained; fresh financial SourceEntry facts/consent still required.");}else if self.v3_audit_attempted[i]{ui.label("Audit Final admitted, verification unconfirmed; no retry or completion inferred.");}
                 if self.v3_pair_result[i].is_some() { ui.label("Original Pair: actual authenticated StatusProof retained; later actions remain unapproved."); }
                 else if self.v3_pair_attempted[i] { ui.label("Original Pair: Final admitted; completion unconfirmed. Cancel is not rollback; no retry."); }
                 else if self.v3_pair_display[i].is_some() { ui.label("Original Pair: exact pending review observed; no Pair consent yet."); }
@@ -3260,7 +4393,7 @@ impl Window {
                 if let Some(failure) = &self.witness_failure[index(role)] { ui.label(format!("{} Witness first failure: {:?}", role_name(role), failure)); }
             }
             if self.writer_flow.attempted && self.writer_flow.acquired.is_none() { ui.label("Acquire Final admitted: actual effect remains unconfirmed. Cancel is not rollback; no retry."); }
-            if self.activate_flow.committed.is_some() { ui.label("Actual authenticated Activate retained. Wallet preparation, observation, Sign and Return remain unavailable and unapproved."); }
+            if self.activate_flow.committed.is_some() { ui.label("Actual authenticated Activate retained. Wallet Prepare and Observe require separate explicit approvals; no Sign or Return permission."); }
             else if self.activate_flow.attempted { ui.label("Activate Final admitted once: completion unconfirmed; Cancel is not rollback, no retry."); }
             if self.activate_flow.outcome.is_some() { ui.label("Original Activate terminal outcome retained."); }
             if self.writer_flow.acquired.is_some() { ui.label("Actual authenticated Acquire receipt retained; this does not approve Activate or establish completed disposal."); }
@@ -3308,7 +4441,73 @@ impl Window {
             if matches!(self.phase, Phase::Selecting | Phase::V3OwnerSelected | Phase::V3Prepared | Phase::V3Received) {
                 for role in [Role::Signer1, Role::Signer2] { if self.v3_receive_ticket[index(role)].is_some() && ui.add_enabled(later_frame, egui::Button::new(format!("Review {} distinct Receive",role_name(role)))).clicked_by(egui::PointerButton::Primary) { self.intent = Some(Intent::ReviewV3Receive(role)); } }
             }
+            if matches!(self.phase,Phase::Selecting|Phase::V3Received|Phase::V3AdmitReadRetained|Phase::V3AdmissionRetained) {
+                for role in [Role::Signer1,Role::Signer2] {
+                    if self.v3_admit_read_ticket[index(role)].is_some() && ui.add_enabled(later_frame,egui::Button::new(format!("Review {} separate admission history Read",role_name(role)))).clicked_by(egui::PointerButton::Primary){self.intent=Some(Intent::ReviewV3AdmitRead(role));}
+                    if self.v3_admit_ticket[index(role)].is_some() && ui.add_enabled(later_frame,egui::Button::new(format!("Review {} exact V3 admission",role_name(role)))).clicked_by(egui::PointerButton::Primary){self.intent=Some(Intent::ReviewV3Admit(role));}
+                }
+            }
+            if matches!(self.phase,Phase::Selecting|Phase::V3AdmissionRetained|Phase::V3Audited){
+                for role in [Role::Signer1,Role::Signer2]{if self.v3_audit_ticket[index(role)].is_some()&&ui.add_enabled(later_frame,egui::Button::new(format!("Review {} fresh original Audit",role_name(role)))).clicked_by(egui::PointerButton::Primary){self.intent=Some(Intent::ReviewV3Audit(role));}}
+            }
+            if matches!(self.phase,Phase::SetupNeeded|Phase::Selecting|Phase::SignCommitted|Phase::ReturnCompleted){
+                for role in [Role::Signer1,Role::Signer2] {if let Some(p)=&self.retained_continue[index(role)] {
+                    if ui.add_enabled(later_frame,egui::Button::new(format!("Show {} exact Host continuation selector (metadata only)",role_name(role)))).clicked_by(egui::PointerButton::Primary){self.intent=Some(Intent::ShowContinuationSelector(role));}
+                    if self.continuation_selector_visible[index(role)] {if let Ok(mut text)=continuation_selector_json(p){ui.label("Exact ordinary Host ContinuationSelectionV1. Copy/save these bytes to your chosen JSON file, then explicitly select that file at the Host prompt. This creates no approval and does not renew any deadline.");ui.add(egui::TextEdit::multiline(&mut text).interactive(false).desired_rows(8).desired_width(f32::INFINITY));}}
+                }}
+            }
+            if matches!(self.phase,Phase::SignCommitted|Phase::ReturnCompleted) && ui.add_enabled(later_frame,egui::Button::new("Keep this original service/result and return to role selection")).clicked_by(egui::PointerButton::Primary){self.intent=Some(Intent::ParkFinancial);}
+            if self.phase==Phase::Selecting {for role in [Role::Signer1,Role::Signer2] {if self.financial_parked[index(role)].is_some()&&ui.add_enabled(later_frame,egui::Button::new(format!("Review {} retained financial custody",role_name(role)))).clicked_by(egui::PointerButton::Primary){self.intent=Some(Intent::ResumeFinancial(role));}}}
+            if matches!(self.phase,Phase::Selecting|Phase::V3Audited){
+                for role in [Role::Signer1,Role::Signer2] {if self.v3_audit_result[index(role)].is_some()&&!self.financial_setup_selected[index(role)]&&ui.add_enabled(later_frame,egui::Button::new(format!("Select {} ordinary financial configurations",role_name(role)))).clicked_by(egui::PointerButton::Primary){self.intent=Some(Intent::ConfigureFinancialSetup(role));}}
+            }
             match self.phase {
+                Phase::ReturnReadReview|Phase::ReturnExactReview=>{
+                    let read=self.phase==Phase::ReturnReadReview;
+                    let text=if read {self.return_flow.read_display.as_ref().and_then(|p|serde_json::to_string_pretty(p).ok())}else{self.return_flow.exact_display.as_ref().and_then(|p|serde_json::to_string_pretty(p).ok())};
+                    if let Some(text)=text {if review_display(ui,&text,visible&&!ctx.will_discard()){painted_to_end=true;}}
+                    ui.checkbox(&mut acknowledged_in_pass,if read {"Read only this actual persisted Sign result and exact original request; send one preview to the same original Host/channel. No signature payload or Return. Waiting retains custody only, not Read permission."}else{"Return only this exact reviewed signature set/result/outbox to the same original Host and prepared stream once. Original source/service/writer/Pair/material clocks remain fixed; exact Ready/Held/Current/Finished checks are required. Partial transfer or report loss is uncertain; never retry."});
+                    if ui.add_enabled(self.read_to_end&&self.acknowledged&&later_frame,egui::Button::new(if read {"Final: approve this separate Return Read once"}else{"Final: return only this exact prepared result once"})).clicked_by(egui::PointerButton::Primary){self.intent=Some(if read {Intent::ReturnRead}else{Intent::ReturnExact});}
+                }
+                Phase::ReturnReading=>{ui.label("Return Read consumed once. Read completion seals denial-only custody while waiting for actual same-stream HostPrepared; no Return approval or renewable Read permission.");}
+                Phase::ReturnPrepared=>{ui.label("Actual same-stream prepared preview retained. Separate Exact Return remains unapproved.");}
+                Phase::ReturningExact=>{ui.label("Return Final consumed once. Waiting for actual authenticated Finished; partial transfer/report loss is uncertain and no retry is permitted.");}
+                Phase::ReturnCompleted=>{ui.label("Actual authenticated original Return Finished retained. This observation does not assert disposal, chain confirmation or authorize another operation.");if let Some(d)=&self.return_flow.completed{ui.monospace(serde_json::to_string_pretty(d).unwrap_or_default());}}
+                Phase::SignReadReview|Phase::SignExactReview=>{
+                    let read=self.phase==Phase::SignReadReview;
+                    let text=if read {self.sign_flow.read_display.as_ref().and_then(|p|serde_json::to_string_pretty(p).ok())}else{self.sign_flow.exact_display.as_ref().and_then(|p|serde_json::to_string_pretty(p).ok())};
+                    if let Some(text)=text {if review_display(ui,&text,visible&&!ctx.will_discard()){painted_to_end=true;}}
+                    ui.checkbox(&mut acknowledged_in_pass,if read {"Authenticate only this same retained writer session/history and read the same guarded source to prepare one immutable exact spend. No reservation, journal mutation, spending key, signature or Return."}else{"Approve only this exact prepared spend: release/request commits, same-writer reservation, authenticated permit, Started commit, one protected key derivation and exact signature, then result commit. Original source/configuration, wallet, writer and all clocks remain fixed. No retry or Return permission."});
+                    if ui.add_enabled(self.read_to_end&&self.acknowledged&&later_frame,egui::Button::new(if read {"Final: approve this separate Sign Read once"}else{"Final: authorize only this exact prepared spend once"})).clicked_by(egui::PointerButton::Primary){self.intent=Some(if read {Intent::SignRead}else{Intent::SignExact});}
+                }
+                Phase::SignReading=>{ui.label("Sign Read consumed once. Waiting for actual prepared commitments; signing remains unapproved.");}
+                Phase::SignPrepared=>{ui.label("Actual immutable spend preparation retained. Separate Exact signing remains unapproved.");}
+                Phase::SigningExact=>{ui.label("Exact Sign Final consumed once. Any partial effect is uncertain until actual result; no retry or rollback inferred.");}
+                Phase::SignCommitted=>{ui.label("Actual original Sign result/outbox commitment retained. Return remains a separate unapproved purpose.");if let Some(d)=&self.sign_flow.committed{ui.monospace(serde_json::to_string_pretty(d).unwrap_or_default());}}
+                Phase::FinancialSetupConfiguring=>{
+                    ui.heading("Ordinary financial configuration selection · no permission");
+                    ui.label("Paste actual existing writer TLS setup JSON (16 KiB) and wallet configuration JSON (32 KiB, including actual birthday). No private key bytes, credentials, guessed paths, defaults or automatic approval. This binds only the same actually audited original source; every private read, import and network effect needs its later separate native review.");
+                    if let Some(role)=self.active {if let Some(audit)=&self.v3_audit_result[index(role)] {ui.monospace(serde_json::to_string_pretty(audit).unwrap_or_default());}}
+                    if let Some((writer,wallet))=&mut financial_in_pass {
+                        ui.label("Writer public setup and existing paths:");ui.add(egui::TextEdit::multiline(writer).desired_rows(8).desired_width(f32::INFINITY));
+                        ui.label("Exact wallet public configuration and birthday:");ui.add(egui::TextEdit::multiline(wallet).desired_rows(8).desired_width(f32::INFINITY));
+                        if ui.add_enabled(parse_financial_setup(writer,wallet).is_ok()&&later_frame,egui::Button::new("Fix these ordinary financial selectors once · no consent")).clicked_by(egui::PointerButton::Primary){self.intent=Some(Intent::SelectFinancialSetup);}
+                    }
+                }
+                Phase::FinancialSetupSelected=>{
+                    ui.label("Ordinary financial selectors submitted once. The same-S authenticated History return, IPC drain and original source disposal still gate actual fresh financial Entry facts. No opening or approval is inferred.");
+                    if let Some(role)=self.active {if ui.add_enabled(later_frame,egui::Button::new("Select Witness inputs, then request genuine financial source review")).clicked_by(egui::PointerButton::Primary){self.intent=Some(Intent::Configure(role));}}
+                }
+                Phase::WalletPrepareReview | Phase::WalletObserveReview => {
+                    let prepare=self.phase==Phase::WalletPrepareReview;
+                    let text=if prepare {self.wallet_flow.prepare_display.as_ref().and_then(|p|serde_json::to_string_pretty(p).ok())} else {self.wallet_flow.observe_display.as_ref().and_then(|p|serde_json::to_string_pretty(p).ok())};
+                    if let Some(text)=text {if review_display(ui,&text,visible && !ctx.will_discard()){painted_to_end=true;}}
+                    ui.checkbox(&mut acknowledged_in_pass,if prepare {"Prepare only this original account, verified fixed material, exact wallet configuration and journal pin. No FVK import or network permission."} else {"Revalidate this same prepared source/account and journal pin, reread the same FVK, enter one guarded import, then sync/reconcile only fixed inputs. No source/configuration change or Sign permission."});
+                    if ui.add_enabled(self.read_to_end && self.acknowledged && later_frame,egui::Button::new(if prepare {"Final: prepare this exact wallet once"} else {"Final: import and observe this same prepared wallet once"})).clicked_by(egui::PointerButton::Primary){self.intent=Some(if prepare {Intent::WalletPrepare}else{Intent::WalletObserve});}
+                }
+                Phase::WalletPreparing | Phase::WalletObserving => {ui.label("Wallet Final consumed once. Actual result pending; no automatic retry and Cancel is not rollback.");}
+                Phase::WalletPrepared => {ui.label("Actual wallet preparation retained. Separate Observe remains unapproved.");}
+                Phase::WalletObserved => {ui.label("Actual wallet observation retained. No Sign, key-use, reservation or Return permission.");}
                 Phase::ActivateReadReview | Phase::ActivateReview | Phase::ActivateReady => {
                     let text=if self.phase==Phase::ActivateReadReview { self.activate_flow.read_display.as_ref().and_then(|p|serde_json::to_string_pretty(p).ok()) } else { self.activate_flow.display.as_ref().and_then(|p|serde_json::to_string_pretty(p).ok()) };
                     if let Some(text)=text { if review_display(ui,&text,visible && !ctx.will_discard()) { painted_to_end=true; } }
@@ -3493,6 +4692,42 @@ impl Window {
                     ui.label("Actual Receive result retained; no later history, admission or financial approval.");
                     if let Some(role) = self.active { if let Some(d) = &self.v3_receive_result[index(role)] { ui.monospace(serde_json::to_string_pretty(d).unwrap_or_default()); } }
                     if ui.add_enabled(later_frame,egui::Button::new("Return to original role selection")).clicked_by(egui::PointerButton::Primary) { self.intent = Some(Intent::SelectNextV3); }
+                }
+                Phase::V3AdmitReadReview|Phase::V3AdmitReview|Phase::V3AdmitReady=>{
+                    if let Some(role)=self.active {let i=index(role);
+                        let text=if self.phase==Phase::V3AdmitReadReview {self.v3_admit_read_display[i].as_ref().and_then(|p|serde_json::to_string_pretty(p).ok())}
+                        else {self.v3_admit_display[i].as_ref().and_then(|p|serde_json::to_string_pretty(&serde_json::json!({"exact_admission":p,"authenticated_ready":self.v3_admit_ready_data[i]})).ok())};
+                        if let Some(text)=text {if review_display(ui,&text,visible&&!ctx.will_discard()){painted_to_end=true;}}
+                        let (notice,label,intent)=match self.phase {
+                            Phase::V3AdmitReadReview=>("Read full authenticated owner history and prepare one exact local immutable admission candidate only. No INSERT, remote READY or admission.","Approve separate admission Read",Intent::FinalV3AdmitRead),
+                            Phase::V3AdmitReview=>("Arm this exact admission request to obtain one authenticated READY on the retained original owner connection. No local publication or final remote send yet.","Arm exact V3 admission",Intent::ArmV3Admit),
+                            _=>("Approve this exact authenticated READY for one local journal publication and exact remote send. Unknown remains uncertain; no retry. Fresh Audit is still required.","Final: admit this exact READY once",Intent::FinalV3Admit),
+                        };
+                        ui.checkbox(&mut acknowledged_in_pass,notice);
+                        if ui.add_enabled(self.read_to_end&&self.acknowledged&&later_frame,egui::Button::new(label)).clicked_by(egui::PointerButton::Primary){self.intent=Some(intent);}
+                    }
+                }
+                Phase::V3AdmitReading=>{ui.label("Original admission history Read in progress; no mutation approval.");}
+                Phase::V3AdmitArmed=>{ui.label("Exact admission Arm sent; authenticated READY pending. Final is not approved.");}
+                Phase::V3Admitting=>{ui.label("V3 Admit Final consumed once. Local/remote effect remains uncertain until actual outcome. No retry or rollback inferred.");}
+                Phase::V3AdmitReadRetained|Phase::V3AdmissionRetained=>{
+                    ui.label("Original exact retained observation only. Fresh Audit still required; no completed V3, financial entry or retry authority.");
+                    if let Some(role)=self.active {let i=index(role);if let Some(d)=&self.v3_admit_result[i] {ui.monospace(serde_json::to_string_pretty(d).unwrap_or_default());}else if let Some(d)=&self.v3_admit_read_result[i]{ui.monospace(serde_json::to_string_pretty(d).unwrap_or_default());}}
+                    if ui.add_enabled(later_frame,egui::Button::new("Return to original role selection")).clicked_by(egui::PointerButton::Primary){self.intent=Some(Intent::SelectNextV3);}
+                }
+                Phase::V3AuditReview=>{
+                    if let Some(role)=self.active {let i=index(role);if let Some(p)=&self.v3_audit_display[i]{
+                        let text=serde_json::to_string_pretty(&serde_json::json!({"exact_audit":p,"original_pair_channel":self.v3_pair_display[i]})).unwrap_or_default();
+                        if review_display(ui,&text,visible&&!ctx.will_discard()){painted_to_end=true;}
+                        ui.checkbox(&mut acknowledged_in_pass,"Read full authenticated original owner history and verify only this exact retained admission and payload. No retry, new admission, wallet or financial effect. Only actual successful verification completes V3 custody.");
+                        if ui.add_enabled(self.read_to_end&&self.acknowledged&&later_frame,egui::Button::new("Approve this fresh Audit only")).clicked_by(egui::PointerButton::Primary){self.intent=Some(Intent::FinalV3Audit);}
+                    }}
+                }
+                Phase::V3Auditing=>{ui.label("Fresh Audit Final consumed once. Waiting for actual authenticated verification; no completed V3 or retry inferred.");}
+                Phase::V3Audited=>{
+                    ui.label("Actual authenticated V3 audit completed. Financial SourceEntry still requires the genuine same-S completed custody bridge and its fresh source facts; no source unlock or financial consent is inherited.");
+                    if let Some(role)=self.active {if let Some(d)=&self.v3_audit_result[index(role)]{ui.monospace(serde_json::to_string_pretty(d).unwrap_or_default());}}
+                    if ui.add_enabled(later_frame,egui::Button::new("Return to original role selection")).clicked_by(egui::PointerButton::Primary){self.intent=Some(Intent::SelectNextV3);}
                 }
                 Phase::V3PairReview => {
                     ui.heading("Distinct V3 Pair · exact fresh original Host channel");
@@ -3740,9 +4975,24 @@ impl Window {
                 }
             }
         }
+        if eligible && self.phase == painted_phase {
+            if let (Some(role), Some((writer, wallet))) = (self.active, financial_in_pass) {
+                if financial_setup_text_bounded(&writer, &wallet) {
+                    self.financial_writer_text[index(role)] = writer;
+                    self.financial_wallet_text[index(role)] = wallet;
+                } else {
+                    self.revoke(
+                        "Financial selection exceeded exact bounds; no truncation or retry.",
+                    );
+                }
+            }
+        }
         if matches!(
             painted_phase,
-            Phase::Configuring | Phase::V3Configuring | Phase::V3OwnerConfiguring
+            Phase::Configuring
+                | Phase::V3Configuring
+                | Phase::V3OwnerConfiguring
+                | Phase::FinancialSetupConfiguring
         ) {
             ctx.input_mut(|input| {
                 scrub_unrequested_payloads(&mut input.events);
@@ -3870,6 +5120,329 @@ impl Window {
             return Err(rejected("protected Host input owns this phase"));
         }
         match intent {
+            Intent::ReviewV3Audit(role)
+                if matches!(
+                    self.phase,
+                    Phase::Selecting | Phase::V3AdmissionRetained | Phase::V3Audited
+                ) =>
+            {
+                self.v3_audit_ticket[index(role)]
+                    .as_ref()
+                    .ok_or_else(|| rejected("Audit nominal ticket missing"))?
+                    .check_current()?;
+                self.active = Some(role);
+                self.transition(Phase::V3AuditReview, frame);
+            }
+            Intent::FinalV3Audit
+                if v3_audit_tail_eligible(
+                    self.phase,
+                    self.read_to_end,
+                    self.acknowledged,
+                    self.focused_last,
+                    self.native.is_revoked(),
+                    frame > self.phase_frame,
+                ) =>
+            {
+                let role = self.active.ok_or_else(|| rejected("Audit role missing"))?;
+                let i = index(role);
+                if self.v3_audit_attempted[i] {
+                    return Err(rejected("Audit already attempted"));
+                }
+                let ticket = self.v3_audit_ticket[i]
+                    .take()
+                    .ok_or_else(|| rejected("Audit ticket consumed"))?;
+                let out = self.native.admit_v3_audit(ticket)?;
+                self.v3_audit_attempted[i] = true;
+                self.transition(Phase::V3Auditing, frame);
+                self.driver.borrow_mut().send_v3_audit(role, out)?;
+            }
+
+            Intent::FinalV3Admit
+                if v3_admission_tail_eligible(
+                    self.phase,
+                    Phase::V3AdmitReady,
+                    self.read_to_end,
+                    self.acknowledged,
+                    self.focused_last,
+                    self.native.is_revoked(),
+                    frame > self.phase_frame,
+                ) =>
+            {
+                let role = self
+                    .active
+                    .ok_or_else(|| rejected("admission role missing"))?;
+                let i = index(role);
+                if self.v3_admit_attempted[i] {
+                    return Err(rejected("V3 Admit Final already attempted"));
+                }
+                let ticket = self.v3_admit_ready[i]
+                    .take()
+                    .ok_or_else(|| rejected("V3 admission READY consumed"))?;
+                let out = self.native.admit_v3_admit(ticket)?;
+                self.v3_admit_attempted[i] = true;
+                self.transition(Phase::V3Admitting, frame);
+                self.driver.borrow_mut().send_v3_admit_final(role, out)?;
+            }
+
+            Intent::ReviewV3Admit(role)
+                if matches!(
+                    self.phase,
+                    Phase::Selecting
+                        | Phase::V3Received
+                        | Phase::V3AdmitReadRetained
+                        | Phase::V3AdmissionRetained
+                ) =>
+            {
+                self.v3_admit_ticket[index(role)]
+                    .as_ref()
+                    .ok_or_else(|| rejected("V3 admission nominal ticket missing"))?
+                    .check_current()?;
+                self.active = Some(role);
+                self.transition(Phase::V3AdmitReview, frame);
+            }
+            Intent::ArmV3Admit
+                if v3_admission_tail_eligible(
+                    self.phase,
+                    Phase::V3AdmitReview,
+                    self.read_to_end,
+                    self.acknowledged,
+                    self.focused_last,
+                    self.native.is_revoked(),
+                    frame > self.phase_frame,
+                ) =>
+            {
+                let role = self
+                    .active
+                    .ok_or_else(|| rejected("admission role missing"))?;
+                let i = index(role);
+                let ticket = self.v3_admit_ticket[i]
+                    .take()
+                    .ok_or_else(|| rejected("V3 admission ticket consumed"))?;
+                let out = self.native.arm_v3_admit(ticket)?;
+                self.transition(Phase::V3AdmitArmed, frame);
+                self.driver.borrow_mut().send_v3_admit_arm(role, out)?;
+            }
+
+            Intent::ReviewV3AdmitRead(role)
+                if matches!(
+                    self.phase,
+                    Phase::Selecting
+                        | Phase::V3Received
+                        | Phase::V3AdmitReadRetained
+                        | Phase::V3AdmissionRetained
+                ) =>
+            {
+                self.v3_admit_read_ticket[index(role)]
+                    .as_ref()
+                    .ok_or_else(|| rejected("V3 admission nominal ticket missing"))?
+                    .check_current()?;
+                self.active = Some(role);
+                self.transition(Phase::V3AdmitReadReview, frame);
+            }
+            Intent::FinalV3AdmitRead
+                if v3_admission_tail_eligible(
+                    self.phase,
+                    Phase::V3AdmitReadReview,
+                    self.read_to_end,
+                    self.acknowledged,
+                    self.focused_last,
+                    self.native.is_revoked(),
+                    frame > self.phase_frame,
+                ) =>
+            {
+                let role = self
+                    .active
+                    .ok_or_else(|| rejected("admission role missing"))?;
+                let i = index(role);
+                let ticket = self.v3_admit_read_ticket[i]
+                    .take()
+                    .ok_or_else(|| rejected("V3 admission ticket consumed"))?;
+                let out = self.native.admit_v3_admit_read(ticket)?;
+                self.v3_admit_read_attempted[i] = true;
+                self.transition(Phase::V3AdmitReading, frame);
+                self.driver.borrow_mut().send_v3_admit_read(role, out)?;
+            }
+
+            Intent::ReturnRead
+                if return_tail_eligible(
+                    self.phase,
+                    Phase::ReturnReadReview,
+                    self.read_to_end,
+                    self.acknowledged,
+                    self.focused_last,
+                    self.native.is_revoked(),
+                    frame > self.phase_frame,
+                ) =>
+            {
+                let role = self.active.ok_or_else(|| rejected("Return role missing"))?;
+                if self.return_flow.read_attempted {
+                    return Err(rejected("Return Final consumed"));
+                }
+                let ticket = self
+                    .return_flow
+                    .read
+                    .take()
+                    .ok_or_else(|| rejected("Return ticket consumed"))?;
+                let serving = self
+                    .writer_flow
+                    .serving
+                    .as_ref()
+                    .ok_or_else(|| rejected("same Signing service missing"))?;
+                let out = self.native.admit_return_read(ticket, serving)?;
+                self.return_flow.read_attempted = true;
+                self.transition(Phase::ReturnReading, frame);
+                self.driver.borrow_mut().send_return_read(role, out)?;
+            }
+            Intent::ReturnExact
+                if return_tail_eligible(
+                    self.phase,
+                    Phase::ReturnExactReview,
+                    self.read_to_end,
+                    self.acknowledged,
+                    self.focused_last,
+                    self.native.is_revoked(),
+                    frame > self.phase_frame,
+                ) =>
+            {
+                let role = self.active.ok_or_else(|| rejected("Return role missing"))?;
+                if self.return_flow.exact_attempted {
+                    return Err(rejected("Return Final consumed"));
+                }
+                let ticket = self
+                    .return_flow
+                    .exact
+                    .take()
+                    .ok_or_else(|| rejected("Return ticket consumed"))?;
+                let serving = self
+                    .writer_flow
+                    .serving
+                    .as_ref()
+                    .ok_or_else(|| rejected("same Signing service missing"))?;
+                let out = self.native.admit_return_exact(ticket, serving)?;
+                self.return_flow.exact_attempted = true;
+                self.transition(Phase::ReturningExact, frame);
+                self.driver.borrow_mut().send_return_exact(role, out)?;
+            }
+            Intent::SignRead
+                if sign_tail_eligible(
+                    self.phase,
+                    Phase::SignReadReview,
+                    self.read_to_end,
+                    self.acknowledged,
+                    self.focused_last,
+                    self.native.is_revoked(),
+                    frame > self.phase_frame,
+                ) =>
+            {
+                let role = self.active.ok_or_else(|| rejected("Sign role missing"))?;
+                if self.sign_flow.read_attempted {
+                    return Err(rejected("Sign Final consumed"));
+                }
+                let ticket = self
+                    .sign_flow
+                    .read
+                    .take()
+                    .ok_or_else(|| rejected("Sign ticket consumed"))?;
+                let serving = self
+                    .writer_flow
+                    .serving
+                    .as_ref()
+                    .ok_or_else(|| rejected("same Signing service missing"))?;
+                let out = self.native.admit_sign_read(ticket, serving)?;
+                self.sign_flow.read_attempted = true;
+                self.transition(Phase::SignReading, frame);
+                self.driver.borrow_mut().send_sign_read(role, out)?;
+            }
+            Intent::SignExact
+                if sign_tail_eligible(
+                    self.phase,
+                    Phase::SignExactReview,
+                    self.read_to_end,
+                    self.acknowledged,
+                    self.focused_last,
+                    self.native.is_revoked(),
+                    frame > self.phase_frame,
+                ) =>
+            {
+                let role = self.active.ok_or_else(|| rejected("Sign role missing"))?;
+                if self.sign_flow.exact_attempted {
+                    return Err(rejected("Sign Final consumed"));
+                }
+                let ticket = self
+                    .sign_flow
+                    .exact
+                    .take()
+                    .ok_or_else(|| rejected("Sign ticket consumed"))?;
+                let serving = self
+                    .writer_flow
+                    .serving
+                    .as_ref()
+                    .ok_or_else(|| rejected("same Signing service missing"))?;
+                let out = self.native.admit_sign_exact(ticket, serving)?;
+                self.sign_flow.exact_attempted = true;
+                self.transition(Phase::SigningExact, frame);
+                self.driver.borrow_mut().send_sign_exact(role, out)?;
+            }
+            Intent::WalletPrepare
+                if wallet_tail_eligible(
+                    self.phase,
+                    Phase::WalletPrepareReview,
+                    self.read_to_end,
+                    self.acknowledged,
+                    self.focused_last,
+                    self.native.is_revoked(),
+                    frame > self.phase_frame,
+                ) =>
+            {
+                let role = self.active.ok_or_else(|| rejected("wallet role missing"))?;
+                if self.wallet_flow.prepare_attempted {
+                    return Err(rejected("wallet Final already attempted"));
+                }
+                let ticket = self
+                    .wallet_flow
+                    .prepare
+                    .take()
+                    .ok_or_else(|| rejected("wallet ticket consumed"))?;
+                let serving = self
+                    .writer_flow
+                    .serving
+                    .as_ref()
+                    .ok_or_else(|| rejected("original Signing service missing"))?;
+                let out = self.native.admit_wallet_prepare(ticket, serving)?;
+                self.wallet_flow.prepare_attempted = true;
+                self.transition(Phase::WalletPreparing, frame);
+                self.driver.borrow_mut().send_wallet_prepare(role, out)?;
+            }
+            Intent::WalletObserve
+                if wallet_tail_eligible(
+                    self.phase,
+                    Phase::WalletObserveReview,
+                    self.read_to_end,
+                    self.acknowledged,
+                    self.focused_last,
+                    self.native.is_revoked(),
+                    frame > self.phase_frame,
+                ) =>
+            {
+                let role = self.active.ok_or_else(|| rejected("wallet role missing"))?;
+                if self.wallet_flow.observe_attempted {
+                    return Err(rejected("wallet Final already attempted"));
+                }
+                let ticket = self
+                    .wallet_flow
+                    .observe
+                    .take()
+                    .ok_or_else(|| rejected("wallet ticket consumed"))?;
+                let serving = self
+                    .writer_flow
+                    .serving
+                    .as_ref()
+                    .ok_or_else(|| rejected("original Signing service missing"))?;
+                let out = self.native.admit_wallet_observe(ticket, serving)?;
+                self.wallet_flow.observe_attempted = true;
+                self.transition(Phase::WalletObserving, frame);
+                self.driver.borrow_mut().send_wallet_observe(role, out)?;
+            }
             Intent::ActivateRead
                 if activate_tail_eligible(
                     self.phase,
@@ -4394,6 +5967,9 @@ impl Window {
                         | Phase::V3OwnerSelected
                         | Phase::V3Prepared
                         | Phase::V3Received
+                        | Phase::V3AdmitReadRetained
+                        | Phase::V3AdmissionRetained
+                        | Phase::V3Audited
                 ) =>
             {
                 self.active = None;
@@ -4418,8 +5994,115 @@ impl Window {
                 self.host_ordinal = ordinal;
                 self.host_entry = HostEntry::Editing(ordinal);
             }
-            Intent::Configure(role)
+            Intent::ShowContinuationSelector(role)
+                if matches!(
+                    self.phase,
+                    Phase::SetupNeeded
+                        | Phase::Selecting
+                        | Phase::SignCommitted
+                        | Phase::ReturnCompleted
+                ) =>
+            {
+                let p = self.retained_continue[index(role)]
+                    .as_ref()
+                    .ok_or_else(|| rejected("original Continue selector absent"))?;
+                continuation_selector_json(p)?;
+                self.continuation_selector_visible[index(role)] = true;
+            }
+            Intent::ParkFinancial
+                if financial_park_eligible(
+                    self.phase,
+                    self.password.is_some(),
+                    host_entry_blocks_source(self.host_entry),
+                    self.native.is_revoked(),
+                ) =>
+            {
+                let role = self
+                    .financial_loaded
+                    .ok_or_else(|| rejected("financial owner missing"))?;
+                if self.active != Some(role) || self.financial_parked[index(role)].is_some() {
+                    return Err(rejected("financial owner changed"));
+                }
+                let mut held = RetainedFinancialRole::default();
+                held.phase = Some(self.phase);
+                held.exchange(self);
+                self.financial_parked[index(role)] = Some(held);
+                self.financial_loaded = None;
+                self.active = None;
+                self.transition(Phase::Selecting, frame);
+            }
+            Intent::ResumeFinancial(role)
                 if self.phase == Phase::Selecting
+                    && self.financial_loaded.is_none()
+                    && !host_entry_blocks_source(self.host_entry) =>
+            {
+                let mut held = self.financial_parked[index(role)]
+                    .take()
+                    .ok_or_else(|| rejected("retained financial owner absent"))?;
+                if !held.current() {
+                    return Err(rejected("original financial custody expired"));
+                }
+                let phase = held
+                    .phase
+                    .take()
+                    .ok_or_else(|| rejected("retained financial phase absent"))?;
+                held.exchange(self);
+                self.financial_loaded = Some(role);
+                self.active = Some(role);
+                self.transition(phase, frame);
+            }
+            Intent::ConfigureFinancialSetup(role)
+                if matches!(self.phase, Phase::Selecting | Phase::V3Audited)
+                    && self.v3_audit_result[index(role)].is_some()
+                    && !self.financial_setup_selected[index(role)] =>
+            {
+                if self.financial_loaded.is_some() || self.financial_parked[index(role)].is_some() {
+                    return Err(rejected("financial role already loaded or retained"));
+                }
+                self.financial_loaded = Some(role);
+                self.active = Some(role);
+                self.transition(Phase::FinancialSetupConfiguring, frame);
+            }
+            Intent::SelectFinancialSetup
+                if self.phase == Phase::FinancialSetupConfiguring
+                    && self.focused_last
+                    && !self.native.is_revoked()
+                    && frame > self.phase_frame =>
+            {
+                let role = self
+                    .active
+                    .ok_or_else(|| rejected("financial setup role missing"))?;
+                let i = index(role);
+                if self.v3_audit_result[i].is_none()
+                    || self.v3_receive_result[i].is_none()
+                    || self.financial_setup_selected[i]
+                {
+                    return Err(rejected(
+                        "financial setup without actual audited completion",
+                    ));
+                }
+                let writer = parse_financial_setup(
+                    &self.financial_writer_text[i],
+                    &self.financial_wallet_text[i],
+                )?;
+                let original = self.v3_selection[i]
+                    .as_ref()
+                    .ok_or_else(|| rejected("financial setup original selection missing"))?;
+                if writer.account_id != original.account_id {
+                    return Err(rejected("financial setup account changed"));
+                }
+                self.financial_setup_selected[i] = true;
+                self.driver.borrow_mut().select_financial_setup(
+                    role,
+                    self.financial_writer_text[i].clone(),
+                    self.financial_wallet_text[i].clone(),
+                )?;
+                self.transition(Phase::FinancialSetupSelected, frame);
+            }
+            Intent::Configure(role)
+                if self.phase == Phase::FinancialSetupSelected
+                    && self.financial_setup_selected[index(role)]
+                    && self.v3_audit_result[index(role)].is_some()
                     && self.progress[index(role)] == Progress::NotStarted =>
             {
                 self.active = Some(role);
@@ -4428,6 +6111,8 @@ impl Window {
             Intent::Begin(role, ceiling)
                 if self.phase == Phase::Configuring
                     && self.active == Some(role)
+                    && self.financial_setup_selected[index(role)]
+                    && self.v3_audit_result[index(role)].is_some()
                     && selectors_valid(&self.selectors[index(role)])
                     && self.progress[index(role)] == Progress::NotStarted =>
             {
@@ -4709,6 +6394,14 @@ impl eframe::App for Window {
             input.raw_input_hook(raw, &mut || self.native.revoke());
         } else if let Some(input) = &mut self.password {
             input.raw_input_hook(raw);
+        } else if self.phase == Phase::FinancialSetupConfiguring
+            && self.focused_last
+            && !self.native.is_revoked()
+        {
+            if !v3_events_bounded(&raw.events) {
+                self.revoke("Financial configuration public event exceeded exact bounds.");
+                scrub_unrequested_payloads(&mut raw.events);
+            }
         } else if self.phase == Phase::V3OwnerConfiguring
             && self.focused_last
             && !self.native.is_revoked()
@@ -4967,7 +6660,12 @@ fn witness_display(p: &FinancialWitnessPresentationV1) -> String {
 fn host_phase_allows_input(phase: Phase) -> bool {
     matches!(
         phase,
-        Phase::Selecting | Phase::HistoryReady | Phase::Waiting
+        Phase::Selecting
+            | Phase::HistoryReady
+            | Phase::Waiting
+            | Phase::SetupNeeded
+            | Phase::SignCommitted
+            | Phase::ReturnCompleted
     )
 }
 fn host_entry_blocks_source(entry: HostEntry) -> bool {
@@ -6272,4 +7970,776 @@ mod activate_result_tests {
         assert!(!activate_head_progression(7, "old", 8, "old"));
         assert!(!activate_head_progression(u64::MAX, "old", 0, "new"));
     }
+}
+
+fn v3_admission_tail_eligible(
+    phase: Phase,
+    expected: Phase,
+    read: bool,
+    ack: bool,
+    focused: bool,
+    revoked: bool,
+    later: bool,
+) -> bool {
+    matches!(
+        expected,
+        Phase::V3AdmitReadReview | Phase::V3AdmitReview | Phase::V3AdmitReady
+    ) && phase == expected
+        && read
+        && ack
+        && focused
+        && !revoked
+        && later
+}
+fn v3_admit_read_matches_receive(
+    p: &SignerV3AdmitReadPresentationV1,
+    r: &SignerV3ReceivePresentationV1,
+) -> bool {
+    p.actor == r.actor
+        && p.source_ceiling_ms == r.source_ceiling_ms
+        && p.service_ceiling_ms == r.service_ceiling_ms
+        && p.material_ceiling_ms == r.material_ceiling_ms
+        && p.facts.owner_selection_digest == r.facts.owner_selection_digest
+        && p.facts.owner_certificate_digest == r.facts.owner_certificate_digest
+        && p.facts.disclosure_digest == r.facts.disclosure_digest
+        && p.facts.source_expires_at_ms == r.facts.source_expires_at_ms
+        && p.facts.service_expires_at_ms == r.facts.service_expires_at_ms
+        && p.facts.material_expires_at_ms == r.facts.material_expires_at_ms
+}
+fn v3_admit_preserves_read(
+    p: &SignerV3AdmitPresentationV1,
+    r: &SignerV3AdmitReadPresentationV1,
+) -> bool {
+    p.actor == r.actor
+        && p.source_ceiling_ms == r.source_ceiling_ms
+        && p.service_ceiling_ms == r.service_ceiling_ms
+        && p.material_ceiling_ms == r.material_ceiling_ms
+        && p.review_ceiling_ms <= r.review_ceiling_ms
+        && p.facts.source_expires_at_ms == r.facts.source_expires_at_ms
+        && p.facts.service_expires_at_ms == r.facts.service_expires_at_ms
+        && p.facts.material_expires_at_ms == r.facts.material_expires_at_ms
+        && p.facts.expires_at_ms <= r.facts.expires_at_ms
+        && p.facts.reviewed_at_ms >= r.facts.reviewed_at_ms
+}
+fn v3_admit_ready_matches(d: &SignerV3AdmitReadyV1, p: &SignerV3AdmitPresentationV1) -> bool {
+    v3_admit_ready_fields_match(d, &p.presentation_digest, &p.facts.read)
+}
+fn v3_admit_ready_fields_match(
+    d: &SignerV3AdmitReadyV1,
+    presentation: &str,
+    r: &SignerV3AdmitReadRetainedV1,
+) -> bool {
+    d.admit_presentation_digest == presentation
+        && d.admission_request_digest == r.admission_request_digest
+        && d.admission_review_digest == r.admission_review_digest
+        && d.owner_service_digest == r.owner_service_digest
+        && d.expected_head_sequence == r.expected_head_sequence
+        && d.expected_head_digest == r.expected_head_digest
+        && d.operation_id == r.operation_id
+}
+
+#[cfg(test)]
+mod v3_admission_ui_tests {
+    use super::*;
+    #[test]
+    fn read_arm_and_ready_final_require_separate_explicit_tail() {
+        for p in [
+            Phase::V3AdmitReadReview,
+            Phase::V3AdmitReview,
+            Phase::V3AdmitReady,
+        ] {
+            assert!(v3_admission_tail_eligible(
+                p, p, true, true, true, false, true
+            ));
+            assert!(!v3_admission_tail_eligible(
+                p, p, true, false, true, false, true
+            ));
+            assert!(!v3_admission_tail_eligible(
+                p, p, false, true, true, false, true
+            ));
+            assert!(!v3_admission_tail_eligible(
+                p, p, true, true, false, false, true
+            ));
+            assert!(!v3_admission_tail_eligible(
+                p, p, true, true, true, true, true
+            ));
+            assert!(!v3_admission_tail_eligible(
+                p, p, true, true, true, false, false
+            ));
+            for prior in [
+                Phase::V3Received,
+                Phase::V3AdmitReadRetained,
+                Phase::V3AdmitArmed,
+                Phase::V3AdmissionRetained,
+            ] {
+                assert!(!v3_admission_tail_eligible(
+                    prior, p, true, true, true, false, true
+                ));
+            }
+        }
+        assert!(!v3_admission_tail_eligible(
+            Phase::V3AdmitReview,
+            Phase::V3AdmitReady,
+            true,
+            true,
+            true,
+            false,
+            true
+        ));
+    }
+}
+
+#[cfg(test)]
+mod v3_admission_ready_tests {
+    use super::*;
+    #[test]
+    fn ready_matches_retained_request_review_service_head_and_operation() {
+        let r = SignerV3AdmitReadRetainedV1 {
+            admit_read_presentation_digest: "read".into(),
+            source_identity_digest: "source".into(),
+            owner_service_digest: "service".into(),
+            recipient_intent_digest: "intent".into(),
+            authenticated_history_digest: "history".into(),
+            admission_request_digest: "request".into(),
+            admission_review_digest: "review".into(),
+            operation_id: "operation".into(),
+            expected_head_sequence: 7,
+            expected_head_digest: "head".into(),
+            display: "ordinary pure fixture; no authority".into(),
+        };
+        let d = SignerV3AdmitReadyV1 {
+            admit_presentation_digest: "presentation".into(),
+            admission_request_digest: r.admission_request_digest.clone(),
+            admission_review_digest: r.admission_review_digest.clone(),
+            owner_service_digest: r.owner_service_digest.clone(),
+            authenticated_ready_digest: "actual-ready".into(),
+            expected_head_sequence: r.expected_head_sequence,
+            expected_head_digest: r.expected_head_digest.clone(),
+            operation_id: r.operation_id.clone(),
+        };
+        assert!(v3_admit_ready_fields_match(&d, "presentation", &r));
+        for key in [
+            "admit_presentation_digest",
+            "admission_request_digest",
+            "admission_review_digest",
+            "owner_service_digest",
+            "expected_head_digest",
+            "operation_id",
+        ] {
+            let mut changed = serde_json::to_value(&d).unwrap();
+            changed[key] = serde_json::json!("changed");
+            assert!(!v3_admit_ready_fields_match(
+                &serde_json::from_value(changed).unwrap(),
+                "presentation",
+                &r
+            ));
+        }
+        let mut changed = d;
+        changed.expected_head_sequence += 1;
+        assert!(!v3_admit_ready_fields_match(&changed, "presentation", &r));
+    }
+}
+
+fn v3_audit_tail_eligible(
+    phase: Phase,
+    read: bool,
+    ack: bool,
+    focused: bool,
+    revoked: bool,
+    later: bool,
+) -> bool {
+    phase == Phase::V3AuditReview && read && ack && focused && !revoked && later
+}
+fn v3_audit_preserves_original(
+    p: &SignerV3AuditPresentationV1,
+    r: &SignerV3PrepareReadPresentationV1,
+) -> bool {
+    p.actor == r.actor
+        && p.source_ceiling_ms == r.source_ceiling_ms
+        && p.service_ceiling_ms == r.service_ceiling_ms
+        && p.material_ceiling_ms == r.material_ceiling_ms
+        && p.facts.owner_selection_digest == r.facts.owner_selection_digest
+        && p.facts.owner_certificate_digest == r.facts.owner_certificate_digest
+        && p.facts.disclosure_digest == r.facts.disclosure_digest
+        && p.facts.source_expires_at_ms == r.facts.source_expires_at_ms
+        && p.facts.service_expires_at_ms == r.facts.service_expires_at_ms
+        && p.facts.material_expires_at_ms == r.facts.material_expires_at_ms
+        && p.facts.reviewed_at_ms >= r.facts.reviewed_at_ms
+}
+fn v3_audited_matches_review(d: &SignerV3AuditedV1, p: &SignerV3AuditPresentationV1) -> bool {
+    d.audit_presentation_digest == p.presentation_digest
+        && d.admit_presentation_digest == p.facts.admitted.admit_presentation_digest
+        && d.source_identity_digest == p.facts.received.source_identity_digest
+        && d.owner_service_digest == p.facts.received.owner_service_digest
+        && d.recipient_intent_digest == p.facts.received.recipient_intent_digest
+        && d.local_record_digest == p.facts.admitted.local_record_digest
+        && d.admission_request_digest == p.facts.admitted.admission_request_digest
+        && d.operation_id == p.facts.operation_id
+}
+#[cfg(test)]
+mod v3_audit_ui_tests {
+    use super::*;
+    #[test]
+    fn fresh_audit_is_never_automatic_from_admission_or_unknown() {
+        assert!(v3_audit_tail_eligible(
+            Phase::V3AuditReview,
+            true,
+            true,
+            true,
+            false,
+            true
+        ));
+        for p in [
+            Phase::V3AdmissionRetained,
+            Phase::V3AdmitReady,
+            Phase::V3Admitting,
+            Phase::V3Auditing,
+            Phase::V3Audited,
+        ] {
+            assert!(!v3_audit_tail_eligible(p, true, true, true, false, true));
+        }
+        assert!(!v3_audit_tail_eligible(
+            Phase::V3AuditReview,
+            false,
+            true,
+            true,
+            false,
+            true
+        ));
+        assert!(!v3_audit_tail_eligible(
+            Phase::V3AuditReview,
+            true,
+            false,
+            true,
+            false,
+            true
+        ));
+        assert!(!v3_audit_tail_eligible(
+            Phase::V3AuditReview,
+            true,
+            true,
+            false,
+            false,
+            true
+        ));
+        assert!(!v3_audit_tail_eligible(
+            Phase::V3AuditReview,
+            true,
+            true,
+            true,
+            true,
+            true
+        ));
+        assert!(!v3_audit_tail_eligible(
+            Phase::V3AuditReview,
+            true,
+            true,
+            true,
+            false,
+            false
+        ));
+    }
+}
+
+fn wallet_tail_eligible(
+    phase: Phase,
+    expected: Phase,
+    read: bool,
+    ack: bool,
+    focused: bool,
+    revoked: bool,
+    later: bool,
+) -> bool {
+    matches!(
+        expected,
+        Phase::WalletPrepareReview | Phase::WalletObserveReview
+    ) && phase == expected
+        && read
+        && ack
+        && focused
+        && !revoked
+        && later
+}
+#[cfg(test)]
+mod wallet_ui_tests {
+    use super::*;
+    #[test]
+    fn preparation_never_approves_observation_or_sign() {
+        for review in [Phase::WalletPrepareReview, Phase::WalletObserveReview] {
+            assert!(wallet_tail_eligible(
+                review, review, true, true, true, false, true
+            ));
+            for actual in [
+                Phase::Activated,
+                Phase::WalletPreparing,
+                Phase::WalletPrepared,
+                Phase::WalletObserving,
+                Phase::WalletObserved,
+            ] {
+                assert!(!wallet_tail_eligible(
+                    actual, review, true, true, true, false, true
+                ));
+            }
+            assert!(!wallet_tail_eligible(
+                review, review, false, true, true, false, true
+            ));
+            assert!(!wallet_tail_eligible(
+                review, review, true, false, true, false, true
+            ));
+            assert!(!wallet_tail_eligible(
+                review, review, true, true, false, false, true
+            ));
+            assert!(!wallet_tail_eligible(
+                review, review, true, true, true, true, true
+            ));
+            assert!(!wallet_tail_eligible(
+                review, review, true, true, true, false, false
+            ));
+        }
+        assert!(!wallet_tail_eligible(
+            Phase::WalletPrepareReview,
+            Phase::WalletObserveReview,
+            true,
+            true,
+            true,
+            false,
+            true
+        ));
+    }
+}
+
+fn financial_setup_text_bounded(writer: &str, wallet: &str) -> bool {
+    v3_owner_text_bounded(writer) && v3_text_bounded(wallet)
+}
+fn parse_financial_setup(writer: &str, wallet: &str) -> Result<SignerV3OwnerSetupSelectionV1> {
+    if !financial_setup_text_bounded(writer, wallet) {
+        return Err(rejected("financial configuration bounds"));
+    }
+    SignerFinancialWalletSetupSelectionV1::parse_json(wallet)?;
+    SignerV3OwnerSetupSelectionV1::parse_json(writer)
+}
+#[cfg(test)]
+mod financial_setup_ui_tests {
+    use super::*;
+    #[test]
+    fn ordinary_selection_is_bounded_not_native_permission() {
+        assert!(!financial_setup_text_bounded(&"x".repeat(16385), "{}"));
+        assert!(!financial_setup_text_bounded("{}", &"x".repeat(32769)));
+        assert!(parse_financial_setup("{}", "{}").is_err());
+        assert!(!financial_setup_text_bounded("a\0b", "{}"));
+        assert!(!wallet_tail_eligible(
+            Phase::FinancialSetupSelected,
+            Phase::WalletPrepareReview,
+            true,
+            true,
+            true,
+            false,
+            true
+        ));
+    }
+}
+
+// S retains the parsed exact configuration and presents its canonical JSON.
+// Compare all values, not formatting or a caller-supplied digest alone.
+fn wallet_selected_configuration_matches(selected: &str, presented: &str) -> bool {
+    if SignerFinancialWalletSetupSelectionV1::parse_json(selected).is_err()
+        || SignerFinancialWalletSetupSelectionV1::parse_json(presented).is_err()
+    {
+        return false;
+    }
+    match (
+        serde_json::from_str::<serde_json::Value>(selected),
+        serde_json::from_str::<serde_json::Value>(presented),
+    ) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+#[cfg(test)]
+mod wallet_selection_binding_tests {
+    use super::*;
+    #[test]
+    fn canonical_wallet_review_keeps_every_selected_value() {
+        let v = serde_json::json!({"schema_version":1,"purpose":"fresh_born_ephemeral_viewing_wallet_v1","policy":{"confidence":"trusted_single_provider_snapshot","source_id":"test","endpoint":"https://example.invalid","maximum_observation_age_seconds":60,"minimum_confirmations":1,"minimum_expiry_margin_blocks":1},"birthday":{"prior_height":1,"prior_block_hash":"00","sapling_tree":"","orchard_tree":"","ironwood_tree":""},"maximum_blocks":10,"retention":"current_native_owner_only"});
+        let selected = serde_json::to_string_pretty(&v).unwrap();
+        assert!(wallet_selected_configuration_matches(
+            &selected,
+            &v.to_string()
+        ));
+        let mut changed = v.clone();
+        changed["maximum_blocks"] = serde_json::json!(11);
+        assert!(!wallet_selected_configuration_matches(
+            &selected,
+            &changed.to_string()
+        ));
+        let mut changed = v;
+        changed["birthday"]["prior_height"] = serde_json::json!(2);
+        assert!(!wallet_selected_configuration_matches(
+            &selected,
+            &changed.to_string()
+        ));
+        assert!(!wallet_selected_configuration_matches("{}", "{}"));
+    }
+}
+
+fn sign_tail_eligible(
+    phase: Phase,
+    expected: Phase,
+    read: bool,
+    ack: bool,
+    focused: bool,
+    revoked: bool,
+    later: bool,
+) -> bool {
+    matches!(expected, Phase::SignReadReview | Phase::SignExactReview)
+        && phase == expected
+        && read
+        && ack
+        && focused
+        && !revoked
+        && later
+}
+fn sign_exact_matches_retained(
+    p: &SignerSignExactPresentationV1,
+    r: &SignerSignReadPresentationV1,
+    d: &SignerSignPreparedV1,
+) -> bool {
+    p.actor == r.actor
+        && p.facts.original == r.facts.original
+        && p.facts.observed == r.facts.observed
+        && sign_prepared_commitments_match(
+            &r.presentation_digest,
+            &p.facts.original_read_presentation_digest,
+            &p.facts.signing_terms_digest,
+            &p.facts.active_receipt_digest,
+            &p.facts.authenticated_history_digest,
+            d,
+        )
+        && p.source_ceiling_ms == r.source_ceiling_ms
+        && p.service_ceiling_ms == r.service_ceiling_ms
+        && p.writer_session_ceiling_ms == r.writer_session_ceiling_ms
+        && p.facts.reviewed_at_ms >= r.facts.reviewed_at_ms
+}
+#[cfg(test)]
+mod sign_ui_tests {
+    use super::*;
+    #[test]
+    fn read_and_prepared_never_approve_exact_sign_or_return() {
+        for review in [Phase::SignReadReview, Phase::SignExactReview] {
+            assert!(sign_tail_eligible(
+                review, review, true, true, true, false, true
+            ));
+            for p in [
+                Phase::WalletObserved,
+                Phase::SignReading,
+                Phase::SignPrepared,
+                Phase::SigningExact,
+                Phase::SignCommitted,
+            ] {
+                assert!(!sign_tail_eligible(
+                    p, review, true, true, true, false, true
+                ));
+            }
+            assert!(!sign_tail_eligible(
+                review, review, false, true, true, false, true
+            ));
+            assert!(!sign_tail_eligible(
+                review, review, true, false, true, false, true
+            ));
+            assert!(!sign_tail_eligible(
+                review, review, true, true, false, false, true
+            ));
+            assert!(!sign_tail_eligible(
+                review, review, true, true, true, true, true
+            ));
+            assert!(!sign_tail_eligible(
+                review, review, true, true, true, false, false
+            ));
+        }
+        assert!(!sign_tail_eligible(
+            Phase::SignReadReview,
+            Phase::SignExactReview,
+            true,
+            true,
+            true,
+            false,
+            true
+        ));
+    }
+}
+
+fn sign_prepared_commitments_match(
+    read: &str,
+    exact_read: &str,
+    terms: &str,
+    receipt: &str,
+    history: &str,
+    d: &SignerSignPreparedV1,
+) -> bool {
+    read == exact_read
+        && d.read_presentation_digest == read
+        && d.signing_terms_digest == terms
+        && d.active_receipt_digest == receipt
+        && d.authenticated_history_digest == history
+}
+#[cfg(test)]
+mod sign_prepared_binding_tests {
+    use super::*;
+    #[test]
+    fn exact_sign_requires_all_actual_prepared_commitments() {
+        let d = SignerSignPreparedV1 {
+            read_presentation_digest: "read".into(),
+            signing_terms_digest: "terms".into(),
+            active_receipt_digest: "receipt".into(),
+            authenticated_history_digest: "history".into(),
+        };
+        assert!(sign_prepared_commitments_match(
+            "read", "read", "terms", "receipt", "history", &d
+        ));
+        for args in [
+            ("other", "read", "terms", "receipt", "history"),
+            ("read", "other", "terms", "receipt", "history"),
+            ("read", "read", "other", "receipt", "history"),
+            ("read", "read", "terms", "other", "history"),
+            ("read", "read", "terms", "receipt", "other"),
+        ] {
+            assert!(!sign_prepared_commitments_match(
+                args.0, args.1, args.2, args.3, args.4, &d
+            ));
+        }
+    }
+}
+
+fn return_tail_eligible(
+    phase: Phase,
+    expected: Phase,
+    read: bool,
+    ack: bool,
+    focused: bool,
+    revoked: bool,
+    later: bool,
+) -> bool {
+    matches!(expected, Phase::ReturnReadReview | Phase::ReturnExactReview)
+        && phase == expected
+        && read
+        && ack
+        && focused
+        && !revoked
+        && later
+}
+fn return_exact_matches_retained(
+    p: &SignerReturnExactPresentationV1,
+    r: &SignerReturnReadPresentationV1,
+    d: &SignerReturnPreparedV1,
+) -> bool {
+    p.actor == r.actor
+        && p.facts.read == *r
+        && return_prepared_commitments_match(
+            &r.presentation_digest,
+            &p.facts.preview_digest,
+            &p.facts.reviewed_digest,
+            &p.facts.signature_set_digest,
+            d,
+        )
+        && p.source_ceiling_ms == r.source_ceiling_ms
+        && p.service_ceiling_ms == r.service_ceiling_ms
+        && p.writer_session_ceiling_ms == r.writer_session_ceiling_ms
+        && p.channel_ceiling_ms == r.channel_ceiling_ms
+        && p.material_ceiling_ms == r.material_ceiling_ms
+        && p.channel_expires_at_ms == r.channel_expires_at_ms
+        && p.material_expires_at_ms == r.material_expires_at_ms
+        && p.facts.reviewed_at_ms >= r.facts.reviewed_at_ms
+}
+fn return_prepared_commitments_match(
+    read: &str,
+    preview: &str,
+    reviewed: &str,
+    signatures: &str,
+    d: &SignerReturnPreparedV1,
+) -> bool {
+    d.read_presentation_digest == read
+        && d.preview_digest == preview
+        && d.reviewed_digest == reviewed
+        && d.signature_set_digest == signatures
+}
+#[cfg(test)]
+mod return_ui_tests {
+    use super::*;
+    #[test]
+    fn return_waiting_or_prepared_never_grants_exact_or_completion() {
+        for review in [Phase::ReturnReadReview, Phase::ReturnExactReview] {
+            assert!(return_tail_eligible(
+                review, review, true, true, true, false, true
+            ));
+            for p in [
+                Phase::SignCommitted,
+                Phase::ReturnReading,
+                Phase::ReturnPrepared,
+                Phase::ReturningExact,
+                Phase::ReturnCompleted,
+            ] {
+                assert!(!return_tail_eligible(
+                    p, review, true, true, true, false, true
+                ));
+            }
+            assert!(!return_tail_eligible(
+                review, review, false, true, true, false, true
+            ));
+            assert!(!return_tail_eligible(
+                review, review, true, false, true, false, true
+            ));
+            assert!(!return_tail_eligible(
+                review, review, true, true, false, false, true
+            ));
+            assert!(!return_tail_eligible(
+                review, review, true, true, true, true, true
+            ));
+            assert!(!return_tail_eligible(
+                review, review, true, true, true, false, false
+            ));
+        }
+        assert!(!return_tail_eligible(
+            Phase::ReturnReadReview,
+            Phase::ReturnExactReview,
+            true,
+            true,
+            true,
+            false,
+            true
+        ));
+    }
+    #[test]
+    fn return_exact_requires_every_actual_prepared_commitment() {
+        let d = SignerReturnPreparedV1 {
+            read_presentation_digest: "read".into(),
+            preview_digest: "preview".into(),
+            reviewed_digest: "reviewed".into(),
+            signature_set_digest: "signatures".into(),
+        };
+        assert!(return_prepared_commitments_match(
+            "read",
+            "preview",
+            "reviewed",
+            "signatures",
+            &d
+        ));
+        for args in [
+            ("other", "preview", "reviewed", "signatures"),
+            ("read", "other", "reviewed", "signatures"),
+            ("read", "preview", "other", "signatures"),
+            ("read", "preview", "reviewed", "other"),
+        ] {
+            assert!(!return_prepared_commitments_match(
+                args.0, args.1, args.2, args.3, &d
+            ));
+        }
+    }
+}
+
+// Exact maintained FinancialResultRequestV1 outer schema confirmed by S/H owners.
+// Full fixed identity remains checked by the actual persisted-result consumer;
+// this ordinary parser never creates an importer, receipt or permission.
+fn return_request_matches_actual(
+    json: &str,
+    account: &str,
+    signed: &SignerSignCommittedV1,
+) -> bool {
+    if json.len() > 8192 {
+        return false;
+    }
+    wholepact_financial_coordinator_origin::SignerReturnRequestDataV1::parse_json(json).is_ok_and(
+        |r| {
+            r.account_id == account
+                && r.authorization_id == signed.authorization_id
+                && r.original_consent_ref == signed.original_consent_ref
+        },
+    )
+}
+#[cfg(test)]
+mod return_request_binding_tests {
+    use super::*;
+    #[test]
+    fn request_keeps_actual_account_authorization_and_consent_not_presentation_alias() {
+        let signed = SignerSignCommittedV1 {
+            sign_presentation_digest: "presentation".into(),
+            authorization_id: "authorization".into(),
+            original_consent_ref: "ab".repeat(32),
+            result_digest: "result".into(),
+            outbox_digest: "outbox".into(),
+            fixed_identity_digest: "fixed".into(),
+        };
+        let account = "cd".repeat(32);
+        let h = "ef".repeat(32);
+        let v = serde_json::json!({"account_id":account,"authorization_id":"authorization","original_consent_ref":signed.original_consent_ref,"fixed":{"schema_version":1,"network_profile_id":"network","agreement_id":"agreement","obligation_id":"obligation","proposal_id":"proposal","revision":1,"expiry_height":1,"proposal_digest":h,"manifest_digest":h,"unsigned_artifact_digest":h,"proved_artifact_digest":h,"effects_commitment":h,"policy_digest":h,"review_binding":h,"action_mapping_digest":h,"anchor":h,"proposal_binding":h}});
+        assert!(return_request_matches_actual(
+            &v.to_string(),
+            &account,
+            &signed
+        ));
+        for (key, value) in [
+            ("account_id", "other"),
+            ("authorization_id", "other"),
+            ("original_consent_ref", "presentation"),
+        ] {
+            let mut q = v.clone();
+            q[key] = serde_json::json!(value);
+            assert!(!return_request_matches_actual(
+                &q.to_string(),
+                &account,
+                &signed
+            ));
+        }
+        let mut q = v;
+        q["operation"] = serde_json::json!("return");
+        assert!(!return_request_matches_actual(
+            &q.to_string(),
+            &account,
+            &signed
+        ));
+    }
+}
+
+fn financial_park_eligible(
+    phase: Phase,
+    password: bool,
+    host_editing: bool,
+    revoked: bool,
+) -> bool {
+    matches!(phase, Phase::SignCommitted | Phase::ReturnCompleted)
+        && !password
+        && !host_editing
+        && !revoked
+}
+#[cfg(test)]
+mod financial_role_custody_tests {
+    use super::*;
+    #[test]
+    fn only_actual_signed_or_finished_custody_can_leave_visible_role() {
+        for p in [Phase::SignCommitted, Phase::ReturnCompleted] {
+            assert!(financial_park_eligible(p, false, false, false));
+            assert!(!financial_park_eligible(p, true, false, false));
+            assert!(!financial_park_eligible(p, false, true, false));
+            assert!(!financial_park_eligible(p, false, false, true));
+        }
+        for p in [
+            Phase::SignExactReview,
+            Phase::SigningExact,
+            Phase::ReturnReading,
+            Phase::ReturnPrepared,
+            Phase::ReturnExactReview,
+            Phase::ReturningExact,
+        ] {
+            assert!(!financial_park_eligible(p, false, false, false));
+        }
+    }
+}
+
+fn continuation_selector_json(p: &SignerContinuePresentationV1) -> Result<String> {
+    p.validate()?;
+    // The actual authenticated request is already strictly validated by Origin.
+    // Preserve its exact bytes rather than reserializing a guessed DTO.
+    Ok(format!(
+        "{{\"version\":1,\"continuation\":{}}}",
+        p.request_json
+    ))
 }

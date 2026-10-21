@@ -1,11 +1,14 @@
 //! Exact coordinated Read/export acquisition of the maintained record lease.
 use super::*;
 use wholepact_financial_coordinator_origin::{
-    SignerV3PrepareReadFinalV1, SignerV3RediscloseFinalV1, SignerV3RedisclosureReadFinalV1,
+    SignerV3AdmitFinalV1, SignerV3AdmitReadFinalV1, SignerV3PrepareReadFinalV1,
+    SignerV3RediscloseFinalV1, SignerV3RedisclosureReadFinalV1,
 };
 pub(crate) enum CoordinatedConstructionActionV1<'a> {
     Read(&'a SignerV3RedisclosureReadFinalV1),
     Prepare(&'a SignerV3PrepareReadFinalV1),
+    AdmitRead(&'a SignerV3AdmitReadFinalV1),
+    Admit(&'a SignerV3AdmitFinalV1),
     Export(&'a SignerV3RediscloseFinalV1),
 }
 impl CoordinatedConstructionActionV1<'_> {
@@ -13,6 +16,8 @@ impl CoordinatedConstructionActionV1<'_> {
         match self {
             Self::Read(v) => v.check_current(),
             Self::Prepare(v) => v.check_current(),
+            Self::AdmitRead(v) => v.check_current(),
+            Self::Admit(v) => v.check_current(),
             Self::Export(v) => v.check_current(),
         }
         .map_err(|_| JournalError::Permission)

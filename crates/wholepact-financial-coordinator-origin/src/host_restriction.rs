@@ -30,7 +30,10 @@ const IMPORT_BUSY: u32 = SIGNER1_IMPORT_BUSY | SIGNER2_IMPORT_BUSY;
 const SIGNER1_JOURNAL_BUSY: u32 = 1 << 3;
 const SIGNER2_JOURNAL_BUSY: u32 = 1 << 4;
 const JOURNAL_BUSY: u32 = SIGNER1_JOURNAL_BUSY | SIGNER2_JOURNAL_BUSY;
-const KNOWN_BITS: u32 = REVOKED | IMPORT_BUSY | JOURNAL_BUSY;
+const SIGNER1_KEY_USE_BUSY: u32 = 1 << 5;
+const SIGNER2_KEY_USE_BUSY: u32 = 1 << 6;
+const KEY_USE_BUSY: u32 = SIGNER1_KEY_USE_BUSY | SIGNER2_KEY_USE_BUSY;
+const KNOWN_BITS: u32 = REVOKED | IMPORT_BUSY | JOURNAL_BUSY | KEY_USE_BUSY;
 
 fn restriction_current(word: u32) -> bool {
     // Only honest actor busy bits may accompany CURRENT. Unknown state retains
@@ -79,8 +82,8 @@ impl Drop for EnteredActorOperation<'_> {
 
 fn actor_busy_mask(role: Role) -> Result<u32> {
     match role {
-        Role::Signer1 => Ok(SIGNER1_IMPORT_BUSY | SIGNER1_JOURNAL_BUSY),
-        Role::Signer2 => Ok(SIGNER2_IMPORT_BUSY | SIGNER2_JOURNAL_BUSY),
+        Role::Signer1 => Ok(SIGNER1_IMPORT_BUSY | SIGNER1_JOURNAL_BUSY | SIGNER1_KEY_USE_BUSY),
+        Role::Signer2 => Ok(SIGNER2_IMPORT_BUSY | SIGNER2_JOURNAL_BUSY | SIGNER2_KEY_USE_BUSY),
         _ => Err(rejected("entered operation requires original Signer actor")),
     }
 }
@@ -114,6 +117,24 @@ impl<'a> EnteredJournalPublication<'a> {
                     "journal publication requires original Signer actor",
                 ))
             }
+        };
+        Ok(Self {
+            _entered: EnteredActorOperation::enter(word, bit, actor_busy_mask(role)?)?,
+        })
+    }
+}
+
+/// A distinct purpose bit for the bounded actual private-key operation. It is
+/// never mislabeled as a wallet import or journal publication.
+struct EnteredSignKeyUse<'a> {
+    _entered: EnteredActorOperation<'a>,
+}
+impl<'a> EnteredSignKeyUse<'a> {
+    fn enter(word: &'a AtomicU32, role: Role) -> Result<Self> {
+        let bit = match role {
+            Role::Signer1 => SIGNER1_KEY_USE_BUSY,
+            Role::Signer2 => SIGNER2_KEY_USE_BUSY,
+            _ => return Err(rejected("sign key use requires original Signer actor")),
         };
         Ok(Self {
             _entered: EnteredActorOperation::enter(word, bit, actor_busy_mask(role)?)?,
@@ -468,6 +489,25 @@ impl SignerSharedRestrictionV1 {
         result
     }
 
+    /// Private integration hook for the genuine one-use SignExact owner only.
+    /// All local source/application locks precede admission. The callback owns
+    /// the entire bounded synchronous derivation/sign/normalization scope; no
+    /// await, queue, network or escaped key/guard is permitted. R denies new
+    /// entries but an already-entered operation may settle. Its result must be
+    /// retained, never treated as permission for another signature attempt.
+    pub(super) fn execute_sign_key_use(
+        &self,
+        operation: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        self.check_current()?;
+        // SAFETY: this owner retains the original inherited mapping throughout
+        // the synchronous operation; all cell accesses remain atomic.
+        let entered = EnteredSignKeyUse::enter(unsafe { self.cell.word.as_ref() }, self.role)?;
+        let result = operation();
+        drop(entered);
+        result
+    }
+
     /// Integration hook ONLY for the future genuine one-use WalletObserveFinal.
     /// Its owner must consume that exact action, validate same-Core purpose,
     /// source, presentation, original C/H lifetimes and immutable deadlines,
@@ -569,7 +609,7 @@ mod wallet_import_gate_tests {
 
     #[test]
     fn unknown_bits_deny_currentness_admission_and_drain() {
-        for bit_index in 5..32 {
+        for bit_index in 7..32 {
             let unknown = 1u32 << bit_index;
             for known in 0..=KNOWN_BITS {
                 let value = unknown | known;
@@ -726,7 +766,7 @@ mod journal_publication_gate_tests {
 
     #[test]
     fn unknown_bits_deny_every_publication_without_mutation() {
-        for index in 5..32 {
+        for index in 7..32 {
             for known in 0..=KNOWN_BITS {
                 let value = (1u32 << index) | known;
                 let word = AtomicU32::new(value);
@@ -770,12 +810,123 @@ mod restriction_observation_tests {
 
     #[test]
     fn unknown_state_is_never_suppressed_even_when_also_revoked() {
-        for index in 5..32 {
+        for index in 7..32 {
             for known in 0..=KNOWN_BITS {
                 let word = (1u32 << index) | known;
                 assert!(current_or_restricted(word).is_err());
                 assert!(current_or_restricted(word | REVOKED).is_err());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod sign_key_use_gate_tests {
+    use super::*;
+    #[test]
+    fn simultaneous_same_actor_sign_key_and_journal_have_one_winner() {
+        use std::sync::Barrier;
+        let word = AtomicU32::new(CURRENT);
+        let winners = AtomicU32::new(0);
+        let attempted = Barrier::new(3);
+        let finish = Barrier::new(3);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let entered = EnteredSignKeyUse::enter(&word, Role::Signer1);
+                if entered.is_ok() {
+                    winners.fetch_add(1, Ordering::SeqCst);
+                }
+                attempted.wait();
+                finish.wait();
+                drop(entered);
+            });
+            scope.spawn(|| {
+                let entered = EnteredJournalPublication::enter(&word, Role::Signer1);
+                if entered.is_ok() {
+                    winners.fetch_add(1, Ordering::SeqCst);
+                }
+                attempted.wait();
+                finish.wait();
+                drop(entered);
+            });
+            attempted.wait();
+            // Both attempts have finished and the winner remains entered.
+            // R does not wait for or overwrite its independently held bit.
+            word.fetch_or(REVOKED, Ordering::SeqCst);
+            finish.wait();
+        });
+        assert_eq!(winners.load(Ordering::SeqCst), 1);
+        assert_eq!(word.load(Ordering::SeqCst), REVOKED);
+    }
+
+    #[test]
+    fn same_actor_all_purposes_exclude_key_use_both_directions() {
+        for role in [Role::Signer1, Role::Signer2] {
+            let word = AtomicU32::new(CURRENT);
+            let key = EnteredSignKeyUse::enter(&word, role).unwrap();
+            assert!(EnteredSignKeyUse::enter(&word, role).is_err());
+            assert!(EnteredWalletImport::enter(&word, role).is_err());
+            assert!(EnteredJournalPublication::enter(&word, role).is_err());
+            drop(key);
+            let wallet = EnteredWalletImport::enter(&word, role).unwrap();
+            assert!(EnteredSignKeyUse::enter(&word, role).is_err());
+            drop(wallet);
+            let journal = EnteredJournalPublication::enter(&word, role).unwrap();
+            assert!(EnteredSignKeyUse::enter(&word, role).is_err());
+            drop(journal);
+            assert_eq!(word.load(Ordering::SeqCst), CURRENT);
+        }
+    }
+    #[test]
+    fn original_r_denies_new_key_use_but_entered_scope_clears_only_itself() {
+        let word = AtomicU32::new(CURRENT);
+        let first = EnteredSignKeyUse::enter(&word, Role::Signer1).unwrap();
+        let second = EnteredJournalPublication::enter(&word, Role::Signer2).unwrap();
+        word.fetch_or(REVOKED, Ordering::SeqCst);
+        assert!(EnteredSignKeyUse::enter(&word, Role::Signer2).is_err());
+        drop(first);
+        assert_eq!(word.load(Ordering::SeqCst), REVOKED | SIGNER2_JOURNAL_BUSY);
+        drop(second);
+        assert_eq!(word.load(Ordering::SeqCst), REVOKED);
+        assert!(EnteredSignKeyUse::enter(&word, Role::Signer1).is_err());
+    }
+    #[test]
+    fn key_use_unwind_preserves_unknown_r_and_other_actor() {
+        let word = AtomicU32::new(CURRENT);
+        let other = EnteredSignKeyUse::enter(&word, Role::Signer2).unwrap();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _key = EnteredSignKeyUse::enter(&word, Role::Signer1).unwrap();
+            word.fetch_or(REVOKED | (1 << 31), Ordering::SeqCst);
+            panic!("bounded operation unwind");
+        }));
+        assert!(result.is_err());
+        assert_eq!(
+            word.load(Ordering::SeqCst),
+            REVOKED | (1 << 31) | SIGNER2_KEY_USE_BUSY
+        );
+        drop(other);
+        assert_eq!(word.load(Ordering::SeqCst), REVOKED | (1 << 31));
+    }
+    #[test]
+    fn unknown_bits_never_admit_key_use_or_imply_wallet_drain() {
+        for index in 7..32 {
+            for known in 0..=KNOWN_BITS {
+                let value = (1 << index) | known;
+                let word = AtomicU32::new(value);
+                assert!(EnteredSignKeyUse::enter(&word, Role::Signer1).is_err());
+                assert!(EnteredSignKeyUse::enter(&word, Role::Signer2).is_err());
+                assert_eq!(word.load(Ordering::SeqCst), value);
+                assert!(!restriction_current(value));
+                assert_ne!(value, REVOKED);
+            }
+        }
+        for bit in [SIGNER1_KEY_USE_BUSY, SIGNER2_KEY_USE_BUSY, KEY_USE_BUSY] {
+            assert!(restriction_current(bit));
+            assert_ne!(bit | REVOKED, REVOKED);
+        }
+        let word = AtomicU32::new(CURRENT);
+        assert!(EnteredSignKeyUse::enter(&word, Role::Coordinator).is_err());
+        assert!(EnteredSignKeyUse::enter(&word, Role::Host).is_err());
+        assert_eq!(word.load(Ordering::SeqCst), CURRENT);
     }
 }

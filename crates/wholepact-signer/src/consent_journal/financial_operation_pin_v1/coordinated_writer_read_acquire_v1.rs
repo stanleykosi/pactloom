@@ -4,11 +4,15 @@
 use super::*;
 use wholepact_financial_coordinator_origin::{
     SignerAcquireArmV1, SignerAcquireFinalV1, SignerActivateArmV1, SignerActivateFinalV1,
-    SignerActivateReadFinalV1, SignerFinancialWriterReadFinalV1,
+    SignerActivateReadFinalV1, SignerFinancialWriterReadFinalV1, SignerWalletObserveFinalV1,
+    SignerWalletPrepareFinalV1, SignerSignReadFinalV1,
 };
 
 // Closed observations, never a caller-supplied callback or a DTO permission.
 enum OperationObservation<'a> {
+    SignRead(&'a SignerSignReadFinalV1),
+    WalletPrepare(&'a SignerWalletPrepareFinalV1),
+    WalletObserve(&'a SignerWalletObserveFinalV1),
     ActivateRead(&'a SignerActivateReadFinalV1),
     ActivateArm(&'a SignerActivateArmV1),
     ActivateFinal(&'a SignerActivateFinalV1),
@@ -19,6 +23,9 @@ enum OperationObservation<'a> {
 impl OperationObservation<'_> {
     fn check(&self) -> Result<()> {
         match self {
+            Self::SignRead(token) => token.check_current(),
+            Self::WalletPrepare(token) => token.check_current(),
+            Self::WalletObserve(token) => token.check_current(),
             Self::ActivateRead(token) => token.check_current(),
             Self::ActivateArm(token) => token.check_current(),
             Self::ActivateFinal(token) => token.check_current(),
@@ -82,6 +89,54 @@ impl FinancialOperationJournalPinV1 {
 }
 
 impl FinancialConsentJournalV1 {
+    pub(crate) fn prepare_coordinated_sign_read_operation_pin_v1(&self,current:&FinancialSourceBindingV1,token:&SignerSignReadFinalV1)->Result<FinancialOperationJournalPinV1>{self.prepare_coordinated_operation_pin_v1(current,OperationObservation::SignRead(token))}
+    pub(crate) fn check_coordinated_sign_read_operation_pin_v1(&self,current:&FinancialSourceBindingV1,pin:&FinancialOperationJournalPinV1,token:&SignerSignReadFinalV1)->Result<()>{self.check_coordinated_operation_pin_v1(current,pin,OperationObservation::SignRead(token))}
+
+    pub(crate) fn prepare_coordinated_wallet_prepare_operation_pin_v1(
+        &self,
+        current: &FinancialSourceBindingV1,
+        token: &SignerWalletPrepareFinalV1,
+    ) -> Result<FinancialOperationJournalPinV1> {
+        self.prepare_coordinated_operation_pin_v1(
+            current,
+            OperationObservation::WalletPrepare(token),
+        )
+    }
+    pub(crate) fn prepare_coordinated_wallet_observe_operation_pin_v1(
+        &self,
+        current: &FinancialSourceBindingV1,
+        token: &SignerWalletObserveFinalV1,
+    ) -> Result<FinancialOperationJournalPinV1> {
+        self.prepare_coordinated_operation_pin_v1(
+            current,
+            OperationObservation::WalletObserve(token),
+        )
+    }
+    pub(crate) fn check_coordinated_wallet_prepare_operation_pin_v1(
+        &self,
+        current: &FinancialSourceBindingV1,
+        pin: &FinancialOperationJournalPinV1,
+        token: &SignerWalletPrepareFinalV1,
+    ) -> Result<()> {
+        self.check_coordinated_operation_pin_v1(
+            current,
+            pin,
+            OperationObservation::WalletPrepare(token),
+        )
+    }
+    pub(crate) fn check_coordinated_wallet_observe_operation_pin_v1(
+        &self,
+        current: &FinancialSourceBindingV1,
+        pin: &FinancialOperationJournalPinV1,
+        token: &SignerWalletObserveFinalV1,
+    ) -> Result<()> {
+        self.check_coordinated_operation_pin_v1(
+            current,
+            pin,
+            OperationObservation::WalletObserve(token),
+        )
+    }
+
     pub(crate) fn prepare_coordinated_activate_read_operation_pin_v1(
         &self,
         current: &FinancialSourceBindingV1,

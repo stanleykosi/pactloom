@@ -345,7 +345,7 @@ impl SignerConsentJournal {
         check_workflow!();
         let tx = c.transaction_with_behavior(TransactionBehavior::Deferred)?;
         presented.check_arm(arm)?;
-        durable_born_entry_v1::validate_delivery_v3(&tx, &source.genesis, self.capacity_limits())?;
+        original_delivery::validate(&tx, &source.genesis, self.capacity_limits())?;
         check_workflow!();
         if workflow {
             #[cfg(feature = "coordinated-financial-workflow-v1")]
@@ -454,7 +454,7 @@ impl FinancialConsentJournalV1 {
                     presented.check_final(&final_admission)?;
                     source.require_pin(&tx)?;
                     check_workflow!();
-                    durable_born_entry_v1::validate_delivery_v3(
+                    original_delivery::validate(
                         &tx,
                         &source.genesis,
                         journal.capacity_limits(),

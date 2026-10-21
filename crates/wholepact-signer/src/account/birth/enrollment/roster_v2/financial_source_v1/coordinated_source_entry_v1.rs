@@ -226,8 +226,8 @@ impl PreparedOriginalFinancialSourceV1 {
         check()?;
         // The existing maintained KDF/original-account decoder is unchanged.
         // The independent origin control owner continues observing global R.
-        let account = Arc::new(active::open_for_manual_roster_enrollment_v2(
-            directory, &password, &encrypted,
+        let account = Arc::new(active::open_for_coordinated_financial_source_entry_v1(
+            directory, &password, &encrypted, &admission,
         )?);
         drop(password);
         check()?;

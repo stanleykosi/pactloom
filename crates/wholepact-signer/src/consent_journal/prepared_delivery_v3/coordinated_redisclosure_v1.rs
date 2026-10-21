@@ -8,7 +8,7 @@ impl SignerConsentJournal {
         lease: &PreconstructionRecordLease<'_>,
         action: &SignerV3RediscloseFinalV1,
         effect: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<T>,
-    ) -> Result<(T, PreparedDeliveryJournalRevisionV3)> {
+    ) -> Result<(T, Result<PreparedDeliveryJournalRevisionV3>)> {
         let current = || action.check_current().map_err(|_| JournalError::Permission);
         current()?;
         lease.require_journal(&self.binding())?;
@@ -48,7 +48,7 @@ impl SignerConsentJournal {
         let mut outcome = None;
         let slot = &mut outcome;
         let prior = &pin;
-        action
+        let gate = action
             .execute_redisclosure_publication(move || {
                 let result = (|| -> Result<(T, DatabaseRevisionV3)> {
                     let result = effect(&tx)?;
@@ -86,15 +86,18 @@ impl SignerConsentJournal {
                     ))
                 }
             })
-            .map_err(|_| JournalError::Permission)?;
+            .map_err(|_| JournalError::Permission);
+        // Capture actual successful commit FIRST. A late restriction or failed
+        // postcheck cannot erase that outcome or restore the consumed old pin.
         let (result, after) = outcome.ok_or(JournalError::Permission)??;
-        // Postcommit errors are uncertain; the consumed old pin is never restored.
-        current()?;
-        if revision(&c)? != after {
-            return Err(JournalError::Conflict);
-        }
-        self.database_identity.check_current(&c)?;
-        pin.revision = after;
-        Ok((result, pin))
+        let restricted_pin = (|| -> Result<PreparedDeliveryJournalRevisionV3> {
+            gate?;
+            current()?;
+            if revision(&c)? != after { return Err(JournalError::Conflict); }
+            self.database_identity.check_current(&c)?;
+            pin.revision = after;
+            Ok(pin)
+        })();
+        Ok((result, restricted_pin))
     }
 }

@@ -31,7 +31,9 @@ pub(crate) struct CoordinatedRediscloseV1 {
 pub(crate) struct CoordinatedRedisclosedSourceV1 {
     pub(super) ready: CoordinatedPreconstructionReadyV1,
     pub(super) outbox: DurableConstructionOutboxV1,
-    report: SignerV3RedisclosedV1,
+    // None retains a real committed outbox after postcommit/send uncertainty.
+    // It is terminal custody, not permission or a successful export report.
+    report: Option<SignerV3RedisclosedV1>,
 }
 fn wall_deadline(captured: Instant, wall: u64, deadline: Instant, source_wall: u64) -> Result<u64> {
     let left = u64::try_from(deadline.saturating_duration_since(captured).as_millis())
@@ -268,6 +270,15 @@ impl CoordinatedRediscloseV1 {
             .journal
             .append_coordinated_redisclosure_v1(pin, &lease, &self.candidate, &action)
             .map_err(|_| Error::Uncertain)?;
+        let pin = match pin {
+            Ok(pin) => pin,
+            Err(_) => {
+                drop(lease);
+                return Ok(CoordinatedRedisclosedSourceV1 {
+                    ready: self.ready, outbox, report: None,
+                });
+            }
+        };
         source.revision = Some(pin);
         let response = DurableConstructionResponseV1::Retained {
             outbox: Box::new(outbox.clone()),
@@ -275,7 +286,7 @@ impl CoordinatedRediscloseV1 {
         // Maintained entered-send boundary: readiness/waits precede final R and
         // immutable-deadline checks, immediately followed by one bounded syscall.
         // A syscall already entered may settle after R. Never retry on ambiguity.
-        crate::authority_bridge::durable_review_ipc_v1::bounded_write_restricted(
+        let sent = crate::authority_bridge::durable_review_ipc_v1::bounded_write_restricted(
             &mut self.stream,
             &response,
             self.deadline,
@@ -308,15 +319,19 @@ impl CoordinatedRediscloseV1 {
                     .check_current()
                     .map_err(|_| crate::authority_bridge::BridgeError::Permission)
             },
-        )
-        .map_err(|_| Error::Uncertain)?;
+        );
         drop(lease);
+        if sent.is_err() {
+            return Ok(CoordinatedRedisclosedSourceV1 {
+                ready: self.ready, outbox, report: None,
+            });
+        }
         let report = SignerV3RedisclosedV1 {
             presentation_digest: action.presentation().presentation_digest.clone(),
             outbox_reference: outbox.reference().into(),
             request_digest: outbox.request_digest().into(),
         };
-        action.finish_export().map_err(|_| Error::Uncertain)?;
+        let report = action.finish_export().ok().map(|()| report);
         Ok(CoordinatedRedisclosedSourceV1 {
             ready: self.ready,
             outbox,
@@ -325,10 +340,11 @@ impl CoordinatedRediscloseV1 {
     }
 }
 impl CoordinatedRedisclosedSourceV1 {
-    pub(crate) fn report(&self) -> SignerV3RedisclosedV1 {
+    pub(crate) fn report(&self) -> Option<SignerV3RedisclosedV1> {
         self.report.clone()
     }
     pub(crate) fn check_current(&self) -> Result<()> {
+        if self.report.is_none() { return Err(Error::Uncertain); }
         self.ready.check_current()
     }
 }

@@ -1,6 +1,8 @@
 //! Consuming post-Acquire owner. Read prepares; distinct Activate effects once.
 //! The only successful output stops BEFORE any wallet private preparation.
 use super::*;
+#[path = "coordinated_financial_wallet_v1.rs"]
+pub(in crate::native_ui::runtime) mod coordinated_financial_wallet_v1;
 use crate::native_ui::witness_workspace::financial_continuation_v1::{
     financial_activation_digest, CoordinatedActivateFailureV1,
 };
@@ -78,13 +80,13 @@ fn ceiling(retained: &AwaitingCoordinatedActivateReadV1) -> Result<(Instant, u64
         .min(retained.context.source.original_ceiling_ms());
     Ok((deadline, wall, expires))
 }
-pub(super) struct PresentedCoordinatedActivateReadV1 {
+pub(in crate::native_ui::runtime) struct PresentedCoordinatedActivateReadV1 {
     retained: AwaitingCoordinatedActivateReadV1,
     presentation: SignerActivateReadPresentationV1,
     original_read_deadline: Instant,
 }
 impl AwaitingCoordinatedActivateReadV1 {
-    pub(super) fn offer_activate_read(
+    pub(in crate::native_ui::runtime) fn offer_activate_read(
         self,
         origin: &mut SignerFinancialWorkflowOriginV1,
     ) -> Result<PresentedCoordinatedActivateReadV1> {
@@ -126,7 +128,7 @@ impl AwaitingCoordinatedActivateReadV1 {
         })
     }
 }
-pub(super) struct PresentedCoordinatedActivateV1 {
+pub(in crate::native_ui::runtime) struct PresentedCoordinatedActivateV1 {
     retained: AwaitingCoordinatedActivateReadV1,
     history: AuthenticatedFinancialContinuationHistoryV1,
     request: wholepact_authority::OwnerControlRequest,
@@ -134,11 +136,10 @@ pub(super) struct PresentedCoordinatedActivateV1 {
     original_activate_deadline: Instant,
 }
 impl PresentedCoordinatedActivateReadV1 {
-    pub(super) fn read_and_prepare(
+    pub(in crate::native_ui::runtime) fn read_and_prepare(
         self,
         read: SignerActivateReadFinalV1,
-        origin: &mut SignerFinancialWorkflowOriginV1,
-    ) -> Result<PresentedCoordinatedActivateV1> {
+    ) -> Result<PreparedCoordinatedActivateUnderReadV1> {
         read.check_current()?;
         check_retained(&self.retained)?;
         let c = &self.retained.context;
@@ -181,39 +182,36 @@ impl PresentedCoordinatedActivateReadV1 {
         };
         facts.validate()?;
         read.check_current()?;
-        let presentation = origin.begin_activate_review(
-            &read,
-            facts.clone(),
-            c.source.original_deadline(),
-            original_activate_deadline,
-        )?;
-        if presentation.facts != facts {
-            return Err(Error::ReviewMismatch);
-        }
-        read.check_current()?;
-        read.finish_read()?;
-        // Display uses frozen cached data only, after the Read is consumed.
-        origin.send_activate_display()?;
-        Ok(PresentedCoordinatedActivateV1 {
-            retained: self.retained,
-            history,
-            request,
-            presentation,
-            original_activate_deadline,
-        })
+        Ok(PreparedCoordinatedActivateUnderReadV1 { retained: self.retained, history, request, facts, read, original_activate_deadline })
     }
 }
-pub(super) struct ReadyCoordinatedActivateV1 {
+pub(in crate::native_ui::runtime) struct PreparedCoordinatedActivateUnderReadV1 {
+    retained: AwaitingCoordinatedActivateReadV1, history: AuthenticatedFinancialContinuationHistoryV1,
+    request: wholepact_authority::OwnerControlRequest, facts: SignerActivateFactsV1,
+    read: SignerActivateReadFinalV1, original_activate_deadline: Instant,
+}
+impl PreparedCoordinatedActivateUnderReadV1 {
+    pub(in crate::native_ui::runtime) fn freeze_and_present(self,origin: &mut SignerFinancialWorkflowOriginV1)->Result<PresentedCoordinatedActivateV1> {
+        self.read.check_current()?;
+        let presentation=origin.begin_activate_review(&self.read,self.facts.clone(),self.retained.context.source.original_deadline(),self.original_activate_deadline)?;
+        if presentation.facts != self.facts {return Err(Error::ReviewMismatch);}
+        self.read.check_current()?;
+        self.read.finish_read()?;
+        origin.send_activate_display()?;
+        Ok(PresentedCoordinatedActivateV1 { retained:self.retained,history:self.history,request:self.request,presentation,original_activate_deadline:self.original_activate_deadline })
+    }
+}
+
+pub(in crate::native_ui::runtime) struct ReadyCoordinatedActivateV1 {
     retained: PresentedCoordinatedActivateV1,
     pin: FinancialOperationSourcePinV1,
     ready_digest: String,
 }
 impl PresentedCoordinatedActivateV1 {
-    pub(super) fn arm(
+    pub(in crate::native_ui::runtime) fn prepare_ready(
         self,
         arm: SignerActivateArmV1,
-        origin: &mut SignerFinancialWorkflowOriginV1,
-    ) -> Result<ReadyCoordinatedActivateV1> {
+    ) -> Result<ActivateReadyToReportV1> {
         arm.check_current()?;
         check_retained(&self.retained)?;
         if arm.presentation() != &self.presentation
@@ -236,16 +234,11 @@ impl PresentedCoordinatedActivateV1 {
         )?;
         let ready_digest = pin.coordinated_activate_ready_digest_v1(&self.presentation)?;
         arm.check_current()?;
-        origin.send_activate_ready(arm, ready_digest.clone())?;
-        Ok(ReadyCoordinatedActivateV1 {
-            retained: self,
-            pin,
-            ready_digest,
-        })
+        Ok(ActivateReadyToReportV1 { arm, ready:ReadyCoordinatedActivateV1 { retained:self,pin,ready_digest } })
     }
 }
 /// Custody only. There is deliberately no implicit prepare call or Wallet grant.
-pub(super) struct AwaitingCoordinatedWalletPrepareV1 {
+pub(in crate::native_ui::runtime) struct AwaitingCoordinatedWalletPrepareV1 {
     context: Context,
     receipt: wholepact_authority::WriterSessionReceipt,
     activated: wholepact_authority::AccountSnapshot,
@@ -254,18 +247,17 @@ pub(super) struct AwaitingCoordinatedWalletPrepareV1 {
     original_writer_session_deadline: Instant,
     original_service_deadline: Instant,
 }
-pub(super) struct FailedCoordinatedActivateV1 {
+pub(in crate::native_ui::runtime) struct FailedCoordinatedActivateV1 {
     retained: ReadyCoordinatedActivateV1,
     authenticated: Option<wholepact_authority::AccountSnapshot>,
     error: Error,
     attempted: bool,
 }
 impl ReadyCoordinatedActivateV1 {
-    pub(super) fn consume_final(
+    pub(in crate::native_ui::runtime) fn commit_final(
         self,
         final_action: SignerActivateFinalV1,
-        origin: &mut SignerFinancialWorkflowOriginV1,
-    ) -> std::result::Result<AwaitingCoordinatedWalletPrepareV1, FailedCoordinatedActivateV1> {
+    ) -> CoordinatedActivateCommitV1 {
         let mut authenticated = None;
         let mut attempted = false;
         let result = (|| -> Result<SignerActivateCommittedV1> {
@@ -326,10 +318,10 @@ impl ReadyCoordinatedActivateV1 {
             };
             authenticated = Some(snapshot);
             report.validate()?;
-            origin.report_activated(report.clone())?;
+
             Ok(report)
         })();
-        match result {
+        let result = match result {
             Ok(activation_report) => {
                 let PresentedCoordinatedActivateV1 {
                     retained,
@@ -348,21 +340,6 @@ impl ReadyCoordinatedActivateV1 {
                 })
             }
             Err(error) => {
-                let presentation_digest = self.retained.presentation.presentation_digest.clone();
-                let activate_ready_digest = Some(self.ready_digest.clone());
-                let outcome = if attempted {
-                    SignerActivateOutcomeV1::Uncertain {
-                        presentation_digest,
-                        activate_ready_digest,
-                    }
-                } else {
-                    SignerActivateOutcomeV1::KnownNoEffect {
-                        presentation_digest,
-                        activate_ready_digest,
-                    }
-                };
-                let _ = origin.send_activate_outcome(outcome);
-                origin.close_for_failed_worker_v1();
                 Err(FailedCoordinatedActivateV1 {
                     retained: self,
                     authenticated,
@@ -370,8 +347,31 @@ impl ReadyCoordinatedActivateV1 {
                     attempted,
                 })
             }
+        };
+        CoordinatedActivateCommitV1 { result }
+    }
+}
+pub(in crate::native_ui::runtime) struct ActivateReadyToReportV1 { arm:SignerActivateArmV1,ready:ReadyCoordinatedActivateV1 }
+impl ActivateReadyToReportV1 {
+    pub(in crate::native_ui::runtime) fn send_ready(self,origin:&mut SignerFinancialWorkflowOriginV1)->Result<ReadyCoordinatedActivateV1> {
+        origin.send_activate_ready(self.arm,self.ready.ready_digest.clone())?; Ok(self.ready)
+    }
+}
+pub(in crate::native_ui::runtime) struct CoordinatedActivateCommitV1 { result:std::result::Result<AwaitingCoordinatedWalletPrepareV1,FailedCoordinatedActivateV1> }
+impl CoordinatedActivateCommitV1 {
+    pub(in crate::native_ui::runtime) fn succeeded(&self)->bool {self.result.is_ok()}
+    pub(in crate::native_ui::runtime) fn report(&self,origin:&mut SignerFinancialWorkflowOriginV1)->Result<()> {
+        match &self.result {
+            Ok(actual)=>{origin.report_activated(actual.activation_report.clone())?;Ok(())}
+            Err(failed)=>{
+                let presentation_digest=failed.retained.retained.presentation.presentation_digest.clone();
+                let activate_ready_digest=Some(failed.retained.ready_digest.clone());
+                let outcome=if failed.attempted {SignerActivateOutcomeV1::Uncertain {presentation_digest,activate_ready_digest}} else {SignerActivateOutcomeV1::KnownNoEffect {presentation_digest,activate_ready_digest}};
+                let report=origin.send_activate_outcome(outcome);origin.close_for_failed_worker_v1();report.map_err(Into::into)
+            }
         }
     }
+    pub(in crate::native_ui::runtime) fn into_result(self)->std::result::Result<AwaitingCoordinatedWalletPrepareV1,FailedCoordinatedActivateV1> {self.result}
 }
 
 #[cfg(test)]

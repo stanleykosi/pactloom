@@ -48,7 +48,7 @@ impl SignerConsentJournal {
         action: &SignerV3RediscloseFinalV1,
     ) -> Result<(
         DurableConstructionOutboxV1,
-        PreparedDeliveryJournalRevisionV3,
+        Result<PreparedDeliveryJournalRevisionV3>,
     )> {
         let facts = action.facts();
         if candidate.redisclosure().is_none()

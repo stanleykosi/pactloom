@@ -187,6 +187,13 @@ impl PrivateDirectory {
         retained.check_current()?;
         Ok(retained)
     }
+    /// Metadata-only identity check of the original retained directory and lock.
+    /// This does not obtain a journal source owner, mutex, SQL transaction, or
+    /// permission; it only reuses the descriptor-backed exclusion invariant.
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    pub(crate) fn check_retained_exclusion_current_v1(&self) -> Result<()> {
+        self.retain_exclusion()?.check_current()
+    }
     /// One concrete owner for this actual locked directory's original journal.
     /// The owner retains descriptors, not this directory, so no strong cycle exists.
     pub(crate) fn signer_journal_source_owner(

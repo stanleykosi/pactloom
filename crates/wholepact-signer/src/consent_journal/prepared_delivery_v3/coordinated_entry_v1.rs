@@ -3,13 +3,15 @@
 //! each acquired fence/connection and before private audit/snapshot/commit.
 use super::*;
 use wholepact_financial_coordinator_origin::{
-    SignerV3PrepareReadFinalV1, SignerV3RedisclosureReadFinalV1, SignerV3SourceEntryFinalV1,
+    SignerV3AdmitReadFinalV1, SignerV3PrepareReadFinalV1, SignerV3RedisclosureReadFinalV1,
+    SignerV3SourceEntryFinalV1,
 };
 // Closed nominal purposes only. A cached lifetime or boolean cannot enter SQL.
 enum ReadPermit<'a> {
     Entry(&'a SignerV3SourceEntryFinalV1),
     Redisclosure(&'a SignerV3RedisclosureReadFinalV1),
     Prepare(&'a SignerV3PrepareReadFinalV1),
+    AdmitRead(&'a SignerV3AdmitReadFinalV1),
 }
 impl ReadPermit<'_> {
     fn current(&self) -> Result<()> {
@@ -17,6 +19,7 @@ impl ReadPermit<'_> {
             Self::Entry(value) => value.check_current(),
             Self::Redisclosure(value) => value.check_current(),
             Self::Prepare(value) => value.check_current(),
+            Self::AdmitRead(value) => value.check_current(),
         }
         .map_err(|_| JournalError::Permission)
     }
@@ -168,6 +171,29 @@ impl SignerConsentJournal {
         read: &SignerV3PrepareReadFinalV1,
     ) -> Result<()> {
         let permit = ReadPermit::Prepare(read);
+        permit.current()?;
+        if prepared.journal != self.binding()
+            || !Arc::ptr_eq(&prepared.registration, &self.source_registration)
+        {
+            return Err(JournalError::Permission);
+        }
+        let current = self.sample_coordinated_v3_entry(
+            &prepared.genesis,
+            prepared.state.enrollment.reference(),
+            prepared.state.manifest.reference(),
+            &permit,
+        )?;
+        if current.0 != prepared.revision || current.1 != prepared.state {
+            return Err(JournalError::Conflict);
+        }
+        permit.current()
+    }
+    pub(crate) fn check_coordinated_v3_admit_read_revision(
+        &self,
+        prepared: &PreparedDeliveryJournalRevisionV3,
+        read: &SignerV3AdmitReadFinalV1,
+    ) -> Result<()> {
+        let permit = ReadPermit::AdmitRead(read);
         permit.current()?;
         if prepared.journal != self.binding()
             || !Arc::ptr_eq(&prepared.registration, &self.source_registration)

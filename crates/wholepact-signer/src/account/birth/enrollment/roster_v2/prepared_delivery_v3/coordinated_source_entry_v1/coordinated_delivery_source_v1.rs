@@ -354,3 +354,9 @@ impl CoordinatedPreparedDeliverySourceV1 {
         self.staged.next_event()
     }
 }
+
+#[path = "coordinated_delivery_source_v1/coordinated_admission_v1.rs"]
+mod coordinated_admission_v1;
+
+#[path = "coordinated_delivery_source_v1/coordinated_financial_selection_v1.rs"]
+mod coordinated_financial_selection_v1;

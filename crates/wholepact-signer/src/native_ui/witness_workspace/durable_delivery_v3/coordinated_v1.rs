@@ -435,3 +435,12 @@ impl CoordinatedDeliveryWitnessV1 {
         Ok(())
     }
 }
+
+#[path = "coordinated_admit_read_v1.rs"]
+pub(in crate::native_ui) mod admit_read;
+
+#[path = "coordinated_audit_v1.rs"]
+pub(in crate::native_ui) mod audit;
+
+#[path = "coordinated_admit_v1.rs"]
+mod admit;

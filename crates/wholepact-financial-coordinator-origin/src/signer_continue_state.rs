@@ -185,6 +185,29 @@ impl Phases {
             match self.word.compare_exchange_weak(old,new,Ordering::AcqRel,Ordering::Acquire){Ok(_)=>return Ok(()),Err(actual)=>old=actual}
         }
     }
+    /// Immutable observation of an already-entered actual admission publication.
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn observe_return_completed(&self,slot:usize)->Result<()>{
+        if slot>1{return Err(rejected("not a fixed exact Return slot"));}let shift=slot*8;let mut old=self.word.load(Ordering::Acquire);
+        loop{if old&QUIESCENT!=0||((old>>shift)&0xff)!=72{return Err(rejected("exact Return observation without exact entered effect"));}let new=(old&!(0xff<<shift))|(73u64<<shift);match self.word.compare_exchange_weak(old,new,Ordering::AcqRel,Ordering::Acquire){Ok(_)=>return Ok(()),Err(actual)=>old=actual}}
+    }
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn observe_sign_committed(&self,slot:usize)->Result<()>{
+        if slot>1{return Err(rejected("not a fixed exact signing slot"));}let shift=slot*8;let mut old=self.word.load(Ordering::Acquire);
+        loop{if old&QUIESCENT!=0||((old>>shift)&0xff)!=66{return Err(rejected("exact signing observation without exact entered effect"));}let new=(old&!(0xff<<shift))|(67u64<<shift);match self.word.compare_exchange_weak(old,new,Ordering::AcqRel,Ordering::Acquire){Ok(_)=>return Ok(()),Err(actual)=>old=actual}}
+    }
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn observe_v3_admission_published(&self,slot:usize)->Result<()>{
+        if slot>1{return Err(rejected("not a fixed V3 admission slot"));}let shift=slot*8;let mut old=self.word.load(Ordering::Acquire);
+        loop{if old&QUIESCENT!=0||((old>>shift)&0xff)!=156{return Err(rejected("V3 admission observation without exact entered effect"));}let new=(old&!(0xff<<shift))|(157u64<<shift);match self.word.compare_exchange_weak(old,new,Ordering::AcqRel,Ordering::Acquire){Ok(_)=>return Ok(()),Err(actual)=>old=actual}}
+    }
+    /// Actual completed V3 observation, only after separate Audit Final has
+    /// finished and its exact original immutable result has been retained.
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn observe_v3_audited_complete(&self,slot:usize)->Result<()>{
+        if slot>1{return Err(rejected("not a fixed V3 Audit slot"));}let shift=slot*8;let mut old=self.word.load(Ordering::Acquire);
+        loop{if old&QUIESCENT!=0||((old>>shift)&0xff)!=160{return Err(rejected("completed V3 without finished actual Audit"));}let new=(old&!(0xff<<shift))|(15u64<<shift);match self.word.compare_exchange_weak(old,new,Ordering::AcqRel,Ordering::Acquire){Ok(_)=>return Ok(()),Err(actual)=>old=actual}}
+    }
     #[cfg(feature="coordinated-financial-workflow-v1")]
     pub(super) fn witness_phase(&self,slot:usize)->u8 { ((self.word.load(Ordering::Acquire)>>(16+slot*4))&0xf) as u8 }
     /// Two fixed W nibbles share the SAME native A/R CAS word as both S slots.

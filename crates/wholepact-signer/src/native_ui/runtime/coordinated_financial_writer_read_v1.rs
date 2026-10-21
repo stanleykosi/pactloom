@@ -7,7 +7,7 @@
 use super::*;
 
 #[path = "coordinated_financial_activate_v1.rs"]
-mod coordinated_financial_activate_v1;
+pub(in crate::native_ui::runtime) mod coordinated_financial_activate_v1;
 use crate::account::birth::enrollment::roster_v2::financial_source_v1::FinancialOperationSourcePinV1;
 use crate::native_ui::witness_workspace::financial_continuation_v1::coordinated_writer_read_v1::{
     PreparedCoordinatedWriterReadV1, PresentedCoordinatedWriterReadV1, ReadFinancialAcquireInputsV1,
@@ -56,12 +56,12 @@ fn check_retained_context(context: &Context) -> Result<()> {
     context.source.check_coordinated_public_custody_v2(host)
 }
 
-pub(super) struct PreparedCoordinatedWriterReadRoleV1 {
+pub(in crate::native_ui::runtime) struct PreparedCoordinatedWriterReadRoleV1 {
     context: Context,
     selected: PreparedCoordinatedWriterReadV1,
     original_session_deadline: Instant,
 }
-pub(super) struct PresentedCoordinatedWriterReadRoleV1 {
+pub(in crate::native_ui::runtime) struct PresentedCoordinatedWriterReadRoleV1 {
     context: Context,
     selected: PresentedCoordinatedWriterReadV1,
     original_session_deadline: Instant,
@@ -72,7 +72,7 @@ impl PreparedCoordinatedWriterReadRoleV1 {
     /// configuration, a historical receipt or independently supplied client
     /// cannot reconstruct this transition. The supplied session bound can only
     /// shorten the original source; Origin independently authenticates it.
-    pub(super) fn prepare(
+    pub(in crate::native_ui::runtime) fn prepare(
         retained: AwaitingCoordinatedWriterReadV1,
         original_session_deadline: Instant,
     ) -> Result<Self> {
@@ -102,19 +102,19 @@ impl PreparedCoordinatedWriterReadRoleV1 {
             original_session_deadline,
         })
     }
-    pub(super) fn facts(&self) -> &SignerFinancialWriterReadFactsV1 {
+    pub(in crate::native_ui::runtime) fn facts(&self) -> &SignerFinancialWriterReadFactsV1 {
         self.selected.facts()
     }
-    pub(super) fn original_source_deadline(&self) -> Instant {
+    pub(in crate::native_ui::runtime) fn original_source_deadline(&self) -> Instant {
         self.selected.original_source_deadline()
     }
-    pub(super) fn original_read_deadline(&self) -> Instant {
+    pub(in crate::native_ui::runtime) fn original_read_deadline(&self) -> Instant {
         self.selected.original_read_deadline()
     }
 
     /// Called with the ordinary presentation returned by the actual original
     /// issuer. Matching data alone neither creates nor substitutes for Final.
-    pub(super) fn freeze_presentation(
+    pub(in crate::native_ui::runtime) fn freeze_presentation(
         self,
         presentation: SignerFinancialWriterReadPresentationV1,
     ) -> Result<PresentedCoordinatedWriterReadRoleV1> {
@@ -131,7 +131,7 @@ impl PreparedCoordinatedWriterReadRoleV1 {
 /// No public source/client access, Clone, serde or retry. The actual Origin
 /// presentation join consumes this state while the same Read remains live.
 /// Dropping it drops this one preparation; no Acquire has been attempted.
-pub(super) struct PreparedCoordinatedAcquireUnderReadV1 {
+pub(in crate::native_ui::runtime) struct PreparedCoordinatedAcquireUnderReadV1 {
     context: Context,
     inputs: ReadFinancialAcquireInputsV1,
     recipe: SignerAcquireFactsV1,
@@ -139,7 +139,7 @@ pub(super) struct PreparedCoordinatedAcquireUnderReadV1 {
 }
 
 impl PresentedCoordinatedWriterReadRoleV1 {
-    pub(super) fn read_and_prepare(
+    pub(in crate::native_ui::runtime) fn read_and_prepare(
         self,
         final_read: SignerFinancialWriterReadFinalV1,
     ) -> Result<PreparedCoordinatedAcquireUnderReadV1> {
@@ -270,7 +270,7 @@ impl PresentedCoordinatedWriterReadRoleV1 {
 /// Same actual Context and selected restricted client, authenticated history,
 /// immutable presentation and original Acquire bound. No source/client getter,
 /// action constructor, session recipe retry or automatic effect is exposed.
-pub(super) struct PresentedCoordinatedAcquireReviewV1 {
+pub(in crate::native_ui::runtime) struct PresentedCoordinatedAcquireReviewV1 {
     context: Context,
     writer: FinancialWitnessCustodyV1,
     history: AuthenticatedFinancialContinuationHistoryV1,
@@ -281,7 +281,7 @@ impl PreparedCoordinatedAcquireUnderReadV1 {
     /// The continuously borrowed actual Origin both freezes and sends this
     /// exact draft. No independently supplied second origin can be substituted
     /// between consuming Read and presenting its already frozen data.
-    pub(super) fn freeze_and_present(
+    pub(in crate::native_ui::runtime) fn freeze_and_present(
         self,
         origin: &mut SignerFinancialWorkflowOriginV1,
     ) -> Result<PresentedCoordinatedAcquireReviewV1> {
@@ -331,17 +331,16 @@ impl PreparedCoordinatedAcquireUnderReadV1 {
 /// Exact actual Ready state only. The existing source, owner/writer clients,
 /// authenticated history and pin remain private; there is no Final effect,
 /// success/report, retry or disposal assertion in this preparation boundary.
-pub(super) struct ReadyCoordinatedAcquireV1 {
+pub(in crate::native_ui::runtime) struct ReadyCoordinatedAcquireV1 {
     retained: PresentedCoordinatedAcquireReviewV1,
     pin: FinancialOperationSourcePinV1,
     acquire_ready_digest: String,
 }
 impl PresentedCoordinatedAcquireReviewV1 {
-    pub(super) fn prepare_and_send_ready(
+    pub(in crate::native_ui::runtime) fn prepare_ready(
         self,
-        origin: &mut SignerFinancialWorkflowOriginV1,
         arm: SignerAcquireArmV1,
-    ) -> Result<ReadyCoordinatedAcquireV1> {
+    ) -> Result<AcquireReadyToReportV1> {
         arm.check_current()?;
         if arm.presentation() != &self.presentation
             || arm.original_source_deadline() != self.context.source.original_deadline()
@@ -368,19 +367,16 @@ impl PresentedCoordinatedAcquireReviewV1 {
         arm.check_current()?;
         // The concrete source/journal factory has returned and dropped every
         // acquisition guard before the genuine original-channel send below.
-        origin.send_acquire_ready(arm, acquire_ready_digest.clone())?;
-        Ok(ReadyCoordinatedAcquireV1 {
-            retained: self,
-            pin,
-            acquire_ready_digest,
-        })
+        Ok(AcquireReadyToReportV1 { arm, ready: ReadyCoordinatedAcquireV1 {
+            retained: self, pin, acquire_ready_digest,
+        } })
     }
 }
 
 /// Only the actual one-use Acquire and authenticated original-channel report
 /// produce this owner. Ordinary receipt data cannot recreate it. The Activate
 /// child may consume these fields; no source/client/permission getter exists.
-pub(super) struct AwaitingCoordinatedActivateReadV1 {
+pub(in crate::native_ui::runtime) struct AwaitingCoordinatedActivateReadV1 {
     context: Context,
     receipt: wholepact_authority::WriterSessionReceipt,
     acquired_presentation: SignerAcquirePresentationV1,
@@ -393,29 +389,28 @@ pub(super) struct AwaitingCoordinatedActivateReadV1 {
 /// clients, pin and authenticated history until the surrounding worker has
 /// actually joined. If transport authenticated a receipt before restriction or
 /// report loss, retain that evidence too; absence is not proof of no effect.
-pub(super) struct FailedCoordinatedAcquireV1 {
+pub(in crate::native_ui::runtime) struct FailedCoordinatedAcquireV1 {
     retained: ReadyCoordinatedAcquireV1,
     receipt: Option<wholepact_authority::WriterSessionReceipt>,
     error: Error,
     attempted: bool,
 }
 impl FailedCoordinatedAcquireV1 {
-    pub(super) fn is_uncertain(&self) -> bool {
+    pub(in crate::native_ui::runtime) fn is_uncertain(&self) -> bool {
         self.attempted
     }
-    pub(super) fn error(&self) -> &Error {
+    pub(in crate::native_ui::runtime) fn error(&self) -> &Error {
         &self.error
     }
 }
 
 impl ReadyCoordinatedAcquireV1 {
-    pub(super) fn consume_final(
+    pub(in crate::native_ui::runtime) fn commit_final(
         self,
         final_action: wholepact_financial_coordinator_origin::SignerAcquireFinalV1,
-        origin: &mut SignerFinancialWorkflowOriginV1,
-    ) -> std::result::Result<AwaitingCoordinatedActivateReadV1, FailedCoordinatedAcquireV1> {
+    ) -> CoordinatedAcquireCommitV1 {
         use crate::native_ui::witness_workspace::financial_continuation_v1::coordinated_acquire_v1::CoordinatedAcquireFailureV1;
-        use wholepact_financial_coordinator_origin::{SignerAcquireCommittedV1, SignerAcquireOutcomeV1};
+        use wholepact_financial_coordinator_origin::SignerAcquireCommittedV1;
         let mut receipt = None;
         let mut attempted = false;
         let original_service_deadline = final_action.original_service_deadline();
@@ -487,10 +482,10 @@ impl ReadyCoordinatedAcquireV1 {
             report.validate()?;
             // This is authenticated-result observation, not renewal of Final.
             // No private audit, wallet preparation, or replacement key occurs.
-            origin.report_acquired(report.clone(), deadline)?;
+
             Ok((deadline, report))
         })();
-        match result {
+        let result = match result {
             Ok((original_writer_session_deadline, acquired_report)) => {
                 let ReadyCoordinatedAcquireV1 { retained, .. } = self;
                 let PresentedCoordinatedAcquireReviewV1 {
@@ -511,23 +506,6 @@ impl ReadyCoordinatedAcquireV1 {
                 })
             }
             Err(error) => {
-                let presentation_digest = self.retained.presentation.presentation_digest.clone();
-                let acquire_ready_digest = Some(self.acquire_ready_digest.clone());
-                let outcome = if attempted {
-                    SignerAcquireOutcomeV1::Uncertain {
-                        presentation_digest,
-                        acquire_ready_digest,
-                    }
-                } else {
-                    SignerAcquireOutcomeV1::KnownNoEffect {
-                        presentation_digest,
-                        acquire_ready_digest,
-                    }
-                };
-                // Report loss cannot erase an authenticated result, permit retry,
-                // or count as disposal. Denial precedes eventual custody drop.
-                let _ = origin.send_acquire_outcome(outcome);
-                origin.close_for_failed_worker_v1();
                 Err(FailedCoordinatedAcquireV1 {
                     retained: self,
                     receipt,
@@ -535,6 +513,34 @@ impl ReadyCoordinatedAcquireV1 {
                     attempted,
                 })
             }
+        };
+        CoordinatedAcquireCommitV1 { result }
+    }
+}
+
+pub(in crate::native_ui::runtime) struct AcquireReadyToReportV1 { arm: SignerAcquireArmV1, ready: ReadyCoordinatedAcquireV1 }
+impl AcquireReadyToReportV1 {
+    pub(in crate::native_ui::runtime) fn send_ready(self, origin: &mut SignerFinancialWorkflowOriginV1) -> Result<ReadyCoordinatedAcquireV1> {
+        origin.send_acquire_ready(self.arm, self.ready.acquire_ready_digest.clone())?;
+        Ok(self.ready)
+    }
+}
+pub(in crate::native_ui::runtime) struct CoordinatedAcquireCommitV1 { result: std::result::Result<AwaitingCoordinatedActivateReadV1, FailedCoordinatedAcquireV1> }
+impl CoordinatedAcquireCommitV1 {
+    pub(in crate::native_ui::runtime) fn succeeded(&self) -> bool { self.result.is_ok() }
+    pub(in crate::native_ui::runtime) fn report(&self, origin: &mut SignerFinancialWorkflowOriginV1) -> Result<()> {
+        use wholepact_financial_coordinator_origin::SignerAcquireOutcomeV1;
+        match &self.result {
+            Ok(actual) => { origin.report_acquired(actual.acquired_report.clone(),actual.original_writer_session_deadline)?; Ok(()) }
+            Err(failed) => {
+                let presentation_digest=failed.retained.retained.presentation.presentation_digest.clone();
+                let acquire_ready_digest=Some(failed.retained.acquire_ready_digest.clone());
+                let outcome=if failed.attempted { SignerAcquireOutcomeV1::Uncertain {presentation_digest,acquire_ready_digest} } else {SignerAcquireOutcomeV1::KnownNoEffect {presentation_digest,acquire_ready_digest}};
+                let report=origin.send_acquire_outcome(outcome);
+                origin.close_for_failed_worker_v1();
+                report.map_err(Into::into)
+            }
         }
     }
+    pub(in crate::native_ui::runtime) fn into_result(self)->std::result::Result<AwaitingCoordinatedActivateReadV1,FailedCoordinatedAcquireV1> {self.result}
 }

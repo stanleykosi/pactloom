@@ -520,3 +520,13 @@ mod tests {
         assert_eq!(wall_at(captured,1_000,captured+Duration::from_secs(120),3_000).unwrap(),3_000);
     }
 }
+
+#[path = "coordinated_delivery_admission_v1.rs"]
+mod coordinated_delivery_admission_v1;
+pub(super) use coordinated_delivery_admission_v1::PreparedCoordinatedAdmissionV1;
+pub(super) use coordinated_delivery_admission_v1::{CoordinatedAdmissionWorkerV1,CoordinatedAdmissionAttemptV1};
+pub(super) use coordinated_delivery_admission_v1::{AuditedCoordinatedV3V1,CompletedCoordinatedV3V1};
+
+pub(super) use coordinated_delivery_admission_v1::HistoryReturnedCoordinatedV3V1;
+
+pub(super) use coordinated_delivery_admission_v1::{DetachedCoordinatedFinancialHandoffV1,PresentedFinancialEntryRoleV1,OpenedFinancialEntryRoleV1,PreparedInitialFinancialReadRoleV1,PresentedInitialFinancialReadRoleV1,ReadInitialFinancialRoleV1};

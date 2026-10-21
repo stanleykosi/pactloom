@@ -9,7 +9,7 @@ pub(crate) use coordinated_source_entry_v1::{
     PreparedCoordinatedV3SourceEntryV1, PresentedCoordinatedV3SourceEntryV1,
     CoordinatedPreparingDeliverySourceV1,CoordinatedPreparedDeliverySourceV1,
     CoordinatedRedisclosureReadV1,CoordinatedRediscloseV1,CoordinatedRedisclosedSourceV1,
-    CoordinatedOriginalDeliverySourceV1, CoordinatedSourcePairingV1, CoordinatedSourceReceiptBindingV1, CoordinatedEnrollmentReviewV1, CoordinatedManifestReviewV1, CoordinatedPreconstructionReadyV1,
+    CoordinatedOriginalDeliverySourceV1, CoordinatedSourcePairingV1, CoordinatedSourceReceiptBindingV1, CoordinatedFinancialRoleTransportV1, CoordinatedEnrollmentReviewV1, CoordinatedManifestReviewV1, CoordinatedPreconstructionReadyV1, CoordinatedRestrictedReceiptV1,
 };
 use crate::consent_journal::PreparedDeliveryJournalRevisionV3;
 use crate::native_ui::PreparedReceiveAndViewAuthorityV3;

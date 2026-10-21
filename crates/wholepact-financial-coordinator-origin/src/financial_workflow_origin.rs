@@ -25,13 +25,22 @@ pub use original_host_peer::OriginalSignerHostPeerV1;
 mod v3_entry;
 use v3_entry::{SV3Entry,CV3Entry,HV3Entry};
 pub(super) use v3_entry::V3EntryOffer;
-pub use v3_entry::{SignerV3PrepareReadTicketV1,SignerV3PrepareReadOutboundV1,SignerV3PrepareReadFinalV1,SignerV3PreparedLifetimeV1,SignerV3ReceiveTicketV1,SignerV3ReceiveOutboundV1,SignerV3ReceiveFinalV1,SignerV3RedisclosureReadTicketV1,SignerV3RedisclosureReadOutboundV1,SignerV3RedisclosureReadFinalV1,SignerV3RediscloseTicketV1,SignerV3RediscloseOutboundV1,SignerV3RediscloseFinalV1,SignerV3EnrollmentTicketV1,SignerV3EnrollmentOutboundV1,SignerV3EnrollmentFinalV1,SignerV3ManifestTicketV1,SignerV3ManifestOutboundV1,SignerV3ManifestFinalV1,SignerV3PairTicketV1,SignerV3PairOutboundV1,SignerV3PairFinalV1,SignerV3PairLifetimeV1,SignerV3SourceEntryOfferV1,SignerV3SourceEntryOutboundV1,SignerV3SourceEntryFinalV1,SignerV3SourceEntryInputV1,SignerV3SourceLifetimeV1};
+pub use v3_entry::{SignerV3AuditTicketV1,SignerV3AuditOutboundV1,SignerV3AuditFinalV1,SignerV3CompletedLifetimeV1,SignerV3AdmitTicketV1,SignerV3AdmitArmOutboundV1,SignerV3AdmitArmV1,SignerV3AdmitReadyTicketV1,SignerV3AdmitFinalOutboundV1,SignerV3AdmitFinalV1,SignerV3AdmitReadTicketV1,SignerV3AdmitReadOutboundV1,SignerV3AdmitReadFinalV1,SignerV3PrepareReadTicketV1,SignerV3PrepareReadOutboundV1,SignerV3PrepareReadFinalV1,SignerV3PreparedLifetimeV1,SignerV3ReceiveTicketV1,SignerV3ReceiveOutboundV1,SignerV3ReceiveFinalV1,SignerV3RedisclosureReadTicketV1,SignerV3RedisclosureReadOutboundV1,SignerV3RedisclosureReadFinalV1,SignerV3RediscloseTicketV1,SignerV3RediscloseOutboundV1,SignerV3RediscloseFinalV1,SignerV3EnrollmentTicketV1,SignerV3EnrollmentOutboundV1,SignerV3EnrollmentFinalV1,SignerV3ManifestTicketV1,SignerV3ManifestOutboundV1,SignerV3ManifestFinalV1,SignerV3PairTicketV1,SignerV3PairOutboundV1,SignerV3PairFinalV1,SignerV3PairLifetimeV1,SignerV3SourceEntryOfferV1,SignerV3SourceEntryOutboundV1,SignerV3SourceEntryFinalV1,SignerV3SourceEntryInputV1,SignerV3SourceLifetimeV1};
 
 #[path="signer_admit_origin.rs"]
 mod admit;
 #[path="signer_writer_read_acquire_origin.rs"]
 mod writer_acquire;
 use writer_acquire::{SWritAcquire,CWritAcquire,HWritAcquire};
+#[path="signer_return_origin.rs"]
+mod returning;
+pub use returning::{SignerReturnReadTicketV1,SignerReturnReadOutboundV1,SignerReturnReadFinalV1,SignerReturnReadCompletedV1,SignerReturnExactTicketV1,SignerReturnExactOutboundV1,SignerReturnExactFinalV1};
+#[path="signer_sign_origin.rs"]
+mod sign;
+pub use sign::{SignerSignReadTicketV1,SignerSignReadOutboundV1,SignerSignReadFinalV1,SignerSignExactTicketV1,SignerSignExactOutboundV1,SignerSignExactFinalV1};
+#[path="signer_wallet_origin.rs"]
+mod wallet;
+pub use wallet::{SignerWalletPrepareTicketV1,SignerWalletPrepareOutboundV1,SignerWalletPrepareFinalV1,SignerWalletObserveTicketV1,SignerWalletObserveOutboundV1,SignerWalletObserveFinalV1};
 #[path="signer_activate_wallet_origin.rs"]
 mod activate;
 use activate::{SActivate,CActivate,HActivate};
@@ -61,6 +70,11 @@ pub enum SignerFinancialWorkflowRequestV1 {
     V3Enrollment{final_action:SignerV3EnrollmentFinalV1},
     V3Manifest{final_action:SignerV3ManifestFinalV1},
     V3RedisclosureRead{final_action:SignerV3RedisclosureReadFinalV1},
+    V3AdmitArm{arm:SignerV3AdmitArmV1},
+    V3AdmitFinal{final_action:SignerV3AdmitFinalV1},
+    V3AdmitRead{final_action:SignerV3AdmitReadFinalV1},
+    V3Audit{final_action:SignerV3AuditFinalV1},
+    FinancialSetupSelection{selection:crate::SignerFinancialSetupSelectionV1},
     V3OwnerSelection{owner_setup_json:String,owner_selection_challenge:String},
     V3PrepareRead{final_action:SignerV3PrepareReadFinalV1},
     V3Receive{final_action:SignerV3ReceiveFinalV1},
@@ -69,6 +83,9 @@ pub enum SignerFinancialWorkflowRequestV1 {
     V3Pair{final_action:SignerV3PairFinalV1},
     V3SourceEntryRequested{selection:crate::SignerV3SourceEntrySelectionV1},
     V3SourceEntry{input:SignerV3SourceEntryInputV1,final_action:SignerV3SourceEntryFinalV1},
+    ReturnRead{final_action:SignerReturnReadFinalV1},ReturnExact{final_action:SignerReturnExactFinalV1},
+    SignRead{final_action:SignerSignReadFinalV1},SignExact{final_action:SignerSignExactFinalV1},
+    WalletPrepare{final_action:SignerWalletPrepareFinalV1},WalletObserve{final_action:SignerWalletObserveFinalV1},
     ActivateRead(SignerActivateReadFinalV1),ActivateArm(SignerActivateArmV1),ActivateFinal(SignerActivateFinalV1),
     WriterRead(SignerFinancialWriterReadFinalV1),AcquireArm(SignerAcquireArmV1),AcquireFinal(SignerAcquireFinalV1),
     SourceEntryRequested,
@@ -145,18 +162,25 @@ impl SignerFinancialWorkflowOriginV1 {
             // and retains its narrow exception. Every other new purpose denies R.
             if !matches!(packet,Packet::ContinueFinal{..}) { self.core.check_action_restrictions()?; }
         }
+        if matches!(packet,Packet::V3AdmitArm{..}|Packet::V3AdmitFinal{..}){return self.receive_v3_admission(packet).map(Some);}
+        if matches!(packet,Packet::V3AdmitReadFinal{..}){return self.receive_v3_admit_read(packet).map(Some);}
+        if matches!(packet,Packet::V3AuditFinal{..}){return self.receive_v3_audit(packet).map(Some);}
+        if matches!(packet,Packet::FinancialSetupSelection{..}){return self.receive_financial_setup(packet).map(Some);}
         if matches!(packet,Packet::V3OwnerSelection{..}){return self.receive_v3_owner_selection(packet).map(Some);}
         if matches!(packet,Packet::V3PrepareReadFinal{..}|Packet::V3ReceiveFinal{..}){return self.receive_v3_delivery(packet).map(Some);}
         if matches!(packet,Packet::V3RedisclosureReadFinal{..}|Packet::V3RediscloseFinal{..}){return self.receive_v3_redisclosure(packet).map(Some);}
         if matches!(packet,Packet::V3EnrollmentFinal{..}|Packet::V3ManifestFinal{..}){return self.receive_v3_receipt(packet).map(Some);}
         if matches!(packet,Packet::V3PairFinal{..}){return self.receive_v3_pair(packet).map(Some);}
         if matches!(packet,Packet::V3StartEntry{..}|Packet::V3EntryCipher{..}){return self.receive_v3_entry(packet).map(Some);}
+        if matches!(packet,Packet::ReturnReadFinal{..}|Packet::ReturnExactFinal{..}){return self.receive_return(packet).map(Some);}
+        if matches!(packet,Packet::SignReadFinal{..}|Packet::SignExactFinal{..}){return self.receive_sign(packet).map(Some);}
+        if matches!(packet,Packet::WalletPrepareFinal{..}|Packet::WalletObserveFinal{..}){return self.receive_wallet(packet).map(Some);}
         if matches!(packet,Packet::ActivateReadFinal{..}|Packet::ActivateArm{..}|Packet::ActivateFinal{..}){return self.receive_activate(packet).map(Some);}
         if matches!(packet,Packet::WriterReadFinal{..}|Packet::AcquireArm{..}|Packet::AcquireFinal{..}){return self.receive_writer_acquire(packet).map(Some);}
         if matches!(packet,Packet::AdmitArm{..}|Packet::AdmitFinal{..}) { return self.receive_admit(packet).map(Some); }
         let request=match packet {
             Packet::StartEntry{start}=>{
-                start.validate()?;if self.start.is_some()||start.role!=self.target{return Err(rejected("workflow source-entry start repeated or wrong role"));}
+                start.validate()?;if !self.v3_entry.has_financial_setup()||self.start.is_some()||start.role!=self.target{return Err(rejected("workflow source-entry start repeated or wrong role"));}
                 self.clocks.restrict_received(&start.profile,start.native_ceiling_ms,self.clocks.supervision(),Instant::now())?;
                 self.core.phase.step(self.target.index(),V3_HELD,ENTRY_PREPARING)?;self.start=Some(start);SignerFinancialWorkflowRequestV1::SourceEntryRequested
             }
@@ -425,6 +449,13 @@ pub enum CoordinatorFinancialEventV1 {
     V3Enrolled{role:Target,data:crate::SignerV3EnrollmentCommittedV1},
     V3ManifestAccepted{role:Target,data:crate::SignerV3ManifestCommittedV1},
     V3RedisclosureReadDisplay(SignerV3RedisclosureReadTicketV1),
+    V3AdmitDisplay(SignerV3AdmitTicketV1),
+    V3AdmitReady(SignerV3AdmitReadyTicketV1),
+    V3Admitted{role:Target,data:crate::SignerV3AdmittedV1},
+    V3AdmitReadDisplay(SignerV3AdmitReadTicketV1),
+    V3AdmitReadRetained{role:Target,data:crate::SignerV3AdmitReadRetainedV1},
+    V3AuditDisplay(SignerV3AuditTicketV1),
+    V3Audited{role:Target,data:crate::SignerV3AuditedV1},
     V3PrepareReadDisplay(SignerV3PrepareReadTicketV1),
     V3ReceiveDisplay(SignerV3ReceiveTicketV1),
     V3Prepared{role:Target,data:crate::SignerV3PreparedV1},
@@ -435,6 +466,9 @@ pub enum CoordinatorFinancialEventV1 {
     V3SourceEntryOffer(SignerV3SourceEntryOfferV1),
     V3SourceOpened{role:Target,data:crate::SignerV3SourceOpenedV1},
     V3SourceEntryFailed{role:Target,presentation_digest:Option<String>},
+    ReturnReadDisplay(SignerReturnReadTicketV1),ReturnExactDisplay(SignerReturnExactTicketV1),ReturnPrepared{role:Target,data:crate::SignerReturnPreparedV1},ReturnCompleted{role:Target,data:crate::SignerReturnCompletedV1},ReturnFailed{role:Target,data:crate::SignerReturnFailureV1},
+    SignReadDisplay(SignerSignReadTicketV1),SignExactDisplay(SignerSignExactTicketV1),SignPrepared{role:Target,data:crate::SignerSignPreparedV1},SignCommitted{role:Target,data:crate::SignerSignCommittedV1},SignFailed{role:Target,data:crate::SignerSignFailureV1},
+    WalletPrepareDisplay(SignerWalletPrepareTicketV1),WalletObserveDisplay(SignerWalletObserveTicketV1),WalletPrepared{role:Target,data:crate::SignerWalletPreparedV1},WalletObserved{role:Target,data:crate::SignerWalletObservedV1},WalletFailed{role:Target,data:crate::SignerWalletFailureV1},
     ActivateReadDisplay(SignerActivateReadTicketV1),ActivateReadFailed{role:Target,presentation_digest:String},
     ActivateDisplay(SignerActivateReviewTicketV1),ActivateReady(SignerActivateReadyTicketV1),ActivateOutcome{role:Target,data:crate::SignerActivateOutcomeV1},
     AwaitingWalletPrepare{role:Target,data:crate::SignerActivateCommittedV1},
@@ -532,7 +566,7 @@ impl CoordinatorFinancialEndpointV1 {
     pub fn try_begin_source_entry(&mut self,target:Target,original:Instant)->Result<FinancialSendProgressV1>{
         let result=(||{
             self.core.check()?;let i=target.index();
-            if self.slots[i].is_some(){return Err(rejected("source-entry preparation repeated"));}
+            if self.slots[i].is_some()||!self.v3_entries[i].has_financial_setup(){return Err(rejected("source-entry preparation repeated or ordinary setup absent"));}
             let now=Instant::now();let ceiling=original.min(self.clocks.supervision()).min(now+std::time::Duration::from_secs(120));
             crate::channel::require_time(ceiling)?;
             if self.core.phase.source_send_restricted(i,V3_HELD)?{return Ok(FinancialSendProgressV1::Restricted);}
@@ -657,11 +691,17 @@ impl CoordinatorFinancialEndpointV1 {
             if self.slots[i].as_ref().is_some_and(|s|!s.activate.disposal_allowed()){return Err(rejected("Activate disposal before actual terminal outcome"));}
             self.disposed[i]=true;return Ok(Some(CoordinatorFinancialEventV1::Disposed(role)));
         }
+        if matches!(packet,Packet::V3AdmitDisplay{..}|Packet::V3AdmitReady{..}|Packet::V3Admitted{..}){return self.receive_v3_admission_event(packet).map(Some);}
+        if matches!(packet,Packet::V3AdmitReadDisplay{..}|Packet::V3AdmitReadRetained{..}){return self.receive_v3_admit_read_event(packet).map(Some);}
+        if matches!(packet,Packet::V3AuditDisplay{..}|Packet::V3Audited{..}){return self.receive_v3_audit_event(packet).map(Some);}
         if matches!(packet,Packet::V3PrepareReadDisplay{..}|Packet::V3ReceiveDisplay{..}|Packet::V3Prepared{..}|Packet::V3Received{..}){return self.receive_v3_delivery_event(packet).map(Some);}
         if matches!(packet,Packet::V3RedisclosureReadDisplay{..}|Packet::V3RediscloseDisplay{..}|Packet::V3RedisclosurePrepared{..}|Packet::V3Redisclosed{..}){return self.receive_v3_redisclosure_event(packet).map(Some);}
         if matches!(packet,Packet::V3EnrollmentDisplay{..}|Packet::V3ManifestDisplay{..}|Packet::V3Enrolled{..}|Packet::V3ManifestAccepted{..}){return self.receive_v3_receipt_event(packet).map(Some);}
         if matches!(packet,Packet::V3PairEndpoint{..}|Packet::V3PairDisplay{..}|Packet::V3Paired{..}){return self.receive_v3_pair_event(packet).map(Some);}
         if matches!(packet,Packet::V3EntryOffer{..}|Packet::V3SourceOpened{..}|Packet::V3SourceFailed{..}){return self.receive_v3_entry_event(packet).map(Some);}
+        if matches!(packet,Packet::ReturnReadDisplay{..}|Packet::ReturnExactDisplay{..}|Packet::ReturnPrepared{..}|Packet::ReturnCompleted{..}|Packet::ReturnFailed{..}){return self.receive_return_event(packet).map(Some);}
+        if matches!(packet,Packet::SignReadDisplay{..}|Packet::SignExactDisplay{..}|Packet::SignPrepared{..}|Packet::SignCommitted{..}|Packet::SignFailed{..}){return self.receive_sign_event(packet).map(Some);}
+        if matches!(packet,Packet::WalletPrepareDisplay{..}|Packet::WalletObserveDisplay{..}|Packet::WalletPrepared{..}|Packet::WalletObserved{..}|Packet::WalletFailed{..}){return self.receive_wallet_event(packet).map(Some);}
         if matches!(packet,Packet::ActivateReadDisplay{..}|Packet::ActivateReadFailed{..}|Packet::ActivateDisplay{..}|Packet::ActivateReady{..}|Packet::ActivateOutcome{..}|Packet::Activated{..}){return self.receive_activate_event(packet).map(Some);}
         if matches!(packet,Packet::WriterReadDisplay{..}|Packet::WriterReadFailed{..}|Packet::AcquireDisplay{..}|Packet::AcquireReady{..}|Packet::AcquireOutcome{..}|Packet::Acquired{..}){return self.receive_writer_acquire_event(packet).map(Some);}
         if matches!(packet,Packet::AdmitDisplay{..}|Packet::AdmitReady{..}|Packet::Admitted{..}|Packet::AdmitOutcome{..}) { return self.receive_admit_event(packet).map(Some); }
@@ -884,12 +924,19 @@ impl HostFinancialWorkflowRelayV1 {
         }
         if self.restricted{return Err(rejected("workflow command after relay restriction"));}
         crate::channel::require_time(self.clocks.supervision())?;
+        if matches!(packet,Packet::V3AdmitArm{..}|Packet::V3AdmitFinal{..}){return self.down_v3_admission(packet);}
+        if matches!(packet,Packet::V3AdmitReadFinal{..}){return self.down_v3_admit_read(packet);}
+        if matches!(packet,Packet::V3AuditFinal{..}){return self.down_v3_audit(packet);}
+        if matches!(packet,Packet::FinancialSetupSelection{..}){return self.down_financial_setup(packet);}
         if matches!(packet,Packet::V3OwnerSelection{..}){return self.down_v3_owner_selection(packet);}
         if matches!(packet,Packet::V3PrepareReadFinal{..}|Packet::V3ReceiveFinal{..}){return self.down_v3_delivery(packet);}
         if matches!(packet,Packet::V3RedisclosureReadFinal{..}|Packet::V3RediscloseFinal{..}){return self.down_v3_redisclosure(packet);}
         if matches!(packet,Packet::V3EnrollmentFinal{..}|Packet::V3ManifestFinal{..}){return self.down_v3_receipt(packet);}
         if matches!(packet,Packet::V3PairFinal{..}){return self.down_v3_pair(packet);}
         if matches!(packet,Packet::V3StartEntry{..}|Packet::V3EntryCipher{..}){return self.down_v3_entry(packet);}
+        if matches!(packet,Packet::ReturnReadFinal{..}|Packet::ReturnExactFinal{..}){return self.down_return(packet);}
+        if matches!(packet,Packet::SignReadFinal{..}|Packet::SignExactFinal{..}){return self.down_sign(packet);}
+        if matches!(packet,Packet::WalletPrepareFinal{..}|Packet::WalletObserveFinal{..}){return self.down_wallet(packet);}
         if matches!(packet,Packet::ActivateReadFinal{..}|Packet::ActivateArm{..}|Packet::ActivateFinal{..}){return self.down_activate(packet);}
         if matches!(packet,Packet::WriterReadFinal{..}|Packet::AcquireArm{..}|Packet::AcquireFinal{..}){return self.down_writer_acquire(packet);}
         if matches!(packet,Packet::AdmitArm{..}|Packet::AdmitFinal{..}) { return self.down_admit(packet); }
@@ -956,11 +1003,17 @@ impl HostFinancialWorkflowRelayV1 {
             if self.slots[i].as_ref().is_some_and(|s|!s.activate.disposal_allowed()){return Err(rejected("Activate disposal before actual terminal outcome"));}
             self.disposed[i]=true;return Ok(true);
         }
+        if matches!(packet,Packet::V3AdmitDisplay{..}|Packet::V3AdmitReady{..}|Packet::V3Admitted{..}){return self.up_v3_admission(target,packet);}
+        if matches!(packet,Packet::V3AdmitReadDisplay{..}|Packet::V3AdmitReadRetained{..}){return self.up_v3_admit_read(target,packet);}
+        if matches!(packet,Packet::V3AuditDisplay{..}|Packet::V3Audited{..}){return self.up_v3_audit(target,packet);}
         if matches!(packet,Packet::V3PrepareReadDisplay{..}|Packet::V3ReceiveDisplay{..}|Packet::V3Prepared{..}|Packet::V3Received{..}){return self.up_v3_delivery(target,packet);}
         if matches!(packet,Packet::V3RedisclosureReadDisplay{..}|Packet::V3RediscloseDisplay{..}|Packet::V3RedisclosurePrepared{..}|Packet::V3Redisclosed{..}){return self.up_v3_redisclosure(target,packet);}
         if matches!(packet,Packet::V3EnrollmentDisplay{..}|Packet::V3ManifestDisplay{..}|Packet::V3Enrolled{..}|Packet::V3ManifestAccepted{..}){return self.up_v3_receipt(target,packet);}
         if matches!(packet,Packet::V3PairEndpoint{..}|Packet::V3PairDisplay{..}|Packet::V3Paired{..}){return self.up_v3_pair(target,packet);}
         if matches!(packet,Packet::V3EntryOffer{..}|Packet::V3SourceOpened{..}|Packet::V3SourceFailed{..}){return self.up_v3_entry(target,packet);}
+        if matches!(packet,Packet::ReturnReadDisplay{..}|Packet::ReturnExactDisplay{..}|Packet::ReturnPrepared{..}|Packet::ReturnCompleted{..}|Packet::ReturnFailed{..}){return self.up_return(target,packet);}
+        if matches!(packet,Packet::SignReadDisplay{..}|Packet::SignExactDisplay{..}|Packet::SignPrepared{..}|Packet::SignCommitted{..}|Packet::SignFailed{..}){return self.up_sign(target,packet);}
+        if matches!(packet,Packet::WalletPrepareDisplay{..}|Packet::WalletObserveDisplay{..}|Packet::WalletPrepared{..}|Packet::WalletObserved{..}|Packet::WalletFailed{..}){return self.up_wallet(target,packet);}
         if matches!(packet,Packet::ActivateReadDisplay{..}|Packet::ActivateReadFailed{..}|Packet::ActivateDisplay{..}|Packet::ActivateReady{..}|Packet::ActivateOutcome{..}|Packet::Activated{..}){return self.up_activate(target,packet);}
         if matches!(packet,Packet::WriterReadDisplay{..}|Packet::WriterReadFailed{..}|Packet::AcquireDisplay{..}|Packet::AcquireReady{..}|Packet::AcquireOutcome{..}|Packet::Acquired{..}){return self.up_writer_acquire(target,packet);}
         if matches!(packet,Packet::AdmitDisplay{..}|Packet::AdmitReady{..}|Packet::Admitted{..}|Packet::AdmitOutcome{..}) { return self.up_admit(target,packet); }

@@ -3,6 +3,15 @@
 //! Actual socket credentials, fresh token possession and a genuine C Pair
 //! Final are required; source lifetime never substitutes for an action grant.
 use super::*;
+use std::sync::atomic::AtomicU8;
+mod return_transport_v1;
+pub(crate) use return_transport_v1::{
+    CoordinatedFinancialResultEventV1, CoordinatedReturnTransportV1,
+};
+const V3_RUNNING: u8 = 0;
+const RETURN_REQUESTED: u8 = 1;
+const RETURN_DRAINED: u8 = 2;
+const RETURN_RUNNING: u8 = 3;
 use crate::authority_bridge::durable_review_ipc_v3::coordinated_v1::{
     CoordinatedAppRequestV1, CoordinatedClosedCommandV1, CoordinatedPrepareClosedRecipientRequestV1,
 };
@@ -54,6 +63,7 @@ struct Bounds {
     lifetime: Arc<SignerV3SourceLifetimeV1>,
     deadline: Instant,
     stopped: Arc<AtomicBool>,
+    mode: AtomicU8,
 }
 impl Bounds {
     fn check(&self) -> Result<()> {
@@ -178,6 +188,7 @@ impl CoordinatedLocalIpcV1 {
             lifetime,
             deadline,
             stopped: Arc::new(AtomicBool::new(false)),
+            mode: AtomicU8::new(V3_RUNNING),
         });
         bounds.check()?;
         let path = directory.root().join(format!(
@@ -404,8 +415,20 @@ fn serve(
 ) {
     let mut pairing_seen = false;
     while bounds.check().is_ok() {
+        // This single worker ACKs only after the preceding parser returned.
+        // Genuine S H/C/R/lifetime checks continue unchanged in all modes.
+        if bounds.mode.load(Ordering::Acquire) == RETURN_REQUESTED {
+            bounds.mode.store(RETURN_DRAINED, Ordering::Release);
+        }
         match listener.accept() {
             Ok((mut stream, _)) => {
+                if !matches!(
+                    bounds.mode.load(Ordering::Acquire),
+                    V3_RUNNING | RETURN_RUNNING
+                ) {
+                    let _ = stream.shutdown(std::net::Shutdown::Both);
+                    continue;
+                }
                 let result = handle(&mut stream, bounds, grants, sender, &mut pairing_seen);
                 if result.is_err() {
                     let _ = stream
@@ -453,6 +476,18 @@ fn handle(
         wholepact_core::strict_json::parse_typed_json_with_byte_limit(&bytes, 144 * 1024)
             .map_err(|_| Error::InvalidData)?;
     bounds.check()?;
+    if bounds.mode.load(Ordering::Acquire) != V3_RUNNING
+        && !matches!(
+            &envelope,
+            CoordinatedEnvelopeV1::CoordinatedV3Request {
+                request: CoordinatedAppRequestV1::FinancialResult { .. },
+                ..
+            }
+        )
+    {
+        let _ = stream.shutdown(std::net::Shutdown::Both);
+        return Ok(());
+    }
     match &mut envelope {
         CoordinatedEnvelopeV1::RequestPairing {
             schema_version: 1,

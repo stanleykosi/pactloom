@@ -4,11 +4,10 @@ use super::*;
 
 /// Retain the exact originally reviewed JSON, not a subsequently reparsed file.
 /// The digest binds the complete bytes (including harmless formatting changes).
-fn configuration_digest(json: &str) -> Result<String> {
+pub(super) fn configuration_digest(json: &str) -> Result<String> {
     let _ = Config::parse_exact(json)?;
-    wholepact_core::proposal::canonical_digest(
-        "wholepact:coordinated-financial-wallet-configuration:v1",
-        &json,
+    wholepact_financial_coordinator_origin::SignerWalletOriginalV1::calculate_configuration_digest(
+        json,
     )
     .map_err(|_| Error::InvalidData)
 }
@@ -17,7 +16,7 @@ fn configuration_digest(json: &str) -> Result<String> {
 /// absolute bounds. It is never a new 120 second action. The eventual nominal
 /// caller must ALSO timeout_at the returned absolute deadline and resample its
 /// actual action in LocalWalletAccess; this helper alone authorizes nothing.
-fn remaining_sync_budget(
+pub(super) fn remaining_sync_budget(
     now: Instant,
     original_action: Instant,
     original_source: Instant,
@@ -79,5 +78,37 @@ mod tests {
         assert!(configuration_digest("").is_err());
         assert!(configuration_digest(&" ".repeat(MAX_SETUP + 1)).is_err());
         assert!(configuration_digest(r#"{"schema_version":1,"purpose":"sign"}"#).is_err());
+    }
+    fn ordinary_config() -> serde_json::Value {
+        serde_json::json!({"schema_version":1,"purpose":"fresh_born_ephemeral_viewing_wallet_v1","retention":"current_native_owner_only","maximum_blocks":10,
+            "policy":{"confidence":"trusted_single_provider_snapshot","source_id":"ordinary-config-only","endpoint":"https://invalid.example","maximum_observation_age_seconds":30,"minimum_confirmations":2,"minimum_expiry_margin_blocks":3},
+            "birthday":{"prior_height":1,"prior_block_hash":"00","sapling_tree":"","orchard_tree":"","ironwood_tree":""}})
+    }
+    #[test]
+    fn config_digest_binds_exact_retained_bytes_not_reparsed_equivalence() {
+        let json = serde_json::to_string(&ordinary_config()).unwrap();
+        let spaced = format!(" {json} ");
+        assert_eq!(
+            configuration_digest(&json).unwrap(),
+            configuration_digest(&json).unwrap()
+        );
+        assert_ne!(
+            configuration_digest(&json).unwrap(),
+            configuration_digest(&spaced).unwrap()
+        );
+    }
+    #[test]
+    fn config_never_accepts_synthetic_or_consensus_claims_and_unknown_fields() {
+        for confidence in [
+            "synthetic_never_chain_evidence",
+            "independently_verified_consensus",
+        ] {
+            let mut value = ordinary_config();
+            value["policy"]["confidence"] = confidence.into();
+            assert!(configuration_digest(&serde_json::to_string(&value).unwrap()).is_err());
+        }
+        let mut value = ordinary_config();
+        value["caller_permission"] = true.into();
+        assert!(configuration_digest(&serde_json::to_string(&value).unwrap()).is_err());
     }
 }

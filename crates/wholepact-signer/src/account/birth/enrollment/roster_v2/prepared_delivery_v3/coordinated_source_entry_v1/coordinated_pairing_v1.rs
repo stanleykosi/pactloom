@@ -187,3 +187,50 @@ impl CoordinatedSourceReceiptBindingV1 {
         ))
     }
 }
+
+/// Same original endpoint and token, monotonically narrowed to Return requests.
+/// No old source, database, consent session or private Read owner survives here.
+pub(crate) struct CoordinatedFinancialRoleTransportV1 {
+    transport: crate::ipc::CoordinatedReturnTransportV1,
+    _temporary: tempfile::TempDir,
+    completed: wholepact_financial_coordinator_origin::SignerV3CompletedLifetimeV1,
+}
+impl CoordinatedFinancialRoleTransportV1 {
+    pub(crate) fn check_current(&self) -> Result<()> {
+        self.completed.check_current()?;
+        self.transport.check_current()
+    }
+    pub(crate) fn next_result(&self) -> Result<Option<crate::ipc::CoordinatedFinancialResultEventV1>> {
+        self.check_current()?;
+        self.transport.next_result()
+    }
+    pub(crate) fn require_peer(&self,peer:&crate::ipc::CoordinatedPairPeerV1)->Result<()> {
+        self.transport.original_peer().require_same_grant(peer)?;
+        self.check_current()
+    }
+}
+impl CoordinatedSourcePairingV1 {
+    /// Called by the actual consumed completed source only, with no worker or
+    /// response stream outstanding. ACK/drain occurs before dropping old files.
+    pub(super) fn into_financial_role_transport(
+        self, completed:wholepact_financial_coordinator_origin::SignerV3CompletedLifetimeV1,
+    )->Result<(CoordinatedFinancialRoleTransportV1,PeerProcess)> {
+        self.check_current()?;
+        completed.check_current()?;
+        if completed.source_identity_digest()!=self.source.opened.source_identity_digest
+            || completed.original_source_deadline()!=self.source.original_source_deadline
+        {return Err(Error::ReviewMismatch);}
+        let transport=self.ipc.enter_financial_return_only(&completed)?;
+        completed.check_current()?;
+        // This is the same original kernel-backed H token, never the random
+        // observed socket instance or a newly imported PID/descriptor.
+        let host=self.source.host.clone();
+        host.check_alive()?;
+        drop(self.source);
+        let retained=CoordinatedFinancialRoleTransportV1 {
+            transport,_temporary:self._temporary,completed,
+        };
+        retained.check_current()?;
+        Ok((retained,host))
+    }
+}

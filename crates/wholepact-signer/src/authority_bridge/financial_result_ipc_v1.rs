@@ -165,6 +165,12 @@ impl ResultPeerOriginV1 {
 #[cfg(feature="coordinated-financial-workflow-v1")]
 #[path="financial_result_ipc_v1/coordinated_original_v1.rs"]
 mod coordinated_original_v1;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+#[path = "financial_result_ipc_v1/coordinated_return_v1.rs"]
+mod coordinated_return_v1;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub(crate) use coordinated_return_v1::PreparedCoordinatedFinancialReturnV1;
+
 #[cfg(feature="coordinated-financial-workflow-v1")]
 pub use coordinated_original_v1::PreparedCoordinatedFinancialResultReceiverV1;
 
@@ -200,6 +206,45 @@ struct Evidence {
     outbox: String,
 }
 impl Evidence {
+    // Pure evidence join only. The concrete native/coordinated reader must
+    // already own the genuine read action and audited original result snapshot.
+    fn from_retained(
+        original: &crate::consent_journal::OriginalAuthorizationEvidence,
+        result: &crate::authority_bridge::protocol::RetainedAuthorizationResult,
+        continuation: OwnerControlRequest,
+        request: &FinancialResultRequestV1,
+    ) -> Result<Self> {
+        let OwnerControl::AdmitFinancialContinuationV1 { record } = &continuation.control else {
+            return Err(BridgeError::Binding);
+        };
+        if original.original_consent().reference() != request.original_consent_ref
+            || result.original_consent_ref != request.original_consent_ref
+            || result.authorization_id != request.authorization_id
+        {
+            return Err(BridgeError::Binding);
+        }
+        let participant_index = original
+            .accepted_manifest()
+            .proposal_input()
+            .manifest
+            .participants
+            .iter()
+            .position(|p| p.account_id == request.account_id)
+            .ok_or(BridgeError::Binding)?;
+        let signature_set_digest = signature_digest(&result.outbox_payload, participant_index)?;
+        let evidence = Self {
+            participant_index,
+            signature_set_digest,
+            request: request.clone(),
+            record: record.as_ref().clone(),
+            continuation,
+            result_digest: result.result_digest.clone(),
+            outbox_digest: result.outbox_digest.clone(),
+            outbox: result.outbox_payload.clone(),
+        };
+        evidence.validate()?;
+        Ok(evidence)
+    }
     fn validate(&self) -> Result<()> {
         self.request.validate()?;
         self.record
@@ -340,35 +385,7 @@ impl PreparedFinancialReturnV1 {
         source
             .check_retained_financial_peer_v1(&peer)
             .map_err(|_| BridgeError::Permission)?;
-        let OwnerControl::AdmitFinancialContinuationV1 { record } = &continuation.control else {
-            return Err(BridgeError::Binding);
-        };
-        if original.original_consent().reference() != request.original_consent_ref
-            || result.original_consent_ref != request.original_consent_ref
-            || result.authorization_id != request.authorization_id
-        {
-            return Err(BridgeError::Binding);
-        }
-        let participant_index = original
-            .accepted_manifest()
-            .proposal_input()
-            .manifest
-            .participants
-            .iter()
-            .position(|p| p.account_id == request.account_id)
-            .ok_or(BridgeError::Binding)?;
-        let signature_set_digest = signature_digest(&result.outbox_payload, participant_index)?;
-        let evidence = Evidence {
-            participant_index,
-            signature_set_digest,
-            request: request.clone(),
-            record: record.as_ref().clone(),
-            continuation,
-            result_digest: result.result_digest.clone(),
-            outbox_digest: result.outbox_digest.clone(),
-            outbox: result.outbox_payload.clone(),
-        };
-        evidence.validate()?;
+        let evidence = Evidence::from_retained(&original, &result, continuation, request)?;
         if journal_pin.result_digest() != evidence.result_digest {
             return Err(BridgeError::Binding);
         }
@@ -493,19 +510,59 @@ impl ApprovedFinancialReturnV1 {
             .check_source(self.prepared.source.identity_digest())
             .map_err(|_| BridgeError::Permission)
     }
-    pub(crate) fn serve(self, mut stream: UnixStream) -> Result<()> {
+    pub(crate) fn serve(self, stream: UnixStream) -> Result<()> {
+        FinancialReturnSenderV1::Native(self).serve(stream)
+    }
+}
+
+// Closed concrete authority backing; only framing and exact evidence are shared.
+// Adding a coordinated arm must retain its genuine Final, source pin and peer.
+enum FinancialReturnSenderV1 {
+    Native(ApprovedFinancialReturnV1),
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    Coordinated(coordinated_return_v1::ApprovedCoordinatedFinancialReturnV1),
+}
+impl FinancialReturnSenderV1 {
+    fn check(&self) -> Result<()> {
+        match self { Self::Native(v) => v.check(),
+            #[cfg(feature = "coordinated-financial-workflow-v1")]
+            Self::Coordinated(v) => v.check(),
+        }
+    }
+    fn peer(&self) -> &PeerProcess {
+        match self { Self::Native(v) => &v.prepared.peer,
+            #[cfg(feature = "coordinated-financial-workflow-v1")]
+            Self::Coordinated(v) => v.peer(),
+        }
+    }
+    fn evidence(&self) -> &Evidence {
+        match self { Self::Native(v) => &v.prepared.evidence,
+            #[cfg(feature = "coordinated-financial-workflow-v1")]
+            Self::Coordinated(v) => v.evidence(),
+        }
+    }
+    fn deadline(&self) -> Result<Instant> {
+        match self {
+            Self::Native(v) => Ok(v.action.binding().bounded_deadline()
+                .map_err(|_| BridgeError::Permission)?
+                .min(v.prepared.source.original_deadline())),
+            #[cfg(feature = "coordinated-financial-workflow-v1")]
+            Self::Coordinated(v) => Ok(v.deadline()),
+        }
+    }
+    fn finish(self) -> Result<()> {
+        match self {
+            Self::Native(_) => Ok(()),
+            #[cfg(feature = "coordinated-financial-workflow-v1")]
+            Self::Coordinated(v) => v.finish(),
+        }
+    }
+    fn serve(self, mut stream: UnixStream) -> Result<()> {
         self.check()?;
         let observed = PeerProcess::observe(&stream).map_err(|_| BridgeError::Permission)?;
-        self.prepared
-            .peer
-            .same_live_process(&observed)
+        self.peer().same_live_process(&observed)
             .map_err(|_| BridgeError::Permission)?;
-        let deadline = self
-            .action
-            .binding()
-            .bounded_deadline()
-            .map_err(|_| BridgeError::Permission)?
-            .min(self.prepared.source.original_deadline());
+        let deadline = self.deadline()?;
         let lease_id = hex::encode(crate::vault::random::<32>().map_err(|_| BridgeError::Ipc)?);
         // Borrow evidence while serializing so no duplicate secret-bearing copy
         // is minted and no later retry can reconstruct a different payload.
@@ -524,7 +581,7 @@ impl ApprovedFinancialReturnV1 {
             deadline,
             &|| self.check(),
         )?;
-        match read(&stream, &self.prepared.peer, deadline, &|| self.check())? {
+        match read(&stream, self.peer(), deadline, &|| self.check())? {
             Command::Fetch { lease_id: actual } if actual == lease_id => (),
             _ => return Err(BridgeError::Permission),
         }
@@ -543,13 +600,13 @@ impl ApprovedFinancialReturnV1 {
                 status: "held",
                 lease_id: &lease_id,
                 remaining_ms,
-                evidence: &self.prepared.evidence,
+                evidence: self.evidence(),
             },
             deadline,
             &|| self.check(),
         )?;
         loop {
-            let command: Command = read(&stream, &self.prepared.peer, deadline, &|| self.check())?;
+            let command: Command = read(&stream, self.peer(), deadline, &|| self.check())?;
             self.check()?;
             match command {
                 Command::Check { nonce } => {
@@ -566,7 +623,7 @@ impl ApprovedFinancialReturnV1 {
                 }
                 Command::Finish => {
                     write(&mut stream, &Response::Finished, deadline, &|| self.check())?;
-                    return Ok(());
+                    return self.finish();
                 }
                 Command::Fetch { .. } | Command::HostPrepared { .. } => {
                     return Err(BridgeError::Permission);

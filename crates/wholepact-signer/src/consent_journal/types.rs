@@ -2,6 +2,9 @@ use super::*;
 use serde::{Deserialize, Serialize};
 use wholepact_core::{Proposal, ProposalInput};
 use wholepact_store::authority::ReleaseIntent;
+#[path = "types/coordinated_financial_spend_v1.rs"]
+mod coordinated_financial_spend_v1;
+pub(crate) use coordinated_financial_spend_v1::CoordinatedFinancialSpendProvenanceV1;
 
 /// Exact evidence category is retained: authenticated local IPC possession is
 /// never labeled as remote participant HPKE/public-key control.
@@ -345,6 +348,8 @@ pub struct OriginalSpendConsent {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct FinancialSpendBindingV1 {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) coordinated_origin_v1: Option<CoordinatedFinancialSpendProvenanceV1>,
     pub(crate) continuation_operation_id: String,
     pub(crate) continuation_request_digest: String,
     pub(crate) continuation_history_digest: String,
@@ -419,7 +424,16 @@ impl OriginalSpendConsent {
         Ok(())
     }
     pub(super) fn new_financial_v1(terms: SpendConsentTerms, binding: FinancialSpendBindingV1) -> Result<Self> {
+        if binding.coordinated_origin_v1.is_some() { return Err(JournalError::Permission); }
         let reference = digest("wholepact:signer-original-financial-spend-consent:v1", &(&terms, &binding))?;
+        let record = Self { reference, terms, financial_continuation_v1: Some(binding) };
+        record.validate_financial_v1()?;
+        Ok(record)
+    }
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    pub(super) fn new_coordinated_financial_v1(terms: SpendConsentTerms, binding: FinancialSpendBindingV1) -> Result<Self> {
+        if binding.coordinated_origin_v1.is_none() { return Err(JournalError::Permission); }
+        let reference = digest("wholepact:signer-original-coordinated-financial-spend-consent:v1", &(&terms, &binding))?;
         let record = Self { reference, terms, financial_continuation_v1: Some(binding) };
         record.validate_financial_v1()?;
         Ok(record)
@@ -436,7 +450,12 @@ impl OriginalSpendConsent {
         if b.reviewed_head.sequence == 0 || b.principal_id != t.principal_id || b.native_session_digest != t.receipt.native_session_id || b.measurement != t.receipt.trusted_launch_measurement
             || b.permission_generation != t.receipt.permission_generation || b.permission_generation != 1 || b.nonce != t.receipt.nonce
             || t.automation.is_some() || t.sponsor_policy.is_some() || t.sponsor_owner_attestation_digest.is_some() || t.durable_born_policy_v1.is_some()
-            || self.reference != digest("wholepact:signer-original-financial-spend-consent:v1", &(t,b))? { return Err(JournalError::InvalidBinding); }
+            { return Err(JournalError::InvalidBinding); }
+        let domain = if let Some(coordinated) = &b.coordinated_origin_v1 {
+            coordinated.validate(t, b)?;
+            "wholepact:signer-original-coordinated-financial-spend-consent:v1"
+        } else { "wholepact:signer-original-financial-spend-consent:v1" };
+        if self.reference != digest(domain, &(t,b))? { return Err(JournalError::InvalidBinding); }
         Ok(())
     }
     fn validate_terms(&self) -> Result<()> {

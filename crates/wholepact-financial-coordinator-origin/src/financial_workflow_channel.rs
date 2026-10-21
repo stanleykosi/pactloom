@@ -245,6 +245,27 @@ pub(super) enum Packet {
     V3RedisclosureReadDisplay{presentation:crate::SignerV3RedisclosureReadPresentationV1},
     V3RedisclosureReadFinal{role:Target,presentation_digest:String},
     V3RedisclosurePrepared{role:Target,data:crate::SignerV3RedisclosurePreparedV1},
+    V3AdmitDisplay{presentation:crate::SignerV3AdmitPresentationV1},
+    V3AdmitArm{role:Target,presentation_digest:String},
+    V3AdmitReady{role:Target,data:crate::SignerV3AdmitReadyV1,ready_challenge:String},
+    V3AdmitFinal{role:Target,presentation_digest:String,ready_challenge:String,authenticated_ready_digest:String},
+    V3Admitted{role:Target,data:crate::SignerV3AdmittedV1},
+    V3AdmitReadDisplay{presentation:crate::SignerV3AdmitReadPresentationV1},
+    V3AdmitReadFinal{role:Target,presentation_digest:String},
+    V3AdmitReadRetained{role:Target,data:crate::SignerV3AdmitReadRetainedV1},
+    ReturnReadDisplay{presentation:crate::SignerReturnReadPresentationV1},ReturnReadFinal{role:Target,presentation_digest:String},ReturnPrepared{role:Target,data:crate::SignerReturnPreparedV1},ReturnExactDisplay{presentation:crate::SignerReturnExactPresentationV1},ReturnExactFinal{role:Target,presentation_digest:String},ReturnCompleted{role:Target,data:crate::SignerReturnCompletedV1},ReturnFailed{role:Target,data:crate::SignerReturnFailureV1},
+    SignReadDisplay{presentation:crate::SignerSignReadPresentationV1},SignReadFinal{role:Target,presentation_digest:String},SignPrepared{role:Target,data:crate::SignerSignPreparedV1},SignExactDisplay{presentation:crate::SignerSignExactPresentationV1},SignExactFinal{role:Target,presentation_digest:String},SignCommitted{role:Target,data:crate::SignerSignCommittedV1},SignFailed{role:Target,data:crate::SignerSignFailureV1},
+    WalletPrepareDisplay{presentation:crate::SignerWalletPreparePresentationV1},
+    WalletPrepareFinal{role:Target,presentation_digest:String},
+    WalletPrepared{role:Target,data:crate::SignerWalletPreparedV1},
+    WalletObserveDisplay{presentation:crate::SignerWalletObservePresentationV1},
+    WalletObserveFinal{role:Target,presentation_digest:String},
+    WalletObserved{role:Target,data:crate::SignerWalletObservedV1},
+    WalletFailed{role:Target,data:crate::SignerWalletFailureV1},
+    V3AuditDisplay{presentation:crate::SignerV3AuditPresentationV1},
+    V3AuditFinal{role:Target,presentation_digest:String},
+    V3Audited{role:Target,data:crate::SignerV3AuditedV1},
+    FinancialSetupSelection{role:Target,selection:crate::SignerFinancialSetupSelectionV1},
     V3OwnerSelection{role:Target,source_identity_digest:String,redisclosure_presentation_digest:String,owner_setup_json:String,owner_selection_challenge:String},
     V3PrepareReadDisplay{presentation:crate::SignerV3PrepareReadPresentationV1},
     V3PrepareReadFinal{role:Target,presentation_digest:String},
@@ -316,6 +337,26 @@ impl Packet {
         Self::V3RedisclosureReadDisplay{presentation}=>{presentation.validate()?;Some(presentation.actor.signer_role)},
         Self::V3RedisclosurePrepared{role,data}=>{data.validate()?;Some(*role)},
         Self::V3RedisclosureReadFinal{role,presentation_digest}=>{if !hash(presentation_digest){return Err(rejected("redisclosure Final digest"));}Some(*role)},
+        Self::V3AdmitDisplay{presentation}=>{presentation.validate()?;Some(presentation.actor.signer_role)},
+        Self::V3Admitted{role,data}=>{data.validate()?;Some(*role)},
+        Self::V3AdmitArm{role,presentation_digest}=>{if !hash(presentation_digest){return Err(rejected("admission Arm digest"));}Some(*role)},
+        Self::V3AdmitReady{role,data,ready_challenge}=>{data.validate()?;if !hash(ready_challenge){return Err(rejected("admission READY challenge"));}Some(*role)},
+        Self::V3AdmitFinal{role,presentation_digest,ready_challenge,authenticated_ready_digest}=>{if ![presentation_digest,ready_challenge,authenticated_ready_digest].iter().all(|v|hash(v)){return Err(rejected("admission Final binding"));}Some(*role)},
+        Self::V3AdmitReadDisplay{presentation}=>{presentation.validate()?;Some(presentation.actor.signer_role)},
+        Self::V3AdmitReadRetained{role,data}=>{data.validate()?;Some(*role)},
+        Self::V3AdmitReadFinal{role,presentation_digest}=>{if !hash(presentation_digest){return Err(rejected("AdmitRead Final digest"));}Some(*role)},
+        Self::ReturnReadDisplay{presentation}=>{presentation.validate()?;Some(presentation.actor.signer_role)},Self::ReturnExactDisplay{presentation}=>{presentation.validate()?;Some(presentation.actor.signer_role)},Self::ReturnReadFinal{role,presentation_digest}|Self::ReturnExactFinal{role,presentation_digest}=>{if !hash(presentation_digest){return Err(rejected("Return Final digest"));}Some(*role)},Self::ReturnPrepared{role,data}=>{data.validate()?;Some(*role)},Self::ReturnCompleted{role,data}=>{data.validate()?;Some(*role)},Self::ReturnFailed{role,data}=>{data.validate()?;Some(*role)},
+        Self::SignReadDisplay{presentation}=>{presentation.validate()?;Some(presentation.actor.signer_role)},Self::SignExactDisplay{presentation}=>{presentation.validate()?;Some(presentation.actor.signer_role)},Self::SignReadFinal{role,presentation_digest}|Self::SignExactFinal{role,presentation_digest}=>{if !hash(presentation_digest){return Err(rejected("sign Final digest"));}Some(*role)},Self::SignPrepared{role,data}=>{data.validate()?;Some(*role)},Self::SignCommitted{role,data}=>{data.validate()?;Some(*role)},Self::SignFailed{role,data}=>{data.validate()?;Some(*role)},
+        Self::WalletPrepareDisplay{presentation}=>{presentation.validate()?;Some(presentation.actor.signer_role)},
+        Self::WalletObserveDisplay{presentation}=>{presentation.validate()?;Some(presentation.actor.signer_role)},
+        Self::WalletPrepared{role,data}=>{data.validate()?;Some(*role)},
+        Self::WalletObserved{role,data}=>{data.validate()?;Some(*role)},
+        Self::WalletFailed{role,data}=>{data.validate()?;Some(*role)},
+        Self::WalletPrepareFinal{role,presentation_digest}|Self::WalletObserveFinal{role,presentation_digest}=>{if !hash(presentation_digest){return Err(rejected("wallet Final digest"));}Some(*role)},
+        Self::V3AuditDisplay{presentation}=>{presentation.validate()?;Some(presentation.actor.signer_role)},
+        Self::V3Audited{role,data}=>{data.validate()?;Some(*role)},
+        Self::V3AuditFinal{role,presentation_digest}=>{if !hash(presentation_digest){return Err(rejected("Audit Final digest"));}Some(*role)},
+        Self::FinancialSetupSelection{role,selection}=>{selection.validate()?;Some(*role)},
         Self::V3OwnerSelection{role,source_identity_digest,redisclosure_presentation_digest,owner_setup_json,owner_selection_challenge}=>{crate::SignerV3OwnerSetupSelectionV1::parse_json(owner_setup_json)?;if ![source_identity_digest,redisclosure_presentation_digest,owner_selection_challenge].iter().all(|v|hash(v)){return Err(rejected("owner selection binding"));}Some(*role)},
         Self::V3PrepareReadDisplay{presentation}=>{presentation.validate()?;Some(presentation.actor.signer_role)},
         Self::V3ReceiveDisplay{presentation}=>{presentation.validate()?;Some(presentation.actor.signer_role)},
@@ -445,7 +486,7 @@ fn check_direction(sender:Role,recipient:Role,packet:&Packet)->Result<()> {
     if let Packet::OriginalHostPeer{role,host_instance}=packet {
         return if sender==Role::Host && recipient==role.role() && hash(host_instance){Ok(())}else{Err(rejected("original H handshake direction rejected"))};
     }
-    let down=matches!(packet,Packet::V3OwnerSelection{..}|Packet::V3PrepareReadFinal{..}|Packet::V3ReceiveFinal{..}|Packet::V3RedisclosureReadFinal{..}|Packet::V3RediscloseFinal{..}|Packet::V3EnrollmentFinal{..}|Packet::V3ManifestFinal{..}|Packet::V3PairFinal{..}|Packet::V3StartEntry{..}|Packet::V3EntryCipher{..}|Packet::ActivateReadFinal{..}|Packet::ActivateArm{..}|Packet::ActivateFinal{..}|Packet::WriterReadFinal{..}|Packet::AcquireArm{..}|Packet::AcquireFinal{..}|Packet::StartEntry{..}|Packet::EntryCipher{..}|Packet::ReadFinal{..}|Packet::ContinuePrepare{..}|Packet::ContinueArm{..}|Packet::ContinueFinal{..}|Packet::AdmitArm{..}|Packet::AdmitFinal{..}|Packet::Cancel{..});
+    let down=matches!(packet,Packet::ReturnReadFinal{..}|Packet::ReturnExactFinal{..}|Packet::SignReadFinal{..}|Packet::SignExactFinal{..}|Packet::FinancialSetupSelection{..}|Packet::WalletPrepareFinal{..}|Packet::WalletObserveFinal{..}|Packet::V3AuditFinal{..}|Packet::V3AdmitArm{..}|Packet::V3AdmitFinal{..}|Packet::V3AdmitReadFinal{..}|Packet::V3OwnerSelection{..}|Packet::V3PrepareReadFinal{..}|Packet::V3ReceiveFinal{..}|Packet::V3RedisclosureReadFinal{..}|Packet::V3RediscloseFinal{..}|Packet::V3EnrollmentFinal{..}|Packet::V3ManifestFinal{..}|Packet::V3PairFinal{..}|Packet::V3StartEntry{..}|Packet::V3EntryCipher{..}|Packet::ActivateReadFinal{..}|Packet::ActivateArm{..}|Packet::ActivateFinal{..}|Packet::WriterReadFinal{..}|Packet::AcquireArm{..}|Packet::AcquireFinal{..}|Packet::StartEntry{..}|Packet::EntryCipher{..}|Packet::ReadFinal{..}|Packet::ContinuePrepare{..}|Packet::ContinueArm{..}|Packet::ContinueFinal{..}|Packet::AdmitArm{..}|Packet::AdmitFinal{..}|Packet::Cancel{..});
     let edge=if down{sender==Role::Coordinator&&recipient==Role::Host||sender==Role::Host&&matches!(recipient,Role::Signer1|Role::Signer2)}
         else{recipient==Role::Coordinator&&sender==Role::Host||recipient==Role::Host&&matches!(sender,Role::Signer1|Role::Signer2)};
     let actual=if matches!(sender,Role::Signer1|Role::Signer2){Some(sender)}else if matches!(recipient,Role::Signer1|Role::Signer2){Some(recipient)}else{None};
@@ -615,3 +656,7 @@ mod tests {
 #[cfg(test)]mod v3_redisclosure_route_tests{use super::*;#[test]fn read_and_export_are_distinct_fixed_original_edges(){let p=Packet::V3RedisclosureReadDisplay{presentation:crate::signer_v3_redisclosure_data::tests::read()};assert!(check_direction(Role::Signer1,Role::Host,&p).is_ok());assert!(check_direction(Role::Signer2,Role::Host,&p).is_err());let p=Packet::V3RediscloseFinal{role:Target::Signer1,presentation_digest:"ab".repeat(32)};assert!(check_direction(Role::Coordinator,Role::Host,&p).is_ok());assert!(check_direction(Role::Host,Role::Signer1,&p).is_ok());assert!(check_direction(Role::Host,Role::Signer2,&p).is_err());assert!(check_direction(Role::Signer1,Role::Host,&p).is_err());}}
 
 #[cfg(test)]mod v3_delivery_route_tests{use super::*;#[test]fn original_owner_selection_and_receive_have_fixed_edges(){let p=Packet::V3OwnerSelection{role:Target::Signer1,source_identity_digest:"ab".repeat(32),redisclosure_presentation_digest:"cd".repeat(32),owner_setup_json:crate::signer_v3_delivery_data::tests::owner_json(),owner_selection_challenge:"ef".repeat(32)};assert!(check_direction(Role::Coordinator,Role::Host,&p).is_ok());assert!(check_direction(Role::Host,Role::Signer1,&p).is_ok());assert!(check_direction(Role::Signer1,Role::Host,&p).is_err());let p=Packet::V3ReceiveDisplay{presentation:crate::signer_v3_delivery_data::tests::receive()};assert!(check_direction(Role::Signer1,Role::Host,&p).is_ok());assert!(check_direction(Role::Signer2,Role::Host,&p).is_err());}}
+#[cfg(test)]mod wallet_route_tests{use super::*;#[test]fn wallet_prepare_and_observe_use_only_original_fixed_edges(){let p=Packet::WalletPrepareDisplay{presentation:crate::signer_wallet_data::tests::prepare()};assert!(check_direction(Role::Signer1,Role::Host,&p).is_ok());assert!(check_direction(Role::Signer2,Role::Host,&p).is_err());let p=Packet::WalletObserveFinal{role:Target::Signer1,presentation_digest:"ab".repeat(32)};assert!(check_direction(Role::Coordinator,Role::Host,&p).is_ok());assert!(check_direction(Role::Host,Role::Signer1,&p).is_ok());assert!(check_direction(Role::Signer1,Role::Host,&p).is_err());}}
+#[cfg(test)]mod financial_setup_route_tests {use super::*;#[test]fn financial_setup_is_only_original_role_downstream_data(){let p=Packet::FinancialSetupSelection{role:Target::Signer1,selection:crate::financial_setup_selection_data::tests::selection()};assert!(check_direction(Role::Coordinator,Role::Host,&p).is_ok());assert!(check_direction(Role::Host,Role::Signer1,&p).is_ok());assert!(check_direction(Role::Signer1,Role::Host,&p).is_err());assert!(check_direction(Role::Host,Role::Signer2,&p).is_err());}}
+#[cfg(test)]mod sign_route_tests{use super::*;#[test]fn exact_sign_packets_have_only_fixed_edges(){let p=Packet::SignReadDisplay{presentation:crate::signer_sign_data::tests::read()};assert!(check_direction(Role::Signer1,Role::Host,&p).is_ok());assert!(check_direction(Role::Signer2,Role::Host,&p).is_err());let p=Packet::SignExactFinal{role:Target::Signer1,presentation_digest:"ab".repeat(32)};assert!(check_direction(Role::Coordinator,Role::Host,&p).is_ok());assert!(check_direction(Role::Signer1,Role::Host,&p).is_err());}}
+#[cfg(test)]mod return_route_tests{use super::*;#[test]fn return_uses_fixed_original_actor_edges(){let p=Packet::ReturnReadDisplay{presentation:crate::signer_return_data::tests::read()};assert!(check_direction(Role::Signer1,Role::Host,&p).is_ok());assert!(check_direction(Role::Signer2,Role::Host,&p).is_err());let p=Packet::ReturnExactFinal{role:Target::Signer1,presentation_digest:"ab".repeat(32)};assert!(check_direction(Role::Host,Role::Signer1,&p).is_ok());assert!(check_direction(Role::Signer1,Role::Host,&p).is_err());}}

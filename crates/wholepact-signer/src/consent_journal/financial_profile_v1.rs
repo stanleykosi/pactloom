@@ -11,6 +11,11 @@ const TABLE: &str = "signer_financial_continuation_intents";
 const COLUMNS: &[&str] = &["operation_id", "authorization_id", "original_admission_operation_id", "request_digest", "enrollment_ref", "manifest_ref", "payload"];
 #[path = "financial_continuation_v1.rs"]
 mod intent;
+#[path = "financial_original_delivery_v1.rs"]
+pub(in crate::consent_journal) mod original_delivery;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+#[path = "financial_coordinated_v3_audit_v1.rs"]
+mod coordinated_v3_audit;
 #[path = "financial_coordinated_continue_v1.rs"]
 mod coordinated_continue;
 #[cfg(feature = "coordinated-financial-workflow-v1")]
@@ -33,6 +38,8 @@ pub(crate) use operation_pin::FinancialOperationJournalPinV1;
 #[path = "financial_session_v1.rs"]
 mod session;
 pub(crate) use session::{ApprovedFinancialSpendConsentV1, PreparedFinancialSpendV1};
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub(crate) use session::{PreparedCoordinatedFinancialSpendV1, PresentedCoordinatedFinancialSpendV1, ApprovedCoordinatedFinancialSpendConsentV1};
 pub(crate) use intent::{PreparedFinancialContinuationIntentV1, RetainedFinancialContinuationIntentV1};
 
 /// No Clone/serde/path constructor. Issued only from an actual validated
@@ -371,7 +378,7 @@ fn validate(c: &Connection, genesis: &AccountUseGenesis) -> Result<()> {
     if state.recovery_required { return Err(JournalError::RecoveryRequired); }
     if origin.exclusion().is_some() || origin.witness_ack().is_some() { return Err(JournalError::Permission); }
     validate_financial_table_policy(c)?;
-    durable_born_entry_v1::validate_delivery_v3_original_cells(c, genesis, &state)?;
+    original_delivery::validate_cells(c, genesis, &state)?;
     validate_financial_original_rows(c)?;
     bridge::validate_rows(c)?;
     let retained = intent::read(c)?;

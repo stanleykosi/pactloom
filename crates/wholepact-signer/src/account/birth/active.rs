@@ -180,6 +180,26 @@ pub(super) fn open_for_coordinated_v3_source_entry_v1(
     encrypted: &[u8],
     entry: &wholepact_financial_coordinator_origin::SignerV3SourceEntryFinalV1,
 ) -> Result<AccountVault> {
+    open_for_coordinated_entry_v1(directory,password,encrypted,CoordinatedEntryV1::Initial(entry))
+}
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub(super) fn open_for_coordinated_financial_source_entry_v1(
+    directory: PrivateDirectory,password:&[u8],encrypted:&[u8],
+    entry:&wholepact_financial_coordinator_origin::SignerSourceEntryFinalV1,
+)->Result<AccountVault>{
+    open_for_coordinated_entry_v1(directory,password,encrypted,CoordinatedEntryV1::Financial(entry))
+}
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+enum CoordinatedEntryV1<'a>{
+    Initial(&'a wholepact_financial_coordinator_origin::SignerV3SourceEntryFinalV1),
+    Financial(&'a wholepact_financial_coordinator_origin::SignerSourceEntryFinalV1),
+}
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+impl CoordinatedEntryV1<'_>{fn check_current(&self)->Result<()>{
+    match self{Self::Initial(v)=>v.check_current()?,Self::Financial(v)=>v.check_current()?} Ok(())
+}}
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+fn open_for_coordinated_entry_v1(directory:PrivateDirectory,password:&[u8],encrypted:&[u8],entry:CoordinatedEntryV1<'_>)->Result<AccountVault>{
     entry.check_current()?;
     super::enrollment::roster_v2::roster_inventory(&directory)?;
     entry.check_current()?;

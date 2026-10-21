@@ -385,11 +385,11 @@ mod tests {
 
 #[path = "coordinated_source_entry_v1/coordinated_pairing_v1.rs"]
 mod coordinated_pairing_v1;
-pub(crate) use coordinated_pairing_v1::{CoordinatedSourcePairingV1, CoordinatedSourceReceiptBindingV1};
+pub(crate) use coordinated_pairing_v1::{CoordinatedSourcePairingV1, CoordinatedSourceReceiptBindingV1, CoordinatedFinancialRoleTransportV1};
 
 #[path = "coordinated_source_entry_v1/coordinated_receipts_v1.rs"]
 mod coordinated_receipts_v1;
-pub(crate) use coordinated_receipts_v1::{CoordinatedEnrollmentReviewV1, CoordinatedManifestReviewV1, CoordinatedPreconstructionReadyV1};
+pub(crate) use coordinated_receipts_v1::{CoordinatedEnrollmentReviewV1, CoordinatedManifestReviewV1, CoordinatedPreconstructionReadyV1, CoordinatedRestrictedReceiptV1};
 
 #[path = "coordinated_source_entry_v1/coordinated_redisclosure_v1.rs"]
 mod coordinated_redisclosure_v1;

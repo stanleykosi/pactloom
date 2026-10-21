@@ -17,7 +17,7 @@ pub(crate) use prepared_delivery_v3::{
     PreparedCoordinatedV3SourceEntryV1, PresentedCoordinatedV3SourceEntryV1,
     CoordinatedPreparingDeliverySourceV1,CoordinatedPreparedDeliverySourceV1,
     CoordinatedRedisclosureReadV1,CoordinatedRediscloseV1,CoordinatedRedisclosedSourceV1,
-    CoordinatedOriginalDeliverySourceV1, CoordinatedSourcePairingV1, CoordinatedSourceReceiptBindingV1, CoordinatedEnrollmentReviewV1, CoordinatedManifestReviewV1, CoordinatedPreconstructionReadyV1,
+    CoordinatedOriginalDeliverySourceV1, CoordinatedSourcePairingV1, CoordinatedSourceReceiptBindingV1, CoordinatedFinancialRoleTransportV1, CoordinatedEnrollmentReviewV1, CoordinatedManifestReviewV1, CoordinatedPreconstructionReadyV1, CoordinatedRestrictedReceiptV1,
 };
 #[cfg(feature = "coordinated-signer-continue")]
 pub(crate) use prepared_delivery_v3::OriginalFinancialReentrySelectionV1;

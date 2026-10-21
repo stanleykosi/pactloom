@@ -2,7 +2,12 @@
 //! The wallet action ends before SignExact. The resulting controller/ticket is
 //! custody and data only; real key use still needs the new SignExact owner.
 use super::*;
-use crate::native_ui::runtime::financial_v1::diagnostics::{self as diag, FinancialNativeStageV1 as Stage};
+use crate::account::birth::enrollment::roster_v2::financial_source_v1::{
+    FinancialOperationSourcePinV1, FinancialOperationV1 as Operation,
+};
+use crate::native_ui::runtime::financial_v1::diagnostics::{
+    self as diag, FinancialNativeStageV1 as Stage,
+};
 use crate::{
     account::birth::enrollment::roster_v2::financial_source_v1::PreparedOriginalFinancialSourceV1,
     native_ui::{
@@ -11,8 +16,7 @@ use crate::{
     },
 };
 use std::os::unix::fs::PermissionsExt;
-use crate::account::birth::enrollment::roster_v2::financial_source_v1::{FinancialOperationV1 as Operation,FinancialOperationSourcePinV1};
-use wholepact_storage_security::{DatabaseFileIdentity, DatabaseKey, create_encrypted};
+use wholepact_storage_security::{create_encrypted, DatabaseFileIdentity, DatabaseKey};
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
@@ -51,8 +55,15 @@ impl Config {
     }
 }
 #[cfg(feature = "coordinated-financial-workflow-v1")]
+#[path = "coordinated_financial_v1.rs"]
+mod coordinated_financial_v1;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
 #[path = "coordinated_wallet_bounds_v1.rs"]
 mod coordinated_wallet_bounds_v1;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub(in crate::native_ui) use coordinated_financial_v1::{
+    ObservedCoordinatedFinancialWalletV1, PreparedCoordinatedFinancialWalletV1, PreparedCoordinatedSigningWalletV1,
+};
 pub(in crate::native_ui) struct PreparedFinancialWalletV1 {
     source: Arc<PreparedOriginalFinancialSourceV1>,
     fixed: Arc<VerifiedDurableEconomicsV1>,
@@ -71,7 +82,17 @@ impl PreparedFinancialWalletV1 {
         let config = Config::parse_exact(json)?;
         let account = source.financial_account()?;
         let account_id = account.account_id()?;
-        let (material, scope) = fixed.original_for_account(&account_id)?;
+        Self::build_from_checked_inputs(source, fixed, config, &account_id)
+    }
+    // Pure preparation after the concrete caller has checked its genuine
+    // purpose-specific source owner. This creates no permission or network I/O.
+    fn build_from_checked_inputs(
+        source: Arc<PreparedOriginalFinancialSourceV1>,
+        fixed: Arc<VerifiedDurableEconomicsV1>,
+        config: Config,
+        account_id: &str,
+    ) -> Result<Self> {
+        let (material, scope) = fixed.original_for_account(account_id)?;
         scope
             .check_valid_at(
                 std::time::SystemTime::now()
@@ -92,7 +113,10 @@ impl PreparedFinancialWalletV1 {
                 ..Default::default()
             },
         )
-        .map_err(|error| { diag::chain(&error); Error::InvalidData })?;
+        .map_err(|error| {
+            diag::chain(&error);
+            Error::InvalidData
+        })?;
         let b = &config.birthday;
         diag::at(Stage::WalletBirthday);
         let birthday = account_birthday_from_tree(TreeState {
@@ -104,7 +128,10 @@ impl PreparedFinancialWalletV1 {
             ironwood_tree: b.ironwood_tree.clone(),
             ..Default::default()
         })
-        .map_err(|error| { diag::sync(&error); Error::InvalidData })?;
+        .map_err(|error| {
+            diag::sync(&error);
+            Error::InvalidData
+        })?;
         let digest = wholepact_core::proposal::canonical_digest(
             "wholepact:financial-exact-wallet-review:v1",
             &(
@@ -138,11 +165,27 @@ impl PreparedFinancialWalletV1 {
         action: FinancialWalletActionV1,
     ) -> Result<(FinancialWalletCustodyV1, ReviewInputs)> {
         action.check_source(self.source.identity_digest())?;
-        let pin=self.source.prepare_financial_operation_source_pin_v1(Operation::WalletObserve,None)?;
+        let pin = self
+            .source
+            .prepare_financial_operation_source_pin_v1(Operation::WalletObserve, None)?;
         action.check_source(self.source.identity_digest())?;
         if action.terms_digest() != self.digest {
             return Err(Error::ReviewMismatch);
         }
+        let guard = WalletObservationGuard::Native { action, pin };
+        let (wallet, inputs, guard) = self.observe_kernel(guard).await?;
+        drop(guard);
+        Ok((wallet, inputs))
+    }
+    async fn observe_kernel(
+        self,
+        guard: WalletObservationGuard,
+    ) -> Result<(
+        FinancialWalletCustodyV1,
+        ReviewInputs,
+        WalletObservationGuard,
+    )> {
+        guard.check(&self.source)?;
         let original = std::fs::canonicalize(self.source.original_root())?;
         let parent = std::fs::canonicalize(std::env::temp_dir())?;
         if parent.starts_with(&original) {
@@ -154,55 +197,69 @@ impl PreparedFinancialWalletV1 {
             .tempdir_in(parent)?;
         let lock = crate::files::PrivateDirectory::open(temporary.path())?;
         let key = DatabaseKey::from_bytes(crate::vault::random::<32>()?);
-        let connection = create_encrypted(temporary.path().join("viewing.sqlite"), &key)
-            .map_err(|error| { diag::storage(&error); Error::Unavailable })?;
+        let connection =
+            create_encrypted(temporary.path().join("viewing.sqlite"), &key).map_err(|error| {
+                diag::storage(&error);
+                Error::Unavailable
+            })?;
         drop(key);
-        let identity = connection
-            .database_identity()
-            .map_err(|error| { diag::storage(&error); Error::Verification })?;
+        let identity = connection.database_identity().map_err(|error| {
+            diag::storage(&error);
+            Error::Verification
+        })?;
         identity
             .check_current(connection.connection())
-            .map_err(|error| { diag::storage(&error); Error::Verification })?;
-        let account = self.source.financial_account_for_operation_v1(&pin,Operation::WalletObserve)?;
+            .map_err(|error| {
+                diag::storage(&error);
+                Error::Verification
+            })?;
+        let account = guard.account(&self.source)?;
         let fvk = account.fvk()?;
         let account_id = account.account_id()?;
         diag::at(Stage::WalletInitialize);
-        let mut wallet = DedicatedTestnetWallet::from_encrypted_connection(connection)
-            .map_err(|error| { diag::wallet(&error); Error::RecoveryRequired })?;
-        {
-            let _held = action.publication_lease()?;
-            self.source.check_financial_operation_source_pin_v1(&pin,Operation::WalletObserve)?;
-            action.check_source(self.source.identity_digest())?;
-            diag::at(Stage::WalletImport);
-            wallet
-                .import_dedicated_fvk(&fvk, self.birthday)
-                .map_err(|error| { diag::wallet(&error); Error::RecoveryRequired })?;
-        }
+        let mut wallet =
+            DedicatedTestnetWallet::from_encrypted_connection(connection).map_err(|error| {
+                diag::wallet(&error);
+                Error::RecoveryRequired
+            })?;
+        guard.import(&self.source, &mut wallet, &fvk, self.birthday)?;
         diag::at(Stage::WalletController);
         let mut controller = ProtectedWalletSync::from_initialized_wallet(
             wallet,
             self.chain,
             NonZeroU32::new(self.config.policy.minimum_confirmations).ok_or(Error::InvalidData)?,
         )
-        .map_err(|error| { diag::sync(&error); Error::RecoveryRequired })?;
+        .map_err(|error| {
+            diag::sync(&error);
+            Error::RecoveryRequired
+        })?;
         diag::at(Stage::WalletVerify);
-        controller
-            .verify_account_fvk(&fvk)
-            .map_err(|error| { diag::sync(&error); Error::Verification })?;
+        controller.verify_account_fvk(&fvk).map_err(|error| {
+            diag::sync(&error);
+            Error::Verification
+        })?;
         diag::at(Stage::WalletStatus);
         let access = Access {
             source: &self.source,
-            pin: &pin,
-            action: &action,
+            guard: &guard,
             identity: &identity,
             account: controller.account_uuid(),
-            backend: controller.status().map_err(|error| { diag::sync(&error); Error::Verification })?.source,
+            backend: controller
+                .status()
+                .map_err(|error| {
+                    diag::sync(&error);
+                    Error::Verification
+                })?
+                .source,
         };
         let (material, scope) = self.fixed.original_for_account(&account_id)?;
         diag::at(Stage::WalletMaterial);
         controller
             .validate_durable_material_source_v1(material, scope, &fvk)
-            .map_err(|error| { diag::durable(&error); Error::Verification })?;
+            .map_err(|error| {
+                diag::durable(&error);
+                Error::Verification
+            })?;
         let immutable = self.fixed.fixed_context();
         diag::at(Stage::WalletSynchronize);
         controller
@@ -211,16 +268,22 @@ impl PreparedFinancialWalletV1 {
                 SyncLimits {
                     maximum_blocks: self.config.maximum_blocks.min(scope.maximum_scan_blocks),
                     anchor_height: Some(immutable.anchor_height),
-                    deadline: Duration::from_secs(120),
+                    deadline: guard.sync_budget()?,
                 },
             )
             .await
-            .map_err(|error| { diag::sync(&error); Error::Verification })?;
+            .map_err(|error| {
+                diag::sync(&error);
+                Error::Verification
+            })?;
         access.check()?;
         diag::at(Stage::WalletTicket);
         let ticket = controller
             .exact_durable_review_ticket_v1(material, scope, &access, &fvk, &self.config.policy)
-            .map_err(|error| { diag::durable(&error); Error::Verification })?;
+            .map_err(|error| {
+                diag::durable(&error);
+                Error::Verification
+            })?;
         let local = LocalSelection::from_key_use_ticket(&ticket, &self.config.policy)?;
         // This is only the contemporaneous review-context required by the
         // maintained manifest reconciler (observed tip + 1). No constructor or
@@ -253,7 +316,7 @@ impl PreparedFinancialWalletV1 {
             .map_err(|_| Error::Verification)?;
         access.check()?;
         drop(access);
-        drop(action);
+
         Ok((
             FinancialWalletCustodyV1 {
                 controller,
@@ -264,25 +327,95 @@ impl PreparedFinancialWalletV1 {
                 _temporary: temporary,
             },
             inputs,
+            guard,
         ))
     }
 }
+
+// Closed genuine owners around shared wallet mechanics, never a generic
+// caller-supplied authority callback and never a legacy-action reconstruction.
+enum WalletObservationGuard {
+    Native {
+        action: FinancialWalletActionV1,
+        pin: FinancialOperationSourcePinV1,
+    },
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    Coordinated(coordinated_financial_v1::CoordinatedObserveGuard),
+}
+impl WalletObservationGuard {
+    fn check(&self, source: &PreparedOriginalFinancialSourceV1) -> Result<()> {
+        match self {
+            Self::Native { action, pin } => {
+                action.check_source(source.identity_digest())?;
+                source.check_financial_operation_source_pin_v1(pin, Operation::WalletObserve)?;
+                action.check_source(source.identity_digest())
+            }
+            #[cfg(feature = "coordinated-financial-workflow-v1")]
+            Self::Coordinated(guard) => guard.check(source),
+        }
+    }
+    fn account<'a>(
+        &self,
+        source: &'a PreparedOriginalFinancialSourceV1,
+    ) -> Result<&'a crate::account::DedicatedAccount> {
+        match self {
+            Self::Native { pin, .. } => {
+                source.financial_account_for_operation_v1(pin, Operation::WalletObserve)
+            }
+            #[cfg(feature = "coordinated-financial-workflow-v1")]
+            Self::Coordinated(guard) => guard.account(source),
+        }
+    }
+    fn import(
+        &self,
+        source: &PreparedOriginalFinancialSourceV1,
+        wallet: &mut DedicatedTestnetWallet,
+        fvk: &FullViewingKey,
+        birthday: AccountBirthday,
+    ) -> Result<()> {
+        match self {
+            Self::Native { action, pin } => {
+                let _held = action.publication_lease()?;
+                source.check_financial_operation_source_pin_v1(pin, Operation::WalletObserve)?;
+                action.check_source(source.identity_digest())?;
+                diag::at(Stage::WalletImport);
+                wallet
+                    .import_dedicated_fvk(fvk, birthday)
+                    .map(|_| ())
+                    .map_err(|error| {
+                        diag::wallet(&error);
+                        Error::RecoveryRequired
+                    })
+            }
+            #[cfg(feature = "coordinated-financial-workflow-v1")]
+            Self::Coordinated(guard) => guard.import(source, wallet, fvk, birthday),
+        }
+    }
+    fn sync_budget(&self) -> Result<Duration> {
+        match self {
+            Self::Native { .. } => Ok(Duration::from_secs(120)),
+            #[cfg(feature = "coordinated-financial-workflow-v1")]
+            Self::Coordinated(guard) => guard.sync_budget(),
+        }
+    }
+}
 struct Access<'a> {
-    pin: &'a FinancialOperationSourcePinV1,
     source: &'a PreparedOriginalFinancialSourceV1,
-    action: &'a FinancialWalletActionV1,
+    guard: &'a WalletObservationGuard,
     identity: &'a DatabaseFileIdentity,
     account: AccountUuid,
     backend: BackendIdentity,
 }
 impl Access<'_> {
     fn check(&self) -> Result<()> {
-        self.action.check_source(self.source.identity_digest()).map_err(|error| { diag::signer(&error); error })?;
-        self.source.check_financial_operation_source_pin_v1(self.pin,Operation::WalletObserve).map_err(|error| { diag::signer(&error); error })?;
-        self.action.check_source(self.source.identity_digest()).map_err(|error| { diag::signer(&error); error })?;
-        self.identity
-            .check_retained_owner_path()
-            .map_err(|error| { diag::storage(&error); Error::Verification })
+        self.guard.check(self.source).map_err(|error| {
+            diag::signer(&error);
+            error
+        })?;
+        self.identity.check_retained_owner_path().map_err(|error| {
+            diag::storage(&error);
+            Error::Verification
+        })
     }
 }
 impl LocalWalletAccess for Access<'_> {
@@ -313,12 +446,14 @@ impl FinancialWalletCustodyV1 {
         deadline: Instant,
     ) -> crate::authority_bridge::Result<crate::authority_bridge::AuthorizationCommit> {
         let mut this = self;
-        this.source
-            .check_custody()
-            .map_err(|error| { diag::signer(&error); crate::authority_bridge::BridgeError::Permission })?;
-        this.identity
-            .check_retained_owner_path()
-            .map_err(|error| { diag::storage(&error); crate::authority_bridge::BridgeError::Permission })?;
+        this.source.check_custody().map_err(|error| {
+            diag::signer(&error);
+            crate::authority_bridge::BridgeError::Permission
+        })?;
+        this.identity.check_retained_owner_path().map_err(|error| {
+            diag::storage(&error);
+            crate::authority_bridge::BridgeError::Permission
+        })?;
         let ticket = this
             .ticket
             .take()

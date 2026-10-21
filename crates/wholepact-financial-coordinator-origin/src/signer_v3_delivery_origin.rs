@@ -22,11 +22,11 @@ struct PrepareReadSlot {
     phase: u8,
     reported: bool,
 }
-struct PrepareReadBinding {
-    service_deadline: Instant,
-    material_deadline: Instant,
-    pair: Arc<PairBinding>,
-    p: SignerV3PrepareReadPresentationV1,
+pub(super) struct PrepareReadBinding {
+    pub(super) service_deadline: Instant,
+    pub(super) material_deadline: Instant,
+    pub(super) pair: Arc<PairBinding>,
+    pub(super) p: SignerV3PrepareReadPresentationV1,
     deadline: Instant,
     last_wall: AtomicU64,
 }
@@ -89,7 +89,7 @@ impl PrepareReadBinding {
         }
         Ok(())
     }
-    fn custody_bounds(&self) -> Result<()> {
+    pub(super) fn custody_bounds(&self) -> Result<()> {
         self.pair.channel_bounds()?;
         let wall = state::wall_ms()?;
         let old = self.last_wall.fetch_max(wall, Ordering::AcqRel);
@@ -147,6 +147,10 @@ pub struct SignerV3PrepareReadFinalV1 {
     consumed: bool,
 }
 impl SignerV3PrepareReadFinalV1 {
+    pub fn original_channel_expires_at_ms(&self) -> u64 {
+        self.binding.pair.p.facts.channel_expires_at_ms
+    }
+
     pub fn original_channel_deadline(&self) -> Instant {
         self.binding.pair.channel_deadline
     }
@@ -551,6 +555,10 @@ pub struct SignerV3ReceiveFinalV1 {
     consumed: bool,
 }
 impl SignerV3ReceiveFinalV1 {
+    pub fn original_channel_expires_at_ms(&self) -> u64 {
+        self.binding.pair.p.facts.channel_expires_at_ms
+    }
+
     pub fn original_channel_deadline(&self) -> Instant {
         self.binding.pair.channel_deadline
     }
@@ -1237,6 +1245,10 @@ pub struct SignerV3PreparedLifetimeV1 {
     binding: Arc<PrepareReadBinding>,
 }
 impl SignerV3PreparedLifetimeV1 {
+    pub fn original_channel_expires_at_ms(&self) -> u64 {
+        self.binding.pair.p.facts.channel_expires_at_ms
+    }
+
     pub fn check_current(&self) -> Result<()> {
         self.binding.custody_bounds()?;
         self.binding.pair.entry.core.check_action_restrictions()
@@ -1463,5 +1475,44 @@ mod tests {
         assert_ne!(p.phase(0), V3_HELD);
         p.revoke();
         assert!(p.step(0, 149, 150).is_err());
+    }
+}
+
+impl DeliverySlots {
+    pub(super) fn admission_predecessor(
+        &self,
+    ) -> Result<(&Arc<PrepareReadBinding>, &SignerV3ReceivedV1)> {
+        if !self.prepare_read.reported || !self.receive.reported {
+            return Err(rejected(
+                "AdmitRead before actual private preparation and verified Receive",
+            ));
+        }
+        Ok((
+            self.prepare_read
+                .binding
+                .as_ref()
+                .ok_or_else(|| rejected("missing original local client custody"))?,
+            self.receive
+                .result
+                .as_ref()
+                .ok_or_else(|| rejected("missing actual Receive result"))?,
+        ))
+    }
+    pub(super) fn admission_wire(
+        &self,
+    ) -> Result<(&SignerV3PrepareReadPresentationV1, &SignerV3ReceivedV1)> {
+        if !self.prepare_read.reported || !self.receive.reported {
+            return Err(rejected("AdmitRead relay before actual Receive"));
+        }
+        Ok((
+            self.prepare_read
+                .wire
+                .as_ref()
+                .ok_or_else(|| rejected("missing original preparation wire"))?,
+            self.receive
+                .result
+                .as_ref()
+                .ok_or_else(|| rejected("missing actual Receive wire result"))?,
+        ))
     }
 }

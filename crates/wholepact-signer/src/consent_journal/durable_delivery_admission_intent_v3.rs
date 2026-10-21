@@ -1,6 +1,9 @@
 //! Closed-source prospective admission. Historical provenance is data, never a
 //! reconstructed native receipt, read owner, action, or financial capability.
 use super::*;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+#[path = "durable_delivery_admission_intent_v3/coordinated_v1.rs"]
+pub(crate) mod coordinated_v1;
 use crate::authority_bridge::durable_review_ipc_v3::RecipientIntentV3;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
@@ -134,17 +137,38 @@ impl DurableDeliveryAdmissionIntentV3 {
 /// Fresh V3 read/admit provenance is explicitly separate, never spliced into it.
 fn validate_original_rows(c: &Connection, intent: &DurableDeliveryAdmissionIntentV3) -> Result<()> {
     intent.validate_review()?;
-    let request = &intent.request;
+    validate_original_row_links(
+        c, &intent.request, &intent.disclosure, &intent.owner_certificate_digest,
+        &intent.enrollment_ref, &intent.manifest_ref,
+        &intent.recipient_intent.participant_id, &intent.read.principal_id,
+    )?;
+    validate_disclosure_lineage(c, intent)?;
+    Ok(())
+}
+
+/// Data-only original19 equality kernel shared by explicitly tagged admission
+/// profiles. Each caller validates its own closed recipient/review envelope and
+/// disclosure lineage separately. This never reads or manufactures permission.
+fn validate_original_row_links(
+    c: &Connection,
+    request: &OwnerControlRequest,
+    disclosure: &WitnessDisclosureDescriptor,
+    owner_certificate_digest: &str,
+    enrollment_ref: &str,
+    manifest_ref: &str,
+    participant_id: &str,
+    principal_id: &str,
+) -> Result<()> {
     let terms = &record(request)?.scope.authorization;
     let account = storage::read_account(c)?;
     let stored = account_use_storage::inspect(c, &account.account_id)?;
     let genesis = stored.genesis().ok_or(JournalError::InvalidBinding)?;
-    let enrollment = storage::read_enrollment(c, &intent.enrollment_ref)?.ok_or(JournalError::NotFound)?;
-    let manifest = storage::read_manifest(c, &intent.manifest_ref)?.ok_or(JournalError::NotFound)?;
+    let enrollment = storage::read_enrollment(c, enrollment_ref)?.ok_or(JournalError::NotFound)?;
+    let manifest = storage::read_manifest(c, manifest_ref)?.ok_or(JournalError::NotFound)?;
     let proposal = manifest.proposal()?;
-    if record(request)?.scope.accepted_manifest_ref != intent.manifest_ref
+    if record(request)?.scope.accepted_manifest_ref != manifest_ref
         || record(request)?.scope.original_writer_epoch != request.writer_epoch
-        || record(request)?.scope.witness != intent.disclosure
+        || &record(request)?.scope.witness != disclosure
         || account.account_id != request.account_id
         || request.writer_epoch > account.writer_epoch
         || genesis.identity.account_id != terms.identity.account_id
@@ -152,18 +176,18 @@ fn validate_original_rows(c: &Connection, intent: &DurableDeliveryAdmissionInten
         || genesis.identity.network_profile_id != terms.identity.network_profile_id
         || genesis.identity.derivation_domain != terms.identity.derivation_domain
         || genesis.digest().map_err(invalid)? != terms.original_genesis_digest
-        || genesis.owner_certificate_digest != intent.owner_certificate_digest
-        || genesis.witness_id != intent.disclosure.witness_id
-        || genesis.witness_origin_digest != account_use_witness_origin_digest(&intent.disclosure).map_err(invalid)?
+        || genesis.owner_certificate_digest != owner_certificate_digest
+        || genesis.witness_id != disclosure.witness_id
+        || genesis.witness_origin_digest != account_use_witness_origin_digest(disclosure).map_err(invalid)?
         || enrollment.account_id() != request.account_id
         || enrollment.account_fvk_digest() != terms.identity.full_viewing_key_digest
         || enrollment.terms.network_profile_id != request.network_profile_id
         || enrollment.agreement_id() != terms.fixed.agreement_id
-        || enrollment.participant_id() != intent.recipient_intent.participant_id
-        || manifest.enrollment_ref() != intent.enrollment_ref
+        || enrollment.participant_id() != participant_id
+        || manifest.enrollment_ref() != enrollment_ref
         || manifest.terms.account_id != request.account_id
         || manifest.terms.principal_id != enrollment.principal_id()
-        || enrollment.principal_id() != intent.read.principal_id
+        || enrollment.principal_id() != principal_id
         || proposal.input().proposal_id != terms.fixed.proposal_id
         || proposal.manifest().agreement.revision != terms.fixed.revision
         || proposal.proposal_digest() != terms.fixed.proposal_digest
@@ -171,7 +195,6 @@ fn validate_original_rows(c: &Connection, intent: &DurableDeliveryAdmissionInten
         || !storage::same_native_origin(enrollment.receipt(), manifest.receipt())
     { return Err(JournalError::InvalidBinding); }
     enrollment.transport().validate_scope(enrollment.account_id(), enrollment.agreement_id(), enrollment.participant_id(), Some(proposal.manifest_digest()))?;
-    validate_disclosure_lineage(c, intent)?;
     Ok(())
 }
 

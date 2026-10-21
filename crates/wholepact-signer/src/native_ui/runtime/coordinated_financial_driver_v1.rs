@@ -2,16 +2,27 @@
 //! This initial source route uses no Signer native window, legacy decision,
 //! credential argv, role replay, or imported completed-V3 custody.
 use super::coordinated_v3_delivery::{
-    self as delivery, CoordinatedReadyToReceiveV1, CoordinatedReceiveReviewV1,
-    CoordinatedReceivedBytesV1, CoordinatedVerifiedImportV1, PreparedCoordinatedDeliveryReviewV1,
+    self as delivery, AuditedCoordinatedV3V1, CompletedCoordinatedV3V1,
+    CoordinatedAdmissionAttemptV1, CoordinatedAdmissionWorkerV1, CoordinatedReadyToReceiveV1,
+    CoordinatedReceiveReviewV1, CoordinatedReceivedBytesV1, CoordinatedVerifiedImportV1,
+    HistoryReturnedCoordinatedV3V1, PreparedCoordinatedAdmissionV1,
+    PreparedCoordinatedDeliveryReviewV1,
 };
 use super::*;
+#[path="coordinated_financial_driver_v1/financial_tail_v1.rs"]
+mod financial_tail_v1;
+use financial_tail_v1::FinancialState;
+#[path="coordinated_financial_driver_v1/status_worker_v1.rs"]
+mod status_worker_v1;
+use status_worker_v1::{StatusKind,StatusWorker};
+use crate::account::birth::enrollment::roster_v2::durable_entry_v1::CoordinatedFinancialRoleTransportV1;
+use wholepact_financial_coordinator_origin::SignerFinancialSetupSelectionV1;
 use crate::account::birth::enrollment::roster_v2::durable_entry_v1::{
     CoordinatedEnrollmentReviewV1, CoordinatedManifestReviewV1,
     CoordinatedOriginalDeliverySourceV1, CoordinatedPreconstructionReadyV1,
     CoordinatedPreparingDeliverySourceV1, CoordinatedRediscloseV1, CoordinatedRedisclosedSourceV1,
-    CoordinatedRedisclosureReadV1, CoordinatedSourcePairingV1, PreparedCoordinatedV3SourceEntryV1,
-    PresentedCoordinatedV3SourceEntryV1,
+    CoordinatedRedisclosureReadV1, CoordinatedRestrictedReceiptV1, CoordinatedSourcePairingV1,
+    PreparedCoordinatedV3SourceEntryV1, PresentedCoordinatedV3SourceEntryV1,
 };
 use crate::authority_bridge::durable_review_ipc_v3::coordinated_v1::CoordinatedClosedCommandV1;
 use crate::ipc::{
@@ -64,6 +75,7 @@ impl Drop for PairIssuing {
 enum ReceiptOutcome {
     Enrolled(CoordinatedManifestReviewV1),
     ManifestAccepted(CoordinatedPreconstructionReadyV1),
+    Restricted(CoordinatedRestrictedReceiptV1),
 }
 struct ReceiptWriting {
     worker: Option<std::thread::JoinHandle<Result<ReceiptOutcome>>>,
@@ -114,6 +126,9 @@ enum DeliveryOutcome {
     Ready(CoordinatedReadyToReceiveV1),
     Received(CoordinatedReceivedBytesV1),
     Verified(CoordinatedVerifiedImportV1),
+    AdmissionPrepared(PreparedCoordinatedAdmissionV1),
+    Audited(AuditedCoordinatedV3V1),
+    HistoryReturned(HistoryReturnedCoordinatedV3V1),
 }
 struct DeliveryWorking {
     worker: Option<std::thread::JoinHandle<Result<DeliveryOutcome>>>,
@@ -159,18 +174,32 @@ enum State {
     EnrollmentReview(CoordinatedEnrollmentReviewV1),
     ManifestReview(CoordinatedManifestReviewV1),
     ReceiptWriting(ReceiptWriting),
+    ReceiptRestricted(CoordinatedRestrictedReceiptV1),
     PreconstructionReady(CoordinatedPreconstructionReadyV1),
     RedisclosureRead(CoordinatedRedisclosureReadV1),
     Redisclose(CoordinatedRediscloseV1),
     RedisclosureWorking(RedisclosureWorking),
     Redisclosed(CoordinatedRedisclosedSourceV1),
+    // Actual committed result retained after R/postcheck/partial-send failure;
+    // no polling, report, grant, mutation retry or next-stage join is permitted.
+    RedisclosureRestricted(CoordinatedRedisclosedSourceV1),
     AwaitingOwner(CoordinatedPreparingDeliverySourceV1),
     DeliveryReadReview(PreparedCoordinatedDeliveryReviewV1),
     DeliveryReceiveReview(CoordinatedReceiveReviewV1),
     DeliveryReady(CoordinatedReadyToReceiveV1),
     DeliveryBytes(CoordinatedReceivedBytesV1),
     DeliveryVerified(CoordinatedVerifiedImportV1),
+    AdmissionPrepared(PreparedCoordinatedAdmissionV1),
+    AdmissionReview(PreparedCoordinatedAdmissionV1),
+    AdmissionWorking(CoordinatedAdmissionWorkerV1),
+    AdmissionAttempt(CoordinatedAdmissionAttemptV1),
+    AuditReview(CoordinatedAdmissionAttemptV1),
+    Audited(AuditedCoordinatedV3V1),
+    Completed(CompletedCoordinatedV3V1),
+    HistoryReturned(HistoryReturnedCoordinatedV3V1),
     DeliveryWorking(DeliveryWorking),
+    StatusWorking(StatusWorker),
+    Financial(FinancialState),
     Taken,
 }
 impl State {
@@ -190,6 +219,10 @@ struct Driver {
     state: State,
     entry_opened_reported: bool,
     owner_selection: Option<(String, String)>,
+    pending_status_control:Option<Request>,
+    financial_setup:Option<SignerFinancialSetupSelectionV1>,
+    financial_entry_requested:bool,
+    financial_transport:Option<CoordinatedFinancialRoleTransportV1>,
 }
 impl Driver {
     fn poll_opening(&mut self) -> Result<()> {
@@ -331,6 +364,7 @@ impl Driver {
                 return Err(Error::Unavailable);
             };
             match job.join()? {
+                ReceiptOutcome::Restricted(held) => self.state = State::ReceiptRestricted(held),
                 ReceiptOutcome::Enrolled(next) => {
                     self.state = State::ManifestReview(next);
                     self.origin.report_v3_enrolled()?;
@@ -377,13 +411,13 @@ impl Driver {
                         next.original_review_deadline(),
                     )?;
                 }
-                RedisclosureOutcome::Exported(next) => {
-                    self.state = State::Redisclosed(next);
-                    let State::Redisclosed(next) = &self.state else {
-                        return Err(Error::Unavailable);
-                    };
-                    self.origin.report_v3_redisclosed(next.report())?;
-                }
+                RedisclosureOutcome::Exported(next) => match next.report() {
+                    Some(report) => {
+                        self.state = State::Redisclosed(next);
+                        self.origin.report_v3_redisclosed(report)?;
+                    }
+                    None => self.state = State::RedisclosureRestricted(next),
+                },
             }
         }
         let event = if let State::PreconstructionReady(ready) = &self.state {
@@ -441,6 +475,24 @@ impl Driver {
         Ok(())
     }
     fn poll_delivery(&mut self) -> Result<()> {
+        if let State::AdmissionWorking(worker) = &mut self.state {
+            if let Some((arm, ready)) = worker.take_ready()? {
+                self.origin.send_v3_admit_ready(arm, ready)?;
+            }
+        }
+        if matches!(&self.state,State::AdmissionWorking(worker) if worker.finished()) {
+            let State::AdmissionWorking(worker) = std::mem::replace(&mut self.state, State::Taken)
+            else {
+                return Err(Error::Unavailable);
+            };
+            self.state = State::AdmissionAttempt(worker.join()?);
+            let State::AdmissionAttempt(attempt) = &self.state else {
+                return Err(Error::Unavailable);
+            };
+            if let Some(report) = attempt.admitted_report() {
+                self.origin.report_v3_admitted(report)?;
+            }
+        }
         if matches!(&self.state,State::DeliveryWorking(job) if job.worker.as_ref().is_some_and(|w|w.is_finished()))
         {
             let State::DeliveryWorking(job) = std::mem::replace(&mut self.state, State::Taken)
@@ -449,6 +501,7 @@ impl Driver {
             };
             match job.join()? {
                 DeliveryOutcome::Staged(source) => self.state = State::AwaitingOwner(source),
+                DeliveryOutcome::HistoryReturned(actual)=>self.state=State::HistoryReturned(actual),
                 DeliveryOutcome::ReadReview(review) => {
                     self.state = State::DeliveryReadReview(review);
                     let State::DeliveryReadReview(review) = &self.state else {
@@ -474,12 +527,34 @@ impl Driver {
                 }
                 DeliveryOutcome::Ready(ready) => self.state = State::DeliveryReady(ready),
                 DeliveryOutcome::Received(bytes) => self.state = State::DeliveryBytes(bytes),
+                DeliveryOutcome::Audited(audited) => {
+                    self.state = State::Audited(audited);
+                    let State::Audited(audited) = &self.state else {
+                        return Err(Error::Unavailable);
+                    };
+                    self.origin.report_v3_audited(audited.report())?;
+                    let State::Audited(audited) = std::mem::replace(&mut self.state, State::Taken)
+                    else {
+                        return Err(Error::Unavailable);
+                    };
+                    self.state = State::Completed(audited.seal()?);
+                }
+                DeliveryOutcome::AdmissionPrepared(prepared) => {
+                    self.state = State::AdmissionPrepared(prepared);
+                    let State::AdmissionPrepared(prepared) = &self.state else {
+                        return Err(Error::Unavailable);
+                    };
+                    self.origin
+                        .report_v3_admit_read_retained(prepared.read_report())?;
+                }
                 DeliveryOutcome::Verified(verified) => {
                     self.state = State::DeliveryVerified(verified);
                     let State::DeliveryVerified(verified) = &self.state else {
                         return Err(Error::Unavailable);
                     };
                     self.origin.report_v3_received(verified.report())?;
+                    let (facts, deadline) = verified.admit_read_review()?;
+                    self.origin.offer_v3_admit_read(facts, deadline)?;
                 }
             }
         }
@@ -500,6 +575,9 @@ impl Driver {
             State::Redisclosed(v) => v.next_event()?,
             State::DeliveryReady(v) => v.next_event()?,
             State::DeliveryBytes(v) => v.next_event()?,
+            State::AdmissionPrepared(v) | State::AdmissionReview(v) => v.next_event()?,
+            State::AdmissionAttempt(v) | State::AuditReview(v) => v.next_event()?,
+            State::Completed(v) => v.next_event()?,
             _ => None,
         };
         if let Some(event) = event {
@@ -531,6 +609,20 @@ impl Driver {
                     })?;
                 }
                 CoordinatedRequestV1::Closed(command) => match command {
+                    CoordinatedClosedCommandV1::Admit {intent_digest,nonce}=>{
+                        self.spawn_status(peer,stream,intent_digest,nonce,original_request_deadline,StatusKind::Admit)?;
+                    },
+                    CoordinatedClosedCommandV1::AdmissionStatus {intent_digest,nonce}=>{
+                        self.spawn_status(peer,stream,intent_digest,nonce,original_request_deadline,StatusKind::Status)?;
+                    },
+                    CoordinatedClosedCommandV1::History {intent_digest,authorization_id,nonce}=>{
+                        if matches!(&self.state,State::Completed(_)) {
+                            let State::Completed(v)=std::mem::replace(&mut self.state,State::Taken) else {return Err(Error::Unavailable)};
+                            self.spawn_delivery(move ||v.respond_history(peer,stream,intent_digest,authorization_id,nonce,original_request_deadline).map(DeliveryOutcome::HistoryReturned))?;
+                        } else {
+                            self.spawn_status(peer,stream,intent_digest,nonce,original_request_deadline,StatusKind::History(authorization_id))?;
+                        }
+                    },
                     CoordinatedClosedCommandV1::PreparationStatus {
                         request_digest,
                         nonce,
@@ -603,13 +695,30 @@ impl Driver {
             State::DeliveryReady(v) => v.check_current()?,
             State::DeliveryBytes(v) => v.check_current()?,
             State::DeliveryVerified(v) => v.check_current()?,
+            State::AdmissionPrepared(v) | State::AdmissionReview(v) => v.check_current()?,
             _ => (),
         }
         Ok(())
     }
     fn handle(&mut self, request: Request) -> Result<bool> {
+        // A real native action may arrive while a denial-only status send owns
+        // custody. Keep its one-use token inert until that exact worker joins.
+        // Cancel never queues and always publishes restriction immediately.
+        if matches!(&self.state,State::StatusWorking(_)) && !matches!(&request,Request::Cancel) {
+            if self.pending_status_control.replace(request).is_some(){return Err(Error::ReviewMismatch)}
+            return Ok(true);
+        }
         match request {
             Request::Cancel => return Ok(false),
+            Request::FinancialSetupSelection {selection}=>{
+                if self.financial_setup.is_some() || self.financial_entry_requested || self.financial_transport.is_some(){return Err(Error::ReviewMismatch)}
+                self.financial_setup=Some(selection);
+            },
+            Request::SourceEntryRequested=>{
+                if self.financial_entry_requested || self.financial_setup.is_none(){return Err(Error::ReviewMismatch)}
+                self.financial_entry_requested=true;
+            },
+            request @ (Request::SourceEntry{..}|Request::InitialRead(_)|Request::ContinueRequested|Request::ContinueArm(_)|Request::ContinueFinal(_)|Request::AdmitArm(_)|Request::AdmitFinal(_)|Request::WriterRead(_)|Request::AcquireArm(_)|Request::AcquireFinal(_)|Request::ActivateRead(_)|Request::ActivateArm(_)|Request::ActivateFinal(_)|Request::WalletPrepare{..}|Request::WalletObserve{..}|Request::SignRead{..}|Request::SignExact{..}|Request::ReturnRead{..}|Request::ReturnExact{..})=>self.handle_financial(request)?,
             Request::V3OwnerSelection {
                 owner_setup_json,
                 owner_selection_challenge,
@@ -634,6 +743,42 @@ impl Driver {
                     review
                         .consume_read(final_action)
                         .map(DeliveryOutcome::ReceiveReview)
+                })?;
+            }
+            Request::V3Audit { final_action } => {
+                let State::AuditReview(attempt) = std::mem::replace(&mut self.state, State::Taken)
+                else {
+                    return Err(Error::ReviewMismatch);
+                };
+                self.spawn_delivery(move || {
+                    attempt.audit(final_action).map(DeliveryOutcome::Audited)
+                })?;
+            }
+            Request::V3AdmitArm { arm } => {
+                let State::AdmissionReview(prepared) =
+                    std::mem::replace(&mut self.state, State::Taken)
+                else {
+                    return Err(Error::ReviewMismatch);
+                };
+                self.state = State::AdmissionWorking(prepared.start_admission(arm)?);
+            }
+            Request::V3AdmitFinal { final_action } => {
+                let State::AdmissionWorking(worker) = &mut self.state else {
+                    return Err(Error::ReviewMismatch);
+                };
+                worker.provide_final(final_action)?;
+            }
+            Request::V3AdmitRead { final_action } => {
+                let State::DeliveryVerified(verified) =
+                    std::mem::replace(&mut self.state, State::Taken)
+                else {
+                    return Err(Error::ReviewMismatch);
+                };
+                self.spawn_delivery(move || {
+                    verified
+                        .read_for_admission(final_action)?
+                        .prepare()
+                        .map(DeliveryOutcome::AdmissionPrepared)
                 })?;
             }
             Request::V3Receive { final_action } => {
@@ -713,7 +858,12 @@ impl Driver {
                 };
                 let worker = std::thread::Builder::new()
                     .name("original-v3-enrollment".into())
-                    .spawn(move || review.commit(final_action).map(ReceiptOutcome::Enrolled))?;
+                    .spawn(move || {
+                        review.commit(final_action).map(|result| match result {
+                            Ok(next) => ReceiptOutcome::Enrolled(next),
+                            Err(held) => ReceiptOutcome::Restricted(held),
+                        })
+                    })?;
                 self.state = State::ReceiptWriting(ReceiptWriting {
                     worker: Some(worker),
                 });
@@ -730,9 +880,10 @@ impl Driver {
                 let worker = std::thread::Builder::new()
                     .name("original-v3-manifest".into())
                     .spawn(move || {
-                        review
-                            .commit(final_action)
-                            .map(ReceiptOutcome::ManifestAccepted)
+                        review.commit(final_action).map(|result| match result {
+                            Ok(next) => ReceiptOutcome::ManifestAccepted(next),
+                            Err(held) => ReceiptOutcome::Restricted(held),
+                        })
                     })?;
                 self.state = State::ReceiptWriting(ReceiptWriting {
                     worker: Some(worker),
@@ -812,7 +963,11 @@ impl Driver {
                 self.begin_enrollment()?;
                 self.poll_receipts()?;
                 self.poll_redisclosure()?;
+                self.poll_status()?;
                 self.poll_delivery()?;
+                self.poll_financial()?;
+                if matches!(&self.state,State::Financial(FinancialState::Complete)){return Ok(())}
+                if let Some(transport)=&self.financial_transport {transport.check_current()?;}
                 if let State::Opened(source) = &self.state {
                     source.check_retained_restriction()?;
                 }
@@ -833,6 +988,10 @@ impl Driver {
         let cancelled_unreported_entry =
             work.is_ok() && matches!(self.state, State::Offered { .. } | State::Opening(_));
         let cleanup = std::mem::replace(&mut self.state, State::Taken).join_and_drop();
+        // Disposal includes the actual original return-only listener/tempdir,
+        // not merely the private source worker. Complete never returns.
+        drop(self.financial_transport.take());
+        drop(self.pending_status_control.take());
         let cleanup = cleanup.and_then(|()| {
             if cancelled_unreported_entry {
                 self.origin.v3_source_entry_failed()?;
@@ -857,6 +1016,7 @@ pub fn run_coordinated_financial_signer_v1(origin: SignerOriginV1) -> ! {
             state: State::AwaitingPeer,
             entry_opened_reported: false,
             owner_selection: None,
+            pending_status_control:None, financial_setup:None, financial_entry_requested:false, financial_transport:None,
         }
         .run(),
         Err(_) => std::process::exit(1),

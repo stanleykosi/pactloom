@@ -44,7 +44,6 @@ pub struct AuthenticatedDurableAdmissionChannelV3<'a> {
     stream: StreamOwned<ClientConnection, CallerDeadlineSocket>,
     request: OwnerControlRequest,
     deadline: Instant,
-    #[cfg(feature = "synthetic-qualification")]
     preparation: DurableAdmissionPrepareV3,
 }
 /// Finite observation sites. These do not change admission or authorize retry.
@@ -211,7 +210,7 @@ impl AuthorityClient {
             _ => return Err(AuthorityError::Authentication.into()),
         }
         Ok(AuthenticatedDurableAdmissionChannelV3 {client:self,stream,request:request.clone(),deadline,
-            #[cfg(feature = "synthetic-qualification")] preparation,
+            preparation,
         })
     }
 }
@@ -231,6 +230,17 @@ pub struct PristineFixtureAdmissionResultV1 {
 impl AuthenticatedDurableAdmissionChannelV3<'_> {
     pub fn request(&self) -> &OwnerControlRequest { &self.request }
     pub fn deadline(&self) -> Instant { self.deadline }
+    /// Inert commitment to the exact READY received on this still-live pinned
+    /// channel. This does not grant publication, expose the stream, or permit a
+    /// retry; the caller must separately obtain its purpose-specific Final.
+    pub fn authenticated_ready_digest_v1(&self) -> Result<String> {
+        self.check_current()?;
+        self.preparation.matches(&self.request)?;
+        let cert = self.stream.conn.peer_certificates().and_then(|c| c.first())
+            .ok_or(AuthorityError::Authentication)?;
+        let alpn = self.stream.conn.alpn_protocol().ok_or(AuthorityError::Authentication)?;
+        authenticated_ready_commitment_v1(&self.preparation, &certificate_digest(cert), alpn)
+    }
     pub fn check_current(&self) -> Result<()> {
         require_before_caller_deadline(self.deadline)?;
         let cert = self.stream.conn.peer_certificates().and_then(|c| c.first()).ok_or(AuthorityError::Authentication)?;
@@ -927,5 +937,49 @@ mod observation_tests {
             .flush().unwrap_err();
         assert_eq!(error.kind(), ErrorKind::Other);
         assert_eq!(collector.first, observation(AdmissionFailureStageV3::FlushIo, AdmissionFailureCauseV3::Io(AdmissionIoKindV3::Other)));
+    }
+}
+
+/// Data-only kernel; only the sealed live channel exposes its result publicly.
+fn authenticated_ready_commitment_v1(
+    preparation: &DurableAdmissionPrepareV3,
+    peer_certificate_digest: &str,
+    alpn: &[u8],
+) -> Result<String> {
+    preparation.validate()?;
+    hash(peer_certificate_digest)?;
+    if alpn != ALPN { return Err(AuthorityError::Authentication); }
+    digest("wholepact:coordinated-durable-admission-authenticated-ready:v1",
+        &(preparation, peer_certificate_digest, hex::encode(alpn)))
+}
+
+#[cfg(test)]
+mod coordinated_ready_commitment_tests {
+    use super::*;
+
+    #[test]
+    fn exact_nonce_request_head_and_peer_are_distinct() {
+        let base = DurableAdmissionPrepareV3 {
+            request_digest: "11".repeat(32), operation_id: "coordinated-ready-test".into(),
+            nonce: "22".repeat(32), expected_head: AuthorityHead {
+                sequence: 3, digest: "33".repeat(32),
+            },
+        };
+        let peer = "44".repeat(32);
+        let expected = authenticated_ready_commitment_v1(&base, &peer, ALPN).unwrap();
+        assert_eq!(expected, authenticated_ready_commitment_v1(&base, &peer, ALPN).unwrap());
+        for variant in 0..5 {
+            let mut changed = base.clone();
+            match variant {
+                0 => changed.nonce = "55".repeat(32),
+                1 => changed.request_digest = "66".repeat(32),
+                2 => changed.operation_id = "other-ready-test".into(),
+                3 => changed.expected_head.sequence += 1,
+                _ => changed.expected_head.digest = "77".repeat(32),
+            }
+            assert_ne!(expected, authenticated_ready_commitment_v1(&changed, &peer, ALPN).unwrap());
+        }
+        assert_ne!(expected, authenticated_ready_commitment_v1(&base, &"88".repeat(32), ALPN).unwrap());
+        assert!(authenticated_ready_commitment_v1(&base, &peer, b"other-alpn").is_err());
     }
 }

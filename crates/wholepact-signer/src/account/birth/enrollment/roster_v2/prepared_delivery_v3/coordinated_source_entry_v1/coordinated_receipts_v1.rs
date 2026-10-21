@@ -11,6 +11,15 @@ use wholepact_financial_coordinator_origin::{
     SignerV3ManifestFinalV1,
 };
 
+/// Actual committed receipt custody after R/postcommit failure. No getters,
+/// next-purpose method or retry exists; the driver retains this until disposal.
+pub(crate) struct CoordinatedRestrictedReceiptV1 {
+    _pairing: CoordinatedSourcePairingV1,
+    _session: CoordinatedPreconstructionSessionV1,
+    _peer: CoordinatedPairPeerV1,
+    _enrollment: AccountEnrollmentRecord,
+    _manifest: Option<AcceptedManifestRecord>,
+}
 pub(crate) struct CoordinatedEnrollmentReviewV1 {
     pairing: CoordinatedSourcePairingV1,
     session: CoordinatedPreconstructionSessionV1,
@@ -91,7 +100,7 @@ impl CoordinatedEnrollmentReviewV1 {
     pub(crate) fn commit(
         mut self,
         action: SignerV3EnrollmentFinalV1,
-    ) -> Result<CoordinatedManifestReviewV1> {
+    ) -> Result<std::result::Result<CoordinatedManifestReviewV1,CoordinatedRestrictedReceiptV1>> {
         self.check_current()?;
         action.check_current()?;
         if action.facts() != &self.facts || action.original_review_deadline() != self.deadline {
@@ -119,9 +128,17 @@ impl CoordinatedEnrollmentReviewV1 {
             .session
             .commit_enrollment(&self.pairing.source.journal, pin, self.prepared, action)
             .map_err(|_| Error::Uncertain)?;
+        let pin = match pin {
+            Ok(pin) => pin,
+            Err(_) => return Ok(Err(CoordinatedRestrictedReceiptV1 {
+                _pairing:self.pairing,_session:self.session,_peer:self.peer,
+                _enrollment:enrollment,_manifest:None,
+            })),
+        };
         self.pairing.source.revision = Some(pin);
         // Candidate/session/actual source are retained BEFORE the later Origin
         // report. Staging next public cached record grants no next approval.
+        let next = (|| -> Result<(PreparedCoordinatedManifestV1,SignerV3ManifestFactsV1,Instant)> {
         let prepared = self.session.stage_manifest(&enrollment)?;
         let record = prepared.record();
         let receipt = record.receipt();
@@ -138,7 +155,18 @@ impl CoordinatedEnrollmentReviewV1 {
         let deadline = prepared
             .original_review_deadline()?
             .min(self.pairing.source.original_source_deadline);
-        Ok(CoordinatedManifestReviewV1 {
+        self.pairing.check_current()?;
+        self.peer.check_current()?;
+        Ok((prepared,facts,deadline))
+        })();
+        let (prepared,facts,deadline)=match next {
+            Ok(next)=>next,
+            Err(_)=>return Ok(Err(CoordinatedRestrictedReceiptV1 {
+                _pairing:self.pairing,_session:self.session,_peer:self.peer,
+                _enrollment:enrollment,_manifest:None,
+            })),
+        };
+        Ok(Ok(CoordinatedManifestReviewV1 {
             pairing: self.pairing,
             session: self.session,
             peer: self.peer,
@@ -146,7 +174,7 @@ impl CoordinatedEnrollmentReviewV1 {
             prepared,
             facts,
             deadline,
-        })
+        }))
     }
 }
 impl CoordinatedManifestReviewV1 {
@@ -164,7 +192,7 @@ impl CoordinatedManifestReviewV1 {
     pub(crate) fn commit(
         mut self,
         action: SignerV3ManifestFinalV1,
-    ) -> Result<CoordinatedPreconstructionReadyV1> {
+    ) -> Result<std::result::Result<CoordinatedPreconstructionReadyV1,CoordinatedRestrictedReceiptV1>> {
         self.check_current()?;
         action.check_current()?;
         if action.facts() != &self.facts || action.original_review_deadline() != self.deadline {
@@ -182,6 +210,13 @@ impl CoordinatedManifestReviewV1 {
             .session
             .commit_manifest(&self.pairing.source.journal, pin, self.prepared, action)
             .map_err(|_| Error::Uncertain)?;
+        let pin = match pin {
+            Ok(pin)=>pin,
+            Err(_)=>return Ok(Err(CoordinatedRestrictedReceiptV1 {
+                _pairing:self.pairing,_session:self.session,_peer:self.peer,
+                _enrollment:self.enrollment,_manifest:Some(manifest),
+            })),
+        };
         self.pairing.source.revision = Some(pin);
         let ready = CoordinatedPreconstructionReadyV1 {
             pairing: self.pairing,
@@ -190,8 +225,13 @@ impl CoordinatedManifestReviewV1 {
             enrollment: self.enrollment,
             manifest,
         };
-        ready.check_current()?;
-        Ok(ready)
+        if ready.check_current().is_err() {
+            return Ok(Err(CoordinatedRestrictedReceiptV1 {
+                _pairing:ready.pairing,_session:ready.session,_peer:ready.peer,
+                _enrollment:ready.enrollment,_manifest:Some(ready.manifest),
+            }));
+        }
+        Ok(Ok(ready))
     }
 }
 impl CoordinatedPreconstructionReadyV1 {

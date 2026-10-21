@@ -27,7 +27,7 @@ impl SignerConsentJournal {
         mut pin: PreparedDeliveryJournalRevisionV3,
         action: CoordinatedReceiptActionV1<'_>,
         prepare: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<F>,
-    ) -> Result<(T, PreparedDeliveryJournalRevisionV3)>
+    ) -> Result<(T, Result<PreparedDeliveryJournalRevisionV3>)>
     where F: FnOnce(&rusqlite::Transaction<'_>) -> Result<T>,
     {
         action.check()?;
@@ -72,7 +72,7 @@ impl SignerConsentJournal {
         let prior = &pin;
         // The transaction is MOVED into this synchronous gate callback. On
         // every error/panic its rollback/destructor precedes gate release.
-        action.execute(move || {
+        let gate = action.execute(move || {
             let result = (|| -> Result<(T, DatabaseRevisionV3)> {
                 let result = effect(&tx)?;
                 let after = revision(&tx)?;
@@ -108,16 +108,18 @@ impl SignerConsentJournal {
                     "coordinated receipt publication failed",
                 ))
             }
-        })?;
+        });
+        // The committed record survives every later restriction/postcheck.
+        // An invalid postcommit pin is withheld, never restored or retried.
         let (result, after) = outcome.ok_or(JournalError::Permission)??;
-        // Any failure from here may follow a committed row. The old pin has
-        // been consumed; no caller can retry it or infer known no effect.
-        action.check()?;
-        if revision(&c)? != after {
-            return Err(JournalError::Conflict);
-        }
-        self.database_identity.check_current(&c)?;
-        pin.revision = after;
-        Ok((result, pin))
+        let checked_pin = (|| -> Result<PreparedDeliveryJournalRevisionV3> {
+            gate?;
+            action.check()?;
+            if revision(&c)? != after { return Err(JournalError::Conflict); }
+            self.database_identity.check_current(&c)?;
+            pin.revision = after;
+            Ok(pin)
+        })();
+        Ok((result, checked_pin))
     }
 }

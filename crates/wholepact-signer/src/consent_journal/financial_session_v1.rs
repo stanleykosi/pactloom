@@ -2,6 +2,11 @@
 //! The original enrollment and manifest remain unchanged; only the explicit
 //! financial consent carries this genuine fresh SignExact decision provenance.
 use super::*;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+#[path = "financial_session_v1/coordinated_sign_v1.rs"]
+mod coordinated_sign_v1;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub(crate) use coordinated_sign_v1::{PreparedCoordinatedFinancialSpendV1, PresentedCoordinatedFinancialSpendV1, ApprovedCoordinatedFinancialSpendConsentV1};
 use crate::native_ui::financial_authority_v1::{FinancialReadLeaseV1, FinancialSignActionV1};
 use crate::{
     account::DedicatedAccount,
@@ -28,6 +33,59 @@ fn receipt(read: &FinancialReadLeaseV1, epoch: u64) -> NativeConsentReceipt {
         nonce: read.nonce().into(),
         reviewed_at_ms: read.reviewed_at_unix_ms(),
         expires_at_ms: read.expires_at_unix_ms(),
+    }
+}
+// A closed purpose guard, not a caller-provided callback or provenance DTO.
+// The coordinated branch is added only with its actual nominal Read consumer.
+enum FinancialSpendPreparationGuardV1<'a> {
+    Native(&'a FinancialReadLeaseV1),
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    Coordinated(&'a wholepact_financial_coordinator_origin::SignerSignReadFinalV1, &'a orchard::keys::FullViewingKey),
+}
+impl FinancialSpendPreparationGuardV1<'_> {
+    fn check(&self, source: &FinancialSourceBindingV1) -> Result<()> {
+        match self {
+            Self::Native(read) => read.check_source(source.identity_digest()),
+            #[cfg(feature = "coordinated-financial-workflow-v1")]
+            Self::Coordinated(read, _) => {
+                if read.presentation().facts.original.activation.facts.original.source_identity_digest != source.identity_digest() {
+                    return Err(JournalError::Permission);
+                }
+                read.check_current().map_err(Into::into)
+            }
+        }.map_err(|_| JournalError::Permission)
+    }
+    fn authenticated_fvk(&self, account: &DedicatedAccount) -> Result<orchard::keys::FullViewingKey> {
+        match self {
+            Self::Native(_) => account.fvk().map_err(|_| JournalError::InvalidBinding),
+            // This is the actual retained WalletObserve ticket's FVK, not a
+            // policy label. Reconciliation below checks private LocalSelection
+            // and the original enrollment digest before retaining any terms.
+            #[cfg(feature = "coordinated-financial-workflow-v1")]
+            Self::Coordinated(_, fvk) => Ok((**fvk).clone()),
+        }
+    }
+    fn principal_id<'a>(&'a self, enrolled: &'a str) -> &'a str {
+        match self {
+            Self::Native(read) => read.principal_id(),
+            #[cfg(feature = "coordinated-financial-workflow-v1")]
+            Self::Coordinated(..) => enrolled,
+        }
+    }
+    fn receipt(&self, writer_epoch: u64) -> NativeConsentReceipt {
+        match self {
+            Self::Native(read) => receipt(read, writer_epoch),
+            #[cfg(feature = "coordinated-financial-workflow-v1")]
+            Self::Coordinated(read, _) => {
+                let p = read.presentation();
+                NativeConsentReceipt {
+                    native_session_id: p.actor.session_challenge.clone(),
+                    trusted_launch_measurement: p.actor.common_image_measurement.clone(),
+                    permission_generation: 1, writer_epoch, nonce: p.challenge.clone(),
+                    reviewed_at_ms: p.facts.reviewed_at_ms, expires_at_ms: p.facts.expires_at_ms,
+                }
+            }
+        }
     }
 }
 /// Full mathematically verified data before the final decision. Its temporary
@@ -57,26 +115,85 @@ impl FinancialConsentJournalV1 {
     ) -> Result<PreparedFinancialSpendV1> {
         read.check_source(source.identity_digest())
             .map_err(|_| JournalError::Permission)?;
-        self.check_financial_source_binding_v1(source)?;
+        let prepared = self.prepare_financial_spend_data_v1(
+            source,
+            account,
+            fixed,
+            inputs,
+            history,
+            &FinancialSpendPreparationGuardV1::Native(read),
+        )?;
+        read.check_source(source.identity_digest())
+            .map_err(|_| JournalError::Permission)?;
+        Ok(prepared)
+    }
+
+    // Private data-only mathematical kernel. The only callers are the two
+    // concrete original-role adapters, which retain their genuine Read through
+    // this call. A provenance tuple is inert and cannot issue a spend approval.
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_financial_spend_data_v1(
+        &self,
+        source: &FinancialSourceBindingV1,
+        account: &DedicatedAccount,
+        fixed: Arc<VerifiedFixedProposal>,
+        inputs: ReviewInputs,
+        history: &wholepact_authority::durable_financial_continuation_v1::AuthenticatedFinancialContinuationHistoryV1,
+        guard: &FinancialSpendPreparationGuardV1<'_>,
+    ) -> Result<PreparedFinancialSpendV1> {
+        guard.check(source)?;
         let (enrollment, manifest, retained, state) = {
+            let _fence = self.journal.authority_fence.read().map_err(|_| JournalError::Permission)?;
+            guard.check(source)?;
             let mut c = self
                 .journal
                 .connection
                 .lock()
                 .map_err(|_| JournalError::Database)?;
+            guard.check(source)?;
+            if !c.is_autocommit() { return Err(JournalError::Conflict); }
             source.require(&self.journal, &c)?;
+            guard.check(source)?;
+            source.require_pin(&c)?;
+            guard.check(source)?;
             let tx = c.transaction_with_behavior(TransactionBehavior::Deferred)?;
+            guard.check(source)?;
             validate(&tx, &self.genesis)?;
+            guard.check(source)?;
             let retained = intent::read(&tx)?;
+            guard.check(source)?;
             let t = retained.terms()?;
             let enrollment = read_enrollment(&tx, &t.original_recipient_enrollment_ref)?
                 .ok_or(JournalError::NotFound)?;
+            guard.check(source)?;
             let manifest = read_manifest(&tx, &t.original_recipient_manifest_ref)?
                 .ok_or(JournalError::NotFound)?;
+            guard.check(source)?;
             let state = read_account(&tx)?;
+            guard.check(source)?;
+            #[cfg(feature = "coordinated-financial-workflow-v1")]
+            if matches!(guard, FinancialSpendPreparationGuardV1::Coordinated(..)) {
+                for table in ["signer_original_consents", "signer_bridge_requests", "signer_bridge_permits", "signer_bridge_keyuse", "signer_bridge_results"] {
+                    guard.check(source)?;
+                    let exists: bool = tx.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {table})"), [], |row| row.get(0))?;
+                    if exists { return Err(JournalError::Conflict); }
+                }
+            }
+            if original_rows_digest(&tx)? != source.original_rows_digest {
+                return Err(JournalError::Conflict);
+            }
+            source.require(&self.journal, &tx)?;
+            guard.check(source)?;
+            source.require_pin(&tx)?;
+            guard.check(source)?;
             tx.commit()?;
+            guard.check(source)?;
+            source.require_pin(&c)?;
+            guard.check(source)?;
             (enrollment, manifest, retained, state)
         };
+        guard.check(source)?;
+        let principal_id = guard.principal_id(enrollment.principal_id());
         if history.continuation_request() != retained.request() {
             return Err(JournalError::InvalidBinding);
         }
@@ -87,7 +204,7 @@ impl FinancialConsentJournalV1 {
         continuation
             .require_live(now_ms()?)
             .map_err(|_| JournalError::Expired)?;
-        let fvk = account.fvk().map_err(|_| JournalError::InvalidBinding)?;
+        let fvk = guard.authenticated_fvk(account)?;
         let account_id = account
             .account_id()
             .map_err(|_| JournalError::InvalidBinding)?;
@@ -95,7 +212,7 @@ impl FinancialConsentJournalV1 {
         if account.recovery_required()
             || account_id != a.identity.account_id
             || account_id != enrollment.account_id()
-            || enrollment.principal_id() != read.principal_id()
+            || enrollment.principal_id() != principal_id
             || state.account_id != account_id
             || state.writer_epoch != continuation.scope.original_writer_epoch
             || disclosure != continuation.scope.witness
@@ -168,6 +285,7 @@ impl FinancialConsentJournalV1 {
             return Err(JournalError::InvalidBinding);
         }
         let selection = &inputs.own_selection.context;
+        let read_receipt = guard.receipt(state.writer_epoch);
         let terms = SpendConsentTerms {
             durable_born_policy_v1: None,
             automation: None,
@@ -177,7 +295,7 @@ impl FinancialConsentJournalV1 {
             enrollment_ref: enrollment.reference().into(),
             accepted_manifest_ref: manifest.reference().into(),
             account_id: account_id.clone(),
-            principal_id: read.principal_id().into(),
+            principal_id: principal_id.into(),
             agreement_id: proposal.manifest().agreement.agreement_id.clone(),
             obligation_id: proposal.manifest().agreement.obligation_id.clone(),
             proposal_id: proposal.input().proposal_id.clone(),
@@ -201,7 +319,7 @@ impl FinancialConsentJournalV1 {
                 anchor_hash: hex::encode(selection.anchor_hash),
                 anchor_root: hex::encode(selection.anchor_root),
             },
-            receipt: receipt(read, state.writer_epoch),
+            receipt: read_receipt,
         };
         if terms.wallet_key_use_policy.is_none() {
             return Err(JournalError::Permission);
@@ -217,9 +335,18 @@ impl FinancialConsentJournalV1 {
                 &continuation.scope.delivery,
             ),
         )?;
-        self.check_financial_source_binding_v1(source)?;
-        read.check_source(source.identity_digest())
-            .map_err(|_| JournalError::Permission)?;
+        guard.check(source)?;
+        // Recheck the exact metadata revision after the pure mathematical work;
+        // do not reopen semantic rows without the live purpose guard.
+        {
+            let c = self.journal.connection.lock().map_err(|_| JournalError::Database)?;
+            guard.check(source)?;
+            source.require(&self.journal, &c)?;
+            if !c.is_autocommit() || source.revision != revision(&c)? {
+                return Err(JournalError::Conflict);
+            }
+        }
+        guard.check(source)?;
         Ok(PreparedFinancialSpendV1 {
             binding: self.journal.binding(),
             source_identity: source.identity_digest().into(),
@@ -277,6 +404,7 @@ impl PreparedFinancialSpendV1 {
             return Err(JournalError::InvalidBinding);
         };
         let binding = FinancialSpendBindingV1 {
+            coordinated_origin_v1: None,
             continuation_operation_id: self.retained.request().operation_id.clone(),
             continuation_request_digest: record
                 .request_digest(self.retained.request())

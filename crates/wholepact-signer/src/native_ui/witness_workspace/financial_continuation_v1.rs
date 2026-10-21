@@ -408,3 +408,6 @@ impl FinancialWitnessCustodyV1 {
         .sign_and_retain(wallet, ticket)
     }
 }
+
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+mod coordinated_sign_v1;

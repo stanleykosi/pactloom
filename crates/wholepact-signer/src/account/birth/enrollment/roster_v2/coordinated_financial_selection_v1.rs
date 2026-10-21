@@ -2,6 +2,19 @@
 //! No source owner, connection, key, grant or lifetime observer is retained.
 use super::*;
 use crate::authority_bridge::durable_review_ipc_v3::RecipientIntentV3;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+use crate::authority_bridge::durable_review_ipc_v3::coordinated_recipient_v1::CoordinatedRecipientIntentV1;
+
+// Inert provenance choice only. Native serialization is unchanged; coordinated
+// provider semantics keep their own explicit envelope and digest domain.
+#[derive(serde::Serialize)]
+#[serde(untagged)]
+enum SelectedRecipientV1 {
+    Native(RecipientIntentV3),
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    Coordinated { coordinated_v1: CoordinatedRecipientIntentV1 },
+}
+
 use crate::consent_journal::{FinancialSourceBindingV1, OriginalFinancialJournalSelectionV1};
 use crate::native_peer::PeerProcess;
 use wholepact_authority::durable_financial_continuation_v1::FinancialContinuationTermsV1;
@@ -32,7 +45,7 @@ pub(crate) struct OriginalFinancialReentrySelectionV1 {
     immutable: BTreeMap<String, FileRevisionV3>,
     disclosure: wholepact_authority::WitnessDisclosureDescriptor,
     terms: FinancialContinuationTermsV1,
-    recipient: RecipientIntentV3,
+    recipient: SelectedRecipientV1,
     prior_source_identity: String,
     host_process_instance: String,
     digest: String,
@@ -177,7 +190,7 @@ impl ActivePreparedDeliverySourceV3 {
             immutable,
             disclosure,
             terms: terms.clone(),
-            recipient: recipient.clone(),
+            recipient: SelectedRecipientV1::Native(recipient.clone()),
             prior_source_identity: self.source.identity().to_owned(),
             host_process_instance,
             digest,
@@ -201,7 +214,7 @@ impl ActivePreparedDeliverySourceV3 {
     ) -> Result<()> {
         self.source.check_custody()?;
         if self.source.identity() != selection.prior_source_identity
-            || recipient != &selection.recipient
+            || !matches!(&selection.recipient, SelectedRecipientV1::Native(actual) if actual == recipient)
         {
             return Err(Error::ReviewMismatch);
         }
@@ -262,5 +275,59 @@ mod tests {
             assert_ne!(inventory_digest(&changed).unwrap(), expected);
         }
         assert_ne!(inventory_digest(&BTreeMap::new()).unwrap(), expected);
+    }
+}
+
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+impl OriginalFinancialReentrySelectionV1 {
+    /// Private producer invoked only by the same actual source's Audit consumer.
+    /// Every private file observation remains under that concrete fresh Final.
+    pub(in crate::account::birth::enrollment::roster_v2::durable_entry_v1) fn capture_coordinated_under_audit_v1(
+        retained: &RetainedBornManualRosterEnrollmentV2,
+        binding: &FinancialSourceBindingV1,
+        terms: &FinancialContinuationTermsV1,
+        recipient: &CoordinatedRecipientIntentV1,
+        source_identity: &str,
+        peer: &PeerProcess,
+        action: &wholepact_financial_coordinator_origin::SignerV3AuditFinalV1,
+    ) -> Result<Self> {
+        action.check_current()?;
+        terms.validate().map_err(|_| Error::ReviewMismatch)?;
+        recipient.validate().map_err(|_| Error::ReviewMismatch)?;
+        peer.check_alive()?;
+        if action.facts().received.source_identity_digest != source_identity
+            || action.facts().received.recipient_intent_digest != recipient.digest().map_err(|_|Error::ReviewMismatch)?
+            || recipient.source_identity_digest != source_identity
+            || peer.instance() != recipient.authorized_host_process_instance
+            || terms.original_recipient_intent_digest != recipient.digest().map_err(|_|Error::ReviewMismatch)?
+            || terms.original_recipient_enrollment_ref != recipient.original_enrollment_ref
+            || terms.original_recipient_manifest_ref != recipient.original_manifest_ref
+            || terms.scope.authorization.identity.account_id != retained.record.account_record.genesis.identity.account_id
+        { return Err(Error::ReviewMismatch); }
+        retained.check()?;
+        action.check_current()?;
+        let journal = binding.original_reentry_selection_v1()?;
+        let immutable = immutable_files(retained)?;
+        let commit = publication::read_commit(retained)?;
+        let disclosure = retained.disclosure()?;
+        action.check_current()?;
+        if terms.scope.witness != disclosure { return Err(Error::ReviewMismatch); }
+        let root = retained.account.directory.root().to_path_buf();
+        let record = retained.record.clone();
+        let host_process_instance = peer.instance().to_owned();
+        let digest = wholepact_core::proposal::canonical_digest(
+            "wholepact:coordinated-v3-financial-reentry-selection:v1",
+            &(&root, source_identity, journal.digest()?, &record, &commit,
+              inventory_digest(&immutable)?, &disclosure, terms, recipient, &host_process_instance),
+        ).map_err(|_| Error::InvalidData)?;
+        let selected = Self {
+            root, journal, record, commit, immutable, disclosure, terms: terms.clone(),
+            recipient: SelectedRecipientV1::Coordinated { coordinated_v1: recipient.clone() },
+            prior_source_identity: source_identity.into(), host_process_instance, digest,
+        };
+        selected.require_reopened(retained,binding)?;
+        peer.check_alive()?;
+        action.check_current()?;
+        Ok(selected)
     }
 }
