@@ -357,6 +357,16 @@ impl LocalPrivateDurableFinancialConsentV1 for ClosedDispatchEffectConsentV1<'_,
     }
 }
 
+/// A report is inert outcome data. Disclosure status never changes its effect.
+pub(in crate::host) enum FinancialReportDisclosureV1 {
+    NotRequested,
+    Displayed,
+    Refused(Error),
+}
+pub(in crate::host) struct OriginalDispatchOutcomeV1 {
+    pub(in crate::host) report: wholepact_chain::SubmissionDispatchReport,
+    pub(in crate::host) disclosure: FinancialReportDisclosureV1,
+}
 impl Host {
     /// Completed-only production composition. Both supplied histories are opaque
     /// authenticated original Witness reads, not parsed JSON grants. This method
@@ -373,6 +383,29 @@ impl Host {
         backend: &mut B,
         clock: &C,
     ) -> Result<wholepact_chain::SubmissionDispatchReport> {
+        self.dispatch_completed_private_financial_kernel_v1(root, key, histories, backend, clock, false)
+            .await.map(|outcome| outcome.report)
+    }
+    /// Explicit saved-byte dispatch plus a separately reviewed local report.
+    /// Successful dispatch remains successful even when later disclosure denies.
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    pub(in crate::host) async fn dispatch_and_display_completed_private_financial_v1<
+        B: wholepact_chain::SubmissionBackend, C: wholepact_chain::SubmissionClock,
+    >(
+        &self, root: &std::path::Path, key: &str,
+        histories: [&wholepact_signer::authority_bridge::financial_continuation_v1::AuthenticatedFinancialContinuationHistoryV1; 2],
+        backend: &mut B, clock: &C,
+    ) -> Result<OriginalDispatchOutcomeV1> {
+        if !crate::terminal::coordinated_restriction_required() { return Err(Error::Permission); }
+        self.dispatch_completed_private_financial_kernel_v1(root, key, histories, backend, clock, true).await
+    }
+    async fn dispatch_completed_private_financial_kernel_v1<
+        B: wholepact_chain::SubmissionBackend, C: wholepact_chain::SubmissionClock,
+    >(
+        &self, root: &std::path::Path, key: &str,
+        histories: [&wholepact_signer::authority_bridge::financial_continuation_v1::AuthenticatedFinancialContinuationHistoryV1; 2],
+        backend: &mut B, clock: &C, display: bool,
+    ) -> Result<OriginalDispatchOutcomeV1> {
         financial_step!(InputValidation, NotEstablished);
         let result = async {
         use wholepact_authority::completed_dispatch_v1::{
@@ -488,7 +521,8 @@ impl Host {
             attempt: prepared.next_dispatch_attempt_v1().map_err(|error| { financial_record!(engine, AuditSummary, NotEstablished, &error); error })?,
         };
         verified.validate_completed_dispatch_context_v1(&context).map_err(|error| { financial_record!(engine, DispatchReview, NotEstablished, &error); error })?;
-        // Last human prompt. Every gate below is closed and has no terminal.
+        // Last effect-authorizing human prompt. All effect gates below are closed;
+        // an explicitly requested later report Read cannot authorize an effect.
         financial_step!(DispatchReview, NotEstablished);
         let native = self.authority.approve_exact_durable_submission_original_v1(
             verified.retained(),
@@ -651,7 +685,7 @@ impl Host {
             used: false,
         };
         financial_step!(DispatchOutcome, OutcomeUncertain);
-        prepared
+        let report = prepared
             .dispatch_original_submission_v1(
                 access,
                 &operation,
@@ -676,7 +710,53 @@ impl Host {
                 &read,
             )
             .await
-            .map_err(|error| { financial_record!(engine, DispatchOutcome, OutcomeUncertain, &error); financial_failure("DISPATCH_OUTCOME") })
+            .map_err(|error| { financial_record!(engine, DispatchOutcome, OutcomeUncertain, &error); financial_failure("DISPATCH_OUTCOME") })?;
+        if !display {
+            return Ok(OriginalDispatchOutcomeV1 { report, disclosure: FinancialReportDisclosureV1::NotRequested });
+        }
+        // Never hold submission/source-effect authority or its journal mutex
+        // across the separate report-only human Read. Original verified source
+        // custody is retained, but the completed dispatch decision is over.
+        drop(authority);
+        drop(journal);
+        drop(effect);
+        drop(native);
+        drop(frozen);
+        drop(read);
+        drop(approval);
+        #[cfg(feature = "coordinated-financial-workflow-v1")]
+        let disclosure = (|| -> Result<()> {
+            if !same(&report.descriptor, verified.retained().descriptor()) {
+                return Err(Error::Authentication);
+            }
+            let source = original_result_material_bounds(
+                inspection, prepared.original_financial_clock_bounds_ms_v1()?,
+            )?;
+            let prompt = crate::terminal::OriginalPromptBoundsV1::new(
+                crate::terminal::original_coordinated_session_ceiling()?, source,
+            )?;
+            original_materials_current(inspection)?;
+            let report_approval = self.terminal.approve_historical_original(
+                "Read and locally display ONLY the actual durable report for the exact saved-byte dispatch that already returned. Refusing or losing this report Read cannot undo the attempted send or its recorded outcome. This does not assert payment inclusion or settlement and cannot authorize a retry, replacement, repair, new admission or another send.",
+                Some(&prompt),
+            )?;
+            let report_read = ClosedFinancialReadConsentV1 { owner: &owner, inspection, approval: &report_approval };
+            let bounds = prompt.narrow_deadline(report_approval.deadline());
+            report_read.check()?;
+            let output = self.terminal.historical_output()?;
+            report_approval.effect(&mut || output.json_checked_original(
+                &report, || report_read.check(), &report_approval, &bounds,
+            ))?;
+            report_read.check()
+        })();
+        #[cfg(not(feature = "coordinated-financial-workflow-v1"))]
+        let disclosure: Result<()> = Err(Error::Permission);
+        // Preserve actual dispatch outcome independently of later disclosure.
+        // Even a partial output failure cannot become a no-effect or retry claim.
+        Ok(OriginalDispatchOutcomeV1 { report, disclosure: match disclosure {
+            Ok(()) => FinancialReportDisclosureV1::Displayed,
+            Err(error) => FinancialReportDisclosureV1::Refused(error),
+        } })
 
         }.await;
         #[cfg(all(
@@ -924,6 +1004,15 @@ impl Host {
             drop(read);
             drop(effect_approval);
             drop(read_approval);
+            #[cfg(feature = "coordinated-financial-workflow-v1")]
+            let receiver = if crate::terminal::coordinated_restriction_required() {
+                let source = original_result_material_bounds(
+                    inspection, setup.original_bounds_ms.ok_or(Error::Permission)?,
+                )?;
+                receiver.bind_original_intake_restriction_v1(Box::new(OriginalResultIoRestrictionV1 {
+                    bounds: setup_approval.original_restriction_bounds(source)?,
+                })).map_err(|_| Error::Permission)?
+            } else { receiver };
             // Only now may the independently approved Signer ReturnExact begin.
             // All later gates are closed; no Host human wait consumes its lease.
             financial_step!(ResultReceive, NotEstablished);
@@ -1220,6 +1309,20 @@ impl Host {
         root: &std::path::Path,
         operation: &str,
     ) -> Result<CompletedPrivateFinancialSummaryV1> {
+        self.completed_private_financial_summary_kernel_v1(root, operation, false)
+    }
+    /// Concrete coordinated disclosure under the same genuine completed-only
+    /// Read and original source owner; never accepts a detached summary DTO.
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    pub(in crate::host) fn display_completed_private_financial_summary_v1(
+        &self, root: &std::path::Path, operation: &str,
+    ) -> Result<()> {
+        if !crate::terminal::coordinated_restriction_required() { return Err(Error::Permission); }
+        self.completed_private_financial_summary_kernel_v1(root, operation, true).map(|_| ())
+    }
+    fn completed_private_financial_summary_kernel_v1(
+        &self, root: &std::path::Path, operation: &str, display: bool,
+    ) -> Result<CompletedPrivateFinancialSummaryV1> {
         financial_step!(InputValidation, NotEstablished);
         let result = (|| -> Result<_> {
             use wholepact_engine::signature_intake::LocalSignedRetention;
@@ -1228,7 +1331,11 @@ impl Host {
             let owner = self.original_financial_owner_v1(root)?;
             let inspection = owner.initial_inspection();
             financial_step!(ReadConsent, NotEstablished);
-            let approval = self.terminal.approve_historical("Read and verify the exact completed original financial transaction and retained dispatch lineage for an inert audit summary. This cannot repair, extract, renew an admission or send a request.")?;
+            let approval = self.terminal.approve_historical(if display {
+                "Read, verify and locally display the exact completed original financial transaction and retained dispatch lineage as an inert audit summary. This cannot repair, extract, renew an admission or send a request."
+            } else {
+                "Read and verify the exact completed original financial transaction and retained dispatch lineage for an inert audit summary. This cannot repair, extract, renew an admission or send a request."
+            })?;
             let read = ClosedFinancialReadConsentV1 {
                 owner: &owner,
                 inspection,
@@ -1298,7 +1405,7 @@ impl Host {
                 None
             };
             read.check()?;
-            Ok(CompletedPrivateFinancialSummaryV1 {
+            let summary = CompletedPrivateFinancialSummaryV1 {
                 checkpoint_id: verified.retained().checkpoint_id(),
                 transaction_digest: verified.retained().descriptor().bytes_sha256.clone(),
                 transaction_id: verified.retained().descriptor().transaction_id.clone(),
@@ -1312,7 +1419,19 @@ impl Host {
                         error
                     },
                 )?,
-            })
+            };
+            if display {
+                let bounds = financial_prompt_bounds(
+                    &read, Some(prepared.original_financial_clock_bounds_ms_v1()?),
+                )?.ok_or(Error::Permission)?;
+                let output = self.terminal.historical_output()?;
+                read.check()?;
+                approval.effect(&mut || output.json_checked_original(
+                    &summary, || read.check(), &approval, &bounds,
+                ))?;
+                read.check()?;
+            }
+            Ok(summary)
         })();
         #[cfg(all(
             test,
@@ -1403,5 +1522,76 @@ mod original_effect_clock_tests {
         assert!(super::original_source_clocks_at((100, 200), 199));
         assert!(!super::original_source_clocks_at((100, 200), 200));
         assert!(!super::original_source_clocks_at((200, 100), 150));
+    }
+}
+
+/// Cached original action/source clocks only. The installed original TTY and
+/// shared observer are checked last, with no source or socket-lock re-entry.
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+struct OriginalResultIoRestrictionV1 {
+    bounds: crate::terminal::OriginalPromptBoundsV1,
+}
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+impl wholepact_signer::authority_bridge::financial_continuation_v1::FinancialResultRestrictionV1 for OriginalResultIoRestrictionV1 {
+    fn check_before_io(&self) -> wholepact_signer::authority_bridge::Result<()> {
+        self.bounds.check().and_then(|()| crate::terminal::check_original_coordinator_restriction())
+            .map_err(|_| wholepact_signer::authority_bridge::BridgeError::Permission)
+    }
+}
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+fn original_result_material_bounds(
+    inspection: &PrivateDurableFinancialInspectionV1, source: (u64, u64),
+) -> Result<(u64, u64)> {
+    if inspection.materials().len() != 2 { return Err(Error::Authentication); }
+    let from = inspection.materials().iter().map(|m| m.scope().valid_from_unix_seconds)
+        .max().ok_or(Error::Authentication)?.checked_mul(1000).ok_or(Error::Permission)?;
+    let until = inspection.materials().iter().map(|m| m.scope().valid_until_unix_seconds)
+        .min().ok_or(Error::Authentication)?.checked_mul(1000).ok_or(Error::Permission)?;
+    Ok((from.max(source.0), until.min(source.1)))
+}
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+impl Host {
+    // Only the actual same-Host retained V3 wrapper calls this. The maintained
+    // opening obtains its own initial inspection before opening private sources.
+    pub(in crate::host::financial) fn prepare_retained_original_financial_preview_v3(
+        &self,
+        root: &std::path::Path,
+        pending: wholepact_signer::authority_bridge::durable_delivery_admission_ipc_v3::PendingDurableDeliveryAdmissionV3,
+        socket: &std::path::Path,
+        request: &wholepact_signer::authority_bridge::financial_continuation_v1::FinancialResultRequestV1,
+        history: &wholepact_signer::authority_bridge::financial_continuation_v1::AuthenticatedFinancialContinuationHistoryV1,
+        original_host_material_delivery_ceiling: std::time::Instant,
+        original: Box<dyn wholepact_signer::authority_bridge::financial_continuation_v1::FinancialResultRestrictionV1>,
+    ) -> Result<wholepact_signer::authority_bridge::financial_continuation_v1::PreparedFinancialResultReceiverV1> {
+        if !crate::terminal::coordinated_restriction_required() { return Err(Error::Permission); }
+        let owner = self.original_financial_owner_v1(root)?;
+        let inspection = owner.initial_inspection();
+        let terms = &history.continuation_record().terms;
+        let source = original_result_material_bounds(inspection, (
+            terms.valid_from_ms.max(terms.scope.authorization.valid_from_ms),
+            terms.valid_until_ms.min(terms.scope.authorization.valid_until_ms),
+        ))?;
+        if inspection.fixed_identity() != &request.fixed { return Err(Error::Authentication); }
+        let prompt_bounds = crate::terminal::OriginalPromptBoundsV1::new(
+            original_host_material_delivery_ceiling.min(crate::terminal::original_coordinated_session_ceiling()?), source,
+        )?;
+        // Static text discloses no saved DTO. The cached original inspection
+        // material/source clocks still bound each prompt write/response read.
+        let approval = self.terminal.approve_historical_original(
+            "Read ONLY the exact protected original financial result-preview metadata from the SAME retained original Signer process for this original fixed source. Independently match its complete continuation and result commitments. No signature bytes, ReturnExact, retention, signing, extraction or dispatch is authorized by this Read.",
+            Some(&prompt_bounds),
+        )?;
+        let read = ClosedFinancialReadConsentV1 { owner: &owner, inspection, approval: &approval };
+        read.check()?;
+        let preview_read = OriginalResultIoRestrictionV1 {
+            bounds: prompt_bounds.narrow_deadline(approval.deadline()),
+        };
+        let receiver = pending.prepare_retained_financial_result_v1(
+            socket, request, history, original_host_material_delivery_ceiling, original, &preview_read,
+        ).map_err(|_| Error::Permission)?;
+        read.check()?;
+        // The fresh preview Read ends here. It is never carried as authority
+        // into the separately reviewed intake or replaced with a new deadline.
+        Ok(receiver)
     }
 }

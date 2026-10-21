@@ -16,13 +16,19 @@ use std::{
     time::{Duration, Instant},
 };
 use wholepact_financial_coordinator_origin::{
-    CoordinatorFinancialEndpointV1, CoordinatorFinancialEventV1, CoordinatorHostTerminalEndpointV1,
+    CoordinatorFinancialEndpointV1, CoordinatorFinancialEventV1,
+    CoordinatorFinancialWitnessEventV1, CoordinatorHostTerminalEndpointV1,
     FinancialCancelProgressV1, FinancialContinueArmOutboundV1, FinancialContinueFinalOutboundV1,
-    SignerContinueRoleV1 as Role, SignerFinancialReadOutboundV1, SignerSourceEntryOutboundV1,
+    FinancialWitnessArmOutboundV1, FinancialWitnessFinalOutboundV1, FinancialWitnessInputsV1,
+    FinancialWitnessSetupOutboundV1, FinancialWitnessSetupTicketV1, SignerAdmitArmOutboundV1,
+    SignerAdmitFinalOutboundV1, SignerContinueRoleV1 as Role, SignerFinancialReadOutboundV1,
+    SignerSourceEntryOutboundV1,
 };
 
 use zeroize::Zeroizing;
 
+const COMMAND_SLOTS: usize = 24;
+const SECURITY_SLOTS: usize = 64;
 const HOST_OUTPUT_SLOTS: usize = 4;
 const HOST_STATUS_SLOTS: usize = 3;
 
@@ -43,9 +49,17 @@ enum Command {
     BeginContinue(Role, Instant),
     ArmContinue(FinancialContinueArmOutboundV1),
     FinalContinue(FinancialContinueFinalOutboundV1),
+    PrepareWitness(Role, FinancialWitnessInputsV1, Instant),
+    SetupWitness(FinancialWitnessSetupOutboundV1),
+    ArmWitness(FinancialWitnessArmOutboundV1),
+    FinalWitness(FinancialWitnessFinalOutboundV1),
+    ArmAdmit(SignerAdmitArmOutboundV1),
+    FinalAdmit(SignerAdmitFinalOutboundV1),
 }
 pub(super) enum Outcome {
     Event(CoordinatorFinancialEventV1),
+    WitnessSetup(Role, FinancialWitnessSetupTicketV1),
+    Witness(CoordinatorFinancialWitnessEventV1),
     DisposalStarted,
     Finished {
         disposal_confirmed: bool,
@@ -69,16 +83,22 @@ pub(super) struct Driver {
     continue_begun: [bool; 2],
     continue_armed: [bool; 2],
     continue_final: [bool; 2],
+    witness_prepared: [bool; 2],
+    witness_setup: [bool; 2],
+    witness_armed: [bool; 2],
+    witness_final: [bool; 2],
+    admit_armed: [bool; 2],
+    admit_final: [bool; 2],
 }
 impl Driver {
     pub(super) fn spawn(
         endpoint: CoordinatorFinancialEndpointV1,
         terminal: CoordinatorHostTerminalEndpointV1,
     ) -> Result<Self> {
-        // Six one-use command slots per original role. No retries.
-        let (input, receive) = mpsc::sync_channel(12);
+        // Twelve one-use commands per original role. No retries.
+        let (input, receive) = mpsc::sync_channel(COMMAND_SLOTS);
         // Finite protocol events only, including two dispositions and finish.
-        let (send, outcome) = mpsc::sync_channel(32);
+        let (send, outcome) = mpsc::sync_channel(SECURITY_SLOTS);
         let (host_input, host_receive) = mpsc::sync_channel(1);
         let (host_send, host_output) = mpsc::sync_channel(HOST_OUTPUT_SLOTS);
         let (host_status_send, host_status) = mpsc::sync_channel(HOST_STATUS_SLOTS);
@@ -114,6 +134,12 @@ impl Driver {
             continue_begun: [false; 2],
             continue_armed: [false; 2],
             continue_final: [false; 2],
+            witness_prepared: [false; 2],
+            witness_setup: [false; 2],
+            witness_armed: [false; 2],
+            witness_final: [false; 2],
+            admit_armed: [false; 2],
+            admit_final: [false; 2],
         })
     }
 
@@ -239,6 +265,106 @@ impl Driver {
         }
         self.queue(Command::FinalContinue(outbound))
     }
+    pub(super) fn prepare_witness(
+        &mut self,
+        role: Role,
+        inputs: FinancialWitnessInputsV1,
+        ceiling: Instant,
+    ) -> Result<()> {
+        if !self.continue_final[index(role)]
+            || !claim_once(
+                &mut self.witness_prepared,
+                role,
+                self.revoked.load(Ordering::Acquire),
+            )
+        {
+            self.revoke();
+            return Err(rejected("Witness Setup preparation consumed"));
+        }
+        self.queue(Command::PrepareWitness(role, inputs, ceiling))
+    }
+    pub(super) fn send_witness_setup(
+        &mut self,
+        role: Role,
+        outbound: FinancialWitnessSetupOutboundV1,
+    ) -> Result<()> {
+        if !self.witness_prepared[index(role)]
+            || !claim_once(
+                &mut self.witness_setup,
+                role,
+                self.revoked.load(Ordering::Acquire),
+            )
+        {
+            self.revoke();
+            return Err(rejected("Witness Setup consumed"));
+        }
+        self.queue(Command::SetupWitness(outbound))
+    }
+    pub(super) fn send_witness_arm(
+        &mut self,
+        role: Role,
+        outbound: FinancialWitnessArmOutboundV1,
+    ) -> Result<()> {
+        if !self.witness_setup[index(role)]
+            || !claim_once(
+                &mut self.witness_armed,
+                role,
+                self.revoked.load(Ordering::Acquire),
+            )
+        {
+            self.revoke();
+            return Err(rejected("Witness Arm consumed"));
+        }
+        self.queue(Command::ArmWitness(outbound))
+    }
+    pub(super) fn send_witness_final(
+        &mut self,
+        role: Role,
+        outbound: FinancialWitnessFinalOutboundV1,
+    ) -> Result<()> {
+        // Only this genuine already-admitted W Final has the scoped late-R
+        // transport exception. A boolean cannot construct or substitute it.
+        if !self.witness_armed[index(role)] || !claim_once(&mut self.witness_final, role, false) {
+            self.revoke();
+            return Err(rejected("Witness Final consumed"));
+        }
+        self.queue(Command::FinalWitness(outbound))
+    }
+    pub(super) fn send_admit_arm(
+        &mut self,
+        role: Role,
+        outbound: SignerAdmitArmOutboundV1,
+    ) -> Result<()> {
+        if !self.continue_final[index(role)]
+            || !claim_once(
+                &mut self.admit_armed,
+                role,
+                self.revoked.load(Ordering::Acquire),
+            )
+        {
+            self.revoke();
+            return Err(rejected("Signer Admit Arm consumed"));
+        }
+        self.queue(Command::ArmAdmit(outbound))
+    }
+    pub(super) fn send_admit_final(
+        &mut self,
+        role: Role,
+        outbound: SignerAdmitFinalOutboundV1,
+    ) -> Result<()> {
+        // S transport remains R-sensitive, unlike the admitted local W append.
+        if !self.admit_armed[index(role)]
+            || !claim_once(
+                &mut self.admit_final,
+                role,
+                self.revoked.load(Ordering::Acquire),
+            )
+        {
+            self.revoke();
+            return Err(rejected("Signer Admit Final consumed"));
+        }
+        self.queue(Command::FinalAdmit(outbound))
+    }
     fn queue(&self, command: Command) -> Result<()> {
         self.input.try_send(command).map_err(|_| {
             // TrySendError owns and drops an unsent password/outbound. No retry.
@@ -292,6 +418,8 @@ fn drive(
     let session = endpoint.session_deadline();
     let mut cancel_sent = false;
     let mut cleanup = None;
+    let mut witness_disposed = [false; 2];
+    let mut witness_close_sent = [false; 2];
     let mut host = HostTransport {
         terminal: Some(terminal),
         pending_line: None,
@@ -310,7 +438,7 @@ fn drive(
             // Drain finite commands first, preserving ONLY an actually
             // admitted Continue Final. An empty queue is not abandonment: A
             // may have won just before R while its owner is still enqueueing.
-            for _ in 0..12 {
+            for _ in 0..COMMAND_SLOTS {
                 let command = match input.try_recv() {
                     Ok(command) => command,
                     Err(mpsc::TryRecvError::Empty) => break,
@@ -322,6 +450,10 @@ fn drive(
                 let restricted = cancel_sent || revoked.load(Ordering::Acquire);
                 if let Command::FinalContinue(outbound) = command {
                     endpoint.send_continue_final(outbound)?;
+                    continue;
+                }
+                if let Command::FinalWitness(outbound) = command {
+                    endpoint.send_witness_final(outbound)?;
                     continue;
                 }
                 if restricted {
@@ -345,7 +477,19 @@ fn drive(
                         endpoint.begin_continue_signer2(ceiling)?
                     }
                     Command::ArmContinue(outbound) => endpoint.send_continue_arm(outbound)?,
-                    Command::FinalContinue(_) => unreachable!("handled exact Final above"),
+                    Command::PrepareWitness(role, inputs, ceiling) => {
+                        let ticket = endpoint.prepare_witness_setup(role, inputs, ceiling)?;
+                        output
+                            .try_send(Outcome::WitnessSetup(role, ticket))
+                            .map_err(|_| rejected("Witness Setup receiver unavailable"))?;
+                    }
+                    Command::SetupWitness(outbound) => endpoint.send_witness_setup(outbound)?,
+                    Command::ArmWitness(outbound) => endpoint.send_witness_arm(outbound)?,
+                    Command::ArmAdmit(outbound) => endpoint.send_admit_arm(outbound)?,
+                    Command::FinalAdmit(outbound) => endpoint.send_admit_final(outbound)?,
+                    Command::FinalContinue(_) | Command::FinalWitness(_) => {
+                        unreachable!("handled exact Finals above")
+                    }
                 }
             }
             if revoked.load(Ordering::Acquire) && !cancel_sent {
@@ -374,6 +518,34 @@ fn drive(
                 output
                     .try_send(Outcome::Event(event))
                     .map_err(|_| rejected("source-entry native receiver unavailable"))?;
+            }
+            // W outcomes remain observable after R. Disposal is not retirement.
+            // Purpose-close is ONLY global cleanup grammar, never normal progress.
+            for _ in 0..16 {
+                let Some(event) = endpoint.try_receive_witness()? else {
+                    break;
+                };
+                match &event {
+                    CoordinatorFinancialWitnessEventV1::Disposed(role) => {
+                        witness_disposed[index(*role)] = true
+                    }
+                    CoordinatorFinancialWitnessEventV1::FirstFailure { .. }
+                    | CoordinatorFinancialWitnessEventV1::PreparationFailed(_)
+                    | CoordinatorFinancialWitnessEventV1::Restricted(_) => {
+                        revoked.store(true, Ordering::Release)
+                    }
+                    _ => {}
+                }
+                output
+                    .try_send(Outcome::Witness(event))
+                    .map_err(|_| rejected("Witness native receiver unavailable"))?;
+            }
+            for role in [Role::Signer1, Role::Signer2] {
+                let i = index(role);
+                if may_close_witness(cancel_sent, witness_disposed[i], witness_close_sent[i]) {
+                    endpoint.close_witness_purpose(role)?;
+                    witness_close_sent[i] = true;
+                }
             }
             // Security commands, native outcomes and typed cancellation always
             // run first. This bounded, nonblocking transport step NEVER returns
@@ -533,10 +705,14 @@ fn record_cancel_progress(
     match progress {
         FinancialCancelProgressV1::Sent => (true, retained),
         // Actual endpoint result, not a caller-created permission to bypass R.
-        FinancialCancelProgressV1::DeferredForAdmittedContinue { deadline } => {
+        FinancialCancelProgressV1::DeferredForAdmittedContinue { deadline }
+        | FinancialCancelProgressV1::DeferredForAdmittedWitness { deadline } => {
             (false, retained.min(deadline))
         }
     }
+}
+fn may_close_witness(global_cancel_sent: bool, actually_disposed: bool, close_sent: bool) -> bool {
+    global_cancel_sent && actually_disposed && !close_sent
 }
 fn first_cleanup_ceiling(session: Instant, now: Instant) -> Instant {
     (now + Duration::from_secs(5)).min(session + Duration::from_secs(5))
@@ -572,6 +748,31 @@ mod tests {
         let (sent, retained) = record_cancel_progress(FinancialCancelProgressV1::Sent, retained);
         assert!(sent);
         assert_eq!(retained, earlier);
+    }
+    #[test]
+    fn witness_pending_final_uses_same_first_cleanup_not_a_fresh_bound() {
+        let first = Instant::now() + Duration::from_secs(5);
+        let (sent, deadline) = record_cancel_progress(
+            FinancialCancelProgressV1::DeferredForAdmittedWitness {
+                deadline: first + Duration::from_secs(30),
+            },
+            first,
+        );
+        assert!(!sent);
+        assert_eq!(deadline, first);
+        let (sent, deadline) = record_cancel_progress(
+            FinancialCancelProgressV1::DeferredForAdmittedContinue { deadline: first },
+            deadline,
+        );
+        assert!(!sent);
+        assert_eq!(deadline, first);
+    }
+    #[test]
+    fn witness_disposed_is_not_normal_retirement_or_permission_to_close() {
+        assert!(!may_close_witness(false, true, false));
+        assert!(!may_close_witness(true, false, false));
+        assert!(may_close_witness(true, true, false));
+        assert!(!may_close_witness(true, true, true));
     }
     #[test]
     fn each_fixed_role_has_one_job_slot_and_revocation_cannot_rearm_it() {

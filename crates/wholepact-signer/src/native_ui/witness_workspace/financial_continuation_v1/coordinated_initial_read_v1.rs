@@ -379,7 +379,9 @@ impl PresentedCoordinatedInitialReadV1 {
         self.check_final(original_host, &final_read)?;
         let source = opened.into_read(&final_read)?;
         self.check(&source, original_host, &final_read)?;
-        let key = read_private_credential(&self.prepared.setup.client_private_key_pkcs8_der)?;
+        let key = crate::native_ui::witness_workspace::coordinated_credential_read_v1::read_initial_owner_credential_v1(
+            &self.prepared.setup.client_private_key_pkcs8_der, &final_read,
+        )?;
         self.check(&source, original_host, &final_read)?;
         let setup = &self.prepared.setup;
         let tls = ClientTls::new(

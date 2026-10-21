@@ -19,6 +19,9 @@ use zeroize::Zeroizing;
 #[cfg(all(feature = "durable-proposal", feature = "pending-birth-owner-signing"))]
 mod durable_payment_v1;
 
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+mod coordinated_credential_read_v1;
+
 const MAX_CONFIG: usize = 16 * 1024;
 const MAX_CREDENTIAL: usize = 16 * 1024;
 

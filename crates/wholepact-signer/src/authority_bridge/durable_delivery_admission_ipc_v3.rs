@@ -6,6 +6,9 @@ use wholepact_authority::OwnerControlRequest;
 use std::time::{Duration,Instant};
 use std::{os::fd::AsRawFd,path::Path};
 
+#[path = "durable_delivery_admission_ipc_v3/retained_financial_result_v1.rs"]
+mod retained_financial_result_v1;
+
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all="snake_case")]
 pub enum DurableDeliveryAdmissionStateV3 { AwaitingAudit, Unknown, Verified }

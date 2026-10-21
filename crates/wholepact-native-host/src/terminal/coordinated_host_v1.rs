@@ -58,6 +58,14 @@ pub(super) fn check(file: Option<&File>) -> Result<()> {
     if tty.is_err() || original.restriction.check_current().is_err() { return deny(); }
     Ok(())
 }
+/// Original installed H session ceiling, exposed only as an additional cached
+/// restriction. No caller duration/importer and no new authority is created.
+pub(super) fn original_session_ceiling() -> Result<std::time::Instant> {
+    if !required() { return Err(Error::Permission); }
+    check(None)?;
+    Ok(ORIGINAL.get().ok_or(Error::Permission)?.terminal.deadline())
+}
+
 fn file() -> Result<File> {
     check(None)?;
     let file = OpenOptions::new().read(true).write(true)

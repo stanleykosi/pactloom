@@ -239,7 +239,7 @@ mod signing;
 pub(crate) use result_ipc::{ApprovedFinancialReturnV1, PreparedFinancialReturnV1};
 pub use result_ipc::{
     AuthenticatedFinancialResultLeaseV1, AuthenticatedFinancialResultPreviewV1,
-    FinancialResultRequestV1, PreparedFinancialResultReceiverV1,
+    FinancialResultRequestV1, PreparedFinancialResultReceiverV1, FinancialResultRestrictionV1,
 };
 pub use wholepact_authority::completed_dispatch_v1::{
     AuthenticatedCompletedDispatchAdmissionV1, AuthorizeCompletedDispatchV1,

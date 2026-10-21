@@ -67,17 +67,27 @@ impl HistoricalOutput {
     ) -> Result<()> {
         // Existing legacy callers have no typed original output ceiling.
         if coordinated_restriction_required() { return Err(Error::Permission); }
-        self.json_kernel(value, check, None, None)
+        self.json_kernel(value, check, None, None, None)
     }
     pub(crate) fn json_checked_under<T: serde::Serialize>(
         &self, value: &T, check: impl FnMut() -> Result<()>,
         approval: &HistoricalApproval, original_wall_bounds: (u64, u64),
     ) -> Result<()> {
-        self.json_kernel(value, check, Some(approval.deadline()), Some(original_wall_bounds))
+        self.json_kernel(value, check, Some(approval.deadline()), Some(original_wall_bounds), None)
+    }
+    /// Actual original Read plus immutable millisecond source bounds. The DTO
+    /// is data only; this path is called before its genuine owner is dropped.
+    pub(crate) fn json_checked_original<T: serde::Serialize>(
+        &self, value: &T, check: impl FnMut() -> Result<()>,
+        approval: &HistoricalApproval, original: &OriginalPromptBoundsV1,
+    ) -> Result<()> {
+        let bounds = original.narrow_deadline(approval.deadline());
+        self.json_kernel(value, check, None, None, Some(&bounds))
     }
     fn json_kernel<T: serde::Serialize>(
         &self, value: &T, mut check: impl FnMut() -> Result<()>,
         deadline: Option<Instant>, wall_bounds: Option<(u64, u64)>,
+        original: Option<&OriginalPromptBoundsV1>,
     ) -> Result<()> {
         let bytes = Zeroizing::new(serde_json::to_string(value)?);
         if bytes.len() > wholepact_storage_security::bundle::recovery::evidence::history::MAX_HISTORICAL_METADATA_BYTES {
@@ -90,10 +100,16 @@ impl HistoricalOutput {
         let mut file = self.0.lock().map_err(|_| Error::Terminal)?;
         check()?;
         foreground(&file)?;
-        write_current_until(&mut file, rendered.as_bytes(), deadline, wall_bounds)?;
+        match original {
+            Some(bounds) => write_prompt_current(&mut file, rendered.as_bytes(), Some(bounds), None)?,
+            None => write_current_until(&mut file, rendered.as_bytes(), deadline, wall_bounds)?,
+        }
         check()?;
         foreground(&file)?;
-        write_current_until(&mut file, b"\n", deadline, wall_bounds)?;
+        match original {
+            Some(bounds) => write_prompt_current(&mut file, b"\n", Some(bounds), None)?,
+            None => write_current_until(&mut file, b"\n", deadline, wall_bounds)?,
+        }
         check()?;
         foreground(&file)?;
         file.flush()?;
@@ -1050,6 +1066,13 @@ pub(crate) struct FinancialIntakeSetupApprovalV1 {
 }
 #[cfg(all(feature = "durable-proposal", target_os = "linux"))]
 impl FinancialIntakeSetupApprovalV1 {
+    #[cfg(feature = "coordinated-financial-workflow-v1")]
+    pub(crate) fn original_restriction_bounds(&self, source: (u64, u64)) -> Result<OriginalPromptBoundsV1> {
+        self.check()?;
+        OriginalPromptBoundsV1::new(self.deadline, source)?.narrow_until(
+            self.wall_until.checked_mul(1000).ok_or(Error::Permission)?,
+        )
+    }
     pub(crate) fn require_scope(
         &self,
         scope: &wholepact_protocol::authorization::retention::SignedRetentionScope,

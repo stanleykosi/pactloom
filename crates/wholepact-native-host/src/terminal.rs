@@ -287,6 +287,11 @@ pub(crate) fn check_original_coordinator_restriction() -> Result<()> {
     #[cfg(not(all(feature = "coordinated-financial-workflow-v1", target_os = "linux")))]
     Ok(())
 }
+#[cfg(all(feature = "coordinated-financial-workflow-v1", target_os = "linux"))]
+pub(crate) fn original_coordinated_session_ceiling() -> Result<std::time::Instant> {
+    coordinated_host_v1::original_session_ceiling()
+}
+
 pub(crate) fn coordinated_restriction_required() -> bool {
     #[cfg(all(feature = "coordinated-financial-workflow-v1", target_os = "linux"))]
     return coordinated_host_v1::required();

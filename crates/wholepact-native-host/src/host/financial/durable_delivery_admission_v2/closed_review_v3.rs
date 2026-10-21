@@ -6,6 +6,10 @@ use wholepact_signer::authority_bridge::durable_delivery_admission_ipc_v3::{Dura
 use wholepact_protocol::durable_proposal_v1::FixedProposalIdentityV1;
 use wholepact_signer::authority_bridge::durable_review_ipc_v3::{PreparedDurableReviewRecipientV3, VerifiedImportedDurableReviewSessionV3};
 
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+#[path = "closed_review_v3/retained_result_v1.rs"]
+mod retained_result_v1;
+
 #[derive(Serialize)]
 pub(in crate::host) struct OriginalDeliveryExportV3 {
     pub request: DurableDeliveryAdmissionRequestV2,
@@ -332,6 +336,7 @@ pub(in crate::host::financial) struct RetainedCoordinatedAdmissionV1<'host> {
     exported: OriginalDeliveryExportV3,
     admitted: Option<DurableDeliveryAdmissionStatusV3>,
     verification_started: bool,
+    material_delivery_restriction: retained_result_v1::HostMaterialDeliveryRestrictionV1,
 }
 
 #[cfg(feature = "coordinated-financial-workflow-v1")]
@@ -392,11 +397,13 @@ pub(in crate::host::financial) fn begin_original_borrowed_fork_v3<'host>(
         || prior.export_scope.recipient.participant_id == selection.participant_id)
     { return Err(Error::Authentication); }
     if !selection.signer_socket.is_absolute() { return Err(Error::Authentication); }
+    let mut material_delivery_restriction = None;
     let (verified, exported) = host.private_original_delivery_export_v3(workspace, &selection.choices, |fixed, digest, bytes, delivery, materials| {
         if fixed.proposal_binding != selection.request.proposal_binding
             || previous.is_some_and(|prior| prior.request.delivery != *delivery
                 || prior.export_scope.proposal != *fixed)
         { return Err(Error::Authentication); }
+        material_delivery_restriction = Some(retained_result_v1::HostMaterialDeliveryRestrictionV1::capture(delivery, materials)?);
         let pair = PairScope { account_id: selection.account_id.clone(), participant_id: selection.participant_id.clone(), agreement_id: fixed.agreement_id.clone(), manifest_digest: fixed.manifest_digest.clone(), history_read: true, authorization_export: false, preconstruction_export: true };
         terminal.confirm("Pair this installed original reviewer for original setup and independently approved closed V3 receive/view. No financial execution is enabled.")?;
         let provider = InstalledSignerProvider::load_for_original_fork(verifier).map_err(|_| Error::Permission)?;
@@ -411,6 +418,7 @@ pub(in crate::host::financial) fn begin_original_borrowed_fork_v3<'host>(
         exported,
         admitted: None,
         verification_started: false,
+        material_delivery_restriction: material_delivery_restriction.ok_or(Error::Permission)?,
     })
 }
 

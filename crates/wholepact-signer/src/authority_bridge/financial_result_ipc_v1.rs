@@ -136,6 +136,11 @@ impl FinancialResultObserverV1 {
         }
     }
 }
+#[path = "financial_result_ipc_v1/retained_original_v3.rs"]
+mod retained_original_v3;
+pub use retained_original_v3::FinancialResultRestrictionV1;
+use retained_original_v3::{OriginalResultRestrictionsV1, read_restricted_observed, read_setup_restricted_observed, write_restricted};
+
 const MAX_FRAME: usize = 512 * 1024;
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -234,21 +239,7 @@ fn read_observed<T: serde::de::DeserializeOwned>(
     check: &dyn Fn() -> Result<()>,
     observer: Option<&FinancialResultObserverV1>,
 ) -> Result<T> {
-    let bytes = wholepact_signer_origin::framing::read_frame_capped_checked_observed_until(
-        stream,
-        peer,
-        MAX_FRAME,
-        deadline,
-        || check().map_err(|_| wholepact_signer_origin::Error::Permission),
-    )
-    .map_err(|failure| {
-        if let Some(observer) = observer {
-            observer.frame.set(Some(failure.cause));
-        }
-        BridgeError::Ipc
-    })?;
-    wholepact_core::strict_json::parse_typed_json_with_byte_limit(&bytes, MAX_FRAME)
-        .map_err(|_| BridgeError::Binding)
+    read_restricted_observed(stream, peer, deadline, check, observer, None)
 }
 // Only inert preview / HostPrepared / READY frames use the setup budget.
 // Actual payload, Fetch, Current and Finish remain on the strict action reader.
@@ -267,21 +258,7 @@ fn read_setup_observed<T: serde::de::DeserializeOwned>(
     check: &dyn Fn() -> Result<()>,
     observer: Option<&FinancialResultObserverV1>,
 ) -> Result<T> {
-    let bytes = wholepact_signer_origin::framing::read_setup_frame_capped_checked_observed_until(
-        stream,
-        peer,
-        MAX_FRAME,
-        deadline,
-        || check().map_err(|_| wholepact_signer_origin::Error::Permission),
-    )
-    .map_err(|failure| {
-        if let Some(observer) = observer {
-            observer.frame.set(Some(failure.cause));
-        }
-        BridgeError::Ipc
-    })?;
-    wholepact_core::strict_json::parse_typed_json_with_byte_limit(&bytes, MAX_FRAME)
-        .map_err(|_| BridgeError::Binding)
+    read_setup_restricted_observed(stream, peer, deadline, check, observer, None)
 }
 fn write<T: Serialize>(
     stream: &mut UnixStream,
@@ -575,6 +552,7 @@ impl ApprovedFinancialReturnV1 {
 /// Owns the actual installed trust anchor and checked kernel peer, not an old
 /// signing lease or a caller-asserted delivery record. No Clone/serde constructor.
 pub struct AuthenticatedFinancialResultLeaseV1 {
+    original_restrictions: Option<OriginalResultRestrictionsV1>,
     diagnostic: Mutex<Option<FinancialResultDiagnosticV1>>,
     provider: crate::authority_bridge::provider::InstalledSignerProvider,
     peer: PeerProcess,
@@ -609,9 +587,13 @@ impl AuthenticatedFinancialResultLeaseV1 {
             if self.failed.load(Ordering::Acquire) || Instant::now() >= deadline {
                 return Err(BridgeError::Permission);
             }
-            self.peer.check_alive().map_err(|_| BridgeError::Permission)
+            self.peer.check_alive().map_err(|_| BridgeError::Permission)?;
+            self.original_restrictions.as_ref().map_or(Ok(()), |r| r.check())
         };
+        let restriction = || self.original_restrictions.as_ref().map_or(Ok(()), |r| r.check());
+        let final_check = self.original_restrictions.as_ref().map(|_| &restriction as &dyn Fn() -> Result<()>);
         let result = (|| {
+            restriction()?;
             current()?;
             observer.at(FinancialResultStageV1::CurrentLock);
             let mut stream =
@@ -630,19 +612,20 @@ impl AuthenticatedFinancialResultLeaseV1 {
             timing.remaining_before_write_ms = Some(bounded_elapsed_ms(
                 deadline.saturating_duration_since(Instant::now()),
             ));
-            write(
+            write_restricted(
                 &mut stream,
                 &Command::Check {
                     nonce: nonce.clone(),
                 },
                 deadline,
                 &current,
+                final_check,
             )?;
             observer.at(FinancialResultStageV1::CurrentRead);
             timing.remaining_before_read_ms = Some(bounded_elapsed_ms(
                 deadline.saturating_duration_since(Instant::now()),
             ));
-            let response = read_observed(&stream, &self.peer, deadline, &current, Some(&observer))?;
+            let response = read_restricted_observed(&stream, &self.peer, deadline, &current, Some(&observer), final_check)?;
             observer.at(FinancialResultStageV1::CurrentMatch);
             match response {
                 Response::Current {
@@ -698,12 +681,15 @@ impl AuthenticatedFinancialResultLeaseV1 {
             if Instant::now() >= deadline {
                 return Err(BridgeError::Permission);
             }
-            self.peer.check_alive().map_err(|_| BridgeError::Permission)
+            self.peer.check_alive().map_err(|_| BridgeError::Permission)?;
+            self.original_restrictions.as_ref().map_or(Ok(()), |r| r.check())
         };
+        let restriction = || self.original_restrictions.as_ref().map_or(Ok(()), |r| r.check());
+        let final_check = self.original_restrictions.as_ref().map(|_| &restriction as &dyn Fn() -> Result<()>);
         observer.at(FinancialResultStageV1::FinishWrite);
-        write(&mut stream, &Command::Finish, deadline, &current)?;
+        write_restricted(&mut stream, &Command::Finish, deadline, &current, final_check)?;
         observer.at(FinancialResultStageV1::FinishRead);
-        let response = read_observed(&stream, &self.peer, deadline, &current, Some(observer))?;
+        let response = read_restricted_observed(&stream, &self.peer, deadline, &current, Some(observer), final_check)?;
         observer.at(FinancialResultStageV1::FinishMatch);
         match response {
             Response::Finished => Ok(()),
@@ -830,6 +816,7 @@ impl AuthenticatedFinancialResultPreviewV1 {
     }
 }
 pub struct PreparedFinancialResultReceiverV1 {
+    original_restrictions: Option<OriginalResultRestrictionsV1>,
     setup_deadline: Instant,
     provider: crate::authority_bridge::provider::InstalledSignerProvider,
     peer: PeerProcess,
@@ -871,6 +858,7 @@ impl PreparedFinancialResultReceiverV1 {
             return Err(BridgeError::Binding);
         }
         Ok(Self {
+            original_restrictions: None,
             setup_deadline: deadline,
             provider,
             peer,
@@ -904,24 +892,31 @@ impl PreparedFinancialResultReceiverV1 {
         observer: &FinancialResultObserverV1,
     ) -> Result<AuthenticatedFinancialResultLeaseV1> {
         let deadline = self.setup_deadline.min(self.original_deadline);
-        let current = || self.peer.check_alive().map_err(|_| BridgeError::Permission);
+        let current = || {
+            self.peer.check_alive().map_err(|_| BridgeError::Permission)?;
+            self.original_restrictions.as_ref().map_or(Ok(()), |r| r.check())
+        };
+        let restriction = || self.original_restrictions.as_ref().map_or(Ok(()), |r| r.check());
+        let final_check = self.original_restrictions.as_ref().map(|_| &restriction as &dyn Fn() -> Result<()>);
+        restriction()?;
         observer.at(FinancialResultStageV1::InstalledProviderVerification);
         let actual = self.provider.verify_server(&self.stream)?;
         self.peer
             .same_live_process(&actual)
             .map_err(|_| BridgeError::Permission)?;
         observer.at(FinancialResultStageV1::HostPreparedWrite);
-        write(
+        write_restricted(
             &mut self.stream,
             &Command::HostPrepared {
                 preview_digest: self.preview.data.digest()?,
             },
             deadline.min(Instant::now() + Duration::from_secs(120)),
             &current,
+            final_check,
         )?;
         observer.at(FinancialResultStageV1::ReadyWait);
         let response =
-            read_setup_observed(&self.stream, &self.peer, deadline, &current, Some(observer))?;
+            read_setup_restricted_observed(&self.stream, &self.peer, deadline, &current, Some(observer), final_check)?;
         observer.at(FinancialResultStageV1::ReadyMatch);
         let Response::Ready { lease_id: ready } = response else {
             return Err(BridgeError::Permission);
@@ -933,16 +928,17 @@ impl PreparedFinancialResultReceiverV1 {
             .original_deadline
             .min(started + Duration::from_secs(120));
         observer.at(FinancialResultStageV1::FetchWrite);
-        write(
+        write_restricted(
             &mut self.stream,
             &Command::Fetch {
                 lease_id: ready.clone(),
             },
             deadline,
             &current,
+            final_check,
         )?;
         observer.at(FinancialResultStageV1::HeldRead);
-        let response = read_observed(&self.stream, &self.peer, deadline, &current, Some(observer))?;
+        let response = read_restricted_observed(&self.stream, &self.peer, deadline, &current, Some(observer), final_check)?;
         observer.at(FinancialResultStageV1::HeldMatch);
         let Response::Held {
             lease_id,
@@ -964,6 +960,7 @@ impl PreparedFinancialResultReceiverV1 {
         }
         let deadline = deadline.min(started + Duration::from_millis(remaining_ms));
         let lease = AuthenticatedFinancialResultLeaseV1 {
+            original_restrictions: self.original_restrictions,
             diagnostic: Mutex::new(None),
             provider: self.provider,
             peer: self.peer,
