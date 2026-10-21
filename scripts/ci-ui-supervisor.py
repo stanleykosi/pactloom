@@ -4,7 +4,8 @@
 The workflow first runs the maintained fixed-origin bootstrap. This supervisor
 builds three serial artifacts, runs exactly two containers, and publishes no
 success before containers, temporary image and build cache are verified absent.
-No credentials, fixture bytes, frames or raw tool logs leave the containers.
+No credentials, fixture bytes, frames or raw runtime logs leave the containers.
+Only pre-credential build failures publish a bounded, scrubbed compiler tail.
 """
 import hashlib
 import importlib.util
@@ -56,7 +57,7 @@ TMPFS = {
     '/tmp': 'rw,noexec,nosuid,nodev,size=64m,mode=1777',
     '/dev/shm': 'rw,noexec,nosuid,nodev,size=128m,mode=1777',
 }
-STAGES = frozenset(('preflight', 'source', 'toolchain', 'compile', 'packages', 'image',
+STAGES = frozenset(('preflight', 'source', 'toolchain', 'prerequisites', 'compile', 'packages', 'image',
                     'container', 'runtime', 'projection', 'cleanup', 'supervisor'))
 CHECKS = frozenset(('ci_context', 'architecture', 'arguments', 'source_commit', 'dirty_source',
     'gate_mode', 'toolchain_version', 'command_failed', 'client_deadline', 'output_limit',
@@ -71,7 +72,9 @@ CHECKS = frozenset(('ci_context', 'architecture', 'arguments', 'source_commit', 
     'device_requests', 'extra_mounts', 'image_volumes', 'pid_namespace', 'ipc_namespace',
     'user_namespace', 'cgroup_namespace', 'setup_user', 'supplementary_groups',
     'tmpfs_destinations', 'tmpfs_options', 'log_driver', 'restart_policy', 'ulimits',
-    'entrypoint', 'command', 'auto_remove', 'runtime_mounts'))
+    'entrypoint', 'command', 'auto_remove', 'runtime_mounts', 'build_environment',
+    'prerequisite_files', 'prerequisite_prefix', 'prerequisite_link', 'prerequisite_versions',
+    'prerequisite_tool'))
 PACKAGE_CHECKS = frozenset(('duplicate_key', 'manifest', 'manifest_size', 'manifest_pin', 'manifest_shape',
     'manifest_version', 'manifest_origin', 'package_name', 'package_version', 'package_architecture',
     'roots', 'base_packages', 'packages', 'package_duplicate', 'package_size', 'dependency_grammar',
@@ -91,11 +94,12 @@ IMAGE_CHECKS = frozenset(('arguments', 'manifest', 'input_file', 'input_digest',
 
 
 class Failure(Exception):
-    def __init__(self, stage, check, output=b''):
+    def __init__(self, stage, check, output=b'', exit_status=None):
         self.stage = stage if stage in STAGES else 'supervisor'
         self.check = check if check in CHECKS else 'internal'
         self.code = self.check
         self.output = output
+        self.exit_status = exit_status
         super().__init__(self.check)
 
 
@@ -176,9 +180,12 @@ def command(args, stage, *, seconds=20, limit=1024 * 1024, env=None, on_line=Non
         except BaseException:
             cleanup_failed = True
     if cleanup_failed and first is None:
-        first = Failure(stage, 'cleanup_unverified')
+        # A completed nonzero command precedes a later pipe/selector cleanup
+        # error. Keep its actual failure, with cleanup uncertainty separate.
+        first = Failure(stage, 'command_failed' if status else 'cleanup_unverified')
     if first is not None:
         first.output = bytes(output)
+        first.exit_status = process.returncode
         first.cleanup_failed = cleanup_failed
         raise first
     return status, bytes(output)
@@ -187,7 +194,7 @@ def command(args, stage, *, seconds=20, limit=1024 * 1024, env=None, on_line=Non
 def checked(args, stage, **kwargs):
     status, output = command(args, stage, **kwargs)
     if status:
-        raise Failure(stage, 'command_failed', output)
+        raise Failure(stage, 'command_failed', output, exit_status=status)
     return output
 
 
@@ -217,30 +224,114 @@ def exact_source(sha):
     require((HERE / 'qualification-gate-mode').read_bytes() == b'ui\n', 'source', 'gate_mode')
 
 
-def compile_errors(raw):
-    prefixes = ('crates/wholepact-financial-coordinator', 'crates/wholepact-financial-coordinator-origin',
-                'crates/wholepact-native-host', 'crates/wholepact-authority')
-    sources = set(checked(['git', 'ls-files', '--', *prefixes], 'source', limit=262144).decode('ascii').splitlines())
-    seen = set()
-    for line in raw.splitlines():
-        if len(line) > 2 * 1024 * 1024:
-            continue
-        try:
-            row = json.loads(line)
-            msg = row.get('message', {})
-            if row.get('reason') != 'compiler-message' or msg.get('level') != 'error':
-                continue
-            code = (msg.get('code') or {}).get('code')
-            code = code if type(code) is str and re.fullmatch('E[0-9]{4}', code) else 'Uncoded'
-            for span in msg.get('spans', [])[:64]:
-                name, number = span.get('file_name'), span.get('line_start')
-                if span.get('is_primary') is True and name in sources and type(number) is int and 0 < number < 100000:
-                    key = (code, name, number)
-                    if key not in seen and len(seen) < 20:
-                        seen.add(key)
-                        emit('COMPILE', dict(code=code, source=name, line=number))
-        except (ValueError, TypeError, AttributeError):
-            continue
+BUILD_LOG_LIMIT = 64 * 1024
+BUILD_ENV_KEYS = frozenset(('PATH', 'HOME', 'CARGO_HOME', 'CARGO_TARGET_DIR', 'CARGO_BUILD_JOBS',
+    'CARGO_INCREMENTAL', 'RUSTUP_HOME', 'RUSTFLAGS', 'WHOLEPACT_BUILD_JOBS',
+    'WHOLEPACT_SQLCIPHER_PREFIX', 'SQLCIPHER_LIB_DIR', 'SQLCIPHER_INCLUDE_DIR',
+    'SQLCIPHER_STATIC', 'PKG_CONFIG_ALL_STATIC', 'PKG_CONFIG_PATH',
+    'GIT_CONFIG_NOSYSTEM', 'GIT_CONFIG_GLOBAL', 'GIT_TERMINAL_PROMPT'))
+BUILD_PACKAGES = {name: 'wholepact-native-host' if name == 'pristine-setup'
+    else 'wholepact-financial-coordinator' for name in I.ARTIFACT_FILES}
+BUILD_PACKAGES['encrypted-storage-prerequisites'] = 'sqlcipher-4.19.0+openssl-3.5.9'
+BUILD_TOOLS = ('curl', 'sha256sum', 'tar', 'make', 'gcc', 'perl', 'tclsh', 'pkg-config')
+
+
+def build_failure_tail(raw):
+    """Pre-credential compiler output only, never reusable for runtime logs.
+
+    Builds use a new HOME/CARGO_HOME and explicit credential-free environment.
+    No fixture, key, native source setup or container exists at this boundary.
+    Preserve dependency/build-script/linker text, including diagnostics without
+    primary local spans. JSON escaping prevents workflow-command/terminal input.
+    """
+    total = len(raw)
+    text = raw[-BUILD_LOG_LIMIT:].decode('utf-8', errors='replace')
+    text = re.sub(r'github_pat_[A-Za-z0-9_]+|gh[pousr]_[A-Za-z0-9_]+', '[REDACTED]', text)
+    text = re.sub(r'(?i)\b(?:bearer|basic)\s+[A-Za-z0-9+/_.=-]+', '[REDACTED]', text)
+    text = re.sub(r'(https?://)[^\s/@]+(?::[^\s/@]*)?@', r'\1[REDACTED]@', text)
+    text = re.sub(r'(?i)\b([A-Za-z0-9_]*(?:token|password|secret|api_key))\s*[=:]\s*[^\s,;]+',
+                  r'\1=[REDACTED]', text)
+    text = ''.join(c if c in '\n\t' or (ord(c) >= 32 and ord(c) != 127) else '?' for c in text)
+    encoded = text.encode('utf-8')
+    shortened = len(encoded) > BUILD_LOG_LIMIT
+    text = encoded[-BUILD_LOG_LIMIT:].decode('utf-8', errors='ignore')
+    return dict(combined_stdout_stderr_tail=text, tail_bytes=len(text.encode('utf-8')),
+                captured_output_bytes=total, tail_truncated=total > BUILD_LOG_LIMIT or shortened)
+
+
+def compile_failure(error, name, args, environment):
+    # Only the pre-credential provider build/checks and three Cargo invocations
+    # use this output contract. Runtime/image/install logs remain closed.
+    value = dict(schema_version=1, artifact=name, package=BUILD_PACKAGES[name], command=args,
+        exit_status=error.exit_status, original_check=error.check, pre_credential=True,
+        exit_signal=-error.exit_status if type(error.exit_status) is int and error.exit_status < 0 else None,
+        capture_truncated=error.check == 'output_limit',
+        client_cleanup_failed=bool(getattr(error, 'cleanup_failed', False)),
+        environment_keys=sorted(environment), credential_environment_forwarded=False)
+    try:
+        value.update(build_failure_tail(error.output))
+    except Exception:
+        # Preserve exact identity/status/first check even if diagnostic rendering
+        # itself fails. Never substitute a cleanup error or an anonymous failure.
+        value['diagnostic_unavailable'] = True
+    emit('COMPILE_FAILURE', value)
+
+
+def build_command(name, args, stage, environment, **bounds):
+    require(name in BUILD_PACKAGES and set(environment) <= BUILD_ENV_KEYS,
+            stage, 'build_environment')
+    try:
+        return checked(args, stage, env=environment, **bounds)
+    except Failure as error:
+        compile_failure(error, name, args, environment)
+        raise
+
+
+def encrypted_build_environment(root, environment):
+    """Maintained pinned private provider build, before any fixture or container.
+
+    The unchanged recipe also executes its synthetic in-memory version probe in
+    isolated CI. It does not create the three-account fixture or install trust.
+    Its static OpenSSL 3.5.9 is separate from the image's pinned OpenSSL CLI.
+    """
+    prefix = root / 'sqlcipher'
+    require(re.fullmatch(r'/[A-Za-z0-9_./-]+', str(prefix)) is not None
+            and not prefix.exists(), 'prerequisites', 'prerequisite_prefix')
+    for tool in BUILD_TOOLS:
+        if shutil.which(tool, path=environment['PATH']) is None:
+            emit('PREREQUISITE_FAILURE', dict(stage='prerequisites', check='prerequisite_tool',
+                missing_tool=tool, pre_credential=True, cleanup_pending=True))
+            raise Failure('prerequisites', 'prerequisite_tool')
+    selected = dict(environment, WHOLEPACT_SQLCIPHER_PREFIX=str(prefix), WHOLEPACT_BUILD_JOBS='3')
+    name = 'encrypted-storage-prerequisites'
+    build_command(name, ['bash', 'scripts/build-encrypted-storage-deps.sh'], 'prerequisites', selected,
+                  seconds=1500, limit=32 * 1024 * 1024)
+    for relative in ('lib/libsqlcipher.a', 'openssl/lib/libcrypto.a', 'include/sqlite3.h',
+                     'include/sqlite3ext.h', 'lib/pkgconfig/sqlcipher.pc', 'env.sh', 'build-versions.txt'):
+        path = prefix / relative
+        require(path.is_file() and not path.is_symlink() and path.stat().st_size > 0
+                and path.resolve().is_relative_to(prefix.resolve()), 'prerequisites', 'prerequisite_files')
+    expected_env = (f"export SQLCIPHER_LIB_DIR='{prefix}/lib'\n"
+        f"export SQLCIPHER_INCLUDE_DIR='{prefix}/include'\n"
+        "export SQLCIPHER_STATIC=1\nexport PKG_CONFIG_ALL_STATIC=1\n"
+        f"export WHOLEPACT_SQLCIPHER_PREFIX='{prefix}'\n")
+    require((prefix / 'env.sh').read_text() == expected_env, 'prerequisites', 'prerequisite_prefix')
+    versions = (prefix / 'build-versions.txt').read_text().splitlines()
+    require(len(versions) == 3 and versions[0] == '4.19.0 community' and versions[1] == 'openssl'
+            and re.fullmatch(r'OpenSSL 3\.5\.9 [0-9]{1,2} [A-Za-z]{3} [0-9]{4}', versions[2]) is not None,
+            'prerequisites', 'prerequisite_versions')
+    selected.update(SQLCIPHER_LIB_DIR=str(prefix / 'lib'), SQLCIPHER_INCLUDE_DIR=str(prefix / 'include'),
+        SQLCIPHER_STATIC='1', PKG_CONFIG_ALL_STATIC='1', PKG_CONFIG_PATH=str(prefix / 'lib/pkgconfig'))
+    actual_prefix = build_command(name, ['pkg-config', '--variable=prefix', 'sqlcipher'],
+        'prerequisites', selected, seconds=20, limit=4096)
+    require(actual_prefix == (str(prefix) + '\n').encode(), 'prerequisites', 'prerequisite_prefix')
+    links = build_command(name, ['pkg-config', '--static', '--libs', 'sqlcipher'],
+        'prerequisites', selected, seconds=20, limit=4096)
+    require(links == f'-L{prefix}/lib -lsqlcipher -L{prefix}/openssl/lib -lcrypto -ldl -lpthread -lm \n'.encode(),
+            'prerequisites', 'prerequisite_link')
+    emit('PREREQUISITES', dict(sqlcipher='4.19.0', static_openssl='3.5.9', private_static_prefix=True,
+        synthetic_in_memory_version_probe=True, pre_credential=True, fixture_created=False))
+    return selected
 
 
 def select_artifact(raw, name, target):
@@ -294,11 +385,14 @@ def build_inputs(root, sha):
         (root / folder).mkdir()
     env = dict(PATH=os.environ['PATH'], HOME=str(root / 'home'), CARGO_HOME=str(root / 'cargo'),
         CARGO_TARGET_DIR=str(root / 'target'), CARGO_BUILD_JOBS='3', CARGO_INCREMENTAL='0',
-        RUSTUP_HOME=os.environ.get('RUSTUP_HOME', str(pathlib.Path.home() / '.rustup')))
+        RUSTUP_HOME=os.environ.get('RUSTUP_HOME', str(pathlib.Path.home() / '.rustup')),
+        GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null', GIT_TERMINAL_PROMPT='0')
     checked(['rustup', 'toolchain', 'install', '1.99.0', '--profile', 'minimal', '--no-self-update'],
             'toolchain', seconds=600, limit=4 * 1024 * 1024, env=env)
     require(checked(['rustup', 'run', '1.99.0', 'rustc', '--version'], 'toolchain', env=env).decode().strip() == B.RUSTC,
             'toolchain', 'toolchain_version')
+    exact_source(sha)
+    env = encrypted_build_environment(root, env)
     pins = {}
     # Serial invocations only. Cargo fingerprints features/cfgs; snapshot each
     # current compiler-selected executable before any following build can run.
@@ -318,14 +412,7 @@ def build_inputs(root, sha):
         args += ['--lib'] if setup else ['--bin', 'wholepact-financial-coordinator']
         args += ['--features', 'durable-proposal,synthetic-born-joined-qualification' if setup else FEATURE,
                  '--message-format=json']
-        try:
-            raw = checked(args, 'compile', seconds=1800, limit=32 * 1024 * 1024, env=selected)
-        except Failure as error:
-            try:
-                compile_errors(error.output)
-            except Failure:
-                pass  # Diagnostic enrichment cannot replace the compile failure.
-            raise
+        raw = build_command(name, args, 'compile', selected, seconds=1800, limit=32 * 1024 * 1024)
         artifact = select_artifact(raw, name, root / 'target')
         shutil.copyfile(artifact, inputs / name)
         (inputs / name).chmod(0o555)
