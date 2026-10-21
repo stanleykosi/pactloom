@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Reuse only CI70's historical successful bootstrap prerequisite, never its failed UI."""
+import hashlib
 import json
 import subprocess
 import sys
@@ -16,7 +17,17 @@ ALLOWED = frozenset((
     "scripts/ci-ui-prerequisite.py", "scripts/tests/test_ci_ui_prerequisite.py",
     "scripts/ci-ui-setup-wrapper.py", "scripts/ci-ui-output.py",
     "scripts/ci-ui-container.py", "scripts/tests/test_ci_ui_setup.py",
+    "scripts/ci-ui-artifacts.py", "scripts/tests/test_ci_ui_artifacts.py",
+    "scripts/ci-ui-reuse.py", "scripts/tests/test_ci_ui_reuse.py",
+    "scripts/ci-ui-reuse-runner.py", "scripts/tests/test_ci_ui_reuse_runner.py",
+    "scripts/ci-ui-reuse-pin.json", "scripts/ci-ui-linux.sh",
 ))
+# This one cfg(test) Host fixture is NOT in the bootstrap production image.
+# Permit only the independently reviewed exact parent-side O_NOCTTY correction,
+# not arbitrary Rust changes or a broadened path allowlist.
+FIXTURE = "crates/wholepact-native-host/src/host/manual_enrollment/command/roster_publication_v2/sequential_construction_v3_qualification.rs"
+FIXTURE_BEFORE = "cb895f688b0060d858d0a61fe1958ac105a0ebb877a613dd035157ba3d73d34c"
+FIXTURE_AFTER = "74024b0ab7fd7d1931d3fbd369598290b481ace0346baf5498b08f96bb79117c"
 STEPS = (
     "Isolated bootstrap profile (UI uses seven reap/lifetime prerequisites)",
     "Verify bootstrap containers and temporary image removed",
@@ -37,8 +48,13 @@ def verify_jobs(value):
         if len(rows) != 1 or rows[0].get("status") != "completed" or rows[0].get("conclusion") != "success":
             raise ValueError("historical_prerequisite")
 
-def verify_paths(paths):
-    if not set(paths) <= ALLOWED:
+def verify_paths(paths, fixture_hashes=None):
+    changed = set(paths)
+    if FIXTURE in changed:
+        if fixture_hashes != (FIXTURE_BEFORE, FIXTURE_AFTER):
+            raise ValueError("test_fixture_delta")
+        changed.remove(FIXTURE)
+    if not changed <= ALLOWED:
         raise ValueError("source_closure_changed")
 
 def git(*args):
@@ -51,7 +67,11 @@ def main():
         if git("status", "--porcelain", "--untracked-files=all"):
             raise ValueError("working_tree")
         paths = git("diff", "--no-renames", "--name-only", "-z", BASE, "HEAD").decode().split("\0")
-        verify_paths([p for p in paths if p])
+        paths = [p for p in paths if p]
+        fixture_hashes = None
+        if FIXTURE in paths:
+            fixture_hashes = tuple(hashlib.sha256(git("show", rev + ":" + FIXTURE)).hexdigest() for rev in (BASE, "HEAD"))
+        verify_paths(paths, fixture_hashes)
         request = urllib.request.Request(
             "https://api.github.com/repos/stanleykosi/pactloom/actions/runs/39604966999/jobs?per_page=100",
             headers={"Accept": "application/vnd.github+json", "User-Agent": "pactloom-public-prerequisite"})

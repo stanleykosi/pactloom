@@ -3,4 +3,4 @@
 set -euo pipefail
 umask 077
 ulimit -c 0
-exec python3 -I -B scripts/ci-ui-supervisor.py run
+exec python3 -I -B scripts/ci-ui-reuse-runner.py
