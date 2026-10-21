@@ -1,0 +1,22 @@
+[package]
+name = "wholepact-financial-coordinator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Inert fixed-fork common-image coordinator bootstrap; no financial adapters"
+
+[features]
+default = []
+common-image-bootstrap = []
+
+[[bin]]
+name = "wholepact-financial-coordinator"
+path = "src/main.rs"
+required-features = ["common-image-bootstrap"]
+
+[dependencies]
+libc = "0.2"
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true

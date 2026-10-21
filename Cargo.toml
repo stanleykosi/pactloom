@@ -20,6 +20,7 @@ members = [
   "crates/wholepact-authority",
   "crates/wholepact-offline-bridge",
   "crates/wholepact-financial-review-model",
+  "crates/wholepact-financial-coordinator",
 ]
 
 [workspace.package]
