@@ -174,6 +174,19 @@ class ClientCleanup(unittest.TestCase):
         self.assertEqual(caught.exception.check, 'cleanup_unverified')
         self.assertTrue(caught.exception.cleanup_failed)
 
+    def test_nonzero_exit_survives_later_pipe_cleanup_failure(self):
+        process, selector = mock.Mock(), mock.Mock()
+        process.wait.return_value = process.returncode = 101
+        selector.get_map.return_value = {}
+        process.stdout.close.side_effect = OSError('later cleanup failure')
+        with mock.patch.object(S.subprocess, 'Popen', return_value=process), \
+             mock.patch.object(S.selectors, 'DefaultSelector', return_value=selector), \
+             self.assertRaises(S.Failure) as caught:
+            S.command(['inert'], 'compile')
+        self.assertEqual(caught.exception.check, 'command_failed')
+        self.assertEqual(caught.exception.exit_status, 101)
+        self.assertTrue(caught.exception.cleanup_failed)
+
     def test_staging_cause_is_closed_and_cleanup_separate(self):
         error = S.Failure('packages', 'staging_rejected')
         error.cause, error.cleanup_failed = 'download_digest', True
@@ -182,6 +195,172 @@ class ClientCleanup(unittest.TestCase):
         self.assertTrue(value['client_or_staging_cleanup_failed'])
         error.cause = 'PRIVATE_SENTINEL'
         self.assertNotIn('PRIVATE_SENTINEL', json.dumps(S.failure_record(error)))
+
+
+class PreCredentialDiagnostics(unittest.TestCase):
+    def test_dependency_linker_and_build_script_text_survive_without_local_spans(self):
+        output = io.StringIO()
+        raw = b'error: failed to run custom build command\nld: cannot find -lsqlcipher\nno primary spans\n'
+        error = S.Failure('compile', 'command_failed', raw, exit_status=101)
+        args = ['rustup', 'run', '1.99.0', 'cargo', 'build']
+        with mock.patch.object(S, 'checked', side_effect=error), contextlib.redirect_stdout(output):
+            with self.assertRaises(S.Failure) as caught:
+                S.build_command('coordinator-production', args, 'compile', {'HOME': '/fresh'})
+        self.assertIs(caught.exception, error)
+        row = json.loads(output.getvalue().split(' ', 1)[1])
+        self.assertEqual(row['combined_stdout_stderr_tail'], raw.decode())
+        self.assertEqual(row['command'], args)
+        self.assertEqual(row['package'], 'wholepact-financial-coordinator')
+        self.assertEqual(row['exit_status'], 101)
+        self.assertFalse(row['capture_truncated'])
+        self.assertTrue(row['pre_credential'])
+
+    def test_tail_bound_utf8_and_capture_limit_are_distinct(self):
+        raw = b'old' * 40000 + ('\u2603' * 30000).encode()
+        value = S.build_failure_tail(raw)
+        self.assertLessEqual(value['tail_bytes'], 65536)
+        self.assertEqual(value['captured_output_bytes'], len(raw))
+        self.assertTrue(value['tail_truncated'])
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            S.compile_failure(S.Failure('compile', 'output_limit', b'captured', -9),
+                'coordinator-observed', ['cargo'], {})
+        row = json.loads(output.getvalue().split(' ', 1)[1])
+        self.assertTrue(row['capture_truncated'])
+        self.assertEqual(row['exit_signal'], 9)
+        self.assertEqual(row['original_check'], 'output_limit')
+        self.assertNotIn('total_output_bytes', row)
+
+    def test_accidental_tokens_userinfo_and_controls_are_scrubbed_and_json_escaped(self):
+        raw = (b'github_pat_private ghp_private Authorization: Bearer private '
+               b'Basic cHJpdmF0ZQ== https://user:private@example.test/path '
+               b'GITHUB_TOKEN=private API_KEY:private\x1b[31m\x00\r\n::error::not a workflow command\n')
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            S.compile_failure(S.Failure('compile', 'command_failed', raw, 1),
+                'pristine-setup', ['cargo', 'test', '--no-run'], {})
+        self.assertEqual(len(output.getvalue().splitlines()), 1)
+        self.assertNotIn('private', output.getvalue())
+        row = json.loads(output.getvalue().split(' ', 1)[1])
+        self.assertIn('[REDACTED]', row['combined_stdout_stderr_tail'])
+        for control in ('\x1b', '\x00', '\r'):
+            self.assertNotIn(control, row['combined_stdout_stderr_tail'])
+
+    def test_projector_fallback_preserves_exact_identity_and_first_failure(self):
+        output = io.StringIO()
+        error = S.Failure('compile', 'client_deadline', b'prior', -9)
+        error.cleanup_failed = True
+        with mock.patch.object(S, 'build_failure_tail', side_effect=ValueError()), contextlib.redirect_stdout(output):
+            S.compile_failure(error, 'pristine-setup', ['cargo', 'test', '--no-run'], {})
+        row = json.loads(output.getvalue().split(' ', 1)[1])
+        self.assertEqual(row['package'], 'wholepact-native-host')
+        self.assertEqual(row['command'], ['cargo', 'test', '--no-run'])
+        self.assertEqual(row['exit_status'], -9)
+        self.assertEqual(row['original_check'], 'client_deadline')
+        self.assertTrue(row['diagnostic_unavailable'])
+        self.assertTrue(row['client_cleanup_failed'])
+
+    def test_unexpected_environment_refused_before_any_command(self):
+        with mock.patch.object(S, 'checked') as checked, self.assertRaises(S.Failure):
+            S.build_command('coordinator-production', ['cargo'], 'compile', {'GITHUB_TOKEN': 'private'})
+        checked.assert_not_called()
+
+    def test_command_cleanup_preserves_status_signal_and_original_failure(self):
+        process, selector = mock.Mock(), mock.Mock()
+        process.pid, process.returncode = 123, -9
+        selector.get_map.return_value = {1: True}
+        selector.select.return_value = [(mock.Mock(fileobj=process.stdout), None)]
+        selector.close.side_effect = OSError('later cleanup error')
+        with mock.patch.object(S.subprocess, 'Popen', return_value=process), \
+             mock.patch.object(S.selectors, 'DefaultSelector', return_value=selector), \
+             mock.patch.object(S.os, 'read', return_value=b'exceeds bound'), \
+             mock.patch.object(S.os, 'killpg'), self.assertRaises(S.Failure) as caught:
+            S.command(['inert'], 'compile', limit=1)
+        self.assertEqual(caught.exception.check, 'output_limit')
+        self.assertEqual(caught.exception.exit_status, -9)
+        self.assertTrue(caught.exception.cleanup_failed)
+
+
+class EncryptedBuildPrerequisites(unittest.TestCase):
+    @staticmethod
+    def files(prefix):
+        for relative in ('lib/libsqlcipher.a', 'openssl/lib/libcrypto.a', 'include/sqlite3.h',
+                         'include/sqlite3ext.h', 'lib/pkgconfig/sqlcipher.pc'):
+            path = prefix / relative; path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(b'inert')
+        (prefix / 'env.sh').write_text(f"export SQLCIPHER_LIB_DIR='{prefix}/lib'\n"
+            f"export SQLCIPHER_INCLUDE_DIR='{prefix}/include'\nexport SQLCIPHER_STATIC=1\n"
+            f"export PKG_CONFIG_ALL_STATIC=1\nexport WHOLEPACT_SQLCIPHER_PREFIX='{prefix}'\n")
+        (prefix / 'build-versions.txt').write_text('4.19.0 community\nopenssl\nOpenSSL 3.5.9 29 Sep 2026\n')
+
+    def build(self, root, mismatch=None):
+        prefix = root / 'sqlcipher'
+        def fake(name, args, stage, environment, **bounds):
+            self.assertEqual(name, 'encrypted-storage-prerequisites')
+            self.assertEqual(stage, 'prerequisites')
+            if args[0] == 'bash':
+                self.assertEqual(args, ['bash', 'scripts/build-encrypted-storage-deps.sh'])
+                self.assertEqual(bounds, {'seconds': 1500, 'limit': 32 * 1024 * 1024})
+                self.assertEqual(environment['WHOLEPACT_SQLCIPHER_PREFIX'], str(prefix))
+                self.assertEqual(environment['WHOLEPACT_BUILD_JOBS'], '3')
+                self.files(prefix)
+                if mismatch == 'env': (prefix / 'env.sh').write_text('unexpected')
+                if mismatch == 'version': (prefix / 'build-versions.txt').write_text('wrong')
+                return b'not published on success'
+            self.assertEqual(environment['SQLCIPHER_STATIC'], '1')
+            self.assertEqual(environment['PKG_CONFIG_ALL_STATIC'], '1')
+            if '--variable=prefix' in args:
+                return b'/other\n' if mismatch == 'prefix' else (str(prefix) + '\n').encode()
+            return b'-lsqlcipher\n' if mismatch == 'link' else (
+                f'-L{prefix}/lib -lsqlcipher -L{prefix}/openssl/lib -lcrypto -ldl -lpthread -lm \n').encode()
+        with mock.patch.object(S, 'build_command', side_effect=fake), \
+             mock.patch.object(S.shutil, 'which', return_value='/fixed/tool'), \
+             contextlib.redirect_stdout(io.StringIO()):
+            return S.encrypted_build_environment(root, {'PATH': '/fixed', 'HOME': '/fresh'})
+
+    def test_exact_builder_static_prefix_and_all_cargo_environment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            env = self.build(root)
+            self.assertEqual(env['SQLCIPHER_LIB_DIR'], str(root / 'sqlcipher/lib'))
+            self.assertEqual(env['SQLCIPHER_INCLUDE_DIR'], str(root / 'sqlcipher/include'))
+            self.assertEqual(env['PKG_CONFIG_PATH'], str(root / 'sqlcipher/lib/pkgconfig'))
+        source = (ROOT / 'ci-ui-supervisor.py').read_text()
+        self.assertLess(source.index('env = encrypted_build_environment(root, env)'),
+                        source.index('for name in I.ARTIFACT_FILES:'))
+        self.assertIn('selected = dict(env)', source)
+        self.assertIn("GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null', GIT_TERMINAL_PROMPT='0'", source)
+
+    def test_prefix_link_env_and_version_drift_fail_closed(self):
+        for mismatch, check in (('env', 'prerequisite_prefix'), ('version', 'prerequisite_versions'),
+                                ('prefix', 'prerequisite_prefix'), ('link', 'prerequisite_link')):
+            with tempfile.TemporaryDirectory() as directory, self.assertRaises(S.Failure) as caught:
+                self.build(pathlib.Path(directory), mismatch)
+            self.assertEqual(caught.exception.check, check)
+
+    def test_exact_missing_tool_is_reported_before_silent_builder(self):
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.object(S.shutil, 'which', side_effect=lambda tool, path: None if tool == 'tclsh' else '/fixed'), \
+             mock.patch.object(S, 'build_command') as build, contextlib.redirect_stdout(output), \
+             self.assertRaises(S.Failure) as caught:
+            S.encrypted_build_environment(pathlib.Path(directory), {'PATH': '/fixed'})
+        build.assert_not_called()
+        self.assertEqual(caught.exception.check, 'prerequisite_tool')
+        self.assertEqual(json.loads(output.getvalue().split(' ', 1)[1])['missing_tool'], 'tclsh')
+
+    def test_builder_failure_has_same_bounded_diagnostic_not_runtime_logs(self):
+        output = io.StringIO()
+        failure = S.Failure('prerequisites', 'command_failed', b'make: compiler failed', 2)
+        with mock.patch.object(S, 'checked', side_effect=failure), contextlib.redirect_stdout(output), \
+             self.assertRaises(S.Failure):
+            S.build_command('encrypted-storage-prerequisites', ['bash', 'scripts/build-encrypted-storage-deps.sh'],
+                'prerequisites', {'PATH': '/fixed'})
+        row = json.loads(output.getvalue().split(' ', 1)[1])
+        self.assertEqual(row['package'], 'sqlcipher-4.19.0+openssl-3.5.9')
+        self.assertEqual(row['exit_status'], 2)
+        self.assertEqual(row['combined_stdout_stderr_tail'], 'make: compiler failed')
+        source = (ROOT / 'ci-ui-supervisor.py').read_text()
+        self.assertEqual(source.count('compile_failure(error,'), 2)  # definition and pre-credential wrapper only
 
 
 class RecordsAndCleanup(unittest.TestCase):

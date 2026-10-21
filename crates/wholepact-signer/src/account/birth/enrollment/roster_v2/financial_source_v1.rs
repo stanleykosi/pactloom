@@ -344,6 +344,83 @@ impl PreparedOriginalFinancialSourceV1 {
         prepared.check_retained_preparation()?;
         Ok(prepared)
     }
+    /// Same frozen ticket only. No journal/source guard is retained when this
+    /// returns to the caller that consumes Arm with origin.send_ready().
+    #[cfg(feature = "coordinated-signer-continue")]
+    pub(crate) fn check_coordinated_continuation_ready_v1(
+        &self,
+        presented: &crate::consent_journal::PresentedCoordinatedFinancialContinuationV1,
+        arm: &wholepact_financial_coordinator_origin::SignerContinueArmV1,
+    ) -> Result<()> {
+        self.check_custody()?;
+        presented.check_source(self.identity_digest(), self.original_deadline, self.original_ceiling_ms)?;
+        presented.check_arm(arm)?;
+        {
+            let binding = self.binding.lock().map_err(|_| Error::Locked)?;
+            presented.check_arm(arm)?;
+            match &self.journal {
+                OriginalJournalV1::Before(journal) => journal
+                    .check_coordinated_financial_preparation_v1(&binding, presented, arm)?,
+                OriginalJournalV1::Financial(_) => return Err(Error::RecoveryRequired),
+            }
+        }
+        self.check_custody()?;
+        presented.check_arm(arm)?;
+        Ok(())
+    }
+    /// Distinct genuine Final is consumed together with the actual original
+    /// source. No native review is synthesized and no error authorizes retry.
+    #[cfg(feature = "coordinated-signer-continue")]
+    pub(crate) fn commit_coordinated_continuation_v1(
+        self,
+        presented: crate::consent_journal::PresentedCoordinatedFinancialContinuationV1,
+        final_admission: wholepact_financial_coordinator_origin::SignerContinueFinalV1,
+    ) -> std::result::Result<(Self, PendingFinancialContinuationAdmissionV1), crate::consent_journal::CoordinatedContinuationCommitFailureV1> {
+        use crate::consent_journal::CoordinatedContinuationCommitFailureV1 as Failure;
+        self.check_custody().map_err(Failure::before_effect)?;
+        presented.check_source(self.identity_digest(), self.original_deadline, self.original_ceiling_ms)
+            .map_err(|error| Failure::before_effect(error.into()))?;
+        presented.check_final(&final_admission).map_err(|error| Failure::before_effect(error.into()))?;
+        let Self {
+            retained,
+            original_commit,
+            original_disclosure,
+            journal,
+            binding,
+            identity: _,
+            recipient,
+            immutable,
+            lifetime,
+            original_ceiling_ms,
+            original_deadline,
+        } = self;
+        let OriginalJournalV1::Before(journal) = journal else {
+            return Err(Failure::before_effect(Error::RecoveryRequired));
+        };
+        let (journal, pending) = FinancialConsentJournalV1::transition_coordinated_original_v1(
+            journal,
+            binding.into_inner().map_err(|_| Failure::before_effect(Error::Locked))?,
+            presented,
+            final_admission,
+        )?;
+        let binding = journal.prepare_financial_source_binding_v1()
+            .map_err(|error| Failure::after_commit_attempt(error.into()))?;
+        let result = Self {
+            retained,
+            original_commit,
+            original_disclosure,
+            journal: OriginalJournalV1::Financial(journal),
+            identity: binding.identity_digest().into(),
+            binding: std::sync::Mutex::new(binding),
+            recipient,
+            immutable,
+            lifetime,
+            original_ceiling_ms,
+            original_deadline,
+        };
+        result.check_custody().map_err(Failure::after_commit_attempt)?;
+        Ok((result, pending))
+    }
     pub(crate) fn commit_continuation(
         self,
         prepared: PreparedFinancialContinuationIntentV1,

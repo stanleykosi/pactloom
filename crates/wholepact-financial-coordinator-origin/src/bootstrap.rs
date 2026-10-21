@@ -17,13 +17,15 @@ const BOOTSTRAP_BUDGET: Duration = Duration::from_secs(30);
 #[derive(Clone, Copy)]
 pub(super) struct PhaseDeadlinesV1 { startup: Instant, pub(super) session: Instant }
 impl PhaseDeadlinesV1 {
+    #[cfg(feature = "coordinated-signer-continue")]
+    pub(super) fn epoch(self) -> Instant { self.startup - BOOTSTRAP_BUDGET }
     fn stop(self) -> Instant {
-        if cfg!(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append")) { self.session + Duration::from_secs(5) } else { self.startup }
+        if cfg!(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append", feature = "coordinated-signer-continue")) { self.session + Duration::from_secs(5) } else { self.startup }
     }
     fn drain(self) -> Instant {
         // Called once after this role's one STOP. This is a subordinate local
         // bound, never a renewal of C's separately retained root cleanup budget.
-        if cfg!(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append")) { (Instant::now() + Duration::from_secs(5)).min(self.stop()) } else { self.startup }
+        if cfg!(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append", feature = "coordinated-signer-continue")) { (Instant::now() + Duration::from_secs(5)).min(self.stop()) } else { self.startup }
     }
 }
 
@@ -43,10 +45,19 @@ pub enum BootstrappedRoleV1 {
 pub struct CoordinatorOriginV1 {
     tree: InertTreeV1,
     clocks: PhaseDeadlinesV1,
-    #[cfg(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append"))]
+    #[cfg(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append", feature = "coordinated-signer-continue"))]
     display: crate::desktop_launch::DesktopLaunchV1,
 }
 impl CoordinatorOriginV1 {
+    /// Separate purpose-specific conversion. No existing W-positive driver is
+    /// redirected, and no binary profile activates this typechecked-only seam.
+    #[cfg(feature = "coordinated-signer-continue")]
+    pub fn into_signer_continue(self) -> Result<(crate::CoordinatorSignerContinueNativeV1, crate::CoordinatorSignerContinueEndpointV1)> {
+        require_time(self.clocks.session)?;
+        self.tree.check_alive()?;
+        self.display.restore_in_coordinator()?;
+        crate::signer_continue_origin::split_coordinator(self.tree, self.clocks)
+    }
     #[cfg(feature = "coordinated-witness-delivery-append")]
     pub fn into_delivery_review(self) -> Result<(crate::delivery_origin::CoordinatorDeliveryNativeV1, crate::delivery_origin::CoordinatorDeliveryEndpointV1)> {
         require_time(self.clocks.session)?;
@@ -55,7 +66,7 @@ impl CoordinatorOriginV1 {
         crate::delivery_origin::split_coordinator(self.tree, self.clocks.session)
     }
 
-    #[cfg(not(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append")))]
+    #[cfg(not(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append", feature = "coordinated-signer-continue")))]
     pub fn finish_inert(self) -> Result<()> { self.tree.stop_and_reap(self.clocks.startup) }
 
     /// Consume C's opaque original coordinate record before the caller starts
@@ -82,6 +93,31 @@ pub struct HostOriginV1 {
     clocks: PhaseDeadlinesV1,
 }
 impl HostOriginV1 {
+    #[cfg(feature = "coordinated-signer-continue")]
+    pub fn into_signer_financial_relay(self) -> Result<crate::HostSignerFinancialRelayV1> {
+        crate::signer_continue_origin::HostSignerFinancialRelayV1::from_host(self)
+    }
+    #[cfg(feature = "coordinated-signer-continue")]
+    pub(super) fn continue_clocks(&self) -> PhaseDeadlinesV1 { self.clocks }
+    #[cfg(feature = "coordinated-signer-continue")]
+    pub(super) fn continue_check(&self) -> Result<()> {
+        require_time(self.clocks.session)?;
+        self.continue_check_lifetimes()
+    }
+    #[cfg(feature = "coordinated-signer-continue")]
+    pub(super) fn continue_check_lifetimes(&self) -> Result<()> {
+        self.origin.check_parent_alive()?;
+        for child in self.signers.iter().flatten() { child.check_alive()?; }
+        Ok(())
+    }
+    #[cfg(feature = "coordinated-signer-continue")]
+    pub(super) fn continue_receive_c(&self) -> Result<Option<crate::signer_continue_channel::Packet>> { self.origin.continue_receive() }
+    #[cfg(feature = "coordinated-signer-continue")]
+    pub(super) fn continue_send_c(&self, packet: &crate::signer_continue_channel::Packet) -> Result<()> { self.origin.continue_send(packet) }
+    #[cfg(feature = "coordinated-signer-continue")]
+    pub(super) fn continue_child(&self, slot: crate::SignerContinueRoleV1) -> Result<&DirectChild> {
+        self.signers[slot.index()].as_ref().ok_or_else(|| rejected("original Signer missing"))
+    }
     /// Fixed S1/S2 order, one attempt only. These check-only handles cannot
     /// launch, discover an endpoint, unlock a role or transfer H's reapers.
     #[cfg(feature = "common-image-fork-provider")]
@@ -109,8 +145,16 @@ impl HostOriginV1 {
     pub fn run_until_stop(self) -> ! { child_exit(finish_host(self)) }
 }
 pub(super) struct LeafCustody { pub(super) origin: ForkOriginV1, pub(super) clocks: PhaseDeadlinesV1 }
-pub struct SignerOriginV1 { leaf: LeafCustody }
+pub struct SignerOriginV1 {
+    leaf: LeafCustody,
+    #[cfg(feature = "coordinated-signer-continue")]
+    continuation: crate::signer_continue_origin::SignerBirthContext,
+}
 impl SignerOriginV1 {
+    #[cfg(feature = "coordinated-signer-continue")]
+    pub fn into_financial_continue(self) -> Result<crate::SignerFinancialOriginV1> {
+        crate::signer_continue_origin::SignerFinancialOriginV1::from_signer(self.leaf, self.continuation)
+    }
     pub fn run_until_stop(self) -> ! { child_exit(finish_leaf(self.leaf, Ok(()))) }
 }
 pub struct InertWitnessOriginV1 { leaf: LeafCustody }
@@ -189,6 +233,14 @@ pub(super) struct InertTreeV1 {
     _image: PinnedCommonImageV1,
 }
 impl InertTreeV1 {
+    #[cfg(feature = "coordinated-signer-continue")]
+    pub(super) fn continue_host(&self) -> Result<&DirectChild> {
+        self.children[0].as_ref().filter(|c| c.role() == Role::Host).ok_or_else(|| rejected("original Host missing"))
+    }
+    #[cfg(feature = "coordinated-signer-continue")]
+    pub(super) fn continue_pidfds(&self) -> Result<Vec<OwnedFd>> {
+        self.children.iter().map(|c| c.as_ref().ok_or_else(|| rejected("original root child missing"))?.continue_pidfd()).collect()
+    }
     #[cfg(wholepact_delivery_ci)]
     pub(super) fn observed_bindings(&self) -> Vec<crate::delivery_observer::ChildBinding> {
         self.children.iter().flatten().map(DirectChild::observed_binding).collect()
@@ -201,12 +253,12 @@ impl InertTreeV1 {
         descriptors.try_into().map_err(|_| rejected("fixed observation inventory missing"))
     }
 
-    #[cfg(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append"))]
+    #[cfg(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append", feature = "coordinated-signer-continue"))]
     pub(super) fn check_alive(&self) -> Result<()> {
         for child in self.children.iter().flatten() { child.check_alive()?; }
         Ok(())
     }
-    #[cfg(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append"))]
+    #[cfg(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append", feature = "coordinated-signer-continue"))]
     pub(super) fn witness(&self) -> Result<&DirectChild> {
         self.children.iter().flatten().find(|c| c.role() == Role::Owner1V3DeliveryAdmission)
             .ok_or_else(|| rejected("original review witness missing"))
@@ -237,7 +289,7 @@ pub fn bootstrap_common_image_v1() -> Result<BootstrappedRoleV1> {
         return Err(rejected("set-id coordinator launch unsupported"));
     }
     if std::env::args_os().count() != 1 { return Err(rejected("no external worker entry")); }
-    #[cfg(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append"))]
+    #[cfg(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append", feature = "coordinated-signer-continue"))]
     let display = crate::desktop_launch::DesktopLaunchV1::capture()?;
     discard_ambient_descriptors()?;
     // Trusted launch is still required: this cannot undo already-run loader
@@ -254,7 +306,7 @@ pub fn bootstrap_common_image_v1() -> Result<BootstrappedRoleV1> {
     let deadline = phase_start + BOOTSTRAP_BUDGET;
     let clocks = PhaseDeadlinesV1 {
         startup: deadline,
-        session: if cfg!(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append")) { phase_start + Duration::from_secs(300) } else { deadline },
+        session: if cfg!(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append", feature = "coordinated-signer-continue")) { phase_start + Duration::from_secs(300) } else { deadline },
     };
     #[cfg(wholepact_bootstrap_ci)]
     crate::ci::deadline(deadline)?;
@@ -266,7 +318,7 @@ pub fn bootstrap_common_image_v1() -> Result<BootstrappedRoleV1> {
             #[cfg(feature = "common-image-fork-provider")]
             let verified_image = image.retain_verified_identity();
             drop(image);
-            #[cfg(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append"))]
+            #[cfg(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append", feature = "coordinated-signer-continue"))]
             drop(display);
             return child_branch(prepare_host(origin, clocks,
                 #[cfg(feature = "common-image-fork-provider")]
@@ -283,9 +335,12 @@ pub fn bootstrap_common_image_v1() -> Result<BootstrappedRoleV1> {
                 // DirectChild drops disarm reapers before closing their FDs.
                 drop(children);
                 drop(image);
-                #[cfg(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append"))]
+                #[cfg(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append", feature = "coordinated-signer-continue"))]
                 drop(display);
-                return child_branch(prepare_leaf(origin, clocks));
+                return child_branch(prepare_leaf(origin, clocks,
+                    #[cfg(feature = "coordinated-signer-continue")]
+                    None,
+                ));
             }
         }
     }
@@ -315,7 +370,7 @@ pub fn bootstrap_common_image_v1() -> Result<BootstrappedRoleV1> {
     let tree = InertTreeV1 { children, _image: image };
     Ok(BootstrappedRoleV1::Coordinator(CoordinatorOriginV1 {
         tree, clocks,
-        #[cfg(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append"))]
+        #[cfg(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append", feature = "coordinated-signer-continue"))]
         display,
     }))
 }
@@ -337,11 +392,19 @@ fn prepare_host(origin: ForkOriginV1, clocks: PhaseDeadlinesV1,
             Forked::Child(signer_origin) => {
                 // S2 must close its copied S1 owner/channel, and both signers
                 // close H's C-facing channel. No signer can send directly to C.
+                #[cfg(feature = "coordinated-signer-continue")]
+                let continuation = crate::signer_continue_origin::SignerBirthContext {
+                    coordinator: origin.retain_host_coordinator_lifetime()?,
+                    image: verified_image.clone(),
+                };
                 drop(signers);
                 drop(origin);
                 #[cfg(feature = "common-image-fork-provider")]
                 drop(verified_image);
-                return child_branch(prepare_leaf(signer_origin, clocks));
+                return child_branch(prepare_leaf(signer_origin, clocks,
+                    #[cfg(feature = "coordinated-signer-continue")]
+                    Some(continuation),
+                ));
             }
         }
     }
@@ -374,7 +437,9 @@ fn prepare_host(origin: ForkOriginV1, clocks: PhaseDeadlinesV1,
     }))
 }
 
-fn finish_host(host: HostOriginV1) -> Result<()> {
+pub(super) fn finish_host(host: HostOriginV1) -> Result<()> { finish_host_capped(host, None) }
+
+pub(super) fn finish_host_capped(host: HostOriginV1, retained_cleanup: Option<Instant>) -> Result<()> {
     #[cfg(feature = "common-image-fork-provider")]
     let mut host = host;
     // This terminal role method is not a concurrent provider-service monitor.
@@ -382,11 +447,11 @@ fn finish_host(host: HostOriginV1) -> Result<()> {
     #[cfg(feature = "common-image-fork-provider")]
     drop(host.verifier_custody.take());
     let HostOriginV1 { origin, mut signers, clocks, .. } = host;
-    #[cfg(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append"))]
-    origin.wait_host_stop(&signers, clocks.stop())?;
-    #[cfg(not(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append")))]
-    origin.receive(Message::Stop, clocks.startup)?;
-    let deadline = clocks.drain();
+    #[cfg(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append", feature = "coordinated-signer-continue"))]
+    origin.wait_host_stop(&signers, capped_deadline(clocks.stop(), retained_cleanup))?;
+    #[cfg(not(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append", feature = "coordinated-signer-continue")))]
+    origin.receive(Message::Stop, capped_deadline(clocks.startup, retained_cleanup))?;
+    let deadline = capped_deadline(clocks.drain(), retained_cleanup);
     for signer in signers.iter().flatten() { signer.send(Message::Stop, deadline)?; }
     for signer in signers.iter().flatten() { signer.receive(Message::Stopped, deadline)?; }
     origin.send(Message::Stopped, deadline)?;
@@ -398,7 +463,10 @@ fn finish_host(host: HostOriginV1) -> Result<()> {
     Ok(())
 }
 
-fn prepare_leaf(origin: ForkOriginV1, clocks: PhaseDeadlinesV1) -> Result<BootstrappedRoleV1> {
+fn prepare_leaf(origin: ForkOriginV1, clocks: PhaseDeadlinesV1,
+    #[cfg(feature = "coordinated-signer-continue")]
+    continuation: Option<crate::signer_continue_origin::SignerBirthContext>,
+) -> Result<BootstrappedRoleV1> {
     let deadline = clocks.startup;
     #[cfg(wholepact_bootstrap_ci)]
     crate::ci::enter_role(origin.role());
@@ -406,6 +474,8 @@ fn prepare_leaf(origin: ForkOriginV1, clocks: PhaseDeadlinesV1) -> Result<Bootst
         return Err(rejected("wrong leaf birth"));
     }
     verify_child_start(&origin)?;
+    #[cfg(feature = "coordinated-signer-continue")]
+    if let Some(context) = &continuation { context.coordinator.check_alive()?; }
     #[cfg(wholepact_bootstrap_ci)]
     {
         let mut fds = vec![0, 1, 2];
@@ -419,7 +489,11 @@ fn prepare_leaf(origin: ForkOriginV1, clocks: PhaseDeadlinesV1) -> Result<Bootst
     crate::delivery_observer::initialize(origin.role(), origin.observed_original_parent(), clocks.session, Vec::new());
     let leaf = LeafCustody { origin, clocks };
     if matches!(leaf.origin.role(), Role::Signer1 | Role::Signer2) {
-        return Ok(BootstrappedRoleV1::Signer(SignerOriginV1 { leaf }));
+        return Ok(BootstrappedRoleV1::Signer(SignerOriginV1 {
+            leaf,
+            #[cfg(feature = "coordinated-signer-continue")]
+            continuation: continuation.ok_or_else(|| rejected("original C lifetime missing in Signer"))?,
+        }));
     }
     #[cfg(feature = "cancel-only-witness-review")]
     if leaf.origin.role() == crate::cancel_review::WITNESS {
@@ -441,13 +515,17 @@ fn claim_entry(entered: &AtomicBool) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn finish_leaf(leaf: LeafCustody, work: Result<()>) -> Result<()> {
+pub(super) fn finish_leaf(leaf: LeafCustody, work: Result<()>) -> Result<()> { finish_leaf_capped(leaf, work, None) }
+
+pub(super) fn finish_leaf_capped(leaf: LeafCustody, work: Result<()>, retained_cleanup: Option<Instant>) -> Result<()> {
     work?;
-    leaf.origin.receive(Message::Stop, leaf.clocks.stop())?;
-    let deadline = leaf.clocks.drain();
+    leaf.origin.receive(Message::Stop, capped_deadline(leaf.clocks.stop(), retained_cleanup))?;
+    let deadline = capped_deadline(leaf.clocks.drain(), retained_cleanup);
     leaf.origin.send(Message::Stopped, deadline)?;
     leaf.origin.receive(Message::Exit, deadline)
 }
+
+fn capped_deadline(original: Instant, cap: Option<Instant>) -> Instant { cap.map_or(original, |cap| original.min(cap)) }
 
 fn verify_child_start(origin: &ForkOriginV1) -> Result<()> {
     let mut limit = libc::rlimit { rlim_cur: 1, rlim_max: 1 };
@@ -536,6 +614,17 @@ impl InertBarrier {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "coordinated-signer-continue")]
+    #[test]
+    fn continue_cleanup_cap_never_renews_original_phase() {
+        let epoch = std::time::Instant::now();
+        let early = epoch + std::time::Duration::from_secs(2);
+        let later = epoch + std::time::Duration::from_secs(5);
+        assert_eq!(super::capped_deadline(later, Some(early)), early);
+        assert_eq!(super::capped_deadline(early, Some(later)), early);
+        assert_eq!(super::capped_deadline(early, None), early);
+    }
+
     use super::*;
     #[test]
     fn entry_claim_is_consumed_once_without_reset() {

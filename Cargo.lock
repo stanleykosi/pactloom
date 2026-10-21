@@ -5847,6 +5847,7 @@ dependencies = [
  "wholepact-authority",
  "wholepact-chain",
  "wholepact-core",
+ "wholepact-financial-coordinator-origin",
  "wholepact-offline-bridge",
  "wholepact-proof-jobs",
  "wholepact-protocol",

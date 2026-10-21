@@ -108,6 +108,8 @@ struct ImageFacts { device: u64, inode: u64, size: u64, sha256: String }
 pub(super) struct VerifiedCommonImageIdentity { facts: ImageFacts }
 #[cfg(feature = "common-image-fork-provider")]
 impl VerifiedCommonImageIdentity {
+    #[cfg(feature = "coordinated-signer-continue")]
+    pub(super) fn measurement(&self) -> &str { &self.facts.sha256 }
     pub(super) fn verify_opened_executable(&self, file: &File) -> Result<()> {
         use std::os::unix::fs::FileExt;
         let before = file.metadata()?;

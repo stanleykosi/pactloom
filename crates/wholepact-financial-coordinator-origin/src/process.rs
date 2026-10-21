@@ -85,6 +85,18 @@ pub(super) struct ForkOriginV1 {
     channel: Channel,
 }
 impl ForkOriginV1 {
+    #[cfg(feature = "coordinated-signer-continue")]
+    pub(super) fn continue_observer(&self) -> Result<crate::signer_continue_state::CheckedPeer> {
+        crate::signer_continue_state::CheckedPeer::retain(&self.parent, self.channel.review_fd())
+    }
+    #[cfg(feature = "coordinated-signer-continue")]
+    pub(super) fn continue_send(&self, packet: &crate::signer_continue_channel::Packet) -> Result<()> {
+        crate::signer_continue_channel::send(self.channel.review_fd(), self.local_role, &self.parent, packet)
+    }
+    #[cfg(feature = "coordinated-signer-continue")]
+    pub(super) fn continue_receive(&self) -> Result<Option<crate::signer_continue_channel::Packet>> {
+        crate::signer_continue_channel::try_receive(self.channel.review_fd(), self.local_role, &self.parent)
+    }
     #[cfg(feature = "common-image-fork-provider")]
     pub(super) fn retain_host_coordinator_lifetime(&self) -> Result<PeerLifetime> {
         if self.local_role != Role::Host || self.parent.role != Role::Coordinator {
@@ -119,7 +131,7 @@ impl ForkOriginV1 {
         if self.local_role != crate::cancel_review::WITNESS || self.parent.role != Role::Coordinator { return Err(rejected("not the original cancel-only witness")); }
         crate::cancel_review::try_receive(self.channel.review_fd(), self.local_role, &self.parent)
     }
-    #[cfg(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append"))]
+    #[cfg(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append", feature = "coordinated-signer-continue"))]
     pub(super) fn wait_host_stop(&self, signers: &[Option<DirectChild>; 2], deadline: Instant) -> Result<()> {
         if self.local_role != Role::Host { return Err(rejected("not original Host")); }
         loop {
@@ -162,6 +174,27 @@ pub(super) struct DirectChild {
     reaped: bool,
 }
 impl DirectChild {
+    #[cfg(feature = "coordinated-signer-continue")]
+    pub(super) fn continue_observer(&self) -> Result<crate::signer_continue_state::CheckedPeer> {
+        self.require_owner()?;
+        crate::signer_continue_state::CheckedPeer::retain(&self.peer, self.channel.review_fd())
+    }
+    #[cfg(feature = "coordinated-signer-continue")]
+    pub(super) fn continue_pidfd(&self) -> Result<OwnedFd> {
+        self.require_owner()?;
+        self.peer.check_alive()?;
+        self.peer.pidfd.try_clone()
+    }
+    #[cfg(feature = "coordinated-signer-continue")]
+    pub(super) fn continue_send(&self, packet: &crate::signer_continue_channel::Packet) -> Result<()> {
+        self.require_owner()?;
+        crate::signer_continue_channel::send(self.channel.review_fd(), self.local_role, &self.peer, packet)
+    }
+    #[cfg(feature = "coordinated-signer-continue")]
+    pub(super) fn continue_receive(&self) -> Result<Option<crate::signer_continue_channel::Packet>> {
+        self.require_owner()?;
+        crate::signer_continue_channel::try_receive(self.channel.review_fd(), self.local_role, &self.peer)
+    }
     #[cfg(feature = "common-image-fork-provider")]
     pub(super) fn retain_original_signer_lifetime(&self, expected: Role) -> Result<PeerLifetime> {
         self.require_owner()?;
@@ -198,7 +231,7 @@ impl DirectChild {
         crate::delivery_channel::try_receive(self.channel.review_fd(), self.local_role, &self.peer)
     }
 
-    #[cfg(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append"))]
+    #[cfg(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append", feature = "coordinated-signer-continue"))]
     pub(super) fn role(&self) -> Role { self.peer.role }
     #[cfg(feature = "cancel-only-witness-review")]
     pub(super) fn review_send(&self, packet: &crate::cancel_review::Packet) -> Result<()> {

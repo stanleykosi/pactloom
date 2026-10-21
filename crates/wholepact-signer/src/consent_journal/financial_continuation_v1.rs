@@ -27,18 +27,59 @@ struct FinancialContinuationIntentV1 {
     review: ReviewProvenanceV1,
 }
 #[derive(Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct RetainedFinancialContinuationIntentV1(FinancialContinuationIntentV1);
+pub(crate) struct RetainedFinancialContinuationIntentV1(RetainedContinuationPayload);
+/// Serialization preserves each version's exact payload. Never derive
+/// Deserialize here: explicit strict version dispatch is mandatory below.
+#[derive(Clone, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+enum RetainedContinuationPayload {
+    NativeV1(FinancialContinuationIntentV1),
+    CoordinatedV2(super::coordinated_continue::CoordinatedFinancialContinuationIntentV2),
+}
+impl RetainedContinuationPayload {
+    fn request(&self) -> &OwnerControlRequest {
+        match self { Self::NativeV1(value) => &value.request, Self::CoordinatedV2(value) => value.request() }
+    }
+    fn owner_certificate_digest(&self) -> &str {
+        match self { Self::NativeV1(value) => &value.owner_certificate_digest,
+            Self::CoordinatedV2(value) => value.owner_certificate_digest() }
+    }
+    fn validate_original(&self, c: &Connection) -> Result<()> {
+        match self { Self::NativeV1(value) => validate_original(c, value),
+            Self::CoordinatedV2(value) => value.validate_original(c) }
+    }
+}
+fn decode_payload(payload: &str) -> Result<RetainedContinuationPayload> {
+    // This bounded selector is not the reader. Decode the original bytes again
+    // into exactly one strict payload so duplicate fields cannot be normalized.
+    let selector: serde_json::Value = decode(payload.to_owned())?;
+    let value = match selector.get("version").and_then(serde_json::Value::as_u64) {
+        Some(1) => RetainedContinuationPayload::NativeV1(decode(payload.to_owned())?),
+        Some(2) => RetainedContinuationPayload::CoordinatedV2(decode(payload.to_owned())?),
+        _ => return Err(JournalError::InvalidBinding),
+    };
+    if encode(&value)?.as_str() != payload { return Err(JournalError::InvalidBinding); }
+    Ok(value)
+}
 impl RetainedFinancialContinuationIntentV1 {
-    pub(crate) fn request(&self) -> &OwnerControlRequest { &self.0.request }
-    pub(crate) fn terms(&self) -> Result<&FinancialContinuationTermsV1> { Ok(&record(&self.0.request)?.terms) }
-    pub(crate) fn history_digest(&self) -> Result<String> { self.0.validate()?; digest("wholepact:signer-financial-continuation-history:v1", &self.0) }
+    pub(crate) fn request(&self) -> &OwnerControlRequest { self.0.request() }
+    pub(crate) fn terms(&self) -> Result<&FinancialContinuationTermsV1> { Ok(&record(self.0.request())?.terms) }
+    pub(crate) fn history_digest(&self) -> Result<String> {
+        match &self.0 {
+            RetainedContinuationPayload::NativeV1(value) => {
+                value.validate()?;
+                digest("wholepact:signer-financial-continuation-history:v1", value)
+            }
+            RetainedContinuationPayload::CoordinatedV2(value) => value.history_digest(),
+        }
+    }
     pub(super) fn require_original(&self, genesis: &AccountUseGenesis) -> Result<()> {
         let t = self.terms()?;
         if t.scope.authorization.identity.account_id != genesis.identity.account_id
             || t.scope.authorization.identity.full_viewing_key_digest != genesis.identity.full_viewing_key_digest
             || t.scope.authorization.identity.network_profile_id != genesis.identity.network_profile_id
             || t.scope.authorization.identity.derivation_domain != genesis.identity.derivation_domain
-            || self.0.owner_certificate_digest != genesis.owner_certificate_digest
+            || self.0.owner_certificate_digest() != genesis.owner_certificate_digest
             || wholepact_authority::account_use_link::account_use_witness_origin_digest(&t.scope.witness).map_err(invalid)? != genesis.witness_origin_digest
             || t.scope.witness.witness_id != genesis.witness_id { return Err(JournalError::InvalidBinding); }
         Ok(())
@@ -138,11 +179,94 @@ pub(super) fn read(c: &Connection) -> Result<RetainedFinancialContinuationIntent
     let rows = q.query_map([], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?,r.get::<_,String>(5)?,r.get::<_,String>(6)?)))?.collect::<std::result::Result<Vec<_>, _>>()?;
     if rows.len() != 1 { return Err(JournalError::RecoveryRequired); }
     let (operation, authorization, original, request_digest, enrollment, manifest, payload) = &rows[0];
-    let value: FinancialContinuationIntentV1 = decode(payload.clone())?;
-    validate_original(c, &value)?;
-    let r = record(&value.request)?;
-    if operation != &value.request.operation_id || authorization != &r.terms.scope.authorization.authorization_id || original != &r.terms.original_delivery_operation_id
-        || request_digest != &r.request_digest(&value.request).map_err(invalid)? || enrollment != &r.terms.original_recipient_enrollment_ref
+    let value = decode_payload(payload)?;
+    value.validate_original(c)?;
+    let r = record(value.request())?;
+    if operation != &value.request().operation_id || authorization != &r.terms.scope.authorization.authorization_id || original != &r.terms.original_delivery_operation_id
+        || request_digest != &r.request_digest(value.request()).map_err(invalid)? || enrollment != &r.terms.original_recipient_enrollment_ref
         || manifest != &r.terms.original_recipient_manifest_ref || encode(&value)?.as_str() != payload { return Err(JournalError::InvalidBinding); }
     Ok(RetainedFinancialContinuationIntentV1(value))
+}
+
+#[cfg(test)]
+mod history_payload_tests {
+    use super::*;
+
+    // Shape-only values deliberately use Pause, not a continuation, so none
+    // passes semantic validation or represents a historical authorization.
+    fn native_shape() -> FinancialContinuationIntentV1 {
+        FinancialContinuationIntentV1 {
+            version: 1,
+            request: OwnerControlRequest {
+                operation_id: "shape-only".into(), account_id: "account".into(),
+                network_profile_id: "network".into(), writer_epoch: 1,
+                expected_head: wholepact_authority::AuthorityHead { sequence: 5, digest: "01".repeat(32) },
+                control: OwnerControl::Pause,
+            },
+            owner_certificate_digest: "02".repeat(32),
+            review: ReviewProvenanceV1 {
+                source_identity_digest: "03".repeat(32), principal_id: "principal".into(),
+                measurement: "04".repeat(32), session_digest: "05".repeat(32),
+                permission_generation: 1, nonce: "06".repeat(32), reviewed_at_ms: 1_000,
+                expires_at_ms: 121_000, terms_digest: "07".repeat(32), native_review_digest: "08".repeat(32),
+            },
+        }
+    }
+    fn coordinated_shape() -> super::super::coordinated_continue::CoordinatedFinancialContinuationIntentV2 {
+        let native = native_shape();
+        serde_json::from_value(serde_json::json!({
+            "version": 2, "request": native.request,
+            "owner_certificate_digest": native.owner_certificate_digest,
+            "coordinated_provenance": {
+                "origin": "original_coordinator_host_signer_v1", "preparation_nonce": "09".repeat(32),
+                "review": {
+                    "coordinator_process_instance": "10".repeat(32), "coordinator_focus_epoch": 7,
+                    "signer_role": "signer1", "signer_process_instance": "11".repeat(32),
+                    "original_host_process_instance": "12".repeat(32), "signer_principal_id": "principal",
+                    "signer_image_measurement": "13".repeat(32), "source_identity_digest": "14".repeat(32),
+                    "terms_digest": "15".repeat(32), "session_digest": "16".repeat(32),
+                    "review_challenge": "17".repeat(32), "review_digest": "18".repeat(32),
+                    "reviewed_at_ms": 1_000, "expires_at_ms": 121_000, "session_expires_at_ms": 300_000,
+                },
+            },
+        })).unwrap()
+    }
+    #[test]
+    fn native_wrapper_preserves_exact_bytes_and_hash_preimage() {
+        let native = native_shape();
+        let old = encode(&native).unwrap();
+        let expected = digest("wholepact:signer-financial-continuation-history:v1", &native).unwrap();
+        let retained = RetainedFinancialContinuationIntentV1(RetainedContinuationPayload::NativeV1(native));
+        assert_eq!(encode(&retained).unwrap().as_str(), old.as_str());
+        assert_eq!(digest("wholepact:signer-financial-continuation-history:v1", &retained).unwrap(), expected);
+        assert!(matches!(decode_payload(&old).unwrap(), RetainedContinuationPayload::NativeV1(_)));
+        assert!(retained.history_digest().is_err()); // Decoding is not semantic validity or permission.
+    }
+    #[test]
+    fn explicit_reader_rejects_version_origin_duplicates_and_unknown_fields() {
+        let native = encode(&native_shape()).unwrap();
+        let coordinated = encode(&coordinated_shape()).unwrap();
+        assert!(matches!(decode_payload(&coordinated).unwrap(), RetainedContinuationPayload::CoordinatedV2(_)));
+        for bad in [
+            native.replacen("\"version\":1", "\"version\":2", 1),
+            coordinated.replacen("\"version\":2", "\"version\":1", 1),
+            coordinated.replacen("\"version\":2", "\"version\":3", 1),
+            coordinated.replacen("\"version\":2", "\"version\":2,\"version\":2", 1),
+            coordinated.replacen("\"version\":2", "\"version\":2,\"extra\":true", 1),
+            coordinated.replace("original_coordinator_host_signer_v1", "signer_native_v1"),
+            coordinated.replacen("\"coordinated_provenance\":{", "\"coordinated_provenance\":{\"extra\":true,", 1),
+            coordinated.replacen("\"review\":{", "\"review\":{\"permission_generation\":1,", 1),
+            coordinated.replacen("\"coordinator_focus_epoch\":7", "\"coordinator_focus_epoch\":7,\"coordinator_focus_epoch\":7", 1),
+            format!(" {coordinated}"),
+        ] { assert!(decode_payload(&bad).is_err()); }
+    }
+    #[test]
+    fn coordinated_history_domain_is_distinct_and_shape_is_not_a_grant() {
+        let coordinated = coordinated_shape();
+        assert_ne!(
+            digest("wholepact:signer-financial-continuation-history:v1", &coordinated).unwrap(),
+            digest("wholepact:signer-coordinated-financial-continuation-history:v2", &coordinated).unwrap(),
+        );
+        assert!(coordinated.history_digest().is_err());
+    }
 }

@@ -1,12 +1,13 @@
-//! Exact whole-image, fixed-fork actor/edge provenance only. This crate neither
-//! proves a human click nor issues a financial effect permit. The whole pinned
+//! Exact whole-image, fixed-fork actor/edge provenance. This crate does not
+//! proves a human click. Purpose-specific opaque gates bind actual native admission
+//! to exact original role custody; source owners still enforce their effect checks. The whole pinned
 //! coordinator image, including its private native controller, is trusted.
 //! The sole entry belongs at the start of that image's private main, before any
 //! thread-capable initialization or role source/key access. It accepts no role,
 //! descriptor, claimed identity, callback or caller-provided pin.
 #![deny(unsafe_op_in_unsafe_fn)]
 #![cfg(target_os = "linux")]
-#[cfg(all(wholepact_bootstrap_ci, any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append")))]
+#[cfg(all(wholepact_bootstrap_ci, any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append", feature = "coordinated-signer-continue")))]
 compile_error!("Bootstrap-only CI instrumentation cannot select the source-opening UI profile");
 #[cfg(all(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append"))]
 compile_error!("Cancel-only and one-exact-append are separate common-image profiles");
@@ -19,6 +20,24 @@ compile_error!("Delivery and bootstrap evidence are separate images");
 mod delivery_observer;
 #[cfg(wholepact_delivery_ci)]
 pub use delivery_observer::{record_delivery_observation_for_ci, finish_delivery_observation_for_ci, DeliveryObservationV1, DeliveryUiPhaseV1, DeliveryWidgetIdV1, DeliveryRectV1, DeliveryWidgetRectV1, DeliveryWidgetSnapshotV1};
+#[cfg(all(feature = "coordinated-signer-continue", any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append")))]
+compile_error!("Continue is a separate typechecked-only custody profile, not a conversion from a Witness profile");
+#[cfg(all(feature = "coordinated-signer-continue", any(wholepact_bootstrap_ci, wholepact_delivery_ci)))]
+compile_error!("The Continue profile has a distinct retained-FD inventory and needs its own reviewed CI gate");
+#[cfg(feature = "coordinated-signer-continue")]
+mod signer_continue_channel;
+#[cfg(feature = "coordinated-signer-continue")]
+mod signer_continue_state;
+#[cfg(feature = "coordinated-signer-continue")]
+mod signer_continue_origin;
+#[cfg(feature = "coordinated-signer-continue")]
+pub use signer_continue_channel::{SignerContinueRoleV1, SignerContinueSourceFactsV1,
+    SignerContinueReviewDataV1, SignerContinuePresentationV1, SignerContinueOutcomeV1};
+#[cfg(feature = "coordinated-signer-continue")]
+pub use signer_continue_origin::{CoordinatorSignerContinueNativeV1, CoordinatorSignerContinueEndpointV1,
+    CoordinatorSignerContinueEventV1, SignerContinueReviewTicketV1, SignerContinueReadyTicketV1,
+    SignerContinueArmOutboundV1, SignerContinueFinalOutboundV1, HostSignerFinancialRelayV1,
+    SignerFinancialOriginV1, SignerContinueRequestV1, SignerContinueArmV1, SignerContinueFinalV1};
 mod bootstrap;
 mod channel;
 mod image;
@@ -31,7 +50,7 @@ mod delivery_failure;
 pub use delivery_failure::{DeliveryFailureV1, DeliveryFailureStageV1, DeliveryFailureClassV1};
 #[cfg(wholepact_bootstrap_ci)]
 mod ci;
-#[cfg(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append"))]
+#[cfg(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append", feature = "coordinated-signer-continue"))]
 mod desktop_launch;
 #[cfg(feature = "cancel-only-witness-review")]
 mod cancel_review;
