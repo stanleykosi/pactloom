@@ -248,16 +248,99 @@ def remove_container(name, token):
         raise first
 
 
-def inspect_isolation(name, token):
-    row = json.loads(docker(['inspect', '--type', 'container', name], 'container', limit=65536))[0]
-    cfg, host = row['Config'], row['HostConfig']
-    require(cfg['Labels'].get(LABEL) == token and host['NetworkMode'] == 'none'
-            and host['ReadonlyRootfs'] is True and host['Privileged'] is False
-            and set(host['CapDrop']) == {'ALL'} and set(host['CapAdd']) == {'SETUID', 'SETGID'}
-            and 'no-new-privileges:true' in host['SecurityOpt'] and host['PidsLimit'] == 64
-            and host['Memory'] == 256 * 1024 * 1024 and not host['Binds']
-            and not host.get('Devices') and host['PidMode'] == ''
-            and set(host['Tmpfs']) == {'/etc/wholepact', '/ci-evidence', '/tmp'}, 'container', 'isolation')
+def finite_list(value, allowed):
+    if value is None: return 'null'
+    if type(value) is not list: return 'invalid_type'
+    if len(value) > 16: return 'oversized'
+    return [item if type(item) is str and item in allowed else 'other' for item in value]
+
+
+def finite_number(value):
+    return value if type(value) is int and 0 <= value <= 2**40 else 'invalid_or_out_of_range'
+
+
+def finite_bool(value):
+    return value if type(value) is bool else 'invalid_type'
+
+
+def absent(value):
+    return value is None or (type(value) is list and not value)
+
+
+def isolation_check(case, field, ok, expected, observed):
+    if not ok:
+        # Both projections come only from the closed vocabulary at each call;
+        # never print arbitrary inspect strings, paths, labels or environment.
+        emit('ISOLATION_FAILURE', dict(case=case, check=field, expected=expected,
+                                       observed=observed, cleanup_pending=True))
+        raise Failure('container', 'isolation_' + field)
+
+
+def inspect_isolation(name, token, case):
+    raw = docker(['inspect', '--type', 'container', name], 'container', limit=65536)
+    try:
+        values = P.loads(raw)
+    except P.Rejected:
+        isolation_check(case, 'inspect_shape', False, 'one_container_object', 'invalid_json')
+    isolation_check(case, 'inspect_shape', type(values) is list and len(values) == 1
+                    and type(values[0]) is dict, 'one_container_object', 'wrong_container_shape')
+    row = values[0]
+    cfg, host = row.get('Config'), row.get('HostConfig')
+    isolation_check(case, 'config_shape', type(cfg) is dict and type(host) is dict,
+                    'config_and_host_objects', 'invalid_config_shape')
+    labels = cfg.get('Labels')
+    matching_label = type(labels) is dict and labels.get(LABEL) == token
+    isolation_check(case, 'run_label', matching_label, 'matching_run_label',
+                    'matching_run_label' if matching_label else 'missing_or_different_run_label')
+    value = host.get('NetworkMode')
+    isolation_check(case, 'network', value == 'none', 'none', value if value in ('none', 'host', 'bridge', 'default', '') else 'other')
+    value = host.get('ReadonlyRootfs')
+    isolation_check(case, 'readonly_root', value is True, True, finite_bool(value))
+    value = host.get('Privileged')
+    isolation_check(case, 'privileged', value is False, False, finite_bool(value))
+    value = host.get('CapDrop')
+    isolation_check(case, 'cap_drop', value == ['ALL'], ['ALL'], finite_list(value, {'ALL'}))
+    value = host.get('CapAdd')
+    # Official ContainerCreate normalizes SETUID to CAP_SETUID (and SETGID):
+    # https://raw.githubusercontent.com/moby/moby/v28.5.2/client/container_create.go
+    # https://raw.githubusercontent.com/docker/cli/v28.5.2/opts/capabilities.go
+    # Accept only these four exact spellings, preserving cardinality and rejecting
+    # aliases duplicated in one list. No case-folding or unknown capability passes.
+    aliases = {'SETUID': 'SETUID', 'CAP_SETUID': 'SETUID', 'SETGID': 'SETGID', 'CAP_SETGID': 'SETGID'}
+    normalized = [aliases.get(item) if type(item) is str else None for item in value] if type(value) is list else []
+    isolation_check(case, 'cap_add', type(value) is list and len(value) == 2
+                    and set(normalized) == {'SETUID', 'SETGID'}, ['SETUID', 'SETGID'], finite_list(value, set(aliases)))
+    value = host.get('SecurityOpt')
+    isolation_check(case, 'no_new_privileges', value == ['no-new-privileges:true'], ['no-new-privileges:true'],
+                    finite_list(value, {'no-new-privileges:true', 'no-new-privileges=false',
+                                        'no-new-privileges=true', 'seccomp=unconfined', 'apparmor=unconfined'}))
+    for field, key, expected in [('pids_limit', 'PidsLimit', 64), ('memory_limit', 'Memory', 256 * 1024 * 1024)]:
+        value = host.get(key)
+        isolation_check(case, field, type(value) is int and value == expected, expected, finite_number(value))
+    for field, value in [('bind_mounts', host.get('Binds')), ('devices', host.get('Devices')),
+                         ('extra_mounts', host.get('Mounts')), ('image_volumes', cfg.get('Volumes'))]:
+        # Config.Volumes is a Go map, whereas the HostConfig fields are slices.
+        is_absent = absent(value) or (field == 'image_volumes' and type(value) is dict and not value)
+        isolation_check(case, field, is_absent, 'absent', 'absent' if is_absent else 'present_or_invalid')
+    value = host.get('PidMode')
+    isolation_check(case, 'pid_namespace', value == '', 'private_default',
+                    'private_default' if value == '' else 'host' if value == 'host' else 'other')
+    value = cfg.get('User')
+    isolation_check(case, 'setup_user', value == '', 'image_default_root',
+                    'image_default_root' if value == '' else 'other')
+    value = host.get('Tmpfs')
+    expected = {'/etc/wholepact': 'rw,noexec,nosuid,nodev,size=64k,mode=0755',
+                '/ci-evidence': 'rw,noexec,nosuid,nodev,size=1m,uid=10001,gid=10001,mode=0700',
+                '/tmp': 'rw,noexec,nosuid,nodev,size=1m,mode=1777'}
+    isolation_check(case, 'tmpfs_destinations', type(value) is dict and set(value) == set(expected),
+                    'pin_evidence_tmp_only', 'pin_evidence_tmp_only' if type(value) is dict and set(value) == set(expected) else 'missing_extra_or_invalid')
+    for path, field in [('/etc/wholepact', 'pin_tmpfs'), ('/ci-evidence', 'evidence_tmpfs'), ('/tmp', 'runtime_tmpfs')]:
+        options = value[path]
+        parts = options.split(',') if type(options) is str else []
+        same = len(parts) == len(set(parts)) and set(parts) == set(expected[path].split(','))
+        expected_parts = expected[path].split(',')
+        isolation_check(case, field, same, expected_parts,
+                        finite_list(parts, set(expected_parts)) if type(options) is str else 'invalid_type')
 
 
 def run_case(case, tag, token):
@@ -278,7 +361,7 @@ def run_case(case, tag, token):
                 '--tmpfs', '/ci-evidence:rw,noexec,nosuid,nodev,size=1m,uid=10001,gid=10001,mode=0700',
                 '--tmpfs', '/tmp:rw,noexec,nosuid,nodev,size=1m,mode=1777', tag, case], 'container', limit=4096)
         create_pending = False
-        inspect_isolation(name, token)
+        inspect_isolation(name, token, case)
         # start --attach may time out while runtime continues. The finally block
         # always kills/removes the known container independently of this client.
         status, raw = command(['docker', '--host', 'unix:///var/run/docker.sock', '--config', os.environ['BOOTSTRAP_DOCKER_CONFIG'],
@@ -344,6 +427,7 @@ def main():
     os.environ['BOOTSTRAP_DOCKER_CONFIG'] = str(root / 'docker')
     passed = False
     first = None
+    cleanup_only = len(sys.argv) == 2 and sys.argv[1] == 'cleanup'
     try:
         require(len(sys.argv) == 2 and sys.argv[1] in ('run', 'cleanup'), 'preflight', 'arguments')
         if sys.argv[1] == 'cleanup':
@@ -374,9 +458,13 @@ def main():
         clean = cleanup(token, tag)
         shutil.rmtree(root)
         passed = passed and clean and first is None
-        emit('RESULT', dict(passed=passed, source=sha, bootstrap_only=True,
-                            financial_authority=False, native_payment_verified=False,
-                            public_chain_verified=False, full_product_verified=False))
+        if cleanup_only:
+            emit('CLEANUP_RESULT', dict(cleanup_passed=passed, cleanup_only=True, source=sha,
+                                        lifecycle_result='not_evaluated'))
+        else:
+            emit('RESULT', dict(passed=passed, source=sha, bootstrap_only=True,
+                                financial_authority=False, native_payment_verified=False,
+                                public_chain_verified=False, full_product_verified=False))
     return 0 if passed else 1
 
 

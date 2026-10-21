@@ -6,6 +6,7 @@ import importlib.util
 import io
 import json
 import pathlib
+import tempfile
 import unittest
 from unittest import mock
 
@@ -17,6 +18,124 @@ def load(name, filename):
     return module
 P = load('projection', 'ci-bootstrap-output.py')
 S = load('supervisor', 'ci-bootstrap-supervisor.py')
+
+
+def inspect_fixture():
+    """Fabricated inspect using official v28.5.2 ContainerCreate canonical caps.
+
+    This is not a captured CI65 inspect: that failed field was not retained.
+    https://raw.githubusercontent.com/moby/moby/v28.5.2/client/container_create.go
+    """
+    return [dict(Config=dict(Labels={S.LABEL: 'token'}, Volumes=None, User=''),
+                 HostConfig=dict(NetworkMode='none', ReadonlyRootfs=True, Privileged=False,
+                     CapDrop=['ALL'], CapAdd=['CAP_SETGID', 'CAP_SETUID'],
+                     SecurityOpt=['no-new-privileges:true'], PidsLimit=64, Memory=268435456,
+                     Binds=None, Devices=[], Mounts=None, PidMode='', Tmpfs={
+                         '/etc/wholepact': 'rw,noexec,nosuid,nodev,size=64k,mode=0755',
+                         '/ci-evidence': 'rw,noexec,nosuid,nodev,size=1m,uid=10001,gid=10001,mode=0700',
+                         '/tmp': 'rw,noexec,nosuid,nodev,size=1m,mode=1777'}))]
+
+
+class Isolation(unittest.TestCase):
+    def inspect(self, rows, field=None):
+        output = io.StringIO()
+        with mock.patch.object(S, 'docker', return_value=json.dumps(rows).encode()), contextlib.redirect_stdout(output):
+            if field is None:
+                S.inspect_isolation('owned-name', 'token', 'production')
+                self.assertEqual(output.getvalue(), '')
+                return
+            with self.assertRaises(S.Failure) as failed:
+                S.inspect_isolation('owned-name', 'token', 'production')
+        self.assertEqual(failed.exception.code, 'isolation_' + field)
+        self.assertIn(failed.exception.code, P.CODES)
+        self.assertNotIn('PRIVATE_SENTINEL', output.getvalue())
+        prefix, raw = output.getvalue().strip().split(' ', 1)
+        self.assertEqual(prefix, 'CI_BOOTSTRAP_ISOLATION_FAILURE')
+        row = json.loads(raw)
+        self.assertEqual(set(row), {'case', 'check', 'expected', 'observed', 'cleanup_pending'})
+        self.assertEqual((row['case'], row['check'], row['cleanup_pending']), ('production', field, True))
+        return row
+
+    def test_canonical_capabilities_and_exact_aliases(self):
+        for caps in (['CAP_SETGID', 'CAP_SETUID'], ['SETUID', 'SETGID'], ['SETGID', 'CAP_SETUID']):
+            rows = inspect_fixture(); rows[0]['HostConfig']['CapAdd'] = caps
+            self.inspect(rows)
+
+    def test_capability_duplicates_extras_and_unknowns_fail_closed(self):
+        for caps in (None, [], ['SETUID'], ['SETUID', 'SETUID'], ['SETUID', 'CAP_SETUID'],
+                     ['SETUID', 'SETGID', 'SETPCAP'], ['CAP_SETUID', 'PRIVATE_SENTINEL'],
+                     ['cap_setuid', 'CAP_SETGID'], [None, 'SETGID'], ['SETUID'] * 17):
+            rows = inspect_fixture(); rows[0]['HostConfig']['CapAdd'] = caps
+            self.inspect(rows, 'cap_add')
+
+    def test_each_isolation_field_has_finite_failure(self):
+        mutations = [
+            ('inspect_shape', lambda rows: rows.clear()),
+            ('config_shape', lambda rows: rows[0].update(Config=None)),
+            ('run_label', lambda rows: rows[0]['Config'].update(Labels={S.LABEL: 'PRIVATE_SENTINEL'})),
+            ('network', lambda rows: rows[0]['HostConfig'].update(NetworkMode='PRIVATE_SENTINEL')),
+            ('readonly_root', lambda rows: rows[0]['HostConfig'].update(ReadonlyRootfs=False)),
+            ('privileged', lambda rows: rows[0]['HostConfig'].update(Privileged=True)),
+            ('cap_drop', lambda rows: rows[0]['HostConfig'].update(CapDrop=['PRIVATE_SENTINEL'])),
+            ('no_new_privileges', lambda rows: rows[0]['HostConfig'].update(SecurityOpt=['no-new-privileges:false'])),
+            ('pids_limit', lambda rows: rows[0]['HostConfig'].update(PidsLimit=65)),
+            ('memory_limit', lambda rows: rows[0]['HostConfig'].update(Memory=268435457)),
+            ('bind_mounts', lambda rows: rows[0]['HostConfig'].update(Binds=['PRIVATE_SENTINEL'])),
+            ('devices', lambda rows: rows[0]['HostConfig'].update(Devices=[{'PathOnHost': 'PRIVATE_SENTINEL'}])),
+            ('extra_mounts', lambda rows: rows[0]['HostConfig'].update(Mounts=['PRIVATE_SENTINEL'])),
+            ('image_volumes', lambda rows: rows[0]['Config'].update(Volumes={'PRIVATE_SENTINEL': {}})),
+            ('pid_namespace', lambda rows: rows[0]['HostConfig'].update(PidMode='PRIVATE_SENTINEL')),
+            ('setup_user', lambda rows: rows[0]['Config'].update(User='PRIVATE_SENTINEL')),
+            ('tmpfs_destinations', lambda rows: rows[0]['HostConfig']['Tmpfs'].update(PRIVATE_SENTINEL='private')),
+            ('pin_tmpfs', lambda rows: rows[0]['HostConfig']['Tmpfs'].update({'/etc/wholepact': 'PRIVATE_SENTINEL'})),
+            ('evidence_tmpfs', lambda rows: rows[0]['HostConfig']['Tmpfs'].update({'/ci-evidence': 'PRIVATE_SENTINEL'})),
+            ('runtime_tmpfs', lambda rows: rows[0]['HostConfig']['Tmpfs'].update({'/tmp': 'PRIVATE_SENTINEL'})),
+        ]
+        for field, change in mutations:
+            with self.subTest(field=field):
+                rows = inspect_fixture(); change(rows); self.inspect(rows, field)
+
+    def test_inspect_duplicate_keys_and_nonfinite_fail_closed(self):
+        for raw in (b'[{"Config":{},"Config":{}}]', b'[NaN]'):
+            output = io.StringIO()
+            with mock.patch.object(S, 'docker', return_value=raw), contextlib.redirect_stdout(output):
+                with self.assertRaises(S.Failure) as failed: S.inspect_isolation('owned-name', 'token', 'production')
+            self.assertEqual(failed.exception.code, 'isolation_inspect_shape')
+            self.assertIn('"observed":"invalid_json"', output.getvalue())
+
+    def test_security_options_cannot_expand_privileges(self):
+        for options in ([], ['no-new-privileges:true', 'seccomp=unconfined'],
+                        ['no-new-privileges:true', 'apparmor=unconfined'],
+                        ['no-new-privileges:true'] * 2, ['no-new-privileges=false']):
+            rows = inspect_fixture(); rows[0]['HostConfig']['SecurityOpt'] = options
+            self.inspect(rows, 'no_new_privileges')
+
+    def test_tmpfs_options_exact_with_safe_projection(self):
+        rows = inspect_fixture()
+        value = rows[0]['HostConfig']['Tmpfs']['/ci-evidence']
+        rows[0]['HostConfig']['Tmpfs']['/ci-evidence'] = ','.join(reversed(value.split(',')))
+        self.inspect(rows)
+        for changed in (value + ',rw', value.replace('noexec,', ''), value.replace('uid=10001', 'uid=0'),
+                        value.replace('size=1m', 'size=PRIVATE_SENTINEL'), None):
+            rows = inspect_fixture(); rows[0]['HostConfig']['Tmpfs']['/ci-evidence'] = changed
+            row = self.inspect(rows, 'evidence_tmpfs')
+            self.assertIn('uid=10001', row['expected'])
+
+    def test_cleanup_only_never_emits_lifecycle_pass(self):
+        for clean in (True, False):
+            output = io.StringIO()
+            with tempfile.TemporaryDirectory() as root, \
+                 mock.patch.object(S, 'context', return_value=('a' * 40, 'token')), \
+                 mock.patch.object(S, 'cleanup', return_value=clean), \
+                 mock.patch.object(S.sys, 'argv', ['supervisor', 'cleanup']), \
+                 mock.patch.dict(S.os.environ, {'RUNNER_TEMP': root}), contextlib.redirect_stdout(output):
+                self.assertEqual(S.main(), 0 if clean else 1)
+            prefix, raw = output.getvalue().strip().split(' ', 1)
+            self.assertEqual(prefix, 'CI_BOOTSTRAP_CLEANUP_RESULT')
+            row = json.loads(raw)
+            self.assertEqual(row, dict(cleanup_passed=clean, cleanup_only=True,
+                                       source='a' * 40, lifecycle_result='not_evaluated'))
+            self.assertNotIn('CI_BOOTSTRAP_RESULT ', output.getvalue())
 
 
 def fixture():

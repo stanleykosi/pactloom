@@ -29,6 +29,11 @@ CODES = {'none', 'arguments', 'container_context', 'single_thread', 'manifest', 
          'graph_identity', 'sequence', 'phase_order', 'deadline_binding', 'success_counts',
          'fault_identity', 'fault_boundary', 'root_finish', 'adoption_identity',
          'fixture_status', 'started_deadline', 'receive_identity', 'reap_identity'}
+CODES |= {'isolation_' + field for field in (
+    'inspect_shape', 'config_shape', 'run_label', 'network', 'readonly_root', 'privileged',
+    'cap_drop', 'cap_add', 'no_new_privileges', 'pids_limit', 'memory_limit', 'bind_mounts',
+    'devices', 'extra_mounts', 'image_volumes', 'pid_namespace', 'setup_user',
+    'tmpfs_destinations', 'pin_tmpfs', 'evidence_tmpfs', 'runtime_tmpfs')}
 STAGES = {'complete', 'setup', 'runtime', 'evidence', 'projection', 'container', 'cleanup', 'supervisor'}
 RESULT_FIELDS = {'schema_version', 'case', 'outcome', 'stage', 'code', 'records', 'roles_ready',
                  'birth_edges', 'authenticated_receives', 'owned_reaps', 'adopted_reaped', 'natural_empty',
