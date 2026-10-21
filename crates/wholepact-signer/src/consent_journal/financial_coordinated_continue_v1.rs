@@ -1,16 +1,18 @@
 //! Inert exact preparation, not a coordinated approval or a journal transition.
 //! The ordinary review facts below do not authenticate Arm, C, H or S. A future
 //! original-role final-token join must compare every frozen fact and clock.
-//! V2 has a distinct provenance tag and digest domain. The V1 reader is unchanged
-//! and cannot read this payload; adding that closed reader is a separate gate
-//! before any future code may persist a coordinated continuation.
+//! V2 has a distinct provenance tag and digest domain. Its historical reader
+//! binds semantic review and the exact request, not the full rendered presentation
+//! or a reusable grant. The live Final must separately bind the presentation.
+//! This module does not infer permission from any retained historical payload.
 use super::*;
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 use wholepact_authority::{
     OwnerControl, OwnerControlRequest,
     durable_financial_continuation_v1::{
-        original_delivery_request_digest_v1, prepare_financial_continuation_request_v1,
+        FinancialContinuationRecordV1, original_delivery_request_digest_v1,
+        prepare_financial_continuation_request_v1,
     },
 };
 
@@ -50,13 +52,7 @@ pub(crate) struct CoordinatedContinueReviewDataV1 {
     pub(crate) session_expires_at_ms: u64,
 }
 impl CoordinatedContinueReviewDataV1 {
-    fn validate_shape(
-        &self,
-        source_identity: &str,
-        terms_digest: &str,
-        original_host_instance: &str,
-        now: u64,
-    ) -> Result<()> {
+    fn validate_historical_shape(&self) -> Result<()> {
         for value in [
             &self.coordinator_process_instance,
             &self.signer_process_instance,
@@ -72,12 +68,7 @@ impl CoordinatedContinueReviewDataV1 {
         }
         id(&self.signer_principal_id)?;
         if self.coordinator_focus_epoch == 0
-            || self.source_identity_digest != source_identity
-            || self.terms_digest != terms_digest
-            || self.original_host_process_instance != original_host_instance
             || self.reviewed_at_ms == 0
-            || self.reviewed_at_ms > now
-            || self.expires_at_ms <= now
             || self.expires_at_ms > self.session_expires_at_ms
             || self
                 .expires_at_ms
@@ -88,25 +79,144 @@ impl CoordinatedContinueReviewDataV1 {
         }
         Ok(())
     }
+    fn validate_shape(
+        &self,
+        source_identity: &str,
+        terms_digest: &str,
+        original_host_instance: &str,
+        now: u64,
+    ) -> Result<()> {
+        self.validate_historical_shape()?;
+        if self.source_identity_digest != source_identity
+            || self.terms_digest != terms_digest
+            || self.original_host_process_instance != original_host_instance
+            || self.reviewed_at_ms > now
+            || self.expires_at_ms <= now
+        {
+            return Err(JournalError::InvalidBinding);
+        }
+        Ok(())
+    }
 }
 
-#[derive(Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 enum CoordinatedReviewOriginV2 {
     #[serde(rename = "original_coordinator_host_signer_v1")]
     OriginalCoordinatorHostSignerV1,
 }
-#[derive(Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CoordinatedContinuationProvenanceV2 {
     origin: CoordinatedReviewOriginV2,
     review: CoordinatedContinueReviewDataV1,
     preparation_nonce: String,
 }
-#[derive(Serialize)]
-struct CoordinatedFinancialContinuationIntentV2 {
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct CoordinatedFinancialContinuationIntentV2 {
     version: u16,
     request: OwnerControlRequest,
     owner_certificate_digest: String,
     coordinated_provenance: CoordinatedContinuationProvenanceV2,
+}
+
+impl CoordinatedFinancialContinuationIntentV2 {
+    pub(super) fn request(&self) -> &OwnerControlRequest {
+        &self.request
+    }
+    pub(super) fn owner_certificate_digest(&self) -> &str {
+        &self.owner_certificate_digest
+    }
+    fn record(&self) -> Result<&FinancialContinuationRecordV1> {
+        match &self.request.control {
+            OwnerControl::AdmitFinancialContinuationV1 { record } => Ok(record),
+            _ => Err(JournalError::InvalidBinding),
+        }
+    }
+    fn seed(&self) -> Result<String> {
+        digest(
+            INTENT_DOMAIN,
+            &(
+                INTENT_VERSION,
+                &self.record()?.terms,
+                &self.owner_certificate_digest,
+                &self.coordinated_provenance,
+            ),
+        )
+    }
+    fn validate(&self) -> Result<()> {
+        let record = self.record()?;
+        record
+            .validate_request(&self.request, &record.terms.scope.witness)
+            .map_err(|_| JournalError::InvalidBinding)?;
+        let provenance = &self.coordinated_provenance;
+        let review = &provenance.review;
+        review.validate_historical_shape()?;
+        hash(&provenance.preparation_nonce)?;
+        hash(&self.owner_certificate_digest)?;
+        if self.version != INTENT_VERSION
+            || review.terms_digest
+                != record
+                    .terms
+                    .intent_terms_digest()
+                    .map_err(|_| JournalError::InvalidBinding)?
+            || review.reviewed_at_ms < record.terms.valid_from_ms
+            || review.expires_at_ms > record.terms.valid_until_ms
+            || record.signer_continuation_intent_digest != self.seed()?
+        {
+            return Err(JournalError::InvalidBinding);
+        }
+        encode(self)?;
+        Ok(())
+    }
+    /// Historical semantic evidence only. Neither the full rendered presentation
+    /// nor the genuine single-use Final capability is reconstructed from this row.
+    pub(super) fn history_digest(&self) -> Result<String> {
+        self.validate()?;
+        digest(
+            "wholepact:signer-coordinated-financial-continuation-history:v2",
+            self,
+        )
+    }
+    pub(super) fn validate_original(&self, c: &Connection) -> Result<()> {
+        self.validate()?;
+        let terms = &self.record()?.terms;
+        let original = authority::durable_delivery_admission_intent_v3::read(
+            c,
+            &terms.scope.authorization.authorization_id,
+        )?
+        .ok_or(JournalError::NotFound)?;
+        let OwnerControl::AdmitDurablePaymentWithDeliveryV2 { record } =
+            &original.request().control
+        else {
+            return Err(JournalError::InvalidBinding);
+        };
+        if record.scope != terms.scope
+            || original.request().operation_id != terms.original_delivery_operation_id
+            || original_delivery_request_digest_v1(original.request())
+                .map_err(|_| JournalError::InvalidBinding)?
+                != terms.original_delivery_request_digest
+            || original.history_digest()? != terms.original_local_intent_digest
+            || original.recipient_intent_digest()? != terms.original_recipient_intent_digest
+            || original.enrollment_ref() != terms.original_recipient_enrollment_ref
+            || original.manifest_ref() != terms.original_recipient_manifest_ref
+            || original.disclosure() != &terms.scope.witness
+            || original.owner_certificate_digest() != self.owner_certificate_digest
+            || original.recipient_intent().authorized_host_process_instance
+                != self
+                    .coordinated_provenance
+                    .review
+                    .original_host_process_instance
+        {
+            return Err(JournalError::InvalidBinding);
+        }
+        let enrollment =
+            read_enrollment(c, original.enrollment_ref())?.ok_or(JournalError::NotFound)?;
+        if enrollment.principal_id() != self.coordinated_provenance.review.signer_principal_id {
+            return Err(JournalError::Permission);
+        }
+        Ok(())
+    }
 }
 
 /// Immutable source-binding data, authenticated history and actual Host peer,
