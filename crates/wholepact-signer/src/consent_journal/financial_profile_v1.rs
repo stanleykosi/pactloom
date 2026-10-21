@@ -11,6 +11,9 @@ const TABLE: &str = "signer_financial_continuation_intents";
 const COLUMNS: &[&str] = &["operation_id", "authorization_id", "original_admission_operation_id", "request_digest", "enrollment_ref", "manifest_ref", "payload"];
 #[path = "financial_continuation_v1.rs"]
 mod intent;
+#[path = "financial_coordinated_continue_v1.rs"]
+mod coordinated_continue;
+pub(crate) use coordinated_continue::{CoordinatedContinueReviewDataV1, CoordinatedContinueSignerRoleV1, PreparedCoordinatedFinancialContinuationV1};
 #[path = "financial_bridge_storage_v1.rs"]
 mod bridge;
 #[path = "financial_return_pin_v1.rs"]

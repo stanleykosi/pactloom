@@ -2,13 +2,18 @@
 //! UI files select exact retained operations. Only installed native peers,
 //! authenticated original Witness history, and the maintained Host methods may
 //! supply custody, current consent, result intake, or saved-byte dispatch.
-use super::{durable_delivery_admission_v2::admit_original_borrowed_v3, Host};
+use super::{
+    coordinated_session_v1::{
+        collect_original_owner_selections_v1, complete_original_financial_session_v1,
+    },
+    durable_delivery_admission_v2::{admit_original_borrowed_v3, OriginalDeliveryExportV3},
+    Host,
+};
 use crate::{files, terminal::Terminal, Error, Result};
 use serde::{de::DeserializeOwned, Deserialize};
 use std::{
     collections::BTreeSet,
     path::{Path, PathBuf},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use wholepact_authority::{
     durable_delivery_scope_v2::{DurableDeliveryPlanV2, DurableDeliveryRouteV2},
@@ -25,9 +30,7 @@ use wholepact_signer::authority_bridge::{
     durable_delivery_admission_ipc_v3::DurableDeliveryAdmissionStatusV3,
     financial_continuation_v1::{
         AuthenticatedFinancialContinuationHistoryV1, FinancialResultRequestV1,
-        PreparedFinancialResultReceiverV1,
     },
-    provider::InstalledSignerProvider,
 };
 use zeroize::Zeroizing;
 
@@ -36,24 +39,24 @@ use zeroize::Zeroizing;
 const MAX_SELECTION_BYTES: usize = 262_144;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ContinuationSelectionV1 {
+pub(super) struct ContinuationSelectionV1 {
     version: u16,
     continuation: OwnerControlRequest,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ResultSelectionV1 {
+pub(super) struct ResultSelectionV1 {
     version: u16,
-    signer_socket: PathBuf,
-    request: FinancialResultRequestV1,
+    pub(super) signer_socket: PathBuf,
+    pub(super) request: FinancialResultRequestV1,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SessionCommandsV1 {
+pub(super) struct SessionCommandsV1 {
     version: u16,
-    bind_key: String,
-    intake_keys: [String; 2],
-    completion_key: String,
+    pub(super) bind_key: String,
+    pub(super) intake_keys: [String; 2],
+    pub(super) completion_key: String,
 }
 impl SessionCommandsV1 {
     fn check(&self) -> Result<()> {
@@ -125,7 +128,7 @@ fn require_admitted_selection(
     }
     Ok(())
 }
-fn require_result_selection(
+pub(super) fn require_result_selection(
     selection: &ResultSelectionV1,
     record: &FinancialContinuationRecordV1,
 ) -> Result<()> {
@@ -148,7 +151,7 @@ fn require_result_selection(
     }
     Ok(())
 }
-fn require_pair(selections: &[ContinuationSelectionV1; 2]) -> Result<()> {
+pub(super) fn require_pair(selections: &[ContinuationSelectionV1; 2]) -> Result<()> {
     let first = continuation_record(&selections[0])?;
     let second = continuation_record(&selections[1])?;
     if selections[0].continuation.account_id == selections[1].continuation.account_id
@@ -160,7 +163,7 @@ fn require_pair(selections: &[ContinuationSelectionV1; 2]) -> Result<()> {
     }
     Ok(())
 }
-fn read_histories(
+pub(super) fn read_histories(
     host: &Host,
     workspace: &Path,
     selections: &[ContinuationSelectionV1; 2],
@@ -181,27 +184,40 @@ fn read_histories(
     }
     histories.try_into().map_err(|_| Error::Authentication)
 }
-fn original_result_deadline(
-    history: &AuthenticatedFinancialContinuationHistoryV1,
-) -> Result<Instant> {
-    // Take the monotonic snapshot first, so computation cannot extend the
-    // authenticated absolute ceiling. Native peer approvals remain independent.
-    let monotonic = Instant::now();
-    let now_ms: u64 = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| Error::Invalid)?
-        .as_millis()
-        .try_into()
-        .map_err(|_| Error::Invalid)?;
-    let terms = &history.continuation_record().terms;
-    terms.require_live(now_ms).map_err(|_| Error::Permission)?;
-    let remaining = terms
-        .valid_until_ms
-        .checked_sub(now_ms)
-        .ok_or(Error::Permission)?;
-    monotonic
-        .checked_add(Duration::from_millis(remaining))
-        .ok_or(Error::Permission)
+
+// Concrete CLI handoff only. Keep its prompts and immediate selection checks
+// here; the private composition does not accept a replaceable prompt provider.
+pub(super) fn select_original_owner_v1(
+    terminal: &Terminal,
+    host: &Host,
+    workspace: &Path,
+    prior: Option<&OriginalDeliveryExportV3>,
+    index: usize,
+) -> Result<(
+    OriginalDeliveryExportV3,
+    DurableDeliveryAdmissionStatusV3,
+    ContinuationSelectionV1,
+    ResultSelectionV1,
+)> {
+    terminal.message(&format!(
+        "Select original reviewer {} of 2 for its separate closed V3 admission.\n",
+        index + 1
+    ))?;
+    let (exported, admitted) = admit_original_borrowed_v3(host, workspace, prior)?;
+    terminal.message("In this same original Signer, review the fresh original financial continuation. Save its explicit continuation selector before Witness approval. Complete the exact Witness continuation and separate Signer decisions without changing native focus or original deadlines. The Host will not send an owner control request from this file.\n")?;
+    let selected: ContinuationSelectionV1 = read_selection(
+        host,
+        "Exact copied native continuation selector JSON file (absolute): ",
+    )?;
+    require_admitted_selection(&selected, &admitted)?;
+    terminal.message("After this owner's genuine SignExact finishes, save its native result selector while keeping that original Signer alive and focused for ReturnExact. For a shared Witness installation, drain and stop its single-owner service before opening the next owner; never run competing exclusive registry owners.\n")?;
+    let result: ResultSelectionV1 = read_selection(
+        host,
+        "Exact copied native AwaitingReturn result selector JSON file (absolute): ",
+    )?;
+    require_result_selection(&result, continuation_record(&selected)?)?;
+    // Retain the actual admission status in the owner's loop scope, as before.
+    Ok((exported, admitted, selected, result))
 }
 
 pub(in crate::host) fn session_v1(
@@ -218,35 +234,7 @@ pub(in crate::host) fn session_v1(
         let commands: SessionCommandsV1 = read_selection(&host,
             "Exact immutable command keys JSON file {version:1,bind_key,intake_keys:[first,second],completion_key} (absolute): ")?;
         commands.check()?;
-        let mut selections = Vec::with_capacity(2);
-        let mut results = Vec::with_capacity(2);
-        let mut prior = None;
-        for index in 0..2 {
-            terminal.message(&format!(
-                "Select original reviewer {} of 2 for its separate closed V3 admission.\n",
-                index + 1
-            ))?;
-            let (exported, admitted) =
-                admit_original_borrowed_v3(&host, workspace, prior.as_ref())?;
-            terminal.message("In this same original Signer, review the fresh original financial continuation. Save its explicit continuation selector before Witness approval. Complete the exact Witness continuation and separate Signer decisions without changing native focus or original deadlines. The Host will not send an owner control request from this file.\n")?;
-            let selected: ContinuationSelectionV1 = read_selection(
-                &host,
-                "Exact copied native continuation selector JSON file (absolute): ",
-            )?;
-            require_admitted_selection(&selected, &admitted)?;
-            terminal.message("After this owner's genuine SignExact finishes, save its native result selector while keeping that original Signer alive and focused for ReturnExact. For a shared Witness installation, drain and stop its single-owner service before opening the next owner; never run competing exclusive registry owners.\n")?;
-            let result: ResultSelectionV1 = read_selection(
-                &host,
-                "Exact copied native AwaitingReturn result selector JSON file (absolute): ",
-            )?;
-            require_result_selection(&result, continuation_record(&selected)?)?;
-            selections.push(selected);
-            results.push(result);
-            prior = Some(exported);
-        }
-        let selections: [_; 2] = selections.try_into().map_err(|_| Error::Authentication)?;
-        let results: [_; 2] = results.try_into().map_err(|_| Error::Authentication)?;
-        require_pair(&selections)?;
+        let selections = collect_original_owner_selections_v1(&terminal, &host, workspace)?;
         terminal.message("Both owners must now have completed signing and be awaiting protected return. Stop and drain initial Witness services. Serve the exact completed original accounts, using the paired mode only for a genuinely shared installation. The next steps require fresh authenticated history, not the copied selectors.\n")?;
         // A readiness acknowledgement is not a financial permission. Every
         // history/intake/checkpoint action retains its maintained exact review.
@@ -257,44 +245,8 @@ pub(in crate::host) fn session_v1(
         {
             return Err(Error::Permission);
         }
-        let histories = read_histories(&host, workspace, &selections)?;
-        host.bind_original_financial_continuations_v1(
-            workspace,
-            &commands.bind_key,
-            [&histories[0], &histories[1]],
-        )?;
-        for index in 0..2 {
-            require_result_selection(&results[index], histories[index].continuation_record())?;
-            let receiver = PreparedFinancialResultReceiverV1::prepare(
-                InstalledSignerProvider::load().map_err(|_| Error::Permission)?,
-                &results[index].signer_socket,
-                &results[index].request,
-                original_result_deadline(&histories[index])?,
-            ).map_err(|_| Error::Receipt("FINANCIAL_RESULT_PREPARE: original result is unavailable or uncertain; preserve exact operations and journals, never re-sign or replace the selector".into()))?;
-            // Maintained intake performs all Host reviews and freezes its gate
-            // before receive() starts the independently approved ReturnExact.
-            host.intake_original_financial_result_v1(
-                workspace,
-                &commands.intake_keys[index],
-                receiver,
-                &histories[index],
-            )?;
-        }
-        let completed =
-            host.complete_original_financial_transaction_v1(workspace, &commands.completion_key)?;
-        let operation = &histories[0]
-            .continuation_record()
-            .terms
-            .scope
-            .delivery
-            .submission_operation_id;
-        let summary = host.verify_completed_private_financial_summary_v1(workspace, operation)?;
-        if summary.checkpoint_id != completed.checkpoint_id
-            || summary.transaction_digest != completed.transaction_digest
-            || summary.transaction_id != completed.txid
-        {
-            return Err(Error::Authentication);
-        }
+        let summary =
+            complete_original_financial_session_v1(&host, workspace, &commands, &selections)?;
         terminal.json(&summary)?;
         terminal.message("Both protected intakes and the exact original completed transaction checkpoint are retained. No transaction was submitted. Close normally; completed-only inspect or dispatch must reopen these exact originals and cannot sign, extract or repair.\n")
     })();

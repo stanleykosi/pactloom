@@ -1,18 +1,27 @@
-//! Source-only bootstrap milestone. This binary has no public role entry and no
-//! financial adapter. The initial native launch must already be trusted, credential-free and
-//! uninjected; checking the running image cannot undo earlier loader injection.
-#![deny(unsafe_op_in_unsafe_fn)]
+//! Private exact-image fixed-fork entry. Separate closed profiles provide inert
+//! bootstrap, cancel-only preparation, or one exact source-backed delivery append.
+//! Initial launch is trusted, credential-free and uninjected; no public worker
+//! entry, source factory or reusable financial approval is accepted.
+#![forbid(unsafe_code)]
+#[cfg(all(wholepact_bootstrap_ci, any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append")))]
+compile_error!("Bootstrap-only CI instrumentation cannot select the source-opening UI profile");
 
-#[cfg(all(target_os = "linux", wholepact_bootstrap_ci))]
-mod ci;
+#[cfg(all(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append"))]
+compile_error!("Cancel-only and one-exact-append are separate common-image profiles");
 #[cfg(target_os = "linux")]
 mod bootstrap;
-#[cfg(target_os = "linux")]
-mod channel;
-#[cfg(target_os = "linux")]
-mod image;
-#[cfg(target_os = "linux")]
-mod process;
+#[cfg(all(target_os = "linux", feature = "coordinated-witness-delivery-append"))]
+mod delivery_driver;
+#[cfg(all(target_os = "linux", feature = "coordinated-witness-delivery-append"))]
+mod delivery_ui;
+#[cfg(all(target_os = "linux", feature = "cancel-only-witness-review"))]
+mod native_ui;
+#[cfg(all(target_os = "linux", feature = "cancel-only-witness-review"))]
+mod review_channel;
+#[cfg(all(target_os = "linux", feature = "cancel-only-witness-review"))]
+mod review_driver;
+#[cfg(all(target_os = "linux", feature = "cancel-only-witness-review"))]
+mod witness_role;
 
 #[cfg(target_os = "linux")]
 type Result<T> = std::io::Result<T>;
@@ -22,16 +31,21 @@ fn rejected(message: &'static str) -> std::io::Error {
 }
 
 fn main() {
-    // Do not move this into a library callable after threads or a GUI/runtime
-    // have started. There is deliberately no externally selectable worker mode.
+    // This private main invokes the argument-free whole-image kernel before
+    // any thread-capable initialization. No public worker/role entry exists.
     #[cfg(target_os = "linux")]
     let code = match bootstrap::run_before_runtime() {
-        Ok(()) => 78, // Bootstrap completed, but financial activation unavailable.
+        Ok(()) => {
+            #[cfg(feature = "coordinated-witness-delivery-append")] { 0 }
+            #[cfg(not(feature = "coordinated-witness-delivery-append"))] { 78 }
+        },
         Err(_) => 1,
     };
     #[cfg(not(target_os = "linux"))]
     let code = 78;
     #[cfg(all(target_os = "linux", wholepact_bootstrap_ci))]
-    ci::finished(code);
+    wholepact_financial_coordinator_origin::record_process_exit_for_ci(code);
+    #[cfg(all(target_os = "linux", wholepact_delivery_ci))]
+    wholepact_financial_coordinator_origin::finish_delivery_observation_for_ci(code);
     std::process::exit(code);
 }

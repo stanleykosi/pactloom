@@ -28,9 +28,13 @@ struct CommonImagePinV1 {
 /// a pristine process. Children inherit the verified image by actual fork.
 pub(super) struct PinnedCommonImageV1 {
     _image: File,
+    #[cfg(feature = "common-image-fork-provider")]
+    identity: VerifiedCommonImageIdentity,
 }
 
 impl PinnedCommonImageV1 {
+    #[cfg(feature = "common-image-fork-provider")]
+    pub(super) fn retain_verified_identity(&self) -> VerifiedCommonImageIdentity { self.identity.clone() }
     #[cfg(wholepact_bootstrap_ci)]
     pub(super) fn ci_fd(&self) -> libc::c_int { self._image.as_raw_fd() }
     pub(super) fn load_running_image() -> Result<Self> {
@@ -82,7 +86,54 @@ impl PinnedCommonImageV1 {
         {
             return Err(rejected("executing common image changed or mismatched"));
         }
-        Ok(Self { _image: image })
+        Ok(Self {
+            _image: image,
+            #[cfg(feature = "common-image-fork-provider")]
+            identity: VerifiedCommonImageIdentity { facts: ImageFacts {
+                device: pin.executable_device, inode: pin.executable_inode,
+                size: pin.executable_size, sha256: pin.executable_sha256,
+            } },
+        })
+    }
+}
+
+// Private inert comparison data is separate from the verified wrapper. Neither
+// is exported; only the successful exact running-image loader mints the wrapper.
+#[cfg(feature = "common-image-fork-provider")]
+#[derive(Clone, PartialEq, Eq)]
+struct ImageFacts { device: u64, inode: u64, size: u64, sha256: String }
+
+#[cfg(feature = "common-image-fork-provider")]
+#[derive(Clone)]
+pub(super) struct VerifiedCommonImageIdentity { facts: ImageFacts }
+#[cfg(feature = "common-image-fork-provider")]
+impl VerifiedCommonImageIdentity {
+    pub(super) fn verify_opened_executable(&self, file: &File) -> Result<()> {
+        use std::os::unix::fs::FileExt;
+        let before = file.metadata()?;
+        if !before.is_file() || before.uid() != 0 || before.mode() & 0o022 != 0
+            || before.mode() & 0o111 == 0 || before.len() == 0 || before.len() > MAX_IMAGE
+            || before.dev() != self.facts.device || before.ino() != self.facts.inode
+            || before.len() != self.facts.size
+        { return Err(rejected("independent Signer image does not match common image")); }
+        // Positional reads leave the independent provider loader's file cursor
+        // untouched. The SAME already-opened, independently pinned file is used.
+        let mut digest = Sha256::new();
+        let mut buffer = [0u8; 64 * 1024];
+        let mut seen = 0u64;
+        loop {
+            let n = file.read_at(&mut buffer, seen)?;
+            if n == 0 { break; }
+            seen = seen.checked_add(n as u64).ok_or_else(|| rejected("image overflow"))?;
+            if seen > MAX_IMAGE { return Err(rejected("image too large")); }
+            digest.update(&buffer[..n]);
+        }
+        let observed = ImageFacts { device: before.dev(), inode: before.ino(),
+            size: seen, sha256: hex::encode(digest.finalize()) };
+        if observed != self.facts || !same_file(&before, &file.metadata()?) {
+            return Err(rejected("independent Signer image changed or mismatched"));
+        }
+        Ok(())
     }
 }
 
@@ -133,6 +184,18 @@ fn same_file(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "common-image-fork-provider")]
+    #[test]
+    fn fork_image_comparison_requires_all_exact_facts() {
+        let original = ImageFacts { device: 1, inode: 2, size: 3, sha256: "ab".repeat(32) };
+        for changed in [
+            ImageFacts { device: 4, ..original.clone() },
+            ImageFacts { inode: 4, ..original.clone() },
+            ImageFacts { size: 4, ..original.clone() },
+            ImageFacts { sha256: "cd".repeat(32), ..original.clone() },
+        ] { assert!(changed != original); }
+        assert!(original.clone() == original);
+    }
     fn valid_data() -> Vec<u8> {
         serde_json::to_vec(&serde_json::json!({
             "schema_version": 1,

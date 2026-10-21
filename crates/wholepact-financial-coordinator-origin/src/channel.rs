@@ -12,6 +12,8 @@ const PACKET_BYTES: usize = 8;
 
 pub(super) struct Channel(OwnedFd);
 impl Channel {
+    #[cfg(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append"))]
+    pub(super) fn review_fd(&self) -> libc::c_int { self.0.as_raw_fd() }
     #[cfg(wholepact_bootstrap_ci)]
     pub(super) fn ci_fd(&self) -> libc::c_int { self.0.as_raw_fd() }
     pub(super) fn pair() -> Result<(Self, Self)> {
@@ -163,7 +165,7 @@ fn packet(message: Message, role: Role) -> [u8; PACKET_BYTES] {
     [b'W', b'P', b'F', b'C', 1, message as u8, role as u8, 0]
 }
 
-fn inspect_ancillary(header: &libc::msghdr, control: &[usize; 64]) -> Result<Option<libc::ucred>> {
+pub(super) fn inspect_ancillary(header: &libc::msghdr, control: &[usize; 64]) -> Result<Option<libc::ucred>> {
     let start = control.as_ptr() as usize;
     let end = start.checked_add(header.msg_controllen).ok_or_else(|| rejected("ancillary overflow"))?;
     if header.msg_controllen > std::mem::size_of_val(control) { return Err(rejected("ancillary bounds")); }

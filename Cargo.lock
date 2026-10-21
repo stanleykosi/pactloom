@@ -5554,6 +5554,7 @@ dependencies = [
  "thiserror 2.0.21",
  "wholepact-chain",
  "wholepact-core",
+ "wholepact-financial-coordinator-origin",
  "wholepact-storage-security",
  "winit",
  "zeroize",
@@ -5643,11 +5644,24 @@ dependencies = [
 name = "wholepact-financial-coordinator"
 version = "0.1.0"
 dependencies = [
+ "eframe",
+ "serde_json",
+ "wholepact-authority",
+ "wholepact-financial-coordinator-origin",
+ "winit",
+ "zeroize",
+]
+
+[[package]]
+name = "wholepact-financial-coordinator-origin"
+version = "0.1.0"
+dependencies = [
  "hex",
  "libc",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "zeroize",
 ]
 
 [[package]]
@@ -5863,6 +5877,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "wholepact-core",
+ "wholepact-financial-coordinator-origin",
  "zeroize",
 ]
 

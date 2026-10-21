@@ -104,11 +104,11 @@ pub(super) fn prepare(terminal: crate::terminal::Terminal) -> Result<DurableInit
         create_agreement(&host, temporary.path(), &payment_receiver)
     })?;
     mark(B::WitnessSetup);
-    let mut witness = EphemeralNativeWitnessV1::new().map_err(|_| stage("witness native setup"))?;
+    let mut witness = EphemeralNativeWitnessV1::new().map_err(|error| { super::super::pristine_diagnostics_v1::source_authority_error(&error); stage("witness native setup") })?;
     mark(B::WitnessOrigin);
     let origin = witness
         .origin()
-        .map_err(|_| stage("original witness pins"))?;
+        .map_err(|error| { super::super::pristine_diagnostics_v1::source_authority_error(&error); stage("original witness pins") })?;
     mark(B::SignerStart);
     let signers =
         JoinedSignerWorkerV1::spawn(origin, payment_receiver.clone(), expiry_ms).map_err(stage)?;
@@ -130,11 +130,11 @@ pub(super) fn prepare(terminal: crate::terminal::Terminal) -> Result<DurableInit
         mark(B::BirthEnroll);
         witness
             .enroll_signed_birth(&account_id, &bytes)
-            .map_err(|_| stage("actual witness birth review"))?;
+            .map_err(|error| { super::super::pristine_diagnostics_v1::source_authority_error(&error); stage("actual witness birth review") })?;
         mark(B::BirthHistory);
         let server = witness
             .serve_original_history()
-            .map_err(|_| stage("original birth TLS server"))?;
+            .map_err(|error| { super::super::pristine_diagnostics_v1::source_authority_error(&error); stage("original birth TLS server") })?;
         mark(B::BirthAcknowledge);
         signers.send(Command::Acknowledge(index)).map_err(stage)?;
         let acknowledged = match signers.receive().map_err(stage)? {
@@ -281,7 +281,7 @@ pub(super) fn publish_single_anchor(
     mark(B::SingleWitness);
     let extension = witness
         .review_original_single_extension_v1(&owner.account_id, &bytes)
-        .map_err(|_| stage("actual Single extension review"))?;
+        .map_err(|error| { super::super::pristine_diagnostics_v1::source_authority_error(&error); stage("actual Single extension review") })?;
     if extension.terms != request.terms {
         return Err(Error::Authentication);
     }
@@ -300,7 +300,7 @@ pub(super) fn publish_single_anchor(
             &owner.account_id,
             &extension.digest().map_err(|_| Error::Invalid)?,
         )
-        .map_err(|_| stage("original Single attempt TLS server"))?;
+        .map_err(|error| { super::super::pristine_diagnostics_v1::source_authority_error(&error); stage("original Single attempt TLS server") })?;
     mark(B::SinglePublicationOpen);
     signers
         .send(Command::OpenSinglePublication(owner.index, request))
@@ -376,7 +376,7 @@ pub(super) fn publish_roster_member(
     mark(B::RosterWitness);
     let original = witness
         .review_original_roster_extension_v2(&owner.account_id, &bytes)
-        .map_err(|_| stage("actual roster extension review"))?;
+        .map_err(|error| { super::super::pristine_diagnostics_v1::source_authority_error(&error); stage("actual roster extension review") })?;
     let request = HostManualRosterPublicationRequestV2 {
         version: 2,
         enrollment: enrollment.enrollment,
@@ -399,7 +399,7 @@ pub(super) fn publish_roster_member(
             &original.extension.digest().map_err(|_| Error::Invalid)?,
             &original.attempt.attempt_digest,
         )
-        .map_err(|_| stage("original roster attempt TLS server"))?;
+        .map_err(|error| { super::super::pristine_diagnostics_v1::source_authority_error(&error); stage("original roster attempt TLS server") })?;
     mark(B::RosterPublicationOpen);
     signers
         .send(Command::OpenRosterPublication(owner.index, request.clone()))
@@ -485,6 +485,21 @@ pub(super) struct PrivateWorkspaceInitialV1 {
 // Host remains in its move-safe slot through the mandatory consuming vault cut.
 
 pub(super) fn prepare_private_workspace_v1(terminal: crate::terminal::Terminal) -> Result<PrivateWorkspaceInitialV1> {
+    prepare_private_workspace_with_profile_v1(terminal, PrivateWorkspaceProfileV1::FullExisting)
+}
+
+/// The same genuine three-account predecessor, stopped before viewing-wallet,
+/// funding or fixed-candidate work, without an unused dispatcher credential.
+pub(super) fn prepare_pristine_coordinator_v1(terminal: crate::terminal::Terminal) -> Result<PrivateWorkspaceInitialV1> {
+    prepare_private_workspace_with_profile_v1(terminal, PrivateWorkspaceProfileV1::PristineCoordinator)
+}
+
+enum PrivateWorkspaceProfileV1 { FullExisting, PristineCoordinator }
+
+fn prepare_private_workspace_with_profile_v1(
+    terminal: crate::terminal::Terminal,
+    profile: PrivateWorkspaceProfileV1,
+) -> Result<PrivateWorkspaceInitialV1> {
     let (temporary, host) = diagnostic::host(B::PrivateWorkspaceBootstrap, || {
         crate::host::born_test_host_v1::create(terminal)
     })?;
@@ -504,11 +519,14 @@ pub(super) fn prepare_private_workspace_v1(terminal: crate::terminal::Terminal) 
         create_private_workspace_agreement_v1(&host, temporary.path(), &payment_receiver)
     })?;
     mark(B::WitnessSetup);
-    let mut witness = EphemeralNativeWitnessV1::new().map_err(|_| stage("witness native setup"))?;
+    let mut witness = match profile {
+        PrivateWorkspaceProfileV1::FullExisting => EphemeralNativeWitnessV1::new(),
+        PrivateWorkspaceProfileV1::PristineCoordinator => EphemeralNativeWitnessV1::new_for_pristine_delivery_review_v1(),
+    }.map_err(|error| { super::super::pristine_diagnostics_v1::source_authority_error(&error); stage("witness native setup") })?;
     mark(B::WitnessOrigin);
     let origin = witness
         .origin()
-        .map_err(|_| stage("original witness pins"))?;
+        .map_err(|error| { super::super::pristine_diagnostics_v1::source_authority_error(&error); stage("original witness pins") })?;
     mark(B::SignerStart);
     let signers =
         JoinedSignerWorkerV1::spawn(origin, payment_receiver.clone(), expiry_ms).map_err(stage)?;
@@ -530,11 +548,11 @@ pub(super) fn prepare_private_workspace_v1(terminal: crate::terminal::Terminal) 
         mark(B::BirthEnroll);
         witness
             .enroll_signed_birth(&account_id, &bytes)
-            .map_err(|_| stage("actual witness birth review"))?;
+            .map_err(|error| { super::super::pristine_diagnostics_v1::source_authority_error(&error); stage("actual witness birth review") })?;
         mark(B::BirthHistory);
         let server = witness
             .serve_original_history()
-            .map_err(|_| stage("original birth TLS server"))?;
+            .map_err(|error| { super::super::pristine_diagnostics_v1::source_authority_error(&error); stage("original birth TLS server") })?;
         mark(B::BirthAcknowledge);
         signers.send(Command::Acknowledge(index)).map_err(stage)?;
         let acknowledged = match signers.receive().map_err(stage)? {

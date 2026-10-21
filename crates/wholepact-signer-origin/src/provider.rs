@@ -49,6 +49,10 @@ pub struct SignerProviderInstallRequest {
 /// installer assumption, not publisher attestation or a proof of human action.
 pub struct InstalledSignerProvider {
     pin: SignerProviderInstallRequest,
+    // Explicit distinct provenance, never a procfs-denial fallback or a fake
+    // LaunchedSigner. The optional capability has no public constructor.
+    #[cfg(feature = "common-image-fork-provider")]
+    original_fork: Option<wholepact_financial_coordinator_origin::OriginalForkSignerVerifier>,
     launched: std::sync::Mutex<Option<crate::native_launch::LaunchedSigner>>,
     #[cfg(all(
         feature = "synthetic-qualification",
@@ -65,30 +69,30 @@ pub struct InstalledSignerProvider {
 }
 impl InstalledSignerProvider {
     pub fn load() -> Result<Self> {
-        let mut file = open_root_controlled(Path::new(INSTALLED_PIN), false)?;
-        if file
-            .metadata()
-            .map_err(|_| BridgeError::SignerOriginUnavailable)?
-            .len()
-            > 4096
-        {
-            return Err(BridgeError::SignerOriginUnavailable);
-        }
-        let mut bytes = Vec::new();
-        file.by_ref()
-            .take(4097)
-            .read_to_end(&mut bytes)
+        let (pin, _executable) = load_verified_installation()?;
+        Ok(Self::from_verified_installation(pin))
+    }
+    /// Genuine fixed H-owned Signer provenance, plus the SAME independent
+    /// owner-installed Signer pin and enrollment reference as legacy loading.
+    /// A standalone Signer image pin cannot match a different common image.
+    /// This never launches a role or supplies native approval/source permission.
+    #[cfg(feature = "common-image-fork-provider")]
+    pub fn load_for_original_fork(
+        verifier: wholepact_financial_coordinator_origin::OriginalForkSignerVerifier,
+    ) -> Result<Self> {
+        verifier.check_original_custody_alive().map_err(|_| BridgeError::SignerOriginUnavailable)?;
+        let (pin, executable) = load_verified_installation()?;
+        verifier.verify_installed_executable(&executable)
             .map_err(|_| BridgeError::SignerOriginUnavailable)?;
-        if bytes.len() > 4096 {
-            return Err(BridgeError::SignerOriginUnavailable);
-        }
-        let pin: SignerProviderInstallRequest =
-            serde_json::from_slice(&bytes).map_err(|_| BridgeError::SignerOriginUnavailable)?;
-        validate_pin(&pin)?;
-        let mut executable = open_root_controlled(Path::new(&pin.executable_path), true)?;
-        verify_image(&mut executable, &pin)?;
-        Ok(Self {
+        let mut provider = Self::from_verified_installation(pin);
+        provider.original_fork = Some(verifier);
+        Ok(provider)
+    }
+    fn from_verified_installation(pin: SignerProviderInstallRequest) -> Self {
+        Self {
             pin,
+            #[cfg(feature = "common-image-fork-provider")]
+            original_fork: None,
             launched: std::sync::Mutex::new(None),
             #[cfg(all(
                 feature = "synthetic-qualification",
@@ -102,7 +106,7 @@ impl InstalledSignerProvider {
                 feature = "authority-signing"
             ))]
             qualification_endpoint: None,
-        })
+        }
     }
     /// Narrow synthetic harness issuer: no caller path, identity, credential or
     /// verification flag is accepted. This trusts only this running test image
@@ -144,6 +148,8 @@ impl InstalledSignerProvider {
         verify_image_owner(&mut image, &pin, uid)?;
         Ok(Self {
             pin,
+            #[cfg(feature = "common-image-fork-provider")]
+            original_fork: None,
             launched: std::sync::Mutex::new(None),
             qualification_process: Some((std::process::id(), uid)),
             #[cfg(all(
@@ -174,6 +180,8 @@ impl InstalledSignerProvider {
     /// Launch exactly the opened owner-installed image. The child still requires
     /// native unlock/pairing; the inherited channel conveys only its endpoint.
     pub fn launch_native(&self) -> Result<()> {
+        #[cfg(feature = "common-image-fork-provider")]
+        if self.original_fork.is_some() { return Err(BridgeError::SignerOriginUnavailable); }
         #[cfg(all(
             feature = "synthetic-qualification",
             feature = "native-ui",
@@ -198,6 +206,8 @@ impl InstalledSignerProvider {
         Ok(())
     }
     pub fn wait_native_endpoint(&self, timeout: std::time::Duration) -> Result<std::path::PathBuf> {
+        #[cfg(feature = "common-image-fork-provider")]
+        if self.original_fork.is_some() { return Err(BridgeError::SignerOriginUnavailable); }
         #[cfg(all(
             feature = "synthetic-qualification",
             feature = "native-ui",
@@ -215,6 +225,18 @@ impl InstalledSignerProvider {
             .map_err(|_| BridgeError::SignerOriginUnavailable)
     }
     pub fn verify_server(&self, stream: &UnixStream) -> Result<PeerProcess> {
+        #[cfg(feature = "common-image-fork-provider")]
+        if let Some(original) = &self.original_fork {
+            // Both observations are of this actual connected stream. The
+            // retained original child remains live throughout, excluding reuse.
+            let peer = PeerProcess::observe(stream).map_err(|_| BridgeError::SignerOriginUnavailable)?;
+            original.verify_connected_signer(stream).map_err(|_| BridgeError::SignerOriginUnavailable)?;
+            peer.check_alive().map_err(|_| BridgeError::SignerOriginUnavailable)?;
+            original.check_original_custody_alive().map_err(|_| BridgeError::SignerOriginUnavailable)?;
+            return Ok(peer);
+        }
+        // Legacy owned-exec and fail-closed procfs paths are unchanged. A failed
+        // fork verification above always returns, never tries these paths.
         if let Some(child) = self
             .launched
             .lock()
@@ -258,6 +280,31 @@ impl InstalledSignerProvider {
     pub fn native_enrollment_reference(&self) -> &str {
         &self.pin.native_enrollment_reference
     }
+}
+fn load_verified_installation() -> Result<(SignerProviderInstallRequest, File)> {
+    let mut file = open_root_controlled(Path::new(INSTALLED_PIN), false)?;
+    if file
+        .metadata()
+        .map_err(|_| BridgeError::SignerOriginUnavailable)?
+        .len()
+        > 4096
+    {
+        return Err(BridgeError::SignerOriginUnavailable);
+    }
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take(4097)
+        .read_to_end(&mut bytes)
+        .map_err(|_| BridgeError::SignerOriginUnavailable)?;
+    if bytes.len() > 4096 {
+        return Err(BridgeError::SignerOriginUnavailable);
+    }
+    let pin: SignerProviderInstallRequest =
+        serde_json::from_slice(&bytes).map_err(|_| BridgeError::SignerOriginUnavailable)?;
+    validate_pin(&pin)?;
+    let mut executable = open_root_controlled(Path::new(&pin.executable_path), true)?;
+    verify_image(&mut executable, &pin)?;
+    Ok((pin, executable))
 }
 fn validate_pin(pin: &SignerProviderInstallRequest) -> Result<()> {
     let hash = |s: &str| {

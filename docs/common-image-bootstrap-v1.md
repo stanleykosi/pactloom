@@ -225,3 +225,127 @@ Local work for this increment is source inspection, compilation and reviewed
 pure data tests only. Passing this gate would establish bootstrap/kernel facts,
 not installed-launch provenance against a hostile launcher, financial authority,
 human review, source readiness or normal-desktop payment readiness.
+
+## Opt-in genuine Witness cancel-only source composition
+
+The separate `cancel-only-witness-review` feature is **not** the bootstrap-only
+CI profile and cannot be combined with its fault-injection cfg. Default and
+`common-image-bootstrap` behavior remains inert ACK/teardown and exit 78.
+This feature adds a real C-only Wayland window and one source-backed operation:
+`Owner1V3DeliveryAdmission` may prepare one existing original delivery review,
+display its complete purpose/version/mode-bound facts, and dispose it. No arm,
+native approval conversion, listener accept/serve, append, source replacement or
+successor operation is reachable. This is not a startup-status mock window and
+is not payment readiness.
+
+C captures only nonsecret `XDG_RUNTIME_DIR` and a single relative
+`WAYLAND_DISPLAY` name before clearing the environment. It rejects imported
+`WAYLAND_SOCKET` and inspection input. Every child explicitly drops the copied
+coordinate record before READY. Only C revalidates the UID-owned mode-0700 runtime
+directory and restores these two values after the complete fixed barrier, while
+still single-threaded. No HOME, EGL/driver overrides, caller FDs, or old stdio are
+restored. Forced Wayland/Glow uses the existing pinned libraries and trusted OS
+defaults. These coordinates do not authenticate a compositor or human input.
+H still has null stdio; a real fresh controlling PTY remains future work.
+
+One absolute start instant supplies the unchanged 30-second bootstrap deadline
+and a separate five-minute maximum cancel-only session ceiling. The latter is
+not a financial expiry and never refreshes the existing proposal absolute bound
+or original 120-second review clock. The one C role-driver thread is started only
+after all forks; it owns the actual image descriptor and 14 original direct-child
+owners. H retains its original two Signer owners and watches both retained pidfds
+while waiting for C. No late legitimate role fork/exec, replacement or reconnect
+exists. The native event loop processes blur, same-batch blur/refocus, Escape and
+close before accepting any queued presentation. Revocation is terminal for this
+one slot, including preparation failure, stale result or driver loss.
+
+C also anchors one monotonic 120-second review ceiling before its sole Prepare
+dispatch, capped by the original session ceiling. It is never replaced on worker
+completion or display. Raw input, visible drawing and queued-presentation
+acceptance all enforce it. This can only shorten, never renew, W's original
+review and absolute proposal bounds, including while W currentness is blocked.
+
+The genuine form carries only bounded original public/source selectors, public
+owner certificate DER hex, original request JSON and four existing file paths.
+There is no password/private-key field or caller-selected namespace root. Only W
+derives the owner-certificate pin and opens the existing namespace storage key,
+TLS private key, certificate and root files. Its single private worker calls the
+same extracted original preparation backend as the legacy Witness window and
+retains the opaque proposal/TLS/listener custody. Preparation does actual I/O,
+may cause the maintained encrypted opener's sidecar work, and binds the exact
+nonaccepting listener. It is **not** advertised as zero-I/O or globally read-only.
+No credentials, namespace or TLS material are generated or installed here.
+
+The new Authority API is honestly non-authorizing preparation only. It does not
+authenticate its caller or mint fork origin; the coordinator's private genuine W
+branch enforces that lineage. The opaque handle exposes only presentation,
+currentness and disposal, with no proposal, key, TLS, listener, decision or lease
+getter/conversion. W sends only the complete corrected CancelOnly presentation,
+never the legacy cancel-before-publication notice. The private C/W grammar has
+exactly PrepareOnce, PreparedDisplay, Cancel, Disposed and PreparationFailed;
+both directions use the original retained lifetimes and per-packet credentials.
+Each whole encoded packet is limited to 64 KiB; oversized input or full review
+fails closed, never truncates or substitutes a synthetic summary.
+
+Cancel first clears C's display and atomically restricts its driver. W's control
+thread stays responsive while preparation/currentness/disposal runs on its own
+worker. A blocked preparation can finish only into disposal after cancellation;
+it cannot publish a new usable review. Disposed is sent only after actual worker
+completion and custody drop, not inferred from killed/reaped process status. An
+explicit Cancel closes the review grammar before ordinary STOP/STOPPED/EXIT,
+including autonomous source expiry, so crossed Cancel/Disposed frames cannot be
+reinterpreted as a new phase. C uses one capped five-second cleanup attempt for
+both source disposal and all owned-child teardown. H's once-created local drain
+bound is subordinate, not a claim of sharing C's exact absolute deadline. Missing
+disposal evidence remains unconfirmed, even if exact pidfd termination/reaping
+succeeds. Kernel final reap still has no guaranteed wall-time completion.
+
+The GUI thread never joins a source worker or waits for child cleanup. After
+eframe returns, main revokes and joins the sole driver before exiting; it cannot
+detach owned children and call process::exit. Pure tests cover closed input,
+packet and local focus-state predicates only. No local native/process/socket/UI
+or protected-source execution has qualified this feature. Genuine source/runtime
+fixtures, actual desktop review and any positive financial adapter require their
+separate reviewed scopes.
+
+## Narrow origin-kernel extraction
+
+`wholepact-financial-coordinator-origin` now owns the actual installed-image,
+hardening, fixed-fork, barrier, pidfd, credential-frame and owned-reap substrate.
+It depends on neither Authority nor GUI code. The coordinator binary forbids
+unsafe code and retains its private main, native input state, driver and real W
+preparation/disposal worker. Authority's existing unsafe-code prohibition is
+unchanged. No positive grammar, issuer, effect permit or CancelOnly conversion
+is added by this extraction.
+
+The sole public startup function takes no arguments, claims its process entry
+once before all forks, and performs the same exact whole-image checks. Every
+child inherits the consumed entry state. It returns only non-Clone actual branch
+custody from the fixed graph; fork functions, raw channels, descriptors, peer
+constructors and image-pin construction stay private. The reviewed binary's
+private main calls it before any thread-capable initialization. Another linked
+executable cannot use a library hash or supplied identity to satisfy the exact
+running-image pin. This remains a trusted uninjected whole-image launch contract,
+not protection against a compromised launcher or historical injected code.
+
+C's opaque display record stays inside its returned custody. A consuming
+cancel-only conversion rechecks the original children, absolute session ceiling,
+single-thread state and runtime-directory ownership/mode, then restores only the
+two retained coordinates before GUI/driver threads. H keeps its exact two Signer
+owners. Leaves cannot control C, H or sibling edges, and child errors/completion
+still terminate with `_exit` rather than falling through into another branch.
+
+Only the finite cancel request/response operations are public on the matching C
+or W custody. Ordinary mirrored input/display DTOs have strict serde shapes and
+the same complete 64 KiB packet limit; explicit field-by-field binary conversion
+preserves all bytes and original bounds. Full Authority input and presentation
+validation remains at its existing call sites. DTOs prove no origin, currentness,
+approval or source disposal. The kernel retains the first Cancel cleanup ceiling
+and can only shorten it or the original session ceiling during teardown.
+
+Existing bootstrap CI observations move with the kernel unchanged and remain
+absent from production. CI67 qualified the pre-extraction image, not this new
+layout. Pure mapping/entry-state tests and compilation are not native kernel,
+desktop or source qualification. Any later positive native issuer must have a
+separate purpose and consume an actual authenticated opaque Ready ticket at C's
+native event-loop admission point; this extraction implements no such operation.

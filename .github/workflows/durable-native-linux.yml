@@ -35,11 +35,11 @@ jobs:
         run: |
           set -euo pipefail
           mode="$(cat scripts/qualification-gate-mode)"
-          [[ "$mode" == origin || "$mode" == full || "$mode" == financial || "$mode" == bootstrap ]]
+          [[ "$mode" == origin || "$mode" == full || "$mode" == financial || "$mode" == bootstrap || "$mode" == ui ]]
           [[ "$(wc -l < scripts/qualification-gate-mode)" -eq 1 ]]
           printf 'gate=%s\n' "$mode" >> "$GITHUB_OUTPUT"
       - name: Minimal real production origin integration (not full qualification)
-        if: steps.mode.outputs.gate != 'bootstrap'
+        if: steps.mode.outputs.gate != 'bootstrap' && steps.mode.outputs.gate != 'ui'
         shell: bash
         working-directory: source
         run: bash scripts/ci-origin-integration-linux.sh
@@ -57,14 +57,14 @@ jobs:
           CARGO_INCREMENTAL: '0'
           WHOLEPACT_BUILD_JOBS: '3'
         run: bash scripts/ci-durable-native-linux.sh
-      - name: Isolated fixed-fork bootstrap only (no financial authority)
-        if: steps.mode.outputs.gate == 'bootstrap'
+      - name: Isolated fixed-fork bootstrap prerequisite (no financial authority)
+        if: steps.mode.outputs.gate == 'bootstrap' || steps.mode.outputs.gate == 'ui'
         timeout-minutes: 45
         shell: bash
         working-directory: source
         run: bash scripts/ci-bootstrap-linux.sh
       - name: Verify bootstrap containers and temporary image removed
-        if: always() && steps.mode.outputs.gate == 'bootstrap'
+        if: always() && (steps.mode.outputs.gate == 'bootstrap' || steps.mode.outputs.gate == 'ui')
         timeout-minutes: 5
         shell: bash
         working-directory: source
@@ -74,3 +74,20 @@ jobs:
         shell: bash
         run: |
           echo 'Bootstrap-only qualification passed. Origin and financial suites were intentionally not rerun. Historical CI64 financial evidence is unchanged, not revalidated. No financial authority, settlement, deployment or full-product acceptance is claimed.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Actual isolated UI smoke and one reused synthetic fixture
+        if: steps.mode.outputs.gate == 'ui'
+        timeout-minutes: 100
+        shell: bash
+        working-directory: source
+        run: bash scripts/ci-ui-linux.sh
+      - name: Verify UI containers, temporary image and build cache removed
+        if: always() && steps.mode.outputs.gate == 'ui'
+        timeout-minutes: 5
+        shell: bash
+        working-directory: source
+        run: python3 -I -B scripts/ci-ui-supervisor.py cleanup
+      - name: Source-backed UI evidence boundary
+        if: success() && steps.mode.outputs.gate == 'ui'
+        shell: bash
+        run: |
+          echo 'Fixed-origin bootstrap and isolated actual UI gate passed. One unfunded synthetic fixture was reused for cancel, blur/refocus and at most one authenticated synthetic journal append. Historical CI64 financial evidence is unchanged, not revalidated. No public-chain settlement, deployment, funded wallet or full-product acceptance is claimed.' >> "$GITHUB_STEP_SUMMARY"

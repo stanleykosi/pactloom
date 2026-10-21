@@ -24,7 +24,7 @@ impl DurableAdmissionPrepareV3 {
         Ok(())
     }
 }
-fn request_commitment_v3(request: &OwnerControlRequest) -> Result<String> {
+pub(crate) fn request_commitment_v3(request: &OwnerControlRequest) -> Result<String> {
     digest("wholepact:durable-delivery-admission-preparation:v3",request)
 }
 /// Only a refused connect before any connection exists permits discovery to
@@ -44,6 +44,8 @@ pub struct AuthenticatedDurableAdmissionChannelV3<'a> {
     stream: StreamOwned<ClientConnection, CallerDeadlineSocket>,
     request: OwnerControlRequest,
     deadline: Instant,
+    #[cfg(feature = "synthetic-qualification")]
+    preparation: DurableAdmissionPrepareV3,
 }
 /// Finite observation sites. These do not change admission or authorize retry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -208,9 +210,24 @@ impl AuthorityClient {
             WireResponse::Rejected(error) => return Err(error.into()),
             _ => return Err(AuthorityError::Authentication.into()),
         }
-        Ok(AuthenticatedDurableAdmissionChannelV3 {client:self,stream,request:request.clone(),deadline})
+        Ok(AuthenticatedDurableAdmissionChannelV3 {client:self,stream,request:request.clone(),deadline,
+            #[cfg(feature = "synthetic-qualification")] preparation,
+        })
     }
 }
+/// Synthetic W-only correlation from a genuine authenticated PREPARE/READY and
+/// the same consumed stream's checked Controlled response. This is not Signer
+/// retained intent, native consent, or complete financial-flow evidence. The
+/// independent original-history audit remains required after process disposal.
+#[cfg(feature = "synthetic-qualification")]
+pub struct PristineFixtureAdmissionResultV1 {
+    pub preparation_nonce: String,
+    pub request_commitment: String,
+    pub operation_id: String,
+    pub expected_head: AuthorityHead,
+    pub controlled: AccountSnapshot,
+}
+
 impl AuthenticatedDurableAdmissionChannelV3<'_> {
     pub fn request(&self) -> &OwnerControlRequest { &self.request }
     pub fn deadline(&self) -> Instant { self.deadline }
@@ -245,6 +262,40 @@ impl AuthenticatedDurableAdmissionChannelV3<'_> {
         let observation = collector.finish(result.is_err());
         (result, observation)
     }
+    /// Closed synthetic-client use of the unchanged consuming transport kernel.
+    /// The request is the exact preserved three-account fixture request, NOT a
+    /// purported Signer journal intent. Only the ignored qualification caller
+    /// uses this entry; actual Witness native admission and every existing TLS,
+    /// request, deadline, response and head check remain mandatory. One failure
+    /// consumes this channel; never reconnect or resubmit to discover outcome.
+    #[cfg(feature = "synthetic-qualification")]
+    pub fn send_pristine_fixture_exact_for_qualification_v1(
+        self,
+        original_fixture_request: &OwnerControlRequest,
+        original_cutoff: Instant,
+        mut check_current: impl FnMut() -> Result<()>,
+    ) -> (Result<PristineFixtureAdmissionResultV1>, Option<AdmissionFailureObservationV3>) {
+        let preparation = self.preparation.clone();
+        let mut collector = AdmissionFailureCollectorV3::default();
+        let mut current = || {
+            let OwnerControl::AdmitDurablePaymentWithDeliveryV2 { record } =
+                &original_fixture_request.control else { return Err(AuthorityError::Permission); };
+            record.require_live(now_ms()?)?;
+            check_current()
+        };
+        let result = self.send_retained_exact_kernel(
+            original_fixture_request, original_cutoff, &mut current, Some(&mut collector),
+        ).map(|controlled| PristineFixtureAdmissionResultV1 {
+            preparation_nonce: preparation.nonce,
+            request_commitment: preparation.request_digest,
+            operation_id: preparation.operation_id,
+            expected_head: preparation.expected_head,
+            controlled,
+        });
+        let observation = collector.finish(result.is_err());
+        (result, observation)
+    }
+
     fn send_retained_exact_kernel(
         mut self,
         retained: &OwnerControlRequest,
@@ -409,10 +460,10 @@ impl<T: Write, C: FnMut() -> Result<()>> Write for CurrentTransportV3<'_, T, C> 
         match result {Err(error)=>Err(error),Ok(())=>after}
     }
 }
-fn write_frame_checked_v3<T: Serialize>(writer: &mut impl Write, value: &T, check: &mut impl FnMut() -> Result<()>) -> Result<()> {
+pub(super) fn write_frame_checked_v3<T: Serialize>(writer: &mut impl Write, value: &T, check: &mut impl FnMut() -> Result<()>) -> Result<()> {
     write_frame_checked_observed_v3(writer, value, check, None)
 }
-fn read_frame_checked_v3<T: serde::de::DeserializeOwned>(reader: &mut impl Read, check: &mut impl FnMut() -> Result<()>) -> Result<T> {
+pub(super) fn read_frame_checked_v3<T: serde::de::DeserializeOwned>(reader: &mut impl Read, check: &mut impl FnMut() -> Result<()>) -> Result<T> {
     read_frame_checked_observed_v3(reader, check, None)
 }
 fn write_frame_checked_observed_v3<T: Serialize>(

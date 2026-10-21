@@ -13,8 +13,13 @@ synthetic-qualification = ["wholepact-storage-security/synthetic-qualification"]
 offline-witness-owner = ["dep:hpke", "dep:rand", "dep:getrandom", "dep:base64", "dep:chrono"]
 pending-birth-foundation = ["dep:webpki"]
 native-witness-owner = ["pending-birth-foundation", "dep:eframe", "dep:winit"]
+# Non-authorizing actual-source prepare/display/dispose only; no positive bridge.
+coordinated-witness-cancel-review = ["native-witness-owner"]
+# Genuine fixed-role one-delivery adapter; cancel custody cannot convert.
+coordinated-witness-delivery-append = ["native-witness-owner", "dep:wholepact-financial-coordinator-origin", "wholepact-financial-coordinator-origin/coordinated-witness-delivery-append"]
 
 [dependencies]
+wholepact-financial-coordinator-origin = { path = "../wholepact-financial-coordinator-origin", optional = true }
 wholepact-core = { path = "../wholepact-core" }
 webpki = { package = "rustls-webpki", version = "=0.103.15", default-features = false, features = ["std", "ring"], optional = true }
 wholepact-chain = { path = "../wholepact-chain", features = ["submission-dispatch"] }
@@ -57,3 +62,6 @@ required-features = ["born-offline-witness-owner"]
 name = "wholepact-financial-witness"
 path = "src/financial_server_main.rs"
 required-features = ["financial-witness-launcher"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(wholepact_delivery_ci)'] }

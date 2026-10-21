@@ -3,6 +3,11 @@
 //! native consent, existing-key authentication and journal creation are distinct.
 //! No signer dependency, no signer-key loader, no socket and no public approval factory.
 mod lifecycle;
+mod delivery_preparation_v2;
+#[cfg(feature = "coordinated-witness-cancel-review")]
+pub mod cancel_delivery_review_v1;
+#[cfg(feature = "coordinated-witness-delivery-append")]
+pub mod coordinated_delivery_append_v1;
 pub(crate) use lifecycle::{NativePublicationLease, NativeWorkerLease};
 #[cfg(feature = "born-offline-witness-owner")]
 pub(crate) use window::NativeBornOfflineArtifactsDecisionV1;

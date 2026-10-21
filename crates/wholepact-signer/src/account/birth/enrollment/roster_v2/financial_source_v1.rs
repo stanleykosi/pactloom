@@ -303,6 +303,47 @@ impl PreparedOriginalFinancialSourceV1 {
             OriginalJournalV1::Financial(_) => Err(Error::RecoveryRequired),
         }
     }
+    /// Inert preparation only, with no native or coordinated effect owner. The
+    /// original source and actual Host peer are checked, but proposed review
+    /// facts do not prove an Arm or permission. No guard escapes this method.
+    /// A distinct genuine final-token join and V2 history reader are required
+    /// before this ticket could ever be used by a future transition.
+    pub(crate) fn prepare_coordinated_continuation_v1(
+        &self,
+        terms: FinancialContinuationTermsV1,
+        history: wholepact_authority::ReconciledAuthorityHistory,
+        original_host: crate::native_peer::PeerProcess,
+        review: crate::consent_journal::CoordinatedContinueReviewDataV1,
+        retained_review_deadline: Instant,
+    ) -> Result<crate::consent_journal::PreparedCoordinatedFinancialContinuationV1> {
+        self.check_custody()?;
+        original_host.check_alive()?;
+        if terms.valid_until_ms != self.original_ceiling_ms
+            || Instant::now() >= self.original_deadline
+        {
+            return Err(Error::ReviewMismatch);
+        }
+        let prepared = {
+            let binding = self.binding.lock().map_err(|_| Error::Locked)?;
+            match &self.journal {
+                OriginalJournalV1::Before(journal) => journal
+                    .prepare_coordinated_financial_continuation_v1(
+                        &binding,
+                        terms,
+                        history,
+                        original_host,
+                        review,
+                        self.original_ceiling_ms,
+                        self.original_deadline,
+                        retained_review_deadline,
+                    )?,
+                OriginalJournalV1::Financial(_) => return Err(Error::RecoveryRequired),
+            }
+        };
+        self.check_custody()?;
+        prepared.check_retained_preparation()?;
+        Ok(prepared)
+    }
     pub(crate) fn commit_continuation(
         self,
         prepared: PreparedFinancialContinuationIntentV1,

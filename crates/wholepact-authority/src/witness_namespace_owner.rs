@@ -299,6 +299,17 @@ impl NamespaceCore {
     fn check_current(&self) -> Result<()> {
         self.files.check_current()?;
         let c = self.registry.lock().map_err(|_| AuthorityError::Storage)?;
+        self.check_registry_locked(&c)
+    }
+    // The coordinated final-effect path never waits for a Rust registry mutex.
+    // SQLite/filesystem work below may still block; its original clock must be
+    // checked again afterwards. This is source continuity, not consent.
+    fn check_current_without_mutex_wait(&self) -> Result<()> {
+        self.files.check_current()?;
+        let c = self.registry.try_lock().map_err(|_| AuthorityError::Permission)?;
+        self.check_registry_locked(&c)
+    }
+    fn check_registry_locked(&self, c: &EncryptedConnection) -> Result<()> {
         self.registry_identity.check_current(c.connection())?;
         require_runtime(c.connection())?;
         let tx = Transaction::new_unchecked(c.connection(), TransactionBehavior::Deferred)?;
@@ -636,6 +647,31 @@ impl BornJournalOwner {
             .registry
             .lock()
             .map_err(|_| AuthorityError::Storage)?;
+        self.check_registry_locked(mutation, &c)
+    }
+    /// Same original namespace/completed-birth/exclusion checks, with no waiting
+    /// for either Rust registry guard. No guard or transaction escapes this call.
+    /// This does NOT bound SQL/filesystem latency or grant publication authority.
+    pub(crate) fn check_mutation_current_without_mutex_wait(&self) -> Result<()> {
+        self.core.check_current_without_mutex_wait()?;
+        let c = self.core.registry.try_lock().map_err(|_| AuthorityError::Permission)?;
+        self.check_registry_locked(true, &c)
+    }
+    /// Retained same-owner account identity, not a caller-selected path/open.
+    /// The caller separately compares the actual held DatabaseFileIdentity.
+    pub(crate) fn require_original_account_connection(
+        &self,
+        connection: &EncryptedConnection,
+        birth: &PendingBirthCommitRecord,
+    ) -> Result<()> {
+        if connection.connection().path() != self.path.to_str()
+            || self.core.path_for(&self.intent)? != self.path
+        {
+            return Err(AuthorityError::InvalidBinding);
+        }
+        validate_record_against_intent(&self.core, &self.intent, birth)
+    }
+    fn check_registry_locked(&self, mutation: bool, c: &EncryptedConnection) -> Result<()> {
         let tx = Transaction::new_unchecked(c.connection(), TransactionBehavior::Deferred)?;
         let history = storage::load_exact(&tx, &self.core.namespace)?;
         let prepared = history

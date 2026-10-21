@@ -3,23 +3,29 @@ name = "wholepact-financial-coordinator"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Inert fixed-fork common-image coordinator bootstrap; no financial adapters"
+description = "Fixed-fork coordinator with inert bootstrap and opt-in source-backed cancel-only or one-exact-append Witness review"
 
 [features]
 default = []
 common-image-bootstrap = []
+cancel-only-witness-review = ["common-image-bootstrap", "wholepact-financial-coordinator-origin/cancel-only-witness-review", "dep:wholepact-authority", "wholepact-authority/coordinated-witness-cancel-review", "dep:eframe", "dep:winit", "dep:zeroize"]
+
+coordinated-witness-delivery-append = ["common-image-bootstrap", "wholepact-financial-coordinator-origin/coordinated-witness-delivery-append", "dep:wholepact-authority", "wholepact-authority/coordinated-witness-delivery-append", "dep:eframe", "dep:winit", "dep:zeroize"]
 
 [[bin]]
 name = "wholepact-financial-coordinator"
 path = "src/main.rs"
 required-features = ["common-image-bootstrap"]
 
-[dependencies]
-libc = "0.2"
-serde.workspace = true
+[dev-dependencies]
 serde_json.workspace = true
-sha2.workspace = true
-hex.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+wholepact-financial-coordinator-origin = { path = "../wholepact-financial-coordinator-origin" }
+wholepact-authority = { path = "../wholepact-authority", optional = true, default-features = false }
+eframe = { version = "=0.36.2", optional = true, default-features = false, features = ["default_fonts", "glow", "wayland"] }
+winit = { version = "=0.30.13", optional = true, default-features = false, features = ["wayland", "rwh_06"] }
+zeroize = { version = "=1.9.1", optional = true }
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(wholepact_bootstrap_ci)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(wholepact_bootstrap_ci)', 'cfg(wholepact_delivery_ci)'] }

@@ -73,6 +73,9 @@ mod public_outcome_v1;
 
 #[path = "sequential_construction_v3_qualification/safe_diagnostics_v1.rs"]
 mod safe_diagnostics_v1;
+#[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+#[path = "sequential_construction_v3_qualification/pristine_diagnostics_v1.rs"]
+mod pristine_diagnostics_v1;
 
 #[cfg(all(
     feature = "durable-proposal",
@@ -805,6 +808,14 @@ fn synthetic_foreground_child() {
     process_containment_v1::require_and_report_core_policy()
         .expect("inherited zero core limit and read-only collector classification");
     let stage = std::env::var(CHILD_ENV).expect("bounded synthetic parent stage");
+    #[cfg(all(feature = "durable-proposal", feature = "synthetic-born-joined-qualification"))]
+    if stage == "coordinator-pristine-source-v1" {
+        // Deliberately before provider TLS setup: this stage does no provider
+        // work and creates only the exact original Witness TLS credential set.
+        let terminal = crate::terminal::Terminal::open().expect("actual pristine setup TTY");
+        durable_proposal_v1::pristine_coordinator_v1::prepare_child(terminal).unwrap();
+        return;
+    }
     #[cfg(all(
         feature = "durable-proposal",
         feature = "synthetic-born-joined-qualification"
@@ -1198,6 +1209,7 @@ mod synthetic_born_submission_sink_v1;
 ))]
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum PrivateWorkspaceStageV1 {
+    PristineCoordinator,
     Producer,
     Reader,
     DeliveryProducer,
@@ -1212,6 +1224,7 @@ enum PrivateWorkspaceStageV1 {
 impl PrivateWorkspaceStageV1 {
     fn label(self) -> &'static str {
         match self {
+            Self::PristineCoordinator => "coordinator-pristine-source-v1",
             Self::Producer => "private-workspace-produce-fixed-v1",
             Self::Reader => "private-workspace-read-fixed-v1",
             Self::DeliveryProducer => "durable-delivery-native-admission-v2",
@@ -1228,6 +1241,8 @@ impl PrivateWorkspaceStageV1 {
     }
     fn marker(self, tail: &str, complete: bool, terminal: bool) -> std::io::Result<bool> {
         match self {
+            // Normal exact child exit, not a kill-marker custody transfer.
+            Self::PristineCoordinator => Ok(false),
             Self::Producer | Self::Reader => {
                 durable_proposal_v1::private_fixed_v2::death_marker_v1(
                     tail,
@@ -1255,6 +1270,7 @@ impl PrivateWorkspaceStageV1 {
     feature = "synthetic-born-joined-qualification"
 ))]
 struct PrivateWorkspaceStageResultV1 {
+    pristine_first_failure: Option<pristine_diagnostics_v1::Failure>,
     financial_progress_failure: Option<financial_progress_v1::Failure>,
     financial_progress_timing: Option<financial_progress_v1::Timing>,
     financial_diagnostic: Option<crate::host::financial_diagnostics_v1::FinancialDiagnosticV1>,
@@ -1318,6 +1334,9 @@ fn private_workspace_stage_v1(
             _ => None,
         })),
     )?;
+    if matches!(stage, PrivateWorkspaceStageV1::PristineCoordinator) {
+        transcript.enable_pristine_first_failure();
+    }
     if matches!(
         stage,
         PrivateWorkspaceStageV1::DeliveryProducer
@@ -1737,6 +1756,9 @@ fn private_workspace_stage_v1(
         None
     };
     Ok(PrivateWorkspaceStageResultV1 {
+        // Preserve the original finite cause even when cleanup is uncertain.
+        // It is not permission to transfer the retained root in that case.
+        pristine_first_failure: transcript.pristine_first_failure(),
         financial_progress_timing,
         financial_progress_failure,
         financial_diagnostic,

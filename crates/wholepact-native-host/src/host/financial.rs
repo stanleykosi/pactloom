@@ -21,6 +21,8 @@ pub(in crate::host) mod durable_delivery_admission_v2;
 pub(in crate::host) mod private_financial_v1;
 #[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
 pub(in crate::host) mod durable_financial_commands_v1;
+#[cfg(all(feature = "durable-proposal", feature = "manual-admission", target_os = "linux"))]
+mod coordinated_session_v1;
 mod proof_delivery;
 mod proof_execution_request;
 mod proof_request;

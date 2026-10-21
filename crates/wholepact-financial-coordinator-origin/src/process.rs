@@ -51,6 +51,16 @@ pub(super) struct PeerLifetime {
     role: Role,
 }
 impl PeerLifetime {
+    #[cfg(feature = "common-image-fork-provider")]
+    fn retain_check_only(&self) -> Result<Self> {
+        self.check_alive()?;
+        let raw = unsafe { libc::fcntl(self.fd(), libc::F_DUPFD_CLOEXEC, 3) };
+        if raw < 0 { return Err(std::io::Error::last_os_error()); }
+        let retained = Self { pid: self.pid, uid: self.uid, role: self.role,
+            pidfd: unsafe { OwnedFd::from_raw_fd(raw) } };
+        retained.check_alive()?;
+        Ok(retained)
+    }
     pub(super) fn pid(&self) -> libc::pid_t { self.pid }
     pub(super) fn uid(&self) -> libc::uid_t { self.uid }
     pub(super) fn role(&self) -> Role { self.role }
@@ -68,13 +78,66 @@ impl PeerLifetime {
 }
 
 /// Born solely in fork_edge's child return, never from a descriptor supplied by
-/// a caller. Non-Clone and private to this executable. Construction lineage only.
+/// a caller. Non-Clone and private to this kernel. Construction lineage only.
 pub(super) struct ForkOriginV1 {
     local_role: Role,
     parent: PeerLifetime,
     channel: Channel,
 }
 impl ForkOriginV1 {
+    #[cfg(feature = "common-image-fork-provider")]
+    pub(super) fn retain_host_coordinator_lifetime(&self) -> Result<PeerLifetime> {
+        if self.local_role != Role::Host || self.parent.role != Role::Coordinator {
+            return Err(rejected("not the original Host branch"));
+        }
+        self.parent.retain_check_only()
+    }
+    #[cfg(wholepact_delivery_ci)]
+    pub(super) fn observed_original_parent(&self) -> i32 { self.parent.pid }
+
+    #[cfg(feature = "coordinated-witness-delivery-append")]
+    pub(super) fn delivery_observer(&self) -> Result<crate::delivery_origin::ObservedPeer> {
+        if self.local_role != Role::Owner1V3DeliveryAdmission { return Err(rejected("wrong positive witness")); }
+        crate::delivery_origin::ObservedPeer::retain(&self.parent, self.channel.review_fd())
+    }
+    #[cfg(feature = "coordinated-witness-delivery-append")]
+    pub(super) fn delivery_send(&self, packet: &crate::delivery_channel::Packet) -> Result<()> {
+        crate::delivery_channel::send(self.channel.review_fd(), self.local_role, &self.parent, packet)
+    }
+    #[cfg(feature = "coordinated-witness-delivery-append")]
+    pub(super) fn delivery_receive(&self) -> Result<Option<crate::delivery_channel::Packet>> {
+        crate::delivery_channel::try_receive(self.channel.review_fd(), self.local_role, &self.parent)
+    }
+
+    #[cfg(feature = "cancel-only-witness-review")]
+    pub(super) fn review_send(&self, packet: &crate::cancel_review::Packet) -> Result<()> {
+        if self.local_role != crate::cancel_review::WITNESS || self.parent.role != Role::Coordinator { return Err(rejected("not the original cancel-only witness")); }
+        crate::cancel_review::send(self.channel.review_fd(), self.local_role, &self.parent, packet)
+    }
+    #[cfg(feature = "cancel-only-witness-review")]
+    pub(super) fn review_try_receive(&self) -> Result<Option<crate::cancel_review::Packet>> {
+        if self.local_role != crate::cancel_review::WITNESS || self.parent.role != Role::Coordinator { return Err(rejected("not the original cancel-only witness")); }
+        crate::cancel_review::try_receive(self.channel.review_fd(), self.local_role, &self.parent)
+    }
+    #[cfg(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append"))]
+    pub(super) fn wait_host_stop(&self, signers: &[Option<DirectChild>; 2], deadline: Instant) -> Result<()> {
+        if self.local_role != Role::Host { return Err(rejected("not original Host")); }
+        loop {
+            crate::channel::require_time(deadline)?;
+            self.parent.check_alive()?;
+            for child in signers.iter().flatten() { child.check_alive()?; }
+            let mut polls = [
+                libc::pollfd { fd: self.channel.review_fd(), events: libc::POLLIN, revents: 0 },
+                libc::pollfd { fd: self.parent.fd(), events: libc::POLLIN, revents: 0 },
+                libc::pollfd { fd: signers[0].as_ref().ok_or_else(|| rejected("missing S1"))?.peer.fd(), events: libc::POLLIN, revents: 0 },
+                libc::pollfd { fd: signers[1].as_ref().ok_or_else(|| rejected("missing S2"))?.peer.fd(), events: libc::POLLIN, revents: 0 },
+            ];
+            let rc = unsafe { libc::poll(polls.as_mut_ptr(), 4, 50) };
+            if rc < 0 && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted { return Err(std::io::Error::last_os_error()); }
+            if polls[1..].iter().any(|p| p.revents != 0) { return Err(rejected("original Host tree peer lost")); }
+            if polls[0].revents != 0 { return self.receive(Message::Stop, deadline); }
+        }
+    }
     #[cfg(wholepact_bootstrap_ci)]
     pub(super) fn ci_descriptors(&self) -> [libc::c_int; 2] { [self.channel.ci_fd(), self.parent.fd()] }
     #[cfg(wholepact_bootstrap_ci)]
@@ -99,6 +162,54 @@ pub(super) struct DirectChild {
     reaped: bool,
 }
 impl DirectChild {
+    #[cfg(feature = "common-image-fork-provider")]
+    pub(super) fn retain_original_signer_lifetime(&self, expected: Role) -> Result<PeerLifetime> {
+        self.require_owner()?;
+        if self.local_role != Role::Host || self.peer.role != expected
+            || !matches!(expected, Role::Signer1 | Role::Signer2)
+        { return Err(rejected("not a fixed original Signer child")); }
+        self.peer.retain_check_only()
+    }
+    #[cfg(wholepact_delivery_ci)]
+    pub(super) fn observed_binding(&self) -> crate::delivery_observer::ChildBinding {
+        crate::delivery_observer::ChildBinding { role: format!("{:?}", self.peer.role), pid: self.peer.pid }
+    }
+
+    #[cfg(feature = "coordinated-witness-delivery-append")]
+    pub(super) fn duplicate_lifetime_for_delivery(&self) -> Result<OwnedFd> {
+        self.require_owner()?;
+        self.peer.check_alive()?;
+        self.peer.pidfd.try_clone()
+    }
+    #[cfg(feature = "coordinated-witness-delivery-append")]
+    pub(super) fn delivery_observer(&self) -> Result<crate::delivery_origin::ObservedPeer> {
+        self.require_owner()?;
+        if self.peer.role != Role::Owner1V3DeliveryAdmission { return Err(rejected("wrong positive witness")); }
+        crate::delivery_origin::ObservedPeer::retain(&self.peer, self.channel.review_fd())
+    }
+    #[cfg(feature = "coordinated-witness-delivery-append")]
+    pub(super) fn delivery_send(&self, packet: &crate::delivery_channel::Packet) -> Result<()> {
+        self.require_owner()?;
+        crate::delivery_channel::send(self.channel.review_fd(), self.local_role, &self.peer, packet)
+    }
+    #[cfg(feature = "coordinated-witness-delivery-append")]
+    pub(super) fn delivery_receive(&self) -> Result<Option<crate::delivery_channel::Packet>> {
+        self.require_owner()?;
+        crate::delivery_channel::try_receive(self.channel.review_fd(), self.local_role, &self.peer)
+    }
+
+    #[cfg(any(feature = "cancel-only-witness-review", feature = "coordinated-witness-delivery-append"))]
+    pub(super) fn role(&self) -> Role { self.peer.role }
+    #[cfg(feature = "cancel-only-witness-review")]
+    pub(super) fn review_send(&self, packet: &crate::cancel_review::Packet) -> Result<()> {
+        self.require_owner()?;
+        crate::cancel_review::send(self.channel.review_fd(), self.local_role, &self.peer, packet)
+    }
+    #[cfg(feature = "cancel-only-witness-review")]
+    pub(super) fn review_try_receive(&self) -> Result<Option<crate::cancel_review::Packet>> {
+        self.require_owner()?;
+        crate::cancel_review::try_receive(self.channel.review_fd(), self.local_role, &self.peer)
+    }
     #[cfg(wholepact_bootstrap_ci)]
     pub(super) fn ci_descriptors(&self) -> [libc::c_int; 2] { [self.channel.ci_fd(), self.peer.fd()] }
     pub(super) fn send(&self, message: Message, deadline: Instant) -> Result<()> {
@@ -122,6 +233,12 @@ impl DirectChild {
                 self.reaped = true;
                 #[cfg(wholepact_bootstrap_ci)]
                 crate::ci::reaped(self.peer.role, self.peer.pid, status);
+                #[cfg(wholepact_delivery_ci)]
+                crate::delivery_observer::record(crate::delivery_observer::Event::OwnedReap {
+                    child_role: format!("{:?}", self.peer.role), child_pid: self.peer.pid,
+                    exit_code: libc::WIFEXITED(status).then(|| libc::WEXITSTATUS(status)),
+                    signal: libc::WIFSIGNALED(status).then(|| libc::WTERMSIG(status)), forced: false,
+                });
                 break status;
             }
             if rc < 0 {
@@ -159,6 +276,12 @@ impl DirectChild {
                 self.reaped = true;
                 #[cfg(wholepact_bootstrap_ci)]
                 crate::ci::reaped(self.peer.role, self.peer.pid, status);
+                #[cfg(wholepact_delivery_ci)]
+                crate::delivery_observer::record(crate::delivery_observer::Event::OwnedReap {
+                    child_role: format!("{:?}", self.peer.role), child_pid: self.peer.pid,
+                    exit_code: libc::WIFEXITED(status).then(|| libc::WEXITSTATUS(status)),
+                    signal: libc::WIFSIGNALED(status).then(|| libc::WTERMSIG(status)), forced: true,
+                });
                 return Ok(status);
             }
             let error = std::io::Error::last_os_error();
@@ -199,7 +322,8 @@ pub(super) fn fork_edge(parent: Role, child: Role) -> Result<Forked> {
     #[cfg(wholepact_bootstrap_ci)]
     crate::ci::configure_pair(parent, child, parent_channel.ci_fd())?;
     // SAFETY: reachable only from private main's fixed, single-threaded startup
-    // and its equally early H branch, before runtime/GUI/keys. No library caller.
+    // and its equally early H branch, before runtime/GUI/keys. The public
+    // entry checks the whole pinned image and exposes no per-role fork API.
     let pid = unsafe { libc::fork() };
     if pid < 0 { return Err(std::io::Error::last_os_error()); }
     if pid == 0 {
