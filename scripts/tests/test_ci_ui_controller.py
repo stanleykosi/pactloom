@@ -355,10 +355,78 @@ class ReceiptBarrier(unittest.TestCase):
             self.process.poll.return_value = 0
         self.transport.corrupt = exited_after_send
         self.controller.close_window()
-        self.assertTrue(self.transport.closed)
+        self.assertFalse(self.transport.closed)  # EOF must not rescue the product.
         self.assertEqual(C.COMMAND.unpack(self.transport.sent[-1])[3], C.CLOSE_WINDOW)
         self.process.wait.assert_not_called()
         self.rejected('target', lambda: self.controller.focus(True))
+
+
+    def test_terminal_widget_release_keeps_child_unreaped_and_edge_open(self):
+        self.bind()
+        def exit_only_after_release(rows):
+            _, _, _, op, value, *_ = C.COMMAND.unpack(self.transport.sent[-1])
+            if op == C.BUTTON and value == 0: self.process.poll.return_value = 0
+        self.transport.corrupt = exit_only_after_release
+        self.controller.terminal_click(100, 200)
+        self.assertTrue(self.controller._terminal_close)
+        self.assertFalse(self.transport.closed)
+        self.process.wait.assert_not_called()
+        operations = [C.COMMAND.unpack(raw)[3:6] for raw in self.transport.sent[-3:]]
+        self.assertEqual(operations, [(C.MOVE, 100, 200), (C.BUTTON, 1, 0), (C.BUTTON, 0, 0)])
+
+    def test_terminal_capture_is_forbidden(self):
+        self.bind(); self.controller.close_window()
+        self.rejected('limit', self.controller.observe)
+
+    def test_terminal_target_error_and_exact_eof_after_product_wait(self):
+        self.bind(); self.controller.close_window(); self.process.returncode = 0
+        self.transport.incoming = [packet(C.ERROR, status=4), b'']
+        self.controller.finish_after_product(1, self.now[0] + 5_000_000_000)
+        self.assertTrue(self.transport.closed)
+
+    def test_terminal_clean_sigterm_exit_with_eof(self):
+        self.bind(); self.controller.close_window(); self.process.returncode = 0
+        self.transport.incoming = [b'']
+        self.controller.finish_after_product(0, self.now[0] + 5_000_000_000)
+        self.assertTrue(self.transport.closed)
+
+    def test_exit_one_without_exact_target_is_not_cleanup_success(self):
+        self.bind(); self.controller.close_window(); self.process.returncode = 0
+        self.transport.incoming = [b'']
+        self.rejected('target', lambda: self.controller.finish_after_product(1, self.now[0] + 5_000_000_000))
+
+    def test_other_terminal_error_and_trailing_packets_are_refused(self):
+        for packets in ([packet(C.ERROR, status=1)], [packet(C.ERROR, sequence=9, status=4)],
+                        [packet(C.ERROR, status=4), packet(C.ACK)],
+                        [packet(C.ERROR, status=4), packet(C.ERROR, status=4)]):
+            with self.subTest(packets=len(packets)):
+                self.setUp(); self.bind(); self.controller.close_window(); self.process.returncode = 0
+                self.transport.incoming = list(packets)
+                self.rejected('protocol', lambda: self.controller.finish_after_product(1, self.now[0] + 5_000_000_000))
+
+    def test_terminal_cleanup_cannot_replace_actual_product_wait(self):
+        self.bind(); self.controller.close_window(); self.process.returncode = None
+        self.rejected('target', lambda: self.controller.finish_after_product(0, self.now[0] + 5_000_000_000))
+
+    def test_terminal_cleanup_signal_status_is_refused(self):
+        self.bind(); self.controller.close_window(); self.process.returncode = 0
+        self.rejected('target', lambda: self.controller.finish_after_product(-15, self.now[0] + 5_000_000_000))
+
+
+    def test_terminal_reads_share_one_original_cleanup_deadline(self):
+        self.bind(); self.controller.close_window(); self.process.returncode = 0
+        deadline = self.now[0] + 5_000_000_000
+        replies = [packet(C.ERROR, status=4), b'']
+        def slow_reads(*args):
+            self.now[0] += 3_000_000_000
+            return replies.pop(0), [], 0, None
+        self.transport.recvmsg = slow_reads
+        self.rejected('deadline', lambda: self.controller.finish_after_product(1, deadline))
+        self.assertEqual(self.transport.timeouts[-2:], [5., 2.])
+
+    def test_terminal_cleanup_cannot_extend_original_scope(self):
+        self.bind(); self.controller.close_window(); self.process.returncode = 0
+        self.rejected('target', lambda: self.controller.finish_after_product(0, self.original + 1))
 
 
 class SourceBoundary(unittest.TestCase):

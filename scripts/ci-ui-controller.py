@@ -365,15 +365,67 @@ class Controller:
 
         Keep the actual child UNREAPED after sending the close. It can naturally
         exit before its ACK arrives, but its retained PID cannot be recycled.
-        No subsequent input/capture is allowed on this permanently closed edge.
+        No subsequent input/capture is allowed; retain the edge through actual C drain.
         """
         if not self._bound or self._terminal_close:
             self._reject('target')
         self._send(CLOSE_WINDOW)
         self._terminal_close = True
-        receipt = self._ack(CLOSE_WINDOW)
-        self.close()
-        return receipt
+        return self._ack(CLOSE_WINDOW)  # retain edge until actual product drain
+
+    def terminal_click(self, x, y):
+        """The same real primary click, exclusively for the observed Close widget.
+
+        The actual Popen stays live-checked until release is sent, then remains
+        unreaped while the ACK arrives. No subsequent input or capture exists.
+        """
+        if self._terminal_close or not self._bound:
+            self._reject('target')
+        if type(x) is not int or type(y) is not int or not (0 <= x < WIDTH and 0 <= y < HEIGHT):
+            self._reject('input')
+        self._budget(3)
+        self._command(MOVE, x, y)
+        self._command(BUTTON, 1)
+        self._send(BUTTON, 0)
+        self._terminal_close = True
+        return self._ack(BUTTON)
+
+    def finish_after_product(self, compositor_status, cleanup_deadline_ns):
+        """Read-only terminal cleanup, only after actual retained product wait0.
+
+        The supervisor independently proves the whole product namespace drained
+        before stopping/reaping Weston. The module deliberately reports TARGET
+        and exit1 on the genuine closed surface's unmap. A concurrent normal
+        SIGTERM may leave status0 with the same TARGET; that exact observation
+        is also accepted, never an arbitrary error/status1.
+        """
+        if (not self._terminal_close or self._closed or self._process is None or
+                self._process.returncode != 0 or type(compositor_status) is not int or
+                compositor_status not in (0, 1) or type(cleanup_deadline_ns) is not int or
+                not self._clock() < cleanup_deadline_ns <= self._original or
+                cleanup_deadline_ns - self._clock() > 5_000_000_000):
+            self._reject('target')
+        try:
+            target = False
+            for index in range(2):
+                left = cleanup_deadline_ns - self._clock()
+                if left <= 0: self._reject('deadline')
+                self._socket.settimeout(left / 1_000_000_000)
+                raw, ancillary, flags, _ = self._socket.recvmsg(HEADER.size + CHUNK_BYTES, 0, socket.MSG_CMSG_CLOEXEC)
+                if self._clock() >= cleanup_deadline_ns: self._reject('deadline')
+                if ancillary or flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC): self._reject('protocol')
+                if not raw:
+                    if compositor_status == 1 and not target: self._reject('target')
+                    return
+                # Every final input ACK was consumed, so no command is pending.
+                expected = HEADER.pack(MAGIC, VERSION, 0, ERROR, 4, 0, 0, 0, 0, 0, 0, 0)
+                if index != 0 or raw != expected: self._reject('protocol')
+                target = True
+            self._reject('protocol')
+        except OSError:
+            self._reject('disconnected')
+        finally:
+            self.close()
 
     def _budget(self, count):
         if self._sequence + count > MAX_COMMANDS:
@@ -414,7 +466,7 @@ class Controller:
         minimum = barrier if after_commit is None else after_commit
         if (type(minimum) is not int or minimum < barrier or
                 minimum > self._receipt.commit or self._captures >= MAX_FRAMES or
-                not self._bound):
+                not self._bound or self._terminal_close):
             self._reject('limit')
         if self._frame is not None:
             self._frame.wipe()

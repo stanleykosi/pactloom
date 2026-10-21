@@ -3,8 +3,9 @@
 
 Only SETUID/GID exist during fixture custody. Root does not read credential
 bytes, although SETUID technically permits impersonation. All product/display
-work must follow the verified permanent UID drop. Main stays fail-closed until
-reviewed genuine input, independent evidence/audit, and cleanup are joined.
+work follows the verified permanent UID drop. This entrypoint is solely for the
+reviewed disposable CI image; the outer exact-source gate owns whole-container
+removal, and no inner success alone claims that removal.
 """
 import ctypes
 import hashlib
@@ -417,8 +418,7 @@ class LibSelector:
     def line(self, line):
         prefix = ('test ' + self.selector + ' ... ').encode('ascii')
         if line.startswith(prefix): line = line[len(prefix):]
-        line = line.removesuffix(b'\r')
-        kind = None
+        kind = None  # Direct Linux pipe: do not normalize typed failure grammar.
         if line.startswith(b'CI_UI_OWNER_CLIENT_FAILURE'):
             require(self.owner and not self.failure_seen, 'setup_output')
             self.failure_seen = True
@@ -456,7 +456,14 @@ class LibSelector:
             self.pending.extend(chunk)
             while b'\n' in self.pending:
                 line, _, rest = self.pending.partition(b'\n'); self.pending[:] = rest; self.line(bytes(line))
-        return not self.poller.get_map()
+        done = not self.poller.get_map()
+        if done:
+            status = self.process.poll()
+            if status is not None:
+                require(not self.pending and status == 0 and
+                    self.counts == {'running': 1, 'result': 1, 'marker': 1},
+                    'owner_response' if self.owner else 'history_audit')
+        return done
 
     def finish(self, allowed, deadline):
         while not self.pump():
@@ -531,13 +538,15 @@ class NativeSession:
         require(not enabled or found[0]['enabled'], 'input_disabled')
         return found[0]
 
-    def click(self, record, name):
+    def click(self, record, name, *, terminal=False):
         self.check()
         latest = P.latest_widget_snapshot(self.records, root_pid=self.product.pid)
         a, b = record['detail']['facts'], latest['detail']['facts']
         require(a['phase'] == b['phase'] and a['presentation_digest'] == b['presentation_digest'] and
                 b['focused'] and self.widget(record, name) == self.widget(latest, name), 'input_phase')
-        return self.controller.click(*center(b, self.widget(latest, name)))
+        require(not terminal or (name == 'Close' and b['phase'] == 'Finished'), 'input_phase')
+        action = self.controller.terminal_click if terminal else self.controller.click
+        return action(*center(b, self.widget(latest, name)))
 
     def fill(self, form):
         self.reporter.stage = 'input'
@@ -598,9 +607,12 @@ class NativeSession:
         # Product must already be independently exited/reaped and namespace empty.
         require(self.product.returncode == 0, 'product_status')
         S.namespace_empty_except((1, self.weston.pid))
-        self.controller.close()
+        cleanup_deadline = min(self.original, time.monotonic_ns() + 5_000_000_000)
         if self.weston.poll() is None: self.weston.terminate()
-        self.weston.wait(timeout=max(.001, min(5., (self.original - time.monotonic_ns()) / 1e9)))
+        remaining = cleanup_deadline - time.monotonic_ns()
+        require(remaining > 0, 'cleanup_failed')
+        status = self.weston.wait(timeout=remaining / 1e9)
+        self.controller.finish_after_product(status, cleanup_deadline)
         S.namespace_empty_except((1,))
         # Only stale private compositor socket/lock, never source custody.
         for path in WAYLAND.iterdir():
@@ -660,13 +672,14 @@ def source_case(case, original, handoff_raw, original_metadata, artifact_digest,
         if session.owner:
             owner = session.owner.finish((1, session.weston.pid, session.product.pid), session.deadline)
         else: owner = None
-        session.click(cleared, 'Close')
+        session.click(cleared, 'Close', terminal=True)
         drain = session.drain_product(); records = session.collector.read(final=True)
         P.validate_trace(records, root_pid=session.product.pid, root_status=0)
+        session.end_display()
         reporter.stage = 'audit'
         selector = S.SELECTOR_PREFIX + ('coordinator_originals_after_one_exact_append' if case == 'append'
             else 'coordinator_pristine_originals_after_cancel_or_blur')
-        audit = LibSelector(selector, original, reporter).finish((1, session.weston.pid), original)
+        audit = LibSelector(selector, original, reporter).finish((1,), original)
         _, current = original_facts(S.read_private(S.BASE / 'handoff.json', S.MAX_HANDOFF), original)
         facts = dict(result=audit, original=original_metadata, current=current, drain=drain, audited_ns=time.monotonic_ns())
         paint = dict(root_pid=session.product.pid, app_id=D.APP_ID, artifact_digest=artifact_digest,
@@ -675,7 +688,7 @@ def source_case(case, original, handoff_raw, original_metadata, artifact_digest,
             refocus=None if refocus is None else dataclasses.asdict(refocus))
         result = P.project_case(records, case, root_pid=session.product.pid, root_status=0,
             audit=facts, paint=paint, owner_client=owner)
-        session.end_display(); session.collector.erase_after_case()
+        session.collector.erase_after_case()
         return result
     except BaseException as error:
         reporter.error(error, session.records)
@@ -701,7 +714,7 @@ def smoke_case(original, reporter):
 
 
 def reviewed_runtime_main(mode):
-    """Not selected by __main__ until the combined final source gate clears."""
+    """Closed smoke or single-fixture route, only inside the owned CI image."""
     reporter = FirstRuntimeFailure(mode); cases = []; setup_ms = None; timing = {}
     try:
         require(mode in P.MODES, 'invalid_record')
@@ -737,9 +750,9 @@ def reviewed_runtime_main(mode):
         return 1
 
 
-def disabled_main():
+def invalid_invocation():
     mode = sys.argv[1] if len(sys.argv) == 2 and sys.argv[1] in P.MODES else 'fixture'
-    first = P.failure(mode, 'lifecycle', 'integration_not_frozen')
+    first = P.failure(mode, 'lifecycle', 'invalid_record')
     print('CI_UI_FAILURE ' + json.dumps(first, separators=(',', ':')), flush=True)
     value = dict(schema_version=1, mode=mode, outcome='error', first_failure=first,
                  setup_elapsed_ms=None, cases=[], natural_empty=False)
@@ -749,4 +762,5 @@ def disabled_main():
 
 
 if __name__ == '__main__':
-    sys.exit(disabled_main())
+    sys.exit(reviewed_runtime_main(sys.argv[1]) if len(sys.argv) == 2 and sys.argv[1] in P.MODES
+             else invalid_invocation())

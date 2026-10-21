@@ -48,7 +48,7 @@ class RootSetup(unittest.TestCase):
 
     def test_pin_and_empty_namespace_precede_permanent_drop(self):
         source = PATH.read_text()
-        body = source[source.index('def prepare_runtime('):source.index('def disabled_main(')]
+        body = source[source.index('def prepare_runtime('):source.index('def invalid_invocation(')]
         self.assertEqual(body.count('create_pin('), 1)
         self.assertLess(body.index('setup_one_fixture'), body.index('create_pin('))
         self.assertLess(body.index('S.namespace_empty_except((1,))'), body.index('os.setgroups([])'))
@@ -62,13 +62,13 @@ class RootSetup(unittest.TestCase):
         runtime = source[source.index('def reviewed_runtime_main('):]
         self.assertLess(runtime.index('prepare_runtime('), runtime.index('S.private_handoff('))
 
-    def test_disabled_main_never_calls_runtime_or_subprocess(self):
+    def test_invalid_invocation_never_calls_runtime_or_subprocess(self):
         tree = ast.parse(PATH.read_text())
-        node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'disabled_main')
+        node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'invalid_invocation')
         calls = [n.func.id for n in ast.walk(node) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
         self.assertNotIn('prepare_runtime', calls)
         self.assertNotIn('root_context', calls)
-        self.assertIn("'integration_not_frozen'", ast.get_source_segment(PATH.read_text(), node))
+        self.assertIn("'invalid_record'", ast.get_source_segment(PATH.read_text(), node))
 
 
 if __name__ == '__main__': unittest.main()
@@ -201,7 +201,7 @@ class RuntimePure(unittest.TestCase):
     def test_source_custody_audit_follows_whole_product_drain(self):
         source = PATH.read_text(); body = source[source.index('def source_case('):source.index('def smoke_case(')]
         self.assertLess(body.index('drain = session.drain_product()'), body.index('audit = LibSelector('))
-        self.assertLess(body.index('P.project_case('), body.index('session.end_display()'))
+        self.assertLess(body.index('session.end_display()'), body.index('audit = LibSelector('))
         self.assertLess(body.index('session.end_display()'), body.index('session.collector.erase_after_case()'))
         self.assertNotIn('.kill(', body)
 
@@ -213,7 +213,7 @@ class RuntimePure(unittest.TestCase):
         self.assertNotIn('close_window()', body)
 
     def test_one_retained_fixture_and_same_artifact_across_cases(self):
-        source = PATH.read_text(); body = source[source.index('def reviewed_runtime_main('):source.index('def disabled_main(')]
+        source = PATH.read_text(); body = source[source.index('def reviewed_runtime_main('):source.index('def invalid_invocation(')]
         self.assertEqual(body.count('prepare_runtime('), 1)
         self.assertEqual(body.count('S.private_handoff('), 1)
         self.assertIn('for case in P.CASES:', body)
@@ -241,3 +241,19 @@ class RuntimePure(unittest.TestCase):
         self.assertIn('sequential_construction_v3::qualification::', C.OWNER_SELECTOR)
         self.assertNotIn('sequential_construction_v3_qualification::', C.OWNER_SELECTOR)
         self.assertTrue(C.OWNER_SELECTOR.endswith('pristine_owner_client_v1::coordinator_pristine_owner_same_stream_one_append'))
+
+
+class TerminalHelperPure(unittest.TestCase):
+    helper = RuntimePure.helper
+    def test_owner_eof_failure_is_immediate_without_waiting_ui_phase(self):
+        helper = self.helper(True); helper.original = 200
+        helper.pending = bytearray(); helper.poller = Mock()
+        helper.poller.select.return_value = []; helper.poller.get_map.return_value = {}
+        helper.process = Mock(); helper.process.poll.return_value = 101
+        with patch.object(C.time, 'monotonic_ns', return_value=100), self.assertRaises(C.S.Rejected) as caught:
+            helper.pump()
+        self.assertEqual(caught.exception.code, 'owner_response')
+
+    def test_typed_failure_cr_is_not_normalized(self):
+        with self.assertRaises(C.P.Rejected):
+            self.helper(True).line(b'CI_UI_OWNER_CLIENT_FAILURE stage=Prepare cause=NotListening\r')
