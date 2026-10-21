@@ -62,8 +62,20 @@ def root_directory(path, code):
             stat.S_IMODE(meta.st_mode) == 0o755, code)
 
 
+def require_image_file_identity(name, meta, pin):
+    require(name in FILES, 'image_file')
+    # The synthetic provider pins its own UID-owned executable. This exact
+    # exception is not an installed production-provider trust change.
+    owner = S.UID if name == 'pristine-setup' else 0
+    require(stat.S_ISREG(meta.st_mode) and meta.st_uid == owner and meta.st_gid == owner and
+            meta.st_nlink == 1 and meta.st_size == pin['size'] and
+            stat.S_IMODE(meta.st_mode) == (0o555 if name in ARTIFACTS else 0o444), 'image_file')
+
+
 def image_manifest():
     require(ROOT == pathlib.Path('/opt/ci-ui'), 'image_directory')
+    # Even the UID-owned synthetic executable cannot be chmod'ed or replaced.
+    require(bool(os.statvfs(ROOT).f_flag & os.ST_RDONLY), 'image_directory')
     for directory in (pathlib.Path('/'), pathlib.Path('/opt'), ROOT):
         root_directory(directory, 'image_directory')
     fd = os.open(ROOT / 'manifest.json', os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
@@ -87,9 +99,7 @@ def image_manifest():
         fd = os.open(ROOT / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
         with os.fdopen(fd, 'rb') as stream:
             meta = os.fstat(stream.fileno())
-            require(stat.S_ISREG(meta.st_mode) and meta.st_uid == 0 and meta.st_gid == 0 and
-                    meta.st_nlink == 1 and meta.st_size == pin['size'] and
-                    stat.S_IMODE(meta.st_mode) == (0o555 if name in ARTIFACTS else 0o444), 'image_file')
+            require_image_file_identity(name, meta, pin)
             require(hashlib.file_digest(stream, 'sha256').hexdigest() == pin['sha256'], 'image_hash')
             actual[name] = (meta, pin['sha256'])
     return actual

@@ -3,11 +3,46 @@ import ast
 import importlib.util
 import pathlib
 import unittest
+from types import SimpleNamespace
 
 PATH = pathlib.Path(__file__).parents[1] / 'ci-ui-container.py'
 SPEC = importlib.util.spec_from_file_location('ci_ui_container', PATH)
 C = importlib.util.module_from_spec(SPEC); SPEC.loader.exec_module(C)
 BASE = b'root:x:0:0:root:/root:/bin/sh\nnobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin\n'
+
+
+class ImageOwnership(unittest.TestCase):
+    def meta(self, name, **changes):
+        owner = 10001 if name == 'pristine-setup' else 0
+        values = dict(st_uid=owner, st_gid=owner, st_nlink=1, st_size=12,
+                      st_mode=C.stat.S_IFREG | (0o555 if name in C.ARTIFACTS else 0o444))
+        return SimpleNamespace(**(values | changes))
+
+    def test_only_synthetic_setup_image_uses_fixture_uid(self):
+        for name in C.FILES:
+            C.require_image_file_identity(name, self.meta(name), {'size':12})
+        for name in ('coordinator-production', 'coordinator-observed', 'ci-ui-container.py'):
+            with self.assertRaises(C.S.Rejected):
+                C.require_image_file_identity(name, self.meta(name, st_uid=10001, st_gid=10001), {'size':12})
+        with self.assertRaises(C.S.Rejected):
+            C.require_image_file_identity('pristine-setup', self.meta('pristine-setup', st_uid=0, st_gid=0), {'size':12})
+
+    def test_setup_identity_still_refuses_links_writes_size_or_gid_changes(self):
+        for changes in ({'st_gid':0}, {'st_nlink':2}, {'st_size':13},
+                        {'st_mode':C.stat.S_IFLNK|0o555}, {'st_mode':C.stat.S_IFREG|0o755}):
+            with self.assertRaises(C.S.Rejected):
+                C.require_image_file_identity('pristine-setup', self.meta('pristine-setup', **changes), {'size':12})
+
+    def test_readonly_container_and_no_image_bind_mount_are_preserved(self):
+        source = (PATH.parent / 'ci-ui-supervisor.py').read_text()
+        self.assertIn("'--read-only'", source)
+        self.assertIn("host.get('ReadonlyRootfs') is True", source)
+        self.assertIn("mount.get('Type') == 'tmpfs'", source)
+        self.assertNotIn("'/opt/ci-ui':", source)
+        container = PATH.read_text()
+        self.assertIn("for directory in (pathlib.Path('/'), pathlib.Path('/opt'), ROOT)", container)
+        self.assertIn('root_directory(directory', container)
+        self.assertIn('os.statvfs(ROOT).f_flag & os.ST_RDONLY', container)
 
 
 class RootSetup(unittest.TestCase):

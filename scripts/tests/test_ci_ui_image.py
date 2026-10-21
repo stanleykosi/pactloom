@@ -421,7 +421,9 @@ class BuildSource(RejectionTests):
             self.assertNotIn('install.py', line)
             self.assertNotIn('*', line)
         for name in I.ARTIFACT_FILES:
-            self.assertIn('COPY --chown=0:0 --chmod=0555 artifacts/' + name + ' /opt/ci-ui/' + name, copies)
+            owner = '10001:10001' if name == 'pristine-setup' else '0:0'
+            self.assertIn('COPY --chown=' + owner + ' --chmod=0555 artifacts/' + name + ' /opt/ci-ui/' + name, copies)
+        self.assertEqual(sum('--chown=10001:10001' in line for line in copies), 1)
         self.assertIn('USER 0:0', docker)
         self.assertIn('"/opt/ci-ui/ci-ui-container.py"', docker)
 

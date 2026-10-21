@@ -618,7 +618,11 @@ def render_dockerfile(manifest):
     _reviewed(manifest)
     scripts = '\n'.join('COPY --chown=0:0 --chmod=0444 inputs/' + name + ' ' + ROOT + '/' + name
                         for name in RUNTIME_FILES)
-    artifacts = '\n'.join('COPY --chown=0:0 --chmod=0555 artifacts/' + name + ' ' + ROOT + '/' + name
+    # The synthetic current-process provider requires its own test-image UID.
+    # Only this fixture executable is owned by UID10001; the read-only runtime
+    # and root-owned parent directory still prevent replacement or chmod.
+    artifacts = '\n'.join('COPY --chown=' + ('10001:10001' if name == 'pristine-setup' else '0:0')
+                          + ' --chmod=0555 artifacts/' + name + ' ' + ROOT + '/' + name
                           for name in ARTIFACT_FILES)
     return f'''# No external/floating Dockerfile frontend, remote ADD, or runtime host mount.
 # Requires the reviewed supervisor to build with --network=none, without secrets.

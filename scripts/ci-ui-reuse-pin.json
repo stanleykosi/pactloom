@@ -1,1 +1,12 @@
-null
+{
+  "version": 1,
+  "repository": "stanleykosi/pactloom",
+  "source": "96d0fdf583e10268eff9dfc57e4416671c28cba5",
+  "source_tree": "f2b335f7ff89dbf481703173a91162a9f2446cec",
+  "run_id": 39628348751,
+  "attempt": 1,
+  "job_id": 119319538158,
+  "artifact_id": 12359177636,
+  "archive_sha256": "00aae05d9d01639c0c87638c8a6fccedf110a093ce9fbcb3a72188ac4482c43a",
+  "bundle_sha256": "e361837c4bbb566efe8228331d7bdec9efc6da5e72b1e76d427c205e95b1d108"
+}
