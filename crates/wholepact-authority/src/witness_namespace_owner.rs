@@ -378,6 +378,18 @@ fn open_namespace_identity_guarded(
         FinancialSetupGuardV1::Legacy(_) => {
             read_existing_storage_key(Path::new(&input.storage_key_file))?
         }
+        #[cfg(feature = "coordinated-witness-completed-pair")]
+        FinancialSetupGuardV1::CompletedPairServe(_) => return Err(AuthorityError::Permission),
+        #[cfg(feature = "coordinated-witness-completed-pair")]
+        FinancialSetupGuardV1::CompletedPairSetup(_) => {
+            let bytes = guard.read(Path::new(&input.storage_key_file), 32)?;
+            if bytes.len() != 32 || bytes.iter().all(|b| *b == 0) {
+                return Err(AuthorityError::Authentication);
+            }
+            let mut key = Zeroizing::new([0u8; 32]);
+            key.copy_from_slice(&bytes);
+            key
+        }
         #[cfg(feature = "coordinated-witness-financial-signing")]
         FinancialSetupGuardV1::SigningServe(_) => return Err(AuthorityError::Permission),
         #[cfg(feature = "coordinated-witness-financial-signing")]
@@ -1485,6 +1497,107 @@ pub(crate) fn open_born_financial_histories_v1(
     core.check_current()?;
     Ok(journals)
 }
+/// Exactly two authenticated original account selections under ONE exclusive
+/// namespace owner. The actual pair consumer derives inputs from its genuine
+/// Setup and independently compares each complete committed continuation.
+#[cfg(feature = "coordinated-witness-completed-pair")]
+pub(crate) fn open_born_financial_histories_guarded_v1(
+    inputs: &[NamespaceOpenInput; 2],
+    guard: FinancialSetupGuardV1<'_>,
+) -> Result<[AuthorityJournal; 2]> {
+    if !matches!(guard, FinancialSetupGuardV1::CompletedPairSetup(_)) {
+        return Err(AuthorityError::Permission);
+    }
+    guard.check()?;
+    validate_completed_pair_inputs_v1(inputs)?;
+    let core = open_namespace_identity_guarded(&inputs[0].setup(), guard)?;
+    let first = open_financial_account_under_namespace_guarded_v1(
+        Arc::clone(&core),
+        &inputs[0].expected_account_id,
+        guard,
+    )?;
+    let second = open_financial_account_under_namespace_guarded_v1(
+        Arc::clone(&core),
+        &inputs[1].expected_account_id,
+        guard,
+    )?;
+    core.check_current_guarded(guard)?;
+    guard.check()?;
+    Ok([first, second])
+}
+#[cfg(feature = "coordinated-witness-completed-pair")]
+fn validate_completed_pair_inputs_v1(inputs: &[NamespaceOpenInput; 2]) -> Result<()> {
+    for input in inputs {
+        input.setup().validate()?;
+        hash(&input.expected_account_id)?;
+    }
+    if inputs[0].expected_account_id == inputs[1].expected_account_id {
+        return Err(AuthorityError::Conflict);
+    }
+    if !same_financial_namespace_v1(&inputs[0], &inputs[1]) {
+        return Err(AuthorityError::InvalidBinding);
+    }
+    Ok(())
+}
+#[cfg(feature = "coordinated-witness-completed-pair")]
+fn open_financial_account_under_namespace_guarded_v1(
+    core: Arc<NamespaceCore>,
+    expected_account_id: &str,
+    guard: FinancialSetupGuardV1<'_>,
+) -> Result<AuthorityJournal> {
+    if !matches!(guard, FinancialSetupGuardV1::CompletedPairSetup(_)) {
+        return Err(AuthorityError::Permission);
+    }
+    hash(expected_account_id)?;
+    core.check_current_guarded(guard)?;
+    let read_guard = crate::journal::ReadGuardV1::coordinated(guard);
+    let (intent, expected_record) = {
+        let c = core.registry.lock().map_err(|_| AuthorityError::Storage)?;
+        guard.check()?;
+        let tx = Transaction::new_unchecked(c.connection(), TransactionBehavior::Deferred)?;
+        guard.check()?;
+        let history = storage::load_exact_guarded(&tx, &core.namespace, read_guard)?;
+        let mut selected = history
+            .prepared
+            .values()
+            .filter(|p| p.intent.identity().account_id == expected_account_id);
+        let prepared = selected.next().ok_or(AuthorityError::RecoveryRequired)?;
+        if selected.next().is_some() {
+            return Err(AuthorityError::CorruptHistory);
+        }
+        let digest = prepared.intent.digest(&core.namespace)?;
+        let completed = history
+            .completed
+            .get(&digest)
+            .ok_or(AuthorityError::RecoveryRequired)?;
+        (
+            prepared.intent.clone(),
+            completed.evidence.birth_commit.clone(),
+        )
+    };
+    guard.check()?;
+    let path = core.path_for(&intent)?;
+    let key = core.key_for(&intent)?;
+    guard.check()?;
+    let intent_digest = intent.digest(&core.namespace)?;
+    let owner = Arc::new(BornJournalOwner {
+        core,
+        intent,
+        path,
+        key,
+        intent_digest,
+    });
+    owner.check_setup_current(guard, false)?;
+    AuthorityJournal::open_born_financial_history_only_guarded_v1(
+        owner.clone(),
+        &owner.path,
+        &owner.key,
+        &owner.intent.request.policy,
+        &expected_record,
+        guard,
+    )
+}
+
 fn same_financial_namespace_v1(a: &NamespaceOpenInput, b: &NamespaceOpenInput) -> bool {
     #[cfg(feature = "synthetic-qualification")]
     if !match (&a.synthetic_installation, &b.synthetic_installation) {
@@ -1831,4 +1944,62 @@ fn inventory_is_file(path: &Path, guard: crate::journal::ReadGuardV1<'_>) -> Res
     let value = path.is_file();
     guard.check()?;
     Ok(value)
+}
+
+#[cfg(all(test, feature = "coordinated-witness-completed-pair"))]
+mod completed_pair_selector_tests {
+    use super::*;
+    // Public fabricated selectors only. No nominal guard/source/credential is created.
+    fn selected(account: char) -> NamespaceOpenInput {
+        NamespaceOpenInput {
+            #[cfg(feature = "synthetic-qualification")]
+            synthetic_installation: None,
+            endpoint: "127.0.0.1:24117".to_owned(),
+            server_name: "witness.example".to_owned(),
+            witness_id: "public-witness".to_owned(),
+            pinned_server_certificate_digest: "a".repeat(64),
+            owner_certificate_digest: "b".repeat(64),
+            network_profile_id: "public-network".to_owned(),
+            storage_key_file: "/public-fixture/never-opened.key".to_owned(),
+            expected_account_id: account.to_string().repeat(64),
+        }
+    }
+    #[test]
+    fn completed_pair_selectors_require_two_distinct_original_accounts() {
+        assert!(validate_completed_pair_inputs_v1(&[selected('1'), selected('2')]).is_ok());
+        assert!(matches!(
+            validate_completed_pair_inputs_v1(&[selected('1'), selected('1')]),
+            Err(AuthorityError::Conflict)
+        ));
+    }
+    #[test]
+    fn completed_pair_selectors_reject_every_namespace_mismatch() {
+        let original = selected('1');
+        for field in 0..7 {
+            let mut second = selected('2');
+            match field {
+                0 => second.endpoint = "127.0.0.1:24118".to_owned(),
+                1 => second.server_name = "other.example".to_owned(),
+                2 => second.witness_id = "other-witness".to_owned(),
+                3 => second.pinned_server_certificate_digest = "c".repeat(64),
+                4 => second.owner_certificate_digest = "d".repeat(64),
+                5 => second.network_profile_id = "other-network".to_owned(),
+                6 => second.storage_key_file = "/public-fixture/other-unopened.key".to_owned(),
+                _ => unreachable!(),
+            }
+            assert!(matches!(
+                validate_completed_pair_inputs_v1(&[original.clone(), second]),
+                Err(AuthorityError::InvalidBinding)
+            ));
+        }
+    }
+    #[test]
+    fn completed_pair_selectors_reject_malformed_selection_without_opening() {
+        let mut second = selected('2');
+        second.expected_account_id = "not-an-account-commitment".to_owned();
+        assert!(validate_completed_pair_inputs_v1(&[selected('1'), second]).is_err());
+        let mut second = selected('2');
+        second.storage_key_file = "not-absolute".to_owned();
+        assert!(validate_completed_pair_inputs_v1(&[selected('1'), second]).is_err());
+    }
 }

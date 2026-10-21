@@ -13,6 +13,14 @@ use wholepact_authority::{AccountSnapshot, ReconciledAuthorityHistory};
 pub(in crate::native_ui) mod coordinated_initial_read_v1;
 #[cfg(feature = "coordinated-financial-workflow-v1")]
 pub(in crate::native_ui) mod coordinated_admit_v1;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub(in crate::native_ui) mod coordinated_writer_read_v1;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub(in crate::native_ui) mod coordinated_acquire_v1;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+mod coordinated_activate_v1;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+pub(in crate::native_ui) use coordinated_activate_v1::CoordinatedActivateFailureV1;
 
 pub(in crate::native_ui) struct FinancialWitnessCustodyV1 {
     client: AuthorityClient,

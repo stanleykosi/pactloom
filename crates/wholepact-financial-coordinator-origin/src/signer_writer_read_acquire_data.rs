@@ -263,6 +263,82 @@ impl SignerAcquirePresentationV1 {
         complete(self)
     }
 }
+/// Inert authenticated-source report. The actual exporter session exists only
+/// after the one maintained Acquire call; these bytes cannot recreate its key.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignerAcquireCommittedV1 {
+    pub presentation_digest: String,
+    pub recipe_digest: String,
+    pub acquire_ready_digest: String,
+    pub signing_service_digest: String,
+    pub session_id: String,
+    pub writer_certificate_digest: String,
+    pub writer_epoch: u64,
+    pub reconciled_head_sequence: u64,
+    pub reconciled_head_digest: String,
+    pub reconciled_history_digest: String,
+    pub acquired_head_sequence: u64,
+    pub acquired_head_digest: String,
+    pub acquired_at_ms: u64,
+    pub expires_at_ms: u64,
+    pub disclosure_json: String,
+    pub disclosure_digest: String,
+}
+impl SignerAcquireCommittedV1 {
+    pub fn validate(&self) -> Result<()> {
+        if ![
+            &self.presentation_digest,
+            &self.recipe_digest,
+            &self.acquire_ready_digest,
+            &self.signing_service_digest,
+            &self.session_id,
+            &self.writer_certificate_digest,
+            &self.reconciled_head_digest,
+            &self.reconciled_history_digest,
+            &self.acquired_head_digest,
+            &self.disclosure_digest,
+        ]
+        .iter()
+        .all(|s| hash(s))
+            || !object(&self.disclosure_json, 16 * 1024)
+            || self.acquired_at_ms == 0
+            || self.expires_at_ms <= self.acquired_at_ms
+            || self.reconciled_head_sequence.checked_add(1) != Some(self.acquired_head_sequence)
+        {
+            return Err(rejected("Acquire committed receipt shape rejected"));
+        }
+        complete(self)
+    }
+    pub fn commitment(&self) -> Result<String> {
+        self.validate()?;
+        digest(
+            b"wholepact:coordinated-financial-acquire:committed:v1\0",
+            self,
+        )
+    }
+    pub(super) fn matches(
+        &self,
+        p: &SignerAcquirePresentationV1,
+        ready: &str,
+        service: &str,
+    ) -> bool {
+        let f = &p.facts;
+        self.presentation_digest == p.presentation_digest
+            && self.recipe_digest == p.recipe_digest
+            && self.acquire_ready_digest == ready
+            && self.signing_service_digest == service
+            && self.writer_certificate_digest == f.writer_certificate_digest
+            && self.writer_epoch == f.writer_epoch
+            && self.reconciled_head_sequence == f.expected_head_sequence
+            && self.reconciled_head_digest == f.expected_head_digest
+            && self.reconciled_history_digest == f.authenticated_history_digest
+            && self.expires_at_ms <= f.source_expires_at_ms
+            && self.disclosure_json == f.writer_disclosure_json
+            && self.disclosure_digest == f.writer_disclosure_digest
+    }
+}
+
 /// Reported terminal observations only. An entered Acquire call that cannot
 /// authenticate completion is uncertain, not a reusable action or retry ticket.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -432,6 +508,108 @@ pub(super) mod tests {
         };
         p.presentation_digest = p.calculate_presentation_digest().unwrap();
         p
+    }
+    fn committed(p: &SignerAcquirePresentationV1) -> SignerAcquireCommittedV1 {
+        SignerAcquireCommittedV1 {
+            presentation_digest: p.presentation_digest.clone(),
+            recipe_digest: p.recipe_digest.clone(),
+            acquire_ready_digest: h(),
+            signing_service_digest: h(),
+            session_id: h(),
+            writer_certificate_digest: p.facts.writer_certificate_digest.clone(),
+            writer_epoch: p.facts.writer_epoch,
+            reconciled_head_sequence: p.facts.expected_head_sequence,
+            reconciled_head_digest: p.facts.expected_head_digest.clone(),
+            reconciled_history_digest: p.facts.authenticated_history_digest.clone(),
+            acquired_head_sequence: p.facts.expected_head_sequence + 1,
+            acquired_head_digest: h(),
+            acquired_at_ms: 3000,
+            expires_at_ms: 200000,
+            disclosure_json: p.facts.writer_disclosure_json.clone(),
+            disclosure_digest: p.facts.writer_disclosure_digest.clone(),
+        }
+    }
+    #[test]
+    fn acquired_report_strict_shape_and_every_commitment_are_data_only() {
+        let p = acquire(&read());
+        let c = committed(&p);
+        c.validate().unwrap();
+        assert!(c.matches(&p, &h(), &h()));
+        let original = c.commitment().unwrap();
+        assert_ne!(original, p.presentation_digest);
+        assert_ne!(original, p.recipe_digest);
+        let encoded = serde_json::to_string(&c).unwrap();
+        assert_eq!(
+            c,
+            serde_json::from_str::<SignerAcquireCommittedV1>(&encoded).unwrap()
+        );
+        for prefix in ["\"unknown\":1,", "\"writer_epoch\":1,"] {
+            assert!(serde_json::from_str::<SignerAcquireCommittedV1>(&format!(
+                "{{{prefix}{}",
+                &encoded[1..]
+            ))
+            .is_err());
+        }
+        for field in [
+            "presentation_digest",
+            "recipe_digest",
+            "acquire_ready_digest",
+            "signing_service_digest",
+            "session_id",
+            "writer_certificate_digest",
+            "reconciled_head_digest",
+            "reconciled_history_digest",
+            "acquired_head_digest",
+            "disclosure_digest",
+        ] {
+            let mut value = serde_json::to_value(&c).unwrap();
+            value[field] = serde_json::Value::String("cd".repeat(32));
+            let changed: SignerAcquireCommittedV1 = serde_json::from_value(value).unwrap();
+            assert_ne!(original, changed.commitment().unwrap(), "{field}");
+        }
+        for field in ["writer_epoch", "acquired_at_ms", "expires_at_ms"] {
+            let mut value = serde_json::to_value(&c).unwrap();
+            value[field] = serde_json::Value::from(value[field].as_u64().unwrap() + 1);
+            let changed: SignerAcquireCommittedV1 = serde_json::from_value(value).unwrap();
+            assert_ne!(original, changed.commitment().unwrap(), "{field}");
+        }
+        let mut changed = c.clone();
+        changed.reconciled_head_sequence += 1;
+        changed.acquired_head_sequence += 1;
+        assert_ne!(original, changed.commitment().unwrap());
+        let mut changed = c.clone();
+        changed.disclosure_json.push(' ');
+        assert_ne!(original, changed.commitment().unwrap());
+        assert!(!changed.matches(&p, &h(), &h()));
+        assert!(!c.matches(&p, &"cd".repeat(32), &h()));
+        assert!(!c.matches(&p, &h(), &"cd".repeat(32)));
+        // Server acquisition time is authenticated output, not a claimed
+        // equality with the user's earlier local review timestamp.
+        assert_ne!(c.acquired_at_ms, p.facts.reviewed_at_ms);
+    }
+    #[test]
+    fn acquired_report_rejects_head_expiry_and_recipe_substitution() {
+        let p = acquire(&read());
+        let c = committed(&p);
+        let mut changed = c.clone();
+        changed.acquired_head_sequence += 1;
+        assert!(changed.validate().is_err());
+        let mut changed = c.clone();
+        changed.reconciled_head_sequence = u64::MAX;
+        assert!(changed.validate().is_err());
+        let mut changed = c.clone();
+        changed.expires_at_ms = changed.acquired_at_ms;
+        assert!(changed.validate().is_err());
+        let mut changed = c.clone();
+        changed.expires_at_ms = p.facts.source_expires_at_ms + 1;
+        changed.validate().unwrap();
+        assert!(!changed.matches(&p, &h(), &h()));
+        let mut changed = c.clone();
+        changed.writer_epoch += 1;
+        assert!(!changed.matches(&p, &h(), &h()));
+        let mut changed = c;
+        changed.disclosure_json = "[]".into();
+        assert!(changed.validate().is_err());
     }
     #[test]
     fn writer_read_and_acquire_data_are_strict_distinct_complete_commitments() {

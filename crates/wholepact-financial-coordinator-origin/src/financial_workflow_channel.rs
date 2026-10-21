@@ -230,10 +230,12 @@ pub enum FinancialWorkflowStageV1 { SourceEntry, InitialRead, Continue }
 #[derive(Serialize,Deserialize)]
 #[serde(tag="kind",deny_unknown_fields)]
 pub(super) enum Packet {
+    CompletedPairServing{data:crate::CompletedPairPresentationV1,witness_instance:String,serve_challenge:String,service_ceiling_ms:u64},
     RetireRequest{request:crate::host_interstage::RetirementRequest},
     RetireQuiescent{request:crate::host_interstage::RetirementRequest},
     RetireResume{request:crate::host_interstage::RetirementRequest},
     RetireResumed{request:crate::host_interstage::RetirementRequest},
+    OriginalHostPeer{role:Target,host_instance:String},
     StartEntry{start:Start}, EntryOffer{offer:EntryOffer},
     EntryCipher{envelope:String},
     SourceRetained{start:Start,presentation_digest:String},
@@ -247,6 +249,24 @@ pub(super) enum Packet {
     ContinueFinal{context:ContinueStart,presentation_digest:String,prepared_digest:String,ready_challenge:String},
     ContinuationSaved{context:ContinueStart,data:SignerContinuationSavedV1},
     ContinueOutcome{context:ContinueStart,data:SignerContinueOutcomeV1},
+    WriterReadDisplay{data:crate::SignerFinancialWriterReadPresentationV1},
+    WriterReadFinal{actor:FinancialActorContextV1,presentation_digest:String,read_challenge:String,service:crate::FinancialSigningServiceV1},
+    WriterReadFailed{actor:FinancialActorContextV1,presentation_digest:String},
+    AcquireDisplay{data:crate::SignerAcquirePresentationV1},
+    AcquireArm{actor:FinancialActorContextV1,presentation_digest:String,recipe_digest:String},
+    AcquireReady{actor:FinancialActorContextV1,presentation_digest:String,recipe_digest:String,ready_challenge:String,acquire_ready_digest:String},
+    AcquireFinal{actor:FinancialActorContextV1,presentation_digest:String,recipe_digest:String,ready_challenge:String,acquire_ready_digest:String,service:crate::FinancialSigningServiceV1},
+    AcquireOutcome{actor:FinancialActorContextV1,data:crate::SignerAcquireOutcomeV1},
+    Acquired{actor:FinancialActorContextV1,data:crate::SignerAcquireCommittedV1,writer_session_ceiling_ms:u64},
+    ActivateReadDisplay{data:crate::SignerActivateReadPresentationV1},
+    ActivateReadFinal{actor:FinancialActorContextV1,presentation_digest:String,read_challenge:String,service:crate::FinancialSigningServiceV1},
+    ActivateReadFailed{actor:FinancialActorContextV1,presentation_digest:String},
+    ActivateDisplay{data:crate::SignerActivatePresentationV1},
+    ActivateArm{actor:FinancialActorContextV1,presentation_digest:String,recipe_digest:String},
+    ActivateReady{actor:FinancialActorContextV1,presentation_digest:String,recipe_digest:String,ready_challenge:String,activate_ready_digest:String},
+    ActivateFinal{actor:FinancialActorContextV1,presentation_digest:String,recipe_digest:String,ready_challenge:String,activate_ready_digest:String,service:crate::FinancialSigningServiceV1},
+    ActivateOutcome{actor:FinancialActorContextV1,data:crate::SignerActivateOutcomeV1},
+    Activated{actor:FinancialActorContextV1,data:crate::SignerActivateCommittedV1},
     AdmitDisplay{data:crate::SignerAdmitPresentationV1},
     AdmitArm{actor:FinancialActorContextV1,presentation_digest:String},
     AdmitReady{actor:FinancialActorContextV1,presentation_digest:String,ready_challenge:String,admission_ready_digest:String},
@@ -259,6 +279,38 @@ pub(super) enum Packet {
 }
 impl Packet {
     pub(super) fn target(&self)->Result<Option<Target>> {Ok(match self {
+        Self::OriginalHostPeer{role,host_instance}=>{if !hash(host_instance){return Err(rejected("original H handshake shape"));}Some(*role)},
+        Self::CompletedPairServing{data,witness_instance,serve_challenge,service_ceiling_ms}=>{data.validate()?;
+            if !hash(witness_instance)||!hash(serve_challenge)||*service_ceiling_ms==0||data.original.owners.iter().any(|o|*service_ceiling_ms>o.source_ceiling_ms){return Err(rejected("Pair service observation shape"));}None},
+        Self::WriterReadDisplay{data}=>{data.validate()?;Some(data.actor.signer_role)},
+        Self::AcquireDisplay{data}=>{data.validate()?;Some(data.actor.signer_role)},
+        Self::WriterReadFinal{actor,presentation_digest,read_challenge,service}=>{
+            actor.validate()?;service.validate()?;
+            if !hash(presentation_digest)||!hash(read_challenge)||actor!=&service.original.actor{return Err(rejected("Writer Read Final shape"));}Some(actor.signer_role)},
+        Self::WriterReadFailed{actor,presentation_digest}=>{actor.validate()?;if !hash(presentation_digest){return Err(rejected("Writer Read failure shape"));}Some(actor.signer_role)},
+        Self::AcquireArm{actor,presentation_digest,recipe_digest}=>{actor.validate()?;
+            if !hash(presentation_digest)||!hash(recipe_digest){return Err(rejected("Acquire Arm shape"));}Some(actor.signer_role)},
+        Self::AcquireReady{actor,presentation_digest,recipe_digest,ready_challenge,acquire_ready_digest}=>{actor.validate()?;
+            if ![presentation_digest,recipe_digest,ready_challenge,acquire_ready_digest].iter().all(|v|hash(v)){return Err(rejected("Acquire Ready shape"));}Some(actor.signer_role)},
+        Self::AcquireFinal{actor,presentation_digest,recipe_digest,ready_challenge,acquire_ready_digest,service}=>{actor.validate()?;service.validate()?;
+            if ![presentation_digest,recipe_digest,ready_challenge,acquire_ready_digest].iter().all(|v|hash(v))||actor!=&service.original.actor{return Err(rejected("Acquire Final shape"));}Some(actor.signer_role)},
+        Self::AcquireOutcome{actor,data}=>{actor.validate()?;data.validate()?;Some(actor.signer_role)},
+        Self::Acquired{actor,data,writer_session_ceiling_ms}=>{actor.validate()?;data.validate()?;
+            if *writer_session_ceiling_ms==0||*writer_session_ceiling_ms>SUPERVISION_MS{return Err(rejected("Acquire original writer-session offset"));}Some(actor.signer_role)},
+        Self::ActivateReadDisplay{data}=>{data.validate()?;Some(data.actor.signer_role)},
+        Self::ActivateDisplay{data}=>{data.validate()?;Some(data.actor.signer_role)},
+        Self::ActivateReadFinal{actor,presentation_digest,read_challenge,service}=>{
+            actor.validate()?;service.validate()?;
+            if !hash(presentation_digest)||!hash(read_challenge)||actor!=&service.original.actor{return Err(rejected("Activate Read Final shape"));}Some(actor.signer_role)},
+        Self::ActivateReadFailed{actor,presentation_digest}=>{actor.validate()?;if !hash(presentation_digest){return Err(rejected("Activate Read failure shape"));}Some(actor.signer_role)},
+        Self::ActivateArm{actor,presentation_digest,recipe_digest}=>{actor.validate()?;
+            if !hash(presentation_digest)||!hash(recipe_digest){return Err(rejected("Activate Arm shape"));}Some(actor.signer_role)},
+        Self::ActivateReady{actor,presentation_digest,recipe_digest,ready_challenge,activate_ready_digest}=>{actor.validate()?;
+            if ![presentation_digest,recipe_digest,ready_challenge,activate_ready_digest].iter().all(|v|hash(v)){return Err(rejected("Activate Ready shape"));}Some(actor.signer_role)},
+        Self::ActivateFinal{actor,presentation_digest,recipe_digest,ready_challenge,activate_ready_digest,service}=>{actor.validate()?;service.validate()?;
+            if ![presentation_digest,recipe_digest,ready_challenge,activate_ready_digest].iter().all(|v|hash(v))||actor!=&service.original.actor{return Err(rejected("Activate Final shape"));}Some(actor.signer_role)},
+        Self::ActivateOutcome{actor,data}=>{actor.validate()?;data.validate()?;Some(actor.signer_role)},
+        Self::Activated{actor,data}=>{actor.validate()?;data.validate()?;Some(actor.signer_role)},
         Self::RetireRequest{..}|Self::RetireQuiescent{..}|Self::RetireResume{..}|Self::RetireResumed{..}=>None,
         Self::StartEntry{start}|Self::SourceRetained{start,..}|Self::ReadOffer{start,..}|Self::ReadFinal{start,..}|Self::HistoryRetained{start,..}|Self::Failed{start,..}=>Some(start.role),
         Self::ContinuePrepare{context}|Self::ContinueArm{context,..}|Self::ContinueReady{context,..}|Self::ContinueFinal{context,..}
@@ -324,6 +376,10 @@ pub(super) fn try_receive(fd:RawFd,local:Role,peer:&PeerLifetime)->Result<Option
     check_direction(peer.role(),local,&packet)?;peer.check_alive()?;Ok(Some(packet))
 }
 fn check_direction(sender:Role,recipient:Role,packet:&Packet)->Result<()> {
+    if matches!(packet,Packet::CompletedPairServing{..}){
+        packet.target()?;
+        return if sender==Role::Coordinator&&recipient==Role::Host{Ok(())}else{Err(rejected("Pair service observation not original C/H"))};
+    }
     if matches!(packet,Packet::RetireRequest{..}|Packet::RetireResume{..}){
         return if sender==Role::Coordinator&&recipient==Role::Host{Ok(())}else{Err(rejected("retirement control not original C/H"))};
     }
@@ -331,7 +387,10 @@ fn check_direction(sender:Role,recipient:Role,packet:&Packet)->Result<()> {
         return if sender==Role::Host&&recipient==Role::Coordinator{Ok(())}else{Err(rejected("retirement observation not original H/C"))};
     }
 
-    let down=matches!(packet,Packet::StartEntry{..}|Packet::EntryCipher{..}|Packet::ReadFinal{..}|Packet::ContinuePrepare{..}|Packet::ContinueArm{..}|Packet::ContinueFinal{..}|Packet::AdmitArm{..}|Packet::AdmitFinal{..}|Packet::Cancel{..});
+    if let Packet::OriginalHostPeer{role,host_instance}=packet {
+        return if sender==Role::Host && recipient==role.role() && hash(host_instance){Ok(())}else{Err(rejected("original H handshake direction rejected"))};
+    }
+    let down=matches!(packet,Packet::ActivateReadFinal{..}|Packet::ActivateArm{..}|Packet::ActivateFinal{..}|Packet::WriterReadFinal{..}|Packet::AcquireArm{..}|Packet::AcquireFinal{..}|Packet::StartEntry{..}|Packet::EntryCipher{..}|Packet::ReadFinal{..}|Packet::ContinuePrepare{..}|Packet::ContinueArm{..}|Packet::ContinueFinal{..}|Packet::AdmitArm{..}|Packet::AdmitFinal{..}|Packet::Cancel{..});
     let edge=if down{sender==Role::Coordinator&&recipient==Role::Host||sender==Role::Host&&matches!(recipient,Role::Signer1|Role::Signer2)}
         else{recipient==Role::Coordinator&&sender==Role::Host||recipient==Role::Host&&matches!(sender,Role::Signer1|Role::Signer2)};
     let actual=if matches!(sender,Role::Signer1|Role::Signer2){Some(sender)}else if matches!(recipient,Role::Signer1|Role::Signer2){Some(recipient)}else{None};
@@ -436,5 +495,62 @@ mod tests {
         assert!(oversized.presentation.facts.validate().is_err());
         assert!(payload(&Packet::EntryCipher{envelope:"x".repeat(envelope::FRAME_LIMIT)}).is_err());
         let mut read=sample_read(&sample_entry());read.facts.original_delivery_operation_id="x".repeat(129);assert!(read.facts.validate().is_err());
+    }
+}
+
+#[cfg(test)]mod writer_route_tests{
+    use super::*;
+    #[test]fn writer_acquire_packets_bind_fixed_actor_and_direction(){
+        let actor=sample_entry().presentation.actor;let h="a".repeat(64);
+        let p=Packet::AcquireArm{actor:actor.clone(),presentation_digest:h.clone(),recipe_digest:h};
+        assert_eq!(p.target().unwrap(),Some(Target::Signer1));
+        assert!(check_direction(Role::Coordinator,Role::Host,&p).is_ok());
+        assert!(check_direction(Role::Host,Role::Signer1,&p).is_ok());
+        assert!(check_direction(Role::Host,Role::Signer2,&p).is_err());
+        assert!(check_direction(Role::Signer1,Role::Host,&p).is_err());
+        let p=Packet::WriterReadFailed{actor,presentation_digest:"not-a-digest".into()};
+        assert!(p.target().is_err());
+    }
+    #[test]fn writer_final_grammar_requires_explicit_original_service_correlation(){
+        assert!(serde_json::from_str::<Packet>(r#"{"kind":"WriterReadFinal","actor":{},"presentation_digest":"a","read_challenge":"b"}"#).is_err());
+        assert!(serde_json::from_str::<Packet>(r#"{"kind":"AcquireFinal","signing_service_digest":"old-digest-only"}"#).is_err());
+        assert!(serde_json::from_str::<Packet>(r#"{"kind":"Acquired","actor":{}}"#).is_err());
+    }
+}
+
+#[cfg(test)]mod activate_route_tests{
+    use super::*;
+    #[test]fn activate_packets_bind_fixed_actor_and_direction(){
+        let actor=sample_entry().presentation.actor;let h="a".repeat(64);
+        let p=Packet::ActivateArm{actor:actor.clone(),presentation_digest:h.clone(),recipe_digest:h.clone()};
+        assert_eq!(p.target().unwrap(),Some(Target::Signer1));
+        assert!(check_direction(Role::Coordinator,Role::Host,&p).is_ok());
+        assert!(check_direction(Role::Host,Role::Signer1,&p).is_ok());
+        assert!(check_direction(Role::Host,Role::Signer2,&p).is_err());
+        assert!(check_direction(Role::Signer1,Role::Host,&p).is_err());
+        let p=Packet::ActivateReadFailed{actor:actor.clone(),presentation_digest:h};
+        assert!(check_direction(Role::Signer1,Role::Host,&p).is_ok());
+        assert!(check_direction(Role::Host,Role::Coordinator,&p).is_ok());
+        assert!(check_direction(Role::Coordinator,Role::Host,&p).is_err());
+        let p=Packet::ActivateReadFailed{actor,presentation_digest:"not-a-digest".into()};
+        assert!(p.target().is_err());
+    }
+    #[test]fn activate_final_grammar_requires_explicit_original_service_correlation(){
+        assert!(serde_json::from_str::<Packet>(r#"{"kind":"ActivateReadFinal","actor":{},"presentation_digest":"a","read_challenge":"b"}"#).is_err());
+        assert!(serde_json::from_str::<Packet>(r#"{"kind":"ActivateFinal","signing_service_digest":"old-digest-only"}"#).is_err());
+        assert!(serde_json::from_str::<Packet>(r#"{"kind":"Activated","actor":{}}"#).is_err());
+    }
+}
+
+#[cfg(test)]mod original_host_peer_route_tests {
+    use super::*;
+    #[test]fn host_peer_first_packet_only_original_host_to_exact_signer(){
+        let p=Packet::OriginalHostPeer{role:Target::Signer1,host_instance:"ab".repeat(32)};
+        assert!(check_direction(Role::Host,Role::Signer1,&p).is_ok());
+        for (sender,recipient) in [(Role::Coordinator,Role::Host),(Role::Host,Role::Signer2),(Role::Signer1,Role::Host),(Role::Host,Role::Coordinator)] {
+            assert!(check_direction(sender,recipient,&p).is_err());
+        }
+        let p=Packet::OriginalHostPeer{role:Target::Signer1,host_instance:"not-an-instance".into()};
+        assert!(p.target().is_err());assert!(check_direction(Role::Host,Role::Signer1,&p).is_err());
     }
 }

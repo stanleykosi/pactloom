@@ -17,8 +17,22 @@ use crate::{SignerContinueArmV1,SignerContinueFinalV1,SignerContinueSourceFactsV
     SignerContinuePresentationV1,SignerContinueOutcomeV1};
 use crate::signer_continue_state::SENT;
 
+#[path="original_signer_host_peer.rs"]
+mod original_host_peer;
+pub use original_host_peer::OriginalSignerHostPeerV1;
+
 #[path="signer_admit_origin.rs"]
 mod admit;
+#[path="signer_writer_read_acquire_origin.rs"]
+mod writer_acquire;
+use writer_acquire::{SWritAcquire,CWritAcquire,HWritAcquire};
+#[path="signer_activate_wallet_origin.rs"]
+mod activate;
+use activate::{SActivate,CActivate,HActivate};
+pub use activate::{SignerActivateReadTicketV1,SignerActivateReadOutboundV1,SignerActivateReadFinalV1,
+    SignerActivateReviewTicketV1,SignerActivateArmOutboundV1,SignerActivateArmV1,SignerActivateReadyTicketV1,SignerActivateFinalV1,SignerActivateFinalOutboundV1};
+pub use writer_acquire::{SignerFinancialWriterReadTicketV1,SignerFinancialWriterReadOutboundV1,SignerFinancialWriterReadFinalV1,
+    SignerAcquireReviewTicketV1,SignerAcquireArmOutboundV1,SignerAcquireArmV1,SignerAcquireReadyTicketV1,SignerAcquireFinalV1,SignerAcquireFinalOutboundV1};
 #[path="financial_witness_coordinator.rs"]
 mod witness;
 #[path="financial_history_coordinator.rs"]
@@ -38,6 +52,9 @@ pub use admit::{SignerAdmitArmV1,SignerAdmitFinalV1,SignerAdmitReviewTicketV1,Si
 use admit::{SAdmit,CAdmit,HAdmit};
 
 pub enum SignerFinancialWorkflowRequestV1 {
+    OriginalHostPeer(OriginalSignerHostPeerV1),
+    ActivateRead(SignerActivateReadFinalV1),ActivateArm(SignerActivateArmV1),ActivateFinal(SignerActivateFinalV1),
+    WriterRead(SignerFinancialWriterReadFinalV1),AcquireArm(SignerAcquireArmV1),AcquireFinal(SignerAcquireFinalV1),
     SourceEntryRequested,
     SourceEntry { input:SignerSourceEntryInputV1, final_action:SignerSourceEntryFinalV1 },
     InitialRead(SignerFinancialReadFinalV1), ContinueRequested,
@@ -45,9 +62,10 @@ pub enum SignerFinancialWorkflowRequestV1 {
 }
 pub struct SignerFinancialWorkflowOriginV1 {
     core:Arc<Core>,clocks:FullWorkflowClocksV1,leaf:Option<LeafCustody>,target:Target,instance:String,image:String,
+    host_peer_seen:bool,host_peer_deadline:Instant,
     start:Option<Start>,entry:Option<Arc<EntryReviewed>>,recipient:Option<crypto::RecipientKey>,
     read:Option<Arc<ReadReviewed>>,offer_started:bool,read_started:bool,source_reported:bool,history_reported:bool,
-    continuation:SContinue,admission:SAdmit,failed:bool,cancel_seen:bool,disposed:bool,cleanup:Option<Instant>,
+    continuation:SContinue,admission:SAdmit,writer_acquire:SWritAcquire,activate:SActivate,failed:bool,cancel_seen:bool,disposed:bool,cleanup:Option<Instant>,
 }
 impl SignerFinancialWorkflowOriginV1 {
     pub(super) fn from_signer(leaf:LeafCustody,birth:SignerBirthContext)->Result<Self>{
@@ -56,9 +74,9 @@ impl SignerFinancialWorkflowOriginV1 {
             owner_pid:unsafe{libc::getpid()},owner_uid:unsafe{libc::geteuid()},epoch:clocks.epoch(),session:clocks.supervision(),
             alive:AtomicBool::new(true),outbound:[AtomicU8::new(PENDING),AtomicU8::new(PENDING)]});
         core.check()?;crate::channel::require_time(clocks.supervision())?;
-        Ok(Self{core,clocks,leaf:Some(leaf),target,instance:state::nonce()?,image:birth.image.measurement().to_owned(),start:None,entry:None,
+        Ok(Self{host_peer_seen:false,host_peer_deadline:(Instant::now()+std::time::Duration::from_secs(120)).min(clocks.supervision()),core,clocks,leaf:Some(leaf),target,instance:state::nonce()?,image:birth.image.measurement().to_owned(),start:None,entry:None,
             recipient:None,read:None,offer_started:false,read_started:false,source_reported:false,history_reported:false,
-            continuation:SContinue::default(),admission:SAdmit::default(),failed:false,cancel_seen:false,disposed:false,cleanup:None})
+            continuation:SContinue::default(),admission:SAdmit::default(),writer_acquire:SWritAcquire::default(),activate:SActivate::default(),failed:false,cancel_seen:false,disposed:false,cleanup:None})
     }
     pub fn session_deadline(&self)->Instant{self.clocks.supervision()}
     pub fn check_original_actors_alive(&self)->Result<()>{self.core.check()}
@@ -70,6 +88,15 @@ impl SignerFinancialWorkflowOriginV1 {
     /// No actor check and no initialization: failure cleanup may still read it.
     pub fn original_cleanup_deadline(&self)->Result<Instant>{
         self.cleanup.ok_or_else(||rejected("Signer original cleanup not started"))
+    }
+    /// Failure-only teardown before joining an owned worker. Publish denial and
+    /// close the original H edge even if its first cleanup capture has expired.
+    /// This records neither disposal nor successful purpose completion.
+    pub fn close_for_failed_worker_v1(&mut self){
+        self.failed=true;
+        let _=self.restrict();
+        self.core.close();
+        self.leaf.take();
     }
 
     fn transport_check(&self)->Result<()>{crate::channel::require_time(self.cleanup.unwrap_or(self.clocks.hard_cleanup()))?;self.core.check()}
@@ -83,7 +110,17 @@ impl SignerFinancialWorkflowOriginV1 {
     }
     fn receive_inner(&mut self)->Result<Option<SignerFinancialWorkflowRequestV1>>{
         self.transport_check()?;
+        if !self.host_peer_seen {crate::channel::require_time(self.host_peer_deadline)?;}
         let Some(packet)=self.leaf.as_ref().ok_or_else(||rejected("workflow Signer consumed"))?.origin.workflow_receive()? else{return Ok(None)};
+        if let Packet::OriginalHostPeer{role,host_instance} = &packet {
+            if !original_host_peer::first_handshake_allowed(self.host_peer_seen,self.start.is_some(),self.target,*role) {return Err(rejected("original H handshake repeated or reordered"));}
+            self.core.check_action_restrictions()?;
+            let (uid,pid)=self.leaf.as_ref().ok_or_else(||rejected("original S custody consumed"))?.origin.original_host_identity()?;
+            self.host_peer_seen=true;
+            let peer=OriginalSignerHostPeerV1::from_authenticated_first_packet(Arc::clone(&self.core),uid,pid,host_instance.clone())?;
+            return Ok(Some(SignerFinancialWorkflowRequestV1::OriginalHostPeer(peer)));
+        }
+        if !self.host_peer_seen && !matches!(packet,Packet::Cancel{..}) {return Err(rejected("original H handshake must precede source workflow"));}
         if !matches!(packet,Packet::Cancel{..}) {
             crate::channel::require_time(self.clocks.supervision())?;
             if self.core.phase.revoked()&&!matches!(packet,Packet::ContinueFinal{..}){return Err(rejected("workflow command after restriction"));}
@@ -91,6 +128,8 @@ impl SignerFinancialWorkflowOriginV1 {
             // and retains its narrow exception. Every other new purpose denies R.
             if !matches!(packet,Packet::ContinueFinal{..}) { self.core.check_action_restrictions()?; }
         }
+        if matches!(packet,Packet::ActivateReadFinal{..}|Packet::ActivateArm{..}|Packet::ActivateFinal{..}){return self.receive_activate(packet).map(Some);}
+        if matches!(packet,Packet::WriterReadFinal{..}|Packet::AcquireArm{..}|Packet::AcquireFinal{..}){return self.receive_writer_acquire(packet).map(Some);}
         if matches!(packet,Packet::AdmitArm{..}|Packet::AdmitFinal{..}) { return self.receive_admit(packet).map(Some); }
         let request=match packet {
             Packet::StartEntry{start}=>{
@@ -302,7 +341,7 @@ impl SignerFinancialWorkflowOriginV1 {
     }
     /// Observation only, after actual worker join and source/key/input drop.
     pub fn send_disposed(&mut self)->Result<()> {
-        if self.disposed||!self.cancel_seen||!self.admission.disposal_allowed()||(self.continuation.binding.is_some()&&!self.continuation.outcome){return Err(rejected("workflow disposal before Cancel/outcome"));}
+        if self.disposed||!self.cancel_seen||!self.admission.disposal_allowed()||!self.writer_acquire.disposal_allowed()||!self.activate.disposal_allowed()||(self.continuation.binding.is_some()&&!self.continuation.outcome){return Err(rejected("workflow disposal before Cancel/outcome"));}
         let start=self.start.as_ref().ok_or_else(||rejected("workflow disposal context missing"))?;
         self.disposed=true;self.send(&Packet::Disposed{coordinator:start.coordinator.clone(),session:start.session.clone(),role:self.target})
     }
@@ -354,13 +393,19 @@ impl CoordinatorFinancialNativeV1 {
 }
 impl Drop for CoordinatorFinancialNativeV1{fn drop(&mut self){self.revoke();}}
 pub enum CoordinatorFinancialEventV1 {
+    ActivateReadDisplay(SignerActivateReadTicketV1),ActivateReadFailed{role:Target,presentation_digest:String},
+    ActivateDisplay(SignerActivateReviewTicketV1),ActivateReady(SignerActivateReadyTicketV1),ActivateOutcome{role:Target,data:crate::SignerActivateOutcomeV1},
+    AwaitingWalletPrepare{role:Target,data:crate::SignerActivateCommittedV1},
+    WriterReadDisplay(SignerFinancialWriterReadTicketV1),WriterReadFailed{role:Target,presentation_digest:String},
+    AcquireDisplay(SignerAcquireReviewTicketV1),AcquireReady(SignerAcquireReadyTicketV1),AcquireOutcome{role:Target,data:crate::SignerAcquireOutcomeV1},
+    AwaitingActivateRead{role:Target,data:crate::SignerAcquireCommittedV1},
     AdmitDisplay(SignerAdmitReviewTicketV1), AdmitReady(SignerAdmitReadyTicketV1),
     AwaitingNextRead{role:Target,data:crate::SignerAdmitCommittedV1}, AdmitOutcome{role:Target,data:crate::SignerAdmitOutcomeV1},
     SourceEntryOffer(SignerSourceEntryOfferV1), SourceRetained(Target), InitialReadOffer(SignerFinancialReadTicketV1),
     HistoryRetained{role:Target,continue_deadline:Instant}, ContinueDisplay(FinancialContinueReviewTicketV1), ContinueReady(FinancialContinueReadyTicketV1),
     AwaitingAdmission{role:Target,data:SignerContinuationSavedV1}, ContinueOutcome{role:Target,data:SignerContinueOutcomeV1}, Failed{role:Target,stage:FinancialWorkflowStageV1}, Disposed(Target), Restricted(Target),
 }
-struct CSlot{start:Start,sender:Option<crypto::SenderKey>,entry:Option<Arc<EntryReviewed>>,read:Option<Arc<ReadReviewed>>,wire_phase:u8,continue_deadline:Option<Instant>,continue_review_ms:Option<u64>,continuation:Option<CContinue>,admission:CAdmit,failed:bool}
+struct CSlot{start:Start,sender:Option<crypto::SenderKey>,entry:Option<Arc<EntryReviewed>>,read:Option<Arc<ReadReviewed>>,wire_phase:u8,continue_deadline:Option<Instant>,continue_review_ms:Option<u64>,continuation:Option<CContinue>,admission:CAdmit,writer_acquire:CWritAcquire,activate:CActivate,failed:bool}
 pub struct CoordinatorFinancialEndpointV1{
     core:Arc<Core>,clocks:FullWorkflowClocksV1,tree:Option<InertTreeV1>,coordinator:String,session:String,image:String,
     host_terminal:Option<crate::CoordinatorHostTerminalEndpointV1>,retirement_resume:Option<Instant>,
@@ -423,7 +468,7 @@ impl CoordinatorFinancialEndpointV1 {
                 if matches!(phase,READ_REVIEW|READ_ADMITTED){
                     slot.read.as_ref().ok_or_else(||rejected("active Read binding missing"))?.check()?;
                 }
-                slot.admission.observe_active(phase)?;
+                slot.admission.observe_active(phase)?;slot.writer_acquire.observe_active(phase)?;slot.activate.observe_active(phase)?;
             }
             for (i,w) in self.witnesses.iter().enumerate(){w.observe_active(&self.core,i)?;}
             for(i,h)in self.histories.iter().enumerate(){h.observe_active(&self.core,i)?;}
@@ -453,7 +498,7 @@ impl CoordinatorFinancialEndpointV1 {
             let sender=crypto::SenderKey::generate()?;
             let start=Start{profile:PROFILE.into(),coordinator:self.coordinator.clone(),session:self.session.clone(),role:target,
                 request_challenge:state::nonce()?,native_ceiling_ms:self.clocks.restrictive_offset(ceiling,original)?,sender_public_key:hex::encode(sender.public_key())};
-            self.slots[i]=Some(CSlot{start:start.clone(),sender:Some(sender),entry:None,read:None,wire_phase:ENTRY_PREPARING,continue_deadline:None,continue_review_ms:None,continuation:None,admission:CAdmit::default(),failed:false});
+            self.slots[i]=Some(CSlot{start:start.clone(),sender:Some(sender),entry:None,read:None,wire_phase:ENTRY_PREPARING,continue_deadline:None,continue_review_ms:None,continuation:None,admission:CAdmit::default(),writer_acquire:CWritAcquire::default(),activate:CActivate::default(),failed:false});
             self.core.check()?;self.clocks.restrict_received(&start.profile,start.native_ceiling_ms,original,Instant::now())?;
             if self.core.phase.source_send_restricted(i,ENTRY_PREPARING)?{return Ok(FinancialSendProgressV1::Restricted);}
             self.send_positive(&Packet::StartEntry{start},ceiling)
@@ -563,8 +608,12 @@ impl CoordinatorFinancialEndpointV1 {
             if !self.cancel_sent||self.disposed[i]||coordinator!=&self.coordinator||session!=&self.session{return Err(rejected("workflow disposal mismatch"));}
             if self.slots[i].as_ref().and_then(|s|s.continuation.as_ref()).is_some_and(|c|c.wire.is_some()&&!c.outcome){return Err(rejected("Continue disposal before exact outcome"));}
             if self.slots[i].as_ref().is_some_and(|s|!s.admission.disposal_allowed()){return Err(rejected("Signer Admit disposal before outcome"));}
+            if self.slots[i].as_ref().is_some_and(|s|!s.writer_acquire.disposal_allowed()){return Err(rejected("Writer Read/Acquire disposal before actual terminal outcome"));}
+            if self.slots[i].as_ref().is_some_and(|s|!s.activate.disposal_allowed()){return Err(rejected("Activate disposal before actual terminal outcome"));}
             self.disposed[i]=true;return Ok(Some(CoordinatorFinancialEventV1::Disposed(role)));
         }
+        if matches!(packet,Packet::ActivateReadDisplay{..}|Packet::ActivateReadFailed{..}|Packet::ActivateDisplay{..}|Packet::ActivateReady{..}|Packet::ActivateOutcome{..}|Packet::Activated{..}){return self.receive_activate_event(packet).map(Some);}
+        if matches!(packet,Packet::WriterReadDisplay{..}|Packet::WriterReadFailed{..}|Packet::AcquireDisplay{..}|Packet::AcquireReady{..}|Packet::AcquireOutcome{..}|Packet::Acquired{..}){return self.receive_writer_acquire_event(packet).map(Some);}
         if matches!(packet,Packet::AdmitDisplay{..}|Packet::AdmitReady{..}|Packet::Admitted{..}|Packet::AdmitOutcome{..}) { return self.receive_admit_event(packet).map(Some); }
         let mut retained_history=None;
         let slot=self.slots[i].as_mut().ok_or_else(||rejected("workflow unsolicited response"))?;
@@ -669,11 +718,12 @@ fn failure_phase(stage:FinancialWorkflowStageV1,phase:u8)->bool{match stage{
     FinancialWorkflowStageV1::Continue=>phase==CONT_PREPARING,
 }}
 
-struct HSlot{start:Start,phase:u8,entry:Option<EntryOffer>,read:Option<SignerFinancialReadPresentationV1>,continue_review_ms:Option<u64>,continuation:Option<HContinue>,admission:HAdmit,last_wall:u64,failed:bool}
+struct HSlot{start:Start,phase:u8,entry:Option<EntryOffer>,read:Option<SignerFinancialReadPresentationV1>,continue_review_ms:Option<u64>,continuation:Option<HContinue>,admission:HAdmit,writer_acquire:HWritAcquire,activate:HActivate,last_wall:u64,failed:bool}
 /// Exact original H is a trusted finite relay, not a direct-C authentication
 /// proof at S. It retains sole S reapers, no plaintext/private keys or issuer.
 pub struct HostFinancialWorkflowRelayV1{
     lifecycle:Arc<crate::host_interstage::HostLifecycle>,
+    pair:crate::host_interstage::HostPairReceiveState,
     retirement:Option<crate::host_interstage::RetirementRequest>,quiescent_sent:bool,retired:[[bool;2];2],
     host:Option<HostOriginV1>,clocks:FullWorkflowClocksV1,image:String,coordinator:Option<String>,session:Option<String>,
     slots:[Option<HSlot>;2],restricted:bool,cancel_seen:bool,disposed:[bool;2],cleanup:Option<Instant>,
@@ -681,7 +731,15 @@ pub struct HostFinancialWorkflowRelayV1{
 impl HostFinancialWorkflowRelayV1 {
     pub(super) fn from_host(host:HostOriginV1)->Result<Self>{
         host.continue_check()?;let clocks=host.continue_clocks().workflow();let image=host.workflow_image()?;
-        Ok(Self{lifecycle:host.workflow_lifecycle(),retirement:None,quiescent_sent:false,retired:[[false;2];2],host:Some(host),clocks,image,coordinator:None,session:None,slots:[None,None],restricted:false,cancel_seen:false,disposed:[false;2],cleanup:None})
+        // The only first H->S data handshake. A partial pair send is a failed
+        // original session: `host` is consumed/dropped, never retried/reentered.
+        let host_instance=state::nonce()?;
+        for role in [Target::Signer1,Target::Signer2] {
+            crate::channel::require_time(clocks.supervision())?;
+            host.continue_check()?;
+            host.continue_child(role)?.workflow_send(&Packet::OriginalHostPeer{role,host_instance:host_instance.clone()})?;
+        }
+        Ok(Self{lifecycle:host.workflow_lifecycle(),pair:crate::host_interstage::HostPairReceiveState::default(),retirement:None,quiescent_sent:false,retired:[[false;2];2],host:Some(host),clocks,image,coordinator:None,session:None,slots:[None,None],restricted:false,cancel_seen:false,disposed:[false;2],cleanup:None})
     }
     pub fn session_deadline(&self)->Instant{self.clocks.supervision()}
     fn restrict(&mut self)->Result<()>{self.restricted=true;if self.cleanup.is_none(){self.cleanup=Some(self.clocks.first_cleanup_ceiling(Instant::now())?);}Ok(())}
@@ -692,7 +750,7 @@ impl HostFinancialWorkflowRelayV1 {
         self.host.as_ref().ok_or_else(||rejected("workflow Host consumed"))?.continue_check_lifetimes()?;
         let mut progress=false;
         if let Some(packet)=self.host.as_ref().unwrap().workflow_receive_c()?{
-            if self.retirement_control(&packet)?{progress=true;}else{
+            if self.completed_pair_control(&packet)?||self.retirement_control(&packet)?{progress=true;}else{
             self.down(&packet)?;let host=self.host.as_ref().unwrap();
             if matches!(packet,Packet::Cancel{..}){
                 host.continue_child(Target::Signer1)?.workflow_send(&packet)?;host.continue_child(Target::Signer2)?.workflow_send(&packet)?;
@@ -708,6 +766,24 @@ impl HostFinancialWorkflowRelayV1 {
             }
         }
         self.host.as_ref().unwrap().continue_check_lifetimes()?;self.lifecycle.check_not_poisoned()?;Ok(progress)
+    }
+    fn completed_pair_control(&mut self,packet:&Packet)->Result<bool>{
+        let Packet::CompletedPairServing{data,witness_instance,serve_challenge,service_ceiling_ms}=packet else{return Ok(false)};
+        if self.restricted||self.cancel_seen||self.retirement.is_some(){return Err(rejected("Host Pair receive during restriction or retirement"));}
+        let mut originals=Vec::with_capacity(2);
+        for i in 0..2{
+            let slot=self.slots[i].as_mut().ok_or_else(||rejected("Host Pair before original owner"))?;
+            if slot.failed||self.disposed[i]{return Err(rejected("Host Pair owner failed or disposed"));}
+            relay_source_current(slot,self.clocks)?;
+            let (_,_,service,_)=slot.writer_acquire.retained_result()?;
+            let original=service.correlation().original.clone();
+            if self.coordinator.as_deref()!=Some(original.actor.coordinator_process_instance.as_str())
+                ||self.session.as_deref()!=Some(original.actor.session_challenge.as_str())
+                ||original.actor.common_image_measurement!=self.image{return Err(rejected("Host Pair original actor mismatch"));}
+            originals.push(original);
+        }
+        let expected=originals.try_into().map_err(|_|rejected("Host Pair owner cardinality"))?;
+        self.pair.receive(&self.lifecycle,data.clone(),witness_instance.clone(),serve_challenge.clone(),*service_ceiling_ms,expected)?;Ok(true)
     }
     fn retirement_control(&mut self,packet:&Packet)->Result<bool>{
         match packet{
@@ -757,6 +833,8 @@ impl HostFinancialWorkflowRelayV1 {
         }
         if self.restricted{return Err(rejected("workflow command after relay restriction"));}
         crate::channel::require_time(self.clocks.supervision())?;
+        if matches!(packet,Packet::ActivateReadFinal{..}|Packet::ActivateArm{..}|Packet::ActivateFinal{..}){return self.down_activate(packet);}
+        if matches!(packet,Packet::WriterReadFinal{..}|Packet::AcquireArm{..}|Packet::AcquireFinal{..}){return self.down_writer_acquire(packet);}
         if matches!(packet,Packet::AdmitArm{..}|Packet::AdmitFinal{..}) { return self.down_admit(packet); }
         match packet{
             Packet::StartEntry{start}=>{
@@ -764,7 +842,7 @@ impl HostFinancialWorkflowRelayV1 {
                 if self.slots[i].is_some()||self.coordinator.as_ref().is_some_and(|s|s!=&start.coordinator)||self.session.as_ref().is_some_and(|s|s!=&start.session){return Err(rejected("workflow relay start replay"));}
                 self.clocks.restrict_received(&start.profile,start.native_ceiling_ms,self.clocks.supervision(),Instant::now())?;
                 self.coordinator=Some(start.coordinator.clone());self.session=Some(start.session.clone());
-                self.slots[i]=Some(HSlot{start:start.clone(),phase:ENTRY_PREPARING,entry:None,read:None,continue_review_ms:None,continuation:None,admission:HAdmit::default(),last_wall:0,failed:false});Ok(())
+                self.slots[i]=Some(HSlot{start:start.clone(),phase:ENTRY_PREPARING,entry:None,read:None,continue_review_ms:None,continuation:None,admission:HAdmit::default(),writer_acquire:HWritAcquire::default(),activate:HActivate::default(),last_wall:0,failed:false});Ok(())
             }
             Packet::EntryCipher{envelope}=>{
                 let encrypted=crypto::Envelope::decode(envelope.as_bytes())?;
@@ -815,8 +893,12 @@ impl HostFinancialWorkflowRelayV1 {
             if !self.cancel_seen||self.disposed[i]||self.coordinator.as_ref()!=Some(coordinator)||self.session.as_ref()!=Some(session){return Err(rejected("workflow relay disposal mismatch"));}
             if self.slots[i].as_ref().and_then(|s|s.continuation.as_ref()).is_some_and(|c|c.binding.is_some()&&!c.outcome){return Err(rejected("Continue relay disposal before outcome"));}
             if self.slots[i].as_ref().is_some_and(|s|!s.admission.disposal_allowed()){return Err(rejected("Signer Admit relay disposal before outcome"));}
+            if self.slots[i].as_ref().is_some_and(|s|!s.writer_acquire.disposal_allowed()){return Err(rejected("Writer Read/Acquire disposal before actual terminal outcome"));}
+            if self.slots[i].as_ref().is_some_and(|s|!s.activate.disposal_allowed()){return Err(rejected("Activate disposal before actual terminal outcome"));}
             self.disposed[i]=true;return Ok(true);
         }
+        if matches!(packet,Packet::ActivateReadDisplay{..}|Packet::ActivateReadFailed{..}|Packet::ActivateDisplay{..}|Packet::ActivateReady{..}|Packet::ActivateOutcome{..}|Packet::Activated{..}){return self.up_activate(target,packet);}
+        if matches!(packet,Packet::WriterReadDisplay{..}|Packet::WriterReadFailed{..}|Packet::AcquireDisplay{..}|Packet::AcquireReady{..}|Packet::AcquireOutcome{..}|Packet::Acquired{..}){return self.up_writer_acquire(target,packet);}
         if matches!(packet,Packet::AdmitDisplay{..}|Packet::AdmitReady{..}|Packet::Admitted{..}|Packet::AdmitOutcome{..}) { return self.up_admit(target,packet); }
         let slot=self.slots[i].as_mut().ok_or_else(||rejected("workflow unsolicited Signer response"))?;
         if slot.failed{return Err(rejected("workflow response after recorded failure"));}

@@ -162,7 +162,10 @@ impl AuthorityJournal {
     }
 
     /// Same maintained original financial source audit with a live setup restriction.
-    #[cfg(feature = "coordinated-witness-financial-signing")]
+    #[cfg(any(
+        feature = "coordinated-witness-financial-signing",
+        feature = "coordinated-witness-completed-pair"
+    ))]
     pub(crate) fn open_born_financial_history_only_guarded_v1(
         owner: std::sync::Arc<crate::witness_locator::BornJournalOwner>,
         path: &Path,

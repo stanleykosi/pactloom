@@ -227,7 +227,7 @@ impl CoordinatorFinancialEndpointV1 {
     pub fn try_prepare_signing_setup(&mut self,role:Target,inputs:FinancialSigningInputsV1,original_native_ceiling:Instant)->Result<Option<FinancialSigningSetupTicketV1>>{
         self.core.check()?;inputs.validate()?;let i=role.index();
         let s=self.slots[i].as_ref().ok_or_else(||rejected("Signing setup before original Signer"))?;
-        if s.wire_phase!=admit::AWAITING_NEXT_READ||self.signing_services[i].setup.is_some()
+        if (s.wire_phase!=admit::AWAITING_NEXT_READ&&!s.writer_acquire.signing_setup_pending(s.wire_phase))||self.signing_services[i].setup.is_some()
             ||!self.witnesses[i].retirement_completed(){return Err(rejected("Signing requires actual Admit and owned predecessor retirement"));}
         let entry=s.entry.as_ref().ok_or_else(||rejected("Signing original Entry missing"))?;entry.check_custody()?;
         let(p,c)=s.admission.retained_result()?;let f=&p.facts;

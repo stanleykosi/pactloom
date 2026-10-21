@@ -23,21 +23,9 @@ struct Config {
     maximum_blocks: u32,
     retention: String,
 }
-pub(in crate::native_ui) struct PreparedFinancialWalletV1 {
-    source: Arc<PreparedOriginalFinancialSourceV1>,
-    fixed: Arc<VerifiedDurableEconomicsV1>,
-    config: Config,
-    chain: ChainAdapter,
-    birthday: AccountBirthday,
-    digest: String,
-}
-impl PreparedFinancialWalletV1 {
-    pub(in crate::native_ui) fn prepare(
-        source: Arc<PreparedOriginalFinancialSourceV1>,
-        fixed: Arc<VerifiedDurableEconomicsV1>,
-        json: &str,
-    ) -> Result<Self> {
-        source.check_custody()?;
+impl Config {
+    /// Ordinary configuration parsing only; no source, FVK, network or authority.
+    fn parse_exact(json: &str) -> Result<Self> {
         if json.is_empty() || json.len() > MAX_SETUP {
             return Err(Error::InvalidData);
         }
@@ -59,6 +47,28 @@ impl PreparedFinancialWalletV1 {
         {
             return Err(Error::InvalidData);
         }
+        Ok(config)
+    }
+}
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+#[path = "coordinated_wallet_bounds_v1.rs"]
+mod coordinated_wallet_bounds_v1;
+pub(in crate::native_ui) struct PreparedFinancialWalletV1 {
+    source: Arc<PreparedOriginalFinancialSourceV1>,
+    fixed: Arc<VerifiedDurableEconomicsV1>,
+    config: Config,
+    chain: ChainAdapter,
+    birthday: AccountBirthday,
+    digest: String,
+}
+impl PreparedFinancialWalletV1 {
+    pub(in crate::native_ui) fn prepare(
+        source: Arc<PreparedOriginalFinancialSourceV1>,
+        fixed: Arc<VerifiedDurableEconomicsV1>,
+        json: &str,
+    ) -> Result<Self> {
+        source.check_custody()?;
+        let config = Config::parse_exact(json)?;
         let account = source.financial_account()?;
         let account_id = account.account_id()?;
         let (material, scope) = fixed.original_for_account(&account_id)?;

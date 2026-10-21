@@ -81,6 +81,20 @@ mod financial_signing_channel;
 mod financial_signing_origin;
 #[cfg(feature = "coordinated-financial-workflow-v1")]
 mod signer_writer_read_acquire_data;
+#[cfg(feature="coordinated-financial-workflow-v1")]
+mod signer_activate_wallet_data;
+#[cfg(feature="coordinated-financial-workflow-v1")]
+mod completed_pair_data;
+#[cfg(feature="coordinated-financial-workflow-v1")]
+mod completed_pair_channel;
+#[cfg(feature="coordinated-financial-workflow-v1")]
+mod completed_pair_origin;
+#[cfg(feature="coordinated-financial-workflow-v1")]
+pub use completed_pair_data::{CompletedPairInputsV1,CompletedPairOriginalV1,CompletedPairAccountV1,CompletedPairPresentationV1,COMPLETED_PAIR_PURPOSE,COMPLETED_PAIR_MODE};
+#[cfg(feature="coordinated-financial-workflow-v1")]
+pub use completed_pair_origin::{WitnessCompletedPairOriginV1,WitnessCompletedPairSetupV1,WitnessCompletedPairServeV1,CompletedPairRequestV1};
+#[cfg(feature="coordinated-financial-workflow-v1")]
+pub use bootstrap::FinancialWitnessPurposeV1;
 #[cfg(feature = "coordinated-financial-workflow-v1")]
 pub use financial_history_data::{FinancialHistoryInputsV1,FinancialHistoryReadBindingV1,FinancialHistoryPresentationV1,FINANCIAL_HISTORY_PURPOSE,FINANCIAL_HISTORY_MODE};
 #[cfg(feature = "coordinated-financial-workflow-v1")]
@@ -97,7 +111,7 @@ mod host_restriction;
 #[cfg(feature="coordinated-financial-workflow-v1")]
 mod host_interstage;
 #[cfg(feature="coordinated-financial-workflow-v1")]
-pub use host_interstage::{HostFinancialForegroundV1,HostFinancialInterstageWaitV1,HostWitnessRetirementGuardV1};
+pub use host_interstage::{HostFinancialForegroundV1,HostFinancialInterstageWaitV1,HostWitnessRetirementGuardV1,HostCompletedPairServiceV1};
 #[cfg(feature = "coordinated-financial-workflow-v1")]
 mod host_terminal;
 #[cfg(feature = "coordinated-financial-workflow-v1")]
@@ -172,3 +186,18 @@ pub use financial_workflow_origin::{CoordinatorWitnessRetirementTicketV1,Coordin
 
 #[cfg(feature="coordinated-financial-workflow-v1")]
 pub use financial_workflow_channel::FinancialSendProgressV1;
+
+#[cfg(feature="coordinated-financial-workflow-v1")]
+pub use signer_writer_read_acquire_data::{SignerFinancialWriterReadFactsV1,SignerFinancialWriterReadPresentationV1,SignerAcquireFactsV1,SignerAcquirePresentationV1,SignerAcquireOutcomeV1,SignerAcquireCommittedV1};
+#[cfg(feature="coordinated-financial-workflow-v1")]
+pub use financial_workflow_origin::{SignerFinancialWriterReadTicketV1,SignerFinancialWriterReadOutboundV1,SignerFinancialWriterReadFinalV1,
+    SignerAcquireReviewTicketV1,SignerAcquireArmOutboundV1,SignerAcquireArmV1,SignerAcquireReadyTicketV1,SignerAcquireFinalV1,SignerAcquireFinalOutboundV1};
+
+#[cfg(feature="coordinated-financial-workflow-v1")]
+pub use signer_activate_wallet_data::{SignerActivateOriginalV1,SignerActivateReadFactsV1,SignerActivateReadPresentationV1,SignerActivateFactsV1,SignerActivatePresentationV1,SignerActivateCommittedV1,SignerActivateOutcomeV1};
+#[cfg(feature="coordinated-financial-workflow-v1")]
+pub use financial_workflow_origin::{SignerActivateReadTicketV1,SignerActivateReadOutboundV1,SignerActivateReadFinalV1,
+    SignerActivateReviewTicketV1,SignerActivateArmOutboundV1,SignerActivateArmV1,SignerActivateReadyTicketV1,SignerActivateFinalV1,SignerActivateFinalOutboundV1};
+
+#[cfg(feature="coordinated-financial-workflow-v1")]
+pub use financial_workflow_origin::OriginalSignerHostPeerV1;

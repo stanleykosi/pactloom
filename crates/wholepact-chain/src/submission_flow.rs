@@ -93,7 +93,8 @@ pub trait SubmissionAuthority {
     fn authorize(&mut self, review: &SubmissionReview<'_>) -> Result<Self::Permit, ChainError>;
 }
 /// Non-authorizing, nonblocking final-effect restriction. It must not acquire
-/// source locks, perform I/O, or mint/refresh any approval.
+/// source locks, wait, perform remote operations, or mint/refresh any approval.
+/// Zero-time local actor/terminal liveness observations are permitted.
 pub trait SubmissionEffectRestriction: Send + Sync {
     fn check_before_effect(&self) -> Result<(), ChainError>;
 }

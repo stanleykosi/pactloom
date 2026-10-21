@@ -3,6 +3,10 @@
 #[derive(Clone, Copy)]
 pub(crate) enum FinancialSetupGuardV1<'a> {
     Legacy(std::marker::PhantomData<&'a ()>),
+    #[cfg(feature = "coordinated-witness-completed-pair")]
+    CompletedPairSetup(&'a wholepact_financial_coordinator_origin::WitnessCompletedPairSetupV1),
+    #[cfg(feature = "coordinated-witness-completed-pair")]
+    CompletedPairServe(&'a wholepact_financial_coordinator_origin::WitnessCompletedPairServeV1),
     #[cfg(feature = "coordinated-witness-financial-signing")]
     SigningSetup(&'a wholepact_financial_coordinator_origin::WitnessFinancialSigningSetupV1),
     #[cfg(feature = "coordinated-witness-financial-signing")]
@@ -25,10 +29,22 @@ impl<'a> FinancialSetupGuardV1<'a> {
     pub(crate) fn check(self) -> crate::Result<()> {
         match self {
             Self::Legacy(_) => Ok(()),
+            #[cfg(feature = "coordinated-witness-completed-pair")]
+            Self::CompletedPairSetup(setup) => setup
+                .check_current()
+                .map_err(|_| crate::AuthorityError::Permission),
+            #[cfg(feature = "coordinated-witness-completed-pair")]
+            Self::CompletedPairServe(serve) => serve
+                .check_current()
+                .map_err(|_| crate::AuthorityError::Permission),
             #[cfg(feature = "coordinated-witness-financial-signing")]
-            Self::SigningSetup(setup) => setup.check_current().map_err(|_| crate::AuthorityError::Permission),
+            Self::SigningSetup(setup) => setup
+                .check_current()
+                .map_err(|_| crate::AuthorityError::Permission),
             #[cfg(feature = "coordinated-witness-financial-signing")]
-            Self::SigningServe(serve) => serve.check_current().map_err(|_| crate::AuthorityError::Permission),
+            Self::SigningServe(serve) => serve
+                .check_current()
+                .map_err(|_| crate::AuthorityError::Permission),
             #[cfg(feature = "coordinated-witness-financial-history")]
             Self::HistorySetup(setup) => setup
                 .check_current()
@@ -63,12 +79,30 @@ impl<'a> FinancialSetupGuardV1<'a> {
                 )
                 .map_err(Into::into)
             }
+            #[cfg(feature = "coordinated-witness-completed-pair")]
+            Self::CompletedPairServe(_) => Err(crate::AuthorityError::Permission),
+            #[cfg(feature = "coordinated-witness-completed-pair")]
+            Self::CompletedPairSetup(_) => {
+                self.check()?;
+                let check = || {
+                    self.check().map_err(|_| {
+                        wholepact_storage_security::StorageSecurityError::SourceChanged
+                    })
+                };
+                let value = wholepact_storage_security::witness_namespace_fs::read_existing_private_file_restricted(path, maximum, Some(&check))?;
+                self.check()?;
+                Ok(value)
+            }
             #[cfg(feature = "coordinated-witness-financial-signing")]
             Self::SigningServe(_) => Err(crate::AuthorityError::Permission),
             #[cfg(feature = "coordinated-witness-financial-signing")]
             Self::SigningSetup(_) => {
                 self.check()?;
-                let check = || self.check().map_err(|_| wholepact_storage_security::StorageSecurityError::SourceChanged);
+                let check = || {
+                    self.check().map_err(|_| {
+                        wholepact_storage_security::StorageSecurityError::SourceChanged
+                    })
+                };
                 let value = wholepact_storage_security::witness_namespace_fs::read_existing_private_file_restricted(path, maximum, Some(&check))?;
                 self.check()?;
                 Ok(value)

@@ -1,6 +1,6 @@
-//! One original C/H/S monotone restriction cell, not a native approval issuer.
-//! The mapping is RW in trusted whole-image C/H/S. H/S sealed APIs expose only
-//! checks; this is NOT OS isolation from hostile code in either trusted role.
+//! One original C/H/S/financial-W monotone restriction cell, not an approval issuer.
+//! The mapping is RW in trusted whole-image roles; H/S/W sealed APIs expose only
+//! checks. This is NOT OS isolation from hostile code in those trusted roles.
 //! Bootstrap alone creates/prunes it. No pointer, FD, path, reset or importer
 //! escapes, and no successful observation may be cached as an effect permit.
 use crate::{
@@ -131,11 +131,10 @@ impl CreatedHostRestrictionV1 {
         observer.check_current()?;
         Ok(observer)
     }
-    /// Exactly the six fixed original History/Continuation/Signing W branches
-    /// retain this same prefork cell. No other W gains a mapping or writer.
+    /// Exactly the seven fixed original History/Continuation/Signing/Pair W
+    /// branches retain this same prefork cell. Other W copies only unmap.
     pub(super) fn into_financial_witness(mut self, origin: &ForkOriginV1) -> Result<WitnessSharedRestrictionV1> {
-        if !(crate::financial_witness_channel::is_financial_witness(origin.role())
-            ||crate::financial_history_channel::is_history_witness(origin.role())||crate::financial_signing_channel::is_signing_witness(origin.role()))
+        if crate::bootstrap::financial_witness_kind(origin.role()).is_err()
             || !origin.has_original_coordinator(self.creator_pid, self.creator_uid)
             || unsafe { libc::geteuid() } != self.creator_uid
         { return Err(rejected("shared restriction requires original financial Witness birth")); }
@@ -213,6 +212,11 @@ impl HostRestrictionChecks {
     }
 }
 impl HostOriginalRestrictionV1 {
+    /// Compare-only same actual lifecycle check, also valid while parked. No
+    /// foreground release or service construction follows from this observer.
+    pub fn check_completed_pair_service(&self,service:&crate::HostCompletedPairServiceV1)->Result<()>{
+        service.matches_lifecycle(&self.lifecycle)?;self.checks.check_current()
+    }
     pub fn deadline(&self)->Instant{self.checks.deadline}
     /// Zero-wait restriction sample. Same-H park/poison is checked before the
     /// final shared C-R SeqCst load; neither observation creates consent.

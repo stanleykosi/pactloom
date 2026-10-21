@@ -3,6 +3,9 @@
 //! No standalone runner, owner/source importer, native conversion, writer key
 //! opening or automatic next-purpose approval.
 use super::*;
+#[cfg(feature = "coordinated-financial-workflow-v1")]
+#[path = "coordinated_financial_writer_read_v1.rs"]
+mod coordinated_writer_read;
 use crate::account::birth::enrollment::roster_v2::financial_source_v1::FinancialAdmissionSourcePinV1;
 use crate::consent_journal::PendingFinancialContinuationAdmissionV1;
 use crate::native_ui::witness_workspace::financial_continuation_v1::coordinated_admit_v1::CoordinatedAdmitFailureV1 as Failure;

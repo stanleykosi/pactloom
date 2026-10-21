@@ -5,6 +5,10 @@ use crate::{channel::require_time,financial_workflow_clock::{FullWorkflowClocksV
     signer_continue_channel::SignerContinueRoleV1};
 use serde::{Deserialize,Serialize};
 use std::{marker::PhantomData,rc::Rc,sync::{Arc,Mutex,atomic::{AtomicU8,AtomicBool,Ordering}},time::Instant};
+#[path="host_completed_pair.rs"]
+mod completed_pair;
+pub use completed_pair::HostCompletedPairServiceV1;
+pub(crate) use completed_pair::HostPairReceiveState;
 const RUNNING:u8=0;const PARKED:u8=1;const REQUESTED:u8=2;const GUARDED:u8=3;
 const RESUME:u8=4;const RESUMED:u8=5;const POISON:u8=255;
 #[derive(Clone,Copy,Debug,PartialEq,Eq,Serialize,Deserialize)]
@@ -32,11 +36,12 @@ impl RetirementRequest {
 pub(super) struct HostLifecycle {
     state:AtomicU8,acknowledged:AtomicBool,request:Mutex<Option<(RetirementRequest,Instant)>>,
     checks:Arc<HostRestrictionChecks>,clocks:FullWorkflowClocksV1,
+    pair_service:std::sync::OnceLock<Arc<completed_pair::PairServiceRecord>>,pair_handoff:AtomicBool,
 }
 impl HostLifecycle {
     pub(super) fn create(checks:Arc<HostRestrictionChecks>,clocks:FullWorkflowClocksV1)
         ->(HostLifecycleOwner,Arc<Self>){
-        let state=Arc::new(Self{state:AtomicU8::new(RUNNING),acknowledged:AtomicBool::new(false),request:Mutex::new(None),checks,clocks});
+        let state=Arc::new(Self{state:AtomicU8::new(RUNNING),acknowledged:AtomicBool::new(false),request:Mutex::new(None),checks,clocks,pair_service:std::sync::OnceLock::new(),pair_handoff:AtomicBool::new(false)});
         (HostLifecycleOwner(Arc::clone(&state)),state)
     }
     pub(super) fn poison(&self){self.state.store(POISON,Ordering::SeqCst);}
@@ -129,6 +134,21 @@ impl HostFinancialInterstageWaitV1{
 impl Drop for HostFinancialInterstageWaitV1{fn drop(&mut self){if !self.consumed{self.state.poison();}}}
 pub struct HostWitnessRetirementGuardV1<'a>{wait:&'a mut HostFinancialInterstageWaitV1,request:RetirementRequest,consumed:bool}
 impl HostWitnessRetirementGuardV1<'_>{
+    /// Consume only this owner's genuine initial-History retirement Resume.
+    pub fn wait_initial_history_resume(self, target: SignerContinueRoleV1)->Result<()> {
+        if self.request.target != target || self.request.purpose != RetirementPurpose::InitialHistory {
+            self.wait.state.poison(); return Err(rejected("Host initial History retirement changed"));
+        }
+        self.wait_resume()
+    }
+    /// Consume only this owner's genuine continuation-admission retirement.
+    pub fn wait_financial_continuation_resume(self, target: SignerContinueRoleV1)->Result<()> {
+        if self.request.target != target || self.request.purpose != RetirementPurpose::FinancialContinuation {
+            self.wait.state.poison(); return Err(rejected("Host continuation retirement changed"));
+        }
+        self.wait_resume()
+    }
+
     pub fn wait_resume(mut self)->Result<()>{
         loop{self.wait.state.check_wait()?;
             let phase=self.wait.state.state.load(Ordering::SeqCst);

@@ -379,11 +379,86 @@ impl ConfiguredFinancialWitnessV1 {
         guard.check()?;
         Ok(Self { journal: Arc::new(journal), admission, disclosure })
     }
-    #[cfg(feature = "coordinated-witness-financial-signing")]
+
+    /// Original two-account service selection only. The actual Pair Setup
+    /// retains both exact requests; neither this caller's expected value nor
+    /// the returned configured source creates new dispatch authority.
+    #[cfg(feature = "coordinated-witness-completed-pair")]
+    pub(crate) fn from_original_completed_pair_v1(
+        journal: AuthorityJournal,
+        expected: &OwnerControlRequest,
+        setup: &wholepact_financial_coordinator_origin::WitnessCompletedPairSetupV1,
+    ) -> Result<Self> {
+        let guard = crate::native_witness_owner::financial_setup_guard_v1::FinancialSetupGuardV1::CompletedPairSetup(setup);
+        guard.check()?;
+        id(&expected.operation_id)?;
+        let mut originals = setup.original_binding().owners.iter().filter(|original| {
+            original.account_id == expected.account_id
+                && original.operation_id == expected.operation_id
+                && original.network_profile_id == expected.network_profile_id
+        });
+        let original = originals.next().ok_or(AuthorityError::InvalidBinding)?;
+        if originals.next().is_some() {
+            return Err(AuthorityError::InvalidBinding);
+        }
+        let retained: OwnerControlRequest =
+            wholepact_core::parse_typed_json(original.request_json.as_bytes())
+                .map_err(|_| AuthorityError::InvalidBinding)?;
+        if retained != *expected {
+            return Err(AuthorityError::InvalidBinding);
+        }
+        guard.check()?;
+        let owner = journal
+            .born_owner
+            .as_ref()
+            .ok_or(AuthorityError::Permission)?;
+        owner.check_setup_current(guard, false)?;
+        let (admission, disclosure) = {
+            let c = journal
+                .connection
+                .lock()
+                .map_err(|_| AuthorityError::Storage)?;
+            guard.check()?;
+            let read_guard = crate::journal::ReadGuardV1::coordinated(guard);
+            let ledger =
+                crate::journal::load_financial_continuation_guarded_v1(c.connection(), read_guard)?;
+            guard.check()?;
+            ledger.require_financial_continuation_history_v1()?;
+            let admission = ledger
+                .financial_continuation_v1(&expected.operation_id)?
+                .ok_or(AuthorityError::Permission)?
+                .clone();
+            if admission != retained || admission != *expected {
+                return Err(AuthorityError::InvalidBinding);
+            }
+            let OwnerControl::AdmitFinancialContinuationV1 { record } = &admission.control else {
+                return Err(AuthorityError::Permission);
+            };
+            record.terms.require_live(now_ms()?)?;
+            guard.check()?;
+            let birth = crate::pending_birth_storage::read_guarded(
+                c.connection(),
+                &ledger.policy,
+                read_guard,
+            )?
+            .ok_or(AuthorityError::CorruptHistory)?;
+            guard.check()?;
+            (admission, birth.request.disclosure)
+        };
+        owner.check_setup_current(guard, false)?;
+        guard.check()?;
+        Ok(Self {
+            journal: Arc::new(journal),
+            admission,
+            disclosure,
+        })
+    }
+
+    #[cfg(any(feature = "coordinated-witness-financial-signing", feature = "coordinated-witness-completed-pair"))]
     pub(crate) fn coordinated_original_admission_v1(&self) -> &OwnerControlRequest {
         &self.admission
     }
-    #[cfg(feature = "coordinated-witness-financial-signing")]
+    #[cfg(any(feature = "coordinated-witness-financial-signing", feature = "coordinated-witness-completed-pair"))]
     pub(crate) fn coordinated_original_disclosure_v1(&self) -> &WitnessDisclosureDescriptor {
         &self.disclosure
     }

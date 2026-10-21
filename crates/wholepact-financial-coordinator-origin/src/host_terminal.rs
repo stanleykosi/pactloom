@@ -1,6 +1,7 @@
 //! Genuine C-master/H-slave terminal custody for the fixed common-image tree.
-//! This leaf is deliberately unregistered. It supplies no native consent,
-//! cancellation ordering, action admission, shell, or descriptor/path importer.
+//! Registered only for the fixed full-workflow profile. Bound close/error/Drop
+//! publishes restriction through the original Core; this supplies no native
+//! consent, action admission, shell, or descriptor/path importer.
 //! Bootstrap must drop the inherited pair in every S/W branch before role work.
 use crate::{
     bootstrap::PhaseDeadlinesV1,

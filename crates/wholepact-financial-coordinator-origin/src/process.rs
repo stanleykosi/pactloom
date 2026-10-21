@@ -86,6 +86,20 @@ pub(super) struct ForkOriginV1 {
 }
 impl ForkOriginV1 {
     #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn original_host_identity(&self)->Result<(u32,u32)>{
+        if !matches!(self.local_role,Role::Signer1|Role::Signer2)||self.parent.role!=Role::Host{return Err(rejected("not original S to H lineage"));}
+        self.parent.check_alive()?;Ok((self.parent.uid(),self.parent.pid() as u32))
+    }
+
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn completed_pair_send(&self,packet:&crate::completed_pair_channel::Packet)->Result<()>{
+        crate::completed_pair_channel::send(self.channel.review_fd(),self.local_role,&self.parent,packet)
+    }
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn completed_pair_receive(&self)->Result<Option<crate::completed_pair_channel::Packet>>{
+        crate::completed_pair_channel::try_receive(self.channel.review_fd(),self.local_role,&self.parent)
+    }
+    #[cfg(feature="coordinated-financial-workflow-v1")]
     pub(super) fn financial_history_send(&self, packet: &crate::financial_history_channel::Packet)->Result<()>{
         crate::financial_history_channel::send(self.channel.review_fd(), self.local_role, &self.parent, packet)
     }
@@ -216,6 +230,16 @@ pub(super) struct DirectChild {
     terminal_observed: bool,
 }
 impl DirectChild {
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn completed_pair_send(&self,packet:&crate::completed_pair_channel::Packet)->Result<()>{
+        self.require_owner()?;
+        crate::completed_pair_channel::send(self.channel.review_fd(),self.local_role,&self.peer,packet)
+    }
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn completed_pair_receive(&self)->Result<Option<crate::completed_pair_channel::Packet>>{
+        self.require_owner()?;
+        crate::completed_pair_channel::try_receive(self.channel.review_fd(),self.local_role,&self.peer)
+    }
     #[cfg(feature="coordinated-financial-workflow-v1")]
     pub(super) fn workflow_send_positive(&self,packet:&crate::financial_workflow_channel::Packet,phases:&crate::signer_continue_state::Phases,deadline:Instant)->Result<crate::FinancialSendProgressV1>{
         self.require_owner()?;

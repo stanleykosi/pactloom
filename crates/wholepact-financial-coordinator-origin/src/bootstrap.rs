@@ -239,7 +239,41 @@ pub struct InertWitnessOriginV1 {
     #[cfg(feature = "coordinated-financial-workflow-v1")]
     financial_restriction: Option<crate::host_restriction::WitnessSharedRestrictionV1>,
 }
+/// Closed dispatch of already-owned fixed original W custody. This enum is
+/// neither service readiness nor permission to open any protected source.
+#[cfg(feature="coordinated-financial-workflow-v1")]
+pub enum FinancialWitnessPurposeV1 {
+    InitialHistory(crate::WitnessFinancialHistoryOriginV1),
+    Continuation(crate::WitnessFinancialContinuationOriginV1),
+    Signing(crate::WitnessFinancialSigningOriginV1),
+    CompletedPair(crate::WitnessCompletedPairOriginV1),
+}
+#[cfg(feature="coordinated-financial-workflow-v1")]
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+pub(super) enum FinancialWitnessKind {InitialHistory,Continuation,Signing,CompletedPair}
+#[cfg(feature="coordinated-financial-workflow-v1")]
+pub(super) fn financial_witness_kind(role:Role)->Result<FinancialWitnessKind>{
+    match role {
+        Role::Owner1FinancialReadHistory|Role::Owner2FinancialReadHistory=>Ok(FinancialWitnessKind::InitialHistory),
+        Role::Owner1FinancialContinuationAdmission|Role::Owner2FinancialContinuationAdmission=>Ok(FinancialWitnessKind::Continuation),
+        Role::Owner1FinancialSigning|Role::Owner2FinancialSigning=>Ok(FinancialWitnessKind::Signing),
+        Role::CompletedPair=>Ok(FinancialWitnessKind::CompletedPair),
+        _=>Err(rejected("original Witness purpose has no financial conversion")),
+    }
+}
 impl InertWitnessOriginV1 {
+    /// Selects only this consumed owner's actual inherited fixed role. No role,
+    /// descriptor, process claim or ordinary readiness value is accepted.
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub fn into_financial_purpose(self)->Result<FinancialWitnessPurposeV1>{
+        match financial_witness_kind(self.leaf.origin.role())? {
+            FinancialWitnessKind::InitialHistory=>self.into_financial_history().map(FinancialWitnessPurposeV1::InitialHistory),
+            FinancialWitnessKind::Continuation=>self.into_financial_continuation().map(FinancialWitnessPurposeV1::Continuation),
+            FinancialWitnessKind::Signing=>self.into_financial_signing().map(FinancialWitnessPurposeV1::Signing),
+            FinancialWitnessKind::CompletedPair=>crate::WitnessCompletedPairOriginV1::from_leaf(self.leaf,
+                self.financial_restriction.ok_or_else(||rejected("not original completed-pair custody"))?).map(FinancialWitnessPurposeV1::CompletedPair),
+        }
+    }
     #[cfg(feature="coordinated-financial-workflow-v1")]
     pub fn into_financial_history(self)->Result<crate::WitnessFinancialHistoryOriginV1>{
         crate::WitnessFinancialHistoryOriginV1::from_leaf(self.leaf,self.financial_restriction.ok_or_else(||rejected("not original financial history custody"))?)
@@ -490,8 +524,7 @@ pub fn bootstrap_common_image_v1() -> Result<BootstrappedRoleV1> {
                 #[cfg(feature = "coordinated-financial-workflow-v1")]
                 drop(host_terminal);
                 #[cfg(feature = "coordinated-financial-workflow-v1")]
-                let financial_restriction = if crate::financial_witness_channel::is_financial_witness(origin.role())
-                    ||crate::financial_history_channel::is_history_witness(origin.role())||crate::financial_signing_channel::is_signing_witness(origin.role()) {
+                let financial_restriction = if financial_witness_kind(origin.role()).is_ok() {
                     Some(match host_restriction.into_financial_witness(&origin) { Ok(reader)=>reader, Err(error)=>child_exit(Err(error)) })
                 } else { drop(host_restriction); None };
                 drop(image);
@@ -831,6 +864,19 @@ impl InertBarrier {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    #[test]
+    fn financial_dispatch_accepts_only_seven_fixed_original_roles(){
+        let allowed=[Role::Owner1FinancialReadHistory,Role::Owner2FinancialReadHistory,
+            Role::Owner1FinancialContinuationAdmission,Role::Owner2FinancialContinuationAdmission,
+            Role::Owner1FinancialSigning,Role::Owner2FinancialSigning,Role::CompletedPair];
+        for role in WITNESS_ROLES {assert_eq!(financial_witness_kind(role).is_ok(),allowed.contains(&role));}
+        for role in [Role::Coordinator,Role::Host,Role::Signer1,Role::Signer2]{assert!(financial_witness_kind(role).is_err());}
+        assert_eq!(financial_witness_kind(Role::CompletedPair).unwrap(),FinancialWitnessKind::CompletedPair);
+        assert_eq!(financial_witness_kind(Role::Owner1FinancialReadHistory).unwrap(),FinancialWitnessKind::InitialHistory);
+        assert_eq!(financial_witness_kind(Role::Owner2FinancialContinuationAdmission).unwrap(),FinancialWitnessKind::Continuation);
+        assert_eq!(financial_witness_kind(Role::Owner1FinancialSigning).unwrap(),FinancialWitnessKind::Signing);
+    }
     #[cfg(feature = "coordinated-signer-continue")]
     #[test]
     fn continue_cleanup_cap_never_renews_original_phase() {

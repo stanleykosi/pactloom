@@ -396,14 +396,17 @@ impl CAdmit { pub(super) fn observe_active(&self,phase:u8)->Result<()> {
 }
 
 impl SAdmit{pub(super) fn retained_result(&self)->Result<(&SignerAdmitPresentationV1,&SignerAdmitCommittedV1)>{
+    if !self.outcome{return Err(rejected("Admit observation not completed"));}
     Ok((&self.review.as_ref().ok_or_else(||rejected("retained Admit presentation missing"))?.wire,
         self.committed.as_ref().ok_or_else(||rejected("retained Admit response missing"))?))
 }}
 impl CAdmit{pub(super) fn retained_result(&self)->Result<(&SignerAdmitPresentationV1,&SignerAdmitCommittedV1)>{
+    if !self.outcome{return Err(rejected("Admit observation not completed"));}
     Ok((self.wire.as_ref().ok_or_else(||rejected("retained Admit presentation missing"))?,
         self.committed.as_ref().ok_or_else(||rejected("retained Admit response missing"))?))
 }}
 impl HAdmit{pub(super) fn retained_result(&self)->Result<(&SignerAdmitPresentationV1,&SignerAdmitCommittedV1)>{
+    if !self.outcome{return Err(rejected("Admit observation not completed"));}
     Ok((self.wire.as_ref().ok_or_else(||rejected("retained Admit presentation missing"))?,
         self.committed.as_ref().ok_or_else(||rejected("retained Admit response missing"))?))
 }}

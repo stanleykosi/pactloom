@@ -23,6 +23,7 @@ coordinated-witness-financial-continuation = ["native-witness-owner", "dep:whole
 # Distinct original resource services; neither creates continuation approval.
 coordinated-witness-financial-history = ["native-witness-owner", "dep:wholepact-financial-coordinator-origin", "wholepact-financial-coordinator-origin/coordinated-financial-workflow-v1"]
 coordinated-witness-financial-signing = ["native-witness-owner", "dep:wholepact-financial-coordinator-origin", "wholepact-financial-coordinator-origin/coordinated-financial-workflow-v1"]
+coordinated-witness-completed-pair = ["native-witness-owner", "dep:wholepact-financial-coordinator-origin", "wholepact-financial-coordinator-origin/coordinated-financial-workflow-v1"]
 
 [dependencies]
 wholepact-financial-coordinator-origin = { path = "../wholepact-financial-coordinator-origin", optional = true }
