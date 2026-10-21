@@ -17,6 +17,7 @@ ALLOWED = frozenset((
     "scripts/ci-ui-prerequisite.py", "scripts/tests/test_ci_ui_prerequisite.py",
     "scripts/ci-ui-setup-wrapper.py", "scripts/ci-ui-output.py",
     "scripts/ci-ui-container.py", "scripts/tests/test_ci_ui_setup.py",
+    "scripts/tests/test_ci_ui_container.py",
     "scripts/ci-ui-artifacts.py", "scripts/tests/test_ci_ui_artifacts.py",
     "scripts/ci-ui-reuse.py", "scripts/tests/test_ci_ui_reuse.py",
     "scripts/ci-ui-reuse-runner.py", "scripts/tests/test_ci_ui_reuse_runner.py",
@@ -57,6 +58,19 @@ def verify_paths(paths, fixture_hashes=None):
     if not changed <= ALLOWED:
         raise ValueError("source_closure_changed")
 
+# Fixed public reason codes only. Never emit exception text, response bodies or paths.
+FAILURE_CODES = frozenset(("job_identity", "run_identity", "historical_prerequisite",
+    "test_fixture_delta", "source_closure_changed", "baseline_tree", "working_tree",
+    "evidence_size"))
+def failure_code(error):
+    if type(error) is ValueError and len(error.args) == 1 and type(error.args[0]) is str and error.args[0] in FAILURE_CODES:
+        return error.args[0]
+    if isinstance(error, subprocess.TimeoutExpired):
+        return "git_timeout"
+    if isinstance(error, subprocess.CalledProcessError):
+        return "git_command"
+    return "evidence_or_internal"
+
 def git(*args):
     return subprocess.check_output(["git", *args], timeout=30, stderr=subprocess.DEVNULL)
 
@@ -80,8 +94,8 @@ def main():
         if len(raw) > 262144:
             raise ValueError("evidence_size")
         verify_jobs(json.loads(raw))
-    except Exception:
-        print("CI_UI_PREREQUISITE historical_reuse=false verified=false", flush=True)
+    except Exception as error:
+        print("CI_UI_PREREQUISITE historical_reuse=false verified=false code=" + failure_code(error), flush=True)
         return 1
     print("CI_UI_PREREQUISITE historical_reuse=true verified=true run=39604966999 job=119238687858 source=" + BASE + " current_bootstrap_executed=false", flush=True)
     return 0

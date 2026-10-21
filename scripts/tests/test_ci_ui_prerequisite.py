@@ -44,7 +44,7 @@ class PrerequisiteTests(unittest.TestCase):
         additions = {'scripts/ci-ui-setup-wrapper.py', 'scripts/ci-ui-output.py',
                      'scripts/ci-ui-container.py', 'scripts/tests/test_ci_ui_setup.py'}
         self.assertTrue(additions <= M.ALLOWED)
-        self.assertEqual(len(M.ALLOWED), 19)
+        self.assertEqual(len(M.ALLOWED), 20)
         M.verify_paths(additions)
         for path in ('scripts/ci-bootstrap-output.py', 'scripts/build-encrypted-storage-deps.sh',
                      'crates/wholepact-native-host/src/lib.rs'):
@@ -68,6 +68,33 @@ class PrerequisiteTests(unittest.TestCase):
         for path in ("scripts/ci-ui-reuse-other.py", "crates/wholepact-authority/Cargo.toml",
                      "crates/wholepact-financial-coordinator-origin/src/ci.rs"):
             with self.assertRaises(ValueError): M.verify_paths([path])
+
+    def test_ci75_container_test_is_exact_nonbootstrap_exception(self):
+        M.verify_paths(["scripts/tests/test_ci_ui_container.py"])
+        for path in ("scripts/tests/test_ci_bootstrap_container.py",
+                     "scripts/ci-bootstrap-container.py", "scripts/tests/new.py"):
+            with self.assertRaisesRegex(ValueError, "source_closure_changed"):
+                M.verify_paths([path])
+
+    def test_public_failure_codes_never_include_exception_payload(self):
+        for code in M.FAILURE_CODES:
+            self.assertEqual(M.failure_code(ValueError(code)), code)
+        for error in (ValueError("private payload"), RuntimeError("private payload"),
+                      ValueError("source_closure_changed", "private payload")):
+            self.assertEqual(M.failure_code(error), "evidence_or_internal")
+        self.assertEqual(M.failure_code(M.subprocess.TimeoutExpired("private", 1)), "git_timeout")
+        self.assertEqual(M.failure_code(M.subprocess.CalledProcessError(1, "private")), "git_command")
+
+    def test_main_reports_closure_reason_before_network(self):
+        from unittest.mock import patch
+        import contextlib, io
+        outputs = [M.TREE.encode(), b"", b"scripts/ci-bootstrap-container.py\0"]
+        captured = io.StringIO()
+        with patch.object(M, 'git', side_effect=outputs), patch.object(M.urllib.request, 'urlopen') as network:
+            with contextlib.redirect_stdout(captured):
+                self.assertEqual(M.main(), 1)
+            network.assert_not_called()
+        self.assertEqual(captured.getvalue(), "CI_UI_PREREQUISITE historical_reuse=false verified=false code=source_closure_changed\n")
 
     def test_complete_nonallowlisted_tree_is_frozen(self):
         M.verify_paths(M.ALLOWED)
