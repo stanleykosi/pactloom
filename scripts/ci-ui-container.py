@@ -515,6 +515,29 @@ class NativeSession:
         require(os.getpgid(self.product.pid) == self.product.pid, 'product_status')
         self.controller.bind_process(self.product); self.controller.focus(True)
 
+    def related_delivery_failure(self):
+        collector = getattr(self, 'collector', None)
+        if collector is not None:
+            try:
+                # Related closed-schema observation, never an inferred cause.
+                self.records = collector.read()
+                return P.delivery_first_failure(self.records)
+            except Exception:
+                pass  # unavailable diagnostics cannot replace the process failure
+        return None
+
+    def require_product_live(self):
+        status = self.product.poll()
+        if status is not None:
+            require(P.number(status, -64, 255), 'product_status')
+            detail = self.related_delivery_failure()
+            self.reporter.note(P.failure(self.reporter.mode, self.reporter.stage,
+                'product_status', self.reporter.case,
+                product_observation=dict(exit_status=status),
+                delivery_stage=None if detail is None else detail['stage'],
+                delivery_class=None if detail is None else detail['class']))
+            raise S.Rejected('product_status')
+
     def require_display_live(self):
         if self.weston.poll() is not None:
             observation = self.controller.observe_exited_compositor(self.weston)
@@ -523,15 +546,7 @@ class NativeSession:
                 status = product.poll()
                 require(status is None or P.number(status, -64, 255), 'product_status')
                 observation['product_exit_status'] = status
-            detail = None
-            collector = getattr(self, 'collector', None)
-            if collector is not None:
-                try:
-                    # Related closed-schema diagnostic only, not a root-cause inference.
-                    self.records = collector.read()
-                    detail = P.delivery_first_failure(self.records)
-                except Exception:
-                    detail = None  # preserve original process failure on diagnostic failure
+            detail = self.related_delivery_failure()
             self.reporter.note(P.failure(self.reporter.mode, self.reporter.stage,
                 'display_status', self.reporter.case, display_observation=observation,
                 delivery_stage=None if detail is None else detail['stage'],
@@ -542,7 +557,7 @@ class NativeSession:
         require(time.monotonic_ns() < self.original, 'original_deadline')
         require(time.monotonic_ns() < self.deadline, 'phase_deadline')
         self.require_display_live()
-        require(self.product.poll() is None, 'product_status')
+        self.require_product_live()
         if self.owner: self.owner.pump()
         if self.collector: self.records = self.collector.read()
 

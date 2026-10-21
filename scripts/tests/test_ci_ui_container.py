@@ -84,6 +84,54 @@ class DisplayFailureObservation(unittest.TestCase):
         self.assertEqual(value['display_observation']['target_reason'], 'destroyed')
         self.assertEqual(value['delivery_class'], 'InvalidBinding')
 
+    def test_both_exit_order_paths_read_collector_and_preserve_primary(self):
+        from unittest import mock
+        import contextlib, io
+        for display_status, product_status, primary in ((None, -11, 'product_status'), (1, -11, 'display_status')):
+            with self.subTest(primary=primary):
+                session = C.NativeSession.__new__(C.NativeSession)
+                session.original = session.deadline = C.time.monotonic_ns() + 10**9
+                session.weston = mock.Mock(); session.weston.poll.return_value = display_status
+                session.product = mock.Mock(); session.product.poll.return_value = product_status
+                session.controller = mock.Mock()
+                session.controller.observe_exited_compositor.return_value = dict(exit_status=1, packet='error', module_error='target', target_reason='destroyed')
+                session.collector = mock.Mock(); session.collector.read.return_value = []
+                session.reporter = C.FirstRuntimeFailure('fixture'); session.reporter.stage = 'prepare'; session.reporter.case = 'cancel'
+                session.owner = None
+                with mock.patch.object(C.P, 'delivery_first_failure', return_value={'stage':'InputValidation', 'class':'InvalidBinding'}), contextlib.redirect_stdout(io.StringIO()):
+                    with self.assertRaises(C.S.Rejected) as failure: session.check()
+                    session.reporter.error(failure.exception)
+                self.assertEqual(failure.exception.code, primary)
+                self.assertEqual(session.reporter.value['code'], primary)
+                self.assertEqual(session.reporter.value['delivery_class'], 'InvalidBinding')
+                session.collector.read.assert_called_once()
+                if primary == 'product_status':
+                    self.assertEqual(session.reporter.value['product_observation'], {'exit_status':-11})
+                    session.controller.observe_exited_compositor.assert_not_called()
+                else:
+                    self.assertEqual(session.reporter.value['display_observation']['product_exit_status'], -11)
+
+    def test_product_failure_survives_unavailable_collector(self):
+        from unittest import mock
+        import contextlib, io
+        session = C.NativeSession.__new__(C.NativeSession)
+        session.product = mock.Mock(); session.product.poll.return_value = 101
+        session.collector = mock.Mock(); session.collector.read.side_effect = ValueError('private text')
+        session.reporter = C.FirstRuntimeFailure('fixture'); session.reporter.stage = 'prepare'
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            with self.assertRaises(C.S.Rejected): session.require_product_live()
+        self.assertEqual(session.reporter.value['product_observation'], {'exit_status':101})
+        self.assertIsNone(session.reporter.value['delivery_class'])
+        self.assertNotIn('private text', output.getvalue())
+
+    def test_product_observation_rejects_unbounded_or_cross_class_data(self):
+        for value in ({'exit_status':True}, {'exit_status':-65}, {'exit_status':256},
+                      {'exit_status':1,'text':'private'}):
+            with self.assertRaises(C.P.Rejected):
+                C.P.failure('fixture', 'prepare', 'product_status', product_observation=value)
+        with self.assertRaises(C.P.Rejected):
+            C.P.failure('fixture', 'prepare', 'display_status', product_observation={'exit_status':1})
+
     def test_live_display_never_consumes_controller(self):
         from unittest import mock
         session = C.NativeSession.__new__(C.NativeSession)
