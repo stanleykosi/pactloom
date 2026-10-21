@@ -334,6 +334,9 @@ fn coordinator_pristine_three_account_source_for_ui() {
             "fixture": handoff});
         let encoded = serde_json::to_vec(&public_to_runner).map_err(|_| std::io::Error::other("handoff encoding refused"))?;
         if encoded.len() > MAX_HANDOFF || Instant::now() >= deadline { return Err(std::io::Error::other("handoff bound refused")); }
+        // Regression: consume the actual original signed JSON envelopes with
+        // the same owner-client parser/verifier before publishing this fixture.
+        super::pristine_owner_client_v1::check_actual_birth_envelope_contract(&encoded)?;
         stage.set(Boundary::PristineCustodyHandoff);
         let kept = root.keep();
         unchanged_directory(&root_file, &kept)?;

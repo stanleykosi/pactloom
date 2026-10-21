@@ -90,6 +90,38 @@ impl HeldPath {
 fn same_cutoff(raw: &str, original: u64) -> bool {
     raw.parse::<u64>().is_ok_and(|value| value == original && value.to_string() == raw)
 }
+// Preserved births are complete signed JSON envelopes, not 32-byte digests.
+// Historical signature verification does not renew initial enrollment time or
+// create native approval. The independent post-drain audit still checks the
+// same envelope against the actual stored birth and original journal prefix.
+fn original_birth(raw: &str) -> std::io::Result<wholepact_authority::pending_birth_signature::PendingBirthOwnerSignature> {
+    if raw.is_empty() || raw.len() > wholepact_authority::MAX_FRAME_BYTES { return Err(refused()); }
+    serde_json::from_str(raw).map_err(|_| refused())
+}
+fn require_original_births(f: &Handoff) -> std::io::Result<()> {
+    if f.form.owner_certificate_der_hex.is_empty() || f.form.owner_certificate_der_hex.len() > 2 * 16384 {
+        return Err(refused());
+    }
+    let owner = hex::decode(&f.form.owner_certificate_der_hex).map_err(|_| refused())?;
+    let owner_pin = wholepact_authority::transport::certificate_digest(&CertificateDer::from(owner));
+    for account in &f.accounts {
+        let signed = original_birth(&account.original_signed_birth)?;
+        let verified = wholepact_authority::pending_birth_signature::verify_pending_birth_owner_signature(
+            &signed, &owner_pin,
+        ).map_err(|_| refused())?;
+        let disclosure = &verified.request().disclosure;
+        if disclosure.account_id != account.account_id
+            || disclosure.network_profile_id != f.form.network_profile_id
+            || disclosure.witness_id != f.form.witness_id
+            || disclosure.endpoint != f.form.endpoint
+            || disclosure.server_name != f.form.server_name
+            || disclosure.pinned_server_certificate_digest != f.form.pinned_server_certificate_digest {
+            return Err(refused());
+        }
+    }
+    Ok(())
+}
+
 fn validate_shape(h: &RunnerHandoff) -> std::io::Result<OwnerControlRequest> {
     let f = &h.fixture;
     if h.version != 1 || f.version != 1 || f.installation.is_empty() || f.installation.len() > 16384
@@ -113,11 +145,45 @@ fn validate_shape(h: &RunnerHandoff) -> std::io::Result<OwnerControlRequest> {
         || d.network_profile_id != f.form.network_profile_id
         || d.pinned_server_certificate_digest != f.form.pinned_server_certificate_digest
         || request.expected_head.sequence != 4 || request.account_id != f.form.expected_account_id
-        || !f.accounts.iter().all(|a| accounts.insert(&a.account_id) && a.original_signed_birth.len() == 64 && a.original_source_commitment.len() == 64)
+        || !f.accounts.iter().all(|a| accounts.insert(&a.account_id) && a.original_source_commitment.len() == 64)
         || !f.accounts.iter().any(|a| a.account_id == request.account_id && a.head == request.expected_head) {
         return Err(refused());
     }
+    require_original_births(f)?;
     Ok(request)
+}
+
+/// Executed by the existing ignored genuine three-birth fixture before handoff.
+/// Positive input is the actual maintained signer output, never fabricated test
+/// authority. Negative variants exist only as in-memory copies of public data.
+pub(super) fn check_actual_birth_envelope_contract(bytes: &[u8]) -> std::io::Result<()> {
+    if bytes.is_empty() || bytes.len() > MAX_HANDOFF { return Err(refused()); }
+    let original: RunnerHandoff = serde_json::from_slice(bytes).map_err(|_| refused())?;
+    validate_shape(&original)?;
+    for account in &original.fixture.accounts {
+        // A signed request and its certificate necessarily exceed digest length.
+        if account.original_signed_birth.len() <= 64 { return Err(refused()); }
+    }
+    for variant in 0..3 {
+        let mut changed: RunnerHandoff = serde_json::from_slice(bytes).map_err(|_| refused())?;
+        let account = changed.fixture.accounts.first_mut().ok_or_else(refused)?;
+        if variant == 0 {
+            account.original_signed_birth = "a".repeat(64);
+        } else {
+            let mut envelope: serde_json::Value = serde_json::from_str(&account.original_signed_birth).map_err(|_| refused())?;
+            if variant == 1 {
+                let signature = envelope.get_mut("signature").and_then(serde_json::Value::as_array_mut).ok_or_else(refused)?;
+                let first = signature.first_mut().ok_or_else(refused)?;
+                let byte = first.as_u64().filter(|v| *v <= 255).ok_or_else(refused)?;
+                *first = serde_json::json!(byte ^ 1);
+            } else {
+                envelope.as_object_mut().ok_or_else(refused)?.insert("restored_approval".into(), serde_json::json!(true));
+            }
+            account.original_signed_birth = serde_json::to_string(&envelope).map_err(|_| refused())?;
+        }
+        if validate_shape(&changed).is_ok() { return Err(refused()); }
+    }
+    Ok(())
 }
 
 fn one_original_attempt() -> std::io::Result<()> {
@@ -209,4 +275,18 @@ fn pristine_owner_cutoff_never_replaces_original() {
 fn pristine_owner_input_is_closed() {
     assert!(serde_json::from_str::<OwnerClient>(r#"{"certificate_der":"a","private_key_pkcs8_der":"b","trusted_server_root_der":"c","approve":true}"#).is_err());
     assert!(serde_json::from_str::<OwnerClient>(r#"{"certificate_der":"a","certificate_der":"b","private_key_pkcs8_der":"b","trusted_server_root_der":"c"}"#).is_err());
+}
+
+#[test]
+fn pristine_owner_birth_is_bounded_envelope_not_digest() {
+    for raw in [String::new(), "a".repeat(64), "{}".into(), "null".into(),
+        " ".repeat(wholepact_authority::MAX_FRAME_BYTES + 1)] {
+        assert!(original_birth(&raw).is_err());
+    }
+}
+#[test]
+fn pristine_owner_birth_rejects_duplicate_or_unknown_envelope_fields() {
+    for raw in [r#"{"version":1,"version":1}"#, r#"{"version":1,"restored_approval":true}"#] {
+        assert!(original_birth(raw).is_err());
+    }
 }
