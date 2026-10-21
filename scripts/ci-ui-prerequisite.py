@@ -19,6 +19,7 @@ ALLOWED = frozenset((
     "scripts/ci-ui-container.py", "scripts/tests/test_ci_ui_setup.py",
     "scripts/tests/test_ci_ui_container.py",
     "scripts/ci-ui-controller.py", "scripts/tests/test_ci_ui_controller.py",
+    "scripts/ci-ui-weston-module.c",
     "scripts/ci-ui-artifacts.py", "scripts/tests/test_ci_ui_artifacts.py",
     "scripts/ci-ui-reuse.py", "scripts/tests/test_ci_ui_reuse.py",
     "scripts/ci-ui-reuse-runner.py", "scripts/tests/test_ci_ui_reuse_runner.py",

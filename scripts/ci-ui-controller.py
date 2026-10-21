@@ -55,6 +55,10 @@ CONTROL_ENV = ('CI_UI_CONTROL_FD', 'CI_UI_ORIGINAL_DEADLINE_NS',
                'CI_UI_SESSION_DEADLINE_NS')
 
 
+TARGET_REASONS = ('none', 'parent_or_resource', 'credentials', 'duplicate_app_id',
+    'other_desktop', 'retained_identity', 'unmapped', 'destroyed',
+    'bind_arguments', 'command_precondition', 'close_desktop')
+
 class Rejected(Exception):
     """Finite, value-free failure. Do not attach raw packets/paths/commands."""
     def __init__(self, code):
@@ -418,8 +422,9 @@ class Controller:
                     if compositor_status == 1 and not target: self._reject('target')
                     return
                 # Every final input ACK was consumed, so no command is pending.
-                expected = HEADER.pack(MAGIC, VERSION, 0, ERROR, 4, 0, 0, 0, 0, 0, 0, 0)
-                if index != 0 or raw != expected: self._reject('protocol')
+                expected = tuple(HEADER.pack(MAGIC, VERSION, 0, ERROR, 4, reason, 0, 0, 0, 0, 0, 0)
+                                 for reason in range(len(TARGET_REASONS)))
+                if index != 0 or raw not in expected: self._reject('protocol')
                 target = True
             self._reject('protocol')
         except OSError:
@@ -453,8 +458,10 @@ class Controller:
                 h = HEADER.unpack(raw)
                 if (h[:2] == (MAGIC, VERSION) and h[2] in (0, self._sequence) and
                         h[3] == ERROR and 0 < h[4] < len(ERRORS) and
-                        h[5:] == (0,) * 7):
+                        h[6:] == (0,) * 6 and
+                        (h[5] == 0 or (ERRORS[h[4]] == 'target' and 0 < h[5] < len(TARGET_REASONS)))):
                     result.update(packet='error', module_error=ERRORS[h[4]])
+                    if h[5]: result['target_reason'] = TARGET_REASONS[h[5]]
                 else:
                     result['packet'] = 'malformed'
         except OSError:

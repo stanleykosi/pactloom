@@ -82,6 +82,11 @@ enum reply_kind { ACK = 1, IMAGE, CHUNK, ERROR, READY, FRAME_BARRIER };
 enum failure { OK = 0, PROTOCOL = 1, DEADLINE, LIMIT, TARGET, INPUT,
                OUTPUT, READBACK, DISCONNECTED, INTERNAL };
 
+/* Closed diagnostic tags only; every original TARGET condition is unchanged. */
+enum target_reason { TARGET_NONE = 0, TARGET_PARENT_OR_RESOURCE,
+    TARGET_CREDENTIALS, TARGET_DUPLICATE_APP_ID, TARGET_OTHER_DESKTOP,
+    TARGET_RETAINED_IDENTITY, TARGET_UNMAPPED, TARGET_DESTROYED,
+    TARGET_BIND_ARGUMENTS, TARGET_COMMAND_PRECONDITION, TARGET_CLOSE_DESKTOP };
 struct control;
 struct watched_surface {
     struct wl_list link;
@@ -97,6 +102,7 @@ struct control {
     bool seat_ready, dead, bound, bind_requested, focused, focus_controlled, button_down;
     bool key_down[KEY_MAX + 1];
     unsigned held_keys, surface_count;
+    enum target_reason target_reason;
     int fd;
     uint64_t original_deadline, session_deadline;
     uint32_t sequence, pending, pending_op, input_sequence;
@@ -156,6 +162,7 @@ fail(struct control *c, enum failure status)
         return;
     c->dead = true;
     header(c, h, ERROR, status, 0, 0, 0, 0, 0);
+    if (status == TARGET) h[5] = htole32(c->target_reason);
     /* One best-effort finite error, no retries or textual diagnostics. */
     (void)send(c->fd, h, sizeof h, MSG_DONTWAIT | MSG_NOSIGNAL);
     if (c->socket_source) {
@@ -171,6 +178,13 @@ fail(struct control *c, enum failure status)
     if (c->pixels)
         explicit_bzero(c->pixels, FRAME_BYTES);
     weston_compositor_exit_with_code(c->compositor, 1);
+}
+
+static void
+fail_target(struct control *c, enum target_reason reason)
+{
+    c->target_reason = reason;
+    fail(c, TARGET);
 }
 
 static bool
@@ -233,24 +247,24 @@ validate_target(struct control *c)
             gid_t gid;
             struct wl_client *client;
             if (!w->surface->resource || weston_desktop_surface_get_parent(d)) {
-                fail(c, TARGET);
+                fail_target(c, TARGET_PARENT_OR_RESOURCE);
                 return false;
             }
             client = wl_resource_get_client(w->surface->resource);
             wl_client_get_credentials(client, &pid, &uid, &gid);
             if (c->bind_requested &&
                 (pid != c->expected_pid || uid != getuid() || gid != getgid())) {
-                fail(c, TARGET);
+                fail_target(c, TARGET_CREDENTIALS);
                 return false;
             }
             match = w;
             if (++matches > 1) {
-                fail(c, TARGET);
+                fail_target(c, TARGET_DUPLICATE_APP_ID);
                 return false;
             }
         } else if (c->bound && d && weston_surface_is_mapped(w->surface)) {
             /* No other native application window may take input/occlude it. */
-            fail(c, TARGET);
+            fail_target(c, TARGET_OTHER_DESKTOP);
             return false;
         }
     }
@@ -259,7 +273,7 @@ validate_target(struct control *c)
             weston_surface_get_desktop_surface(match->surface) != c->desktop ||
             wl_resource_get_client(match->surface->resource) != c->client ||
             !weston_surface_is_mapped(match->surface)) {
-            fail(c, TARGET);
+            fail_target(c, TARGET_RETAINED_IDENTITY);
             return false;
         }
         if (c->focus_controlled && weston_seat_get_keyboard(&c->seat)->focus !=
@@ -302,7 +316,7 @@ surface_unmapped(struct wl_listener *listener, void *data)
     struct watched_surface *w = wl_container_of(listener, w, unmap);
     (void)data;
     if (w->control->target == w)
-        fail(w->control, TARGET);
+        fail_target(w->control, TARGET_UNMAPPED);
 }
 
 static void
@@ -312,7 +326,7 @@ surface_destroyed(struct wl_listener *listener, void *data)
     (void)data;
     if (w->control->target == w) {
         w->control->target = NULL;
-        fail(w->control, TARGET);
+        fail_target(w->control, TARGET_DESTROYED);
     }
     wl_list_remove(&w->commit.link);
     wl_list_remove(&w->destroy.link);
@@ -535,7 +549,7 @@ dispatch(struct control *c, const uint32_t *v)
     c->pending_op = op;
     if (op == BIND) {
         if (c->bind_requested || a <= 1 || a > INT_MAX || b) {
-            fail(c, TARGET);
+            fail_target(c, TARGET_BIND_ARGUMENTS);
             return;
         }
         c->expected_pid = (pid_t)a;
@@ -552,7 +566,7 @@ dispatch(struct control *c, const uint32_t *v)
     }
     if (!c->bound || !output_valid(c) || !keyboard || !pointer ||
         clock_gettime(CLOCK_MONOTONIC, &t) < 0) {
-        fail(c, TARGET);
+        fail_target(c, TARGET_COMMAND_PRECONDITION);
         return;
     }
     if (op == FRAME) {
@@ -624,7 +638,7 @@ dispatch(struct control *c, const uint32_t *v)
         struct weston_desktop_surface *desktop =
             weston_surface_get_desktop_surface(c->target->surface);
         if (!desktop) {
-            fail(c, TARGET);
+            fail_target(c, TARGET_CLOSE_DESKTOP);
             return;
         }
         /* Genuine compositor close request, credential-free smoke only. */

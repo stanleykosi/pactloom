@@ -1142,12 +1142,20 @@ def validate_failure(value, mode):
     if 'display_observation' in value:
         observation = value['display_observation']
         require(value['code'] == 'display_status' and type(observation) is dict and
-                set(observation) == {'exit_status', 'packet', 'module_error'})
+                {'exit_status', 'packet', 'module_error'} <= set(observation) <=
+                {'exit_status', 'packet', 'module_error', 'target_reason', 'product_exit_status'})
         require(number(observation['exit_status'], -64, 255) and
                 observation['packet'] in ('error', 'eof', 'malformed', 'unavailable'))
         require((observation['packet'] == 'error' and observation['module_error'] in
                  ('protocol', 'deadline', 'limit', 'target', 'input', 'output', 'readback', 'disconnected', 'internal')) or
                 (observation['packet'] != 'error' and observation['module_error'] is None))
+        if 'target_reason' in observation:
+            require(observation['packet'] == 'error' and observation['module_error'] == 'target' and
+                    observation['target_reason'] in ('parent_or_resource', 'credentials',
+                    'duplicate_app_id', 'other_desktop', 'retained_identity', 'unmapped',
+                    'destroyed', 'bind_arguments', 'command_precondition', 'close_desktop'))
+        if 'product_exit_status' in observation:
+            require(observation['product_exit_status'] is None or number(observation['product_exit_status'], -64, 255))
     boundary, outcome = value['source_boundary'], value['source_outcome']
     require((boundary is None and outcome is None) or
             (type(boundary) is str and boundary in SETUP_BOUNDARIES and

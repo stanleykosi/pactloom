@@ -65,6 +65,25 @@ class DisplayFailureObservation(unittest.TestCase):
         self.assertEqual(session.reporter.value['display_observation'], observation)
         session.controller.observe_exited_compositor.assert_called_once_with(session.weston)
 
+    def test_exit_observes_product_and_closed_delivery_failure(self):
+        from unittest import mock
+        import contextlib, io
+        session = C.NativeSession.__new__(C.NativeSession)
+        session.weston = mock.Mock(); session.weston.poll.return_value = 1
+        session.product = mock.Mock(); session.product.poll.return_value = -11
+        session.controller = mock.Mock()
+        session.controller.observe_exited_compositor.return_value = dict(
+            exit_status=1, packet='error', module_error='target', target_reason='destroyed')
+        session.collector = mock.Mock(); session.collector.read.return_value = []
+        session.reporter = C.FirstRuntimeFailure('fixture'); session.reporter.stage = 'prepare'
+        with mock.patch.object(C.P, 'delivery_first_failure', return_value=dict(stage='InputValidation', cls='InvalidBinding', **{'class':'InvalidBinding'})), contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(C.S.Rejected): session.require_display_live()
+        value = session.reporter.value
+        self.assertEqual(value['code'], 'display_status')
+        self.assertEqual(value['display_observation']['product_exit_status'], -11)
+        self.assertEqual(value['display_observation']['target_reason'], 'destroyed')
+        self.assertEqual(value['delivery_class'], 'InvalidBinding')
+
     def test_live_display_never_consumes_controller(self):
         from unittest import mock
         session = C.NativeSession.__new__(C.NativeSession)

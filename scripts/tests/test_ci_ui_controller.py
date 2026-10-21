@@ -99,6 +99,34 @@ class Protocol(unittest.TestCase):
         self.assertEqual(str(found.exception), code)
         self.assertTrue(self.transport.closed)
 
+    def test_terminal_cleanup_accepts_only_closed_target_reason(self):
+        self.bind()
+        self.controller._terminal_close = True
+        self.process.returncode = 0
+        self.transport.incoming = [packet(C.ERROR, status=4, commit=6), b'']
+        self.controller.finish_after_product(1, self.now[0] + 5_000_000_000)
+        self.assertTrue(self.transport.closed)
+
+    def test_target_subreason_is_closed_and_preserves_target_class(self):
+        compositor = mock.Mock(spec=subprocess.Popen); compositor.poll.return_value = 1
+        self.transport.incoming = [packet(C.ERROR, status=4, commit=6)]
+        result = self.controller.observe_exited_compositor(compositor)
+        self.assertEqual(result, dict(exit_status=1, packet='error', module_error='target', target_reason='unmapped'))
+
+    def test_target_subreason_on_other_error_is_malformed(self):
+        compositor = mock.Mock(spec=subprocess.Popen); compositor.poll.return_value = 1
+        self.transport.incoming = [packet(C.ERROR, status=5, commit=6)]
+        self.assertEqual(self.controller.observe_exited_compositor(compositor),
+                         dict(exit_status=1, packet='malformed', module_error=None))
+
+    def test_module_target_tags_cover_each_original_rejection(self):
+        source = (ROOT / 'ci-ui-weston-module.c').read_text()
+        self.assertEqual(source.count('fail(c, TARGET);'), 1)
+        self.assertEqual(source.count('fail_target('), 11)
+        for reason in C.TARGET_REASONS[1:]:
+            self.assertIn('TARGET_' + reason.upper(), source)
+        self.assertIn('if (status == TARGET) h[5] = htole32(c->target_reason);', source)
+
     def test_exited_compositor_observation_is_bounded_and_never_sends(self):
         self.bind()
         compositor = mock.Mock(spec=subprocess.Popen)

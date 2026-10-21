@@ -518,8 +518,24 @@ class NativeSession:
     def require_display_live(self):
         if self.weston.poll() is not None:
             observation = self.controller.observe_exited_compositor(self.weston)
+            product = getattr(self, 'product', None)
+            if product is not None:
+                status = product.poll()
+                require(status is None or P.number(status, -64, 255), 'product_status')
+                observation['product_exit_status'] = status
+            detail = None
+            collector = getattr(self, 'collector', None)
+            if collector is not None:
+                try:
+                    # Related closed-schema diagnostic only, not a root-cause inference.
+                    self.records = collector.read()
+                    detail = P.delivery_first_failure(self.records)
+                except Exception:
+                    detail = None  # preserve original process failure on diagnostic failure
             self.reporter.note(P.failure(self.reporter.mode, self.reporter.stage,
-                'display_status', self.reporter.case, display_observation=observation))
+                'display_status', self.reporter.case, display_observation=observation,
+                delivery_stage=None if detail is None else detail['stage'],
+                delivery_class=None if detail is None else detail['class']))
             raise S.Rejected('display_status')
 
     def check(self):
