@@ -3,6 +3,14 @@
 //! connection mutex or a read transaction over that audit or a human/network wait.
 use super::*;
 
+/// Additional denial-only observation at one original metadata commit.
+/// Implementations must not wait, acquire source/store locks, or issue consent.
+/// All ordinary authority, exact payload and revision checks remain mandatory.
+pub trait OriginalCommitRestrictionV3 {
+    fn check_before_commit(&self) -> Result<()>;
+}
+
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Stamp {
     data_version: i64,
@@ -246,6 +254,36 @@ impl Store {
         payload: Value,
         event_kind: &str,
     ) -> Result<(MutationResult, OriginalPrivateRevisionPinV3<'a>)> {
+        self.update_original_agreement_pinned_kernel_v3(
+            pin, context, id, expected_revision, payload, event_kind, None,
+        )
+    }
+    /// As above, with a fresh restriction sample immediately before the actual
+    /// commit. Refusal rolls back staged writes; it never authorizes a retry.
+    pub fn update_original_agreement_pinned_restricted_v3<'a>(
+        &'a self,
+        pin: OriginalPrivateRevisionPinV3<'a>,
+        context: &CommandContext,
+        id: &str,
+        expected_revision: u64,
+        payload: Value,
+        event_kind: &str,
+        restriction: &dyn OriginalCommitRestrictionV3,
+    ) -> Result<(MutationResult, OriginalPrivateRevisionPinV3<'a>)> {
+        self.update_original_agreement_pinned_kernel_v3(
+            pin, context, id, expected_revision, payload, event_kind, Some(restriction),
+        )
+    }
+    fn update_original_agreement_pinned_kernel_v3<'a>(
+        &'a self,
+        pin: OriginalPrivateRevisionPinV3<'a>,
+        context: &CommandContext,
+        id: &str,
+        expected_revision: u64,
+        payload: Value,
+        event_kind: &str,
+        restriction: Option<&dyn OriginalCommitRestrictionV3>,
+    ) -> Result<(MutationResult, OriginalPrivateRevisionPinV3<'a>)> {
         pin.require_target(self, id, Some(expected_revision))?;
         let (result, next) = self.commit_record_kernel_v3(
             context,
@@ -255,6 +293,7 @@ impl Store {
             payload,
             event_kind,
             Some(pin),
+            restriction,
         )?;
         Ok((result, next.ok_or(StoreError::RecoveryRequired)?))
     }
@@ -289,6 +328,51 @@ mod tests {
             .unwrap();
         (dir, path, store)
     }
+    #[test]
+    fn encrypted_original_commit_restriction_rolls_back_and_samples_each_attempt() {
+        use std::cell::Cell;
+        struct Restriction { denied: Cell<bool>, calls: Cell<usize> }
+        impl OriginalCommitRestrictionV3 for Restriction {
+            fn check_before_commit(&self) -> Result<()> {
+                self.calls.set(self.calls.get() + 1);
+                if self.denied.get() {
+                    Err(StoreError::InvalidInput("original effect restriction denied"))
+                } else { Ok(()) }
+            }
+        }
+        let (_dir, _path, store) = fixture();
+        let before = store.get_agreement("agreement").unwrap().unwrap();
+        let history = serde_json::to_value(store.events_after(0, 100).unwrap()).unwrap();
+        let command = context("restricted-denied");
+        let gate = Restriction { denied: Cell::new(true), calls: Cell::new(0) };
+        let result = store.update_original_agreement_pinned_restricted_v3(
+            store.pin_original_revision_v3("agreement").unwrap(), &command,
+            "agreement", before.revision, serde_json::json!({"synthetic":2}),
+            "synthetic.update", &gate,
+        );
+        assert!(matches!(result, Err(StoreError::InvalidInput("original effect restriction denied"))));
+        assert_eq!(gate.calls.get(), 1);
+        assert_eq!(store.get_agreement("agreement").unwrap().unwrap(), before);
+        assert_eq!(serde_json::to_value(store.events_after(0,100).unwrap()).unwrap(), history);
+        assert!(store.find_replay(&command).unwrap().is_none());
+        // A separate explicit attempt uses a freshly audited pin and request.
+        gate.denied.set(false);
+        let (committed, pin) = store.update_original_agreement_pinned_restricted_v3(
+            store.pin_original_revision_v3("agreement").unwrap(), &context("restricted-allowed"),
+            "agreement", before.revision, serde_json::json!({"synthetic":3}),
+            "synthetic.update", &gate,
+        ).unwrap();
+        assert_eq!(gate.calls.get(), 2);
+        pin.check_current_v3().unwrap();
+        gate.denied.set(true);
+        assert!(store.update_original_agreement_pinned_restricted_v3(
+            pin, &context("restricted-next-denied"), "agreement", committed.record.revision,
+            serde_json::json!({"synthetic":4}), "synthetic.update", &gate,
+        ).is_err());
+        assert_eq!(gate.calls.get(), 3);
+        assert_eq!(store.get_agreement("agreement").unwrap().unwrap(), committed.record);
+    }
+
     #[test]
     fn encrypted_source_read_pin_preserves_original_destination_write_separation() {
         let (_dir, _path, store) = fixture();

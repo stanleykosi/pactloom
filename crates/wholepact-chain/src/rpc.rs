@@ -370,6 +370,15 @@ impl Rpc {
         bytes: &[u8],
         valid_until_unix_seconds: u64,
     ) -> Result<crate::BackendSubmissionResult, ChainError> {
+        self.submit_once_restricted(bytes, valid_until_unix_seconds, None).await
+    }
+    #[cfg(feature = "submission-dispatch")]
+    pub(crate) async fn submit_once_restricted(
+        &self,
+        bytes: &[u8],
+        valid_until_unix_seconds: u64,
+        restriction: Option<&dyn crate::SubmissionEffectRestriction>,
+    ) -> Result<crate::BackendSubmissionResult, ChainError> {
         if bytes.is_empty() || bytes.len() > 2 * 1024 * 1024 {
             return Err(ChainError::ResourceLimit);
         }
@@ -390,6 +399,9 @@ impl Rpc {
                 return Err(ChainError::StaleChain);
             }
             let method = "/cash.z.wallet.sdk.rpc.CompactTxStreamer/SendTransaction";
+            if let Some(restriction) = restriction {
+                restriction.check_before_effect()?;
+            }
             let response = grpc
                 .unary(
                     request,

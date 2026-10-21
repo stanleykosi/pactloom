@@ -94,6 +94,13 @@ impl EncryptedSubmissionJournal {
         Ok(())
     }
     pub(crate) fn bind_submission_plan(&mut self, plan: &SubmissionPlan) -> Result<(), ChainError> {
+        self.bind_submission_plan_restricted(plan, None)
+    }
+    pub(crate) fn bind_submission_plan_restricted(
+        &mut self,
+        plan: &SubmissionPlan,
+        restriction: Option<&dyn crate::SubmissionEffectRestriction>,
+    ) -> Result<(), ChainError> {
         self.verify_identity()?;
         let tx = self
             .connection
@@ -159,6 +166,12 @@ impl EncryptedSubmissionJournal {
             ],
         )
         .map_err(|_| ChainError::JournalFailure)?;
+        if let Some(restriction) = restriction {
+            if let Err(denied) = restriction.check_before_effect() {
+                tx.rollback().map_err(|_| ChainError::SubmissionRetentionUncertain)?;
+                return Err(denied);
+            }
+        }
         tx.commit().map_err(|_| ChainError::JournalFailure)
     }
     pub(crate) fn recover_submission_plan(
@@ -185,6 +198,16 @@ impl EncryptedSubmissionJournal {
         source: &str,
         now: u64,
         expected_number: Option<u32>,
+    ) -> Result<SubmissionAttempt, ChainError> {
+        self.begin_submission_attempt_restricted(plan, source, now, expected_number, None)
+    }
+    pub(crate) fn begin_submission_attempt_restricted(
+        &mut self,
+        plan: &SubmissionPlan,
+        source: &str,
+        now: u64,
+        expected_number: Option<u32>,
+        restriction: Option<&dyn crate::SubmissionEffectRestriction>,
     ) -> Result<SubmissionAttempt, ChainError> {
         if !crate::reconciliation::valid_source_id(source) || now > i64::MAX as u64 {
             return Err(ChainError::InvalidConfiguration);
@@ -221,6 +244,12 @@ impl EncryptedSubmissionJournal {
             outcome: SubmissionAttemptOutcome::Unknown,
         };
         tx.execute("INSERT INTO submission_attempts(operation,number,source,started,outcome) VALUES(?1,?2,?3,?4,?5)", params![plan.descriptor.operation_id, attempt.number, source, now, serde_json::to_string(&attempt.outcome).map_err(|_| ChainError::JournalFailure)?]).map_err(|_| ChainError::JournalFailure)?;
+        if let Some(restriction) = restriction {
+            if let Err(denied) = restriction.check_before_effect() {
+                tx.rollback().map_err(|_| ChainError::SubmissionRetentionUncertain)?;
+                return Err(denied);
+            }
+        }
         tx.commit().map_err(|_| ChainError::JournalFailure)?;
         Ok(attempt)
     }
