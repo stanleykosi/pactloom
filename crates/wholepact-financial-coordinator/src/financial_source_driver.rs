@@ -17,6 +17,9 @@ use std::{
 };
 use wholepact_financial_coordinator_origin::{
     CoordinatorFinancialEndpointV1, CoordinatorFinancialEventV1,
+    CompletedPairInputsV1, CoordinatorCompletedPairEventV1,
+    FinancialCompletedPairSetupTicketV1, FinancialCompletedPairSetupOutboundV1,
+    FinancialCompletedPairServeOutboundV1,
     CoordinatorFinancialHistoryEventV1, CoordinatorFinancialSigningEventV1,
     CoordinatorFinancialWitnessEventV1, CoordinatorHostTerminalEndpointV1,
     CoordinatorWitnessRetiredV1, CoordinatorWitnessRetirementOutboundV1,
@@ -25,7 +28,7 @@ use wholepact_financial_coordinator_origin::{
     FinancialHistoryServeOutboundV1, FinancialHistorySetupOutboundV1,
     FinancialHistorySetupTicketV1, FinancialSendProgressV1, FinancialSigningInputsV1,
     FinancialSigningServeOutboundV1, FinancialSigningSetupOutboundV1,
-    FinancialSigningSetupTicketV1, FinancialWitnessArmOutboundV1, FinancialWitnessFinalOutboundV1,
+    FinancialSigningSetupTicketV1, FinancialSignedResultCustodyV1, FinancialWitnessArmOutboundV1, FinancialWitnessFinalOutboundV1,
     FinancialWitnessInputsV1, FinancialWitnessSetupOutboundV1, FinancialWitnessSetupTicketV1,
     SignerAcquireArmOutboundV1, SignerAcquireFinalOutboundV1, SignerActivateArmOutboundV1,
     SignerActivateFinalOutboundV1, SignerActivateReadOutboundV1, SignerAdmitArmOutboundV1,
@@ -63,6 +66,9 @@ pub(super) enum HostStatus {
 }
 
 enum Command {
+    PrepareCompletedPair(CompletedPairInputsV1, Instant),
+    SetupCompletedPair(FinancialCompletedPairSetupOutboundV1),
+    ServeCompletedPair(FinancialCompletedPairServeOutboundV1),
     ReturnRead(SignerReturnReadOutboundV1),
     ReturnExact(SignerReturnExactOutboundV1),
     SignRead(SignerSignReadOutboundV1),
@@ -95,6 +101,8 @@ enum Command {
     ServeHistory(FinancialHistoryServeOutboundV1),
     RetireHistory(CoordinatorWitnessRetirementOutboundV1),
     RetireSigningPredecessor(CoordinatorWitnessRetirementOutboundV1),
+    BeginSigningRetirement(Role),
+    RetireSigning(CoordinatorWitnessRetirementOutboundV1),
     BeginContinue(Role, Instant),
     ArmContinue(FinancialContinueArmOutboundV1),
     FinalContinue(FinancialContinueFinalOutboundV1),
@@ -112,6 +120,8 @@ enum Command {
     FinalAcquire(SignerAcquireFinalOutboundV1),
 }
 pub(super) enum Outcome {
+    CompletedPairSetup(FinancialCompletedPairSetupTicketV1),
+    CompletedPair(CoordinatorCompletedPairEventV1),
     Event(CoordinatorFinancialEventV1),
     HistorySetup(Role, FinancialHistorySetupTicketV1),
     History(CoordinatorFinancialHistoryEventV1),
@@ -121,6 +131,9 @@ pub(super) enum Outcome {
     SigningPredecessorRetirement(CoordinatorWitnessRetirementTicketV1),
     SigningPredecessorRetired(CoordinatorWitnessRetiredV1),
     SigningPredecessorResumed(Role),
+    SigningRetirement(CoordinatorWitnessRetirementTicketV1),
+    SigningRetired(CoordinatorWitnessRetiredV1),
+    SigningResumed(FinancialSignedResultCustodyV1),
     SigningSetup(Role, FinancialSigningSetupTicketV1),
     Signing(CoordinatorFinancialSigningEventV1),
     SigningDisposed(Role),
@@ -136,6 +149,9 @@ pub(super) enum Outcome {
 }
 
 pub(super) struct Driver {
+    completed_pair_prepared: bool,
+    completed_pair_setup: bool,
+    completed_pair_serve: bool,
     input: mpsc::SyncSender<Command>,
     pub(super) outcome: mpsc::Receiver<Outcome>,
     revoked: Arc<AtomicBool>,
@@ -172,6 +188,8 @@ pub(super) struct Driver {
     admit_armed: [bool; 2],
     admit_final: [bool; 2],
     signing_predecessor_retirement_sent: [bool; 2],
+    signing_retirement_requested: [bool; 2],
+    signing_retirement_sent: [bool; 2],
     signing_prepared: [bool; 2],
     signing_setup: [bool; 2],
     signing_serve: [bool; 2],
@@ -247,6 +265,9 @@ impl Driver {
             history_prepared: [false; 2],
             history_setup: [false; 2],
             history_serve: [false; 2],
+            completed_pair_prepared: false,
+            completed_pair_setup: false,
+            completed_pair_serve: false,
             history_retirement_sent: [false; 2],
             continue_begun: [false; 2],
             continue_armed: [false; 2],
@@ -258,6 +279,8 @@ impl Driver {
             admit_armed: [false; 2],
             admit_final: [false; 2],
             signing_predecessor_retirement_sent: [false; 2],
+            signing_retirement_requested: [false; 2],
+            signing_retirement_sent: [false; 2],
             signing_prepared: [false; 2],
             signing_setup: [false; 2],
             signing_serve: [false; 2],
@@ -761,6 +784,44 @@ impl Driver {
         }
         self.queue(Command::RetireSigningPredecessor(outbound))
     }
+    pub(super) fn prepare_completed_pair(&mut self, inputs: CompletedPairInputsV1, deadline: Instant) -> Result<()> {
+        if self.completed_pair_prepared || self.revoked.load(Ordering::Acquire) {
+            return Err(rejected("CompletedPair preparation consumed or restricted"));
+        }
+        self.completed_pair_prepared = true;
+        self.queue(Command::PrepareCompletedPair(inputs, deadline))
+    }
+    pub(super) fn send_completed_pair_setup(&mut self, outbound: FinancialCompletedPairSetupOutboundV1) -> Result<()> {
+        if !self.completed_pair_prepared || self.completed_pair_setup || self.revoked.load(Ordering::Acquire) {
+            return Err(rejected("CompletedPair Setup consumed or restricted"));
+        }
+        self.completed_pair_setup = true;
+        self.queue(Command::SetupCompletedPair(outbound))
+    }
+    pub(super) fn send_completed_pair_serve(&mut self, outbound: FinancialCompletedPairServeOutboundV1) -> Result<()> {
+        if !self.completed_pair_setup || self.completed_pair_serve || self.revoked.load(Ordering::Acquire) {
+            return Err(rejected("CompletedPair Serve consumed or restricted"));
+        }
+        self.completed_pair_serve = true;
+        self.queue(Command::ServeCompletedPair(outbound))
+    }
+    pub(super) fn begin_signing_retirement(&mut self, role: Role) -> Result<()> {
+        if !self.sign_exact[index(role)] || !claim_once(&mut self.signing_retirement_requested,
+            role, self.revoked.load(Ordering::Acquire)) {
+            self.revoke();
+            return Err(rejected("Signing retirement request consumed or restricted"));
+        }
+        self.queue(Command::BeginSigningRetirement(role))
+    }
+    pub(super) fn send_signing_retirement(&mut self, role: Role,
+        outbound: CoordinatorWitnessRetirementOutboundV1) -> Result<()> {
+        if !self.signing_retirement_requested[index(role)] || !claim_once(
+            &mut self.signing_retirement_sent, role, self.revoked.load(Ordering::Acquire)) {
+            self.revoke();
+            return Err(rejected("Signing retirement native pause consumed or restricted"));
+        }
+        self.queue(Command::RetireSigning(outbound))
+    }
     pub(super) fn prepare_signing(
         &mut self,
         role: Role,
@@ -1192,6 +1253,8 @@ fn drive(
     let mut cancel_sent = false;
     let mut cleanup = None;
     let mut signing_disposed = [false; 2];
+    let mut completed_pair_disposed = false;
+    let mut completed_pair_close_sent = false;
     let mut signing_close_sent = [false; 2];
     let mut admission_retained = [false; 2];
     let mut predecessor_retired = [false; 2];
@@ -1345,7 +1408,7 @@ fn drive(
                     Command::ServeHistory(outbound) => {
                         record_send_progress(endpoint.try_send_history_serve(outbound)?, &revoked)
                     }
-                    Command::RetireHistory(_) | Command::RetireSigningPredecessor(_) => {
+                    Command::RetireHistory(_) | Command::RetireSigningPredecessor(_) | Command::RetireSigning(_) => {
                         return Err(rejected("retirement outside its exclusive owner wait"))
                     }
                     Command::BeginContinue(role, ceiling) => record_send_progress(
@@ -1377,6 +1440,26 @@ fn drive(
                     }
                     Command::FinalAdmit(outbound) => {
                         record_send_progress(endpoint.try_send_admit_final(outbound)?, &revoked)
+                    }
+                    Command::PrepareCompletedPair(inputs, deadline) => {
+                        let ticket = endpoint.prepare_completed_pair_setup(inputs, deadline)?;
+                        output.try_send(Outcome::CompletedPairSetup(ticket))
+                            .map_err(|_| rejected("CompletedPair Setup receiver unavailable"))?;
+                    }
+                    Command::SetupCompletedPair(outbound) => {
+                        record_send_progress(endpoint.try_send_completed_pair_setup(outbound)?, &revoked);
+                    }
+                    Command::ServeCompletedPair(outbound) => {
+                        record_send_progress(endpoint.try_send_completed_pair_serve(outbound)?, &revoked);
+                    }
+                    Command::BeginSigningRetirement(role) => {
+                        // Origin proves the actual signed result and original current
+                        // service. This per-role boundary intentionally does not wait
+                        // for the other signer, whose shared installation is locked.
+                        let ticket = endpoint.prepare_signing_retirement(role)?;
+                        retire_signing_exclusively(&mut endpoint, &input, &output, &revoked, ticket)?;
+                        signing_disposed[index(role)] = true;
+                        signing_close_sent[index(role)] = true;
                     }
                     Command::PrepareSigning(role, inputs, ceiling) => {
                         if let Some(ticket) =
@@ -1572,6 +1655,22 @@ fn drive(
                     witness_close_sent[i] = true;
                 }
             }
+            for _ in 0..16 {
+                let Some(event) = endpoint.try_receive_completed_pair()? else { break; };
+                match &event {
+                    CoordinatorCompletedPairEventV1::Disposed => completed_pair_disposed = true,
+                    CoordinatorCompletedPairEventV1::PreparationFailed
+                    | CoordinatorCompletedPairEventV1::ServiceFailed
+                    | CoordinatorCompletedPairEventV1::Restricted => revoked.store(true, Ordering::Release),
+                    _ => {}
+                }
+                output.try_send(Outcome::CompletedPair(event))
+                    .map_err(|_| rejected("CompletedPair outcome receiver unavailable"))?;
+            }
+            if cancel_sent && completed_pair_disposed && !completed_pair_close_sent {
+                endpoint.close_completed_pair_purpose()?;
+                completed_pair_close_sent = true;
+            }
             // Security commands, native outcomes and typed cancellation always
             // run first. This bounded, nonblocking transport step NEVER returns
             // an error out of the security loop, even after EOF or partial write.
@@ -1740,6 +1839,72 @@ fn retire_signing_predecessor_exclusively(
     output
         .try_send(Outcome::SigningPredecessorResumed(role))
         .map_err(|_| rejected("Signing predecessor resume receiver unavailable"))?;
+    Ok(())
+}
+
+// Actual post-Sign retirement, distinct from predecessor append retirement.
+fn retire_signing_exclusively(
+    endpoint: &mut CoordinatorFinancialEndpointV1,
+    input: &mpsc::Receiver<Command>,
+    output: &mpsc::SyncSender<Outcome>,
+    revoked: &AtomicBool,
+    ticket: CoordinatorWitnessRetirementTicketV1,
+) -> Result<()> {
+    let role = ticket.role();
+    let original_cutoff = ticket.deadline();
+    output
+        .try_send(Outcome::SigningRetirement(ticket))
+        .map_err(|_| rejected("Signing service retirement native receiver unavailable"))?;
+    let outbound = loop {
+        if revoked.load(Ordering::Acquire) || Instant::now() >= original_cutoff {
+            return Err(rejected(
+                "Signing service retirement interrupted before native pause",
+            ));
+        }
+        // No reap can start until this sole owner receives the nominal pause
+        // outbound. Ordinary actor checks are still valid before that point.
+        endpoint.check_original_tree_alive()?;
+        match input.try_recv() {
+            Ok(Command::RetireSigning(outbound)) => break outbound,
+            Ok(_) => {
+                return Err(rejected(
+                    "unexpected positive command during Signing service retirement",
+                ))
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                return Err(rejected(
+                    "Signing service retirement native owner ended",
+                ))
+            }
+            Err(mpsc::TryRecvError::Empty) => thread::sleep(Duration::from_millis(1)),
+        }
+    };
+    let completion = endpoint.retire_witness(outbound)?;
+    if completion.role() != role {
+        return Err(rejected(
+            "Signing service retirement actual role changed",
+        ));
+    }
+    output
+        .try_send(Outcome::SigningRetired(completion))
+        .map_err(|_| rejected("Signing service retirement completion receiver unavailable"))?;
+    loop {
+        if revoked.load(Ordering::Acquire) || Instant::now() >= original_cutoff {
+            return Err(rejected(
+                "Signing service retirement interrupted before native resume",
+            ));
+        }
+        if endpoint.finish_retirement_resume()? {
+            break;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    let custody = endpoint.signed_result_custody(role)?;
+    custody.check_current()?;
+    if custody.role() != role { return Err(rejected("Signing retired custody role changed")); }
+    output
+        .try_send(Outcome::SigningResumed(custody))
+        .map_err(|_| rejected("Signing service resume receiver unavailable"))?;
     Ok(())
 }
 

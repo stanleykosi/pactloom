@@ -9,6 +9,7 @@
 //! stock GUI undo/input/backend/OS/IME temporaries are dropped, not guaranteed
 //! overwritten. Neither this controller nor its input leaf clears OS clipboard.
 use crate::{
+    financial_completed_pair_ui::{PairFlow, PairStage, PairOutbound},
     financial_source_driver::{Driver, HostStatus, Outcome},
     host_line_input::{HostLineInput, HostLineStatus},
     host_output_text::{HostOutputText, OutputState},
@@ -25,6 +26,7 @@ use std::{
 use wholepact_financial_coordinator_origin::SignerFinancialWalletSetupSelectionV1;
 use wholepact_financial_coordinator_origin::{
     CoordinatorFinancialEndpointV1, CoordinatorFinancialEventV1 as Event,
+    CompletedPairInputsV1, CompletedPairOriginalV1, CoordinatorCompletedPairEventV1,
     CoordinatorFinancialHistoryEventV1 as HistoryEvent, CoordinatorFinancialNativeV1,
     CoordinatorFinancialWitnessEventV1 as WitnessEvent, CoordinatorWitnessRetiredV1,
     CoordinatorWitnessRetirementTicketV1, DeliveryFailureV1, FinancialContinueReadyTicketV1,
@@ -64,7 +66,8 @@ use wholepact_financial_coordinator_origin::{
 use wholepact_financial_coordinator_origin::{
     SignerSignCommittedV1, SignerSignExactPresentationV1, SignerSignExactTicketV1,
     SignerSignFailureStageV1, SignerSignFailureV1, SignerSignPreparedV1,
-    SignerSignReadPresentationV1, SignerSignReadTicketV1,
+    SignerSignReadPresentationV1, SignerSignReadTicketV1, FinancialSignedResultCustodyV1,
+    SignerFinancialResultSelectorV1,
 };
 use wholepact_financial_coordinator_origin::{
     SignerWalletFailureStageV1, SignerWalletFailureV1, SignerWalletObservePresentationV1,
@@ -93,6 +96,8 @@ struct SignFlow {
     exact_display: Option<SignerSignExactPresentationV1>,
     exact_attempted: bool,
     committed: Option<SignerSignCommittedV1>,
+    retired: Option<FinancialSignedResultCustodyV1>,
+    retirement_requested: bool,
     failure: Option<SignerSignFailureV1>,
 }
 #[derive(Default)]
@@ -183,6 +188,7 @@ const READ_PURPOSE: &str = "original-history-and-one-local-continue-preparation-
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase {
+    CompletedPairFlow,
     ReturnReadReview,
     ReturnReading,
     ReturnPrepared,
@@ -195,6 +201,8 @@ enum Phase {
     SignExactReview,
     SigningExact,
     SignCommitted,
+    SigningRetiring,
+    SignedRetired,
     FinancialSetupConfiguring,
     FinancialSetupSelected,
     WalletPrepareReview,
@@ -316,8 +324,13 @@ struct PairedConsent {
     acknowledged: [bool; 2],
 }
 enum Intent {
+    PrepareCompletedPair,
+    CompletedPairAction,
     ShowContinuationSelector(Role),
+    SaveContinuationSelector(Role),
+    SaveResultSelector(Role),
     ParkFinancial,
+    RetireSigning,
     ResumeFinancial(Role),
     ReturnRead,
     ReturnExact,
@@ -402,6 +415,10 @@ pub(super) fn run(
     let driver = Rc::new(RefCell::new(Driver::spawn(endpoint, terminal)?));
     let app = Window { native, driver: Rc::clone(&driver), session_deadline,
         financial_loaded:None, financial_parked:[None,None], continuation_selector_visible:[false;2],
+        continuation_save_paths: std::array::from_fn(|_| String::new()),
+        result_save_paths: std::array::from_fn(|_| String::new()),
+        result_selectors: [None, None],
+        pair_flow: PairFlow::default(),
         writer_flow: WriterFlow::default(),
         financial_writer_text: [String::new(),String::new()],
         financial_wallet_text: [String::new(),String::new()],
@@ -583,10 +600,9 @@ impl RetainedFinancialRole {
         self.witness_ready.take();
     }
     fn current(&self) -> bool {
-        self.writer_flow
-            .serving
-            .as_ref()
-            .is_none_or(|s| s.check_current().is_ok())
+        // A parked signed role must carry actual normal-retirement custody.
+        // Removing a dead Serving token is never evidence of successful retirement.
+        self.sign_flow.retired.as_ref().is_some_and(|s| s.check_current().is_ok())
             && self
                 .return_flow
                 .read
@@ -601,6 +617,10 @@ impl RetainedFinancialRole {
 }
 
 struct Window {
+    pair_flow: PairFlow,
+    continuation_save_paths: [String; 2],
+    result_save_paths: [String; 2],
+    result_selectors: [Option<SignerFinancialResultSelectorV1>; 2],
     continuation_selector_visible: [bool; 2],
     financial_loaded: Option<Role>,
     financial_parked: [Option<RetainedFinancialRole>; 2],
@@ -1664,6 +1684,26 @@ impl Window {
         self.writer_flow.stage = stage;
         self.transition(Phase::WriterFlow, frame);
     }
+    fn retained_signing_inputs(&self, role: Role) -> Result<FinancialSigningInputsV1> {
+        let p = self.signer_display[index(role)].as_ref().ok_or_else(|| rejected("original actual Admit missing"))?;
+        let inputs = FinancialSigningInputsV1 { selectors: history_inputs(&self.selectors[index(role)])?, continuation_operation_id: p.facts.operation_id.clone() };
+        inputs.validate()?;
+        Ok(inputs)
+    }
+    fn require_pair_original(&self, original: &CompletedPairOriginalV1) -> Result<()> {
+        original.validate()?;
+        for role in [Role::Signer1, Role::Signer2] {
+            let flow = if self.financial_loaded == Some(role) { &self.sign_flow }
+                else { &self.financial_parked[index(role)].as_ref().ok_or_else(|| rejected("CompletedPair original role absent"))?.sign_flow };
+            let custody = flow.retired.as_ref().ok_or_else(|| rejected("CompletedPair actual retired custody absent"))?;
+            custody.check_current()?;
+            if custody.role() != role || custody.original_binding() != &original.owners[index(role)]
+                || flow.committed.as_ref() != Some(custody.signed_result()) {
+                return Err(rejected("CompletedPair original signed custody mismatch"));
+            }
+        }
+        Ok(())
+    }
     fn signing_inputs(&self) -> Result<FinancialSigningInputsV1> {
         let role = self
             .active
@@ -1855,15 +1895,12 @@ impl Window {
                     drop(ticket);
                     return Ok(());
                 }
-                if self.phase != Phase::SignCommitted {
-                    return Err(rejected("Return Read without actual committed Sign"));
+                if self.phase != Phase::SignedRetired {
+                    return Err(rejected("Return Read without actual signed retirement"));
                 }
                 ticket.check_current()?;
-                self.writer_flow
-                    .serving
-                    .as_ref()
-                    .ok_or_else(|| rejected("same Signing service missing"))?
-                    .check_current()?;
+                self.sign_flow.retired.as_ref()
+                    .ok_or_else(|| rejected("actual signed retirement custody missing"))?.check_current()?;
                 self.return_flow.read = Some(ticket);
                 self.transition(Phase::ReturnReadReview, frame);
             }
@@ -1975,6 +2012,21 @@ impl Window {
             }
             _ => return Err(rejected("wrong Return event")),
         }
+        Ok(())
+    }
+    fn accept_result_selector(&mut self, role: Role, data: SignerFinancialResultSelectorV1) -> Result<()> {
+        data.selector_json()?;
+        let flow = if self.financial_loaded == Some(role) { &self.sign_flow }
+            else { &self.financial_parked[index(role)].as_ref().ok_or_else(|| rejected("result selector owner absent"))?.sign_flow };
+        let sign = flow.exact_display.as_ref().ok_or_else(|| rejected("result selector exact Sign absent"))?;
+        let actual = flow.committed.as_ref().ok_or_else(|| rejected("result selector actual Sign absent"))?;
+        if self.result_selectors[index(role)].is_some() || data.actor != sign.actor
+            || data.actor.signer_role != role || data.sign_presentation_digest != actual.sign_presentation_digest
+            || data.sign_presentation_digest != sign.presentation_digest
+            || data.source_identity_digest != sign.facts.original.activation.facts.original.source_identity_digest {
+            return Err(rejected("result selector original correlation changed"));
+        }
+        self.result_selectors[index(role)] = Some(data);
         Ok(())
     }
     fn accept_sign(&mut self, event: Event, frame: u64) -> Result<()> {
@@ -2790,6 +2842,7 @@ impl Window {
     fn clear_review(&mut self) {
         // Ordinary stage cleanup must never discard another original service.
         if self.native.is_revoked() || self.terminal() {
+            self.pair_flow.clear_actions();
             for parked in &mut self.financial_parked {
                 if let Some(p) = parked {
                     p.clear_actions();
@@ -2949,6 +3002,8 @@ impl Window {
             return;
         }
         if driver_revoked
+            || self.pair_flow.current().is_err()
+            || self.sign_flow.retired.as_ref().is_some_and(|s| s.check_current().is_err())
             || self
                 .financial_parked
                 .iter()
@@ -3167,6 +3222,30 @@ impl Window {
         for _ in 0..32 {
             let outcome = self.driver.borrow().outcome.try_recv();
             match outcome {
+                Ok(Outcome::CompletedPairSetup(ticket)) => {
+                    if self.terminal() { drop(ticket); }
+                    else if self.phase != Phase::CompletedPairFlow
+                        || self.require_pair_original(ticket.original_binding()).is_err()
+                        || self.pair_flow.accept_setup(ticket).is_err() {
+                        self.revoke("CompletedPair Setup changed or lacks both actual retired originals.");
+                    } else { self.transition(Phase::CompletedPairFlow, ctx.cumulative_frame_nr()); }
+                }
+                Ok(Outcome::CompletedPair(event)) => {
+                    let positive = matches!(&event, CoordinatorCompletedPairEventV1::Display(_) | CoordinatorCompletedPairEventV1::Serving(_));
+                    let matches_originals = match &event {
+                        CoordinatorCompletedPairEventV1::Display(t) => self.require_pair_original(&t.presentation().original).is_ok(),
+                        CoordinatorCompletedPairEventV1::Serving(t) => self.require_pair_original(&t.presentation().original).is_ok(),
+                        _ => true,
+                    };
+                    if positive && self.terminal() { drop(event); }
+                    else if (positive && self.phase != Phase::CompletedPairFlow) || !matches_originals
+                        || self.pair_flow.accept_event(event).is_err() {
+                        self.revoke("Original CompletedPair resource failed or changed; no Return permission inferred.");
+                    } else if !self.terminal() && positive {
+                        let phase = if self.pair_flow.stage() == PairStage::Serving { Phase::Selecting } else { Phase::CompletedPairFlow };
+                        self.transition(phase, ctx.cumulative_frame_nr());
+                    }
+                }
                 Ok(Outcome::Event(Event::Disposed(role))) => self.disposed[index(role)] = true,
                 Ok(Outcome::Finished {
                     disposal_confirmed,
@@ -3237,6 +3316,48 @@ impl Window {
                 Ok(Outcome::SigningDisposed(role)) => self.signing_disposed[index(role)] = true,
                 Ok(Outcome::SigningClosed(role)) => self.signing_closed[index(role)] = true,
                 Ok(Outcome::SigningFailed(_)) => self.revoke("An original Signing role reported failure or restriction during cleanup. This is not a service-ready or financial outcome."),
+                Ok(Outcome::SigningRetirement(ticket)) => {
+                    let role = ticket.role();
+                    if self.terminal() { drop(ticket); }
+                    else if self.phase != Phase::SigningRetiring || self.active != Some(role)
+                        || !self.sign_flow.retirement_requested || self.sign_flow.committed.is_none()
+                        || self.sign_flow.retired.is_some() || self.history_retirement.is_some()
+                        || self.retirement_paused.is_some() {
+                        self.revoke("Unexpected actual Signing retirement ticket."); drop(ticket);
+                    } else { self.history_retirement = Some(ticket); }
+                }
+                Ok(Outcome::SigningRetired(completion)) => {
+                    let role = completion.role();
+                    if self.terminal() { drop(completion); }
+                    else if self.phase != Phase::SigningRetiring || self.active != Some(role)
+                        || self.retirement_paused.is_none_or(|(expected, _)| expected != role)
+                        || self.history_retired.is_some() {
+                        self.revoke("Unexpected actual Signing retirement completion."); drop(completion);
+                    } else { self.history_retired = Some(completion); }
+                }
+                Ok(Outcome::SigningResumed(custody)) => {
+                    let role = custody.role();
+                    if self.terminal() { drop(custody); }
+                    else if self.phase != Phase::SigningRetiring || self.active != Some(role)
+                        || self.retirement_paused.is_some() || self.history_resume_pending != Some(role)
+                        || self.sign_flow.retired.is_some()
+                        || self.sign_flow.committed.as_ref() != Some(custody.signed_result())
+                        || self.writer_flow.service_display.as_ref()
+                            .is_none_or(|p| &p.original != custody.original_binding())
+                        || custody.check_current().is_err() {
+                        self.revoke("Actual Signing retirement custody or Host resume changed."); drop(custody);
+                    } else {
+                        self.history_resume_pending = None;
+                        self.signing_disposed[index(role)] = true;
+                        self.signing_closed[index(role)] = true;
+                        // Only this exact nominal completion replaces the now-dead
+                        // Serving observer. Ordinary absence never permits parking.
+                        self.sign_flow.retired = Some(custody);
+                        self.writer_flow.serving.take();
+                        self.transition(Phase::SignedRetired, ctx.cumulative_frame_nr());
+                        self.message = "This original Signing service was actually disposed and normally retired, and the Host resumed. Its signed-result custody is retained; the next role may now be selected.";
+                    }
+                }
                 Ok(Outcome::SigningPredecessorRetirement(ticket)) => {
                     let role = ticket.role();
                     if self.terminal() { drop(ticket); }
@@ -3403,6 +3524,11 @@ impl Window {
                 }
                 Ok(Outcome::Event(event @ (Event::WalletPrepareDisplay(_) | Event::WalletObserveDisplay(_) | Event::WalletPrepared{..} | Event::WalletObserved{..} | Event::WalletFailed{..}))) => {
                     if self.accept_wallet(event,ctx.cumulative_frame_nr()).is_err(){self.revoke("Original wallet custody changed; no retry, source substitution or Sign permission.");}
+                }
+                Ok(Outcome::Event(Event::FinancialResultSelector { role, data })) => {
+                    if self.accept_result_selector(role, data).is_err() {
+                        self.revoke("Actual signed-result selector binding changed; no replacement or guessed request is accepted.");
+                    }
                 }
                 Ok(Outcome::Event(event @ (Event::SignReadDisplay(_)|Event::SignExactDisplay(_)|Event::SignPrepared{..}|Event::SignCommitted{..}|Event::SignFailed{..})))=>{
                     if self.accept_sign(event,ctx.cumulative_frame_nr()).is_err(){self.revoke("Original Sign source/receipt binding changed; no retry, rollback or Return permission.");}
@@ -4334,6 +4460,8 @@ impl Window {
         let mut painted_to_end = self.read_to_end;
         let mut acknowledged_in_pass = self.acknowledged;
         let mut paired_in_pass = self.paired;
+        let mut continuation_paths_in_pass = self.continuation_save_paths.clone();
+        let mut result_paths_in_pass = self.result_save_paths.clone();
         let mut financial_in_pass = if self.phase == Phase::FinancialSetupConfiguring {
             self.active.map(|r| {
                 (
@@ -4450,13 +4578,34 @@ impl Window {
             if matches!(self.phase,Phase::Selecting|Phase::V3AdmissionRetained|Phase::V3Audited){
                 for role in [Role::Signer1,Role::Signer2]{if self.v3_audit_ticket[index(role)].is_some()&&ui.add_enabled(later_frame,egui::Button::new(format!("Review {} fresh original Audit",role_name(role)))).clicked_by(egui::PointerButton::Primary){self.intent=Some(Intent::ReviewV3Audit(role));}}
             }
-            if matches!(self.phase,Phase::SetupNeeded|Phase::Selecting|Phase::SignCommitted|Phase::ReturnCompleted){
+            if matches!(self.phase,Phase::SetupNeeded|Phase::Selecting|Phase::SignCommitted|Phase::SignedRetired|Phase::ReturnCompleted){
                 for role in [Role::Signer1,Role::Signer2] {if let Some(p)=&self.retained_continue[index(role)] {
                     if ui.add_enabled(later_frame,egui::Button::new(format!("Show {} exact Host continuation selector (metadata only)",role_name(role)))).clicked_by(egui::PointerButton::Primary){self.intent=Some(Intent::ShowContinuationSelector(role));}
                     if self.continuation_selector_visible[index(role)] {if let Ok(mut text)=continuation_selector_json(p){ui.label("Exact ordinary Host ContinuationSelectionV1. Copy/save these bytes to your chosen JSON file, then explicitly select that file at the Host prompt. This creates no approval and does not renew any deadline.");ui.add(egui::TextEdit::multiline(&mut text).interactive(false).desired_rows(8).desired_width(f32::INFINITY));}}
                 }}
             }
-            if matches!(self.phase,Phase::SignCommitted|Phase::ReturnCompleted) && ui.add_enabled(later_frame,egui::Button::new("Keep this original service/result and return to role selection")).clicked_by(egui::PointerButton::Primary){self.intent=Some(Intent::ParkFinancial);}
+            if matches!(self.phase, Phase::SetupNeeded | Phase::Selecting | Phase::SignCommitted | Phase::SignedRetired | Phase::ReturnCompleted) {
+                for role in [Role::Signer1, Role::Signer2] {
+                    let i = index(role);
+                    if self.retained_continue[i].is_some() {
+                        ui.label(format!("{} exact Continue selector destination (new absolute file)", role_name(role)));
+                        ui.add(egui::TextEdit::singleline(&mut continuation_paths_in_pass[i]));
+                        if ui.add_enabled(later_frame && selector_path_valid(&continuation_paths_in_pass[i]), egui::Button::new(format!("Save {} actual Continue selector", role_name(role)))).clicked_by(egui::PointerButton::Primary) { self.intent = Some(Intent::SaveContinuationSelector(role)); }
+                    }
+                    if self.result_selectors[i].is_some() {
+                        ui.label(format!("{} exact signed-result selector destination (new absolute file)", role_name(role)));
+                        ui.add(egui::TextEdit::singleline(&mut result_paths_in_pass[i]));
+                        if ui.add_enabled(later_frame && selector_path_valid(&result_paths_in_pass[i]), egui::Button::new(format!("Save {} actual signed-result selector", role_name(role)))).clicked_by(egui::PointerButton::Primary) { self.intent = Some(Intent::SaveResultSelector(role)); }
+                    }
+                }
+            }
+            if self.phase == Phase::Selecting && !self.pair_flow.is_started()
+                && self.financial_parked.iter().all(|p| p.as_ref().is_some_and(|p| p.current()))
+                && ui.add_enabled(later_frame, egui::Button::new("Prepare original CompletedPair Setup review")).clicked_by(egui::PointerButton::Primary) {
+                self.intent = Some(Intent::PrepareCompletedPair);
+            }
+            if matches!(self.phase,Phase::SignedRetired|Phase::ReturnCompleted) && ui.add_enabled(later_frame,egui::Button::new("Keep this retired original result and return to role selection")).clicked_by(egui::PointerButton::Primary){self.intent=Some(Intent::ParkFinancial);}
+            if self.phase == Phase::SignCommitted && ui.add_enabled(later_frame && !host_entry_blocks_source(self.host_entry), egui::Button::new("Finish and retire this original Signing service")).clicked_by(egui::PointerButton::Primary) { self.intent = Some(Intent::RetireSigning); }
             if self.phase==Phase::Selecting {for role in [Role::Signer1,Role::Signer2] {if self.financial_parked[index(role)].is_some()&&ui.add_enabled(later_frame,egui::Button::new(format!("Review {} retained financial custody",role_name(role)))).clicked_by(egui::PointerButton::Primary){self.intent=Some(Intent::ResumeFinancial(role));}}}
             if matches!(self.phase,Phase::Selecting|Phase::V3Audited){
                 for role in [Role::Signer1,Role::Signer2] {if self.v3_audit_result[index(role)].is_some()&&!self.financial_setup_selected[index(role)]&&ui.add_enabled(later_frame,egui::Button::new(format!("Select {} ordinary financial configurations",role_name(role)))).clicked_by(egui::PointerButton::Primary){self.intent=Some(Intent::ConfigureFinancialSetup(role));}}
@@ -4483,7 +4632,9 @@ impl Window {
                 Phase::SignReading=>{ui.label("Sign Read consumed once. Waiting for actual prepared commitments; signing remains unapproved.");}
                 Phase::SignPrepared=>{ui.label("Actual immutable spend preparation retained. Separate Exact signing remains unapproved.");}
                 Phase::SigningExact=>{ui.label("Exact Sign Final consumed once. Any partial effect is uncertain until actual result; no retry or rollback inferred.");}
-                Phase::SignCommitted=>{ui.label("Actual original Sign result/outbox commitment retained. Return remains a separate unapproved purpose.");if let Some(d)=&self.sign_flow.committed{ui.monospace(serde_json::to_string_pretty(d).unwrap_or_default());}}
+                Phase::SigningRetiring=>{ui.label("Waiting for actual Signing service disposal, owned retirement and matching Host resume. The next role is not enabled.");}
+                Phase::SignedRetired=>{ui.label("Actual signed result and normal retirement custody retained. Return still requires the later original CompletedPair service and separate approvals.");}
+                Phase::SignCommitted=>{ui.label("Actual original Sign result/outbox commitment retained. Finish and retire its service before selecting another role. Return remains a separate unapproved purpose.");if let Some(d)=&self.sign_flow.committed{ui.monospace(serde_json::to_string_pretty(d).unwrap_or_default());}}
                 Phase::FinancialSetupConfiguring=>{
                     ui.heading("Ordinary financial configuration selection · no permission");
                     ui.label("Paste actual existing writer TLS setup JSON (16 KiB) and wallet configuration JSON (32 KiB, including actual birthday). No private key bytes, credentials, guessed paths, defaults or automatic approval. This binds only the same actually audited original source; every private read, import and network effect needs its later separate native review.");
@@ -4900,6 +5051,21 @@ impl Window {
                     }
                 }
                 Phase::ContinuePreparing => { ui.label("Retrieving the already-prepared immutable Continue. No fresh Read, source or review deadline is created."); }
+                Phase::CompletedPairFlow => {
+                    ui.heading("Separate original CompletedPair resource");
+                    match self.pair_flow.display() {
+                        Ok((text, button, consent)) => {
+                            if review_display(ui, &text, visible) { painted_to_end = true; }
+                            if consent { ui.checkbox(&mut acknowledged_in_pass, "I reviewed this complete resource purpose and original expiry. This approves only the named action, not Return or dispatch."); }
+                            if let Some(label) = button {
+                                if ui.add_enabled(visible && later_frame && self.read_to_end && (!consent || self.acknowledged), egui::Button::new(label)).clicked_by(egui::PointerButton::Primary) {
+                                    self.intent = Some(Intent::CompletedPairAction);
+                                }
+                            }
+                        }
+                        Err(_) => self.revoke("CompletedPair exact review could not be displayed in full."),
+                    }
+                }
                 Phase::WriterFlow => {
                     let (text, button, consent) = self.writer_display();
                     ui.heading("Separate original Writer Read and Acquire");
@@ -4949,6 +5115,10 @@ impl Window {
             self.phase == painted_phase,
         );
         if eligible && self.phase == painted_phase {
+            if continuation_paths_in_pass.iter().chain(result_paths_in_pass.iter()).all(|p| p.len() <= 4096 && !p.contains('\0')) {
+                self.continuation_save_paths = continuation_paths_in_pass;
+                self.result_save_paths = result_paths_in_pass;
+            } else { self.revoke("Selector destination exceeded its bounds; no file was written."); }
             if let (Some(role), Some(inputs)) = (self.active, selectors_in_pass) {
                 if selectors_bounded(&inputs) {
                     self.selectors[index(role)] = inputs;
@@ -5014,7 +5184,7 @@ impl Window {
         self.last_tail_frame = Some(frame);
         if matches!(
             self.phase,
-            Phase::HistoryRetiring | Phase::RetirementBlocked
+            Phase::HistoryRetiring | Phase::RetirementBlocked | Phase::SigningRetiring
         ) {
             if host_line.is_some()
                 || password.is_some()
@@ -5283,12 +5453,11 @@ impl Window {
                     .read
                     .take()
                     .ok_or_else(|| rejected("Return ticket consumed"))?;
-                let serving = self
-                    .writer_flow
-                    .serving
-                    .as_ref()
-                    .ok_or_else(|| rejected("same Signing service missing"))?;
-                let out = self.native.admit_return_read(ticket, serving)?;
+                let custody = self.sign_flow.retired.as_ref()
+                    .ok_or_else(|| rejected("actual signed retirement custody missing"))?;
+                let pair = self.pair_flow.serving()
+                    .ok_or_else(|| rejected("actual CompletedPair service missing"))?;
+                let out = self.native.admit_return_read(ticket, custody, pair)?;
                 self.return_flow.read_attempted = true;
                 self.transition(Phase::ReturnReading, frame);
                 self.driver.borrow_mut().send_return_read(role, out)?;
@@ -5313,12 +5482,11 @@ impl Window {
                     .exact
                     .take()
                     .ok_or_else(|| rejected("Return ticket consumed"))?;
-                let serving = self
-                    .writer_flow
-                    .serving
-                    .as_ref()
-                    .ok_or_else(|| rejected("same Signing service missing"))?;
-                let out = self.native.admit_return_exact(ticket, serving)?;
+                let custody = self.sign_flow.retired.as_ref()
+                    .ok_or_else(|| rejected("actual signed retirement custody missing"))?;
+                let pair = self.pair_flow.serving()
+                    .ok_or_else(|| rejected("actual CompletedPair service missing"))?;
+                let out = self.native.admit_return_exact(ticket, custody, pair)?;
                 self.return_flow.exact_attempted = true;
                 self.transition(Phase::ReturningExact, frame);
                 self.driver.borrow_mut().send_return_exact(role, out)?;
@@ -5975,6 +6143,33 @@ impl Window {
                 self.active = None;
                 self.transition(Phase::Selecting, frame);
             }
+            Intent::PrepareCompletedPair if self.phase == Phase::Selecting
+                && !self.pair_flow.is_started() && self.financial_loaded.is_none()
+                && self.password.is_none() && !host_entry_blocks_source(self.host_entry) =>
+            {
+                let mut deadline = (Instant::now() + Duration::from_secs(120)).min(self.session_deadline);
+                for role in [Role::Signer1, Role::Signer2] {
+                    let custody = self.financial_parked[index(role)].as_ref()
+                        .and_then(|p| p.sign_flow.retired.as_ref())
+                        .ok_or_else(|| rejected("CompletedPair requires both actual retired results"))?;
+                    custody.check_current()?;
+                    deadline = deadline.min(custody.original_service_deadline()).min(custody.original_writer_deadline());
+                }
+                let inputs = CompletedPairInputsV1 { owners: [self.retained_signing_inputs(Role::Signer1)?, self.retained_signing_inputs(Role::Signer2)?] };
+                let preparation = self.pair_flow.begin(inputs, deadline)?;
+                self.driver.borrow_mut().prepare_completed_pair(preparation.inputs, preparation.deadline)?;
+                self.transition(Phase::CompletedPairFlow, frame);
+            }
+            Intent::CompletedPairAction if self.phase == Phase::CompletedPairFlow
+                && self.read_to_end && self.acknowledged && frame > self.phase_frame
+                && self.password.is_none() && !host_entry_blocks_source(self.host_entry) =>
+            {
+                match self.pair_flow.action(&self.native)? {
+                    PairOutbound::Setup(o) => self.driver.borrow_mut().send_completed_pair_setup(o)?,
+                    PairOutbound::Serve(o) => self.driver.borrow_mut().send_completed_pair_serve(o)?,
+                }
+                self.transition(Phase::CompletedPairFlow, frame);
+            }
             Intent::WriterAction if self.phase == Phase::WriterFlow && self.read_to_end => {
                 self.writer_action(frame)?;
             }
@@ -5994,12 +6189,32 @@ impl Window {
                 self.host_ordinal = ordinal;
                 self.host_entry = HostEntry::Editing(ordinal);
             }
+            Intent::SaveContinuationSelector(role) | Intent::SaveResultSelector(role)
+                if matches!(self.phase, Phase::SetupNeeded | Phase::Selecting | Phase::SignCommitted | Phase::SignedRetired | Phase::ReturnCompleted)
+                    && self.password.is_none() && !host_entry_blocks_source(self.host_entry) =>
+            {
+                let is_result = matches!(intent, Intent::SaveResultSelector(_));
+                let i = index(role);
+                let (path, json) = if is_result {
+                    let data = self.result_selectors[i].as_ref().ok_or_else(|| rejected("actual result selector absent"))?;
+                    (&self.result_save_paths[i], data.selector_json()?)
+                } else {
+                    let data = self.retained_continue[i].as_ref().ok_or_else(|| rejected("actual Continue selector absent"))?;
+                    (&self.continuation_save_paths[i], continuation_selector_json(data)?)
+                };
+                self.message = if save_actual_selector(path, &json).is_ok() {
+                    "Exact existing selector saved to the selected new file. Select that file at the Host prompt; saving is not consent and renews no deadline."
+                } else {
+                    "Selector save failed. The destination may already exist or contain an incomplete write; it was not overwritten or deleted. Choose a new path for another explicit attempt."
+                };
+            }
             Intent::ShowContinuationSelector(role)
                 if matches!(
                     self.phase,
                     Phase::SetupNeeded
                         | Phase::Selecting
                         | Phase::SignCommitted
+                        | Phase::SignedRetired
                         | Phase::ReturnCompleted
                 ) =>
             {
@@ -6008,6 +6223,19 @@ impl Window {
                     .ok_or_else(|| rejected("original Continue selector absent"))?;
                 continuation_selector_json(p)?;
                 self.continuation_selector_visible[index(role)] = true;
+            }
+            Intent::RetireSigning
+                if signing_retirement_action_eligible(self.phase, self.sign_flow.committed.is_some(),
+                    self.sign_flow.retirement_requested, self.password.is_some(),
+                    host_entry_blocks_source(self.host_entry), self.focused_last,
+                    self.native.is_revoked(), frame > self.phase_frame) =>
+            {
+                let role = self.active.ok_or_else(|| rejected("Signing retirement role missing"))?;
+                self.writer_flow.serving.as_ref()
+                    .ok_or_else(|| rejected("Signing retirement service missing"))?.check_current()?;
+                self.sign_flow.retirement_requested = true;
+                self.transition(Phase::SigningRetiring, frame);
+                self.driver.borrow_mut().begin_signing_retirement(role)?;
             }
             Intent::ParkFinancial
                 if financial_park_eligible(
@@ -6023,6 +6251,8 @@ impl Window {
                 if self.active != Some(role) || self.financial_parked[index(role)].is_some() {
                     return Err(rejected("financial owner changed"));
                 }
+                self.sign_flow.retired.as_ref()
+                    .ok_or_else(|| rejected("actual signed retirement custody missing"))?.check_current()?;
                 let mut held = RetainedFinancialRole::default();
                 held.phase = Some(self.phase);
                 held.exchange(self);
@@ -6058,6 +6288,13 @@ impl Window {
             {
                 if self.financial_loaded.is_some() || self.financial_parked[index(role)].is_some() {
                     return Err(rejected("financial role already loaded or retained"));
+                }
+                // A second financial W lifetime cannot overlap the previous
+                // original Signing owner on the shared protected installation.
+                let other = 1 - index(role);
+                if self.financial_setup_selected[other]
+                    && self.financial_parked[other].as_ref().is_none_or(|p| !p.current()) {
+                    return Err(rejected("previous financial role not actually retired"));
                 }
                 self.financial_loaded = Some(role);
                 self.active = Some(role);
@@ -6306,7 +6543,7 @@ impl Window {
     fn history_retirement_tail(&mut self) -> Result<()> {
         if !matches!(
             self.phase,
-            Phase::HistoryRetiring | Phase::RetirementBlocked
+            Phase::HistoryRetiring | Phase::RetirementBlocked | Phase::SigningRetiring
         ) || !self.focused_last
             || self.native.is_revoked()
         {
@@ -6320,7 +6557,9 @@ impl Window {
             }
             let outbound = self.native.pause_for_witness_retirement(ticket)?;
             self.retirement_paused = Some((role, cutoff));
-            if self.phase == Phase::RetirementBlocked {
+            if self.phase == Phase::SigningRetiring {
+                self.driver.borrow_mut().send_signing_retirement(role, outbound)?;
+            } else if self.phase == Phase::RetirementBlocked {
                 self.driver
                     .borrow_mut()
                     .send_signing_predecessor_retirement(role, outbound)?;
@@ -6665,6 +6904,7 @@ fn host_phase_allows_input(phase: Phase) -> bool {
             | Phase::Waiting
             | Phase::SetupNeeded
             | Phase::SignCommitted
+            | Phase::SignedRetired
             | Phase::ReturnCompleted
     )
 }
@@ -8705,7 +8945,7 @@ fn financial_park_eligible(
     host_editing: bool,
     revoked: bool,
 ) -> bool {
-    matches!(phase, Phase::SignCommitted | Phase::ReturnCompleted)
+    matches!(phase, Phase::SignedRetired | Phase::ReturnCompleted)
         && !password
         && !host_editing
         && !revoked
@@ -8715,13 +8955,15 @@ mod financial_role_custody_tests {
     use super::*;
     #[test]
     fn only_actual_signed_or_finished_custody_can_leave_visible_role() {
-        for p in [Phase::SignCommitted, Phase::ReturnCompleted] {
+        for p in [Phase::SignedRetired, Phase::ReturnCompleted] {
             assert!(financial_park_eligible(p, false, false, false));
             assert!(!financial_park_eligible(p, true, false, false));
             assert!(!financial_park_eligible(p, false, true, false));
             assert!(!financial_park_eligible(p, false, false, true));
         }
         for p in [
+            Phase::SignCommitted,
+            Phase::SigningRetiring,
             Phase::SignExactReview,
             Phase::SigningExact,
             Phase::ReturnReading,
@@ -8742,4 +8984,63 @@ fn continuation_selector_json(p: &SignerContinuePresentationV1) -> Result<String
         "{{\"version\":1,\"continuation\":{}}}",
         p.request_json
     ))
+}
+
+// Review of this action is an explicit request to finish a current service,
+// never a substitute for Origin's actual signed result and normal-reap proof.
+fn signing_retirement_action_eligible(phase: Phase, committed: bool, attempted: bool,
+    password: bool, host_editing: bool, focused: bool, revoked: bool, later_frame: bool) -> bool {
+    phase == Phase::SignCommitted && committed && !attempted && !password
+        && !host_editing && focused && !revoked && later_frame
+}
+#[cfg(test)]
+mod signing_retirement_action_tests {
+    use super::*;
+    #[test]
+    fn signing_retirement_requires_actual_commit_and_fresh_explicit_action() {
+        assert!(signing_retirement_action_eligible(Phase::SignCommitted,true,false,false,false,true,false,true));
+        for p in [Phase::SigningExact,Phase::SignPrepared,Phase::SigningRetiring,Phase::SignedRetired,Phase::Selecting] {
+            assert!(!signing_retirement_action_eligible(p,true,false,false,false,true,false,true));
+        }
+        assert!(!signing_retirement_action_eligible(Phase::SignCommitted,false,false,false,false,true,false,true));
+        assert!(!signing_retirement_action_eligible(Phase::SignCommitted,true,true,false,false,true,false,true));
+        assert!(!signing_retirement_action_eligible(Phase::SignCommitted,true,false,true,false,true,false,true));
+        assert!(!signing_retirement_action_eligible(Phase::SignCommitted,true,false,false,true,true,false,true));
+        assert!(!signing_retirement_action_eligible(Phase::SignCommitted,true,false,false,false,false,false,true));
+        assert!(!signing_retirement_action_eligible(Phase::SignCommitted,true,false,false,false,true,true,true));
+        assert!(!signing_retirement_action_eligible(Phase::SignCommitted,true,false,false,false,true,false,false));
+    }
+    #[test]
+    fn absent_retirement_custody_never_makes_parked_owner_current() {
+        let held = RetainedFinancialRole::default();
+        assert!(!held.current());
+    }
+}
+
+fn selector_path_valid(path: &str) -> bool {
+    !path.is_empty() && path.len() <= 4096 && !path.contains('\0')
+        && std::path::Path::new(path).is_absolute()
+}
+fn save_actual_selector(path: &str, json: &str) -> Result<()> {
+    use std::{io::Write, os::unix::fs::OpenOptionsExt};
+    if !selector_path_valid(path) || json.is_empty() || json.len() > 64 * 1024 {
+        return Err(rejected("selector destination or exact bytes invalid"));
+    }
+    // create_new atomically rejects existing files and symlinks, including
+    // dangling ones. Rust's File opens with close-on-exec on this Unix target.
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600)
+        .open(path)
+        .map_err(|_| rejected("selector new file unavailable"))?;
+    file.write_all(json.as_bytes()).map_err(|_| rejected("selector exact write failed"))?;
+    file.sync_all().map_err(|_| rejected("selector exact file sync failed"))
+}
+#[cfg(test)]
+mod actual_selector_save_tests {
+    use super::*;
+    #[test]
+    fn selector_destination_is_explicit_absolute_and_bounded() {
+        assert!(selector_path_valid("/tmp/explicit-selector.json"));
+        for p in ["", "relative.json", "/tmp/bad\0name"] { assert!(!selector_path_valid(p)); }
+        assert!(!selector_path_valid(&format!("/{}", "x".repeat(4096))));
+    }
 }

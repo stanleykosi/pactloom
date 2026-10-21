@@ -378,6 +378,9 @@ impl InertTreeV1 {
     }
 
     #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn completed_pair(&self)->Result<&DirectChild>{self.children.iter().flatten().find(|c|c.role()==Role::CompletedPair).ok_or_else(||rejected("original CompletedPair child missing"))}
+
+    #[cfg(feature="coordinated-financial-workflow-v1")]
     pub(super) fn take_witness_retirement(&mut self,target:crate::SignerContinueRoleV1,purpose:crate::host_interstage::RetirementPurpose,instance:String,core:std::sync::Arc<crate::signer_continue_state::Core>)->Result<OwnedWitnessRetirement>{
         let role=purpose.role(target);
         let index=self.children.iter().position(|c|c.as_ref().is_some_and(|c|c.role()==role)).ok_or_else(||rejected("retirement original child missing"))?;

@@ -231,6 +231,11 @@ pub(super) struct DirectChild {
 }
 impl DirectChild {
     #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn completed_pair_send_positive(&self, packet:&crate::completed_pair_channel::Packet, phases:&crate::signer_continue_state::Phases, deadline:Instant)->Result<crate::FinancialSendProgressV1>{
+        self.require_owner()?;
+        crate::completed_pair_channel::send_positive(self.channel.review_fd(),self.local_role,&self.peer,packet,phases,deadline)
+    }
+    #[cfg(feature="coordinated-financial-workflow-v1")]
     pub(super) fn completed_pair_send(&self,packet:&crate::completed_pair_channel::Packet)->Result<()>{
         self.require_owner()?;
         crate::completed_pair_channel::send(self.channel.review_fd(),self.local_role,&self.peer,packet)

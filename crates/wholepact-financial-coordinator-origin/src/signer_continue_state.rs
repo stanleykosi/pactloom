@@ -241,6 +241,27 @@ impl Phases {
             let new=(old&!(15<<shift))|((to as u64)<<shift);
             match self.word.compare_exchange_weak(old,new,Ordering::AcqRel,Ordering::Acquire){Ok(_)=>return Ok(()),Err(actual)=>old=actual}}
     }
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn signing_retirement_step(&self,slot:usize,from:u8,to:u8)->Result<()> {
+        if slot>1||!matches!((from,to),(4,5)|(5,6)){return Err(rejected("invalid normal Signing retirement transition"));}
+        let shift=32+slot*4;let mut old=self.word.load(Ordering::Acquire);
+        loop{if old&REVOKED!=0||old&QUIESCENT==0||((old>>shift)&15)!=from as u64{return Err(rejected("Signing retirement not exclusive current phase"));}
+            let new=(old&!(15<<shift))|((to as u64)<<shift);
+            match self.word.compare_exchange_weak(old,new,Ordering::AcqRel,Ordering::Acquire){Ok(_)=>return Ok(()),Err(actual)=>old=actual}}
+    }
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn pair_phase(&self)->u8{((self.word.load(Ordering::Acquire)>>40)&15)as u8}
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn pair_step(&self,from:u8,to:u8)->Result<()> {
+        if from>15||to>15{return Err(rejected("invalid Pair phase"));}let mut old=self.word.load(Ordering::Acquire);
+        loop{if old&(REVOKED|QUIESCENT)!=0||((old>>40)&15)!=from as u64{return Err(rejected("Pair phase consumed or restricted"));}
+            let new=(old&!(15<<40))|((to as u64)<<40);match self.word.compare_exchange_weak(old,new,Ordering::AcqRel,Ordering::Acquire){Ok(_)=>return Ok(()),Err(actual)=>old=actual}}
+    }
+    #[cfg(feature="coordinated-financial-workflow-v1")]
+    pub(super) fn pair_send_restricted(&self,expected:u8)->Result<bool>{
+        let word=self.word.load(Ordering::Acquire);if ((word>>40)&15)!=expected as u64{return Err(rejected("Pair send phase mismatch"));}
+        if word&QUIESCENT!=0{return Err(rejected("Pair send during retirement"));}Ok(word&REVOKED!=0)
+    }
     /// Only after actual normal owned History reap. This observation keeps
     /// QUIESCENT and R, and cannot create any native admission or reset a slot.
     #[cfg(feature="coordinated-financial-workflow-v1")]
@@ -526,4 +547,12 @@ mod fresh_receipt_observation_tests {
  use super::*;
  #[test]fn fresh_record_completion_preserves_r_without_issuing_next_purpose(){let p=Phases::new();p.step(0,0,133).unwrap();p.revoke();p.observe_v3_enrollment_published(0).unwrap();assert!(p.revoked());assert_eq!(p.phase(0),134);assert!(p.step(0,134,135).is_err());assert!(p.observe_v3_enrollment_published(0).is_err());let p=Phases::new();p.step(1,0,136).unwrap();p.revoke();p.observe_v3_manifest_published(1).unwrap();assert!(p.revoked());assert_eq!(p.phase(1),137);assert!(p.step(1,137,138).is_err());}
  #[test]fn fresh_record_observation_rejects_wrong_slot_phase_and_quiescence(){let p=Phases::new();assert!(p.observe_v3_enrollment_published(2).is_err());assert!(p.observe_v3_manifest_published(0).is_err());p.step(0,0,133).unwrap();p.word.fetch_or(QUIESCENT,Ordering::AcqRel);assert!(p.observe_v3_enrollment_published(0).is_err());}
+}
+
+#[cfg(all(test,feature="coordinated-financial-workflow-v1"))]
+mod signing_retirement_pair_tests {
+ use super::*;
+ #[test]fn signing_normal_retirement_requires_exclusive_exact_transition(){let p=Phases::new();p.signing_step(0,0,4).unwrap();assert!(p.signing_retirement_step(0,4,5).is_err());p.begin_quiescence(p.snapshot()).unwrap();assert!(p.signing_retirement_step(0,4,6).is_err());p.signing_retirement_step(0,4,5).unwrap();p.signing_retirement_step(0,5,6).unwrap();assert!(p.signing_retirement_step(0,5,6).is_err());assert!(p.quiescent());}
+ #[test]fn revoke_during_normal_reap_cannot_create_retired_phase(){let p=Phases::new();p.signing_step(0,0,4).unwrap();p.begin_quiescence(p.snapshot()).unwrap();p.signing_retirement_step(0,4,5).unwrap();p.revoke();assert!(p.signing_retirement_step(0,5,6).is_err());assert!(p.finish_quiescence().is_err());}
+ #[test]fn pair_bits_do_not_alias_signing_history_or_source(){let p=Phases::new();p.step(0,0,67).unwrap();p.signing_step(0,0,6).unwrap();p.history_step(1,0,6).unwrap();p.pair_step(0,1).unwrap();assert_eq!(p.phase(0),67);assert_eq!(p.signing_phase(0),6);assert_eq!(p.history_phase(1),6);assert_eq!(p.pair_phase(),1);p.revoke();assert!(p.pair_send_restricted(1).unwrap());assert!(p.pair_step(1,2).is_err());}
 }

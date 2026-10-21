@@ -12,24 +12,42 @@ pub(crate) use completed_pair::HostPairReceiveState;
 const RUNNING:u8=0;const PARKED:u8=1;const REQUESTED:u8=2;const GUARDED:u8=3;
 const RESUME:u8=4;const RESUMED:u8=5;const POISON:u8=255;
 #[derive(Clone,Copy,Debug,PartialEq,Eq,Serialize,Deserialize)]
-pub(super) enum RetirementPurpose{InitialHistory,FinancialContinuation}
+pub(super) enum RetirementPurpose{InitialHistory,FinancialContinuation,FinancialSigning}
 impl RetirementPurpose{
-    pub(super) fn index(self)->usize{match self{Self::InitialHistory=>0,Self::FinancialContinuation=>1}}
+    pub(super) fn index(self)->usize{match self{Self::InitialHistory=>0,Self::FinancialContinuation=>1,Self::FinancialSigning=>2}}
     pub(super) fn role(self,target:SignerContinueRoleV1)->crate::process::Role{match self{
-        Self::InitialHistory=>crate::financial_history_channel::role_for(target),Self::FinancialContinuation=>crate::financial_witness_channel::role_for(target)}}
+        Self::InitialHistory=>crate::financial_history_channel::role_for(target),Self::FinancialContinuation=>crate::financial_witness_channel::role_for(target),Self::FinancialSigning=>crate::financial_signing_channel::role_for(target)}}
 }
 #[derive(Clone,Debug,PartialEq,Eq,Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RetirementRequest {
     pub profile:String,pub coordinator:String,pub session:String,pub target:SignerContinueRoleV1,pub purpose:RetirementPurpose,pub binding_digest:String,
     pub witness_instance:String,pub challenge:String,pub cleanup_ceiling_ms:u64,
+    pub signing:Option<SigningRetirementBindingV1>,
 }
 impl RetirementRequest {
     pub(super) fn validate(&self,clocks:FullWorkflowClocksV1)->Result<Instant>{
         if self.profile!=PROFILE||![&self.coordinator,&self.session,&self.witness_instance,&self.challenge,&self.binding_digest].iter().all(|v|hash(v)){
             return Err(rejected("original retirement identity rejected"));}
+        match (&self.purpose,&self.signing) {
+            (RetirementPurpose::FinancialSigning,Some(binding))=>{binding.validate()?;if binding.commitment()?!=self.binding_digest{return Err(rejected("Signing retirement commitment changed"));}},
+            (RetirementPurpose::FinancialSigning,None)=>return Err(rejected("Signing retirement missing actual result")),
+            (_,Some(_))=>return Err(rejected("non Signing retirement contains signed result")),
+            (_,None)=>{},
+        }
         clocks.received_cleanup(self.cleanup_ceiling_ms,Instant::now())
     }
+}
+/// Ordinary correlation only. Only the actual C/H result slots may supply it.
+#[derive(Clone,Debug,PartialEq,Eq,Serialize,Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SigningRetirementBindingV1 {
+    pub original_commitment:String,
+    pub signed:crate::SignerSignCommittedV1,
+}
+impl SigningRetirementBindingV1 {
+    pub(super) fn validate(&self)->Result<()>{self.signed.validate()?;if !hash(&self.original_commitment){return Err(rejected("Signing retirement original"));}Ok(())}
+    pub(super) fn commitment(&self)->Result<String>{use sha2::{Digest,Sha256};self.validate()?;let mut h=Sha256::new();h.update(b"wholepact:signing-retirement:v1\0");h.update(serde_json::to_vec(self).map_err(|_|rejected("Signing retirement encoding"))?);Ok(hex::encode(h.finalize()))}
 }
 /// Created only in actual H after both S forks. Physical-effect paths sample
 /// only this atomic; the tiny inert control-record mutex never covers I/O.
@@ -204,6 +222,12 @@ impl HostWitnessRetirementGuardV1<'_>{
         self.wait_resume()
     }
 
+    pub fn wait_financial_signing_resume(self,target:SignerContinueRoleV1,authorization_id:&str,original_consent_ref:&str)->Result<()> {
+        let matches=self.request.target==target && self.request.purpose==RetirementPurpose::FinancialSigning
+            && self.request.signing.as_ref().is_some_and(|b|b.signed.authorization_id==authorization_id && b.signed.original_consent_ref==original_consent_ref);
+        if !matches{self.wait.state.poison();return Err(rejected("Host Signing retirement differs from selected actual result"));}
+        self.wait_resume()
+    }
     pub fn wait_resume(mut self)->Result<()>{
         loop{self.wait.state.check_wait()?;
             let phase=self.wait.state.state.load(Ordering::SeqCst);
@@ -231,13 +255,13 @@ mod tests{
         assert_eq!(RetirementPurpose::InitialHistory.role(SignerContinueRoleV1::Signer1),Role::Owner1FinancialReadHistory);
         assert_eq!(RetirementPurpose::FinancialContinuation.role(SignerContinueRoleV1::Signer1),Role::Owner1FinancialContinuationAdmission);
         assert_ne!(RetirementPurpose::InitialHistory.index(),RetirementPurpose::FinancialContinuation.index());
-        assert!(serde_json::from_str::<RetirementPurpose>("\"FinancialSigning\"").is_err());
+        assert_eq!(RetirementPurpose::FinancialSigning.role(SignerContinueRoleV1::Signer1),Role::Owner1FinancialSigning);
     }
     #[test]
     fn retirement_request_is_fixed_profile_identity_and_original_cleanup_data(){
         let clocks=FullWorkflowClocksV1::from_initial_epoch(Instant::now()).unwrap();let h="a".repeat(64);
         let r=RetirementRequest{profile:PROFILE.into(),coordinator:h.clone(),session:h.clone(),target:SignerContinueRoleV1::Signer1,purpose:RetirementPurpose::FinancialContinuation,binding_digest:h.clone(),
-            witness_instance:h.clone(),challenge:h,cleanup_ceiling_ms:5_000};
+            witness_instance:h.clone(),challenge:h,cleanup_ceiling_ms:5_000,signing:None};
         r.validate(clocks).unwrap();let mut bad=r.clone();bad.profile="another-profile".into();assert!(bad.validate(clocks).is_err());
         bad=r.clone();bad.challenge="".into();assert!(bad.validate(clocks).is_err());
         bad=r.clone();bad.cleanup_ceiling_ms=1_805_001;assert!(bad.validate(clocks).is_err());

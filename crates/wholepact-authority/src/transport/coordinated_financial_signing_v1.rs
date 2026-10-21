@@ -47,6 +47,7 @@ fn monitor(owned: &mut super::coordinated_service_worker_v1::ServiceWorkerOwnerV
     let mut disposed = false;
     let mut failure_reported = false;
     let mut ordered_terminal = false;
+    let mut normal_finish = false;
     loop {
         origin
             .check_original_coordinator_alive()
@@ -99,7 +100,14 @@ fn monitor(owned: &mut super::coordinated_service_worker_v1::ServiceWorkerOwnerV
                     .try_send(grant)
                     .map_err(|_| AuthorityError::Permission)?;
             }
-            Some(Request::FinishService | Request::Cancel) => {
+            Some(Request::FinishService) => {
+                normal_finish = true;
+                stopped.store(true, Ordering::Release);
+                terminal = true;
+                ordered_terminal = true;
+                drop(serve_tx.take());
+            }
+            Some(Request::Cancel) => {
                 // Origin already latched its genuine local restriction before
                 // returning this request. Stop before dropping queues/custody.
                 stopped.store(true, Ordering::Release);
@@ -148,7 +156,17 @@ fn monitor(owned: &mut super::coordinated_service_worker_v1::ServiceWorkerOwnerV
                 .ok_or(AuthorityError::Storage)?
                 .join()
                 .map_err(|_| AuthorityError::Storage)?;
-            if result.is_err() && !terminal {
+            // A genuine normal FinishService requires a successfully joined
+            // worker, not merely a joined handle. Cancellation can dispose
+            // failed work, but must never turn its result into normal success.
+            if normal_finish {
+                if let Err(error) = result {
+                    origin.restrict();
+                    stopped.store(true, Ordering::Release);
+                    origin.send_service_failed().map_err(|_| AuthorityError::Permission)?;
+                    return Err(error);
+                }
+            } else if result.is_err() && !terminal {
                 origin.restrict();
                 stopped.store(true, Ordering::Release);
                 terminal = true;

@@ -1,6 +1,7 @@
 //! Distinct original-result Read and exact same-original-Host Return.
 use super::activate::ActivateReview;
-use super::signing::{FinancialSigningServingV1, SigningServiceLease};
+use super::signed_custody::{FinancialSignedResultCustodyV1, SignedResultLease};
+use super::completed_pair::{FinancialCompletedPairServingV1, CompletedPairServiceLease};
 use super::v3_entry::ReturnTransportBounds;
 use super::*;
 use crate::signer_return_data::*;
@@ -14,6 +15,7 @@ trait Presentation: Clone {
     fn validate(&self) -> Result<()>;
     fn original(&self) -> &SignerWalletOriginalV1;
     fn observed(&self) -> &SignerWalletObservedV1;
+    fn signed(&self) -> &SignerSignCommittedV1;
     fn actor(&self) -> &FinancialActorContextV1;
     fn digest(&self) -> &str;
     fn ceiling(&self) -> u64;
@@ -31,6 +33,9 @@ impl Presentation for SignerReturnReadPresentationV1 {
     }
     fn observed(&self) -> &SignerWalletObservedV1 {
         &self.facts.observed
+    }
+    fn signed(&self) -> &SignerSignCommittedV1 {
+        &self.facts.signed
     }
     fn actor(&self) -> &FinancialActorContextV1 {
         &self.actor
@@ -68,6 +73,9 @@ impl Presentation for SignerReturnExactPresentationV1 {
     }
     fn observed(&self) -> &SignerWalletObservedV1 {
         &self.facts.read.facts.observed
+    }
+    fn signed(&self) -> &SignerSignCommittedV1 {
+        &self.facts.read.facts.signed
     }
     fn actor(&self) -> &FinancialActorContextV1 {
         &self.actor
@@ -253,7 +261,8 @@ impl Drop for SignerReturnReadTicketV1 {
 }
 pub struct SignerReturnReadOutboundV1 {
     binding: Arc<Binding<SignerReturnReadPresentationV1>>,
-    service: SigningServiceLease,
+    signed: SignedResultLease,
+    pair: CompletedPairServiceLease,
     consumed: bool,
 }
 impl Drop for SignerReturnReadOutboundV1 {
@@ -308,26 +317,29 @@ impl CoordinatorFinancialNativeV1 {
     pub fn admit_return_read(
         &self,
         mut ticket: SignerReturnReadTicketV1,
-        serving: &FinancialSigningServingV1,
+        custody: &FinancialSignedResultCustodyV1,
+        pair: &FinancialCompletedPairServingV1,
     ) -> Result<SignerReturnReadOutboundV1> {
         let b = &ticket.binding;
         if !Arc::ptr_eq(&self.core, b.core()) {
             self.revoke();
             return Err(rejected("sign foreign native Core"));
         }
-        serving.matches_acquire(&self.core, &b.activation.read.acquired_presentation)?;
-        let service = serving.retain()?;
-        b.activation
-            .read
-            .service
-            .require_same(&service.correlation())?;
+        let original = &b.activation.read.service.correlation().original;
+        let signed = custody.retain()?;
+        signed.require_same(&self.core, original, b.p.signed())?;
+        b.activation.read.service.require_same(&signed.correlation())?;
+        pair.require_member(&self.core, original, b.p.signed())?;
+        let pair = pair.retain()?;
         ticket.check_current()?;
-        service.check()?;
+        signed.check()?;
+        pair.check()?;
         self.core.phase.step(b.slot(), 68, 69)?;
         ticket.consumed = true;
         Ok(SignerReturnReadOutboundV1 {
             binding: Arc::clone(b),
-            service,
+            signed,
+            pair,
             consumed: false,
         })
     }
@@ -355,11 +367,9 @@ impl CoordinatorFinancialEndpointV1 {
                 return Err(rejected("sign outbound mismatch/replay"));
             }
             b.bounds()?;
-            out.service.check()?;
-            b.activation
-                .read
-                .service
-                .require_same(&out.service.correlation())?;
+            out.signed.require_same(&self.core, &b.activation.read.service.correlation().original, b.p.signed())?;
+            b.activation.read.service.require_same(&out.signed.correlation())?;
+            out.pair.require_member(&self.core, &b.activation.read.service.correlation().original, b.p.signed())?;
             if self.core.phase.source_send_restricted(i, 69)? {
                 return Ok(FinancialSendProgressV1::Restricted);
             }
@@ -411,7 +421,8 @@ impl Drop for SignerReturnExactTicketV1 {
 }
 pub struct SignerReturnExactOutboundV1 {
     binding: Arc<Binding<SignerReturnExactPresentationV1>>,
-    service: SigningServiceLease,
+    signed: SignedResultLease,
+    pair: CompletedPairServiceLease,
     consumed: bool,
 }
 impl Drop for SignerReturnExactOutboundV1 {
@@ -469,26 +480,29 @@ impl CoordinatorFinancialNativeV1 {
     pub fn admit_return_exact(
         &self,
         mut ticket: SignerReturnExactTicketV1,
-        serving: &FinancialSigningServingV1,
+        custody: &FinancialSignedResultCustodyV1,
+        pair: &FinancialCompletedPairServingV1,
     ) -> Result<SignerReturnExactOutboundV1> {
         let b = &ticket.binding;
         if !Arc::ptr_eq(&self.core, b.core()) {
             self.revoke();
             return Err(rejected("sign foreign native Core"));
         }
-        serving.matches_acquire(&self.core, &b.activation.read.acquired_presentation)?;
-        let service = serving.retain()?;
-        b.activation
-            .read
-            .service
-            .require_same(&service.correlation())?;
+        let original = &b.activation.read.service.correlation().original;
+        let signed = custody.retain()?;
+        signed.require_same(&self.core, original, b.p.signed())?;
+        b.activation.read.service.require_same(&signed.correlation())?;
+        pair.require_member(&self.core, original, b.p.signed())?;
+        let pair = pair.retain()?;
         ticket.check_current()?;
-        service.check()?;
+        signed.check()?;
+        pair.check()?;
         self.core.phase.step(b.slot(), 71, 72)?;
         ticket.consumed = true;
         Ok(SignerReturnExactOutboundV1 {
             binding: Arc::clone(b),
-            service,
+            signed,
+            pair,
             consumed: false,
         })
     }
@@ -516,11 +530,9 @@ impl CoordinatorFinancialEndpointV1 {
                 return Err(rejected("sign outbound mismatch/replay"));
             }
             b.bounds()?;
-            out.service.check()?;
-            b.activation
-                .read
-                .service
-                .require_same(&out.service.correlation())?;
+            out.signed.require_same(&self.core, &b.activation.read.service.correlation().original, b.p.signed())?;
+            b.activation.read.service.require_same(&out.signed.correlation())?;
+            out.pair.require_member(&self.core, &b.activation.read.service.correlation().original, b.p.signed())?;
             if self.core.phase.source_send_restricted(i, 72)? {
                 return Ok(FinancialSendProgressV1::Restricted);
             }
@@ -1343,6 +1355,24 @@ impl SignerFinancialWorkflowOriginV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn return_native_admissions_and_outbound_samples_deny_r_and_q() {
+        for (before, after) in [(68, 69), (71, 72)] {
+            let q = Phases::new();
+            q.step(0, 0, before).unwrap();
+            q.begin_quiescence(q.snapshot()).unwrap();
+            assert!(q.step(0, before, after).is_err());
+            assert!(q.source_send_restricted(0, before).is_err());
+            assert!(q.positive_send_restricted().is_err());
+            assert_eq!(q.phase(0), before);
+            let r = Phases::new();
+            r.step(0, 0, before).unwrap(); r.revoke();
+            assert!(r.step(0, before, after).is_err());
+            assert!(r.source_send_restricted(0, before).unwrap());
+            assert!(r.positive_send_restricted().unwrap());
+            assert_eq!(r.phase(0), before);
+        }
+    }
     #[test]
     fn finished_return_observation_preserves_r_not_permission() {
         let p = Phases::new();

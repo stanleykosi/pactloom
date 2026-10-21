@@ -6,7 +6,7 @@ pub(super) const PAIR_ADMITTED: u8 = 129;
 pub(super) const PAIR_ISSUED: u8 = 130;
 pub(super) const PAIRED: u8 = 131;
 #[derive(Default)]
-pub(super) struct PairSlot {
+pub(in crate::financial_workflow_origin) struct PairSlot {
     pub endpoint: Option<SignerV3PairEndpointV1>,
     pub(super) binding: Option<Arc<PairBinding>>,
     pub(super) wire: Option<SignerV3PairPresentationV1>,

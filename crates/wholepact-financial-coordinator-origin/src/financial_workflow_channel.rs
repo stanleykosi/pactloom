@@ -230,6 +230,7 @@ pub enum FinancialWorkflowStageV1 { SourceEntry, InitialRead, Continue }
 #[derive(Serialize,Deserialize)]
 #[serde(tag="kind",deny_unknown_fields)]
 pub(super) enum Packet {
+    FinancialResultSelector{role:Target,data:crate::SignerFinancialResultSelectorV1},
     CompletedPairServing{data:crate::CompletedPairPresentationV1,witness_instance:String,serve_challenge:String,service_ceiling_ms:u64},
     RetireRequest{request:crate::host_interstage::RetirementRequest},
     RetireQuiescent{request:crate::host_interstage::RetirementRequest},
@@ -346,6 +347,7 @@ impl Packet {
         Self::V3AdmitReadRetained{role,data}=>{data.validate()?;Some(*role)},
         Self::V3AdmitReadFinal{role,presentation_digest}=>{if !hash(presentation_digest){return Err(rejected("AdmitRead Final digest"));}Some(*role)},
         Self::ReturnReadDisplay{presentation}=>{presentation.validate()?;Some(presentation.actor.signer_role)},Self::ReturnExactDisplay{presentation}=>{presentation.validate()?;Some(presentation.actor.signer_role)},Self::ReturnReadFinal{role,presentation_digest}|Self::ReturnExactFinal{role,presentation_digest}=>{if !hash(presentation_digest){return Err(rejected("Return Final digest"));}Some(*role)},Self::ReturnPrepared{role,data}=>{data.validate()?;Some(*role)},Self::ReturnCompleted{role,data}=>{data.validate()?;Some(*role)},Self::ReturnFailed{role,data}=>{data.validate()?;Some(*role)},
+        Self::FinancialResultSelector{role,data}=>{data.validate()?;if data.actor.signer_role!=*role{return Err(rejected("selector actor role"));}Some(*role)},
         Self::SignReadDisplay{presentation}=>{presentation.validate()?;Some(presentation.actor.signer_role)},Self::SignExactDisplay{presentation}=>{presentation.validate()?;Some(presentation.actor.signer_role)},Self::SignReadFinal{role,presentation_digest}|Self::SignExactFinal{role,presentation_digest}=>{if !hash(presentation_digest){return Err(rejected("sign Final digest"));}Some(*role)},Self::SignPrepared{role,data}=>{data.validate()?;Some(*role)},Self::SignCommitted{role,data}=>{data.validate()?;Some(*role)},Self::SignFailed{role,data}=>{data.validate()?;Some(*role)},
         Self::WalletPrepareDisplay{presentation}=>{presentation.validate()?;Some(presentation.actor.signer_role)},
         Self::WalletObserveDisplay{presentation}=>{presentation.validate()?;Some(presentation.actor.signer_role)},

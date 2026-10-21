@@ -55,6 +55,10 @@ impl Driver {
             self.state=State::Financial(w.join()?);
         }
         if !matches!(&self.state,State::Financial(_)){return Ok(())}
+        if let State::Financial(FinancialState::AwaitingReturn(actual))=&mut self.state {
+            // Actual owner is stored before any fallible metadata observation.
+            actual.report_result_selector(&mut self.origin)?;
+        }
         if matches!(&self.state,State::Financial(FinancialState::AwaitingReturn(_))) {
             let event=self.financial_transport.as_ref().ok_or(Error::Unavailable)?.next_result()?;
             if let Some(event)=event {

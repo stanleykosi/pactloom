@@ -152,6 +152,7 @@ impl<P: Presentation, R> Default for Slot<P, R> {
 }
 #[derive(Default)]
 pub(super) struct SignSlots {
+    pub(super) selector_seen:bool,
     pub(super) returning: super::returning::ReturnSlots,
     read: Slot<SignerSignReadPresentationV1, SignerSignPreparedV1>,
     exact: Slot<SignerSignExactPresentationV1, SignerSignCommittedV1>,

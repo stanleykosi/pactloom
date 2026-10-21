@@ -21,6 +21,8 @@ mod financial_source_driver;
 #[cfg(all(target_os = "linux", feature = "coordinated-financial-source-ui"))]
 mod financial_source_ui;
 #[cfg(all(target_os = "linux", feature = "coordinated-financial-source-ui"))]
+mod financial_completed_pair_ui;
+#[cfg(all(target_os = "linux", feature = "coordinated-financial-source-ui"))]
 mod host_line_input;
 #[cfg(all(target_os = "linux", feature = "coordinated-financial-source-ui"))]
 mod host_output_text;

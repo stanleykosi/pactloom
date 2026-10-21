@@ -17,6 +17,9 @@ use crate::{SignerContinueArmV1,SignerContinueFinalV1,SignerContinueSourceFactsV
     SignerContinuePresentationV1,SignerContinueOutcomeV1};
 use crate::signer_continue_state::SENT;
 
+#[path="financial_selector_origin.rs"]
+mod financial_selector;
+
 #[path="original_signer_host_peer.rs"]
 mod original_host_peer;
 pub use original_host_peer::OriginalSignerHostPeerV1;
@@ -57,6 +60,12 @@ pub use history::{FinancialHistorySetupTicketV1,FinancialHistorySetupOutboundV1,
 #[path="financial_signing_coordinator.rs"]
 mod signing;
 pub use signing::{FinancialSigningSetupTicketV1,FinancialSigningSetupOutboundV1,FinancialSigningReviewTicketV1,FinancialSigningServeOutboundV1,FinancialSigningServingV1,CoordinatorFinancialSigningEventV1};
+#[path="completed_pair_coordinator.rs"]
+mod completed_pair;
+pub use completed_pair::{FinancialCompletedPairSetupTicketV1,FinancialCompletedPairSetupOutboundV1,FinancialCompletedPairReviewTicketV1,FinancialCompletedPairServeOutboundV1,FinancialCompletedPairServingV1,CoordinatorCompletedPairEventV1};
+#[path="signed_result_custody.rs"]
+mod signed_custody;
+pub use signed_custody::FinancialSignedResultCustodyV1;
 #[path="witness_retirement.rs"]
 mod retirement;
 pub use retirement::{CoordinatorWitnessRetirementTicketV1,CoordinatorWitnessRetirementOutboundV1,CoordinatorWitnessRetiredV1};
@@ -441,6 +450,7 @@ impl CoordinatorFinancialNativeV1 {
 }
 impl Drop for CoordinatorFinancialNativeV1{fn drop(&mut self){self.revoke();}}
 pub enum CoordinatorFinancialEventV1 {
+    FinancialResultSelector{role:Target,data:crate::SignerFinancialResultSelectorV1},
     V3PairEndpoint{role:Target,data:crate::SignerV3PairEndpointV1},
     V3PairDisplay(SignerV3PairTicketV1),
     V3Paired{role:Target,data:crate::SignerV3PairedV1},
@@ -486,7 +496,7 @@ pub struct CoordinatorFinancialEndpointV1{
     v3_entries:[CV3Entry;2],
     core:Arc<Core>,clocks:FullWorkflowClocksV1,tree:Option<InertTreeV1>,coordinator:String,session:String,image:String,
     host_terminal:Option<crate::CoordinatorHostTerminalEndpointV1>,retirement_resume:Option<Instant>,
-    witnesses:[witness::CWSlot;2],histories:[history::CHSlot;2],signing_services:[signing::CGSlot;2],slots:[Option<CSlot>;2],cancel_sent:bool,disposed:[bool;2],cleanup:Option<Instant>,
+    witnesses:[witness::CWSlot;2],histories:[history::CHSlot;2],signing_services:[signing::CGSlot;2],pair_service:completed_pair::CPState,slots:[Option<CSlot>;2],cancel_sent:bool,disposed:[bool;2],cleanup:Option<Instant>,
 }
 pub(super) fn split_coordinator(tree:InertTreeV1,phases:PhaseDeadlinesV1,
     host_restriction:crate::host_restriction::CoordinatorHostRestrictionV1,
@@ -504,7 +514,7 @@ pub(super) fn split_coordinator(tree:InertTreeV1,phases:PhaseDeadlinesV1,
     // On error the local Core/writer drops before the tree parameter's reapers.
     let coordinator=state::nonce()?;let session=state::nonce()?;
     Ok((CoordinatorFinancialNativeV1{core:Arc::clone(&core),_thread:PhantomData},CoordinatorFinancialEndpointV1{
-        v3_entries:std::array::from_fn(|_|CV3Entry::default()),core,clocks,tree:Some(tree),coordinator,session,image,host_terminal:Some(host_terminal),retirement_resume:None,witnesses:std::array::from_fn(|_|witness::CWSlot::default()),histories:std::array::from_fn(|_|history::CHSlot::default()),signing_services:std::array::from_fn(|_|signing::CGSlot::default()),slots:[None,None],cancel_sent:false,disposed:[false;2],cleanup:None}))
+        v3_entries:std::array::from_fn(|_|CV3Entry::default()),core,clocks,tree:Some(tree),coordinator,session,image,host_terminal:Some(host_terminal),retirement_resume:None,witnesses:std::array::from_fn(|_|witness::CWSlot::default()),histories:std::array::from_fn(|_|history::CHSlot::default()),signing_services:std::array::from_fn(|_|signing::CGSlot::default()),pair_service:completed_pair::CPState::default(),slots:[None,None],cancel_sent:false,disposed:[false;2],cleanup:None}))
 }
 impl CoordinatorFinancialEndpointV1 {
     /// One C-only transport handoff to the sole owned driver, never authority.
@@ -551,6 +561,7 @@ impl CoordinatorFinancialEndpointV1 {
             for (i,w) in self.witnesses.iter().enumerate(){w.observe_active(&self.core,i)?;}
             for(i,h)in self.histories.iter().enumerate(){h.observe_active(&self.core,i)?;}
             for(i,g)in self.signing_services.iter().enumerate(){g.observe_active(&self.core,i)?;}
+            self.pair_service.observe_active(&self.core)?;
             Ok(())
         })();if result.is_err(){self.core.phase.revoke();}result
     }
@@ -673,7 +684,7 @@ impl CoordinatorFinancialEndpointV1 {
         for slot in self.slots.iter_mut().flatten(){slot.sender.take();}
         if self.cancel_sent{return Err(rejected("workflow Cancel consumed"));}self.cancel_sent=true;
         if self.cleanup.is_none(){self.cleanup=Some(self.clocks.first_cleanup_ceiling(Instant::now())?);}
-        self.cancel_witnesses()?;self.cancel_histories()?;self.cancel_signing_services()?;
+        self.cancel_witnesses()?;self.cancel_histories()?;self.cancel_signing_services()?;self.cancel_completed_pair()?;
         self.send(&Packet::Cancel{coordinator:self.coordinator.clone(),session:self.session.clone()})
     }
     pub fn try_receive(&mut self)->Result<Option<CoordinatorFinancialEventV1>>{
@@ -699,6 +710,7 @@ impl CoordinatorFinancialEndpointV1 {
         if matches!(packet,Packet::V3EnrollmentDisplay{..}|Packet::V3ManifestDisplay{..}|Packet::V3Enrolled{..}|Packet::V3ManifestAccepted{..}){return self.receive_v3_receipt_event(packet).map(Some);}
         if matches!(packet,Packet::V3PairEndpoint{..}|Packet::V3PairDisplay{..}|Packet::V3Paired{..}){return self.receive_v3_pair_event(packet).map(Some);}
         if matches!(packet,Packet::V3EntryOffer{..}|Packet::V3SourceOpened{..}|Packet::V3SourceFailed{..}){return self.receive_v3_entry_event(packet).map(Some);}
+        if matches!(packet,Packet::FinancialResultSelector{..}){return self.receive_financial_result_selector(packet).map(Some);}
         if matches!(packet,Packet::ReturnReadDisplay{..}|Packet::ReturnExactDisplay{..}|Packet::ReturnPrepared{..}|Packet::ReturnCompleted{..}|Packet::ReturnFailed{..}){return self.receive_return_event(packet).map(Some);}
         if matches!(packet,Packet::SignReadDisplay{..}|Packet::SignExactDisplay{..}|Packet::SignPrepared{..}|Packet::SignCommitted{..}|Packet::SignFailed{..}){return self.receive_sign_event(packet).map(Some);}
         if matches!(packet,Packet::WalletPrepareDisplay{..}|Packet::WalletObserveDisplay{..}|Packet::WalletPrepared{..}|Packet::WalletObserved{..}|Packet::WalletFailed{..}){return self.receive_wallet_event(packet).map(Some);}
@@ -792,7 +804,7 @@ impl CoordinatorFinancialEndpointV1 {
             _=>return Err(rejected("wrong coordinator workflow response")),
         };if let Some(read)=retained_history{self.note_history_retained(role,&read)?;}Ok(Some(event))
     }
-    pub fn is_disposed(&self)->bool{self.disposed==[true;2]&&self.witnesses.iter().all(witness::CWSlot::closed)&&self.histories.iter().all(history::CHSlot::closed)&&self.signing_services.iter().all(signing::CGSlot::closed)}
+    pub fn is_disposed(&self)->bool{self.disposed==[true;2]&&self.witnesses.iter().all(witness::CWSlot::closed)&&self.histories.iter().all(history::CHSlot::closed)&&self.signing_services.iter().all(signing::CGSlot::closed)&&self.pair_service.closed()}
     pub fn stop_and_reap(mut self)->Result<()>{
         if !self.cancel_sent||!self.is_disposed(){return Err(rejected("workflow actual source disposal unconfirmed"));}
         let cutoff=self.cleanup.ok_or_else(||rejected("workflow cleanup missing"))?;
@@ -815,7 +827,7 @@ pub struct HostFinancialWorkflowRelayV1{
     v3_entries:[HV3Entry;2],host_peer_instance:String,
     lifecycle:Arc<crate::host_interstage::HostLifecycle>,
     pair:crate::host_interstage::HostPairReceiveState,
-    retirement:Option<crate::host_interstage::RetirementRequest>,quiescent_sent:bool,retired:[[bool;2];2],
+    retirement:Option<crate::host_interstage::RetirementRequest>,quiescent_sent:bool,retired:[[bool;2];3],
     host:Option<HostOriginV1>,clocks:FullWorkflowClocksV1,image:String,coordinator:Option<String>,session:Option<String>,
     slots:[Option<HSlot>;2],restricted:bool,cancel_seen:bool,disposed:[bool;2],cleanup:Option<Instant>,
 }
@@ -830,7 +842,7 @@ impl HostFinancialWorkflowRelayV1 {
             host.continue_check()?;
             host.continue_child(role)?.workflow_send(&Packet::OriginalHostPeer{role,host_instance:host_instance.clone()})?;
         }
-        Ok(Self{v3_entries:std::array::from_fn(|_|HV3Entry::default()),host_peer_instance:host_instance,lifecycle:host.workflow_lifecycle(),pair:crate::host_interstage::HostPairReceiveState::default(),retirement:None,quiescent_sent:false,retired:[[false;2];2],host:Some(host),clocks,image,coordinator:None,session:None,slots:[None,None],restricted:false,cancel_seen:false,disposed:[false;2],cleanup:None})
+        Ok(Self{v3_entries:std::array::from_fn(|_|HV3Entry::default()),host_peer_instance:host_instance,lifecycle:host.workflow_lifecycle(),pair:crate::host_interstage::HostPairReceiveState::default(),retirement:None,quiescent_sent:false,retired:[[false;2];3],host:Some(host),clocks,image,coordinator:None,session:None,slots:[None,None],restricted:false,cancel_seen:false,disposed:[false;2],cleanup:None})
     }
     pub fn session_deadline(&self)->Instant{self.clocks.supervision()}
     fn restrict(&mut self)->Result<()>{self.restricted=true;if self.cleanup.is_none(){self.cleanup=Some(self.clocks.first_cleanup_ceiling(Instant::now())?);}Ok(())}
@@ -889,6 +901,13 @@ impl HostFinancialWorkflowRelayV1 {
                         let read=slot.read.as_ref().ok_or_else(||rejected("Host history retirement before actual Read"))?;
                         if slot.phase!=HISTORY_RETAINED||slot.continue_review_ms.is_none()||request.binding_digest!=read.presentation_digest{return Err(rejected("Host retirement before actual history retention"));}
                     },
+                    crate::host_interstage::RetirementPurpose::FinancialSigning=>{
+                        if slot.phase!=67{return Err(rejected("Host Signing retirement before actual Sign"));}
+                        let(_,signed)=slot.activate.wallet.sign.return_predecessor()?;
+                        let(_,_,service,_)=slot.writer_acquire.retained_result()?;
+                        let binding=request.signing.as_ref().ok_or_else(||rejected("Host Signing retirement lacks actual result"))?;
+                        if binding.signed!=*signed||binding.original_commitment!=service.correlation().original.commitment()?||request.witness_instance!=service.correlation().witness_instance||binding.commitment()?!=request.binding_digest{return Err(rejected("Host Signing retirement original/result mismatch"));}
+                    },
                     crate::host_interstage::RetirementPurpose::FinancialContinuation=>{
                         let(p,_)=slot.admission.retained_result()?;
                         if (slot.phase!=admit::AWAITING_NEXT_READ&&!slot.writer_acquire.signing_setup_pending(slot.phase))||request.binding_digest!=p.presentation_digest{return Err(rejected("Host retirement before actual admitted response"));}
@@ -912,6 +931,7 @@ impl HostFinancialWorkflowRelayV1 {
             }
         }else if self.lifecycle.resumed()?.as_ref()==Some(request){
             self.host.as_ref().ok_or_else(||rejected("Host consumed"))?.workflow_send_c(&Packet::RetireResumed{request:request.clone()})?;
+            if request.purpose==crate::host_interstage::RetirementPurpose::FinancialSigning{self.pair.record_signing_retired(request)?;}
             self.lifecycle.acknowledge_resumed(request)?;self.retired[request.purpose.index()][request.target.index()]=true;self.retirement=None;return Ok(true);
         }
         Ok(false)
@@ -1011,6 +1031,7 @@ impl HostFinancialWorkflowRelayV1 {
         if matches!(packet,Packet::V3EnrollmentDisplay{..}|Packet::V3ManifestDisplay{..}|Packet::V3Enrolled{..}|Packet::V3ManifestAccepted{..}){return self.up_v3_receipt(target,packet);}
         if matches!(packet,Packet::V3PairEndpoint{..}|Packet::V3PairDisplay{..}|Packet::V3Paired{..}){return self.up_v3_pair(target,packet);}
         if matches!(packet,Packet::V3EntryOffer{..}|Packet::V3SourceOpened{..}|Packet::V3SourceFailed{..}){return self.up_v3_entry(target,packet);}
+        if matches!(packet,Packet::FinancialResultSelector{..}){return self.up_financial_result_selector(target,packet);}
         if matches!(packet,Packet::ReturnReadDisplay{..}|Packet::ReturnExactDisplay{..}|Packet::ReturnPrepared{..}|Packet::ReturnCompleted{..}|Packet::ReturnFailed{..}){return self.up_return(target,packet);}
         if matches!(packet,Packet::SignReadDisplay{..}|Packet::SignExactDisplay{..}|Packet::SignPrepared{..}|Packet::SignCommitted{..}|Packet::SignFailed{..}){return self.up_sign(target,packet);}
         if matches!(packet,Packet::WalletPrepareDisplay{..}|Packet::WalletObserveDisplay{..}|Packet::WalletPrepared{..}|Packet::WalletObserved{..}|Packet::WalletFailed{..}){return self.up_wallet(target,packet);}

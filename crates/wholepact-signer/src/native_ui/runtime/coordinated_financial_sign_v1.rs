@@ -53,6 +53,7 @@ pub(in crate::native_ui::runtime) struct CoordinatedSignCommitV1 {
     observed: SignerWalletObservedV1,
 }
 pub(in crate::native_ui::runtime) struct AwaitingCoordinatedReturnReadV1 {
+    selector_reported: bool,
     retained: AwaitingCoordinatedWalletPrepareV1,
     result_request: FinancialResultRequestV1,
     committed: AuthorizationCommit,
@@ -168,6 +169,27 @@ impl CoordinatedSignCommitV1 {
         // actual committed result. The kept object has no signing entry point.
         let (Some(committed),Some(result_request),Some(report))=(self.committed.take(),self.result_request.take(),self.report.take()) else {return Err(self);};
         self.retained.context.next=Next::Return;
-        Ok(AwaitingCoordinatedReturnReadV1{retained:self.retained,committed,result_request,report,original:self.original,observed:self.observed})
+        Ok(AwaitingCoordinatedReturnReadV1{selector_reported:false,retained:self.retained,committed,result_request,report,original:self.original,observed:self.observed})
+    }
+}
+
+impl AwaitingCoordinatedReturnReadV1 {
+    /// Emit only this retained successful result request. Origin supplies the
+    /// genuine original endpoint and independently matches the reported Sign.
+    /// This public metadata neither reads nor returns signature bytes.
+    pub(in crate::native_ui::runtime) fn report_result_selector(
+        &mut self, origin:&mut SignerFinancialWorkflowOriginV1,
+    )->Result<()> {
+        if self.selector_reported {return Ok(());}
+        self.result_request.validate().map_err(|_|Error::InvalidData)?;
+        if self.result_request.authorization_id!=self.report.authorization_id
+            || self.result_request.original_consent_ref!=self.report.original_consent_ref
+            || self.committed.result_digest!=self.report.result_digest
+            || self.committed.outbox_digest!=self.report.outbox_digest
+        {return Err(Error::ReviewMismatch);}
+        let encoded=serde_json::to_string(&self.result_request).map_err(|_|Error::InvalidData)?;
+        self.selector_reported=true;
+        origin.report_financial_result_selector(encoded)?;
+        Ok(())
     }
 }

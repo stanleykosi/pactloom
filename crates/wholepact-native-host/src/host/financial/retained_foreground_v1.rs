@@ -213,6 +213,12 @@ impl<'host> FirstResumedOriginalOwnerV1<'host> {
         let result: ResultSelectionV1 = read_selection(host,
             "Exact copied native AwaitingReturn result selector JSON file (absolute): ")?;
         require_result_selection(&result, continuation_record(&continuation)?)?;
+        // Release this exact original Signing installation before reviewer 2
+        // can open it. Selection metadata cannot stand in for the actual
+        // drained/reaped Signing purpose and acknowledged same-H Resume.
+        let foreground = wait_selected_signing_retirement(
+            foreground, &[&self.admission], SignerContinueRoleV1::Signer1, &result,
+        )?;
         Ok(FirstSelectedOriginalOwnerV1 {
             foreground,
             first: SelectedRetainedOriginalOwnerV1 { admission: self.admission, continuation, result },
@@ -302,6 +308,10 @@ impl<'host> SecondResumedOriginalOwnerV1<'host> {
         let result: ResultSelectionV1 = read_selection(host,
             "Exact copied native AwaitingReturn result selector JSON file (absolute): ")?;
         require_result_selection(&result, continuation_record(&continuation)?)?;
+        let foreground = wait_selected_signing_retirement(
+            foreground, &[&self.first.admission, &self.admission],
+            SignerContinueRoleV1::Signer2, &result,
+        )?;
         // Preserve immediate owner checks before the pair can be constructed.
         // No caller can mint a pair from detached DTOs or imported peers.
         let selections = [self.first.continuation, continuation];
@@ -333,6 +343,39 @@ fn wait_selected_continuation_retirement(
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     for admission in admissions { admission.check_pair_parked_bounds().map_err(restrict_failed_foreground)?; }
+    parked.leave_after_resume().map_err(|e| restrict_failed_foreground(e.into()))
+}
+
+/// Normal retirement is role-specific and follows the actual successful
+/// Sign's selected request. The original peer/providers remain retained while
+/// parked; this wait never reads a journal, renews a clock, or mints permission.
+fn wait_selected_signing_retirement(
+    foreground: HostFinancialForegroundV1,
+    admissions: &[&RetainedOriginalCoordinatedAdmissionV1<'_>],
+    target: SignerContinueRoleV1,
+    result: &ResultSelectionV1,
+) -> Result<HostFinancialForegroundV1> {
+    for admission in admissions {
+        admission.check_pair_parked_bounds().map_err(restrict_failed_foreground)?;
+    }
+    let mut parked = foreground.enter_owner_workflow_wait()
+        .map_err(|e| restrict_failed_foreground(e.into()))?;
+    loop {
+        for admission in admissions {
+            admission.check_pair_parked_bounds().map_err(restrict_failed_foreground)?;
+        }
+        if let Some(guard) = parked.try_next_retirement()
+            .map_err(|e| restrict_failed_foreground(e.into()))? {
+            guard.wait_financial_signing_resume(
+                target, &result.request.authorization_id, &result.request.original_consent_ref,
+            ).map_err(|e| restrict_failed_foreground(e.into()))?;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    for admission in admissions {
+        admission.check_pair_parked_bounds().map_err(restrict_failed_foreground)?;
+    }
     parked.leave_after_resume().map_err(|e| restrict_failed_foreground(e.into()))
 }
 

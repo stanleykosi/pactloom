@@ -178,6 +178,7 @@ pub(super) struct CGSlot {
     close_sent: bool,
     closed: bool,
     cleanup: Option<Instant>,
+    retired:Option<Arc<super::signed_custody::SignedResultRecord>>,
 }
 impl CoordinatorFinancialNativeV1 {
     pub fn admit_signing_setup(
@@ -565,7 +566,20 @@ fn received_signing_progress(phase:&Phases,slot:usize,from:u8,to:u8)->Result<boo
     }
 }
 impl CGSlot {
-    pub(super) fn retirement_idle(&self)->bool{self.setup.is_none()}
+    pub(super) fn retirement_idle(&self)->bool{self.setup.is_none()||self.retired.is_some()}
+    pub(super) fn retirement_wall_bounds(&self)->Result<(u64,u64,u64)>{let b=self.review.as_ref().ok_or_else(||rejected("retirement service wall bounds absent"))?;Ok((b.data.valid_from_ms,b.data.valid_until_ms,b.last_wall.load(Ordering::Acquire)))}
+    pub(super) fn retired_record(&self)->Option<&Arc<super::signed_custody::SignedResultRecord>>{self.retired.as_ref()}
+    pub(super) fn retirement_source(&self)->Result<(Arc<EntryReviewed>,FinancialSigningServiceV1,Instant)> {
+        if !self.serving_ack||self.failed||self.cancel_sent||self.finish_sent||self.disposed||self.retired.is_some(){return Err(rejected("Signing retirement lacks actual active service"));}
+        let b=self.review.as_ref().ok_or_else(||rejected("Signing retirement review absent"))?;b.service_bounds()?;
+        Ok((Arc::clone(&b.setup.entry),b.correlation(),b.service_ceiling))
+    }
+    pub(super) fn install_retired_result(&mut self,record:Arc<super::signed_custody::SignedResultRecord>)->Result<()> {
+        if !self.finish_sent||!self.disposed||!self.close_sent||!self.closed||self.failed||self.cancel_sent||self.retired.is_some(){return Err(rejected("Signing retirement requires normal closed source"));}
+        self.retired=Some(record);Ok(())
+    }
+    pub(super) fn normal_retirement_idle(&self)->bool{self.serving_ack&&!self.failed&&!self.cancel_sent&&!self.finish_sent&&!self.disposed&&self.retired.is_none()}
+
 
     pub(super) fn closed(&self) -> bool {
         self.closed
@@ -583,6 +597,7 @@ impl CGSlot {
                 .ok_or_else(|| rejected("active financial signing review missing"))?
                 .check(),
             G_SERVING => self.review.as_ref().ok_or_else(||rejected("active Signing service missing"))?.service_check(),
+            6 => self.retired.as_ref().ok_or_else(||rejected("retired Signing custody absent"))?.check(),
             _ => Ok(()),
         }
     }
@@ -623,5 +638,23 @@ mod tests {
         let p=Phases::new();p.signing_step(0,0,G_SETUP_ADMITTED).unwrap();p.revoke();
         assert!(!received_signing_progress(&p,0,G_SETUP_ADMITTED,G_REVIEW).unwrap());
         assert!(received_signing_progress(&p,0,G_REVIEW,G_REVIEW).is_err());
+    }
+}
+
+impl CoordinatorFinancialEndpointV1 {
+    pub(super) fn finish_signing_for_retirement(&mut self,role:Target)->Result<()> {
+        self.core.check()?;
+        let i=role.index();let slot=&mut self.signing_services[i];
+        if !slot.normal_retirement_idle(){return Err(rejected("normal Signing retirement not current"));}
+        let b=slot.review.as_ref().ok_or_else(||rejected("normal Signing review missing"))?;
+        b.service_bounds()?;
+        self.core.phase.signing_retirement_step(i,G_SERVING,G_DONE)?;
+        let packet=GP::FinishService{setup_challenge:b.setup.wire.setup_challenge.clone(),witness_instance:b.instance.clone(),presentation_digest:b.data.presentation_digest.clone()};
+        slot.finish_sent=true;slot.wire_phase=G_DONE;self.send_signing(role,&packet)
+    }
+    pub(super) fn signing_retirement_cleanup(&self,role:Target)->Result<Instant>{
+        let slot=&self.signing_services[role.index()];
+        if !slot.finish_sent||!slot.disposed||slot.failed||slot.cancel_sent{return Err(rejected("normal Signing drain not complete"));}
+        slot.cleanup.ok_or_else(||rejected("normal Signing cleanup missing"))
     }
 }

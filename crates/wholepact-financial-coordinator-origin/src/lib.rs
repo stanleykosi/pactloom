@@ -254,3 +254,12 @@ pub use financial_workflow_origin::{SignerV3PairTicketV1,SignerV3PairOutboundV1,
 #[cfg(feature="coordinated-financial-workflow-v1")]mod signer_return_data;
 #[cfg(feature="coordinated-financial-workflow-v1")]pub use signer_return_data::{SignerReturnRequestDataV1,SignerReturnFixedIdentityDataV1,SignerReturnReadFactsV1,SignerReturnReadPresentationV1,SignerReturnPreparedV1,SignerReturnExactFactsV1,SignerReturnExactPresentationV1,SignerReturnCompletedV1,SignerReturnFailureStageV1,SignerReturnFailureV1};
 #[cfg(feature="coordinated-financial-workflow-v1")]pub use financial_workflow_origin::{SignerReturnReadTicketV1,SignerReturnReadOutboundV1,SignerReturnReadFinalV1,SignerReturnReadCompletedV1,SignerReturnExactTicketV1,SignerReturnExactOutboundV1,SignerReturnExactFinalV1};
+
+#[cfg(feature="coordinated-financial-workflow-v1")] pub use financial_workflow_origin::FinancialSignedResultCustodyV1;
+
+#[cfg(feature="coordinated-financial-workflow-v1")] pub use financial_workflow_origin::{FinancialCompletedPairSetupTicketV1,FinancialCompletedPairSetupOutboundV1,FinancialCompletedPairReviewTicketV1,FinancialCompletedPairServeOutboundV1,FinancialCompletedPairServingV1,CoordinatorCompletedPairEventV1};
+
+#[cfg(feature="coordinated-financial-workflow-v1")]
+mod financial_selector_data;
+#[cfg(feature="coordinated-financial-workflow-v1")]
+pub use financial_selector_data::SignerFinancialResultSelectorV1;

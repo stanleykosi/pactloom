@@ -17,6 +17,12 @@ pub(crate) struct HostPairReceiveState {
     signing_retired:[Option<SigningRetiredRecord>;2],received:bool,
 }
 impl HostPairReceiveState {
+    pub(crate) fn record_signing_retired(&mut self,request:&RetirementRequest)->Result<()> {
+        if request.purpose!=RetirementPurpose::FinancialSigning{return Err(rejected("wrong Pair retirement purpose"));}
+        let b=request.signing.as_ref().ok_or_else(||rejected("Pair retirement signed binding missing"))?;b.validate()?;
+        let i=request.target.index();if self.received||self.signing_retired[i].is_some(){return Err(rejected("Pair retirement repeated"));}
+        self.signing_retired[i]=Some(SigningRetiredRecord{role:request.target,witness_instance:request.witness_instance.clone(),original_commitment:b.original_commitment.clone(),signed_result_digest:b.commitment()?});Ok(())
+    }
     fn require_retired(&self,original:&CompletedPairOriginalV1)->Result<()>{
         for (i,o) in original.owners.iter().enumerate(){
             let r=self.signing_retired[i].as_ref().ok_or_else(||rejected("Pair requires actual normal Signing retirement"))?;
