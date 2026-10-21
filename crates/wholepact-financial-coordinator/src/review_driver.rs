@@ -1,7 +1,8 @@
 //! C-owned post-fork driver. The native event loop never blocks on preparation,
 //! IPC, source disposal or child reaping; main still joins the terminal driver.
-use crate::{bootstrap::InertTreeV1, rejected, review_channel::{self, Packet}, Result};
+use crate::{bootstrap::InertTreeV1, rejected, review_channel, Result};
 use std::{sync::{Arc, atomic::{AtomicBool, Ordering}, mpsc}, thread, time::{Duration, Instant}};
+use wholepact_financial_coordinator_origin::CancelReviewResponseV1 as Response;
 use wholepact_authority::native_witness_owner::cancel_delivery_review_v1::{CancelOnlyDeliveryInputsV1, CancelOnlyDeliveryPresentationV1};
 
 pub(super) enum Outcome { Prepared(CancelOnlyDeliveryPresentationV1), DisposalStarted, Finished { disposal_confirmed: bool, clean: bool } }
@@ -43,7 +44,7 @@ impl Drop for Driver {
     }
 }
 
-fn drive(tree: InertTreeV1, input: mpsc::Receiver<CancelOnlyDeliveryInputsV1>, output: mpsc::Sender<Outcome>, revoked: Arc<AtomicBool>, session_deadline: Instant) -> Result<()> {
+fn drive(mut tree: InertTreeV1, input: mpsc::Receiver<CancelOnlyDeliveryInputsV1>, output: mpsc::Sender<Outcome>, revoked: Arc<AtomicBool>, session_deadline: Instant) -> Result<()> {
     struct RevokeOnExit(Arc<AtomicBool>);
     impl Drop for RevokeOnExit { fn drop(&mut self) { self.0.store(true, Ordering::Release); } }
     // Locals drop before the tree argument during unwinding, so a driver panic
@@ -62,32 +63,33 @@ fn drive(tree: InertTreeV1, input: mpsc::Receiver<CancelOnlyDeliveryInputsV1>, o
             if revoked.load(Ordering::Acquire) && !cancel_sent {
                 cleanup_deadline = Some((Instant::now() + Duration::from_secs(5)).min(session_deadline + Duration::from_secs(5)));
                 let _ = output.send(Outcome::DisposalStarted);
-                tree.witness()?.review_send(&Packet::Cancel)?;
+                tree.send_cancel()?;
                 cancel_sent = true;
             }
             if let Ok(data) = input.try_recv() {
                 if submitted { return Err(rejected("second driver prepare")); }
                 submitted = true;
-                if !revoked.load(Ordering::Acquire) { tree.witness()?.review_send(&Packet::PrepareOnce(data))?; }
+                if !revoked.load(Ordering::Acquire) { tree.send_prepare_once(review_channel::inputs_to_wire(data))?; }
             }
-            if let Some(packet) = tree.witness()?.review_try_receive()? {
+            if let Some(packet) = tree.try_receive_cancel_response()? {
                 match packet {
-                    Packet::PreparedDisplay(presentation) if submitted && !display_received && !failed => {
+                    Response::PreparedDisplay(data) if submitted && !display_received && !failed => {
+                        let presentation = review_channel::presentation_from_wire(data);
                         display_received = true;
                         review_channel::validate_presentation(&presentation)?;
                         if !revoked.load(Ordering::Acquire) {
                             output.send(Outcome::Prepared(presentation)).map_err(|_| rejected("native display gone"))?;
                         }
                     }
-                    Packet::PreparationFailed if submitted && !failed && !disposed => {
+                    Response::PreparationFailed if submitted && !failed && !disposed => {
                         failed = true;
                         revoked.store(true, Ordering::Release);
                     }
-                    Packet::Disposed if !disposed && (cancel_sent || submitted || Instant::now() >= session_deadline) => {
+                    Response::Disposed if !disposed && (cancel_sent || submitted || Instant::now() >= session_deadline) => {
                         disposed = true;
                         revoked.store(true, Ordering::Release);
                         cleanup_deadline.get_or_insert_with(|| (Instant::now() + Duration::from_secs(5)).min(session_deadline + Duration::from_secs(5)));
-                        if !cancel_sent { tree.witness()?.review_send(&Packet::Cancel)?; }
+                        if !cancel_sent { tree.send_cancel()?; }
                         break;
                     }
                     _ => return Err(rejected("duplicate or out-of-phase source result")),

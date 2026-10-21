@@ -8,21 +8,18 @@ description = "Fixed-fork coordinator with inert bootstrap and opt-in source-bac
 [features]
 default = []
 common-image-bootstrap = []
-cancel-only-witness-review = ["common-image-bootstrap", "dep:wholepact-authority", "dep:eframe", "dep:winit", "dep:zeroize"]
+cancel-only-witness-review = ["common-image-bootstrap", "wholepact-financial-coordinator-origin/cancel-only-witness-review", "dep:wholepact-authority", "dep:eframe", "dep:winit", "dep:zeroize"]
 
 [[bin]]
 name = "wholepact-financial-coordinator"
 path = "src/main.rs"
 required-features = ["common-image-bootstrap"]
 
-[dependencies]
-libc = "0.2"
-serde.workspace = true
+[dev-dependencies]
 serde_json.workspace = true
-sha2.workspace = true
-hex.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
+wholepact-financial-coordinator-origin = { path = "../wholepact-financial-coordinator-origin" }
 wholepact-authority = { path = "../wholepact-authority", optional = true, default-features = false, features = ["coordinated-witness-cancel-review"] }
 eframe = { version = "=0.36.2", optional = true, default-features = false, features = ["default_fonts", "glow", "wayland"] }
 winit = { version = "=0.30.13", optional = true, default-features = false, features = ["wayland", "rwh_06"] }

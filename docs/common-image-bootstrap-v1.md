@@ -307,3 +307,45 @@ packet and local focus-state predicates only. No local native/process/socket/UI
 or protected-source execution has qualified this feature. Genuine source/runtime
 fixtures, actual desktop review and any positive financial adapter require their
 separate reviewed scopes.
+
+## Narrow origin-kernel extraction
+
+`wholepact-financial-coordinator-origin` now owns the actual installed-image,
+hardening, fixed-fork, barrier, pidfd, credential-frame and owned-reap substrate.
+It depends on neither Authority nor GUI code. The coordinator binary forbids
+unsafe code and retains its private main, native input state, driver and real W
+preparation/disposal worker. Authority's existing unsafe-code prohibition is
+unchanged. No positive grammar, issuer, effect permit or CancelOnly conversion
+is added by this extraction.
+
+The sole public startup function takes no arguments, claims its process entry
+once before all forks, and performs the same exact whole-image checks. Every
+child inherits the consumed entry state. It returns only non-Clone actual branch
+custody from the fixed graph; fork functions, raw channels, descriptors, peer
+constructors and image-pin construction stay private. The reviewed binary's
+private main calls it before any thread-capable initialization. Another linked
+executable cannot use a library hash or supplied identity to satisfy the exact
+running-image pin. This remains a trusted uninjected whole-image launch contract,
+not protection against a compromised launcher or historical injected code.
+
+C's opaque display record stays inside its returned custody. A consuming
+cancel-only conversion rechecks the original children, absolute session ceiling,
+single-thread state and runtime-directory ownership/mode, then restores only the
+two retained coordinates before GUI/driver threads. H keeps its exact two Signer
+owners. Leaves cannot control C, H or sibling edges, and child errors/completion
+still terminate with `_exit` rather than falling through into another branch.
+
+Only the finite cancel request/response operations are public on the matching C
+or W custody. Ordinary mirrored input/display DTOs have strict serde shapes and
+the same complete 64 KiB packet limit; explicit field-by-field binary conversion
+preserves all bytes and original bounds. Full Authority input and presentation
+validation remains at its existing call sites. DTOs prove no origin, currentness,
+approval or source disposal. The kernel retains the first Cancel cleanup ceiling
+and can only shorten it or the original session ceiling during teardown.
+
+Existing bootstrap CI observations move with the kernel unchanged and remain
+absent from production. CI67 qualified the pre-extraction image, not this new
+layout. Pure mapping/entry-state tests and compilation are not native kernel,
+desktop or source qualification. Any later positive native issuer must have a
+separate purpose and consume an actual authenticated opaque Ready ticket at C's
+native event-loop admission point; this extraction implements no such operation.

@@ -1,0 +1,21 @@
+[package]
+name = "wholepact-financial-coordinator-origin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Fixed whole-image fork origin and finite retained role custody; no financial issuer"
+
+[features]
+default = []
+cancel-only-witness-review = ["dep:zeroize"]
+
+[dependencies]
+libc = "0.2"
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+zeroize = { version = "=1.9.1", optional = true }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(wholepact_bootstrap_ci)'] }

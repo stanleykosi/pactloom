@@ -68,7 +68,7 @@ impl PeerLifetime {
 }
 
 /// Born solely in fork_edge's child return, never from a descriptor supplied by
-/// a caller. Non-Clone and private to this executable. Construction lineage only.
+/// a caller. Non-Clone and private to this kernel. Construction lineage only.
 pub(super) struct ForkOriginV1 {
     local_role: Role,
     parent: PeerLifetime,
@@ -76,14 +76,14 @@ pub(super) struct ForkOriginV1 {
 }
 impl ForkOriginV1 {
     #[cfg(feature = "cancel-only-witness-review")]
-    pub(super) fn review_send(&self, packet: &crate::review_channel::Packet) -> Result<()> {
-        if self.local_role != crate::review_channel::WITNESS || self.parent.role != Role::Coordinator { return Err(rejected("not the original cancel-only witness")); }
-        crate::review_channel::send(self.channel.review_fd(), self.local_role, &self.parent, packet)
+    pub(super) fn review_send(&self, packet: &crate::cancel_review::Packet) -> Result<()> {
+        if self.local_role != crate::cancel_review::WITNESS || self.parent.role != Role::Coordinator { return Err(rejected("not the original cancel-only witness")); }
+        crate::cancel_review::send(self.channel.review_fd(), self.local_role, &self.parent, packet)
     }
     #[cfg(feature = "cancel-only-witness-review")]
-    pub(super) fn review_try_receive(&self) -> Result<Option<crate::review_channel::Packet>> {
-        if self.local_role != crate::review_channel::WITNESS || self.parent.role != Role::Coordinator { return Err(rejected("not the original cancel-only witness")); }
-        crate::review_channel::try_receive(self.channel.review_fd(), self.local_role, &self.parent)
+    pub(super) fn review_try_receive(&self) -> Result<Option<crate::cancel_review::Packet>> {
+        if self.local_role != crate::cancel_review::WITNESS || self.parent.role != Role::Coordinator { return Err(rejected("not the original cancel-only witness")); }
+        crate::cancel_review::try_receive(self.channel.review_fd(), self.local_role, &self.parent)
     }
     #[cfg(feature = "cancel-only-witness-review")]
     pub(super) fn wait_host_stop(&self, signers: &[Option<DirectChild>; 2], deadline: Instant) -> Result<()> {
@@ -131,14 +131,14 @@ impl DirectChild {
     #[cfg(feature = "cancel-only-witness-review")]
     pub(super) fn role(&self) -> Role { self.peer.role }
     #[cfg(feature = "cancel-only-witness-review")]
-    pub(super) fn review_send(&self, packet: &crate::review_channel::Packet) -> Result<()> {
+    pub(super) fn review_send(&self, packet: &crate::cancel_review::Packet) -> Result<()> {
         self.require_owner()?;
-        crate::review_channel::send(self.channel.review_fd(), self.local_role, &self.peer, packet)
+        crate::cancel_review::send(self.channel.review_fd(), self.local_role, &self.peer, packet)
     }
     #[cfg(feature = "cancel-only-witness-review")]
-    pub(super) fn review_try_receive(&self) -> Result<Option<crate::review_channel::Packet>> {
+    pub(super) fn review_try_receive(&self) -> Result<Option<crate::cancel_review::Packet>> {
         self.require_owner()?;
-        crate::review_channel::try_receive(self.channel.review_fd(), self.local_role, &self.peer)
+        crate::cancel_review::try_receive(self.channel.review_fd(), self.local_role, &self.peer)
     }
     #[cfg(wholepact_bootstrap_ci)]
     pub(super) fn ci_descriptors(&self) -> [libc::c_int; 2] { [self.channel.ci_fd(), self.peer.fd()] }
@@ -240,7 +240,8 @@ pub(super) fn fork_edge(parent: Role, child: Role) -> Result<Forked> {
     #[cfg(wholepact_bootstrap_ci)]
     crate::ci::configure_pair(parent, child, parent_channel.ci_fd())?;
     // SAFETY: reachable only from private main's fixed, single-threaded startup
-    // and its equally early H branch, before runtime/GUI/keys. No library caller.
+    // and its equally early H branch, before runtime/GUI/keys. The public
+    // entry checks the whole pinned image and exposes no per-role fork API.
     let pid = unsafe { libc::fork() };
     if pid < 0 { return Err(std::io::Error::last_os_error()); }
     if pid == 0 {

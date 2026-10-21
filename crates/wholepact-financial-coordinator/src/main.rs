@@ -3,22 +3,12 @@
 //! financial approval. Neither has a public worker entry. Initial native launch
 //! must be trusted, credential-free and uninjected; image checks cannot undo
 //! earlier loader injection.
-#![deny(unsafe_op_in_unsafe_fn)]
+#![forbid(unsafe_code)]
 #[cfg(all(wholepact_bootstrap_ci, feature = "cancel-only-witness-review"))]
 compile_error!("Bootstrap-only CI instrumentation cannot select the source-opening UI profile");
 
-#[cfg(all(target_os = "linux", wholepact_bootstrap_ci))]
-mod ci;
 #[cfg(target_os = "linux")]
 mod bootstrap;
-#[cfg(target_os = "linux")]
-mod channel;
-#[cfg(target_os = "linux")]
-mod image;
-#[cfg(target_os = "linux")]
-mod process;
-#[cfg(all(target_os = "linux", feature = "cancel-only-witness-review"))]
-mod desktop_launch;
 #[cfg(all(target_os = "linux", feature = "cancel-only-witness-review"))]
 mod native_ui;
 #[cfg(all(target_os = "linux", feature = "cancel-only-witness-review"))]
@@ -36,8 +26,8 @@ fn rejected(message: &'static str) -> std::io::Error {
 }
 
 fn main() {
-    // Do not move this into a library callable after threads or a GUI/runtime
-    // have started. There is deliberately no externally selectable worker mode.
+    // This private main invokes the argument-free whole-image kernel before
+    // any thread-capable initialization. No public worker/role entry exists.
     #[cfg(target_os = "linux")]
     let code = match bootstrap::run_before_runtime() {
         Ok(()) => 78, // Bootstrap completed, but financial activation unavailable.
@@ -46,6 +36,6 @@ fn main() {
     #[cfg(not(target_os = "linux"))]
     let code = 78;
     #[cfg(all(target_os = "linux", wholepact_bootstrap_ci))]
-    ci::finished(code);
+    wholepact_financial_coordinator_origin::record_process_exit_for_ci(code);
     std::process::exit(code);
 }
