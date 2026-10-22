@@ -259,5 +259,129 @@ class CachedProgressDiagnostics(unittest.TestCase):
                 if fail:self.assertIn('"code":"normal_finish"',text)
                 else:self.assertIn('CI_FINANCIAL_CANDIDATE ',text)
 
+
+class ReviewerArtifactTests(unittest.TestCase):
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
+        self.base=pathlib.Path(self.temp.name);self.root=self.base/'f-test';self.root.mkdir(mode=0o700)
+        self.patch=mock.patch.object(M.F,'ARTIFACT_PARENT',self.base);self.patch.start();self.addCleanup(self.patch.stop)
+        self.check=mock.patch.object(M.F.Fixture,'check');self.check.start();self.addCleanup(self.check.stop)
+        self.fixture=M.F.Fixture.__new__(M.F.Fixture)
+        self.fixture._fixture_root=self.root;self.fixture._artifact_root_identity=None
+        self.choices=dict(submission_operation_id='synthetic-original-delivery-admission-v2',
+            provider=dict(source_id='synthetic-source',endpoint='https://example.invalid',
+                trust_profile='single_tls_provider_report_not_consensus'),route={'kind':'direct'},
+            minimum_expiry_margin_blocks=1,maximum_fresh_admission_lifetime_ms=120000,
+            maximum_explicitly_approved_attempts=3)
+        protected=self.base/'protected-profile';protected.mkdir(mode=0o700)
+        data={'delivery_choices':self.choices,'profile':str(protected),'sources':[]}
+        for key,name in [('session_commands_file','coordinated-fixture-session-commands.json'),
+                         ('delivery_choices_file','coordinated-fixture-delivery-choices.json'),
+                         ('wallet_setup_file','coordinated-fixture-wallet-setup.json'),
+                         ('host_password_file','coordinated-fixture-host-password.private'),
+                         ('source_password_file','coordinated-fixture-source-password.private')]:
+            path=self.root/name;path.write_text(json.dumps(self.choices if key=='delivery_choices_file' else {}));path.chmod(0o600);data[key]=str(path)
+        for index in (1,2):
+            account=str(index)*64;entry={'account_id':account};path=self.root/f'coordinated-fixture-source-{index}-entry.json'
+            path.write_text(json.dumps(entry));path.chmod(0o600)
+            data['sources'].append({'role':f'signer{index}','entry_selection':entry,'entry_selection_file':str(path),
+                'reopen_selector':{'account_id':account},'original_capture':{'scope':{'account_id':account,
+                'participant_id':f'synthetic-participant-{index}'},'request':{'operation_id':f'private-original-native-capture-{index}'}}})
+        self.fixture._data=data
+    def test_native_path_reader_receives_private_exact_schema_for_each_owner(self):
+        native=(ROOT.parent/'crates/wholepact-native-host/src/host.rs').read_text()
+        body=native[native.index('fn read_json<T:'):native.index('fn pair(&self)')]
+        self.assertIn('files::read_artifact(&path, 262_144)',body)
+        paths=[]
+        for index in (1,2):
+            path=pathlib.Path(self.fixture.reviewer_selection_path(f'Signer{index}'));paths.append(path)
+            self.assertTrue(path.is_absolute());self.assertEqual(path.parent,self.root)
+            meta=path.stat();self.assertEqual(stat.S_IMODE(meta.st_mode),0o600);self.assertEqual(meta.st_uid,os.getuid());self.assertEqual(meta.st_nlink,1)
+            raw=M.F.private_bytes(path,262144);value=json.loads(raw)
+            self.assertEqual(value,dict(import_operation_id=f'full-native-import-{index}',
+                redisclosure_operation_id=f'full-native-redisclose-{index}',account_id=str(index)*64,
+                participant_id=f'synthetic-participant-{index}',choices=self.choices))
+        self.assertNotEqual(paths[0],paths[1])
+    def test_flow_returns_path_once_never_inline_or_recreates(self):
+        flow=M.FLOW.FullFlow.__new__(M.FLOW.FullFlow)
+        flow.startup_index=len(M.FLOW.HOST_STARTUP) # genuine startup tested separately
+        flow.fixture=self.fixture;flow.last_rendered=None;flow.host_paths=set();flow.challenges=set()
+        flow.records=[];flow.reviewer_index=0;flow.continue_index=flow.result_index=0
+        text='Exact coordinated reviewer selection JSON'
+        kind,value=flow.expected_host_line(text)
+        self.assertEqual(kind,'public');self.assertTrue(pathlib.Path(value).is_absolute())
+        before=pathlib.Path(value).stat().st_ino
+        self.assertIsNone(flow.expected_host_line(text));self.assertEqual(flow.reviewer_index,1)
+        self.assertEqual(pathlib.Path(value).stat().st_ino,before)
+        with self.assertRaises(Exception):self.fixture.reviewer_selection_path('Signer1')
+    def test_existing_symlink_and_hardlink_destinations_never_overwritten(self):
+        target=self.root/'coordinated-reviewer-selection-1.json';outside=self.base/'untouched';outside.write_bytes(b'original')
+        for kind in ('existing','symlink','hardlink'):
+            with self.subTest(kind=kind):
+                if kind=='existing':target.write_bytes(b'existing')
+                elif kind=='symlink':target.symlink_to(outside)
+                else:os.link(outside,target)
+                with self.assertRaises(Exception):self.fixture.reviewer_selection_path('Signer1')
+                self.assertEqual(outside.read_bytes(),b'original');target.unlink()
+    def test_missing_alias_symlink_handoff_and_rebound_root_rejected(self):
+        path=pathlib.Path(self.fixture._data['delivery_choices_file']);saved=path.read_bytes();path.unlink()
+        with self.assertRaises(Exception):self.fixture.reviewer_selection_path('Signer1')
+        path.write_bytes(saved);path.chmod(0o600)
+        renamed=self.root/'alias.json';path.rename(renamed);path.symlink_to(renamed)
+        with self.assertRaises(Exception):self.fixture.reviewer_selection_path('Signer1')
+        path.unlink();renamed.rename(path)
+        fd=self.fixture._artifact_root_fd();os.close(fd)
+        old=self.base/'old';self.root.rename(old);self.root.mkdir(mode=0o700)
+        with self.assertRaises(Exception):self.fixture.reviewer_selection_path('Signer1')
+    def test_identity_choices_and_original_operation_collisions_fail_before_creation(self):
+        cases=[('scope',lambda:self.fixture._data['sources'][0]['original_capture']['scope'].update(account_id='f'*64)),
+               ('participant',lambda:self.fixture._data['sources'][0]['original_capture']['scope'].update(participant_id='synthetic-participant-2')),
+               ('operation',lambda:self.fixture._data['sources'][0]['original_capture']['request'].update(operation_id='full-native-import-1')),
+               ('choices',lambda:self.choices.update(maximum_explicitly_approved_attempts=True))]
+        import copy
+        original=copy.deepcopy(self.fixture._data)
+        for name,change in cases:
+            with self.subTest(name=name):
+                self.fixture._data=copy.deepcopy(original);self.choices=self.fixture._data['delivery_choices'];change()
+                with self.assertRaises(Exception):self.fixture.reviewer_selection_path('Signer1')
+                self.assertFalse((self.root/'coordinated-reviewer-selection-1.json').exists())
+    def test_authoritative_file_mismatch_and_entry_alias_rejected(self):
+        entry=pathlib.Path(self.fixture._data['sources'][0]['entry_selection_file'])
+        entry.write_text('{}')
+        with self.assertRaises(Exception):self.fixture.reviewer_selection_path('Signer1')
+        entry.write_text(json.dumps(self.fixture._data['sources'][0]['entry_selection']))
+        alias=self.root/'entry-alias.json';entry.rename(alias)
+        self.fixture._data['sources'][0]['entry_selection_file']=str(alias)
+        with self.assertRaises(Exception):self.fixture.reviewer_selection_path('Signer1')
+        self.assertFalse((self.root/'coordinated-reviewer-selection-1.json').exists())
+    def test_profile_symlink_alias_to_artifact_root_rejected(self):
+        alias=self.base/'profile-alias';alias.symlink_to(self.root,target_is_directory=True)
+        self.fixture._data['profile']=str(alias)
+        with self.assertRaises(Exception):self.fixture.reviewer_selection_path('Signer1')
+        self.assertFalse((self.root/'coordinated-reviewer-selection-1.json').exists())
+    def test_artifact_root_beneath_protected_profile_rejected(self):
+        self.fixture._data['profile']=str(self.base)
+        with self.assertRaises(Exception):self.fixture.reviewer_selection_path('Signer1')
+        self.assertFalse((self.root/'coordinated-reviewer-selection-1.json').exists())
+    def test_artifact_never_created_inside_protected_profile(self):
+        self.fixture._data['profile']=str(self.root)
+        with self.assertRaises(Exception):self.fixture.reviewer_selection_path('Signer1')
+        self.assertFalse((self.root/'coordinated-reviewer-selection-1.json').exists())
+    def test_creation_failure_keeps_input_counter_and_original_file(self):
+        flow=M.FLOW.FullFlow.__new__(M.FLOW.FullFlow)
+        flow.startup_index=len(M.FLOW.HOST_STARTUP) # genuine startup tested separately
+        flow.fixture=self.fixture;flow.last_rendered=None;flow.host_paths=set();flow.records=[];flow.reviewer_index=0
+        target=self.root/'coordinated-reviewer-selection-1.json';target.write_text('keep')
+        with self.assertRaises(Exception):flow.expected_host_line('Exact coordinated reviewer selection JSON')
+        self.assertEqual(flow.reviewer_index,0);self.assertEqual(target.read_text(),'keep')
+    def test_owned_disposable_root_cleanup_covers_artifacts_without_touching_profile_elsewhere(self):
+        import shutil
+        protected=self.base/'protected-profile';sentinel=protected/'keep';sentinel.write_text('untouched')
+        self.fixture._data['profile']=str(protected)
+        path=pathlib.Path(self.fixture.reviewer_selection_path('Signer1'))
+        shutil.rmtree(self.root) # test-owned root only; same containment as native root cleanup
+        self.assertFalse(path.exists());self.assertEqual(sentinel.read_text(),'untouched')
+
 if __name__=='__main__':unittest.main()
+
 

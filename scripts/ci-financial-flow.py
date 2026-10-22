@@ -43,6 +43,27 @@ SELECT=('ReviewV3Pair','ReviewV3Enrollment','ReviewV3Manifest','ReviewV3Redisclo
 RESULT_PHASES=frozenset(('V3Held','V3Paired','V3Enrolled','V3ManifestAccepted','V3RedisclosurePrepared',
  'V3Redisclosed','V3OwnerSelected','V3Prepared','V3Received','V3AdmitReadRetained','V3AdmissionRetained','V3Audited'))
 
+HOST_STARTUP=('profile','workspace','password','financial_password','historical_approval',
+              'principal','scope','shared','mode','origin','credential','session_approval',
+              'session_commands_file')
+HOST_STARTUP_MARKERS=(
+ ('Existing original Host profile directory (absolute):','profile'),
+ ('Existing original dispatcher workspace directory (absolute):','workspace'),
+ ('Storage passphrase:','password'),
+ ('Original primary financial passphrase:','financial_password'),
+ ('Local application principal ID:','principal'),
+ ('Scope choice: type SELECTED','scope'),
+ ('Additional shared agreement IDs, comma-separated; blank for none:','shared'),
+ ('Exact selected agreement IDs, comma-separated; blank grants no agreements:','unexpected'),
+ ('Grant READ only, or PREPARE','mode'),
+ ('Optional exact browser origin for this session','origin'),
+ ('New private bootstrap credential file (absolute path','credential'),
+ ('Exact immutable command keys JSON file','session_commands_file'),
+ ('Exact coordinated reviewer selection JSON','unexpected'),
+ ('Exact copied native continuation selector JSON file','unexpected'),
+ ('Exact copied native AwaitingReturn result selector JSON file','unexpected'),
+ ('Type APPROVE ','approval'))
+
 class FullFlow:
     def __init__(self,controller,fixture,observer,ocr,operator=None):
         self.operator=operator
@@ -53,6 +74,9 @@ class FullFlow:
         self.last_ocr=0;self.ocr_delay=1_000_000_000;self.last_capture=None;self.last_rendered=None;self.challenges=set();self.host_paths=set()
         self.reviewer_index=0;self.continue_index=0;self.result_index=0
         self.records=[];self.pending_host=None;self.location=None
+        self.startup_index=0;self.startup_issued=None;self.pending_startup=None
+        self.startup_waiting=False;self.startup_input_attempted=False
+        self.startup_focus_seen=False;self.startup_focus_waits=0
         self.last_phase=None;self.search_direction='up';self.search_geometry=None
     def snapshot(self):
         self.fixture.check();snapshot=self.native.snapshot()
@@ -110,12 +134,14 @@ class FullFlow:
         C.require(count<64,'input_widget')
         self.scroll(s,'ScrollRegion',None,'up' if count<24 else 'down');return False
     def idle_scan(self,s):
-        # Search the actual panel in both directions. A stable observed boundary
-        # reverses native wheel direction; no scroll position is read or set.
-        geometry=tuple((w['tag'],w['owner'],tuple(w['rect']),w['enabled']) for w in s['widgets'])
-        if geometry==self.search_geometry:self.search_direction='down' if self.search_direction=='up' else 'up'
-        self.search_geometry=geometry
-        return self.scroll(s,'ScrollRegion',None,self.search_direction)
+        # Clipped/tagged geometry can stay identical while untagged content
+        # moves. Never treat that equality as proof of a scroll boundary.
+        # One finite up-then-down sweep per actual phase/subphase/owner; the
+        # existing native scroll/input/deadline guards remain authoritative.
+        key=(s['phase'],s['subphase'],'idle_sweep',s['owner'])
+        count=self.scrolls.get(key,0);C.require(count<64,'input_budget')
+        self.scrolls[key]=count+1
+        return self.scroll(s,'ScrollRegion',None,'up' if count<8 else 'down')
     def field(self,s,tag,owner,value):
         key=(s['phase'],tag,owner)
         if key in self.filled:return True
@@ -156,12 +182,57 @@ class FullFlow:
         if self.find(s,action,owner) and self.find(s,action,owner)['enabled'] and not self.used(s,action,owner):
             self.press(s,action,owner);return True
         return False
+    @property
+    def host_startup_complete(self):
+        # Local scheduling guard only, never native approval/completion evidence.
+        return (self.startup_index==len(HOST_STARTUP) and not self.startup_waiting
+                and self.pending_host is None and self.pending_startup is None
+                and self.startup_issued is None)
+
+    def startup_host_line(self,text):
+        """Only the next native startup prompt may consume one exact response.
+
+        Merely recognizing a prompt never advances this sequence: actual guarded
+        HostSubmit must return first. Empty replies are deliberate native lines.
+        No source/reviewer input can skip the original Host enrollment gates.
+        """
+        positions=[(text.rfind(marker),kind) for marker,kind in HOST_STARTUP_MARKERS if marker in text]
+        if not positions:return None
+        position,kind=max(positions);tail=text[position:]
+        expected=HOST_STARTUP[self.startup_index];challenge=None
+        if kind=='approval':
+            matches=re.findall(r'Type (APPROVE [0-9a-f]{16}) to approve this exact operation,',tail)
+            if not matches:return None
+            challenge=matches[-1]
+            if challenge in self.challenges:return None
+            C.require(expected in ('historical_approval','session_approval'),'input_phase')
+        else:
+            C.require(kind in HOST_STARTUP,'input_phase')
+            index=HOST_STARTUP.index(kind)
+            if index<self.startup_index:return None
+            C.require(index==self.startup_index,'input_phase')
+        if self.startup_issued is not None:return None
+        self.fixture.validate_host_startup()
+        if expected in ('password','financial_password'):line=('secret',None)
+        elif challenge is not None:line=('public',challenge)
+        else:line=('public',self.fixture.host_startup_value(expected))
+        self.startup_issued=self.startup_index # latch BEFORE input; never retry.
+        if challenge is not None:self.challenges.add(challenge)
+        return line
+
+    def startup_submitted(self):
+        C.require(self.pending_startup==self.startup_index==self.startup_issued,'input_phase')
+        self.host_paths.add(HOST_STARTUP[self.startup_index])
+        self.startup_index+=1;self.startup_issued=None;self.pending_startup=None
+        self.startup_input_attempted=False;self.startup_waiting=True
+
     def expected_host_line(self,rendered):
         # OCR whitespace wrapping may vary; characters/challenge are never repaired.
         text=' '.join(rendered.split())
         digest=hashlib.sha256(text.encode()).digest()
         if digest==self.last_rendered:return None
         self.last_rendered=digest
+        if self.startup_index<len(HOST_STARTUP):return self.startup_host_line(text)
         markers=('Existing original Host profile directory (absolute):','Existing original dispatcher workspace directory (absolute):','Exact immutable command keys JSON file','Storage passphrase:','Exact coordinated reviewer selection JSON','Exact copied native continuation selector JSON file','Exact copied native AwaitingReturn result selector JSON file','Type APPROVE ')
         positions=[text.rfind(marker) for marker in markers if marker in text]
         if positions:text=text[max(positions):]
@@ -178,18 +249,12 @@ class FullFlow:
             if self.reviewer_index==1 and not self.host_milestone('Owner1SigningRetired'):
                 # Deferred readiness is not consumption of the rendered prompt.
                 self.last_rendered=None;return None
-            owner='Signer'+str(self.reviewer_index+1);source=self.fixture.source(owner)
-            scope=source['original_capture']['scope']
-            participant=scope['participant_id']
-            C.require(type(participant) is str and participant,'fixture')
+            owner='Signer'+str(self.reviewer_index+1)
+            # Native Host.read_json reads an absolute artifact path, not JSON
+            # entered into the terminal. Creation is exclusive and never retried.
+            path=self.fixture.reviewer_selection_path(owner)
             self.reviewer_index+=1
-            # New inert operation names only; account/participant/choices come
-            # from actual preserved fixture, not a grant or speculative result.
-            value={'import_operation_id':f'full-native-import-{self.reviewer_index}',
-                   'redisclosure_operation_id':f'full-native-redisclose-{self.reviewer_index}',
-                   'account_id':source['entry_selection']['account_id'],
-                   'participant_id':participant,'choices':self.fixture._data['delivery_choices']}
-            return ('public',json.dumps(value,separators=(',',':')))
+            return ('public',path)
         for prompt,kind,counter in (
           ('Exact copied native continuation selector JSON file','continuation_output_file','continue_index'),
           ('Exact copied native AwaitingReturn result selector JSON file','result_output_file','result_index')):
@@ -213,12 +278,30 @@ class FullFlow:
         if self.pending_host is not None:
             if not s['host_input']:return True
             kind,value=self.pending_host
+            if self.pending_startup is not None:
+                C.require(not self.startup_input_attempted,'replay')
+                self.startup_input_attempted=True # uncertain typing/submit is never retried
             if kind=='secret':self.native.protected_input(s['phase'],s['owner'],'HostEditor',self.fixture.secret('host'))
             else:self.native.public_host_line(s['phase'],s['owner'],value)
             fresh=self.snapshot()
             self.press(fresh,'HostSubmit',None,ordinal=self.host_lines)
+            if self.pending_startup is not None:self.startup_submitted()
             self.pending_host=None;return True
-        if s['secret_input'] or s['host_input']:return False
+        if self.startup_waiting:
+            C.require(not s['secret_input'],'input_phase')
+            if s['host_input']:
+                self.controller.wait_render_progress();return True
+            self.startup_waiting=False
+            if self.startup_index==len(HOST_STARTUP):return False
+        if self.startup_index<len(HOST_STARTUP):
+            C.require(not(s['secret_input'] or s['host_input']),'input_phase')
+        if s['host_input']:
+            # A submitted later Host line can remain in native Writing after
+            # pending_host is consumed. Hold every Source action/outer scroll
+            # until genuine idle; no capture, retyping, or deadline renewal.
+            C.require(not s['secret_input'],'input_phase')
+            self.controller.wait_render_progress();return True
+        if s['secret_input']:return False
         button=self.find(s,'BeginHostLine',None)
         if button is None or not button['enabled']:return False
         if time.monotonic_ns()-self.last_ocr<self.ocr_delay:return False
@@ -232,7 +315,9 @@ class FullFlow:
         line=self.expected_host_line(text)
         if line is None:return False
         self.host_lines+=1;C.require(self.host_lines<=128,'input_budget')
-        self.pending_host=line;self.press(s,'BeginHostLine',None,ordinal=self.host_lines);return True
+        self.pending_host=line
+        if self.startup_index<len(HOST_STARTUP):self.pending_startup=self.startup_index
+        self.press(s,'BeginHostLine',None,ordinal=self.host_lines);return True
     def run(self):
         while True:
             s=self.snapshot();phase=s['phase'];owner=s['owner'];target=self.current_owner()
@@ -246,6 +331,16 @@ class FullFlow:
             C.require(phase not in ('Revoked',),'source_failure')
             if phase=='Finished':
                 self.native.close_after_normal_proof(self.records,owner,self.expected_profile);return
+            if not s['focused']:
+                # Observe initial compositor focus only; never refocus or renew
+                # the original deadline, and reject any later focus loss.
+                C.require(not self.startup_focus_seen and phase=='Selecting' and owner is None and
+                          s['subphase']=='None' and not(s['secret_input'] or s['host_input']),'input_phase')
+                self.startup_focus_waits+=1;C.require(self.startup_focus_waits<64,'input_budget')
+                self.controller.wait_render_progress();continue
+            self.startup_focus_seen=True
+            if not self.host_startup_complete:
+                C.require(phase=='Selecting' and owner is None and s['subphase']=='None','input_phase')
             if phase in ('V3Password','Password'):
                 if not self.used(s,'PasswordSubmit',owner):
                     self.native.protected_input(phase,owner,'SourcePassword',self.fixture.secret('source'))
@@ -258,6 +353,13 @@ class FullFlow:
                 retired=next((r for r in self.records if r['kind']=='SignerMilestone' and r['facts']=={'owner':'Signer1','step':'SigningRetired'}),None)
                 if retired:self.operator.signal('Signer2','start',retired)
             if self.pump_host(s):continue
+            if not self.host_startup_complete:
+                # Native startup is independent of Signer selection. Do not
+                # mistake unchanged Selecting for permission to skip its prompts.
+                if self.find(s,'BeginHostLine',None) is None or self.find(s,'HostOutput',None) is None:
+                    self.seek(s,'HostOutput' if self.find(s,'HostOutput',None) is None else 'BeginHostLine',None)
+                else:self.controller.wait_render_progress()
+                continue
             if phase in ('SetupNeeded','Selecting','SignCommitted','SignedRetired','ReturnCompleted'):
                 saved=False
                 for role in ('Signer1','Signer2'):

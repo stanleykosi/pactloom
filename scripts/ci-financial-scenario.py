@@ -97,14 +97,15 @@ class NativeScenario:
         C.require(s['host_input'] if tag=='HostEditor' else s['secret_input'],'input_phase')
         point=self.point(s,tag,None if tag=='HostEditor' else owner);self._protected=True
         try:
-            self.controller.click(*point)
             def native(value):
                 # Convert only fixed synthetic bytes, preflight then emit evdev.
                 # Do not call public type_ascii or include values in exceptions.
-                text=bytes(value).decode('ascii');events=K._ascii_events(text)
-                self.controller._budget(len(events)+1)
-                for key,pressed in events:self.controller._command(K.KEY,key,pressed)
-                self.controller.wait_render_progress()
+                text=bytes(value).decode('ascii')
+                batches=self.controller._preflight_ascii_batches(text,extra_commands=3)
+                self.controller.click(*point)
+                for events in batches:
+                    for key,pressed in events:self.controller._command(K.KEY,key,pressed)
+                    self.controller.wait_render_progress()
             secret.consume(native)
         finally:secret.wipe()
         # Remains protected until actual submit and later observer says both
