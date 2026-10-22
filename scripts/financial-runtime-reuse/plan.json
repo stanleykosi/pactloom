@@ -11,8 +11,8 @@
   },
   "harness": {
     "repository": "stanleykosi/pactloom",
-    "source": "a987126bdd80c0a66492a691c3b638a14d094223",
-    "source_tree": "c23c6e07e1a412b1318dce9cec97fcf6049f6d8a"
+    "source": "99f26c7490186f0e8034c2d32c24754799a96d7a",
+    "source_tree": "57a1b5fe78534cfad517dbe71f60c89e0930804c"
   },
   "artifact_pins": {
     "archive_sha256": "da7ee0e9daa0e9b889fded84beedbea5f7c12ab782def73afce7b0e21ae5c4b9",
@@ -25,8 +25,8 @@
     "run": "4e34fd7c57ef56376448839b36227f6ff91ee3a22dee2c8760299d91f3cc4575"
   },
   "reviewed_runtime_changes": {
-    "scripts/ci-financial-flow.py": "c3c8963e7c0671e976b5ba27bd82ce3a26a947f9616c54a4e866d09e7403049b",
-    "scripts/tests/test_ci_financial_observer.py": "35be9c29142f5d2aa89f7bc6032d3cfabbda5b6d5bc95d80aa1a03fadcd5539f"
+    "scripts/ci-financial-flow.py": "d8af288005d3422b6076f58cfe0b905754e25c13b5ce90729b89bdbcaca6800c",
+    "scripts/tests/test_ci_financial_observer.py": "21f607f6f06d16b4d68dde2833bc93754cb2cc190e38fd34b3f9e21d2497ec75"
   },
   "transition_compatibility": {
     "version": 1,

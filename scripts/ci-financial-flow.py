@@ -560,7 +560,12 @@ class FullFlow:
                 kind,action=FORMS[phase];complete=True
                 for field,value in self.fixture.form(owner,kind).items():
                     if not self.field(s,'Field:'+field,owner,value):complete=False;break
-                if complete and self.find(s,action,owner) and self.find(s,action,owner)['enabled'] and not self.used(s,action,owner):self.press(s,action,owner)
+                if complete and not self.used(s,action,owner):
+                    # Multiline public forms can push their submit below the
+                    # viewport. Use bounded ordinary navigation, never retype a
+                    # consumed field or infer that an unseen action is enabled.
+                    if self.seek(s,action,owner) and self.find(s,action,owner)['enabled']:
+                        self.press(s,action,owner)
                 continue
             if phase in REVIEW:self.review(s,REVIEW[phase],owner);continue
             if phase in READ_ONLY:self.review(s,READ_ONLY[phase],owner,ack=None);continue

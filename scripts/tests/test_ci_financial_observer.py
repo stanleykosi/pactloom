@@ -1628,3 +1628,87 @@ class HostReadOnlyTransitionTests(unittest.TestCase):
             with self.assertRaises(F.C.Rejected) as error:flow.pump_host(s)
             self.assertEqual(str(error.exception),'input_phase');capture.assert_not_called()
         self.assertEqual(controller.mock_calls,[]);observer.host_view.assert_not_called()
+
+class FormNavigationTests(unittest.TestCase):
+    def test_actual_form_fill_seeks_clipped_submit_and_dispatches_once(self):
+        from unittest import mock
+        class Submitted(Exception):pass
+        class Stalled(Exception):pass
+        state=dict(generation=0,visible=False,submitted=False)
+        class Observer:
+            expected_profile=F.C.SEMANTIC_PROFILE
+            def read(self):return []
+            def host_view(self,s):raise AssertionError("No Host view admitted during this form test")
+            def next_snapshot(self,deadline):
+                if state['submitted']:raise Submitted()
+                state['generation']+=1
+                if state['generation']>120:raise Stalled()
+                widgets=[dict(tag='ScrollRegion',owner=None,enabled=True,rect=[10,10,1270,790])]
+                if not state['visible']:widgets.append(dict(tag='Field:V3Selection',owner='Signer1',enabled=True,rect=[10,500,1200,740]))
+                if state['visible']:widgets.append(dict(tag='BeginV3',owner='Signer1',enabled=True,rect=[10,750,400,780]))
+                return dict(phase='V3Configuring',subphase='None',owner='Signer1',view_generation=state['generation'],focused=True,secret_input=False,host_input=False,pixels_per_point=1,viewport=[1280,800],widgets=widgets,host_view_id=None,host_observation=dict(revision=1,nonws_end=0,context_valid=False,entry='Idle',editor=None,view=None))
+        fixture=mock.Mock(deadline_ns=time.monotonic_ns()+F.C.ORIGINAL_NS)
+        fixture.form.return_value={'V3Selection':'synthetic public selection'}
+        controller=mock.Mock()
+        def click(x,y):
+            if (x,y)==(205,765):state['submitted']=True
+            else:self.assertEqual((x,y),(605,620))
+        controller.click.side_effect=click
+        controller.scroll_down.side_effect=lambda *args:state.update(visible=True)
+        flow=F.FullFlow(controller,fixture,Observer(),None)
+        flow.startup_index=13;flow.startup_focus_seen=True;flow._startup_ceiling=None
+        with self.assertRaises(Submitted):flow.run()
+        controller.type_ascii.assert_called_once_with('synthetic public selection')
+        controller.clear_field.assert_called_once();self.assertEqual(controller.click.call_count,2)
+        self.assertEqual(controller.scroll_up.call_count,24);controller.scroll_down.assert_called_once()
+        self.assertEqual(flow.actions,1);self.assertTrue(flow.used(dict(phase='V3Configuring',subphase='None'),'BeginV3','Signer1'))
+        controller.observe.assert_not_called()
+    def test_form_navigation_respects_consumed_disabled_incomplete_and_protected_states(self):
+        from unittest import mock
+        for case in ('consumed','disabled','incomplete','host_protected','secret_protected'):
+            with self.subTest(case=case):
+                class End(Exception):pass
+                state=dict(generation=0)
+                class Observer:
+                    expected_profile=F.C.SEMANTIC_PROFILE
+                    def read(self):return []
+                    def host_view(self,s):raise AssertionError('unexpected Host capture')
+                    def next_snapshot(self,deadline):
+                        state['generation']+=1
+                        if state['generation']>3:raise End()
+                        widgets=[dict(tag='ScrollRegion',owner=None,enabled=True,rect=[10,10,1270,790])]
+                        if case=='disabled':widgets.append(dict(tag='BeginV3',owner='Signer1',enabled=False,rect=[10,750,400,780]))
+                        return dict(phase='V3Configuring',subphase='None',owner='Signer1',view_generation=state['generation'],focused=True,secret_input=case=='secret_protected',host_input=case=='host_protected',pixels_per_point=1,viewport=[1280,800],widgets=widgets,host_view_id=None,host_observation=dict(revision=1,nonws_end=0,context_valid=False,entry='Writing' if case=='host_protected' else 'Idle',editor=None,view=None))
+                fixture=mock.Mock(deadline_ns=time.monotonic_ns()+F.C.ORIGINAL_NS)
+                fixture.form.return_value={'V3Selection':'synthetic public selection'}
+                controller=mock.Mock();flow=F.FullFlow(controller,fixture,Observer(),None)
+                flow.startup_index=13;flow.startup_focus_seen=True;flow._startup_ceiling=None
+                if case!='incomplete':flow.filled.add(('V3Configuring','Field:V3Selection','Signer1'))
+                if case=='consumed':flow.done.add(('V3Configuring','None','BeginV3','Signer1',None))
+                with mock.patch.object(flow,'seek',wraps=flow.seek) as seek:
+                    with self.assertRaises(F.C.Rejected if case=='secret_protected' else End):flow.run()
+                    tags=[call.args[1] for call in seek.call_args_list]
+                self.assertEqual(tags,['Field:V3Selection']*3 if case=='incomplete' else ['BeginV3']*3 if case=='disabled' else [])
+                controller.click.assert_not_called();controller.type_ascii.assert_not_called();controller.clear_field.assert_not_called();controller.observe.assert_not_called()
+                if case!='incomplete':controller.scroll_up.assert_not_called();controller.scroll_down.assert_not_called()
+                if case=='host_protected':self.assertEqual(controller.wait_render_progress.call_count,3)
+    def test_permanently_hidden_form_action_exhausts_original_seek_bound(self):
+        from unittest import mock
+        state=dict(generation=0)
+        observer=mock.Mock(expected_profile=F.C.SEMANTIC_PROFILE);observer.read.return_value=[]
+        def snapshot(deadline):
+            state['generation']+=1
+            return dict(phase='V3Configuring',subphase='None',owner='Signer1',view_generation=state['generation'],focused=True,secret_input=False,host_input=False,pixels_per_point=1,viewport=[1280,800],widgets=[dict(tag='ScrollRegion',owner=None,enabled=True,rect=[10,10,1270,790])],host_view_id=None,host_observation=dict(revision=1,nonws_end=0,context_valid=False,entry='Idle',editor=None,view=None))
+        observer.next_snapshot.side_effect=snapshot
+        fixture=mock.Mock(deadline_ns=time.monotonic_ns()+F.C.ORIGINAL_NS)
+        fixture.form.return_value={'V3Selection':'synthetic public selection'}
+        controller=mock.Mock();flow=F.FullFlow(controller,fixture,observer,None)
+        flow.startup_index=13;flow.startup_focus_seen=True;flow._startup_ceiling=None
+        flow.filled.add(('V3Configuring','Field:V3Selection','Signer1'))
+        original_deadline=fixture.deadline_ns
+        with self.assertRaises(F.C.Rejected) as error:flow.run()
+        self.assertEqual(str(error.exception),'input_widget')
+        self.assertEqual(controller.scroll_up.call_count,24);self.assertEqual(controller.scroll_down.call_count,40)
+        self.assertEqual(state['generation'],65);self.assertEqual(flow.actions,0)
+        self.assertIsNone(flow._startup_ceiling);self.assertEqual(fixture.deadline_ns,original_deadline)
+        controller.click.assert_not_called();controller.type_ascii.assert_not_called();controller.clear_field.assert_not_called();controller.observe.assert_not_called();observer.host_view.assert_not_called()
