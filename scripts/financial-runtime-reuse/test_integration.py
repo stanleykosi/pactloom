@@ -9,8 +9,8 @@ ROOT=HERE.parents[1]
 class IntegrationTests(unittest.TestCase):
  def test_concrete_plan_pins_and_exact_delta(self):
   plan=L.validate_plan(json.loads((HERE/'plan.json').read_text()))
-  self.assertEqual(plan['harness']['source'],'b5e5b63d7436b292f65cdaf30c28fd3a4f7f8764')
-  self.assertEqual(plan['harness']['source_tree'],'8139a367f38d4d2347491291b46b154685fc25f3')
+  self.assertEqual(plan['harness']['source'],'82c92a21720e3fdb7ee967330ef531c523a2a9bf')
+  self.assertEqual(plan['harness']['source_tree'],'7f207b5465f981f1428fb4264864b6ae2af0f4ab')
   self.assertEqual(plan['artifact_pins']['artifact_id'],12402292135)
   self.assertEqual(set(plan['reviewed_runtime_changes']),{'scripts/ci-financial-container.py','scripts/ci-financial-flow.py','scripts/tests/test_ci_financial_observer.py'})
   self.assertNotIn('launcher',plan)
