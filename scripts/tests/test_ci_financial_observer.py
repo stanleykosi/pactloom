@@ -116,6 +116,144 @@ class NativeScrollAckTests(unittest.TestCase):
         self.assertIn('(void)ack(c);',source[end:end+80])
 
 
+
+class ClickRenderBoundaryTests(unittest.TestCase):
+    # Native witness: host-line-frame-audit/harness.rs, actual egui0.36.2 +
+    # unchanged HostLineInput. Coalesced click+first32 dropped that first batch;
+    # a rendered click-only frame preserved all34 synthetic Host bytes.
+    def recording(self,fail_barrier=False):
+        import test_ci_financial_input_batching as B
+        class Recording(B.RecordingController):
+            def __init__(self):super().__init__();self.trace=[]
+            def _command(self,op,a=0,b=0):
+                self.trace.append((op,a,b));super()._command(op,a,b)
+                return (op,a,b,self._sequence)
+            def wait_render_progress(self):
+                self.trace.append(('render',))
+                if fail_barrier:raise B.K.Rejected('protocol')
+                return super().wait_render_progress()
+        from unittest import mock
+        controller=Recording()
+        self.configured_flow=F.FullFlow(controller,mock.Mock(),
+            mock.Mock(expected_profile=F.C.EXTERNAL_PROFILE),mock.Mock())
+        return controller,B
+    def protected(self,c,B):
+        native=self.configured_flow.native
+        self.assertIs(native.controller,c)
+        native.stable=lambda *a,**kw:dict(host_input=True,secret_input=False,
+            host_observation=dict(revision=1,nonws_end=8,context_valid=True,entry='Editing',
+                editor=dict(ordinal=1,revision=1),view=None))
+        native.point=lambda *a:(100,100)
+        secret=F.S.F.SyntheticSecret(F.S.F._TOKEN,F.S.F._SYNTHETIC_PASSWORDS['host'])
+        return native,secret
+    def test_click_returns_release_receipt_only_after_rendered_boundary(self):
+        c,B=self.recording();receipt=c.click(100,100)
+        self.assertEqual(receipt,(K.BUTTON,0,0,3))
+        self.assertEqual(c.trace,[(K.MOVE,100,100),(K.BUTTON,1,0),(K.BUTTON,0,0),('render',)])
+        self.assertEqual((c._sequence,c._progress),(4,1))
+    def test_actual_protected_input_click_release_render_then_exact_first_key(self):
+        c,B=self.recording();native,secret=self.protected(c,B)
+        native.protected_input('Selecting',None,'HostEditor',secret,(0,8,1))
+        expected=B.K._ascii_events(B.S.F._SYNTHETIC_PASSWORDS['host'].decode('ascii'))
+        self.assertEqual(c.trace[:5],[(K.MOVE,100,100),(K.BUTTON,1,0),(K.BUTTON,0,0),
+            ('render',),(K.KEY,*expected[0])])
+        self.assertEqual(tuple((a,b) for op,a,b in c.commands if op==K.KEY),expected)
+        self.assertEqual(tuple(map(len,c.batches)),(0,64,4))
+        self.assertEqual((c._sequence,c._progress),(74,3))
+        self.assertFalse(c.held);self.assertTrue(all(v==0 for v in secret._bytes))
+    def test_click_barrier_failure_sends_no_keys_and_wipes_secret(self):
+        c,B=self.recording(True);native,secret=self.protected(c,B)
+        with self.assertRaises(B.K.Rejected):
+            native.protected_input('Selecting',None,'HostEditor',secret,(0,8,1))
+        self.assertEqual([op for op,a,b in c.commands],[K.MOVE,K.BUTTON,K.BUTTON])
+        self.assertTrue(all(v==0 for v in secret._bytes))
+    def test_click_budget_failure_before_any_pointer_input(self):
+        for kind in ('commands','progress'):
+            c,B=self.recording()
+            if kind=='commands':c._sequence=K.MAX_COMMANDS-3
+            else:c._progress=K.MAX_PROGRESS
+            with self.assertRaises(B.K.Rejected):c.click(100,100)
+            self.assertEqual(c.trace,[])
+    def test_whole_secret_preflight_includes_click_barrier_and_exact_boundary(self):
+        for kind in ('commands','progress'):
+            for fits in (False,True):
+                with self.subTest(kind=kind,fits=fits):
+                    c,B=self.recording();native,secret=self.protected(c,B)
+                    if kind=='commands':c._sequence=K.MAX_COMMANDS-(74 if fits else 73)
+                    else:c._progress=K.MAX_PROGRESS-(3 if fits else 2)
+                    if fits:
+                        native.protected_input('Selecting',None,'HostEditor',secret,(0,8,1))
+                        self.assertEqual(c._sequence if kind=='commands' else c._progress,
+                                         K.MAX_COMMANDS if kind=='commands' else K.MAX_PROGRESS)
+                    else:
+                        with self.assertRaises(B.K.Rejected):
+                            native.protected_input('Selecting',None,'HostEditor',secret,(0,8,1))
+                        self.assertEqual(c.trace,[])
+                    self.assertTrue(all(v==0 for v in secret._bytes))
+    def test_private_preflight_contract_rejects_unrecognized_reservations(self):
+        for extra in (-1,1,4,True,None):
+            c,B=self.recording()
+            with self.assertRaises(B.K.Rejected):c._preflight_ascii_batches('a',extra_commands=extra)
+            self.assertEqual(c.trace,[])
+    def test_full_flow_unconditionally_enables_mode_before_any_input(self):
+        from unittest import mock
+        import test_ci_financial_input_batching as B
+        c=B.RecordingController();self.assertFalse(c._rendered_clicks)
+        observer=mock.Mock(expected_profile=F.C.EXTERNAL_PROFILE)
+        F.FullFlow(c,mock.Mock(),observer,mock.Mock())
+        self.assertTrue(c._rendered_clicks);self.assertEqual(c.commands,[])
+        c.enable_rendered_clicks();self.assertTrue(c._rendered_clicks)
+        c.click(100,100);self.assertEqual((c._sequence,c._progress),(4,1))
+    def test_full_flow_configuration_cannot_be_disabled_by_instance_override(self):
+        from unittest import mock
+        import test_ci_financial_input_batching as B
+        class Override(B.RecordingController):
+            def enable_rendered_clicks(self):pass
+        c=Override();c.enable_rendered_clicks();self.assertFalse(c._rendered_clicks)
+        F.FullFlow(c,mock.Mock(),mock.Mock(expected_profile=F.C.EXTERNAL_PROFILE),mock.Mock())
+        c.enable_rendered_clicks();self.assertTrue(c._rendered_clicks)
+        c.click(100,100);self.assertEqual((c._sequence,c._progress),(4,1))
+    def test_enabled_public_host_path_renders_focus_before_typing(self):
+        c,B=self.recording();native,secret=self.protected(c,B);secret.wipe()
+        native.public_host_line('Selecting',None,'public-path',(0,8,1))
+        self.assertEqual(c.trace[2:5],[(K.BUTTON,0,0),('render',),(K.KEY,*B.K._ascii_events('p')[0])])
+        self.assertEqual(tuple((a,b) for op,a,b in c.commands if op==K.KEY),B.K._ascii_events('public-path'))
+    def test_full_flow_public_form_renders_click_before_clear_and_text(self):
+        c,B=self.recording();native,secret=self.protected(c,B);secret.wipe()
+        snapshot=observed_snapshot(phase='Selecting',subphase='None',owner=None,
+            view_generation=1,focused=True,host_input=False,secret_input=False,
+            pixels_per_point=1,viewport=[1280,800],widgets=[dict(tag='Field:HostProfile',
+                owner=None,rect=[90,90,110,110],enabled=True)])
+        F.C.validate_snapshot(snapshot)
+        native.stable=lambda *a,**kw:snapshot
+        native.point=F.S.NativeScenario.point.__get__(native)
+        native.public_field('Selecting',None,'Field:HostProfile','path')
+        self.assertEqual(c.trace[2:5],[(K.BUTTON,0,0),('render',),(K.KEY,29,1)])
+        self.assertFalse(c.held)
+    def test_full_flow_source_password_renders_click_before_first_key(self):
+        c,B=self.recording();native,secret=self.protected(c,B)
+        secret.wipe()
+        secret=F.S.F.SyntheticSecret(F.S.F._TOKEN,F.S.F._SYNTHETIC_PASSWORDS['source'])
+        native.stable=lambda *a,**kw:dict(host_input=False,secret_input=True)
+        native.protected_input('V3Confirm','Signer1','SourcePassword',secret)
+        first=B.K._ascii_events(F.S.F._SYNTHETIC_PASSWORDS['source'].decode('ascii'))[0]
+        self.assertEqual(c.trace[2:5],[(K.BUTTON,0,0),('render',),(K.KEY,*first)])
+        self.assertTrue(all(v==0 for v in secret._bytes))
+    def test_standalone_legacy_click_keeps_original_contract(self):
+        import test_ci_financial_input_batching as B
+        c=B.RecordingController();c.click(100,100)
+        self.assertEqual((c._sequence,c._progress),(3,0));self.assertEqual(c.batches,[])
+    def test_terminal_close_remains_release_then_ack_without_render_wait(self):
+        from unittest import mock
+        transport=NativeAckTransport()
+        c=K.Controller(transport,1_000_000_000,1_000_000_000,_clock=lambda:1)
+        c._ready=c._bound=True;c.enable_rendered_clicks();self.addCleanup(c.close)
+        with mock.patch.object(K.Controller,'wait_render_progress',side_effect=AssertionError('post-close render')):
+            receipt=c.terminal_click(100,100)
+        self.assertEqual([command[3] for command in transport.commands],[K.MOVE,K.BUTTON,K.BUTTON])
+        self.assertEqual(receipt,K.Receipt(3,13,23,3));self.assertTrue(c._terminal_close)
+        self.assertEqual(c._progress,0)
+
 # Pure scheduling regressions: no product, UI, credentials or forged runtime proof.
 spec=importlib.util.spec_from_file_location('financial_completion_flow_tested',ROOT/'ci-financial-flow.py')
 F=importlib.util.module_from_spec(spec);sys.modules[spec.name]=F;spec.loader.exec_module(F)
@@ -348,7 +486,8 @@ class HostStartupContractTests(unittest.TestCase):
     def flow(self):
         from unittest import mock
         observer=mock.Mock();observer.expected_profile=F.C.EXTERNAL_PROFILE
-        return F.FullFlow(mock.Mock(),self.fixture,observer,None)
+        flow=F.FullFlow(mock.Mock(),self.fixture,observer,None)
+        return flow
     def acknowledge(self,flow):
         flow.pending_startup=flow.startup_index;flow.startup_submitted();flow.startup_waiting=False
     def test_whole_real_prompt_sequence_has_exact_read_only_responses_and_separate_latches(self):
@@ -592,6 +731,77 @@ class HostStartupContractTests(unittest.TestCase):
         with self.assertRaises(F.S.F.C.Rejected):self.fixture.host_credential_destination()
         target.unlink();os.link(other,target)
         with self.assertRaises(F.S.F.C.Rejected):self.fixture.host_credential_destination()
+    def _run_revoked_third_host_boundary(self,after_submit):
+        from unittest import mock
+        from test_ci_financial_input_batching import RecordingController
+        flow=self.flow()
+        previous_end=0
+        for revision,prompt in enumerate(self.PROMPTS[:2],1):
+            flow.expected_host_line(prompt);self.acknowledge(flow)
+            end=previous_end+F.H.count(prompt)
+            flow.host_occurrences.latch((previous_end,end,revision));previous_end=end
+        flow.host_lines=2
+        text=''.join(self.PROMPTS[:3]);end=F.H.count(text);budget=RecordingController()
+        state=dict(mode='Idle',seen_revoked=False,generation=0,effects=[])
+        def snapshot():
+            state['generation']+=1
+            mode=state['mode'];revoked=mode=='Revoked';editing=mode=='Editing'
+            if revoked:state['seen_revoked']=True
+            h=dict(revision=3,nonws_end=end,context_valid=not revoked,
+                   entry='Closed' if revoked else mode,
+                   editor=dict(ordinal=3,revision=3) if editing else None,
+                   view=dict(rect=[10,200,110,220],nonws=end,rows=1) if mode=='Idle' else None)
+            widgets=[] if revoked else ([('HostEditor',100),('HostSubmit',150)] if editing
+                else [('HostOutput',200),('BeginHostLine',250)])
+            result=observed_snapshot(phase='Revoked' if revoked else 'Selecting',owner=None,
+                subphase='None',focused=True,view_generation=state['generation'],
+                secret_input=False,host_input=editing,host_observation=h,
+                pixels_per_point=1,viewport=[1280,800],widgets=[
+                    dict(tag=t,owner=None,rect=[10,y,110,y+20],enabled=True) for t,y in widgets])
+            F.C.validate_snapshot(result);return result
+        def effect(name):
+            self.assertFalse(state['seen_revoked'],'effect after observed terminal state')
+            state['effects'].append(name)
+        def click(x,y):
+            effect('click')
+            if y==260:
+                self.assertEqual(state['mode'],'Idle')
+                state['mode']='Editing' if after_submit else 'Revoked'
+            elif y==110:self.assertEqual(state['mode'],'Editing')
+            elif y==160:
+                self.assertEqual(state['mode'],'Editing');state['mode']='Revoked'
+            else:self.fail('unexpected click')
+        def progress():effect('barrier');budget.wait_render_progress()
+        def key(op,a,b):effect('key');budget._command(op,a,b)
+        flow.native.snapshot=snapshot;flow.observer.read.return_value=[]
+        flow.native.capture_host=mock.Mock(return_value=(text,snapshot()['host_observation']))
+        flow.controller.click.side_effect=click
+        flow.controller.wait_render_progress.side_effect=progress
+        flow.controller._preflight_ascii_batches.side_effect=budget._preflight_ascii_batches
+        flow.controller._command.side_effect=key
+        with mock.patch.object(F.time,'monotonic_ns',return_value=10_000_000_000):
+            with self.assertRaises(F.C.Rejected) as error:flow.run()
+        self.assertEqual(error.exception.code,'source_failure')
+        self.assertTrue(state['seen_revoked'])
+        self.assertEqual(flow.host_occurrences.attempts,3)
+        self.assertEqual(flow.host_stage,'Storage')
+        self.assertEqual(flow.startup_index,3 if after_submit else 2)
+        self.assertEqual(flow.pending_host is None,after_submit)
+        self.assertEqual(flow.host_rejection,None if after_submit else 'host_entry_changed')
+        self.assertEqual(flow.controller.click.call_count,3 if after_submit else 1)
+        self.assertEqual(len(self.fixture.secret_instances),1 if after_submit else 0)
+        self.assertEqual(sum(x=='key' for x in state['effects']),68 if after_submit else 0)
+        flow.native.capture_host.assert_called_once()
+        flow.controller.observe.assert_not_called();flow.controller.type_ascii.assert_not_called()
+        flow.controller.scroll_up.assert_not_called();flow.controller.scroll_down.assert_not_called()
+        F.C.validate_host_diagnostic(dict(version=1,attempted_lines=3,startup_stage='Storage',category=flow.host_rejection or 'none'))
+
+    def test_revoked_after_third_begin_before_typing_marks_pending_entry_boundary(self):
+        self._run_revoked_third_host_boundary(False)
+
+    def test_revoked_after_third_submit_return_preserves_no_pending_entry_category(self):
+        self._run_revoked_third_host_boundary(True)
+
     def test_full_run_owned_writing_is_observation_only_until_later_idle(self):
         from unittest import mock
         flow=self.flow();flow.startup_index=13;flow.startup_waiting=True;flow.startup_focus_seen=True
@@ -725,7 +935,8 @@ class BoundedIdleSweepTests(unittest.TestCase):
                     view_generation=state['generation'],focused=True,secret_input=False,
                     host_input=False,pixels_per_point=1,viewport=[1280,800],widgets=widgets)
         fixture=mock.Mock();fixture.deadline_ns=123
-        return F.FullFlow(controller,fixture,Observer(),None),controller,state
+        flow=F.FullFlow(controller,fixture,Observer(),None)
+        return flow,controller,state
     def test_sweep_crosses_unchanged_tag_geometry_and_clicks_only_real_enabled_target(self):
         flow,controller,state=self.model()
         for _ in range(64):

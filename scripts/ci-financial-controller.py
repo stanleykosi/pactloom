@@ -206,6 +206,8 @@ def _ascii_events(text):
 class Controller:
     """One closed session, one Popen target, one live private image buffer."""
 
+    _rendered_clicks = False  # legacy standalone contract; FullFlow opts in once
+
     def __init__(self, transport, original_deadline_ns, session_deadline_ns,
                  *, _clock=time.monotonic_ns):
         _deadlines(original_deadline_ns, session_deadline_ns, _clock())
@@ -374,13 +376,24 @@ class Controller:
             self._reject('input')
         return self._command(FOCUS, int(enabled))
 
+    def enable_rendered_clicks(self):
+        """Monotonic full-flow focus boundary; no disable or deadline renewal."""
+        self._rendered_clicks = True
+
     def click(self, x, y):
         if type(x) is not int or type(y) is not int or not (0 <= x < WIDTH and 0 <= y < HEIGHT):
             self._reject('input')
-        self._budget(3)
+        # Focus acquisition must be rendered before a caller can send text.
+        # Reserve the entire click, including its progress barrier, before MOVE.
+        self._budget(4 if self._rendered_clicks else 3)
+        if self._rendered_clicks and self._progress >= MAX_PROGRESS:
+            self._reject('limit')
         self._command(MOVE, x, y)
         self._command(BUTTON, 1)
-        return self._command(BUTTON, 0)
+        receipt = self._command(BUTTON, 0)
+        if self._rendered_clicks:
+            self.wait_render_progress()
+        return receipt  # preserve the button-up receipt contract
 
     def scroll_down(self, x, y):
         """One fixed real wheel event, never an arbitrary axis value."""
@@ -520,8 +533,15 @@ class Controller:
             self._reject('input')
         batches = tuple(_ascii_events(value[start:start + INPUT_BATCH_CHARS])
                         for start in range(0, len(value), INPUT_BATCH_CHARS))
-        self._budget(sum(map(len, batches)) + len(batches) + extra_commands)
-        if self._progress + len(batches) > MAX_PROGRESS:
+        # Private call contract: 0 means typing alone; 3 means the one
+        # preceding MOVE/down/up click used by protected_input. Its rendered
+        # focus boundary adds one command AND one progress slot. Preflight the
+        # whole secret plus that click before any input; never renew limits.
+        if type(extra_commands) is not int or extra_commands not in (0, 3):
+            self._reject('input')
+        click_progress = int(self._rendered_clicks and extra_commands == 3)
+        self._budget(sum(map(len, batches)) + len(batches) + extra_commands + click_progress)
+        if self._progress + len(batches) + click_progress > MAX_PROGRESS:
             self._reject('limit')
         return batches
 
