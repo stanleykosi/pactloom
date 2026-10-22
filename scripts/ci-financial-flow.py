@@ -55,9 +55,14 @@ class FullFlow:
         self.records=[];self.pending_host=None;self.location=None
         self.last_phase=None;self.search_direction='up';self.search_geometry=None
     def snapshot(self):
-        self.fixture.check();self.records=self.observer.read()
+        self.fixture.check();snapshot=self.native.snapshot()
+        # next_snapshot may observe later records while awaiting a fresh frame.
+        # Refresh AFTER that read: Finished is not normal-completion proof, and
+        # the exact native proof guard must not receive a pre-frame record set.
+        # ObserverFiles retains append-only validation and the original deadline.
+        self.records=self.observer.read()
         C.require(not any(r['kind']=='Failure' for r in self.records),'observer_failure')
-        return self.native.snapshot()
+        return snapshot
     @staticmethod
     def find(s,tag,owner):
         return next((w for w in s['widgets'] if w['tag']==tag and w['owner']==owner),None)
