@@ -1,6 +1,6 @@
 """PRIVATE review candidate, no network or activation at import.
 
-Only retry03 native producer is accepted. H contains runtime-only edits; L is
+Only P16 native producer is accepted. H contains runtime-only edits; L is
 an independent exact CI event checkout. Missing future artifact/H pins reject.
 No compiler invocation, context override, monkey-patch or runtime policy change.
 """
