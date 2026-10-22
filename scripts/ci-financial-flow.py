@@ -44,6 +44,8 @@ SELECT=('ReviewV3Pair','ReviewV3Enrollment','ReviewV3Manifest','ReviewV3Redisclo
 RESULT_PHASES=frozenset(('V3Held','V3Paired','V3Enrolled','V3ManifestAccepted','V3RedisclosurePrepared',
  'V3Redisclosed','V3OwnerSelected','V3Prepared','V3Received','V3AdmitReadRetained','V3AdmissionRetained','V3Audited'))
 
+HOST_COMMANDS_INSTRUCTION='Select original reviewer 1 of 2 for its separate closed V3 admission.\n'
+
 HOST_STARTUP=('profile','workspace','password','financial_password','historical_approval',
               'principal','scope','shared','mode','origin','credential','session_approval',
               'session_commands_file')
@@ -82,6 +84,7 @@ class FullFlow:
         self.records=[];self.pending_host=None;self.location=None
         self.startup_index=0;self.startup_issued=None;self.pending_startup=None
         self.startup_waiting=False;self.startup_input_attempted=False
+        self.commands_instruction_observed=False;self.commands_instruction_context=None
         self.startup_focus_seen=False;self.startup_focus_waits=0
         self.host_occurrences=H.HostOccurrences();self.pending_occurrence=None;self.host_rejection=None;self.host_stage='Unobserved';self.host_visibility_steps=0;self.host_deferred=None;self.host_ignored=None;self.host_prepared=None;self.host_coverage_context=None;self.host_coverage_steps=0
         self.last_phase=None;self.search_direction='up';self.search_geometry=None
@@ -266,7 +269,58 @@ class FullFlow:
         # Local scheduling guard only, never native approval/completion evidence.
         return (self.startup_index==len(HOST_STARTUP) and not self.startup_waiting
                 and self.pending_startup is None
-                and self.startup_issued is None)
+                and self.startup_issued is None
+                and (self.expected_profile!=C.SEMANTIC_PROFILE or self.commands_instruction_observed))
+
+    def observe_commands_instruction(self,s):
+        """Passive commands-consumption discriminator; not an input or proof.
+
+        Native asks for the path without a newline, then emits this exact message
+        before waiting for the first V3 endpoint. Keep the original final-slot
+        deadline until that actual rendered suffix is observed. No ledger grant,
+        retry, normalization, private fixture text or direct process read.
+        """
+        C.require(self.expected_profile==C.SEMANTIC_PROFILE and
+                  self.startup_index==len(HOST_STARTUP) and not self.startup_waiting and
+                  self.pending_host is None and self.pending_startup is None and
+                  self.startup_issued is None,'input_phase')
+        C.require(self._startup_ceiling is not None and time.monotonic_ns()<self._startup_ceiling,'deadline')
+        C.require(s['focused'] and not(s['host_input'] or s['secret_input']),'input_phase')
+        h=s['host_observation']
+        if not h['context_valid'] or h['entry']!='Idle':return False
+        if self.find(s,'HostOutput',None) is None:return False
+        if h['view'] is None:return self.seek_host_tail(s)
+        if time.monotonic_ns()-self.last_ocr<self.ocr_delay:return False
+        self.last_ocr=time.monotonic_ns();self.host_action='NoPending'
+        try:text,observed=self.native.capture_host(s['phase'],s['owner'],self.ocr)
+        except S.HostObservationChanged:return True # Fresh outer snapshot only.
+        except C.Rejected:
+            self.host_rejection='capture_guard';self.host_capture_outcome='capture_guard'
+            self.host_capture_context=None;raise
+        self.cache_host_observation(observed)
+        self.host_capture_context=(observed['revision'],observed['nonws_end'])
+        C.require(type(text) is str and text.isascii() and len(text)<=8192 and
+                  H.count(text)==observed['view']['nonws'],'snapshot')
+        C.require(observed['revision']>=self.host_occurrences.last_revision and
+                  observed['nonws_end']>=self.host_occurrences.last_end,'snapshot')
+        if text.endswith(HOST_COMMANDS_INSTRUCTION):
+            start=observed['nonws_end']-H.count(HOST_COMMANDS_INSTRUCTION)
+            C.require(start>=self.host_occurrences.frontier and
+                      observed['nonws_end']>self.host_occurrences.frontier,'input_phase')
+            # A blocking read must not resurrect an expired final-slot ceiling.
+            C.require(time.monotonic_ns()<self._startup_ceiling,'deadline')
+            self.commands_instruction_observed=True;self.host_stage='Operational'
+            self.commands_instruction_context=(observed['revision'],observed['nonws_end'])
+            self.host_capture_outcome='Accepted';self.host_rejection=None
+            self.host_coverage_context=None;self._startup_ceiling=None
+            return True # Dispatch only from a fresh main-loop observation.
+        self.host_capture_outcome='host_capture_grammar';self.host_rejection='host_capture_grammar'
+        if observed['view']['nonws']<observed['nonws_end']:
+            context=(observed['revision'],observed['nonws_end'])
+            if self.host_coverage_context!=context:self.host_coverage_steps=0
+            self.host_coverage_context=context
+            return self.seek_host_coverage(s)
+        return False
 
     def startup_host_line(self,text):
         """Only the next native startup prompt may consume one exact response.
@@ -410,8 +464,9 @@ class FullFlow:
             if self.startup_index==len(HOST_STARTUP):
                 if self.expected_profile==C.SEMANTIC_PROFILE:
                     C.require(self._startup_ceiling is not None and time.monotonic_ns()<self._startup_ceiling,'deadline')
-                    self._startup_ceiling=None
-                return False
+                    # Actual Idle ends submission waiting, not commands
+                    # consumption. Retain the final slot until its native message.
+                else:return False
         if self.startup_index<len(HOST_STARTUP):
             C.require(not(s['secret_input'] or s['host_input']),'input_phase')
         if s['host_input']:
@@ -422,6 +477,10 @@ class FullFlow:
             self.controller.wait_render_progress();return True
         if s['secret_input']:return False
         if not h['context_valid'] or h['entry']!='Idle':return False
+        if (self.expected_profile==C.SEMANTIC_PROFILE and self.startup_index==len(HOST_STARTUP)
+                and not self.commands_instruction_observed):
+            return self.observe_commands_instruction(s)
+        if context==self.commands_instruction_context:return False # Known noninteractive native tail.
         self.host_action='NoPending'
         if self.host_prepared is not None:
             occurrence,line=self.host_prepared

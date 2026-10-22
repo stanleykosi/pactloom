@@ -992,7 +992,7 @@ class HostStartupContractTests(unittest.TestCase):
         state=dict(mode='Idle',remaining=0,step=0,generation=0,line=None,submitted=[],captures=0,focus=0,
                    begin_boundary=0,submit_boundary=0,coverage=0)
         prompts=self.PROMPTS
-        def text():return '\n'.join(prompts[:min(state['step']+1,13)])
+        def text():return '\n'.join(prompts[:min(state['step']+1,13)])+(F.HOST_COMMANDS_INSTRUCTION if semantic and state['step']==13 else '')
         def crop():return (':' if state['coverage']==0 else 'directory (absolute): ') if state['step']==0 and state['coverage']<2 else text()
         class Observer:
             expected_profile=F.C.SEMANTIC_PROFILE if semantic else F.C.EXTERNAL_PROFILE
@@ -1018,7 +1018,7 @@ class HostStartupContractTests(unittest.TestCase):
                 if mode=='BeginIdle':state['begin_boundary']+=1
                 if mode=='SubmitEditing':state['submit_boundary']+=1
                 widgets=[('HostEditor',100),('HostSubmit',150)] if editing else ([('HostOutput',200),('BeginHostLine',250),('ScrollRegion',400)] if not protected else [])
-                h=dict(revision=min(state['step']+1,13),nonws_end=F.H.count(text()),context_valid=True,
+                h=dict(revision=min(state['step']+1,14 if semantic else 13),nonws_end=F.H.count(text()),context_valid=True,
                        entry=entry,editor=dict(ordinal=state['step']+1,revision=state['step']+1) if editing else None,
                        view=dict(rect=[10,200,110,220],nonws=F.H.count(crop()),rows=20) if not protected else None)
                 result=observed_snapshot(phase='Selecting',owner=None,subphase='None',focused=True,
@@ -1068,7 +1068,7 @@ class HostStartupContractTests(unittest.TestCase):
         self.assertEqual(len(self.fixture.secret_instances),2)
         self.assertIsNot(self.fixture.secret_instances[0],self.fixture.secret_instances[1])
         self.assertTrue(all(not any(secret._bytes) for secret in self.fixture.secret_instances))
-        self.assertEqual(state['captures'],15);controller.focus.assert_not_called()
+        self.assertEqual(state['captures'],16 if semantic else 15);controller.focus.assert_not_called()
         if semantic:
             ocr.read.assert_not_called();controller.observe.assert_not_called()
         self.assertEqual(state['coverage'],2);self.assertEqual(controller.scroll_up.call_count,2)
@@ -1509,8 +1509,9 @@ class SemanticStartupCeilingTests(unittest.TestCase):
             flow.pending_host=None
             writing=observed_snapshot(secret_input=False,host_input=True)
             self.assertTrue(flow.pump_host(writing));self.assertEqual(flow.startup_wait_ceiling(),second)
-            self.assertFalse(flow.pump_host(observed_snapshot(secret_input=False,host_input=False)))
-            self.assertTrue(flow.host_startup_complete);self.assertIsNone(flow.startup_wait_ceiling())
+            self.assertFalse(flow.pump_host(observed_snapshot(focused=True,secret_input=False,host_input=False,widgets=[])))
+            self.assertFalse(flow.host_startup_complete);self.assertEqual(flow.startup_wait_ceiling(),second)
+            self.assertFalse(flow.startup_waiting) # Idle alone no longer proves commands consumption.
         old=F.FullFlow(mock.Mock(),mock.Mock(),mock.Mock(expected_profile=F.C.EXTERNAL_PROFILE),None)
         self.assertIsNone(old.startup_wait_ceiling())
         self.assertNotIn('_wait_ceiling_installed',old.controller.__dict__)
@@ -1532,7 +1533,7 @@ class HostReadOnlyTransitionTests(unittest.TestCase):
                 owner='Signer1' if phase=='V3Configuring' else None
                 widgets=[dict(tag='HostOutput',owner=None,enabled=True,rect=[10,10,600,230]),dict(tag='BeginHostLine',owner=None,enabled=True,rect=[10,250,200,280])]
                 if phase=='Selecting':widgets.append(dict(tag='ConfigureV3',owner='Signer1',enabled=True,rect=[10,300,200,330]))
-                return dict(phase=phase,subphase='None',owner=owner,view_generation=state['generation'],focused=True,secret_input=False,host_input=False,pixels_per_point=1,viewport=[1280,800],widgets=widgets,host_view_id=1,host_observation=dict(revision=14,nonws_end=n,context_valid=True,entry='Idle',editor=None,view=dict(rect=[10,10,600,230],nonws=n,rows=1)))
+                return dict(phase=phase,subphase='None',owner=owner,view_generation=state['generation'],focused=True,secret_input=False,host_input=False,pixels_per_point=1,viewport=[1280,800],widgets=widgets,host_view_id=1,host_observation=dict(revision=15 if state['clicked'] else 14,nonws_end=n,context_valid=True,entry='Idle',editor=None,view=dict(rect=[10,10,600,230],nonws=n,rows=1)))
         fixture=mock.Mock(deadline_ns=time.monotonic_ns()+F.C.ORIGINAL_NS)
         temp=tempfile.TemporaryDirectory();self.addCleanup(temp.cleanup)
         fixture.source_path.return_value=str(pathlib.Path(temp.name)/'not-created')
@@ -1541,7 +1542,9 @@ class HostReadOnlyTransitionTests(unittest.TestCase):
             self.assertEqual((x,y),(105,315));state.update(clicked=True,pretail=1)
         controller.click.side_effect=click
         flow=F.FullFlow(controller,fixture,Observer(),mock.Mock())
-        flow.startup_index=13;flow.startup_waiting=True;flow.startup_focus_seen=True
+        flow.startup_index=13;flow.startup_waiting=False;flow.startup_focus_seen=True
+        flow.commands_instruction_observed=True;flow._startup_ceiling=None
+        flow.host_ignored=(14,n,n) # Already inspected noninteractive pre-Configure tail.
         flow.host_lines=13;flow.host_stage='Commands'
         class SourceReached(Exception):pass
         fixture.form.side_effect=SourceReached()
@@ -1657,6 +1660,7 @@ class FormNavigationTests(unittest.TestCase):
         controller.scroll_down.side_effect=lambda *args:state.update(visible=True)
         flow=F.FullFlow(controller,fixture,Observer(),None)
         flow.startup_index=13;flow.startup_focus_seen=True;flow._startup_ceiling=None
+        flow.commands_instruction_observed=True
         with self.assertRaises(Submitted):flow.run()
         controller.type_ascii.assert_called_once_with('synthetic public selection')
         controller.clear_field.assert_called_once();self.assertEqual(controller.click.call_count,2)
@@ -1683,6 +1687,7 @@ class FormNavigationTests(unittest.TestCase):
                 fixture.form.return_value={'V3Selection':'synthetic public selection'}
                 controller=mock.Mock();flow=F.FullFlow(controller,fixture,Observer(),None)
                 flow.startup_index=13;flow.startup_focus_seen=True;flow._startup_ceiling=None
+                flow.commands_instruction_observed=True
                 if case!='incomplete':flow.filled.add(('V3Configuring','Field:V3Selection','Signer1'))
                 if case=='consumed':flow.done.add(('V3Configuring','None','BeginV3','Signer1',None))
                 with mock.patch.object(flow,'seek',wraps=flow.seek) as seek:
@@ -1704,6 +1709,7 @@ class FormNavigationTests(unittest.TestCase):
         fixture.form.return_value={'V3Selection':'synthetic public selection'}
         controller=mock.Mock();flow=F.FullFlow(controller,fixture,observer,None)
         flow.startup_index=13;flow.startup_focus_seen=True;flow._startup_ceiling=None
+        flow.commands_instruction_observed=True
         flow.filled.add(('V3Configuring','Field:V3Selection','Signer1'))
         original_deadline=fixture.deadline_ns
         with self.assertRaises(F.C.Rejected) as error:flow.run()
@@ -1871,3 +1877,140 @@ class NativeFailureBoundaryTests(unittest.TestCase):
         self.assertIn('"passed":true',lines[0])
         self.assertTrue(lines[1].startswith('CI_FINANCIAL_NATIVE_FAILURE_DIAGNOSTIC '))
         self.assertTrue(lines[2].startswith('CI_FINANCIAL_FAILURE '))
+
+class CommandsConsumptionGateTests(unittest.TestCase):
+    def harness(self,*,ack_after=2,marker=None,clock=None,crop='full'):
+        from unittest import mock
+        marker=F.HOST_COMMANDS_INSTRUCTION if marker is None else marker
+        prompt=HostStartupContractTests.PROMPTS[-1]
+        state=dict(ack=False,waits=0,configured=False,generation=0,captures=0,observations=0,crop=crop)
+        frontier=F.H.count(prompt)
+        class ReachedSource(Exception):pass
+        class Observer:
+            expected_profile=F.C.SEMANTIC_PROFILE
+            def read(self):
+                state['observations']+=1
+                # Publish between outer observations, never inside the stable
+                # capture bracket. Mid-bracket publication must still reject.
+                if ack_after is not None and state['observations']>ack_after:state['ack']=True
+                return []
+            def next_snapshot(self,deadline):
+                if clock is not None:F.C.require(clock[0]<deadline,'deadline')
+                state['generation']+=1
+                text=prompt+(marker if state['ack'] else '')
+                h=dict(revision=14 if state['ack'] else 13,nonws_end=F.H.count(text),context_valid=True,
+                       entry='Idle',editor=None,view=(None if state['crop']=='none' else dict(rect=[10,10,600,230],nonws=F.H.count(text[-14:] if state['crop']=='partial' else text),rows=4)))
+                return dict(phase='V3Configuring' if state['configured'] else 'Selecting',subphase='None',
+                    owner='Signer1' if state['configured'] else None,view_generation=state['generation'],focused=True,
+                    secret_input=False,host_input=False,pixels_per_point=1,viewport=[1280,800],
+                    host_view_id=None if state['crop']=='none' else (2 if state['ack'] else 1)+(1 if state['crop']=='partial' else 0),host_observation=h,widgets=[
+                        dict(tag='ScrollRegion',owner=None,enabled=True,rect=[0,0,1280,790]),
+                        dict(tag='HostOutput',owner=None,enabled=True,rect=[0,0,640,240]),
+                        dict(tag='BeginHostLine',owner=None,enabled=True,rect=[10,250,200,280]),
+                        dict(tag='ConfigureV3',owner='Signer1',enabled=True,rect=[10,300,200,330])])
+            def host_view(self,s):
+                state['captures']+=1;text=prompt+(marker if state['ack'] else '')
+                if state['crop']=='partial':text=text[-14:]
+                h=s['host_observation']
+                F.C.match_host_view(s,dict(id=s['host_view_id'],view_generation=s['view_generation'],
+                    revision=h['revision'],nonws_end=h['nonws_end'],view=h['view'],text=text))
+                return text
+        now=time.monotonic_ns();fixture=mock.Mock(deadline_ns=now+F.C.ORIGINAL_NS)
+        temp=tempfile.TemporaryDirectory();self.addCleanup(temp.cleanup)
+        fixture.source_path.return_value=str(pathlib.Path(temp.name)/'not-created')
+        fixture.form.side_effect=ReachedSource()
+        controller=mock.Mock()
+        def progress():
+            state['waits']+=1
+            if clock is not None:clock[0]+=1_000_000_000
+        def click(x,y):
+            self.assertTrue(state['ack'],'Source input must wait for actual native message')
+            self.assertEqual((x,y),(105,315));self.assertFalse(state['configured']);state['configured']=True
+        controller.wait_render_progress.side_effect=progress;controller.click.side_effect=click
+        observer=Observer();flow=F.FullFlow(controller,fixture,observer,None)
+        flow.startup_index=13;flow.startup_waiting=True;flow.startup_focus_seen=True
+        flow.host_lines=13;flow.host_stage='Commands';flow.ocr_delay=0
+        flow.host_occurrences.frontier=frontier;flow.host_occurrences.last_end=frontier;flow.host_occurrences.last_revision=13
+        return flow,state,controller,observer,ReachedSource
+    def test_actual_run_waits_for_new_rendered_message_then_configures_once(self):
+        flow,state,c,o,stop=self.harness()
+        bound=flow.startup_wait_ceiling();frontier=flow.host_occurrences.frontier
+        with self.assertRaises(stop):flow.run()
+        self.assertGreaterEqual(state['waits'],2);self.assertEqual(state['captures'],3)
+        self.assertTrue(flow.commands_instruction_observed);self.assertTrue(flow.host_startup_complete)
+        self.assertEqual(flow.host_stage,'Operational');self.assertEqual(flow.host_capture_outcome,'Accepted')
+        self.assertEqual(flow.host_occurrences.frontier,frontier);self.assertEqual(flow.host_lines,13)
+        self.assertIsNone(flow.startup_wait_ceiling());self.assertGreater(bound,0)
+        c.click.assert_called_once();c.type_ascii.assert_not_called();c._command.assert_not_called();c.observe.assert_not_called()
+        self.assertEqual(flow.location['phase'],'V3Configuring')
+    def test_missing_message_expires_original_final_slot_without_source_action(self):
+        from unittest import mock
+        clock=[1_000_000_000]
+        with mock.patch.object(F.time,'monotonic_ns',side_effect=lambda:clock[0]):
+            flow,state,c,o,_=self.harness(ack_after=None,clock=clock)
+            bound=flow.startup_wait_ceiling()
+            with self.assertRaises(F.C.Rejected) as e:flow.run()
+        self.assertEqual(str(e.exception),'deadline');self.assertEqual(flow.startup_wait_ceiling(),bound)
+        self.assertFalse(flow.commands_instruction_observed);self.assertFalse(flow.startup_waiting)
+        self.assertEqual(flow.host_stage,'Commands');self.assertEqual(flow.host_lines,13)
+        c.click.assert_not_called();c.type_ascii.assert_not_called();c._command.assert_not_called();c.observe.assert_not_called()
+    def test_exact_marker_and_native_source_order_no_normalization(self):
+        from unittest import mock
+        source=(ROOT.parent/'crates/wholepact-native-host/src/host/financial/retained_foreground_v1.rs').read_text()
+        self.assertIn('terminal.message("'+F.HOST_COMMANDS_INSTRUCTION.replace('\n','\\n')+'")?',source)
+        self.assertLess(source.index('let commands = read_selection'),source.index('Select original reviewer 1 of 2'))
+        self.assertLess(source.index('Select original reviewer 1 of 2'),source.index('let endpoint = wait_original_coordinated_pair_endpoint'))
+        for marker in (F.HOST_COMMANDS_INSTRUCTION[:-1],F.HOST_COMMANDS_INSTRUCTION.replace('reviewer 1','reviewer 2'),
+                       F.HOST_COMMANDS_INSTRUCTION.replace('original reviewer','original\nreviewer'),F.HOST_COMMANDS_INSTRUCTION+'extra'):
+            flow,state,c,o,_=self.harness(marker=marker);state['ack']=True;flow.startup_waiting=False
+            bound=flow.startup_wait_ceiling()
+            self.assertFalse(flow.observe_commands_instruction(o.next_snapshot(bound)))
+            self.assertFalse(flow.commands_instruction_observed);self.assertEqual(flow.startup_wait_ceiling(),bound)
+            c.click.assert_not_called();c._command.assert_not_called()
+    def test_stale_span_focus_protection_and_context_guards_remain_closed(self):
+        from unittest import mock
+        for change in ('stale','focus','secret','host','context'):
+            with self.subTest(change=change):
+                flow,state,c,o,_=self.harness();state['ack']=True;flow.startup_waiting=False
+                s=o.next_snapshot(flow.startup_wait_ceiling())
+                if change=='stale':flow.host_occurrences.frontier=s['host_observation']['nonws_end']
+                elif change=='context':s['host_observation']['context_valid']=False
+                else:s[{'focus':'focused','secret':'secret_input','host':'host_input'}[change]]=change!='focus'
+                if change=='context':self.assertFalse(flow.observe_commands_instruction(s))
+                else:
+                    with self.assertRaises(F.C.Rejected):flow.observe_commands_instruction(s)
+                self.assertFalse(flow.commands_instruction_observed);c.click.assert_not_called();c.observe.assert_not_called()
+                if change!='stale':self.assertEqual(state['captures'],0)
+    def test_writing_hold_and_expired_after_capture_never_clear_ceiling(self):
+        from unittest import mock
+        flow,state,c,o,_=self.harness();bound=flow.startup_wait_ceiling()
+        s=o.next_snapshot(bound);s['host_input']=True;s['host_observation'].update(entry='Writing',view=None)
+        self.assertTrue(flow.pump_host(s));self.assertEqual(state['captures'],0);self.assertEqual(flow.startup_wait_ceiling(),bound)
+        state['ack']=True;flow.startup_waiting=False;s=o.next_snapshot(bound)
+        original=o.host_view
+        def expired(snapshot):
+            result=original(snapshot);flow._startup_ceiling=time.monotonic_ns()-1;return result
+        flow.native.host_view=expired
+        with self.assertRaises(F.C.Rejected) as e:flow.observe_commands_instruction(s)
+        self.assertEqual(str(e.exception),'deadline');self.assertFalse(flow.commands_instruction_observed)
+        c.click.assert_not_called();c.type_ascii.assert_not_called()
+    def test_missing_then_partial_view_requires_real_bounded_wheels_before_source(self):
+        flow,state,c,o,stop=self.harness(ack_after=0,crop='none')
+        bound=flow.startup_wait_ceiling();frontier=flow.host_occurrences.frontier
+        def wheel(*args):
+            self.assertFalse(state['configured']);self.assertFalse(flow.commands_instruction_observed)
+            self.assertEqual(flow.startup_wait_ceiling(),bound)
+            state['crop']='partial' if state['crop']=='none' else 'full'
+        c.scroll_down.side_effect=wheel;c.scroll_up.side_effect=wheel
+        with self.assertRaises(stop):flow.run()
+        self.assertEqual(state['captures'],2);self.assertEqual(flow.host_visibility_steps,2)
+        c.scroll_down.assert_called_once();c.scroll_up.assert_called_once();c.click.assert_called_once()
+        self.assertEqual(flow.host_occurrences.frontier,frontier);self.assertEqual(flow.host_stage,'Operational')
+        c.type_ascii.assert_not_called();c._command.assert_not_called();c.observe.assert_not_called()
+    def test_permanently_missing_view_keeps_original_visibility_budget(self):
+        flow,state,c,o,_=self.harness(ack_after=0,crop='none')
+        bound=flow.startup_wait_ceiling()
+        with self.assertRaises(F.C.Rejected) as e:flow.run()
+        self.assertEqual(str(e.exception),'input_budget');self.assertEqual(flow.host_visibility_steps,128)
+        self.assertEqual(flow.startup_wait_ceiling(),bound);self.assertFalse(flow.commands_instruction_observed)
+        self.assertEqual(state['captures'],0);c.click.assert_not_called();c._command.assert_not_called()
