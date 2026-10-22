@@ -311,8 +311,13 @@ def main():
     if mode=='acquire':
         boot_require(len(sys.argv)==5,'arguments')
         _,_,plan_path,staging,launcher=sys.argv
-        trusted,raw=bootstrap(launcher,plan_path);load_helpers(trusted)
-        acquisition=trusted.module('reviewed_acquisition',HERE/'acquire_archive.py',L=sys.modules[__name__])
+        try:
+            trusted,raw=bootstrap(launcher,plan_path);load_helpers(trusted)
+            acquisition=trusted.module('reviewed_acquisition',HERE/'acquire_archive.py',L=sys.modules[__name__])
+        except BaseException:
+            try:print('CI_FINANCIAL_REUSE_ACQUISITION_DIAGNOSTIC {"version":1,"stage":"bootstrap","category":"verification","api_pin":"none","http_status":0}',flush=True)
+            except BaseException:pass
+            raise
         return acquisition.acquire_command(raw,staging)
     boot_require(mode=='run' and len(sys.argv)==7,'arguments')
     _,_,plan_path,producer,harness,staging,launcher=sys.argv
