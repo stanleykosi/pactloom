@@ -175,7 +175,9 @@ class FullFlow:
             self.host_paths.add('password');return ('secret',None)
         if 'Exact coordinated reviewer selection JSON' in text:
             if self.reviewer_index>=2:return None
-            if self.reviewer_index==1 and not self.host_milestone('Owner1SigningRetired'):return None
+            if self.reviewer_index==1 and not self.host_milestone('Owner1SigningRetired'):
+                # Deferred readiness is not consumption of the rendered prompt.
+                self.last_rendered=None;return None
             owner='Signer'+str(self.reviewer_index+1);source=self.fixture.source(owner)
             scope=source['original_capture']['scope']
             participant=scope['participant_id']
@@ -193,7 +195,9 @@ class FullFlow:
           ('Exact copied native AwaitingReturn result selector JSON file','result_output_file','result_index')):
             if prompt in text:
                 index=getattr(self,counter)
-                if index>=2 or (index==1 and not self.host_milestone('Owner1SigningRetired')):return None
+                if index>=2:return None
+                if index==1 and not self.host_milestone('Owner1SigningRetired'):
+                    self.last_rendered=None;return None
                 owner='Signer'+str(index+1);path=self.fixture.source_path(owner,kind)
                 if not pathlib.Path(path).exists():self.last_rendered=None;return None
                 self.fixture.source_path(owner,kind,must_exist=True);setattr(self,counter,index+1)
@@ -232,7 +236,10 @@ class FullFlow:
     def run(self):
         while True:
             s=self.snapshot();phase=s['phase'];owner=s['owner'];target=self.current_owner()
-            self.location={'phase':phase,'subphase':s['subphase'],'owner':owner}
+            # Failure LOCATION is the last validated nonterminal observation,
+            # not the current terminal state or an attribution of its cause.
+            if phase not in ('Revoked','Finished'):
+                self.location={'phase':phase,'subphase':s['subphase'],'owner':owner}
             phase_key=(phase,s['subphase'],owner)
             if phase_key!=self.last_phase:
                 self.scrolls={};self.search_geometry=None;self.search_direction='up';self.last_phase=phase_key
