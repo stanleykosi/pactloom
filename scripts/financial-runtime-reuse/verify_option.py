@@ -13,16 +13,19 @@ import stat
 import zipfile
 
 HERE=pathlib.Path(__file__).resolve().parent
-PARSER_SHA='d24433f973c77d34e6d1f5c299cc1c7d00a7d024584bbfcb3d45e077c0e92f5d'
+PARSER_SHA='53ae1125701112917530d45c04df18e785afa8e973a9d9b7d0de0a77a95dee50'
 # Source-bound callback executes verified parser bytes without bytecode.
 assert hashlib.sha256((HERE/'producer_artifacts.py').read_bytes()).hexdigest()==PARSER_SHA
 A=_reviewed_parser()
+QUALIFICATION_PROFILE='coordinated-financial-rendered-host-semantic-v1'
+POLICY='p26-rendered-host-semantic-reuse-v1'
 
-PRODUCER=dict(repository='stanleykosi/pactloom',source='f98de7fd79389ce340343292086c852825f59b60',
- source_tree='1b4df59f4e2e664cad33440a947645e66424e410',run_id=39704950389,attempt=1)
-JOB_ID=119582700875
+PRODUCER=dict(repository='stanleykosi/pactloom',source='8f1d67bdef50d886955d026e5fce2c8e8635ecbb',
+ source_tree='82591c243dc981cafee4e768db3339ae31994ecc',run_id=39864693253,attempt=1)
+JOB_ID=120123827440
 # Exact existing runtime files, NOT a suffix/directory exclusion. Contract,
 # output projection, fixture profile/scenario, image and orchestration are fixed.
+# No source exceptions or annexes are accepted by the P26 v4 policy.
 RUNTIME_ONLY=frozenset((
  'scripts/ci-financial-container.py',
  'scripts/ci-financial-fixture.py',
@@ -73,7 +76,6 @@ def equivalent(producer,current):
     require(set(producer)==set(current),'tracked_path_set')
     changed=sorted(name for name in producer if producer[name]!=current[name])
     require(set(changed)<=RUNTIME_ONLY,'native_or_unreviewed_input_changed')
-    # Empty change is valid; it does not imply runtime acceptance.
     return changed
 
 
@@ -112,7 +114,7 @@ def qualify(bundle,archive,pins,run,artifact,producer_inventory,current_inventor
         and run.get('repository',{}).get('full_name')==PRODUCER['repository'],'producer_run')
     # A runtime-failed job is expected and does not invalidate its pre-fixture build.
     require(run.get('conclusion') in ('failure','success'),'producer_terminal')
-    name='financial-build-39704950389-1-'+PRODUCER['source']
+    name='financial-build-39864693253-1-'+PRODUCER['source']
     origin=artifact.get('workflow_run',{})
     require(artifact.get('id')==pins['artifact_id'] and type(artifact.get('id')) is int
         and artifact.get('name')==name and artifact.get('expired') is False
@@ -122,7 +124,7 @@ def qualify(bundle,archive,pins,run,artifact,producer_inventory,current_inventor
     with pathlib.Path(bundle).open('rb') as stream:bundle_digest=hashlib.file_digest(stream,'sha256').hexdigest()
     require(bundle_digest==pins['bundle_sha256'],'bundle_digest')
     # Original full closure stays exact, including all old runtime files.
-    original=A.verify_bundle(bundle,PRODUCER,producer_inventory)
+    original=A.verify_bundle(bundle,PRODUCER,producer_inventory,QUALIFICATION_PROFILE)
     require(type(harness) is dict and set(harness)=={'repository','source','source_tree'},'harness_identity')
     require(harness['repository']==PRODUCER['repository'] and
         A.COMMIT.fullmatch(harness['source']) is not None and
@@ -130,9 +132,10 @@ def qualify(bundle,archive,pins,run,artifact,producer_inventory,current_inventor
     changes=equivalent(producer_inventory,current_inventory)
     require(not changes or (harness['source']!=PRODUCER['source'] and
         harness['source_tree']!=PRODUCER['source_tree']),'contradictory_harness_identity')
-    return dict(schema=1,native_producer=PRODUCER.copy(),harness=harness.copy(),
+    evidence=dict(schema=4,policy=POLICY,qualification_profile=QUALIFICATION_PROFILE,native_producer=PRODUCER.copy(),harness=harness.copy(),
         original_manifest=original,current_source_inventory=current_inventory.copy(),
-        permitted_runtime_changes=changes,artifact_pins=pins.copy(),
+        permitted_runtime_changes=[name for name in changes if name in RUNTIME_ONLY],artifact_pins=pins.copy(),
         native_binaries_reused=True,native_binaries_freshly_compiled=False,
         runtime_verified=False,synthetic_full_native_verified=False,
         public_chain_verified=False,dispatch_requested=False)
+    return evidence
